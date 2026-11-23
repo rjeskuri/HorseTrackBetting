@@ -27,3 +27,6 @@ CLAUDE.local.md
 
 # macOS
 .DS_Store
+
+# Data: scraped and licensed data never enters git (public repository)
+/data/
