@@ -29,4 +29,4 @@ CLAUDE.local.md
 .DS_Store
 
 # Data: scraped and licensed data never enters git (public repository)
-data/
+/data/
