@@ -28,8 +28,9 @@ from datetime import date, datetime, timedelta, timezone
 from itertools import combinations
 
 import jradb_pages as pages
-from horsetrack.countries.japan.jra import official_pages as op
 from jradb_pages import CARD_PATH, ODDS_PATH
+
+from horsetrack.countries.japan.jra import official_pages as op
 
 UTC = timezone.utc
 SAT = date(2026, 11, 28)
