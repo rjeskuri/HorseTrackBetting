@@ -1,7 +1,8 @@
 """The locked final holdout per country, and the log of every use (#71).
 
 ``split_off`` divides a frame into development rows and a ``LockedHoldout``. The holdout is
-defined in ``<countries_dir>/<country>/config/evaluation.yaml``::
+defined in ``<countries_dir>/<country>/config/holdout.yaml`` (with the default root, read through
+``horsetrack.core.config.load_country_yaml(country, "holdout")``)::
 
     holdout:
       start: 2026-11-28
@@ -24,12 +25,16 @@ import re
 import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import yaml
 
+from horsetrack.core.config import load_country_yaml
+
 DEFAULT_COUNTRIES_DIR = Path(__file__).resolve().parents[2] / "countries"
-CONFIG_NAME = Path("config") / "evaluation.yaml"
+CONFIG_STEM = "holdout"
+CONFIG_NAME = Path("config") / f"{CONFIG_STEM}.yaml"
 LOG_NAME = "holdout_log.jsonl"
 
 _ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -43,13 +48,26 @@ def _is_holdout_day(seed: str, day: str) -> bool:
     return int(hashlib.sha256(f"{seed}:{day}".encode()).hexdigest(), 16) % 2 == 0
 
 
-def _load_definition(config_path: Path) -> tuple[date, str]:
-    if not config_path.is_file():
-        raise HoldoutConfigError(f"no holdout definition: {config_path} does not exist")
+def _read_config(countries_dir: Path, country: str) -> tuple[Any, Path]:
+    """The parsed holdout.yaml of ``country`` and its path; the default root goes through the
+    shared ``load_country_yaml`` (cached: the result is only read, never mutated)."""
+    config_path = countries_dir / country / CONFIG_NAME
     try:
-        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if countries_dir.resolve() == DEFAULT_COUNTRIES_DIR.resolve():
+            return load_country_yaml(country, CONFIG_STEM), config_path
+        if not config_path.is_file():
+            raise FileNotFoundError(config_path)
+        return yaml.safe_load(config_path.read_text(encoding="utf-8")), config_path
+    except OSError as exc:
+        raise HoldoutConfigError(
+            f"no holdout definition: {config_path} cannot be read ({exc})"
+        ) from exc
     except yaml.YAMLError as exc:
         raise HoldoutConfigError(f"{config_path} is not valid YAML: {exc}") from exc
+
+
+def _load_definition(countries_dir: Path, country: str) -> tuple[date, str]:
+    config, config_path = _read_config(countries_dir, country)
     section = config.get("holdout") if isinstance(config, dict) else None
     if not isinstance(section, dict):
         raise HoldoutConfigError(f"{config_path} has no holdout section")
@@ -175,7 +193,7 @@ def split_off(
     Raises ``HoldoutConfigError`` when the country has no valid holdout definition.
     """
     country_dir = Path(countries_dir) / country
-    start, seed = _load_definition(country_dir / CONFIG_NAME)
+    start, seed = _load_definition(Path(countries_dir), country)
 
     days = _race_days(frame, date_col)
     start_label = start.isoformat()

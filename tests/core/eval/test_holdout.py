@@ -4,8 +4,10 @@ Contract pinned here (the coder implements what these tests call):
 
 - ``split_off(frame, date_col, country, *, countries_dir=...)`` returns
   ``(development, LockedHoldout)``. ``countries_dir`` is the one seam for the
-  countries root; by default it is the package's ``src/horsetrack/countries``.
-  The config is ``<countries_dir>/<country>/config/evaluation.yaml``::
+  countries root; by default it is the package's ``src/horsetrack/countries``
+  (the root ``horsetrack.core.config.load_country_yaml`` reads). The config is
+  ``<countries_dir>/<country>/config/holdout.yaml`` (one file per eval ticket;
+  ``evaluation.yaml`` is not read). Hong Kong's country id is ``hongkong``::
 
       holdout:
         start: 2026-11-28        # quoted or unquoted YAML date
@@ -22,14 +24,17 @@ Contract pinned here (the coder implements what these tests call):
   ``start`` as YYYY-MM-DD, and something that identifies the seed) before it
   returns the rows. Nothing else on the object reaches the rows.
 
-Every test points ``countries_dir`` at ``tmp_path``; an autouse guard fails any
-test that touches a real ``src/horsetrack/countries/*/holdout_log.jsonl``.
+Every synthetic test points ``countries_dir`` at ``tmp_path``; one test loads the
+committed definitions through the default root without ever calling ``open``.
+An autouse guard fails any test that touches a real
+``src/horsetrack/countries/*/holdout_log.jsonl``.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +42,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from horsetrack.core.eval.holdout import HoldoutConfigError, LockedHoldout, split_off
 
@@ -72,7 +78,7 @@ def write_config(
     config_dir.mkdir(parents=True, exist_ok=True)
     if raw is None:
         raw = f'holdout:\n  start: "{start}"\n  seed: "{seed}"\n'
-    path = config_dir / "evaluation.yaml"
+    path = config_dir / "holdout.yaml"
     path.write_text(raw)
     return path
 
@@ -227,11 +233,11 @@ def test_days_before_start_are_always_development(tmp_path):
 
 def test_each_country_uses_its_own_definition_and_log(tmp_path):
     write_config(tmp_path, "japan", start=JAPAN_START, seed=SEED_A)
-    write_config(tmp_path, "hong_kong", start="2026-12-10", seed=SEED_B)
+    write_config(tmp_path, "hongkong", start="2026-12-10", seed=SEED_B)
     frame = make_frame()
 
     jp_dev, jp_hold = split_off(frame, "race_date", "japan", countries_dir=tmp_path)
-    hk_dev, hk_hold = split_off(frame, "race_date", "hong_kong", countries_dir=tmp_path)
+    hk_dev, hk_hold = split_off(frame, "race_date", "hongkong", countries_dir=tmp_path)
 
     exp_jp_dev, exp_jp_hold = expected_ids(frame, JAPAN_START, SEED_A)
     exp_hk_dev, exp_hk_hold = expected_ids(frame, "2026-12-10", SEED_B)
@@ -242,7 +248,7 @@ def test_each_country_uses_its_own_definition_and_log(tmp_path):
     hk_rows = hk_hold.open(ticket=72, purpose="hk check")
     assert set(hk_rows["row_id"]) == exp_hk_hold
     assert log_lines(tmp_path, "japan") == []
-    (hk_line,) = log_lines(tmp_path, "hong_kong")
+    (hk_line,) = log_lines(tmp_path, "hongkong")
     assert json.loads(hk_line)["n_rows"] == len(exp_hk_hold)
 
 
@@ -325,7 +331,7 @@ def test_open_appends_one_log_line(tmp_path, seed, start, ticket, purpose):
 def test_the_logged_period_identifies_the_rule(tmp_path):
     """Same start, different seed: the logged period must tell them apart."""
     periods = []
-    for country, seed in (("japan", SEED_A), ("hong_kong", SEED_B)):
+    for country, seed in (("japan", SEED_A), ("hongkong", SEED_B)):
         write_config(tmp_path, country, start=JAPAN_START, seed=seed)
         _, holdout = split_off(make_frame(), "race_date", country, countries_dir=tmp_path)
         holdout.open(ticket=71, purpose="period identity")
@@ -445,13 +451,13 @@ MISSING_DEFINITIONS = [
 @pytest.mark.parametrize("raw", MISSING_DEFINITIONS)
 def test_a_missing_holdout_period_is_an_error(tmp_path, raw):
     if raw is None:
-        (tmp_path / "hong_kong").mkdir()
+        (tmp_path / "hongkong").mkdir()
     else:
-        write_config(tmp_path, "hong_kong", raw=raw)
+        write_config(tmp_path, "hongkong", raw=raw)
 
     with pytest.raises(HoldoutConfigError):
-        split_off(make_frame(), "race_date", "hong_kong", countries_dir=tmp_path)
-    assert log_lines(tmp_path, "hong_kong") == []
+        split_off(make_frame(), "race_date", "hongkong", countries_dir=tmp_path)
+    assert log_lines(tmp_path, "hongkong") == []
 
 
 def test_an_unquoted_yaml_start_date_is_read(tmp_path):
@@ -462,3 +468,61 @@ def test_an_unquoted_yaml_start_date_is_read(tmp_path):
     development, _ = split_off(frame, "race_date", "japan", countries_dir=tmp_path)
 
     assert set(development["row_id"]) == exp_dev
+
+
+def test_a_config_named_evaluation_yaml_is_not_read(tmp_path):
+    """The definition lives in holdout.yaml only; the old evaluation.yaml name is ignored."""
+    config_dir = tmp_path / "japan" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "evaluation.yaml").write_text(
+        f'holdout:\n  start: "{JAPAN_START}"\n  seed: "{SEED_A}"\n'
+    )
+
+    with pytest.raises(HoldoutConfigError):
+        split_off(make_frame(), "race_date", "japan", countries_dir=tmp_path)
+    assert log_lines(tmp_path, "japan") == []
+
+
+# --------------------------------------------------------------------------- committed definitions
+
+
+HEX32 = re.compile(r"[0-9a-f]{32}")
+
+
+def committed_holdout(country: str) -> dict:
+    """The committed definition, read straight from the YAML, not through the code under test."""
+    path = REAL_COUNTRIES / country / "config" / "holdout.yaml"
+    return yaml.safe_load(path.read_text())["holdout"]
+
+
+def as_day(value) -> date | None:
+    if value is None or isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
+def test_the_committed_japan_definition_loads_by_default():
+    """Pins the pre-registered A2 definition: start 2026-11-28 and a 32-hex seed."""
+    definition = committed_holdout("japan")
+    seed = definition["seed"]
+    assert isinstance(seed, str) and HEX32.fullmatch(seed)
+    assert as_day(definition["start"]) == date(2026, 11, 28)
+
+    frame = make_frame(first="2026-11-14", n_days=40)
+    exp_dev, exp_hold = expected_ids(frame, JAPAN_START, seed)
+    assert exp_hold and len(exp_dev) > len(frame[frame["race_date"] < JAPAN_START])
+
+    development, holdout = split_off(frame, "race_date", "japan")  # default countries root
+
+    assert set(development["row_id"].astype(int)) == exp_dev
+    assert len(development) == len(exp_dev)
+    assert str(len(exp_hold)) in repr(holdout)  # counts only; the holdout is never opened
+
+
+def test_the_committed_hongkong_definition_has_no_start_yet():
+    definition = committed_holdout("hongkong")
+    assert definition["start"] is None
+    assert isinstance(definition["seed"], str) and HEX32.fullmatch(definition["seed"])
+
+    with pytest.raises(HoldoutConfigError):
+        split_off(make_frame(), "race_date", "hongkong")  # default countries root
