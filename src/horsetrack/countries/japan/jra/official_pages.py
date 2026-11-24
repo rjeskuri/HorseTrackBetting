@@ -140,7 +140,7 @@ def race_number(doc: BeautifulSoup) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _local_clock(local_date: date, text: str | None) -> datetime | None:
+def local_clock(local_date: date, text: str | None) -> datetime | None:
     """'15時01分' on `local_date` in Tokyo -> an aware datetime; None when `text` has no clock."""
     m = _CLOCK.search(text or "")
     if not m:
@@ -217,7 +217,7 @@ def post_times(card_race_list: BeautifulSoup, race_date: date) -> dict[int, date
     out = {}
     for race_no, row in race_rows(card_race_list):
         cell = row.select_one(_POST_TIME)
-        local = _local_clock(race_date, cell.get_text(" ")) if cell is not None else None
+        local = local_clock(race_date, cell.get_text(" ")) if cell is not None else None
         if local is not None:
             out[race_no] = local.astimezone(timezone.utc)
     return out
@@ -232,7 +232,7 @@ def source_update_utc(state: str | None, fetched_utc: datetime) -> datetime | No
     fetched = (
         fetched_utc if fetched_utc.tzinfo is not None else fetched_utc.replace(tzinfo=timezone.utc)
     )
-    local = _local_clock(fetched.astimezone(_zone()).date(), state)
+    local = local_clock(fetched.astimezone(_zone()).date(), state)
     if local is None:
         return None
     if local > fetched:
