@@ -17,10 +17,12 @@ import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import yaml
 
 UNITS = ("day", "week", "month", "quarter", "year")
 WINDOWS = ("expanding", "rolling")
@@ -71,6 +73,15 @@ class FoldScheme:
         if unknown:
             raise ValueError(f"fold scheme has unknown field(s): {', '.join(unknown)}")
         return cls(**{n: fields[n] for n in names})
+
+
+def load_scheme(path: str | Path) -> FoldScheme:
+    """The scheme in the `folds:` section of a config file; other sections are left alone."""
+    config = yaml.safe_load(Path(path).read_text())
+    folds = config.get("folds") if isinstance(config, Mapping) else None
+    if not isinstance(folds, Mapping):
+        raise ValueError(f"{path} has no `folds:` mapping")
+    return FoldScheme.from_mapping(folds)
 
 
 @dataclass(frozen=True, eq=False)
