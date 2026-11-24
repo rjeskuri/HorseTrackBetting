@@ -1,16 +1,16 @@
 # Problem statement
 
-Status: draft, awaiting owner sign-off
+Signed off by the owner on 2026-11-24 (ticket #14)
 
 This document says what HorseTrackBetting is trying to predict, what it is judged against, how it is tested and
-when a model or a betting rule may be adopted. Claude drafted it (ticket #14). Nothing in it is adopted until the
-owner signs it off.
+when a model or a betting rule may be adopted. Claude drafted it (ticket #14) and the owner signed it off.
 
 How to read it:
 - Each section first states what the brief already fixes. Those lines are not open.
-- Each open choice is a line `OWNER DECISION (Dn): <question>`, followed by the options with their tradeoffs and an
-  empty `Answer:` line. The options are listed in no order of preference, and none is chosen here.
-- The owner answers by number (D1 to D21). The table at the end lists every decision and its section.
+- Each choice the brief left open is a line `OWNER DECISION (Dn): <question>`, followed by the options with their
+  tradeoffs, kept as the record of what was considered, and an `Answer:` line with the owner's answer.
+- The owner answered by number (D1 to D21) on ticket #14. The table at the end lists every decision, its answer and
+  its section.
 
 Sources: the HorseTrackBetting brief (HKTrack `docs/research/25-horsetrackbetting-brief.md`, section "Modeling
 governance"), the HKTrack process review (`docs/research/24-process-review-2026-11-22.md`, sections 1 to 4 and 7),
@@ -37,7 +37,9 @@ What the brief fixes:
   that covariance is negative and the product of the two expectations overstates the value.
 - **Place and Wide** pay a dividend that depends on which other runners also place (the co-placers): the same
   Place ticket pays differently when it places with the favourite than with two outsiders. Their value needs the
-  joint finishing distribution and the final pools, not a single marginal probability and a single price.
+  joint finishing distribution and the final pools, not a single marginal probability and a single price. How many
+  runners place depends on the field: JRA Place pays the top three in fields of 8 or more runners and the top two
+  in fields of 5 to 7, and is not sold with 4 or fewer (to confirm in the ledger against the official JRA rule).
 
 Facts the statement relies on (each to be entered in the known-vs-assumed ledger, #12):
 - **The payout identity.** For a single-winner pool (Win, Quinella, Exacta, Trio, Trifecta) a combination c with
@@ -50,19 +52,22 @@ Facts the statement relies on (each to be entered in the known-vs-assumed ledger
   per-race lookup (date, pool, boost), never a constant.
 - **Breakage and the minimum payout.** Dividends are rounded down to ¥10 per ¥100. The JRA minimum payout is ¥110
   per ¥100 (Plus 10); it is withheld, and the dividend is ¥100, when paying it would exceed the pool. At a dividend
-  of ¥110 a Place bet needs P(top 3) > 0.909 to have value; at ¥100 it can never have value.
+  of ¥110 a Place bet needs P(place) > 0.909 to have value; at ¥100 it can never have value.
 - **Closing-line value in the sports-betting sense is degenerate on a tote.** Every bet is paid at the closing
   price, so the price obtained always equals the closing price and "beating the closing line" in that sense is
   identically zero. HKTrack's measure (HKTrack DECISIONS #12) is a different quantity and is not zero: the log of
   the final odds over the odds at decision, and the share of bets whose final odds stayed at or above the bet's
   minimum acceptable odds. It measures how the price moved after the decision, not a price the bet obtained. The
-  brief lists closing-line value as the primary live metric among the assumptions to retest or drop, so whether a
-  measure of this kind is a live diagnostic is an owner choice (D8), alongside the price half's own score.
+  brief lists closing-line value as the primary live metric among the assumptions to retest or drop; the owner
+  made a measure of this kind a secondary live diagnostic, never the primary metric (D8), beside the price half's
+  own score.
 - **Pricing on a forecast of the final odds is biased upward.** Multiplying a probability by a point forecast of
   the final odds overstates value even when the forecast is unbiased in log terms. Under an efficient final price
-  and a lognormal forecast with log-scale standard deviation σ, the bias for Win at a 20% takeout is about
-  `0.8(e^{σ²} - 1)`: about +1.8 points of EV at σ = 0.15 and +4.0 at σ = 0.22. It adds to winner's-curse
-  selection: picking the bets with the largest claimed value picks the largest errors.
+  and a lognormal forecast with log-scale standard deviation σ, with p = P(win | info_t), the bias for Win at a 20%
+  takeout is about `0.8(e^{σ²/2} - 1)` when the forecast is unbiased in log terms (it is the median of `O_final`):
+  about +0.9 points of EV at σ = 0.15 and +2.0 at σ = 0.22. When the forecast is unbiased in level (it is
+  `E[O_final | info_t]`) the bias is about `0.8(e^{σ²} - 1)`: about +1.8 points at σ = 0.15 and +4.0 at σ = 0.22.
+  It adds to winner's-curse selection: picking the bets with the largest claimed value picks the largest errors.
 - **Sales close before the off.** Online sales close about one minute before the off (T-1) and on-course sales
   about T-2, so the last bettable board is about T-1 (from the internal research; to be confirmed in the ledger).
 
@@ -75,7 +80,8 @@ HKTrack's evidence is the starting point, not something to explain away (brief, 
   final price, and the blend fitted on that board still trailed the final price. Most of the apparent gain was the
   board being stale, not information in the model.
 - In Hong Kong the fitted blend weight on the form model was zero. That zero was the lower bound of a constraint
-  that forbade negative weights; without the bound the estimate was slightly negative.
+  that forbade negative weights, so the unconstrained value is inferred to be zero or negative; it was not
+  estimated without the bound.
 - No betting rule tested showed a profit that survived its uncertainty. Some Win rules had a positive point
   return at the final dividends, but every return interval reported for them spans zero (HKTrack DECISIONS #26
   and #27); the rules compared in the process review all lost money; and a large search over segments, pools and
@@ -123,7 +129,7 @@ OWNER DECISION (D1): Which form of the estimand does the project model?
   it barely needs a price forecast; it can only ever claim δ, and it still needs a price model for Place, Wide and
   exotics.
 
-Answer:
+Answer: A. Condition on the final price and integrate over a nowcast of the final pools made at t.
 
 OWNER DECISION (D2): What is the decision time t, and which other horizons are reported?
 
@@ -135,7 +141,7 @@ OWNER DECISION (D2): What is the decision time t, and which other horizons are r
   off and supports a time-varying blend; costs more logging and more scoring, and multiplies the number of
   comparisons (D17).
 
-Answer:
+Answer: A grid (T-60, T-30, T-16, T-5, T-2, T-1) with T-2 as the primary decision time.
 
 OWNER DECISION (D3): Which pools does this statement cover first?
 
@@ -147,7 +153,8 @@ OWNER DECISION (D3): Which pools does this statement cover first?
 - **All pools including exotics.** Most opportunities and the highest takeouts; exotic boards before the decision
   exist only if logged going forward, and own price impact matters for long combinations.
 
-Answer:
+Answer: Win, Place and Wide. (Wide is quinella place, its own pool; final Wide dividends exist for all history, but
+pre-race Wide odds paths exist only from our own logs.)
 
 ## 2. Baseline
 
@@ -172,7 +179,8 @@ OWNER DECISION (D4): How does the final Win price become a probability?
   `ln q`). The hardest and most honest baseline; the most flexible to fit, so the most care is needed to keep it
   out of fold.
 
-Answer:
+Answer: A calibrated market: the final Win price through a fitted calibration curve (spline in ln q), fitted in-fold
+only.
 
 OWNER DECISION (D5): What is the baseline for Place, Wide and the exotic pools?
 
@@ -187,7 +195,8 @@ OWNER DECISION (D5): What is the baseline for Place, Wide and the exotic pools?
 - **Both, with the pool's own price as the primary.** Shows separately how much a model gains from ordering and
   how much against the pool; two baselines to maintain.
 
-Answer:
+Answer: Both, with the pool's own final prices as the primary baseline and the Win-derived ordering baseline as
+secondary.
 
 ## 3. Metric
 
@@ -196,8 +205,11 @@ What the brief fixes:
   baseline**, per race and paired: the same races, the same folds.
 - Every gain carries a **paired bootstrap confidence interval**: the model and the baseline are resampled with the
   same indices, so the interval is on the difference.
-- Two halves are scored: the **outcome half** (the probability of the result) and the **price half** (the forecast
-  of `O_final` from info_t). A bet's value needs both (section 1).
+
+Scoring the price half separately is not fixed by the brief; it follows from the owner's answers to D1 and D8.
+Because D1 (A) integrates the outcome model over a nowcast of the final pools, two halves are scored: the **outcome
+half** (the probability of the result, by the metric above) and the **price half** (the forecast of `O_final` from
+info_t, scored as D8 sets). A bet's value needs both (section 1).
 
 OWNER DECISION (D6): Which outcome is scored, and against what is pseudo-R² defined?
 
@@ -210,7 +222,9 @@ OWNER DECISION (D6): Which outcome is scored, and against what is pseudo-R² def
   literature) or relative to the final-price baseline (reads directly as the gain). The second makes small gains
   look large; the first makes them look tiny.
 
-Answer:
+Answer: Pool-matched primary: a Win claim is judged on winner log loss vs the Win baseline; a Place or Wide claim on
+top-3 order log loss (and the placed-set score) vs that pool's own baseline. Both reported for every model.
+Pseudo-R² reported vs equal chances, with the gain over the final price in nats per race alongside.
 
 OWNER DECISION (D7): What is the bootstrap's resampling unit, and what is the confidence level?
 
@@ -225,7 +239,7 @@ OWNER DECISION (D7): What is the bootstrap's resampling unit, and what is the co
 - Level: 90% or 95%, and one-sided (a gain claim is one-sided) or two-sided. A higher level and a two-sided test
   need more data for the same claim.
 
-Answer:
+Answer: Resample meetings (venue x day); 95%, one-sided.
 
 OWNER DECISION (D8): How is the price half (forecasting `O_final` from info_t) scored, and is a closing-line-style
 measure used as a live diagnostic?
@@ -251,7 +265,9 @@ measure used as a live diagnostic?
   replaces profit with a faster signal; as a secondary diagnostic it sits beside the joint check; not used, the
   price half is judged only by the scores above.
 
-Answer:
+Answer: Primary: log predictive density of the final log share, with PIT and interval coverage per horizon; price
+baseline: a fitted average drift by odds band and horizon; the shadow calibration slope as the joint check. A
+closing-line-style measure (HKTrack DECISIONS #12) is a secondary live diagnostic, never the primary metric.
 
 ## 4. Splits
 
@@ -278,7 +294,8 @@ window?
 - **Embargo:** none, or a gap (for example one week) between training and scoring. A gap guards against leakage
   through slowly published data; it wastes a little data.
 
-Answer:
+Answer: Fold unit quarter, quarterly refit, expanding window, 5 seasons minimum before the first scored fold, nested
+out-of-fold for stacked models, 1-week embargo.
 
 OWNER DECISION (D10): How are races before 2014-06-07 (the earlier, race-varying takeout regime) treated?
 
@@ -289,7 +306,8 @@ OWNER DECISION (D10): How are races before 2014-06-07 (the earlier, race-varying
   them wherever the market or a dividend enters. Keeps the history where it is harmless; two training windows to
   maintain.
 
-Answer:
+Answer: Races before 2014-06-07 are used only for components that do not touch the price (ability, speed/par,
+lineage); excluded wherever the market or a dividend enters.
 
 ## 5. Holdout
 
@@ -298,10 +316,12 @@ What the brief fixes:
   selection or tuning, and is opened only by owner decision.
 - **Every use of it is logged**: the date, the ticket, the hypothesis, the code version and the result (ticket #71
   builds the lock and the log).
+- The owner's answer to D14 (No) is consistent with this: holdout days are fully locked, so their price paths do
+  not train the price half either, and no exception to "not used for development" is needed.
 
 ### 5.1 Exposure so far (disclosure)
 
-The owner has not chosen a holdout. Before choosing, these are the periods already seen:
+Before the owner chose the holdout (D11 to D15), these were the periods already seen:
 
 - **HKTrack (Japan).** Models were trained on seasons from 2010/11 through races of 2026-11-15. Test seasons from
   2023/24 on were scored repeatedly and used for model selection, so HKTrack reused its holdout. HKTrack research
@@ -320,9 +340,9 @@ The owner has not chosen a holdout. Before choosing, these are the periods alrea
 
 Consequence for Japan:
 
-| Period | Touched by | Status |
+| Period | Touched by | Exposure |
 |---|---|---|
-| 2010-01 to 2023-12 | HKTrack training and test seasons; the pattern search; the aggregates | Development only |
+| 2010-01 to 2023-12 | HKTrack training and test seasons; the pattern search; the aggregates | Touched by everything above; cannot be a clean holdout |
 | 2024-01-01 to 2026-11-15 | HKTrack test seasons and research; the aggregates | Not touched by the pattern search, so a fair test for hypotheses it generated; not fair for anything HKTrack or the aggregates measured |
 | 2026-11-16 to 2026-11-23 | The Kyoto snapshots; HKTrack live scoring of 2026-11-22; the WIN5 page | Touched |
 | After 2026-11-23 | Nothing | Untouched |
@@ -332,22 +352,25 @@ No historical period of either country is untouched. Only race days after 2026-1
 OWNER DECISION (D11): What kind of holdout does Japan use?
 
 - **A1. Prospective, contiguous.** Every JRA race from a start date on. Logged days before the start are
-  development for the price half. Untouched by anyone, and every holdout race has a logged decision-time board,
-  which is the only data on which a betting rule can be judged without look-ahead. Slow to reach power: on the
-  order of a year of all-venue racing to detect a gain of a few thousandths of a nat per race. The price half
-  starts with few logged days, and the holdout starts later.
+  development for the price half. Untouched by anyone, and every holdout race has a logged board at each decision
+  time, which is the only data on which a betting rule at those times can be judged without look-ahead. Slow to
+  reach power: on the order of a year of all-venue racing to detect a gain of a few thousandths of a nat per race.
+  The price half starts with few logged days, and the holdout starts later.
 - **A2. Prospective, interleaved.** From a start date, a seeded, pre-registered random half of race days goes to
   the holdout and the other half to development. Both sides grow at the same rate and the price half gets data at
   once; seasonal regimes are shared between them and the discipline must be strict.
 - **B. A historical block** (the candidate is 2024-01-01 to 2026-11-15, about three seasons). Available now and fair
   for hypotheses from the pattern search; contaminated for anything HKTrack or the aggregates measured; usable
-  once; and it has no decision-time boards, so it can test probability claims but not betting rules.
+  once. Its only pre-race board is a single licensed tote snapshot taken well before the off, on which HKTrack
+  already fitted and scored for 2024 to 2026 (HKTrack DECISIONS #27); it has no boards at the near-off decision
+  times, so it can test probability claims, and betting rules only at that snapshot's time.
 - **C. Hybrid.** Use B once as a confirmation set for a pre-registered list of probability claims from the pattern
   search, which may demote a hypothesis but never adopt one; use A1 or A2 as the only holdout for adoption and for
   every betting rule. An early, honest read without spending the prospective holdout; two governance objects and a
   rule for which hypotheses may touch B.
 
-Answer:
+Answer: A2. Prospective, interleaved: from the start date a seeded, pre-registered random half of race days is the
+holdout and the other half development.
 
 OWNER DECISION (D12): What are the Japan holdout's dates and size?
 
@@ -358,7 +381,8 @@ OWNER DECISION (D12): What are the Japan holdout's dates and size?
 - A fixed date is simple and verifiable; a power target opens the holdout only when it can answer, but its end is
   not known in advance.
 
-Answer:
+Answer: Start 2026-11-28 (the next JRA race day). Opened only when it reaches a power target (the races needed to
+detect a stated gain at the D7 level). After an opening, a fresh block rolls forward from that date.
 
 OWNER DECISION (D13): What is Hong Kong's holdout?
 
@@ -368,7 +392,8 @@ OWNER DECISION (D13): What is Hong Kong's holdout?
   requires the Hong Kong ingest to keep running.
 - **Defer the choice** until Hong Kong resumes. No cost now; Hong Kong history keeps being the only data.
 
-Answer:
+Answer: Prospective from now: the Hong Kong data keeps being ingested while Hong Kong model work is paused, so clean
+races accumulate.
 
 OWNER DECISION (D14): May holdout-period price paths train the price half?
 
@@ -380,7 +405,7 @@ OWNER DECISION (D14): May holdout-period price paths train the price half?
 - **Yes, with a lag.** Holdout paths become training data only after a set delay or after the holdout is spent.
   A compromise; more bookkeeping.
 
-Answer:
+Answer: No. Holdout days are fully locked, outcomes and prices alike.
 
 OWNER DECISION (D15): Who may open a holdout, how often, and what does a use mean?
 
@@ -392,7 +417,8 @@ OWNER DECISION (D15): Who may open a holdout, how often, and what does a use mea
   spent). Flexible; every opening weakens the next.
 - In every option, a use is logged whether or not the result is reported, and a failed claim counts as a use.
 
-Answer:
+Answer: Once per pre-registered family, opened by the owner, scored together with the D17 correction; every opening
+is logged and a failed claim counts as a use.
 
 ## 6. Adoption rule
 
@@ -420,7 +446,9 @@ OWNER DECISION (D16): What evidence adopts a model?
 - **For a component of a stack:** the gain of the full stack over the stack without it, on the same bootstrap
   indices. Avoids adopting components that only duplicate others; costs a refit per component.
 
-Answer:
+Answer: On the holdout: the lower bound of the log-loss gain over the final price is above 0 at the D7 level, AND in
+a model + final-price combination the model's weight is positive with its interval above 0; a stack component must
+also show the full-stack gain over the stack without it.
 
 OWNER DECISION (D17): How are many candidate rules and variants tested without mining noise?
 
@@ -435,7 +463,9 @@ OWNER DECISION (D17): How are many candidate rules and variants tested without m
 - **False-discovery screens (Benjamini-Hochberg or Benjamini-Yekutieli)** as a screen only, not a decision tool.
 - Any option: the number of rules tried is reported with every result.
 
-Answer:
+Answer: Pre-registered families tested with Hansen SPA and Romano-Wolf StepM, bootstrapped over meetings; segment
+returns shrunk hierarchically with odds-band fixed effects; FDR only as a screen; the number of rules tried reported
+with every result.
 
 OWNER DECISION (D18): Are betting rules split into two families with different evidence standards?
 
@@ -448,7 +478,9 @@ OWNER DECISION (D18): Are betting rules split into two families with different e
 - **No: one standard for every rule** (positive realised return on the holdout). Simple; no loss-avoidance rule can
   be adopted until an edge exists, which may be never.
 
-Answer:
+Answer: Yes. Loss-avoidance rules are adopted on a one-sided paired difference vs a stated alternative on the same
+races and never claim profit; positive-edge rules need a realised return above 0 at final dividends on the holdout,
+on top of the log-loss evidence.
 
 OWNER DECISION (D19): What are the staking rungs, and what evidence moves a rule up a rung?
 
@@ -464,7 +496,10 @@ OWNER DECISION (D19): What are the staking rungs, and what evidence moves a rule
   once an edge exists; overestimating the edge by more than a factor of two makes Kelly growth negative.
 - **Caps:** per ticket, per race and per day.
 
-Answer:
+Answer: Five rungs: avoid (default), shadow, flat minimum, flat small under a cap, shrunk fractional Kelly under a
+cap. Flat minimum needs the D16 evidence and a shadow calibration slope whose interval includes 1; flat small adds a
+positive realised holdout return; Kelly adds a further prospective period. Caps per ticket, race and day are set
+later on a ticket.
 
 ## 7. Out of scope
 
@@ -483,7 +518,8 @@ OWNER DECISION (D20): Are NAR (local government) tracks in scope for Japan?
   leaving the door open; NAR pools are smaller, so own price impact and data quality differ.
 - **Yes, now.** More races for the holdout and for power; new sources, rules and takeouts before any JRA result.
 
-Answer:
+Answer: Later, as an extension: this statement is JRA-only; NAR comes in with its own data-access ticket, takeouts
+and holdout.
 
 ## 8. Governance
 
@@ -497,9 +533,9 @@ What the brief fixes:
 - **A known-vs-assumed ledger** (#12) labels every claim as measured (with its source), single-run or assumption.
   The claims of section 1.1 enter it.
 
-The owner-decision list in this statement: D1 to D21, in the table below. Sections 2 to 7 cannot be implemented
-until their decisions are answered; the evaluation-harness tickets that depend on them (scoring #69, folds #70,
-holdout #71) stay blocked until sign-off.
+The owner-decision list in this statement: D1 to D21, in the table below, all answered at sign-off on 2026-11-24.
+The evaluation-harness tickets that depend on them (scoring #69, folds #70, holdout #71) now have the decisions
+they waited for.
 
 OWNER DECISION (D21): Two governance points: may figures derived from the licensed data source appear in this
 public repository, and how is this statement amended after sign-off?
@@ -514,30 +550,47 @@ public repository, and how is this statement amended after sign-off?
 - **Amendments, option 2:** factual corrections (a takeout rate, a typo) need no sign-off but are logged; any
   change to a decision needs sign-off. Faster; the line between "factual" and "decision" must be drawn.
 
-Answer:
+Answer: Licensed-source figures never appear in the public repository (cite by internal document and decision number
+only). Amendments: factual corrections need no sign-off but are logged in a dated change log at the end of the file;
+any change to a decision needs owner sign-off on a ticket.
 
 ## Decisions summary
 
-| ID | Decision | Section |
-|---|---|---|
-| D1 | Estimand form: condition on the final price and integrate over a nowcast, condition on the board at t, or a residual on the final price | 1. Decision problem |
-| D2 | Decision time t and the horizons reported | 1. Decision problem |
-| D3 | Pools covered first | 1. Decision problem |
-| D4 | How the final Win price becomes a probability (normalised 1/odds, power, Shin, calibrated) | 2. Baseline |
-| D5 | Baseline for Place, Wide and the exotic pools | 2. Baseline |
-| D6 | The outcome scored and the pseudo-R² reference | 3. Metric |
-| D7 | Bootstrap resampling unit (race, meeting, day, block) and confidence level | 3. Metric |
-| D8 | How the price half (forecasting O_final from info_t) is scored, its baseline, and whether a closing-line-style measure is a live diagnostic | 3. Metric |
-| D9 | Fold scheme: unit, refit cadence, window, minimum training window, nesting, embargo | 4. Splits |
-| D10 | Treatment of races before 2014-06-07 | 4. Splits |
-| D11 | Japan holdout design (prospective contiguous, prospective interleaved, historical block, hybrid) | 5. Holdout |
-| D12 | Japan holdout dates and size | 5. Holdout |
-| D13 | Hong Kong holdout | 5. Holdout |
-| D14 | Whether holdout-period price paths may train the price half | 5. Holdout |
-| D15 | Who opens a holdout, how often, and what counts as a use | 5. Holdout |
-| D16 | Evidence that adopts a model (the adoption threshold) | 6. Adoption rule |
-| D17 | Multiple-testing policy | 6. Adoption rule |
-| D18 | Two families of betting rules with separate evidence standards, or one | 6. Adoption rule |
-| D19 | Staking rungs, their entry evidence, method and caps | 6. Adoption rule |
-| D20 | NAR tracks in or out of scope | 7. Out of scope |
-| D21 | Licensed-source figures in the public repo; amending this statement | 8. Governance |
+| ID | Question | Decision | Section |
+|---|---|---|---|
+| D1 | Estimand form: condition on the final price and integrate over a nowcast, condition on the board at t, or a residual on the final price | A: condition on the final price, integrate over a nowcast of the final pools made at t | 1. Decision problem |
+| D2 | Decision time t and the horizons reported | Grid T-60, T-30, T-16, T-5, T-2, T-1; T-2 primary | 1. Decision problem |
+| D3 | Pools covered first | Win, Place and Wide | 1. Decision problem |
+| D4 | How the final Win price becomes a probability (normalised 1/odds, power, Shin, calibrated) | Calibrated market (spline in ln q), fitted in-fold only | 2. Baseline |
+| D5 | Baseline for Place, Wide and the exotic pools | Both: pool's own final prices primary, Win-derived ordering secondary | 2. Baseline |
+| D6 | The outcome scored and the pseudo-R² reference | Pool-matched primary (winner for Win, top-3 order for Place and Wide), both reported; pseudo-R² vs equal chances plus nats per race over the final price | 3. Metric |
+| D7 | Bootstrap resampling unit (race, meeting, day, block) and confidence level | Meetings (venue x day); 95%, one-sided | 3. Metric |
+| D8 | How the price half (forecasting O_final from info_t) is scored, its baseline, and whether a closing-line-style measure is a live diagnostic | Log predictive density with PIT and coverage; fitted drift baseline; shadow slope as joint check; closing-line-style measure secondary only | 3. Metric |
+| D9 | Fold scheme: unit, refit cadence, window, minimum training window, nesting, embargo | Quarter folds, quarterly refit, expanding, 5 seasons minimum, nested OOF, 1-week embargo | 4. Splits |
+| D10 | Treatment of races before 2014-06-07 | Only for components that do not touch the price | 4. Splits |
+| D11 | Japan holdout design (prospective contiguous, prospective interleaved, historical block, hybrid) | A2: prospective, interleaved (seeded random half of race days) | 5. Holdout |
+| D12 | Japan holdout dates and size | Start 2026-11-28; opened at a power target; rolls forward after an opening | 5. Holdout |
+| D13 | Hong Kong holdout | Prospective from now; ingest keeps running while model work is paused | 5. Holdout |
+| D14 | Whether holdout-period price paths may train the price half | No: fully locked, outcomes and prices | 5. Holdout |
+| D15 | Who opens a holdout, how often, and what counts as a use | Once per pre-registered family, by the owner, with the D17 correction; every opening logged | 5. Holdout |
+| D16 | Evidence that adopts a model (the adoption threshold) | Holdout gain lower bound above 0 AND positive encompassing weight; stack components also need the full-stack gain | 6. Adoption rule |
+| D17 | Multiple-testing policy | Pre-registered families with SPA and StepM over meetings; hierarchical shrinkage; FDR as screen; rules tried reported | 6. Adoption rule |
+| D18 | Two families of betting rules with separate evidence standards, or one | Yes: loss-avoidance (paired, one-sided) and positive-edge (holdout return above 0) | 6. Adoption rule |
+| D19 | Staking rungs, their entry evidence, method and caps | Five rungs, avoid to shrunk fractional Kelly; entry evidence per rung; caps set later on a ticket | 6. Adoption rule |
+| D20 | NAR tracks in or out of scope | Later, as an extension with its own ticket; this statement is JRA-only | 7. Out of scope |
+| D21 | Licensed-source figures in the public repo; amending this statement | Never; factual corrections logged without sign-off, decision changes need owner sign-off | 8. Governance |
+
+## Change log
+
+- 2026-11-24: signed off; D1-D21 answered on ticket #14; seven review corrections applied (listed):
+  1. Section 1.1: the Hong Kong blend weight's unconstrained value is stated as an inference (zero or negative),
+     not as a measured slightly negative estimate.
+  2. Section 1: the forecast-of-final-odds bias states both conditions: `0.8(e^{σ²/2} - 1)` for a forecast
+     unbiased in log terms (median), `0.8(e^{σ²} - 1)` for one unbiased in level.
+  3. Section 1: the minimum-payout break-even uses P(place), and the Place text notes that the places paid depend
+     on field size (to confirm in the ledger).
+  4. Section 3: scoring the price half separately is moved out of "What the brief fixes" and tied to D1 and D8.
+  5. Section 5: the "not used for development" line is stated as consistent with D14 (No).
+  6. Section 5.1: the exposure table describes exposure instead of assigning a holdout use.
+  7. D11 option B: the historical block's tradeoff notes the licensed pre-race tote snapshot HKTrack fitted and
+     scored on (HKTrack DECISIONS #27).
