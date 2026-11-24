@@ -4,6 +4,7 @@ plus the source facts the URL builders and parsers both read from config. Pure f
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import date
 from urllib.parse import parse_qs, urlparse
 
@@ -16,6 +17,8 @@ SOURCE = "hkjc"
 
 _WS = re.compile(r"\s+")
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")
+_CLAIM_SUFFIX = re.compile(r"\(\s*[-+]?\d+\s*\)")
+_NON_NAME = re.compile(r"[\W_]+")  # anything but letters and digits, of any script
 
 NO_INFO_MARKER = "No information."
 
@@ -53,6 +56,26 @@ def season_of(race_date: date) -> str:
 def meeting_id(race_date: date, venue: str) -> str:
     """hkjc:<YYYY-MM-DD>:<VENUE>, the store's meeting id."""
     return f"{SOURCE}:{race_date.isoformat()}:{venue}"
+
+
+def race_id(meeting: str, race_no: int) -> str:
+    """<meeting_id>:<NN>, the store's race id."""
+    return f"{meeting}:{int(race_no):02d}"
+
+
+def normalise_name(name: str) -> str:
+    """NFKC (full- and half-width forms fold together), drop apprentice-claim suffixes like
+    '(-7)', casefold, keep letters and digits of any script; everything else becomes single
+    spaces (HKTrack's `core.ids.normalise_name`)."""
+    s = _CLAIM_SUFFIX.sub(" ", unicodedata.normalize("NFKC", name or "")).casefold()
+    return _NON_NAME.sub(" ", s).strip()
+
+
+def person_key(role: str, name: str) -> str | None:
+    """Join key for jockeys and trainers, e.g. 'jockey:a lima bravo'. Old pages print retired
+    people without any id, so the name is the key (HKTrack's `core.ids.person_key`)."""
+    norm = normalise_name(name)
+    return f"{role}:{norm}" if norm else None
 
 
 def soup(body: bytes | str) -> BeautifulSoup:
