@@ -7,8 +7,10 @@ to the post. A race with no capture inside its window has the whole window as it
 
 A health line: `<venue> snapshots=N rows=N failures=N wrong_meeting=N max_gap_t20_s=N
 stopped=<reason>`, with `<date> ` in front when the date is given; max_gap_t20_s is in whole
-seconds, `-` when the venue has no post time. A venue that logged 0 rows, stopped other than
-'ended', or whose max_gap_t20_s is over 120 also gets `ALERT [<date> ]<venue> <reasons>`.
+seconds, `-` when the venue has no post time; with tier 2 on (ticket #130) the line ends
+` tier2_skipped=N`, the venue's tier-2 grid points not captured. A venue that logged 0 rows,
+stopped other than 'ended', or whose max_gap_t20_s is over 120 also gets
+`ALERT [<date> ]<venue> <reasons>`.
 """
 
 from __future__ import annotations
@@ -86,6 +88,7 @@ def health_lines(
             f"{head}{venue} snapshots={v.snapshots} rows={v.rows} failures={v.failures}"
             f" wrong_meeting={v.wrong_meeting} max_gap_t20_s={'-' if gap_s is None else gap_s}"
             f" stopped={v.stopped or '-'}"
+            + (f" tier2_skipped={v.tier2_skipped}" if v.tier2_skipped is not None else "")
         )
         reasons = _alert_reasons(v, gap_s)
         if reasons:

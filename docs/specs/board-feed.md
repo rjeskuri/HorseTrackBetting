@@ -1,8 +1,14 @@
 # The live-board feed
 
 Code: `src/horsetrack/countries/japan/board/feed.py`. Input: a race day's odds snapshot logs
-(docs/specs/odds-log.md), read with `odds_log.read_rows`, and the post times of
-`snapshot.post_times_for`. The feed never requests anything over the network.
+(docs/specs/odds-log.md), streamed member by member with `odds_log.iter_members`, and the post
+times of `snapshot.post_times_for`. The feed never requests anything over the network.
+
+The feed carries tier-1 pools only: `WIN`, `PLACE`, `QUINELLA`, `QUINELLA_PLACE` (`BOARD_POOLS`).
+Tier-2 (`BRACKET_QUINELLA`, `FORECAST`, `TRIO`, `TIERCE`) and `WIN5` rows in the same log are
+dropped row by row as each member is read, before anything below: they never reach a pool, a race
+with only such rows is not on the board, and they do not move `last_capture_utc`. The board over a
+log is exactly the board over its tier-1 rows, and a day's trifecta boards are never held in memory.
 
 `build_board(race_date, *, venues=None, now=utc_now, morning_from='07:00') -> dict`
 
@@ -73,3 +79,52 @@ and starts only once the `SCR` row is captured at or before `now()`.
 sidecar beside the log; else HKTrack's stored card,
 `processed/jra/upcoming/jra_<date>_<VENUE>/races.parquet` column `post_time_local` (the copied
 HKTrack days, 2026-11-21 and 22 at Kyoto, have no sidecar); else null for the race.
+
+## The shadow feed
+
+Code: `src/horsetrack/countries/japan/board/shadow_feed.py` (ticket #121), served at
+`/shadow-feed` beside `/feed` and read by the shadow page at `/shadow` (#122). The plain feed
+above is unchanged and stays free of probabilities and values; the shadow values travel only here.
+
+`build_shadow(race_date, *, venues=None, now=utc_now, models, flag_rules, n_draws=400, seed=0,
+cache=None) -> dict`
+
+```
+{race_date, generated_utc,
+ models: {win, ordering, nowcast} | null,
+ races: [{race_id, venue, race_no, post_utc, minutes_to_post, tau_bucket_min, board_capture_utc,
+          pools: {WIN:            {"7":   {value_mean, value_q05, value_q95, flags}},
+                  PLACE:          {"7":   {value_at_low, value_at_high, flags}},
+                  QUINELLA_PLACE: {"3,7": {value_at_low, value_at_high, flags}}}}]}
+```
+
+- Input: the same logs as the plain feed, read on with `odds_log.LogTail`, and the post times of
+  `post_times_for`. It never reads the shadow log (docs/specs/shadow-log.md), so nothing from a
+  sealed holdout record reaches the page.
+- `races`: every race with a board as of `now()` (`board_at`: rows available after `now()` are not
+  on it), venues sorted by name and races in number order. A race with no row available yet is
+  not listed.
+- `minutes_to_post`: `(post - now)` in minutes, two decimals. `tau_bucket_min`:
+  `bucket_for(minutes_to_post, decision grid)`, the smallest grid horizon at or above the minutes
+  to post (the largest for anything earlier) and 0 at or after the post, where the board is the
+  latest one. Without a post time both are null, and so are the values.
+- Values: `shadow_values(board, tau_min=tau_bucket_min, ...)` with the draws seeded by
+  `point_seed(seed, race_id, tau)` as in shadow-day. A value is the gross return per 1 yen at the
+  final price (1.0 is break-even). A value that cannot be formed (no models, no post time, no
+  ordering fit, or a failed computation) is null; NaN and infinity are null.
+- `flags`: the sorted `avoid_flags(board, rules=flag_rules, now_utc=now())` of the key, `[]` when
+  none. Every WIN runner, PLACE runner and Wide pair on the board has an entry.
+- `models`: the ids of the fits in use, or null when `load_shadow_models` found none; then every
+  value is null and the flags still show.
+- No key names a stake, a bet, Kelly, an amount or a wager.
+
+Recompute: `cache` is a mapping the caller keeps between builds (the server keeps one). A race's
+values are recomputed only when its board (`board_capture_utc` and its figures) or its bucket
+changed; flags read the clock on every build. The same mapping holds the log readers, so a build
+parses only the members appended since the last one; a clock that goes back reads the logs again.
+
+Serving: `/shadow-feed` has the headers, gzip, ETag and 304 of `/feed`. It is rebuilt at most
+every `min_rebuild_s`, whether or not a log changed (buckets and the stale flag follow the clock),
+and its body and ETag change only when something other than `generated_utc` and
+`minutes_to_post` did, so the page's poll costs a 304 between captures; the page counts down to
+the post from `post_utc`. `board-serve` loads the models once at start with `load_shadow_models`.
