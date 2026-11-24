@@ -85,6 +85,14 @@ def run_cli(*args):
     return CliRunner().invoke(app, ["japan", "pull-vm", *args])
 
 
+ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def plain(text: str) -> str:
+    """Strip ANSI escapes: Typer forces a terminal under GITHUB_ACTIONS / FORCE_COLOR."""
+    return ANSI.sub("", text)
+
+
 def dest_of(argv) -> Path:
     return Path(argv[-1])
 
@@ -260,7 +268,7 @@ def test_cli_exits_non_zero_when_rsync_fails(data_dir, monkeypatch):
 def test_cli_requires_a_host(data_dir):
     result = run_cli()
     assert result.exit_code == 2
-    assert "--host" in result.output
+    assert "--host" in plain(result.output)
 
 
 # ------------------------------------------------------------------ launchd
