@@ -17,6 +17,7 @@ Research and tooling for pari-mutuel horse racing, one folder per country (Japan
 - `tests/`: the test suite.
 - `scripts/verify.sh`: the checks behind the verify command; `.github/workflows/ci.yml` runs it.
 - `.githooks/`: `pre-commit` (format and lint on staged files, no commits on main) and `pre-push` (no pushes to main, no force pushes).
+- `src/horsetrack/cli.py`: the CLI root; commands live in their own modules and register on the `japan` group (e.g. `japan.command('log-day')(log_day)`).
 - `src/horsetrack/`: the package. Entries marked (planned) do not exist until a ticket creates them.
 - `src/horsetrack/core/{env,paths}.py`: settings from the environment or the repo-root `.env`; `HORSETRACK_DATA_DIR` resolution and the on-disk layout under it (see `.env.example`).
 - `src/horsetrack/core/{config,pricing}.py` (`config.py` exists, `pricing.py` planned): configuration, pari-mutuel pricing maths.
