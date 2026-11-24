@@ -1,0 +1,27 @@
+# The v0 nowcast (read by countries/japan/models/v0/nowcast.py; ticket #116). D8 (signed): "price
+# baseline: a fitted average drift by odds band and horizon". The three values below are
+# implementation choices of #116, recorded as Rulings on its pull request.
+
+# Ruling: band cut points on the low figure of O_t; band = number of cut points at or below the odds
+# (seven bands: <2, 2-5, 5-10, 10-20, 20-50, 50-100, 100+), because they follow the ticket's
+# outline and split the favourite, mid-price and long-shot regimes where drift differs.
+bands: [2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
+
+# Ruling: prior_n = 50, because a cell's examples are correlated within a race (one race's money
+# moves all its prices together), so a band keeps half its own mean only after roughly three to
+# five races' worth of examples; with ~21 near-post races on the two development days most cells
+# then sit near the (pool, tau) prior, which the fit manifest reports.
+prior_n: 50
+
+# Ruling: the oldest board accepted at each decision horizon tau (minutes before post), in seconds:
+# about a sixth of the horizon and never under 30 s, because an older board is an earlier horizon's
+# board in disguise; near the post 30-45 s still admits a logger capturing every ~30 s, while a
+# race with no capture in its last three minutes is dropped at tau 2 and 1. Every grid tau of
+# decision.yaml needs a value.
+max_board_age_s:
+  60: 600
+  30: 300
+  16: 180
+  5: 60
+  2: 45
+  1: 30

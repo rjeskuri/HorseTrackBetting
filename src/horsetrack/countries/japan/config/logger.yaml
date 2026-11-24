@@ -1,0 +1,4 @@
+# The odds logger's settings.
+# raw_pages: "all" keeps every odds page a capture fetches (gzip, under raw/jra/official_odds/),
+# so a parser bug found later can be re-run over a logged day; "none" keeps nothing.
+raw_pages: all

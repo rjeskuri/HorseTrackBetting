@@ -12,20 +12,28 @@ an empty list, so a loop kept writing 0-row captures and its stop rule never fir
 
 from __future__ import annotations
 
+import gzip
+import logging
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 
-from horsetrack.core.config import load_source
+from horsetrack.core import paths
+from horsetrack.core.config import load_country_yaml, load_source
 from horsetrack.core.ingest.fetcher import Fetcher
 from horsetrack.core.ingest.types import FetchTask, RawPage
 from horsetrack.countries.japan.jra import official_pages as op
 
+log = logging.getLogger(__name__)
+
 SOURCE = "jra"
+RAW_PAGES = ("all", "none")
 CARD_MENU = op.Link("/JRADB/accessD.html", "pw01dli00/F3")  # 出馬表: this week's meetings
 ODDS_MENU = op.Link(op.ODDS_PATH, "pw15oli00/6D")  # オッズ: this week's meetings
 ODDS_POOLS = ("WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE")
@@ -112,6 +120,30 @@ def read_post_times(fetcher: Fetcher, race_date: date, venue: str) -> dict[int, 
     return op.post_times(race_list, race_date)
 
 
+def raw_odds_path(
+    race_date: date, venue: str, race_no: int, code: str, fetched_utc: datetime
+) -> Path:
+    """Where a capture keeps one odds page: raw/jra/official_odds/<race date>/<VENUE>/
+    <HHMMSS>Z-<RR>-<code>.html.gz, the time being the fetch time in UTC."""
+    stamp = fetched_utc.astimezone(timezone.utc)
+    name = f"{stamp:%H%M%S}Z-{race_no:02d}-{code}.html.gz"
+    return paths.raw_dir(SOURCE) / "official_odds" / race_date.isoformat() / venue / name
+
+
+def _keep_raw(path: Path, body: bytes) -> None:
+    """gzip `body` to `path`: a temp file beside it, then a rename; no temp file survives."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "wb") as raw:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+                gz.write(body)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def capture_meeting(
     fetcher: Fetcher,
     race_date: date,
@@ -120,18 +152,27 @@ def capture_meeting(
     *,
     races: Sequence[int] | None = None,
     now: Callable[[], datetime] = utc_now,
+    raw_pages: str | None = None,
 ) -> MeetingCapture:
     """The odds rows of `pools` for every race of the meeting (or `races` only), in race-list
     order: the オッズ menu, the race list, then one request per distinct odds page of each race.
-    Raises NotListed, WrongMeeting, or ValueError (an unknown pool, before any request)."""
+    `raw_pages` "all" keeps each odds page body (see raw_odds_path), "none" nothing; None reads
+    logger.yaml. A page that cannot be written never fails the capture: one warning is logged.
+    Raises NotListed, WrongMeeting, or ValueError (an unknown pool or raw_pages, before any
+    request)."""
     wanted = list(dict.fromkeys(pools))
     unknown = [p for p in wanted if p not in ODDS_POOLS]
     if unknown or not wanted:
         raise ValueError(f"no JRA live odds for pool(s) {unknown or wanted}; known: {ODDS_POOLS}")
+    if raw_pages is None:
+        raw_pages = load_country_yaml("japan", "logger")["raw_pages"]
+    if raw_pages not in RAW_PAGES:
+        raise ValueError(f"raw_pages must be one of {RAW_PAGES}, not {raw_pages!r}")
     snapshot_utc = now()
     start = fetcher.requests_sent
     race_list = _race_list(fetcher, ODDS_MENU, "official_racelist", race_date, venue)
     rows: list[dict[str, Any]] = []
+    unwritten: list[OSError] = []
     for number, row in op.race_rows(race_list):
         if races is not None and number not in races:
             continue
@@ -147,6 +188,14 @@ def capture_meeting(
             shown = op.race_number(doc)
             if shown != number:
                 raise WrongMeeting(f"{what} is for race {shown}, asked for race {number}: refused")
+            if raw_pages == "all":
+                where = raw_odds_path(
+                    race_date, venue, number, link.cname.split("/")[0], page.fetched_utc
+                )
+                try:
+                    _keep_raw(where, page.body)
+                except OSError as err:
+                    unwritten.append(err)
             rows += op.odds_rows(
                 doc,
                 race_id(race_date, venue, number),
@@ -154,4 +203,10 @@ def capture_meeting(
                 snapshot_utc=snapshot_utc,
                 fetched_utc=page.fetched_utc,
             )
+    if unwritten:
+        log.warning(
+            "raw odds pages not kept: %d of this capture's pages failed to write (first: %s)",
+            len(unwritten),
+            unwritten[0],
+        )
     return MeetingCapture(rows, snapshot_utc, fetcher.requests_sent - start)
