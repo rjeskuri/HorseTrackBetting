@@ -23,14 +23,21 @@
 #   ultra_premium: every race and day the page lists, 2024-2025 (JRA ran no Premium in those years;
 #     its 2024-2025 programme was Ultra Premium). WIN5 is excluded on the 2024 GI-day races (the
 #     page's note) and included on the two all-race days.
-#   premium: 2015-2023, only the campaigns the pages pin to whole days or to numbered races.
-#     NOT transcribed, because the pages name them by race class or race name without a venue and
-#     race number:
+#   premium: 2014-09-13 to 2023-12-28, every campaign whose page pins it to whole days or to a
+#     venue and race number:
+#       金杯馬連 2015-2019: the pages list 中山 11R and 京都 11R.
+#       最終馬連 (the 12R Quinella), autumn 2014 and spring and autumn 2015 and 2016: one entry per
+#         venue the page lists for each day; the counts match each page's race total.
+#     The base rate is unknown before 2014-06-07, so spring 2014 and earlier campaigns are not listed.
+#     NOT transcribed:
+#       金杯 2020-2023 (馬連 2020-2021, ワイド 2022-2023): the pages give the date and the two race
+#         names but no venue or race number.
 #       2歳単勝 (WIN on every 2-year-old race; summer 2015-2023, autumn 2017-2023, with 12-28 in
-#         2017-2019 and 2021), 3歳重賞 (2017-2023), 最終馬連 (2014-2016), 金杯 (2015-2023),
-#       JRA60周年記念競走 (2014).
+#         2017-2019 and 2021): defined by race class; the pages list days, not races (the per-day
+#         result PDFs of 2015-2019 were not transcribed).
+#       3歳重賞 (2017-2023) and JRA60周年記念競走 (2014): the pages name the races and their meeting
+#         day but give no race number.
 #     Races in those campaigns get the base rate from this calendar: up to about 700 races a year.
-#     Before 2015 the base rate is unknown before 2014-06-07, so earlier Premium is not listed.
 
 boosts:
   # --- premium ---
@@ -72,6 +79,177 @@ boosts:
   - {kind: premium, date: 2023-05-28, pools: [QUINELLA_PLACE]}  # ダービーデーワイド
   - {kind: premium, date: 2023-12-24, pools: [QUINELLA_PLACE]}  # 有馬記念デーワイド
   - {kind: premium, date: 2023-12-28, pools: [WIN, QUINELLA_PLACE]}  # ホープフルデー単勝&ワイド
+
+  # --- premium: 金杯馬連 (中山金杯 and 京都金杯, 11R each) ---
+  - &kinpai {kind: premium, date: 2015-01-04, venue: NAK, race_no: 11, pools: [QUINELLA]}
+  - {<<: *kinpai, date: 2015-01-04, venue: KYO}
+  - {<<: *kinpai, date: 2016-01-05, venue: NAK}
+  - {<<: *kinpai, date: 2016-01-05, venue: KYO}
+  - {<<: *kinpai, date: 2017-01-05, venue: NAK}
+  - {<<: *kinpai, date: 2017-01-05, venue: KYO}
+  - {<<: *kinpai, date: 2018-01-06, venue: NAK}
+  - {<<: *kinpai, date: 2018-01-06, venue: KYO}
+  - {<<: *kinpai, date: 2019-01-05, venue: NAK}
+  - {<<: *kinpai, date: 2019-01-05, venue: KYO}
+
+  # --- premium: 最終馬連 (the 12R Quinella at each venue the page lists that day) ---
+  # 2014 秋の最終馬連 (28 races)
+  - &last_race {kind: premium, date: 2014-09-13, venue: NII, race_no: 12, pools: [QUINELLA]}
+  - {<<: *last_race, date: 2014-09-13, venue: HSN}
+  - {<<: *last_race, date: 2014-09-14, venue: NII}
+  - {<<: *last_race, date: 2014-09-14, venue: HSN}
+  - {<<: *last_race, date: 2014-09-20, venue: NII}
+  - {<<: *last_race, date: 2014-09-20, venue: HSN}
+  - {<<: *last_race, date: 2014-09-21, venue: NII}
+  - {<<: *last_race, date: 2014-09-21, venue: HSN}
+  - {<<: *last_race, date: 2014-09-27, venue: NII}
+  - {<<: *last_race, date: 2014-09-27, venue: HSN}
+  - {<<: *last_race, date: 2014-09-28, venue: NII}
+  - {<<: *last_race, date: 2014-09-28, venue: HSN}
+  - {<<: *last_race, date: 2014-10-04, venue: NII}
+  - {<<: *last_race, date: 2014-10-04, venue: HSN}
+  - {<<: *last_race, date: 2014-10-05, venue: NII}
+  - {<<: *last_race, date: 2014-10-05, venue: HSN}
+  - {<<: *last_race, date: 2014-10-11, venue: TOK}
+  - {<<: *last_race, date: 2014-10-11, venue: KYO}
+  - {<<: *last_race, date: 2014-10-12, venue: TOK}
+  - {<<: *last_race, date: 2014-10-12, venue: KYO}
+  - {<<: *last_race, date: 2014-10-13, venue: TOK}
+  - {<<: *last_race, date: 2014-10-14, venue: KYO}
+  - {<<: *last_race, date: 2014-10-18, venue: FKS}
+  - {<<: *last_race, date: 2014-10-18, venue: TOK}
+  - {<<: *last_race, date: 2014-10-18, venue: KYO}
+  - {<<: *last_race, date: 2014-10-19, venue: FKS}
+  - {<<: *last_race, date: 2014-10-19, venue: TOK}
+  - {<<: *last_race, date: 2014-10-19, venue: KYO}
+  # 2015 春の最終馬連 (32 races)
+  - {<<: *last_race, date: 2015-02-28, venue: NAK}
+  - {<<: *last_race, date: 2015-02-28, venue: HSN}
+  - {<<: *last_race, date: 2015-02-28, venue: KOK}
+  - {<<: *last_race, date: 2015-03-01, venue: NAK}
+  - {<<: *last_race, date: 2015-03-01, venue: HSN}
+  - {<<: *last_race, date: 2015-03-01, venue: KOK}
+  - {<<: *last_race, date: 2015-03-07, venue: NAK}
+  - {<<: *last_race, date: 2015-03-07, venue: HSN}
+  - {<<: *last_race, date: 2015-03-08, venue: NAK}
+  - {<<: *last_race, date: 2015-03-08, venue: HSN}
+  - {<<: *last_race, date: 2015-03-14, venue: NAK}
+  - {<<: *last_race, date: 2015-03-14, venue: CKY}
+  - {<<: *last_race, date: 2015-03-14, venue: HSN}
+  - {<<: *last_race, date: 2015-03-15, venue: NAK}
+  - {<<: *last_race, date: 2015-03-15, venue: CKY}
+  - {<<: *last_race, date: 2015-03-15, venue: HSN}
+  - {<<: *last_race, date: 2015-03-21, venue: NAK}
+  - {<<: *last_race, date: 2015-03-21, venue: CKY}
+  - {<<: *last_race, date: 2015-03-21, venue: HSN}
+  - {<<: *last_race, date: 2015-03-22, venue: NAK}
+  - {<<: *last_race, date: 2015-03-22, venue: CKY}
+  - {<<: *last_race, date: 2015-03-22, venue: HSN}
+  - {<<: *last_race, date: 2015-03-28, venue: NAK}
+  - {<<: *last_race, date: 2015-03-28, venue: CKY}
+  - {<<: *last_race, date: 2015-03-28, venue: HSN}
+  - {<<: *last_race, date: 2015-03-29, venue: NAK}
+  - {<<: *last_race, date: 2015-03-29, venue: CKY}
+  - {<<: *last_race, date: 2015-03-29, venue: HSN}
+  - {<<: *last_race, date: 2015-04-04, venue: NAK}
+  - {<<: *last_race, date: 2015-04-04, venue: HSN}
+  - {<<: *last_race, date: 2015-04-05, venue: NAK}
+  - {<<: *last_race, date: 2015-04-05, venue: HSN}
+  # 2015 秋の最終馬連 (30 races)
+  - {<<: *last_race, date: 2015-09-12, venue: NAK}
+  - {<<: *last_race, date: 2015-09-12, venue: HSN}
+  - {<<: *last_race, date: 2015-09-13, venue: NAK}
+  - {<<: *last_race, date: 2015-09-13, venue: HSN}
+  - {<<: *last_race, date: 2015-09-19, venue: NAK}
+  - {<<: *last_race, date: 2015-09-19, venue: HSN}
+  - {<<: *last_race, date: 2015-09-20, venue: NAK}
+  - {<<: *last_race, date: 2015-09-20, venue: HSN}
+  - {<<: *last_race, date: 2015-09-21, venue: NAK}
+  - {<<: *last_race, date: 2015-09-21, venue: HSN}
+  - {<<: *last_race, date: 2015-09-26, venue: NAK}
+  - {<<: *last_race, date: 2015-09-26, venue: HSN}
+  - {<<: *last_race, date: 2015-09-27, venue: NAK}
+  - {<<: *last_race, date: 2015-09-27, venue: HSN}
+  - {<<: *last_race, date: 2015-10-03, venue: NAK}
+  - {<<: *last_race, date: 2015-10-03, venue: HSN}
+  - {<<: *last_race, date: 2015-10-04, venue: NAK}
+  - {<<: *last_race, date: 2015-10-04, venue: HSN}
+  - {<<: *last_race, date: 2015-10-10, venue: TOK}
+  - {<<: *last_race, date: 2015-10-10, venue: KYO}
+  - {<<: *last_race, date: 2015-10-11, venue: TOK}
+  - {<<: *last_race, date: 2015-10-11, venue: KYO}
+  - {<<: *last_race, date: 2015-10-12, venue: TOK}
+  - {<<: *last_race, date: 2015-10-12, venue: KYO}
+  - {<<: *last_race, date: 2015-10-17, venue: NII}
+  - {<<: *last_race, date: 2015-10-17, venue: TOK}
+  - {<<: *last_race, date: 2015-10-17, venue: KYO}
+  - {<<: *last_race, date: 2015-10-18, venue: NII}
+  - {<<: *last_race, date: 2015-10-18, venue: TOK}
+  - {<<: *last_race, date: 2015-10-18, venue: KYO}
+  # 2016 春の最終馬連 (34 races)
+  - {<<: *last_race, date: 2016-02-27, venue: NAK}
+  - {<<: *last_race, date: 2016-02-27, venue: HSN}
+  - {<<: *last_race, date: 2016-02-27, venue: KOK}
+  - {<<: *last_race, date: 2016-02-28, venue: NAK}
+  - {<<: *last_race, date: 2016-02-28, venue: HSN}
+  - {<<: *last_race, date: 2016-02-28, venue: KOK}
+  - {<<: *last_race, date: 2016-03-05, venue: NAK}
+  - {<<: *last_race, date: 2016-03-05, venue: HSN}
+  - {<<: *last_race, date: 2016-03-05, venue: KOK}
+  - {<<: *last_race, date: 2016-03-06, venue: NAK}
+  - {<<: *last_race, date: 2016-03-06, venue: HSN}
+  - {<<: *last_race, date: 2016-03-06, venue: KOK}
+  - {<<: *last_race, date: 2016-03-12, venue: NAK}
+  - {<<: *last_race, date: 2016-03-12, venue: CKY}
+  - {<<: *last_race, date: 2016-03-12, venue: HSN}
+  - {<<: *last_race, date: 2016-03-13, venue: NAK}
+  - {<<: *last_race, date: 2016-03-13, venue: CKY}
+  - {<<: *last_race, date: 2016-03-13, venue: HSN}
+  - {<<: *last_race, date: 2016-03-19, venue: CKY}
+  - {<<: *last_race, date: 2016-03-19, venue: HSN}
+  - {<<: *last_race, date: 2016-03-20, venue: NAK}
+  - {<<: *last_race, date: 2016-03-20, venue: HSN}
+  - {<<: *last_race, date: 2016-03-21, venue: NAK}
+  - {<<: *last_race, date: 2016-03-21, venue: CKY}
+  - {<<: *last_race, date: 2016-03-26, venue: NAK}
+  - {<<: *last_race, date: 2016-03-26, venue: CKY}
+  - {<<: *last_race, date: 2016-03-26, venue: HSN}
+  - {<<: *last_race, date: 2016-03-27, venue: NAK}
+  - {<<: *last_race, date: 2016-03-27, venue: CKY}
+  - {<<: *last_race, date: 2016-03-27, venue: HSN}
+  - {<<: *last_race, date: 2016-04-02, venue: NAK}
+  - {<<: *last_race, date: 2016-04-02, venue: HSN}
+  - {<<: *last_race, date: 2016-04-03, venue: NAK}
+  - {<<: *last_race, date: 2016-04-03, venue: HSN}
+  # 2016 秋の最終馬連 (28 races)
+  - {<<: *last_race, date: 2016-09-10, venue: NAK}
+  - {<<: *last_race, date: 2016-09-10, venue: HSN}
+  - {<<: *last_race, date: 2016-09-11, venue: NAK}
+  - {<<: *last_race, date: 2016-09-11, venue: HSN}
+  - {<<: *last_race, date: 2016-09-17, venue: NAK}
+  - {<<: *last_race, date: 2016-09-17, venue: HSN}
+  - {<<: *last_race, date: 2016-09-18, venue: NAK}
+  - {<<: *last_race, date: 2016-09-18, venue: HSN}
+  - {<<: *last_race, date: 2016-09-24, venue: NAK}
+  - {<<: *last_race, date: 2016-09-24, venue: HSN}
+  - {<<: *last_race, date: 2016-09-25, venue: NAK}
+  - {<<: *last_race, date: 2016-09-25, venue: HSN}
+  - {<<: *last_race, date: 2016-10-01, venue: NAK}
+  - {<<: *last_race, date: 2016-10-01, venue: HSN}
+  - {<<: *last_race, date: 2016-10-02, venue: NAK}
+  - {<<: *last_race, date: 2016-10-02, venue: HSN}
+  - {<<: *last_race, date: 2016-10-08, venue: TOK}
+  - {<<: *last_race, date: 2016-10-08, venue: KYO}
+  - {<<: *last_race, date: 2016-10-09, venue: TOK}
+  - {<<: *last_race, date: 2016-10-09, venue: KYO}
+  - {<<: *last_race, date: 2016-10-10, venue: TOK}
+  - {<<: *last_race, date: 2016-10-10, venue: KYO}
+  - {<<: *last_race, date: 2016-10-15, venue: NII}
+  - {<<: *last_race, date: 2016-10-15, venue: TOK}
+  - {<<: *last_race, date: 2016-10-15, venue: KYO}
+  - {<<: *last_race, date: 2016-10-16, venue: NII}
+  - {<<: *last_race, date: 2016-10-16, venue: TOK}
+  - {<<: *last_race, date: 2016-10-16, venue: KYO}
 
   # --- super_premium ---
   - {kind: super_premium, date: 2017-12-28}
