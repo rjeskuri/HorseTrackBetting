@@ -15,6 +15,13 @@ import horsetrack
 ROOT = Path(__file__).resolve().parent.parent
 runner = CliRunner()
 
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _plain(text: str) -> str:
+    """Output without ANSI escapes: typer forces colour under CI (GITHUB_ACTIONS, FORCE_COLOR)."""
+    return _ANSI.sub("", text)
+
 
 def _app_and_japan():
     from horsetrack.cli import app, japan
@@ -35,23 +42,25 @@ def test_root_help_lists_the_japan_group():
     app, _ = _app_and_japan()
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "japan" in result.output
-    assert "--version" in result.output
+    out = _plain(result.output)
+    assert "japan" in out
+    assert "--version" in out
 
 
 def test_japan_group_help_exits_zero():
     app, _ = _app_and_japan()
     result = runner.invoke(app, ["japan", "--help"])
     assert result.exit_code == 0
-    assert "Usage" in result.output
+    assert "Usage" in _plain(result.output)
 
 
 def test_version_prints_the_package_version():
     app, _ = _app_and_japan()
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert horsetrack.__version__ in result.output
-    assert horsetrack.__version__ in result.output.strip().split()
+    out = _plain(result.output)
+    assert horsetrack.__version__ in out
+    assert horsetrack.__version__ in out.strip().split()
 
 
 def test_app_and_japan_are_typer_apps_with_japan_mounted():
@@ -66,11 +75,13 @@ def test_app_and_japan_are_typer_apps_with_japan_mounted():
 def test_bare_invocations_show_help_instead_of_running_anything():
     app, _ = _app_and_japan()
     root = runner.invoke(app, [])
-    assert "japan" in root.output
-    assert "Usage" in root.output
+    root_out = _plain(root.output)
+    assert "japan" in root_out
+    assert "Usage" in root_out
     japan = runner.invoke(app, ["japan"])
-    assert "Usage" in japan.output
-    assert "horsetrack japan" in japan.output or "japan" in japan.output
+    japan_out = _plain(japan.output)
+    assert "Usage" in japan_out
+    assert "horsetrack japan" in japan_out or "japan" in japan_out
 
 
 def test_unknown_command_fails_nonzero():
@@ -89,10 +100,10 @@ def test_a_command_registered_on_japan_is_reachable(japan_group, name, arg):
 
     result = runner.invoke(app, ["japan", name, arg])
     assert result.exit_code == 0
-    assert f"{name}:{arg}" in result.output
+    assert f"{name}:{arg}" in _plain(result.output)
 
     listing = runner.invoke(app, ["japan", "--help"])
-    assert name in listing.output
+    assert name in _plain(listing.output)
     # It lives under japan, not at the root.
     assert runner.invoke(app, [name, arg]).exit_code != 0
 
