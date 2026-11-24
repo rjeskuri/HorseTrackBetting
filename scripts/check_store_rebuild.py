@@ -10,9 +10,11 @@ tables and the reports all land in the work dir and opening the manifest creates
 beside the original. For jra the JRDB build runs too, on `raw/jrdb` and `jrdb/specs` linked the
 same way. Then every table of `processed/<source>` is compared with its rebuild by
 `compare_tables`: row count, column set, Arrow types and a content hash of the rows sorted by the
-table's key (`schemas.TABLES[name].sort_by`). A work dir inside the data dir (or the reverse) is
-refused, and the data dir's `raw/<source>`, `processed/<source>` (and the JRDB folders) are
-fingerprinted (path, size, mtime) before and after: a change fails the run.
+table's key (`schemas.TABLES[name].sort_by`). A column of `schemas.OPTIONAL_COLUMNS` that the copy
+lacks and the rebuild has with only nulls is no difference: the line reads `match` with a note
+naming it (a column with values, or one the rebuild lacks, still fails). A work dir inside the data
+dir (or the reverse) is refused, and the data dir's `raw/<source>`, `processed/<source>` (and the
+JRDB folders) are fingerprinted (path, size, mtime) before and after: a change fails the run.
 
 Prints one line per table and no row contents; jrdb_* lines carry no row counts (licensed data).
 `--compare-only` compares an earlier run's work dir again without building. Exit status: 0 when
@@ -52,6 +54,7 @@ class TableDiff:
     missing_columns: list[str] = field(default_factory=list)  # in a, not in b
     extra_columns: list[str] = field(default_factory=list)  # in b, not in a
     dtype_diffs: dict[str, tuple[str, str]] = field(default_factory=dict)  # column -> (a, b)
+    forgiven_columns: list[str] = field(default_factory=list)  # optional, new in b, all null
     hash_a: str = ""
     hash_b: str = ""
 
@@ -126,8 +129,19 @@ def _content_hash(table: pa.Table, key: Sequence[str]) -> str:
     return h.hexdigest()
 
 
-def compare_tables(a: Path, b: Path, key: Sequence[str] | None = None) -> TableDiff:
+def _all_null(path: Path, column: str) -> bool:
+    return pq.read_table(path, columns=[column]).column(column).null_count == (
+        pq.ParquetFile(path).metadata.num_rows
+    )
+
+
+def compare_tables(
+    a: Path, b: Path, key: Sequence[str] | None = None, optional: Sequence[str] = ()
+) -> TableDiff:
     """Compare two Parquet tables; reads them (one after the other) and writes nothing.
+
+    A column of `optional` that b has, a lacks and b holds only nulls in is not an extra column: it
+    is listed in `forgiven_columns` and left out of the comparison (only that direction).
 
     The content hashes cover the columns both sides have with the same type, so a schema
     difference does not hide whether the rest of the content matches. `key` None: sort by every
@@ -140,6 +154,10 @@ def compare_tables(a: Path, b: Path, key: Sequence[str] | None = None) -> TableD
         missing_columns=[c for c in schema_a.names if c not in names_b],
         extra_columns=[c for c in schema_b.names if c not in names_a],
     )
+    for name in [c for c in diff.extra_columns if c in optional]:
+        if _all_null(b, name):
+            diff.extra_columns.remove(name)
+            diff.forgiven_columns.append(name)
     shared = []
     for name in schema_a.names:
         if name not in names_b:
@@ -228,10 +246,14 @@ def rebuild(work: Path, source: str, workers: int) -> list[str]:
 
 
 def compare_stores(
-    copied: Path, rebuilt: Path, tables: Mapping[str, Sequence[str]]
+    copied: Path,
+    rebuilt: Path,
+    tables: Mapping[str, Sequence[str]],
+    optional: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[list[str], bool]:
     """One line per table, match / MISMATCH with the failed checks (no row contents), and whether
-    every table matched. A table neither side has is skipped."""
+    every table matched. A table neither side has is skipped. `optional` maps a table to its
+    optional columns; one forgiven there is named in a note on the `match` line."""
     lines, ok = [], True
     for name, key in tables.items():
         a, b = copied / f"{name}.parquet", rebuilt / f"{name}.parquet"
@@ -242,10 +264,11 @@ def compare_stores(
                 )
                 ok = False
             continue
-        diff = compare_tables(a, b, key=key)
+        diff = compare_tables(a, b, key=key, optional=(optional or {}).get(name, ()))
         rows = "" if name.startswith("jrdb_") else f" rows {diff.rows_a} / {diff.rows_b}"
         if diff.equal:
-            lines.append(f"{name}: match{rows}")
+            note = f"; note new all-null optional columns: {','.join(diff.forgiven_columns)}"
+            lines.append(f"{name}: match{rows}{note if diff.forgiven_columns else ''}")
             continue
         ok = False
         detail = [f"failed {','.join(diff.failed_checks())}"]
@@ -286,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(line)
         tables = {name: spec.sort_by for name, spec in schemas.TABLES.items()}
         copied, rebuilt = data / "processed" / args.source, work / "processed" / args.source
-        result = compare_stores(copied, rebuilt, tables)
+        result = compare_stores(copied, rebuilt, tables, schemas.OPTIONAL_COLUMNS)
     except Refused as exc:
         print(f"ERROR {exc}")
     finally:  # also when the build raised
