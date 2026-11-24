@@ -4,3 +4,4 @@
 holdout:
   start: null
   seed: "d50cd0037e8a10ae27b37cbda2a1bdc2"
+  timezone: Asia/Hong_Kong  # the local race date of each logged opening places the next block (#126)
