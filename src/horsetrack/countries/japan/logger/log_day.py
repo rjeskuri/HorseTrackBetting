@@ -9,12 +9,24 @@ is appended to `logs_dir('japan')/health.log` (see `health.py`), each ALERT also
 Exit codes: 0 clean, 2 with any ALERT, 1 on error (one `ERROR` line on stderr; a bad option is an
 error too, so 2 always means an alert).
 
+`--unattended` (ticket #27) is how launchd starts it every 30 minutes (see `launchd.py`), with no
+restart loop against the site (HKTrack's bug f: its supervisor relaunched 30 s after every exit).
+The start exits 0 at once, sending nothing and waiting for nothing, when today's `stop`
+(logger.yaml) has passed; when another log-day holds `logs_dir('japan')/log-day.lock` (a start that
+goes on holds a non-blocking fcntl.flock on it until it exits); when the block marker
+`jra-block.txt` has today's line for the JRA host; or when the no-meeting marker
+`jra-no-meeting.txt` has a line for today. The markers are read under the lock. Otherwise the day
+runs as above, and when its one discovery finds no venue the start appends `<race date> at=<UTC
+instant>` to the no-meeting marker (a blocked discovery writes the block line instead). So after a
+block or on a day without racing, every later start that day sends nothing.
+
 Seams, looked up at call time: `utc_now` (the only clock), `sleep` (the only wait) and
 `make_fetcher` (the Fetcher every request goes through).
 """
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import time
 from collections.abc import Callable, Sequence
@@ -40,7 +52,7 @@ from horsetrack.countries.japan.jra.capture import (
     read_post_times,
 )
 from horsetrack.countries.japan.logger.health import health_lines
-from horsetrack.countries.japan.logger.schedule import run_day
+from horsetrack.countries.japan.logger.schedule import blocked, run_day
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +160,29 @@ def _logged(race_date: date, venue: str) -> tuple[list[dict[str, Any]], dict[str
     return rows, {f"{prefix}:{n:02d}": at for n, at in posts.items()}
 
 
+def _block_marker(logs: Path) -> Path:
+    """Where schedule.run_day appends `<host> <race date> ...` when a 403/429 opens the breaker."""
+    return logs / f"{SOURCE}-block.txt"
+
+
+def _no_meeting_marker(logs: Path) -> Path:
+    """`<race date> at=<UTC instant>` lines, one per day whose discovery found no venue."""
+    return logs / f"{SOURCE}-no-meeting.txt"
+
+
+def _no_meeting(marker: Path, race_date: date) -> bool:
+    if not marker.is_file():
+        return False
+    lines = marker.read_text(encoding="utf-8").splitlines()
+    return any(line.split()[:1] == [race_date.isoformat()] for line in lines)
+
+
+def _write_no_meeting(marker: Path, race_date: date, at: datetime) -> None:
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    with open(marker, "a", encoding="utf-8") as fh:
+        fh.write(f"{race_date.isoformat()} at={at.astimezone(timezone.utc).isoformat()}\n")
+
+
 # ---------------------------------------------------------------- options
 
 
@@ -223,8 +258,16 @@ def _file_log(path: Path) -> logging.Handler:
     return handler
 
 
-def _run(race_date: date, venues: list[str] | None, pools: list[str], config) -> int:
-    """Log the day, write the health lines; the exit code (0 clean, 2 with an alert)."""
+def _run(
+    race_date: date,
+    venues: list[str] | None,
+    pools: list[str],
+    config,
+    *,
+    no_meeting: Path | None = None,
+) -> int:
+    """Log the day, write the health lines; the exit code (0 clean, 2 with an alert). With
+    `no_meeting`, a discovery that finds no venue appends the day's line to that marker."""
     logs = paths.logs_dir("japan")
     day_log = logs / f"log-day-{race_date.isoformat()}.log"
     handler = _file_log(day_log)
@@ -243,9 +286,14 @@ def _run(race_date: date, venues: list[str] | None, pools: list[str], config) ->
                 config=config,
                 now=utc_now,
                 sleep=sleep,
-                block_marker=logs / f"{SOURCE}-block.txt",
+                block_marker=_block_marker(logs),
                 venues=venues,
             )
+        # No venue and no stop reason: discovery answered with none (a block stops the day as
+        # circuit_open, an error page raises).
+        if no_meeting is not None and venues is None and not summary.venues and not summary.stopped:
+            _write_no_meeting(no_meeting, race_date, utc_now())
+            typer.echo(f"no meeting on {race_date.isoformat()}: noted in {no_meeting}")
         rows_by_venue, post_times = {}, {}
         for venue in summary.venues:
             rows_by_venue[venue], posts = _logged(race_date, venue)
@@ -271,6 +319,33 @@ def _run(race_date: date, venues: list[str] | None, pools: list[str], config) ->
         handler.close()
 
 
+def _unattended(race_date: date, venues: list[str] | None, pools: list[str], config) -> int:
+    """A start by launchd: 0 at once when there is nothing to do, else the day under the lock."""
+
+    def skip(reason: str) -> int:
+        typer.echo(f"log-day {race_date.isoformat()} --unattended: {reason}; nothing sent")
+        return 0
+
+    at = datetime.strptime(str(config["stop"]), "%H:%M").time()
+    if utc_now() >= datetime.combine(race_date, at, tzinfo=JST):
+        return skip(f"past the stop ({config['stop']} {TIMEZONE})")
+    logs = paths.logs_dir("japan")
+    logs.mkdir(parents=True, exist_ok=True)
+    with open(logs / "log-day.lock", "a") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return skip(f"another log-day holds {lock.name}")
+        # Under the lock, so a marker the previous holder wrote before letting go is seen.
+        host = _official_host()
+        if blocked(_block_marker(logs), host, race_date):
+            return skip(f"{host} blocked today ({_block_marker(logs).name})")
+        marker = _no_meeting_marker(logs)
+        if _no_meeting(marker, race_date):
+            return skip(f"no meeting today ({marker.name})")
+        return _run(race_date, venues, pools, config, no_meeting=marker)
+
+
 # ---------------------------------------------------------------- the command
 
 
@@ -285,6 +360,12 @@ def log_day(
         None, "--pools", help="Pools, e.g. WIN,QUINELLA; default: logger.yaml's."
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan; send no request."),
+    unattended: bool = typer.Option(
+        False,
+        "--unattended",
+        help="As launchd starts it: exit 0 at once past the stop, while another log-day runs,"
+        " or when today is blocked or has no meeting.",
+    ),
 ) -> None:
     """Log every JRA venue of a day's odds, then append health lines to health.log."""
     try:
@@ -296,7 +377,7 @@ def log_day(
             for line in _plan(day, codes, wanted, config):
                 typer.echo(line)
             return
-        code = _run(day, codes, wanted, config)
+        code = (_unattended if unattended else _run)(day, codes, wanted, config)
     except Exception as exc:
         typer.echo(f"ERROR {' '.join(str(exc).split())[:300] or type(exc).__name__}", err=True)
         raise typer.Exit(EXIT_ERROR) from exc

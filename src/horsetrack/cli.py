@@ -6,6 +6,7 @@ from horsetrack import __version__
 from horsetrack.countries.japan.board.server import board_serve_command
 from horsetrack.countries.japan.logger.compact import compact
 from horsetrack.countries.japan.logger.compare import compare_logs_command
+from horsetrack.countries.japan.logger.launchd import launchd_command
 from horsetrack.countries.japan.logger.log_day import log_day
 from horsetrack.countries.japan.logger.pull_vm import pull_vm_command
 
@@ -14,6 +15,7 @@ japan = typer.Typer(no_args_is_help=True, help="Japan commands.")
 app.add_typer(japan, name="japan")
 japan.command("compact")(compact)
 japan.command("log-day")(log_day)
+japan.command("launchd")(launchd_command)
 japan.command("pull-vm")(pull_vm_command)
 japan.command("board-serve")(board_serve_command)
 
