@@ -425,8 +425,11 @@ class _Day:
             self._failed(v, exc, self.now(), "post times")
             return
         if times:  # {} is unknown: keep what was known, and the store's sidecar
-            v.state.post_times = times
-            self.store.write_post_times(v.state.code, times)
+            # merged, not replaced: the reader leaves out races already off (発走済), and those
+            # keep their known time; a time the read does give wins (a post moved)
+            merged = {**v.state.post_times, **times}
+            v.state.post_times = merged
+            self.store.write_post_times(v.state.code, merged)
 
     def _capture(self, v: _Venue, job: Job, start: datetime) -> None:
         if v.started_at is not None:  # the floor between real capture starts

@@ -50,6 +50,10 @@ run_day(race_date, site, store, *, config, now, sleep, block_marker, venues=None
 - post_times(venue) is read before the venue's first capture and again with each full cycle (not
   every round), and each read is written with store.write_post_times; every successful capture is
   written with store.write.
+- A re-read adds to what is known, it does not replace it: the real reader leaves out races already
+  off (a 発走済 cell), so a race missing from a re-read keeps its known post time and is still
+  captured through post + after_post_min, and still counts for the venue's end. A time the re-read
+  does give replaces the known one (a post moved later).
 - Full cycles run back to back: the next starts all_every_s after the last one started, or in the
   round after it completes if that is later.
 - A venue ends at its last post (latest post times) + after_last_race_min when post times are known,
@@ -824,6 +828,64 @@ def test_a_venue_is_logged_until_its_last_post_plus_after_last_race_min(
     assert after_hot, f"not captured between {hhmm(last_post)} + 5 minutes and {hhmm(end_t)}"
     if delay:
         assert ("TOK", moved) in store.post_times, "the moved post time was not stored"
+
+
+def started_left_out(times_at: Callable[[str, datetime], dict[int, datetime]], lag: timedelta):
+    """A post_times reader that, like official_pages.post_times (発走済 cells), leaves out every
+    race whose post is `lag` or more in the past."""
+
+    def shown(venue: str, t: datetime) -> dict[int, datetime]:
+        return {n: post for n, post in times_at(venue, t).items() if t < post + lag}
+
+    return shown
+
+
+@pytest.mark.parametrize(
+    ("lag_s", "after_post_min", "after_min", "delay"),
+    [
+        (0, 5, 10, None),
+        (90, 5, 10, None),
+        (0, 8, 15, None),
+        (60, 5, 10, 20),  # TOK race 12 moved from 15:30 to 15:50 at 11:00
+    ],
+    ids=["left-out-at-post", "left-out-90-s-after-post", "8-min-tail", "post-moved"],
+)
+def test_a_race_left_off_a_post_time_reread_after_its_off_is_still_captured_to_post_plus_5(
+    tmp_path, lag_s, after_post_min, after_min, delay
+):
+    first = staggered()
+    final = copy.deepcopy(first)
+    if delay:
+        final["TOK"][12] = first["TOK"][12] + timedelta(minutes=delay)
+
+    def times_at(venue, t):
+        return dict(final[venue] if t >= jst(11, 0) else first[venue])
+
+    cfg = config(hot_races={"after_post_min": after_post_min}, after_last_race_min=after_min)
+    clock = Clock(jst(6, 30))
+    reader = started_left_out(times_at, timedelta(seconds=lag_s))
+    site = FakeSite(clock, final, rps=1.0, post_times=reader)
+    summary, store = run(site, clock, tmp_path / "blocked", cfg=cfg)
+
+    # every race is followed after its off to post + after_post_min, at the 20 s round cadence
+    tail = timedelta(minutes=after_post_min)
+    cut_short = []
+    for venue, posts in final.items():
+        ok = caps(site, venue, ok=True)
+        for n, post in posts.items():
+            off = [c.t for c in ok if n in asked(c, site) and post <= c.t <= post + tail]
+            if not off or secs(post + tail - off[-1]) > 20 + EPS:
+                last = hhmm(off[-1]) if off else "none"
+                cut_short.append(f"{venue} {n} (post {hhmm(post)}, last after it {last})")
+    races = sum(len(posts) for posts in final.values())
+    assert cut_short == [], f"{len(cut_short)} of {races} races cut short: {cut_short[:4]}"
+    assert_hot_races_followed(site, cfg, final, every=20)
+    # and each venue still ends at its last post (the moved one too) + after_last_race_min
+    for venue, posts in final.items():
+        assert_logged_until(site, venue, max(posts.values()) + timedelta(minutes=after_min))
+        vs = summary.venues[venue]
+        assert (vs.failures, vs.wrong_meeting) == (0, 0), venue
+    assert_summary_matches(summary, site, store)
 
 
 def test_three_wrong_meetings_in_a_row_stop_that_venue_only(tmp_path):
