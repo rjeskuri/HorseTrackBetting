@@ -24,10 +24,13 @@ the code under test.
 
 from __future__ import annotations
 
+import ast
 from datetime import date, datetime, timedelta, timezone
 from itertools import combinations
+from pathlib import Path
 
 import jradb_pages as pages
+from bs4.element import Tag
 from jradb_pages import CARD_PATH, ODDS_PATH
 
 from horsetrack.countries.japan.jra import official_pages as op
@@ -473,3 +476,104 @@ def test_race_rows_and_pool_links_of_the_odds_race_list():
             "TRIO": (ODDS_PATH, b["3連複"]),
             "TIERCE": (ODDS_PATH, b["3連単"]),
         }, n
+
+
+# ---------------------------------------------------------------- the declared selectors (#31)
+#
+# `official_pages.SELECTORS: Mapping[str, tuple[str, ...]]` declares every CSS selector the parser
+# reads, by page kind (jradb_pages.PAGE_KINDS): card_menu, odds_menu, card_race_list,
+# odds_race_list, win_place, quinella, wide. Each selector, as a whole-page selector, finds a node
+# in the builder's page of its kind (here) and in the real page (test_official_real.py); the
+# parser takes every `select` / `select_one` argument from it, never a literal.
+
+DAY = date(2026, 11, 15)
+SAMPLE_KIND_POOLS = {
+    "win_place": ["WIN", "PLACE"],
+    "quinella": ["QUINELLA"],
+    "wide": ["QUINELLA_PLACE"],
+}
+
+
+def test_selectors_are_declared_for_every_page_kind():
+    declared = op.SELECTORS
+    assert set(declared) == set(pages.PAGE_KINDS)
+    sample = pages.sample_pages()
+    for kind, selectors in declared.items():
+        assert isinstance(selectors, tuple) and selectors, kind
+        assert all(isinstance(s, str) and s.strip() for s in selectors), kind
+        assert len(set(selectors)) == len(selectors), f"{kind}: a selector listed twice"
+        page = op.soup(sample[kind])
+        assert [s for s in selectors if page.select_one(s) is None] == [], kind
+    # The odds pages declare the cells and clocks they are read from, not just a container.
+    for kind in SAMPLE_KIND_POOLS:
+        assert len(declared[kind]) >= 6, kind
+    assert len(declared["card_race_list"]) >= 2 and len(declared["odds_race_list"]) >= 2
+
+
+def test_the_parser_passes_no_literal_selector():
+    """`select` / `select_one` in official_pages.py take their selector from SELECTORS: a string
+    literal argument is a selector the declaration (and the real-page check) would not see."""
+    tree = ast.parse(Path(op.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("select", "select_one")
+    ]
+    assert calls, "the scan found no select call: the parser reads nothing?"
+    literal = [
+        (node.lineno, node.args[0].value)
+        for node in calls
+        if node.args and isinstance(node.args[0], ast.Constant)
+    ]
+    assert literal == []
+    assert all(node.args and not node.keywords for node in calls), "selector passed by keyword"
+
+
+def test_the_parser_reads_only_declared_selectors(monkeypatch):
+    """Run every parser entry point over each kind's page, recording what reaches soupsieve: each
+    selector is one of SELECTORS (so the mapping is what the real pages are checked against)."""
+    seen: list[str] = []
+
+    def recorded(original):
+        def recording(self, selector, *args, **kwargs):
+            seen.append(selector)
+            return original(self, selector, *args, **kwargs)
+
+        return recording
+
+    for name in ("select", "select_one"):
+        monkeypatch.setattr(Tag, name, recorded(getattr(Tag, name)))
+
+    declared = {sel for sels in op.SELECTORS.values() for sel in sels}
+    sample = pages.sample_pages()
+    by_kind: dict[str, set[str]] = {}
+    for kind, body in sample.items():
+        seen.clear()
+        page = op.soup(body)
+        if kind.endswith("_menu"):
+            path = CARD_PATH if kind == "card_menu" else ODDS_PATH
+            assert op.meetings_on(page, DAY, path), kind
+        elif kind == "card_race_list":
+            assert op.page_meeting(page) == (DAY, "KYO")
+            assert op.post_times(page, DAY)
+        elif kind == "odds_race_list":
+            assert op.page_meeting(page) == (DAY, "KYO")
+            assert [op.pool_links(row) for _, row in op.race_rows(page)]
+        else:
+            assert op.page_meeting(page) == (DAY, "KYO") and op.race_number(page) == 10
+            rows = op.odds_rows(
+                page, "r", SAMPLE_KIND_POOLS[kind], snapshot_utc=SNAP, fetched_utc=FETCHED
+            )
+            assert rows
+        by_kind[kind] = set(seen)
+    undeclared = {
+        kind: sorted(read - declared) for kind, read in by_kind.items() if read - declared
+    }
+    assert undeclared == {}
+    for kind in ("card_race_list", "odds_race_list", *SAMPLE_KIND_POOLS):
+        assert by_kind[kind], f"{kind}: the parser read no selector through select / select_one"
+    # The odds pages are read through selectors declared for them, not another kind's.
+    for kind in SAMPLE_KIND_POOLS:
+        assert by_kind[kind] & set(op.SELECTORS[kind]), kind

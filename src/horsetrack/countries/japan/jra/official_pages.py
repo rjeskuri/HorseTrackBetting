@@ -22,6 +22,7 @@ stake (yen). Changes from HKTrack:
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
@@ -47,6 +48,36 @@ _MENU_DAY = re.compile(r"([0-9]{1,2})月([0-9]{1,2})日")
 _MENU_MEETING = re.compile(r"[0-9]+回(\D+?)[0-9]+日")
 _RACE_NO = re.compile(r"([0-9]{1,2})レース")
 _CLOCK = re.compile(r"([0-9]{1,2})時([0-9]{1,2})分")
+
+# Every CSS selector the parser reads, whole-page, by the kind of page it is read on (the kinds of
+# tests/countries/japan/jradb_pages.PAGE_KINDS). The parser passes only these to `select` /
+# `select_one`; test_official_pages.py checks that, and the `local` test_official_real.py checks
+# that each one finds a node in the real page of its kind, so a page redesign shows up there.
+_TITLE = "h1, h2"  # the date line of a race list (it has no .race_header)
+_DATE_LINE = ".race_header .date_line .date"
+_RACE_NUMBER = ".race_header .race_number img[alt]"
+_POST_TIME = "td.time"
+_REFRESH_TIME = ".refresh_line .time"
+_ODDS_LIST = "#odds_list"
+_NUM = "#odds_list td.num"
+_WIN_CELL = "#odds_list td.odds_tan"
+_PLACE_CELL = "#odds_list td.odds_fuku"
+_LOW = "#odds_list .min"  # inside a Place or Wide cell; a Win or Quinella cell has none
+_HIGH = "#odds_list .max"
+_VOTES_ROW = "#votes tr"
+_PAIR_CAPTION = "#odds_list table caption"
+_PAIR_HEAD = "#odds_list table tr th"
+
+_PAGE_HEAD = (_DATE_LINE, _RACE_NUMBER, _REFRESH_TIME, _VOTES_ROW)
+SELECTORS: Mapping[str, tuple[str, ...]] = {
+    "card_menu": ("h3",),
+    "odds_menu": ("h3",),
+    "card_race_list": (_TITLE, _POST_TIME),
+    "odds_race_list": (_TITLE, "tr th img[alt]"),
+    "win_place": (*_PAGE_HEAD, _NUM, _WIN_CELL, _PLACE_CELL, _LOW, _HIGH),
+    "quinella": (*_PAGE_HEAD, _ODDS_LIST, _PAIR_CAPTION, _PAIR_HEAD),
+    "wide": (*_PAGE_HEAD, _ODDS_LIST, _PAIR_CAPTION, _PAIR_HEAD, _LOW, _HIGH),
+}
 
 
 class Link(NamedTuple):
@@ -90,7 +121,7 @@ def venue_code(name: str) -> str | None:
 def page_meeting(doc: BeautifulSoup) -> tuple[date, str | None] | None:
     """(date, venue code) a race list or race page says it is for, from its date line
     ('2026年11月15日（日曜） 5回京都4日'); None when the page has none (an error page)."""
-    nodes = [*doc.select(".race_header .date_line .date"), *doc.select("h1, h2")]
+    nodes = [*doc.select(_DATE_LINE), *doc.select(_TITLE)]
     for node in nodes:
         m = _PAGE_MEETING.search(clean(node.get_text(" ")))
         if m:
@@ -104,7 +135,7 @@ def page_meeting(doc: BeautifulSoup) -> tuple[date, str | None] | None:
 
 def race_number(doc: BeautifulSoup) -> int | None:
     """The race number of a race page, from its race-number image ('10レース')."""
-    img = doc.select_one(".race_header .race_number img[alt]")
+    img = doc.select_one(_RACE_NUMBER)
     m = _RACE_NO.fullmatch(clean(str(img.get("alt")))) if img is not None else None
     return int(m.group(1)) if m else None
 
@@ -185,7 +216,7 @@ def post_times(card_race_list: BeautifulSoup, race_date: date) -> dict[int, date
     not a clock (発走済, empty) are left out."""
     out = {}
     for race_no, row in race_rows(card_race_list):
-        cell = row.select_one("td.time")
+        cell = row.select_one(_POST_TIME)
         local = _local_clock(race_date, cell.get_text(" ")) if cell is not None else None
         if local is not None:
             out[race_no] = local.astimezone(timezone.utc)
@@ -216,7 +247,7 @@ def _price(cell: Tag | None) -> tuple[float | None, float | None, str | None]:
     if any(word in text for word in SCRATCH_WORDS):
         return None, None, SCRATCHED
     low, high = (
-        (cell.select_one(".min"), cell.select_one(".max")) if cell is not None else (None, None)
+        (cell.select_one(_LOW), cell.select_one(_HIGH)) if cell is not None else (None, None)
     )
     if low is not None:
         return _number(low.get_text()), _number(high.get_text()) if high is not None else None, None
@@ -246,7 +277,7 @@ def odds_rows(
 ) -> list[dict[str, Any]]:
     """The rows of `pools` on one odds page (単勝・複勝, 馬連 or ワイド) plus their pool totals.
     `snapshot_utc` is the capture's (one for every page of it), `fetched_utc` this page's."""
-    state_node = doc.select_one(".refresh_line .time")
+    state_node = doc.select_one(_REFRESH_TIME)
     state = clean(state_node.get_text(" ")) if state_node is not None else ""
     base = {
         "snapshot_utc": snapshot_utc,
@@ -263,13 +294,13 @@ def odds_rows(
         return out
 
     rows = []
-    odds_list = doc.select_one("#odds_list") or doc
+    odds_list = doc.select_one(_ODDS_LIST) or doc
     for tr in odds_list.find_all("tr"):
-        num = tr.select_one("td.num")
+        num = tr.select_one(_NUM)
         number = _int(num.get_text()) if num is not None else None
-        if number is None or tr.select_one("td.odds_tan") is None:
+        if number is None or tr.select_one(_WIN_CELL) is None:
             continue
-        for pool, cell in (("WIN", "td.odds_tan"), ("PLACE", "td.odds_fuku")):
+        for pool, cell in (("WIN", _WIN_CELL), ("PLACE", _PLACE_CELL)):
             if pool in pools:
                 rows.append(row(pool, str(number), *_price(tr.select_one(cell))))
     pair_pools = [p for p in pools if p in PAIR_POOLS]
@@ -290,7 +321,7 @@ def _pool_totals(doc: BeautifulSoup, base: dict[str, Any], pools: list[str]) -> 
     """発売票数: tickets sold per pool (one ticket = one unit stake) -> money in the pool."""
     config = _config()
     out = []
-    for tr in doc.select("#votes tr"):
+    for tr in doc.select(_VOTES_ROW):
         pool = config.pool_by_label(clean(tr.th.get_text())) if tr.th is not None else None
         tickets = _int(tr.td.get_text().replace(",", "")) if tr.td is not None else None
         if pool is not None and pool.code in pools and tickets is not None:
