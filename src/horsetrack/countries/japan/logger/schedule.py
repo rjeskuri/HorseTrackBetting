@@ -266,7 +266,7 @@ def _plan(
 # ---------------------------------------------------------------- the block marker
 
 
-def _blocked(marker: Path, host: str, race_date: date) -> bool:
+def blocked(marker: Path, host: str, race_date: date) -> bool:
     """Whether the marker holds a line for this host and race date."""
     if not marker.is_file():
         return False
@@ -321,7 +321,7 @@ class _Day:
         self.venues: dict[str, _Venue] = {}
 
     def run(self, codes: list[str] | None) -> DaySummary:
-        if _blocked(self.marker, self.site.host, self.race_date):
+        if blocked(self.marker, self.site.host, self.race_date):
             log.warning("%s is blocked for %s: nothing sent", self.site.host, self.race_date)
             self._add(codes or [])
             self._stop_running("circuit_open")
