@@ -3,6 +3,11 @@
 # so a parser bug found later can be re-run over a logged day; "none" keeps nothing.
 raw_pages: all
 
+# The sources `log-day` logs when `--sources` is not given (ticket #38): jra, nar or both, each
+# with its own site, rate and schedule, all at once in one process. The top-level keys below are
+# JRA's schedule; NAR's is the `nar` block at the end.
+sources: [jra]
+
 # The JRA odds logger's schedule (ticket #24): what it captures, when, and how many requests it may
 # spend per round. Read by horsetrack.countries.japan.logger.schedule. Times are JRA local time
 # (Asia/Tokyo) on the race date; keep them quoted, or YAML reads 07:00 as a base-60 number.
@@ -38,3 +43,25 @@ max_wrong_meeting: 3
 # After a 403/429 (or any open circuit): null stops the host for the rest of the day and the
 # block marker keeps a restart from sending anything; N resumes once after N minutes. Owner's call.
 on_block: {cooldown_min: null}
+
+# NAR's schedule (ticket #38; night racing per docs/research/nar-data-access.md): nar.netkeiba.com
+# at nar.yaml's rate (0.1 requests a second, one host for every venue), so a round's budget is
+# every_s / 10 requests. Meetings run from about 10:40 to 21:00 JST, the nighters last. Keys left
+# out here are the top level's; tier 2 is never inherited (there is no NAR tier-2 capture).
+nar:
+  # Win/Place/Wide first (D3): the b1 page (WIN, PLACE) and the b5 page (QUINELLA_PLACE).
+  pools: [WIN, PLACE, QUINELLA_PLACE]
+  min_poll_interval_s: 20
+  # From 10:00 a 60 s round (6 requests) fits a hot race of each of two meetings' nearest posts.
+  windows:
+    - {from: "09:00", every_s: 300}
+    - {from: "10:00", every_s: 60}
+  # A venue whose post times are unknown ends here; the others at their last post + 10 min.
+  stop: "21:15"
+  after_last_race_min: 10
+  # A full cycle of a 12-race meeting is 25 requests (about 4 minutes): at most every 15 minutes.
+  hot_races: {within_min: 20, after_post_min: 5, all_every_s: 900}
+  # The race list (one page for every meeting), then per race one page per page type: b1, b5.
+  requests: {navigation: 1, per_race: 2}
+  max_wrong_meeting: 3
+  on_block: {cooldown_min: null}

@@ -18,6 +18,10 @@ one that does not fit is tried again in a later round of its stretch, and one wi
 capture when its stretch ends counts in VenueSummary.tier2_skipped. A failed tier-2 capture is
 logged and never touches tier 1 (a CircuitOpen still ends the day: the host blocked us).
 
+Several sources (ticket #38, logger.yaml `sources`): `run_sources` runs each source's run_day on
+a thread of its own, all at once, each with its own site (so its own host, rate and budget), store,
+schedule (`source_config`) and block marker. A block on one source's host stops that source only.
+
 `plan_round` is pure. `run_day` drives it with an injected clock (`now`, `sleep`) and reaches the
 site and the store only through the protocols below. `config` is a mapping shaped like
 `countries/japan/config/logger.yaml`. Window and stop times are Asia/Tokyo wall-clock times; every
@@ -27,7 +31,8 @@ instant is an aware datetime, and post times are UTC.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable, Mapping
+import threading
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -49,6 +54,7 @@ _CALL_ERRORS = (WrongMeeting, NotListed, FetchError, ValueError)
 
 
 class Site(Protocol):
+    source: str  # its source key, "jra" or "nar" (run_sources keys its summaries by it)
     host: str
     requests_per_second: float
 
@@ -323,6 +329,81 @@ def run_day(
     """Log every venue of `race_date` (discovered when `venues` is None) from the first window to
     its end, round by round, and return what was done."""
     return _Day(race_date, site, store, config, now, sleep, Path(block_marker)).run(venues)
+
+
+# ---------------------------------------------------------------- several sources
+
+SOURCES = ("jra", "nar")
+
+
+def source_config(config: Mapping[str, Any], source: str) -> dict[str, Any]:
+    """One source's schedule (the mapping run_day takes) out of logger.yaml. JRA's is the top level,
+    as before #38; another source's is its own block (`nar:`) over the top level's keys, with no
+    tier 2 unless its block has one."""
+    if source not in SOURCES:
+        raise ValueError(f"unknown source {source!r}; known: {', '.join(SOURCES)}")
+    out = {k: v for k, v in config.items() if k not in SOURCES and k != "sources"}
+    if source == "jra":
+        return out
+    block = config.get(source)
+    if not isinstance(block, Mapping):
+        raise ValueError(f"logger.yaml has no {source!r} block")
+    out.pop("tier2", None)
+    return {**out, **block}
+
+
+@dataclass
+class Source:
+    """One source's day for run_sources: run_day's arguments but the clock."""
+
+    site: Site
+    store: Store
+    config: Mapping[str, Any]
+    block_marker: Path | str
+    venues: list[str] | None = None
+
+
+def run_sources(
+    race_date: date,
+    sources: Sequence[Source],
+    *,
+    now: Callable[[], datetime],
+    sleep: Callable[[float], None],
+) -> dict[str, DaySummary]:
+    """Every source's run_day at once, each on a thread of its own (one source runs in the calling
+    thread), keyed by its site's source. Returns once every day is over; an error in one source's
+    day is raised after the others have finished theirs."""
+    keys = [s.site.source for s in sources]
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"a source given twice: {keys}")
+
+    def day(s: Source) -> DaySummary:
+        return run_day(race_date, s.site, s.store, config=s.config, now=now, sleep=sleep,
+                       block_marker=s.block_marker, venues=s.venues)  # fmt: skip
+
+    if len(sources) == 1:
+        return {keys[0]: day(sources[0])}
+    done: dict[str, DaySummary] = {}
+    errors: list[BaseException] = []
+
+    def target(key: str, s: Source) -> None:
+        try:
+            done[key] = day(s)
+        except BaseException as exc:  # raised again in the calling thread
+            log.error("%s: the day's run failed: %r", key, exc)
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=target, args=(k, s), name=f"log-day-{k}", daemon=True)
+        for k, s in zip(keys, sources, strict=True)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
+    return {k: done[k] for k in keys}
 
 
 class _Day:
