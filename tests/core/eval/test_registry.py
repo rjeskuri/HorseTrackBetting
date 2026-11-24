@@ -1,0 +1,958 @@
+"""Ticket #74: the append-only experiment registry and its committed summary.
+
+Contract pinned here (the coder implements what these tests call):
+
+- ``FoldMetric(fold, metric, value, lo, hi, n)`` and ``RunRecord(hypothesis_id, family_id,
+  variant, ticket, git_sha, data_builds, sources, fold_scheme, components, params, metrics,
+  status, holdout_open=None, owner_signoff=None)`` compare equal by value. ``records()`` gives
+  back equal objects (tuples stay tuples, floats are exact) in append order, from any
+  ``Registry`` opened on the same file; a registry with no file yet has no records.
+- ``Registry(path, *, holdout_log)`` keeps one JSON line per run in ``path``. An append only adds
+  bytes at the end (the file keeps its inode), one line per run, whichever ``Registry`` object on
+  the file makes it; each line carries the sha256 hex of the previous line. No public name on
+  ``Registry`` updates or deletes. Appending an equal record twice is a duplicate run id and is
+  refused.
+- ``verify()`` raises ``RegistryTampered`` (never a decode error) when any byte of any line is
+  changed, the last line included, and when a line other than the last is deleted, swapped or
+  replayed. It passes on an untouched file, and again once the file is restored.
+- Refusals raise ``RecordRefused`` and write nothing: a hypothesis id that is not ``E``, ``L`` or
+  ``P`` followed by ASCII digits; a blank family id; a status other than failed, scored, rejected
+  or adopted; a ``holdout_open`` that is not the sha256 hex of a line (its bytes without the
+  newline) of ``holdout_log`` as that file is at append time; ``adopted`` without a positive int
+  ``owner_signoff``.
+- ``family_size`` counts every record of the family, failed ones included.
+- ``freeze_family(family_id, spec)`` returns
+  ``sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")))`` as hex. The freeze persists
+  in the registry and is not a run; a different spec raises ``FamilyAlreadyFrozen``.
+- ``write_summary(registry, path)`` writes the family, E id, variant, status and per-fold metric,
+  value, CI and n of each run, and nothing else from the record. A run with a source in
+  ``WITHHELD_SOURCES`` (in any spelling) shows ``withheld (licensed source)`` in place of its
+  values, or is refused at append.
+- ``default_registry(country)`` stores at ``data_dir()/registry/<country>.jsonl`` and creates the
+  directory.
+
+Every path is under ``tmp_path``; HORSETRACK_DATA_DIR points into ``tmp_path`` and an autouse
+guard fails any test that changes a real ``src/horsetrack/countries/*/holdout_log.jsonl``. Field
+names on disk, the run-id format and the summary's layout are left to the implementation. Every
+value here is synthetic.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+from horsetrack.core.eval.registry import (
+    FamilyAlreadyFrozen,
+    FoldMetric,
+    RecordRefused,
+    Registry,
+    RegistryTampered,
+    RunRecord,
+    default_registry,
+    write_summary,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+REAL_COUNTRIES = REPO_ROOT / "src" / "horsetrack" / "countries"
+DATA_DIR_VAR = "HORSETRACK_DATA_DIR"
+
+GIT_SHA = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+BUILD_HASH = hashlib.sha256(b"synthetic build").hexdigest()
+SEED_SHA = hashlib.sha256(b"synthetic seed").hexdigest()
+WITHHELD_LABEL = "withheld (licensed source)"
+
+
+# --------------------------------------------------------------------------- helpers
+
+
+def fold(name: str, metric: str, value: float, lo, hi, n: int) -> FoldMetric:
+    return FoldMetric(fold=name, metric=metric, value=value, lo=lo, hi=hi, n=n)
+
+
+def make_record(**overrides) -> RunRecord:
+    fields = {
+        "hypothesis_id": "E1",
+        "family_id": "F1",
+        "variant": "baseline",
+        "ticket": 74,
+        "git_sha": GIT_SHA,
+        "data_builds": {"results": BUILD_HASH},
+        "sources": ("netkeiba",),
+        "fold_scheme": "walk-forward-6",
+        "components": {"model": "logit-1.0"},
+        "params": {"C": 1.0},
+        "metrics": (fold("wf-1", "log_loss", 0.69, 0.65, 0.73, 500),),
+        "status": "scored",
+    }
+    fields.update(overrides)
+    return RunRecord(**fields)
+
+
+def registry_path(tmp_path: Path) -> Path:
+    path = tmp_path / "data" / "registry" / "japan.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def holdout_log_path(tmp_path: Path) -> Path:
+    path = tmp_path / "countries" / "japan" / "holdout_log.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def open_registry(tmp_path: Path) -> tuple[Registry, Path, Path]:
+    path, log = registry_path(tmp_path), holdout_log_path(tmp_path)
+    return Registry(path, holdout_log=log), path, log
+
+
+def append_holdout_opens(log: Path, purposes: list[str], *, first_ticket: int = 71) -> list[str]:
+    """Synthetic #71 log lines, written the way ``LockedHoldout.open`` writes them."""
+    lines = []
+    for i, purpose in enumerate(purposes):
+        record = {
+            "utc": f"2026-12-{i + 1:02d}T09:{i:02d}:00+00:00",
+            "ticket": first_ticket + i,
+            "purpose": purpose,
+            "git_sha": GIT_SHA,
+            "n_rows": 1200 + 37 * i,
+            "period": {"start": "2026-11-28", "seed_sha256": SEED_SHA},
+        }
+        lines.append(json.dumps(record))
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write("".join(line + "\n" for line in lines))
+    return lines
+
+
+def line_sha(line: str) -> str:
+    return hashlib.sha256(line.encode("utf-8")).hexdigest()
+
+
+def file_bytes(path: Path) -> bytes | None:
+    return path.read_bytes() if path.exists() else None
+
+
+def line_spans(data: bytes) -> list[tuple[int, int]]:
+    """(start, end) of each line, the newline excluded; the data ends with a newline."""
+    spans, start = [], 0
+    while start < len(data):
+        end = data.index(b"\n", start)
+        spans.append((start, end))
+        start = end + 1
+    return spans
+
+
+def flip(data: bytes, pos: int) -> bytes:
+    """One byte changed (low bit flipped): it either breaks the JSON or changes a value."""
+    return data[:pos] + bytes([data[pos] ^ 0x01]) + data[pos + 1 :]
+
+
+def expect_tampered(registry: Registry, what: str) -> None:
+    try:
+        registry.verify()
+    except RegistryTampered:
+        return
+    pytest.fail(f"verify() did not raise RegistryTampered after {what}")
+
+
+def summary_of(registry: Registry, tmp_path: Path) -> str:
+    out = tmp_path / "docs" / "experiments" / "registry-japan.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_summary(registry, out)
+    return out.read_text(encoding="utf-8")
+
+
+def shows_number(text: str, number: str) -> bool:
+    """Whether ``number`` (or a longer rounding of it) appears as a number of its own.
+
+    A decimal may be followed by more digits (0.12 matches 0.123456); an integer may carry a
+    thousands separator. Digits inside a longer number, a timestamp or a hash do not count.
+    """
+    if "." in number:
+        pattern = r"(?<![0-9A-Za-z.])" + re.escape(number)
+    else:
+        forms = {number, f"{int(number):,}"}
+        pattern = r"(?<![0-9A-Za-z.,])(?:" + "|".join(map(re.escape, forms)) + r")(?![0-9])"
+    return re.search(pattern, text) is not None
+
+
+@pytest.fixture(autouse=True)
+def isolated(tmp_path, monkeypatch):
+    """No test reads the real data directory or changes a real holdout log."""
+    monkeypatch.setenv(DATA_DIR_VAR, str(tmp_path / "guard-data"))
+
+    def snapshot() -> dict[Path, bytes]:
+        return {p: p.read_bytes() for p in REAL_COUNTRIES.glob("*/holdout_log.jsonl")}
+
+    before = snapshot()
+    yield
+    assert snapshot() == before, "a test wrote to a real holdout_log.jsonl"
+
+
+# --------------------------------------------------------------------------- round trip
+
+
+def varied_records(holdout_hash: str) -> list[RunRecord]:
+    return [
+        make_record(
+            hypothesis_id="E1",
+            family_id="F-win",
+            variant="v-logit",
+            params={
+                "C": 0.5,
+                "penalty": "l2",
+                "features": ["odds", "draw", 3],
+                "nested": {"depth": 3, "flag": True, "none": None},
+            },
+            metrics=(
+                fold("wf-2021", "log_loss", 0.1 + 0.2, 0.25, 0.35, 812),
+                fold("wf-2022", "brier", 1e-300, None, None, 3),
+            ),
+        ),
+        make_record(
+            hypothesis_id="L7",
+            family_id="L-calib",
+            variant="v-failed",
+            ticket=88,
+            data_builds={},
+            sources=(),
+            fold_scheme="walk-forward-4",
+            components={},
+            params={},
+            metrics=(),
+            status="failed",
+        ),
+        make_record(
+            hypothesis_id="P12",
+            family_id="P-edge",
+            variant="v-adopted",
+            ticket=141,
+            git_sha="a" * 40,
+            data_builds={"results": BUILD_HASH, "odds": hashlib.sha256(b"odds").hexdigest()},
+            sources=("netkeiba", "jra"),
+            components={"model": "gbm-2.1", "calibration": "isotonic-0.3"},
+            params={"rounds": 400, "eta": 0.05},
+            metrics=(fold("holdout", "log_loss", 0.6825, 0.6702, 0.6951, 20_413),),
+            status="adopted",
+            holdout_open=holdout_hash,
+            owner_signoff=141,
+        ),
+        make_record(
+            hypothesis_id="E1",
+            family_id="F-win",
+            variant="ペース-v2",
+            params={"window": "2019-2023", "weights": [0.25, 0.75]},
+            metrics=(fold("wf-2023", "roi", -2.5, -3.75, -1.25, 1_000_000),),
+            status="rejected",
+        ),
+    ]
+
+
+def test_an_appended_record_reads_back_unchanged(tmp_path):
+    reg, path, log = open_registry(tmp_path)
+    assert reg.records() == []
+    reg.verify()  # no file yet: nothing to fail
+
+    (opened,) = append_holdout_opens(log, ["final evaluation"])
+    records = varied_records(line_sha(opened))
+    ids = [reg.append(record) for record in records]
+
+    assert all(isinstance(run_id, str) and run_id for run_id in ids)
+    assert len(set(ids)) == len(ids)
+    assert reg.records() == records
+
+    reopened = Registry(path, holdout_log=log)
+    got = reopened.records()
+    assert got == records
+    for record in got:
+        assert isinstance(record, RunRecord)
+        assert isinstance(record.sources, tuple)
+        assert isinstance(record.metrics, tuple)
+        assert all(isinstance(m, FoldMetric) for m in record.metrics)
+    assert got[0].metrics[0].value == 0.1 + 0.2
+    assert got[0].metrics[1].value == 1e-300
+    assert got[2].holdout_open == line_sha(opened)
+    assert got[2].owner_signoff == 141
+
+    assert reopened.records("F-win") == [records[0], records[3]]
+    assert reopened.records("P-edge") == [records[2]]
+    assert reopened.records("no-such-family") == []
+    reopened.verify()
+
+
+# --------------------------------------------------------------------------- append only
+
+
+FORBIDDEN_WORDS = (
+    "update",
+    "delete",
+    "remove",
+    "edit",
+    "replace",
+    "rewrite",
+    "overwrite",
+    "amend",
+    "modify",
+    "erase",
+    "truncate",
+    "drop",
+    "purge",
+    "discard",
+    "clear",
+    "pop",
+    "set_",
+)
+
+
+def test_records_are_append_only(tmp_path):
+    reg, path, log = open_registry(tmp_path)
+    first = make_record(variant="first", params={"seed": 1})
+    reg.append(first)
+    previous = path.read_bytes()
+    assert previous.endswith(b"\n")
+    first_line = previous.split(b"\n")[0]
+    inode = path.stat().st_ino
+
+    # Separate processes each open their own Registry on the same file.
+    other = Registry(path, holdout_log=log)
+    writers = [other, reg, other, reg, Registry(path, holdout_log=log)]
+    for n, writer in enumerate(writers, start=2):
+        writer.append(make_record(variant=f"later-{n}", params={"seed": n}))
+        current = path.read_bytes()
+        assert current.startswith(previous), f"append {n} changed earlier bytes"
+        added = current[len(previous) :]
+        assert added.endswith(b"\n") and added.count(b"\n") == 1, "one run is one line"
+        assert path.stat().st_ino == inode, "the file was replaced, not appended to"
+        previous = current
+
+    assert previous.split(b"\n")[0] == first_line
+    fresh = Registry(path, holdout_log=log)
+    fresh.verify()
+    expected = ["first"] + [f"later-{n}" for n in range(2, 2 + len(writers))]
+    assert [r.variant for r in fresh.records()] == expected
+
+    # Each line carries the sha256 of the line before it.
+    lines = previous.split(b"\n")[:-1]
+    for before, line in zip(lines, lines[1:], strict=False):
+        digests = {
+            hashlib.sha256(before).hexdigest().encode(),
+            hashlib.sha256(before + b"\n").hexdigest().encode(),
+        }
+        assert any(d in line for d in digests), "a line does not carry the previous line's hash"
+
+    # No update or delete path.
+    for obj in (Registry, reg):
+        offending = [
+            name
+            for name in dir(obj)
+            if not name.startswith("_") and any(word in name.lower() for word in FORBIDDEN_WORDS)
+        ]
+        assert offending == [], f"Registry exposes {offending}"
+
+    # The same run twice is a duplicate run id.
+    before_dup = path.read_bytes()
+    with pytest.raises(RecordRefused):
+        reg.append(first)
+    with pytest.raises(RecordRefused):
+        Registry(path, holdout_log=log).append(make_record(variant="first", params={"seed": 1}))
+    assert path.read_bytes() == before_dup
+
+
+# --------------------------------------------------------------------------- tamper evidence
+
+
+TAMPER_MARKERS = ["tamper-alpha", "tamper-bravo", "tamper-charlie", "tamper-delta"]
+
+
+def tamper_registry(tmp_path: Path) -> tuple[Registry, Path, Path, bytes]:
+    reg, path, log = open_registry(tmp_path)
+    for i, marker in enumerate(TAMPER_MARKERS, start=1):
+        reg.append(make_record(hypothesis_id=f"E{i}", variant=marker, params={"seed": i}))
+    reg.verify()
+    return reg, path, log, path.read_bytes()
+
+
+def test_an_edited_line_is_detected(tmp_path):
+    assert issubclass(RegistryTampered, ValueError)
+    reg, path, log, pristine = tamper_registry(tmp_path)
+
+    def check(data: bytes, what: str) -> None:
+        path.write_bytes(data)
+        expect_tampered(reg, what)
+        expect_tampered(Registry(path, holdout_log=log), what)
+
+    # One byte of a value: the last letter of each run's variant, line 1 first.
+    for marker in TAMPER_MARKERS:
+        pos = pristine.index(marker.encode()) + len(marker) - 1
+        check(flip(pristine, pos), f"editing the variant {marker!r}")
+
+    # One byte anywhere in a line: line 1 and every other line, the last one included.
+    spans = line_spans(pristine)
+    assert len(spans) >= len(TAMPER_MARKERS)
+    for number, (start, end) in enumerate(spans, start=1):
+        step = max(1, (end - start) // 25)
+        for pos in sorted({start, end - 1, *range(start, end, step)}):
+            check(flip(pristine, pos), f"changing byte {pos - start} of line {number}")
+
+    path.write_bytes(pristine)
+    reg.verify()
+    Registry(path, holdout_log=log).verify()
+
+
+def test_a_deleted_or_reordered_line_is_detected(tmp_path):
+    _, path, log, pristine = tamper_registry(tmp_path)
+    lines = pristine.split(b"\n")[:-1]
+    cases = {
+        "deleting line 1": lines[1:],
+        "deleting a middle line": lines[:1] + lines[2:],
+        "swapping two lines": [lines[0], lines[2], lines[1], *lines[3:]],
+        "replaying a line": [lines[0], lines[1], lines[1], *lines[2:]],
+    }
+    for what, kept in cases.items():
+        path.write_bytes(b"".join(line + b"\n" for line in kept))
+        expect_tampered(Registry(path, holdout_log=log), what)
+
+
+# --------------------------------------------------------------------------- refusals
+
+
+HYPOTHESIS_IDS = [
+    *[
+        pytest.param(hid, True, id=f"ok-{hid}")
+        for hid in ("E1", "L2", "P3", "E10", "L042", "P999", "E0")
+    ],
+    *[
+        pytest.param(hid, False, id=f"bad-{label}")
+        for label, hid in (
+            ("empty", ""),
+            ("X1", "X1"),
+            ("E-alone", "E"),
+            ("L-alone", "L"),
+            ("P-alone", "P"),
+            ("lower-e1", "e1"),
+            ("lower-p4", "p4"),
+            ("E1a", "E1a"),
+            ("1E", "1E"),
+            ("E-dash-1", "E-1"),
+            ("E-space-1", "E 1"),
+            ("leading-space", " E1"),
+            ("trailing-space", "E1 "),
+            ("trailing-newline", "E1\n"),
+            ("EE1", "EE1"),
+            ("decimal", "E1.5"),
+            ("fullwidth-digit", "E１"),
+            ("cyrillic-E", "Е1"),
+        )
+    ],
+]
+
+
+@pytest.mark.parametrize(("hypothesis_id", "accepted"), HYPOTHESIS_IDS)
+def test_a_run_without_hypothesis_id_is_refused(tmp_path, hypothesis_id, accepted):
+    assert issubclass(RecordRefused, ValueError)
+    reg, path, _ = open_registry(tmp_path)
+    reg.append(make_record(hypothesis_id="E1", variant="anchor"))
+    before = path.read_bytes()
+
+    if accepted:
+        reg.append(make_record(hypothesis_id=hypothesis_id, variant="candidate"))
+        assert [r.hypothesis_id for r in reg.records()] == ["E1", hypothesis_id]
+        return
+    with pytest.raises(RecordRefused):
+        reg.append(make_record(hypothesis_id=hypothesis_id, variant="candidate"))
+    assert path.read_bytes() == before
+    assert [r.variant for r in reg.records()] == ["anchor"]
+
+
+@pytest.mark.parametrize("hypothesis_id", [None, 1], ids=["none", "int"])
+def test_a_run_with_a_non_string_hypothesis_id_is_refused(tmp_path, hypothesis_id):
+    reg, path, _ = open_registry(tmp_path)
+    with pytest.raises((RecordRefused, TypeError)):
+        reg.append(make_record(hypothesis_id=hypothesis_id))
+    assert file_bytes(path) in (None, b"")
+
+
+@pytest.mark.parametrize(
+    ("family_id", "accepted"),
+    [
+        pytest.param("F1", True, id="ok-F1"),
+        pytest.param("P-roi-2026", True, id="ok-P-roi"),
+        pytest.param("L1-calibration", True, id="ok-L1-calibration"),
+        pytest.param("", False, id="empty"),
+        pytest.param("   ", False, id="spaces"),
+        pytest.param("\t\n", False, id="whitespace"),
+        pytest.param(None, False, id="none"),
+    ],
+)
+def test_a_run_without_family_id_is_refused(tmp_path, family_id, accepted):
+    reg, path, _ = open_registry(tmp_path)
+    reg.append(make_record(family_id="F-anchor", variant="anchor"))
+    before = path.read_bytes()
+
+    if accepted:
+        reg.append(make_record(family_id=family_id, variant="candidate"))
+        assert [r.family_id for r in reg.records()] == ["F-anchor", family_id]
+        return
+    with pytest.raises((RecordRefused, TypeError) if family_id is None else RecordRefused):
+        reg.append(make_record(family_id=family_id, variant="candidate"))
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("status", "accepted"),
+    [
+        ("failed", True),
+        ("scored", True),
+        ("rejected", True),
+        ("accepted", False),
+        ("Adopted", False),
+        ("SCORED", False),
+        ("scored ", False),
+        ("", False),
+        ("pending", False),
+    ],
+)
+def test_an_unknown_status_is_refused(tmp_path, status, accepted):
+    reg, path, _ = open_registry(tmp_path)
+    reg.append(make_record(variant="anchor"))
+    before = path.read_bytes()
+
+    if accepted:
+        reg.append(make_record(variant="candidate", status=status))
+        assert [r.status for r in reg.records()] == ["scored", status]
+        return
+    with pytest.raises(RecordRefused):
+        reg.append(make_record(variant="candidate", status=status))
+    assert path.read_bytes() == before
+
+
+# --------------------------------------------------------------------------- family size
+
+
+FAMILIES = {
+    "FA": [("E1", "scored"), ("E1", "failed"), ("E1", "rejected")],
+    "FB": [("L2", "failed")],
+    "FC": [
+        ("P3", "scored"),
+        ("P3", "failed"),
+        ("P4", "failed"),
+        ("P4", "rejected"),
+        ("P3", "scored"),
+        ("P4", "adopted"),
+    ],
+}
+
+
+def test_family_size_counts_failed_variants(tmp_path):
+    reg, path, log = open_registry(tmp_path)
+    assert reg.family_size("FA") == 0
+
+    # Interleave the families so a count cannot lean on contiguous blocks.
+    queues = {fam: list(enumerate(runs)) for fam, runs in FAMILIES.items()}
+    while any(queues.values()):
+        for fam, queue in queues.items():
+            if not queue:
+                continue
+            i, (hid, status) = queue.pop(0)
+            reg.append(
+                make_record(
+                    hypothesis_id=hid,
+                    family_id=fam,
+                    variant=f"v-{fam}-{i}",
+                    status=status,
+                    metrics=() if status == "failed" else (fold("wf-1", "ll", 0.7, 0.6, 0.8, 9),),
+                    owner_signoff=141 if status == "adopted" else None,
+                )
+            )
+
+    reopened = Registry(path, holdout_log=log)
+    for registry in (reg, reopened):
+        for fam, runs in FAMILIES.items():
+            assert registry.family_size(fam) == len(runs), fam
+            got = registry.records(fam)
+            assert sorted(r.variant for r in got) == sorted(
+                f"v-{fam}-{i}" for i in range(len(runs))
+            )
+            assert sorted(r.status for r in got) == sorted(status for _, status in runs)
+        assert registry.family_size("FZ") == 0
+
+
+# --------------------------------------------------------------------------- frozen families
+
+
+SPECS = [
+    {
+        "metric": "log_loss",
+        "variants": ["a", "b", "c"],
+        "alpha": 5,
+        "cluster": {"by": "meeting", "reps": 2000},
+    },
+    {"variants": ["only"], "flag": True, "none": None},
+    {"z": 1, "a": [3, 2, 1], "m": {"y": "x", "b": "c"}},
+]
+
+
+def canonical_hash(spec: dict) -> str:
+    text = json.dumps(spec, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def reordered(value):
+    """The same JSON value with every mapping's keys in reverse order."""
+    if isinstance(value, dict):
+        return {key: reordered(value[key]) for key in reversed(list(value))}
+    if isinstance(value, list):
+        return [reordered(item) for item in value]
+    return value
+
+
+def test_a_frozen_family_cannot_be_refrozen_with_a_different_spec(tmp_path):
+    assert issubclass(FamilyAlreadyFrozen, ValueError)
+    reg, path, log = open_registry(tmp_path)
+    reg.append(make_record(family_id="F-unfrozen", variant="a-run"))
+
+    for i, spec in enumerate(SPECS):
+        family = f"P-fam-{i}"
+        assert reg.frozen_spec_hash(family) is None
+        frozen = reg.freeze_family(family, spec)
+        assert frozen == canonical_hash(spec)
+        assert reg.frozen_spec_hash(family) == frozen
+        assert reg.freeze_family(family, reordered(spec)) == frozen  # same spec, any key order
+    assert len({canonical_hash(spec) for spec in SPECS}) == len(SPECS)
+
+    changed_value = {**SPECS[0], "alpha": 6}
+    extra_variant = {**SPECS[0], "variants": ["a", "b", "c", "d"]}
+    extra_key = {**SPECS[1], "note": "added after the freeze"}
+    list_order = {**SPECS[2], "a": [1, 2, 3]}
+    for family, spec in (
+        ("P-fam-0", changed_value),
+        ("P-fam-0", extra_variant),
+        ("P-fam-1", extra_key),
+        ("P-fam-2", list_order),
+    ):
+        with pytest.raises(FamilyAlreadyFrozen):
+            reg.freeze_family(family, spec)
+
+    reopened = Registry(path, holdout_log=log)
+    for i, spec in enumerate(SPECS):
+        assert reopened.frozen_spec_hash(f"P-fam-{i}") == canonical_hash(spec)
+    with pytest.raises(FamilyAlreadyFrozen):
+        reopened.freeze_family("P-fam-1", SPECS[2])
+    assert reopened.frozen_spec_hash("P-fam-1") == canonical_hash(SPECS[1])
+    assert reopened.frozen_spec_hash("never-frozen") is None
+
+    # A freeze is not a run.
+    assert [r.variant for r in reopened.records()] == ["a-run"]
+    assert reopened.family_size("F-unfrozen") == 1
+    assert reopened.family_size("P-fam-0") == 0
+    assert reopened.records("P-fam-0") == []
+    reopened.verify()
+
+
+# --------------------------------------------------------------------------- holdout link
+
+
+def test_holdout_open_links_to_the_holdout_log(tmp_path):
+    reg, path, log = open_registry(tmp_path)
+    lines = append_holdout_opens(log, ["calibration check", "final evaluation", "re-check"])
+    other_log = tmp_path / "countries" / "hongkong" / "holdout_log.jsonl"
+    other_log.parent.mkdir(parents=True)
+    other_lines = append_holdout_opens(other_log, ["hong kong check"], first_ticket=90)
+
+    for i, line in enumerate(lines):
+        reg.append(make_record(variant=f"opened-{i}", holdout_open=line_sha(line)))
+    # The log is read as it is at append time, not when the registry was opened.
+    (later,) = append_holdout_opens(log, ["a later open"], first_ticket=99)
+    reg.append(make_record(variant="opened-later", holdout_open=line_sha(later)))
+    expected = [line_sha(line) for line in [*lines, later]]
+    assert [r.holdout_open for r in reg.records()] == expected
+
+    before = path.read_bytes()
+    refused = {
+        "an unknown hash": hashlib.sha256(b"never logged").hexdigest(),
+        "the hash of the line with its newline": line_sha(lines[0] + "\n"),
+        "the hash of an empty line": hashlib.sha256(b"").hexdigest(),
+        "a line of another country's log": line_sha(other_lines[0]),
+        "a prefix of a real hash": line_sha(lines[0])[:16],
+        "a real hash with a suffix": line_sha(lines[0]) + "00",
+        "not a hash": "not-a-hash",
+        "an empty string": "",
+        "the log line itself": lines[0],
+    }
+    for what, value in refused.items():
+        try:
+            reg.append(make_record(variant="bad-open", holdout_open=value))
+        except RecordRefused:
+            continue
+        pytest.fail(f"a holdout_open of {what} was accepted")
+    assert path.read_bytes() == before
+
+    # With no holdout log on disk, no open can match.
+    bare_path = tmp_path / "data" / "registry" / "bare.jsonl"
+    bare = Registry(bare_path, holdout_log=tmp_path / "missing" / "holdout_log.jsonl")
+    with pytest.raises(RecordRefused):
+        bare.append(make_record(variant="no-log", holdout_open=line_sha(lines[0])))
+    assert file_bytes(bare_path) in (None, b"")
+    bare.append(make_record(variant="no-open"))
+    assert [r.holdout_open for r in bare.records()] == [None]
+
+
+@pytest.mark.parametrize(
+    ("signoff", "error"),
+    [
+        pytest.param(None, RecordRefused, id="none"),
+        pytest.param(0, RecordRefused, id="zero"),
+        pytest.param(-141, RecordRefused, id="negative"),
+        pytest.param(True, (RecordRefused, TypeError), id="bool"),
+        pytest.param("141", (RecordRefused, TypeError), id="string"),
+        pytest.param(141.0, (RecordRefused, TypeError), id="float"),
+    ],
+)
+def test_adopted_status_needs_an_owner_signoff_ticket(tmp_path, signoff, error):
+    reg, path, _ = open_registry(tmp_path)
+    reg.append(make_record(variant="scored-without-signoff"))
+    before = path.read_bytes()
+
+    with pytest.raises(error):
+        reg.append(make_record(variant="adopted", status="adopted", owner_signoff=signoff))
+    assert path.read_bytes() == before
+
+    for ticket in (141, 9):
+        reg.append(make_record(variant=f"adopted-{ticket}", status="adopted", owner_signoff=ticket))
+    got = [(r.variant, r.status, r.owner_signoff) for r in reg.records()]
+    assert got == [
+        ("scored-without-signoff", "scored", None),
+        ("adopted-141", "adopted", 141),
+        ("adopted-9", "adopted", 9),
+    ]
+
+
+# --------------------------------------------------------------------------- committed summary
+
+
+SHA_MARK = "5ca1ab1ec0ffee0ddba11c0de5eed5facade0042"
+BUILD_MARK = "b0a710ad" * 8
+SUMMARY_TICKET = 90817
+
+
+def summary_records(holdout_hash: str) -> list[RunRecord]:
+    common = {
+        "ticket": SUMMARY_TICKET,
+        "git_sha": SHA_MARK,
+        "data_builds": {"buildkeyqx": BUILD_MARK},
+        "sources": ("netkeiba",),
+        "fold_scheme": "schemeqx-walk-6",
+        "components": {"compkeyqx": "compverqx-3.1"},
+    }
+    return [
+        make_record(
+            **common,
+            hypothesis_id="E31",
+            family_id="FAM-alpha",
+            variant="var-alpha-1",
+            params={
+                "paramkeyqx": "paramvalqx",
+                "lrqx": 0.0371,
+                "nestedqx": {"deepqx": "deepvalqx"},
+            },
+            metrics=(
+                fold("foldqa-2021", "log_loss", 0.71, 0.63, 0.82, 977),
+                fold("foldqa-2022", "brier", 0.58, 0.47, 0.66, 640),
+            ),
+            status="scored",
+        ),
+        make_record(
+            **common,
+            hypothesis_id="L8",
+            family_id="FAM-beta",
+            variant="var-beta-fail",
+            params={"paramkeyqy": "paramvalqy"},
+            metrics=(),
+            status="failed",
+        ),
+        make_record(
+            **common,
+            hypothesis_id="P5",
+            family_id="FAM-alpha",
+            variant="var-alpha-2",
+            params={"paramkeyqz": 4417},
+            metrics=(
+                fold("foldqa-2021", "roi", 0.39, 0.27, 0.44, 812),
+                fold("foldqa-2022", "roi", 0.52, None, None, 503),
+            ),
+            status="rejected",
+            holdout_open=holdout_hash,
+        ),
+    ]
+
+
+def test_committed_summary_has_aggregates_only(tmp_path):
+    reg, _, log = open_registry(tmp_path)
+    (opened,) = append_holdout_opens(log, ["summary check"])
+    holdout_hash = line_sha(opened)
+    for record in summary_records(holdout_hash):
+        reg.append(record)
+
+    text = summary_of(reg, tmp_path)
+
+    listed = [
+        "FAM-alpha",
+        "FAM-beta",
+        "E31",
+        "L8",
+        "P5",
+        "var-alpha-1",
+        "var-beta-fail",
+        "var-alpha-2",
+        "scored",
+        "failed",
+        "rejected",
+        "foldqa-2021",
+        "foldqa-2022",
+        "log_loss",
+        "brier",
+        "roi",
+    ]
+    numbers = ["0.71", "0.63", "0.82", "977", "0.58", "0.47", "0.66", "640"]
+    numbers += ["0.39", "0.27", "0.44", "812", "0.52", "503"]
+    missing = [item for item in listed if item not in text]
+    missing += [num for num in numbers if not shows_number(text, num)]
+    assert missing == [], f"the summary lacks {missing}"
+
+    not_listed = [
+        "paramkeyqx",
+        "paramvalqx",
+        "lrqx",
+        "nestedqx",
+        "deepqx",
+        "deepvalqx",
+        "paramkeyqy",
+        "paramvalqy",
+        "paramkeyqz",
+        "buildkeyqx",
+        BUILD_MARK,
+        BUILD_MARK[:12],
+        SHA_MARK,
+        SHA_MARK[:7],
+        "schemeqx",
+        "compkeyqx",
+        "compverqx",
+        holdout_hash,
+        holdout_hash[:12],
+        "netkeiba",
+    ]
+    leaked = [item for item in not_listed if item in text]
+    leaked += [num for num in ("0.0371", "4417", str(SUMMARY_TICKET)) if shows_number(text, num)]
+    assert leaked == [], f"the summary carries fields that are not aggregates: {leaked}"
+
+
+# The licensed run's numbers: every rounding to 2-6 decimals keeps the 2-decimal prefix.
+LICENSED_METRICS = (
+    fold("foldqb-2021", "log_loss", 0.123456, 0.08312, 0.16424, 4321),
+    fold("foldqb-2022", "log_loss", 0.94321, 0.91234, 0.97111, 6789),
+)
+LICENSED_NUMBERS = ["0.123456", "0.12", "0.08", "0.16", "4321", "0.94", "0.91", "0.97", "6789"]
+PUBLIC_METRICS = (fold("foldqb-2021", "log_loss", 0.71, 0.63, 0.82, 977),)
+PUBLIC_NUMBERS = ["0.71", "0.63", "0.82", "977"]
+
+
+def licensed_and_public(sources) -> tuple[RunRecord, RunRecord]:
+    licensed = make_record(
+        hypothesis_id="E77",
+        family_id="FAM-lic",
+        variant="var-licensed",
+        sources=sources,
+        metrics=LICENSED_METRICS,
+    )
+    public = make_record(
+        hypothesis_id="E5",
+        family_id="FAM-lic",
+        variant="var-public",
+        sources=("netkeiba",),
+        metrics=PUBLIC_METRICS,
+    )
+    return licensed, public
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        pytest.param(("netkeiba", "jrdb"), id="netkeiba-jrdb"),
+        pytest.param(("jrdb",), id="jrdb"),
+        pytest.param(("jravan",), id="jravan"),
+        pytest.param(("jra", "jravan"), id="jra-jravan"),
+        pytest.param(("jravan", "jrdb"), id="jravan-jrdb"),
+    ],
+)
+def test_summary_withholds_metrics_of_licensed_source_runs(tmp_path, sources):
+    reg, _, _ = open_registry(tmp_path)
+    licensed, public = licensed_and_public(sources)
+    reg.append(public)
+    reg.append(licensed)
+    assert reg.records() == [public, licensed]  # the registry itself keeps the values
+
+    text = summary_of(reg, tmp_path)
+
+    leaked = [num for num in LICENSED_NUMBERS if shows_number(text, num)]
+    assert leaked == [], f"the summary shows values of a licensed-source run: {leaked}"
+    assert WITHHELD_LABEL in text
+    assert "E77" in text and "var-licensed" in text and "FAM-lic" in text
+    assert "E5" in text and "var-public" in text
+    shown = [num for num in PUBLIC_NUMBERS if shows_number(text, num)]
+    assert shown == PUBLIC_NUMBERS, "a run with no licensed source must show its values"
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        pytest.param(("JRDB",), id="upper-case"),
+        pytest.param(("netkeiba", "JraVan"), id="mixed-case"),
+        pytest.param((" jrdb",), id="leading-space"),
+        pytest.param("jrdb", id="bare-string"),
+    ],
+)
+def test_a_licensed_source_in_another_spelling_is_still_withheld(tmp_path, sources):
+    """Either the record is refused, or the summary withholds it; its values never show."""
+    reg, path, _ = open_registry(tmp_path)
+    _, public = licensed_and_public(("netkeiba",))
+    reg.append(public)
+    before = path.read_bytes()
+
+    appended = False
+    try:
+        licensed, _ = licensed_and_public(sources)
+        reg.append(licensed)
+        appended = True
+    except (RecordRefused, TypeError):
+        assert path.read_bytes() == before
+
+    text = summary_of(reg, tmp_path)
+    leaked = [num for num in LICENSED_NUMBERS if shows_number(text, num)]
+    assert leaked == [], f"the summary shows values of a licensed-source run: {leaked}"
+    if appended:
+        assert WITHHELD_LABEL in text
+    assert [num for num in PUBLIC_NUMBERS if shows_number(text, num)] == PUBLIC_NUMBERS
+
+
+# --------------------------------------------------------------------------- default registry
+
+
+def test_default_registry_lives_in_the_data_directory(tmp_path, monkeypatch):
+    data = tmp_path / "data-dir"
+    monkeypatch.setenv(DATA_DIR_VAR, str(data))
+    records = {
+        country: make_record(variant=f"default-{country}") for country in ("japan", "hongkong")
+    }
+
+    for country, record in records.items():
+        default_registry(country).append(record)
+
+    for country, record in records.items():
+        path = data / "registry" / f"{country}.jsonl"
+        assert path.is_file()
+        assert Registry(path, holdout_log=tmp_path / "no-log.jsonl").records() == [record]
+        assert default_registry(country).records() == [record]
