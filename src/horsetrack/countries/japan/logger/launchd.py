@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import pwd
 import subprocess
 import sys
 from pathlib import Path
@@ -36,7 +37,10 @@ def launchctl(args: list[str]) -> int:
 
 
 def plist_path() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+    """The plist under $HOME/Library/LaunchAgents; with HOME unset or empty, the user's home from
+    the password database (the same lookup pathlib makes)."""
+    home = os.environ.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir
+    return Path(home) / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
 
 def job() -> dict[str, Any]:
