@@ -3,9 +3,11 @@ health line per venue and an alert for a venue that logged nothing, stopped earl
 
 It wires the JRA site (one ingest Fetcher, so one rate limit for www.jra.go.jp, and the capture
 module) and the odds log to `schedule.run_day`, with logger.yaml as the schedule; its `tier2` block
-adds the tier-2 pools and WIN5 (ticket #130; `--pools` picks tier 1's only). Log records go to
-`logs_dir('japan')/log-day-<date>.log`; the terminal gets a few lines. At the end one line per venue
-is appended to `logs_dir('japan')/health.log` (see `health.py`), each ALERT also on stderr.
+adds the tier-2 pools and WIN5 (ticket #130; `--pools` picks tier 1's only), its `results` block
+the result-publication polls (ticket #225), kept in the odds log's `<VENUE>.results.json`. Log
+records go to `logs_dir('japan')/log-day-<date>.log`; the terminal gets a few lines. At the end one
+line per venue is appended to `logs_dir('japan')/health.log` (see `health.py`), each ALERT also on
+stderr.
 
 Exit codes: 0 clean, 2 with any ALERT, 1 on error (one `ERROR` line on stderr; a bad option is an
 error too, so 2 always means an alert).
@@ -42,7 +44,7 @@ from __future__ import annotations
 import fcntl
 import logging
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -65,6 +67,7 @@ from horsetrack.countries.japan.jra.capture import (
     capture_meeting,
     capture_tier2,
     discover_venues,
+    published_results,
     read_post_times,
 )
 from horsetrack.countries.japan.logger.health import health_lines
@@ -152,6 +155,9 @@ class JraSite:
             win5=self.win5,
         )  # fmt: skip
 
+    def published_results(self, venue: str) -> set[int]:
+        return published_results(self.fetcher, self.race_date, venue)
+
 
 def _log_path(race_date: date, venue: str) -> Path:
     return paths.odds_snapshot_path(SOURCE, race_date.isoformat(), venue)
@@ -161,9 +167,14 @@ def _sidecar_path(race_date: date, venue: str) -> Path:
     return _log_path(race_date, venue).with_name(f"{venue}.races.json")
 
 
+def _results_path(race_date: date, venue: str) -> Path:
+    return _log_path(race_date, venue).with_name(f"{venue}.results.json")
+
+
 @dataclass
 class OddsLogStore:
-    """schedule.Store over the odds log: one gzip member per capture, post times in the sidecar."""
+    """schedule.Store over the odds log: one gzip member per capture, post times in the sidecar,
+    first-seen result publication times in the results sidecar (ticket #225)."""
 
     race_date: date
     now: Callable[[], datetime]
@@ -173,6 +184,9 @@ class OddsLogStore:
 
     def write_post_times(self, venue: str, times: dict[int, datetime]) -> None:
         odds_log.write_post_times(_sidecar_path(self.race_date, venue), times, self.now())
+
+    def write_published(self, venue: str, races: Iterable[int], seen_utc: datetime) -> None:
+        odds_log.record_published(_results_path(self.race_date, venue), races, seen_utc)
 
 
 def _logged(race_date: date, venue: str) -> tuple[list[dict[str, Any]], dict[str, datetime]]:
@@ -291,6 +305,11 @@ def _plan(race_date: date, venues: Sequence[str] | None, pools: Sequence[str], c
         [f"tier 2: {','.join(tier2['pools'])} at T-{',T-'.join(map(str, tier2['grid_min']))} min,"
          " from what tier 1 leaves of each round"] if tier2 else []
     )  # fmt: skip
+    results = config.get("results")
+    results_line = (
+        [f"results: every {results['every_s']} s from first post to last post +"
+         f" {results['until_min']} min, first sighting per race"] if results else []
+    )  # fmt: skip
     return [
         f"log-day {race_date.isoformat()}: dry run, no request sent",
         f"time zone: {TIMEZONE} (window and stop times are local)",
@@ -301,6 +320,7 @@ def _plan(race_date: date, venues: Sequence[str] | None, pools: Sequence[str], c
         f" a full cycle at most every {hot['all_every_s']} s",
         f"pools: {','.join(pools)}",
         *tier2_line,
+        *results_line,
         f"rate: {_number(_requests_per_second(host))} req/s to {host}"
         " (a round's budget is every_s x the rate)",
         f"venues: {given}",

@@ -1,4 +1,4 @@
-# Odds snapshot log and post-time sidecar
+# Odds snapshot log and its sidecars
 
 Code: `src/horsetrack/countries/japan/odds_log.py`. The format is HKTrack's, unchanged: logs copied
 from HKTrack read exactly like logs written here.
@@ -80,3 +80,25 @@ Path: `<VENUE>.races.json` beside the log, one per meeting.
 - `write_post_times(path, post_times, updated_utc)` replaces the file as a whole: a temporary file,
   fsynced, then `os.replace`. A failed write leaves the previous sidecar and no temporary file.
 - `read_post_times(path)` returns `{race_number: aware UTC datetime}`, empty when the file is missing.
+
+## Results sidecar (ticket #225)
+
+Path: `<VENUE>.results.json` beside the log, one per meeting, written by `log-day` when logger.yaml
+has a `results` block.
+
+```json
+{
+  "published_utc": {
+    "1": "2026-11-28T01:14:00+00:00",
+    "2": "2026-11-28T01:47:20+00:00"
+  }
+}
+```
+
+- `published_utc`: race number (as a JSON string key) to the first poll instant, ISO UTC, at which
+  the meeting's レース結果 race list linked the race's result page. The poll interval
+  (`results.every_s`) bounds how late that is.
+- `record_published(path, races, seen_utc)` adds each race not yet there at `seen_utc`; a race
+  already there keeps its first instant. Written as the post-time sidecar is (temporary file,
+  fsync, `os.replace`), and only when a race is new. Returns the mapping after the write.
+- `read_published(path)` returns `{race_number: aware UTC datetime}`, empty when the file is missing.

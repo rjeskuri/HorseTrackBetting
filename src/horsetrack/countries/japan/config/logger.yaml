@@ -38,3 +38,9 @@ max_wrong_meeting: 3
 # After a 403/429 (or any open circuit): null stops the host for the rest of the day and the
 # block marker keeps a restart from sending anything; N resumes once after N minutes. Owner's call.
 on_block: {cooldown_min: null}
+# Result publication (ticket #225): each venue's レース結果 race list is polled at most every every_s
+# from its first post to its last post + until_min (past the odds' end), and each race's first
+# sighting of its official result is kept in <VENUE>.results.json beside the odds log. every_s 60
+# gives minute resolution; until_min past 30 lets the log see lags beyond the 30-minute proxy.
+# Without this block: no results polling.
+results: {every_s: 60, until_min: 60}

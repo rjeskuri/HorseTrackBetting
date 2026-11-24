@@ -9,10 +9,12 @@ the out-of-fold rows of folds before k that are among fold k's training days, so
 embargo (fold 0 only trains). Scored as #69 defines it: winner log
 loss per race, a dead heat's k winners each weighted 1/k, and a paired bootstrap over meetings.
 
-The store holds no publication time, so a proxy stands in: a race's result counts as published
-at its local post time + PUBLISH_LAG, and the decision time is the target's post time -
-DECISION_LEAD. Holdout days are never read (#114's scoped reader); only aggregates are returned
-and nothing is written. Measurement only: nothing here is adopted (D16).
+A race's result counts as published at its logged `result_published_utc` (the odds logger's first
+sighting, ticket #225) where the store has one, else at the proxy, its local post time +
+PUBLISH_LAG (`published_times`); `publication_lag_summary` measures that proxy against the logged
+times. The decision time is the target's post time - DECISION_LEAD. Holdout days are never read
+(#114's scoped reader); only aggregates are returned and nothing is written. Measurement only:
+nothing here is adopted (D16).
 """
 
 from __future__ import annotations
@@ -35,7 +37,8 @@ from horsetrack.countries.japan.handicap.track_bias import CELL, fit_bias_prior,
 
 PUBLISH_LAG = timedelta(minutes=30)
 DECISION_LEAD = timedelta(minutes=2)
-RACE_COLUMNS = ("race_id", "race_date", "meeting_id", "race_no", "post_time_local", *CELL)
+LOGGED = "result_published_utc"
+RACE_COLUMNS = ("race_id", "race_date", "meeting_id", "race_no", "post_time_local", LOGGED, *CELL)
 RUNNER_COLUMNS = ("race_id", "race_date", "horse_no", "horse_id", "draw", "finish_pos",
                   "running_positions", "is_scratched")  # fmt: skip
 VARIANTS = ("prior", "update")
@@ -47,6 +50,55 @@ def _post(day: date, hhmm: str | None) -> datetime | None:
         return None
     hh, mm = hhmm.split(":")
     return datetime.combine(day, time(int(hh), int(mm)), tzinfo=JST)
+
+
+def _posts_and_logged(races: pl.DataFrame) -> list[tuple[str, datetime | None, datetime | None]]:
+    """(race_id, local post time, logged publication time) per race; a frame without the logged
+    column (a store built before #225) has none logged."""
+    logged = races.get_column(LOGGED) if LOGGED in races.columns else [None] * races.height
+    return [
+        (rid, _post(day, hhmm), at)
+        for (rid, day, hhmm), at in zip(
+            races.select("race_id", "race_date", "post_time_local").rows(), logged, strict=True
+        )
+    ]
+
+
+def published_times(races: pl.DataFrame) -> dict[str, datetime]:
+    """race_id -> when its result counts as published: the logged `result_published_utc` where
+    there is one (it stands without a post time), else post + PUBLISH_LAG; a race with neither
+    is left out."""
+    out = {}
+    for rid, post, logged in _posts_and_logged(races):
+        if logged is not None:
+            out[rid] = logged
+        elif post is not None:
+            out[rid] = post + PUBLISH_LAG
+    return out
+
+
+def publication_lag_summary(races: pl.DataFrame) -> dict:
+    """Aggregates only of logged publication time - local post time, in minutes, over the races
+    having both: count, min, median, p90, max and the share within PUBLISH_LAG (the proxy's
+    claim). No race has both: `races` 0 and the rest None."""
+    lags = np.array(
+        [(logged - post).total_seconds() / 60.0
+         for _, post, logged in _posts_and_logged(races)
+         if post is not None and logged is not None]
+    )  # fmt: skip
+    proxy = PUBLISH_LAG.total_seconds() / 60.0
+    if lags.size == 0:
+        stats = dict.fromkeys(("min_minutes", "median_minutes", "p90_minutes", "max_minutes",
+                               "share_within_30_minutes"))  # fmt: skip
+        return {"races": 0, **stats}
+    return {
+        "races": int(lags.size),
+        "min_minutes": float(lags.min()),
+        "median_minutes": float(np.median(lags)),
+        "p90_minutes": float(np.quantile(lags, 0.9)),
+        "max_minutes": float(lags.max()),
+        "share_within_30_minutes": float((lags <= proxy).mean()),
+    }
 
 
 def _runner_style(day: date) -> pl.DataFrame:
@@ -73,7 +125,7 @@ def _day_rows(prior, races: pl.DataFrame, runners: pl.DataFrame, day: date) -> l
     posts = {
         rid: _post(day, hhmm) for rid, hhmm in races.select("race_id", "post_time_local").rows()
     }
-    published = {rid: t + PUBLISH_LAG for rid, t in posts.items() if t is not None}
+    published = published_times(races)
     style = _runner_style(day)
     out = []
     for rid, meeting in races.select("race_id", "meeting_id").sort("race_id").rows():

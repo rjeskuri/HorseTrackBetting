@@ -18,6 +18,14 @@ one that does not fit is tried again in a later round of its stretch, and one wi
 capture when its stretch ends counts in VenueSummary.tier2_skipped. A failed tier-2 capture is
 logged and never touches tier 1 (a CircuitOpen still ends the day: the host blocked us).
 
+Results (ticket #225, logger.yaml `results`): each venue with post times polls the site's
+`published_results` from its first post to its last post + until_min, at most every every_s, and
+writes each race the first time a poll shows its official result, at the instant that poll
+returned. Polls ride on the rounds while odds are logged (after tier 1, ahead of tier 2's share
+of the budget) and set their own pace once they end; a venue stops polling once every race with a
+post time is logged. A failed poll is retried at the next one and is not an odds failure; a
+CircuitOpen ends the day as from any site call.
+
 `plan_round` is pure. `run_day` drives it with an injected clock (`now`, `sleep`) and reaches the
 site and the store only through the protocols below. `config` is a mapping shaped like
 `countries/japan/config/logger.yaml`. Window and stop times are Asia/Tokyo wall-clock times; every
@@ -46,6 +54,7 @@ _EPS = 1e-9
 # What a failed site call can raise without ending the day (CircuitOpen does end it). ValueError is
 # the capture's verdict on an error page.
 _CALL_ERRORS = (WrongMeeting, NotListed, FetchError, ValueError)
+_RESULTS_REQUESTS = 2  # a results poll: the レース結果 menu and the meeting's race list
 
 
 class Site(Protocol):
@@ -60,11 +69,16 @@ class Site(Protocol):
 
     def capture_tier2(self, venue: str, races: list[int]) -> MeetingCapture: ...  # with `tier2`
 
+    def published_results(self, venue: str) -> set[int]: ...  # with `results`
+
 
 class Store(Protocol):
     def write(self, venue: str, capture: MeetingCapture) -> int: ...  # rows written
 
     def write_post_times(self, venue: str, times: dict[int, datetime]) -> None: ...
+
+    # with `results`: the races first seen published at `seen_utc`
+    def write_published(self, venue: str, races: Iterable[int], seen_utc: datetime) -> None: ...
 
 
 @dataclass
@@ -307,6 +321,8 @@ class _Venue:
     wrong_in_row: int = 0
     tier2_tried: set[tuple[int, int]] = field(default_factory=set)  # (race, grid value)
     tier2_got: set[tuple[int, int]] = field(default_factory=set)  # tried and written
+    published: set[int] = field(default_factory=set)  # races whose result this run has logged
+    results_polled: datetime | None = None  # when the latest results poll started
 
 
 def run_day(
@@ -333,6 +349,13 @@ class _Day:
         self.summary = DaySummary()
         self.venues: dict[str, _Venue] = {}
         self.tier2 = config.get("tier2")
+        self.results = config.get("results")
+        able = callable(getattr(site, "published_results", None)) and callable(
+            getattr(store, "write_published", None)
+        )
+        if self.results and not able:  # a site or store from before #225: odds only
+            log.warning("results polling off: the site or store has no results methods")
+            self.results = None
         self.grid = sorted(set(self.tier2["grid_min"]), reverse=True) if self.tier2 else []
 
     def run(self, codes: list[str] | None) -> DaySummary:
@@ -414,27 +437,32 @@ class _Day:
         while True:
             start = self.now()
             active = self._active(start)
-            if not active:
+            if not active and self._results_wake() is None:
                 return
             for v in active:  # post times refresh as each full cycle starts
                 fresh = v.read_at is None or start - v.read_at >= all_every
                 if fresh and _new_cycle_due(v.state, start, self.config):
                     self._read(v, start)
             active = self._active(self.now())
-            if not active:
+            jobs: list[Job] = []
+            if active:
+                rps = self.site.requests_per_second
+                jobs, wanted = _plan(start, [v.state for v in active], self.config, rps)
+                self.summary.deferred += wanted - sum(
+                    1 if j.races is None else len(j.races) for j in jobs
+                )
+                for job in jobs:
+                    v = self.venues[job.venue]
+                    if self._running(v, self.now()):
+                        self._capture(v, job, start)
+            polled = self._results_round()
+            if self.tier2 and active:
+                self._tier2_round(start, sum(job.requests for job in jobs) + polled)
+            # while odds are logged, results polls ride on the rounds; after, they set the pace
+            wake = self._next_round(start) if self._active(self.now()) else self._results_wake()
+            if wake is None:
                 return
-            rps = self.site.requests_per_second
-            jobs, wanted = _plan(start, [v.state for v in active], self.config, rps)
-            self.summary.deferred += wanted - sum(
-                1 if j.races is None else len(j.races) for j in jobs
-            )
-            for job in jobs:
-                v = self.venues[job.venue]
-                if self._running(v, self.now()):
-                    self._capture(v, job, start)
-            if self.tier2:
-                self._tier2_round(start, sum(job.requests for job in jobs))
-            self._sleep_until(self._next_round(start))
+            self._sleep_until(wake)
 
     def _read(self, v: _Venue, start: datetime) -> None:
         v.read_at = start
@@ -480,6 +508,57 @@ class _Day:
         if not left:
             cycle_s = _secs(t1 - v.cycle_first)
             v.summary.longest_cycle_s = max(v.summary.longest_cycle_s, cycle_s)
+
+    # ------------------------------------------------ results (ticket #225)
+
+    def _results_due(self, v: _Venue, t: datetime) -> tuple[datetime, datetime] | None:
+        """(when v's next results poll falls due, the last instant it may poll) at `t`; None when
+        it polls no more: no `results` block or no post times, every race logged, past its
+        window (last post + until_min), or its odds stopped otherwise than as 'ended' (a block,
+        or answers for another meeting)."""
+        posts = v.state.post_times.values()
+        if not self.results or not posts or v.state.stopped not in (None, "ended"):
+            return None
+        if set(v.state.post_times) <= v.published:
+            return None
+        first = min(posts)
+        until = max(posts) + timedelta(minutes=self.results["until_min"])
+        due = first
+        if v.results_polled is not None:
+            due = max(first, v.results_polled + timedelta(seconds=self.results["every_s"]))
+        return (due, until) if t <= until and due <= until else None
+
+    def _results_wake(self) -> datetime | None:
+        """The earliest instant a venue's results poll falls due; None when none polls again."""
+        t = self.now()
+        dues = [d[0] for v in self.venues.values() if (d := self._results_due(v, t)) is not None]
+        return min(dues, default=None)
+
+    def _results_round(self) -> int:
+        """Poll every venue whose results poll is due; the requests the polls cost."""
+        sent = 0
+        for v in self.venues.values():
+            t = self.now()
+            due = self._results_due(v, t)
+            if due is not None and due[0] <= t <= due[1]:
+                self._poll_results(v, t)
+                sent += _RESULTS_REQUESTS
+        return sent
+
+    def _poll_results(self, v: _Venue, t: datetime) -> None:
+        """One results poll: the races shown and not yet logged are written at the instant the
+        poll returned. A failed poll is retried at the next one and is no failure of the odds
+        (CircuitOpen still ends the day)."""
+        v.results_polled = t
+        try:
+            shown = {int(n) for n in self.site.published_results(v.state.code)}
+        except _CALL_ERRORS as exc:
+            log.info("%s results poll failed, retried at the next poll: %s", v.state.code, exc)
+            return
+        new = shown - v.published
+        if new:
+            self.store.write_published(v.state.code, sorted(new), self.now())
+            v.published |= new
 
     # ------------------------------------------------ tier 2
 
