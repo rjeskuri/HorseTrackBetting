@@ -68,8 +68,20 @@ def test_app_and_japan_are_typer_apps_with_japan_mounted():
     assert isinstance(app, typer.Typer)
     assert isinstance(japan, typer.Typer)
     assert japan is not app
-    assert [g.name for g in app.registered_groups] == ["japan"]
-    assert app.registered_groups[0].typer_instance is japan
+    from horsetrack.core.ingest.cli import scrape_app
+    from horsetrack.core.store.cli import store_app
+
+    names = [g.name for g in app.registered_groups]
+    # #45 mounts `scrape` and #50 mounts `store` beside `japan`; each group is mounted exactly once.
+    assert sorted(names) == ["japan", "scrape", "store"]
+    groups = {g.name: g.typer_instance for g in app.registered_groups}
+    assert groups["japan"] is japan
+    assert isinstance(scrape_app, typer.Typer)
+    assert groups["scrape"] is scrape_app
+    assert scrape_app is not japan and scrape_app is not app
+    assert isinstance(store_app, typer.Typer)
+    assert groups["store"] is store_app
+    assert store_app is not japan and store_app is not app and store_app is not scrape_app
 
 
 def test_bare_invocations_show_help_instead_of_running_anything():

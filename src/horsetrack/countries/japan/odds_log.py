@@ -16,7 +16,7 @@ import zlib
 from collections.abc import Iterable, Iterator
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 log = logging.getLogger(__name__)
 
@@ -62,47 +62,127 @@ def append_capture(path: Path, rows: Iterable[dict[str, Any]]) -> int:
     return len(rows)
 
 
-def _complete_members(raw: bytes, path: Path) -> Iterator[bytes]:
-    """Decompressed gzip members, in order. Only whole, CRC-checked members count: a capture is all
-    or nothing. A torn or damaged member costs that capture only: reading resumes at the next member
-    header, since the logger is restarted and keeps appending after it."""
-    start = 0
-    while start < len(raw):
-        member = zlib.decompressobj(wbits=31)
+# zlib is fed bounded chunks, so a member's unused_data is at most one chunk and a scan stays linear
+_CHUNK = 1 << 16
+
+
+def _next_header(fh: BinaryIO, after: int) -> int | None:
+    """The offset of the first member header at or after byte `after`, or None."""
+    fh.seek(after)
+    offset, carry = after, b""
+    while True:
+        chunk = fh.read(_CHUNK)
+        if not chunk:
+            return None
+        window = carry + chunk
+        found = window.find(_GZIP_MEMBER_HEADER)
+        if found >= 0:
+            return offset - len(carry) + found
+        carry = window[-(len(_GZIP_MEMBER_HEADER) - 1) :]
+        offset += len(chunk)
+
+
+def _complete_members(path: Path, start: int) -> Iterator[tuple[int, bytes]]:
+    """(end offset, decompressed bytes) of each gzip member from byte `start`, in order. Only whole,
+    CRC-checked members count: a capture is all or nothing. A torn or damaged member costs that
+    capture only: reading resumes at the next member header, since the logger is restarted and
+    keeps appending after it. A torn trailing member is not yielded and no end offset passes it."""
+    try:
+        fh = open(path, "rb")
+    except FileNotFoundError:
+        return
+    with fh:
+        fh.seek(start)
+        pos, pending = start, b""  # pending: bytes read from `pos` on, not yet fed to zlib
+        while True:
+            member = zlib.decompressobj(wbits=31)
+            parts: list[bytes] = []
+            fed = 0
+            try:
+                while not member.eof:
+                    data = pending or fh.read(_CHUNK)
+                    pending = b""
+                    if not data:
+                        break
+                    fed += len(data)
+                    parts.append(member.decompress(data))
+            except zlib.error:
+                pass
+            if member.eof:
+                end = pos + fed - len(member.unused_data)
+                yield end, b"".join(parts)
+                pos, pending = end, member.unused_data
+                continue
+            if fed == 0:
+                return  # the end of the log, on a member boundary
+            resume = _next_header(fh, pos + 1)
+            if resume is None:
+                log.warning("odds log %s: damaged or unfinished data after byte %d", path, pos)
+                return
+            log.warning("odds log %s: damaged member at %d skipped, on at %d", path, pos, resume)
+            fh.seek(resume)
+            pos, pending = resume, b""
+
+
+def _member_rows(data: bytes) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in data.decode("utf-8", errors="replace").splitlines():
         try:
-            data = member.decompress(memoryview(raw)[start:])
-            complete = member.eof
-        except zlib.error:
-            data, complete = b"", False
-        if complete:
-            yield data
-            start = len(raw) - len(member.unused_data)
+            row = json.loads(line)
+        except ValueError:
             continue
-        resume = raw.find(_GZIP_MEMBER_HEADER, start + 1)
-        if resume < 0:
-            log.warning("odds log %s: damaged data after byte %d ignored", path, start)
-            return
-        log.warning("odds log %s: damaged member at %d skipped, on at %d", path, start, resume)
-        start = resume
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def iter_members_with_offsets(
+    path: Path, *, start: int = 0
+) -> Iterator[tuple[int, list[dict[str, Any]]]]:
+    """(end offset, rows) of each whole member from byte offset `start`, in log order. The end
+    offset is the byte just after the member, where a later read can resume; nothing when there is
+    no log yet. The file is read in bounded chunks and one member is held at a time."""
+    for end, data in _complete_members(Path(path), start):
+        yield end, _member_rows(data)
+
+
+def iter_members(path: Path, *, start: int = 0) -> Iterator[list[dict[str, Any]]]:
+    """The rows of each whole member (one capture) from byte offset `start`, in log order; nothing
+    when there is no log yet. Only one decompressed member is held at a time, so a reader can
+    filter as it goes."""
+    for _, rows in iter_members_with_offsets(path, start=start):
+        yield rows
+
+
+class LogTail:
+    """A growing log read on: each poll returns the rows of the members appended since the previous
+    poll, reading from where the last whole member ended. A torn trailing member (a write still in
+    progress) is read on the poll after it is complete. Polling a missing log creates nothing."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.offset = 0
+
+    def poll(self) -> list[dict[str, Any]]:
+        try:
+            size = os.stat(self.path).st_size
+        except FileNotFoundError:
+            return []
+        if size < self.offset:  # the log is append-only; a shorter file is a replaced one
+            log.warning("odds log %s shrank below byte %d: read from 0", self.path, self.offset)
+            self.offset = 0
+        if size == self.offset:
+            return []
+        rows: list[dict[str, Any]] = []
+        for end, member in iter_members_with_offsets(self.path, start=self.offset):
+            rows.extend(member)
+            self.offset = end
+        return rows
 
 
 def read_rows(path: Path) -> list[dict[str, Any]]:
     """Every row of every whole member, as logged; empty when there is no log yet."""
-    path = Path(path)
-    try:
-        raw = path.read_bytes()
-    except FileNotFoundError:
-        return []
-    rows: list[dict[str, Any]] = []
-    for data in _complete_members(raw, path):
-        for line in data.decode("utf-8", errors="replace").splitlines():
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(row, dict):
-                rows.append(row)
-    return rows
+    return [row for rows in iter_members(path) for row in rows]
 
 
 def _instant(value: Any) -> datetime | None:
