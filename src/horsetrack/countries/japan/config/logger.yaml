@@ -1,3 +1,8 @@
+# The odds logger's settings.
+# raw_pages: "all" keeps every odds page a capture fetches (gzip, under raw/jra/official_odds/),
+# so a parser bug found later can be re-run over a logged day; "none" keeps nothing.
+raw_pages: all
+
 # The JRA odds logger's schedule (ticket #24): what it captures, when, and how many requests it may
 # spend per round. Read by horsetrack.countries.japan.logger.schedule. Times are JRA local time
 # (Asia/Tokyo) on the race date; keep them quoted, or YAML reads 07:00 as a base-60 number.
