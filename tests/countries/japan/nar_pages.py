@@ -210,6 +210,52 @@ def _votes(votes: Sequence[tuple[str, int]]) -> str:
     return f'<div id="odds_vote_block"><table class="RaceOdds_Vote_Table">{rows}</table></div>'
 
 
+@dataclass(frozen=True)
+class RaceNav:
+    """The race navigation a real odds page carries (ticket #38; shape seen on captured b1 pages,
+    no content copied). A page links to far more races than its own:
+    - venue tabs `div.RaceKaisaiWrap ul.Col li a[href="?race_id=..."]`: one race per venue racing
+      that day (other venues included), the page's own as `li.Active`;
+    - race numbers `div.RaceNumWrap ul.fc li a[href="?race_id=..."][title="NR"]`: every race of
+      the page's meeting, the page's own as `li.Active`;
+    - the page menu `ul.RaceMainMenu li.race_navi_*`, whose links name the page's own race.
+    So a page's own race is its active nav entry (and its race_navi links), not "every race_id= on
+    the page"."""
+
+    own: str  # the page's own 12-digit race id
+    meeting: Sequence[str]  # the race ids of the page's meeting, race 1 first
+    venues: Sequence[str]  # one race id per venue tab, the page's own among them
+
+
+def _race_nav(nav: RaceNav | None) -> str:
+    if nav is None:
+        return ""
+    own = nav.own
+    tabs = "".join(
+        ('<li class="Active">' if rid == own else "<li>")
+        + f'<a href="?race_id={rid}">ギジ{rid[4:6]}</a></li>'
+        for rid in nav.venues
+    )
+    numbers = "".join(
+        ('<li class="Active">' if rid == own else "<li>")
+        + f'<a href="?race_id={rid}" title="{int(rid[10:])}R">{int(rid[10:])}R</a></li>'
+        for rid in nav.meeting
+    )
+    menu = (
+        '<ul class="RaceMainMenu">'
+        f'<li id="a-navi_shutuba" class="race_navi_shutuba"><a href="/race/shutuba.html?'
+        f'race_id={own}">出馬表</a></li>'
+        f'<li id="a-navi_odds" class="race_navi_odds"><a href="/odds/?race_id={own}&amp;type=b1">'
+        "オッズ</a></li>"
+        f'<li id="a-navi_result"><a href="/race/result.html?race_id={own}">結果</a></li></ul>'
+    )
+    return (
+        '<div class="RaceMainColumn">'
+        f'<div class="RaceKaisaiWrap"><ul class="Col Col">{tabs}</ul></div>'
+        f'<div class="RaceNumWrap"><ul class="fc">{numbers}</ul></div></div>' + menu
+    )
+
+
 def _nav(race_id: str) -> str:
     """The odds-type tabs every odds page carries (their text names pools: a decoy)."""
     tabs = (("b1", "単勝・複勝"), ("b3", "枠連"), ("b4", "馬連"), ("b5", "ワイド"), ("b6", "馬単"))
@@ -247,15 +293,20 @@ def odds_b1(
     updated: str | None = "14:27",
     votes: Sequence[tuple[str, int]] = (),
     columns: Sequence[str] = TAN_COLUMNS,
+    race_nav: RaceNav | None = None,
 ) -> bytes:
     """The 単勝・複勝 page of a race on sale. `runners`: number -> (win price, place price);
     a place price is a (lo, hi) range, a scratched runner prints 取消 or 除外 in both.
-    `columns`: the header order of both tables (the parser keys by label)."""
+    `columns`: the header order of both tables (the parser keys by label). `race_nav`: the page's
+    race navigation (none by default, as #37's pages)."""
     size = len(runners)
     win = {n: w for n, (w, _) in runners.items()}
     place = {n: p for n, (_, p) in runners.items()}
     body = (
-        _nav(race_id) + _update(updated) + '<div id="odds_tan_block" class="RaceOdds_HorseList">'
+        _race_nav(race_nav)
+        + _nav(race_id)
+        + _update(updated)
+        + '<div id="odds_tan_block" class="RaceOdds_HorseList">'
         '<div class="RaceOdds_HorseList_Title"><h2>単勝</h2></div>'
         + _horse_table(win, 1, columns, size)
         + "</div>"
@@ -274,6 +325,7 @@ def odds_b1_before_sales(
     *,
     in_tan_block: bool = False,
     ninki_class: bool = True,
+    race_nav: RaceNav | None = None,
 ) -> bytes:
     """The 単勝・複勝 page before sales open: netkeiba's 予想オッズ table (`.Ninki`), ordered by
     forecast favouritism, its forecast in a `td.Odds` cell as a real price is (a trap for a loose
@@ -298,7 +350,8 @@ def odds_b1_before_sales(
             '<div id="odds_tan_block" class="RaceOdds_HorseList">'
             f'<div class="RaceOdds_HorseList_Title"><h2>単勝</h2></div>{inner}</div>'
         )
-    return page(_nav(race_id) + inner, imitates="nar.netkeiba.com odds b1, before sales")
+    body = _race_nav(race_nav) + _nav(race_id) + inner
+    return page(body, imitates="nar.netkeiba.com odds b1, before sales")
 
 
 def odds_pairs(
@@ -308,6 +361,7 @@ def odds_pairs(
     label: str = "ワイド",
     updated: str | None = "14:27",
     votes: Sequence[tuple[str, int]] = (),
+    race_nav: RaceNav | None = None,
 ) -> bytes:
     """GUESS of a pair-pool page (`b5` ワイド, `b4` 馬連/馬複): one table per first runner as the
     pair is given (so (10, 9) prints under 10), each row the second runner and its price."""
@@ -321,7 +375,8 @@ def odds_pairs(
         for a, seconds in by_first.items()
     )
     body = (
-        _nav(race_id)
+        _race_nav(race_nav)
+        + _nav(race_id)
         + _update(updated)
         + f'<div id="odds_pair_block" class="GraphOdds"><h2>{label}</h2>{tables}</div>'
         + _votes(votes)

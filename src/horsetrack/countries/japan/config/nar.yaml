@@ -47,8 +47,9 @@ pools:
   TIERCE: {labels: ["3連単"], legs: 3}
 
 # Rate and block policy, verbatim from the research doc. Jitter stays 0: the Fetcher's jitter is
-# symmetric, so any positive value allows gaps under 10 s. The logger handles a block on top of
-# CircuitOpen (wait 15 minutes, a fresh Fetcher at 0.05 requests a second, a second block stops the day).
+# symmetric, so any positive value allows gaps under 10 s. The breaker opens on the first 403/429;
+# the logger's response to it is logger.yaml's `nar.on_block` (wait 15 minutes, resume once on a
+# fresh Fetcher at 0.05 requests a second, the same User-Agent; a second block stops the day).
 http:
   hosts:
     default: {requests_per_second: 0.1, jitter: 0.0}
