@@ -25,7 +25,8 @@ Research and tooling for pari-mutuel horse racing, one folder per country (Japan
 - `src/horsetrack/core/ingest/`, `core/store/` (planned): HTTP/ingest, storage.
 - `src/horsetrack/core/eval/`: the evaluation harness; `holdout.py` splits off the locked final holdout.
 - `src/horsetrack/countries/<country>/config/holdout.yaml` (`japan`, `hongkong`): each country's holdout start and seed, read through `core.config.load_country_yaml`. Each eval ticket owns one file there: `scoring.yaml` (#69), `folds.yaml` (#70), `holdout.yaml` (#71).
-- `src/horsetrack/countries/japan/{jra,nar,jrdb,logger,board}/` (planned): Japan sources, odds logger, board.
+- `src/horsetrack/countries/japan/{jra,nar,jrdb,logger}/` (planned): Japan sources, odds logger.
+- `src/horsetrack/countries/japan/board/`: the board at a decision time and the final board (`docs/specs/board-at-t.md`).
 - `src/horsetrack/countries/hongkong/hkjc/` (planned): Hong Kong source.
 - `docs/problem-statement.md`, `docs/ledger.md`, `docs/experiment-report.md` (planned): the signed problem statement, the known-vs-assumed ledger, the report template.
 - `tests/fixtures/synthetic/` (planned): the only fixtures committed.
