@@ -185,8 +185,16 @@ class OddsLogStore:
     def write_post_times(self, venue: str, times: dict[int, datetime]) -> None:
         odds_log.write_post_times(_sidecar_path(self.race_date, venue), times, self.now())
 
-    def write_published(self, venue: str, races: Iterable[int], seen_utc: datetime) -> None:
-        odds_log.record_published(_results_path(self.race_date, venue), races, seen_utc)
+    def write_published(
+        self,
+        venue: str,
+        races: Iterable[int],
+        seen_utc: datetime,
+        unpublished_utc: datetime | None = None,
+    ) -> None:
+        odds_log.record_published(
+            _results_path(self.race_date, venue), races, seen_utc, unpublished_utc=unpublished_utc
+        )
 
 
 def _logged(race_date: date, venue: str) -> tuple[list[dict[str, Any]], dict[str, datetime]]:

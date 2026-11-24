@@ -166,12 +166,23 @@ def season_start_month(source: str) -> int:
     return month
 
 
+def _race_instants(source: str, hook_name: str) -> dict[str, datetime]:
+    """race_id -> instant in UTC from the adapter's optional `<hook_name>()` hook, else none."""
+    hook = getattr(get_adapter(source), hook_name, None)
+    logged = dict(hook()) if callable(hook) else {}
+    return {str(rid): _coerce_value(at, schemas.UTC) for rid, at in logged.items()}
+
+
 def result_published_utc(source: str) -> dict[str, datetime]:
     """race_id -> when the race's official result was first seen published, in UTC: the adapter's
     optional `result_published_utc()` hook (ticket #225), else none."""
-    hook = getattr(get_adapter(source), "result_published_utc", None)
-    logged = dict(hook()) if callable(hook) else {}
-    return {str(rid): _coerce_value(at, schemas.UTC) for rid, at in logged.items()}
+    return _race_instants(source, "result_published_utc")
+
+
+def result_unpublished_utc(source: str) -> dict[str, datetime]:
+    """race_id -> the race's lower bound, the last logger poll that did not show its result, in
+    UTC: the adapter's optional `result_unpublished_utc()` hook (ticket #225), else none."""
+    return _race_instants(source, "result_unpublished_utc")
 
 
 def _season_of(race_date: date, start_month: int) -> str:
@@ -508,10 +519,13 @@ def _assemble(
     )
     races["race_no"] = races["race_no"].fillna(keys["race_no"])
     races["season"] = _season(races["race_date"], start_month)
-    published = result_published_utc(source)
-    races["result_published_utc"] = pd.Series(
-        [published.get(rid) for rid in races["race_id"]], index=races.index, dtype=_UTC_DTYPE
-    )
+    for column, instants in (
+        ("result_published_utc", result_published_utc(source)),
+        ("result_unpublished_utc", result_unpublished_utc(source)),
+    ):
+        races[column] = pd.Series(
+            [instants.get(rid) for rid in races["race_id"]], index=races.index, dtype=_UTC_DTYPE
+        )
 
     keys = _race_keys(runners["race_id"])
     for column in ("meeting_id", "race_date", "venue", "race_no"):

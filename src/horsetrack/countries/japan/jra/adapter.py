@@ -11,8 +11,8 @@ Priorities give a newest-first, complete-by-date backfill: the calendar months c
 month first), then every task of a race date outranks every task of an older date, the day's race
 list before its results. Registered as "jra" in `core.ingest.adapters.ADAPTERS`.
 
-Store hook: `result_published_utc()` gives the store build the odds logger's first-seen result
-publication times (ticket #225).
+Store hooks: `result_published_utc()` and `result_unpublished_utc()` give the store build the odds
+logger's first-seen result publication times and their lower bounds (ticket #225).
 """
 
 from __future__ import annotations
@@ -170,17 +170,30 @@ class JRAAdapter:
         """race_id -> when its official result was first seen published (aware UTC): every
         results sidecar the odds logger wrote under odds_snapshots/jra (ticket #225). The store
         build fills `races.result_published_utc` from it."""
-        root = paths.data_dir() / "odds_snapshots" / SOURCE
-        out: dict[str, datetime] = {}
-        for sidecar in sorted(root.glob(f"*/*{RESULTS_SIDECAR}")):
-            venue = sidecar.name.removesuffix(RESULTS_SIDECAR)
-            try:
-                race_day = date.fromisoformat(sidecar.parent.name)
-            except ValueError:
-                continue  # not a race-date folder
-            for number, at in odds_log.read_published(sidecar).items():
+        return _logged_results(odds_log.read_published)
+
+    def result_unpublished_utc(self) -> dict[str, datetime]:
+        """race_id -> its lower bound (aware UTC), the last logger poll that did not show its
+        result, for the bounded races of every results sidecar only (a late sighting has none).
+        The store build fills `races.result_unpublished_utc` from it."""
+        return _logged_results(odds_log.read_unpublished)
+
+
+def _logged_results(read) -> dict[str, datetime]:
+    """race_id -> the non-null instant `read(sidecar)` gives per race, over every results sidecar
+    the odds logger wrote under odds_snapshots/jra."""
+    root = paths.data_dir() / "odds_snapshots" / SOURCE
+    out: dict[str, datetime] = {}
+    for sidecar in sorted(root.glob(f"*/*{RESULTS_SIDECAR}")):
+        venue = sidecar.name.removesuffix(RESULTS_SIDECAR)
+        try:
+            race_day = date.fromisoformat(sidecar.parent.name)
+        except ValueError:
+            continue  # not a race-date folder
+        for number, at in read(sidecar).items():
+            if at is not None:
                 out[common.store_race_id(race_day, venue, number)] = at
-        return out
+    return out
 
 
 def _parser_module(page_type: str):

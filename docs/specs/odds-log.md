@@ -91,14 +91,28 @@ has a `results` block.
   "published_utc": {
     "1": "2026-11-28T01:14:00+00:00",
     "2": "2026-11-28T01:47:20+00:00"
+  },
+  "unpublished_utc": {
+    "2": "2026-11-28T01:46:20+00:00"
   }
 }
 ```
 
 - `published_utc`: race number (as a JSON string key) to the first poll instant, ISO UTC, at which
-  the meeting's レース結果 race list linked the race's result page. The poll interval
-  (`results.every_s`) bounds how late that is.
-- `record_published(path, races, seen_utc)` adds each race not yet there at `seen_utc`; a race
-  already there keeps its first instant. Written as the post-time sidecar is (temporary file,
-  fsync, `os.replace`), and only when a race is new. Returns the mapping after the write.
+  the meeting's レース結果 race list linked the race's result page.
+- `unpublished_utc`: the race's lower bound, the instant the last successful poll of the same run
+  before that one returned (it did not show the race), ISO UTC. Only bounded races appear: a race
+  shown on a run's first successful poll (a restart, a late start, a wake from sleep, or a result
+  out before the first post) is a late sighting and has no bound, so its `published_utc` says when
+  it was seen, not when it came out. A failed poll shows nothing and is never a bound. The
+  published time lies in `(unpublished_utc, published_utc]`; a bracket wider than the poll
+  interval spans failed polls.
+- `record_published(path, races, seen_utc, unpublished_utc=None)` adds each race not yet there at
+  `seen_utc` with the bound `unpublished_utc` (None: a late sighting); a race already there keeps
+  its first instant and its bound, whatever a later call or run says. Written as the post-time
+  sidecar is (temporary file, fsync, `os.replace`), and only when a race is new. Returns the
+  `published_utc` mapping after the write.
 - `read_published(path)` returns `{race_number: aware UTC datetime}`, empty when the file is missing.
+- `read_unpublished(path)` returns `{race_number: aware UTC datetime or None}`, one entry per race
+  of `read_published`; a sidecar written before the bound (no `unpublished_utc` key) reads every
+  race as None, and a missing file reads as empty.

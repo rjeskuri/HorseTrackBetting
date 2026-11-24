@@ -277,35 +277,65 @@ def read_post_times(path: Path) -> dict[int, datetime]:
 # ---------------------------------------------------------------- results sidecar (ticket #225)
 
 
-def read_published(path: Path) -> dict[int, datetime]:
-    """Race number -> the instant its official result was first seen published, as an aware UTC
-    datetime; empty when there is no sidecar."""
+def _read_results(path: Path) -> tuple[dict[int, datetime], dict[int, datetime | None]]:
+    """(race -> first seen, race -> lower bound or None) from the results sidecar; both empty
+    when there is no sidecar. A sidecar written before the bound reads every race as None."""
     try:
         document = json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
-    out: dict[int, datetime] = {}
-    for no, text in document.get("published_utc", {}).items():
-        at = _instant(text)
-        if at is None:
-            raise ValueError(f"results sidecar {path}: race {no} has no readable time: {text!r}")
-        out[int(no)] = at
-    return out
+        return {}, {}
+
+    def instants(key: str) -> dict[int, datetime]:
+        out: dict[int, datetime] = {}
+        for no, text in document.get(key, {}).items():
+            at = _instant(text)
+            if at is None:
+                raise ValueError(f"results sidecar {path}: race {no}: unreadable {key} {text!r}")
+            out[int(no)] = at
+        return out
+
+    published, bounds = instants("published_utc"), instants("unpublished_utc")
+    return published, {no: bounds.get(no) for no in published}
 
 
-def record_published(path: Path, races: Iterable[int], seen_utc: datetime) -> dict[int, datetime]:
-    """Merge `races` into the results sidecar, each new race at `seen_utc`: a race already there
-    keeps its first instant. Written as write_post_times writes (temporary file, fsync,
-    os.replace), only when a race is new. Returns the sidecar's mapping after the write."""
+def read_published(path: Path) -> dict[int, datetime]:
+    """Race number -> the instant its official result was first seen published, as an aware UTC
+    datetime; empty when there is no sidecar."""
+    return _read_results(path)[0]
+
+
+def read_unpublished(path: Path) -> dict[int, datetime | None]:
+    """Race number -> its lower bound: the instant of the last poll of the same run that did not
+    show its result (aware UTC), or None for a late sighting (shown on a run's first poll, or in a
+    sidecar written before the bound). One entry per race of read_published; empty when there is
+    no sidecar."""
+    return _read_results(path)[1]
+
+
+def record_published(
+    path: Path,
+    races: Iterable[int],
+    seen_utc: datetime,
+    unpublished_utc: datetime | None = None,
+) -> dict[int, datetime]:
+    """Merge `races` into the results sidecar, each new race at `seen_utc` with the lower bound
+    `unpublished_utc` (None: a late sighting): a race already there keeps its first instant and
+    its bound. Written as write_post_times writes (temporary file, fsync, os.replace), only when
+    a race is new. Returns the sidecar's first-seen mapping after the write."""
     path = Path(path)
-    published = read_published(path)
-    seen = _instant(seen_utc)
+    published, bounds = _read_results(path)
     new = {int(no) for no in races} - set(published)
     if not new:
         return published
-    published.update({no: seen for no in new})
+    seen = _instant(seen_utc)
+    bound = None if unpublished_utc is None else _instant(unpublished_utc)
+    published.update(dict.fromkeys(new, seen))
+    bounds.update(dict.fromkeys(new, bound))
     document = {
         "published_utc": {str(no): _utc_iso(at) for no, at in sorted(published.items())},
+        "unpublished_utc": {
+            str(no): _utc_iso(at) for no, at in sorted(bounds.items()) if at is not None
+        },
     }
     _write_atomic(path, json.dumps(document, indent=2) + "\n")
     return published

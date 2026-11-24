@@ -43,6 +43,25 @@ results path. A row without one, or no row, is not published; the page's navigat
   dir's odds_snapshots/jra; the store build fills `races.result_published_utc` from it
   (tests/core/test_store_published.py).
 
+The lower bound (review of PR #261: a run's first poll stamps every race already shown with that
+poll's time, so a restart, a late start or a wake from sleep must not read as a measured lag):
+- Each logged race also gets a lower bound, `unpublished_utc`: the instant of the last successful
+  poll in the same run that did not show the race (the instant that poll's `seen_utc` would have
+  been). A race shown on a run's first successful poll has none (None): a late sighting. A failed
+  poll shows nothing and is never a bound.
+- `record_published(path, races, seen_utc, unpublished_utc=None)`: every new race of the call
+  gets `seen_utc` and `unpublished_utc` (None: late). Both are first-write: a race already in the
+  sidecar keeps both whatever a later call (a later run) says. Returns the published mapping, as
+  before. The sidecar gains `"unpublished_utc": {"<race>": ISO UTC}` holding the bounded races
+  only.
+- `odds_log.read_unpublished(path) -> dict[int, datetime | None]`: one entry per race of
+  read_published, its bound as an aware UTC instant or None. A sidecar written before the bound
+  (no `unpublished_utc` key) reads every race as None (late); {} when there is no sidecar.
+- schedule's Store: `write_published(venue, races, seen_utc, unpublished_utc)`, the bound passed
+  as the fourth argument or the keyword `unpublished_utc`.
+- `JRAAdapter().result_unpublished_utc() -> dict[str, datetime]`: race_id -> bound, the bounded
+  races of every results sidecar only; the store build fills `races.result_unpublished_utc`.
+
 Everything is synthetic: the three tests/fixtures/synthetic/jra_results_*.html pages, the JRADB
 double (jradb_double.py) and fakes. No HTTP, no real sleep.
 """
@@ -131,6 +150,19 @@ def first_seen(polls: list[tuple[datetime, frozenset[int]]]) -> dict[int, dateti
     for t, shown in sorted(polls, key=lambda p: p[0]):
         for n in shown:
             out.setdefault(n, t)
+    return out
+
+
+def last_unshown(polls: list[tuple[datetime, frozenset[int]]]) -> dict[int, datetime | None]:
+    """From first principles: race -> the latest of these (one run's successful) polls before its
+    first sighting, a poll that did not show it; None when the first poll already showed it."""
+    out: dict[int, datetime | None] = {}
+    previous: datetime | None = None
+    for t, shown in sorted(polls, key=lambda p: p[0]):
+        for n in shown:
+            if n not in out:
+                out[n] = previous
+        previous = t
     return out
 
 
@@ -259,6 +291,59 @@ def test_read_published_without_a_sidecar_is_empty():
     assert odds_log.read_published(sidecar(SAT, "HSN")) == {}
 
 
+@pytest.mark.parametrize(
+    "calls",
+    [
+        # (seen, races, unpublished): a run's first poll shows 1 (late), later polls bound 2 and 3
+        [(jst(10, 12), [1], None), (jst(10, 13), [1, 2], jst(10, 12)),
+         (jst(10, 45), [1, 2, 3], jst(10, 44, 20))],
+        # a later run's bound changes neither instant of a late race nor of a bounded one
+        [(jst(11, 0), [4], None), (jst(11, 1), [4, 5], jst(11, 0)),
+         (jst(11, 30), [4, 5, 7], jst(11, 29, 20)), (jst(11, 50), [4, 5, 7], jst(11, 49))],
+        # a later call that calls a bounded race late changes nothing either
+        [(jst(12, 0), [5], jst(11, 59)), (jst(12, 30), [5, 6], None)],
+    ],
+    ids=["one-run", "later-run-with-bounds", "later-run-late"],
+)  # fmt: skip
+def test_record_published_keeps_each_races_first_bound(calls):
+    path = sidecar(SAT, "KYO")
+    seen: dict[int, datetime] = {}
+    bound: dict[int, datetime | None] = {}
+    for t, races, lower in calls:
+        for n in races:
+            if n not in seen:
+                seen[n], bound[n] = t, lower
+        assert odds_log.record_published(path, races, t, unpublished_utc=lower) == seen
+    assert odds_log.read_published(path) == seen
+    got = odds_log.read_unpublished(path)
+    assert got == bound
+    assert all(t is None or t.utcoffset() == timedelta(0) for t in got.values()), "UTC"
+    assert sorted(p.name for p in path.parent.iterdir()) == [path.name], "no temporary file"
+
+
+def test_record_published_without_a_bound_is_a_late_sighting():
+    path = sidecar(SAT, "TOK")
+    odds_log.record_published(path, [2, 3], jst(10, 41, 7))
+    assert odds_log.read_unpublished(path) == {2: None, 3: None}
+
+
+def test_a_sidecar_written_before_the_bound_reads_as_late_sightings():
+    path = sidecar(SAT, "TOK")
+    path.parent.mkdir(parents=True)
+    old = {1: jst(10, 9, 20), 4: jst(11, 41)}
+    document = {"published_utc": {str(n): t.isoformat() for n, t in old.items()}}
+    path.write_text(json.dumps(document), encoding="utf-8")
+    assert odds_log.read_published(path) == old
+    assert odds_log.read_unpublished(path) == {1: None, 4: None}
+    odds_log.record_published(path, [1, 4, 6], jst(12, 0), unpublished_utc=jst(11, 59))
+    assert odds_log.read_published(path) == {**old, 6: jst(12, 0)}
+    assert odds_log.read_unpublished(path) == {1: None, 4: None, 6: jst(11, 59)}
+
+
+def test_read_unpublished_without_a_sidecar_is_empty():
+    assert odds_log.read_unpublished(sidecar(SAT, "HSN")) == {}
+
+
 # ---------------------------------------------------------------- run_day with fakes
 
 CONFIG = {
@@ -362,6 +447,7 @@ class FakeSite:
 class FakeStore:
     def __init__(self):
         self.published: dict[str, dict[int, datetime]] = defaultdict(dict)
+        self.unpublished: dict[str, dict[int, datetime | None]] = defaultdict(dict)
 
     def write(self, venue: str, cap: MeetingCapture) -> int:
         return len(cap.rows)
@@ -369,9 +455,23 @@ class FakeStore:
     def write_post_times(self, venue: str, times: dict[int, datetime]) -> None:
         pass
 
-    def write_published(self, venue: str, races, seen_utc: datetime) -> None:
-        for n in races:  # first seen wins, as the sidecar does
-            self.published[venue].setdefault(int(n), seen_utc)
+    def write_published(
+        self, venue: str, races, seen_utc: datetime, unpublished_utc: datetime | None = None
+    ) -> None:
+        for n in races:  # first seen wins, its bound with it, as the sidecar does
+            if int(n) not in self.published[venue]:
+                self.published[venue][int(n)] = seen_utc
+                self.unpublished[venue][int(n)] = unpublished_utc
+
+
+class SidecarStore(FakeStore):
+    """The fake store with the real results sidecar behind write_published."""
+
+    def write_published(
+        self, venue: str, races, seen_utc: datetime, unpublished_utc: datetime | None = None
+    ) -> None:
+        odds_log.record_published(sidecar(SAT, venue), races, seen_utc,
+                                  unpublished_utc=unpublished_utc)  # fmt: skip
 
 
 def config(**results) -> dict:
@@ -434,6 +534,83 @@ def test_failed_polls_are_retried_and_never_count_as_failures(tmp_path):
         assert set(store.published[venue]) == appeared, venue
         assert summary.venues[venue].failures == 0, venue
         assert summary.venues[venue].snapshots > 0, venue
+
+
+def tok_fails_around_race_2(t: datetime, venue: str, nth: int) -> BaseException | None:
+    """TOK's polls fail from 10:43 to 10:46: TOK 2 (out 10:44:30) is first seen after them."""
+    if venue == "TOK" and jst(10, 43) <= t < jst(10, 46):
+        return FetchError("timed out")
+    return None
+
+
+@pytest.mark.parametrize(
+    "every_s, fail",
+    [(60, None), (120, None), (60, tok_fails_around_race_2)],
+    ids=["60s", "120s", "60s-failed-polls"],
+)
+def test_run_day_bounds_each_race_by_the_last_poll_that_did_not_show_it(tmp_path, every_s, fail):
+    summary, site, store = day(config(every_s=every_s), tmp_path, fail=fail)
+    for venue in POSTS:
+        polls = site.ok_polls(venue)
+        expected = last_unshown(polls)
+        assert set(expected) == set(store.published[venue]), venue
+        assert dict(store.unpublished[venue]) == expected, venue
+        # the day starts at 06:00: the first poll (at first post) shows nothing, so none is late
+        assert all(b is not None for b in expected.values()), venue
+        for n, bound in expected.items():
+            assert bound < APPEAR[venue][n] <= store.published[venue][n], (venue, n)
+    if fail is not None:
+        failed = [p.t for p in site.polls if p.venue == "TOK" and p.shown is None]
+        assert failed, "no TOK poll failed"
+        bound = store.unpublished["TOK"][2]
+        assert bound < min(failed), "a failed poll was taken for a poll that did not show TOK 2"
+        assert (store.published["TOK"][2] - bound).total_seconds() > every_s + ROUND_S
+
+
+class Died(BaseException):
+    """The run died mid-day (a crash, a kill, the lid closed)."""
+
+
+def test_a_restart_records_results_out_during_the_gap_as_late_sightings(tmp_path):
+    """launchd restarts a dead run: what came out while nothing ran is seen late, not measured."""
+    dies_at, restart_at = jst(10, 30), jst(11, 5)
+    gap = {(v, n) for v, races in APPEAR.items() for n, at in races.items()
+           if at is not None and dies_at <= at <= restart_at}  # fmt: skip
+    assert gap == {("TOK", 2), ("KYO", 2)}, "the fixture's gap"
+    store = SidecarStore()
+
+    first = Clock(jst(6, 0))
+
+    def dying_sleep(seconds: float) -> None:
+        if first.t >= dies_at:
+            raise Died
+        first.sleep(seconds)
+
+    site1 = FakeSite(first)
+    with pytest.raises(Died):
+        run_day(SAT, site1, store, config=config(), now=first.now, sleep=dying_sleep,
+                block_marker=tmp_path / "jra-block.txt")  # fmt: skip
+    second = Clock(restart_at)
+    site2 = FakeSite(second)
+    run_day(SAT, site2, store, config=config(), now=second.now, sleep=second.sleep,
+            block_marker=tmp_path / "jra-block.txt")  # fmt: skip
+
+    for venue in POSTS:
+        run1, run2 = site1.ok_polls(venue), site2.ok_polls(venue)
+        assert run1 and run2, venue
+        seen1, seen2 = first_seen(run1), first_seen(run2)
+        bound1, bound2 = last_unshown(run1), last_unshown(run2)
+        seen = {**seen2, **seen1}  # the first run's instants stand
+        bound = {n: bound1[n] if n in seen1 else bound2[n] for n in seen}
+        assert odds_log.read_published(sidecar(SAT, venue)) == seen, venue
+        assert odds_log.read_unpublished(sidecar(SAT, venue)) == bound, venue
+        restart_poll = min(t for t, _ in run2)
+        for n, at in APPEAR[venue].items():
+            if (venue, n) in gap:
+                assert seen[n] == restart_poll, (venue, n)
+                assert bound[n] is None, f"{venue} {n} came out during the gap: a late sighting"
+            elif at is not None:
+                assert bound[n] is not None and bound[n] < at <= seen[n], (venue, n)
 
 
 def test_a_block_on_a_results_poll_ends_the_day(tmp_path):
@@ -537,6 +714,9 @@ def test_log_day_writes_each_venues_first_seen_publication_times(monkeypatch, la
         for n, seen in got.items():
             lag = (seen - appear[(venue, n)]).total_seconds()
             assert 0 <= lag <= every_s + ROUND_S + EPS, (venue, n, lag)
+        bounds = odds_log.read_unpublished(sidecar(SAT, venue))
+        assert bounds == last_unshown(polls), f"{venue}: log-day wrote no lower bound"
+        assert all(b is not None and b < appear[(venue, n)] for n, b in bounds.items()), venue
     assert json.loads(sidecar(SAT, "TOK").read_text(encoding="utf-8")), "an empty sidecar"
 
 
@@ -570,3 +750,30 @@ def test_jra_adapter_without_logged_days_has_no_publication_times():
     from horsetrack.countries.japan.jra.adapter import JRAAdapter
 
     assert dict(JRAAdapter().result_published_utc()) == {}
+    assert dict(JRAAdapter().result_unpublished_utc()) == {}
+
+
+def test_jra_adapter_reads_every_logged_lower_bound():
+    from horsetrack.countries.japan.jra.adapter import JRAAdapter
+
+    # (race, first seen, the last poll that did not show it or None: late)
+    logged = {
+        (SAT, "TOK"): [(1, jst(10, 9, 20), jst(10, 8, 20)), (3, jst(11, 12, 0), None),
+                       (12, jst(16, 41, 40), jst(16, 40, 0))],
+        (SAT, "KYO"): [(2, jst(10, 51, 0), None)],
+        (SUN, "TOK"): [(11, jst(15, 58, 20, day=SUN), jst(15, 57, 20, day=SUN))],
+    }  # fmt: skip
+    for (d, venue), races in logged.items():
+        for n, seen, bound in races:
+            odds_log.record_published(sidecar(d, venue), [n], seen, unpublished_utc=bound)
+    old = sidecar(SUN, "KYO")  # written before the bound: every race late
+    old.write_text(json.dumps({"published_utc": {"4": jst(11, 2, day=SUN).isoformat()}}),
+                   encoding="utf-8")  # fmt: skip
+    expected = {
+        f"jra:{d.isoformat()}:{venue}:{n:02d}": bound
+        for (d, venue), races in logged.items()
+        for n, _, bound in races
+        if bound is not None
+    }
+    assert JRAAdapter().result_unpublished_utc() == expected
+    assert f"jra:{SUN.isoformat()}:KYO:04" in JRAAdapter().result_published_utc()

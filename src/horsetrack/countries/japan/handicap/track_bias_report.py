@@ -12,9 +12,10 @@ loss per race, a dead heat's k winners each weighted 1/k, and a paired bootstrap
 A race's result counts as published at its logged `result_published_utc` (the odds logger's first
 sighting, ticket #225) where the store has one, else at the proxy, its local post time +
 PUBLISH_LAG (`published_times`); `publication_lag_summary` measures that proxy against the logged
-times. The decision time is the target's post time - DECISION_LEAD. Holdout days are never read
-(#114's scoped reader); only aggregates are returned and nothing is written. Measurement only:
-nothing here is adopted (D16).
+times whose bracket (`result_unpublished_utc`, the last poll that did not show the result) is
+narrow, leaving out late sightings and wide brackets. The decision time is the target's post
+time - DECISION_LEAD. Holdout days are never read (#114's scoped reader); only aggregates are
+returned and nothing is written. Measurement only: nothing here is adopted (D16).
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from datetime import date, datetime, time, timedelta
 import numpy as np
 import polars as pl
 
+from horsetrack.core.config import load_country_yaml
 from horsetrack.core.eval.folds import FoldScheme, load_country_scheme, walk_forward
 from horsetrack.countries.japan.handicap.factors import (
     COUNTRY,
@@ -38,7 +40,9 @@ from horsetrack.countries.japan.handicap.track_bias import CELL, fit_bias_prior,
 PUBLISH_LAG = timedelta(minutes=30)
 DECISION_LEAD = timedelta(minutes=2)
 LOGGED = "result_published_utc"
-RACE_COLUMNS = ("race_id", "race_date", "meeting_id", "race_no", "post_time_local", LOGGED, *CELL)
+BOUND = "result_unpublished_utc"  # the last logger poll that did not show the result
+RACE_COLUMNS = ("race_id", "race_date", "meeting_id", "race_no", "post_time_local", LOGGED, BOUND,
+                *CELL)  # fmt: skip
 RUNNER_COLUMNS = ("race_id", "race_date", "horse_no", "horse_id", "draw", "finish_pos",
                   "running_positions", "is_scratched")  # fmt: skip
 VARIANTS = ("prior", "update")
@@ -52,14 +56,20 @@ def _post(day: date, hhmm: str | None) -> datetime | None:
     return datetime.combine(day, time(int(hh), int(mm)), tzinfo=JST)
 
 
+def _column(races: pl.DataFrame, name: str) -> list:
+    """The column's values, all None when the frame has no such column (an older store)."""
+    return races.get_column(name).to_list() if name in races.columns else [None] * races.height
+
+
 def _posts_and_logged(races: pl.DataFrame) -> list[tuple[str, datetime | None, datetime | None]]:
     """(race_id, local post time, logged publication time) per race; a frame without the logged
     column (a store built before #225) has none logged."""
-    logged = races.get_column(LOGGED) if LOGGED in races.columns else [None] * races.height
     return [
         (rid, _post(day, hhmm), at)
         for (rid, day, hhmm), at in zip(
-            races.select("race_id", "race_date", "post_time_local").rows(), logged, strict=True
+            races.select("race_id", "race_date", "post_time_local").rows(),
+            _column(races, LOGGED),
+            strict=True,
         )
     ]
 
@@ -77,21 +87,42 @@ def published_times(races: pl.DataFrame) -> dict[str, datetime]:
     return out
 
 
-def publication_lag_summary(races: pl.DataFrame) -> dict:
+def default_max_bracket_s() -> float:
+    """Twice logger.yaml's `results.every_s`: a healthy bracket is every_s plus up to one round
+    (results polls ride on the logging rounds); a wider one spans a failed poll."""
+    return 2.0 * float(load_country_yaml(COUNTRY, "logger")["results"]["every_s"])
+
+
+def publication_lag_summary(races: pl.DataFrame, max_bracket_s: float | None = None) -> dict:
     """Aggregates only of logged publication time - local post time, in minutes, over the races
-    having both: count, min, median, p90, max and the share within PUBLISH_LAG (the proxy's
-    claim). No race has both: `races` 0 and the rest None."""
-    lags = np.array(
-        [(logged - post).total_seconds() / 60.0
-         for _, post, logged in _posts_and_logged(races)
-         if post is not None and logged is not None]
-    )  # fmt: skip
+    having both and a measured bracket: count, min, median, p90, max and the share within
+    PUBLISH_LAG (the proxy's claim). A race is measured when its bracket, result_published_utc -
+    result_unpublished_utc, is at most `max_bracket_s` seconds (default: default_max_bracket_s);
+    `excluded_late` counts those with no lower bound (a late sighting, or a frame without the
+    column), `excluded_wide` those with a wider bracket. None measured: `races` 0, the rest None."""
+    limit = default_max_bracket_s() if max_bracket_s is None else float(max_bracket_s)
+    lags: list[float] = []
+    late = wide = 0
+    for (_, post, logged), bound in zip(
+        _posts_and_logged(races), _column(races, BOUND), strict=True
+    ):
+        if post is None or logged is None:
+            continue
+        if bound is None:
+            late += 1
+        elif (logged - bound).total_seconds() > limit:
+            wide += 1
+        else:
+            lags.append((logged - post).total_seconds() / 60.0)
+    counts = {"excluded_late": late, "excluded_wide": wide}
     proxy = PUBLISH_LAG.total_seconds() / 60.0
-    if lags.size == 0:
+    if not lags:
         stats = dict.fromkeys(("min_minutes", "median_minutes", "p90_minutes", "max_minutes",
                                "share_within_30_minutes"))  # fmt: skip
-        return {"races": 0, **stats}
+        return {"races": 0, **stats, **counts}
+    lags = np.array(lags)
     return {
+        **counts,
         "races": int(lags.size),
         "min_minutes": float(lags.min()),
         "median_minutes": float(np.median(lags)),

@@ -21,10 +21,12 @@ logged and never touches tier 1 (a CircuitOpen still ends the day: the host bloc
 Results (ticket #225, logger.yaml `results`): each venue with post times polls the site's
 `published_results` from its first post to its last post + until_min, at most every every_s, and
 writes each race the first time a poll shows its official result, at the instant that poll
-returned. Polls ride on the rounds while odds are logged (after tier 1, ahead of tier 2's share
-of the budget) and set their own pace once they end; a venue stops polling once every race with a
-post time is logged. A failed poll is retried at the next one and is not an odds failure; a
-CircuitOpen ends the day as from any site call.
+returned, with a lower bound: the instant the run's previous successful poll returned (None, a
+late sighting, for a race shown on the run's first successful poll). Polls ride on the rounds
+while odds are logged (after tier 1, ahead of tier 2's share of the budget) and set their own pace
+once they end; a venue stops polling once every race with a post time is logged. A failed poll is
+retried at the next one, is never a bound and is not an odds failure; a CircuitOpen ends the day
+as from any site call.
 
 `plan_round` is pure. `run_day` drives it with an injected clock (`now`, `sleep`) and reaches the
 site and the store only through the protocols below. `config` is a mapping shaped like
@@ -77,8 +79,15 @@ class Store(Protocol):
 
     def write_post_times(self, venue: str, times: dict[int, datetime]) -> None: ...
 
-    # with `results`: the races first seen published at `seen_utc`
-    def write_published(self, venue: str, races: Iterable[int], seen_utc: datetime) -> None: ...
+    # with `results`: the races first seen published at `seen_utc`, bounded below by
+    # `unpublished_utc` (None: a late sighting, shown on the run's first successful poll)
+    def write_published(
+        self,
+        venue: str,
+        races: Iterable[int],
+        seen_utc: datetime,
+        unpublished_utc: datetime | None,
+    ) -> None: ...
 
 
 @dataclass
@@ -323,6 +332,7 @@ class _Venue:
     tier2_got: set[tuple[int, int]] = field(default_factory=set)  # tried and written
     published: set[int] = field(default_factory=set)  # races whose result this run has logged
     results_polled: datetime | None = None  # when the latest results poll started
+    results_ok: datetime | None = None  # when the latest successful results poll returned
 
 
 def run_day(
@@ -547,18 +557,25 @@ class _Day:
 
     def _poll_results(self, v: _Venue, t: datetime) -> None:
         """One results poll: the races shown and not yet logged are written at the instant the
-        poll returned. A failed poll is retried at the next one and is no failure of the odds
-        (CircuitOpen still ends the day)."""
+        poll returned, bounded below by the instant the run's previous successful poll returned
+        (it did not show them). On the run's first successful poll there is no such poll: the
+        races are late sightings (bound None), whatever came out while nothing ran (a restart, a
+        late start, a wake). A failed poll is retried at the next one, is never a bound and is no
+        failure of the odds (CircuitOpen still ends the day)."""
         v.results_polled = t
         try:
             shown = {int(n) for n in self.site.published_results(v.state.code)}
         except _CALL_ERRORS as exc:
             log.info("%s results poll failed, retried at the next poll: %s", v.state.code, exc)
             return
+        seen = self.now()
         new = shown - v.published
         if new:
-            self.store.write_published(v.state.code, sorted(new), self.now())
+            self.store.write_published(
+                v.state.code, sorted(new), seen, unpublished_utc=v.results_ok
+            )
             v.published |= new
+        v.results_ok = seen
 
     # ------------------------------------------------ tier 2
 
