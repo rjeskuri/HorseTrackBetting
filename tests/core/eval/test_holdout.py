@@ -24,6 +24,11 @@ Contract pinned here (the coder implements what these tests call):
   ``start`` as YYYY-MM-DD, and something that identifies the seed) before it
   returns the rows. Nothing else on the object reaches the rows.
 
+Ticket #126 changed ``open``: it now takes ``family=`` and is gated on that family's power
+target (``config/families.yaml``), counting races by ``split_off(..., race_col=...)``, and an
+opening rolls a fresh block forward (tests/core/eval/test_holdout_power.py). The fixtures here
+register a family with a target of one race and pass ``race_col="row_id"`` (one row per race).
+
 Every synthetic test points ``countries_dir`` at ``tmp_path``; one test loads the
 committed definitions through the default root without ever calling ``open``.
 An autouse guard fails any test that touches a real
@@ -44,7 +49,12 @@ import pandas as pd
 import pytest
 import yaml
 
-from horsetrack.core.eval.holdout import HoldoutConfigError, LockedHoldout, split_off
+from horsetrack.core.eval.holdout import (
+    HoldoutConfigError,
+    HoldoutOpenError,
+    LockedHoldout,
+    split_off,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 REAL_COUNTRIES = REPO_ROOT / "src" / "horsetrack" / "countries"
@@ -53,6 +63,8 @@ SEED_A = "3f9c2a7be1d04c55a8e6f0b19d7c4e21"
 SEED_B = "b7e1d0c9a8f746352e1f0a9b8c7d6e5f"
 SEED_C = "0123456789abcdef0123456789abcdef"
 JAPAN_START = "2026-11-28"
+FAMILY = "F71"
+ZONES = {"japan": "Asia/Tokyo", "hongkong": "Asia/Hong_Kong"}
 
 
 # --------------------------------------------------------------------------- helpers
@@ -73,11 +85,14 @@ def write_config(
     start: str | None = JAPAN_START,
     seed: str | None = SEED_A,
     raw: str | None = None,
+    families: tuple[str, ...] = (FAMILY,),
 ) -> Path:
     config_dir = root / country / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     if raw is None:
-        raw = f'holdout:\n  start: "{start}"\n  seed: "{seed}"\n'
+        raw = f'holdout:\n  start: "{start}"\n  seed: "{seed}"\n  timezone: "{ZONES[country]}"\n'
+        entries = "".join(f"  {name}:\n    power_target_races: 1\n" for name in families)
+        (config_dir / "families.yaml").write_text(f"families:\n{entries}")
     path = config_dir / "holdout.yaml"
     path.write_text(raw)
     return path
@@ -207,8 +222,10 @@ def test_open_returns_exactly_the_holdout_days(tmp_path, seed, start, date_kind)
     frame = make_frame(date_kind=date_kind)
     exp_dev, exp_hold = expected_ids(frame, start, seed)
 
-    development, holdout = split_off(frame, "race_date", "japan", countries_dir=tmp_path)
-    rows = holdout.open(ticket=71, purpose="partition check")
+    development, holdout = split_off(
+        frame, "race_date", "japan", countries_dir=tmp_path, race_col="row_id"
+    )
+    rows = holdout.open(ticket=71, purpose="partition check", family=FAMILY)
 
     assert isinstance(rows, pd.DataFrame)
     assert set(rows["row_id"].astype(int)) == exp_hold
@@ -222,13 +239,15 @@ def test_days_before_start_are_always_development(tmp_path):
     write_config(tmp_path, "japan", start="2030-01-01", seed=SEED_A)
     frame = make_frame()
 
-    development, holdout = split_off(frame, "race_date", "japan", countries_dir=tmp_path)
+    development, holdout = split_off(
+        frame, "race_date", "japan", countries_dir=tmp_path, race_col="row_id"
+    )
 
     assert set(development["row_id"]) == set(frame["row_id"])
-    rows = holdout.open(ticket=71, purpose="nothing assigned yet")
-    assert len(rows) == 0
-    (line,) = log_lines(tmp_path, "japan")
-    assert json.loads(line)["n_rows"] == 0
+    # #126: an empty holdout is below any power target (at least one race), so it stays shut.
+    with pytest.raises(HoldoutOpenError):
+        holdout.open(ticket=71, purpose="nothing assigned yet", family=FAMILY)
+    assert log_lines(tmp_path, "japan") == []
 
 
 def test_each_country_uses_its_own_definition_and_log(tmp_path):
@@ -237,7 +256,9 @@ def test_each_country_uses_its_own_definition_and_log(tmp_path):
     frame = make_frame()
 
     jp_dev, jp_hold = split_off(frame, "race_date", "japan", countries_dir=tmp_path)
-    hk_dev, hk_hold = split_off(frame, "race_date", "hongkong", countries_dir=tmp_path)
+    hk_dev, hk_hold = split_off(
+        frame, "race_date", "hongkong", countries_dir=tmp_path, race_col="row_id"
+    )
 
     exp_jp_dev, exp_jp_hold = expected_ids(frame, JAPAN_START, SEED_A)
     exp_hk_dev, exp_hk_hold = expected_ids(frame, "2026-12-10", SEED_B)
@@ -245,7 +266,7 @@ def test_each_country_uses_its_own_definition_and_log(tmp_path):
     assert set(jp_dev["row_id"]) == exp_jp_dev
     assert set(hk_dev["row_id"]) == exp_hk_dev
 
-    hk_rows = hk_hold.open(ticket=72, purpose="hk check")
+    hk_rows = hk_hold.open(ticket=72, purpose="hk check", family=FAMILY)
     assert set(hk_rows["row_id"]) == exp_hk_hold
     assert log_lines(tmp_path, "japan") == []
     (hk_line,) = log_lines(tmp_path, "hongkong")
@@ -272,14 +293,16 @@ MISSING_TICKET_OR_PURPOSE = [
 @pytest.mark.parametrize("kwargs", MISSING_TICKET_OR_PURPOSE)
 def test_open_requires_a_ticket_and_a_purpose(tmp_path, kwargs):
     write_config(tmp_path, "japan")
-    _, holdout = split_off(make_frame(), "race_date", "japan", countries_dir=tmp_path)
+    _, holdout = split_off(
+        make_frame(), "race_date", "japan", countries_dir=tmp_path, race_col="row_id"
+    )
 
     with pytest.raises((TypeError, ValueError)):
-        holdout.open(**kwargs)
+        holdout.open(family=FAMILY, **kwargs)
     assert log_lines(tmp_path, "japan") == []
 
     # A refused open leaves the holdout usable with a proper ticket and purpose.
-    rows = holdout.open(ticket=71, purpose="final evaluation")
+    rows = holdout.open(ticket=71, purpose="final evaluation", family=FAMILY)
     assert len(rows) > 0
     assert len(log_lines(tmp_path, "japan")) == 1
 
@@ -289,7 +312,7 @@ def test_open_is_keyword_only(tmp_path):
     _, holdout = split_off(make_frame(), "race_date", "japan", countries_dir=tmp_path)
 
     with pytest.raises(TypeError):
-        holdout.open(71, "final evaluation")
+        holdout.open(71, "final evaluation", FAMILY)
     assert log_lines(tmp_path, "japan") == []
 
 
@@ -304,11 +327,11 @@ def test_open_appends_one_log_line(tmp_path, seed, start, ticket, purpose):
     write_config(tmp_path, "japan", start=start, seed=seed)
     frame = make_frame()
     _, exp_hold = expected_ids(frame, start, seed)
-    _, holdout = split_off(frame, "race_date", "japan", countries_dir=tmp_path)
+    _, holdout = split_off(frame, "race_date", "japan", countries_dir=tmp_path, race_col="row_id")
     assert log_lines(tmp_path, "japan") == []  # split_off alone logs nothing
 
     before = datetime.now(timezone.utc) - timedelta(seconds=1)
-    rows = holdout.open(ticket=ticket, purpose=purpose)
+    rows = holdout.open(ticket=ticket, purpose=purpose, family=FAMILY)
     after = datetime.now(timezone.utc) + timedelta(seconds=1)
 
     raw = log_path(tmp_path, "japan").read_text()
@@ -333,8 +356,10 @@ def test_the_logged_period_identifies_the_rule(tmp_path):
     periods = []
     for country, seed in (("japan", SEED_A), ("hongkong", SEED_B)):
         write_config(tmp_path, country, start=JAPAN_START, seed=seed)
-        _, holdout = split_off(make_frame(), "race_date", country, countries_dir=tmp_path)
-        holdout.open(ticket=71, purpose="period identity")
+        _, holdout = split_off(
+            make_frame(), "race_date", country, countries_dir=tmp_path, race_col="row_id"
+        )
+        holdout.open(ticket=71, purpose="period identity", family=FAMILY)
         (line,) = log_lines(tmp_path, country)
         periods.append(json.loads(line)["period"])
     assert periods[0]["start"] == periods[1]["start"] == JAPAN_START
@@ -342,23 +367,26 @@ def test_the_logged_period_identifies_the_rule(tmp_path):
 
 
 def test_the_log_is_append_only(tmp_path):
-    write_config(tmp_path, "japan")
+    # #126: each opening spends its block and its family, so every look is a fresh split with its
+    # own family; the frame runs well past today, since each opening rolls a block forward from now.
+    write_config(tmp_path, "japan", families=("F1", "F2", "F3"))
     earlier = '{"utc": "2026-11-29T00:00:00+00:00", "ticket": 1, "purpose": "earlier"}\n'
     log = log_path(tmp_path, "japan")
     log.write_text(earlier)
-    frame = make_frame()
+    frame = make_frame(first=(date.today() - timedelta(days=30)).isoformat(), n_days=200)
 
-    _, first = split_off(frame, "race_date", "japan", countries_dir=tmp_path)
-    _, second = split_off(frame, "race_date", "japan", countries_dir=tmp_path)
     opens = [
-        (first, 71, "first look"),
-        (first, 72, "second look, same object"),
-        (second, 73, "third look, new split"),
+        ("F1", 71, "first look"),
+        ("F2", 72, "second look, new split"),
+        ("F3", 73, "third look, new split"),
     ]
 
     previous = log.read_bytes()
-    for n, (holdout, ticket, purpose) in enumerate(opens, start=1):
-        holdout.open(ticket=ticket, purpose=purpose)
+    for n, (family, ticket, purpose) in enumerate(opens, start=1):
+        _, holdout = split_off(
+            frame, "race_date", "japan", countries_dir=tmp_path, race_col="row_id"
+        )
+        holdout.open(ticket=ticket, purpose=purpose, family=family)
         current = log.read_bytes()
         assert current.startswith(previous), "an earlier line was rewritten"
         added = current[len(previous) :].decode()
@@ -371,11 +399,13 @@ def test_the_log_is_append_only(tmp_path):
 
 def test_open_returns_no_rows_when_the_log_cannot_be_written(tmp_path):
     write_config(tmp_path, "japan")
-    _, holdout = split_off(make_frame(), "race_date", "japan", countries_dir=tmp_path)
+    _, holdout = split_off(
+        make_frame(), "race_date", "japan", countries_dir=tmp_path, race_col="row_id"
+    )
     log_path(tmp_path, "japan").mkdir()  # a directory where the log file should be
 
     with pytest.raises(OSError):
-        holdout.open(ticket=71, purpose="log is unwritable")
+        holdout.open(ticket=71, purpose="log is unwritable", family=FAMILY)
 
 
 # --------------------------------------------------------------------------- the lock
