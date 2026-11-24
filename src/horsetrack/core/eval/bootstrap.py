@@ -1,9 +1,9 @@
 """The paired cluster bootstrap as signed in docs/problem-statement.md, section 3 (Metric), D7.
 
 Section 3 signs a paired bootstrap: the model and the baseline are resampled with the same
-indices, so the interval is on the per-race difference. Passing that difference (see
-`horsetrack.core.eval.scoring.gain`) and resampling it is the same as resampling both sides with
-shared indices. D7 signs the resampling unit as the meeting (venue x day) and the level as 95%,
+indices, so the interval is on the per-race difference. Passing that difference (the `per_race`
+of `horsetrack.core.eval.scoring.gain`) and resampling it is the same as resampling both sides
+with shared indices. D7 signs the resampling unit as the meeting (venue x day) and the level as 95%,
 one-sided. Neither is defaulted here: callers pass them from the country's evaluation config.
 """
 

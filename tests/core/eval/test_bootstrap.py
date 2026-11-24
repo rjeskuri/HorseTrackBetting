@@ -113,11 +113,16 @@ def test_identical_forecasts_give_a_zero_width_interval():
                 for i, p in enumerate(probs)
             ]
     frame = pd.DataFrame(rows)
-    ll_model = per_race_log_loss(frame["p"], frame["won"], frame["race_id"])
-    ll_baseline = per_race_log_loss(frame["p"].copy(), frame["won"], frame["race_id"])
+    no_scratch = pd.Series(False, index=frame.index)
+    ll_model = per_race_log_loss(
+        frame["p"], frame["won"], frame["race_id"], scratched=no_scratch
+    ).per_race
+    ll_baseline = per_race_log_loss(
+        frame["p"].copy(), frame["won"], frame["race_id"], scratched=no_scratch
+    ).per_race
     clusters = frame.drop_duplicates("race_id").set_index("race_id")["meeting"]
 
-    diff = gain(ll_model, ll_baseline)
+    diff = gain(ll_model, ll_baseline).per_race
     result = paired_bootstrap(diff, clusters, n_boot=1000, level=0.95, seed=3)
 
     assert result.n_clusters == 12
