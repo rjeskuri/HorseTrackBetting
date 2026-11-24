@@ -3,10 +3,12 @@
 import typer
 
 from horsetrack import __version__
+from horsetrack.countries.japan.logger.compact import compact
 
 app = typer.Typer(no_args_is_help=True)
 japan = typer.Typer(no_args_is_help=True, help="Japan commands.")
 app.add_typer(japan, name="japan")
+japan.command("compact")(compact)
 
 
 def _version_callback(value: bool) -> None:
