@@ -48,6 +48,9 @@ These are owner decisions: target and estimand, loss and metric, baseline, split
 - Committed fixtures are synthetic (`tests/fixtures/synthetic/`). Real pages live under `$HORSETRACK_DATA_DIR/fixtures`, and tests that need them carry the `local` marker.
 - Data, raw caches and reports built on licensed sources stay outside the tree, under `$HORSETRACK_DATA_DIR`.
 
+## Modeling governance
+- [docs/ledger.md](docs/ledger.md) labels every modeling claim measured (with its source), single-run, or assumption. Cite its row, or add one, before relying on a claim.
+
 ## Gotchas
 - HKTrack (`~/Projects/HKTrack`) is a read-only reference. It stays runnable on race days.
 - All HTTP to racing sites goes through `horsetrack.core.ingest` (cache-first, rate-limited, circuit breaker).
