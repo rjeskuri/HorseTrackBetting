@@ -1,0 +1,57 @@
+# Local racing (NAR, chihō keiba): the facts the NAR parsers and logger need, as data.
+# Source: nar.netkeiba.com (private use only: its data never enters git), per the "Logger spec for NAR"
+# in docs/research/nar-data-access.md. Read with `core.config.load_country_yaml("japan", "nar")`, not
+# `load_source`: the http block is the Fetcher's own format.
+source: nar
+display_name: Local racing (NAR) via nar.netkeiba.com
+timezone: Asia/Tokyo
+currency: JPY
+unit_stake: 100           # one ticket (票) = one 100-yen unit: pool totals are tickets x 100
+
+hosts:
+  race: https://nar.netkeiba.com    # race list, odds pages, results; private use only
+
+# Short code -> netkeiba venue number (characters 5-6 of a race id, `jyo_cd`) and the name the site
+# prints. Verified on captured pages: URA, NGY, SON; the rest are unverified (research doc table).
+# A race id with a number not listed here is an error, never skipped.
+venues:
+  OBI: {number: "65", name: 帯広}     # ばんえい: a different sport for modelling; logged only if the owner says so
+  MON: {number: "30", name: 門別}
+  MOR: {number: "35", name: 盛岡}
+  MIZ: {number: "36", name: 水沢}
+  URA: {number: "42", name: 浦和}
+  FUN: {number: "43", name: 船橋}
+  OOI: {number: "44", name: 大井}
+  KAW: {number: "45", name: 川崎}
+  KNZ: {number: "46", name: 金沢}
+  KSM: {number: "47", name: 笠松}
+  NGY: {number: "48", name: 名古屋}
+  SON: {number: "50", name: 園田}
+  HIM: {number: "51", name: 姫路}
+  KOC: {number: "54", name: 高知}
+  SAG: {number: "55", name: 佐賀}
+
+# Pools, by the JRA pool code where the rules are the same. netkeiba prints JRA-style labels, NAR's own
+# are 枠複/馬複: both are listed. The odds parser reads WIN, PLACE, QUINELLA and QUINELLA_PLACE (Win/
+# Place/Wide first, D3); PLACE and QUINELLA_PLACE print a min-max range per ticket. Takeout and places
+# paid per organiser are not set: they need a source per value and are not copied from jra.yaml.
+pools:
+  WIN: {labels: ["単勝"], legs: 1}
+  PLACE: {labels: ["複勝"], legs: 1}
+  BRACKET_QUINELLA: {labels: ["枠連", "枠複"], legs: 2}
+  QUINELLA: {labels: ["馬連", "馬複"], legs: 2}
+  QUINELLA_PLACE: {labels: ["ワイド"], legs: 2}
+  BRACKET_EXACTA: {labels: ["枠単"], legs: 2}    # new key: JRA does not sell 枠単
+  FORECAST: {labels: ["馬単"], legs: 2}
+  TRIO: {labels: ["3連複"], legs: 3}
+  TIERCE: {labels: ["3連単"], legs: 3}
+
+# Rate and block policy, verbatim from the research doc. Jitter stays 0: the Fetcher's jitter is
+# symmetric, so any positive value allows gaps under 10 s. The logger handles a block on top of
+# CircuitOpen (wait 15 minutes, a fresh Fetcher at 0.05 requests a second, a second block stops the day).
+http:
+  hosts:
+    default: {requests_per_second: 0.1, jitter: 0.0}
+    nar.netkeiba.com: {requests_per_second: 0.1, jitter: 0.0}
+  max_retries: 2
+  circuit_breaker: {stop_on_status: [403, 429], max_consecutive_failures: 5}
