@@ -10,7 +10,8 @@ defined in ``<countries_dir>/<country>/config/holdout.yaml`` (with the default r
 
 A race day (its local date) on or after ``start`` is holdout when
 ``int(sha256(f"{seed}:{YYYY-MM-DD}").hexdigest(), 16) % 2 == 0``; every other day is
-development. A missing or invalid definition raises ``HoldoutConfigError``; there is no default.
+development. ``is_holdout_day(country, day)`` applies that rule to one day. A missing or invalid
+definition raises ``HoldoutConfigError``; there is no default.
 
 The holdout rows are reached only through ``LockedHoldout.open(ticket=..., purpose=...)``, which
 appends one JSON line to ``<countries_dir>/<country>/holdout_log.jsonl`` before it returns them.
@@ -87,6 +88,15 @@ def _load_definition(countries_dir: Path, country: str) -> tuple[date, str]:
     if not isinstance(seed, str) or not seed.strip():
         raise HoldoutConfigError(f"{config_path}: holdout.seed must be a non-empty string")
     return start, seed
+
+
+def is_holdout_day(country: str, day: date) -> bool:
+    """Whether the race day ``day`` (its local date) is in ``country``'s locked holdout, by the
+    committed definition in its holdout.yaml. Raises ``HoldoutConfigError`` when there is none."""
+    if not isinstance(day, date) or isinstance(day, datetime):
+        raise TypeError(f"day must be a date, got {day!r}")
+    start, seed = _load_definition(DEFAULT_COUNTRIES_DIR, country)
+    return day >= start and _is_holdout_day(seed, day.isoformat())
 
 
 def _race_days(frame: pd.DataFrame, date_col: str) -> pd.Series:

@@ -86,15 +86,16 @@ def _complete_members(raw: bytes, path: Path) -> Iterator[bytes]:
         start = resume
 
 
-def read_rows(path: Path) -> list[dict[str, Any]]:
-    """Every row of every whole member, as logged; empty when there is no log yet."""
+def iter_members(path: Path) -> Iterator[list[dict[str, Any]]]:
+    """The rows of each whole member (one capture), in log order; nothing when there is no log
+    yet. Only one decompressed member is held at a time, so a reader can filter as it goes."""
     path = Path(path)
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
-        return []
-    rows: list[dict[str, Any]] = []
+        return
     for data in _complete_members(raw, path):
+        rows: list[dict[str, Any]] = []
         for line in data.decode("utf-8", errors="replace").splitlines():
             try:
                 row = json.loads(line)
@@ -102,7 +103,12 @@ def read_rows(path: Path) -> list[dict[str, Any]]:
                 continue
             if isinstance(row, dict):
                 rows.append(row)
-    return rows
+        yield rows
+
+
+def read_rows(path: Path) -> list[dict[str, Any]]:
+    """Every row of every whole member, as logged; empty when there is no log yet."""
+    return [row for rows in iter_members(path) for row in rows]
 
 
 def _instant(value: Any) -> datetime | None:
