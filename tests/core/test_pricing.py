@@ -13,6 +13,9 @@ from functools import partial
 
 import numpy as np
 import pytest
+
+from horsetrack.core import pricing
+from horsetrack.core.config import load_country_yaml, load_source
 from horsetrack.core.pricing import (
     clean_odds,
     detruncate,
@@ -21,9 +24,6 @@ from horsetrack.core.pricing import (
     overround,
     stake_back_share_dividend,
 )
-
-from horsetrack.core import pricing
-from horsetrack.core.config import load_country_yaml, load_source
 
 NAN = float("nan")
 
