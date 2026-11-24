@@ -68,6 +68,15 @@ def read_table(source: str, name: str, columns: Sequence[str] | None = None) -> 
     return frame
 
 
+def row_counts(source: str) -> dict[str, int]:
+    """Rows per declared table whose file exists, from the Parquet footers (no data is read)."""
+    return {
+        name: pq.read_metadata(path).num_rows
+        for name in schemas.TABLE_NAMES
+        if (path := table_path(source, name)).exists()
+    }
+
+
 def _sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
