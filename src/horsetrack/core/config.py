@@ -66,14 +66,21 @@ class Pool(_Strict):
 
 class Venue(_Strict):
     code: str
-    number: str
     name: str
+    number: str | None = None  # the netkeiba venue number (JRA); HKJC venues have none
 
 
 class Hosts(_Strict):
-    official: str
-    db: str
-    race: str
+    # Each source names only its own hosts: official/db/race (JRA), html/graphql (HKJC).
+    official: str | None = None
+    db: str | None = None
+    race: str | None = None
+    html: str | None = None
+    graphql: str | None = None
+
+
+class Season(_Strict):
+    start_month: int = Field(ge=1, le=12)  # a season starts on the 1st of this month
 
 
 class RateLimit(_Strict):
@@ -100,7 +107,10 @@ class SourceConfig(_Strict):
     unit_stake: float
     odds_format: str
     hosts: Hosts
+    season: Season | None = None
     venues: dict[str, Venue]
+    # rule breaks features must respect: name -> the first day of the new rule
+    eras: dict[str, date] = Field(default_factory=dict)
     pools: dict[str, Pool]
     odds_display: dict[str, float] = Field(default_factory=dict)
     http: Http
