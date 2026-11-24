@@ -25,16 +25,29 @@ Pinned semantics, derived here by brute force rather than from the code under te
   'label_only' or 'current_value' rule with label_columns, or label_columns that list the rule's
   own `column` or `anchor`, is a ValueError. `read_label` still refuses every table that is not
   'label_only', label columns or not.
+- an offset rule on a DATE anchor (the local race date) takes `tz` (an IANA zone): the row is
+  available at midnight of the date in `tz` plus the offset (an absolute timedelta). A DATE anchor
+  without `tz`, `tz` on a timezone-aware anchor, or an unknown zone is a ValueError; `tz` on any
+  other kind is a ValueError at construction.
+- a column rule may take `fallback`, a second timezone-aware column: the row is available at
+  coalesce(column, fallback). A non-null column wins even when the fallback is earlier; both null
+  is never available. A fallback of another type, one listed in `label_columns`, or `fallback` on
+  any other kind is a ValueError.
+- kind 'static': every row is available at any t (no time field; `label_columns` allowed).
+  `read_asof`/`asof_join` return it without its label columns; `read_label` refuses it.
+- the session time zone of the connection never changes what a view returns.
 
 YAML format of `load_availability` (pinned below):
 
     tables:
       <table>:
-        kind: column | offset | label_only | current_value
+        kind: column | offset | label_only | current_value | static
         column: <name>        # kind column only, required
+        fallback: <name>      # kind column only, optional
         anchor: <name>        # kind offset only, required
         offset_min: <number>  # kind offset only, required; minutes, int or float
-        label_columns: [<name>, ...]  # kinds column and offset only, optional
+        tz: <IANA zone>       # kind offset only, optional (required at query time on a DATE anchor)
+        label_columns: [<name>, ...]  # kinds column, offset and static only, optional
 
 A key that does not belong to the entry's kind, an unknown key, an unknown kind or a missing
 required key is a ValueError, and so is a `label_columns` that is not a list of strings.
@@ -42,8 +55,9 @@ required key is a ValueError, and so is a `label_columns` that is not a list of 
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import duckdb
 import numpy as np
@@ -902,3 +916,603 @@ def test_load_availability_refuses_a_malformed_file(tmp_path: Path, text: str):
 def test_load_availability_of_a_missing_file_is_an_error(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         load_availability("japan", path=tmp_path / "nope.yaml")
+
+
+# --- offset rules on a DATE anchor: midnight of the local date in `tz`, plus the offset ----------
+
+
+def put_typed(con, name: str, frame: pd.DataFrame, casts: dict[str, str]) -> None:
+    """Like `put`, with the named columns cast to a DuckDB type (DATE, VARCHAR, TIMESTAMP...)."""
+    con.register("_frame", frame)
+    replaced = ", ".join(f'CAST("{c}" AS {kind}) AS "{c}"' for c, kind in casts.items())
+    con.execute(f'CREATE TABLE "{name}" AS SELECT * REPLACE ({replaced}) FROM _frame')
+    con.unregister("_frame")
+
+
+def local_midnight(day: date, tz: str) -> datetime:
+    """00:00 of `day` on the wall clock of `tz`, as a UTC instant (derived with zoneinfo)."""
+    return datetime.combine(day, time(0), tzinfo=ZoneInfo(tz)).astimezone(UTC)
+
+
+def set_session_zone(con, zone: str | None) -> None:
+    if zone is not None:
+        con.execute(f"SET TimeZone = '{zone}'")
+
+
+US = timedelta(microseconds=1)
+RACE_DATES = [
+    date(2026, 1, 15),  # London on GMT
+    date(2026, 7, 4),  # London on BST: its midnight is 23:00 UTC of the day before
+    date(2026, 11, 27),
+    date(2026, 11, 28),
+    date(2026, 11, 29),
+    date(2026, 12, 31),
+    date(2027, 1, 1),
+]
+SESSION_ZONES = [
+    pytest.param(None, id="session-default"),
+    pytest.param("America/Los_Angeles", id="session-LA"),
+    pytest.param("Asia/Tokyo", id="session-JST"),
+]
+DATE_CASES = [
+    pytest.param("Asia/Tokyo", 0.0, id="jst-0"),
+    pytest.param("Asia/Tokyo", 1440.0, id="jst-next-day"),
+    pytest.param("Asia/Tokyo", -90.0, id="jst-minus-90min"),
+    pytest.param("UTC", 30.0, id="utc-30min"),
+    pytest.param("Europe/London", 0.0, id="london-gmt-and-bst"),
+    pytest.param("America/New_York", 600.5, id="new-york-10h-30s"),
+]
+
+
+def _dated() -> pd.DataFrame:
+    """Two rows per race date on different horses (no ties within a horse), and two null dates."""
+    dates = RACE_DATES * 2 + [None, None]
+    return pd.DataFrame(
+        {
+            "row_id": np.arange(len(dates), dtype="int64"),
+            "horse_id": [f"H{i % 3 + 1}" for i in range(len(dates))],
+            "race_date": dates,
+            "value": [1.25 * i for i in range(len(dates))],
+        }
+    )
+
+
+@pytest.mark.parametrize("session", SESSION_ZONES)
+@pytest.mark.parametrize(("tz", "offset_min"), DATE_CASES)
+def test_an_offset_on_a_date_anchor_is_local_midnight_plus_the_offset(con, tz, offset_min, session):
+    set_session_zone(con, session)
+    frame = _dated()
+    put_typed(con, "runners", frame, {"race_date": "DATE"})
+    shift = timedelta(minutes=offset_min)
+    rules = {"runners": Availability("runners", "offset", anchor="race_date", offset=shift, tz=tz)}
+
+    def avail(row):
+        return None if pd.isna(row["race_date"]) else local_midnight(row["race_date"], tz) + shift
+
+    available_at = {int(r["row_id"]): avail(r) for _, r in frame.iterrows()}
+    times = sorted({a for a in available_at.values() if a is not None})
+    probes = [datetime(2025, 6, 1, tzinfo=UTC), datetime(2028, 1, 1, tzinfo=UTC)]
+    probes += times + [a - US for a in times]
+    for t in probes:
+        expected = sorted(i for i, a in available_at.items() if a is not None and a <= t)
+        assert ids(read_asof(con, "runners", t, rules=rules)) == expected, f"t={t.isoformat()}"
+
+    horses = ["H1", "H2", "H3", "H9"]  # H9 has no rows
+    keys = pd.DataFrame(
+        {
+            "horse_id": [h for h in horses for _ in probes],
+            "t_utc": utc_series([t for _ in horses for t in probes]),
+        }
+    )
+    expected = _brute_force(frame, keys, ["horse_id"], "t_utc", avail)
+    got = asof_join(keys, "runners", on=["horse_id"], rules=rules, con=con).reset_index(drop=True)
+    assert len(got) == len(keys)
+    assert any(e is None for e in expected) and any(e is not None for e in expected)
+    by_id = frame.set_index("row_id")["value"]
+    for j, want in enumerate(expected):
+        if want is None:
+            assert pd.isna(got["row_id"].iloc[j]), f"key {j}"
+        else:
+            assert int(got["row_id"].iloc[j]) == want, f"key {j}"
+            assert got["value"].iloc[j] == pytest.approx(by_id[want])
+
+
+def test_a_race_date_in_jst_opens_at_midnight_jst(con):
+    put_typed(
+        con,
+        "runners",
+        pd.DataFrame(
+            {
+                "row_id": [1, 2],
+                "horse_id": ["H1", "H1"],
+                "race_date": [date(2026, 11, 28), date(2026, 11, 29)],
+                "draw": [3, 7],
+            }
+        ),
+        {"race_date": "DATE"},
+    )
+
+    def rule(minutes: int) -> dict[str, Availability]:
+        return {
+            "runners": Availability(
+                "runners", "offset", anchor="race_date", offset=timedelta(minutes=minutes),
+                tz="Asia/Tokyo",
+            )
+        }  # fmt: skip
+
+    same_day, next_day = rule(0), rule(1440)
+    opens = datetime(2026, 11, 27, 15, tzinfo=UTC)  # 2026-11-28 00:00 JST
+    later = datetime(2026, 11, 28, 15, tzinfo=UTC)  # 2026-11-29 00:00 JST
+    assert ids(read_asof(con, "runners", opens - US, rules=same_day)) == []
+    assert ids(read_asof(con, "runners", opens, rules=same_day)) == [1]
+    assert ids(read_asof(con, "runners", later - US, rules=same_day)) == [1]
+    assert ids(read_asof(con, "runners", later, rules=same_day)) == [1, 2]
+    assert ids(read_asof(con, "runners", later - US, rules=next_day)) == []
+    assert ids(read_asof(con, "runners", later, rules=next_day)) == [1]
+
+    keys = pd.DataFrame(
+        {"horse_id": ["H1"] * 4, "t_utc": utc_series([opens - US, opens, later - US, later])}
+    )
+    got = asof_join(keys, "runners", on=["horse_id"], rules=same_day, con=con)
+    assert [None if pd.isna(v) else int(v) for v in got["draw"]] == [None, 3, 3, 7]
+    got = asof_join(keys, "runners", on=["horse_id"], rules=next_day, con=con)
+    assert [None if pd.isna(v) else int(v) for v in got["draw"]] == [None, None, None, 3]
+
+
+def test_tz_is_required_on_a_date_anchor_and_refused_elsewhere(con):
+    put_typed(
+        con,
+        "runners",
+        pd.DataFrame(
+            {
+                "row_id": [1],
+                "horse_id": ["H1"],
+                "race_date": [date(2026, 11, 28)],
+                "post_utc": utc_series([datetime(2026, 11, 28, 5, 40, tzinfo=UTC)]),
+                "post_text": ["2026-11-28"],
+            }
+        ),
+        {"race_date": "DATE", "post_text": "VARCHAR"},
+    )
+    keys = pd.DataFrame({"horse_id": ["H1"], "t_utc": utc_series([at(23)])})
+    t = datetime(2026, 11, 28, 12, tzinfo=UTC)
+
+    def offset(anchor: str, **extra) -> Availability:
+        return Availability("runners", "offset", anchor=anchor, offset=timedelta(0), **extra)
+
+    assert offset("post_utc").tz is None
+    good = offset("race_date", tz="Asia/Tokyo")
+    assert good.tz == "Asia/Tokyo"
+    assert ids(read_asof(con, "runners", t, rules={"runners": good})) == [1]
+
+    for rule in (
+        offset("race_date"),  # a DATE anchor without a zone
+        offset("post_utc", tz="Asia/Tokyo"),  # a zone on an anchor that already is an instant
+        offset("post_text", tz="Asia/Tokyo"),  # a string anchor stays refused
+    ):
+        rules = {"runners": rule}
+        with pytest.raises(ValueError):
+            read_asof(con, "runners", t, rules=rules)
+        with pytest.raises(ValueError):
+            asof_join(keys, "runners", on=["horse_id"], rules=rules, con=con)
+
+    for fields in (
+        {"kind": "column", "column": "post_utc", "tz": "Asia/Tokyo"},
+        {"kind": "label_only", "tz": "Asia/Tokyo"},
+        {"kind": "current_value", "tz": "Asia/Tokyo"},
+        {"kind": "static", "tz": "Asia/Tokyo"},
+    ):
+        with pytest.raises(ValueError):
+            Availability("runners", **fields)
+
+    for zone in ("Asia/Tokio", "JST+9", "", 9):
+        with pytest.raises(ValueError):  # at construction or at query time
+            rules = {"runners": offset("race_date", tz=zone)}
+            read_asof(con, "runners", t, rules=rules)
+
+
+def test_load_availability_reads_tz_and_refuses_it_off_an_offset_rule(tmp_path: Path, con):
+    path = tmp_path / "availability.yaml"
+    path.write_text(
+        "tables:\n"
+        "  runners:\n"
+        "    kind: offset\n"
+        "    anchor: race_date\n"
+        "    offset_min: 1440\n"
+        "    tz: Asia/Tokyo\n"
+        "    label_columns: [finish_pos]\n"
+        "  sectionals:\n"
+        "    kind: offset\n"
+        "    anchor: off_utc\n"
+        "    offset_min: 30\n",
+        encoding="utf-8",
+    )
+    rules = load_availability("japan", path=path)
+    run = rules["runners"]
+    assert (run.kind, run.anchor, run.offset, run.tz) == (
+        "offset", "race_date", timedelta(days=1), "Asia/Tokyo",
+    )  # fmt: skip
+    assert rules["sectionals"].tz is None
+
+    put_typed(
+        con,
+        "runners",
+        pd.DataFrame(
+            {"row_id": [1], "race_date": [date(2026, 11, 28)], "draw": [4], "finish_pos": [1]}
+        ),
+        {"race_date": "DATE"},
+    )
+    opens = datetime(2026, 11, 28, 15, tzinfo=UTC)  # 2026-11-29 00:00 JST
+    assert ids(read_asof(con, "runners", opens - US, rules=rules)) == []
+    view = read_asof(con, "runners", opens, rules=rules)
+    assert ids(view) == [1] and set(view.columns) == {"row_id", "race_date", "draw"}
+
+    for entry in (
+        "kind: column\n    column: fetched_utc\n    tz: Asia/Tokyo",
+        "kind: label_only\n    tz: Asia/Tokyo",
+        "kind: current_value\n    tz: Asia/Tokyo",
+        "kind: static\n    tz: Asia/Tokyo",
+        "kind: offset\n    anchor: race_date\n    offset_min: 0\n    tz: 9",
+        "kind: offset\n    anchor: race_date\n    offset_min: 0\n    tz: [Asia/Tokyo]",
+        "kind: offset\n    anchor: race_date\n    offset_min: 0\n    tz:",
+    ):
+        _refuse_entry(tmp_path, entry)
+
+    path.write_text(
+        "tables:\n  runners:\n    kind: offset\n    anchor: race_date\n    offset_min: 0\n"
+        "    tz: Asia/Tokio\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):  # at load or at query time
+        read_asof(con, "runners", opens, rules=load_availability("japan", path=path))
+
+
+# --- column rules with a fallback column: available at coalesce(column, fallback) ---------------
+
+
+def _captures(rng: np.random.Generator) -> pd.DataFrame:
+    """Captures of every shape the fallback must handle, on four (race, combination) keys."""
+    rows = []
+    starts = rng.choice(np.arange(0, 900, 3), size=36, replace=False)
+    for i, m in enumerate(starts):
+        base = DAY + timedelta(hours=1, minutes=int(m), seconds=int(rng.integers(0, 60)))
+        shape = i % 6
+        fetched, snapshot = {
+            0: (base + timedelta(minutes=20), base),  # fetched well after the snapshot
+            1: (base + timedelta(seconds=4), base),
+            2: (None, base),  # an HKTrack row: no fetched_utc, so the snapshot counts
+            3: (base, base + timedelta(minutes=20)),  # a snapshot after the fetch: fetched wins
+            4: (base, None),
+            5: (None, None),  # never available
+        }[shape]
+        rows.append(
+            {
+                "row_id": i,
+                "race_id": f"jra:2026-11-22:TOK:{1 + i % 2:02d}",
+                "pool": "WIN",
+                "combination": str(1 + (i // 2) % 2),
+                "fetched_utc": fetched,
+                "snapshot_utc": snapshot,
+                "odds": round(float(rng.uniform(1.1, 80.0)), 1),
+            }
+        )
+    frame = pd.DataFrame(rows)
+    frame["fetched_utc"] = utc_series(frame["fetched_utc"])
+    frame["snapshot_utc"] = utc_series(frame["snapshot_utc"])
+    return frame
+
+
+def _coalesced(row) -> datetime | None:
+    for column in ("fetched_utc", "snapshot_utc"):
+        if not pd.isna(row[column]):
+            return row[column].to_pydatetime()
+    return None
+
+
+@pytest.mark.parametrize("session", SESSION_ZONES[:2])
+@pytest.mark.parametrize("seed", [7, 8])
+def test_a_fallback_column_counts_only_where_the_column_is_null(con, seed, session):
+    set_session_zone(con, session)
+    frame = _captures(np.random.default_rng(seed))
+    put(con, "odds_timeseries", frame)
+    rules = {
+        "odds_timeseries": Availability(
+            "odds_timeseries", "column", column="fetched_utc", fallback="snapshot_utc"
+        )
+    }
+    available_at = {int(r["row_id"]): _coalesced(r) for _, r in frame.iterrows()}
+    on = ["race_id", "pool", "combination"]
+    per_key: dict[tuple, list[datetime]] = {}
+    for _, r in frame.iterrows():
+        if _coalesced(r) is not None:
+            per_key.setdefault(tuple(r[c] for c in on), []).append(_coalesced(r))
+    assert all(len(v) == len(set(v)) for v in per_key.values())  # no ties: the pick is defined
+
+    times = sorted({a for a in available_at.values() if a is not None})
+    snapshots = [s.to_pydatetime() for s in frame["snapshot_utc"].dropna()]
+    probes = [at(0), at(23, 59), *times, *[a - US for a in times], *snapshots]
+    for t in probes:
+        expected = sorted(i for i, a in available_at.items() if a is not None and a <= t)
+        got = read_asof(con, "odds_timeseries", t, rules=rules)
+        assert ids(got) == expected, f"t={t.isoformat()}"
+
+    keys = pd.DataFrame(
+        [
+            {"race_id": race, "pool": "WIN", "combination": comb, "t_utc": t}
+            for race in ("jra:2026-11-22:TOK:01", "jra:2026-11-22:TOK:02")
+            for comb in ("1", "2", "3")  # combination 3 has no rows
+            for t in probes[::2]
+        ]
+    )
+    keys["t_utc"] = utc_series(keys["t_utc"])
+    expected = _brute_force(frame, keys, on, "t_utc", _coalesced)
+    got = asof_join(keys, "odds_timeseries", on=on, rules=rules, con=con).reset_index(drop=True)
+    assert any(e is None for e in expected) and any(e is not None for e in expected)
+    for j, want in enumerate(expected):
+        if want is None:
+            assert pd.isna(got["row_id"].iloc[j]), f"key {j}"
+        else:
+            assert int(got["row_id"].iloc[j]) == want, f"key {j}"
+
+
+def test_a_fallback_must_be_a_utc_column_of_a_column_rule(con):
+    put_typed(
+        con,
+        "odds_timeseries",
+        pd.DataFrame(
+            {
+                "row_id": [1, 2],
+                "race_id": ["jra:2026-11-22:TOK:01"] * 2,
+                "fetched_utc": utc_series([None, at(9, 30)]),
+                "snapshot_utc": utc_series([at(9, 10), at(9)]),
+                "snap_naive": pd.to_datetime(["2026-11-22 09:10:00", "2026-11-22 09:00:00"]),
+                "snap_date": [date(2026, 11, 22)] * 2,
+                "snap_text": ["2026-11-22T09:10:00Z", "2026-11-22T09:00:00Z"],
+                "dividend": [250.0, 0.0],
+            }
+        ),
+        {"snap_date": "DATE", "snap_text": "VARCHAR"},
+    )
+    keys = pd.DataFrame({"race_id": ["jra:2026-11-22:TOK:01"], "t_utc": utc_series([at(10)])})
+
+    def column(**extra) -> dict[str, Availability]:
+        rule = Availability("odds_timeseries", "column", column="fetched_utc", **extra)
+        return {"odds_timeseries": rule}
+
+    assert column()["odds_timeseries"].fallback is None
+    good = column(fallback="snapshot_utc")
+    assert good["odds_timeseries"].fallback == "snapshot_utc"
+    assert ids(read_asof(con, "odds_timeseries", at(9, 10), rules=good)) == [1]
+    assert ids(read_asof(con, "odds_timeseries", at(9, 29), rules=good)) == [1]
+
+    for fallback in ("snap_naive", "snap_date", "snap_text"):
+        rules = column(fallback=fallback)
+        with pytest.raises(ValueError):
+            read_asof(con, "odds_timeseries", at(10), rules=rules)
+        with pytest.raises(ValueError):
+            asof_join(keys, "odds_timeseries", on=["race_id"], rules=rules, con=con)
+
+    with pytest.raises(ValueError):  # at construction or at query time
+        rules = column(fallback="snapshot_utc", label_columns=("dividend", "snapshot_utc"))
+        read_asof(con, "odds_timeseries", at(10), rules=rules)
+
+    for fields in (
+        {"kind": "offset", "anchor": "fetched_utc", "offset": timedelta(0),
+         "fallback": "snapshot_utc"},
+        {"kind": "label_only", "fallback": "snapshot_utc"},
+        {"kind": "current_value", "fallback": "snapshot_utc"},
+        {"kind": "static", "fallback": "snapshot_utc"},
+    ):  # fmt: skip
+        with pytest.raises(ValueError):
+            Availability("odds_timeseries", **fields)
+
+
+def test_load_availability_reads_a_fallback(tmp_path: Path, con):
+    path = tmp_path / "availability.yaml"
+    path.write_text(
+        "tables:\n"
+        "  odds_timeseries:\n"
+        "    kind: column\n"
+        "    column: fetched_utc\n"
+        "    fallback: snapshot_utc\n"
+        "    label_columns: [dividend]\n"
+        "  jrdb_pre_race:\n"
+        "    kind: column\n"
+        "    column: released_utc\n",
+        encoding="utf-8",
+    )
+    rules = load_availability("japan", path=path)
+    odds = rules["odds_timeseries"]
+    assert (odds.kind, odds.column, odds.fallback, odds.label_columns) == (
+        "column", "fetched_utc", "snapshot_utc", ("dividend",),
+    )  # fmt: skip
+    assert rules["jrdb_pre_race"].fallback is None
+
+    put(
+        con,
+        "odds_timeseries",
+        pd.DataFrame(
+            {
+                "row_id": [1, 2],
+                "fetched_utc": utc_series([None, at(9, 30)]),
+                "snapshot_utc": utc_series([at(9, 10), at(9)]),
+                "dividend": [250.0, 0.0],
+            }
+        ),
+    )
+    assert ids(read_asof(con, "odds_timeseries", at(9, 10) - US, rules=rules)) == []
+    view = read_asof(con, "odds_timeseries", at(9, 10), rules=rules)
+    assert ids(view) == [1] and "dividend" not in view.columns
+    assert ids(read_asof(con, "odds_timeseries", at(9, 30), rules=rules)) == [1, 2]
+
+    for entry in (
+        "kind: offset\n    anchor: post_utc\n    offset_min: 0\n    fallback: snapshot_utc",
+        "kind: label_only\n    fallback: snapshot_utc",
+        "kind: current_value\n    fallback: snapshot_utc",
+        "kind: static\n    fallback: snapshot_utc",
+        "kind: column\n    column: fetched_utc\n    fallback: 3",
+        "kind: column\n    column: fetched_utc\n    fallback: [snapshot_utc]",
+        "kind: column\n    column: fetched_utc\n    fallback:",
+    ):
+        _refuse_entry(tmp_path, entry)
+
+    path.write_text(
+        "tables:\n  odds_timeseries:\n    kind: column\n    column: fetched_utc\n"
+        "    fallback: snapshot_utc\n    label_columns: [snapshot_utc]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):  # at load or at query time
+        read_asof(con, "odds_timeseries", at(10), rules=load_availability("japan", path=path))
+
+
+# --- static tables: every row available at any t -----------------------------------------------
+
+PEDIGREE = pd.DataFrame(
+    {
+        "jurisdiction": ["jra"] * 4,
+        "horse_id": ["H1", "H2", "H3", "H4"],
+        "sire_name": ["Sire A", "Sire B", "Sire A", "Sire C"],
+        "dam_name": ["Dam 1", "Dam 2", "Dam 3", "Dam 4"],
+        "source_race_id": [f"jra:2026-11-22:TOK:{i:02d}" for i in (1, 2, 3, 4)],
+        # scraped after the decision times below: a static table ignores it
+        "scraped_utc": utc_series([datetime(2026, 11, 30, 3, tzinfo=UTC)] * 4),
+    }
+)
+STATIC_TIMES = [
+    datetime(1990, 1, 1, tzinfo=UTC),
+    at(0),
+    at(23, 59),
+    datetime(2100, 1, 1, tzinfo=UTC),
+]
+
+
+@pytest.mark.parametrize("session", SESSION_ZONES[:2])
+@pytest.mark.parametrize(
+    "labels",
+    [pytest.param((), id="no-labels"), pytest.param(("source_race_id", "scraped_utc"), id="two")],
+)
+def test_a_static_table_is_whole_in_every_view_at_any_t(con, labels, session):
+    set_session_zone(con, session)
+    put(con, "horse_pedigree", PEDIGREE)
+    rule = Availability("horse_pedigree", "static", label_columns=labels)
+    assert (rule.column, rule.anchor, rule.offset, rule.tz, rule.fallback) == (None,) * 5
+    rules = {"horse_pedigree": rule}
+    kept = set(PEDIGREE.columns) - set(labels)
+
+    for t in STATIC_TIMES:
+        view = read_asof(con, "horse_pedigree", t, rules=rules)
+        assert sorted(view["horse_id"]) == ["H1", "H2", "H3", "H4"], f"t={t.isoformat()}"
+        assert set(view.columns) == kept
+
+    keys = pd.DataFrame(
+        {
+            "horse_id": ["H2", "H4", "H9", "H1", "H3"],
+            "t_utc": utc_series([STATIC_TIMES[0], STATIC_TIMES[3], at(12), at(3), at(0)]),
+        }
+    )
+    got = asof_join(keys, "horse_pedigree", on=["horse_id"], rules=rules, con=con)
+    got = got.reset_index(drop=True)
+    assert set(got.columns) == {"horse_id", "t_utc"} | (kept - {"horse_id"})
+    sires = [None if pd.isna(v) else v for v in got["sire_name"]]
+    assert sires == ["Sire B", "Sire C", None, "Sire A", "Sire A"]
+    assert [None if pd.isna(v) else v for v in got["dam_name"]] == [
+        "Dam 2", "Dam 4", None, "Dam 1", "Dam 3",
+    ]  # fmt: skip
+
+    with pytest.raises(ValueError):
+        read_label(con, "horse_pedigree", rules=rules)
+
+
+def test_a_static_rule_takes_no_time_fields(con):
+    put(con, "horse_pedigree", PEDIGREE)
+    assert Availability("horse_pedigree", "static").label_columns == ()
+    for fields in (
+        {"column": "scraped_utc"},
+        {"anchor": "scraped_utc", "offset": timedelta(0)},
+        {"offset": timedelta(minutes=5)},
+        {"tz": "Asia/Tokyo"},
+        {"fallback": "scraped_utc"},
+    ):
+        with pytest.raises(ValueError):
+            Availability("horse_pedigree", "static", **fields)
+    rules = {"horse_pedigree": Availability("horse_pedigree", "static", label_columns=("sir",))}
+    with pytest.raises(ValueError):  # a misspelt label column cannot let the real one through
+        read_asof(con, "horse_pedigree", at(12), rules=rules)
+
+
+def test_load_availability_reads_a_static_rule(tmp_path: Path, con):
+    path = tmp_path / "availability.yaml"
+    path.write_text(
+        "tables:\n"
+        "  horse_pedigree:\n"
+        "    kind: static\n"
+        "    label_columns: [source_race_id, scraped_utc]\n"
+        "  dividends:\n"
+        "    kind: label_only\n",
+        encoding="utf-8",
+    )
+    rules = load_availability("japan", path=path)
+    ped = rules["horse_pedigree"]
+    assert (ped.kind, ped.column, ped.anchor, ped.offset) == ("static", None, None, None)
+    assert ped.label_columns == ("source_race_id", "scraped_utc")
+    put(con, "horse_pedigree", PEDIGREE)
+    view = read_asof(con, "horse_pedigree", datetime(1990, 1, 1, tzinfo=UTC), rules=rules)
+    assert len(view) == 4 and not {"source_race_id", "scraped_utc"} & set(view.columns)
+
+    for entry in (
+        "kind: static\n    column: scraped_utc",
+        "kind: static\n    anchor: scraped_utc\n    offset_min: 0",
+        "kind: static\n    offset_min: 0",
+        "kind: static\n    tz: Asia/Tokyo",
+        "kind: static\n    fallback: scraped_utc",
+        "kind: static\n    label_columns: source_race_id",
+    ):
+        _refuse_entry(tmp_path, entry)
+
+
+# --- joining on a label column -------------------------------------------------------------------
+
+JOIN_ON_LABEL_RULES = [
+    pytest.param({"kind": "column", "column": "fetched_utc"}, id="column"),
+    pytest.param(
+        {"kind": "offset", "anchor": "fetched_utc", "offset": timedelta(minutes=20)}, id="offset"
+    ),
+    pytest.param(
+        {"kind": "offset", "anchor": "race_date", "offset": timedelta(0), "tz": "Asia/Tokyo"},
+        id="offset-on-date",
+    ),
+    pytest.param({"kind": "static"}, id="static"),
+]
+
+
+@pytest.mark.parametrize("fields", JOIN_ON_LABEL_RULES)
+def test_asof_join_on_a_label_column_is_refused(con, fields):
+    put_typed(
+        con,
+        "runners",
+        pd.DataFrame(
+            {
+                "row_id": [1, 2],
+                "race_id": ["jra:2026-11-22:TOK:01"] * 2,
+                "horse_no": [1, 2],
+                "race_date": [date(2026, 11, 22)] * 2,
+                "fetched_utc": utc_series([at(1), at(1)]),
+                "finish_pos": [2, 1],
+            }
+        ),
+        {"race_date": "DATE"},
+    )
+    rules = {"runners": Availability("runners", label_columns=("finish_pos",), **fields)}
+    keys = pd.DataFrame(
+        {
+            "race_id": ["jra:2026-11-22:TOK:01"] * 2,
+            "horse_no": [1, 2],
+            "finish_pos": [1, 2],
+            "t_utc": utc_series([at(23), at(23)]),
+        }
+    )
+    with pytest.raises(ValueError):
+        asof_join(keys, "runners", on=["race_id", "finish_pos"], rules=rules, con=con)
+    got = asof_join(keys, "runners", on=["race_id", "horse_no"], rules=rules, con=con)
+    assert [int(v) for v in got["row_id"]] == [1, 2]
+    assert list(got["finish_pos"]) == [1, 2]  # the keys' own column, untouched

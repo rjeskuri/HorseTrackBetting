@@ -7,28 +7,52 @@ frame at (race, horse, t) is built through these views, so nothing available aft
 ## Rule kinds
 
 Every table that is read needs a rule. A table without one raises `NoAvailabilityRule` (a
-`KeyError`) from `read_asof`, `asof_join` and `read_label`; there is no default and no fallback
-column.
+`KeyError`) from `read_asof`, `asof_join` and `read_label`; there is no default rule.
 
 | kind | a row is available at | `read_asof` / `asof_join` | `read_label` |
 | --- | --- | --- | --- |
-| `column` | `row[column]` | yes | refused (`ValueError`) |
-| `offset` | `row[anchor] + offset` | yes | refused (`ValueError`) |
+| `column` | `row[column]`, or `coalesce(row[column], row[fallback])` with a `fallback` | yes | refused (`ValueError`) |
+| `offset` | `row[anchor] + offset`; on a DATE anchor, 00:00 of the date in `tz` + offset | yes | refused (`ValueError`) |
+| `static` | always, at any t | yes, every row | refused (`ValueError`) |
 | `label_only` | never, at any t | `LabelOnlyTable` | the whole table |
 | `current_value` | never: the values are as of the scrape, not as of t | `CurrentValueTable` | refused (`ValueError`) |
 
 - A row whose availability time is null is never available.
-- The time column (`column`, or `anchor`) must be a timezone-aware timestamp
-  (`TIMESTAMP WITH TIME ZONE`); any other type is a `ValueError`, since a naive one would be read
-  in the session's time zone.
+- The time columns (`column`, `fallback`, or an `anchor` without `tz`) must be timezone-aware
+  timestamps (`TIMESTAMP WITH TIME ZONE`); any other type is a `ValueError`, since a naive one
+  would be read in the session's time zone. The session's time zone never changes a view.
+- The offset is an absolute duration: 1440 min is 24 hours even across a DST change.
 - `LabelOnlyTable` and `CurrentValueTable` are `ValueError`s, and neither is the other.
+
+### Fallback (column rules)
+
+`fallback` names a second timezone-aware column, used only where `column` is null: a non-null
+`column` wins even when the fallback is earlier, and a row with both null is never available. A
+`fallback` of another type is a `ValueError` at query time; a `fallback` listed in
+`label_columns`, or a `fallback` on any kind but `column`, is a `ValueError` at construction.
+
+### Local dates (offset rules)
+
+An `anchor` of type `DATE` is a local date (the race date), not an instant. Its rule takes `tz`,
+an IANA zone name: the row is available at 00:00 of the date on the wall clock of `tz`, plus the
+offset (for `Asia/Tokyo`, 15:00 UTC of the day before). A DATE anchor without `tz`, a `tz` on a
+timezone-aware anchor and an anchor of any other type are `ValueError`s at query time; an unknown
+zone is a `ValueError` at construction (or at query time, if DuckDB's zone database lacks it), and
+so is a `tz` on any kind but `offset`.
+
+### Static tables
+
+`static` is for values that never change once known (a horse's sire, dam and broodmare sire):
+every row is in every view at any t, and `asof_join` matches on `on` alone. It takes no time
+field (`column`, `anchor`, `offset`, `tz`, `fallback`), only `label_columns`. It is not a label
+table: `read_label` refuses it.
 
 ## Label columns
 
 The rule kinds above apply per row, so a `column` or `offset` rule alone makes every column of an
 available row available. A table that carries result or look-ahead columns on rows that are
-otherwise known before the race needs those columns named: a `column` or `offset` rule takes
-`label_columns`, a tuple of column names (default `()`).
+otherwise known before the race needs those columns named: a `column`, `offset` or `static` rule
+takes `label_columns`, a tuple of column names (default `()`).
 
 - `read_asof` and `asof_join` drop the label columns from the result: they are not in the frame
   at all, not present and null.
@@ -36,9 +60,9 @@ otherwise known before the race needs those columns named: a `column` or `offset
   misspelt name cannot let the real column through. Joining `on` a label column is a
   `ValueError`.
 - A `label_only` or `current_value` rule with label columns, or label columns that list the rule's
-  own `column` or `anchor`, is a `ValueError`.
-- `read_label` still refuses every table that is not `label_only`: label columns of a `column` or
-  `offset` table are not readable as labels through it.
+  own `column`, `fallback` or `anchor`, is a `ValueError`.
+- `read_label` still refuses every table that is not `label_only`: label columns of a `column`,
+  `offset` or `static` table are not readable as labels through it.
 
 ## Views
 
@@ -63,13 +87,15 @@ offsets are passed as parameters.
 `odds_timeseries` follows the board-at-t rule (`docs/specs/board-at-t.md`): for each (race, pool,
 combination) the board at t is the latest capture with `fetched_utc <= t`. A capture whose
 `snapshot_utc` is before t but which was fetched after t is not on the board. As a view this is a
-`column` rule on `fetched_utc` joined on `race_id`, `pool` and `combination`.
+`column` rule on `fetched_utc` joined on `race_id`, `pool` and `combination`. Rows ported from
+HKTrack have no `fetched_utc`; the shipped rule's `fallback` on `snapshot_utc` counts those at
+their snapshot time, and a row with neither stamp is never on the board.
 
 A plain `fetched_utc` rule is not safe for `odds_timeseries` on its own. The compacted log
 (`countries/japan/logger/compact.py` `SCHEMA`) puts the race's result on every capture: `dividend`
 and `is_refund` are the payout of each combination, and `is_final_capture` is worked out from the
-whole day's log. Without listing them in `label_columns`, the board at t carries the payout. Which
-columns the shipped rule lists is an owner decision (see Rules per table).
+whole day's log. Without listing them in `label_columns`, the board at t carries the payout; the
+shipped rule lists all three (see Rules per table).
 
 ## Config
 
@@ -79,52 +105,64 @@ availability.yaml` (through `core.config.load_country_yaml`), or `path`:
 ```yaml
 tables:
   <table>:
-    kind: column | offset | label_only | current_value
+    kind: column | offset | static | label_only | current_value
     column: <name>        # kind column only, required
+    fallback: <name>      # kind column only, optional
     anchor: <name>        # kind offset only, required
     offset_min: <number>  # kind offset only, required; minutes, int or float
-    label_columns: [<name>, ...]  # kinds column and offset only, optional
+    tz: <IANA zone>       # kind offset only, optional; required at query time on a DATE anchor
+    label_columns: [<name>, ...]  # kinds column, offset and static only, optional
 ```
 
 The result maps each table to an `Availability(table, kind, column, anchor, offset,
-label_columns)` with `offset = timedelta(minutes=offset_min)` and `label_columns` a tuple (`()`
-when the key is absent; flow or block lists both work). A key that does not belong to the entry's
-kind, an unknown key, an unknown kind, a missing required key, a non-numeric `offset_min`, a
+label_columns, tz, fallback)` with `offset = timedelta(minutes=offset_min)` and `label_columns` a
+tuple (`()` when the key is absent; flow or block lists both work). A key that does not belong to
+the entry's kind, an unknown key, an unknown kind, a missing required key, a non-numeric
+`offset_min`, a `fallback` or `tz` that is not a non-empty string, an unknown zone, a
 `label_columns` that is not a list of strings (a string, null, a mapping, nested lists) or that
-lists the entry's `column` or `anchor`, `label_columns` on `label_only` or `current_value`, a file
-without a
-top-level `tables:` mapping or an entry that is not a mapping is a `ValueError`; a missing file is
-a `FileNotFoundError`. With no file, every view is refused: the safe default.
+lists the entry's `column`, `fallback` or `anchor`, `label_columns` on `label_only` or
+`current_value`, a file without a top-level `tables:` mapping or an entry that is not a mapping is
+a `ValueError`; a missing file is a `FileNotFoundError`. With no file, every view is refused: the
+safe default.
 
 ## Rules per table
 
-The per-table values are owner decisions (08 §9.18), pending on the needs-input of #80; they are
-never implementation rulings. Until they are filled, no `japan/config/availability.yaml` ships.
-The tables that must get a rule:
+The per-table values are owner decisions (08 §9.18), never implementation rulings: the owner's
+answer on #80 (2026-11-24) accepted the proposed defaults, each conservative relative to JRA's
+actual publication. They ship in `src/horsetrack/countries/japan/config/availability.yaml`, one
+entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compacted odds log,
+#32); `tests/countries/japan/test_availability.py` checks the file against that answer.
 
-- every store table in `schemas.TABLES`: `meetings`, `races`, `runners`, `dividends`,
-  `sectionals`, `incidents`, `running_comments`, `horses`, `horse_runs`, `horse_pedigree`,
-  `jrdb_pre_race`, `jrdb_post_race`;
-- `odds_timeseries` (the compacted odds log, #32).
+| table | kind | available at | label columns (never in a view) |
+| --- | --- | --- | --- |
+| `odds_timeseries` | `column` | `fetched_utc`, else `fallback` `snapshot_utc` (HKTrack rows) | `dividend`, `is_refund`, `is_final_capture` |
+| `meetings` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | none |
+| `races` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | `finish_time_s`, `split_times_s`, `going`, `going_raw` |
+| `runners` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | `finish_pos`, `placing_raw`, `placing_code`, `dead_heat`, `finish_time_s`, `lbw_raw`, `lbw_lengths`, `running_positions`, `last_3f_s`, `win_odds`, `win_fav_rank`, `horse_wt_kg`, `horse_wt_change_kg` |
+| `dividends` | `label_only` | never; `read_label` only | n/a |
+| `sectionals` | `label_only` | never; `read_label` only | n/a |
+| `incidents` | `label_only` | never; `read_label` only | n/a |
+| `running_comments` | `label_only` | never; `read_label` only | n/a |
+| `horses` | `current_value` | never: profile pages show today's values | n/a |
+| `horse_pedigree` | `static` | always: sire, dam and broodmare sire never change | `source_race_id`, `scraped_utc` |
+| `horse_runs` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 1440 min (the next day) | none |
+| `jrdb_pre_race` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | none |
+| `jrdb_post_race` | `label_only` | never; `read_label` only | n/a |
 
-What the store schema implies for those decisions:
-
-- Only three tables carry a UTC time: `horses` (`profile_scraped_utc`), `horse_pedigree`
-  (`scraped_utc`) and `odds_timeseries` (`fetched_utc`). A `column` or `offset` rule on any other
-  table needs a UTC column the store does not have yet.
-- `races` has `post_time_local` (a string) and no `post_utc`, so an offset rule anchored on the
-  post time needs that column derived first.
-- `runners` and `races` mix pre-race columns (draw, weights, jockey) and result columns
-  (`finish_pos`, `finish_time_s`, `win_odds`) under one table rule: one rule cannot make the
-  pre-race columns available before the post and the results only after it. Instead of making the
-  whole table `label_only`, a `column` or `offset` rule can list the result columns in
-  `label_columns`, so the pre-race columns enter a view and the results never do.
-- `odds_timeseries` carries result and look-ahead columns on every capture (`dividend`,
-  `is_refund`, `is_final_capture`; see The board at t): a rule that does not list them in
-  `label_columns` puts the payout on the board at t.
-
-Which columns go in `label_columns` for each shipped table is also an owner decision, pending on
-the same needs-input of #80; no `availability.yaml` ships until it is answered.
+- Nothing else is banned. JRDB tables are inputs to private models only (D21: no JRDB-derived
+  figure in the public repository).
+- Same-day results may be used once JRA has officially published them, but the store has no UTC
+  post time yet: `races` has `post_time_local` (a string) and no `post_utc`. Until follow-up #227
+  derives `post_utc`, the rules stay on the conservative side:
+  - `dividends`, `sectionals`, `incidents` and `running_comments` are `label_only`; the owner's
+    rule once `post_utc` exists is post + 30 min.
+  - `horse_wt_kg` and `horse_wt_change_kg` (runners) and the same-day `going` and `going_raw`
+    (races) are label columns; the owner's rule once `post_utc` exists is post − 60 min.
+  - The result columns of `races` and `runners` stay label columns.
+- A race-date rule opens a whole day's card at 00:00 JST of the race date: a column JRA changes
+  later that day (a late scratch, a jockey change) is a trap the rule does not catch (see Known
+  traps).
+- A table outside the file is refused with `NoAvailabilityRule`.
 
 ## Known traps (07 §6)
 
