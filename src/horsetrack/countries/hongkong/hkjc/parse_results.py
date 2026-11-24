@@ -47,6 +47,7 @@ from horsetrack.countries.hongkong.hkjc.parse_common import (
     header_index,
     href_param,
     lbw_to_lengths,
+    meeting_id,
     person_key,
     race_id,
     soup,
@@ -135,7 +136,7 @@ def parse(page: RawPage) -> ParsedPage:
         return {"races": [], "runners": [], "dividends": [], "incidents": [], "_meta": []}
 
     race_date, venue, race_no = identity
-    rid = race_id(race_date, venue, race_no)
+    rid = race_id(meeting_id(race_date, venue), race_no)
     runners = _runners(runner_table, rid)
     race = _race_row(rid, race_no, header, runners, abandoned=abandoned)
     race_nos = _local_race_nos(root, venue, race_no)
@@ -412,10 +413,10 @@ def _runner(cells: list[Tag], at: dict[str, int], rid: str) -> dict[str, Any]:
         "race_id": rid,
         **horse,
         "horse_no": to_int(text("horse_no")),
-        "jockey_key": person_key("jockey", jockey_name),
+        "jockey_key": person_key("jockey", jockey_name or ""),
         "jockey_code": jockey_code,
         "jockey_name": jockey_name,
-        "trainer_key": person_key("trainer", trainer_name),
+        "trainer_key": person_key("trainer", trainer_name or ""),
         "trainer_code": trainer_code,
         "trainer_name": trainer_name,
         "actual_wt_lb": to_int(text("actual_wt")),
