@@ -144,18 +144,32 @@ class JRAAdapter:
 
     def parse(self, page: RawPage) -> ParsedPage:
         """Dispatch to netkeiba.parse_<page_type>, so new parser modules plug in untouched."""
-        module_name = f"{PARSERS}.parse_{page.page_type}"
-        try:
-            module = import_module(module_name) if page.page_type.isidentifier() else None
-        except ModuleNotFoundError as exc:
-            if exc.name != module_name:
-                raise  # the parser exists but one of ITS imports is missing: do not hide that
-            module = None
+        module = _parser_module(page.page_type)
         if module is not None:
             return module.parse(page)
         raise NotImplementedError(
-            f"no JRA parser for page_type {page.page_type!r} (expected {module_name})"
+            f"no JRA parser for page_type {page.page_type!r} (expected {PARSERS}.parse_"
+            f"{page.page_type})"
         )
+
+    def parser_version(self, page_type: str) -> str | None:
+        """PARSER_VERSION of netkeiba.parse_<page_type> ("0" when it declares none); None when the
+        page type has no parser, which the store build skips."""
+        module = _parser_module(page_type)
+        return None if module is None else str(getattr(module, "PARSER_VERSION", "0"))
+
+
+def _parser_module(page_type: str):
+    """The netkeiba `parse_<page_type>` module, None when there is none."""
+    module_name = f"{PARSERS}.parse_{page_type}"
+    if not page_type.isidentifier():
+        return None
+    try:
+        return import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != module_name:
+            raise  # the parser exists but one of ITS imports is missing: do not hide that
+        return None
 
 
 def _task(page_type: str, key: str, url: str, race_date: date, today: date) -> FetchTask:
