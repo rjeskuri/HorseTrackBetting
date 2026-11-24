@@ -9,9 +9,10 @@ HKTrack's known bugs are normalised first, on their rows only: a `source_update_
 after its `snapshot_utc` was dated by the race day and is moved back one day. On both sides a
 `status_raw` other than "SCR" (time text, "", 最終オッズ) counts as null.
 
-Each of their price rows is matched to the nearest of our rows with the same race, pool and
-combination, captured within 20 s, whose source update agrees with their normalised one (null with
-null; otherwise within 20 s, which is equality for JRA's minute-precision printed time).
+Each of their price rows is matched to the nearest of our rows with the same race, pool,
+combination and source update (exact equality with their normalised one; null matches null),
+captured within 20 s. Source updates compare as instants where readable, so equivalent ISO
+spellings are equal, and as raw text otherwise.
 
 `render` writes markdown that carries the first 20 mismatched rows with their prices: it belongs
 under $HORSETRACK_DATA_DIR, not in git.
@@ -74,21 +75,24 @@ def _status(row: Row) -> str | None:
     return SCRATCHED if row.get("status_raw") == SCRATCHED else None
 
 
-def _their_source_update(row: Row) -> datetime | None:
-    """Their source_update_utc, moved back a day when it lands more than 1 h after the capture."""
-    source = _instant(row.get("source_update_utc"))
+def _source_update(row: Row) -> Any:
+    """source_update_utc as a UTC instant where readable, else its raw value (None stays None;
+    a JSON list or object becomes its repr, so it can key the index)."""
+    raw = row.get("source_update_utc")
+    instant = _instant(raw)
+    if instant is not None:
+        return instant
+    return repr(raw) if isinstance(raw, (list, dict)) else raw
+
+
+def _their_source_update(row: Row) -> Any:
+    """Their source update, moved back a day when it lands more than 1 h after the capture."""
+    source = _source_update(row)
     snapshot = _instant(row.get("snapshot_utc"))
-    if source is not None and snapshot is not None and source - snapshot > DAY_OFF_THRESHOLD:
-        source -= timedelta(days=1)
+    if isinstance(source, datetime) and snapshot is not None:
+        if source - snapshot > DAY_OFF_THRESHOLD:
+            source -= timedelta(days=1)
     return source
-
-
-def _same_source_update(ours: datetime | None, theirs: datetime | None) -> bool:
-    """Null matches null. JRA prints the update to the minute, so on real logs the window is plain
-    equality; it only absorbs sub-minute differences in how a source time was derived."""
-    if ours is None or theirs is None:
-        return ours is theirs
-    return abs(ours - theirs) <= MATCH_WINDOW
 
 
 def _snapshot_counts(rows: Iterable[Row]) -> dict[PoolKey, int]:
@@ -114,17 +118,16 @@ def compare_logs(ours: list[dict], theirs: list[dict]) -> Comparison:
     pools_ours = frozenset((row.get("race_id"), row.get("pool")) for row in ours)
     pools_theirs = frozenset((row.get("race_id"), row.get("pool")) for row in theirs)
 
-    # Our price rows by (race, pool, combination): (snapshot, position, source update), sorted by
-    # time; positions are unique, so sorting never compares source updates.
-    index: dict[tuple, list[tuple[datetime, int, datetime | None]]] = defaultdict(list)
+    # Our price rows by (race, pool, combination, source update): (snapshot, position), by time.
+    index: dict[tuple, list[tuple[datetime, int]]] = defaultdict(list)
     for position, row in enumerate(ours):
         if row.get("combination") == POOL_TOTAL:
             continue
         snapshot = _instant(row.get("snapshot_utc"))
         if snapshot is None:
             continue
-        key = (row.get("race_id"), row.get("pool"), row.get("combination"))
-        index[key].append((snapshot, position, _instant(row.get("source_update_utc"))))
+        key = (row.get("race_id"), row.get("pool"), row.get("combination"), _source_update(row))
+        index[key].append((snapshot, position))
     for captures in index.values():
         captures.sort()
 
@@ -138,16 +141,15 @@ def compare_logs(ours: list[dict], theirs: list[dict]) -> Comparison:
         if snapshot is None:
             continue
         key = (row.get("race_id"), row.get("pool"), row.get("combination"))
-        captures = index.get(key)
+        captures = index.get((*key, _their_source_update(row)))
         if not captures:
             continue
-        source = _their_source_update(row)
         at = bisect.bisect_left(captures, (snapshot - MATCH_WINDOW,))
         best: tuple[timedelta, int] | None = None
         while at < len(captures) and captures[at][0] <= snapshot + MATCH_WINDOW:
-            when, position, our_source = captures[at]
+            when, position = captures[at]
             gap = abs(when - snapshot)
-            if _same_source_update(our_source, source) and (best is None or gap < best[0]):
+            if best is None or gap < best[0]:
                 best = (gap, position)
             at += 1
         if best is None:
@@ -239,8 +241,8 @@ def render(comparison: Comparison) -> str:
         "",
         "## Odds agreement",
         "",
-        f"Their price rows matched to ours by race, pool, combination and source update, captured"
-        f" within {MATCH_WINDOW.seconds} s; equal means odds, odds_hi and status agree.",
+        f"Their price rows matched to ours by race, pool, combination and the same source update,"
+        f" captured within {MATCH_WINDOW.seconds} s; equal means odds, odds_hi and status agree.",
         "",
         "| | rows | rate |",
         "| --- | ---: | ---: |",

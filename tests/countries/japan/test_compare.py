@@ -10,8 +10,9 @@ Contract pinned here (`horsetrack.countries.japan.logger.compare`):
     (set-like); plain set differences, so a missing race's pools are listed too.
   - `snapshots_ours`, `snapshots_theirs`: `{(race_id, pool): distinct snapshot_utc count}`.
   - `compared`: their price rows (pool-total "__pool__" rows are not in the odds agreement).
-  - `matched`: those with our row of the same race, pool, combination and (normalised)
-    `source_update_utc` captured within 20 s (inclusive) of theirs; the nearest such row is used.
+  - `matched`: those with our row of the same race, pool, combination and the same (normalised)
+    `source_update_utc` (exact equality; null matches null) captured within 20 s (inclusive) of
+    theirs; the nearest such row is used.
   - `equal`: matched rows whose odds, odds_hi (absent == null) and normalised status agree.
   - `mismatches`: the first 20 matched-but-unequal rows in their log order; each has `race_id`,
     `pool`, `combination`, `ours` and `theirs` (the two rows).
@@ -42,6 +43,8 @@ DAY = "2026-11-28"
 T0 = datetime(2026, 11, 28, 5, 0, tzinfo=UTC)  # 14:00 in Tokyo
 POOL = "__pool__"
 MISSING = object()
+# JRA prints its update time to the minute (HH時MM分): both logs carry the same printed value.
+SU0 = T0 - timedelta(minutes=1)
 
 
 def race(no: int, venue: str = "TOK") -> str:
@@ -63,7 +66,7 @@ def price(
     status=MISSING,
     odds_hi=MISSING,
 ) -> dict:
-    """A price row as the log holds it (ISO UTC text)."""
+    """A price row as the log holds it (ISO UTC text); the source update defaults to SU0."""
     row = {
         "snapshot_utc": iso(at),
         "race_id": race(race_no),
@@ -71,14 +74,14 @@ def price(
         "combination": combination,
         "odds": odds,
         "status_raw": ("SCR" if odds is None else "14時00分現在") if status is MISSING else status,
-        "source_update_utc": iso(at - timedelta(seconds=12) if su is MISSING else su),
+        "source_update_utc": iso(SU0 if su is MISSING else su),
     }
     if odds_hi is not MISSING:
         row["odds_hi"] = odds_hi
     return row
 
 
-def total(pool: str, investment: float, *, at: datetime, race_no: int = 11) -> dict:
+def total(pool: str, investment: float, *, at: datetime, race_no: int = 11, su=SU0) -> dict:
     return {
         "snapshot_utc": iso(at),
         "race_id": race(race_no),
@@ -87,7 +90,7 @@ def total(pool: str, investment: float, *, at: datetime, race_no: int = 11) -> d
         "odds": None,
         "investment": investment,
         "status_raw": None,
-        "source_update_utc": iso(at - timedelta(seconds=12)),
+        "source_update_utc": iso(su),
     }
 
 
@@ -100,22 +103,24 @@ POOLS = {
 
 
 def day(race_nos: list[int], captures: int, pools: dict[str, list[str]] = POOLS) -> list[dict]:
-    """A synthetic day: every race and pool in every capture, one minute apart."""
+    """A synthetic day: every race and pool in every capture, one minute apart, each capture
+    showing the page as updated the minute before."""
     rows = []
     for c in range(captures):
         at = T0 + timedelta(minutes=c)
+        su = at - timedelta(minutes=1)
         for r in race_nos:
             for pool, combos in pools.items():
                 for i, combo in enumerate(combos):
                     if pool == "WIN" and combo == "4" and r == race_nos[-1]:
-                        rows.append(price(combo, None, at=at, pool=pool, race_no=r))
+                        rows.append(price(combo, None, at=at, pool=pool, race_no=r, su=su))
                         continue
                     odds = round(1.5 + r + i * 1.7 + c * 0.1, 1)
                     extra = {}
                     if pool in ("PLACE", "QUINELLA_PLACE"):
                         extra["odds_hi"] = round(odds + 0.8, 1)
-                    rows.append(price(combo, odds, at=at, pool=pool, race_no=r, **extra))
-                rows.append(total(pool, 1000.0 * (r + c + 1), at=at, race_no=r))
+                    rows.append(price(combo, odds, at=at, pool=pool, race_no=r, su=su, **extra))
+                rows.append(total(pool, 1000.0 * (r + c + 1), at=at, race_no=r, su=su))
     return rows
 
 
@@ -335,6 +340,41 @@ def test_rows_more_than_20_s_apart_are_not_matched():
     assert result.matched == within + 2
     assert result.equal == within + 1
     assert mismatch_keys(result) == [(race(11), "WIN", "B")]
+
+
+def test_source_updates_must_be_equal_to_match():
+    # Captures within 20 s of each other; only an exactly equal source update (after the day-off
+    # shift) makes a match, however small the difference.
+    su = SU0
+    cases = [  # (combination, our capture offset s, our source update, matched)
+        ("1", 2, su, True),
+        ("2", 2, su + timedelta(seconds=1), False),
+        ("3", 2, su - timedelta(seconds=10), False),
+        ("4", 2, su + timedelta(seconds=20), False),
+        ("5", 2, su + timedelta(minutes=1), False),
+        ("6", -2, su - timedelta(minutes=1), False),
+        ("7", 15, su, True),
+        ("8", 2, None, False),  # null matches only null
+    ]
+    theirs, ours = [], []
+    for i, (combo, off, our_su, _) in enumerate(cases):
+        odds = 3.0 + i
+        theirs.append(price(combo, odds, at=T0, su=su, status=None))
+        ours.append(price(combo, odds, at=T0 + timedelta(seconds=off), su=our_su, status=None))
+    theirs.append(price("9", 4.4, at=T0, su=None, status=None))
+    ours.append(price("9", 4.4, at=T0 + timedelta(seconds=2), su=su, status=None))
+
+    # The nearest capture with a different source update loses to a farther one with the same.
+    theirs.append(price("A", 5.0, at=T0, su=su, status=None))
+    ours.append(price("A", 9.9, at=T0 + timedelta(seconds=1), su=su + timedelta(seconds=5)))
+    ours.append(price("A", 5.0, at=T0 + timedelta(seconds=12), su=su, status=None))
+
+    result = compare_logs(ours, theirs)
+    expected = sum(1 for case in cases if case[3]) + 1
+    assert result.compared == len(cases) + 2
+    assert result.matched == expected
+    assert result.equal == expected
+    assert list(result.mismatches) == []
 
 
 def test_snapshot_counts_per_race_and_pool():
