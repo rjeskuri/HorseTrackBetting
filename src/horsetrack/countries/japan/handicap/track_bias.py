@@ -135,12 +135,15 @@ def fit_bias_prior(
 
 
 def _day_spread(obs: pl.DataFrame, means: dict[tuple, float]) -> tuple[float, float]:
-    """(observation variance, day sd) of each score's deviation from its cell's prior mean over
+    """(observation variance, day sd) of each score's deviation e from its cell's prior mean over
     the history's (day, venue, surface, level) groups, by moments. The observation variance is
-    the pooled within-group variance. The day variance is the mean over groups of d^2 - v0, d the
-    group's mean deviation and v0 its variance with no day effect: a race's places shuffled among
-    its nf finishers, so a level's c scores in that race are drawn without replacement and their
-    sum has variance c (nf - c) / (nf - 1) s2, s2 the race's score variance."""
+    the pooled within-group variance of e. The day variance is the mean over groups of d^2 - v,
+    d the group's mean e and v its variance with no day effect. A level's scores in one race are
+    not independent (a race's places are a permutation), so v is built from races: a race's mean
+    e varies around d with variance lam * w0, w0 = s2 (nf - c) / ((nf - 1) c) for its c scores at
+    the level among nf finishers (the variance of c places drawn without replacement, s2 the
+    race's score variance), and lam, one per level, is fitted from how a group's race means
+    spread around d, which a day effect shared by the group's races leaves untouched."""
     if obs.height == 0:
         return UNIFORM_VAR, MIN_DAY_SD
     prior = [
@@ -153,23 +156,40 @@ def _day_spread(obs: pl.DataFrame, means: dict[tuple, float]) -> tuple[float, fl
         pl.col("e").mean().alias("d"),
         ((pl.col("e") - pl.col("e").mean()) ** 2).sum().alias("ss"),
     )
-    sum_var = (
-        obs.group_by(*key, "race_id")
-        .agg(pl.len().alias("c"), pl.col("nf").first(), pl.col("s2").first())
-        .group_by(key)
-        .agg(
-            (pl.col("c") * (pl.col("nf") - pl.col("c")) / (pl.col("nf") - 1) * pl.col("s2"))
-            .sum()
-            .alias("v")
-        )
-    )
     dof = (groups.get_column("m") - 1).sum()
     noise_var = groups.get_column("ss").sum() / dof if dof > 0 else 0.0
     if not noise_var > 0:
         noise_var = UNIFORM_VAR
+
+    a, w0 = pl.col("c") / pl.col("m"), pl.col("w0")
+    races = (
+        obs.group_by(*key, "race_id")
+        .agg(pl.len().alias("c"), pl.col("e").mean(), pl.col("nf").first(), pl.col("s2").first())
+        .with_columns(
+            (
+                pl.col("s2") * (pl.col("nf") - pl.col("c")) / ((pl.col("nf") - 1) * pl.col("c"))
+            ).alias("w0")
+        )
+        .join(groups.select(*key, "m", "d"), on=key)
+    )
+    by_group = races.group_by(key).agg(
+        ((pl.col("e") - pl.col("d")) ** 2).sum().alias("q"),
+        (w0 * (1 - 2 * a)).sum().alias("q0"),
+        pl.len().alias("r"),
+        (a**2 * w0).sum().alias("v0"),
+        pl.col("d").first(),
+    )
+    by_level = by_group.group_by("factor", "level").agg(
+        pl.col("q").sum(), (pl.col("q0") + pl.col("r") * pl.col("v0")).sum().alias("eq")
+    )
+    lam = by_level.select(
+        "factor",
+        "level",
+        pl.when(pl.col("eq") > 0).then(pl.col("q") / pl.col("eq")).otherwise(1.0).alias("lam"),
+    )
     tau2 = (
-        groups.join(sum_var, on=key)
-        .select((pl.col("d") ** 2 - pl.col("v") / pl.col("m") ** 2).mean())
+        by_group.join(lam, on=["factor", "level"])
+        .select((pl.col("d") ** 2 - pl.col("lam") * pl.col("v0")).mean())
         .item()
     )
     return float(noise_var), max(math.sqrt(max(tau2, 0.0)), MIN_DAY_SD)
