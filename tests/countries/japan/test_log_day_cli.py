@@ -36,6 +36,21 @@ Tier 2 (ticket #130, D3 as amended 2026-11-24: all JRA pools are in scope), with
 - only pages of tier 1 and of the configured tier-2 pools are asked for (the double serves those
   alone).
 
+NAR (ticket #38), `log-day --sources jra,nar` (default: logger.yaml's `sources`):
+- each source runs with its own site, Fetcher and schedule, all at once in one process (see
+  test_schedule_sources.py). `make_fetcher` is called once per source run, with the source key
+  ("jra" or "nar") as its first argument or as `source=`; with none it is JRA's.
+- `--venues` may name venues of either source (jra.yaml or nar.yaml codes); a source none of whose
+  venues is named sends nothing. Without `--venues` each source discovers its own.
+- JRA's log paths are unchanged; NAR's snapshots go to
+  `odds_snapshots/nar/<date>/<VENUE>.jsonl.gz` (odds_log format, `nar:` race ids).
+- Every health line names its source: a venue line is the line above with ` source=<key>` as its
+  last field (after tier2_skipped when present); an ALERT line is
+  `ALERT <date> <venue> source=<key> <reasons>`. Nothing else in JRA's line changes.
+- A block on the NAR host (403/429) stops NAR only: its venues stop as circuit_open (with an
+  ALERT), a block line `<host> <date> ...` names nar.netkeiba.com, and JRA logs its day and
+  writes no block line.
+
 The JRADB double (jradb_double.py) serves a synthetic week through the real Fetcher; its post times
 are moved 20 minutes later here so every race's T-20 window falls in logger.yaml's 20 s window
 (a race off before 09:50 has 5-minute rounds in its window, a true gap alert). Nothing goes to the
@@ -60,7 +75,10 @@ from horsetrack.countries.japan import odds_log
 
 # isort: split
 import jradb_double as dbl
+import nar_double as nd
 from jradb_double import Meeting, World
+from nar_double import NarMeeting, NarWorld
+from thread_clock import ThreadClock
 
 UTC = timezone.utc
 SAT = date(2026, 11, 28)
@@ -71,7 +89,8 @@ HEALTH = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2}) (?P<venue>\S+) snapshots=(?P<snapshots>\d+) rows=(?P<rows>\d+)"
     r" failures=(?P<failures>\d+) wrong_meeting=(?P<wrong_meeting>\d+)"
     r" max_gap_t20_s=(?P<gap>\S+) stopped=(?P<stopped>\S+)"
-    r"(?: tier2_skipped=(?P<tier2_skipped>\d+))?$"  # with logger.yaml's tier2 on (#130)
+    r"(?: tier2_skipped=(?P<tier2_skipped>\d+))?"  # with logger.yaml's tier2 on (#130)
+    r"(?: source=(?P<source>[a-z]+))?$"  # the line's source, last (#38)
 )
 WIN5_SAT = dbl.Win5Day(
     legs=(("TOK", 1), ("KYO", 1), ("NAK", 11), ("HSN", 10), ("TOK", 11)),
@@ -452,3 +471,178 @@ def test_the_default_date_is_today_in_tokyo(monkeypatch, data_dir, late_posts, n
     dates = {line.split()[1] if line.startswith("ALERT") else line.split()[0] for line in lines}
     assert dates == {today.isoformat()}
     assert (paths.logs_dir("japan") / f"log-day-{today.isoformat()}.log").is_file()
+
+
+# ---------------------------------------------------------------- two sources (#38)
+
+SOURCE_LINE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2}) (?P<venue>\S+) snapshots=(?P<snapshots>\d+) rows=(?P<rows>\d+)"
+    r" failures=\d+ wrong_meeting=\d+ max_gap_t20_s=\S+ stopped=(?P<stopped>\S+)"
+    r"(?: tier2_skipped=\d+)? source=(?P<source>[a-z]+)$"
+)
+SOURCE_ALERT = re.compile(
+    r"^ALERT (?P<date>\d{4}-\d{2}-\d{2}) (?P<venue>\S+) source=(?P<source>[a-z]+) (?P<reason>\S.*)$"
+)
+
+
+def nar_saturday() -> NarWorld:
+    """Urawa by day, and a Sonoda nighter racing on past JRA's 16:45 stop."""
+    return NarWorld(
+        {
+            SAT: [
+                NarMeeting("URA", ("13:00", "13:30")),
+                NarMeeting("SON", ("16:50", "17:20"), nighter=True),
+            ]
+        }
+    )
+
+
+def run_with_nar(monkeypatch, world: World, nar_world: NarWorld, *args: str, refuse_from=None):
+    """`horsetrack japan log-day *args` with JRA on the JRADB double and NAR on the NAR double, on
+    a clock with one virtual time per thread (a source on its own thread lives its own day).
+    Returns (result, jra site, nar site)."""
+    mod = importlib.import_module(MODULE)
+    clock = ThreadClock(datetime(2026, 11, 27, 21, 0, tzinfo=UTC))  # 06:00 in Tokyo
+    jra_site = dbl.JradbSite(dict(world.pages))
+    nar_site = nd.NarSite(nar_world, refuse_from=refuse_from)
+
+    def make_fetcher(*a, **k):
+        source = k.get("source", a[0] if a else "jra")
+        assert source in ("jra", "nar"), f"make_fetcher for {source!r}"
+        return dbl.make_fetcher(jra_site) if source == "jra" else nd.make_fetcher(nar_site)
+
+    monkeypatch.setattr(mod, "utc_now", clock.now)
+    monkeypatch.setattr(mod, "sleep", clock.sleep)
+    monkeypatch.setattr(mod, "make_fetcher", make_fetcher)
+    from horsetrack.cli import app
+
+    result = CliRunner().invoke(app, ["japan", "log-day", *args])
+    assert clock.errors == [], clock.errors
+    # a usage error exits 2 as an alert does: the health log tells the two apart
+    assert health_file().is_file(), f"log-day wrote no health line: {plain(result.output)}"
+    return result, jra_site, nar_site
+
+
+def source_health(day: str) -> tuple[dict[str, list[dict]], list[dict]]:
+    """health.log's lines for `day`, each required to name its source."""
+    lines, alerts = {}, []
+    for line in health_file().read_text(encoding="utf-8").splitlines():
+        m = (SOURCE_ALERT if line.startswith("ALERT") else SOURCE_LINE).match(line)
+        assert m, f"a health line that does not name its source as pinned: {line!r}"
+        if m["date"] == day:
+            if line.startswith("ALERT"):
+                alerts.append(m.groupdict())
+            else:
+                lines.setdefault(m["venue"], []).append(m.groupdict())
+    return lines, alerts
+
+
+def nar_log(data_dir: Path, day: date, venue: str) -> Path:
+    return data_dir / "odds_snapshots" / "nar" / day.isoformat() / f"{venue}.jsonl.gz"
+
+
+@pytest.mark.parametrize(
+    "args, jra_venues, nar_venues, empty",
+    [
+        (["--sources", "jra,nar"], {"TOK"}, {"URA", "SON"}, set()),
+        (["--sources", "jra,nar", "--venues", "TOK,URA,FUN"], {"TOK"}, {"URA", "FUN"}, {"FUN"}),
+        (["--sources", "nar"], set(), {"URA", "SON"}, set()),
+    ],
+    ids=["both-discovered", "both-venues-given", "nar-only"],
+)
+def test_health_lines_name_the_source(
+    monkeypatch, data_dir, late_posts, args, jra_venues, nar_venues, empty
+):
+    world = World({SAT: [Meeting("TOK", 1)]}, tier2=tier2_config()["pools"])
+    nar_world = nar_saturday()
+
+    result, jra_site, nar_site = run_with_nar(
+        monkeypatch, world, nar_world, "--date", SAT.isoformat(), *args
+    )
+
+    out = plain(result.output)
+    # 2 with the venue that logged nothing; otherwise NAR's own gap alerts are not pinned here
+    assert result.exit_code == 2 if empty else result.exit_code in (0, 2), out
+    lines, alerts = source_health(SAT.isoformat())
+    assert sorted(lines) == sorted(jra_venues | nar_venues), out
+    for venue, got in lines.items():
+        assert len(got) == 1, (venue, got)
+        assert got[0]["source"] == ("jra" if venue in jra_venues else "nar"), got[0]
+    for alert in alerts:
+        assert alert["source"] == ("jra" if alert["venue"] in jra_venues else "nar"), alert
+    assert {a["venue"] for a in alerts} >= empty
+    assert not {a["venue"] for a in alerts} & jra_venues, alerts
+
+    # JRA: its log where it always was, its line counting what that log holds.
+    tok = paths.odds_snapshot_path("jra", SAT.isoformat(), "TOK")
+    if jra_venues:
+        assert jra_site.seen and all(s.served for s in jra_site.seen)
+        rows = [r for r in odds_log.read_rows(tok) if r["pool"] in ALL_POOLS]
+        assert rows and {r["race_id"] for r in rows} == {"jra:2026-11-28:TOK:01"}
+        assert int(lines["TOK"][0]["rows"]) == len(rows)
+    else:
+        assert jra_site.seen == [], "a NAR-only log-day sent a request to JRA"
+        assert not tok.exists()
+
+    # NAR: odds_snapshots/nar/<date>/<VENUE>.jsonl.gz, each board as the double printed it.
+    assert nar_site.seen and all(s.served for s in nar_site.seen), nar_site.seen[:3]
+    assert {(s.method, s.host) for s in nar_site.seen} == {("GET", nd.HOST)}
+    for venue in nar_venues - empty:
+        path = nar_log(data_dir, SAT, venue)
+        members = list(odds_log.iter_members(path))
+        rows = [row for member in members for row in member]
+        assert rows, f"{venue}: nothing logged at {path}"
+        assert int(lines[venue][0]["snapshots"]) == len(members), venue
+        assert int(lines[venue][0]["rows"]) == len(rows), venue
+        races = {r.race_id: r for r in nar_world.races(SAT, venue)}
+        boards: dict[tuple, set] = {}
+        for row in rows:
+            assert row["race_id"] in races, row["race_id"]
+            key = (row["race_id"], row["snapshot_utc"], row["pool"])
+            boards.setdefault(key, set()).add(
+                (row["combination"], row.get("odds"), row.get("odds_hi"), row.get("investment"))
+            )
+        for (race_id, _, pool), board in boards.items():
+            assert board == races[race_id].board(pool), (venue, race_id, pool)
+        assert not paths.odds_snapshot_path("jra", SAT.isoformat(), venue).exists(), venue
+    for venue in empty:
+        assert int(lines[venue][0]["rows"]) == 0, venue
+        assert not nar_log(data_dir, SAT, venue).exists(), venue
+
+
+def test_a_block_on_the_nar_host_stops_nar_only(monkeypatch, data_dir, late_posts):
+    world = World({SAT: [Meeting("TOK", 1)]}, tier2=tier2_config()["pools"])
+    args = ["--date", SAT.isoformat(), "--sources", "jra,nar", "--venues", "TOK,URA,SON"]
+
+    # nar.netkeiba.com answers 403 from its 4th request on
+    result, jra_site, nar_site = run_with_nar(
+        monkeypatch, world, nar_saturday(), *args, refuse_from=4
+    )
+
+    out = plain(result.output)
+    assert result.exit_code == 2, out
+    lines, alerts = source_health(SAT.isoformat())
+    assert sorted(lines) == ["SON", "TOK", "URA"], out
+    tok = lines["TOK"][0]
+    assert (tok["stopped"], tok["source"]) == ("ended", "jra"), tok
+    assert int(tok["rows"]) > 0
+    assert jra_site.seen and all(s.served for s in jra_site.seen)
+    for venue in ("URA", "SON"):
+        assert (lines[venue][0]["stopped"], lines[venue][0]["source"]) == ("circuit_open", "nar")
+    assert {(a["venue"], a["source"]) for a in alerts} == {("URA", "nar"), ("SON", "nar")}
+
+    # After the 403, nothing but refusals: the breaker held (a resume, if any, was refused too).
+    statuses = [s.status for s in nar_site.seen]
+    first = statuses.index(403)
+    assert set(statuses[first:]) == {403} and 1 <= len(statuses[first:]) <= 2, statuses
+
+    # The block is NAR's alone: a block line for its host and today, none for JRA's.
+    day = SAT.isoformat()
+    marked = [
+        line.split()[:2]
+        for path in paths.logs_dir("japan").iterdir()
+        if path.is_file() and path.name != "health.log"
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+    ]
+    assert [nd.HOST, day] in marked, "no block line for nar.netkeiba.com today"
+    assert [dbl.HOST, day] not in marked, "a block on the NAR host was recorded for JRA's host"
