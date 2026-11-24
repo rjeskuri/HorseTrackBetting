@@ -18,6 +18,13 @@ Pinned semantics, derived here by brute force rather than from the code under te
 - 'label_only' tables raise LabelOnlyTable and 'current_value' tables CurrentValueTable from both
   `read_asof` and `asof_join`; `read_label` returns a label-only table whole. A table with no rule
   raises NoAvailabilityRule from all three.
+- label columns: a 'column' or 'offset' rule may list `label_columns` (a tuple, default ()), the
+  table's result or look-ahead columns (odds_timeseries' `dividend`, `is_refund`,
+  `is_final_capture`). `read_asof` and `asof_join` never return them: they are dropped from the
+  result, not nulled. A listed column the table does not have is a ValueError at query time. A
+  'label_only' or 'current_value' rule with label_columns, or label_columns that list the rule's
+  own `column` or `anchor`, is a ValueError. `read_label` still refuses every table that is not
+  'label_only', label columns or not.
 
 YAML format of `load_availability` (pinned below):
 
@@ -27,9 +34,10 @@ YAML format of `load_availability` (pinned below):
         column: <name>        # kind column only, required
         anchor: <name>        # kind offset only, required
         offset_min: <number>  # kind offset only, required; minutes, int or float
+        label_columns: [<name>, ...]  # kinds column and offset only, optional
 
 A key that does not belong to the entry's kind, an unknown key, an unknown kind or a missing
-required key is a ValueError.
+required key is a ValueError, and so is a `label_columns` that is not a list of strings.
 """
 
 from __future__ import annotations
@@ -479,6 +487,240 @@ def test_board_at_t_is_the_latest_capture_fetched_by_t(con):
     assert all(instant(v) <= instant(at(9, 20, 10)) for v in view["fetched_utc"])
 
 
+# --- label columns: result and look-ahead columns never reach a view ----------------------------
+
+ODDS_LABELS = ("dividend", "is_refund", "is_final_capture")
+
+
+def test_board_at_t_carries_no_payout_or_final_capture_columns(con):
+    """odds_timeseries (logger/compact.py SCHEMA) puts the result on every capture: `dividend`
+    and `is_refund`, and `is_final_capture` worked out from the whole day's log. Listed as label
+    columns, none of them is on the board at t, while the prices still are."""
+    race = "jra:2026-11-22:TOK:05"
+    rows = []
+    payout = {"1": 280.0, "2": 0.0, "3": 0.0}  # the result: combination 1 won
+
+    def capture(snap, fetched, prices, final):
+        for combination, odds in prices.items():
+            rows.append(
+                {
+                    "race_id": race,
+                    "pool": "WIN",
+                    "combination": combination,
+                    "snapshot_utc": snap,
+                    "fetched_utc": fetched,
+                    "odds": odds,
+                    "investment": 1000.0 * odds,
+                    "is_final_capture": final,
+                    "dividend": payout[combination],
+                    "is_refund": combination == "3",
+                }
+            )
+
+    capture(at(9, 0), at(9, 0, 5), {"1": 3.0, "2": 4.0, "3": 9.0}, False)
+    capture(at(9, 10), at(9, 10, 4), {"1": 2.8, "2": 4.4, "3": 8.0}, True)
+    frame = pd.DataFrame(rows)
+    frame["snapshot_utc"] = utc_series(frame["snapshot_utc"])
+    frame["fetched_utc"] = utc_series(frame["fetched_utc"])
+    put(con, "odds_timeseries", frame)
+    rules = {
+        "odds_timeseries": Availability(
+            "odds_timeseries", "column", column="fetched_utc", label_columns=ODDS_LABELS
+        )
+    }
+    assert rules["odds_timeseries"].label_columns == ODDS_LABELS
+
+    keys = pd.DataFrame(
+        {
+            "race_id": [race] * 3,
+            "pool": ["WIN"] * 3,
+            "combination": ["1", "2", "3"],
+            "t_utc": utc_series([at(9, 5), at(9, 10, 4), at(8)]),
+        }
+    )
+    got = asof_join(
+        keys, "odds_timeseries", on=["race_id", "pool", "combination"], rules=rules, con=con
+    ).reset_index(drop=True)
+    for column in ODDS_LABELS:
+        assert column not in got.columns, f"{column} is on the board at t"
+    assert {"odds", "investment", "snapshot_utc", "fetched_utc"} <= set(got.columns)
+    assert list(got["combination"]) == ["1", "2", "3"]
+    assert float(got["odds"][0]) == 3.0  # the 09:00 capture at 09:05
+    assert float(got["odds"][1]) == 4.4  # the 09:10 capture, fetched exactly at t
+    assert pd.isna(got["odds"][2])  # nothing fetched by 08:00
+
+    view = read_asof(con, "odds_timeseries", at(9, 5), rules=rules)
+    assert len(view) == 3
+    assert set(view.columns) == set(frame.columns) - set(ODDS_LABELS)
+    assert sorted(float(v) for v in view["odds"]) == [3.0, 4.0, 9.0]
+
+
+LABEL_SETS = [
+    pytest.param(("payout",), id="one-label"),
+    pytest.param(("payout", "settled", "is_last"), id="three-labels"),
+]
+
+
+@pytest.mark.parametrize("labels", LABEL_SETS)
+@pytest.mark.parametrize(("table", "kind", "stamp", "offset_min"), RULE_CASES)
+def test_label_columns_never_reach_a_view_and_the_rest_is_point_in_time(
+    con, table, kind, stamp, offset_min, labels
+):
+    rng = np.random.default_rng(11)
+    frame = _history(rng, stamp, n=50)
+    n = len(frame)
+    frame["payout"] = rng.uniform(100, 5000, n)  # what the result paid: known only after it
+    frame["settled"] = rng.integers(0, 2, n).astype(bool)
+    frame["is_last"] = rng.integers(0, 2, n).astype(bool)
+    put(con, table, frame)
+    base = _rule(table, kind, stamp, offset_min)
+    rule = Availability(
+        table, kind, column=base.column, anchor=base.anchor, offset=base.offset,
+        label_columns=labels,
+    )  # fmt: skip
+    rules = {table: rule}
+    shift = timedelta(minutes=offset_min or 0.0)
+
+    def avail(row):
+        return None if pd.isna(row[stamp]) else row[stamp].to_pydatetime() + shift
+
+    kept = set(frame.columns) - set(labels)
+    for t in [at(5), at(9, 30), at(12), at(23, 59)]:
+        view = read_asof(con, table, t, rules=rules)
+        assert set(view.columns) == kept, f"t={t.isoformat()}"
+        expected = sorted(
+            int(r.row_id) for _, r in frame.iterrows() if avail(r) is not None and avail(r) <= t
+        )
+        assert ids(view) == expected, f"t={t.isoformat()}"
+
+    n_keys = 25
+    keys = pd.DataFrame(
+        {
+            "race_id": [f"jra:2026-11-22:TOK:{1 + int(r):02d}" for r in rng.integers(0, 7, n_keys)],
+            "horse_no": rng.integers(1, 10, n_keys).astype("int64"),
+            "t_utc": utc_series(
+                DAY + timedelta(hours=5, minutes=int(m)) for m in rng.integers(0, 720, n_keys)
+            ),
+        }
+    )
+    on = ["race_id", "horse_no"]
+    expected = _brute_force(frame, keys, on, "t_utc", avail)
+    got = asof_join(keys, table, on=on, rules=rules, con=con).reset_index(drop=True)
+    assert set(got.columns) == set(keys.columns) | (kept - set(on))
+    assert any(e is not None for e in expected)
+    by_id = frame.set_index("row_id")["value"]
+    for j, want in enumerate(expected):
+        if want is None:
+            assert pd.isna(got["row_id"].iloc[j]), f"key {j}"
+        else:
+            assert int(got["row_id"].iloc[j]) == want, f"key {j}"
+            assert got["value"].iloc[j] == pytest.approx(by_id[want])
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        pytest.param(("dividnd",), id="typo"),
+        pytest.param(("dividend", "payout_yen"), id="one-real-one-missing"),
+    ],
+)
+def test_a_label_column_the_table_lacks_is_an_error(con, labels):
+    put(
+        con,
+        "odds_timeseries",
+        pd.DataFrame(
+            {
+                "race_id": ["jra:2026-11-22:TOK:01"],
+                "fetched_utc": utc_series([at(9)]),
+                "odds": [2.5],
+                "dividend": [250.0],
+            }
+        ),
+    )
+    rules = {
+        "odds_timeseries": Availability(
+            "odds_timeseries", "column", column="fetched_utc", label_columns=labels
+        )
+    }
+    keys = pd.DataFrame({"race_id": ["jra:2026-11-22:TOK:01"], "t_utc": utc_series([at(10)])})
+    with pytest.raises(ValueError):
+        read_asof(con, "odds_timeseries", at(10), rules=rules)
+    with pytest.raises(ValueError):
+        asof_join(keys, "odds_timeseries", on=["race_id"], rules=rules, con=con)
+
+
+def test_read_label_still_refuses_a_table_with_label_columns(con):
+    put(
+        con,
+        "odds_timeseries",
+        pd.DataFrame({"fetched_utc": utc_series([at(9)]), "dividend": [250.0]}),
+    )
+    rules = {
+        "odds_timeseries": Availability(
+            "odds_timeseries", "column", column="fetched_utc", label_columns=("dividend",)
+        )
+    }
+    with pytest.raises(ValueError):
+        read_label(con, "odds_timeseries", rules=rules)
+
+
+def test_availability_label_columns_default_and_refusals():
+    assert Availability("runners", "column", column="post_utc").label_columns == ()
+    off = Availability(
+        "runners", "offset", anchor="post_utc", offset=timedelta(minutes=20),
+        label_columns=("finish_pos", "finish_time_s"),
+    )  # fmt: skip
+    assert off.label_columns == ("finish_pos", "finish_time_s")
+    bad = [
+        {"kind": "label_only", "label_columns": ("dividend",)},
+        {"kind": "current_value", "label_columns": ("career_wins",)},
+        {"kind": "column", "column": "fetched_utc", "label_columns": ("fetched_utc",)},
+        {"kind": "column", "column": "fetched_utc", "label_columns": ("odds", "fetched_utc")},
+        {
+            "kind": "offset",
+            "anchor": "post_utc",
+            "offset": timedelta(minutes=20),
+            "label_columns": ("post_utc",),
+        },
+    ]
+    for fields in bad:
+        with pytest.raises(ValueError):
+            Availability("t", **fields)
+
+
+# --- existing refusals ---------------------------------------------------------------------------
+
+
+def test_a_naive_availability_column_is_refused(con):
+    put(
+        con,
+        "odds_timeseries",
+        pd.DataFrame(
+            {
+                "race_id": ["jra:2026-11-22:TOK:01"],
+                "fetched_utc": pd.to_datetime(["2026-11-22 09:00:00"]),  # naive TIMESTAMP
+                "odds": [2.5],
+            }
+        ),
+    )
+    rules = {"odds_timeseries": Availability("odds_timeseries", "column", column="fetched_utc")}
+    keys = pd.DataFrame({"race_id": ["jra:2026-11-22:TOK:01"], "t_utc": utc_series([at(10)])})
+    with pytest.raises(ValueError):
+        read_asof(con, "odds_timeseries", at(10), rules=rules)
+    with pytest.raises(ValueError):
+        asof_join(keys, "odds_timeseries", on=["race_id"], rules=rules, con=con)
+
+
+def test_asof_join_refuses_naive_key_times_and_clashing_columns(con):
+    rules = _three_releases(con)
+    naive = pd.DataFrame({"horse_id": ["H1"], "t_utc": pd.to_datetime(["2026-11-22 10:30:00"])})
+    with pytest.raises(ValueError):
+        asof_join(naive, "jrdb_pre_race", on=["horse_id"], rules=rules, con=con)
+    clash = pd.DataFrame({"horse_id": ["H1"], "rating": [1.0], "t_utc": utc_series([at(10, 30)])})
+    with pytest.raises(ValueError):
+        asof_join(clash, "jrdb_pre_race", on=["horse_id"], rules=rules, con=con)
+
+
 # --- load_availability ---------------------------------------------------------------------------
 
 GOOD_YAML = """\
@@ -558,6 +800,81 @@ def test_rules_loaded_from_yaml_drive_the_views(tmp_path: Path, con):
     ],
 )
 def test_load_availability_refuses_a_malformed_entry(tmp_path: Path, entry: str):
+    _refuse_entry(tmp_path, entry)
+
+
+def test_load_availability_reads_label_columns(tmp_path: Path, con):
+    path = tmp_path / "availability.yaml"
+    path.write_text(
+        "tables:\n"
+        "  odds_timeseries:\n"
+        "    kind: column\n"
+        "    column: fetched_utc\n"
+        "    label_columns: [dividend, is_refund, is_final_capture]\n"
+        "  runners:\n"
+        "    kind: offset\n"
+        "    anchor: post_utc\n"
+        "    offset_min: 0\n"
+        "    label_columns:\n"
+        "      - finish_pos\n"
+        "  horse_pedigree:\n"
+        "    kind: column\n"
+        "    column: scraped_utc\n",
+        encoding="utf-8",
+    )
+    rules = load_availability("japan", path=path)
+    assert rules["odds_timeseries"].label_columns == ODDS_LABELS
+    assert isinstance(rules["odds_timeseries"].label_columns, tuple)
+    assert rules["runners"].label_columns == ("finish_pos",)
+    assert rules["horse_pedigree"].label_columns == ()
+
+    put(
+        con,
+        "runners",
+        pd.DataFrame(
+            {"row_id": [1], "post_utc": utc_series([at(3)]), "draw": [4], "finish_pos": [1]}
+        ),
+    )
+    view = read_asof(con, "runners", at(3), rules=rules)
+    assert ids(view) == [1] and set(view.columns) == {"row_id", "post_utc", "draw"}
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param(
+            "kind: column\n    column: post_utc\n    label_columns: finish_pos", id="a-string"
+        ),
+        pytest.param("kind: column\n    column: post_utc\n    label_columns:", id="null"),
+        pytest.param(
+            "kind: column\n    column: post_utc\n    label_columns: [1, 2]", id="not-strings"
+        ),
+        pytest.param(
+            "kind: column\n    column: post_utc\n    label_columns: [finish_pos, [x]]",
+            id="nested-list",
+        ),
+        pytest.param(
+            "kind: column\n    column: post_utc\n    label_columns: {finish_pos: 1}",
+            id="a-mapping",
+        ),
+        pytest.param("kind: label_only\n    label_columns: [finish_pos]", id="on-label_only"),
+        pytest.param("kind: current_value\n    label_columns: [finish_pos]", id="on-current_value"),
+        pytest.param(
+            "kind: column\n    column: post_utc\n    label_columns: [post_utc]",
+            id="lists-the-column",
+        ),
+        pytest.param(
+            "kind: offset\n    anchor: post_utc\n    offset_min: 20\n"
+            "    label_columns: [finish_pos, post_utc]",
+            id="lists-the-anchor",
+        ),
+    ],
+)
+def test_load_availability_refuses_malformed_label_columns(tmp_path: Path, entry: str):
+    _refuse_entry(tmp_path, entry)
+
+
+def _refuse_entry(tmp_path: Path, entry: str) -> None:
     path = tmp_path / "availability.yaml"
     path.write_text(
         "tables:\n  dividends:\n    kind: label_only\n  runners:\n    " + entry + "\n",

@@ -2,9 +2,11 @@
 
 Every table that enters a view needs an availability rule: a `column` rule (a row is available at
 `row[column]`), an `offset` rule (at `row[anchor] + offset`), `label_only` (never in a view at t,
-only through `read_label`) or `current_value` (never in a view, never as a label). A row whose
-availability time is null is never available. A table without a rule is refused. The per-table
-rules are owner decisions, kept in `countries/<country>/config/availability.yaml`.
+only through `read_label`) or `current_value` (never in a view, never as a label). A `column`
+or `offset` rule may list `label_columns`, the table's result or look-ahead columns, which a view
+never returns. A row whose availability time is null is never available. A table without a rule is
+refused. The per-table rules are owner decisions, kept in
+`countries/<country>/config/availability.yaml`.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import yaml
 from horsetrack.core.config import load_country_yaml
 
 KINDS: tuple[str, ...] = ("column", "offset", "label_only", "current_value")
+_VIEW_KINDS = ("column", "offset")  # the kinds that enter a view, and may list label columns
 # the YAML keys each kind takes besides `kind`; all of them are required
 _KEYS: dict[str, frozenset[str]] = {
     "column": frozenset({"column"}),
@@ -53,6 +56,8 @@ class Availability:
     column: str | None = None
     anchor: str | None = None
     offset: timedelta | None = None
+    # result or look-ahead columns: never returned by a view (column and offset rules only)
+    label_columns: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -74,6 +79,14 @@ class Availability:
             )
         if self.offset is not None and not isinstance(self.offset, timedelta):
             raise ValueError(f"{self.table}: offset must be a timedelta, got {self.offset!r}")
+        labels = self.label_columns
+        if not isinstance(labels, tuple) or not all(isinstance(c, str) and c for c in labels):
+            raise ValueError(f"{self.table}: label_columns must be a tuple of names: {labels!r}")
+        if labels and self.kind not in _VIEW_KINDS:
+            raise ValueError(f"{self.table}: a {self.kind!r} rule takes no label_columns")
+        stamp = self.column if self.kind == "column" else self.anchor
+        if stamp is not None and stamp in labels:
+            raise ValueError(f"{self.table}: label_columns list the rule's time column {stamp!r}")
 
 
 def _entry(table: str, raw: Any) -> Availability:
@@ -82,14 +95,18 @@ def _entry(table: str, raw: Any) -> Availability:
     kind = raw.get("kind")
     if kind not in KINDS:
         raise ValueError(f"availability of {table!r}: kind must be one of {KINDS}, got {kind!r}")
-    keys = set(raw) - {"kind"}
+    keys = set(raw) - {"kind", "label_columns"}
     if keys != _KEYS[kind]:
         raise ValueError(
             f"availability of {table!r}: kind {kind!r} takes {sorted(_KEYS[kind])}, "
             f"got {sorted(keys)}"
         )
+    if "label_columns" in raw and kind not in _VIEW_KINDS:
+        raise ValueError(f"availability of {table!r}: kind {kind!r} takes no label_columns")
+    labels = _labels(table, raw.get("label_columns", []))
     if kind == "column":
-        return Availability(table, kind, column=_name(table, "column", raw["column"]))
+        column = _name(table, "column", raw["column"])
+        return Availability(table, kind, column=column, label_columns=labels)
     if kind == "offset":
         minutes = raw["offset_min"]
         if isinstance(minutes, bool) or not isinstance(minutes, int | float):
@@ -99,8 +116,15 @@ def _entry(table: str, raw: Any) -> Availability:
             kind,
             anchor=_name(table, "anchor", raw["anchor"]),
             offset=timedelta(minutes=minutes),
+            label_columns=labels,
         )
     return Availability(table, kind)
+
+
+def _labels(table: str, value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"availability of {table!r}: label_columns must be a list, got {value!r}")
+    return tuple(_name(table, "label_columns", item) for item in value)
 
 
 def _name(table: str, key: str, value: Any) -> str:
@@ -156,6 +180,16 @@ def _available_sql(con: duckdb.DuckDBPyConnection, rule: Availability) -> tuple[
     return f"({_ident(stamp)} + ?)", [rule.offset]
 
 
+def _view_columns(con, rule: Availability) -> list[str]:
+    """The table's columns a view returns: all but the rule's label columns, each of which the
+    table must have (a misspelt one would otherwise let the real column through)."""
+    columns = list(con.sql(f"SELECT * FROM {_ident(rule.table)} LIMIT 0").columns)
+    missing = [c for c in rule.label_columns if c not in columns]
+    if missing:
+        raise ValueError(f"table {rule.table!r} has no label columns {missing}")
+    return [c for c in columns if c not in rule.label_columns]
+
+
 def _fetch_utc(con, sql: str, params: list[Any]) -> pd.DataFrame:
     """The query's frame, with timezone-aware columns in UTC (DuckDB hands them back in the
     session's time zone)."""
@@ -175,8 +209,10 @@ def read_asof(con, table: str, at_utc: datetime, *, rules) -> pd.DataFrame:
     """Every row of `table` available at or before `at_utc` (the whole history, not the latest)."""
     rule = _view_rule(table, rules)
     _aware(at_utc)
+    columns = _view_columns(con, rule)
     available, params = _available_sql(con, rule)
-    sql = f"SELECT * FROM {_ident(table)} WHERE {available} <= ?"
+    picked = ", ".join(_ident(c) for c in columns)
+    sql = f"SELECT {picked} FROM {_ident(table)} WHERE {available} <= ?"
     return _fetch_utc(con, sql, [*params, at_utc])
 
 
@@ -191,11 +227,15 @@ def asof_join(
 ) -> pd.DataFrame:
     """One row per key row, in the keys' order, with the keys' columns unchanged plus the columns
     of the latest `table` row matching on `on` and available at or before the key's `t_col`
-    (an ASOF LEFT JOIN: a key with no such row keeps null table columns)."""
+    (an ASOF LEFT JOIN: a key with no such row keeps null table columns). The rule's label
+    columns are left out, and joining on one is a ValueError."""
     rule = _view_rule(table, rules)
     if not isinstance(keys[t_col].dtype, pd.DatetimeTZDtype):
         raise ValueError(f"keys[{t_col!r}] must be timezone-aware, got {keys[t_col].dtype}")
-    columns = list(con.sql(f"SELECT * FROM {_ident(table)} LIMIT 0").columns)
+    joined = [c for c in on if c in rule.label_columns]
+    if joined:
+        raise ValueError(f"table {table!r}: cannot join on label columns {joined}")
+    columns = _view_columns(con, rule)
     added = [c for c in columns if c not in on]
     clash = [c for c in added if c in keys.columns or c in (_POS, _AVAIL)]
     if clash:
