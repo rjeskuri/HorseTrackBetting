@@ -229,3 +229,126 @@ def test_a_row_count_difference_is_reported(tmp_path, n_a, n_b):
     assert diff.equal is False
     assert (diff.rows_a, diff.rows_b) == (n_a, n_b)
     assert not diff.missing_columns and not diff.extra_columns
+
+
+# --- prepare_work_dir exposes the upcoming cards (ticket #210 fix round) ---------------------
+#
+# The JRDB build (`jrdb/tables.py::_store`) also reads `processed/jra/upcoming/<meeting>/` when it
+# holds `races.parquet` and `racecard_runners.parquet`. For source jra the work dir therefore links
+# `processed/jra/upcoming` to the data dir's folder (when it exists) while `processed/jra` itself
+# stays a real folder inside the work dir, so the build writes only there.
+
+MEETINGS = ("2026_0405_tokyo", "2026_1128_kyoto", "2026_1129_hanshin")
+
+
+def _data_dir(tmp_path: Path, source: str, meetings: tuple[str, ...] | None) -> Path:
+    """A minimal data dir: a manifest for `source` and, for jra, upcoming meeting folders."""
+    data = tmp_path / "data"
+    (data / "raw" / source).mkdir(parents=True)
+    (data / "raw" / source / "manifest.sqlite").write_bytes(b"synthetic")
+    (data / "processed" / source).mkdir(parents=True)
+    for meeting in meetings or ():
+        folder = data / "processed" / "jra" / "upcoming" / meeting
+        folder.mkdir(parents=True)
+        for name in ("races.parquet", "racecard_runners.parquet"):
+            _write(folder / name, _rows(3), SCHEMA)
+    return data
+
+
+@pytest.mark.parametrize("meetings", [MEETINGS[:1], MEETINGS])
+def test_jra_work_dir_shows_the_upcoming_meetings_and_keeps_processed_jra_its_own(
+    tmp_path, meetings
+):
+    data = _data_dir(tmp_path, "jra", meetings)
+    work = tmp_path / "work"
+
+    _script().prepare_work_dir(data, work, "jra")
+
+    upcoming = work / "processed" / "jra" / "upcoming"
+    assert upcoming.is_dir()
+    assert sorted(p.name for p in upcoming.iterdir()) == sorted(meetings)
+    for meeting in meetings:
+        for name in ("races.parquet", "racecard_runners.parquet"):
+            seen = upcoming / meeting / name
+            assert (
+                seen.read_bytes() == (data / "processed/jra/upcoming" / meeting / name).read_bytes()
+            )
+    # the build writes into processed/jra: that folder must be the work dir's own
+    jra = work / "processed" / "jra"
+    assert jra.resolve().is_relative_to(work.resolve())
+    assert not jra.resolve().is_relative_to(data.resolve())
+    assert not jra.is_symlink()
+    assert not (work / "processed").is_symlink()
+    # a file the build writes there does not reach the data dir
+    (jra / "races.parquet").write_bytes(b"built")
+    assert not (data / "processed" / "jra" / "races.parquet").exists()
+
+
+def test_jra_work_dir_without_upcoming_in_data_links_nothing(tmp_path):
+    data = _data_dir(tmp_path, "jra", None)
+    work = tmp_path / "work"
+
+    _script().prepare_work_dir(data, work, "jra")
+
+    assert not (work / "processed" / "jra" / "upcoming").exists()
+    assert not (work / "processed" / "jra" / "upcoming").is_symlink()
+    assert (work / "processed").is_dir()
+
+
+def test_non_jra_work_dir_links_no_upcoming(tmp_path):
+    data = _data_dir(tmp_path, "nar", None)
+    folder = data / "processed" / "jra" / "upcoming" / MEETINGS[0]
+    folder.mkdir(parents=True)
+    _write(folder / "races.parquet", _rows(3), SCHEMA)
+    work = tmp_path / "work"
+
+    _script().prepare_work_dir(data, work, "nar")
+
+    assert not (work / "processed" / "jra").exists()
+    assert not any(p.name == "upcoming" for p in (work / "processed").rglob("*"))
+
+
+def test_a_build_writing_through_the_upcoming_link_is_caught_by_the_data_dir_guard(
+    tmp_path, monkeypatch, capsys
+):
+    """The link must not weaken the guard: the fingerprint covers processed/jra incl. upcoming."""
+    data = _data_dir(tmp_path, "jra", MEETINGS)
+    work = tmp_path / "work"
+    script = _script()
+    saw = {}
+
+    def build(work_dir, source, workers):
+        upcoming = work_dir / "processed" / "jra" / "upcoming"
+        saw["meetings"] = sorted(p.name for p in upcoming.iterdir())
+        (upcoming / MEETINGS[0] / "stray.parquet").write_bytes(b"x")  # writes into the data dir
+        return []
+
+    monkeypatch.setattr(script, "rebuild", build)
+    monkeypatch.setattr(script, "compare_stores", lambda *a, **k: ([], True))
+
+    code = script.main(["--source", "jra", "--data-dir", str(data), "--work-dir", str(work)])
+
+    assert saw["meetings"] == sorted(MEETINGS)
+    assert code == 2
+    assert "data dir changed" in capsys.readouterr().out
+
+
+def test_a_build_that_only_reads_upcoming_leaves_the_data_dir_unchanged(tmp_path, monkeypatch):
+    data = _data_dir(tmp_path, "jra", MEETINGS)
+    work = tmp_path / "work"
+    script = _script()
+
+    def build(work_dir, source, workers):
+        upcoming = work_dir / "processed" / "jra" / "upcoming"
+        for folder in sorted(upcoming.iterdir()):
+            pq.read_table(folder / "races.parquet")
+        (work_dir / "processed" / "jra" / "jrdb_pre_race.parquet").write_bytes(b"built")
+        return []
+
+    monkeypatch.setattr(script, "rebuild", build)
+    monkeypatch.setattr(script, "compare_stores", lambda *a, **k: ([], True))
+
+    code = script.main(["--source", "jra", "--data-dir", str(data), "--work-dir", str(work)])
+
+    assert code == 0
+    assert not (data / "processed" / "jra" / "jrdb_pre_race.parquet").exists()

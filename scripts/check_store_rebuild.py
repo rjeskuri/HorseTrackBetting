@@ -8,11 +8,12 @@ new temporary one; a given one must be empty) laid out like a data dir: `raw/<so
 folder holding a copy of the manifest and a symlink to each page folder, so the parse cache, the
 tables and the reports all land in the work dir and opening the manifest creates no -shm file
 beside the original. For jra the JRDB build runs too, on `raw/jrdb` and `jrdb/specs` linked the
-same way. Then every table of `processed/<source>` is compared with its rebuild by
-`compare_tables`: row count, column set, Arrow types and a content hash of the rows sorted by the
-table's key (`schemas.TABLES[name].sort_by`). A work dir inside the data dir (or the reverse) is
-refused, and the data dir's `raw/<source>`, `processed/<source>` (and the JRDB folders) are
-fingerprinted (path, size, mtime) before and after: a change fails the run.
+same way, and `processed/jra/upcoming` (the cards the JRDB build joins) is linked when the data dir
+has it, inside a real `processed/jra` folder. Then every table of `processed/<source>` is compared
+with its rebuild by `compare_tables`: row count, column set, Arrow types and a content hash of the
+rows sorted by the table's key (`schemas.TABLES[name].sort_by`). A work dir inside the data dir (or
+the reverse) is refused, and the data dir's `raw/<source>`, `processed/<source>` (and the JRDB
+folders) are fingerprinted (path, size, mtime) before and after: a change fails the run.
 
 Prints one line per table and no row contents; jrdb_* lines carry no row counts (licensed data).
 `--compare-only` compares an earlier run's work dir again without building. Exit status: 0 when
@@ -235,6 +236,10 @@ def prepare_work_dir(data: Path, work: Path, source: str) -> None:
         (work / rel).mkdir(parents=True, exist_ok=True)
         if _inside((work / rel).resolve(), data):
             raise Refused(f"{work / rel} resolves into the data dir")
+    upcoming = data / "processed" / "jra" / "upcoming"
+    if source == "jra" and upcoming.is_dir():  # the JRDB build also joins the upcoming cards
+        (work / "processed" / "jra").mkdir(parents=True, exist_ok=True)  # a real folder: it writes
+        (work / "processed" / "jra" / "upcoming").symlink_to(upcoming, target_is_directory=True)
 
 
 def _guarded(source: str) -> list[str]:
