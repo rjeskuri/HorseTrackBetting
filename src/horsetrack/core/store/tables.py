@@ -60,7 +60,12 @@ def read_table(source: str, name: str, columns: Sequence[str] | None = None) -> 
         raise ValueError(f"table {name!r} of source {source!r}: {path} has no column {missing}")
     target = pa.schema([(c, ARROW_TYPES[spec.columns[c]]) for c in wanted])
     data = pq.read_table(path, columns=wanted).select(wanted).cast(target)
-    return data.to_pandas(types_mapper=_PANDAS_TYPES.get)
+    frame = data.to_pandas(types_mapper=_PANDAS_TYPES.get)
+    for column in wanted:
+        if spec.columns[column] == schemas.STR:  # pandas 3 reads strings as `str`, NaN for missing
+            values = frame[column].astype(object)
+            frame[column] = values.where(values.notna(), None)
+    return frame
 
 
 def _sql_string(value: str) -> str:
