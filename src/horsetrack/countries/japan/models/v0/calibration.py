@@ -10,7 +10,8 @@ for first counts as a winner of its race; `run_fit` leaves those races out.
 Memory: the fit works on flat arrays sorted by race (np.add.reduceat over race segments), and the
 out-of-fold run predicts in chunks of at most `chunk_races` whole races.
 
-CLI: `python -m horsetrack.countries.japan.models.v0.calibration --fit [--out DIR]`.
+CLI: `python -m horsetrack.countries.japan.models.v0.calibration --fit [--out DIR]`; an
+`--out` inside the repository is refused (`paths.DataDirInsideRepo`, non-zero exit).
 """
 
 from __future__ import annotations
@@ -338,7 +339,14 @@ def _development_frame(table: pa.Table) -> tuple[pd.DataFrame, dict, dict]:
 
 def run_fit(out_dir: Path | None = None, *, n_knots: int = 5, chunk_races: int = 2000) -> dict:
     """Fit the live model on every development race from the price era, write out-of-fold
-    predictions over Japan's fold scheme, and write the fit, the predictions and a manifest."""
+    predictions over Japan's fold scheme, and write the fit, the predictions and a manifest.
+
+    An `out_dir` that resolves inside the repository raises `paths.DataDirInsideRepo` before
+    anything is read or written."""
+    if out_dir is None:
+        out_dir = paths.data_dir() / "models" / "japan" / "v0"
+    else:
+        out_dir = paths.outside_repo(Path(out_dir), what="out_dir")
     table = read_store_table(
         "runners",
         columns=STORE_COLUMNS,
@@ -354,7 +362,6 @@ def run_fit(out_dir: Path | None = None, *, n_knots: int = 5, chunk_races: int =
     folds = walk_forward(frame["race_date"], scheme=scheme)
     oof = oof_predict(frame, folds=folds, n_knots=n_knots, chunk_races=chunk_races)
 
-    out_dir = Path(out_dir) if out_dir is not None else paths.data_dir() / "models" / "japan" / "v0"
     out_dir.mkdir(parents=True, exist_ok=True)
     fit_path = out_dir / f"win_calibration-{model.fit_id}.json"
     oof_path = out_dir / f"win_calibration_oof-{model.fit_id}.parquet"

@@ -27,7 +27,10 @@ Contract pinned here (`horsetrack.countries.japan.models.v0.calibration`):
   `out_dir`, default `data_dir()/models/japan/v0/`. The manifest (also returned) has `fit_id`,
   `git_sha`, `n_races`, `races_left_out` (with `dead_heat_for_first`: the count) and `folds` (one
   entry per fold). CLI: `python -m horsetrack.countries.japan.models.v0.calibration --fit
-  [--out DIR]`.
+  [--out DIR]`. An `out_dir` or `--out` that resolves inside the repository (absolute, relative to
+  the cwd, through `..` or a symlink) is refused with `paths.DataDirInsideRepo`, the error
+  `data_dir()` raises for a data dir inside the repo, and nothing is written; the CLI exits
+  non-zero.
 
 Expected values come from first principles (q from odds, planted p from q^gamma) or, for the
 out-of-fold contract, from the separately tested `fit_win_calibration` on the fold's training
@@ -41,8 +44,10 @@ from __future__ import annotations  # noqa: I001
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
+import uuid
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -52,7 +57,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from horsetrack.core import env
+from horsetrack.core import env, paths
 from horsetrack.core.eval.folds import FoldScheme, walk_forward
 from horsetrack.countries.japan.models.v0 import calibration
 from horsetrack.countries.japan.models.v0.calibration import (
@@ -776,3 +781,58 @@ def test_the_cli_fits_into_out(small_store, tmp_path):
     assert len(names) == 3
     fit_id = names[0].removeprefix("manifest-win_calibration-").removesuffix(".json")
     assert names == sorted(p.name for p in fit_files(Path(out_dir), fit_id).values())
+
+
+def fresh_name_in_repo():
+    """The resolved repo root and a directory name in it that nothing uses."""
+    return env.repo_root().resolve(), f".pytest-refused-out-{uuid.uuid4().hex}"
+
+
+@pytest.mark.parametrize("case", ["absolute", "relative", "dotdot", "symlink"])
+def test_run_fit_refuses_an_out_dir_inside_the_repo(small_store, tmp_path, monkeypatch, case):
+    root, name = fresh_name_in_repo()
+    if case == "absolute":
+        out_dir, target = root / name, root / name
+    elif case == "relative":
+        monkeypatch.chdir(root / "tests")
+        out_dir, target = Path(name), root / "tests" / name
+    elif case == "dotdot":
+        # leaves the repo as written, then comes back into it
+        out_dir, target = Path(f"{root}/../{root.name}/{name}"), root / name
+    else:
+        link = tmp_path / "link-to-repo"
+        link.symlink_to(root, target_is_directory=True)
+        out_dir, target = link / name, root / name
+    before = repo_outputs()
+    try:
+        with pytest.raises(paths.DataDirInsideRepo):
+            run_fit(out_dir)
+        assert not target.exists()
+        assert repo_outputs() - before == set()
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def test_the_cli_refuses_an_out_inside_the_repo(small_store, tmp_path):
+    root, name = fresh_name_in_repo()
+    target = root / name
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "horsetrack.countries.japan.models.v0.calibration",
+                "--fit",
+                "--out",
+                str(target),
+            ],
+            env={**os.environ, DATA_VAR: str(small_store)},
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=170,
+        )
+        assert proc.returncode != 0, "the CLI wrote a fit inside the repo"
+        assert not target.exists()
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
