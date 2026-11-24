@@ -659,6 +659,26 @@ def test_parser_columns_outside_the_schema_are_reported(raw_root):
     assert "cap_colour" not in pq.read_schema(tables.table_path(SOURCE, "runners")).names
 
 
+def test_a_rail_setting_in_a_parser_row_lands_in_races_and_is_null_otherwise(raw_root):
+    """#222: `rail_setting` is a declared, nullable races column, not an extra one."""
+    assert build_now().extra_columns == {}
+    before = read("races")
+    assert len(before) >= 2
+    assert before["rail_setting"].isna().all()  # no parser prints it: null, never a sentinel
+    assert pq.read_schema(tables.table_path(SOURCE, "races")).field("rail_setting").type == (
+        pa.string()
+    )
+
+    with_rail = copy.deepcopy(RESULTS_2026)
+    with_rail["races"][0]["rail_setting"] = "B"
+    add(results_page(KEY_2026, 2026, with_rail))
+    summary = build_now()
+    assert summary.extra_columns == {}
+    races = read("races").set_index("race_id")
+    assert races.loc[RACE_2026, "rail_setting"] == "B"
+    assert races.drop(index=RACE_2026)["rail_setting"].isna().all()
+
+
 # ---------------------------------------------------------------- contents
 
 
