@@ -20,7 +20,10 @@ Contract pinned here (the coder implements what these tests call):
   or adopted; a ``holdout_open`` that is not the sha256 hex of a line (its bytes without the
   newline) of ``holdout_log`` as that file is at append time; ``adopted`` without a positive int
   ``owner_signoff``.
-- ``family_size`` counts every record of the family, failed ones included.
+- ``family_size`` counts the distinct ``(hypothesis_id, variant)`` pairs of the family: every
+  variant tried counts once whatever its status and however many runs it has, failed ones
+  included. A later decision, retry or rerun is another run (``records()`` keeps every run), not
+  another variant.
 - ``freeze_family(family_id, spec)`` returns
   ``sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")))`` as hex. The freeze persists
   in the registry and is not a run; a different spec raises ``FamilyAlreadyFrozen``.
@@ -42,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -579,6 +583,47 @@ def test_family_size_counts_failed_variants(tmp_path):
             )
             assert sorted(r.status for r in got) == sorted(status for _, status in runs)
         assert registry.family_size("FZ") == 0
+
+
+def test_a_later_decision_on_a_variant_does_not_grow_the_family(tmp_path):
+    """A decision, retry or rerun appended for a variant already tried is another run of that
+    variant, not another variant: the family counts (hypothesis_id, variant) pairs."""
+    reg, path, log = open_registry(tmp_path)
+    base = make_record(hypothesis_id="E1", family_id="F1", variant="v1")
+    failed = {"status": "failed", "metrics": ()}
+
+    # (family, hypothesis_id, variant, run) in append order; F2 is interleaved.
+    runs = [
+        ("F1", "E1", "v1", base),
+        ("F2", "E1", "v1", replace(base, family_id="F2")),
+        ("F1", "E1", "v1", replace(base, status="rejected")),  # rejected after comparison
+        ("F1", "E1", "v2", replace(base, variant="v2", **failed)),
+        ("F2", "E1", "v1", replace(base, family_id="F2", status="adopted", owner_signoff=141)),
+        ("F1", "E1", "v2", replace(base, variant="v2")),  # the retry, scored
+        ("F1", "E2", "v1", replace(base, hypothesis_id="E2")),  # same name, other hypothesis
+        ("F1", "E1", "v2", replace(base, variant="v2", status="adopted", owner_signoff=141)),
+        ("F1", "E1", "v1", replace(base, git_sha="b" * 40, params={"C": 2.0})),  # a rerun
+        ("F1", "E1", "v3", replace(base, variant="v3", **failed)),  # failed, never retried
+    ]
+
+    tried: dict[str, set[tuple[str, str]]] = {"F1": set(), "F2": set()}
+    for i, (family, hid, variant, run) in enumerate(runs):
+        reg.append(run)
+        tried[family].add((hid, variant))
+        for fam, pairs in tried.items():
+            assert reg.family_size(fam) == len(pairs), f"{fam} after run {i}"
+    assert {fam: len(pairs) for fam, pairs in tried.items()} == {"F1": 4, "F2": 1}
+
+    reopened = Registry(path, holdout_log=log)
+    for registry in (reg, reopened):
+        assert registry.family_size("F1") == 4
+        assert registry.family_size("F2") == 1
+        assert registry.family_size("F9") == 0
+        # Every run is still there, decisions and retries included, in append order.
+        assert registry.records() == [run for *_, run in runs]
+        for fam in ("F1", "F2"):
+            assert registry.records(fam) == [run for f, *_, run in runs if f == fam]
+    reopened.verify()
 
 
 # --------------------------------------------------------------------------- frozen families

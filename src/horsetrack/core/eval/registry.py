@@ -308,8 +308,11 @@ class Registry:
         return runs if family_id is None else [r for r in runs if r.family_id == family_id]
 
     def family_size(self, family_id: str) -> int:
-        """How many runs the family has, failed and rejected ones included."""
-        return len(self.records(family_id))
+        """How many variants the family has tried: its distinct ``(hypothesis_id, variant)`` pairs,
+        each counted once whatever its status or number of runs, failed ones included. A later
+        decision, retry or rerun of a variant is another run in ``records()``, not another variant.
+        """
+        return len({(r.hypothesis_id, r.variant) for r in self.records(family_id)})
 
     def freeze_family(self, family_id: str, spec: dict) -> str:
         """Freeze the family's pre-registered spec and return its hash (sha256 hex of the spec's
