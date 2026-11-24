@@ -18,15 +18,27 @@ one that does not fit is tried again in a later round of its stretch, and one wi
 capture when its stretch ends counts in VenueSummary.tier2_skipped. A failed tier-2 capture is
 logged and never touches tier 1 (a CircuitOpen still ends the day: the host blocked us).
 
-Results (ticket #225, logger.yaml `results`): each venue with post times polls the site's
-`published_results` from its first post to its last post + until_min, at most every every_s, and
-writes each race the first time a poll shows its official result, at the instant that poll
-returned, with a lower bound: the instant the run's previous successful poll returned (None, a
+Results (ticket #225, logger.yaml `results`, JRA only): each venue with post times polls the
+site's `published_results` from its first post to its last post + until_min, at most every
+every_s, and writes each race the first time a poll shows its official result, at the instant that
+poll returned, with a lower bound: the instant the run's previous successful poll returned (None, a
 late sighting, for a race shown on the run's first successful poll). Polls ride on the rounds
 while odds are logged (after tier 1, ahead of tier 2's share of the budget) and set their own pace
 once they end; a venue stops polling once every race with a post time is logged. A failed poll is
-retried at the next one, is never a bound and is not an odds failure; a CircuitOpen ends the day
+retried at the next one, is never a bound and is not an odds failure; a CircuitOpen is a block,
 as from any site call.
+
+Several sources (ticket #38, logger.yaml `sources`): `run_sources` runs each source's run_day on
+a thread of its own, all at once, each with its own site (so its own host, rate and budget), store,
+schedule (`source_config`) and block marker. A block on one source's host stops that source only.
+Any other error escaping a source's day stops that source only (stopped 'error'): `on_error` hears
+of it at once, and run_sources still returns every source's summary.
+
+The block policy is the schedule's `on_block`. Every block appends a marker line, and a run that
+finds one for its host and date sends nothing. `cooldown_min: null` stops the day at the first
+block; N pauses that source N minutes, then resumes once: on `resume(rate)`'s site when run_day is
+given `resume` (NAR: a fresh Fetcher at `resume_requests_per_second`), else on the same site. A
+second block stops the day.
 
 `plan_round` is pure. `run_day` drives it with an injected clock (`now`, `sleep`) and reaches the
 site and the store only through the protocols below. `config` is a mapping shaped like
@@ -37,7 +49,8 @@ instant is an aware datetime, and post times are UTC.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable, Mapping
+import threading
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -60,6 +73,7 @@ _RESULTS_REQUESTS = 2  # a results poll: the レース結果 menu and the meetin
 
 
 class Site(Protocol):
+    source: str  # its source key, "jra" or "nar" (run_sources keys its summaries by it)
     host: str
     requests_per_second: float
 
@@ -117,7 +131,7 @@ class VenueSummary:
     rows: int = 0  # rows the store wrote
     failures: int = 0
     wrong_meeting: int = 0
-    stopped: str | None = None  # 'ended', 'wrong_meeting' or 'circuit_open'
+    stopped: str | None = None  # 'ended', 'wrong_meeting', 'circuit_open' or 'error'
     longest_cycle_s: float = 0.0  # longest full cycle: first capture start to last capture end
     tier2_skipped: int | None = None  # grid points (race x grid value) not captured; None: off
 
@@ -127,7 +141,7 @@ class DaySummary:
     venues: dict[str, VenueSummary] = field(default_factory=dict)
     requests: int = 0  # requests the successful captures sent
     deferred: int = 0  # race captures a round left out for budget
-    stopped: str | None = None  # 'circuit_open' when a block ended the day
+    stopped: str | None = None  # 'circuit_open' when a block ended the day, 'error' (run_sources)
 
 
 # ---------------------------------------------------------------- time
@@ -345,17 +359,100 @@ def run_day(
     sleep: Callable[[float], None],
     block_marker: Path | str,
     venues: list[str] | None = None,
+    resume: Callable[[float], Site] | None = None,
 ) -> DaySummary:
     """Log every venue of `race_date` (discovered when `venues` is None) from the first window to
-    its end, round by round, and return what was done."""
-    return _Day(race_date, site, store, config, now, sleep, Path(block_marker)).run(venues)
+    its end, round by round, and return what was done. `resume(requests_per_second)`: the site the
+    day goes on with after a block's cooldown (None: the same site)."""
+    day = _Day(race_date, site, store, config, now, sleep, Path(block_marker), resume)
+    return day.run(venues)
+
+
+# ---------------------------------------------------------------- several sources
+
+SOURCES = ("jra", "nar")
+
+
+def source_config(config: Mapping[str, Any], source: str) -> dict[str, Any]:
+    """One source's schedule (the mapping run_day takes) out of logger.yaml. JRA's is the top level,
+    as before #38; another source's is its own block (`nar:`) over the top level's keys, with no
+    tier 2 or results polling (#225) unless its block has them."""
+    if source not in SOURCES:
+        raise ValueError(f"unknown source {source!r}; known: {', '.join(SOURCES)}")
+    out = {k: v for k, v in config.items() if k not in SOURCES and k != "sources"}
+    if source == "jra":
+        return out
+    block = config.get(source)
+    if not isinstance(block, Mapping):
+        raise ValueError(f"logger.yaml has no {source!r} block")
+    out.pop("tier2", None)
+    out.pop("results", None)
+    return {**out, **block}
+
+
+@dataclass
+class Source:
+    """One source's day for run_sources: run_day's arguments but the clock."""
+
+    site: Site
+    store: Store
+    config: Mapping[str, Any]
+    block_marker: Path | str
+    venues: list[str] | None = None
+    resume: Callable[[float], Site] | None = None  # run_day's `resume`
+
+
+def run_sources(
+    race_date: date,
+    sources: Sequence[Source],
+    *,
+    now: Callable[[], datetime],
+    sleep: Callable[[float], None],
+    on_error: Callable[[str, Exception], None] | None = None,
+) -> dict[str, DaySummary]:
+    """Every source's run_day at once, each on a thread of its own (one source runs in the calling
+    thread), keyed by its site's source. Returns once every day is over. An error escaping one
+    source's day stops that source only: `on_error(source, exc)` is called once, from that
+    source's thread, as soon as its day fails; its summary is stopped 'error', as is each of its
+    venues still running. Nothing is raised for it."""
+    keys = [s.site.source for s in sources]
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"a source given twice: {keys}")
+    days = {
+        k: _Day(race_date, s.site, s.store, s.config, now, sleep, Path(s.block_marker), s.resume)
+        for k, s in zip(keys, sources, strict=True)
+    }
+
+    def target(key: str, s: Source) -> None:
+        day = days[key]
+        try:
+            day.run(s.venues)
+        except Exception as exc:
+            log.error("%s: the day's run failed: %r", key, exc)
+            day._stop_running("error")
+            if on_error is not None:
+                on_error(key, exc)
+
+    if len(sources) == 1:
+        target(keys[0], sources[0])
+    else:
+        threads = [
+            threading.Thread(target=target, args=(k, s), name=f"log-day-{k}", daemon=True)
+            for k, s in zip(keys, sources, strict=True)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    return {k: days[k].summary for k in keys}
 
 
 class _Day:
-    def __init__(self, race_date, site, store, config, now, sleep, marker: Path):
+    def __init__(self, race_date, site, store, config, now, sleep, marker: Path, resume=None):
         self.race_date = race_date
         self.site, self.store, self.config = site, store, config
         self.now, self.sleep, self.marker = now, sleep, marker
+        self.resume = resume
         self.summary = DaySummary()
         self.venues: dict[str, _Venue] = {}
         self.tier2 = config.get("tier2")
@@ -376,7 +473,8 @@ class _Day:
             return self.summary
         first = _windows(self.race_date, self.config)[0][0]
         self._sleep_until(first)
-        cooldown = self.config["on_block"]["cooldown_min"]
+        on_block = self.config["on_block"]
+        cooldown = on_block["cooldown_min"]
         resumes = 0 if cooldown is None else 1
         while True:
             try:
@@ -394,6 +492,11 @@ class _Day:
                     return self.summary
                 resumes -= 1
                 self.sleep(60.0 * cooldown)
+                if self.resume is not None:
+                    rate = on_block.get("resume_requests_per_second")
+                    rate = self.site.requests_per_second if rate is None else float(rate)
+                    log.info("%s: resuming at %g requests a second", self.site.host, rate)
+                    self.site = self.resume(rate)
 
     def _add(self, codes: Iterable[str]) -> None:
         for code in dict.fromkeys(codes):
@@ -561,7 +664,7 @@ class _Day:
         (it did not show them). On the run's first successful poll there is no such poll: the
         races are late sightings (bound None), whatever came out while nothing ran (a restart, a
         late start, a wake). A failed poll is retried at the next one, is never a bound and is no
-        failure of the odds (CircuitOpen still ends the day)."""
+        failure of the odds (a CircuitOpen is still a block, per `on_block`)."""
         v.results_polled = t
         try:
             shown = {int(n) for n in self.site.published_results(v.state.code)}

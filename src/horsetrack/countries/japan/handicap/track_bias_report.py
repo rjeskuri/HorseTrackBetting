@@ -35,7 +35,12 @@ from horsetrack.countries.japan.handicap.factors import (
     handicap_dir,
 )
 from horsetrack.countries.japan.handicap.pp import JST
-from horsetrack.countries.japan.handicap.track_bias import CELL, fit_bias_prior, track_bias_features
+from horsetrack.countries.japan.handicap.track_bias import (
+    CELL,
+    DaySd,
+    fit_bias_prior,
+    track_bias_features,
+)
 
 PUBLISH_LAG = timedelta(minutes=30)
 DECISION_LEAD = timedelta(minutes=2)
@@ -185,6 +190,10 @@ def _day_rows(prior, races: pl.DataFrame, runners: pl.DataFrame, day: date) -> l
     return out
 
 
+def _by_level(sds: dict[tuple[str, str], float]) -> dict[str, float]:
+    return {f"{factor}:{level}": sd for (factor, level), sd in sds.items()}
+
+
 def _bootstrap(gain: np.ndarray, meeting: np.ndarray, n_boot: int, seed: int) -> dict:
     codes, inv = np.unique(meeting, return_inverse=True)
     sums = np.bincount(inv, weights=gain, minlength=len(codes))
@@ -208,12 +217,13 @@ def track_bias_report(
     scheme: FoldScheme | None = None,
     n_boot: int = 2000,
     seed: int = 0,
-    day_sd: float | None = None,
+    day_sd: DaySd = None,
 ) -> dict:
     """Aggregates only: per-variant log loss and pseudo-R² against equal chances, the update's
-    gain over the prior with meeting-bootstrap bounds overall and by races entered, and the
-    fitted priors' day sd and observation variance. `day_sd` (None: estimated) goes to every
-    fold's prior."""
+    gain over the prior with meeting-bootstrap bounds overall and by races entered, and per fold
+    the priors' day sd per level ("factor:level"), the unfloored estimate behind it (when
+    estimated) and the observation variance. `day_sd` (None or "pooled": the pooled estimate;
+    "per_level"; a float or a per-level mapping, #224) goes to every fold's prior."""
     races = _read("races", RACE_COLUMNS, date_from, date_to)
     runners = _read("runners", RUNNER_COLUMNS, date_from, date_to)
     folds = walk_forward(races.get_column("race_date").to_list(),
@@ -222,7 +232,7 @@ def track_bias_report(
     parts, priors = [], []
     for k, fold in enumerate(folds):
         prior = fit_bias_prior(races, runners, train_end=fold.train_end, day_sd=day_sd)
-        priors.append((prior.day_sd, prior.noise_var))
+        priors.append(prior)
         for day in sorted(dates.gather(fold.test_idx).unique().to_list()):
             day_races = races.filter(pl.col("race_date") == day)
             day_runners = runners.filter(pl.col("race_date") == day)
@@ -266,8 +276,14 @@ def track_bias_report(
         "meetings": int(len(np.unique(meeting))),
         "scored_from": frame.get_column("race_date").min(),
         "scored_to": frame.get_column("race_date").max(),
-        "day_sd": [p[0] for p in priors],
-        "noise_var": [p[1] for p in priors],
+        "day_sd": [_by_level(p.day_sd) for p in priors],
+        "day_sd_estimate": [
+            None
+            if p.estimate is None
+            else {"per_level": _by_level(p.estimate.per_level), "pooled": p.estimate.pooled}
+            for p in priors
+        ],
+        "noise_var": [p.noise_var for p in priors],
     }
     for v in VARIANTS:
         ll = per_race.get_column(f"ll_{v}").to_numpy()

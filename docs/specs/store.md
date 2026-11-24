@@ -59,10 +59,13 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   post_time_local, field_size, finish_time_s, split_times_s` (cumulative leader times), `status`.
   Denormalised meeting keys: `meeting_id, race_date, venue, race_no, season`. Optional:
   `weight_type, race_class_raw, going_raw, source_race_key` (the key of the results page the race
-  came from, for sources whose other race pages use it), `result_published_utc` (when the race's
-  official result was first seen published, ticket #225; null for history without a logged time),
-  `result_unpublished_utc` (its lower bound, the last logger poll that did not show the result;
-  null when unknown: a late sighting, shown on a run's first poll, or no logged time).
+  came from, for sources whose other race pages use it), `rail_setting` (JRA's turf rail position,
+  `A`, `B`, `C` or `D`, from the going page's 使用コース; null when not published and for every
+  non-turf race, never a guess; filled by `jra.going.attach_rail_setting`, not by the results
+  parsers), `result_published_utc` (when the race's official result was first seen published,
+  ticket #225; null for history without a logged time), `result_unpublished_utc` (its lower bound,
+  the last logger poll that did not show the result; null when unknown: a late sighting, shown on a
+  run's first poll, or no logged time).
 - **runners**: the meeting keys as on races, then `horse_id, horse_no, horse_name, brand_raw`,
   jockey and trainer `*_key, *_code, *_name`, `actual_wt_lb, declared_horse_wt_lb, draw,
   placing_raw, finish_pos` (null when not placed), `placing_code, dead_heat, lbw_raw, lbw_lengths`

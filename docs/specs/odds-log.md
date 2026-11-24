@@ -5,8 +5,10 @@ from HKTrack read exactly like logs written here.
 
 ## The log
 
-Path: `$HORSETRACK_DATA_DIR/odds_snapshots/jra/<YYYY-MM-DD>/<VENUE>.jsonl.gz`
-(`core.paths.odds_snapshot_path(source, race_date, venue)`).
+Path: `$HORSETRACK_DATA_DIR/odds_snapshots/<source>/<YYYY-MM-DD>/<VENUE>.jsonl.gz`
+(`core.paths.odds_snapshot_path(source, race_date, venue)`): `jra` for JRA, `nar` for NAR
+(ticket #38, `log-day --sources nar`, venues of `nar.yaml`). `log-day` appends one health line per
+venue to `logs/japan/health.log`, ending ` source=<jra|nar>` (`logger/health.py`).
 
 - One gzip member per capture, appended in one write and fsynced before `append_capture` returns.
   A capture with no rows writes nothing.
