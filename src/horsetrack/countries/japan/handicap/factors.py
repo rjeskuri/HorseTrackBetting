@@ -506,11 +506,15 @@ class HandicapScore:
         return _group_softmax(z @ beta, codes) if len(codes) else np.empty(0)
 
 
-def _design(frame: pl.DataFrame, features: Sequence[str]) -> np.ndarray:
-    """The feature matrix as float64, a null as NaN; Booleans as 0/1."""
-    x = np.empty((frame.height, len(features)))
+def _design(
+    frame: pl.DataFrame | pl.LazyFrame, features: Sequence[str], n: int | None = None
+) -> np.ndarray:
+    """The feature matrix as float64, a null as NaN; Booleans as 0/1. A LazyFrame (of `n` rows)
+    is collected one column at a time, so only the matrix is held."""
+    lazy = isinstance(frame, pl.LazyFrame)
+    x = np.empty((frame.height if n is None else n, len(features)))
     for j, f in enumerate(features):
-        col = frame.get_column(f)
+        col = frame.select(f).collect().to_series() if lazy else frame.get_column(f)
         if not (col.dtype.is_numeric() or col.dtype == pl.Boolean):
             raise TypeError(f"feature {f} is {col.dtype}, not numeric or Boolean")
         x[:, j] = col.cast(pl.Float64).fill_null(np.nan).to_numpy()
@@ -622,7 +626,12 @@ def oof_handicap_score(
     features = tuple(SCORE_FEATURES if features is None else features)
     _refuse_holdout(frame.get_column("race_date"))
     x, won, codes, dates = _arrays(frame, features)
-    race_id, horse_no = frame.get_column("race_id"), frame.get_column("horse_no")
+    keys = frame.select("race_id", pl.col("horse_no").cast(pl.Int64))
+    return _oof_rows(x, won, codes, dates, keys, folds, features, alpha)
+
+
+def _oof_rows(x, won, codes, dates, keys: pl.DataFrame, folds, features, alpha) -> pl.DataFrame:
+    """oof_handicap_score on flat arrays; `keys` holds race_id and horse_no row for row."""
     parts = []
     for k, fold in enumerate(folds):
         test = np.asarray(fold.test_idx)
@@ -635,11 +644,11 @@ def oof_handicap_score(
         else:
             score = model._predict(x[test], pd.factorize(codes[test])[0])
         parts.append(
-            pl.DataFrame({
-                "race_id": race_id.gather(test), "horse_no": horse_no.gather(test).cast(pl.Int64),
-                "fold": np.full(len(test), k, dtype=np.int64), "handicap_score": score,
-            }).with_columns(pl.col("handicap_score").fill_nan(None))
-        )  # fmt: skip
+            keys[test].with_columns(
+                pl.lit(k, pl.Int64).alias("fold"),
+                pl.Series("handicap_score", score).fill_nan(None),
+            )
+        )
     if not parts:
         return pl.DataFrame(
             schema={
@@ -694,7 +703,7 @@ def build_handicap_table(
     scores = _oof_over(written, date_from, date_to, scheme or load_country_scheme(COUNTRY))
     for path in written.values():
         part = pl.read_parquet(path).drop("handicap_score")
-        part = part.join(scores, on=["race_id", "horse_no"], how="left")
+        part = part.join(scores, on=["race_id", "horse_no"], how="left", maintain_order="left")
         _write(part, path)
         del part
     return written
@@ -703,15 +712,19 @@ def build_handicap_table(
 def _oof_over(
     written: dict[date, Path], date_from: date, date_to: date, scheme: FoldScheme
 ) -> pl.DataFrame:
-    """The out-of-fold score of every written row over `scheme`'s folds of their race days."""
-    rows = pl.scan_parquet([str(p) for _, p in sorted(written.items())]).select(
-        "race_id", "race_date", "horse_no", *SCORE_FEATURES
-    ).collect()  # fmt: skip
+    """The out-of-fold score of every written row over `scheme`'s folds of their race days, the
+    feature matrix read from the written files one column at a time."""
+    scan = pl.scan_parquet([str(p) for _, p in sorted(written.items())])
+    keys = scan.select("race_id", "race_date", pl.col("horse_no").cast(pl.Int64)).collect()
     won = _read("runners", ["race_id", "horse_no", "finish_pos"], date_from, date_to).select(
         "race_id", pl.col("horse_no").cast(pl.Int64), (pl.col("finish_pos") == 1).alias("won")
     )
-    rows = rows.join(won, on=["race_id", "horse_no"], how="left")
-    folds = walk_forward(rows.get_column("race_date").to_list(), scheme=scheme)
-    oof = oof_handicap_score(rows, folds=folds)
-    del rows
+    keys = keys.join(won, on=["race_id", "horse_no"], how="left", maintain_order="left")
+    _refuse_holdout(keys.get_column("race_date"))
+    x = _design(scan, SCORE_FEATURES, n=keys.height)
+    _, won_rows, codes, dates = _arrays(keys, ())
+    folds = walk_forward(keys.get_column("race_date").to_list(), scheme=scheme)
+    oof = _oof_rows(
+        x, won_rows, codes, dates, keys.select("race_id", "horse_no"), folds, SCORE_FEATURES, 1.0
+    )
     return oof.select("race_id", "horse_no", "handicap_score")
