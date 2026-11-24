@@ -103,7 +103,7 @@ be sealed (`n_records` 0).
   `read()` raises `HoldoutSealed` (a `PermissionError`) when the rule says the day is holdout at the
   time of reading, or when any record in the file was logged as `holdout`.
 - Reading a holdout day's values for settlement or calibration is #101's, through
-  `LockedHoldout.open(ticket=..., purpose=...)` (D15). This module gives no other path.
+  `LockedHoldout.open(ticket=..., purpose=..., family=...)` (D15, #126). This module gives no other path.
 
 ## Reading
 

@@ -15,6 +15,17 @@ Contract pinned here:
 - `write_post_times(path, post_times, updated_utc)` / `read_post_times(path) -> {int: aware UTC}`;
   a failed write leaves the previous sidecar intact and no temporary file behind.
 
+Tailing (#22 as amended, implemented by #120):
+- `iter_members(path, *, start=0)` keeps yielding each whole member's rows (`list[dict]`), now from
+  byte offset `start`; its existing callers are unchanged.
+- `iter_members_with_offsets(path, *, start=0) -> Iterator[tuple[int, list[dict]]]` yields
+  (end offset, rows) per whole member from byte offset `start`: the end offset is the byte just
+  after that member. A torn trailing member (a write still in progress, no later member header) is
+  not yielded, and no offset passes it.
+- `LogTail(path).poll() -> list[dict]` returns the rows of the members appended since the previous
+  poll, reading the file from where the last whole member ended; a missing file gives []. A torn
+  trailing member is read on the poll after it is complete.
+
 All fixtures are synthetic and built in tmp_path.
 """
 
@@ -538,3 +549,147 @@ def test_post_times_sidecar_round_trips_and_is_written_atomically(tmp_path, monk
         odds_log.write_post_times(path, {4: object()}, datetime(2026, 11, 28, 2, 0, tzinfo=UTC))
     check(odds_log.read_post_times(path), second)
     assert sorted(os.listdir(folder)) == ["TOK.races.json"]
+
+
+# ---------------------------------------------------------------- tailing (#22 as amended, #120)
+
+
+def stored_member(rows: list[dict]) -> bytes:
+    """One gzip member of `rows` with stored (uncompressed) deflate blocks: its length depends only
+    on the payload's length, so a same-length payload can replace it in place."""
+    payload = "".join(json.dumps(as_logged(r), separators=(",", ":")) + "\n" for r in rows)
+    return gzip.compress(payload.encode("utf-8"), compresslevel=0, mtime=0)
+
+
+def four_captures() -> list[list[dict]]:
+    return [
+        *three_captures(),
+        [price(str(n), 4.0 + n, at=T0 + timedelta(seconds=90), race_no=12) for n in (1, 2, 3)],
+    ]
+
+
+@pytest.mark.parametrize("first", [0, 1, 2, 3, 4])
+def test_iter_members_resumes_from_an_offset(tmp_path, first):
+    path = log_path(tmp_path)
+    captures = four_captures()
+    sizes = append_members(path, captures)
+    start = 0 if first == 0 else sizes[first - 1]
+    logged = [[as_logged(r) for r in rows] for rows in captures]
+
+    got = list(odds_log.iter_members_with_offsets(path, start=start))
+    assert got == list(zip(sizes[first:], logged[first:], strict=True))
+    if first == 0:
+        assert list(odds_log.iter_members_with_offsets(path)) == got  # start defaults to 0
+    # iter_members keeps its yield type (rows only) and takes the same offset
+    assert list(odds_log.iter_members(path, start=start)) == logged[first:]
+    assert list(odds_log.iter_members(path)) == logged
+    # resuming from each yielded end offset gives exactly what follows it
+    for i, (end, _) in enumerate(got):
+        rest = list(odds_log.iter_members_with_offsets(path, start=end))
+        assert rest == got[i + 1 :]
+    missing = tmp_path / "nowhere" / "TOK.jsonl.gz"
+    assert list(odds_log.iter_members_with_offsets(missing, start=start)) == []
+
+
+TEARS = {
+    "kill -9 near the end": lambda m: len(m) - 9,
+    "inside the gzip header": lambda m: 6,
+    "half the member": lambda m: len(m) // 2,
+    "one byte": lambda m: 1,
+}
+
+
+@pytest.mark.parametrize("tear", list(TEARS.values()), ids=list(TEARS))
+def test_a_torn_trailing_member_is_retried_on_the_next_poll(tmp_path, tear):
+    path = log_path(tmp_path)
+    captures = four_captures()
+    sizes = append_members(path, captures[:2])
+    member = gzip.compress(
+        "".join(
+            json.dumps(as_logged(r), separators=(",", ":")) + "\n" for r in captures[2]
+        ).encode()
+    )
+    cut = tear(member)
+    with open(path, "ab") as fh:  # the write of the third capture is still in progress
+        fh.write(member[:cut])
+
+    logged = [[as_logged(r) for r in rows] for rows in captures]
+    got = list(odds_log.iter_members_with_offsets(path))
+    assert got == [(sizes[0], logged[0]), (sizes[1], logged[1])]
+    assert list(odds_log.iter_members_with_offsets(path, start=sizes[1])) == []
+
+    tail = odds_log.LogTail(path)
+    assert tail.poll() == logged[0] + logged[1]
+    assert tail.poll() == []  # still torn: nothing new, nothing repeated
+    with open(path, "ab") as fh:  # the write completes
+        fh.write(member[cut:])
+    assert tail.poll() == logged[2]
+    assert tail.poll() == []
+    odds_log.append_capture(path, captures[3])
+    assert tail.poll() == logged[3]
+    assert odds_log.read_rows(path) == [row for rows in logged for row in rows]
+
+
+def test_a_torn_member_left_behind_by_a_restarted_logger_is_skipped(tmp_path):
+    """A capture whose write never completes is lost when the logger restarts and appends after it,
+    as `read_rows` skips it; the tail then reads on."""
+    path = log_path(tmp_path)
+    captures = four_captures()
+    append_members(path, captures[:1])
+    member = gzip.compress(
+        "".join(
+            json.dumps(as_logged(r), separators=(",", ":")) + "\n" for r in captures[1]
+        ).encode()
+    )
+    with open(path, "ab") as fh:
+        fh.write(member[: len(member) // 2])
+    tail = odds_log.LogTail(path)
+    assert tail.poll() == [as_logged(r) for r in captures[0]]
+    append_members(path, captures[2:])
+    assert tail.poll() == [as_logged(r) for r in captures[2] + captures[3]]
+    assert tail.poll() == []
+
+
+def test_log_tail_returns_only_new_rows(tmp_path):
+    path = log_path(tmp_path)
+    captures = four_captures()
+    first = stored_member(captures[0])
+    path.parent.mkdir(parents=True)
+    path.write_bytes(first)
+
+    tail = odds_log.LogTail(path)
+    assert tail.poll() == [as_logged(r) for r in captures[0]]
+    assert tail.poll() == []
+
+    # The bytes already read are changed in place (same length). A tail reads on from where the
+    # last whole member ended, so it never sees them again; a reader that starts over would.
+    changed = [dict(r, odds=None if r["odds"] is None else r["odds"] + 0.1) for r in captures[0]]
+    replaced = stored_member(changed)
+    assert len(replaced) == len(first) and replaced != first
+    path.write_bytes(replaced)
+
+    odds_log.append_capture(path, captures[1])
+    assert tail.poll() == [as_logged(r) for r in captures[1]]
+    assert tail.poll() == []
+    append_members(path, captures[2:])
+    assert tail.poll() == [as_logged(r) for r in captures[2] + captures[3]]
+    assert tail.poll() == []
+
+    # a second tail on the same file starts at its beginning and is independent of the first
+    other = odds_log.LogTail(path)
+    whole = [as_logged(r) for r in changed + captures[1] + captures[2] + captures[3]]
+    assert other.poll() == whole
+    assert tail.poll() == []
+
+
+def test_log_tail_on_a_missing_file_is_empty(tmp_path):
+    path = log_path(tmp_path)
+    tail = odds_log.LogTail(path)
+    assert tail.poll() == []
+    assert tail.poll() == []
+    assert not path.exists() and not path.parent.exists()  # polling creates nothing
+
+    captures = four_captures()
+    odds_log.append_capture(path, captures[0])
+    assert tail.poll() == [as_logged(r) for r in captures[0]]
+    assert tail.poll() == []

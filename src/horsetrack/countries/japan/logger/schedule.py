@@ -10,6 +10,14 @@ Ported from HKTrack's `ingest/live.py` (`poll_odds`, `_poll_loop`, `hot_races`) 
     venues. Here every round has a budget, the window's every_s x the host's requests per second:
     hot races first, nearest post first, then the venues' full cycles race by race.
 
+Tier 2 (ticket #130, logger.yaml `tier2`): each race's tier-2 pools once per grid point. Grid
+point g of a race falls due at post - g and belongs to the stretch until the next smaller grid
+value (the post after the last). Each round runs tier 1 first, exactly as without tier 2, then
+spends only what is left of its budget on the grid points due, the stretch ending soonest first;
+one that does not fit is tried again in a later round of its stretch, and one with no successful
+capture when its stretch ends counts in VenueSummary.tier2_skipped. A failed tier-2 capture is
+logged and never touches tier 1 (a CircuitOpen still ends the day: the host blocked us).
+
 `plan_round` is pure. `run_day` drives it with an injected clock (`now`, `sleep`) and reaches the
 site and the store only through the protocols below. `config` is a mapping shaped like
 `countries/japan/config/logger.yaml`. Window and stop times are Asia/Tokyo wall-clock times; every
@@ -50,6 +58,8 @@ class Site(Protocol):
 
     def capture(self, venue: str, races: list[int] | None) -> MeetingCapture: ...
 
+    def capture_tier2(self, venue: str, races: list[int]) -> MeetingCapture: ...  # with `tier2`
+
 
 class Store(Protocol):
     def write(self, venue: str, capture: MeetingCapture) -> int: ...  # rows written
@@ -86,6 +96,7 @@ class VenueSummary:
     wrong_meeting: int = 0
     stopped: str | None = None  # 'ended', 'wrong_meeting' or 'circuit_open'
     longest_cycle_s: float = 0.0  # longest full cycle: first capture start to last capture end
+    tier2_skipped: int | None = None  # grid points (race x grid value) not captured; None: off
 
 
 @dataclass
@@ -266,7 +277,7 @@ def _plan(
 # ---------------------------------------------------------------- the block marker
 
 
-def _blocked(marker: Path, host: str, race_date: date) -> bool:
+def blocked(marker: Path, host: str, race_date: date) -> bool:
     """Whether the marker holds a line for this host and race date."""
     if not marker.is_file():
         return False
@@ -294,6 +305,8 @@ class _Venue:
     started_at: datetime | None = None  # when the latest capture really started (the floor)
     cycle_first: datetime | None = None  # when the cycle in progress's first capture started
     wrong_in_row: int = 0
+    tier2_tried: set[tuple[int, int]] = field(default_factory=set)  # (race, grid value)
+    tier2_got: set[tuple[int, int]] = field(default_factory=set)  # tried and written
 
 
 def run_day(
@@ -319,9 +332,11 @@ class _Day:
         self.now, self.sleep, self.marker = now, sleep, marker
         self.summary = DaySummary()
         self.venues: dict[str, _Venue] = {}
+        self.tier2 = config.get("tier2")
+        self.grid = sorted(set(self.tier2["grid_min"]), reverse=True) if self.tier2 else []
 
     def run(self, codes: list[str] | None) -> DaySummary:
-        if _blocked(self.marker, self.site.host, self.race_date):
+        if blocked(self.marker, self.site.host, self.race_date):
             log.warning("%s is blocked for %s: nothing sent", self.site.host, self.race_date)
             self._add(codes or [])
             self._stop_running("circuit_open")
@@ -352,6 +367,8 @@ class _Day:
             if code not in self.venues:
                 self.venues[code] = _Venue(VenueState(code=code))
                 self.summary.venues[code] = self.venues[code].summary
+                if self.tier2:
+                    self.venues[code].summary.tier2_skipped = 0
 
     def _stop(self, v: _Venue, reason: str) -> None:
         v.state.stopped = v.summary.stopped = reason
@@ -415,6 +432,8 @@ class _Day:
                 v = self.venues[job.venue]
                 if self._running(v, self.now()):
                     self._capture(v, job, start)
+            if self.tier2:
+                self._tier2_round(start, sum(job.requests for job in jobs))
             self._sleep_until(self._next_round(start))
 
     def _read(self, v: _Venue, start: datetime) -> None:
@@ -430,6 +449,7 @@ class _Day:
             merged = {**v.state.post_times, **times}
             v.state.post_times = merged
             self.store.write_post_times(v.state.code, merged)
+            self._count_tier2(v)
 
     def _capture(self, v: _Venue, job: Job, start: datetime) -> None:
         if v.started_at is not None:  # the floor between real capture starts
@@ -460,6 +480,65 @@ class _Day:
         if not left:
             cycle_s = _secs(t1 - v.cycle_first)
             v.summary.longest_cycle_s = max(v.summary.longest_cycle_s, cycle_s)
+
+    # ------------------------------------------------ tier 2
+
+    def _grid_point(self, post: datetime, t: datetime) -> int | None:
+        """The grid value whose stretch [post - g, post - next smaller g) holds `t`, or None."""
+        for i, g in enumerate(self.grid):
+            nxt = self.grid[i + 1] if i + 1 < len(self.grid) else 0
+            if post - timedelta(minutes=g) <= t < post - timedelta(minutes=nxt):
+                return g
+        return None
+
+    def _tier2_round(self, start: datetime, spent: float) -> None:
+        """The grid points due at `start`, in what tier 1 left of the round's budget (`spent`: its
+        planned cost); a capture that would run past the next round's start is left for later."""
+        every = _every_s(start, self.config, self.race_date)
+        if every is None:
+            return
+        rps = self.site.requests_per_second
+        left = every * rps - spent
+        nav, per = self.tier2["requests"]["navigation"], self.tier2["requests"]["per_race"]
+        due = []
+        for v in self.venues.values():
+            if v.state.stopped is not None:
+                continue
+            for race, post in v.state.post_times.items():
+                g = self._grid_point(post, start)
+                if g is not None and (race, g) not in v.tier2_tried:
+                    due.append((post - timedelta(minutes=g), v.state.code, race, g))
+        picked: dict[str, list[tuple[int, int]]] = {}
+        for _, code, race, g in sorted(due):  # by due time: the stretch ending soonest
+            cost = per if code in picked else nav + per
+            if cost <= left + _EPS:
+                picked.setdefault(code, []).append((race, g))
+                left -= cost
+        deadline = self._next_round(start)
+        for code, points in picked.items():
+            v, cost = self.venues[code], nav + per * len(points)
+            if v.state.stopped is None and self.now() + timedelta(seconds=cost / rps) <= deadline:
+                self._capture_tier2(v, points)
+
+    def _capture_tier2(self, v: _Venue, points: list[tuple[int, int]]) -> None:
+        v.tier2_tried.update(points)
+        races = sorted(race for race, _ in points)
+        try:
+            capture = self.site.capture_tier2(v.state.code, races)
+            self.store.write(v.state.code, capture)
+        except CircuitOpen:
+            raise
+        except Exception as exc:  # parser errors included: tier 2 never stops tier 1
+            log.warning("%s tier-2 capture of races %s failed: %r", v.state.code, races, exc)
+            return
+        v.tier2_got.update(points)
+        self.summary.requests += capture.requests
+        self._count_tier2(v)
+
+    def _count_tier2(self, v: _Venue) -> None:
+        if self.tier2:
+            got = {(race, g) for race, g in v.tier2_got if race in v.state.post_times}
+            v.summary.tier2_skipped = len(v.state.post_times) * len(self.grid) - len(got)
 
     def _failed(self, v: _Venue, exc: Exception, t: datetime, what: str) -> None:
         if isinstance(exc, WrongMeeting):
