@@ -94,13 +94,16 @@ class CheckResult:
             )
             out.append(f"{level.upper():<4} orphan race ids (not in races): {cells}")
         out += [check.line() for check in self.integrity]
-        out.append(f"race dates {self.date_min} .. {self.date_max}, {len(self.seasons)} seasons")
+        out.append(f"race dates {self.date_min} .. {self.date_max}")
         if self.seasons:
             shares = [s["rating_share"] for s in self.seasons if s["rating_share"] is not None]
             races = sum(s["races"] for s in self.seasons)
             starters = sum(s["starters"] for s in self.seasons)
             spread = f"{100 * min(shares):.1f}%..{100 * max(shares):.1f}%" if shares else "n/a"
-            out.append(f"run races {races}, starters {starters}, rating share by season {spread}")
+            out.append(
+                f"{len(self.seasons)} seasons: run races {races}, starters {starters},"
+                f" rating share by season {spread}"
+            )
         out.append(f"report {self.report_path}")
         return out
 
