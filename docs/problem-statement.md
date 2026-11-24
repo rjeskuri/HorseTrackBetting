@@ -14,7 +14,7 @@ How to read it:
 
 Sources: the HorseTrackBetting brief (HKTrack `docs/research/25-horsetrackbetting-brief.md`, section "Modeling
 governance"), the HKTrack process review (`docs/research/24-process-review-2026-11-22.md`, sections 1 to 4 and 7),
-HKTrack `docs/DECISIONS.md` #26 and #27, and an internal research synthesis (not published).
+HKTrack `docs/DECISIONS.md` #12, #26 and #27, and an internal research synthesis (not published).
 
 Notation: race r; runner i; time to post τ; decision time t; the board at t (the odds displayed at t) `O_t`; the
 final odds that pay `O_final`; the market's implied probability from the final price `q_final`; takeout τ_k of
@@ -51,8 +51,13 @@ Facts the statement relies on (each to be entered in the known-vs-assumed ledger
 - **Breakage and the minimum payout.** Dividends are rounded down to ¥10 per ¥100. The JRA minimum payout is ¥110
   per ¥100 (Plus 10); it is withheld, and the dividend is ¥100, when paying it would exceed the pool. At a dividend
   of ¥110 a Place bet needs P(top 3) > 0.909 to have value; at ¥100 it can never have value.
-- **Closing-line value is degenerate on a tote.** Every bet is paid at the closing price, so "beating the closing
-  line" is identically zero and cannot be the live metric. The price half needs its own score (D8).
+- **Closing-line value in the sports-betting sense is degenerate on a tote.** Every bet is paid at the closing
+  price, so the price obtained always equals the closing price and "beating the closing line" in that sense is
+  identically zero. HKTrack's measure (HKTrack DECISIONS #12) is a different quantity and is not zero: the log of
+  the final odds over the odds at decision, and the share of bets whose final odds stayed at or above the bet's
+  minimum acceptable odds. It measures how the price moved after the decision, not a price the bet obtained. The
+  brief lists closing-line value as the primary live metric among the assumptions to retest or drop, so whether a
+  measure of this kind is a live diagnostic is an owner choice (D8), alongside the price half's own score.
 - **Pricing on a forecast of the final odds is biased upward.** Multiplying a probability by a point forecast of
   the final odds overstates value even when the forecast is unbiased in log terms. Under an efficient final price
   and a lognormal forecast with log-scale standard deviation σ, the bias for Win at a 20% takeout is about
@@ -71,12 +76,17 @@ HKTrack's evidence is the starting point, not something to explain away (brief, 
   board being stale, not information in the model.
 - In Hong Kong the fitted blend weight on the form model was zero. That zero was the lower bound of a constraint
   that forbade negative weights; without the bound the estimate was slightly negative.
-- Every betting rule tested lost money at the final dividends, and a large search over segments, pools and ticket
-  combinations found nothing that beat the takeout.
+- No betting rule tested showed a profit that survived its uncertainty. Some Win rules had a positive point
+  return at the final dividends, but every return interval reported for them spans zero (HKTrack DECISIONS #26
+  and #27); the rules compared in the process review all lost money; and a large search over segments, pools and
+  ticket combinations found nothing that beat the takeout.
 - The Win rule HKTrack shipped claimed a clearly positive expected value; with the same probabilities at the
-  actual final odds the expected value was negative. The rule priced bets as a probability fitted on the board
-  times a forecast of the final odds (the bias above, plus selection), and it was judged against the board instead
-  of the final price.
+  actual final odds the expected value was negative. Its stage-2 combiner had been fitted on the final odds but
+  was fed, live, the much less sharp board or a forecast of the final odds made from it ("fit final, fed forecast
+  final"), so the weights fitted on the sharp final price over-trusted a stale input. The value was then that
+  probability times the forecast of the final odds (the bias above, plus selection), and the model was judged
+  against the board instead of the final price. HKTrack DECISIONS #27's fix was to fit stage 2 on the board it is
+  fed.
 
 See HKTrack `docs/research/24-process-review-2026-11-22.md` sections 1 to 4, HKTrack `docs/DECISIONS.md` #26 and
 #27, and the brief's "Why". The figures themselves are not reproduced here: the models behind them used inputs from
@@ -87,13 +97,16 @@ The claims this null result rests on, to be cross-referenced to the known-vs-ass
    (one model; its test seasons were reused for model selection, so this is at best single-run).
 2. The decision-time board is less sharp than the final price, and model plus board trails the final price.
 3. The Hong Kong blend weight of zero is a bound-constrained estimate, not an unconstrained zero.
-4. Every betting rule tested lost money at final dividends.
+4. No tested betting rule showed a profit that survived: every reported return interval spans zero (some Win
+   rules had positive point estimates), and the rules compared in the process review lost money at final
+   dividends.
 5. A large hypothesis search found nothing beating the takeout (its period is not stated in the source).
 6. The shipped Win rule's claimed value reversed sign at the actual final odds.
 7. The late price-move sizes quoted in the process review come from one day at one venue and from flagged tickets,
    so they are single-run and selection-conditional.
 8. The JRA takeout schedule and the minimum-payout rule (public rules; measured).
-9. Closing-line value is zero by construction on a tote (arithmetic).
+9. Closing-line value in the sports-betting sense (price obtained against closing price) is zero by construction
+   on a tote (arithmetic); HKTrack's decision-to-final measure (HKTrack DECISIONS #12) is not.
 
 OWNER DECISION (D1): Which form of the estimand does the project model?
 
@@ -214,7 +227,8 @@ OWNER DECISION (D7): What is the bootstrap's resampling unit, and what is the co
 
 Answer:
 
-OWNER DECISION (D8): How is the price half (forecasting `O_final` from info_t) scored?
+OWNER DECISION (D8): How is the price half (forecasting `O_final` from info_t) scored, and is a closing-line-style
+measure used as a live diagnostic?
 
 - **Log predictive density of the final log share** per runner (and per combination). Proper and uses the whole
   forecast distribution, which is what the value calculation integrates over; needs a density, and is sensitive to
@@ -230,6 +244,12 @@ OWNER DECISION (D8): How is the price half (forecasting `O_final` from info_t) s
 - **Joint check in shadow:** regress the realised return at the final dividend on the claimed value; a calibrated
   value has slope near 1. It is the only score of the two halves together, and it needs many bets before it says
   anything.
+- **Closing-line-style live diagnostic (HKTrack DECISIONS #12): primary, secondary or not used.** Per bet, the log
+  of `O_final` over the odds at decision, and the share of bets still good at the final price. Cheap, available
+  from the first live day and read on real bets; but it is not a proper score of the forecast, it is conditional
+  on the bets chosen, and the brief lists it as an assumption to retest or drop. As the primary live metric it
+  replaces profit with a faster signal; as a secondary diagnostic it sits beside the joint check; not used, the
+  price half is judged only by the scores above.
 
 Answer:
 
@@ -507,7 +527,7 @@ Answer:
 | D5 | Baseline for Place, Wide and the exotic pools | 2. Baseline |
 | D6 | The outcome scored and the pseudo-R² reference | 3. Metric |
 | D7 | Bootstrap resampling unit (race, meeting, day, block) and confidence level | 3. Metric |
-| D8 | How the price half (forecasting O_final from info_t) is scored, and its baseline | 3. Metric |
+| D8 | How the price half (forecasting O_final from info_t) is scored, its baseline, and whether a closing-line-style measure is a live diagnostic | 3. Metric |
 | D9 | Fold scheme: unit, refit cadence, window, minimum training window, nesting, embargo | 4. Splits |
 | D10 | Treatment of races before 2014-06-07 | 4. Splits |
 | D11 | Japan holdout design (prospective contiguous, prospective interleaved, historical block, hybrid) | 5. Holdout |
