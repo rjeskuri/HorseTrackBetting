@@ -59,6 +59,14 @@ that moment. `generated_utc` is `now()`.
 A row whose current `status_raw` is `SCR` carries status `SCR`, null `odds` and `odds_hi`, and
 null moves. Its references still show what the runner was priced at, for the record.
 
+A scratch carries onto every combination containing the runner. When a runner's current WIN or
+PLACE row is `SCR`, every row in every pool of that race whose combination contains that runner
+number (whole numbers of the comma-separated pair: runner 1 matches `'1,10'`, not `'10,11'`) is
+reported the same way: status `SCR`, null `odds`, `odds_hi` and moves, references kept. This
+holds whether or not the source still lists the combination: after a scratch it stops listing the
+runner's pairs, whose last row would otherwise stand as current. The carry stays within the race
+and starts only once the `SCR` row is captured at or before `now()`.
+
 ## Post times
 
 `snapshot.post_times_for(race_date, venue)` (docs/specs/board-at-t.md): the `<VENUE>.races.json`

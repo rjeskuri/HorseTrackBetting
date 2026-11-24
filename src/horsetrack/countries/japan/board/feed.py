@@ -7,6 +7,8 @@ Rules (docs/specs/board-feed.md):
 - Current: the latest row per (race, pool, combination). Morning reference: the earliest priced
   row captured on race day at or after `morning_from` Japan time. T-20 reference: the latest row
   at or before post - 20 min, null before then or without a post time. Moves are on `odds`.
+- A runner whose current WIN or PLACE row is `SCR` is scratched on every combination of its race
+  that contains its number, listed or not since.
 - The feed is JSON-ready and carries prices only: no probability, value or bet field.
 """
 
@@ -23,6 +25,7 @@ from horsetrack.countries.japan.odds_log import POOL_TOTAL
 
 _JST = timezone(timedelta(hours=9))  # Japan keeps no daylight saving time
 _LOG_SUFFIX = ".jsonl.gz"
+_RUNNER_POOLS = ("WIN", "PLACE")  # one runner per combination: where a scratch shows
 T20 = timedelta(minutes=20)
 
 _instant = odds_log._instant
@@ -65,6 +68,12 @@ def _combination_order(combination: Any) -> tuple:
         return (1, (), str(combination))
 
 
+def _runners(combination: Any) -> set[str]:
+    """The runner numbers of a combination (`'1'`, `'1,10'`), as whole numbers."""
+    parts = (part.strip() for part in str(combination).split(","))
+    return {str(int(part)) if part.isdigit() else part for part in parts}
+
+
 def _venues_logged(race_date: date) -> list[str]:
     day_dir = paths.odds_snapshot_path("jra", race_date.isoformat(), "_").parent
     if not day_dir.is_dir():
@@ -77,8 +86,10 @@ def _row_feed(
     morning_start: datetime,
     morning_end: datetime,
     t20_at: datetime | None,
+    scratched: bool = False,
 ) -> dict[str, Any]:
-    """One combination's line from its rows in capture order (at the same instant, log order)."""
+    """One combination's line from its rows in capture order (at the same instant, log order);
+    `scratched` when one of its runners is out of the race."""
     _, current = history[-1]
     morning = next(
         (row for at, row in history if morning_start <= at < morning_end and _priced(row)), None
@@ -89,12 +100,12 @@ def _row_feed(
         t20 = before[-1] if before and _priced(before[-1]) else None
     morning_odds = None if morning is None else morning.get("odds")
     t20_odds = None if t20 is None else t20.get("odds")
-    priced = _priced(current)
+    priced = _priced(current) and not scratched
     return {
         "combination": current.get("combination"),
         "odds": current.get("odds") if priced else None,
         "odds_hi": current.get("odds_hi") if priced else None,
-        "status": current.get("status_raw"),
+        "status": SCRATCHED if scratched else current.get("status_raw"),
         "morning_odds": morning_odds,
         "move_morning_pct": _move(current.get("odds"), morning_odds) if priced else None,
         "t20_odds": t20_odds,
@@ -120,13 +131,26 @@ def _race_feed(
         if combination != POOL_TOTAL:
             lines.setdefault(combination, []).append((at, row))
     totals = odds_log.latest_totals(row for _, row in ordered)
+    out_runners = {
+        runner
+        for pool in _RUNNER_POOLS
+        for combination, history in histories.get(pool, {}).items()
+        if history[-1][1].get("status_raw") == SCRATCHED
+        for runner in _runners(combination)
+    }
     pools = {}
     for pool in sorted(histories, key=str):
         total = totals.get((race_id, pool))
         pools[pool] = {
             "investment": None if total is None else total.get("investment"),
             "rows": [
-                _row_feed(histories[pool][c], morning_start, morning_end, t20_at)
+                _row_feed(
+                    histories[pool][c],
+                    morning_start,
+                    morning_end,
+                    t20_at,
+                    scratched=bool(_runners(c) & out_runners),
+                )
                 for c in sorted(histories[pool], key=_combination_order)
             ],
         }

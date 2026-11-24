@@ -461,6 +461,93 @@ def test_a_scratched_runner_has_status_and_no_move():
     assert (runner["move_morning_pct"], runner["move_t20_pct"]) == (-17.1, -5.6)
 
 
+def test_a_scratch_carries_onto_the_runners_combinations():
+    """Ruling (PR #166): once a runner's current WIN or PLACE row is 'SCR', every combination of
+    that race containing the runner number is 'SCR' with no odds and no move, even when the pair
+    pool stops listing it; combinations without the runner (10,11 when 1 is out) move as usual."""
+    r11, r12 = rid("TOK", 11), rid("TOK", 12)
+    write_sidecar("TOK", {11: jst(15, 1).astimezone(UTC), 12: jst(15, 31).astimezone(UTC)})
+    # pool, combination: figures at 07:05 (morning), 14:40 (pre-T-20), 14:55 (None: not listed)
+    prices = {
+        ("WIN", "1"): ((3.0,), (2.8,), "SCR"),
+        ("WIN", "2"): ((5.0,), (5.5,), (4.0,)),
+        ("QUINELLA", "1,2"): ((10.0,), (9.0,), None),
+        ("QUINELLA", "1,10"): ((50.0,), None, None),
+        ("QUINELLA", "1,11"): ((150.0,), (140.0,), None),
+        ("QUINELLA", "2,3"): ((20.0,), (18.0,), (16.0,)),
+        ("QUINELLA", "2,10"): ((60.0,), (55.0,), (66.0,)),
+        ("QUINELLA", "10,11"): ((200.0,), (180.0,), (160.0,)),
+        ("QUINELLA_PLACE", "1,3"): ((4.0, 5.0), (3.5, 4.5), None),
+        ("QUINELLA_PLACE", "2,3"): ((6.0, 7.0), (5.0, 6.0), (4.5, 5.5)),
+    }
+    rows = []
+    for (pool, combination), captures in prices.items():
+        for at, figures in zip((jst(7, 5), jst(14, 40), jst(14, 55)), captures, strict=True):
+            if figures == "SCR":
+                rows.append(price(r11, pool, combination, None, at))
+            elif figures is not None:
+                hi = figures[1] if len(figures) > 1 else None
+                rows.append(price(r11, pool, combination, figures[0], at, odds_hi=hi))
+    # race 12: its runner 1 runs, so its pairs are untouched by race 11's scratch
+    rows += [
+        price(r12, "WIN", "1", 3.0, jst(7, 5)),
+        price(r12, "QUINELLA", "1,2", 10.0, jst(7, 5)),
+        price(r12, "WIN", "1", 2.5, jst(14, 55)),
+        price(r12, "QUINELLA", "1,2", 8.0, jst(14, 55)),
+    ]
+    write_log("TOK", rows)
+
+    board = build(jst(14, 58))
+    race11 = race_of(board, "TOK", 11)
+
+    # scratched: (pool, combination): (morning_odds, t20_odds), kept for the record
+    scratched = {
+        ("WIN", "1"): (3.0, 2.8),
+        ("QUINELLA", "1,2"): (10.0, 9.0),
+        ("QUINELLA", "1,10"): (50.0, 50.0),
+        ("QUINELLA", "1,11"): (150.0, 140.0),
+        ("QUINELLA_PLACE", "1,3"): (4.0, 3.5),
+    }
+    for (pool, combination), (morning, t20) in scratched.items():
+        got = line(race11, pool, combination)
+        assert got["status"] == "SCR", (pool, combination)
+        assert (got["odds"], got["odds_hi"]) == (None, None), (pool, combination)
+        assert (got["move_morning_pct"], got["move_t20_pct"]) == (None, None), (pool, combination)
+        assert (got["morning_odds"], got["t20_odds"]) == (morning, t20), (pool, combination)
+
+    # running: (pool, combination): (odds, odds_hi, move_morning_pct, move_t20_pct)
+    running = {
+        ("WIN", "2"): (4.0, None, -20.0, -27.3),
+        ("QUINELLA", "2,3"): (16.0, None, -20.0, -11.1),
+        ("QUINELLA", "2,10"): (66.0, None, 10.0, 20.0),
+        ("QUINELLA", "10,11"): (160.0, None, -20.0, -11.1),
+        ("QUINELLA_PLACE", "2,3"): (4.5, 5.5, -25.0, -10.0),
+    }
+    for (pool, combination), want in running.items():
+        got = line(race11, pool, combination)
+        assert got["status"] != "SCR", (pool, combination)
+        assert (
+            got["odds"],
+            got["odds_hi"],
+            got["move_morning_pct"],
+            got["move_t20_pct"],
+        ) == want, (pool, combination)
+
+    race12 = race_of(board, "TOK", 12)
+    for pool, combination, odds, move in (
+        ("WIN", "1", 2.5, -16.7),
+        ("QUINELLA", "1,2", 8.0, -20.0),
+    ):
+        got = line(race12, pool, combination)
+        assert got["status"] != "SCR", (pool, combination)
+        assert (got["odds"], got["move_morning_pct"]) == (odds, move), (pool, combination)
+
+    # before the scratch is captured, runner 1's pairs are priced and move
+    before = line(race_of(build(jst(14, 50)), "TOK", 11), "QUINELLA", "1,2")
+    assert before["status"] != "SCR"
+    assert (before["odds"], before["move_morning_pct"]) == (9.0, -10.0)
+
+
 def test_pool_investment_is_the_latest_total():
     r11, r12 = rid("TOK", 11), rid("TOK", 12)
     rows = [
