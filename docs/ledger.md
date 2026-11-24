@@ -56,6 +56,12 @@ read-only predecessor project. A claim moves to a stronger label only when new e
 | Odds displayed before the off are floored to 0.1 (not rounded), like the final odds. | assumption | Stated in HKTrack `config/jurisdictions/jra.yaml` `odds_display` and HKTrack `docs/research/results/jra-2026-11-18/B-betting-rules.md` §8 without a quoted primary source or a check against pool totals. | Compare displayed odds with odds recomputed from logged pool totals. |
 | Adding back 0.05 (half a step) to displayed odds removes the flooring bias. | assumption | HKTrack `config/jurisdictions/jra.yaml` `odds_display.detruncate_below` and `detruncate_at_or_above` 0.05; assumes the floored remainder is uniform over the step. | Same comparison as the row above, by odds level. |
 
+## Japan (JRA): ported stores
+
+| Claim | Label | Evidence (source, n, date) | Retest by |
+|---|---|---|---|
+| `horse_pedigree` has 108917 rows, one per distinct `horse_id`; the 32668 in HKTrack's `processed/jra/_build.json` counted only the store build's table before the JRDB UKC merge rewrote the file, so it is stale, not a second truth. | measured | Parquet count (2026-11-25, ticket #154): `pq.ParquetFile("$HORSETRACK_DATA_DIR/processed/jra/horse_pedigree.parquet").metadata.num_rows` gives 108917, and `pl.scan_parquet(...).select(pl.col("horse_id").n_unique())` gives 108917. Which step wrote each number, read from code: `_build.json` is written only by HKTrack `src/hktrack/store/build.py` (`summary.rows` line 629, written line 639) from the netkeiba `pedigree_card` pages (`store/schemas.py` line 136). `_build_horse_pedigree` in HKTrack `src/hktrack/sources/jra/jrdb/tables.py` (line 288; called line 362) then merges the UKC table over that file (`merge_pedigree`, `sources/jra/jrdb/pedigree.py` line 114) and rewrites the parquet (line 302); nothing in it touches `_build.json`. Consistent with the file times of the ported copies: parquet written about 3.5 minutes after `_build.json` (2026-11-22). The 32668 was not reproduced, since the merge replaced the file: its source is the code reading plus the timestamps. | Run the ported UKC merge (#209) and read the row count from the parquet metadata, never from `_build.json`. Until then no ticket relies on 32668. |
+
 ## HKTrack design assumptions (retest or drop)
 
 | Claim | Label | Evidence (source, n, date) | Retest by |
