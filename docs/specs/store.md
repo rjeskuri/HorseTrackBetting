@@ -82,7 +82,10 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   placing_raw, race_id`.
 - **horse_pedigree**: written only for sources with pedigree pages. `sire_name, dam_name,
   dam_sire_name` as printed, their `*_norm` forms (NFKC and casefold), `sire_id, dam_id,
-  dam_sire_id` (null where the page does not link them), `source_race_id, scraped_utc`.
+  dam_sire_id` (null where the page does not link them), `source_race_id, scraped_utc`. For jra,
+  `horsetrack japan jrdb build` rewrites it when JRDB UKC is delivered: UKC's rows, plus the
+  netkeiba rows for horses UKC lacks, in `jrdb.pedigree.OUTPUT_COLUMNS` (the netkeiba-only
+  columns dropped; see `countries/japan/jrdb/tables.py`).
 - **jrdb_pre_race**, **jrdb_post_race**: JRDB rows matched to the store's races and runners. Declared
   here: the key columns `race_id, race_date, horse_no, horse_id, race_key, jrdb_horse_id,
   matched_by`. The per-family data columns (`<family>_<column>`, from each family's spec under
