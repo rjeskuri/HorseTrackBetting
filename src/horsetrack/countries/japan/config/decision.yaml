@@ -1,0 +1,5 @@
+# The decision grid: minutes before post at which the board is read and scored.
+# Owner decision D2 (docs/problem-statement.md): "A grid (T-60, T-30, T-16, T-5, T-2, T-1) with T-2 as
+# the primary decision time." Changing either value is an owner decision, not a code change.
+grid_min: [60, 30, 16, 5, 2, 1]
+primary_min: 2

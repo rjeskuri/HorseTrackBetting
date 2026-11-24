@@ -1,1 +1,1 @@
-"""Evaluation: walk-forward folds and the scoring built on them."""
+"""Evaluation: walk-forward folds, the locked final holdout and its use log."""

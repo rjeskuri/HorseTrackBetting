@@ -1,1 +1,1 @@
-"""Core library: data-independent building blocks."""
+"""Core library code shared by every country."""
