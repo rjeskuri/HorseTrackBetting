@@ -5,7 +5,9 @@ Reads every `<VENUE>.jsonl.gz` log and `<VENUE>.races.json` post-time sidecar un
 `processed/<source>/odds_timeseries/<YYYY-MM-DD>.parquet`. The logs are the record; the Parquet is
 derived and rebuilt whole on every run.
 
-Columns, one row per logged row (pool-total `__pool__` rows included):
+Columns, one row per logged row (pool-total `__pool__` rows, tier-2 and WIN5 rows included). The
+logs are streamed member by member and the day is held as one Arrow table per member, not one
+Python dict per row (a tier-2 day runs to millions of rows):
 
 - race_id, venue, race_no, pool, combination: venue is the log file's; race_no from the race_id.
 - snapshot_utc, fetched_utc: as logged, tz-aware UTC; fetched_utc null when absent or null.
@@ -37,7 +39,7 @@ import pyarrow.parquet as pq
 import typer
 
 from horsetrack.core import paths
-from horsetrack.countries.japan.odds_log import _instant, read_post_times, read_rows
+from horsetrack.countries.japan.odds_log import _instant, iter_members, read_post_times
 
 _LOG_SUFFIX = ".jsonl.gz"
 _SIDECAR_SUFFIX = ".races.json"
@@ -64,6 +66,24 @@ SCHEMA = pa.schema(
         ("is_refund", pa.bool_()),
     ]
 )
+# The columns a logged row gives on its own; the rest need the whole day (or the dividends).
+_LOGGED = pa.schema(
+    [f for f in SCHEMA if f.name not in ("is_final_capture", "dividend", "is_refund")]
+)
+# A total order on the row's content, so the bytes do not depend on file or log order.
+_SORT_COLUMNS = (
+    "race_id",
+    "pool",
+    "combination",
+    "snapshot_utc",
+    "venue",
+    "fetched_utc",
+    "is_final_capture",
+    "odds",
+    "odds_hi",
+    "investment",
+    "status_raw",
+)
 
 
 class NoLogs(FileNotFoundError):
@@ -85,20 +105,36 @@ def compact_day(race_date: str, source: str = "jra") -> Path:
     if not logs:
         raise NoLogs(f"no odds logs for {day} under {day_dir}")
 
-    records: list[dict[str, Any]] = []
+    # One Arrow table per member, so the day is held column-wise (tier-2 days run to millions of
+    # rows); only the latest (instant, log position) per key and the race ids are kept in Python.
+    parts: list[pa.Table] = []
+    latest: dict[tuple, tuple[datetime, int]] = {}
+    race_ids: set[Any] = set()
+    position = 0
     for log_path in logs:
         venue = log_path.name[: -len(_LOG_SUFFIX)]
         post_times = read_post_times(log_path.with_name(venue + _SIDECAR_SUFFIX))
-        for row in read_rows(log_path):
-            records.append(_record(row, venue, post_times))
+        for member in iter_members(log_path):
+            records = [_record(row, venue, post_times) for row in member]
+            for rec in records:
+                _note_latest(latest, rec, position)
+                race_ids.add(rec["race_id"])
+                position += 1
+            if records:
+                parts.append(pa.Table.from_pylist(records, schema=_LOGGED))
+    race_ids.discard(None)
 
-    _flag_final_captures(records)
-    _join_dividends(records, paths.processed_dir(source) / "dividends.parquet")
-    records.sort(key=_sort_key)
-
-    table = pa.Table.from_pylist(
-        [{name: rec[name] for name in SCHEMA.names} for rec in records], schema=SCHEMA
-    )
+    finals = {at_position for _, at_position in latest.values()}
+    del latest
+    dividends = _read_dividends(paths.processed_dir(source) / "dividends.parquet", race_ids)
+    start = 0
+    for i, part in enumerate(parts):
+        parts[i] = _with_derived(part, start, finals, dividends)
+        start += part.num_rows
+    table = pa.concat_tables(parts) if parts else SCHEMA.empty_table()
+    del parts
+    # null last and strings in code-point order, as a Python sort on (is None, value) would give
+    table = table.sort_by([(name, "ascending") for name in _SORT_COLUMNS])
     sink = pa.BufferOutputStream()
     pq.write_table(table, sink, compression="snappy")
     target = day_file(day, source)
@@ -138,68 +174,60 @@ def _record(row: dict[str, Any], venue: str, post_times: dict[int, datetime]) ->
         "odds_hi": _number(row.get("odds_hi")),
         "investment": _number(row.get("investment")),
         "status_raw": row.get("status_raw"),
-        "is_final_capture": False,
-        "dividend": None,
-        "is_refund": None,
     }
 
 
-def _flag_final_captures(records: list[dict[str, Any]]) -> None:
-    """Flag the latest row per key; records are in log order (venues by name), so `>=` lets the
-    later logged row win a tie. Rows without a readable snapshot_utc are never final."""
-    best: dict[tuple, dict[str, Any]] = {}
-    for rec in records:
-        at = rec["snapshot_utc"]
-        if at is None:
-            continue
-        key = tuple(rec[field] for field in _JOIN_KEY)
-        current = best.get(key)
-        if current is None or at >= current["snapshot_utc"]:
-            best[key] = rec
-    for rec in best.values():
-        rec["is_final_capture"] = True
-
-
-def _join_dividends(records: list[dict[str, Any]], path: Path) -> None:
-    if not path.exists() or not records:
+def _note_latest(latest: dict[tuple, tuple[datetime, int]], rec: dict[str, Any], at: int) -> None:
+    """Keep the latest row per key by its log position; rows come in log order (venues by name),
+    so `>=` lets the later logged row win a tie. Rows without a readable snapshot_utc are never
+    final."""
+    snapshot = rec["snapshot_utc"]
+    if snapshot is None:
         return
+    key = tuple(rec[field] for field in _JOIN_KEY)
+    current = latest.get(key)
+    if current is None or snapshot >= current[0]:
+        latest[key] = (snapshot, at)
+
+
+_Dividends = dict[tuple, tuple[float | None, bool | None]]
+
+
+def _read_dividends(path: Path, race_ids: set[Any]) -> _Dividends:
+    """(race_id, pool, combination) -> (dividend, is_refund) for the day's races; ValueError when a
+    key appears twice."""
+    if not path.exists() or not race_ids:
+        return {}
     table = pq.read_table(path, columns=[*_JOIN_KEY, "dividend", "is_refund"])
-    race_ids = pa.array(sorted({rec["race_id"] for rec in records if rec["race_id"] is not None}))
-    table = table.filter(pc.is_in(table["race_id"], value_set=race_ids))
-    dividends: dict[tuple, tuple[float | None, bool | None]] = {}
+    table = table.filter(pc.is_in(table["race_id"], value_set=pa.array(sorted(race_ids))))
+    dividends: _Dividends = {}
     for row in table.to_pylist():
         key = tuple(row[field] for field in _JOIN_KEY)
         if key in dividends:
             raise ValueError(f"{path}: (race_id, pool, combination) {key} appears more than once")
         refund = row["is_refund"]
         dividends[key] = (_number(row["dividend"]), None if refund is None else bool(refund))
-    for rec in records:
-        match = dividends.get(tuple(rec[field] for field in _JOIN_KEY))
-        if match is not None:
-            rec["dividend"], rec["is_refund"] = match
+    return dividends
 
 
-def _sort_key(rec: dict[str, Any]) -> tuple:
-    """A total order on the row's content, so the bytes do not depend on file or log order."""
-
-    def part(value: Any) -> tuple:
-        return (value is None, "" if value is None else value)
-
-    return tuple(
-        part(rec[name])
-        for name in (
-            "race_id",
-            "pool",
-            "combination",
-            "snapshot_utc",
-            "venue",
-            "fetched_utc",
-            "is_final_capture",
-            "odds",
-            "odds_hi",
-            "investment",
-            "status_raw",
-        )
+def _with_derived(part: pa.Table, start: int, finals: set[int], dividends: _Dividends) -> pa.Table:
+    """A member's table (rows at log positions start...) with is_final_capture and the dividend
+    join added, in SCHEMA's column order."""
+    final = [start + i in finals for i in range(part.num_rows)]
+    if dividends:
+        keys = zip(*(part[field].to_pylist() for field in _JOIN_KEY), strict=True)
+        matches = [dividends.get(key, (None, None)) for key in keys]
+        dividend, refund = [m[0] for m in matches], [m[1] for m in matches]
+    else:
+        dividend = refund = [None] * part.num_rows
+    columns = {
+        "is_final_capture": pa.chunked_array([pa.array(final, pa.bool_())]),
+        "dividend": pa.chunked_array([pa.array(dividend, pa.float64())]),
+        "is_refund": pa.chunked_array([pa.array(refund, pa.bool_())]),
+    }
+    return pa.table(
+        [part[name] if name in part.column_names else columns[name] for name in SCHEMA.names],
+        schema=SCHEMA,
     )
 
 

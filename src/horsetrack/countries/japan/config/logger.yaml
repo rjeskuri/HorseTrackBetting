@@ -24,6 +24,15 @@ after_last_race_min: 10
 hot_races: {within_min: 20, after_post_min: 5, all_every_s: 300}
 # What a capture costs: `navigation` once (the odds menu and the race list), `per_race` per race.
 requests: {navigation: 2, per_race: 3}
+# Tier 2 (ticket #130): 枠連, 馬単, 3連複 and 3連単, each race captured once per grid point
+# (minutes before post: decision.yaml's D2 grid), only from what tier 1 leaves of a round's budget.
+# A grid point with no capture by the next one counts as tier2_skipped on the health line. On a WIN5
+# day the WIN5 page comes with the tier-2 captures of its five races. Without this block: tier 1 only.
+tier2:
+  pools: [BRACKET_QUINELLA, FORECAST, TRIO, TIERCE]
+  grid_min: [60, 30, 16, 5, 2, 1]
+  # the odds menu and the race list, then one page per pool of each race
+  requests: {navigation: 2, per_race: 4}
 # A venue answering for another meeting this many captures in a row stops (that venue only).
 max_wrong_meeting: 3
 # After a 403/429 (or any open circuit): null stops the host for the rest of the day and the

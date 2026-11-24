@@ -48,7 +48,9 @@ import pytest
 from horsetrack.core.ingest.adapters import SourceAdapter, get_adapter
 from horsetrack.core.ingest.queue import FetchQueue
 from horsetrack.core.ingest.types import FetchTask, RawPage
+from horsetrack.core.store import build
 from horsetrack.countries.hongkong.hkjc import (
+    parse_common,
     parse_corunning,
     parse_entries,
     parse_fixture,
@@ -957,3 +959,26 @@ def test_unpublished_comments_on_running_can_be_fetched_again_inside_the_window(
         (again,) = followups_on(RACE_DAY + timedelta(days=8))["corunning"]
         queue.enqueue([again])
         assert [(t.key, t.mutable) for t in queue.next_pending(5)] == [(first.key, True)]
+
+
+# The store build labels meetings, races and runners with a season through the adapter's optional
+# `season_start_month()` hook (core/store/build.py), falling back to calendar years. HKJC seasons
+# start in September (hkjc.yaml `season.start_month: 9`); without the hook the rebuilt tables
+# disagreed with the copied ones on 925 meetings, 8765 races and 110495 runners.
+def test_the_store_build_reads_the_hkjc_season_start_month():
+    assert build.season_start_month("hkjc") == parse_common.season_start_month() == 9
+
+
+@pytest.mark.parametrize(
+    "day, label",
+    [
+        (date(2010, 1, 1), "2009/10"),  # the copied-vs-rebuilt mismatch from the rebuild check
+        (date(2026, 9, 23), "2026/27"),
+        (date(2026, 9, 1), "2026/27"),  # first day of a season
+        (date(2026, 8, 31), "2025/26"),  # last day of the previous one
+        (date(2026, 12, 31), "2026/27"),
+        (date(1999, 12, 31), "1999/00"),  # century wrap
+    ],
+)
+def test_the_store_build_labels_hkjc_seasons_from_september(day, label):
+    assert build._season_of(day, build.season_start_month("hkjc")) == label
