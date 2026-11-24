@@ -19,6 +19,15 @@ _WS = re.compile(r"\s+")
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")
 _CLAIM_SUFFIX = re.compile(r"\(\s*[-+]?\d+\s*\)")
 _NON_NAME = re.compile(r"[\W_]+")  # anything but letters and digits, of any script
+# Not content: every route ships its inline CSS even on the "No information." page, and those
+# selectors name the very containers a classifier looks for. Scanned opener by opener (see
+# strip_not_content): one lazy regex over the page is quadratic when openers are never closed.
+_NOT_CONTENT_OPEN = re.compile(r"<!--|<(style|script)\b", re.I)
+_NOT_CONTENT_CLOSE = {
+    "": re.compile(r"-->"),
+    "style": re.compile(r"</style\s*>", re.I),
+    "script": re.compile(r"</script\s*>", re.I),
+}
 
 NO_INFO_MARKER = "No information."
 
@@ -76,6 +85,28 @@ def person_key(role: str, name: str) -> str | None:
     people without any id, so the name is the key (HKTrack's `core.ids.person_key`)."""
     norm = normalise_name(name)
     return f"{role}:{norm}" if norm else None
+
+
+def strip_not_content(text: str) -> str:
+    """The page without HTML comments, <style> and <script> blocks; an opener that is never
+    closed stays in place. Linear: every opener is looked at once, and a closer that does not
+    exist is searched for once per kind."""
+    parts: list[str] = []
+    kept_from = scan = 0
+    never_closed: set[str] = set()
+    while (opener := _NOT_CONTENT_OPEN.search(text, scan)) is not None:
+        kind = (opener.group(1) or "").lower()
+        closer = (
+            None if kind in never_closed else _NOT_CONTENT_CLOSE[kind].search(text, opener.end())
+        )
+        if closer is None:
+            never_closed.add(kind)
+            scan = opener.end()
+            continue
+        parts += (text[kept_from : opener.start()], " ")
+        kept_from = scan = closer.end()
+    parts.append(text[kept_from:])
+    return "".join(parts)
 
 
 def soup(body: bytes | str) -> BeautifulSoup:
