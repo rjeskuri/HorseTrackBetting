@@ -24,10 +24,13 @@ the code under test.
 
 from __future__ import annotations
 
+import ast
 from datetime import date, datetime, timedelta, timezone
 from itertools import combinations
+from pathlib import Path
 
 import jradb_pages as pages
+from bs4.element import Tag
 from jradb_pages import CARD_PATH, ODDS_PATH
 
 from horsetrack.countries.japan.jra import official_pages as op
@@ -230,6 +233,52 @@ def test_pool_totals_are_pool_rows_in_yen():
     w_totals = [r for r in rows_of(wide, ["QUINELLA_PLACE"]) if r["combination"] == POOL]
     assert q_totals == [pool_row("QUINELLA", 5_432_100.0)]
     assert w_totals == [pool_row("QUINELLA_PLACE", 700.0)]
+
+
+# ---------------------------------------------------------------- a page without #odds_list
+
+
+def test_odds_page_without_the_odds_list_id_parses_like_one_with_it():
+    """The id is a hint, not a requirement: the rows are read from the whole document when it is
+    missing (the selectors are not anchored to it)."""
+    votes = [("単勝", 12_345), ("複勝", 6_789), ("馬連", 54_321), ("ワイド", 7)]
+    bodies = {
+        "win_place": (
+            pages.win_place(SAT, MEETING, 11, RUNNERS, state=NOW_STATE, votes=votes),
+            ["WIN", "PLACE"],
+        ),
+        "scratched": (
+            pages.win_place(SAT, MEETING, 11, scratched_field(), state=NOW_STATE, votes=votes),
+            ["WIN", "PLACE"],
+        ),
+        "quinella": (
+            pages.pairs(SAT, MEETING, 11, QUINELLA, state=NOW_STATE, votes=votes),
+            ["QUINELLA"],
+        ),
+        "wide": (
+            pages.pairs(SAT, MEETING, 11, WIDE, state=NOW_STATE, votes=votes),
+            ["QUINELLA_PLACE"],
+        ),
+    }
+    for kind, (body, pools) in bodies.items():
+        assert b'id="odds_list"' in body, kind
+        renamed = body.replace(b'id="odds_list"', b'id="odds_table"')
+        assert b'id="odds_list"' not in renamed and renamed != body, kind
+        with_id = by_key(rows_of(body, pools))
+        assert any(r["combination"] != POOL for r in with_id), kind
+        assert any(r["combination"] == POOL for r in with_id), kind
+        assert by_key(rows_of(renamed, pools)) == with_id, kind
+
+    # and the values are the page's, not just equal to each other
+    renamed = bodies["wide"][0].replace(b'id="odds_list"', b'id="odds_table"')
+    expected = [price_row("QUINELLA_PLACE", SORTED[k], lo, hi) for k, (lo, hi) in WIDE.items()]
+    expected.append(pool_row("QUINELLA_PLACE", 700.0))
+    assert by_key(rows_of(renamed, ["QUINELLA_PLACE"])) == by_key(expected)
+    renamed = bodies["win_place"][0].replace(b'id="odds_list"', b'id="odds_table"')
+    expected = [price_row("WIN", str(n), w) for n, (w, _) in RUNNERS.items()]
+    expected += [price_row("PLACE", str(n), lo, hi) for n, (_, (lo, hi)) in RUNNERS.items()]
+    expected += [pool_row("WIN", 1_234_500.0), pool_row("PLACE", 678_900.0)]
+    assert by_key(rows_of(renamed, ["WIN", "PLACE"])) == by_key(expected)
 
 
 # ---------------------------------------------------------------- (b) one snapshot per capture
@@ -473,3 +522,104 @@ def test_race_rows_and_pool_links_of_the_odds_race_list():
             "TRIO": (ODDS_PATH, b["3連複"]),
             "TIERCE": (ODDS_PATH, b["3連単"]),
         }, n
+
+
+# ---------------------------------------------------------------- the declared selectors (#31)
+#
+# `official_pages.SELECTORS: Mapping[str, tuple[str, ...]]` declares every CSS selector the parser
+# reads, by page kind (jradb_pages.PAGE_KINDS): card_menu, odds_menu, card_race_list,
+# odds_race_list, win_place, quinella, wide. Each selector, as a whole-page selector, finds a node
+# in the builder's page of its kind (here) and in the real page (test_official_real.py); the
+# parser takes every `select` / `select_one` argument from it, never a literal.
+
+DAY = date(2026, 11, 15)
+SAMPLE_KIND_POOLS = {
+    "win_place": ["WIN", "PLACE"],
+    "quinella": ["QUINELLA"],
+    "wide": ["QUINELLA_PLACE"],
+}
+
+
+def test_selectors_are_declared_for_every_page_kind():
+    declared = op.SELECTORS
+    assert set(declared) == set(pages.PAGE_KINDS)
+    sample = pages.sample_pages()
+    for kind, selectors in declared.items():
+        assert isinstance(selectors, tuple) and selectors, kind
+        assert all(isinstance(s, str) and s.strip() for s in selectors), kind
+        assert len(set(selectors)) == len(selectors), f"{kind}: a selector listed twice"
+        page = op.soup(sample[kind])
+        assert [s for s in selectors if page.select_one(s) is None] == [], kind
+    # The odds pages declare the cells and clocks they are read from, not just a container.
+    for kind in SAMPLE_KIND_POOLS:
+        assert len(declared[kind]) >= 6, kind
+    assert len(declared["card_race_list"]) >= 2 and len(declared["odds_race_list"]) >= 2
+
+
+def test_the_parser_passes_no_literal_selector():
+    """`select` / `select_one` in official_pages.py take their selector from SELECTORS: a string
+    literal argument is a selector the declaration (and the real-page check) would not see."""
+    tree = ast.parse(Path(op.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("select", "select_one")
+    ]
+    assert calls, "the scan found no select call: the parser reads nothing?"
+    literal = [
+        (node.lineno, node.args[0].value)
+        for node in calls
+        if node.args and isinstance(node.args[0], ast.Constant)
+    ]
+    assert literal == []
+    assert all(node.args and not node.keywords for node in calls), "selector passed by keyword"
+
+
+def test_the_parser_reads_only_declared_selectors(monkeypatch):
+    """Run every parser entry point over each kind's page, recording what reaches soupsieve: each
+    selector is one of SELECTORS (so the mapping is what the real pages are checked against)."""
+    seen: list[str] = []
+
+    def recorded(original):
+        def recording(self, selector, *args, **kwargs):
+            seen.append(selector)
+            return original(self, selector, *args, **kwargs)
+
+        return recording
+
+    for name in ("select", "select_one"):
+        monkeypatch.setattr(Tag, name, recorded(getattr(Tag, name)))
+
+    declared = {sel for sels in op.SELECTORS.values() for sel in sels}
+    sample = pages.sample_pages()
+    by_kind: dict[str, set[str]] = {}
+    for kind, body in sample.items():
+        seen.clear()
+        page = op.soup(body)
+        if kind.endswith("_menu"):
+            path = CARD_PATH if kind == "card_menu" else ODDS_PATH
+            assert op.meetings_on(page, DAY, path), kind
+        elif kind == "card_race_list":
+            assert op.page_meeting(page) == (DAY, "KYO")
+            assert op.post_times(page, DAY)
+        elif kind == "odds_race_list":
+            assert op.page_meeting(page) == (DAY, "KYO")
+            assert [op.pool_links(row) for _, row in op.race_rows(page)]
+        else:
+            assert op.page_meeting(page) == (DAY, "KYO") and op.race_number(page) == 10
+            rows = op.odds_rows(
+                page, "r", SAMPLE_KIND_POOLS[kind], snapshot_utc=SNAP, fetched_utc=FETCHED
+            )
+            assert rows
+        by_kind[kind] = set(seen)
+    undeclared = {
+        kind: sorted(read - declared) for kind, read in by_kind.items() if read - declared
+    }
+    assert undeclared == {}
+    for kind in ("card_race_list", "odds_race_list", *SAMPLE_KIND_POOLS):
+        assert by_kind[kind], f"{kind}: the parser read no selector through select / select_one"
+    # The odds pages are read through selectors declared for them, not another kind's.
+    for kind in SAMPLE_KIND_POOLS:
+        assert by_kind[kind] & set(op.SELECTORS[kind]), kind
