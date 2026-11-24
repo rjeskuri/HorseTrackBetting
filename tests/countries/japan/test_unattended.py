@@ -28,11 +28,15 @@ test_log_day_cli.py: `utc_now`, `sleep` and `make_fetcher`, looked up at call ti
   exits 0 (a blocked discovery is a block, not a day without racing: no no-meeting line).
 - Ruling: a start whose run of the day finished appends today's day-done line, `at=` being
   utc_now() once run_day has returned. Finished means run_day returned, with at least one venue,
-  and the day was not stopped by a block (DaySummary.stopped is not 'circuit_open': a block has its
-  own marker, and clearing that line by hand resumes the day). A run that raised, or that was
-  terminated before run_day returned, writes no day-done line, so the next start resumes the day.
-  (Without it a start after the last race but before the stop rediscovers, rereads post times
-  and appends a health block of 'logged 0 rows' alerts.)
+  every venue stopped as 'ended' (VenueSummary.stopped). A venue stopped as 'circuit_open' (a
+  block has its own marker, and clearing that line by hand resumes the day) or as 'wrong_meeting'
+  (max_wrong_meeting answers in a row for another meeting: one bad stretch of the site, not the
+  end of the day) leaves the day open: no day-done line, so a later start that day, the site
+  answering for the right meeting again, logs that venue; that holds when the other venues
+  ended. A run that raised, or that was terminated before run_day returned, writes no day-done
+  line, so the next start resumes the day. (Without the line a start after the last race but
+  before the stop rediscovers, rereads post times and appends a health block of 'logged 0 rows'
+  alerts.)
 - So after a block, on a day without racing, or once the day's run has finished, every later start
   that day sends nothing and appends no health line; a line for another day, or for another host,
   blocks nothing.
@@ -43,6 +47,17 @@ run next to the agent never doubles the per-host rate to the JRA site. When anot
 the lock it sends no request, does not sleep, appends no health line and exits 1 (the module's error
 code: the owner at the terminal sees it), with one `ERROR` line on stderr that names the lock file
 (`log-day.lock`). `--dry-run` takes no lock: it prints its plan and exits 0 while the lock is held.
+
+Ruling: the real `sleep(seconds)` seam of log_day (the module attribute the CLI passes to run_day)
+waits on the wall clock utc_now(), not on time.sleep's clock, which stops while the Mac sleeps
+(caffeinate -i blocks idle sleep only, not a closed lid, and launchd starts nothing while the job
+runs: a 6.5 h wait from 00:30 through a night asleep 01:00-08:00 would wake at about 14:00 and lose
+the morning). It takes the deadline utc_now() + seconds once, then, while utc_now() is before the
+deadline, calls time.sleep (the time module's, looked up at call time) with one slice of
+min(60, seconds left to the deadline by utc_now()); it returns as soon as utc_now() reaches the
+deadline (>=). So every slice is over 0 and at most 60 s, none starts at or past the deadline, a
+plain wait sleeps its length, and a wall-clock jump (the Mac waking) ends the wait after the slice
+it happened in. seconds <= 0 returns without calling time.sleep.
 
 `launchd` (module horsetrack.countries.japan.logger.launchd, registered on the japan group as
 `launchd`): `horsetrack japan launchd --print | --install | --uninstall`.
@@ -67,7 +82,9 @@ code: the owner at the terminal sees it), with one `ERROR` line on stderr that n
   <plist path>`) and removes the plist file.
 
 The JRADB double (jradb_double.py) serves a synthetic week through the real Fetcher. Nothing goes
-to the network and nothing really sleeps (the clock is fake and sleep moves it). In the launchd
+to the network and nothing really sleeps (the clock is fake and sleep moves it; the real `sleep`
+seam runs against a fake wall clock and a fake time.sleep, and a real wait over 20 s fails the
+test). In the launchd
 tests HOME is under tmp_path, starting any process is an AssertionError, and the real user's
 LaunchAgents plist is checked unchanged.
 """
@@ -81,6 +98,7 @@ import os
 import plistlib
 import pwd
 import re
+import signal
 import subprocess
 import sys
 import textwrap
@@ -211,13 +229,16 @@ def start(
     site: Site | None = None,
     sleep: Callable[[float], None] | None = None,
     args: Sequence[str] = ("--unattended",),
+    real_sleep: bool = False,
 ) -> Start:
     """One `horsetrack japan log-day --unattended` (or log-day with `args`), as launchd starts it:
-    the seams on the fake clock, a fresh JRADB double over `world` (or `site`)."""
+    the seams on the fake clock, a fresh JRADB double over `world` (or `site`). With `real_sleep`
+    the module's own `sleep` stays (the caller fakes time.sleep)."""
     mod = importlib.import_module(LOG_DAY)
     site = site if site is not None else Site(dict(world.pages), clock=clock)
     monkeypatch.setattr(mod, "utc_now", clock.now)
-    monkeypatch.setattr(mod, "sleep", sleep or clock.sleep)
+    if not real_sleep:
+        monkeypatch.setattr(mod, "sleep", sleep or clock.sleep)
     monkeypatch.setattr(mod, "make_fetcher", lambda *a, **k: dbl.make_fetcher(site))
     from horsetrack.cli import app
 
@@ -317,6 +338,22 @@ def write_day_done_lines(*days: date) -> None:
 def health_bytes() -> bytes | None:
     path = logs() / "health.log"
     return path.read_bytes() if path.is_file() else None
+
+
+HEALTH_STOP = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2}) (?P<venue>\S+) snapshots=.* stopped=(?P<stopped>\S+)$"
+)
+
+
+def health_stops(day: date) -> dict[str, str]:
+    """venue -> the stopped= field of its latest health line for `day` (test_log_day_cli.py's
+    line format)."""
+    out = {}
+    for line in (health_bytes() or b"").decode("utf-8").splitlines():
+        m = HEALTH_STOP.match(line)
+        if m and m["date"] == day.isoformat():
+            out[m["venue"]] = m["stopped"]
+    return out
 
 
 def day_end(world: World, day: date) -> datetime:
@@ -698,6 +735,71 @@ def test_a_start_after_the_day_has_finished_exits_0_without_a_request(
     assert s.requests == 1, f"Monday sent {s.requests} requests"
 
 
+@pytest.mark.parametrize(
+    "today, meetings, wrong, first, later",
+    [
+        # TOK's race list claims Sunday's meeting from 09:00: three answers, stopped at 09:10.
+        (SAT, [Meeting("TOK", 2)], {"TOK": (SUN, "5回東京8日")}, (9, 0), (9, 30)),
+        # Both venues answer for another meeting (another venue, another day).
+        (
+            SUN,
+            [Meeting("KYO", 2, nichi=8), Meeting("NAK", 2, nichi=8)],
+            {"KYO": (SUN, "5回阪神8日"), "NAK": (SAT, "5回中山7日")},
+            (9, 0),
+            (9, 30),
+        ),
+        # KYO logs its one race and ends at 09:45; NAK stops as wrong_meeting, its race 2 at 10:10.
+        (
+            SUN,
+            [Meeting("KYO", 1, nichi=8), Meeting("NAK", 2, nichi=8)],
+            {"NAK": (SAT, "5回中山7日")},
+            (9, 0),
+            (10, 0),
+        ),
+    ],
+    ids=["the-one-venue", "every-venue", "one-of-two-venues"],
+)
+def test_a_venue_stopped_for_another_meeting_leaves_the_day_open(
+    monkeypatch, today, meetings, wrong, first, later
+):
+    """A run in which any venue stopped as wrong_meeting (max_wrong_meeting answers in a row for
+    another meeting) has not finished the day: no day-done line, and a later start that day, the
+    site answering for the right meeting again, logs that venue."""
+    world = World({today: meetings})
+    venues = [m.venue for m in meetings]
+    bad = dict(world.pages)
+    for venue, (day, meeting) in wrong.items():
+        link = world.odds_list(today, venue)
+        bad[link] = dbl.relabel(bad[link], today, world.meeting(today, venue).name, day, meeting)
+    clock = Clock(at(today, *first))
+
+    s = start(monkeypatch, clock, world, site=Site(bad, clock=clock))
+    assert s.code in (0, 2), s.output
+    want = {v: "wrong_meeting" if v in wrong else "ended" for v in venues}
+    assert health_stops(today) == want, f"the run's stops are not the case's: {s.output}"
+    for venue in venues:
+        assert bool(logged_rows(today, venue)) == (venue not in wrong), venue
+    assert today.isoformat() not in day_done_days(), (
+        f"day-done {day_done_lines()} after a run in which {sorted(wrong)} stopped as wrong_meeting"
+    )
+
+    t = at(today, *later)
+    assert clock.now() < t < day_end(world, today)
+    resumed = start(monkeypatch, Clock(t), world)
+    when = f"{later[0]:02d}:{later[1]:02d}"
+    assert resumed.code in (0, 2), resumed.output
+    assert resumed.requests >= 1, f"a start at {when} sent nothing: the day counted as done"
+    for venue in wrong:
+        new = [
+            r for r in logged_rows(today, venue) if datetime.fromisoformat(r["snapshot_utc"]) >= t
+        ]
+        assert new, f"{venue} logged nothing from the start at {when}: {resumed.output}"
+    assert day_done_days() == [today.isoformat()], "the later run ended every venue: no day-done"
+
+    s = start(monkeypatch, Clock(day_end(world, today) + timedelta(minutes=10)), world)
+    assert (s.code, s.requests, s.waited) == (0, 0, 0.0), s.output
+
+
 class Crash(Exception):
     """An error from inside the day's run."""
 
@@ -776,6 +878,172 @@ def test_after_the_stop_time_it_exits_0(monkeypatch, day, after_stop_s, runs):
     if day not in week().days:
         assert s.requests == 1
         assert no_meeting_days() == [day.isoformat()]
+
+
+# ---------------------------------------------------------------- the wait, on the wall clock
+
+
+class WallClock:
+    """The Mac's wall clock (utc_now) and the time.sleep it runs. A slice of s seconds moves the
+    wall clock s, plus `jumps[k]` after slice k (1-based); with `lid` (closes, opens), the slice
+    running when the wall clock passes `closes` wakes `opens - closes` later than it would (the
+    Mac slept, and time.sleep's clock with it). Every slice is kept as (wall time at its start,
+    s); nothing really waits."""
+
+    def __init__(
+        self,
+        start: datetime,
+        jumps: dict[int, timedelta] | None = None,
+        lid: tuple[datetime, datetime] | None = None,
+    ):
+        self.t = start
+        self.jumps = dict(jumps or {})
+        self.lid = lid
+        self.slices: list[tuple[datetime, float]] = []
+
+    @property
+    def slept(self) -> float:
+        return sum(s for _, s in self.slices)
+
+    def now(self) -> datetime:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        seconds = float(seconds)
+        self.slices.append((self.t, seconds))
+        if seconds < 0:
+            raise ValueError("sleep length must be non-negative")  # as time.sleep
+        end = self.t + timedelta(seconds=seconds) + self.jumps.get(len(self.slices), timedelta(0))
+        if self.lid is not None and self.t <= self.lid[0] < end:
+            closes, opens = self.lid
+            end += opens - closes
+            self.lid = None
+        self.t = end
+
+
+@pytest.fixture
+def no_real_wait() -> Iterator[None]:
+    """A real wait fails the test (an AssertionError after 20 s) instead of hanging it."""
+
+    def expired(signum, frame):
+        raise AssertionError("the test really waited 20 s")
+
+    old = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, 20)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def real_sleep(monkeypatch, wall: WallClock) -> Callable[[float], None]:
+    """log_day's own `sleep`, with its utc_now and the time module's sleep on `wall`."""
+    mod = importlib.import_module(LOG_DAY)
+    monkeypatch.setattr(mod, "utc_now", wall.now)
+    monkeypatch.setattr(mod.time, "sleep", wall.sleep)
+    return mod.sleep
+
+
+def bad_slices(wall: WallClock, deadline: datetime) -> list[str]:
+    """What is wrong with the slices: each over 0 and at most min(60, what is left to the deadline
+    by the wall clock at its start), none starting at or past the deadline."""
+    bad = []
+    for k, (begun, s) in enumerate(wall.slices, 1):
+        left = (deadline - begun).total_seconds()
+        if not (left > 0 and 0 < s <= min(60.0, left) + 1e-6):
+            bad.append(f"slice {k} of {s} s at {left} s before the deadline")
+    return bad
+
+
+WAIT_S = 6.5 * 3600  # launchd's first start, 00:30, to the 07:00 window
+
+
+@pytest.mark.parametrize("wait_s", [WAIT_S, 3600, 125.25, 61])
+def test_the_real_sleep_waits_on_the_wall_clock_in_slices_of_at_most_60_s(
+    monkeypatch, no_real_wait, wait_s
+):
+    t0 = at(SAT, 0, 30)
+    wall = WallClock(t0)
+    sleep = real_sleep(monkeypatch, wall)
+    deadline = t0 + timedelta(seconds=wait_s)
+
+    assert sleep(wait_s) is None
+    assert wall.slices, "it returned without sleeping"
+    assert not bad_slices(wall, deadline), bad_slices(wall, deadline)[:5]
+    assert wall.t >= deadline, f"returned {(deadline - wall.t).total_seconds()} s early"
+    assert abs(wall.slept - wait_s) < 1e-3, f"slept {wall.slept} s of a {wait_s} s wait"
+
+
+@pytest.mark.parametrize(
+    "slice_no, jump, ends_after",
+    [
+        (2, timedelta(hours=7), 2),  # the Mac slept 7 h during the second slice
+        (1, timedelta(hours=9), 1),
+        (5, timedelta(hours=6, minutes=30), 5),
+        (2, timedelta(hours=3), None),  # a shorter sleep: the rest of the wait, on the wall clock
+        (40, timedelta(hours=5), None),
+    ],
+    ids=["7h-in-slice-2", "9h-in-slice-1", "6h30-in-slice-5", "3h-in-slice-2", "5h-in-slice-40"],
+)
+def test_a_wall_clock_jump_ends_the_real_sleep_after_that_slice(
+    monkeypatch, no_real_wait, slice_no, jump, ends_after
+):
+    t0 = at(SAT, 0, 30)
+    wall = WallClock(t0, jumps={slice_no: jump})
+    sleep = real_sleep(monkeypatch, wall)
+    deadline = t0 + timedelta(seconds=WAIT_S)
+
+    sleep(WAIT_S)
+    case = f"a {jump} jump in slice {slice_no}: {len(wall.slices)} slices, {wall.slept} s slept"
+    assert not bad_slices(wall, deadline), (case, bad_slices(wall, deadline)[:5])
+    assert wall.t >= deadline, f"{case}: returned before the deadline"
+    if ends_after is not None:
+        assert len(wall.slices) == ends_after, f"{case}: not over after slice {ends_after}"
+    else:
+        rest = WAIT_S - jump.total_seconds()
+        assert len(wall.slices) > slice_no, case
+        assert abs(wall.slept - rest) < 1e-3, f"{case}: the wall clock left {rest} s to sleep"
+
+
+@pytest.mark.parametrize("wait_s", [0, 0.0, -0.5, -1, -WAIT_S])
+def test_the_real_sleep_of_no_time_returns_without_sleeping(monkeypatch, no_real_wait, wait_s):
+    t0 = at(SAT, 0, 30)
+    wall = WallClock(t0)
+    sleep = real_sleep(monkeypatch, wall)
+    try:
+        sleep(wait_s)
+    except ValueError as exc:
+        pytest.fail(f"sleep({wait_s}) raised {exc!r}: time.sleep got a negative length")
+    assert wall.slices == [], f"sleep({wait_s}) called time.sleep: {wall.slices}"
+    assert wall.t == t0
+
+
+def test_a_start_before_a_night_asleep_wakes_with_the_mac_and_logs_the_morning(
+    monkeypatch, no_real_wait
+):
+    """launchd's 00:30 start waits for the 07:00 window through log_day's own sleep; the lid is
+    closed 01:00-08:00. The wait ends when the Mac wakes, and the morning's race is logged."""
+    world = week()  # Saturday: TOK's one race, off at 09:35
+    closes, opens = at(SAT, 1, 0), at(SAT, 8, 0)
+    wall = WallClock(at(SAT, 0, 30), lid=(closes, opens))
+    real_sleep(monkeypatch, wall)
+    site = Site(dict(world.pages), clock=wall)
+
+    s = start(monkeypatch, wall, world, site=site, real_sleep=True)
+    assert s.code in (0, 2), s.output
+    assert s.site.at, "nothing was sent"
+    woke = min(s.site.at)
+    assert opens <= woke <= opens + timedelta(seconds=60), (
+        f"the first request at {woke.astimezone(TOKYO):%H:%M:%S}: the wait did not end at 08:00"
+    )
+    [post] = world.expected_post_times(SAT, "TOK").values()
+    t20 = [
+        r
+        for r in logged_rows(SAT, "TOK")
+        if post - timedelta(minutes=20) <= datetime.fromisoformat(r["snapshot_utc"]) <= post
+    ]
+    assert t20, f"nothing logged in race 1's T-20 window: {s.output}"
 
 
 # ---------------------------------------------------------------- the race date

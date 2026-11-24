@@ -23,14 +23,17 @@ The start exits 0 at once, sending nothing and waiting for nothing, when today's
 are read under the lock. Otherwise the day runs as above. Once run_day has returned, the start
 appends `<race date> at=<UTC instant>` to the no-meeting marker when its one discovery found no
 venue (a blocked discovery writes the block line instead), or to the day-done marker when that
-discovery found a venue and no block stopped the day. A run that raised or was terminated writes
-neither, so the next start resumes the day. So after a block, on a day without racing, or once the
-day's run has finished, every later start that day sends nothing. Only `--unattended` writes these
-markers: an attended log-day may cover other venues, pools or another date, so it never marks a
-day for the agent.
+discovery found a venue and every venue stopped as `ended`. A venue stopped by a block or by
+answers for another meeting leaves the day open, as does a run that raised or was terminated, so
+the next start resumes the day. So after a block, on a day without racing, or once the day's run
+has finished, every later start that day sends nothing. Only `--unattended` writes these markers:
+an attended log-day may cover other venues, pools or another date, so it never marks a day for the
+agent.
 
 Seams, looked up at call time: `utc_now` (the only clock), `sleep` (the only wait) and
-`make_fetcher` (the Fetcher every request goes through).
+`make_fetcher` (the Fetcher every request goes through). `sleep` waits on `utc_now`, in
+`time.sleep` slices of at most 60 s, because time.sleep's clock stops while the Mac sleeps: the
+00:30 start's wait for the first window then ends when the Mac wakes, not hours later.
 """
 
 from __future__ import annotations
@@ -41,7 +44,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -84,7 +87,12 @@ def utc_now() -> datetime:
 
 
 def sleep(seconds: float) -> None:
-    time.sleep(seconds)
+    """Wait `seconds` on the wall clock `utc_now()`: time.sleep's clock stops while the Mac sleeps
+    (a closed lid), so a long wait sleeps in slices of at most 60 s, each up to the deadline by
+    utc_now(), and ends after the slice in which the wall clock reaches it."""
+    deadline = utc_now() + timedelta(seconds=seconds)
+    while (left := (deadline - utc_now()).total_seconds()) > 0:
+        time.sleep(min(60.0, left))
 
 
 def make_fetcher() -> Fetcher:
@@ -304,8 +312,8 @@ def _run(
 ) -> int:
     """Log the day, write the health lines; the exit code (0 clean, 2 with an alert). The caller
     holds the lock. Once run_day has returned: with `no_meeting`, a discovery that found no venue
-    appends the day's line to that marker; with `day_done`, a day of discovered venues that no block
-    stopped appends the day's line to that one."""
+    appends the day's line to that marker; with `day_done`, a day of discovered venues that all
+    stopped as 'ended' appends the day's line to that one."""
     logs = paths.logs_dir("japan")
     day_log = logs / f"log-day-{race_date.isoformat()}.log"
     handler = _file_log(day_log)
@@ -333,9 +341,11 @@ def _run(
         if no_meeting is not None and venues is None and not summary.venues and not summary.stopped:
             _mark(no_meeting, race_date, returned)
             typer.echo(f"no meeting on {race_date.isoformat()}: noted in {no_meeting}")
-        # run_day returned with the day's venues and no block: the day's run is over (a block
-        # keeps its own marker, so clearing that line by hand resumes the day).
-        finished = bool(summary.venues) and summary.stopped != "circuit_open"
+        # run_day returned with every venue ended: the day's run is over. A venue stopped by a
+        # block (its own marker: clearing that line by hand resumes the day) or by answers for
+        # another meeting (one bad stretch of the site) leaves the day open for a later start.
+        stops = [v.stopped for v in summary.venues.values()]
+        finished = bool(stops) and all(stop == "ended" for stop in stops)
         if day_done is not None and venues is None and finished:
             _mark(day_done, race_date, returned)
             typer.echo(f"day done on {race_date.isoformat()}: noted in {day_done}")
