@@ -1,8 +1,9 @@
 """Serve the board page and its live feed on localhost (ticket #41).
 
-Two paths only: `/` (the page at `page_path`, read on every request) and `/feed` (`build_board` of
-the day as JSON, docs/specs/board-feed.md) with an ETag, so the page's poll costs a 304 when
-nothing changed. Anything else is 404: no listings, no other files. Every response carries
+Three paths only: `/` (the page at `page_path`, read on every request), `/board.js` (the page's
+script, `board.js` beside `page_path`, ticket #42) and `/feed` (`build_board` of the day as JSON,
+docs/specs/board-feed.md) with an ETag, so the page's poll costs a 304 when nothing changed.
+Anything else is 404: no listings, no other files. Every response carries
 Cache-Control no-store, X-Robots-Tag noindex nofollow, Referrer-Policy no-referrer and
 X-Content-Type-Options nosniff.
 
@@ -135,6 +136,12 @@ def _make_handler(page_path: Path, feed: Feed) -> type[BaseHTTPRequestHandler]:
                 except OSError:
                     return self._send(503, b"page not built\n", "text/plain; charset=utf-8")
                 return self._send(200, html, "text/html; charset=utf-8")
+            if path == "/board.js":
+                try:
+                    script = page_path.with_name("board.js").read_bytes()
+                except OSError:
+                    return self._send(404, b"not found\n", "text/plain; charset=utf-8")
+                return self._send(200, script, "text/javascript; charset=utf-8")
             if path == "/feed":
                 gzipped = self._wants_gzip()
                 body, etag = feed.current(gzipped=gzipped)
