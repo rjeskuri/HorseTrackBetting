@@ -29,11 +29,21 @@ before it returns them. An opening is gated (#126, docs/problem-statement.md D12
 - a family opens once (any log line naming it counts), and a block opens once: a holdout split
   before another opening refuses.
 
-A refused opening raises ``HoldoutOpenError`` and logs nothing. Every log line is an opening:
-the current block starts on the later of ``start`` and the local date (``timezone``) of the
-latest logged ``utc``, so the opening day belongs to the next block. The days of an opened block
-stay holdout days: development rows and ``is_holdout_day`` never change, and only the
-``LockedHoldout`` moves to the current block. A log line that cannot be read refuses.
+A refused opening raises ``HoldoutOpenError`` and logs nothing. Every log line is an opening,
+and its ``period`` records the block it opened: ``start`` and ``end``, the last race day
+(YYYY-MM-DD) among the rows it returned. A race day an opening returned never belongs to a later
+block, so the current block starts on the latest of:
+
+- the configured ``start``;
+- the local date (``timezone``) of the latest logged ``utc``;
+- the day after the latest ``period.end`` over every log line.
+
+An opening made before its day's races are in the frame leaves that day in the next block; one
+made after pushes the next block to the following day. A line without ``period.end`` (absent or
+null, as before this rule) is placed by its local date alone. The days of an opened block stay
+holdout days: development rows and ``is_holdout_day`` never change, and only the
+``LockedHoldout`` moves to the current block. A log line that cannot be read, an unparseable
+``period.end`` included, refuses.
 """
 
 from __future__ import annotations
@@ -43,7 +53,7 @@ import json
 import os
 import re
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -170,9 +180,25 @@ def _read_log(log_path: Path) -> list[str]:
     return [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _parse_openings(lines: list[str], log_path: Path) -> list[tuple[datetime, Any]]:
-    """(utc, family) of every logged opening. A line that cannot be read could hide an opening,
-    so it raises ``HoldoutOpenError``."""
+def _period_end(record: dict) -> date | None:
+    """The logged ``period.end`` (the last race day an opening returned), or None when the line
+    has none. A value that is not a YYYY-MM-DD date raises ``ValueError``."""
+    period = record.get("period")
+    if period is None:
+        return None
+    if not isinstance(period, dict):
+        raise ValueError(f"period must be a mapping, got {period!r}")
+    end = period.get("end")
+    if end is None:
+        return None
+    if not isinstance(end, str) or not _ISO_DAY.fullmatch(end):
+        raise ValueError(f"period.end must be a YYYY-MM-DD date, got {end!r}")
+    return date.fromisoformat(end)
+
+
+def _parse_openings(lines: list[str], log_path: Path) -> list[tuple[datetime, Any, date | None]]:
+    """(utc, family, period.end) of every logged opening. A line that cannot be read could hide
+    an opening, so it raises ``HoldoutOpenError``."""
     openings = []
     for number, line in enumerate(lines, start=1):
         try:
@@ -180,19 +206,24 @@ def _parse_openings(lines: list[str], log_path: Path) -> list[tuple[datetime, An
             stamp = datetime.fromisoformat(record["utc"].replace("Z", "+00:00"))
             if stamp.utcoffset() is None:
                 raise ValueError("utc has no offset")
+            end = _period_end(record)
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise HoldoutOpenError(
                 f"{log_path} line {number} cannot be read ({exc}); the current block cannot be "
                 "placed"
             ) from exc
-        openings.append((stamp, record.get("family")))
+        openings.append((stamp, record.get("family"), end))
     return openings
 
 
 def _block_start(
-    start: date, openings: list[tuple[datetime, Any]], zone: ZoneInfo | None, log_path: Path
+    start: date,
+    openings: list[tuple[datetime, Any, date | None]],
+    zone: ZoneInfo | None,
+    log_path: Path,
 ) -> date:
-    """The later of ``start`` and the local date of the latest logged opening."""
+    """The latest of ``start``, the local date of the latest logged opening and the day after
+    the latest race day any logged opening returned."""
     if not openings:
         return start
     if zone is None:
@@ -200,8 +231,12 @@ def _block_start(
             f"{log_path} records openings but holdout.timezone is not set; the current block "
             "cannot be placed"
         )
-    latest = max(stamp for stamp, _ in openings).astimezone(zone).date()
-    return max(start, latest)
+    latest = max(stamp for stamp, _, _ in openings).astimezone(zone).date()
+    block_start = max(start, latest)
+    ends = [end for _, _, end in openings if end is not None]
+    if ends:
+        block_start = max(block_start, max(ends) + timedelta(days=1))
+    return block_start
 
 
 def is_holdout_day(country: str, day: date) -> bool:
@@ -253,6 +288,7 @@ class LockedHoldout:
         "__zone",
         "__n_days",
         "__n_races",
+        "__end",
         "__seen_lines",
     )
 
@@ -268,6 +304,7 @@ class LockedHoldout:
         zone: ZoneInfo | None,
         n_days: int,
         n_races: int | None,
+        end: str | None,
         seen_lines: list[str],
     ) -> None:
         self.__rows = rows
@@ -279,6 +316,7 @@ class LockedHoldout:
         self.__zone = zone
         self.__n_days = n_days
         self.__n_races = n_races
+        self.__end = end
         self.__seen_lines = tuple(seen_lines)
 
     def open(self, *, ticket: int, purpose: str, family: str) -> pd.DataFrame:
@@ -312,7 +350,7 @@ class LockedHoldout:
                 f"{self.__log_path} changed since this holdout was split: its block is spent; "
                 "split again for the current block"
             )
-        if any(logged == family for _, logged in openings):
+        if any(logged == family for _, logged, _ in openings):
             raise HoldoutOpenError(f"family {family!r} has already opened the holdout")
         if family not in targets:
             raise HoldoutOpenError(
@@ -342,6 +380,7 @@ class LockedHoldout:
             "power_target": target,
             "period": {
                 "start": self.__start.isoformat(),
+                "end": self.__end,
                 "seed_sha256": hashlib.sha256(self.__seed.encode()).hexdigest(),
             },
         }
@@ -410,6 +449,7 @@ def split_off(
         zone=zone,
         n_days=len(block_days),
         n_races=n_races,
+        end=max(block_days) if block_days else None,
         seen_lines=lines,
     )
     return development, holdout

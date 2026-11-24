@@ -368,12 +368,13 @@ def test_the_logged_period_identifies_the_rule(tmp_path):
 
 def test_the_log_is_append_only(tmp_path):
     # #126: each opening spends its block and its family, so every look is a fresh split with its
-    # own family; the frame runs well past today, since each opening rolls a block forward from now.
+    # own family; each frame runs further past today than the last, since an opening rolls the block
+    # forward past now and past every race day it returned.
     write_config(tmp_path, "japan", families=("F1", "F2", "F3"))
     earlier = '{"utc": "2026-11-29T00:00:00+00:00", "ticket": 1, "purpose": "earlier"}\n'
     log = log_path(tmp_path, "japan")
     log.write_text(earlier)
-    frame = make_frame(first=(date.today() - timedelta(days=30)).isoformat(), n_days=200)
+    first = (date.today() - timedelta(days=30)).isoformat()
 
     opens = [
         ("F1", 71, "first look"),
@@ -383,6 +384,7 @@ def test_the_log_is_append_only(tmp_path):
 
     previous = log.read_bytes()
     for n, (family, ticket, purpose) in enumerate(opens, start=1):
+        frame = make_frame(first=first, n_days=60 + 60 * n)
         _, holdout = split_off(
             frame, "race_date", "japan", countries_dir=tmp_path, race_col="row_id"
         )
