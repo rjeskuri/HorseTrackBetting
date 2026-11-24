@@ -341,7 +341,8 @@ def health_bytes() -> bytes | None:
 
 
 HEALTH_STOP = re.compile(
-    r"^(?P<date>\d{4}-\d{2}-\d{2}) (?P<venue>\S+) snapshots=.* stopped=(?P<stopped>\S+)$"
+    r"^(?P<date>\d{4}-\d{2}-\d{2}) (?P<venue>\S+) snapshots=.* stopped=(?P<stopped>\S+)"
+    r"(?: tier2_skipped=\d+)?$"  # with logger.yaml's tier2 on (#130)
 )
 
 
