@@ -147,6 +147,10 @@ backfill can keep writing).
 ## Not here yet
 
 Upcoming race cards and the odds snapshots (`docs/specs/odds-log.md`) are outside this spec.
+The one reader of the cards here is `horsetrack japan jrdb build` (#186): it joins JRDB rows to
+every `processed_dir("jra")/upcoming/<meeting>/` holding both `races.parquet` and
+`racecard_runners.parquet` as well as to history, so not-yet-run races reach `jrdb_pre_race`. It
+skips JRDB's UKC and never writes `horse_pedigree` (#209 owns that merge).
 
 The post-build reconciliation checks live in `core/store/checks.py` (`run_checks(source, config=...)`,
 ported from HKTrack with its tolerances); the report goes to `reports_dir()/store-check-<source>.md`.
