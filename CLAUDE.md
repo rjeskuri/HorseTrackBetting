@@ -12,6 +12,7 @@ Research and tooling for pari-mutuel horse racing, one folder per country (Japan
 ## Commands
 - Verify, the whole suite plus lint (CI runs the same): `scripts/verify.sh`
 - Named test files: `uv run pytest -q {files}`, with `{files}` replaced by their paths
+- Real-page tests (marker `local`, need `$HORSETRACK_DATA_DIR/fixtures`, skipped when absent): `uv run pytest -m local -q`
 
 ## Where things live
 - `tests/`: the test suite.
