@@ -8,8 +8,9 @@ chosen source, nar.netkeiba.com). Every claim below has a row in [docs/ledger.md
 
 **Feasible from nar.netkeiba.com, under the owner's conditions, with one check left for the logger ticket.**
 Race lists, cards, odds and results are plain server-rendered UTF-8 HTML on one host, the race id encodes the
-date and venue, one page carries both 単勝 and 複勝, and a day of NAR racing fits the 10 s rate with a per-race
-schedule (about 420 requests, 70 minutes of request time, on the 2026-11-25 card). Not yet seen: an odds page
+date and venue, one page carries both 単勝 and 複勝, and a day of NAR racing fits the 10 s rate when each race is captured at the
+owner's decision grid (D2, `countries/japan/config/decision.yaml`) plus the final board: about 560 requests,
+93 minutes of request time, on the 2026-11-25 card. Not yet seen: an odds page
 while sales are open. At 02:45 JST no race was on sale, and the odds page showed netkeiba's own AI forecast
 (予想オッズ) instead. The parsing ticket's first capture must be a live-sales page; until then the live-odds
 markup is an assumption (that it is the finished-race markup, which was captured).
@@ -48,13 +49,14 @@ would be evasion); Rakuten Keiba sets `Crawl-Delay: 60`, too slow for more than 
 ## The chosen source: nar.netkeiba.com (2026-11-25)
 
 - **Access**: ten requests, 2026-11-24 17:44-17:49 UTC (02:44-02:49 JST on Wed 2026-11-25), all through
-  `horsetrack.core.ingest.Fetcher` at one request per 10.5 s or slower, with the project's User-Agent: seven
-  pages on nar.netkeiba.com (race list shell and sub page for 2026-11-25, one card, the `b1` odds page of a
-  race not yet on sale and of a finished 2026-11-24 race, that race's result), two odds scripts on
-  cdnv2.netkeiba.com, and the terms on www.netkeiba.com. Nine answered 200; `nar.netkeiba.com/robots.txt`
-  answered 404, as on 2026-11-24. No 403 or 429. Stored under
-  `raw/nar/netkeiba/2026/` (pages) and `raw/nar/policy/2026/terms_netkeiba.html.gz`, each with a
-  `<key>.headers.json` sidecar (status, URL, response headers).
+  `horsetrack.core.ingest.Fetcher` at one request per 10.5 s or slower, with the project's User-Agent: six
+  HTML pages on nar.netkeiba.com (race list shell and sub page for 2026-11-25, one card, the `b1` odds page
+  of a race not yet on sale and of a finished 2026-11-24 race, that race's result), its robots.txt, two odds
+  scripts on cdnv2.netkeiba.com, and the terms on www.netkeiba.com. Nine answered 200;
+  `nar.netkeiba.com/robots.txt` answered 404, as on 2026-11-24. No 403 or 429. Stored under
+  `raw/nar/netkeiba/2026/` (the six pages and two scripts: eight `<key>.headers.json` sidecars, six of them
+  HTML) and `raw/nar/policy/2026/terms_netkeiba.html.gz` (with its own sidecar); a sidecar holds the status,
+  URL and response headers.
 - **Terms** (`raw/nar/policy/2026/terms_netkeiba.html.gz`, https://www.netkeiba.com/info/kiyaku.html, last
   revised 2022-04-01): Art. 14 forbids use beyond the private use copyright law allows, treats all data from the
   service as copyrighted, and counts putting data where unspecified or many people can see it as beyond
@@ -81,10 +83,22 @@ All venues share one host and so one budget: 360 requests an hour.
   WIN/PLACE only: 13 requests, about 2 minutes.
 - **One sweep of a whole day** (2026-11-25: 3 meetings, 36 races): 1 + 72 = 73 requests, about 12 minutes,
   so the JRA pattern of sweeping every meeting every few minutes does not fit.
-- **A day by race**: 5 captures a race (T-30, T-10, T-5, T-2, and the final board after the off) x 2 pages
-  = 10 requests a race, 360 for 36 races; plus one result page per race (36) and a race-list refresh every
-  30 minutes (about 20): about 420 requests, 70 minutes of request time across 10:40-20:50 JST. A day of 5-6
-  meetings (assumption) about doubles it, still under a quarter of the host budget.
+- **A day by race**: the capture times are the owner's decision grid (D2), read from
+  `src/horsetrack/countries/japan/config/decision.yaml` (`grid_min: [60, 30, 16, 5, 2, 1]`, primary T-2);
+  this doc sets no NAR schedule, and #38 owns the logger's cadence. Six grid captures plus the final board
+  after the off = 7 captures x 2 pages (`b1`, `b5`) = 14 requests a race, 504 for 36 races; plus one result
+  page per race (36) and a race-list refresh every 30 minutes (about 20): about 560 requests, about 93
+  minutes of request time across 10:40-20:50 JST. WIN/PLACE only (`b1`): 7 a race, about 310 requests, 52
+  minutes. A day of 5-6 meetings (assumption) about doubles it, still well under the host budget.
+- **Close posts**: on 2026-11-25, 浦和 3R and 園田 6R both post at 13:20. Each grid time then asks for 4
+  requests (two races x two pages), 40 s; T-2 and T-1 are 60 s apart, so the two captures do not overlap,
+  and fetching both `b1` pages before either `b5` keeps each race's WIN/PLACE within 10 s of the first
+  request, the last `b5` within 30 s. A simulation of the whole card (one queue, 10 s a request, WIN/PLACE
+  first near the off, final board 2-5 minutes after post: an assumption) puts every T-2 and T-1 `b1` within
+  10 s of its grid time and every T-2 and T-1 `b5` within 30 s; the worst lag on the day is 50-70 s, on T-60
+  and T-5 `b5` pages where one race's grid time meets another race's captures. `board_at` uses only rows
+  available at or before t (`docs/specs/board-at-t.md`), so a capture that starts at its grid time lands
+  after it; how far ahead of each grid time to start is #38's call.
 - Bytes per page (single-run): race list about 40 KB, odds about 55 KB, result about 78 KB, card about
   200 KB (the card is not needed by the logger).
 
@@ -93,7 +107,7 @@ All venues share one host and so one budget: 360 requests an hour.
 - NAR races most days of the week, morning to about 21:00 JST; the 2026-11-25 card runs 10:40-20:50, with the
   nighter meeting marked on the race list (`small.icon-nighter`). 21:00 JST is 12:00 UTC on the same date,
   so no meeting crosses a UTC date; race ids keep the JST date, storage timestamps stay UTC.
-- **Cadence**: schedule by race post time, not by meeting sweep. Read the race list at the start of the day
+- **Cadence** (#38 owns it): schedule by race post time at the `decision.yaml` grid, not by meeting sweep. Read the race list at the start of the day
   and every 30 minutes (NAR posts move; assumption). When two races share a post minute, order by post time,
   take WIN/PLACE before ワイド near the off, and accept a late capture rather than shorten the 10 s gap.
 - **Stop rule**: per meeting, then per day. A meeting stops after its last race's final board and result
@@ -141,6 +155,10 @@ everything else is marked unverified.
     `Wide`, `Wakutan`, `Umatan`, `Fuku3`, `Tan3`; cells `td.Result` (numbers in `span`s or `ul li span`),
     `td.Payout span` (`N,NNN円`, several winners separated by `<br />`) and `td.Ninki`.
   - Unverified: the scratched-runner (取消/除外) markup, the `b5` matrix, and any sales-closed marker.
+  - Open for #37, not decided here: how the final board is recognised. The stored finished-race `b1` page
+    has no 最終 or 確定 marker (nor 締切 or 発売), while `final_board` in `docs/specs/board-at-t.md` keys on
+    `最終オッズ` in `page_state` or `status_raw`. Options: treat the first `b1` capture after the off as
+    final, or take the result page's 単勝オッズ column.
 - **Pool labels to pool keys** (netkeiba prints JRA-style names, though NAR's own are 枠複/馬複; list both):
   単勝 WIN, 複勝 PLACE, 枠連/枠複 BRACKET_QUINELLA, 馬連/馬複 QUINELLA, ワイド QUINELLA_PLACE, 枠単
   BRACKET_EXACTA (new key: JRA does not sell it), 馬単 FORECAST, 3連複 TRIO, 3連単 TIERCE. All nine were paid
