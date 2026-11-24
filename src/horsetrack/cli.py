@@ -5,6 +5,7 @@ import typer
 from horsetrack import __version__
 from horsetrack.core.ingest.cli import scrape_app
 from horsetrack.countries.japan.board.server import board_serve_command
+from horsetrack.countries.japan.jrdb.tables import build_command as jrdb_build_command
 from horsetrack.countries.japan.logger.compact import compact
 from horsetrack.countries.japan.logger.compare import compare_logs_command
 from horsetrack.countries.japan.logger.log_day import log_day
@@ -18,6 +19,9 @@ japan.command("compact")(compact)
 japan.command("log-day")(log_day)
 japan.command("pull-vm")(pull_vm_command)
 japan.command("board-serve")(board_serve_command)
+jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
+japan.add_typer(jrdb, name="jrdb")
+jrdb.command("build")(jrdb_build_command)
 
 
 def _version_callback(value: bool) -> None:
