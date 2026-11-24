@@ -235,6 +235,52 @@ def test_pool_totals_are_pool_rows_in_yen():
     assert w_totals == [pool_row("QUINELLA_PLACE", 700.0)]
 
 
+# ---------------------------------------------------------------- a page without #odds_list
+
+
+def test_odds_page_without_the_odds_list_id_parses_like_one_with_it():
+    """The id is a hint, not a requirement: the rows are read from the whole document when it is
+    missing (the selectors are not anchored to it)."""
+    votes = [("単勝", 12_345), ("複勝", 6_789), ("馬連", 54_321), ("ワイド", 7)]
+    bodies = {
+        "win_place": (
+            pages.win_place(SAT, MEETING, 11, RUNNERS, state=NOW_STATE, votes=votes),
+            ["WIN", "PLACE"],
+        ),
+        "scratched": (
+            pages.win_place(SAT, MEETING, 11, scratched_field(), state=NOW_STATE, votes=votes),
+            ["WIN", "PLACE"],
+        ),
+        "quinella": (
+            pages.pairs(SAT, MEETING, 11, QUINELLA, state=NOW_STATE, votes=votes),
+            ["QUINELLA"],
+        ),
+        "wide": (
+            pages.pairs(SAT, MEETING, 11, WIDE, state=NOW_STATE, votes=votes),
+            ["QUINELLA_PLACE"],
+        ),
+    }
+    for kind, (body, pools) in bodies.items():
+        assert b'id="odds_list"' in body, kind
+        renamed = body.replace(b'id="odds_list"', b'id="odds_table"')
+        assert b'id="odds_list"' not in renamed and renamed != body, kind
+        with_id = by_key(rows_of(body, pools))
+        assert any(r["combination"] != POOL for r in with_id), kind
+        assert any(r["combination"] == POOL for r in with_id), kind
+        assert by_key(rows_of(renamed, pools)) == with_id, kind
+
+    # and the values are the page's, not just equal to each other
+    renamed = bodies["wide"][0].replace(b'id="odds_list"', b'id="odds_table"')
+    expected = [price_row("QUINELLA_PLACE", SORTED[k], lo, hi) for k, (lo, hi) in WIDE.items()]
+    expected.append(pool_row("QUINELLA_PLACE", 700.0))
+    assert by_key(rows_of(renamed, ["QUINELLA_PLACE"])) == by_key(expected)
+    renamed = bodies["win_place"][0].replace(b'id="odds_list"', b'id="odds_table"')
+    expected = [price_row("WIN", str(n), w) for n, (w, _) in RUNNERS.items()]
+    expected += [price_row("PLACE", str(n), lo, hi) for n, (_, (lo, hi)) in RUNNERS.items()]
+    expected += [pool_row("WIN", 1_234_500.0), pool_row("PLACE", 678_900.0)]
+    assert by_key(rows_of(renamed, ["WIN", "PLACE"])) == by_key(expected)
+
+
 # ---------------------------------------------------------------- (b) one snapshot per capture
 
 
