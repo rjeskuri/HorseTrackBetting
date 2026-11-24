@@ -1,0 +1,4 @@
+# Ordering model for Place and Wide v0 (read by countries/japan/models/v0/ordering.py, read_family).
+# Owner decision, 2026-11-24 (#115): discounted Harville, with lambda2 and lambda3 fitted in-fold on
+# pre-holdout history (lambda = 1 is plain Harville). Plackett-Luce comes later, in #92.
+family: discounted_harville
