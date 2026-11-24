@@ -303,3 +303,80 @@ def test_launchd_refuses_an_address():
         plist_text("user@1.2.3.4")
     with pytest.raises(ValueError):
         plist_text("1.2.3.4")
+
+
+# ------------------------------------------------------------------ launchd: env, logs, remote dir
+
+
+def _plists(host, **kwargs):
+    """The plist from the function and from the CLI, parsed; both must agree on what is pinned."""
+    from horsetrack.countries.japan.logger.pull_vm import launchd_plist as impl
+
+    cli_args = ["--host", host, "--print-launchd"]
+    if "remote_dir" in kwargs:
+        cli_args += ["--remote-dir", kwargs["remote_dir"]]
+    cli = run_cli(*cli_args)
+    assert cli.exit_code == 0, cli.output
+    return [plistlib.loads(impl(host, **kwargs).encode()), plistlib.loads(cli.stdout.encode())]
+
+
+@pytest.mark.parametrize("host", ALIASES)
+def test_launchd_pins_the_data_dir_in_the_job_environment(host, data_dir):
+    for plist in _plists(host):
+        env = plist["EnvironmentVariables"]
+        assert env[paths.DATA_DIR_VAR] == str(data_dir.resolve())
+
+
+def test_launchd_environment_follows_the_data_dir(tmp_path, monkeypatch):
+    other = tmp_path / "elsewhere" / "ht-data"
+    other.mkdir(parents=True)
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(other))
+    for plist in _plists("vm1"):
+        assert plist["EnvironmentVariables"][paths.DATA_DIR_VAR] == str(other.resolve())
+
+
+@pytest.mark.parametrize("host", ALIASES)
+def test_launchd_job_output_goes_to_the_vm_subtree_not_the_mac_logs(host, data_dir):
+    root = data_dir.resolve()
+    for plist in _plists(host):
+        for key in ("StandardOutPath", "StandardErrorPath"):
+            target = Path(plist[key])
+            assert target.is_absolute()
+            assert target.is_relative_to(root / "vm" / host), (key, target)
+            assert not target.is_relative_to(root / "logs"), (key, target)
+
+
+def test_launchd_log_paths_differ_per_host(data_dir):
+    a, _ = _plists("vm1")
+    b, _ = _plists("vm2")
+    assert Path(a["StandardOutPath"]).parent != Path(b["StandardOutPath"]).parent
+    assert Path(b["StandardErrorPath"]).is_relative_to(data_dir.resolve() / "vm" / "vm2")
+
+
+def test_launchd_without_a_data_dir_raises_and_the_cli_prints_nothing(monkeypatch):
+    from horsetrack.countries.japan.logger.pull_vm import launchd_plist as impl
+
+    monkeypatch.delenv(paths.DATA_DIR_VAR, raising=False)  # fixture already hides any `.env`
+    with pytest.raises(paths.DataDirNotSet):
+        impl("vm1")
+    result = run_cli("--host", "vm1", "--print-launchd")
+    assert result.exit_code != 0
+    assert result.stdout.strip() == ""
+    assert "<plist" not in result.output
+
+
+@pytest.mark.parametrize("host", ["vm1", "horse-trial"])
+@pytest.mark.parametrize("remote", ["/srv/ht", "/mnt/data/horsetrack"])
+def test_launchd_carries_a_non_default_remote_dir(host, remote):
+    for plist in _plists(host, remote_dir=remote):
+        args = plist["ProgramArguments"]
+        i = args.index("--remote-dir")
+        assert args[i + 1] == remote
+        assert args.count("--remote-dir") == 1
+        assert args[args.index("--host") + 1] == host
+        assert "--dry-run" not in args
+
+
+def test_launchd_remote_dir_differs_per_call():
+    (a, _), (b, _) = _plists("vm1", remote_dir="/srv/a"), _plists("vm1", remote_dir="/srv/b")
+    assert a["ProgramArguments"] != b["ProgramArguments"]

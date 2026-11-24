@@ -7,7 +7,11 @@ a destination outside that VM's folder.
 
 The VM is named by an `~/.ssh/config` alias only. The key, user, port and address stay in the ssh
 config, so a host that looks like an address (`1.2.3.4`, `user@host`, IPv6, `host:path`) is refused.
-`--print-launchd` prints a LaunchAgent that runs the pull daily at 22:00 local.
+`--print-launchd` prints a LaunchAgent that runs the pull daily at 22:00 local. launchd jobs do
+not inherit the shell environment, so the plist pins `HORSETRACK_DATA_DIR` and sends the job's
+stdout and stderr to `<data_dir>/vm/<ALIAS>/pull-vm.{out,err}.log`, so a failed night leaves a
+trace. launchd does not create that folder: run the pull by hand once first, which creates
+`vm/<ALIAS>/`. Printing creates nothing, and fails if the data dir is not set.
 """
 
 from __future__ import annotations
@@ -85,12 +89,23 @@ def _horsetrack_executable() -> str:
     return shutil.which("horsetrack") or "horsetrack"
 
 
-def launchd_plist(host: str) -> str:
-    """LaunchAgent plist text that runs the pull for `host` daily at 22:00 local."""
+def launchd_plist(host: str, remote_dir: str = DEFAULT_REMOTE_DIR) -> str:
+    """LaunchAgent plist text that runs the pull for `host` daily at 22:00 local.
+
+    Raises ValueError for a host that is not an alias, and `paths.DataDirNotSet` (or
+    `DataDirInsideRepo`) when the data dir does not resolve: the job needs it in its environment."""
     check_host(host)
+    data_dir = paths.data_dir()
+    log_dir = data_dir / "vm" / host
+    args = [_horsetrack_executable(), "japan", "pull-vm", "--host", host]
+    if remote_dir != DEFAULT_REMOTE_DIR:
+        args += ["--remote-dir", remote_dir]
     plist = {
         "Label": f"horsetrack.pull-vm.{host}",
-        "ProgramArguments": [_horsetrack_executable(), "japan", "pull-vm", "--host", host],
+        "ProgramArguments": args,
+        "EnvironmentVariables": {paths.DATA_DIR_VAR: str(data_dir)},
+        "StandardOutPath": str(log_dir / "pull-vm.out.log"),
+        "StandardErrorPath": str(log_dir / "pull-vm.err.log"),
         "StartCalendarInterval": {"Hour": 22, "Minute": 0},
     }
     return plistlib.dumps(plist).decode()
@@ -110,7 +125,7 @@ def pull_vm_command(
     """Pull the VM's logs into $HORSETRACK_DATA_DIR/vm/<host>/ (rsync over ssh, never --delete)."""
     try:
         if print_launchd:
-            typer.echo(launchd_plist(host), nl=False)
+            typer.echo(launchd_plist(host, remote_dir=remote_dir), nl=False)
             return
         code = pull_vm(host, remote_dir=remote_dir, dry_run=dry_run)
     except ValueError as exc:
