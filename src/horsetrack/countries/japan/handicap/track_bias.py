@@ -1,8 +1,8 @@
-"""Within-day track bias from the races already run that day (#138).
+"""Within-day track bias from the races already run that day (#138, day variance #224).
 
 Every function takes store-shaped polars frames (`races`, `runners`; docs/specs/store.md) and reads
 nothing else: the caller scopes the store. The rulings are pinned in
-tests/countries/japan/handicap/test_track_bias.py.
+tests/countries/japan/handicap/test_track_bias.py and test_track_bias_day_variance.py.
 
 - Score: a finisher in place `pos` among `nf` finishers (nf >= 2) scores (nf - pos) / (nf - 1) -
   0.5, the share of rivals beaten minus one half; 0 means no bias. Each finisher is one draw
@@ -12,15 +12,25 @@ tests/countries/japan/handicap/test_track_bias.py.
   going) on the race days on or before `train_end`, shrunk by PRIOR_RACES pseudo-races toward
   (venue, surface, distance), that toward (venue, surface), and that toward 0; a cell with no
   history takes its coarsest known parent, and no history at the venue and surface gives 0. The
-  observation variance and (when not given) `day_sd`, the sd of a day's deviation from the
-  prior, are moment estimates over the history's (day, venue, surface) groups; the day variance
-  is measured against each group's variance with no day effect, a race's places shuffled among
-  its finishers (so a level's scores in one race are drawn without replacement).
-- `within_day_posterior`: today's deviation at each level, N(0, day_sd^2), updated conjugately by
-  the scores of the races of the target's day, venue and surface with a smaller race_no whose
-  results were published strictly before `decision_time`, each score taken against the prior mean
-  of its own race's cell. The level's posterior mean is the target cell's prior mean plus the
-  deviation's posterior mean.
+  observation variance is the pooled within-group variance of a score's deviation from its cell's
+  prior mean over the history's (day, venue, surface, level) groups. Each level's `day_sd`, the
+  prior sd of a day's deviation from the prior, is given (a float for every level, or a mapping
+  per level) or estimated (`"pooled"`, the default, or `"per_level"`), an estimate floored at
+  MIN_DAY_SD.
+- `estimate_day_variance` (#224): the day sd per level and pooled, by a nested moment estimator
+  over the history's (day, venue, surface) groups with at least two races at the level. In a
+  group of r races whose race means of the level's deviations are m_j, d = mean(m_j) and s2 is
+  their sample variance; given the day effect the races are independent, so E[d^2 - s2 / r] is
+  the day variance whatever each race's own noise. A level's day variance is the mean of
+  d^2 - s2 / r over its groups, the pooled one the mean over every level's groups, and each sd
+  the root of the variance clipped at 0. It uses the race-to-race spread observed within groups,
+  not a places-shuffled null, so it holds when a level's race means vary less than a random order
+  of the race's places allows (a style level is read from the race's own first corner).
+- `within_day_posterior`: today's deviation at each level, N(0, the level's day_sd^2), updated
+  conjugately by the scores of the races of the target's day, venue and surface with a smaller
+  race_no whose results were published strictly before `decision_time`, each score taken against
+  the prior mean of its own race's cell. The level's posterior mean is the target cell's prior
+  mean plus the deviation's posterior mean.
 - `track_bias_features`: the posterior per declared runner of the target race.
 
 No layer here is adopted (D16); these are features and a measurement scaffold.
@@ -45,6 +55,15 @@ DEPTHS = (2, 3, 5)  # (venue, surface) -> + distance -> the full cell
 PRIOR_RACES = 10  # pseudo-races shrinking a cell's mean toward its parent's
 MIN_DAY_SD = 0.01  # floor of an estimated day_sd
 UNIFORM_VAR = 1 / 12  # the observation variance when the history has none to estimate it from
+DAY_SD_MODES = ("pooled", "per_level")
+
+
+@dataclass(frozen=True)
+class DayVariance:
+    """Estimated day sds, unfloored: `per_level` keyed by (factor, level), and `pooled`."""
+
+    per_level: dict[tuple[str, str], float]
+    pooled: float
 
 
 @dataclass(frozen=True, eq=False)
@@ -52,9 +71,10 @@ class BiasPrior:
     """A fitted history prior; opaque to callers."""
 
     train_end: date
-    day_sd: float
+    day_sd: dict[tuple[str, str], float]  # (factor, level) -> prior sd of today's deviation
     noise_var: float
     means: dict[tuple, float]  # (cell prefix, factor, level) -> shrunk mean, every depth
+    estimate: DayVariance | None = None  # the estimate behind day_sd, when it was estimated
 
     def mean(self, cell: tuple, factor: str, level: str) -> float:
         for depth in reversed(DEPTHS):
@@ -96,12 +116,32 @@ def _observations(runners: pl.DataFrame) -> pl.DataFrame:
     return pl.concat(parts)
 
 
-def fit_bias_prior(
-    races: pl.DataFrame, runners: pl.DataFrame, *, train_end: date, day_sd: float | None = None
-) -> BiasPrior:
-    """The history prior on the race days on or before `train_end` (see the module doc)."""
-    if day_sd is not None and not day_sd > 0:
-        raise ValueError(f"day_sd must be positive, got {day_sd}")
+DaySd = float | str | Mapping[tuple[str, str], float] | None
+
+
+def _given_day_sd(day_sd: DaySd) -> dict[tuple[str, str], float] | None:
+    """The per-level sds a float or mapping gives; None for an estimated mode."""
+    if day_sd is None or (isinstance(day_sd, str) and day_sd in DAY_SD_MODES):
+        return None
+    if isinstance(day_sd, Mapping):
+        if set(day_sd) != set(LEVELS):
+            raise ValueError(f"a day_sd mapping must have exactly the levels {LEVELS}")
+        sds = {key: day_sd[key] for key in LEVELS}
+    elif isinstance(day_sd, int | float) and not isinstance(day_sd, bool):
+        sds = dict.fromkeys(LEVELS, day_sd)
+    else:
+        raise ValueError(f"day_sd must be None, {DAY_SD_MODES}, a float or a mapping: {day_sd!r}")
+    for key, sd in sds.items():
+        if isinstance(sd, bool) or not isinstance(sd, int | float) or not sd > 0:
+            raise ValueError(f"day_sd must be positive, got {sd!r} at {key}")
+    return {key: float(sd) for key, sd in sds.items()}
+
+
+def _history(
+    races: pl.DataFrame, runners: pl.DataFrame, train_end: date
+) -> tuple[pl.DataFrame, dict[tuple, float]]:
+    """The history's observations, each with its deviation `e` from its cell's prior mean, and
+    the shrunk prior means."""
     races = races.filter(pl.col("race_date") <= train_end)
     runners = runners.filter(pl.col("race_date") <= train_end)
     days = set(races.get_column("race_date").to_list()) | set(runners.get_column("race_date"))
@@ -125,74 +165,87 @@ def fit_bias_prior(
             parent = 0.0 if up is None else means[(cell[:up], factor, level)]
             means[(cell, factor, level)] = (n * ybar + PRIOR_RACES * parent) / (n + PRIOR_RACES)
         up = depth
-    noise_var, tau = _day_spread(obs, means)
-    return BiasPrior(
-        train_end=train_end,
-        day_sd=float(day_sd) if day_sd is not None else tau,
-        noise_var=noise_var,
-        means=means,
-    )
-
-
-def _day_spread(obs: pl.DataFrame, means: dict[tuple, float]) -> tuple[float, float]:
-    """(observation variance, day sd) of each score's deviation e from its cell's prior mean over
-    the history's (day, venue, surface, level) groups, by moments. The observation variance is
-    the pooled within-group variance of e. The day variance is the mean over groups of d^2 - v,
-    d the group's mean e and v its variance with no day effect. A level's scores in one race are
-    not independent (a race's places are a permutation), so v is built from races: a race's mean
-    e varies around d with variance lam * w0, w0 = s2 (nf - c) / ((nf - 1) c) for its c scores at
-    the level among nf finishers (the variance of c places drawn without replacement, s2 the
-    race's score variance), and lam, one per level, is fitted from how a group's race means
-    spread around d, which a day effect shared by the group's races leaves untouched."""
-    if obs.height == 0:
-        return UNIFORM_VAR, MIN_DAY_SD
     prior = [
         means[(tuple(r[:5]), r[5], r[6])] for r in obs.select(*CELL, "factor", "level").iter_rows()
     ]
-    key = ["race_date", "venue", "surface", "factor", "level"]
-    obs = obs.with_columns((pl.col("y") - pl.Series(prior)).alias("e"))
-    groups = obs.group_by(key).agg(
-        pl.len().alias("m"),
-        pl.col("e").mean().alias("d"),
-        ((pl.col("e") - pl.col("e").mean()) ** 2).sum().alias("ss"),
-    )
-    dof = (groups.get_column("m") - 1).sum()
-    noise_var = groups.get_column("ss").sum() / dof if dof > 0 else 0.0
-    if not noise_var > 0:
-        noise_var = UNIFORM_VAR
+    obs = obs.with_columns((pl.col("y") - pl.Series(prior, dtype=pl.Float64)).alias("e"))
+    return obs, means
 
-    a, w0 = pl.col("c") / pl.col("m"), pl.col("w0")
-    races = (
-        obs.group_by(*key, "race_id")
-        .agg(pl.len().alias("c"), pl.col("e").mean(), pl.col("nf").first(), pl.col("s2").first())
-        .with_columns(
-            (
-                pl.col("s2") * (pl.col("nf") - pl.col("c")) / ((pl.col("nf") - 1) * pl.col("c"))
-            ).alias("w0")
+
+def fit_bias_prior(
+    races: pl.DataFrame, runners: pl.DataFrame, *, train_end: date, day_sd: DaySd = None
+) -> BiasPrior:
+    """The history prior on the race days on or before `train_end` (see the module doc)."""
+    given = _given_day_sd(day_sd)
+    obs, means = _history(races, runners, train_end)
+    estimate = None
+    if given is None:
+        estimate = _day_variance(obs)
+        if day_sd == "per_level":
+            given = {key: max(sd, MIN_DAY_SD) for key, sd in estimate.per_level.items()}
+        else:
+            given = dict.fromkeys(LEVELS, max(estimate.pooled, MIN_DAY_SD))
+    return BiasPrior(
+        train_end=train_end,
+        day_sd=given,
+        noise_var=_noise_var(obs),
+        means=means,
+        estimate=estimate,
+    )
+
+
+def estimate_day_variance(
+    races: pl.DataFrame, runners: pl.DataFrame, *, train_end: date
+) -> DayVariance:
+    """The day sd per level and pooled on the race days on or before `train_end`, unfloored (see
+    the module doc). A holdout race day on or before `train_end` is a ValueError (D14)."""
+    obs, _ = _history(races, runners, train_end)
+    return _day_variance(obs)
+
+
+GROUP = ["race_date", "venue", "surface", "factor", "level"]
+
+
+def _noise_var(obs: pl.DataFrame) -> float:
+    """The pooled within-group variance of the deviations e over (day, venue, surface, level)."""
+    groups = (  # sorted, so the sums run in one order (group_by's output order varies)
+        obs.group_by(GROUP)
+        .agg(pl.len().alias("m"), ((pl.col("e") - pl.col("e").mean()) ** 2).sum().alias("ss"))
+        .sort(GROUP)
+    )
+    dof = (groups.get_column("m") - 1).sum() if groups.height else 0
+    noise_var = groups.get_column("ss").sum() / dof if dof > 0 else 0.0
+    return float(noise_var) if noise_var > 0 else UNIFORM_VAR
+
+
+def _day_variance(obs: pl.DataFrame) -> DayVariance:
+    """The nested moment estimate of the day variance (see the module doc): per group of at least
+    two races at the level, d^2 - s2 / r over the race means of e; their mean per level and over
+    every level, each sd the root clipped at 0."""
+    # sorted after each group_by, whose output order varies, so every sum runs in one order (a
+    # group keeps its rows' order)
+    terms = (
+        obs.group_by(*GROUP, "race_id")
+        .agg(pl.col("e").mean().alias("m"))
+        .sort(*GROUP, "race_id")
+        .group_by(GROUP)
+        .agg(
+            pl.len().alias("r"), pl.col("m").mean().alias("d"), pl.col("m").var(ddof=1).alias("s2")
         )
-        .join(groups.select(*key, "m", "d"), on=key)
+        .filter(pl.col("r") >= 2)
+        .sort(GROUP)
+        .select("factor", "level", (pl.col("d") ** 2 - pl.col("s2") / pl.col("r")).alias("t"))
     )
-    by_group = races.group_by(key).agg(
-        ((pl.col("e") - pl.col("d")) ** 2).sum().alias("q"),
-        (w0 * (1 - 2 * a)).sum().alias("q0"),
-        pl.len().alias("r"),
-        (a**2 * w0).sum().alias("v0"),
-        pl.col("d").first(),
-    )
-    by_level = by_group.group_by("factor", "level").agg(
-        pl.col("q").sum(), (pl.col("q0") + pl.col("r") * pl.col("v0")).sum().alias("eq")
-    )
-    lam = by_level.select(
-        "factor",
-        "level",
-        pl.when(pl.col("eq") > 0).then(pl.col("q") / pl.col("eq")).otherwise(1.0).alias("lam"),
-    )
-    tau2 = (
-        by_group.join(lam, on=["factor", "level"])
-        .select((pl.col("d") ** 2 - pl.col("lam") * pl.col("v0")).mean())
-        .item()
-    )
-    return float(noise_var), max(math.sqrt(max(tau2, 0.0)), MIN_DAY_SD)
+    by_level = dict.fromkeys(LEVELS, 0.0)
+    levels = terms.group_by("factor", "level").agg(pl.col("t").mean())
+    for factor, level, t in levels.iter_rows():
+        by_level[(factor, level)] = t
+    pooled = terms.get_column("t").mean() if terms.height else 0.0
+
+    def sd(var: float) -> float:
+        return float(math.sqrt(max(var, 0.0)))
+
+    return DayVariance(per_level={key: sd(v) for key, v in by_level.items()}, pooled=sd(pooled))
 
 
 def _aware(t: datetime, what: str) -> None:
@@ -243,9 +296,10 @@ def _posterior(
     for rid, factor, level, y in obs.iter_rows():
         evidence[(factor, level)].append(y - prior.mean(cell_of[rid], factor, level))
 
-    tau, var = prior.day_sd, prior.noise_var
+    var = prior.noise_var
     rows = []
     for factor, level in LEVELS:
+        tau = prior.day_sd[(factor, level)]
         e = evidence[(factor, level)]
         prior_mean = prior.mean(cell, factor, level)
         if e:
