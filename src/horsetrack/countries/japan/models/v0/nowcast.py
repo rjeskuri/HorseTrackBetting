@@ -129,7 +129,7 @@ def training_examples(
     post - tau drops its examples; `attrs["dropped"]` counts them per tau, and `attrs["skipped"]`
     counts races without a final board and (per tau) without any board.
     """
-    if is_holdout_day(race_date, COUNTRY):
+    if is_holdout_day(COUNTRY, race_date):
         raise HoldoutDayError(f"{race_date.isoformat()} is a {COUNTRY} holdout day (D14)")
     missing = [tau for tau in grid.minutes if tau not in max_board_age_s]
     if missing:

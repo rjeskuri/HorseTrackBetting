@@ -10,7 +10,8 @@ defined in ``<countries_dir>/<country>/config/holdout.yaml`` (with the default r
 
 A race day (its local date) on or after ``start`` is holdout when
 ``int(sha256(f"{seed}:{YYYY-MM-DD}").hexdigest(), 16) % 2 == 0``; every other day is
-development. A missing or invalid definition raises ``HoldoutConfigError``; there is no default.
+development. ``is_holdout_day(country, day)`` applies that rule to one day. A missing or invalid
+definition raises ``HoldoutConfigError``; there is no default.
 
 The holdout rows are reached only through ``LockedHoldout.open(ticket=..., purpose=...)``, which
 appends one JSON line to ``<countries_dir>/<country>/holdout_log.jsonl`` before it returns them.
@@ -89,17 +90,13 @@ def _load_definition(countries_dir: Path, country: str) -> tuple[date, str]:
     return start, seed
 
 
-def is_holdout_day(
-    day: date | str, country: str, *, countries_dir: Path | str = DEFAULT_COUNTRIES_DIR
-) -> bool:
-    """Whether the race day `day` (its local date) is in ``country``'s holdout: on or after
-    ``start`` and chosen by the seed. Raises ``HoldoutConfigError`` like ``split_off``."""
-    if isinstance(day, datetime):
-        raise TypeError("pass the local race date, not a datetime")
-    start, seed = _load_definition(Path(countries_dir), country)
-    label = day.isoformat() if isinstance(day, date) else str(day)
-    date.fromisoformat(label)  # refuse anything that is not a YYYY-MM-DD day
-    return label >= start.isoformat() and _is_holdout_day(seed, label)
+def is_holdout_day(country: str, day: date) -> bool:
+    """Whether the race day ``day`` (its local date) is in ``country``'s locked holdout, by the
+    committed definition in its holdout.yaml. Raises ``HoldoutConfigError`` when there is none."""
+    if not isinstance(day, date) or isinstance(day, datetime):
+        raise TypeError(f"day must be a date, got {day!r}")
+    start, seed = _load_definition(DEFAULT_COUNTRIES_DIR, country)
+    return day >= start and _is_holdout_day(seed, day.isoformat())
 
 
 def _race_days(frame: pd.DataFrame, date_col: str) -> pd.Series:
