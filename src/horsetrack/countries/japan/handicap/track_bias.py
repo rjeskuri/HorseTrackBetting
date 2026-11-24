@@ -9,14 +9,17 @@ tests/countries/japan/handicap/test_track_bias.py and test_track_bias_day_varian
   observation at its draw third and, with a first-corner position, one style observation, both by
   #129's thirds rules over the race's declared runners.
 - `fit_bias_prior`: each level's mean score per cell (venue, surface, distance, course_config,
-  going) on the race days on or before `train_end`, shrunk by PRIOR_RACES pseudo-races toward
-  (venue, surface, distance), that toward (venue, surface), and that toward 0; a cell with no
-  history takes its coarsest known parent, and no history at the venue and surface gives 0. The
-  observation variance is the pooled within-group variance of a score's deviation from its cell's
-  prior mean over the history's (day, venue, surface, level) groups. Each level's `day_sd`, the
-  prior sd of a day's deviation from the prior, is given (a float for every level, or a mapping
-  per level) or estimated (`"pooled"`, the default, or `"per_level"`), an estimate floored at
-  MIN_DAY_SD.
+  going, rail_setting) on the race days on or before `train_end`, shrunk by PRIOR_RACES
+  pseudo-races toward (venue, surface, distance), that toward (venue, surface), and that toward 0;
+  a cell with no history takes its coarsest known parent, and no history at the venue and surface
+  gives 0. `rail_setting` (#222, JRA's A/B/C/D rail position, the store's races column) is part of
+  the full cell only: a null one is a cell of its own, so a race with a letter reaches null-rail
+  history only through the (venue, surface, distance) parent, and a races frame without the
+  column is read as all null. The observation variance is the pooled within-group variance of a
+  score's deviation from its cell's prior mean over the history's (day, venue, surface, level)
+  groups. Each level's `day_sd`, the prior sd of a day's deviation from the prior, is given (a
+  float for every level, or a mapping per level) or estimated (`"pooled"`, the default, or
+  `"per_level"`), an estimate floored at MIN_DAY_SD.
 - `estimate_day_variance` (#224): the day sd per level and pooled, by a nested moment estimator
   over the history's (day, venue, surface) groups with at least two races at the level. In a
   group of r races whose race means of the level's deviations are m_j, d = mean(m_j) and s2 is
@@ -29,8 +32,8 @@ tests/countries/japan/handicap/test_track_bias.py and test_track_bias_day_varian
 - `within_day_posterior`: today's deviation at each level, N(0, the level's day_sd^2), updated
   conjugately by the scores of the races of the target's day, venue and surface with a smaller
   race_no whose results were published strictly before `decision_time`, each score taken against
-  the prior mean of its own race's cell. The level's posterior mean is the target cell's prior
-  mean plus the deviation's posterior mean.
+  the prior mean of its own race's cell (rail setting included). The level's posterior mean is
+  the target cell's prior mean plus the deviation's posterior mean.
 - `track_bias_features`: the posterior per declared runner of the target race.
 
 No layer here is adopted (D16); these are features and a measurement scaffold.
@@ -50,8 +53,8 @@ from horsetrack.countries.japan.handicap.factors import COUNTRY, STYLES, _draw_g
 
 DRAW_LEVELS = ("inner", "middle", "outer")
 LEVELS = tuple([("draw", lv) for lv in DRAW_LEVELS] + [("style", lv) for lv in STYLES])
-CELL = ("venue", "surface", "distance_m", "course_config", "going")
-DEPTHS = (2, 3, 5)  # (venue, surface) -> + distance -> the full cell
+CELL = ("venue", "surface", "distance_m", "course_config", "going", "rail_setting")
+DEPTHS = (2, 3, len(CELL))  # (venue, surface) -> + distance -> the full cell
 PRIOR_RACES = 10  # pseudo-races shrinking a cell's mean toward its parent's
 MIN_DAY_SD = 0.01  # floor of an estimated day_sd
 UNIFORM_VAR = 1 / 12  # the observation variance when the history has none to estimate it from
@@ -82,6 +85,13 @@ class BiasPrior:
             if got is not None:
                 return got
         return 0.0
+
+
+def _with_rail(races: pl.DataFrame) -> pl.DataFrame:
+    """`races` with a `rail_setting` column, all null when it has none."""
+    if "rail_setting" in races.columns:
+        return races
+    return races.with_columns(pl.lit(None, pl.String).alias("rail_setting"))
 
 
 def _observations(runners: pl.DataFrame) -> pl.DataFrame:
@@ -142,7 +152,7 @@ def _history(
 ) -> tuple[pl.DataFrame, dict[tuple, float]]:
     """The history's observations, each with its deviation `e` from its cell's prior mean, and
     the shrunk prior means."""
-    races = races.filter(pl.col("race_date") <= train_end)
+    races = _with_rail(races).filter(pl.col("race_date") <= train_end)
     runners = runners.filter(pl.col("race_date") <= train_end)
     days = set(races.get_column("race_date").to_list()) | set(runners.get_column("race_date"))
     held = sorted(d for d in days if d is not None and is_holdout_day(COUNTRY, d))
@@ -166,7 +176,8 @@ def _history(
             means[(cell, factor, level)] = (n * ybar + PRIOR_RACES * parent) / (n + PRIOR_RACES)
         up = depth
     prior = [
-        means[(tuple(r[:5]), r[5], r[6])] for r in obs.select(*CELL, "factor", "level").iter_rows()
+        means[(tuple(r[: len(CELL)]), r[len(CELL)], r[len(CELL) + 1])]
+        for r in obs.select(*CELL, "factor", "level").iter_rows()
     ]
     obs = obs.with_columns((pl.col("y") - pl.Series(prior, dtype=pl.Float64)).alias("e"))
     return obs, means
@@ -264,6 +275,7 @@ def _posterior(
     _aware(decision_time, "decision_time")
     for rid, when in published.items():
         _aware(when, f"the publication time of {rid}")
+    races = _with_rail(races)
     target = races.filter(pl.col("race_id") == race_id)
     if target.height != 1:
         raise ValueError(f"{race_id} is not exactly one row of races ({target.height})")
