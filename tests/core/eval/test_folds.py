@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta
 import numpy as np
 import pandas as pd
 import pytest
+
 from horsetrack.core.eval.folds import Fold, FoldScheme, walk_forward
 
 FIELDS = ("unit", "test_length", "step", "min_train", "window", "embargo_days", "anchor_month")
@@ -180,7 +181,9 @@ def build(case: str):
     dates = date_series(start, end, **options)
     py = to_py(dates)
     windows = expected_windows(py, s)
-    assert windows and windows[-1][1] <= max(py), "fixture must close its last test window"
+    # The calendar runs through `end`; race-day fixtures may have no row on that day itself, so the
+    # last window is checked against the calendar, not against the last row's date.
+    assert windows and windows[-1][1] == end, "fixture must end on its last test window's last day"
     return s, dates, py, windows
 
 
