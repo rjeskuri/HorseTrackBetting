@@ -1,0 +1,132 @@
+# Hong Kong Jockey Club: the history-relevant facts of HKTrack's hkjc.yaml, as data (ticket #60).
+# Site specifics live here or in src/horsetrack/countries/hongkong/hkjc/. HKTrack's page, model and
+# betting blocks are not carried over.
+source: hkjc
+display_name: Hong Kong Jockey Club
+timezone: Asia/Hong_Kong
+currency: HKD
+unit_stake: 10            # dividends are quoted per this stake; minimum bet
+odds_format: decimal_incl_stake
+season:
+  start_month: 9          # seasons run September to July; "2026/27" starts Sept 2026
+
+hosts:
+  html: https://racing.hkjc.com
+  graphql: https://info.cld.hkjc.com/graphql/base/
+
+# Configured local courses: a fixture cell naming any other venue (Conghua, simulcasts) is not a meeting.
+venues:
+  HV: {name: Happy Valley}
+  ST: {name: Sha Tin}
+
+# Known rule/era breaks that features must respect
+eras:
+  weight_scale_change: 2022-06-25   # handicap scale 133/113 lb -> 135/115 lb; never compare raw lb across it
+
+# Pools. `code` is the normalised name used everywhere outside the adapter; `labels` are what the site prints.
+# `takeout` is the rate in force today (HKTrack: verified on HKJC's official local-pools page, 2026-09-20).
+# `takeout_history` lists earlier rates as [effective_from, rate]; use Pool.takeout_on(date) for back-calculation.
+# Exact change dates between 2022-12 and 2023-11 are unverified (assumed season start 2023-09-01).
+pools:
+  WIN:
+    labels: ["WIN"]
+    takeout: 0.175
+    legs: 1
+    kind: win
+    dividend_step: 0.5
+    min_dividend: 10.5
+    enabled: true
+  PLACE:
+    labels: ["PLACE"]
+    takeout: 0.175
+    legs: 1
+    kind: place
+    dividend_step: 0.5
+    min_dividend: 10.1
+    # places paid by number of declared starters; the net pool is split equally between placed horses
+    places_paid: [{min_starters: 7, places: 3}, {min_starters: 4, places: 2}]
+    enabled: true
+  QUINELLA:
+    labels: ["QUINELLA"]
+    takeout: 0.175
+    legs: 2
+    kind: unordered_top2
+    dividend_step: 0.5
+    min_dividend: 10.5
+    enabled: true
+  QUINELLA_PLACE:
+    labels: ["QUINELLA PLACE"]
+    takeout: 0.175
+    legs: 2
+    kind: any2_of_top3
+    dividend_step: 0.5
+    min_dividend: 10.5
+    enabled: true
+  FORECAST:
+    labels: ["FORECAST"]
+    takeout: 0.195
+    takeout_history: [["2020-09-06", 0.195]]   # relaunched 2020-09-06; not offered before
+    legs: 2
+    kind: ordered_top2
+    dividend_step: 1.0
+    min_dividend: 11.0
+    enabled: false
+  TRIO:
+    labels: ["TRIO"]
+    takeout: 0.23
+    takeout_history: [["2010-01-01", 0.25], ["2020-09-06", 0.195], ["2023-09-01", 0.23]]
+    legs: 3
+    kind: unordered_top3
+    dividend_step: 1.0
+    min_dividend: 11.0
+    enabled: false
+  TIERCE:
+    labels: ["TIERCE"]
+    takeout: 0.25
+    takeout_history: [["2010-01-01", 0.25], ["2022-09-01", 0.22], ["2023-09-01", 0.25]]
+    legs: 3
+    kind: ordered_top3
+    dividend_step: 1.0
+    min_dividend: 11.0
+    enabled: false
+  FIRST_4:
+    labels: ["FIRST 4"]
+    takeout: 0.25
+    legs: 4
+    kind: unordered_top4
+    dividend_step: 1.0
+    min_dividend: 11.0
+    enabled: false
+  QUARTET:
+    labels: ["QUARTET"]
+    takeout: 0.25
+    legs: 4
+    kind: ordered_top4
+    dividend_step: 1.0
+    min_dividend: 11.0
+    enabled: false
+  DOUBLE:
+    labels: ["DOUBLE"]
+    takeout: 0.175
+    legs: 2
+    kind: multi_race_win
+    dividend_step: 0.5
+    min_dividend: 10.5
+    enabled: false
+
+# How the site displays odds: the declared dividend / unit, TRUNCATED (not rounded).
+# Below `threshold` odds are floored to 1 decimal, at or above it to an integer. `detruncate` is the expected
+# amount lost to flooring, added back before converting odds to implied probabilities.
+odds_display:
+  cap: 99
+  threshold: 10
+  detruncate_below: 0.025
+  detruncate_at_or_above: 0.475
+
+# Politeness: HKTrack's scrape.yaml values for HKJC (1 request a second, +/- 30 % jitter, stop on 403/429
+# or after 5 consecutive failures). The user agent is not set here.
+http:
+  default: {requests_per_second: 1.0, jitter: 0.3}   # +/- fraction applied to each inter-request gap
+  circuit_breaker:
+    stop_on_status: [403, 429]
+    max_consecutive_failures: 5
