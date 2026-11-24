@@ -4,8 +4,14 @@ version = "0.1.0"
 description = ""
 requires-python = ">=3.10"
 dependencies = [
+    "httpx>=0.28",
     "pydantic>=2.14.4",
     "pyyaml>=6.0.4",
+]
+
+[project.optional-dependencies]
+http2 = [
+    "httpx[http2]>=0.28",
 ]
 
 [dependency-groups]
