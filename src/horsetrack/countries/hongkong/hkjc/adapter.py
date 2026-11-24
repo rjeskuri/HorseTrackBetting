@@ -42,6 +42,7 @@ from horsetrack.countries.hongkong.hkjc.parse_common import (
     COUNTRY,
     NO_INFO_MARKER,
     SOURCE,
+    season_start_month,
     strip_not_content,
 )
 from horsetrack.countries.hongkong.hkjc.parse_results import ABANDONED_MARKERS, safe_id
@@ -85,6 +86,10 @@ class HKJCAdapter:
 
     def __init__(self, today: Callable[[], date] | None = None) -> None:
         self._today = today or _local_today
+
+    def season_start_month(self) -> int:
+        """The store build's season hook: HKJC seasons start in September (hkjc.yaml)."""
+        return season_start_month()
 
     # ------------------------------------------------------------ task generation
 

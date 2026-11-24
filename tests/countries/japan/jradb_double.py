@@ -13,6 +13,11 @@ lists and three odds pages per race (単勝・複勝, 馬連, ワイド). Every 
 carries a checksum the code under test cannot derive: it is only readable off the pages.
 `scramble` swaps every checksum for another, in the pages and the routing alike.
 
+Tier 2 (ticket #130): every race list also links 枠連, 馬単, 3連複 and 3連単. Their pages exist only
+for the pools a World is given in `tier2` (built with `jradb_pages.legs`, prices from
+`exotic_board`), so a request for any other pool's page gets the error page (`served` False). A
+`win5` day adds a WIN5 link to that day's オッズ menu and its page (`jradb_pages.win5`).
+
 Every value is invented. No real page, name or scraped value is copied here.
 """
 
@@ -68,6 +73,14 @@ VENUES = {  # code -> (number, name as printed), as in countries/japan/config/jr
 KINDS = ("winplace", "quinella", "wide")  # the odds pages of a race, one per kind
 KIND_POOLS = {"winplace": ("WIN", "PLACE"), "quinella": ("QUINELLA",), "wide": ("QUINELLA_PLACE",)}
 POOL_KIND = {pool: kind for kind, pools in KIND_POOLS.items() for pool in pools}
+# Tier 2 (#130): pool -> (race-list label, the code's page digit)
+TIER2 = {
+    "BRACKET_QUINELLA": ("枠連", "3"),
+    "FORECAST": ("馬単", "6"),
+    "TRIO": ("3連複", "7"),
+    "TIERCE": ("3連単", "8"),
+}
+UNIT_STAKE = 100  # yen per ticket, jra.yaml
 
 Link = tuple[str, str]  # (path, cname)
 
@@ -154,6 +167,72 @@ def make_race(day: date, venue: str, number: int) -> Race:
     return Race(day, venue, number, win, place, quinella, wide, post)
 
 
+# ---------------------------------------------------------------- tier 2 (#130)
+
+
+def _brackets(runners: int) -> dict[int, int]:
+    """Runner -> bracket: one runner a bracket up to 8 runners; past 8, the last brackets take
+    two runners each (9 runners: 1-7 alone, 8 and 9 in bracket 8)."""
+    single = 8 - max(0, runners - 8)
+    return {h: h if h <= single else single + (h - single + 1) // 2 for h in range(1, runners + 1)}
+
+
+def _seed(race: Race) -> int:
+    return race.day.toordinal() % 11 + list(VENUES).index(race.venue) * 5 + race.number * 3
+
+
+def exotic_board(race: Race, pool: str) -> dict[tuple[int, ...], float]:
+    """The invented tier-2 board of `race`: combination as the page lays it out (finishing order
+    for FORECAST and TIERCE, ascending for TRIO and BRACKET_QUINELLA, a same-bracket pair where a
+    bracket holds two runners) -> odds."""
+    runners = sorted(race.win)
+    k = _seed(race)
+    if pool == "BRACKET_QUINELLA":
+        held: dict[int, int] = {}
+        for b in _brackets(len(runners)).values():
+            held[b] = held.get(b, 0) + 1
+        pairs = [(a, b) for a in held for b in held if a < b or (a == b and held[a] > 1)]
+        return {c: round(4.0 + ((c[0] * 13 + c[1] * 7 + k) % 61) * 1.1, 1) for c in pairs}
+    if pool == "FORECAST":
+        pairs = [(a, b) for a in runners for b in runners if a != b]
+        return {c: round(6.0 + ((c[0] * 17 + c[1] * 5 + k) % 89) * 2.3, 1) for c in pairs}
+    triples = [(a, b, c) for a in runners for b in runners for c in runners if len({a, b, c}) == 3]
+    if pool == "TRIO":
+        return {
+            c: round(9.0 + ((c[0] * 7 + c[1] * 11 + c[2] * 3 + k) % 97) * 3.1, 1)
+            for c in triples
+            if c[0] < c[1] < c[2]
+        }
+    if pool == "TIERCE":
+        return {
+            c: round(20.0 + ((c[0] * 19 + c[1] * 7 + c[2] * 3 + k) % 211) * 9.7, 1) for c in triples
+        }
+    raise ValueError(pool)
+
+
+def exotic_expected(race: Race, pool: str) -> dict[str, float]:
+    """The log's {combination: odds} for `race`'s `pool` board: the page lays every combination
+    out in the log's order already (ordered pools as run, unordered ones ascending)."""
+    return {",".join(map(str, c)): odds for c, odds in exotic_board(race, pool).items()}
+
+
+def exotic_tickets(race: Race, pool: str) -> int:
+    """発売票数 the `pool` page of `race` prints."""
+    return 1000 + _seed(race) * 37 + list(TIER2).index(pool) * 4111
+
+
+@dataclass(frozen=True)
+class Win5Day:
+    """A WIN5 day: the five legs (venue code, race number), tickets sold and carryover in yen."""
+
+    legs: tuple[tuple[str, int], ...]
+    tickets: int
+    carryover_yen: int
+
+    def race_ids(self, day: date) -> list[str]:
+        return [f"jra:{day.isoformat()}:{v}:{n:02d}" for v, n in self.legs]
+
+
 # ---------------------------------------------------------------- the week
 
 
@@ -172,9 +251,19 @@ class Meeting:
 class World:
     """The pages of a synthetic week, keyed by (path, cname) as JRADB routes them."""
 
-    def __init__(self, days: Mapping[date, Sequence[Meeting]]):
+    def __init__(
+        self,
+        days: Mapping[date, Sequence[Meeting]],
+        *,
+        tier2: Sequence[str] = (),
+        win5: Mapping[date, Win5Day] | None = None,
+    ):
         self.days = {day: list(meetings) for day, meetings in days.items()}
+        unknown = set(tier2) - set(TIER2)
+        assert not unknown, f"no tier-2 page for {unknown}"
+        self.tier2 = tuple(tier2)
         self.pages: dict[Link, bytes] = {}
+        self.win5_links: dict[date, Link] = {}
         self._card_lists: dict[tuple[date, str], Link] = {}
         self._odds_lists: dict[tuple[date, str], Link] = {}
         self._odds: dict[tuple[date, str, int, str], Link] = {}
@@ -188,8 +277,17 @@ class World:
                 card, odds = self._build_meeting(day, m)
                 card_menu[day].append((m.name, card[1]))
                 odds_menu[day].append((m.name, odds[1]))
+        extra: dict[date, list[tuple[str, str]]] = {}
+        for day, w5 in (win5 or {}).items():
+            link = (ODDS_PATH, _cname(f"pw15w5ou10{day:%Y%m%d}Z"))
+            self.win5_links[day] = link
+            extra[day] = [("WIN5", link[1])]
+            printed = [(VENUES[v][1], n) for v, n in w5.legs]
+            self.pages[link] = pages.win5(
+                day, printed, state=LIVE_STATE, tickets=w5.tickets, carryover_yen=w5.carryover_yen
+            )
         self.pages[CARD_MENU] = pages.menu(card_menu, CARD_PATH)
-        self.pages[ODDS_MENU] = pages.menu(odds_menu, ODDS_PATH)
+        self.pages[ODDS_MENU] = pages.menu(odds_menu, ODDS_PATH, extra=extra)
 
     def _codes(self, day: date, m: Meeting) -> str:
         return f"{VENUES[m.venue][0]}{day.year}{m.kai:02d}{m.nichi:02d}"
@@ -210,11 +308,22 @@ class World:
             for kind, link in links.items():
                 self._odds[(day, m.venue, n, kind)] = link
                 self.pages[link] = self.odds_page(race, kind, day, m.name)
-            # The race list offers more pools than the four: those pages must never be asked for.
-            extra = {
-                label: _cname(f"pw15{digit}ou10{mid}{n:02d}{ymd}Z")
-                for label, digit in (("枠連", "3"), ("馬単", "6"), ("3連複", "7"))
-            }
+            # The race list offers more pools than the four (tier 2, #130): their pages exist
+            # only for the World's `tier2` pools; any other is the error page (never served).
+            extra = {}
+            for pool, (label, digit) in TIER2.items():
+                link = (ODDS_PATH, _cname(f"pw15{digit}ou10{mid}{n:02d}{ymd}Z"))
+                extra[label] = link[1]
+                self._odds[(day, m.venue, n, pool)] = link
+                if pool in self.tier2:
+                    self.pages[link] = pages.legs(
+                        day,
+                        m.name,
+                        n,
+                        exotic_board(race, pool),
+                        state=LIVE_STATE,
+                        votes=[(label, exotic_tickets(race, pool))],
+                    )
             buttons[n] = {
                 "単勝 複勝": links["winplace"][1],
                 "馬連": links["quinella"][1],
