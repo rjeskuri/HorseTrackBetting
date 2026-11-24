@@ -13,10 +13,14 @@ its own site, Fetcher (so its own per-host rate and circuit breaker), schedule
 (`schedule.run_sources`). NAR's snapshots go to `odds_snapshots/nar/<date>/<VENUE>.jsonl.gz`.
 `--venues` codes go to the source whose yaml lists them (jra.yaml, nar.yaml); a source none of
 whose venues is named sends nothing. Every health line ends ` source=<key>`, and an ALERT reads
-`ALERT <date> <venue> source=<key> <reasons>`. A block on one host stops that source only.
+`ALERT <date> <venue> source=<key> <reasons>`. A block on one host stops that source only, after
+its schedule's `on_block` (NAR: a 15-minute pause, then once on a fresh Fetcher at
+`resume_requests_per_second`; see `schedule`). An error escaping one source's day stops that
+source only: an `ERROR source=<key> ...` line on stderr at once, and the other sources log their
+day and get their health lines and markers.
 
 Exit codes: 0 clean, 2 with any ALERT, 1 on error (one `ERROR` line on stderr; a bad option is an
-error too, so 2 always means an alert).
+error too, so 2 always means an alert). A failed source exits 1 even with alerts.
 
 Every run that sends requests, attended or not, holds a non-blocking fcntl.flock on
 `logs_dir('japan')/log-day.lock` until it exits, so two log-days never share the per-host rate.
@@ -114,15 +118,21 @@ def sleep(seconds: float) -> None:
         time.sleep(min(60.0, left))
 
 
-def make_fetcher(source: str = SOURCE) -> Fetcher:
+def make_fetcher(source: str = SOURCE, *, requests_per_second: float | None = None) -> Fetcher:
     """The ingest Fetcher for `source` (JRA by default), with its yaml's per-host rates and
-    circuit breaker (nar.yaml's http block is already in the Fetcher's format)."""
+    circuit breaker (nar.yaml's http block is already in the Fetcher's format). A
+    `requests_per_second` replaces the rate of every host of that block (a resume after a block);
+    jitter and the User-Agent stay."""
     http = load_country_yaml("japan", source)["http"]
     if source == SOURCE:
         http = {
             "hosts": {"default": http["default"], **http.get("hosts", {})},
             "circuit_breaker": http["circuit_breaker"],
         }
+    if requests_per_second is not None:
+        rate = float(requests_per_second)
+        hosts = {h: {**entry, "requests_per_second": rate} for h, entry in http["hosts"].items()}
+        http = {**http, "hosts": hosts}
     return Fetcher(source, http=http)
 
 
@@ -424,13 +434,32 @@ def _file_log(path: Path) -> logging.Handler:
     return handler
 
 
-def _site(run: _SourceRun, fetcher: Fetcher, race_date: date) -> JraSite | NarSite:
+def _site(
+    run: _SourceRun, fetcher: Fetcher, race_date: date, rate: float | None = None
+) -> JraSite | NarSite:
+    """The source's site over `fetcher`; `rate`: the fetcher's rate when it was given one."""
     host = _host(run.key)
+    rps = _rate(run.key, host) if rate is None else rate
     if run.key == SOURCE:
         tier2 = run.config.get("tier2") or {}
-        return JraSite(fetcher, race_date, run.pools, utc_now, host, _rate(run.key, host),
+        return JraSite(fetcher, race_date, run.pools, utc_now, host, rps,
                        tier2.get("pools", ()))  # fmt: skip
-    return NarSite(fetcher, race_date, run.pools, utc_now, host, _rate(run.key, host))
+    return NarSite(fetcher, race_date, run.pools, utc_now, host, rps)
+
+
+def _resume(
+    run: _SourceRun, race_date: date, stack: ExitStack
+) -> Callable[[float], JraSite | NarSite] | None:
+    """schedule.Source.resume for a source whose on_block names a resume rate (NAR's): a site over
+    a fresh Fetcher at that rate, closed with the others. None otherwise (the same site resumes)."""
+    if run.config["on_block"].get("resume_requests_per_second") is None:
+        return None
+
+    def resume(rate: float) -> JraSite | NarSite:
+        fetcher = stack.enter_context(make_fetcher(run.key, requests_per_second=rate))
+        return _site(run, fetcher, race_date, rate)
+
+    return resume
 
 
 def _run(race_date: date, runs: Sequence[_SourceRun], *, markers: bool = False) -> int:
@@ -461,14 +490,25 @@ def _run(race_date: date, runs: Sequence[_SourceRun], *, markers: bool = False) 
                         config=run.config,
                         block_marker=_block_marker(logs, run.key),
                         venues=run.venues,
+                        resume=_resume(run, race_date, stack),
                     )
                 )
-            summaries = run_sources(race_date, sources, now=utc_now, sleep=sleep)
+            failed: list[str] = []
+
+            def on_error(key: str, exc: Exception) -> None:
+                # from the failed source's thread, while the others go on logging
+                failed.append(key)
+                log.error("log-day %s source=%s failed", race_date, key, exc_info=exc)
+                text = " ".join(str(exc).split())[:300] or type(exc).__name__
+                typer.echo(f"ERROR source={key} {type(exc).__name__}: {text}", err=True)
+
+            summaries = run_sources(race_date, sources, now=utc_now, sleep=sleep,
+                                    on_error=on_error)  # fmt: skip
         returned = utc_now()
         lines: list[str] = []
         for run in runs:
             summary = summaries[run.key]
-            if markers and run.venues is None:
+            if markers and run.venues is None and run.key not in failed:
                 _mark_day(race_date, run.key, summary, logs, returned)
             rows_by_venue, post_times = {}, {}
             for venue in summary.venues:
@@ -489,6 +529,8 @@ def _run(race_date: date, runs: Sequence[_SourceRun], *, markers: bool = False) 
         typer.echo(
             f"done: requests={requests} deferred={deferred} alerts={len(alerts)} health: {health}"
         )
+        if failed:
+            return EXIT_ERROR
         return EXIT_ALERT if alerts else 0
     except Exception:
         log.exception("log-day %s failed", race_date)

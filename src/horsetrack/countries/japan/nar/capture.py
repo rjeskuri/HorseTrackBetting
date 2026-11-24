@@ -9,7 +9,10 @@ Every request is a FetchTask: GET, source "nar", mutable, to nar.netkeiba.com (n
 PLACE, `b4` QUINELLA, `b5` QUINELLA_PLACE. Pages are untrusted data, only parsed (`nar/pages.py`).
 
 Refusals, as JRA's: a meeting the race list does not list raises NotListed; an odds page whose own
-race id (the `race_id=` of its links) is not the race asked for raises WrongMeeting. A race whose
+race is not the race asked for raises WrongMeeting. A page's own race is what its race navigation
+names (`_OWN_RACE`): the active race-number entry, the active venue tab and the page menu's links,
+never every `race_id=` on the page (a real page links to every race of its meeting and to the
+day's other venues). A page that names no race of its own is a ValueError. A race whose
 odds page shows netkeiba's 予想オッズ (`pages.NotOnSale`: sales not open yet) gives no rows and
 its other pages are not asked for; the capture goes on with the other races.
 """
@@ -77,10 +80,19 @@ def _meeting(race_list: BeautifulSoup, race_date: date, venue: str) -> pages.Mee
     return meeting
 
 
+# The links where an odds page names its own race: the active race number, the active venue tab,
+# the page menu (出馬表, オッズ, ...).
+_OWN_RACE = (
+    "div.RaceNumWrap ul.fc li.Active a[href]",
+    "div.RaceKaisaiWrap ul.Col li.Active a[href]",
+    'ul.RaceMainMenu li[class*="race_navi_"] a[href]',
+)
+
+
 def _page_race_ids(doc: BeautifulSoup) -> set[str]:
-    """The `race_id=` values of the page's links."""
+    """The `race_id=` values of the page's own-race links (`_OWN_RACE`)."""
     out: set[str] = set()
-    for a in doc.find_all("a", href=True):
+    for a in doc.select(", ".join(_OWN_RACE)):
         out.update(parse_qs(urlsplit(str(a["href"])).query).get("race_id", []))
     return out
 
@@ -88,7 +100,7 @@ def _page_race_ids(doc: BeautifulSoup) -> set[str]:
 def _check_race(doc: BeautifulSoup, race_id: str, what: str) -> None:
     shown = _page_race_ids(doc)
     if not shown:
-        raise ValueError(f"{what}: no race id on the page (an error page?)")
+        raise ValueError(f"{what}: the page names no race of its own (an error page?)")
     if shown != {race_id}:
         raise WrongMeeting(f"{what} is for race {','.join(sorted(shown))}, asked for {race_id}")
 

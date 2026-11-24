@@ -41,7 +41,8 @@ tier2:
 # A venue answering for another meeting this many captures in a row stops (that venue only).
 max_wrong_meeting: 3
 # After a 403/429 (or any open circuit): null stops the host for the rest of the day and the
-# block marker keeps a restart from sending anything; N resumes once after N minutes. Owner's call.
+# block marker keeps a restart from sending anything; N resumes once after N minutes (on a fresh
+# Fetcher at `resume_requests_per_second` where that is given, as NAR's below). Owner's call.
 on_block: {cooldown_min: null}
 
 # NAR's schedule (ticket #38; night racing per docs/research/nar-data-access.md): nar.netkeiba.com
@@ -64,4 +65,8 @@ nar:
   # The race list (one page for every meeting), then per race one page per page type: b1, b5.
   requests: {navigation: 1, per_race: 2}
   max_wrong_meeting: 3
-  on_block: {cooldown_min: null}
+  # The owner's NAR block policy (docs/research/nar-data-access.md): on a 403/429, NAR alone pauses
+  # 15 minutes, then resumes once on a fresh Fetcher at half nar.yaml's rate (20 s between
+  # requests); a second block stops NAR for the day (venues circuit_open, an ALERT each). Every
+  # block appends a line to nar-block.txt, and a restart that finds one sends NAR nothing that day.
+  on_block: {cooldown_min: 15, resume_requests_per_second: 0.05}
