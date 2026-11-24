@@ -11,7 +11,7 @@ Contract pinned here (the coder follows it):
   tier-2 rows is not on the board; a tier-2 capture does not move `last_capture_utc`.
 - Bounded memory: `build_board` over a venue-day holding 24 tier-2 captures of 18-runner races
   (4,896 3連単 prices each, ~145k tier-2 rows) does not materialise the tier-2 rows: its peak RSS
-  rises by less than FEED_LIMIT_BYTES (a child process measures it).
+  rises by less than FEED_LIMIT_BYTES (a child process measures its own peak: child_memory.py).
 - `logger.compact.compact_day` keeps tier-2 and WIN5 rows in the day's Parquet, one row per logged
   row as for tier 1 (Ruling: tier-2 studies need decision-time prices, so the Parquet carries them;
   the live board is the reader that drops them). Over the same venue-day its peak RSS rises by less
@@ -26,13 +26,13 @@ would be several GB there. All logs are synthetic, written under tmp_path.
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
+import os
 from datetime import date, datetime, timedelta, timezone
 from itertools import combinations, combinations_with_replacement, permutations
 from pathlib import Path
 from typing import Any
 
+import child_memory
 import pyarrow.parquet as pq
 import pytest
 
@@ -377,13 +377,12 @@ def heavy_day(tmp_path_factory) -> Path:
     return data
 
 
+# runs after child_memory.PROBE, which defines peak_bytes() (the child's own peak) and START_PEAK
 CHILD = r"""
-import json, resource, sys
+import json
 from datetime import date, datetime
 
-def peak():
-    used = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return used if sys.platform == "darwin" else used * 1024  # bytes on macOS, KiB on Linux
+peak = peak_bytes
 
 mode, day = sys.argv[1], sys.argv[2]
 if mode == "feed":
@@ -407,25 +406,15 @@ else:
     pools = pq.read_table(path, columns=["pool"]).column("pool").to_pylist()
     out = {"pools": {p: pools.count(p) for p in sorted(set(pools))}}
 out["rise"] = after - before
+out["start"] = START_PEAK
 print(json.dumps(out))
 """
 
 
 def run_child(data: Path, *args: str) -> dict[str, Any]:
-    env = {**__import__("os").environ, paths.DATA_DIR_VAR: str(data)}
-    done = subprocess.run(
-        [sys.executable, "-c", CHILD, *args],
-        capture_output=True,
-        text=True,
-        timeout=170,
-        check=False,
-        env=env,
-    )
-    assert done.returncode == 0, done.stderr[-2000:]
-    return json.loads(done.stdout.strip().splitlines()[-1])
+    return child_memory.run_child(CHILD, *args, env={**os.environ, paths.DATA_DIR_VAR: str(data)})
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="resource is POSIX only")
 def test_the_board_over_a_day_of_trifecta_captures_does_not_hold_them(heavy_day):
     out = run_child(heavy_day, "feed", DAY.isoformat(), iso(jst(23, 0)))
 
@@ -437,7 +426,6 @@ def test_the_board_over_a_day_of_trifecta_captures_does_not_hold_them(heavy_day)
     )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="resource is POSIX only")
 def test_compacting_a_day_of_trifecta_captures_stays_under_its_memory_bound(heavy_day):
     out = run_child(heavy_day, "compact", DAY.isoformat())
 

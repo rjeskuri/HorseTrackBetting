@@ -19,7 +19,7 @@ Contract pinned here (the coder follows it):
   100 yen, `carryover` (yen, float), `legs` (the five designated races' race_ids, leg order),
   and the base keys (snapshot_utc, fetched_utc, source_update_utc) as on any odds page.
 - Parsing an 18-runner 3連単 page (4,896 combinations) and appending its rows to the odds log
-  peaks under 200 MB RSS (in a child process, so nothing else counts).
+  peaks under 200 MB RSS (in a child process, counting its own memory only: child_memory.py).
 
 Pages are synthetic (jradb_pages.legs / jradb_pages.win5). Their layout follows the 馬連 page the
 real-page tests check (one table per leading leg, a row per last leg); no real 枠連 / 馬単 / 3連複
@@ -30,11 +30,10 @@ never computed by the code under test.
 from __future__ import annotations
 
 import random
-import subprocess
-import sys
 from datetime import date, datetime, timezone
 from itertools import combinations, combinations_with_replacement, permutations
 
+import child_memory
 import jradb_pages as pages
 import pytest
 
@@ -286,8 +285,9 @@ def test_an_18_runner_trifecta_page_has_all_4896_ordered_combinations():
 
 
 PEAK_LIMIT_BYTES = 200 * 1000 * 1000  # 200 MB
+# runs after child_memory.PROBE, which defines peak_bytes() and START_PEAK
 CHILD = r"""
-import resource, sys
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -298,28 +298,19 @@ body = Path(sys.argv[1]).read_bytes()
 at = datetime(2026, 11, 28, 5, 0, 15, tzinfo=timezone.utc)
 rows = ep.odds_rows(body, "jra:2026-11-28:TOK:11", "TIERCE", snapshot_utc=at, fetched_utc=at)
 written = odds_log.append_capture(Path(sys.argv[2]), rows)
-peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-# ru_maxrss is bytes on macOS, KiB on Linux
-print(written, peak if sys.platform == "darwin" else peak * 1024)
+print(json.dumps({"written": written, "peak": peak_bytes(), "start": START_PEAK}))
 """
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="resource is POSIX only")
 def test_parsing_an_18_runner_trifecta_page_peaks_under_200_mb(tmp_path):
     body, want = trifecta_18()
     page_file, log_file = tmp_path / "tierce.html", tmp_path / "TOK.jsonl.gz"
     page_file.write_bytes(body)
 
-    done = subprocess.run(
-        [sys.executable, "-c", CHILD, str(page_file), str(log_file)],
-        capture_output=True,
-        text=True,
-        timeout=170,
-        check=False,
-    )
-    assert done.returncode == 0, done.stderr[-2000:]
-    written, peak = (int(x) for x in done.stdout.split())
-    assert written == 4_896 + 1
+    # the child's own peak, not the pytest parent's (see child_memory.py)
+    out = child_memory.run_child(CHILD, str(page_file), str(log_file))
+    assert out["written"] == 4_896 + 1
+    peak = out["peak"]
     assert peak < PEAK_LIMIT_BYTES, f"peak RSS {peak / 1e6:.1f} MB"
     logged = odds_log.read_rows(log_file)
     assert {r["combination"]: r["odds"] for r in logged if r["combination"] != POOL} == want
