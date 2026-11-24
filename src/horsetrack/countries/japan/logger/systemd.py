@@ -7,7 +7,11 @@ exit at once. The timer starts it at :00 and :30 of every hour, Tokyo time (Pers
 start missed while the VM was down runs at boot); a start while the service still runs is a no-op.
 
 The unit sets only HORSETRACK_DATA_DIR and reads the VM's `<repo>/.env` (optional), which the owner
-writes on the VM and which holds the user agent; nothing secret goes in the unit. The defaults are
+writes on the VM and which holds the user agent; nothing secret goes in the unit. That .env must not
+set HORSETRACK_DATA_DIR: systemd lets EnvironmentFile= values override Environment= ones whatever
+their order, so a data dir there (say .env.example's `~/Data/horsetrack`, which is
+/root/Data/horsetrack for a root service) sends the logs away from the unit's data dir, where
+`pull-vm` looks; vm_setup.sh refuses to run while the VM's .env names another one. The defaults are
 the VM's paths (`scripts/vm_setup.sh` clones into /opt/horsetrack; `pull-vm` pulls from
 /var/lib/horsetrack), never this machine's environment. --print writes the two files to stdout,
 each after a header line `# <file name>` that vm_setup.sh splits on; it writes no file.

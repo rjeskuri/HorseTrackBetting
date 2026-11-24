@@ -16,8 +16,12 @@
 # --user NAME   run the logger as NAME, an existing user (the unit's User=); without it, as root.
 # --dry-run     print every command on stdout, in order, and run none; no root needed.
 #
-# It never writes or reads a .env: the owner writes /opt/horsetrack/.env on the VM (the user
-# agent; readable by the service user), and the unit reads it.
+# It never writes a .env: the owner writes /opt/horsetrack/.env on the VM (the user agent;
+# readable by the service user), and the unit reads it. That .env must not set HORSETRACK_DATA_DIR:
+# systemd lets EnvironmentFile= values override the unit's Environment= ones, so a data dir there
+# (such as .env.example's ~/Data/horsetrack, /root/Data/horsetrack for a root service) sends the
+# logs away from /var/lib/horsetrack, where pull-vm looks. A real run reads that .env, when it
+# exists, only to stop if it sets HORSETRACK_DATA_DIR to another dir, and prints none of it.
 
 set -euo pipefail
 umask 022
@@ -115,6 +119,22 @@ write_unit() { # $1: a file name, $2: its text
   fi
 }
 
+other_data_dir() { # true when the env file $1 sets HORSETRACK_DATA_DIR to anything but $DATA_DIR
+  awk -v want="$DATA_DIR" -v q="'" '
+    { line = $0; sub(/^[ \t]*(export[ \t]+)?/, "", line) }
+    line !~ /^HORSETRACK_DATA_DIR[ \t]*=/ { next }
+    {
+      sub(/^[^=]*=[ \t]*/, "", line)
+      sub(/[ \t\r]+$/, "", line)
+      a = substr(line, 1, 1)
+      if (length(line) > 1 && (a == "\"" || a == q) && substr(line, length(line)) == a)
+        line = substr(line, 2, length(line) - 2)
+      sub(/\/+$/, "", line)
+      if (line != want) other = 1
+    }
+    END { exit !other }' "$1"
+}
+
 # ------------------------------------------------------------------ the host (real run only)
 
 if [ "$dry_run" = 1 ]; then
@@ -127,6 +147,10 @@ else
   done
   if [ -n "$user" ] && ! id -u "$user" >/dev/null 2>&1; then
     die "--user $user: no such user (create it first)"
+  fi
+  if [ -f "$INSTALL_DIR/.env" ] && other_data_dir "$INSTALL_DIR/.env"; then
+    die "$INSTALL_DIR/.env sets HORSETRACK_DATA_DIR, which overrides the unit's $DATA_DIR" \
+      "(where pull-vm looks): delete that line, then run this again"
   fi
 fi
 
@@ -176,3 +200,5 @@ run systemctl enable --now "$TIMER"
 if [ "$dry_run" != 1 ]; then
   printf '%s\n' "set up $TIMER at $tag: it starts $SERVICE at :00 and :30, Tokyo time" >&2
 fi
+printf '%s\n' "reminder: $INSTALL_DIR/.env holds the user agent and no HORSETRACK_DATA_DIR," \
+  "  which would override the unit's $DATA_DIR, where pull-vm looks" >&2
