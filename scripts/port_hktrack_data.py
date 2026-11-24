@@ -2,8 +2,10 @@
 
     uv run python3 scripts/port_hktrack_data.py --from <HKTrack root> --to <data dir> [--dry-run]
 
-Ports `data/{raw,interim,processed,odds_snapshots}` to the same names under the destination and
-`tests/fixtures/{hkjc,jra,jrdb,web}` to `<dst>/fixtures/`. Skips every other data directory
+Ports `data/{raw,interim,processed,odds_snapshots}` to the same names under the destination,
+`tests/fixtures/{hkjc,jra,jrdb,web}` to `<dst>/fixtures/`, and the JRDB field-spec tables
+`src/hktrack/sources/jra/jrdb/specs/*.csv` to `<dst>/jrdb/specs/` (ticket #58: the JRDB parser reads
+them there; they are licensed, so they stay out of the repo). Skips every other data directory
 (`data/features` among them), anything under `__pycache__`, `*.lock`, `*.tmp`, `.DS_Store` and the
 -wal, -shm and -journal files of a `*.sqlite` database. A database is copied with the sqlite3
 backup API from a read-only connection, so rows still in its -wal reach the copy and HKTrack's
@@ -39,7 +41,9 @@ from pathlib import Path
 
 DATA_DIRS = ("raw", "interim", "processed", "odds_snapshots")
 FIXTURE_DIRS = ("hkjc", "jra", "jrdb", "web")
-TOPS = (*DATA_DIRS, "fixtures")
+SPECS = "jrdb/specs"  # the JRDB spec tables' destination, under the top "jrdb"
+SPECS_SOURCE = ("src", "hktrack", "sources", "jra", "jrdb", "specs")  # under the HKTrack root
+TOPS = (*DATA_DIRS, "fixtures", "jrdb")
 SKIP_DIRS = frozenset({"__pycache__"})
 SKIP_NAMES = frozenset({".DS_Store"})
 SKIP_SUFFIXES = (".lock", ".tmp")
@@ -79,11 +83,21 @@ class Report:
 # --- plan -------------------------------------------------------------------------------------
 
 
-def plan(src_data: Path, src_fixtures: Path, dst: Path) -> list[Step]:
-    """Every source file to port, in order; raises Refused for a destination it must not write."""
+def plan(
+    src_data: Path, src_fixtures: Path, dst: Path, src_specs: Path | None = None
+) -> list[Step]:
+    """Every source file to port, in order; raises Refused for a destination it must not write.
+
+    `src_specs`, when given, is HKTrack's JRDB spec directory: the `*.csv` files directly in it go
+    to `jrdb/specs` (a missing directory ports nothing).
+    """
     src_data = Path(src_data).expanduser().resolve()
     src_fixtures = Path(src_fixtures).expanduser().resolve()
-    dst = _checked_destination(Path(dst), (src_data, src_fixtures))
+    sources = (src_data, src_fixtures)
+    if src_specs is not None:
+        src_specs = Path(src_specs).expanduser().resolve()
+        sources += (src_specs,)
+    dst = _checked_destination(Path(dst), sources)
     if not src_data.is_dir():
         raise Refused(f"no data directory at {src_data}")
     steps: list[Step] = []
@@ -91,6 +105,8 @@ def plan(src_data: Path, src_fixtures: Path, dst: Path) -> list[Step]:
         steps += _walk(src_data / top, dst, top, top)
     for sub in FIXTURE_DIRS:
         steps += _walk(src_fixtures / sub, dst, f"fixtures/{sub}", "fixtures")
+    if src_specs is not None:
+        steps += _specs(src_specs, dst)
     return steps
 
 
@@ -118,6 +134,14 @@ def _walk(src_root: Path, dst_root: Path, prefix: str, top: str) -> list[Step]:
             rel = f"{prefix}/{path.relative_to(src_root).as_posix()}"
             steps.append(Step(path, dst_root / rel, rel, top, name.endswith(SQLITE)))
     return steps
+
+
+def _specs(src_root: Path, dst_root: Path) -> list[Step]:
+    """The spec tables, the `*.csv` files directly in src_root, sorted by name."""
+    if not src_root.is_dir():
+        return []
+    names = sorted(p.name for p in src_root.iterdir() if p.suffix == ".csv" and p.is_file())
+    return [Step(src_root / n, dst_root / SPECS / n, f"{SPECS}/{n}", "jrdb", False) for n in names]
 
 
 def _skipped(name: str) -> bool:
@@ -339,7 +363,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = Path(args.source).expanduser().resolve()
     try:
-        steps = plan(root / "data", root / "tests" / "fixtures", Path(args.dest))
+        specs = root.joinpath(*SPECS_SOURCE)
+        steps = plan(root / "data", root / "tests" / "fixtures", Path(args.dest), specs)
     except Refused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
