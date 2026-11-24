@@ -11,6 +11,7 @@ from horsetrack.countries.japan.logger.compact import compact
 from horsetrack.countries.japan.logger.compare import compare_logs_command
 from horsetrack.countries.japan.logger.log_day import log_day
 from horsetrack.countries.japan.logger.pull_vm import pull_vm_command
+from horsetrack.countries.japan.shadow.day import shadow_day_command
 
 app = typer.Typer(no_args_is_help=True)
 japan = typer.Typer(no_args_is_help=True, help="Japan commands.")
@@ -21,6 +22,7 @@ japan.command("compact")(compact)
 japan.command("log-day")(log_day)
 japan.command("pull-vm")(pull_vm_command)
 japan.command("board-serve")(board_serve_command)
+japan.command("shadow-day")(shadow_day_command)
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
 japan.add_typer(jrdb, name="jrdb")
 jrdb.command("build")(jrdb_build_command)
