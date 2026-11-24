@@ -5,8 +5,13 @@ description = ""
 requires-python = ">=3.10"
 dependencies = [
     "pandas>=2.3.3",
+    "pydantic>=2.14.4",
     "pyyaml>=6.0.4",
+    "typer>=0.29.1",
 ]
+
+[project.scripts]
+horsetrack = "horsetrack.cli:app"
 
 [dependency-groups]
 dev = [
