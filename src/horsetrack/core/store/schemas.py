@@ -55,6 +55,7 @@ _SPECS = (
             "split_times_s": FLOAT_LIST, "status": STR,
             "weight_type": STR, "race_class_raw": STR, "going_raw": STR, "source_race_key": STR,
             "rail_setting": STR,
+            "result_published_utc": UTC, "result_unpublished_utc": UTC,
         },
         ("race_id",),
     ),

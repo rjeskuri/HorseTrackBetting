@@ -44,11 +44,17 @@ max_wrong_meeting: 3
 # block marker keeps a restart from sending anything; N resumes once after N minutes (on a fresh
 # Fetcher at `resume_requests_per_second` where that is given, as NAR's below). Owner's call.
 on_block: {cooldown_min: null}
+# Result publication (ticket #225): each venue's レース結果 race list is polled at most every every_s
+# from its first post to its last post + until_min (past the odds' end), and each race's first
+# sighting of its official result is kept in <VENUE>.results.json beside the odds log. every_s 60
+# gives minute resolution; until_min past 30 lets the log see lags beyond the 30-minute proxy.
+# Without this block: no results polling. JRA only: NAR never inherits it.
+results: {every_s: 60, until_min: 60}
 
 # NAR's schedule (ticket #38; night racing per docs/research/nar-data-access.md): nar.netkeiba.com
 # at nar.yaml's rate (0.1 requests a second, one host for every venue), so a round's budget is
 # every_s / 10 requests. Meetings run from about 10:40 to 21:00 JST, the nighters last. Keys left
-# out here are the top level's; tier 2 is never inherited (there is no NAR tier-2 capture).
+# out here are the top level's; tier 2 and results are never inherited (NAR has neither).
 nar:
   # Win/Place/Wide first (D3): the b1 page (WIN, PLACE) and the b5 page (QUINELLA_PLACE).
   pools: [WIN, PLACE, QUINELLA_PLACE]
