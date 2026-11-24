@@ -219,7 +219,8 @@ def test_orphan_race_ids_above_one_percent_fail(built_root):
         (200, ["g1", "g2"], checks.WARN, 2, 202),  # 2 <= 1% of 202
         (200, ["g1", "g2", "g3"], checks.FAIL, 3, 203),  # 3 > 1% of 203
         (100, ["g1"], checks.WARN, 1, 101),  # 1 <= 1.01
-        (99, ["g1"], checks.FAIL, 1, 100),  # 1 > 1.00
+        (99, ["g1"], checks.WARN, 1, 100),  # 1 <= 1.00: exactly 1% still warns
+        (98, ["g1"], checks.FAIL, 1, 99),  # 1 > 0.99
         (3, ["g1"], checks.FAIL, 1, 4),
     ],
 )
