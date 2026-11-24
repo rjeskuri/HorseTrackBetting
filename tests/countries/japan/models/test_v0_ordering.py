@@ -15,14 +15,18 @@ from __future__ import annotations  # noqa: I001
 import json
 import math
 import tracemalloc
+from datetime import date, timedelta
 from itertools import permutations
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from scipy.optimize import minimize_scalar
 from scipy.special import logsumexp
 
+from horsetrack.countries.japan.models.v0 import ordering
 from horsetrack.countries.japan.models.v0.ordering import (
     OrderingFit,
     fit_ordering,
@@ -425,3 +429,284 @@ def test_the_fit_round_trips_through_json():
                 back.pair_probs(probe, places), original.pair_probs(probe, places)
             )
     assert built.n_races == 4321 and fitted.n_races == 400
+
+
+# ---------------------------------------------------------------------------------------------
+# Outline 3: run_fit reads #114's OOF (race_id, horse_no, fold, q, p_cal) and joins finish_pos,
+# dead_heat and is_scratched from processed_dir('jra')/runners.parquet on (race_id, horse_no)
+# ---------------------------------------------------------------------------------------------
+
+DATA_VAR = "HORSETRACK_DATA_DIR"
+OOF_NAME = "win_calibration_oof-0123456789ab.parquet"
+RUNNERS_SCHEMA = pa.schema(
+    [
+        ("race_id", pa.string()),
+        ("race_date", pa.date32()),
+        ("horse_no", pa.int32()),
+        ("win_odds", pa.float64()),
+        ("finish_pos", pa.int32()),  # null: scratched or did not finish
+        ("is_scratched", pa.bool_()),
+        ("dead_heat", pa.bool_()),
+        ("win_fav_rank", pa.int32()),
+    ]
+)
+OOF_SCHEMA = pa.schema(
+    [
+        ("race_id", pa.string()),
+        ("horse_no", pa.int64()),
+        ("fold", pa.int64()),
+        ("q", pa.float64()),
+        ("p_cal", pa.float64()),
+    ]
+)
+
+
+def race_key(r):
+    """A store-style race id and date for synthetic race number r."""
+    day = date(2020, 1, 4) + timedelta(days=r // 12)
+    return f"jra:{day.isoformat()}:TOK:{r % 12 + 1:02d}", day
+
+
+def race_tables(p, order, first_race=0):
+    """#114's OOF rows and the store's runner rows for simulated races.
+
+    p_cal is the model's Win probability; q (the market) is deliberately a different curve of
+    it, so a fit on q instead of p_cal lands far from the reference.
+    """
+    n_races, n = p.shape
+    rows = np.arange(n_races)[:, None]
+    finish_pos = np.empty(order.shape, dtype=float)
+    finish_pos[rows, order] = np.arange(1, n + 1)[None, :]
+    ids, days = zip(*(race_key(first_race + r) for r in range(n_races)), strict=True)
+    q = p**0.6
+    q /= q.sum(axis=1, keepdims=True)
+    horse_no = np.tile(np.arange(1, n + 1), n_races)
+    oof = pd.DataFrame(
+        {
+            "race_id": np.repeat(ids, n),
+            "horse_no": horse_no,
+            "fold": np.repeat(np.arange(n_races) % 4, n),
+            "q": q.ravel(),
+            "p_cal": p.ravel(),
+        }
+    )
+    runners = pd.DataFrame(
+        {
+            "race_id": np.repeat(ids, n),
+            "race_date": np.repeat(days, n),
+            "horse_no": horse_no,
+            "win_odds": 0.8 / q.ravel(),
+            "finish_pos": finish_pos.ravel(),
+            "is_scratched": False,
+            "dead_heat": False,
+            "win_fav_rank": np.argsort(np.argsort(-q, axis=1), axis=1).ravel() + 1,
+        }
+    )
+    return oof, runners
+
+
+def write_inputs(tmp_path, monkeypatch, oof, runners):
+    """Point the data dir at tmp_path, write the store's runners table and the OOF file."""
+    data = (tmp_path / "data").resolve()
+    monkeypatch.setenv(DATA_VAR, str(data))
+    # read_family's default path is bound at definition and the config is an owner decision:
+    # supply the family through the module seam run_fit calls.
+    monkeypatch.setattr(ordering, "read_family", lambda *a, **k: FAMILY)
+    rng = np.random.default_rng(len(oof) + len(runners))
+    store = data / "processed" / "jra"
+    store.mkdir(parents=True)
+    runners = runners.iloc[rng.permutation(len(runners))].reset_index(drop=True)
+    pq.write_table(
+        pa.Table.from_pandas(runners, schema=RUNNERS_SCHEMA, preserve_index=False),
+        store / "runners.parquet",
+    )
+    oof_path = data / "models" / "japan" / "v0" / OOF_NAME
+    oof_path.parent.mkdir(parents=True)
+    oof = oof.iloc[rng.permutation(len(oof))].reset_index(drop=True)
+    pq.write_table(pa.Table.from_pandas(oof, schema=OOF_SCHEMA, preserve_index=False), oof_path)
+    return data, oof_path
+
+
+def assert_fit_files(out_dir, manifest):
+    """The fit and the manifest are in out_dir under the ticket's names, and agree."""
+    fit_id = manifest["fit_id"]
+    fit_path = out_dir / f"ordering-{fit_id}.json"
+    manifest_path = out_dir / f"manifest-ordering-{fit_id}.json"
+    assert fit_path.is_file() and manifest_path.is_file()
+    fit = OrderingFit.from_json(fit_path.read_text())
+    assert fit.family == FAMILY and fit.fit_id == fit_id
+    assert fit.n_races == manifest["n_races"]
+    np.testing.assert_allclose(fit.lambdas, manifest["lambdas"], rtol=0, atol=1e-12)
+    assert json.loads(manifest_path.read_text()) == json.loads(json.dumps(manifest))
+    return fit
+
+
+@pytest.mark.parametrize(
+    "planted, n_races, n_runners, seed",
+    [((0.8, 0.7), 2500, 12, 1142), ((1.2, 0.55), 2000, 10, 1143)],
+)
+def test_run_fit_fits_p_cal_from_the_oof_joined_to_the_store_results(
+    tmp_path, monkeypatch, planted, n_races, n_runners, seed
+):
+    rng = np.random.default_rng(seed)
+    p, order = simulate(rng, n_races, n_runners, planted)
+    oof, runners = race_tables(p, order)
+    _, oof_path = write_inputs(tmp_path, monkeypatch, oof, runners)
+    out_dir = tmp_path / "out"
+
+    manifest = ordering.run_fit(oof_path, out_dir)
+
+    assert manifest["n_races"] == n_races
+    assert manifest["family"] == FAMILY
+    fit = assert_fit_files(out_dir, manifest)
+    ref, _ = reference_mle(p, order)
+    for stage, (got, truth) in enumerate(zip(fit.lambdas, planted, strict=True), start=1):
+        se = stage_se(p, order, stage, got)
+        assert abs(got - truth) < max(0.15, 4 * se), (stage, got, truth, se)
+        # The MLE on p_cal (not q) over exactly these races.
+        assert got == pytest.approx(ref[stage - 1], abs=5e-3), (stage, got, ref)
+
+
+def test_run_fit_drops_scratched_runners_and_adds_no_runner_outside_the_oof(tmp_path, monkeypatch):
+    rng = np.random.default_rng(1144)
+    n_races, n = 1500, 10
+    p, order = simulate(rng, n_races, n, (0.85, 0.7))
+    oof, runners = race_tables(p, order)
+    ids = runners["race_id"].unique()
+
+    # A scratched runner in every race, carried in the OOF with a large p_cal: kept in the field
+    # it would move both discounts well away from the clean estimate (checked below).
+    scratched_p = 0.5
+    scr_oof = pd.DataFrame(
+        {"race_id": ids, "horse_no": n + 1, "fold": 0, "q": 0.01, "p_cal": scratched_p}
+    )
+    scr_run = pd.DataFrame(
+        {
+            "race_id": ids,
+            "race_date": [race_key(r)[1] for r in range(n_races)],
+            "horse_no": n + 1,
+            "win_odds": np.nan,
+            "finish_pos": np.nan,
+            "is_scratched": True,
+            "dead_heat": False,
+            "win_fav_rank": 0,
+        }
+    )
+    # A runner the store has and the OOF does not (unpriced, finished last): not in the field.
+    extra_run = scr_run.assign(horse_no=n + 2, finish_pos=float(n + 1), is_scratched=False)
+    # Whole races the store has and the OOF does not: they are not fitted and not counted.
+    p_out, o_out = simulate(rng, 300, n, (0.3, 2.0))
+    _, out_run = race_tables(p_out, o_out, first_race=n_races)
+
+    _, oof_path = write_inputs(
+        tmp_path,
+        monkeypatch,
+        pd.concat([oof, scr_oof], ignore_index=True),
+        pd.concat([runners, scr_run, extra_run, out_run], ignore_index=True),
+    )
+
+    manifest = ordering.run_fit(oof_path, tmp_path / "out")
+
+    assert manifest["n_races"] == n_races
+    left_out = manifest["races_left_out"]
+    assert left_out["dead_heat_in_first_three"] == 0
+    assert left_out["incomplete_first_three"] == 0
+    ref, _ = reference_mle(p, order)
+    np.testing.assert_allclose(manifest["lambdas"], ref, atol=5e-3)
+    # The scratched runner matters: fitted as part of the field it would give another answer.
+    with_scratched, _ = reference_mle(np.hstack([p, np.full((n_races, 1), scratched_p)]), order)
+    assert np.abs(np.subtract(with_scratched, ref)).max() > 0.05
+
+
+def test_the_manifest_counts_races_left_out_for_dead_heats_and_incomplete_results(
+    tmp_path, monkeypatch
+):
+    rng = np.random.default_rng(1145)
+    n = 11
+    n_clean, n_dead_heat, n_missing_placer, n_no_third = 900, 37, 14, 9
+    p, order = simulate(rng, n_clean, n, (0.9, 0.75))
+    oof, runners = race_tables(p, order)
+
+    def bad_races(first_race, n_dh, n_missing, n_dnf):
+        """Races with a dead heat in the first three, a placed runner absent from the OOF, or
+        no third finisher; returns their OOF and store rows."""
+        total = n_dh + n_missing + n_dnf
+        pb, ob = simulate(rng, total, n, (0.9, 0.75))
+        b_oof, b_run = race_tables(pb, ob, first_race=first_race)
+        drop = []
+        for r, race_id in enumerate(b_run["race_id"].unique()):
+            in_race = b_run["race_id"] == race_id
+            pos = b_run["finish_pos"]
+            if r < n_dh:
+                tie = r % 3 + 1  # a tie for first, second or third
+                pair = b_run.index[in_race & pos.isin([tie, tie + 1])]
+                b_run.loc[pair, "finish_pos"] = tie
+                b_run.loc[pair, "dead_heat"] = True
+            elif r < n_dh + n_missing:
+                placed = int(b_run.loc[in_race & (pos == r % 3 + 1), "horse_no"].iloc[0])
+                drop.append((race_id, placed))
+            else:
+                b_run.loc[in_race & (pos >= 3), "finish_pos"] = np.nan
+        keys = set(drop)
+        mask = [(a, b) in keys for a, b in zip(b_oof["race_id"], b_oof["horse_no"], strict=True)]
+        return b_oof[~np.array(mask, dtype=bool)], b_run
+
+    bad_oof, bad_run = bad_races(n_clean, n_dead_heat, n_missing_placer, n_no_third)
+    # The same kinds of race in the store but not in the OOF: none of them is counted.
+    _, stray_run = bad_races(n_clean + 500, 11, 5, 4)
+
+    _, oof_path = write_inputs(
+        tmp_path,
+        monkeypatch,
+        pd.concat([oof, bad_oof], ignore_index=True),
+        pd.concat([runners, bad_run, stray_run], ignore_index=True),
+    )
+    out_dir = tmp_path / "out"
+
+    manifest = ordering.run_fit(oof_path, out_dir)
+
+    assert manifest["n_races"] == n_clean
+    left_out = manifest["races_left_out"]
+    assert left_out["dead_heat_in_first_three"] == n_dead_heat
+    assert left_out["incomplete_first_three"] == n_missing_placer + n_no_third
+    ref, _ = reference_mle(p, order)
+    np.testing.assert_allclose(manifest["lambdas"], ref, atol=5e-3)
+    assert_fit_files(out_dir, manifest)
+
+
+def test_the_fit_and_its_manifest_are_written_to_the_out_dir(tmp_path, monkeypatch):
+    rng = np.random.default_rng(1146)
+    p, order = simulate(rng, 400, 9, (0.8, 0.8))
+    oof, runners = race_tables(p, order)
+    data, oof_path = write_inputs(tmp_path, monkeypatch, oof, runners)
+    out_dir = tmp_path / "elsewhere" / "fits"
+
+    manifest = ordering.run_fit(oof_path, out_dir)
+
+    fit_id = manifest["fit_id"]
+    assert isinstance(fit_id, str) and fit_id
+    assert sorted(x.name for x in out_dir.iterdir()) == sorted(
+        [f"ordering-{fit_id}.json", f"manifest-ordering-{fit_id}.json"]
+    )
+    fit = assert_fit_files(out_dir, manifest)
+    assert fit.n_races == 400
+    ref, _ = reference_mle(p, order)
+    np.testing.assert_allclose(fit.lambdas, ref, atol=5e-3)
+    # Nothing fitted lands next to the OOF when an out dir is given.
+    assert not list((data / "models" / "japan" / "v0").glob("*ordering-*"))
+
+
+def test_the_default_out_dir_is_models_japan_v0_under_the_data_dir(tmp_path, monkeypatch):
+    rng = np.random.default_rng(1147)
+    p, order = simulate(rng, 300, 8, (0.9, 0.7))
+    oof, runners = race_tables(p, order)
+    data, oof_path = write_inputs(tmp_path, monkeypatch, oof, runners)
+
+    manifest = ordering.run_fit(oof_path)
+
+    default = data / "models" / "japan" / "v0"
+    fit = assert_fit_files(default, manifest)
+    assert fit.n_races == 300
+    assert sorted(x.name for x in default.glob("*ordering-*.json")) == sorted(
+        [f"ordering-{fit.fit_id}.json", f"manifest-ordering-{fit.fit_id}.json"]
+    )

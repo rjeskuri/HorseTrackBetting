@@ -24,14 +24,19 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 import yaml
 from scipy.optimize import minimize_scalar
 from scipy.special import logsumexp
 
-from horsetrack.core.paths import data_dir
+from horsetrack.core.paths import data_dir, processed_dir
 
 FAMILIES = ("discounted_harville",)
 COLUMNS = ["race_id", "horse_no", "p_win", "finish_pos", "dead_heat"]
+OOF_COLUMNS = ["race_id", "horse_no", "p_cal"]  # of #114's win_calibration_oof-<id>.parquet
+RESULT_COLUMNS = ["race_id", "horse_no", "finish_pos", "dead_heat", "is_scratched"]
+KEY = ["race_id", "horse_no"]
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "ordering_v0.yaml"
 # Search range for each discount: 0 is a uniform draw among the rest, above 1 favours favourites.
 LAMBDA_BOUNDS = (0.0, 5.0)
@@ -256,11 +261,42 @@ def read_family(path: Path = CONFIG_PATH) -> str:
 
 
 def _read_oof(path: Path) -> pd.DataFrame:
-    if path.suffix == ".parquet":
-        return pd.read_parquet(path, columns=COLUMNS)
-    if path.suffix == ".csv":
-        return pd.read_csv(path, usecols=COLUMNS, dtype={"race_id": str})
-    raise ValueError(f"{path}: the OOF file must be .parquet or .csv")
+    if path.suffix != ".parquet":
+        raise ValueError(f"{path}: the OOF file must be #114's .parquet")
+    return pd.read_parquet(path, columns=OOF_COLUMNS)
+
+
+def _fit_frame(oof: pd.DataFrame, runners_path: Path) -> pd.DataFrame:
+    """The OOF's p_cal as p_win, inner-joined to the store's results; scratched runners dropped.
+
+    Only the OOF's races are read from the store. Store runners absent from the OOF are not in
+    the field; an OOF runner absent from the store is an error.
+    """
+    oof = oof.astype({"race_id": str, "horse_no": "int64"})
+    race_ids = pd.unique(oof["race_id"]).tolist()
+    table = pq.read_table(
+        runners_path, columns=RESULT_COLUMNS, filters=pc.field("race_id").isin(race_ids)
+    )
+    results = table.to_pandas().astype({"race_id": str, "horse_no": "int64"})
+    if results["is_scratched"].isna().any():
+        raise ValueError(f"{runners_path}: is_scratched has missing values")
+    joined = oof.merge(results, on=KEY, how="left", validate="one_to_one", indicator=True)
+    missing = joined["_merge"] == "left_only"
+    if missing.any():
+        examples = list(joined.loc[missing, KEY].head(5).itertuples(index=False, name=None))
+        raise ValueError(
+            f"{int(missing.sum())} OOF runners are not in {runners_path}, e.g. {examples}"
+        )
+    joined = joined[~joined["is_scratched"].astype(bool)]
+    return joined.rename(columns={"p_cal": "p_win"})[COLUMNS].reset_index(drop=True)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _git_sha() -> str | None:
@@ -278,11 +314,12 @@ def _git_sha() -> str | None:
 
 
 def run_fit(oof_path: Path, out_dir: Path | None = None) -> dict:
-    """Fit on out-of-fold Win probabilities joined to finish_pos; write the fit and its manifest."""
+    """Fit on #114's out-of-fold p_cal joined to the store's finish_pos; write fit and manifest."""
     family = read_family()
     _check_family(family)
     oof_path = Path(oof_path)
-    races = _prepare(_read_oof(oof_path))
+    runners_path = processed_dir("jra") / "runners.parquet"
+    races = _prepare(_fit_frame(_read_oof(oof_path), runners_path))
     fit = _fit(races, family)
     out_dir = Path(out_dir) if out_dir is not None else data_dir() / "models" / "japan" / "v0"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -297,7 +334,8 @@ def run_fit(oof_path: Path, out_dir: Path | None = None) -> dict:
             "dead_heat_in_first_three": races.n_dead_heat,
             "incomplete_first_three": races.n_incomplete,
         },
-        "oof": {"path": str(oof_path), "sha256": hashlib.sha256(oof_path.read_bytes()).hexdigest()},
+        "oof": {"path": str(oof_path), "sha256": _sha256(oof_path)},
+        "runners": {"path": str(runners_path), "sha256": _sha256(runners_path)},
         "git_sha": _git_sha(),
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "fit_path": str(fit_path),
