@@ -1,185 +1,192 @@
 # NAR data access for live odds (research, #36)
 
-Date of all findings: 2026-11-24. Epic #5. Every claim below has a row in [docs/ledger.md](../ledger.md)
-under "Japan (NAR): data access". Sample paths are relative to `$HORSETRACK_DATA_DIR`.
+Epic #5. Findings are dated: 2026-11-24 (the official site and the other candidates) and 2026-11-25 (the
+chosen source, nar.netkeiba.com). Every claim below has a row in [docs/ledger.md](../ledger.md) under
+"Japan (NAR): data access". Sample paths are relative to `$HORSETRACK_DATA_DIR`; no fetched page is in git.
 
 ## Verdict
 
-**Blocked on owner decision.** The official site's robots.txt shuts every crawler except Googlebot out of
-the pages a logger needs (today's race lists and odds, and the results archive), so this document does not
-recommend a NAR logger. The question for the owner is under [Question for the owner](#question-for-the-owner).
-The [Logger spec](#logger-spec-for-nar-draft-not-a-recommendation) below is a draft for the parsing ticket,
-should the owner choose a source that allows it; it is not a recommendation to build one.
+**Feasible from nar.netkeiba.com, under the owner's conditions, with one check left for the logger ticket.**
+Race lists, cards, odds and results are plain server-rendered UTF-8 HTML on one host, the race id encodes the
+date and venue, one page carries both 単勝 and 複勝, and a day of NAR racing fits the 10 s rate with a per-race
+schedule (about 420 requests, 70 minutes of request time, on the 2026-11-25 card). Not yet seen: an odds page
+while sales are open. At 02:45 JST no race was on sale, and the odds page showed netkeiba's own AI forecast
+(予想オッズ) instead. The parsing ticket's first capture must be a live-sales page; until then the live-odds
+markup is an assumption (that it is the finished-race markup, which was captured).
 
-## The official source: keiba.go.jp
+## Owner decision (2026-11-24)
 
-The site is the 地方競馬情報サイト, run by the local racing organisers and the National Association of Racing
-(地方競馬主催者および地方競馬全国協会, "主催者等" in its terms). It is the only official source covering every
-NAR venue.
+The official site restricts automated access (below), so the ticket went to needs-input. The owner chose
+option (3), **nar.netkeiba.com, polite**, on the same footing as the JRA history source:
 
-### robots.txt (fetched, `raw/nar/policy/2026/robots.html.gz`)
+- private use only; at least 10 s between requests;
+- nothing scraped in the public repo: pages and rows stay under `$HORSETRACK_DATA_DIR`, tests use synthetic
+  fixtures, and PRs show aggregates only;
+- block policy: on HTTP 403 or 429, pause 15 minutes, resume once at half rate, and on a second block stop
+  for the day and alert;
+- keiba.go.jp's disallowed paths are not read. #37 and #38 build against nar.netkeiba.com.
 
-- `User-agent: Googlebot` with an empty `Disallow`: Google may crawl everything.
-- `User-agent: *`: `Crawl-delay: 10`, and `Disallow` for:
-  `/KeibaWeb/TodayRaceInfo/`, `/KeibaWeb/DataRoom/`, `/KeibaWeb/DataDownload/`,
-  `/KeibaWeb/MonthlyConveneInfo/`, `/KeibaWeb_IPAT/`, `/KeibaWebSP/TodayRaceInfo/`,
-  `/KeibaWebSP/DataRoom/`, `/KeibaWebSP/MonthlyConveneInfo/`, `/wp-json/`, `/xmlrpc.php`.
-- The file's own comment gives the reason (gist): these are dynamic PHP/DB pages with heavy load and a wide
-  parameter space; bots are to be steered to public static content.
+## The official source: keiba.go.jp (2026-11-24, not used)
 
-`TodayRaceInfo` is the home page's "レース情報" entry (`/KeibaWeb/TodayRaceInfo/TodayRaceInfoTop`), so the
-race lists, cards and odds of the day sit under a disallowed path. `MonthlyConveneInfo` (the meeting
-calendar) and `DataRoom` (results, history) are disallowed as well.
+The 地方競馬情報サイト is run by the local organisers and the National Association of Racing.
 
-### Terms of use (fetched, `raw/nar/policy/2026/terms.html.gz`, https://www.keiba.go.jp/terms.html)
+- **robots.txt** (`raw/nar/policy/2026/robots.html.gz`): only Googlebot may crawl everything. For `*`:
+  `Crawl-delay: 10` and `Disallow` for `/KeibaWeb/TodayRaceInfo/` (the day's races and odds),
+  `/KeibaWeb/DataRoom/` (results), `/KeibaWeb/DataDownload/`, `/KeibaWeb/MonthlyConveneInfo/` (calendar),
+  `/KeibaWeb_IPAT/` and the `KeibaWebSP` twins. The file's comment: these are heavy dynamic PHP/DB pages,
+  and bots are to keep to static content.
+- **Terms of use** (`raw/nar/policy/2026/terms.html.gz`, https://www.keiba.go.jp/terms.html): no clause names
+  robots or scraping. 著作権について prohibits reproduction or copying (転載、複製) without prior permission;
+  禁止事項について item 8 covers any act the organisers judge inappropriate; 不正なアクセスへの対応について allows
+  blocking an IP with abnormal access. Read with the robots.txt, this restricts automated access to the
+  pages a logger needs, which is why the ticket stopped for the owner.
+- No page under a disallowed path was ever requested.
 
-No clause names robots, scraping or programs. The clauses that bear on automated access, by heading:
+Other candidates (2026-11-24): SPAT4 and Oddspark answer 403 to a plain client (not pursued: getting past it
+would be evasion); Rakuten Keiba sets `Crawl-Delay: 60`, too slow for more than one or two meetings.
 
-- 利用規約について: using the site means accepting the terms.
-- 著作権について: rights in the site's images and text belong in principle to the organisers; reproduction or
-  copying (転載、複製) without prior permission is prohibited.
-- 禁止事項について, items 7 and 8: acts that break, or may break, laws and regulations; and any other act the
-  organisers judge inappropriate.
-- 不正なアクセスへの対応について: an IP address with an abnormal number of accesses, or unauthorised access, may
-  be blocked.
-- 免責事項について: no warranty of completeness, accuracy or currency of the content.
+## The chosen source: nar.netkeiba.com (2026-11-25)
 
-Read together: the terms alone do not forbid a polite private reader, but the robots.txt is the site's
-explicit statement about automated access, item 8 lets the organisers treat ignoring it as inappropriate,
-and storing pages is copying (複製) under the copyright clause. That is a restriction on automated access to
-the pages a logger needs, so the ticket's rule applies: stop and ask.
+- **Access**: ten requests, 2026-11-24 17:44-17:49 UTC (02:44-02:49 JST on Wed 2026-11-25), all through
+  `horsetrack.core.ingest.Fetcher` at one request per 10.5 s or slower, with the project's User-Agent: seven
+  pages on nar.netkeiba.com (race list shell and sub page for 2026-11-25, one card, the `b1` odds page of a
+  race not yet on sale and of a finished 2026-11-24 race, that race's result), two odds scripts on
+  cdnv2.netkeiba.com, and the terms on www.netkeiba.com. Nine answered 200; `nar.netkeiba.com/robots.txt`
+  answered 404, as on 2026-11-24. No 403 or 429. Stored under
+  `raw/nar/netkeiba/2026/` (pages) and `raw/nar/policy/2026/terms_netkeiba.html.gz`, each with a
+  `<key>.headers.json` sidecar (status, URL, response headers).
+- **Terms** (`raw/nar/policy/2026/terms_netkeiba.html.gz`, https://www.netkeiba.com/info/kiyaku.html, last
+  revised 2022-04-01): Art. 14 forbids use beyond the private use copyright law allows, treats all data from the
+  service as copyrighted, and counts putting data where unspecified or many people can see it as beyond
+  private use; Art. 15 forbids commercial use; Art. 16 (12) forbids unauthorised access to, or obstructing,
+  the service's equipment. No clause names robots or scraping, and there is no robots.txt. The owner's
+  conditions (private, 10 s, nothing published but aggregates) are written to stay inside these articles.
+- **Encoding and headers**: every HTML page is UTF-8 (`Content-Type: text/html; charset=UTF-8` and
+  `<meta charset="UTF-8">`), served by Apache behind CloudFront (`x-cache: Miss from cloudfront` on every
+  HTML response). No `Cache-Control`, `Expires`, `ETag` or `Last-Modified` on HTML, and the odds page prints no
+  as-of time, so a snapshot's time is the fetch time. Odds refresh rate: unknown.
+- **Race id**: 12 digits `YYYY VV MMDD RR` (year, venue code, month and day, race number), e.g.
+  `2026 42 1124 12` is 浦和 12R on 2026-11-24 (the page title says so). A meeting id (`kaisai_id`) is the
+  first 10 digits. Unlike JRA's netkeiba id (`YYYY VV KK DD RR`, meeting and day numbers), the date is in the
+  id, so ids can be computed; the logger still reads them off the race list. NAR venue codes are 30 and up; JRA's are 01-10.
+- **The 2026-11-25 card** (single day): 3 meetings, 36 races, 12 each: 浦和 (12:20-18:20), 名古屋
+  (nighter, 14:40-20:50) and 園田 (10:40-16:45). Two venues have a race at the same minute (13:20).
 
-### What was not fetched, and why
+## Request cost (10 s a request, one host)
 
-No page under a disallowed path was requested, through the Fetcher or otherwise: no race list, odds page,
-card, calendar or result. The page structure below is therefore unverified (every such row in the ledger is
-an assumption). Reading the home page and terms with WebFetch, and four robots.txt files plus the terms
-through the Fetcher, are the only accesses made.
+All venues share one host and so one budget: 360 requests an hour.
 
-### What the site is believed to offer (unverified)
+- **One capture of one meeting** (12 races): the race list (one page for all meetings) plus, per race, the
+  `b1` page (単勝 and 複勝 together) and the `b5` page (ワイド): 1 + 2 x 12 = 25 requests, about 4 minutes.
+  WIN/PLACE only: 13 requests, about 2 minutes.
+- **One sweep of a whole day** (2026-11-25: 3 meetings, 36 races): 1 + 72 = 73 requests, about 12 minutes,
+  so the JRA pattern of sweeping every meeting every few minutes does not fit.
+- **A day by race**: 5 captures a race (T-30, T-10, T-5, T-2, and the final board after the off) x 2 pages
+  = 10 requests a race, 360 for 36 races; plus one result page per race (36) and a race-list refresh every
+  30 minutes (about 20): about 420 requests, 70 minutes of request time across 10:40-20:50 JST. A day of 5-6
+  meetings (assumption) about doubles it, still under a quarter of the host budget.
+- Bytes per page (single-run): race list about 40 KB, odds about 55 KB, result about 78 KB, card about
+  200 KB (the card is not needed by the logger).
 
-- Today's races: `TodayRaceInfoTop` lists the day's meetings; each meeting has a race list, a card per race,
-  odds pages per pool and a dividends page. Query parameters are believed to be `k_raceDate` (YYYY/MM/DD),
-  `k_babaCode` (venue number) and `k_raceNo`, e.g. `/KeibaWeb/TodayRaceInfo/RaceList`,
-  `/KeibaWeb/TodayRaceInfo/OddsTanFuku`, `/KeibaWeb/TodayRaceInfo/RefundMoneyList`.
-- Pools: 単勝, 複勝, 枠複, 枠単, 馬複, 馬単, ワイド, 3連複, 3連単 (NAR says 馬複/枠複 where JRA says 馬連/枠連, and
-  sells 枠単, which JRA does not). Some organisers also sell multi-race bets through the betting sites only.
-  Takeout varies by organiser and pool; do not carry JRA's rates over.
-- History: results and dividends under `DataRoom`; the terms mention notation changes from 2001, so the
-  archive is believed to reach back at least that far.
-- Encoding: the static pages fetched are UTF-8 (`<meta charset="UTF-8">` on the terms page). The dynamic pages
-  are unverified.
-- Odds refresh rate: unknown. JRA's is about 30-40 s with `max-age=20` (ledger, JRA site rows); nothing is
-  known for NAR.
+## Night racing: cadence and stop rule
 
-## Other sources of NAR live odds
+- NAR races most days of the week, morning to about 21:00 JST; the 2026-11-25 card runs 10:40-20:50, with the
+  nighter meeting marked on the race list (`small.icon-nighter`). 21:00 JST is 12:00 UTC on the same date,
+  so no meeting crosses a UTC date; race ids keep the JST date, storage timestamps stay UTC.
+- **Cadence**: schedule by race post time, not by meeting sweep. Read the race list at the start of the day
+  and every 30 minutes (NAR posts move; assumption). When two races share a post minute, order by post time,
+  take WIN/PLACE before ワイド near the off, and accept a late capture rather than shorten the 10 s gap.
+- **Stop rule**: per meeting, then per day. A meeting stops after its last race's final board and result
+  page; the day stops after the last meeting (as late as 21:00 JST). The JRA rule (stop after three
+  consecutive WrongMeeting or NotListed captures, #23) applies per meeting, and a meeting cancelled mid-card
+  stops alone. The block policy above overrides both: a second block stops the whole day.
 
-| Site | Status | robots.txt (2026-11-24) | Terms that matter |
-|---|---|---|---|
-| keiba.go.jp | official (organisers and NAR) | `*` disallowed from today's races, calendar and results; `Crawl-delay: 10` | above |
-| SPAT4 (www.spat4.jp) | betting site run for the Minami-Kanto organisers; members bet | HTTP 403 to a generic User-Agent; not read | not read (403) |
-| Oddspark (www.oddspark.com) | betting site for many NAR organisers | HTTP 403 to a generic User-Agent; site policy page 403 to WebFetch as well | not read (403) |
-| Rakuten Keiba (keiba.rakuten.co.jp) | betting site for NAR; odds pages public | `*` `Crawl-Delay: 60`; disallows only `/app/` and a prediction path, not odds | 楽天競馬規約: 利用規約 Art. 17 (prohibitions on 会員: (7) commercial use, (9) heavy load on systems or servers), Art. 18 (IP rights to Rakuten or the provider), 規約 Art. 32 (no reposting or reuse). Written for members; silent on non-member readers. Odds URL: `/odds/tanfuku/RACEID/<18 digits>` |
-| netkeiba (nar.netkeiba.com) | private media site | no robots.txt (HTTP 404) | netkeiba 利用規約 Art. 14 (no copying beyond private use; making data available to many people is beyond private use), Art. 15 (no commercial use), Art. 16 (12) unauthorised access, (15) obstructing the service |
+## Logger spec for NAR
 
-The two betting sites that answered 403 refuse a plain client; getting past that would be evasion and is
-out of bounds. Rakuten Keiba and netkeiba do not disallow odds pages to crawlers; both are third-party
-sources whose terms allow private use at most. This project already reads netkeiba for JRA history on a
-private-use-only basis (`countries/japan/config/jra.yaml`); whether that stance extends to NAR live odds,
-or to Rakuten Keiba, is the owner's call, not a ruling.
+For the parsing ticket (#37) and the logger (#38). "Verified" means seen in the captured pages listed above;
+everything else is marked unverified.
 
-## Request cost
+- **Source and storage**: source key `nar`; race id `nar:<YYYY-MM-DD>:<VENUE>:<NN>` (JST date), the
+  12-digit netkeiba id kept as a field; rows in the format of `docs/specs/odds-log.md` at
+  `odds_snapshots/nar/<YYYY-MM-DD>/<VENUE>.jsonl.gz`; raw pages via the Fetcher at
+  `raw/nar/<page_type>/<YYYY>/<key>.html.gz` (page types `race_list`, `odds_b1`, `odds_b5`, `result`).
+- **Entry URLs and navigation** (verified unless marked):
+  - Day's meetings and races: `https://nar.netkeiba.com/top/race_list_sub.html?kaisai_date=YYYYMMDD`. The
+    page `top/race_list.html?kaisai_date=` is a shell that loads `race_list_get_date_list.html` and then
+    `race_list_sub.html` by JavaScript; fetch the sub page directly.
+  - Odds: `https://nar.netkeiba.com/odds/?race_id=<id>&type=<t>`, with the race id read off the race list
+    (the race list links only to cards; the card's odds links have this form). Types: `b0` 上位人気一覧, `b1` 単勝・複勝, `b3` 枠連, `b9` 枠単, `b4` 馬連,
+    `b5` ワイド, `b6` 馬単, `b7` 3連複, `b8` 3連単. Only `b1` was captured.
+  - Result and dividends: `https://nar.netkeiba.com/race/result.html?race_id=<id>`. A per-meeting
+    `top/payback_list.html?kaisai_date=YYYYMMDD&kaisai_id=<10 digits>` is linked (unverified: not fetched).
+  - The odds are in the HTML: neither the odds page nor `odds_common.js`/`odds_tanfuku.js` references an odds
+    API (the only `api/` calls are favourites and cart). Unverified for a race on sale.
+  - Check every page: the race id in the URL and in the page's links matches the race asked for
+    (WrongMeeting, as for JRA).
+- **Selectors** (verified on the pages captured):
+  - Race list: venue tabs `ul.RaceList_ProvinceSelect li a` (text: venue name; `href` has `kaisai_id`); one
+    `dl.RaceList_DataList` per meeting; meeting title `p.RaceList_DataTitle` (round, venue, day; nighter flag
+    `small.icon-nighter`); races `li.RaceList_DataItem > a[href*="shutuba.html?race_id="]`, number in
+    `.Race_Num`, post time the first `span` of `.RaceData` (`HH:MM`), runner count as text `N頭` in `.RaceData`.
+  - Odds `b1`, on sale or after: `#odds_tan_block` (h2 単勝) and `#odds_fuku_block` (h2 複勝), each a
+    `table.RaceOdds_HorseList_Table` with headers 枠, 馬番, 印, 馬名, オッズ; per row, 馬番 is the second `td`
+    (no class) and the price `td.Odds span.Odds`; 複勝 is a range `lo - hi` (to `odds` and `odds_hi`). Key
+    columns by header label, not position. Verified on a finished race only.
+  - Odds `b1`, before sales: one `table.RaceOdds_HorseList_Table.Ninki` with headers 人気, 馬番, 印, 馬名,
+    予想オッズ, and a notice that the forecast switches to real odds when sales open. This is netkeiba's
+    model, not the board: the parser must reject it (a `NotOnSale` result), never log it. The same goes for
+    the card's 予想オッズ column (`span.Odds_Ninki`).
+  - Result: `#All_Result_Table` (headers 着順, 枠, 馬番, 馬名, ..., 人気, 単勝オッズ); dividends in two
+    `table.Payout_Detail_Table`, one `tr` per pool with classes `Tansho`, `Fukusho`, `Wakuren`, `Umaren`,
+    `Wide`, `Wakutan`, `Umatan`, `Fuku3`, `Tan3`; cells `td.Result` (numbers in `span`s or `ul li span`),
+    `td.Payout span` (`N,NNN円`, several winners separated by `<br />`) and `td.Ninki`.
+  - Unverified: the scratched-runner (取消/除外) markup, the `b5` matrix, and any sales-closed marker.
+- **Pool labels to pool keys** (netkeiba prints JRA-style names, though NAR's own are 枠複/馬複; list both):
+  単勝 WIN, 複勝 PLACE, 枠連/枠複 BRACKET_QUINELLA, 馬連/馬複 QUINELLA, ワイド QUINELLA_PLACE, 枠単
+  BRACKET_EXACTA (new key: JRA does not sell it), 馬単 FORECAST, 3連複 TRIO, 3連単 TIERCE. All nine were paid
+  on the one result captured. Win/Place/Wide first (D3). Places paid and each organiser's takeout go in a
+  `countries/japan/config/nar.yaml` with a source per value, not copied from `jra.yaml` (unverified).
+- **Venue codes and names** (characters 5-6 of the race id, `jyo_cd` on netkeiba; short codes proposed):
 
-The Fetcher keeps one gap per host, and every NAR venue is on one host (www.keiba.go.jp), so all meetings of
-a day share one request budget. At the robots.txt `Crawl-delay: 10` a host allows 360 requests an hour.
+  | short | name | code | |
+  |---|---|---|---|
+  | OBI | 帯広 (ばんえい) | 65 | unverified |
+  | MON | 門別 | 30 | unverified |
+  | MOR | 盛岡 | 35 | unverified |
+  | MIZ | 水沢 | 36 | unverified |
+  | URA | 浦和 | 42 | verified |
+  | FUN | 船橋 | 43 | unverified |
+  | OOI | 大井 | 44 | unverified |
+  | KAW | 川崎 | 45 | unverified |
+  | KNZ | 金沢 | 46 | unverified |
+  | KSM | 笠松 | 47 | unverified |
+  | NGY | 名古屋 | 48 | verified |
+  | SON | 園田 | 50 | verified |
+  | HIM | 姫路 | 51 | unverified |
+  | KOC | 高知 | 54 | unverified |
+  | SAG | 佐賀 | 55 | unverified |
 
-- One capture of one meeting, assuming one race-list page plus one page per pool per race (unverified page
-  layout): 1 + P x R requests. With R = 12 races and P = 3 pages (単勝/複勝 together, 馬複, ワイド):
-  37 requests, about 6 minutes at 10 s. The JRA capture is 2 + 3R = 38 requests, about 38 s at 1 a second.
-- A day: weekday NAR cards run about 4-7 meetings (assumption). One sweep of 6 meetings x 12 races x 3 pages
-  is 222 requests, about 37 minutes, so the JRA pattern (sweep the whole meeting every few minutes) cannot
-  run at that delay.
-- A per-race pattern fits: k captures per race near its off (say T-30, T-10, T-5, T-2 and the final board
-  after the off) is 5 x 3 = 15 requests a race, 1,080 for 72 races, 3 hours of request time spread over a
-  racing day of about 11 hours (10:00-21:00 JST). Races at different venues are staggered by minutes, so the
-  T-2 captures of two venues can collide; the scheduler must order by post time and accept a late capture
-  rather than shorten the gap.
-- Dividends: one dividends page per meeting after its last race: about 6 requests a day.
+  The logger maps by the race list's tab text and code, and fails on a code it does not know. Ban'ei (OBI) is
+  a different sport for modelling; log it only if the owner says so.
+- **Synthetic fixtures** (`tests/fixtures/synthetic/nar/`, UTF-8, invented names and numbers, built by a
+  builder function like `tests/countries/japan/jradb_double.py`): a `race_list_sub` page with two meetings on
+  one date (one with `icon-nighter`) and three races each with post times; a `b1` page on sale with eight
+  runners, one scratched (markup a guess until seen) and ranged 複勝 prices; a `b1` page before sales (the
+  予想オッズ table, which must parse to `NotOnSale`); a result page with the nine payout rows, ranged rows with
+  three winners.
+- **Rate and block policy**: in `nar.yaml`,
 
-At Rakuten Keiba's `Crawl-Delay: 60` the same per-race pattern costs 18 hours a day: not feasible beyond
-one or two meetings.
+  ```yaml
+  http:
+    hosts:
+      default: {requests_per_second: 0.1, jitter: 0.0}
+      nar.netkeiba.com: {requests_per_second: 0.1, jitter: 0.0}
+    max_retries: 2
+    circuit_breaker: {stop_on_status: [403, 429], max_consecutive_failures: 5}
+  ```
 
-## Night racing: logger cadence and stop rule
-
-- NAR racing spans most days of the week, from late morning to about 21:00 JST: Ohi (TCK Twinkle), Kawasaki,
-  Funabashi, Mombetsu, Kochi and Sonoda run night or twilight cards in season; Obihiro (ban'ei) runs into the
-  evening. All assumption until a calendar is read.
-- 21:00 JST is 12:00 UTC on the same date, so no meeting crosses a UTC date; the race date in a race id stays
-  the JST date and storage timestamps stay UTC, as for JRA.
-- Cadence: schedule by race (post time), not by meeting sweep, as above. The logger reads post times once
-  per meeting at the start of the day and again after any race-list change (NAR delays posts more often than
-  JRA; assumption).
-- Stop rule: per meeting, not per day. A meeting stops after its last race's final board and the dividends
-  page; the day ends after the last meeting, which may be after 20:30 JST. The JRA rule (stop after three
-  consecutive WrongMeeting or NotListed captures, #23) carries over per meeting, and a meeting cancelled
-  mid-card (weather is commoner at NAR's dirt-only tracks; assumption) must stop that meeting alone.
-
-## Logger spec for NAR (draft, not a recommendation)
-
-For the parsing ticket, if the owner approves a source. Every item marked (unverified) must be checked
-against a captured page first; the first capture is a fixture task, not a logger task.
-
-- Source key `nar`; race id `nar:<YYYY-MM-DD>:<VENUE>:<NN>` (JST date), rows in the format of
-  `docs/specs/odds-log.md` at `odds_snapshots/nar/<YYYY-MM-DD>/<VENUE>.jsonl.gz`, post-time sidecar beside it.
-- Entry URL (keiba.go.jp, unverified): `/KeibaWeb/TodayRaceInfo/TodayRaceInfoTop` for the day's meetings;
-  then `RaceList?k_raceDate=<YYYY/MM/DD>&k_babaCode=<n>` per meeting; then odds pages per race and pool with
-  `&k_raceNo=<n>`; `RefundMoneyList` for dividends. Like the JRA capture, follow links read off a fetched page
-  rather than computing them, and check every page's date and venue (WrongMeeting).
-- Selectors (unverified): none are known; the parsing ticket takes them from the first fixture. Expect
-  table-based layouts; key columns by their header labels (馬番, 単勝, 複勝, 人気), not by position.
-- Pool labels to pool keys: 単勝 WIN, 複勝 PLACE, 枠複 BRACKET_QUINELLA, 枠単 BRACKET_EXACTA (new key), 馬複
-  QUINELLA, 馬単 FORECAST, ワイド QUINELLA_PLACE, 3連複 TRIO, 3連単 TIERCE. Win/Place/Wide first (D3).
-  Places paid and takeout per organiser go in a `nar.yaml` with a source per value, not copied from `jra.yaml`.
-- Venue codes and names (`k_babaCode` unverified; short codes proposed here):
-
-  | short | name | k_babaCode |
-  |---|---|---|
-  | OBI | 帯広 (ばんえい) | 3 |
-  | MON | 門別 | 36 |
-  | MOR | 盛岡 | 10 |
-  | MIZ | 水沢 | 11 |
-  | URA | 浦和 | 18 |
-  | FUN | 船橋 | 19 |
-  | OOI | 大井 | 20 |
-  | KAW | 川崎 | 21 |
-  | KNZ | 金沢 | 22 |
-  | KSM | 笠松 | 23 |
-  | NGY | 名古屋 | 24 |
-  | SON | 園田 | 27 |
-  | HIM | 姫路 | 28 |
-  | KOC | 高知 | 31 |
-  | SAG | 佐賀 | 32 |
-
-  Ban'ei (OBI) is a different sport for modelling purposes; log it only if the owner says so.
-- Synthetic fixture shape (`tests/fixtures/synthetic/nar/`): a meetings page listing two venues on one date;
-  a race list of three races with post times, one already off; a 単勝/複勝 page of eight runners with one
-  scratched (取消) and a ranged 複勝 price; a dividends page for one race. Invented names and numbers only,
-  in the encoding the real page uses, built by a builder function like the JRA test double
-  (`tests/countries/japan/jradb_double.py`).
-- Rate: the site's `Crawl-delay: 10`, i.e. `www.keiba.go.jp: {requests_per_second: 0.1, jitter: 0.1}`; one
-  host for all venues; the circuit breaker stops on 403 and 429 as for JRA. The terms' IP-blocking clause makes
-  a block costly (it would also cut off manual reading), so no retry storm: `max_retries` at most 2.
-
-## Question for the owner
-
-The official site's robots.txt disallows all crawlers but Googlebot from `/KeibaWeb/TodayRaceInfo/` (today's
-race lists and odds), `/KeibaWeb/DataRoom/` (results) and `/KeibaWeb/MonthlyConveneInfo/` (the calendar), and
-its terms prohibit copying without permission and any act the organisers judge inappropriate. Options:
-
-1. Do not log NAR (close the epic's NAR goal as infeasible).
-2. Ask the organisers (the site's feedback form) for permission to read these pages automatically at the
-   crawl delay, for private research.
-3. Use a third-party source that does not disallow odds pages (Rakuten Keiba at a 60 s crawl delay, or
-   nar.netkeiba.com under the same private-use stance as JRA history), accepting its terms.
-4. Read the official pages anyway at 10 s a request. Not advised: it goes against the site's stated robots.txt
-   and risks the IP block in its terms.
+  Jitter stays 0: the Fetcher's jitter is symmetric, so any positive value allows gaps under 10 s. The
+  Fetcher spaces retries and redirect hops by the same gap. Its breaker opens on the first 403/429 and stays
+  open; the logger implements the rest of the block policy on top of `CircuitOpen`: wait 15 minutes, start a
+  fresh Fetcher at `requests_per_second: 0.05`, and on a second block stop for the day and alert. Never
+  change the User-Agent or otherwise work around a block.
