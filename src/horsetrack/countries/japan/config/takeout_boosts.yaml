@@ -1,0 +1,128 @@
+# JRA payout-rate boosts by race and pool (ticket #76), read by countries/japan/takeout.py.
+#
+# Transcribed 2026-11-24 from the official JRA pages and the result PDFs they link:
+#   https://www.jra.go.jp/kouza/premium/index.html (and result.html, <year>premium.html, the
+#     campaign pages they link)
+#   https://www.jra.go.jp/kouza/superpremium/index.html (and the per-day result PDFs)
+#   https://www.jra.go.jp/kouza/ultrapremium/index.html (and result.html, 2024ultrapremium.html,
+#     2025ultrapremium.html and their result PDFs)
+# Only facts are kept here: dates, venues, race numbers, pools.
+#
+# Entry: {kind, date, venue?, race_no?, pools?}. A missing venue, race_no or pools means every venue,
+# race or pool that day. Venue and pool codes are jra.yaml's.
+#   premium:       5% of sales added to the pool (JRA may withhold it when betting is extremely
+#                  concentrated).
+#   super_premium: every pool's payout rate set to 80%.
+#   ultra_premium: super_premium plus the 5% premium on the same pools.
+# Where a premium and a super_premium entry match the same race and pool, the two stack (80% + 5%),
+# as the result PDFs show for 2022-12-28 and 2023-12-28.
+#
+# Coverage:
+#   super_premium: every day the page lists, 2017-12-28 to 2026-10-10 (21 days). Each result PDF
+#     covers all races at the venues it names; a venue is set only where the PDF names one venue.
+#   ultra_premium: every race and day the page lists, 2024-2025 (JRA ran no Premium in those years;
+#     its 2024-2025 programme was Ultra Premium). WIN5 is excluded on the 2024 GI-day races (the
+#     page's note) and included on the two all-race days.
+#   premium: 2015-2023, only the campaigns the pages pin to whole days or to numbered races.
+#     NOT transcribed, because the pages name them by race class or race name without a venue and
+#     race number:
+#       2歳単勝 (WIN on every 2-year-old race; summer 2015-2023, autumn 2017-2023, with 12-28 in
+#         2017-2019 and 2021), 3歳重賞 (2017-2023), 最終馬連 (2014-2016), 金杯 (2015-2023),
+#       JRA60周年記念競走 (2014).
+#     Races in those campaigns get the base rate from this calendar: up to about 700 races a year.
+#     Before 2015 the base rate is unknown before 2014-06-07, so earlier Premium is not listed.
+
+boosts:
+  # --- premium ---
+  - {kind: premium, date: 2015-05-30, pools: [QUINELLA]}  # ダービーウィーク馬連
+  - {kind: premium, date: 2015-05-31, pools: [QUINELLA]}
+  - {kind: premium, date: 2015-12-13, venue: HSN, race_no: 11, pools: [WIN, QUINELLA]}  # 2歳GI
+  - {kind: premium, date: 2015-12-20, venue: HSN, race_no: 11, pools: [WIN, QUINELLA]}
+  - {kind: premium, date: 2015-12-26, pools: [QUINELLA]}  # 有馬記念ウィーク馬連
+  - {kind: premium, date: 2015-12-27, pools: [QUINELLA]}
+  - {kind: premium, date: 2016-04-10, venue: HSN, race_no: 11, pools: [QUINELLA]}  # 桜花賞
+  - {kind: premium, date: 2016-04-17, venue: NAK, race_no: 11, pools: [QUINELLA]}  # 皐月賞
+  - {kind: premium, date: 2016-05-22, venue: TOK, race_no: 11, pools: [QUINELLA]}  # オークス
+  - {kind: premium, date: 2016-05-28, pools: [QUINELLA]}  # ダービーウィーク馬連
+  - {kind: premium, date: 2016-05-29, pools: [QUINELLA]}
+  - {kind: premium, date: 2016-12-11, venue: HSN, race_no: 11, pools: [WIN, QUINELLA]}  # 2歳GI
+  - {kind: premium, date: 2016-12-18, venue: HSN, race_no: 11, pools: [WIN, QUINELLA]}
+  - {kind: premium, date: 2016-12-23, pools: [QUINELLA]}  # 有馬記念ウィーク馬連
+  - {kind: premium, date: 2016-12-24, pools: [QUINELLA]}
+  - {kind: premium, date: 2016-12-25, pools: [QUINELLA]}
+  - {kind: premium, date: 2017-04-02, pools: [QUINELLA]}  # 大阪杯デー馬連
+  - {kind: premium, date: 2017-05-27, pools: [QUINELLA]}  # ダービーウィーク馬連
+  - {kind: premium, date: 2017-05-28, pools: [QUINELLA]}
+  - {kind: premium, date: 2017-12-23, pools: [QUINELLA]}  # 有馬記念ウィーク馬連
+  - {kind: premium, date: 2017-12-24, pools: [QUINELLA]}
+  - {kind: premium, date: 2018-05-27, pools: [QUINELLA]}  # ダービーデー馬連
+  - {kind: premium, date: 2018-12-22, pools: [QUINELLA]}  # 有馬記念ウィーク馬連
+  - {kind: premium, date: 2018-12-23, pools: [QUINELLA]}
+  - {kind: premium, date: 2019-05-26, pools: [QUINELLA]}  # ダービーデー馬連
+  - {kind: premium, date: 2019-12-21, pools: [QUINELLA]}  # 有馬記念ウィーク馬連
+  - {kind: premium, date: 2019-12-22, pools: [QUINELLA]}
+  - {kind: premium, date: 2020-05-31, pools: [QUINELLA]}  # ダービーデー馬連
+  - {kind: premium, date: 2020-12-26, pools: [QUINELLA]}  # 有馬記念ウィーク馬連
+  - {kind: premium, date: 2020-12-27, pools: [QUINELLA]}
+  - {kind: premium, date: 2021-05-30, pools: [QUINELLA]}  # ダービーデー馬連
+  - {kind: premium, date: 2021-12-26, pools: [QUINELLA]}  # 有馬記念デー馬連
+  - {kind: premium, date: 2022-05-29, pools: [QUINELLA_PLACE]}  # ダービーデーワイド
+  - {kind: premium, date: 2022-12-25, pools: [QUINELLA_PLACE]}  # 有馬記念デーワイド
+  - {kind: premium, date: 2022-12-28, pools: [WIN, QUINELLA_PLACE]}  # ホープフルデー単勝&ワイド
+  - {kind: premium, date: 2023-05-28, pools: [QUINELLA_PLACE]}  # ダービーデーワイド
+  - {kind: premium, date: 2023-12-24, pools: [QUINELLA_PLACE]}  # 有馬記念デーワイド
+  - {kind: premium, date: 2023-12-28, pools: [WIN, QUINELLA_PLACE]}  # ホープフルデー単勝&ワイド
+
+  # --- super_premium ---
+  - {kind: super_premium, date: 2017-12-28}
+  - {kind: super_premium, date: 2018-12-28}
+  - {kind: super_premium, date: 2019-09-16}
+  - {kind: super_premium, date: 2019-12-28}
+  - {kind: super_premium, date: 2020-09-21}
+  - {kind: super_premium, date: 2020-12-13}
+  - {kind: super_premium, date: 2020-12-20}
+  - {kind: super_premium, date: 2021-09-20}
+  - {kind: super_premium, date: 2021-12-28}
+  - {kind: super_premium, date: 2022-09-19}
+  - {kind: super_premium, date: 2022-12-28}
+  - {kind: super_premium, date: 2023-07-01}
+  - {kind: super_premium, date: 2023-08-27}
+  - {kind: super_premium, date: 2023-09-18}
+  - {kind: super_premium, date: 2023-12-28}
+  - {kind: super_premium, date: 2024-11-24}
+  - {kind: super_premium, date: 2025-09-15}
+  - {kind: super_premium, date: 2025-10-26}
+  - {kind: super_premium, date: 2026-09-21, venue: HSN}
+  - {kind: super_premium, date: 2026-09-22, venue: NAK}
+  - {kind: super_premium, date: 2026-10-10}
+
+  # --- ultra_premium ---
+  # 2024: one race on each GI day, every pool but WIN5.
+  - &gi_day {kind: ultra_premium, date: 2024-02-18, venue: TOK, race_no: 10,
+             pools: [WIN, PLACE, BRACKET_QUINELLA, QUINELLA, QUINELLA_PLACE, FORECAST, TRIO, TIERCE]}
+  - {<<: *gi_day, date: 2024-03-24, venue: CKY, race_no: 10}
+  - {<<: *gi_day, date: 2024-03-31, venue: HSN, race_no: 10}
+  - {<<: *gi_day, date: 2024-04-07, venue: HSN, race_no: 10}
+  - {<<: *gi_day, date: 2024-04-14, venue: NAK, race_no: 10}
+  - {<<: *gi_day, date: 2024-04-28, venue: KYO, race_no: 10}
+  - {<<: *gi_day, date: 2024-05-05, venue: TOK, race_no: 10}
+  - {<<: *gi_day, date: 2024-05-12, venue: TOK, race_no: 10}
+  - {<<: *gi_day, date: 2024-05-19, venue: TOK, race_no: 10}
+  - {<<: *gi_day, date: 2024-05-26, venue: TOK, race_no: 10}
+  - {<<: *gi_day, date: 2024-06-02, venue: TOK, race_no: 10}
+  - {<<: *gi_day, date: 2024-06-23, venue: KYO, race_no: 10}
+  - {<<: *gi_day, date: 2024-09-29, venue: NAK, race_no: 10}
+  - {<<: *gi_day, date: 2024-10-13, venue: KYO, race_no: 10}
+  - {<<: *gi_day, date: 2024-10-20, venue: KYO, race_no: 10}
+  - {<<: *gi_day, date: 2024-10-27, venue: TOK, race_no: 10}
+  - {<<: *gi_day, date: 2024-11-10, venue: KYO, race_no: 10}
+  - {<<: *gi_day, date: 2024-11-17, venue: KYO, race_no: 10}
+  - {<<: *gi_day, date: 2024-11-24, venue: TOK, race_no: 11}
+  - {<<: *gi_day, date: 2024-12-01, venue: CKY, race_no: 10}
+  - {<<: *gi_day, date: 2024-12-08, venue: KYO, race_no: 10}
+  - {<<: *gi_day, date: 2024-12-15, venue: KYO, race_no: 10}
+  - {<<: *gi_day, date: 2024-12-22, venue: NAK, race_no: 10}
+  - {<<: *gi_day, date: 2024-12-28, venue: NAK, race_no: 10}
+  # All races and pools, WIN5 included.
+  - {kind: ultra_premium, date: 2024-09-16}  # JRAアニバーサリー
+  - {kind: ultra_premium, date: 2025-05-04}  # 天皇賞(春)当日
