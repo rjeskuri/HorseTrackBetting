@@ -431,7 +431,7 @@ def _meetings(fixtures: pd.DataFrame, races: pd.DataFrame, start_month: int) -> 
     meetings = pd.concat([meetings, extra], ignore_index=True)
     any_run = seen["status"].eq("run").groupby(seen["meeting_id"]).any()
     outcome = meetings["meeting_id"].map(any_run.map({True: "run", False: "abandoned"}))
-    meetings["status"] = _nulls(outcome.fillna("scheduled"))
+    meetings["status"] = _nulls(outcome.astype(object).fillna("scheduled"))  # all-NaN is float64
     meetings["season"] = _season(meetings["race_date"], start_month)
     return meetings
 
