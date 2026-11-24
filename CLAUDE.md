@@ -17,7 +17,10 @@ hooks, not here. When Claude makes the same mistake twice, add one line here.
 - `tests/`: the test suite.
 - `scripts/verify.sh`: the checks behind the verify command; `.github/workflows/ci.yml` runs it.
 - `.githooks/`: `pre-commit` (format and lint on staged files, no commits on main) and `pre-push` (no pushes to main, no force pushes).
-- `<path>`: <what lives there>
+- `src/horsetrack/core/eval/`: evaluation code; `holdout.py` splits off the locked final holdout.
+- `src/horsetrack/countries/<country>/config/evaluation.yaml`: each country's holdout start and seed.
 
 ## Gotchas
-- <A place where the code is misleading, a variable the tests need, a decision that is not in the repo.>
+- Every holdout use goes through `LockedHoldout.open(ticket=..., purpose=...)`; the line it appends to
+  `src/horsetrack/countries/<country>/holdout_log.jsonl` is committed with the PR. Never edit that log
+  or the holdout's `start`/`seed`.
