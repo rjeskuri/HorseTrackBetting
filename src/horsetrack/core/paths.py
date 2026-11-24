@@ -26,11 +26,16 @@ def data_dir() -> Path:
     raw = env.get_setting(DATA_DIR_VAR)
     if not raw or not raw.strip():
         raise DataDirNotSet(f"{DATA_DIR_VAR} is not set: export it or add it to .env")
-    path = Path(raw.strip()).expanduser().resolve()
+    return outside_repo(Path(raw.strip()), what=DATA_DIR_VAR)
+
+
+def outside_repo(path: Path, *, what: str) -> Path:
+    """`path` resolved (`~`, the cwd, `..`, symlinks); raises DataDirInsideRepo if in the repo."""
+    resolved = Path(path).expanduser().resolve()
     root = env.repo_root().resolve()
-    if path.is_relative_to(root):
-        raise DataDirInsideRepo(f"{DATA_DIR_VAR}={path} is inside the repository at {root}")
-    return path
+    if resolved.is_relative_to(root):
+        raise DataDirInsideRepo(f"{what}={resolved} is inside the repository at {root}")
+    return resolved
 
 
 def raw_dir(source: str) -> Path:

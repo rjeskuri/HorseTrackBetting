@@ -1,6 +1,7 @@
 # Store: tables, keys and read access
 
-Code: `src/horsetrack/core/store/schemas.py` (the column contracts) and `tables.py` (read access).
+Code: `src/horsetrack/core/store/schemas.py` (the column contracts), `tables.py` (read access)
+and `build.py` (the build that writes the tables).
 The store is jurisdiction-agnostic: the source is always an argument, never a constant, and every
 table carries a `jurisdiction` column. The table and column set starts from HKTrack's normalised
 tables; anything one source alone needs is an optional column, null for the other sources.
@@ -84,8 +85,10 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   dam_sire_id` (null where the page does not link them), `source_race_id, scraped_utc`.
 - **jrdb_pre_race**, **jrdb_post_race**: JRDB rows matched to the store's races and runners. Declared
   here: the key columns `race_id, race_date, horse_no, horse_id, race_key, jrdb_horse_id,
-  matched_by`. The per-family data columns (`<family>_<column>`) are declared by the ticket that
-  builds these tables.
+  matched_by`. The per-family data columns (`<family>_<column>`, from each family's spec under
+  `<data dir>/jrdb/specs`) are written by `horsetrack japan jrdb build`
+  (`countries/japan/jrdb/tables.py`), which also writes `jurisdiction`; a family not delivered
+  still has its columns, all null.
 
 Withdrawals and placing codes differ by site: each source adapter maps its own codes before rows
 reach the store, and documents the mapping.
@@ -101,8 +104,49 @@ reach the store, and documents the mapping.
   declared table whose file exists for that source, named after the table. File paths are quoted
   as SQL strings, so a data directory with a `'` in it works.
 
+## Build
+
+`build.build_tables(source, *, page_types=None, workers=None, limit=None) -> BuildSummary` turns
+the ingest manifest and the raw page cache into the tables above (`core/store/build.py`, ported
+from HKTrack). It does no HTTP and only ever reads the manifest (opened read-only, so a live
+backfill can keep writing).
+
+- **Input**: the manifest rows with status `fetched` or `abandoned` and a sha256
+  (`build.read_manifest(source)`), in `(page_type, key)` order. A page whose raw file is missing,
+  is not valid gzip or is not the body the manifest recorded is listed as unreadable.
+- **Parsing**: a page is parsed again only when its sha256 or its parser version
+  (`parse_worker.parser_version`) differs from the parse cache's (`interim_dir(source)/
+  parse_cache.sqlite`). Failures are never cached. With `workers >= 2` and at least 64 stale pages
+  the pages go to spawned worker processes; a worker that dies is a `RuntimeError`.
+  `page_types` and `limit` (pages per type, newest keys first) restrict what a run parses, never
+  what it assembles: the tables always hold every cached page that still matches the manifest, so
+  a partial run never drops rows an earlier run parsed.
+- **Page types feed tables** as `schemas.FED_BY` says (`fixture` and `results` feed `meetings`;
+  `results` races, runners, dividends, incidents; `sectional` sectionals; `corunning`
+  running_comments; `horse` horses and horse_runs; `pedigree_card` horse_pedigree). Any other
+  page type, or one whose adapter has no parser version, is skipped and counted.
+- **Assembly**: pages whose parser flags a key mismatch are dropped, with every page sharing that
+  key. Two pages claiming one race: the smaller page key wins; one horse: the latest
+  `profile_scraped_utc` wins; the loser's rows leave every table its page type feeds. Races and
+  runners get `meeting_id, race_date, venue, race_no` from the race id and a `season` label
+  (`YYYY/YY`) starting in the month of the adapter's optional `season_start_month()` hook
+  (default 1). Meetings start from the calendar pages (the newer page wins) and are upgraded by
+  the results: `run`, `abandoned`, or `scheduled` without results. Runners take `rating` and
+  `gear_raw` from `horse_runs` on `(horse_id, race_date)`, withdrawals excluded and one run per
+  key. `horse_pedigree` keeps one row per horse, each column's first non-null value, newest
+  card first. A bad cell becomes null, never a broken build.
+- **Output**: the nine tables fed by `fixture` .. `horse` on every build, `horse_pedigree` only
+  when the manifest holds pedigree pages (`schemas.SOURCE_TABLES`), never the JRDB tables; each
+  written to a tmp file and moved into place. `processed_dir(source)/_build.json` holds the
+  summary's fields (page counts, failures, rows per table, enrichment stats, `snapshot_id`: sha1
+  over the included pages' `(page_type, key, sha256)`) plus `built_utc`; a report goes to
+  `reports_dir()/store-build-<source>.md`.
+- **Byte-stable**: two builds of the same inputs write identical Parquet bytes; `_build.json`
+  differs only in `built_utc` and `seconds`.
+
 ## Not here yet
 
-The build that writes these tables (parsers, incremental rebuilds, the build report), the
-reconciliation checks, upcoming race cards and the odds snapshots
-(`docs/specs/odds-log.md`) are outside this spec.
+Upcoming race cards and the odds snapshots (`docs/specs/odds-log.md`) are outside this spec.
+
+The post-build reconciliation checks live in `core/store/checks.py` (`run_checks(source, config=...)`,
+ported from HKTrack with its tolerances); the report goes to `reports_dir()/store-check-<source>.md`.
