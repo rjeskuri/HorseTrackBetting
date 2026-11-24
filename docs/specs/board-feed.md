@@ -1,8 +1,14 @@
 # The live-board feed
 
 Code: `src/horsetrack/countries/japan/board/feed.py`. Input: a race day's odds snapshot logs
-(docs/specs/odds-log.md), read with `odds_log.read_rows`, and the post times of
-`snapshot.post_times_for`. The feed never requests anything over the network.
+(docs/specs/odds-log.md), streamed member by member with `odds_log.iter_members`, and the post
+times of `snapshot.post_times_for`. The feed never requests anything over the network.
+
+The feed carries tier-1 pools only: `WIN`, `PLACE`, `QUINELLA`, `QUINELLA_PLACE` (`BOARD_POOLS`).
+Tier-2 (`BRACKET_QUINELLA`, `FORECAST`, `TRIO`, `TIERCE`) and `WIN5` rows in the same log are
+dropped row by row as each member is read, before anything below: they never reach a pool, a race
+with only such rows is not on the board, and they do not move `last_capture_utc`. The board over a
+log is exactly the board over its tier-1 rows, and a day's trifecta boards are never held in memory.
 
 `build_board(race_date, *, venues=None, now=utc_now, morning_from='07:00') -> dict`
 
