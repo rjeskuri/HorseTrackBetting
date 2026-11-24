@@ -93,10 +93,22 @@ class CircuitBreaker(_Strict):
     max_consecutive_failures: int
 
 
+class QuietHours(_Strict):
+    # No request to `hosts` (every host when empty) on `days` from `start` (inclusive) to `end`
+    # (exclusive), local to `timezone`. Times are quoted "HH:MM": YAML 1.1 reads 17:00 as 1020.
+    # The scrape CLI validates the values.
+    days: list[str]
+    start: str
+    end: str
+    timezone: str
+    hosts: list[str] = Field(default_factory=list)
+
+
 class Http(_Strict):
     default: RateLimit
     hosts: dict[str, RateLimit] = Field(default_factory=dict)
     circuit_breaker: CircuitBreaker
+    quiet_hours: list[QuietHours] = Field(default_factory=list)
 
 
 class SourceConfig(_Strict):
