@@ -17,6 +17,26 @@ Contract pinned here (the coder follows it), on top of test_schedule.py's for ru
   'circuit_open', its DaySummary.stopped 'circuit_open', its block marker written with its host
   and the Tokyo race date); every other source logs its whole day, and its marker is not written.
   A later run that day sends nothing for the blocked source and logs the others.
+- Block policy per source (fix round, review of PR #255), from its schedule's `on_block`. JRA's
+  is `{cooldown_min: null}`: the first block stops it for the day, as above. NAR's follows the
+  owner decision in docs/research/nar-data-access.md: `{cooldown_min: 15,
+  resume_requests_per_second: 0.05}` (half nar.yaml's 0.1). On the first block that source alone
+  pauses `cooldown_min` minutes (no call to it meanwhile; the other sources keep logging), then
+  resumes once on a fresh site (so a fresh Fetcher) at `resume_requests_per_second`, its rounds'
+  budgets at that rate; a second block stops it for the day (venues 'circuit_open', its block
+  marker has the host and race date) and a later run that day sends it nothing. Whether the first
+  block already writes a marker line is not pinned.
+  Ruling: the fresh-site seam is `Source.resume`, a callable taking the resume rate
+  (`resume(requests_per_second)`, positional) and returning the site the rest of the day uses;
+  run_day takes the same as `resume=`. Without one a cooldown resumes on the same site. log-day
+  builds it from `make_fetcher(source, requests_per_second=rate)`.
+- An error other than CircuitOpen escaping one source's day (a FetchError at discovery, a parser
+  bug in a capture) stops that source only: its DaySummary.stopped is 'error', each of its venues
+  not ended yet is stopped 'error', no marker is written; every other source logs its whole day.
+  run_sources returns every source's summary and does not raise for it.
+  Ruling: `run_sources(..., on_error=None)`; `on_error(source_key, exception)` is called once per
+  failed source, as soon as its day fails (from its own thread), while the others still log; so
+  log-day reports it at once, not after the other sources' days.
 - `schedule.source_config(config, source) -> mapping`: one source's schedule out of logger.yaml.
   JRA's is the outline's values as before; NAR's (night racing, docs/research/nar-data-access.md)
   has a window in force from 10:20 JST (the earliest race's hot window, a 10:40 post) to 20:50
@@ -43,7 +63,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from horsetrack.core.config import load_country_yaml
-from horsetrack.core.ingest.fetcher import CircuitOpen
+from horsetrack.core.ingest.fetcher import CircuitOpen, FetchError
 from horsetrack.countries.japan.jra.capture import ODDS_POOLS, MeetingCapture, NotListed
 
 # isort: split
@@ -77,6 +97,8 @@ NAR_CONFIG = {
     "windows": [{"from": "10:00", "every_s": 60}, {"from": "10:15", "every_s": 20}],
     "stop": "21:00",
     "requests": {"navigation": 1, "per_race": 1},
+    # the owner's NAR block policy: pause 15 minutes, resume once at half rate
+    "on_block": {"cooldown_min": 15, "resume_requests_per_second": 0.05},
 }
 
 
@@ -265,6 +287,59 @@ def from_time(kind: str, venue: str | None, start: datetime, make):
     return rule
 
 
+def first_call(make):
+    """The site's first call, whatever it is, raises make(); later calls are served."""
+    pending = [make()]
+
+    def rule(k, v, n, t):
+        return pending.pop(0) if pending else None
+
+    return rule
+
+
+class Resumer:
+    """A Source.resume for the tests: each call notes (the calling thread's time, the rate asked)
+    and returns a fresh site from `make(rate)`, kept in `sites`."""
+
+    def __init__(self, clock: ThreadClock, make: Callable[[float], SourceSite]):
+        self.clock, self.make = clock, make
+        self.calls: list[tuple[datetime, float]] = []
+        self.sites: list[SourceSite] = []
+
+    def __call__(self, requests_per_second: float) -> SourceSite:
+        self.calls.append((self.clock.t, float(requests_per_second)))
+        site = self.make(float(requests_per_second))
+        self.sites.append(site)
+        return site
+
+
+def resumers(clock: ThreadClock, *, nar_fail: Rule | None = None) -> dict[str, Resumer]:
+    """Per source a Resumer making a fresh site of that source at the rate asked (NAR's failing
+    by `nar_fail`)."""
+    return {
+        "jra": Resumer(clock, lambda rps: SourceSite(clock, "jra", JRA_HOST, jra_meetings(),
+                                                     rps=rps, nav=2, per_race=3)),
+        "nar": Resumer(clock, lambda rps: SourceSite(clock, "nar", NAR_HOST, nar_meetings(),
+                                                     rps=rps, nav=1, per_race=1, fail=nar_fail)),
+    }  # fmt: skip
+
+
+def held_after(after: datetime, reported: threading.Event, late: list[str]) -> Rule:
+    """For the healthy site: its first call at or after `after` (its own time) waits, in real time
+    up to 5 s, for the other source's failure to be reported; a wait that runs out is noted in
+    `late` (the report was held back until this source's day ended)."""
+    waited: list[datetime] = []
+
+    def rule(k, v, n, t):
+        if t >= after and not waited:
+            waited.append(t)
+            if not reported.wait(5.0):
+                late.append(f"no failure reported by {hhmm(t)} of the healthy source's day")
+        return None
+
+    return rule
+
+
 def make_sites(clock, *, jra_rps=1.0, nar_rps=0.1, jra_fail=None, nar_fail=None, barrier=None):
     jra = SourceSite(clock, "jra", JRA_HOST, jra_meetings(), rps=jra_rps, nav=2, per_race=3,
                      fail=jra_fail, barrier=barrier)  # fmt: skip
@@ -276,15 +351,30 @@ def make_sites(clock, *, jra_rps=1.0, nar_rps=0.1, jra_fail=None, nar_fail=None,
 CONFIGS = {"jra": JRA_CONFIG, "nar": NAR_CONFIG}
 
 
-def run(clock: ThreadClock, sites: dict[str, SourceSite], markers: dict[str, Path]):
+def run(
+    clock: ThreadClock,
+    sites: dict[str, SourceSite],
+    markers: dict[str, Path],
+    *,
+    configs=CONFIGS,
+    resume: dict[str, Resumer] | None = None,
+    on_error=None,
+):
     stores = {key: FakeStore() for key in sites}
     sources = [
-        Source(site=sites[k], store=stores[k], config=CONFIGS[k], block_marker=markers[k])
+        Source(
+            site=sites[k],
+            store=stores[k],
+            config=configs[k],
+            block_marker=markers[k],
+            **({"resume": resume[k]} if resume else {}),
+        )  # fmt: skip
         for k in sites
     ]
-    summaries = run_sources(SAT, sources, now=clock.now, sleep=clock.sleep)
+    extra = {} if on_error is None else {"on_error": on_error}
+    summaries = run_sources(SAT, sources, now=clock.now, sleep=clock.sleep, **extra)
     assert clock.errors == [], clock.errors
-    for site in sites.values():
+    for site in [*sites.values(), *(s for r in (resume or {}).values() for s in r.sites)]:
         assert site.defects == [], site.defects
     assert set(summaries) == set(sites), f"summaries for {sorted(summaries)}"
     return summaries, stores
@@ -417,32 +507,58 @@ def test_two_sources_keep_their_own_rate_budgets(tmp_path, jra_rps, nar_rps):
 
 
 @pytest.mark.parametrize(
-    ("which", "fail"),
+    ("which", "first", "second"),
     [
-        ("nar", from_time("capture", "URA", jst(11, 0), blocked(NAR_HOST, 403))),
-        ("nar", on_calls("post_times", "SON", {1}, blocked(NAR_HOST, 429))),
-        ("nar", on_calls("discover", None, {1}, blocked(NAR_HOST, 403))),
-        ("jra", from_time("capture", "KYO", jst(12, 0), blocked(JRA_HOST, 429))),
+        ("nar", lambda: from_time("capture", "URA", jst(11, 0), blocked(NAR_HOST, 403)),
+         lambda: first_call(blocked(NAR_HOST, 403))),
+        ("nar", lambda: on_calls("post_times", "SON", {1}, blocked(NAR_HOST, 429)),
+         lambda: from_time("capture", "URA", jst(12, 0), blocked(NAR_HOST, 429))),
+        ("nar", lambda: on_calls("discover", None, {1}, blocked(NAR_HOST, 403)),
+         lambda: first_call(blocked(NAR_HOST, 403))),
+        ("jra", lambda: from_time("capture", "KYO", jst(12, 0), blocked(JRA_HOST, 429)), None),
     ],
     ids=["nar-capture-403", "nar-post-times-429", "nar-discover-403", "jra-capture-429"],
-)
-def test_a_block_on_one_source_leaves_the_other_logging(tmp_path, which, fail):
+)  # fmt: skip
+def test_a_block_on_one_source_leaves_the_other_logging(tmp_path, which, first, second):
+    """JRA: the first block stops it for the day. NAR: the first block pauses it, it resumes once
+    on a fresh site, and the second block (`second`, on that site) stops it for the day. Either
+    way the other source logs its whole day."""
     other = "jra" if which == "nar" else "nar"
     clock = ThreadClock(jst(6, 30))
-    sites = make_sites(clock, **{f"{which}_fail": fail})
+    sites = make_sites(clock, **{f"{which}_fail": first()})
     markers = {k: tmp_path / f"{k}-block.txt" for k in sites}
+    resume = resumers(clock, nar_fail=second() if second else None)
 
-    summaries, _ = run(clock, sites, markers)
+    summaries, _ = run(clock, sites, markers, resume=resume)
     hit, spared = sites[which], sites[other]
 
-    # The blocked source: nothing after the block, every venue stopped, its marker written.
-    opened = [i for i, c in enumerate(hit.calls) if c.error == "CircuitOpen"]
-    assert len(opened) == 1, f"{which}: the scripted block never came"
-    assert opened[0] == len(hit.calls) - 1, f"{which}: called after the block: {hit.calls[-3:]}"
+    # The blocked source's sites in turn: the first, then (NAR only) the one its resume gave.
+    chain = [hit, *resume[which].sites]
+    assert len(chain) == (2 if which == "nar" else 1), (
+        f"{which}: resumed {len(chain) - 1} times; on_block {CONFIGS[which]['on_block']}"
+    )
+    assert resume[other].calls == [], f"{other} resumed after a block on {which}"
+    # On each site, nothing after its block.
+    for site in chain:
+        opened = [i for i, c in enumerate(site.calls) if c.error == "CircuitOpen"]
+        assert len(opened) == 1, f"{which}: a scripted block never came: {site.calls[-3:]}"
+        assert opened[0] == len(site.calls) - 1, f"{which}: called after a block: {site.calls[-3:]}"
+    if which == "nar":
+        policy = CONFIGS["nar"]["on_block"]
+        [(_, rate)] = resume["nar"].calls
+        assert rate == pytest.approx(policy["resume_requests_per_second"]), rate
+        pause_end = hit.calls[-1].t + timedelta(minutes=policy["cooldown_min"])
+        fresh = chain[1]
+        assert fresh.calls[0].t >= pause_end - timedelta(seconds=EPS), (
+            f"NAR resumed at {hhmm(fresh.calls[0].t)}, before the pause ended {hhmm(pause_end)}"
+        )
+        assert_rounds_fit_budget(fresh, CONFIGS["nar"])  # the fresh site's rate, 0.05
+        # JRA never paused while NAR did: its hot races followed every 20 s all day.
+        assert_hot_races_followed(spared, JRA_CONFIG, every=20)
     stops = {v: vs.stopped for v, vs in summaries[which].venues.items()}
     assert all(s == "circuit_open" for s in stops.values()), stops
     assert summaries[which].stopped == "circuit_open"
-    if hit.calls[opened[0]].kind == "capture":
+    if hit.calls[-1].kind == "capture":
         assert caps(hit, ok=True), f"{which}: nothing captured before the block"
     text = markers[which].read_text(encoding="utf-8")
     assert hit.host in text and SAT.isoformat() in text, text
@@ -458,11 +574,134 @@ def test_a_block_on_one_source_leaves_the_other_logging(tmp_path, which, fail):
     # A later run the same day: nothing for the blocked source, the other logs again.
     clock = ThreadClock(jst(13, 0))
     sites = make_sites(clock)
-    summaries, _ = run(clock, sites, markers)
+    again = resumers(clock)
+    summaries, _ = run(clock, sites, markers, resume=again)
     assert sites[which].calls == [], f"{which} after its block: {sites[which].calls[:3]}"
+    assert again[which].calls == [], f"{which} resumed in a run after its day's last block"
     assert summaries[which].requests == 0
     assert caps(sites[other], ok=True), f"{other} logged nothing after {which}'s block"
     assert summaries[other].stopped is None
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"cooldown_min": 15, "resume_requests_per_second": 0.05},
+        {"cooldown_min": 40, "resume_requests_per_second": 0.02},
+    ],
+    ids=["15min-at-0.05", "40min-at-0.02"],
+)
+@pytest.mark.parametrize(
+    "first",
+    [
+        lambda: from_time("capture", "URA", jst(11, 0), blocked(NAR_HOST, 403)),
+        lambda: on_calls("discover", None, {1}, blocked(NAR_HOST, 429)),
+    ],
+    ids=["capture-403", "discover-429"],
+)
+def test_a_first_nar_block_pauses_nar_alone_then_resumes_at_the_slower_rate(
+    tmp_path, policy, first
+):
+    nar_cfg = {**NAR_CONFIG, "on_block": policy}
+    configs = {"jra": JRA_CONFIG, "nar": nar_cfg}
+    clock = ThreadClock(jst(6, 30))
+    sites = make_sites(clock, nar_fail=first())
+    markers = {k: tmp_path / f"{k}-block.txt" for k in sites}
+    resume = resumers(clock)
+
+    summaries, _ = run(clock, sites, markers, configs=configs, resume=resume)
+    hit, jra = sites["nar"], sites["jra"]
+
+    # The block: the first site's last call; then one resume, at the policy's rate.
+    blocks = [c for c in hit.calls if c.error == "CircuitOpen"]
+    assert blocks == [hit.calls[-1]], f"NAR's first site after its block: {hit.calls[-3:]}"
+    assert len(resume["nar"].calls) == 1, f"NAR resumed {len(resume['nar'].calls)} times"
+    [(_, rate)] = resume["nar"].calls
+    assert rate == pytest.approx(policy["resume_requests_per_second"]), rate
+    [fresh] = resume["nar"].sites
+
+    # The pause: nothing to NAR for cooldown_min, then the rest of its day on the fresh site.
+    resumed_at = blocks[0].t + timedelta(minutes=policy["cooldown_min"])
+    assert fresh.calls, "NAR never resumed"
+    assert fresh.calls[0].t >= resumed_at - timedelta(seconds=EPS), (
+        f"NAR resumed at {hhmm(fresh.calls[0].t)}, before its pause ended {hhmm(resumed_at)}"
+    )
+    assert [c for c in fresh.calls if c.error] == [], fresh.calls[:3]
+    assert_rounds_fit_budget(fresh, nar_cfg)  # at the resume rate: fresh.requests_per_second
+    within = timedelta(minutes=nar_cfg["hot_races"]["within_min"])
+    for venue, posts in fresh.meetings.items():
+        for n, post in posts.items():
+            if post - within < resumed_at:
+                continue  # hot before the resume, maybe during the pause
+            hot = [c for c in caps(fresh, venue, ok=True)
+                   if n in asked(c, fresh) and is_hot(post, c.t, nar_cfg)]  # fmt: skip
+            assert hot, f"NAR {venue} race {n} (post {hhmm(post)}): never captured after resume"
+        end = max(posts.values()) + timedelta(minutes=nar_cfg["after_last_race_min"])
+        assert [c for c in fresh.calls if c.venue == venue and c.t >= end] == [], venue
+    assert summaries["nar"].stopped is None, summaries["nar"].stopped
+    stops = {v: vs.stopped for v, vs in summaries["nar"].venues.items()}
+    assert set(stops) == set(nar_meetings()) and set(stops.values()) == {"ended"}, stops
+
+    # JRA: never paused, never resumed, no marker; its whole day at its own rate.
+    assert resume["jra"].calls == []
+    assert summaries["jra"].stopped is None
+    assert_logged_its_day(jra, JRA_CONFIG)
+    assert_rounds_fit_budget(jra, JRA_CONFIG)
+    assert_hot_races_followed(jra, JRA_CONFIG, every=20)
+    assert not markers["jra"].exists()
+
+
+@pytest.mark.parametrize(
+    ("which", "fail", "error"),
+    [
+        ("nar", lambda e: on_calls("discover", None, {1}, lambda: e),
+         FetchError("HTTP 500 for race_list/20261128", http_status=500)),
+        ("nar", lambda e: from_time("capture", "URA", jst(11, 0), lambda: e),
+         KeyError("odds_tan_block")),
+        ("jra", lambda e: from_time("capture", "KYO", jst(12, 0), lambda: e),
+         RuntimeError("an odds table the parser does not know")),
+    ],
+    ids=["nar-discover-fetch-error", "nar-capture-key-error", "jra-capture-runtime-error"],
+)  # fmt: skip
+def test_an_error_in_one_source_is_reported_at_once_and_the_other_logs_its_day(
+    tmp_path, which, fail, error
+):
+    other = "jra" if which == "nar" else "nar"
+    clock = ThreadClock(jst(6, 30))
+    reported_now = threading.Event()
+    late: list[str] = []
+    # the healthy source waits, part way through its day, for the failure to be reported
+    hold = held_after(jst(14, 0) if other == "jra" else jst(15, 30), reported_now, late)
+    sites = make_sites(clock, **{f"{which}_fail": fail(error), f"{other}_fail": hold})
+    markers = {k: tmp_path / f"{k}-block.txt" for k in sites}
+    reported: list[tuple[str, BaseException]] = []
+
+    def on_error(key, exc):
+        reported.append((key, exc))
+        reported_now.set()
+
+    summaries, _ = run(clock, sites, markers, on_error=on_error)  # returns: does not raise
+    failed, healthy = sites[which], sites[other]
+
+    # The failure: reported once, naming the source and its error, while the other still logged.
+    assert [(k, type(e), str(e)) for k, e in reported] == [(which, type(error), str(error))]
+    assert late == [], late
+    assert failed.calls[-1].error == type(error).__name__, failed.calls[-3:]
+    assert [c for c in failed.calls if c.error] == [failed.calls[-1]], "called after its error"
+    assert summaries[which].stopped == "error", summaries[which].stopped
+    stops = {v: vs.stopped for v, vs in summaries[which].venues.items()}
+    assert all(s in ("error", "ended") for s in stops.values()), stops
+    if failed.calls[-1].venue is not None:
+        assert stops[failed.calls[-1].venue] == "error", stops
+
+    # The other source: its whole day, as if alone.
+    assert summaries[other].stopped is None
+    assert set(summaries[other].venues) == set(healthy.meetings)
+    assert all(vs.stopped == "ended" for vs in summaries[other].venues.values())
+    assert_logged_its_day(healthy, CONFIGS[other])
+    assert_rounds_fit_budget(healthy, CONFIGS[other])
+    # An error is not a block.
+    assert not markers[which].exists() and not markers[other].exists()
 
 
 # ---------------------------------------------------------------- logger.yaml
@@ -491,3 +730,7 @@ def test_logger_yaml_ships_a_schedule_per_source():
             f"at {hhmm(t)} a NAR round ({every_s_at(t, nar)} s x {rps}) fits no race"
         )
     assert not nar.get("tier2"), "NAR has no tier-2 capture"
+    # The owner's NAR block policy: pause 15 minutes, resume once at half nar.yaml's rate. JRA's
+    # stays as it was (cooldown null, checked with the rest of JRA_CONFIG above).
+    assert nar["on_block"]["cooldown_min"] == 15, nar["on_block"]
+    assert nar["on_block"]["resume_requests_per_second"] == pytest.approx(rps / 2), nar["on_block"]

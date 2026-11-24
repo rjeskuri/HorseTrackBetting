@@ -16,8 +16,12 @@ Contract pinned here (the coder follows it):
   page its asked pools are on (`b1` WIN and PLACE, `b4` QUINELLA, `b5` QUINELLA_PLACE): 1 +
   pages x races requests. `now()` is read before the first request and is every row's
   snapshot_utc. NotListed when the race list has no meeting of `venue` (after 1 request). An odds
-  page whose own race id (the `race_id=` of its links) is not the race asked for raises
-  WrongMeeting. A pool outside those four is a ValueError before any request.
+  page whose own race id is not the race asked for raises WrongMeeting. A page's own race is the
+  one its race navigation marks active (`li.Active` in `div.RaceNumWrap` / `div.RaceKaisaiWrap`)
+  and its `li.race_navi_*` menu links name, never "every `race_id=` on the page": a real odds
+  page links to every race of its meeting and to races at the day's other venues (fix round,
+  review of PR #255; the shape is `nar_pages.RaceNav`). A correct page with those links does not
+  raise. A pool outside those four is a ValueError before any request.
 - Requests: GET, source "nar", mutable, to https://nar.netkeiba.com:
   `/top/race_list_sub.html?kaisai_date=YYYYMMDD` and `/odds/?race_id=<12 digits>&type=<t>`, the
   race id read off the race list. Other query parameters are not pinned.
@@ -34,8 +38,10 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from bs4 import BeautifulSoup
 
 from horsetrack.countries.japan.jra import capture as jra_capture
 
@@ -111,6 +117,24 @@ def odds_blocks(keys: list[tuple], start: int, size: int) -> list[set]:
     return [set(keys[i : i + size]) for i in range(start, len(keys), size)]
 
 
+def linked(body: bytes) -> set[str]:
+    """Every `race_id=` a page links to (the fixture's own check, not the code under test's)."""
+    out: set[str] = set()
+    for a in BeautifulSoup(body, "html.parser").find_all("a", href=True):
+        out.update(parse_qs(urlsplit(str(a["href"])).query).get("race_id", []))
+    return out
+
+
+def assert_page_links_like_a_real_one(world: NarWorld, race: nd.NarRace, body: bytes) -> None:
+    """The served page links, as real pages do, to every race of its meeting and to another
+    venue's race, besides its own: a capture that passes over it reads the page's own race."""
+    ids = linked(body)
+    siblings = {r.netkeiba_id for r in world.races(race.day, race.venue)}
+    assert race.netkeiba_id in ids and siblings <= ids, sorted(ids)
+    other_venues = {i for i in ids if i[4:6] != race.netkeiba_id[4:6]}
+    assert other_venues, f"no link to another venue's race: {sorted(ids)}"
+
+
 # ---------------------------------------------------------------- navigation and rows
 
 
@@ -131,6 +155,9 @@ def test_capture_meeting_navigates_and_returns_rows(venue, pools, races):
     every = world.races(WED, venue)
     asked = [r for r in every if races is None or r.number in races]  # race-list order
     types = nd.page_types(pools)
+    for race in asked:  # the pages served link to sibling races and other venues
+        for t in types:
+            assert_page_links_like_a_real_one(world, race, world.page(race, t))
     with fetcher:
         ticks = Ticks(site)
         cap = capture_meeting(fetcher, WED, venue, pools, races=races, now=ticks)
@@ -203,22 +230,37 @@ def _claims(world: NarWorld, day: date, venue: str, number: int) -> str:
 
 
 @pytest.mark.parametrize(
-    ("venue", "race", "page_type", "claims"),
+    ("venue", "race", "page_type", "claims", "links_asked"),
     [
-        ("URA", 2, "b1", (WED, "URA", 3)),  # another race of the meeting
-        ("URA", 1, "b5", (WED, "SON", 1)),  # another venue's race, same day
-        ("SON", 2, "b4", (THU, "SON", 2)),  # the same race number another day
-        ("URA", 4, "b1", (date(2026, 11, 24), "URA", 4)),  # the day before
+        # another race of the meeting: its race nav links to the race asked for, not active
+        ("URA", 2, "b1", (WED, "URA", 3), True),
+        ("URA", 4, "b5", (WED, "URA", 1), True),
+        # another venue's race, same day: its venue tabs link to the race asked for, not active
+        ("URA", 1, "b5", (WED, "SON", 1), True),
+        ("SON", 3, "b1", (WED, "URA", 3), True),
+        ("SON", 2, "b4", (THU, "SON", 2), False),  # the same race number another day
+        ("URA", 4, "b1", (date(2026, 11, 24), "URA", 4), False),  # the day before
     ],
-    ids=["other-race", "other-venue", "next-day", "day-before"],
+    ids=[
+        "other-race",
+        "other-race-wide",
+        "other-venue",
+        "other-venue-tab",
+        "next-day",
+        "day-before",
+    ],  # fmt: skip
 )
-def test_wrong_meeting_raises(venue, race, page_type, claims):
+def test_wrong_meeting_raises(venue, race, page_type, claims, links_asked):
     world = week()
     site, fetcher = serve(world)
     asked = world.race(WED, venue, race)
     other = _claims(world, *claims)
     assert other != asked.netkeiba_id
-    site.replace[(asked.netkeiba_id, page_type)] = nd.odds_page(asked, page_type, as_id=other)
+    # the page of `other`, as the site prints it: its own race active, its siblings and venues
+    page = world.page(asked, page_type, as_id=other)
+    assert other in linked(page)
+    assert (asked.netkeiba_id in linked(page)) == links_asked, sorted(linked(page))
+    site.replace[(asked.netkeiba_id, page_type)] = page
     with fetcher, pytest.raises(jra_capture.WrongMeeting) as caught:
         capture_meeting(fetcher, WED, venue, list(ALL_POOLS), now=Ticks(site))
     assert isinstance(caught.value, WrongMeeting)

@@ -50,6 +50,19 @@ NAR (ticket #38), `log-day --sources jra,nar` (default: logger.yaml's `sources`)
 - A block on the NAR host (403/429) stops NAR only: its venues stop as circuit_open (with an
   ALERT), a block line `<host> <date> ...` names nar.netkeiba.com, and JRA logs its day and
   writes no block line.
+- NAR's block policy (fix round, review of PR #255; owner decision in
+  docs/research/nar-data-access.md): the first block pauses NAR alone for logger.yaml's
+  `nar.on_block.cooldown_min` (15), then NAR resumes once on a fresh Fetcher,
+  `make_fetcher("nar", requests_per_second=<nar.on_block.resume_requests_per_second>)` (0.05:
+  20 s between requests to nar.netkeiba.com); a second block stops NAR for the day as above, and
+  a restart that day sends NAR nothing. JRA never pauses and its make_fetcher is never given a
+  rate. Ruling: `make_fetcher(source="jra", *, requests_per_second=None)`; a rate replaces the
+  rate of every host of that source's http block, jitter and User-Agent unchanged.
+- An error escaping one source's day (a 500 on NAR's race list at discovery: a FetchError) stops
+  that source only. The other source logs its day; its health lines and, unattended, its
+  day-done marker are written; the failed source gets no day-done, no-meeting or block line. An
+  `ERROR` line naming the source (`nar`) and the error goes to the terminal.
+  Ruling: log-day then exits 1 (EXIT_ERROR), after writing everything else; 1 wins over 2.
 
 The JRADB double (jradb_double.py) serves a synthetic week through the real Fetcher; its post times
 are moved 20 minutes later here so every race's T-20 window falls in logger.yaml's 20 s window
@@ -497,19 +510,37 @@ def nar_saturday() -> NarWorld:
     )
 
 
-def run_with_nar(monkeypatch, world: World, nar_world: NarWorld, *args: str, refuse_from=None):
+def run_with_nar(
+    monkeypatch,
+    world: World,
+    nar_world: NarWorld,
+    *args: str,
+    refuse_from=None,
+    status_for=None,
+    made: list | None = None,
+):
     """`horsetrack japan log-day *args` with JRA on the JRADB double and NAR on the NAR double, on
-    a clock with one virtual time per thread (a source on its own thread lives its own day).
-    Returns (result, jra site, nar site)."""
+    a clock with one virtual time per thread (a source on its own thread lives its own day). The
+    NAR site records each request's time (`Seen.at`); a NAR fetcher asked for a rate
+    (`requests_per_second=`) spaces its requests at that rate on that clock. Every make_fetcher
+    call is appended to `made` as (source, its keyword arguments). Returns (result, jra site,
+    nar site)."""
     mod = importlib.import_module(MODULE)
     clock = ThreadClock(datetime(2026, 11, 27, 21, 0, tzinfo=UTC))  # 06:00 in Tokyo
     jra_site = dbl.JradbSite(dict(world.pages))
-    nar_site = nd.NarSite(nar_world, refuse_from=refuse_from)
+    nar_site = nd.NarSite(nar_world, refuse_from=refuse_from, status_for=status_for,
+                          clock=clock.now)  # fmt: skip
 
     def make_fetcher(*a, **k):
         source = k.get("source", a[0] if a else "jra")
         assert source in ("jra", "nar"), f"make_fetcher for {source!r}"
-        return dbl.make_fetcher(jra_site) if source == "jra" else nd.make_fetcher(nar_site)
+        if made is not None:
+            made.append((source, {key: v for key, v in k.items() if key != "source"}))
+        if source == "jra":
+            return dbl.make_fetcher(jra_site)
+        rate = k.get("requests_per_second")
+        return nd.make_fetcher(nar_site, requests_per_second=rate, clock=clock.now,
+                               sleep=clock.sleep)  # fmt: skip
 
     monkeypatch.setattr(mod, "utc_now", clock.now)
     monkeypatch.setattr(mod, "sleep", clock.sleep)
@@ -610,13 +641,40 @@ def test_health_lines_name_the_source(
         assert not nar_log(data_dir, SAT, venue).exists(), venue
 
 
+def nar_block_policy() -> dict:
+    """logger.yaml's NAR on_block (pinned to 15 min and 0.05 in test_schedule_sources.py)."""
+    return load_country_yaml("japan", "logger")["nar"]["on_block"]
+
+
+def marked_lines() -> list[list[str]]:
+    """The first two fields of every line of every marker file (health.log aside)."""
+    return [
+        line.split()[:2]
+        for path in paths.logs_dir("japan").iterdir()
+        if path.is_file() and path.name != "health.log" and not path.name.endswith(".log")
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+    ]
+
+
+def nar_fetchers(made: list) -> list[dict]:
+    """The keyword arguments of each make_fetcher call for NAR, in order; JRA's never had a rate."""
+    for source, kwargs in made:
+        if source == "jra":
+            assert kwargs.get("requests_per_second") is None, f"JRA's fetcher given {kwargs}"
+    assert [s for s, _ in made].count("jra") <= 1, made
+    return [kwargs for source, kwargs in made if source == "nar"]
+
+
 def test_a_block_on_the_nar_host_stops_nar_only(monkeypatch, data_dir, late_posts):
+    """nar.netkeiba.com answers 403 from its 4th request on: the first block pauses NAR, the
+    resume on a fresh Fetcher is refused too, and that second block stops NAR for the day."""
     world = World({SAT: [Meeting("TOK", 1)]}, tier2=tier2_config()["pools"])
     args = ["--date", SAT.isoformat(), "--sources", "jra,nar", "--venues", "TOK,URA,SON"]
+    policy = nar_block_policy()
+    made: list = []
 
-    # nar.netkeiba.com answers 403 from its 4th request on
     result, jra_site, nar_site = run_with_nar(
-        monkeypatch, world, nar_saturday(), *args, refuse_from=4
+        monkeypatch, world, nar_saturday(), *args, refuse_from=4, made=made
     )
 
     out = plain(result.output)
@@ -631,18 +689,177 @@ def test_a_block_on_the_nar_host_stops_nar_only(monkeypatch, data_dir, late_post
         assert (lines[venue][0]["stopped"], lines[venue][0]["source"]) == ("circuit_open", "nar")
     assert {(a["venue"], a["source"]) for a in alerts} == {("URA", "nar"), ("SON", "nar")}
 
-    # After the 403, nothing but refusals: the breaker held (a resume, if any, was refused too).
+    # Two blocks, each a request that was sent: the first Fetcher's, then the fresh one's after
+    # the pause (an open breaker refuses without sending, so a reused Fetcher sends nothing).
     statuses = [s.status for s in nar_site.seen]
     first = statuses.index(403)
-    assert set(statuses[first:]) == {403} and 1 <= len(statuses[first:]) <= 2, statuses
+    assert statuses[first:] == [403, 403], statuses
+    pause = nar_site.seen[first + 1].at - nar_site.seen[first].at
+    assert pause >= timedelta(minutes=policy["cooldown_min"]), pause
+    fetchers = nar_fetchers(made)
+    assert len(fetchers) == 2, f"NAR's fetchers: {fetchers}"
+    assert fetchers[0].get("requests_per_second") in (None, 0.1), fetchers[0]
+    assert fetchers[1].get("requests_per_second") == pytest.approx(
+        policy["resume_requests_per_second"]
+    ), fetchers[1]
 
     # The block is NAR's alone: a block line for its host and today, none for JRA's.
     day = SAT.isoformat()
-    marked = [
-        line.split()[:2]
-        for path in paths.logs_dir("japan").iterdir()
-        if path.is_file() and path.name != "health.log"
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
-    ]
+    marked = marked_lines()
     assert [nd.HOST, day] in marked, "no block line for nar.netkeiba.com today"
     assert [dbl.HOST, day] not in marked, "a block on the NAR host was recorded for JRA's host"
+
+    # A restart that day sends NAR nothing.
+    again: list = []
+    result, _, nar_site = run_with_nar(
+        monkeypatch, world, nar_saturday(), "--date", day, "--sources", "nar",
+        "--venues", "URA,SON", made=again,
+    )  # fmt: skip
+    assert nar_site.seen == [], f"NAR after its second block: {nar_site.seen[:3]}"
+    assert len(nar_fetchers(again)) <= 1, again
+
+
+def test_a_first_nar_block_pauses_nar_then_resumes_on_a_slower_fresh_fetcher(
+    monkeypatch, data_dir, late_posts
+):
+    """nar.netkeiba.com answers 403 to its 4th request only: NAR pauses, resumes on a fresh
+    Fetcher at the resume rate (20 s between requests) and logs the rest of its day; JRA is
+    never affected."""
+    world = World({SAT: [Meeting("TOK", 1)]}, tier2=tier2_config()["pools"])
+    args = ["--date", SAT.isoformat(), "--sources", "jra,nar", "--venues", "TOK,URA,SON"]
+    policy = nar_block_policy()
+    made: list = []
+
+    result, jra_site, nar_site = run_with_nar(
+        monkeypatch, world, nar_saturday(), *args,
+        status_for=lambda n, path: 403 if n == 4 else None, made=made,
+    )  # fmt: skip
+
+    out = plain(result.output)
+    assert result.exit_code in (0, 2), out
+    lines, alerts = source_health(SAT.isoformat())
+    assert sorted(lines) == ["SON", "TOK", "URA"], out
+    for venue in ("URA", "SON"):
+        got = lines[venue][0]
+        assert (got["stopped"], got["source"]) == ("ended", "nar"), got
+        assert int(got["rows"]) > 0, got
+
+    seen = nar_site.seen
+    assert [s.status for s in seen].count(403) == 1 and seen[3].status == 403, seen[:5]
+    after = seen[4:]
+    assert after and all(s.served for s in after), after[:3]
+    assert after[0].at - seen[3].at >= timedelta(minutes=policy["cooldown_min"]), after[0].at
+    gap = 1.0 / policy["resume_requests_per_second"]
+    gaps = [(b.at - a.at).total_seconds() for a, b in zip(after, after[1:], strict=False)]
+    assert gaps and min(gaps) >= gap - 1e-3, f"{min(gaps)} s between NAR requests after resume"
+    fetchers = nar_fetchers(made)
+    assert len(fetchers) == 2, f"NAR's fetchers: {fetchers}"
+    assert fetchers[1].get("requests_per_second") == pytest.approx(
+        policy["resume_requests_per_second"]
+    ), fetchers[1]
+
+    # JRA: its day as ever, no alert, no block line.
+    tok = lines["TOK"][0]
+    assert (tok["stopped"], tok["source"]) == ("ended", "jra"), tok
+    assert int(tok["rows"]) > 0
+    assert all(s.served for s in jra_site.seen)
+    assert not [a for a in alerts if a["source"] == "jra"], alerts
+    assert [dbl.HOST, SAT.isoformat()] not in marked_lines()
+
+
+def test_an_error_in_one_source_leaves_the_other_its_day_health_and_markers(
+    monkeypatch, data_dir, late_posts
+):
+    """Unattended, both sources discovered: NAR's race list answers 500 at discovery (a
+    FetchError run_day does not catch). JRA logs its day and writes its health line and day-done
+    marker; NAR is reported as an ERROR naming it; log-day exits 1."""
+    world = World({SAT: [Meeting("TOK", 1)]}, tier2=tier2_config()["pools"])
+    args = ["--date", SAT.isoformat(), "--sources", "jra,nar", "--unattended"]
+
+    result, jra_site, nar_site = run_with_nar(
+        monkeypatch, world, nar_saturday(), *args,
+        status_for=lambda n, path: 500 if path == nd.RACE_LIST_PATH and n == 1 else None,
+    )  # fmt: skip
+
+    out = plain(result.output)
+    assert result.exit_code == 1, out
+    errors = [line for line in out.splitlines() if line.startswith("ERROR")]
+    assert any(re.search(r"\bnar\b", line) and "500" in line for line in errors), errors
+    assert [s.status for s in nar_site.seen] == [500], "NAR sent requests after its error"
+
+    lines, _ = source_health(SAT.isoformat())
+    assert "TOK" in lines, out
+    tok = lines["TOK"][0]
+    assert (tok["stopped"], tok["source"]) == ("ended", "jra"), tok
+    assert int(tok["rows"]) > 0
+    assert jra_site.seen and all(s.served for s in jra_site.seen)
+
+    day = SAT.isoformat()
+    logs = paths.logs_dir("japan")
+
+    def days_in(name: str) -> list[str]:
+        path = logs / name
+        if not path.is_file():
+            return []
+        return [line.split()[0] for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+    assert days_in("jra-day-done.txt") == [day], "JRA's finished day was not marked"
+    assert day not in days_in("nar-day-done.txt"), "a failed NAR day was marked done"
+    assert day not in days_in("nar-no-meeting.txt"), "a failed discovery is not 'no meeting'"
+    marked = marked_lines()
+    assert [nd.HOST, day] not in marked and [dbl.HOST, day] not in marked, "an error is no block"
+
+
+@pytest.mark.parametrize(
+    ("source", "kwargs", "host"),
+    [("nar", {}, nd.HOST), ("nar", "resume", nd.HOST), ("jra", {}, dbl.HOST)],
+    ids=["nar", "nar-resume", "jra"],
+)
+def test_make_fetcher_spaces_each_host_at_its_own_rate(monkeypatch, source, kwargs, host):
+    """The real log_day.make_fetcher, its Fetcher on a fake monotonic clock and a recording
+    transport: nar.netkeiba.com 10 s apart (nar.yaml's 0.1, jitter 0), 20 s on the resume
+    Fetcher (logger.yaml's nar.on_block rate), JRA's host at jra.yaml's own rate; one User-Agent."""
+    from horsetrack.core.ingest import fetcher as ingest
+    from horsetrack.core.ingest.types import FetchTask
+
+    if kwargs == "resume":
+        kwargs = {"requests_per_second": nar_block_policy()["resume_requests_per_second"]}
+    t = [1_000.0]
+    sent: list[tuple[float, str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append((t[0], request.url.host, request.headers.get("user-agent", "")))
+        return httpx.Response(200, content=b"<html><body>ok</body></html>")
+
+    def advance(seconds: float) -> None:
+        t[0] += max(0.0, float(seconds))
+
+    original = ingest.Fetcher.__init__
+
+    def init(self, src, *, http, **kw):
+        kw.update(transport=httpx.MockTransport(handler), sleep=advance, clock=lambda: t[0])
+        original(self, src, http=http, **kw)
+
+    monkeypatch.setattr(ingest.Fetcher, "__init__", init)
+    mod = importlib.import_module(MODULE)
+    fetcher = mod.make_fetcher(source, **kwargs)
+    with fetcher:
+        assert fetcher.source == source
+        for i in range(6):
+            url = f"https://{host}/odds/?race_id=2026421128{i + 1:02d}"
+            fetcher.request(FetchTask(source, "odds_b1", f"k{i}", url, 2026, mutable=True))
+    assert [h for _, h, _ in sent] == [host] * 6
+    assert {ua for *_, ua in sent} == {"horsetrack-tests/1.0"}, "the User-Agent changed"
+    gaps = [b - a for (a, *_), (b, *_) in zip(sent, sent[1:], strict=False)]
+
+    rates = load_country_yaml("japan", source)["http"]
+    entry = rates["hosts"].get(host) or rates.get("default") or rates["hosts"]["default"]
+    rps = float(kwargs.get("requests_per_second", entry["requests_per_second"]))
+    if source == "nar":
+        assert kwargs or rps == pytest.approx(0.1), entry  # the DoD's 10 s
+        assert gaps == pytest.approx([1.0 / rps] * 5, abs=1e-9), gaps  # jitter 0: exactly
+    else:
+        jitter = float(entry.get("jitter", 0.0))
+        lo, hi = (1.0 - jitter) / rps, (1.0 + jitter) / rps
+        assert all(lo - 1e-9 <= g <= hi + 1e-9 for g in gaps), (gaps, lo, hi)
+        assert max(gaps) < 10.0, "JRA's host spaced at NAR's rate"
