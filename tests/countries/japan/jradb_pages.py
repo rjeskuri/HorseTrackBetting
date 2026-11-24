@@ -63,6 +63,12 @@ def race_header(day: date | None, meeting: str, race_no: int | None = None) -> s
     return f'<div class="race_header">{line}{number}</div>'
 
 
+def list_header(day: date, meeting: str) -> str:
+    """The date line of a race list: the real race lists print it in an h2 (and the page's h1),
+    not in a `.race_header` as the race pages do (ticket #31)."""
+    return f"<h2>{date_line(day, meeting)}</h2>"
+
+
 # ---------------------------------------------------------------- menus
 
 
@@ -121,7 +127,7 @@ def odds_race_list(
             f'<tr><th class="race_num" scope="row">{number}</th><td class="time">{time}</td>'
             f'<td class="odds"><div class="btn_list">{"".join(cells)}</div></td></tr>'
         )
-    return page(race_header(day, meeting) + _table(rows, columns=2))
+    return page(list_header(day, meeting) + _table(rows, columns=2))
 
 
 def card_race_list(day: date, meeting: str, times: Mapping[int, str]) -> bytes:
@@ -135,7 +141,7 @@ def card_race_list(day: date, meeting: str, times: Mapping[int, str]) -> bytes:
             f'<tr><th class="race_num" scope="row">{number}</th><td class="time">{time}</td>'
             f'<td class="syutsuba">{href_link(CARD_PATH, cname, "<span>x</span>")}</td></tr>'
         )
-    return page(race_header(day, meeting) + _table(rows, columns=1))
+    return page(list_header(day, meeting) + _table(rows, columns=1))
 
 
 def _table(rows: Sequence[str], *, columns: int) -> str:
@@ -220,6 +226,59 @@ def pairs(
         tables.append(f"<table><caption>{first}</caption><tbody>{rows}</tbody></table>")
     body = f'<div id="odds_list">{"".join(tables)}</div>'
     return page(race_header(day, meeting, race_no) + _refresh(state) + body + _votes(votes))
+
+
+PAGE_KINDS = (
+    "card_menu",
+    "odds_menu",
+    "card_race_list",
+    "odds_race_list",
+    "win_place",
+    "quinella",
+    "wide",
+)
+
+
+def sample_pages(day: date = date(2026, 11, 15), meeting: str = "5回京都4日") -> dict[str, bytes]:
+    """One page per kind of `PAGE_KINDS` (the kinds of `official_pages.SELECTORS`), each with every
+    structure the parser reads: a race number, a clock, a range, a figure, a scratched cell and
+    the votes table (ticket #31)."""
+    final = "最終オッズ"
+    return {
+        "card_menu": menu({day: [(meeting, "pw01drl10082026050420261115/82")]}, CARD_PATH),
+        "odds_menu": menu({day: [(meeting, "pw15orl10082026050420261115/FC")]}, ODDS_PATH),
+        "card_race_list": card_race_list(day, meeting, {9: "14時20分", 10: "15時01分"}),
+        "odds_race_list": odds_race_list(
+            day,
+            meeting,
+            {10: {"単勝 複勝": "pw151x/AA", "馬連": "pw154x/BB", "ワイド": "pw155x/CC"}},
+            {10: "15時01分"},
+        ),
+        "win_place": win_place(
+            day,
+            meeting,
+            10,
+            {1: (37.8, (3.0, 7.3)), 6: ("取消", "取消"), 9: (1.7, (1.1, 1.1))},
+            state=final,
+            votes=[("単勝", 716_227), ("複勝", 648_500)],
+        ),
+        "quinella": pairs(
+            day,
+            meeting,
+            10,
+            {(1, 2): 326.8, (1, 9): 25.3, (2, 9): 63.6},
+            state=final,
+            votes=[("馬連", 877_724)],
+        ),
+        "wide": pairs(
+            day,
+            meeting,
+            10,
+            {(1, 2): (63.5, 65.9), (1, 9): (6.5, 8.5), (2, 9): (14.3, 18.4)},
+            state=final,
+            votes=[("ワイド", 764_551)],
+        ),
+    }
 
 
 def no_header_page() -> bytes:
