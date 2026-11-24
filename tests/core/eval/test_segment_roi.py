@@ -351,3 +351,65 @@ def test_a_seed_makes_the_fit_reproducible():
     first = outputs(42)
     assert outputs(42) == first
     assert all(math.isfinite(x) for row in first for x in row)
+
+
+# --- a level whose bets all won -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("odds", "band", "n_won"),
+    [(10.0, "long", 1), (1.5, "fav", 2)],
+    ids=["one-win-at-10.0", "two-wins-at-1.5"],
+)
+def test_a_level_whose_bets_all_won_is_fitted_and_shrunk(odds, band, n_won):
+    """Review of PR #201: a tiny segment level with only winning bets (no loser) must not crash
+    the fit. Among 10 null segments of 1,000 bets (omega 1), the all-win level gets a finite
+    posterior mean shrunk well below its raw ln-omega deviation, is not flagged, and has a finite
+    predictive ROI interval; the null segments are still not flagged.
+    """
+    rng = np.random.default_rng(7801)
+    frames = [
+        make_bets(rng, 1000, omega_by_band=flat(1.0), labels={"segment": f"n{i:02d}"})
+        for i in range(10)
+    ]
+    tiny = pd.DataFrame(
+        {
+            "stake": 1.0,
+            "odds": odds,
+            "won": [1] * n_won,
+            "band": band,
+            "takeout": TAKEOUT,
+            "segment": "allwin",
+        }
+    )
+    tiny["payout"] = tiny["odds"] * tiny["won"]
+    bets = pd.concat([*frames, tiny[frames[0].columns]], ignore_index=True)
+
+    # Premise: the level's raw deviation is large and positive (every bet won).
+    raw = raw_log_omega(tiny)
+    assert raw == pytest.approx(math.log(odds / (1 - TAKEOUT)))
+    assert raw > 0.6
+
+    fit = fit_segment_roi(
+        bets,
+        segment_cols=["segment"],
+        odds_band_col="band",
+        takeout_col="takeout",
+        seed=2,
+        draws=DRAWS,
+    )
+
+    u = fit.posterior_mean(seg("allwin"))
+    assert math.isfinite(u)
+    assert abs(u) < raw / 2, (u, raw)
+    p = fit.p_beats_takeout(seg("allwin"))
+    assert 0.0 <= p < 0.5, p
+    interval = fit.predictive_roi(seg("allwin"), 100)
+    assert math.isfinite(interval.low) and math.isfinite(interval.high)
+    assert -1.0 <= interval.low < interval.high
+
+    for i in range(10):
+        s = f"n{i:02d}"
+        prob = fit.p_beats_takeout(seg(s))
+        assert 0.0 <= prob < 0.5, (s, prob)
+        assert math.isfinite(fit.posterior_mean(seg(s)))

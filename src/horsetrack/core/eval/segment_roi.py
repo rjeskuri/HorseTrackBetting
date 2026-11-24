@@ -30,6 +30,18 @@ samples weight the conditional Gaussians. ``draws`` posterior draws of ``theta``
 mixture. Every random number comes from ``np.random.default_rng`` with the given seed, so a seed
 reproduces every output exactly.
 
+The p = 1 boundary. A cell whose likeliest bet won and that no loser bounds (a small level whose
+bets all won, say) has only the prior to hold it back from ``p = 1``. Once ``tau`` is large enough
+the conditional supremum lies on that boundary, the Laplace approximation does not hold, and that
+tau sample gets zero weight, as do samples outside ``_LOG_TAU_RANGE`` (``tau_rejected`` counts
+both). This truncates the tau posterior from above where the boundary binds: for ``n`` all-won
+bets at implied probability ``q e^mu`` it binds at about ``tau = sqrt(-ln(q e^mu) / n)``, e.g.
+0.37 for three wins at odds 1.2, far out in the prior's tail. It matters only when many
+high-probability bets of one level all won and the column has few other levels to pin tau (a 1-D
+check: 20 wins at odds 1.0 beside three null levels gives a tau posterior mean of 0.070 against
+0.097 exact), and then about half the tau samples are rejected. A band whose bets all won cannot
+be fitted at any tau and raises.
+
 Queries name a segment as ``{column: level}`` for one or more segment columns. Its omega is the
 mean over the segment's own bets of each bet's fitted omega (its band, its levels of every column),
 and ``p_beats_takeout`` is the probability that the segment's mean expected return per unit stake,
@@ -63,6 +75,10 @@ class Interval:
     level: float
 
 
+class _BoundaryMode(RuntimeError):
+    """The conditional posterior's supremum lies on the ``p = 1`` boundary: no interior mode."""
+
+
 class _Likelihood:
     """The Bernoulli log-likelihood aggregated by cell and implied probability."""
 
@@ -75,13 +91,14 @@ class _Likelihood:
         self.lose_cell = losers.index.get_level_values("cell").to_numpy()
         self.lose_q = losers.index.get_level_values("q").to_numpy()
         self.lose_n = losers.to_numpy(dtype=float)
-        self.max_q = np.zeros(n_cells)
-        np.maximum.at(self.max_q, cell, q)
+        max_q = np.zeros(n_cells)
+        np.maximum.at(max_q, cell, q)
+        self.eta_max = np.log(P_MAX) - np.log(max_q)  # each cell's eta must stay below this
 
     def log_joint(self, theta: np.ndarray, lam: np.ndarray) -> float:
         """Log-likelihood plus the Gaussian prior kernel; minus infinity where some p >= P_MAX."""
         eta = self.design @ theta
-        if np.any(self.max_q * np.exp(eta) >= P_MAX):
+        if np.any(eta >= self.eta_max):
             return -np.inf
         p = self.lose_q * np.exp(eta[self.lose_cell])
         return float(self.wins @ eta + self.lose_n @ np.log1p(-p) - 0.5 * lam @ theta**2)
@@ -106,7 +123,7 @@ class _Likelihood:
             if decrement < 1e-14:
                 return theta, f, chol
             size = 1.0
-            while True:
+            while size >= 1e-12:
                 candidate = theta + size * step
                 f_new = self.log_joint(candidate, lam)
                 if np.isfinite(f_new) and (
@@ -114,9 +131,14 @@ class _Likelihood:
                 ):
                     break
                 size /= 2
-                if size < 1e-12:
-                    raise RuntimeError("segment ROI fit: the line search failed")
+            else:
+                break  # the line search stalled
             theta, f = candidate, f_new
+        # Stalled, or out of iterations, with a Newton step that leaves the feasible set: the
+        # iterate has run into p = 1 (a cell whose likeliest bet won, with no loser to bound it),
+        # where the supremum is on the boundary and there is no interior mode.
+        if not np.isfinite(self.log_joint(theta + step, lam)):
+            raise _BoundaryMode("segment ROI fit: the mode lies on the p = 1 boundary")
         raise RuntimeError("segment ROI fit: Newton's method did not converge")
 
 
@@ -154,6 +176,7 @@ class SegmentROI:
         takeout: np.ndarray,
         tau: np.ndarray,
         tau_ess: float,
+        tau_rejected: int,
         seed: int,
     ):
         self._columns = columns
@@ -167,11 +190,13 @@ class SegmentROI:
         self._odds = odds
         self._takeout = takeout
         self._seed = seed
-        # Posterior means of the band effects (ln omega) and of each column's tau, and the effective
-        # sample size of the tau importance weights (out of TAU_SAMPLES): diagnostics, not verdicts.
+        # Posterior means of the band effects (ln omega) and of each column's tau, the effective
+        # sample size of the tau importance weights (out of TAU_SAMPLES), and how many tau samples
+        # got zero weight (out of range, or conditional mode on p = 1): diagnostics, not verdicts.
         self.band_effects = {b: float(m) for b, m in zip(band_levels, theta_mean, strict=False)}
         self.tau = {c: float(t) for c, t in zip(columns, tau, strict=True)}
         self.tau_ess = tau_ess
+        self.tau_rejected = tau_rejected
 
     def _codes_of(self, segment: dict[str, str]) -> dict[int, int]:
         if not segment:
@@ -255,10 +280,12 @@ def _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws) -> No
         raise ValueError("bets has missing values in " + ", ".join(needed))
     odds = pd.to_numeric(bets["odds"], errors="coerce").to_numpy(dtype=float)
     takeout = pd.to_numeric(bets[takeout_col], errors="coerce").to_numpy(dtype=float)
-    if not (np.isfinite(odds) & (odds > 1)).all():
-        raise ValueError("odds must be finite decimal odds above 1")
+    if not (np.isfinite(odds) & (odds >= 1)).all():
+        raise ValueError("odds must be finite decimal odds of at least 1")
     if not ((takeout >= 0) & (takeout < 1)).all():
         raise ValueError(f"{takeout_col} must be in [0, 1)")
+    if not ((1 - takeout) / odds < P_MAX).all():
+        raise ValueError(f"(1 - {takeout_col}) / odds must be below 1 (odds 1 needs a takeout)")
     if not bets["won"].isin([0, 1]).all():
         raise ValueError("won must be 0 or 1")
 
@@ -301,10 +328,17 @@ def fit_segment_roi(
 
     warm = np.zeros(offsets[-1])
 
-    def log_post(log_tau: np.ndarray) -> tuple[float, np.ndarray]:
-        """Log posterior of ln tau (Laplace marginal likelihood, prior, Jacobian) and the mode."""
+    def log_post(log_tau: np.ndarray) -> tuple[float, np.ndarray | None]:
+        """Log posterior of ln tau (Laplace marginal likelihood, prior, Jacobian) and the mode.
+
+        Minus infinity and no mode where the conditional mode is on the p = 1 boundary: the Laplace
+        approximation does not hold there, so such a tau gets no weight (module docstring).
+        """
         lam = precisions(log_tau)
-        theta, f, chol = lik.mode(warm, lam)
+        try:
+            theta, f, chol = lik.mode(warm, lam)
+        except _BoundaryMode:
+            return -np.inf, None
         warm[:] = theta
         marginal = f + 0.5 * np.log(lam).sum() - np.log(np.diag(chol)).sum()
         prior = (-0.5 * np.exp(2 * log_tau) / TAU_PRIOR_SCALE**2 + log_tau).sum()
@@ -314,11 +348,19 @@ def fit_segment_roi(
         return -log_post(x)[0]
 
     start = np.full(len(segment_cols), np.log(TAU_PRIOR_SCALE))
-    best = optimize.minimize(
-        objective, start, method="Nelder-Mead", options={"xatol": 1e-4, "fatol": 1e-8}
-    ).x
+    while not np.isfinite(objective(start)) and start[0] > _LOG_TAU_RANGE[0] + 1:
+        start -= np.log(2)  # a smaller tau pulls the random effects back from p = 1
+    with np.errstate(invalid="ignore"):  # inf - inf where a tau has its mode on p = 1
+        best = optimize.minimize(
+            objective, start, method="Nelder-Mead", options={"xatol": 1e-4, "fatol": 1e-8}
+        ).x
+        if not np.isfinite(objective(best)):
+            raise RuntimeError("segment ROI fit: found no tau whose conditional mode is interior")
+        hessian = _fd_hessian(objective, best)
     try:
-        scale = np.linalg.cholesky(np.linalg.inv(_fd_hessian(objective, best)) * _INFLATE**2)
+        if not np.isfinite(hessian).all():
+            raise np.linalg.LinAlgError("a finite-difference point has its mode on p = 1")
+        scale = np.linalg.cholesky(np.linalg.inv(hessian) * _INFLATE**2)
     except np.linalg.LinAlgError:
         scale = np.eye(len(best))
 
@@ -332,8 +374,14 @@ def fit_segment_roi(
     modes = np.zeros((TAU_SAMPLES, offsets[-1]))
     for k, log_tau in enumerate(samples):
         if ((log_tau > _LOG_TAU_RANGE[0]) & (log_tau < _LOG_TAU_RANGE[1])).all():
-            value, modes[k] = log_post(log_tau)
-            log_w[k] = value - log_q[k]
+            value, mode = log_post(log_tau)
+            if mode is not None:
+                modes[k] = mode
+                log_w[k] = value - log_q[k]
+    if not np.isfinite(log_w).any():
+        raise RuntimeError(
+            "segment ROI fit: every tau sample is out of range or has its mode on p = 1"
+        )
     weights = np.exp(log_w - special.logsumexp(log_w))
 
     theta_draws = []
@@ -358,5 +406,6 @@ def fit_segment_roi(
         takeout=takeout,
         tau=weights @ np.exp(samples),
         tau_ess=float(1 / (weights**2).sum()),
+        tau_rejected=int((~np.isfinite(log_w)).sum()),
         seed=seed,
     )
