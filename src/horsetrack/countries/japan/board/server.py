@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 
 LOCALHOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-DEFAULT_PAGE = Path(__file__).with_name("board.html")  # rendered by ticket #42
+DEFAULT_PAGE = Path(__file__).with_name("web") / "board.html"  # written by ticket #42
 HEADERS = {
     "Cache-Control": "no-store",
     "X-Robots-Tag": "noindex, nofollow",
@@ -176,7 +176,9 @@ def board_serve_command(
     port: int = typer.Option(DEFAULT_PORT, "--port", help="Port to listen on."),
     host: str = typer.Option(LOCALHOST, "--host", help="Address to bind; keep 127.0.0.1."),
     page: str | None = typer.Option(
-        None, "--page", help="The board page served at / (default: board.html beside server.py)."
+        None,
+        "--page",
+        help="The board page served at / (default: web/board.html beside server.py).",
     ),
 ) -> None:
     """Serve the board page at / and the day's live feed at /feed."""
