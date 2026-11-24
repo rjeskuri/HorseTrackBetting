@@ -1,0 +1,7 @@
+# Japan's locked final holdout (docs/problem-statement.md, A2: prospective, interleaved; the
+# owner's answers on #71). From `start`, a race day (local JST date) is holdout when
+# int(sha256(f"{seed}:{YYYY-MM-DD}").hexdigest(), 16) % 2 == 0; every other day is development.
+# Pre-registered: never change the start or regenerate the seed.
+holdout:
+  start: 2026-11-28
+  seed: "ac19ee6884c4087031c7a03e6e933fd1"
