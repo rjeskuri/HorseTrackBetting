@@ -4,6 +4,7 @@ import typer
 
 from horsetrack import __version__
 from horsetrack.core.ingest.cli import scrape_app
+from horsetrack.core.store.cli import store_app
 from horsetrack.countries.japan.board.server import board_serve_command
 from horsetrack.countries.japan.jrdb.tables import build_command as jrdb_build_command
 from horsetrack.countries.japan.logger.compact import compact
@@ -15,6 +16,7 @@ app = typer.Typer(no_args_is_help=True)
 japan = typer.Typer(no_args_is_help=True, help="Japan commands.")
 app.add_typer(japan, name="japan")
 app.add_typer(scrape_app, name="scrape")
+app.add_typer(store_app, name="store")
 japan.command("compact")(compact)
 japan.command("log-day")(log_day)
 japan.command("pull-vm")(pull_vm_command)
