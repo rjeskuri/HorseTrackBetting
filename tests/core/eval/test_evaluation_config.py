@@ -1,8 +1,11 @@
 """Japan's fold scheme loaded from config (ticket #70, outline step 2; D9 and the owner's answers).
 
-The scheme lives in `config/<country>/evaluation.yaml` under a top-level `folds:` section whose keys
-are exactly the FoldScheme fields; `load_scheme(path)` reads that section and refuses missing or
-unknown keys (through `FoldScheme.from_mapping`). Other top-level sections are left alone.
+The scheme lives in the country's packaged config,
+`src/horsetrack/countries/<country>/config/folds.yaml` (read through `load_country_yaml`, where
+main loads every country config), under a top-level `folds:` section whose keys are exactly the
+FoldScheme fields. `load_scheme(path)` reads that section from a file and
+`load_country_scheme(country)` from the country's `folds` config; both refuse missing or unknown
+keys (through `FoldScheme.from_mapping`). Other top-level sections are left alone.
 
 Japan, signed: quarters anchored on January, one quarter scored per fold, one quarter step, an
 expanding window, a 7-day embargo, and 22 quarters of minimum training, so that training runs from
@@ -17,10 +20,16 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from horsetrack.core import config as core_config
+
+# The country loader is reached through the module so that, before it exists, only the tests that
+# use it fail (an AttributeError naming it) while the file-loader tests still run.
+from horsetrack.core.eval import folds as folds_module
 from horsetrack.core.eval.folds import FoldScheme, load_scheme, walk_forward
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-JAPAN_CONFIG = REPO_ROOT / "config" / "japan" / "evaluation.yaml"
+JAPAN_CONFIG = REPO_ROOT / "src" / "horsetrack" / "countries" / "japan" / "config" / "folds.yaml"
+OLD_JAPAN_CONFIG = REPO_ROOT / "config" / "japan" / "evaluation.yaml"
 JAPAN_DATA_START = date(2014, 6, 7)  # a Saturday
 FIRST_SCORED_QUARTER = date(2020, 1, 1)
 
@@ -108,12 +117,82 @@ def test_load_scheme_refuses_an_unknown_field(tmp_path):
         load_scheme(path)
 
 
+# --- the country loader, on varied country configs ------------------------------------------------
+
+
+@pytest.fixture
+def countries_dir(tmp_path, monkeypatch):
+    """A stand-in for src/horsetrack/countries, so a country's config/folds.yaml can be written."""
+    monkeypatch.setattr(core_config, "_COUNTRIES", tmp_path)
+    core_config.load_country_yaml.cache_clear()
+    yield tmp_path
+    core_config.load_country_yaml.cache_clear()
+
+
+def write_country_folds(countries: Path, country: str, text: str) -> None:
+    path = countries / country / "config" / "folds.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+
+
+@pytest.mark.parametrize("case", LOADER_CASES)
+def test_load_country_scheme_reads_the_countrys_folds_config(countries_dir, case):
+    fields, extra = LOADER_CASES[case]
+    country = f"land-{case}"  # a distinct country per case, so no cached answer can carry over
+    write_country_folds(countries_dir, country, folds_yaml(fields, extra))
+    # a decoy beside it: the scheme comes from folds.yaml, not another file of the country
+    decoy = {**JAPAN_SCHEME, "embargo_days": 99}
+    (countries_dir / country / "config" / "evaluation.yaml").write_text(folds_yaml(decoy))
+    assert folds_module.load_country_scheme(country) == FoldScheme(**fields)
+
+
+@pytest.mark.parametrize("missing", ["unit", "embargo_days", "anchor_month"])
+def test_load_country_scheme_refuses_a_missing_field(countries_dir, missing):
+    country = f"missing-{missing}"
+    fields = {k: v for k, v in JAPAN_SCHEME.items() if k != missing}
+    write_country_folds(countries_dir, country, folds_yaml(fields))
+    with pytest.raises(ValueError, match=missing):
+        folds_module.load_country_scheme(country)
+
+
+def test_load_country_scheme_refuses_an_unknown_field(countries_dir):
+    write_country_folds(countries_dir, "unknown", folds_yaml({**JAPAN_SCHEME, "season_start": 1}))
+    with pytest.raises(ValueError, match="season_start"):
+        folds_module.load_country_scheme("unknown")
+
+
+BARE_CONFIGS = {
+    "empty": "",
+    "no-folds-section": "metrics:\n  primary: log_loss\n",
+    "folds-not-a-mapping": "folds: quarterly\n",
+}
+
+
+@pytest.mark.parametrize("case", BARE_CONFIGS)
+def test_load_country_scheme_refuses_a_config_without_a_folds_mapping(countries_dir, case):
+    write_country_folds(countries_dir, f"bare-{case}", BARE_CONFIGS[case])
+    with pytest.raises(ValueError, match="folds"):
+        folds_module.load_country_scheme(f"bare-{case}")
+
+
 # --- Japan's signed scheme ------------------------------------------------------------------------
 
 
 def test_the_japan_config_holds_the_signed_scheme():
     assert JAPAN_CONFIG.is_file(), f"missing {JAPAN_CONFIG.relative_to(REPO_ROOT)}"
     assert load_scheme(JAPAN_CONFIG) == FoldScheme(**JAPAN_SCHEME)
+
+
+def test_the_japan_scheme_loads_through_the_country_loader():
+    assert folds_module.load_country_scheme("japan") == FoldScheme(**JAPAN_SCHEME)
+
+
+def test_the_japan_scheme_has_one_home():
+    # a copy left at the old repo-root path would be a second, silently diverging source of truth
+    assert not OLD_JAPAN_CONFIG.exists(), (
+        f"{OLD_JAPAN_CONFIG.relative_to(REPO_ROOT)} should have moved to "
+        f"{JAPAN_CONFIG.relative_to(REPO_ROOT)}"
+    )
 
 
 def weekly_race_dates(start: date, end: date) -> pd.Series:
@@ -125,7 +204,7 @@ def weekly_race_dates(start: date, end: date) -> pd.Series:
 def test_japan_scheme_first_scores_2020_q1_after_training_on_2014_to_2019(end):
     dates = weekly_race_dates(JAPAN_DATA_START, end)
     py = [d.date() for d in dates]
-    folds = walk_forward(dates, scheme=load_scheme(JAPAN_CONFIG))
+    folds = walk_forward(dates, scheme=folds_module.load_country_scheme("japan"))
     assert folds, "the Japan scheme gave no folds"
 
     first = folds[0]

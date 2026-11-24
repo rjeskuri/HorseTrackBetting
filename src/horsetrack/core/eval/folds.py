@@ -8,7 +8,8 @@ at least `embargo_days` before the window's first scored row: all of them for an
 the last `min_train` units for a rolling one. Rows in `exclude` (a locked holdout) are in no fold,
 and a window the exclusion empties is dropped.
 
-The scheme itself (what a season is, the anchor month) is an owner decision and comes from config.
+The scheme itself (what a season is, the anchor month) is an owner decision and comes from config:
+the `folds:` section of countries/<country>/config/folds.yaml, read by `load_country_scheme`.
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yaml
+
+from horsetrack.core.config import load_country_yaml
 
 UNITS = ("day", "week", "month", "quarter", "year")
 WINDOWS = ("expanding", "rolling")
@@ -75,13 +78,22 @@ class FoldScheme:
         return cls(**{n: fields[n] for n in names})
 
 
-def load_scheme(path: str | Path) -> FoldScheme:
-    """The scheme in the `folds:` section of a config file; other sections are left alone."""
-    config = yaml.safe_load(Path(path).read_text())
+def _scheme_from_config(config: Any, source: str) -> FoldScheme:
+    """The scheme in the `folds:` section of a parsed config; other sections are left alone."""
     folds = config.get("folds") if isinstance(config, Mapping) else None
     if not isinstance(folds, Mapping):
-        raise ValueError(f"{path} has no `folds:` mapping")
+        raise ValueError(f"{source} has no `folds:` mapping")
     return FoldScheme.from_mapping(folds)
+
+
+def load_scheme(path: str | Path) -> FoldScheme:
+    """The scheme in the `folds:` section of a config file."""
+    return _scheme_from_config(yaml.safe_load(Path(path).read_text()), str(path))
+
+
+def load_country_scheme(country: str) -> FoldScheme:
+    """The scheme in the `folds:` section of countries/<country>/config/folds.yaml."""
+    return _scheme_from_config(load_country_yaml(country, "folds"), f"{country} folds config")
 
 
 @dataclass(frozen=True, eq=False)

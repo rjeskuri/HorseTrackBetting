@@ -1,6 +1,6 @@
-# Japan evaluation settings.
+# Japan's walk-forward fold scheme, read by horsetrack.core.eval.folds.load_country_scheme.
 #
-# folds: the walk-forward scheme (owner decision D9: quarter unit, quarterly refit, expanding
+# folds: the scheme (owner decision D9: quarter unit, quarterly refit, expanding
 # window, 1-week embargo). Owner's answer on #70: the Japan season is the calendar year, so
 # quarters are anchored on January; min_train 22 trains on 2014-06-07..2019-12-31 and the first
 # scored quarter is 2020-Q1.
