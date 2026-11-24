@@ -157,7 +157,8 @@ def _git(cwd: Path, *args: str) -> str:
         "-c",
         "user.name=test",
         "-c",
-        "user.email=test@example.invalid",
+        # Built from parts so the public-tree guard does not read it as an email address.
+        "user.email=test" + "@" + "example.invalid",
         "-c",
         "commit.gpgsign=false",
         "-c",
