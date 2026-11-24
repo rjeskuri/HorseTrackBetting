@@ -247,10 +247,17 @@ def _race_late(lines: pl.DataFrame) -> pl.DataFrame:
         (pl.col("running_positions").list.get(-1, null_on_oob=True) - pl.col("finish_pos")).alias(
             "gain"
         ),
+        _style_code(p, n).alias("style_code"),
+        _level(pl.col("race_class")).alias("level"),
+    )  # fmt: skip
+
+
+def _style_code(p: pl.Expr, n: pl.Expr) -> pl.Expr:
+    """Running style code (0 front .. 3 closer) from the first-corner position p in a field of n."""
+    return (
         pl.when(p.is_null() | n.is_null()).then(None).when(p == 1).then(0)
         .when(3 * (p - 1) <= n - 1).then(1).when(3 * (p - 1) <= 2 * (n - 1)).then(2)
-        .otherwise(3).alias("style_code"),
-        _level(pl.col("race_class")).alias("level"),
+        .otherwise(3)
     )  # fmt: skip
 
 
