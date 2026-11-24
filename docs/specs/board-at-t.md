@@ -16,8 +16,12 @@ Code: `src/horsetrack/countries/japan/board/snapshot.py`. Input: rows of the odd
 - A runner whose latest WIN or PLACE row has `status_raw` `SCR` is in `scratched` and has no price
   in any pool, Wide pairs included. Any row with null odds is unpriced.
 - `totals[pool]` is the `investment` of the latest `__pool__` row of that pool that carries one.
-- `capture_utc` is the oldest availability time among the price rows used (scratched rows
-  included, totals not), so the board's staleness is never understated.
+- `capture_utc` is the oldest availability time among the price rows used: the rows that reach
+  `win`, `place` or `wide`, plus the `SCR` rows that put a runner in `scratched`. Totals do not
+  count, and neither does a row dropped for naming a scratched runner (a Wide pair the logger
+  stopped refreshing after a scratch, or a stale priced PLACE row), so staleness is neither
+  understated nor pinned to rows the board does not show. When no row is used, it is the oldest
+  among all the latest price rows.
 - No price row (WIN, PLACE or Wide) of the race available by t gives None, even when pool totals
   are.
 - `starters` is the number of runners with a WIN price; `context()` gives venue and race number

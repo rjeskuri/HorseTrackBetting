@@ -3,7 +3,8 @@
 Rules (docs/specs/board-at-t.md):
 - A row is available at its `fetched_utc`, else at its `snapshot_utc` (HKTrack rows have no
   fetched_utc). The board at t takes, per (pool, combination), the latest row available at or
-  before t; `capture_utc` is the oldest availability time among the price rows used.
+  before t; `capture_utc` is the oldest availability time among the price rows on the board and
+  the SCR rows (a stale row dropped for naming a scratched runner does not count).
 - A row is final when `source_update_utc` is null and '最終オッズ' is in `page_state` or
   `status_raw`. The final board is the first capture (rows sharing a snapshot_utc) whose priced WIN
   rows are all final.
@@ -136,12 +137,17 @@ def _build(
     win: dict[int, float] = {}
     place: dict[int, tuple[float, float | None]] = {}
     wide: dict[tuple[int, int], tuple[float, float | None]] = {}
-    for (pool, combination), (_, row) in prices.items():
+    used: list[datetime] = []  # availability of the rows the board shows, SCR rows included
+    for (pool, combination), (available, row) in prices.items():
+        if pool in (WIN, PLACE) and row.get("status_raw") == SCRATCHED:
+            used.append(available)
+            continue
         if not _priced(row):
             continue
         runners = combination if pool == WIDE else (combination,)
         if any(runner in scratched for runner in runners):
             continue
+        used.append(available)
         odds = float(row["odds"])
         if pool == WIN:
             win[combination] = odds
@@ -161,7 +167,7 @@ def _build(
         race_id=race_id,
         post_utc=post_utc,
         at_utc=at_utc,
-        capture_utc=min(available for available, _ in prices.values()),
+        capture_utc=min(used or (available for available, _ in prices.values())),
         final=_win_rows_final(win_rows),
         win=win,
         place=place,

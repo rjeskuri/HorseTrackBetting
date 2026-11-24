@@ -304,6 +304,42 @@ def test_scratched_runners_are_listed_and_unpriced():
     assert isinstance(after.scratched, frozenset)
 
 
+def test_a_late_scratch_drops_its_wide_pairs_and_their_staleness():
+    """HKTrack's logger stops logging Wide pairs that name a scratched runner, so their last rows
+    stay behind at the pre-scratch capture. They are not on the board, so they do not set
+    capture_utc; the SCR rows do count, pool totals do not."""
+    early, scratch = at(5, 0), at(5, 57)
+    rows = [
+        row("WIN", "1", 2.5, fetched=early),
+        row("WIN", "4", 6.0, fetched=early),
+        row("WIN", "7", 9.0, fetched=early),
+        row("PLACE", "4", 1.8, fetched=early, odds_hi=2.4),
+        row("QUINELLA_PLACE", "1,4", 3.1, fetched=early, odds_hi=3.9),
+        row("QUINELLA_PLACE", "4,7", 7.2, fetched=early, odds_hi=8.8),
+        row("QUINELLA_PLACE", "1,7", 4.4, fetched=early, odds_hi=5.6),
+        row("WIN", "__pool__", None, fetched=early, investment=90_000_000),  # never refreshed
+        # runner 4 scratched at 05:57; fresh rows for everything else, no pair naming 4
+        row("WIN", "1", 2.2, fetched=scratch),
+        row("WIN", "4", None, fetched=scratch),
+        row("WIN", "7", 8.5, fetched=scratch),
+        row("PLACE", "4", None, fetched=scratch),
+        row("QUINELLA_PLACE", "1,7", 4.0, fetched=scratch, odds_hi=5.1),
+    ]
+    before = snapshot.board_at(rows, RACE, at(5, 30))
+    assert before.wide == {(1, 4): (3.1, 3.9), (4, 7): (7.2, 8.8), (1, 7): (4.4, 5.6)}
+    assert before.capture_utc == early
+
+    board = snapshot.board_at(rows, RACE, at(5, 58))
+    assert board.scratched == frozenset({4})
+    assert board.win == {1: 2.2, 7: 8.5}
+    assert board.place == {}
+    assert board.wide == {(1, 7): (4.0, 5.1)}
+    assert (1, 4) not in board.wide and (4, 7) not in board.wide
+    assert board.totals == {"WIN": 90_000_000}
+    # every row on the board, SCR rows included, was available at 05:57
+    assert board.capture_utc == scratch
+
+
 def test_capture_utc_is_the_oldest_row_used():
     rows = [
         row("WIN", "7", 4.1, fetched=at(5, 50)),
@@ -442,6 +478,29 @@ def test_a_scratched_runner_does_not_block_the_final_capture(hktrack):
     assert board.scratched == frozenset({5})
 
 
+def test_final_board_times_come_from_the_final_capture():
+    """at_utc: the latest availability in the final capture; capture_utc: the oldest among its
+    price rows. Neither reads another capture."""
+    rows = [r for r in _race_to_the_final(hktrack=False) if r["snapshot_utc"] != iso(at(6, 2))]
+    snap = at(6, 2)
+    for pool, combination, odds, fetched in [
+        ("WIN", "7", 3.2, at(6, 2, 7)),
+        ("WIN", "3", 8.5, at(6, 2, 3)),
+        ("PLACE", "7", 1.3, at(6, 2, 11)),
+    ]:
+        r = final_row(pool, combination, odds, snap=snap, hktrack=False)
+        r["fetched_utc"] = iso(fetched)
+        rows.append(r)
+    board = snapshot.final_board(rows, RACE)
+    assert board.win == {7: 3.2, 3: 8.5}
+    assert board.at_utc == at(6, 2, 11)
+    assert board.capture_utc == at(6, 2, 3)
+
+    hk = snapshot.final_board(_race_to_the_final(hktrack=True), RACE)
+    assert hk.at_utc == at(6, 2)
+    assert hk.capture_utc == at(6, 2)
+
+
 def test_a_race_never_final_gives_none():
     rows = [
         row("WIN", "7", 3.6, fetched=at(5, 58), page_state="発売中"),
@@ -528,6 +587,17 @@ def test_post_times_fall_back_to_the_hktrack_card(data_dir):
         datetime(2026, 11, 22, 0, 0, tzinfo=UTC),
     )
     assert snapshot.post_times_for(day, "KYO") == got
+
+
+def test_a_card_time_without_an_offset_is_japan_time(data_dir):
+    day = date(2026, 11, 22)
+    _card(day, "KYO", {1: "2026-11-22T10:05:00", 12: "2026-11-22T16:30:00+09:00"})
+    got = snapshot.post_times_for(day, "KYO")
+    assert got == {
+        1: datetime(2026, 11, 22, 1, 5, tzinfo=UTC),
+        12: datetime(2026, 11, 22, 7, 30, tzinfo=UTC),
+    }
+    assert _aware_utc(got.values())
 
 
 def test_post_times_with_neither_source_are_empty(data_dir):
