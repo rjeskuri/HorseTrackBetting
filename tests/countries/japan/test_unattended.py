@@ -12,18 +12,37 @@ test_log_day_cli.py: `utc_now`, `sleep` and `make_fetcher`, looked up at call ti
   - the block marker logs_dir('japan')/jra-block.txt has a line `<host> <race date> ...` for the
     JRA official host (jra.yaml hosts.official) and today: the line schedule.run_day appends when
     a 403/429 opens the breaker;
-  - another open file holds fcntl.flock(LOCK_EX) on logs_dir('japan')/log-day.lock. A start that
-    goes on takes fcntl.flock(fd, LOCK_EX | LOCK_NB) on that file (never a blocking wait) and keeps
-    it until it exits; the file existing blocks nothing;
+  - another open file holds fcntl.flock(LOCK_EX) on logs_dir('japan')/log-day.lock: another
+    --unattended start or an attended log-day (below). A start that goes on takes
+    fcntl.flock(fd, LOCK_EX | LOCK_NB) on that file (never a blocking wait) and keeps it until it
+    exits; the file existing blocks nothing;
   - the no-meeting marker logs_dir('japan')/jra-no-meeting.txt has a line whose first field is
     today's date (ISO). Its lines are `<race date> at=<UTC instant>`, appended;
+  - the day-done marker logs_dir('japan')/jra-day-done.txt has a line whose first field is today's
+    date (ISO). Its lines are `<race date> at=<UTC instant>`, appended;
   - the time is past today's stop.
+  The markers are read under the lock.
 - Otherwise it runs the day as log-day does (run_day with logger.yaml and the block marker above);
   as logger.yaml says, nothing is requested before the first window. The venues come from one
   discovery request; when it answers with no venue, the start appends today's no-meeting line and
   exits 0 (a blocked discovery is a block, not a day without racing: no no-meeting line).
-- So after a block, or on a day without racing, every later start that day sends nothing; a line
-  for another day, or for another host, blocks nothing.
+- Ruling: a start whose run of the day finished appends today's day-done line, `at=` being
+  utc_now() once run_day has returned. Finished means run_day returned, with at least one venue,
+  and the day was not stopped by a block (DaySummary.stopped is not 'circuit_open': a block has its
+  own marker, and clearing that line by hand resumes the day). A run that raised, or that was
+  terminated before run_day returned, writes no day-done line, so the next start resumes the day.
+  (Without it a start after the last race but before the stop rediscovers, rereads post times
+  and appends a health block of 'logged 0 rows' alerts.)
+- So after a block, on a day without racing, or once the day's run has finished, every later start
+  that day sends nothing and appends no health line; a line for another day, or for another host,
+  blocks nothing.
+
+Ruling: an attended `log-day` (no --unattended; any --date, --venues, --pools) takes the same
+fcntl.flock(fd, LOCK_EX | LOCK_NB) on logs_dir('japan')/log-day.lock for its whole run, so a manual
+run next to the agent never doubles the per-host rate to the JRA site. When another open file holds
+the lock it sends no request, does not sleep, appends no health line and exits 1 (the module's error
+code: the owner at the terminal sees it), with one `ERROR` line on stderr that names the lock file
+(`log-day.lock`). `--dry-run` takes no lock: it prints its plan and exits 0 while the lock is held.
 
 `launchd` (module horsetrack.countries.japan.logger.launchd, registered on the japan group as
 `launchd`): `horsetrack japan launchd --print | --install | --uninstall`.
@@ -66,7 +85,7 @@ import subprocess
 import sys
 import textwrap
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -175,6 +194,10 @@ class Start:
     def output(self) -> str:
         return plain(self.result.output)
 
+    @property
+    def stderr(self) -> str:
+        return plain(self.result.stderr)
+
 
 def plain(text: str) -> str:
     return ANSI.sub("", text)
@@ -187,9 +210,10 @@ def start(
     *,
     site: Site | None = None,
     sleep: Callable[[float], None] | None = None,
+    args: Sequence[str] = ("--unattended",),
 ) -> Start:
-    """One `horsetrack japan log-day --unattended`, as launchd starts it: the seams on the fake
-    clock, a fresh JRADB double over `world` (or `site`)."""
+    """One `horsetrack japan log-day --unattended` (or log-day with `args`), as launchd starts it:
+    the seams on the fake clock, a fresh JRADB double over `world` (or `site`)."""
     mod = importlib.import_module(LOG_DAY)
     site = site if site is not None else Site(dict(world.pages), clock=clock)
     monkeypatch.setattr(mod, "utc_now", clock.now)
@@ -198,9 +222,9 @@ def start(
     from horsetrack.cli import app
 
     before = clock.slept
-    result = CliRunner().invoke(app, ["japan", "log-day", "--unattended"])
+    result = CliRunner().invoke(app, ["japan", "log-day", *args])
     out = plain(result.output)
-    assert "No such option" not in out and "Usage:" not in out, f"--unattended refused: {out}"
+    assert "No such option" not in out and "Usage:" not in out, f"{list(args)} refused: {out}"
     return Start(result, site, clock.slept - before)
 
 
@@ -259,6 +283,49 @@ def write_block_lines(*lines: tuple[str, date, int]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def day_done_lines() -> list[tuple[str, datetime | None]]:
+    """(race date, the at= instant or None) of every line of the day-done marker."""
+    path = logs() / "jra-day-done.txt"
+    if not path.is_file():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        stamps = [f[3:] for f in fields[1:] if f.startswith("at=")]
+        instant = None
+        if stamps:
+            text = stamps[0][:-1] + "+00:00" if stamps[0].endswith("Z") else stamps[0]
+            instant = datetime.fromisoformat(text)
+        out.append((fields[0], instant))
+    return out
+
+
+def day_done_days() -> list[str]:
+    return [day for day, _ in day_done_lines()]
+
+
+def write_day_done_lines(*days: date) -> None:
+    """Day-done lines as a finished start appends them: `<race date> at=<UTC instant>`."""
+    path = logs() / "jra-day-done.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "".join(f"{day.isoformat()} at={at(day, 10, 31).isoformat()}\n" for day in days)
+    path.write_text(text, encoding="utf-8")
+
+
+def health_bytes() -> bytes | None:
+    path = logs() / "health.log"
+    return path.read_bytes() if path.is_file() else None
+
+
+def day_end(world: World, day: date) -> datetime:
+    """When the day's last venue ends: its last post + after_last_race_min."""
+    after = timedelta(minutes=load_country_yaml("japan", "logger")["after_last_race_min"])
+    posts = [t for m in world.days[day] for t in world.expected_post_times(day, m.venue).values()]
+    return max(posts) + after
+
+
 def logged_rows(day: date, venue: str) -> list[dict]:
     path = paths.odds_snapshot_path("jra", day.isoformat(), venue)
     return list(odds_log.read_rows(path)) if path.exists() else []
@@ -295,9 +362,9 @@ def holding(path: Path) -> Iterator[None]:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
-# A second `log-day --unattended` in a process of its own, on the same data dir: the seams on a fake
-# clock from `now`, a JRADB double with no racing that day, no network. It writes what it did as
-# JSON to `out`.
+# A second `log-day --unattended` (or log-day with the arguments after `out`) in a process of its
+# own, on the same data dir: the seams on a fake clock from `now`, a JRADB double with no racing
+# that day, no network. It writes what it did as JSON to `out`.
 SECOND_START = textwrap.dedent(
     """
     import importlib
@@ -307,6 +374,7 @@ SECOND_START = textwrap.dedent(
     from pathlib import Path
 
     tests_dir, repo, now, out = sys.argv[1:5]
+    args = sys.argv[5:]
     sys.path.insert(0, tests_dir)
 
     import httpx
@@ -344,19 +412,22 @@ SECOND_START = textwrap.dedent(
 
     from horsetrack.cli import app
 
-    result = CliRunner().invoke(app, ["japan", "log-day", "--unattended"])
+    result = CliRunner().invoke(app, ["japan", "log-day", *args])
     done = {
         "exit_code": result.exit_code,
         "requests": len(site.seen),
         "slept": clock["slept"],
         "output": result.output,
+        "stderr": result.stderr,
     }
     Path(out).write_text(json.dumps(done))
     """
 )
 
 
-def start_in_another_process(tmp_path: Path, now: datetime) -> dict:
+def start_in_another_process(
+    tmp_path: Path, now: datetime, args: Sequence[str] = ("--unattended",)
+) -> dict:
     driver = tmp_path / "second_start.py"
     driver.write_text(SECOND_START, encoding="utf-8")
     out = tmp_path / "second_start.json"
@@ -365,7 +436,7 @@ def start_in_another_process(tmp_path: Path, now: datetime) -> dict:
     argv = [sys.executable, str(driver), str(TESTS_DIR), str(tmp_path / "repo"), now.isoformat()]
     # A blocking lock would wait for the first start, which waits for this: the timeout ends it.
     proc = subprocess.run(
-        [*argv, str(out)], env=env, capture_output=True, text=True, timeout=30, check=False
+        [*argv, str(out), *args], env=env, capture_output=True, text=True, timeout=30, check=False
     )
     if proc.returncode != 0 or not out.is_file():
         return {"error": f"exit {proc.returncode}: {proc.stderr[-3000:]}"}
@@ -411,6 +482,86 @@ def test_a_running_logger_holds_the_lock_and_a_second_start_exits_0(monkeypatch,
     assert after.requests == 1, f"{after.requests} requests once the lock was free"
 
 
+def one_error_naming_the_lock(stderr: str) -> list[str]:
+    lines = [line for line in plain(stderr).splitlines() if line.strip()]
+    ok = len(lines) == 1 and lines[0].startswith("ERROR") and "log-day.lock" in lines[0]
+    return [] if ok else lines
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["--date", SAT.isoformat()],
+        ["--date", MON.isoformat()],
+        ["--date", SAT.isoformat(), "--venues", "TOK", "--pools", "WIN"],
+    ],
+    ids=["today", "a-racing-day", "a-day-without-racing", "venues-and-pools"],
+)
+def test_an_attended_log_day_takes_the_same_lock(monkeypatch, args):
+    """The owner's `log-day` while the agent (here: the test, a genuine flock holder) holds the
+    lock: refused before any request, an error the owner sees. --dry-run is not refused."""
+    lock, world = lock_path(), week()
+    with holding(lock):
+        refused = start(monkeypatch, Clock(at(SAT, 9, 25)), world, args=args)
+        dry = start(monkeypatch, Clock(at(SAT, 9, 25)), world, args=[*args, "--dry-run"])
+
+    assert refused.code == 1, f"exit {refused.code} while the lock was held: {refused.output}"
+    assert refused.requests == 0, f"{refused.requests} request(s) while the lock was held"
+    assert refused.waited == 0.0, f"it waited {refused.waited} s instead of exiting"
+    assert not one_error_naming_the_lock(refused.result.stderr), (
+        f"stderr is not one ERROR line naming log-day.lock: {refused.stderr!r}"
+    )
+    assert health_bytes() is None, "a refused log-day appended health lines"
+    assert not logged_rows(SAT, "TOK")
+
+    assert dry.code == 0, f"--dry-run refused while the lock was held: {dry.output}"
+    assert dry.requests == 0
+
+    # The flock, not the file: once the holder lets go, the same kind of run goes on.
+    after = start(monkeypatch, Clock(at(MON, 5, 0)), world, args=["--date", MON.isoformat()])
+    assert after.code in (0, 2), after.output
+    assert after.requests == 1, f"{after.requests} requests once the lock was free"
+
+
+@pytest.mark.parametrize(
+    "second_args, second_code",
+    [(["--unattended"], 0), ([], 1)],
+    ids=["then-an-unattended-start", "then-another-attended-log-day"],
+)
+def test_a_running_attended_log_day_holds_the_lock_against_a_second_start(
+    monkeypatch, tmp_path, second_args, second_code
+):
+    """The reverse order: the owner's log-day runs, and a start in another process (launchd's, or
+    a second terminal's) sends nothing meanwhile."""
+    lock = lock_path()
+    clock = Clock(at(SAT, 9, 25))
+    held: list[bool] = []
+    second: dict = {}
+
+    def sleep(seconds: float) -> None:
+        held.append(held_elsewhere(lock))
+        if not second:
+            try:
+                second.update(start_in_another_process(tmp_path, clock.now(), second_args))
+            except Exception as exc:  # e.g. a blocking lock: the second start waits for the first
+                second["error"] = repr(exc)
+        clock.sleep(seconds)
+
+    first = start(monkeypatch, clock, week(), sleep=sleep, args=[])
+
+    assert first.code in (0, 2), first.output
+    assert logged_rows(SAT, "TOK"), f"the attended log-day did not log the day: {first.output}"
+    assert held, "the attended log-day never waited"
+    assert all(held), f"the lock was free at {held.count(False)} of {len(held)} waits of the run"
+    assert "error" not in second, second.get("error")
+    got = (second["exit_code"], second["requests"], second["slept"])
+    assert got == (second_code, 0, 0.0), f"{second_args} while log-day runs: {second}"
+    if second_code:
+        assert not one_error_naming_the_lock(second["stderr"]), second["stderr"]
+    assert not held_elsewhere(lock), "the lock outlived the run"
+
+
 # ---------------------------------------------------------------- after a block
 
 
@@ -439,6 +590,7 @@ def test_a_block_marker_for_today_exits_0_without_a_request(monkeypatch, today, 
         )
         assert [HOST, today.isoformat()] in block_lines(), "no block line for today"
         assert today.isoformat() not in no_meeting_days(), "a block is not a day without racing"
+        assert today.isoformat() not in day_done_days(), "a block is not a finished day"
 
     for t in later:
         s = start(monkeypatch, Clock(t), world)
@@ -487,6 +639,105 @@ def test_a_day_without_racing_costs_one_request_per_day(monkeypatch, today, firs
     assert s.requests == 1, f"the next day's first start sent {s.requests} requests"
     assert sorted(no_meeting_days()) == [today.isoformat(), nxt.isoformat()]
     s = start(monkeypatch, Clock(at(nxt, 11, 0)), world)
+    assert (s.code, s.requests, s.waited) == (0, 0, 0.0), s.output
+
+
+# ---------------------------------------------------------------- once the day's run has finished
+
+
+TWO_VENUE_SUN = {SUN: [Meeting("KYO", 1, nichi=8), Meeting("NAK", 1, nichi=8)]}
+
+
+@pytest.mark.parametrize(
+    "today, days, first, later",
+    [
+        # TOK's one race is off at 09:35 and ends at 09:45; 10:15 is the reviewer's case.
+        (SAT, None, (9, 25), [(10, 15), (13, 0), (16, 44, 59)]),
+        # Both venues end at 09:45; the first start comes in the 5-minute window.
+        (SUN, TWO_VENUE_SUN, (9, 0), [(9, 46), (12, 30), (16, 44, 59)]),
+        # Today's line from an earlier start; lines for other days block nothing.
+        (SAT, None, None, [(9, 25), (12, 0)]),
+    ],
+    ids=["one-venue-ended-mid-morning", "two-venues", "marker-left-earlier"],
+)
+def test_a_start_after_the_day_has_finished_exits_0_without_a_request(
+    monkeypatch, today, days, first, later
+):
+    world = week() if days is None else World(days)
+    venues = [m.venue for m in world.days[today]]
+    if first is None:
+        write_day_done_lines(FRI, today, date(2026, 12, 5))
+    else:
+        s = start(monkeypatch, Clock(at(today, *first)), world)
+        assert s.code in (0, 2), s.output
+        for venue in venues:
+            assert logged_rows(today, venue), f"{today} {venue} logged nothing: {s.output}"
+        assert day_done_days() == [today.isoformat()], (
+            f"day-done lines {day_done_lines()} after the day's run finished"
+        )
+        [(_, finished)] = day_done_lines()
+        assert finished is not None and finished.utcoffset() == timedelta(0), day_done_lines()
+        assert finished >= max(s.site.at), "the day-done line predates the run's last request"
+        assert finished >= day_end(world, today), "the day was marked done before it ended"
+    health = health_bytes()
+
+    for hms in later:
+        t = at(today, *hms)
+        assert (first is None or t > day_end(world, today)) and t < stop(today)
+        s = start(monkeypatch, Clock(t), world)
+        when = t.astimezone(TOKYO).strftime("%H:%M:%S")
+        assert s.code == 0, f"a start at {when} once the day was done: {s.output}"
+        assert s.requests == 0, f"a start at {when} sent {s.requests} request(s): the day was done"
+        assert s.waited == 0.0, f"a start at {when} waited {s.waited} s instead of exiting"
+        assert health_bytes() == health, f"a start at {when} appended health lines"
+    assert day_done_days().count(today.isoformat()) == 1, day_done_lines()
+
+    # The day-done line is for today only: Monday, without racing, has its one discovery.
+    s = start(monkeypatch, Clock(at(MON, 5, 0)), world)
+    assert s.code == 0, s.output
+    assert s.requests == 1, f"Monday sent {s.requests} requests"
+
+
+class Crash(Exception):
+    """An error from inside the day's run."""
+
+
+@pytest.mark.parametrize(
+    "death, code",
+    [(lambda: Crash("synthetic failure mid-day"), 1), (lambda: SystemExit(143), 143)],
+    ids=["an-error", "terminated"],
+)
+def test_a_run_interrupted_mid_day_is_resumed_by_the_next_start(monkeypatch, death, code):
+    """A run that died before run_day returned is not a finished day: the next start goes on."""
+    # Posts 09:35 and 10:10, so the day ends at 10:20: the run dies between the races, and the
+    # next start comes in race 2's hot window.
+    world = World({SAT: [Meeting("TOK", 2)]})
+    clock = Clock(at(SAT, 9, 41))
+    dies_at = at(SAT, 9, 47)
+
+    def sleep(seconds: float) -> None:
+        if clock.now() >= dies_at:
+            raise death()
+        clock.sleep(seconds)
+
+    first = start(monkeypatch, clock, world, sleep=sleep)
+    assert first.code == code, f"exit {first.code}: {first.output}"
+    assert logged_rows(SAT, "TOK"), "the run logged nothing before it died"
+    assert SAT.isoformat() not in day_done_days(), "a run that died counted as the day done"
+
+    resume_at = at(SAT, 10, 12)
+    resumed = start(monkeypatch, Clock(resume_at), world)
+    assert resumed.code in (0, 2), resumed.output
+    assert resumed.requests >= 1, "the next start did not resume the day"
+    new = {
+        r["race_id"]
+        for r in logged_rows(SAT, "TOK")
+        if datetime.fromisoformat(r["snapshot_utc"]) >= resume_at
+    }
+    assert f"jra:{SAT.isoformat()}:TOK:02" in new, f"race 2 not logged after the resume: {new}"
+    assert day_done_days() == [SAT.isoformat()], "the resumed run finished: no day-done line"
+
+    s = start(monkeypatch, Clock(at(SAT, 10, 45)), world)
     assert (s.code, s.requests, s.waited) == (0, 0, 0.0), s.output
 
 
