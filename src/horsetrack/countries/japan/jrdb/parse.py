@@ -176,14 +176,15 @@ def _records(family: str, data: bytes, width: int) -> list[bytes]:
     return records
 
 
-def _by_value(raw: np.ndarray, convert: Callable[[bytes], object]) -> np.ndarray:
-    """``convert`` applied once per distinct byte string (values repeat a lot): an object array."""
+def _by_value(raw: np.ndarray, convert: Callable[[bytes], object]) -> pd.Series:
+    """``convert`` applied once per distinct byte string (values repeat a lot): an object Series.
+    The dtype is explicit because pandas 3 infers ``str`` from strings, turning None into NaN."""
     if raw.size == 0:
-        return np.empty(0, dtype=object)
+        return pd.Series([], dtype=object)
     values, inverse = np.unique(raw, return_inverse=True)
     converted = np.empty(len(values), dtype=object)
     converted[:] = [convert(bytes(v)) for v in values]
-    return converted[inverse.reshape(-1)]
+    return pd.Series(converted[inverse.reshape(-1)], dtype=object)
 
 
 def _text(raw: bytes) -> str | None:
