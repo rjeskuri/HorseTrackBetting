@@ -1,0 +1,150 @@
+# Japan Racing Association (central racing): the facts the logger and parsers need, as data.
+# History comes from netkeiba (private use only: scraping code is fine, but its data never enters git);
+# live odds come from the JRA site.
+source: jra
+display_name: Japan Racing Association
+timezone: Asia/Tokyo
+currency: JPY
+unit_stake: 100           # dividends are quoted per 100 yen; minimum bet
+odds_format: decimal_incl_stake
+
+hosts:
+  official: https://www.jra.go.jp
+  db: https://db.netkeiba.com        # race lists and results (history); private use only
+  race: https://race.netkeiba.com    # monthly calendar, five-run cards; private use only
+
+# Short code -> netkeiba venue number (characters 5-6 of a race id) and the name the site prints.
+venues:
+  SAP: {number: "01", name: 札幌}
+  HAK: {number: "02", name: 函館}
+  FKS: {number: "03", name: 福島}
+  NII: {number: "04", name: 新潟}
+  TOK: {number: "05", name: 東京}
+  NAK: {number: "06", name: 中山}
+  CKY: {number: "07", name: 中京}
+  KYO: {number: "08", name: 京都}
+  HSN: {number: "09", name: 阪神}
+  KOK: {number: "10", name: 小倉}
+
+# Pools. `takeout` = 1 - payout rate, in force since 2014-06-07. Before that date the rate varied per race:
+# estimate it from the overround, never assume today's.
+# Dividends per 100 yen are multiples of 10, with a 110-yen floor ("Plus 10").
+# `takeout_unknown_before_history`: Pool.takeout_on returns None before 2014-06-07.
+# `payout_rule: stake_back_share` (Place and Wide): a winning ticket gets its stake back plus 1/P of the
+# losers' money, so the board shows a min-max range per ticket.
+pools:
+  WIN:
+    labels: ["単勝", "WIN"]
+    takeout: 0.20
+    takeout_history: [["2014-06-07", 0.20]]
+    takeout_unknown_before_history: true
+    legs: 1
+    kind: win
+    dividend_step: 10
+    min_dividend: 110
+    enabled: true
+  PLACE:
+    labels: ["複勝", "PLACE"]
+    takeout: 0.20
+    takeout_history: [["2014-06-07", 0.20]]
+    takeout_unknown_before_history: true
+    legs: 1
+    kind: place
+    dividend_step: 10
+    min_dividend: 110
+    # places paid by runners at the start of sales: 8+ pay 3, 5-7 pay 2, 4 or fewer: not sold
+    places_paid: [{min_starters: 8, places: 3}, {min_starters: 5, places: 2}]
+    payout_rule: stake_back_share
+    enabled: true
+  BRACKET_QUINELLA:
+    labels: ["枠連", "BRACKET QUINELLA"]
+    takeout: 0.225
+    takeout_history: [["2014-06-07", 0.225]]
+    takeout_unknown_before_history: true
+    legs: 2
+    kind: unordered_top2_bracket
+    dividend_step: 10
+    min_dividend: 110
+    enabled: false        # sold only with 9+ runners; needs the horse -> bracket map
+  QUINELLA:
+    labels: ["馬連", "QUINELLA"]
+    takeout: 0.225
+    takeout_history: [["2014-06-07", 0.225]]
+    takeout_unknown_before_history: true
+    legs: 2
+    kind: unordered_top2
+    dividend_step: 10
+    min_dividend: 110
+    enabled: true
+  QUINELLA_PLACE:
+    labels: ["ワイド", "WIDE"]
+    takeout: 0.225
+    takeout_history: [["2014-06-07", 0.225]]
+    takeout_unknown_before_history: true
+    legs: 2
+    kind: any2_of_top3
+    dividend_step: 10
+    min_dividend: 110
+    # any two of the first three, sold from 4 runners: three places even where Place pays two
+    places_paid: [{min_starters: 4, places: 3}]
+    payout_rule: stake_back_share
+    enabled: true
+  FORECAST:
+    labels: ["馬単", "EXACTA"]
+    takeout: 0.25
+    takeout_history: [["2014-06-07", 0.25]]
+    takeout_unknown_before_history: true
+    legs: 2
+    kind: ordered_top2
+    dividend_step: 10
+    min_dividend: 110
+    enabled: false
+  TRIO:
+    labels: ["3連複", "三連複", "TRIO"]
+    takeout: 0.25
+    takeout_history: [["2014-06-07", 0.25]]
+    takeout_unknown_before_history: true
+    legs: 3
+    kind: unordered_top3
+    dividend_step: 10
+    min_dividend: 110
+    enabled: false
+  TIERCE:
+    labels: ["3連単", "三連単", "TRIFECTA"]
+    takeout: 0.275
+    takeout_history: [["2014-06-07", 0.275]]
+    takeout_unknown_before_history: true
+    legs: 3
+    kind: ordered_top3
+    dividend_step: 10
+    min_dividend: 110
+    enabled: false
+  WIN5:
+    labels: ["WIN5"]
+    takeout: 0.30
+    takeout_history: [["2014-06-07", 0.30]]
+    takeout_unknown_before_history: true
+    legs: 5
+    kind: multi_race_win
+    dividend_step: 10
+    min_dividend: 110
+    enabled: false        # carries over; out of scope
+
+# Displayed odds are floored to 0.1 at every level: add back half a step everywhere.
+odds_display:
+  cap: 9999.9
+  threshold: 0
+  detruncate_below: 0.05
+  detruncate_at_or_above: 0.05
+
+# Politeness per host. The 1 request a second rate is HKTrack's value and is an ASSUMPTION here, not a
+# measured limit of these sites: revisit it before any large backfill. The user agent is not set here.
+http:
+  default: {requests_per_second: 1.0, jitter: 0.3}   # +/- fraction applied to each inter-request gap
+  hosts:
+    www.jra.go.jp: {requests_per_second: 1.0, jitter: 0.1}
+    db.netkeiba.com: {requests_per_second: 1.0, jitter: 0.1}
+    race.netkeiba.com: {requests_per_second: 1.0, jitter: 0.1}
+  circuit_breaker:
+    stop_on_status: [403, 429]
+    max_consecutive_failures: 5
