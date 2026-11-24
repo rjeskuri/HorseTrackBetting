@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+import numpy as np
+
 from horsetrack.core import config
 from horsetrack.countries.japan.shadow.log import NO_BOARD, ShadowLog, shadow_log_path
 
@@ -39,6 +41,9 @@ LOG_KIND = "formation"
 
 _EPS = 1e-9
 _DIGITS = 9  # gains are compared after rounding, so summation order cannot break a tie
+_SLACK = 1e-6  # the search cuts a branch only when its bound is this far below the best gain
+# the search's Lagrange multipliers: the gains ranked at these multiples of the ticket limit
+_RANKS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.25, 1.5, 2.0, 3.0)
 
 
 # ---------------------------------------------------------------- pools and combinations
@@ -52,8 +57,12 @@ def _legs(pool: str) -> int:
 
 
 def _canon(pool: str, combo: Iterable[int]) -> Combo:
+    return _canon_order(ORDERED[pool], combo)
+
+
+def _canon_order(ordered: bool, combo: Iterable[int]) -> Combo:
     t = tuple(combo)
-    return t if ORDERED[pool] else tuple(sorted(t))
+    return t if ordered else tuple(sorted(t))
 
 
 def _horses(horses: Iterable[int], what: str) -> tuple[int, ...]:
@@ -289,79 +298,192 @@ def _subsets(items: Sequence[Any], visit: Callable[[list[Any]], bool]) -> bool:
     return any_single
 
 
+class _Search:
+    """Exact branch and bound over the formations whose every combination is in ``q``.
+
+    Horses are labelled one at a time, strongest first (by the positive gain of their
+    combinations): a label is the set of legs a horse is in, as a bit mask (0 = out). The legs
+    are read off the labels, so every formation has a labelling; a combination is in it when its
+    horses can fill the legs, one each, and it is decided when its last horse is labelled. A
+    labelling is dropped as soon as a decided combination is outside ``q`` or the tickets pass
+    ``most``. On unordered pools the legs are interchangeable, so only labellings whose legs'
+    membership columns do not increase from one leg to the next are searched.
+
+    A branch is cut only when an upper bound on every formation under it falls below the best
+    gain found (by ``_SLACK``), so the answer, ties included, is the one full enumeration gives.
+    The bound relaxes the ticket limit (Lagrange, for each multiplier ``lam`` in ``lams``: the
+    profit is at most ``lam * most`` plus the most ``gain - lam`` can add up to with no limit).
+    That sum is the decided part plus, for each unlabelled horse z on its own, the best over its
+    labels of: z's combinations whose other horses are labelled (exact), plus the positive part
+    of z's other combinations that the labels already given still allow.
+    """
+
+    def __init__(self, pool: str, q: set[Combo], gain: Mapping[Combo, float], most: int) -> None:
+        k = self.k = _legs(pool)
+        self.ordered = ORDERED[pool]
+        self.gain = gain
+        self.most = most
+        self.best = _Best()
+        potential: dict[int, float] = {}
+        for c in q:
+            for h in c:
+                potential[h] = potential.get(h, 0.0) + max(0.0, gain[c])
+        self.order = sorted(potential, key=lambda h: (-potential[h], h))
+        n = self.n = len(self.order)
+        at = {h: i for i, h in enumerate(self.order)}
+        # An ordered pool has one item per arrangement (member r, in search order, finishes at
+        # position s[r]); an unordered pool one item. Cells are indexed by members in search order.
+        arrangements = list(itertools.permutations(range(k)))
+        items = len(arrangements) if self.ordered else 1
+        nl = 1 << k
+        cell = np.zeros((items,) + (n,) * k + (3,))  # gain, 1 if in q, 1 if not
+        cell[..., 2] = 1.0
+        for c in q:
+            members = sorted(c, key=at.__getitem__)
+            item = arrangements.index(tuple(c.index(h) for h in members)) if self.ordered else 0
+            cell[(item, *(at[h] for h in members))] = (gain[c], 1.0, 0.0)
+        self.cell = cell
+        real = np.zeros((items,) + (nl,) * k)  # 1 when members with these labels fill the legs
+        for labels in itertools.product(range(nl), repeat=k):
+            fits = [all(labels[r] >> s[r] & 1 for r in range(k)) for s in arrangements]
+            if self.ordered:
+                for item, ok in enumerate(fits):
+                    real[(item, *labels)] = ok
+            else:
+                real[(0, *labels)] = any(fits)
+        self.real = real
+        positive = sorted((v for v in gain.values() if v > 0), reverse=True)
+        ranks = {max(1, round(most * f)) for f in _RANKS}
+        self.lams = np.array(sorted({0.0, *(positive[r - 1] for r in ranks if r <= len(positive))}))
+        # Positive parts of z's undecided combinations (second-last member j or later):
+        # rest_open[j, z, label of z, lam] those with no labelled member, by what z's label allows;
+        # after[i, x, j, z, lam] those whose first member x is labelled (k = 3), by can_xz.
+        valid = cell[..., 1] > 0
+        pos = np.where(valid[..., None], np.maximum(cell[..., 0, None] - self.lams, 0.0), 0.0)
+        ax = k - 1  # the second-last member's axis
+        tail = np.zeros(pos.shape[:ax] + (n + 1,) + pos.shape[ax + 1 :])
+        tail[(slice(None),) * ax + (slice(0, n),)] = np.flip(np.cumsum(np.flip(pos, ax), ax), ax)
+        can_z = real.reshape(items, -1, nl).max(axis=1)
+        self.after = tail
+        self.after_by: dict[tuple[int, int], Any] = {}
+        if k == 3:
+            self.can_xz = real.max(axis=2)
+            unlabelled = np.triu(np.ones((n, n + 1)))  # [x, j] = 1 when x >= j
+            tail = np.einsum("ixjzm,xj->ijzm", tail, unlabelled)
+        self.rest_open = np.einsum("ijzm,il->jzlm", tail, can_z)
+
+    def _after(self, x: int, label: int) -> Any:
+        """``after`` for first member x labelled ``label``, by z's label: [j, z, label, lam]."""
+        key = (x, label)
+        if key not in self.after_by:
+            self.after_by[key] = np.einsum("ijzm,il->jzlm", self.after[:, x], self.can_xz[:, label])
+        return self.after_by[key]
+
+    def hopeless(self, bound: float) -> bool:
+        key = self.best.key
+        return key is not None and bound < key[0] - _SLACK
+
+    def run(self) -> tuple[tuple[int, ...], ...] | None:
+        for c in sorted(self.gain):
+            if self.gain[c] > 0:
+                self.best.offer(self.gain[c], 1, lambda c=c: [c], tuple((h,) for h in c))
+        if self.best.key is None:
+            return None
+        sums = np.zeros((self.n, 1 << self.k, 3))
+        self._node([], sums, 0.0, 0, (True,) * (self.k - 1))
+        legs = self.best.found
+        if self.ordered:  # each leg trimmed to the horses its combinations use there
+            combos = _expand(True, legs)
+            legs = tuple(tuple(sorted({c[i] for c in combos})) for i in range(self.k))
+        return legs
+
+    def _offer(self, labels: list[int]) -> None:
+        legs = tuple(
+            tuple(sorted(h for h, lab in zip(self.order, labels, strict=False) if lab >> b & 1))
+            for b in range(self.k)
+        )
+        if not all(legs):
+            return
+        if not self.ordered:
+            legs = tuple(sorted(legs, key=lambda leg: (len(leg), leg)))
+        combos = _expand(self.ordered, legs)
+        self.best.offer(math.fsum(self.gain[c] for c in combos), len(combos), lambda: combos, legs)
+
+    def _node(
+        self, labels: list[int], sums: Any, gain: float, n: int, ties: tuple[bool, ...]
+    ) -> None:
+        """Label the next horse every way that keeps its decided combinations in ``q`` and within
+        ``most``, best bound first. ``sums[z, label of z]`` holds (gain, count in q, count not in
+        q) of z's combinations whose other members are labelled; ``gain`` and ``n`` the decided
+        combinations'. All children are scored at once."""
+        j, k, z0 = len(labels), self.k, len(labels) + 1
+        if j == self.n:
+            return
+        cand = []
+        for label in range(1 << k):
+            if not self.ordered and any(
+                tied and label >> (b + 1) & 1 and not label >> b & 1 for b, tied in enumerate(ties)
+            ):
+                continue  # leg b + 1 would come before leg b, its twin so far
+            if label and (sums[j, label, 2] or n + sums[j, label, 1] > self.most):
+                continue
+            cand.append(label)
+        ls = np.array(cand)
+        gains = gain + sums[j, ls, 0]
+        counts = n + sums[j, ls, 1]
+        upd = None  # (child, z, label of z, 3): what labelling horse j adds to later sums
+        if k == 2:  # tensordot: a BLAS product, far faster here than einsum
+            upd = np.tensordot(self.cell[:, j, z0:], self.real[:, ls], axes=([0], [0]))
+        elif j:
+            mask = self.real[:, labels][:, :, ls]  # (items, a, child, label of z)
+            upd = np.tensordot(self.cell[:, :j, j, z0:], mask, axes=([0, 1], [0, 1]))
+        if upd is not None:
+            upd = upd.transpose(2, 0, 3, 1)  # (z, 3, child, label of z) -> (child, z, label, 3)
+        lams = self.lams
+        base = lams * self.most + gains[:, None] - lams * counts[:, None]  # (child, lam)
+        if z0 < self.n:
+            s = sums[z0:, 1:] if upd is None else sums[z0:, 1:] + upd[:, :, 1:]
+            rest = self.rest_open[z0, z0:, 1:]
+            if k == 3:
+                for x, lab in enumerate(labels):
+                    if lab:
+                        rest = rest + self._after(x, lab)[z0, z0:, 1:]
+                if any(cand):
+                    own = [self._after(j, lab)[z0, z0:, 1:] if lab else 0.0 for lab in cand]
+                    rest = rest + np.stack(np.broadcast_arrays(*own))
+            ok = (s[..., 2] == 0) & (counts[:, None, None] + s[..., 1] <= self.most)
+            val = s[..., 0, None] - s[..., 1, None] * lams + rest
+            val = np.where(ok[..., None], val, -np.inf).max(axis=-2)  # (child, z, lam)
+            base = base + np.maximum(val, 0.0).sum(axis=-2)
+        bounds = base.min(axis=1)
+        for c in sorted(range(len(cand)), key=lambda c: (-bounds[c], cand[c])):
+            if self.hopeless(bounds[c]):
+                continue
+            label = cand[c]
+            here = [*labels, label]
+            if label and not self.hopeless(gains[c]):
+                self._offer(here)
+            child = sums
+            if label and upd is not None:
+                child = sums.copy()
+                child[z0:] += upd[c]
+            twins = tuple(
+                t and (label >> b & 1) == (label >> (b + 1) & 1) for b, t in enumerate(ties)
+            )
+            self._node(here, child, float(gains[c]), int(counts[c]), twins)
+
+
+def _expand(ordered: bool, legs: Sequence[Sequence[int]]) -> list[Combo]:
+    """The sorted distinct combinations of a per-position formation."""
+    n = len(legs)
+    return sorted({_canon_order(ordered, t) for t in itertools.product(*legs) if len(set(t)) == n})
+
+
 def _search_formations(
     pool: str, q: set[Combo], gain: Mapping[Combo, float], most: int
 ) -> tuple[tuple[int, ...], ...] | None:
-    """Legs of the best formation whose every combination is in ``q`` within ``most`` tickets.
-
-    Exact: legs range over the horses ``q`` places at each position; the last leg is chosen per
-    prefix of the others, and a prefix is dropped with its extensions once no last-leg horse can
-    join it (a combination outside ``q`` or too many tickets stays so as legs grow).
-    """
-    n_legs = _legs(pool)
-    ordered = ORDERED[pool]
-    if ordered:
-        sets = [sorted({c[i] for c in q}) for i in range(n_legs)]
-    else:
-        sets = [sorted({h for c in q for h in c})] * n_legs
-    best = _Best()
-
-    def last_leg(prefix: list[tuple[int, ...]]) -> bool:
-        heads = [t for t in itertools.product(*prefix) if len(set(t)) == n_legs - 1]
-        usable = False
-        live: list[tuple[int, frozenset[Combo]]] = []
-        for c in sets[-1]:
-            group = frozenset(_canon(pool, (*t, c)) for t in heads if c not in t)
-            if len(group) <= most and group <= q:
-                usable = True
-                if group:
-                    live.append((c, group))
-        if ordered:
-            _choose_ordered(prefix, live)
-        else:
-            _choose_unordered(prefix, live)
-        return usable
-
-    def _choose_ordered(prefix: list[tuple[int, ...]], live: list[Any]) -> None:
-        # groups are disjoint (they differ in the last position): gains add up
-        items = [(c, g, math.fsum(gain[x] for x in g)) for c, g in live]
-        items = [it for it in items if it[2] > 0]
-
-        def visit(chosen: list[Any]) -> bool:
-            n = sum(len(g) for _, g, _ in chosen)
-            if n > most:
-                return False
-            union = [x for _, g, _ in chosen for x in g]
-            best.offer(math.fsum(v for *_, v in chosen), n, lambda: union, lambda: union)
-            return True
-
-        _subsets(items, visit)
-
-    def _choose_unordered(prefix: list[tuple[int, ...]], live: list[Any]) -> None:
-        def visit(chosen: list[Any]) -> bool:
-            union = frozenset().union(*(g for _, g in chosen))
-            if len(union) > most:
-                return False
-            legs = (*prefix, tuple(c for c, _ in chosen))
-            best.offer(math.fsum(gain[x] for x in union), len(union), lambda: union, legs)
-            return True
-
-        _subsets(live, visit)
-
-    def leg(i: int, prefix: list[tuple[int, ...]]) -> bool:
-        def visit(chosen: list[int]) -> bool:
-            here = [*prefix, tuple(chosen)]
-            return last_leg(here) if i == n_legs - 2 else leg(i + 1, here)
-
-        return _subsets(sets[i], visit)
-
-    leg(0, [])
-    if best.key is None:
-        return None
-    if ordered:
-        combos = best.found
-        return tuple(tuple(sorted({c[i] for c in combos})) for i in range(n_legs))
-    return best.found
+    """Legs of the best formation whose every combination is in ``q`` within ``most`` tickets."""
+    return _Search(pool, q, gain, most).run()
 
 
 def _search_boxes(
@@ -378,7 +500,11 @@ def _search_boxes(
         while len(held) > len(chosen):
             held.pop()
         h = chosen[-1]
-        new = {_canon(pool, t) for t in itertools.permutations(chosen, n_legs) if h in t}
+        rest = itertools.combinations(chosen[:-1], n_legs - 1)
+        if ORDERED[pool]:
+            new = {t for c in rest for t in itertools.permutations((*c, h))}
+        else:
+            new = {tuple(sorted((*c, h))) for c in rest}
         combos = held[-1] | new
         if not new <= q or len(combos) > most:
             return False
