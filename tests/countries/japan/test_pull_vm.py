@@ -380,3 +380,73 @@ def test_launchd_carries_a_non_default_remote_dir(host, remote):
 def test_launchd_remote_dir_differs_per_call():
     (a, _), (b, _) = _plists("vm1", remote_dir="/srv/a"), _plists("vm1", remote_dir="/srv/b")
     assert a["ProgramArguments"] != b["ProgramArguments"]
+
+
+# ------------------------------------------------------------------ launchd: the log folder exists
+# launchd does not create the folder of StandardOutPath / StandardErrorPath: a job whose log folder
+# is missing fails to start (exit 78) and never runs. So `--print-launchd` creates that folder.
+
+
+def _tree(root: Path) -> set[Path]:
+    return {p.relative_to(root) for p in root.rglob("*")}
+
+
+@pytest.mark.parametrize("host", ALIASES)
+def test_print_launchd_creates_the_folder_of_the_job_logs(host, data_dir, monkeypatch):
+    from horsetrack.countries.japan.logger import pull_vm as mod
+
+    rec = Recorder()
+    monkeypatch.setattr(mod, "run_rsync", rec)
+    assert not (data_dir / "vm").exists()
+
+    result = run_cli("--host", host, "--print-launchd")
+    assert result.exit_code == 0, result.output
+    plist = plistlib.loads(result.stdout.encode())
+    for key in ("StandardOutPath", "StandardErrorPath"):
+        assert Path(plist[key]).parent.is_dir(), key
+    assert Path(plist["StandardOutPath"]).parent == data_dir.resolve() / "vm" / host
+    assert rec.calls == []  # still no rsync
+
+
+def test_print_launchd_creates_only_the_one_hosts_folder(data_dir):
+    result = run_cli("--host", "vm1", "--print-launchd")
+    assert result.exit_code == 0, result.output
+    # nothing but `vm/vm1` (no logs/, no other host, no rsync subtree, no log file itself)
+    assert _tree(data_dir) == {Path("vm"), Path("vm/vm1")}
+    assert not (data_dir / "logs").exists()
+
+    result = run_cli("--host", "horse-trial", "--print-launchd")
+    assert result.exit_code == 0, result.output
+    assert _tree(data_dir) == {Path("vm"), Path("vm/vm1"), Path("vm/horse-trial")}
+
+
+def test_print_launchd_keeps_what_is_already_in_the_log_folder(data_dir):
+    folder = data_dir / "vm" / "vm1"
+    (folder / "logs").mkdir(parents=True)
+    (folder / "pull-vm.err.log").write_text("last night\n")
+    (folder / "logs" / "a.log").write_text("kept\n")
+
+    for _ in range(2):  # a second print is fine too
+        assert run_cli("--host", "vm1", "--print-launchd").exit_code == 0
+    assert (folder / "pull-vm.err.log").read_text() == "last night\n"
+    assert (folder / "logs" / "a.log").read_text() == "kept\n"
+
+
+@pytest.mark.parametrize("host", ["1.2.3.4", "user@1.2.3.4", "vm1:/etc", "-oProxyCommand=evil"])
+def test_print_launchd_with_a_refused_host_creates_nothing(host, data_dir):
+    result = run_cli("--host", host, "--print-launchd")
+    assert result.exit_code != 0
+    assert "<plist" not in result.stdout
+    assert _tree(data_dir) == set()
+
+
+def test_print_launchd_without_a_data_dir_creates_nothing(tmp_path, monkeypatch):
+    workdir = tmp_path / "cwd"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    monkeypatch.delenv(paths.DATA_DIR_VAR, raising=False)
+    result = run_cli("--host", "vm1", "--print-launchd")
+    assert result.exit_code != 0
+    assert _tree(workdir) == set()  # no relative `vm/` either
+    assert _tree(tmp_path / "data") == set()
+    assert _tree(tmp_path / "repo") == set()

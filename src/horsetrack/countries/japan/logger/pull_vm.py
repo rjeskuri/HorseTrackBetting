@@ -10,8 +10,10 @@ config, so a host that looks like an address (`1.2.3.4`, `user@host`, IPv6, `hos
 `--print-launchd` prints a LaunchAgent that runs the pull daily at 22:00 local. launchd jobs do
 not inherit the shell environment, so the plist pins `HORSETRACK_DATA_DIR` and sends the job's
 stdout and stderr to `<data_dir>/vm/<ALIAS>/pull-vm.{out,err}.log`, so a failed night leaves a
-trace. launchd does not create that folder: run the pull by hand once first, which creates
-`vm/<ALIAS>/`. Printing creates nothing, and fails if the data dir is not set.
+trace. launchd does not create the folder of those logs (a job without it fails to start, exit 78),
+so the CLI's `--print-launchd` creates `vm/<ALIAS>/` (and only that, never wiping anything) once
+the host and data dir are validated, then prints. No rsync runs. It fails, creating nothing, if
+the host is refused or the data dir is not set. `launchd_plist` itself creates nothing.
 """
 
 from __future__ import annotations
@@ -119,13 +121,18 @@ def pull_vm_command(
     remote_dir: str = typer.Option(DEFAULT_REMOTE_DIR, "--remote-dir", help="Data dir on the VM."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Pass --dry-run to rsync."),
     print_launchd: bool = typer.Option(
-        False, "--print-launchd", help="Print a LaunchAgent plist (daily 22:00) and exit."
+        False,
+        "--print-launchd",
+        help="Print a LaunchAgent plist (daily 22:00) and exit; creates the job log folder.",
     ),
 ) -> None:
     """Pull the VM's logs into $HORSETRACK_DATA_DIR/vm/<host>/ (rsync over ssh, never --delete)."""
     try:
         if print_launchd:
-            typer.echo(launchd_plist(host, remote_dir=remote_dir), nl=False)
+            text = launchd_plist(host, remote_dir=remote_dir)  # validates host and data dir
+            # launchd will not create the log folder, and a job without it never starts
+            (paths.data_dir() / "vm" / host).mkdir(parents=True, exist_ok=True)
+            typer.echo(text, nl=False)
             return
         code = pull_vm(host, remote_dir=remote_dir, dry_run=dry_run)
     except ValueError as exc:
