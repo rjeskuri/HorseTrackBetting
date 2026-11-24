@@ -1,4 +1,7 @@
-"""Builders for minimal synthetic netkeiba results pages (ticket #52): db.netkeiba.com/race/<id>/.
+"""Builders for minimal synthetic netkeiba result pages (ticket #52): db.netkeiba.com/race/<id>/.
+
+Only the result page lives here; the calendar, race-list and pedigree-card builders of #51 are in
+netkeiba_pages.py.
 
 Each page holds only the structure HKTrack's `sources/jra/parse_results.py` reads, laid out as on
 the site: the race-number strip (`div.race_num`, the current race's link `a.active`), the race

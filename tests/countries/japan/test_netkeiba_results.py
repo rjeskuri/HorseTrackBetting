@@ -1,9 +1,9 @@
 """Ticket #52: the netkeiba results page -> meetings, races, runners, dividends.
 
 HKTrack's tests/unit/sources/jra/test_parse_results.py ported onto synthetic pages
-(netkeiba_pages.py): a plain race, a dead heat for 3rd, a withdrawal (取) with a dead heat for
-2nd, a demoted (降), a disqualified (失) and an excluded (除) runner, and a jump race with two
-runners pulled up (中). The real-page versions run under `local` in a separate ticket.
+(netkeiba_results_pages.py): a plain race, a dead heat for 3rd, a withdrawal (取) with a dead
+heat for 2nd, a demoted (降), a disqualified (失) and an excluded (除) runner, and a jump race
+with two runners pulled up (中). The real-page versions run under `local` in a separate ticket.
 
 Contract pinned here (the coder follows it):
 - `horsetrack.countries.japan.jra.netkeiba.parse_results.parse(page: RawPage) -> ParsedPage`
@@ -28,7 +28,7 @@ from collections import Counter
 from dataclasses import replace
 from functools import cache
 
-import netkeiba_pages as pages
+import netkeiba_results_pages as pages
 import pytest
 
 from horsetrack.core.config import load_source
