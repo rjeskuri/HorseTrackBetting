@@ -24,6 +24,18 @@ The command lives in `horsetrack.countries.japan.logger.log_day` and registers o
   early, or whose max_gap_t20_s > 120;
 - exit 0 clean, 2 with any ALERT.
 
+Tier 2 (ticket #130, D3 as amended 2026-11-24: all JRA pools are in scope), with logger.yaml's
+`tier2` block on:
+- log-day also captures the tier-2 pools of logger.yaml (`--pools` picks tier 1's only) into the
+  same odds log, one member per capture, a member holding tier-1 pools only or tier-2 (and WIN5)
+  pools only; tier-2 rows carry the page's prices exactly, plus each pool's "__pool__" row.
+- snapshots, rows and failures on the health line count tier 1 only (the #25 meaning); the
+  line ends ` tier2_skipped=N`, N being the venue's grid points (race x grid_min value) with no
+  tier-2 capture, each capture falling in one grid interval [post - g, post - next smaller g).
+- on a WIN5 day (a WIN5 link on the オッズ menu) one venue's log holds the WIN5 "__pool__" row.
+- only pages of tier 1 and of the configured tier-2 pools are asked for (the double serves those
+  alone).
+
 The JRADB double (jradb_double.py) serves a synthetic week through the real Fetcher; its post times
 are moved 20 minutes later here so every race's T-20 window falls in logger.yaml's 20 s window
 (a race off before 09:50 has 5-minute rounds in its window, a true gap alert). Nothing goes to the
@@ -58,7 +70,13 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 HEALTH = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2}) (?P<venue>\S+) snapshots=(?P<snapshots>\d+) rows=(?P<rows>\d+)"
     r" failures=(?P<failures>\d+) wrong_meeting=(?P<wrong_meeting>\d+)"
-    r" max_gap_t20_s=(?P<gap>\S+) stopped=(?P<stopped>\S+)$"
+    r" max_gap_t20_s=(?P<gap>\S+) stopped=(?P<stopped>\S+)"
+    r"(?: tier2_skipped=(?P<tier2_skipped>\d+))?$"  # with logger.yaml's tier2 on (#130)
+)
+WIN5_SAT = dbl.Win5Day(
+    legs=(("TOK", 1), ("KYO", 1), ("NAK", 11), ("HSN", 10), ("TOK", 11)),
+    tickets=4_321_987,
+    carryover_yen=312_450_000,
 )
 ALERT = re.compile(r"^ALERT (?P<date>\d{4}-\d{2}-\d{2}) (?P<venue>\S+) (?P<reason>\S.*)$")
 MAX_TERMINAL_LINES = 12  # "at most about 10"
@@ -123,6 +141,13 @@ def run(monkeypatch, clock: Clock, world: World, *args: str):
     return result, site
 
 
+def tier2_config() -> dict:
+    """logger.yaml's shipped tier 2 (#130): pools, grid_min, requests."""
+    tier2 = load_country_yaml("japan", "logger").get("tier2")
+    assert tier2, "logger.yaml ships no tier2 block"
+    return tier2
+
+
 def plain(text: str) -> str:
     return ANSI.sub("", text)
 
@@ -153,13 +178,34 @@ def read_health(day: str) -> tuple[dict[str, list[dict]], list[dict]]:
     return health, alerts
 
 
-def snapshots_of(race_date: date, venue: str) -> dict[str, list[datetime]]:
-    """race_id -> the snapshot instants the venue's log holds for it."""
+def snapshots_of(
+    race_date: date, venue: str, pools: frozenset[str] | set[str] = frozenset(ALL_POOLS)
+) -> dict[str, list[datetime]]:
+    """race_id -> the snapshot instants the venue's log holds for it in `pools` (tier 1's)."""
     path = paths.odds_snapshot_path("jra", race_date.isoformat(), venue)
     out: dict[str, set[datetime]] = {}
     for row in odds_log.read_rows(path):
-        out.setdefault(row["race_id"], set()).add(datetime.fromisoformat(row["snapshot_utc"]))
+        if row["pool"] in pools:
+            out.setdefault(row["race_id"], set()).add(datetime.fromisoformat(row["snapshot_utc"]))
     return {rid: sorted(times) for rid, times in out.items()}
+
+
+def grid_points_captured(times: list[datetime], post: datetime, grid: list[int]) -> int:
+    """The grid points of a race (post) that `times` (its tier-2 captures) cover, from first
+    principles: g's interval is [post - g, post - next smaller g), the last one up to the post.
+    Asserts every capture falls in one interval and no interval holds two."""
+    values = sorted(grid, reverse=True)
+    hits = dict.fromkeys(values, 0)
+    for t in times:
+        inside = []
+        for i, g in enumerate(values):
+            nxt = values[i + 1] if i + 1 < len(values) else 0
+            if post - timedelta(minutes=g) <= t < post - timedelta(minutes=nxt):
+                inside.append(g)
+        assert inside, f"a tier-2 capture at {t.isoformat()} is off the grid (post {post})"
+        hits[inside[0]] += 1
+    assert all(n <= 1 for n in hits.values()), f"a grid point captured twice: {hits}"
+    return sum(hits.values())
 
 
 def longest_gap(times: list[datetime], post: datetime, within_min: int = 20) -> float:
@@ -227,17 +273,20 @@ def test_dry_run_prints_the_plan_and_sends_nothing(monkeypatch, data_dir, args, 
 
 
 @pytest.mark.parametrize(
-    "venues, meetings, pools",
+    "venues, meetings, pools, win5",
     [
-        ("TOK,KYO", [Meeting("TOK", 1), Meeting("KYO", 1, nichi=3)], None),
-        ("FKS", [Meeting("FKS", 1, 3, 1), Meeting("TOK", 1)], "WIN,QUINELLA"),
+        ("TOK,KYO", [Meeting("TOK", 1), Meeting("KYO", 1, nichi=3)], None, WIN5_SAT),
+        ("FKS", [Meeting("FKS", 1, 3, 1), Meeting("TOK", 1)], "WIN,QUINELLA", None),
     ],
     ids=["tok-kyo-all-pools", "fks-two-pools"],
 )
 def test_log_day_writes_one_health_line_per_venue(
-    monkeypatch, data_dir, late_posts, venues, meetings, pools
+    monkeypatch, data_dir, late_posts, venues, meetings, pools, win5
 ):
-    world = World({SAT: meetings})
+    tier2 = tier2_config()
+    tier2_pools, grid = set(tier2["pools"]), list(tier2["grid_min"])
+    # The double serves tier 1's pages and the configured tier-2 pools' pages, nothing else.
+    world = World({SAT: meetings}, tier2=tier2["pools"], win5={SAT: win5} if win5 else None)
     health_file().parent.mkdir(parents=True, exist_ok=True)
     earlier = (
         "2026-11-21 TOK snapshots=3 rows=30 failures=0 wrong_meeting=0"
@@ -255,6 +304,7 @@ def test_log_day_writes_one_health_line_per_venue(
     assert result.exit_code == 0, out
     assert len(terminal_lines(result)) <= MAX_TERMINAL_LINES, out
     assert "ALERT" not in out
+    # Every request was for a page the double serves: tier 1's and the configured tier-2 pools'.
     assert site.seen and all(s.served for s in site.seen)
     assert (paths.logs_dir("japan") / f"log-day-{SAT.isoformat()}.log").is_file()
     assert health_file().read_text(encoding="utf-8").splitlines()[0] == earlier  # appended
@@ -264,25 +314,84 @@ def test_log_day_writes_one_health_line_per_venue(
     assert alerts == []
     assert sorted(health) == sorted(asked)
     wanted_pools = set(pools.split(",")) if pools else set(ALL_POOLS)
+    win5_rows = []
     for venue in asked:
         assert len(health[venue]) == 1, venue
         line = health[venue][0]
         log_path = paths.odds_snapshot_path("jra", SAT.isoformat(), venue)
         members = list(odds_log.iter_members(log_path))
-        rows = [row for member in members for row in member]
+        # One capture, one member, of one tier: tier 1's pools, or tier 2's (and WIN5).
+        tier1_members, tier2_members = [], []
+        for member in members:
+            in_member = {row["pool"] for row in member}
+            if in_member <= set(ALL_POOLS):
+                tier1_members.append(member)
+            else:
+                assert in_member <= tier2_pools | {"WIN5"}, (venue, in_member)
+                tier2_members.append(member)
+        rows = [row for member in tier1_members for row in member]
         assert rows, venue
         assert {row["pool"] for row in rows} == wanted_pools, venue
-        assert int(line["snapshots"]) == len(members), venue
+        assert int(line["snapshots"]) == len(tier1_members), venue
         assert int(line["rows"]) == len(rows), venue
         assert (int(line["failures"]), int(line["wrong_meeting"])) == (0, 0), venue
-        # The gap, from the log's own snapshot times and the double's post times.
+        # The gap, from the log's own tier-1 snapshot times and the double's post times.
         snaps = snapshots_of(SAT, venue)
         races = [world.race(SAT, venue, n) for n in range(1, world.meeting(SAT, venue).races + 1)]
         gaps = [longest_gap(snaps[race.race_id], race.post_utc) for race in races]
         assert float(line["gap"]) == pytest.approx(max(gaps), abs=1.0), venue
         assert float(line["gap"]) <= 120, venue
+
+        # Tier 2: every configured pool logged (whatever --pools said), each board as printed.
+        rows2 = [row for member in tier2_members for row in member]
+        win5_rows += [row for row in rows2 if row["pool"] == "WIN5"]
+        rows2 = [row for row in rows2 if row["pool"] != "WIN5"]
+        assert {row["pool"] for row in rows2} == tier2_pools, venue
+        boards: dict[tuple, dict[str, float]] = {}
+        totals: dict[tuple, list[float]] = {}
+        for row in rows2:
+            key = (row["race_id"], row["snapshot_utc"], row["pool"])
+            if row["combination"] == "__pool__":
+                totals.setdefault(key, []).append(row["investment"])
+            else:
+                boards.setdefault(key, {})[row["combination"]] = row["odds"]
+        by_race = {race.race_id: race for race in races}
+        for (race_id, _, pool), board in boards.items():
+            race = by_race[race_id]
+            assert board == dbl.exotic_expected(race, pool), (venue, race_id, pool)
+        for key, invested in totals.items():
+            race = by_race[key[0]]
+            assert invested == [dbl.exotic_tickets(race, key[2]) * dbl.UNIT_STAKE], key
+        assert set(totals) == set(boards), venue  # each board with its pool total
+        captures = {(rid, at) for rid, at, _ in boards}
+        for rid, at in captures:  # a tier-2 capture of a race takes all its pools at once
+            assert {(rid, at, p) for p in tier2_pools} <= set(boards), (rid, at)
+        # tier2_skipped, from first principles: the grid points the log has no capture for.
+        assert line["tier2_skipped"] is not None, f"{venue}: no tier2_skipped with tier 2 on"
+        captured = 0
+        for race in races:
+            times = sorted(
+                datetime.fromisoformat(at) for rid, at in captures if rid == race.race_id
+            )
+            covered = grid_points_captured(times, race.post_utc, grid)
+            assert covered > 0, f"{venue} race {race.number}: tier 2 never captured"
+            captured += covered
+        assert int(line["tier2_skipped"]) == len(races) * len(grid) - captured, venue
     for venue in {m.venue for m in meetings} - set(asked):
         assert not paths.odds_snapshot_path("jra", SAT.isoformat(), venue).exists()
+
+    # WIN5: on a WIN5 day its page is read and its pool row logged; on any other day nothing.
+    if win5 is None:
+        assert win5_rows == []
+    else:
+        assert site.links().count(world.win5_links[SAT]) >= 1
+        assert win5_rows, "a WIN5 day logged no WIN5 row"
+        for row in win5_rows:
+            assert row["race_id"] == f"jra:{SAT.isoformat()}:WIN5", row
+            assert row["combination"] == "__pool__", row
+            assert row["legs"] == win5.race_ids(SAT), row
+            assert row["investment"] == win5.tickets * dbl.UNIT_STAKE, row
+            assert row["carryover"] == win5.carryover_yen, row
 
 
 @pytest.mark.parametrize(
@@ -293,10 +402,11 @@ def test_log_day_writes_one_health_line_per_venue(
 def test_a_venue_that_logged_nothing_raises_an_alert_and_exit_2(
     monkeypatch, data_dir, late_posts, venues, empty
 ):
-    world = World({SAT: [Meeting("TOK", 1), Meeting("KYO", 1, nichi=3)]})  # only TOK of these
+    meetings = [Meeting("TOK", 1), Meeting("KYO", 1, nichi=3)]  # only TOK of the venues asked
+    world = World({SAT: meetings}, tier2=tier2_config()["pools"])
     clock = Clock(datetime(2026, 11, 27, 21, 0, tzinfo=UTC))
 
-    result, _ = run(monkeypatch, clock, world, "--date", SAT.isoformat(), "--venues", venues)
+    result, site = run(monkeypatch, clock, world, "--date", SAT.isoformat(), "--venues", venues)
 
     assert result.exit_code == 2, plain(result.output)
     assert len(terminal_lines(result)) <= MAX_TERMINAL_LINES, plain(result.output)
@@ -307,6 +417,8 @@ def test_a_venue_that_logged_nothing_raises_an_alert_and_exit_2(
         assert len(health[venue]) == 1, venue
         logged = int(health[venue][0]["rows"])
         assert (logged == 0) is (venue in empty), venue
+    assert health["TOK"][0]["tier2_skipped"] is not None, "no tier2_skipped with tier 2 on"
+    assert site.seen and all(s.served for s in site.seen)
     assert {a["venue"] for a in alerts} == empty
     stderr_alerts = [line for line in plain(result.stderr).splitlines() if "ALERT" in line]
     assert {word for line in stderr_alerts for word in line.split()} >= empty

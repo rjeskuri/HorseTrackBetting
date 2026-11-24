@@ -79,14 +79,19 @@ def menu(
     path: str = ODDS_PATH,
     *,
     decoys: bool = True,
+    extra: Mapping[date, Sequence[tuple[str, str]]] | None = None,
 ) -> bytes:
     """An 出馬表 or オッズ menu: per day, a panel with its heading (11月28日（土曜）) and one link
     per meeting `(name like 5回東京7日, cname)` to `path`. With `decoys`, each day's panel also
     has a meeting-named link to another path, and a second panel under the same heading lists
-    single races (東京11R) the way the real menus feature them."""
+    single races (東京11R) the way the real menus feature them. `extra[day]` adds links
+    `(text, cname)` to `path` in that day's panel after its meetings (the WIN5 link, #130)."""
     panels = []
     for day, meetings in days.items():
         links = [f"<li>{action_link(path, cname, name)}</li>" for name, cname in meetings]
+        links += [
+            f"<li>{action_link(path, c, text)}</li>" for text, c in (extra or {}).get(day, ())
+        ]
         if decoys and meetings:
             name, _ = meetings[0]
             links.append(f"<li>{action_link(OTHER_PATH, 'pw17x0/00', name)}</li>")
@@ -228,6 +233,67 @@ def pairs(
         tables.append(f"<table><caption>{first}</caption><tbody>{rows}</tbody></table>")
     body = f'<div id="odds_list">{"".join(tables)}</div>'
     return page(race_header(day, meeting, race_no) + _refresh(state) + body + _votes(votes))
+
+
+def legs(
+    day: date,
+    meeting: str,
+    race_no: int,
+    odds: Mapping[tuple[int, ...], Cell],
+    *,
+    state: str | None,
+    votes: Sequence[tuple[str, int]] = (),
+) -> bytes:
+    """枠連, 馬単, 3連複 or 3連単 page (ticket #130), laid out like the 馬連 page: one table per
+    leading combination, its `caption` the leading legs joined by '-' ("3" for a two-leg pool,
+    "3-12" for a three-leg one), one row per last leg (`th`) with the price `td`.
+    `odds[(a, b)]` or `odds[(a, b, c)]` is a number or text (取消, ---.-). Keys are laid out as
+    given: (12, 3, 7) prints row 7 under caption 12-3, so an unordered pool's page may list a
+    combination in any order. Table and row order follow the order of `odds`."""
+    by_lead: dict[tuple[int, ...], list[tuple[int, Cell]]] = defaultdict(list)
+    for combination, spec in odds.items():
+        by_lead[tuple(combination[:-1])].append((combination[-1], spec))
+    tables = []
+    for lead, lasts in by_lead.items():
+        rows = "".join(
+            f'<tr><th scope="row">{last}</th>{_cell("odds", spec)}</tr>' for last, spec in lasts
+        )
+        caption = "-".join(str(n) for n in lead)
+        tables.append(f"<table><caption>{caption}</caption><tbody>{rows}</tbody></table>")
+    body = f'<div id="odds_list">{"".join(tables)}</div>'
+    return page(race_header(day, meeting, race_no) + _refresh(state) + body + _votes(votes))
+
+
+def win5(
+    day: date,
+    races: Sequence[tuple[str, int]],
+    *,
+    state: str | None,
+    tickets: int | None,
+    carryover_yen: int | None,
+) -> bytes:
+    """WIN5 page (ticket #130): the date line (no meeting: WIN5 spans venues), one row per leg
+    (`th` 1レース目 ... 5レース目, `td` the venue name as printed and the race, e.g. 東京10レース),
+    the tickets sold in the votes table under the label WIN5 (one ticket = one unit stake), and
+    the carryover in yen (キャリーオーバー 312,450,000円). None leaves that figure out."""
+    header = (
+        '<div class="race_header"><div class="date_line"><div class="inner">'
+        f'<div class="cell date">{day.year}年{day_heading(day)}</div>'
+        "</div></div></div>"
+    )
+    rows = "".join(
+        f'<tr><th scope="row">{i}レース目</th><td class="race">{venue}{race_no}レース</td></tr>'
+        for i, (venue, race_no) in enumerate(races, start=1)
+    )
+    body = f'<div id="win5_list"><table><tbody>{rows}</tbody></table></div>'
+    votes = _votes([("WIN5", tickets)]) if tickets is not None else ""
+    carry = ""
+    if carryover_yen is not None:
+        carry = (
+            '<div class="carryover"><table><tbody><tr><th scope="row">キャリーオーバー</th>'
+            f"<td>{carryover_yen:,}円</td></tr></tbody></table></div>"
+        )
+    return page(header + _refresh(state) + body + votes + carry)
 
 
 PAGE_KINDS = (

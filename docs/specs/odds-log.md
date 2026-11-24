@@ -30,6 +30,12 @@ Path: `$HORSETRACK_DATA_DIR/odds_snapshots/jra/<YYYY-MM-DD>/<VENUE>.jsonl.gz`
 | `page_state` | text or null | optional; the page's selling state (absent in HKTrack logs) |
 | `source_update_utc` | ISO UTC text or null | the source's own "as of" time |
 | `investment` | number or null | pool-total rows only: the money in the pool |
+| `carryover` | number or null | optional; WIN5 rows only (race_id `jra:<YYYY-MM-DD>:WIN5`): the carryover in yen |
+| `legs` | list of text | optional; WIN5 rows only: the five designated races' race_ids, in leg order |
+
+Tier-2 pools (ticket #130): `BRACKET_QUINELLA`, `FORECAST`, `TRIO`, `TIERCE` combinations are
+numbers joined by `,`, FORECAST and TIERCE in finishing order, the others sorted ascending
+(`1,1` is a same-bracket pair).
 
 Optional keys are left out of a row, not written as null, when the source does not give them.
 

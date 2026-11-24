@@ -2,7 +2,8 @@
 health line per venue and an alert for a venue that logged nothing, stopped early or left a gap.
 
 It wires the JRA site (one ingest Fetcher, so one rate limit for www.jra.go.jp, and the capture
-module) and the odds log to `schedule.run_day`, with logger.yaml as the schedule. Log records go to
+module) and the odds log to `schedule.run_day`, with logger.yaml as the schedule; its `tier2` block
+adds the tier-2 pools and WIN5 (ticket #130; `--pools` picks tier 1's only). Log records go to
 `logs_dir('japan')/log-day-<date>.log`; the terminal gets a few lines. At the end one line per venue
 is appended to `logs_dir('japan')/health.log` (see `health.py`), each ALERT also on stderr.
 
@@ -18,7 +19,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,9 @@ from horsetrack.countries.japan.jra.capture import (
     ODDS_POOLS,
     SOURCE,
     MeetingCapture,
+    Win5,
     capture_meeting,
+    capture_tier2,
     discover_venues,
     read_post_times,
 )
@@ -99,6 +102,8 @@ class JraSite:
     now: Callable[[], datetime]
     host: str
     requests_per_second: float
+    tier2_pools: Sequence[str] = ()  # logger.yaml tier2.pools
+    win5: Win5 = field(default_factory=Win5)  # the day's WIN5 legs, once read
 
     def discover(self) -> list[str]:
         return discover_venues(self.fetcher, self.race_date)
@@ -110,6 +115,12 @@ class JraSite:
         return capture_meeting(
             self.fetcher, self.race_date, venue, self.pools, races=races, now=self.now
         )
+
+    def capture_tier2(self, venue: str, races: list[int]) -> MeetingCapture:
+        return capture_tier2(
+            self.fetcher, self.race_date, venue, self.tier2_pools, races=races, now=self.now,
+            win5=self.win5,
+        )  # fmt: skip
 
 
 def _log_path(race_date: date, venue: str) -> Path:
@@ -136,11 +147,13 @@ class OddsLogStore:
 
 def _logged(race_date: date, venue: str) -> tuple[list[dict[str, Any]], dict[str, datetime]]:
     """The venue's capture instants per race, read back from the day's log (every run that day),
-    one member at a time; and its post times from the sidecar, as race_id -> post."""
+    one member at a time; and its post times from the sidecar, as race_id -> post. Tier-2 rows
+    are left out: the gap metric is tier 1's."""
     seen = {
         (row.get("race_id"), row.get("snapshot_utc"))
         for member in odds_log.iter_members(_log_path(race_date, venue))
         for row in member
+        if row.get("pool") in ODDS_POOLS
     }
     rows = [{"race_id": race_id, "snapshot_utc": at} for race_id, at in seen]
     posts = odds_log.read_post_times(_sidecar_path(race_date, venue))
@@ -195,6 +208,11 @@ def _plan(race_date: date, venues: Sequence[str] | None, pools: Sequence[str], c
     hot = config["hot_races"]
     windows = ", ".join(f"from {w['from']} every {w['every_s']} s" for w in config["windows"])
     given = ",".join(venues) if venues else "discovered from the race-card menu at the first window"
+    tier2 = config.get("tier2")
+    tier2_line = (
+        [f"tier 2: {','.join(tier2['pools'])} at T-{',T-'.join(map(str, tier2['grid_min']))} min,"
+         " from what tier 1 leaves of each round"] if tier2 else []
+    )  # fmt: skip
     return [
         f"log-day {race_date.isoformat()}: dry run, no request sent",
         f"time zone: {TIMEZONE} (window and stop times are local)",
@@ -204,6 +222,7 @@ def _plan(race_date: date, venues: Sequence[str] | None, pools: Sequence[str], c
         f"hot races: post - {hot['within_min']} min to post + {hot['after_post_min']} min first;"
         f" a full cycle at most every {hot['all_every_s']} s",
         f"pools: {','.join(pools)}",
+        *tier2_line,
         f"rate: {_number(_requests_per_second(host))} req/s to {host}"
         " (a round's budget is every_s x the rate)",
         f"venues: {given}",
@@ -235,7 +254,9 @@ def _run(race_date: date, venues: list[str] | None, pools: list[str], config) ->
         typer.echo(f"log: {day_log}")
         log.info("log-day %s venues=%s pools=%s", race_date, given, ",".join(pools))
         with make_fetcher() as fetcher:
-            site = JraSite(fetcher, race_date, pools, utc_now, host, _requests_per_second(host))
+            tier2 = config.get("tier2") or {}
+            site = JraSite(fetcher, race_date, pools, utc_now, host, _requests_per_second(host),
+                           tier2.get("pools", ()))  # fmt: skip
             summary = run_day(
                 race_date,
                 site,
