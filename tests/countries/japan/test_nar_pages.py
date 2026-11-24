@@ -23,7 +23,8 @@ Contract pinned here (the coder follows it):
   source_update_utc is the page's HH:MM on the JST date of fetched_utc, or the day before when
   that would be later than fetched_utc, None when the page prints no clock; page_state is the
   clock's text (whitespace collapsed), None when absent.
-- A `b1` page before sales (the 予想オッズ `.Ninki` table) raises `NotOnSale`.
+- A `b1` page before sales (the `.Ninki` table, or any odds table headed 予想オッズ) raises
+  `NotOnSale`. Header labels are read as the site prints them: `馬<br>番`, `予想<br>オッズ`.
 
 Pages are synthetic (nar_pages.py; its docstring lists which markup is a guess). Expected values
 are written out here, never computed by the code under test.
@@ -442,11 +443,15 @@ def test_source_update_is_dated_by_the_fetch_day():
 
 def test_before_sales_page_is_not_on_sale():
     forecast = {1: 4.2, 2: 2.1, 3: 15.0, 4: 33.3, 5: 7.5, 6: 60.0, 7: 9.8, 8: 120.0}
+    # ninki_class=False: only the 予想<br>オッズ header (as the site prints it) marks the page
     for in_tan_block in (False, True):
-        body = np_.odds_b1_before_sales(RACE, forecast, in_tan_block=in_tan_block)
-        for pools in (["WIN", "PLACE"], ["WIN"], ["PLACE"]):
-            with pytest.raises(pages.NotOnSale):
-                rows_of(body, pools)
+        for ninki_class in (True, False):
+            body = np_.odds_b1_before_sales(
+                RACE, forecast, in_tan_block=in_tan_block, ninki_class=ninki_class
+            )
+            for pools in (["WIN", "PLACE"], ["WIN"], ["PLACE"]):
+                with pytest.raises(pages.NotOnSale):
+                    rows_of(body, pools)
 
 
 def test_an_unknown_venue_code_fails_loudly():

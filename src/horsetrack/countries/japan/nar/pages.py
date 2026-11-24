@@ -103,6 +103,12 @@ def _text(node: Tag | None) -> str:
     return clean(node.get_text(" ")) if node is not None else ""
 
 
+def _label(node: Tag | None) -> str:
+    """A header or pool label with all whitespace removed: the page breaks labels with <br>
+    ('馬<br>番'), which _text turns into a space. Every label comparison goes through here."""
+    return "".join(_text(node).split())
+
+
 # ---------------------------------------------------------------- race ids
 
 
@@ -251,7 +257,7 @@ def _before_sales(doc: BeautifulSoup) -> bool:
     if doc.select_one(_FORECAST_TABLE) is not None:
         return True
     return any(
-        _text(th) == _FORECAST_COLUMN for table in doc.select(_HORSE_TABLE) for th in table("th")
+        _label(th) == _FORECAST_COLUMN for table in doc.select(_HORSE_TABLE) for th in table("th")
     )
 
 
@@ -262,7 +268,7 @@ def _runner_prices(
     table = block.select_one(_HORSE_TABLE)
     if table is None:
         return
-    labels = [_text(th) for th in table("th")]
+    labels = [_label(th) for th in table("th")]
     if _NUMBER_COLUMN not in labels or _ODDS_COLUMN not in labels:
         raise ValueError(f"odds table without {_NUMBER_COLUMN} and {_ODDS_COLUMN}: {labels}")
     number_at, odds_at = labels.index(_NUMBER_COLUMN), labels.index(_ODDS_COLUMN)
@@ -322,7 +328,7 @@ def odds_rows(
 
     rows = []
     for block in doc.select(_ODDS_BLOCKS):
-        pool = _pool_of(_text(block.find("h2")))
+        pool = _pool_of(_label(block.find("h2")))
         if pool is None or pool not in pools:
             continue
         if pool in RUNNER_POOLS:
@@ -337,7 +343,7 @@ def _pool_totals(doc: BeautifulSoup, base: dict[str, Any], pools: Collection[str
     unit = float(_config()["unit_stake"])
     out = []
     for tr in doc.select(_VOTE_ROWS):
-        pool = _pool_of(_text(tr.find("th")))
+        pool = _pool_of(_label(tr.find("th")))
         tickets = _TICKETS.fullmatch(_text(tr.find("td")))
         if pool is not None and pool in pools and tickets is not None:
             out.append(

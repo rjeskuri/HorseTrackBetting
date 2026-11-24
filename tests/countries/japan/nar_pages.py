@@ -7,16 +7,23 @@ Each page holds only the structure `countries/japan/nar/pages.py` reads, in the 
 UTF-8 bytes, as the site sends them. Every name, id and number is invented; no real page, name or
 scraped value is copied here.
 
-Verified markup (seen in the captured pages, per the research doc):
-- race list: `ul.RaceList_ProvinceSelect li a` venue tabs (href has `kaisai_id`), one
-  `dl.RaceList_DataList` per meeting, `p.RaceList_DataTitle` with `small.icon-nighter` on a
-  nighter, races `li.RaceList_DataItem > a[href*="shutuba.html?race_id="]`, `.Race_Num`, post
-  time in the first `span` of `.RaceData`, runners as `N頭`.
+Verified markup (seen in the captured pages, per the research doc). Header cells are printed as
+the site prints them: a two-line label is split by `<br>` (`馬<br>番`), so a parser must not compare
+the raw cell text with the one-line label.
+- race list: `ul.RaceList_ProvinceSelect li a` venue tabs (href has `kaisai_id`, the first `li`
+  `.Active`), one `dl.RaceList_DataList` per meeting, `p.RaceList_DataTitle` as
+  `<small>第N回</small>venue<small>N日目</small>` plus an empty `small.icon-nighter` on a nighter,
+  races `li.RaceList_DataItem > a[href*="shutuba.html?race_id="]`, `.Race_Num` holding a hidden
+  `span.MyRace_List_Item` before `NR`, post time in the first `span` of `.RaceData`, runners as a
+  bare `N頭` text node.
 - `b1` on sale (seen on a finished race only): `#odds_tan_block` (h2 単勝) and
-  `#odds_fuku_block` (h2 複勝), each a `table.RaceOdds_HorseList_Table` with headers 枠, 馬番, 印,
-  馬名, オッズ; 馬番 a `td` with no class; price `td.Odds span.Odds`; 複勝 a range `lo - hi`.
-- `b1` before sales: one `table.RaceOdds_HorseList_Table.Ninki` with headers 人気, 馬番, 印,
-  馬名, 予想オッズ and a notice that real odds replace the forecast when sales open.
+  `#odds_fuku_block` (h2 複勝), each a `table.RaceOdds_HorseList_Table` (no thead or tbody) with
+  headers `th.Waku` 枠, `th.W31` `馬<br>番`, `th.Mark` 印, 馬名, オッズ; 馬番 a `td` with no class;
+  price `td.Odds span.Odds`; 複勝 a range `lo - hi`.
+- `b1` before sales: an h2 `予想オッズ（単勝）` and one `table.RaceOdds_HorseList_Table.Ninki`, its
+  header row `tr.col_label`: `th.Ninki` `人<br>気`, `th.Waku` `馬<br>番`, `th.Mark` 印,
+  `th.Horse_Name` 馬名, `th.Odds` `予想<br>オッズ`; the number in `td.Waku<bracket>`, the forecast
+  bare in `td.Odds`; and a notice that real odds replace the forecast when sales open.
 
 GUESSES (unverified: no page of a race on sale was captured; revise when one is seen):
 - Scratched runner: the row gets class `Cancel` and its price cell prints the word (取消 or
@@ -42,6 +49,22 @@ from datetime import date
 BASE = "https://nar.netkeiba.com"
 SCRATCH_WORDS = ("取消", "除外")
 TAN_COLUMNS = ("枠", "馬番", "印", "馬名", "オッズ")
+# Each column's header cell as the b1 page on sale prints it (verified).
+TAN_HEADERS = {
+    "枠": '<th class="Waku">枠</th>',
+    "馬番": '<th class="W31">馬<br>番</th>',
+    "印": '<th class="Mark">印</th>',
+    "馬名": "<th>馬名</th>",
+    "オッズ": "<th>オッズ</th>",
+}
+# The header cells of the before-sales 予想オッズ table (verified).
+FORECAST_HEADERS = (
+    '<th class="Ninki">人<br>気</th>'
+    '<th class="Waku">馬<br>番</th>'
+    '<th class="Mark">印</th>'
+    '<th class="Horse_Name">馬名</th>'
+    '<th class="Odds">予想<br>オッズ</th>'
+)
 
 # A price spec: a number (one figure), a (lo, hi) pair (a range), or text printed as is
 # (取消, 除外, ---.-).
@@ -92,11 +115,13 @@ def _race_item(day: date, meeting: Meeting, race: Race) -> str:
     return (
         '<li class="RaceList_DataItem">'
         f'<a href="../race/shutuba.html?race_id={rid}&amp;rf=race_list">'
-        f'<div class="Race_Num"><span>{race.number}R</span></div>'
+        '<div class="Race_Num">\n<span>\n'
+        f'<span class="MyRace_List_Item" id="myrace_{rid}" style="display: none;"></span>\n'
+        f"{race.number}R\n</span>\n</div>"
         '<div class="RaceList_ItemContent">'
-        f'<div class="ItemTitle">ギジ特別{race.number}</div>'
-        f'<div class="RaceData"><span>{race.post}</span>'
-        f'<span class="Dart">ダ1400m</span><span>{race.runners}頭</span></div>'
+        f'<div class="RaceList_ItemTitle">ギジ特別{race.number}</div>'
+        f'<div class="RaceData">\n<span>{race.post}</span>\n'
+        f'<span class="Dart">ダ1400m</span>\n{race.runners}頭\n</div>'
         "</div></a></li>"
     )
 
@@ -106,9 +131,10 @@ def race_list(day: date, meetings: Sequence[Meeting], *, decoys: bool = True) ->
     With `decoys`: a link to the next day's list, and per meeting a 払戻一覧 item that is not a
     race (no shutuba link)."""
     tabs = "".join(
-        f'<li><a href="?kaisai_date={day:%Y%m%d}&amp;kaisai_id={kaisai_id(day, m.venue_number)}">'
-        f"{html.escape(m.name)}</a></li>"
-        for m in meetings
+        ('<li class="Active">' if i == 0 else "<li>")
+        + f'<a href="?kaisai_id={kaisai_id(day, m.venue_number)}&amp;kaisai_date={day:%Y%m%d}'
+        f'&amp;rf=race_list">{html.escape(m.name)}</a></li>'
+        for i, m in enumerate(meetings)
     )
     parts = [f'<ul class="RaceList_ProvinceSelect">{tabs}</ul>']
     if decoys:
@@ -118,8 +144,11 @@ def race_list(day: date, meetings: Sequence[Meeting], *, decoys: bool = True) ->
             f'<a href="race_list.html?kaisai_date={nxt:%Y%m%d}">翌日</a></div>'
         )
     for m in meetings:
-        nighter = ' <small class="icon-nighter">ナイター</small>' if m.nighter else ""
-        title = f"第{m.round_no}回 {html.escape(m.name)} {m.day_no}日目{nighter}"
+        nighter = '<small class="icon-nighter"></small>' if m.nighter else ""
+        title = (
+            f"\n<small>第{m.round_no}回</small>{html.escape(m.name)}"
+            f"<small>{m.day_no}日目</small>{nighter}\n"
+        )
         items = "".join(_race_item(day, m, r) for r in m.races)
         if decoys:
             items += (
@@ -193,25 +222,22 @@ def _nav(race_id: str) -> str:
 def _horse_table(
     runners: Mapping[int, Price], which: int, columns: Sequence[str], field_size: int
 ) -> str:
-    head = "".join(f"<th>{c}</th>" for c in columns)
+    head = "".join(TAN_HEADERS[c] for c in columns)
     rows = []
     for number, spec in runners.items():
         bracket = bracket_of(number, field_size)
         cells = {
-            "枠": f'<td class="Waku{bracket} Txt_C"><span>{bracket}</span></td>',
+            "枠": f'<td class="Waku{bracket}">{bracket}</td>',
             "馬番": f"<td>{number}</td>",
-            "印": '<td class="Txt_C"><span class="Mark"></span></td>',
+            "印": f'<td class="Mark_User"><span class="MarkIcon"><div id="mymarkb{which}_{number}">'
+            "</div></span></td>",
             "馬名": f'<td class="Horse_Name"><a href="#">ギジノウマ{number}</a></td>',
             "オッズ": _odds_cell(spec),
         }
-        cls = "HorseList Cancel" if _is_scratch(spec) else "HorseList"
-        rows.append(
-            f'<tr class="{cls}" id="tr_{which}_{number}">{"".join(cells[c] for c in columns)}</tr>'
-        )
-    return (
-        '<table class="RaceOdds_HorseList_Table">'
-        f'<thead><tr class="Header">{head}</tr></thead><tbody>{"".join(rows)}</tbody></table>'
-    )
+        tr = '<tr class="Cancel">' if _is_scratch(spec) else "<tr>"  # the class: a GUESS
+        rows.append(f"{tr}{''.join(cells[c] for c in columns)}</tr>")
+    # as the site sends it: no thead or tbody, the header row a plain tr of th
+    return f'<table class="RaceOdds_HorseList_Table"><tr>{head}</tr>{"".join(rows)}</table>'
 
 
 def odds_b1(
@@ -243,26 +269,30 @@ def odds_b1(
 
 
 def odds_b1_before_sales(
-    race_id: str, forecast: Mapping[int, float], *, in_tan_block: bool = False
+    race_id: str,
+    forecast: Mapping[int, float],
+    *,
+    in_tan_block: bool = False,
+    ninki_class: bool = True,
 ) -> bytes:
     """The 単勝・複勝 page before sales open: netkeiba's 予想オッズ table (`.Ninki`), ordered by
-    forecast favouritism, with the same `td.Odds span.Odds` cells as real prices (a trap for a
-    loose parser). `in_tan_block` wraps it in `#odds_tan_block` with an h2 単勝 (a GUESS that the
-    container is shared)."""
+    forecast favouritism, its forecast in a `td.Odds` cell as a real price is (a trap for a loose
+    parser). `ninki_class=False` drops the table's `.Ninki` class, so only its `予想<br>オッズ`
+    header tells the page apart. `in_tan_block` wraps it in `#odds_tan_block` with an h2 単勝 (a
+    GUESS that the container is shared)."""
     order = sorted(forecast, key=lambda n: forecast[n])
-    head = "".join(f"<th>{c}</th>" for c in ("人気", "馬番", "印", "馬名", "予想オッズ"))
+    size = len(forecast)
     rows = "".join(
-        f'<tr class="HorseList"><td class="Ninki Txt_C">{rank}</td><td>{n}</td>'
-        f'<td class="Txt_C"><span class="Mark"></span></td>'
-        f'<td class="Horse_Name"><a href="#">ギジノウマ{n}</a></td>{_odds_cell(forecast[n])}</tr>'
+        f'<tr><td class="Ninki">{rank}</td><td class="Waku{bracket_of(n, size)}">{n}</td>'
+        f'<td class="Mark_User"><span class="MarkIcon"><div id="mymarkb1_{n}"></div></span></td>'
+        f'<td class="Horse_Name"><a href="#">ギジノウマ{n}</a></td>'
+        f'<td class="Odds">{forecast[n]:.1f}</td></tr>'
         for rank, n in enumerate(order, start=1)
     )
-    table = (
-        '<table class="RaceOdds_HorseList_Table Ninki">'
-        f'<thead><tr class="Header">{head}</tr></thead><tbody>{rows}</tbody></table>'
-    )
+    cls = "RaceOdds_HorseList_Table Ninki" if ninki_class else "RaceOdds_HorseList_Table"
+    table = f'<table class="{cls}"><tr class="col_label">{FORECAST_HEADERS}</tr>{rows}</table>'
     notice = '<p class="Caption">※発売開始後、予想オッズは実際のオッズに切り替わります。</p>'
-    inner = notice + table
+    inner = "<h2>予想オッズ（単勝）</h2>" + notice + table
     if in_tan_block:
         inner = (
             '<div id="odds_tan_block" class="RaceOdds_HorseList">'
