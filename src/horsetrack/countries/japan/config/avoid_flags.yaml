@@ -1,0 +1,18 @@
+# The avoid flags shown on the board at t (ticket #117), information on the avoid rung (D19's
+# default). Nothing here is adopted and nothing is staked.
+# OPEN: the owner confirms these values before Saturday (open question on epic #6). Changing one is
+# an owner decision, not a code change.
+
+# #82 L2: a WIN odds, or a PLACE / Wide low figure, at or below this pays the 110 yen floor (100 yen
+# when Plus-10 is withheld).
+floor_max_odds: 1.1
+
+# #82 L3: a WIN or PLACE runner whose WIN odds are above this is a tail runner (owner, 2026-11-24:
+# ">100/1 tail").
+tail_min_odds: 100.0
+
+# #82 L3: a Wide pair with a runner whose WIN-odds rank is this or worse (ties take the better rank).
+tail_rank: 9
+
+# Owner, 2026-11-24: seconds after which the board's capture is stale against the clock.
+stale_s: 120
