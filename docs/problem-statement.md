@@ -156,6 +156,10 @@ OWNER DECISION (D3): Which pools does this statement cover first?
 Answer: Win, Place and Wide. (Wide is quinella place, its own pool; final Wide dividends exist for all history, but
 pre-race Wide odds paths exist only from our own logs.)
 
+Amended 2026-11-24 (ticket #127): every JRA pool is in research scope in two priority tiers. Tier 1: Win, Place and
+Wide (quinella place). Tier 2, lower priority: Quinella, Exacta, Trio, Trifecta, Bracket quinella and WIN5. The
+combination methods (box, wheel with multi, formation) are studied for coverage and cost against single tickets.
+
 ## 2. Baseline
 
 What the brief fixes:
@@ -560,7 +564,7 @@ any change to a decision needs owner sign-off on a ticket.
 |---|---|---|---|
 | D1 | Estimand form: condition on the final price and integrate over a nowcast, condition on the board at t, or a residual on the final price | A: condition on the final price, integrate over a nowcast of the final pools made at t | 1. Decision problem |
 | D2 | Decision time t and the horizons reported | Grid T-60, T-30, T-16, T-5, T-2, T-1; T-2 primary | 1. Decision problem |
-| D3 | Pools covered first | Win, Place and Wide | 1. Decision problem |
+| D3 | Pools covered first | Win, Place and Wide first (tier 1); all other JRA pools in research scope at lower priority (tier 2), amended 2026-11-24 (#127) | 1. Decision problem |
 | D4 | How the final Win price becomes a probability (normalised 1/odds, power, Shin, calibrated) | Calibrated market (spline in ln q), fitted in-fold only | 2. Baseline |
 | D5 | Baseline for Place, Wide and the exotic pools | Both: pool's own final prices primary, Win-derived ordering secondary | 2. Baseline |
 | D6 | The outcome scored and the pseudo-R² reference | Pool-matched primary (winner for Win, top-3 order for Place and Wide), both reported; pseudo-R² vs equal chances plus nats per race over the final price | 3. Metric |
@@ -594,3 +598,4 @@ any change to a decision needs owner sign-off on a ticket.
   6. Section 5.1: the exposure table describes exposure instead of assigning a holdout use.
   7. D11 option B: the historical block's tradeoff notes the licensed pre-race tote snapshot HKTrack fitted and
      scored on (HKTrack DECISIONS #27).
+- 2026-11-24: D3 amended by the owner (ticket #127): all pools in scope, Win/Place/Wide first.
