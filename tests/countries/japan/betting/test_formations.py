@@ -423,6 +423,161 @@ def test_optimizer_finds_the_brute_force_best_formation(pool, n, seed, rules, re
         assert choice.chosen.expected_profit >= got.expected_profit - 1e-9
 
 
+# (pool, budget, unit, min_ev, scenario seed), each brute-forced with a floor below 1. The fixture
+# check in the test makes sure the floor matters: the best formation holds a combination worth
+# less than 1 and beats the best formation at a floor of 1.
+LOW_FLOOR_SCENARIOS = [
+    ("TIERCE", 5, 30, (3000, 100, 0.7)),
+    ("TIERCE", 5, 10, (2000, 100, 0.8)),
+    ("TRIO", 5, 28, (2000, 100, 0.8)),
+    ("TRIO", 5, 8, (3000, 100, 0.7)),
+    ("FORECAST", 6, 18, (3000, 100, 0.7)),
+    ("QUINELLA", 6, 9, (2000, 100, 0.8)),
+]
+
+
+@pytest.mark.parametrize(("pool", "n", "seed", "rules"), LOW_FLOOR_SCENARIOS)
+def test_optimizer_brute_force_with_a_floor_below_one(pool, n, seed, rules):
+    """min_ev < 1 admits losing combinations; the best formation may carry one to reach others.
+    Every per-position formation is enumerated; the optimizer must return the brute-force best."""
+    budget, unit, min_ev = rules
+    probs, divs = S.synthetic_race(seed, pool, n)
+    value = S.values(probs, divs)
+    forms = S.all_formations(pool, n)
+    top = S.ranked(forms, value, budget=budget, unit=unit, min_ev=min_ev)
+    at_one = S.ranked(forms, value, budget=budget, unit=unit, min_ev=1.0)
+    assert len(top) == 1 or top[0][0] - top[1][0] > 1e-6, "fixture: the best must be unique"
+    assert any(value[c] < 1.0 for c in top[0][1]), "fixture: the best holds a value under 1"
+    assert top[0][0] > at_one[0][0] + 1e-6, "fixture: the low floor must pay"
+
+    choice = F.optimise_formation(
+        pool, range(1, n + 1), probs, divs, budget=budget, unit=unit, min_ev=min_ev
+    )
+
+    assert as_set(choice.chosen) == set(top[0][1])
+    assert choice.chosen.expected_profit == pytest.approx(top[0][0])
+    assert min(value[c] for c in as_set(choice.chosen)) >= min_ev
+    assert as_set(F.formation(pool, choice.legs)) == set(top[0][1])
+
+
+# ---------------------------------------------------------------- the optimizer: planted races
+#
+# One big combination on horses B plus a cluster box on a disjoint set of horses C, every other
+# combination below the floor. No feasible formation mixes the two: a formation holding the big
+# combination and a cluster combination puts some cluster horse x in the leg of a big horse, and
+# then (x with the other big horses in their legs) is a combination of the formation that is
+# neither, so it is below the floor. The best formation is therefore the big combination alone or
+# the best formation inside C; with every cluster combination +EV and the budget covering the
+# whole cluster box, the latter is that box. So the optimum is whichever of the two gains more.
+
+
+def cluster_box(pool, horses):
+    return S.ref_formation([horses] * S.LEGS[pool], S.ORDERED[pool])
+
+
+# (pool, big combination and its value in cents, cluster horses, cluster value in cents,
+#  expected profit at 100 yen a point)
+REVIEW_COUNTEREXAMPLES = [
+    # 三連複, 9 runners: (1,2,3) at 11 (gain 10) against the 20 triples of 4-9 at 1.6 (gain 12).
+    # Each cluster horse is in 10 triples, potential 6 < 10, so the big horses are searched first.
+    ("TRIO", (1, 2, 3), 1100, range(4, 10), 160, 1200.0),
+    # 三連単: (1,2,3) at 13 (gain 12) against the 24 orders of 4-7 at 1.6 (gain 14.4).
+    ("TIERCE", (1, 2, 3), 1300, range(4, 8), 160, 1440.0),
+]
+
+
+@pytest.mark.parametrize(
+    ("pool", "big", "big_cents", "cluster", "cluster_cents", "profit"), REVIEW_COUNTEREXAMPLES
+)
+def test_optimizer_prefers_a_moderate_cluster_over_one_big_combination(
+    pool, big, big_cents, cluster, cluster_cents, profit
+):
+    """The reviewer's counterexamples (PR #207): every other combination is worth 0.5; budget
+    5000, unit 100, min_ev 1.0. The optimum is the cluster box (see the section note), and the
+    search must not cut it in favour of the big single."""
+    cluster = list(cluster)
+    box_combos = cluster_box(pool, cluster)
+    cents = {c: cluster_cents for c in box_combos}
+    cents[big] = big_cents
+    probs, divs = S.planted_race(pool, range(1, 10), cents, other=50)
+
+    choice = F.optimise_formation(
+        pool, range(1, 10), probs, divs, budget=5000, unit=100, min_ev=1.0
+    )
+
+    assert as_set(choice.chosen) == box_combos
+    assert choice.chosen.expected_profit == pytest.approx(profit)
+    assert as_set(F.formation(pool, choice.legs)) == box_combos
+    assert choice.best_single is not None and as_set(choice.best_single) == {big}
+    assert choice.best_single.expected_profit == pytest.approx(big_cents - 100)
+    assert choice.best_box is not None and as_set(choice.best_box) == box_combos
+    assert choice.best_box.expected_profit == pytest.approx(profit)
+    assert choice.chosen.expected_profit >= choice.best_box.expected_profit - 1e-9
+    assert choice.chosen.expected_profit >= choice.best_single.expected_profit - 1e-9
+
+
+CLUSTER_SIZES = {"TRIO": (5, 6), "TIERCE": (4,), "QUINELLA": (4, 5), "FORECAST": (3, 4)}
+PLANTED = [
+    *[(pool, seed) for pool in ("TRIO", "TIERCE") for seed in range(8)],
+    *[(pool, seed) for pool in ("QUINELLA", "FORECAST") for seed in range(4)],
+]
+
+
+def planted_case(pool, seed):
+    """A seeded planted race: (field, cents, big, cluster combos, unit, budget, min_ev,
+    expected combos, expected profit in yen). Three seeds in four make the cluster win with the
+    big combination still the strongest per horse (the adversarial shape); the fourth makes the
+    big combination win."""
+    rng = random.Random(1390 + 31 * seed + len(pool))
+    k = S.LEGS[pool]
+    m = rng.choice(CLUSTER_SIZES[pool])
+    n = min(10, k + m + rng.randint(0, 2))
+    field = rng.sample(range(1, 19), n)
+    big = S.canon(rng.sample(field[:k], k), S.ORDERED[pool])
+    combos = cluster_box(pool, field[k : k + m])
+    cents = {c: rng.randint(110, 190) for c in combos}
+    total = sum(v - 100 for v in cents.values())
+    potential = max(sum(cents[c] - 100 for c in combos if h in c) for h in field[k : k + m])
+    if seed % 4 != 3:
+        assert potential + 2 < total - 2, "fixture: room for the adversarial big value"
+        big_gain = rng.randint(potential + 2, total - 2)
+    else:
+        big_gain = rng.randint(total + 2, total + 200)
+    cents[big] = 100 + big_gain
+    unit = rng.choice((100, 200))
+    budget = unit * (len(combos) + rng.randint(0, 10))
+    min_ev = rng.choice((1.0, 1.05))
+    other = rng.choice((10, 50, 90))
+    if big_gain > total:
+        expected, gain = {big}, big_gain
+    else:
+        expected, gain = combos, total
+    return field, cents, other, big, combos, unit, budget, min_ev, expected, gain * unit / 100
+
+
+@pytest.mark.parametrize(("pool", "seed"), PLANTED)
+def test_optimizer_is_never_worse_than_the_best_box_or_single_on_planted_races(pool, seed):
+    field, cents, other, big, combos, unit, budget, min_ev, expected, profit = planted_case(
+        pool, seed
+    )
+    probs, divs = S.planted_race(pool, field, cents, other)
+
+    choice = F.optimise_formation(pool, field, probs, divs, budget=budget, unit=unit, min_ev=min_ev)
+
+    assert choice.best_single is not None and choice.best_box is not None
+    assert choice.chosen.expected_profit >= choice.best_box.expected_profit - 1e-6
+    assert choice.chosen.expected_profit >= choice.best_single.expected_profit - 1e-6
+    assert as_set(choice.chosen) == expected
+    assert choice.chosen.expected_profit == pytest.approx(profit)
+    assert choice.chosen.cost <= budget
+    assert as_set(choice.best_single) == {big}
+    total = sum(cents[c] - 100 for c in combos) * unit / 100
+    big_profit = (cents[big] - 100) * unit / 100
+    # a 3-horse 三連複 box or a 2-horse 馬連 box is the big combination alone
+    box_profit = total if S.ORDERED[pool] else max(total, big_profit)
+    assert choice.best_box.expected_profit == pytest.approx(box_profit)
+
+
 # A strong favourite 1 and six +EV orders, set by hand (dividend 1000 for all, so value = 10 p).
 ABC_VALUES = {
     (1, 2, 3): 2.0,

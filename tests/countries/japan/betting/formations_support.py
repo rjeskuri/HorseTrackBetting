@@ -99,6 +99,29 @@ def all_boxes(pool: str, n: int) -> tuple[frozenset[Combo], ...]:
     )
 
 
+def all_combos(pool: str, field: Iterable[int]) -> list[Combo]:
+    """Every combination of ``pool`` over ``field``, in canonical form."""
+    hs = sorted(field)
+    if ORDERED[pool]:
+        return list(itertools.permutations(hs, LEGS[pool]))
+    return list(itertools.combinations(hs, LEGS[pool]))
+
+
+PLANT_P = 1 / 1024  # exact in binary; at most 720 combinations (TIERCE on 10) keeps the sum < 1
+
+
+def planted_race(
+    pool: str, field: Iterable[int], cents: Mapping[Combo, int], other: int
+) -> tuple[dict[Combo, float], dict[Combo, int]]:
+    """(probs, dividends) with value p x d / 100 equal to ``cents[c] / 100`` exactly (the nearest
+    double), ``other / 100`` for every combination not in ``cents``. p is 1/1024 everywhere and
+    d = cents x 1024, so p x d is an exact integer number of cents."""
+    combos = all_combos(pool, field)
+    probs = dict.fromkeys(combos, PLANT_P)
+    divs = {c: int(cents.get(c, other)) * 1024 for c in combos}
+    return probs, divs
+
+
 def values(probs: Mapping[Combo, float], dividends: Mapping[Combo, float]) -> dict[Combo, float]:
     """Gross return per yen of each combination: p * dividend / 100."""
     return {c: probs[c] * dividends[c] / 100 for c in probs}

@@ -368,7 +368,7 @@ class _Search:
         self.after_by: dict[tuple[int, int], Any] = {}
         if k == 3:
             self.can_xz = real.max(axis=2)
-            unlabelled = np.triu(np.ones((n, n + 1)))  # [x, j] = 1 when x >= j
+            unlabelled = np.tril(np.ones((n, n + 1)))  # [x, j] = 1 when x >= j
             tail = np.einsum("ixjzm,xj->ijzm", tail, unlabelled)
         self.rest_open = np.einsum("ijzm,il->jzlm", tail, can_z)
 
