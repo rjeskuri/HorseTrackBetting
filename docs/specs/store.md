@@ -84,8 +84,10 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   dam_sire_id` (null where the page does not link them), `source_race_id, scraped_utc`.
 - **jrdb_pre_race**, **jrdb_post_race**: JRDB rows matched to the store's races and runners. Declared
   here: the key columns `race_id, race_date, horse_no, horse_id, race_key, jrdb_horse_id,
-  matched_by`. The per-family data columns (`<family>_<column>`) are declared by the ticket that
-  builds these tables.
+  matched_by`. The per-family data columns (`<family>_<column>`, from each family's spec under
+  `<data dir>/jrdb/specs`) are written by `horsetrack japan jrdb build`
+  (`countries/japan/jrdb/tables.py`), which also writes `jurisdiction`; a family not delivered
+  still has its columns, all null.
 
 Withdrawals and placing codes differ by site: each source adapter maps its own codes before rows
 reach the store, and documents the mapping.
