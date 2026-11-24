@@ -8,15 +8,24 @@ new temporary one; a given one must be empty) laid out like a data dir: `raw/<so
 folder holding a copy of the manifest and a symlink to each page folder, so the parse cache, the
 tables and the reports all land in the work dir and opening the manifest creates no -shm file
 beside the original. For jra the JRDB build runs too, on `raw/jrdb` and `jrdb/specs` linked the
-same way. Then every table of `processed/<source>` is compared with its rebuild by
-`compare_tables`: row count, column set, Arrow types and a content hash of the rows sorted by the
-table's key (`schemas.TABLES[name].sort_by`). A work dir inside the data dir (or the reverse) is
-refused, and the data dir's `raw/<source>`, `processed/<source>` (and the JRDB folders) are
-fingerprinted (path, size, mtime) before and after: a change fails the run.
+same way, and `processed/jra/upcoming` (the cards the JRDB build joins) is linked when the data dir
+has it, inside a real `processed/jra` folder. Then every table of `processed/<source>` is compared
+with its rebuild by `compare_tables`: row count, column set, Arrow types and a content hash of the
+rows sorted by the table's key (`schemas.TABLES[name].sort_by`). A work dir inside the data dir (or
+the reverse) is refused, and the data dir's `raw/<source>`, `processed/<source>` (and the JRDB
+folders) are fingerprinted (path, size, mtime) before and after: a change fails the run.
 
 Prints one line per table and no row contents; jrdb_* lines carry no row counts (licensed data).
 `--compare-only` compares an earlier run's work dir again without building. Exit status: 0 when
 every table matches, 1 when one differs, 2 when the run is refused or the data dir changed.
+
+Accepted differences (#210), settled against HKTrack's copy and named on the table's line
+(`jrdb_pre_race: match (accepted: jurisdiction added; all-null: cyb_a, sed_remarks)`); they do not
+fail a table, and every other difference still does:
+- `EXPECTED_ADDITIONS`: a column the rebuild has and the copy lacks (`jurisdiction` on jrdb_pre_race
+  and jrdb_post_race, added after the copy was made).
+- every table: a column the copy types as Arrow `null` (it was all null when written) that the
+  rebuild types otherwise but holds only nulls in. One value in the rebuild is still a difference.
 """
 
 from __future__ import annotations
@@ -38,6 +47,13 @@ import pyarrow.parquet as pq
 
 MANIFEST = "manifest.sqlite"
 JRDB_LINKS = ("raw/jrdb", "jrdb")  # the JRDB archives and the field-spec tables, for jra
+# columns the rebuild may have and HKTrack's copy lacks, per table (see the module docstring)
+EXPECTED_ADDITIONS: dict[str, tuple[str, ...]] = {
+    "jrdb_pre_race": ("jurisdiction",),
+    "jrdb_post_race": ("jurisdiction",),
+}
+ADDED = "added"
+ALL_NULL = "all-null"
 _BITS_AS_INT = {16: pa.int16(), 32: pa.int32(), 64: pa.int64()}
 
 
@@ -54,17 +70,20 @@ class TableDiff:
     dtype_diffs: dict[str, tuple[str, str]] = field(default_factory=dict)  # column -> (a, b)
     hash_a: str = ""
     hash_b: str = ""
+    accepted: dict[str, str] = field(default_factory=dict)  # column -> why it is not a difference
 
     @property
     def equal(self) -> bool:
         return not self.failed_checks()
 
     def failed_checks(self) -> list[str]:
+        rows_differ = self.rows_a != self.rows_b
         checks = [
-            ("rows", self.rows_a != self.rows_b),
+            ("rows", rows_differ),
             ("columns", bool(self.missing_columns or self.extra_columns)),
             ("dtypes", bool(self.dtype_diffs)),
-            ("content", self.hash_a != self.hash_b),
+            # the hashes differ by construction when the row counts do: the difference is named once
+            ("content", not rows_differ and self.hash_a != self.hash_b),
         ]
         return [name for name, failed in checks if failed]
 
@@ -126,19 +145,29 @@ def _content_hash(table: pa.Table, key: Sequence[str]) -> str:
     return h.hexdigest()
 
 
-def compare_tables(a: Path, b: Path, key: Sequence[str] | None = None) -> TableDiff:
+def _all_null(path: Path, name: str) -> bool:
+    column = pq.read_table(path, columns=[name]).column(name)
+    return column.null_count == len(column)
+
+
+def compare_tables(
+    a: Path, b: Path, key: Sequence[str] | None = None, *, expected_extra: Sequence[str] = ()
+) -> TableDiff:
     """Compare two Parquet tables; reads them (one after the other) and writes nothing.
 
     The content hashes cover the columns both sides have with the same type, so a schema
     difference does not hide whether the rest of the content matches. `key` None: sort by every
-    column."""
+    column. Two kinds of difference are accepted and recorded in `TableDiff.accepted`: a column of
+    `expected_extra` that only b has, and a column typed `null` in a whose values in b are all
+    null (b's type is any other)."""
     schema_a, schema_b = pq.read_schema(a), pq.read_schema(b)
     names_a, names_b = set(schema_a.names), set(schema_b.names)
     diff = TableDiff(
         rows_a=pq.ParquetFile(a).metadata.num_rows,
         rows_b=pq.ParquetFile(b).metadata.num_rows,
         missing_columns=[c for c in schema_a.names if c not in names_b],
-        extra_columns=[c for c in schema_b.names if c not in names_a],
+        extra_columns=[c for c in schema_b.names if c not in names_a and c not in expected_extra],
+        accepted={c: ADDED for c in schema_b.names if c not in names_a and c in expected_extra},
     )
     shared = []
     for name in schema_a.names:
@@ -147,6 +176,8 @@ def compare_tables(a: Path, b: Path, key: Sequence[str] | None = None) -> TableD
         type_a, type_b = schema_a.field(name).type, schema_b.field(name).type
         if type_a == type_b:
             shared.append(name)
+        elif pa.types.is_null(type_a) and not pa.types.is_null(type_b) and _all_null(b, name):
+            diff.accepted[name] = ALL_NULL
         else:
             diff.dtype_diffs[name] = (str(type_a), str(type_b))
     sort_key = [c for c in (key if key is not None else shared) if c in shared]
@@ -205,6 +236,10 @@ def prepare_work_dir(data: Path, work: Path, source: str) -> None:
         (work / rel).mkdir(parents=True, exist_ok=True)
         if _inside((work / rel).resolve(), data):
             raise Refused(f"{work / rel} resolves into the data dir")
+    upcoming = data / "processed" / "jra" / "upcoming"
+    if source == "jra" and upcoming.is_dir():  # the JRDB build also joins the upcoming cards
+        (work / "processed" / "jra").mkdir(parents=True, exist_ok=True)  # a real folder: it writes
+        (work / "processed" / "jra" / "upcoming").symlink_to(upcoming, target_is_directory=True)
 
 
 def _guarded(source: str) -> list[str]:
@@ -227,6 +262,16 @@ def rebuild(work: Path, source: str, workers: int) -> list[str]:
     return lines
 
 
+def _accepted_note(diff: TableDiff) -> str:
+    """` (accepted: a added; all-null: b, c)` for the accepted columns, or nothing."""
+    parts = []
+    for reason, label in ((ADDED, "{} added"), (ALL_NULL, "all-null: {}")):
+        names = [c for c, why in diff.accepted.items() if why == reason]
+        if names:
+            parts.append(label.format(", ".join(names)))
+    return f" (accepted: {'; '.join(parts)})" if parts else ""
+
+
 def compare_stores(
     copied: Path, rebuilt: Path, tables: Mapping[str, Sequence[str]]
 ) -> tuple[list[str], bool]:
@@ -242,10 +287,10 @@ def compare_stores(
                 )
                 ok = False
             continue
-        diff = compare_tables(a, b, key=key)
+        diff = compare_tables(a, b, key=key, expected_extra=EXPECTED_ADDITIONS.get(name, ()))
         rows = "" if name.startswith("jrdb_") else f" rows {diff.rows_a} / {diff.rows_b}"
         if diff.equal:
-            lines.append(f"{name}: match{rows}")
+            lines.append(f"{name}: match{rows}{_accepted_note(diff)}")
             continue
         ok = False
         detail = [f"failed {','.join(diff.failed_checks())}"]
