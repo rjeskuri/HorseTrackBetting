@@ -13,7 +13,9 @@ tests/countries/japan/handicap/test_track_bias.py.
   (venue, surface, distance), that toward (venue, surface), and that toward 0; a cell with no
   history takes its coarsest known parent, and no history at the venue and surface gives 0. The
   observation variance and (when not given) `day_sd`, the sd of a day's deviation from the
-  prior, are moment estimates over the history's (day, venue, surface) groups.
+  prior, are moment estimates over the history's (day, venue, surface) groups; the day variance
+  is measured against each group's variance with no day effect, a race's places shuffled among
+  its finishers (so a level's scores in one race are drawn without replacement).
 - `within_day_posterior`: today's deviation at each level, N(0, day_sd^2), updated conjugately by
   the scores of the races of the target's day, venue and surface with a smaller race_no whose
   results were published strictly before `decision_time`, each score taken against the prior mean
@@ -63,7 +65,8 @@ class BiasPrior:
 
 
 def _observations(runners: pl.DataFrame) -> pl.DataFrame:
-    """One row per (finisher, factor) with its level and score y; race_id kept."""
+    """One row per (finisher, factor) with its level and score y; race_id kept, with the race's
+    finisher count nf and the population variance s2 of its finishers' scores."""
     n = pl.len().over("race_id")
     nf = pl.col("finish_pos").is_not_null().sum().over("race_id")
     scored = (
@@ -72,7 +75,9 @@ def _observations(runners: pl.DataFrame) -> pl.DataFrame:
             _draw_group(pl.col("draw"), n).alias("_d"),
             _style_code(pl.col("running_positions").list.get(0, null_on_oob=True), n).alias("_s"),
             pl.when(nf >= 2).then((nf - pl.col("finish_pos")) / (nf - 1) - 0.5).alias("y"),
+            nf.alias("nf"),
         )
+        .with_columns(pl.col("y").var(ddof=0).over("race_id").alias("s2"))
         .filter(pl.col("y").is_not_null())
     )
     parts = [
@@ -83,6 +88,8 @@ def _observations(runners: pl.DataFrame) -> pl.DataFrame:
             .replace_strict(dict(enumerate(names)), return_dtype=pl.String)
             .alias("level"),
             "y",
+            "nf",
+            "s2",
         ).drop_nulls("level")
         for factor, code, names in (("draw", "_d", DRAW_LEVELS), ("style", "_s", STYLES))
     ]
@@ -128,27 +135,43 @@ def fit_bias_prior(
 
 
 def _day_spread(obs: pl.DataFrame, means: dict[tuple, float]) -> tuple[float, float]:
-    """(observation variance, day sd): within and between the history's (day, venue, surface,
-    level) groups of each score's deviation from its cell's prior mean, by moments."""
+    """(observation variance, day sd) of each score's deviation from its cell's prior mean over
+    the history's (day, venue, surface, level) groups, by moments. The observation variance is
+    the pooled within-group variance. The day variance is the mean over groups of d^2 - v0, d the
+    group's mean deviation and v0 its variance with no day effect: a race's places shuffled among
+    its nf finishers, so a level's c scores in that race are drawn without replacement and their
+    sum has variance c (nf - c) / (nf - 1) s2, s2 the race's score variance."""
     if obs.height == 0:
         return UNIFORM_VAR, MIN_DAY_SD
     prior = [
         means[(tuple(r[:5]), r[5], r[6])] for r in obs.select(*CELL, "factor", "level").iter_rows()
     ]
-    groups = (
-        obs.with_columns((pl.col("y") - pl.Series(prior)).alias("e"))
-        .group_by("race_date", "venue", "surface", "factor", "level")
+    key = ["race_date", "venue", "surface", "factor", "level"]
+    obs = obs.with_columns((pl.col("y") - pl.Series(prior)).alias("e"))
+    groups = obs.group_by(key).agg(
+        pl.len().alias("m"),
+        pl.col("e").mean().alias("d"),
+        ((pl.col("e") - pl.col("e").mean()) ** 2).sum().alias("ss"),
+    )
+    sum_var = (
+        obs.group_by(*key, "race_id")
+        .agg(pl.len().alias("c"), pl.col("nf").first(), pl.col("s2").first())
+        .group_by(key)
         .agg(
-            pl.len().alias("m"),
-            pl.col("e").mean().alias("d"),
-            ((pl.col("e") - pl.col("e").mean()) ** 2).sum().alias("ss"),
+            (pl.col("c") * (pl.col("nf") - pl.col("c")) / (pl.col("nf") - 1) * pl.col("s2"))
+            .sum()
+            .alias("v")
         )
     )
     dof = (groups.get_column("m") - 1).sum()
     noise_var = groups.get_column("ss").sum() / dof if dof > 0 else 0.0
     if not noise_var > 0:
         noise_var = UNIFORM_VAR
-    tau2 = groups.select((pl.col("d") ** 2 - noise_var / pl.col("m")).mean()).item()
+    tau2 = (
+        groups.join(sum_var, on=key)
+        .select((pl.col("d") ** 2 - pl.col("v") / pl.col("m") ** 2).mean())
+        .item()
+    )
     return float(noise_var), max(math.sqrt(max(tau2, 0.0)), MIN_DAY_SD)
 
 
@@ -196,7 +219,8 @@ def _posterior(
     cell_of = {r[0]: tuple(r[1:]) for r in entered}
     obs = _observations(runners.filter(pl.col("race_id").is_in(list(cell_of))))
     evidence: dict[tuple[str, str], list[float]] = {key: [] for key in LEVELS}
-    for rid, factor, level, y in obs.sort("race_id", "factor", "level", "y").iter_rows():
+    obs = obs.select("race_id", "factor", "level", "y").sort("race_id", "factor", "level", "y")
+    for rid, factor, level, y in obs.iter_rows():
         evidence[(factor, level)].append(y - prior.mean(cell_of[rid], factor, level))
 
     tau, var = prior.day_sd, prior.noise_var

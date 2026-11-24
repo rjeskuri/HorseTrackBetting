@@ -5,7 +5,8 @@ fitted on the days up to the fold's `train_end`; each runner gets two feature pa
 alone (nothing published) and prior + within-day update: `draw_adj` and `style_adj`, the
 adjustment of its #129 running style (null without one). Both pairs go through the same form, a
 ridge conditional logit on the winner (#129's `fit_handicap_score`, alpha 1), fitted for fold k on
-the out-of-fold rows of folds before k (fold 0 only trains). Scored as #69 defines it: winner log
+the out-of-fold rows of folds before k that are among fold k's training days, so outside its
+embargo (fold 0 only trains). Scored as #69 defines it: winner log
 loss per race, a dead heat's k winners each weighted 1/k, and a paired bootstrap over meetings.
 
 The store holds no publication time, so a proxy stands in: a race's result counts as published
@@ -148,7 +149,10 @@ def track_bias_report(
 
     scored = []
     for k in range(1, len(folds)):
-        train, test = rows.filter(pl.col("fold") < k), rows.filter(pl.col("fold") == k)
+        # fold k's own training days (#70's embargo), as #129's oof_handicap_score uses them
+        train_days = dates.gather(folds[k].train_idx).unique()
+        train = rows.filter((pl.col("fold") < k) & pl.col("race_date").is_in(train_days))
+        test = rows.filter(pl.col("fold") == k)
         if test.height == 0:
             continue
         for variant in VARIANTS:
