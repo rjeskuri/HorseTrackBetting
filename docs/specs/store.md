@@ -146,5 +146,7 @@ backfill can keep writing).
 
 ## Not here yet
 
-The reconciliation checks, upcoming race cards and the odds snapshots
-(`docs/specs/odds-log.md`) are outside this spec.
+Upcoming race cards and the odds snapshots (`docs/specs/odds-log.md`) are outside this spec.
+
+The post-build reconciliation checks live in `core/store/checks.py` (`run_checks(source, config=...)`,
+ported from HKTrack with its tolerances); the report goes to `reports_dir()/store-check-<source>.md`.
