@@ -22,7 +22,8 @@ Research and tooling for pari-mutuel horse racing, one folder per country (Japan
 - `src/horsetrack/core/{env,paths}.py`: settings from the environment or the repo-root `.env`; `HORSETRACK_DATA_DIR` resolution and the on-disk layout under it (see `.env.example`).
 - `src/horsetrack/core/{config,pricing}.py` (`config.py` exists, `pricing.py` planned): configuration, pari-mutuel pricing maths.
 - `src/horsetrack/core/ingest/`, `core/store/`, `core/eval/` (planned): HTTP/ingest, storage, evaluation harness.
-- `src/horsetrack/countries/japan/{jra,nar,jrdb,logger,board}/` (planned): Japan sources, odds logger, board.
+- `src/horsetrack/countries/japan/{jra,nar,jrdb,logger}/` (planned): Japan sources, odds logger.
+- `src/horsetrack/countries/japan/board/`: the board at a decision time and the final board (`docs/specs/board-at-t.md`).
 - `src/horsetrack/countries/hongkong/hkjc/` (planned): Hong Kong source.
 - `docs/problem-statement.md`, `docs/ledger.md`, `docs/experiment-report.md` (planned): the signed problem statement, the known-vs-assumed ledger, the report template.
 - `tests/fixtures/synthetic/` (planned): the only fixtures committed.
