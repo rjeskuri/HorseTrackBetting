@@ -67,17 +67,23 @@ def meeting_id(race_date: date, venue: str) -> str:
     return f"{SOURCE}:{race_date.isoformat()}:{venue}"
 
 
-def race_id(race_date: date, venue: str, race_no: int) -> str:
-    """hkjc:<YYYY-MM-DD>:<VENUE>:<NN>, the store's race id."""
-    return f"{meeting_id(race_date, venue)}:{int(race_no):02d}"
+def race_id(meeting: str, race_no: int) -> str:
+    """<meeting_id>:<NN>, the store's race id."""
+    return f"{meeting}:{int(race_no):02d}"
 
 
-def person_key(role: str, name: str | None) -> str | None:
-    """Join key for jockeys and trainers, '<role>:<name>': NFKC, without the apprentice claim
-    '(-2)', casefolded, anything but letters and digits as single spaces. Old pages print retired
-    people without a link, so the name is the key."""
-    norm = _CLAIM_SUFFIX.sub(" ", unicodedata.normalize("NFKC", name or "")).casefold()
-    norm = _NON_NAME.sub(" ", norm).strip()
+def normalise_name(name: str) -> str:
+    """NFKC (full- and half-width forms fold together), drop apprentice-claim suffixes like
+    '(-7)', casefold, keep letters and digits of any script; everything else becomes single
+    spaces (HKTrack's `core.ids.normalise_name`)."""
+    s = _CLAIM_SUFFIX.sub(" ", unicodedata.normalize("NFKC", name or "")).casefold()
+    return _NON_NAME.sub(" ", s).strip()
+
+
+def person_key(role: str, name: str) -> str | None:
+    """Join key for jockeys and trainers, e.g. 'jockey:a lima bravo'. Old pages print retired
+    people without any id, so the name is the key (HKTrack's `core.ids.person_key`)."""
+    norm = normalise_name(name)
     return f"{role}:{norm}" if norm else None
 
 

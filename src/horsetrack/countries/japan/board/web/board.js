@@ -3,6 +3,8 @@
  * Pure render functions first (exported for node), then the browser glue: poll `feed` every 5 s
  * with If-None-Match, redraw #board, switch venue tabs, keep the race strip on the next race.
  * Feed text is untrusted: every feed string goes through esc() before it reaches the markup.
+ * The shadow page (#122) reuses renderBoard with `opts.columns` (extra cells per row) and finds
+ * these functions on window.HorseBoard in the browser.
  * The page shows prices and their moves only.
  */
 (function () {
@@ -136,7 +138,8 @@
       esc(formatMove(pct)) + "</td>";
   }
 
-  function renderPool(code, body) {
+  /* columns (optional): {head: extra <th> markup, cells(raceId, code, line): extra <td> markup}. */
+  function renderPool(code, body, raceId, columns) {
     var rows = (body && body.rows) || [];
     var multi = rows.some(function (l) { return String(l.combination).indexOf(",") >= 0; });
     var money = yen(body && body.investment);
@@ -146,7 +149,8 @@
       "</span></div>" +
       '<table><thead><tr><th scope="col">' + (multi ? "Horses" : "Horse") + "</th>" +
       '<th scope="col" class="num">Odds</th><th scope="col" class="num">Since morning</th>' +
-      '<th scope="col" class="num">Since T-20</th></tr></thead><tbody>';
+      '<th scope="col" class="num">Since T-20</th>' + (columns ? columns.head : "") +
+      "</tr></thead><tbody>";
     rows.forEach(function (line) {
       var scr = line.status === "SCR";
       out += "<tr" + (scr ? ' class="scratched"' : "") + ' data-combination="' +
@@ -154,12 +158,13 @@
         esc(String(line.combination).split(",").join("-")) + "</th>" +
         '<td data-col="odds" class="num">' + esc(oddsText(line)) + "</td>" +
         moveCell("move-morning", line.move_morning_pct) +
-        moveCell("move-t20", line.move_t20_pct) + "</tr>";
+        moveCell("move-t20", line.move_t20_pct) +
+        (columns ? columns.cells(raceId, code, line) : "") + "</tr>";
     });
     return out + "</tbody></table></section>";
   }
 
-  function renderRace(venue, race, nowMs, nextId) {
+  function renderRace(venue, race, nowMs, nextId, columns) {
     var postMs = instantMs(race.post_utc);
     var lastMs = instantMs(race.last_capture_utc);
     var stale = isStale(race.last_capture_utc, nowMs);
@@ -176,7 +181,9 @@
     }
     out += '<span class="chip ' + (stale ? "stale" : "live") + '">' +
       (stale ? "stale · " : "") + esc(captureAge(lastMs, nowMs)) + "</span></p></header>";
-    pools.forEach(function (code) { out += renderPool(code, race.pools[code]); });
+    pools.forEach(function (code) {
+      out += renderPool(code, race.pools[code], race.race_id, columns);
+    });
     if (!pools.length) out += '<p class="muted">No odds captured yet.</p>';
     return out + "</article>";
   }
@@ -213,7 +220,9 @@
         "</i></a>";
     });
     out += '</nav><div class="races">';
-    races.forEach(function (r) { out += renderRace(shown.venue, r, nowMs, nextId); });
+    races.forEach(function (r) {
+      out += renderRace(shown.venue, r, nowMs, nextId, opts.columns);
+    });
     if (!races.length) out += '<p class="empty muted">No races captured at this venue yet.</p>';
     return out + "</div>";
   }
@@ -284,12 +293,15 @@
     })();
   }
 
-  if (typeof module !== "undefined" && module.exports) {
-    module.exports = {
-      formatMove: formatMove, isStale: isStale, renderBoard: renderBoard, poll: poll, esc: esc,
-    };
-  }
-  if (typeof document !== "undefined" && typeof fetch === "function") {
+  var api = {
+    formatMove: formatMove, moveClass: moveClass, isStale: isStale, renderBoard: renderBoard,
+    poll: poll, esc: esc, num: num,
+  };
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  if (typeof window !== "undefined") window.HorseBoard = api;
+  // Only a page with #board polls here; the shadow page draws #shadow with shadow.js.
+  if (typeof document !== "undefined" && typeof fetch === "function" &&
+      document.getElementById("board")) {
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
     else start();
   }
