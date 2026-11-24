@@ -1,6 +1,6 @@
 # Hong Kong's locked final holdout, same rule as Japan (docs/problem-statement.md, A2; #71).
 # `start` is filled in with the first day horsetrack's Hong Kong ingest captures; until then
-# split_off raises HoldoutConfigError for hong_kong. Never regenerate the seed.
+# split_off raises HoldoutConfigError for hongkong. Never regenerate the seed.
 holdout:
   start: null
   seed: "d50cd0037e8a10ae27b37cbda2a1bdc2"
