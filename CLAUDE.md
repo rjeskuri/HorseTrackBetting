@@ -22,7 +22,7 @@ Research and tooling for pari-mutuel horse racing, one folder per country (Japan
 - `src/horsetrack/`: the package. Entries marked (planned) do not exist until a ticket creates them.
 - `src/horsetrack/core/{env,paths}.py`: settings from the environment or the repo-root `.env`; `HORSETRACK_DATA_DIR` resolution and the on-disk layout under it (see `.env.example`).
 - `src/horsetrack/core/{config,pricing}.py` (`config.py` exists, `pricing.py` planned): configuration, pari-mutuel pricing maths.
-- `src/horsetrack/core/ingest/`, `core/store/`: HTTP/ingest, storage (the store's tables and readers: `docs/specs/store.md`).
+- `src/horsetrack/core/ingest/`, `core/store/`: HTTP/ingest, storage (the store's tables and readers: `docs/specs/store.md`; as-of views at a decision time: `docs/specs/as-of.md`).
 - `src/horsetrack/core/eval/`: the evaluation harness; `holdout.py` splits off the locked final holdout.
 - `src/horsetrack/countries/<country>/config/holdout.yaml` (`japan`, `hongkong`): each country's holdout start and seed, read through `core.config.load_country_yaml`. Each eval ticket owns one file there: `scoring.yaml` (#69), `folds.yaml` (#70), `holdout.yaml` (#71).
 - `src/horsetrack/countries/japan/{jra,nar,jrdb,logger}/` (planned): Japan sources, odds logger.
