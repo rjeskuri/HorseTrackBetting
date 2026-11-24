@@ -21,7 +21,8 @@ Path: `$HORSETRACK_DATA_DIR/odds_snapshots/jra/<YYYY-MM-DD>/<VENUE>.jsonl.gz`
 | --- | --- | --- |
 | `snapshot_utc` | ISO UTC text | when the capture was taken; orders the log for `latest_*` |
 | `fetched_utc` | ISO UTC text or null | optional; when the page was fetched (absent in HKTrack logs) |
-| `race_id` | text | `jra:<YYYY-MM-DD>:<VENUE>:<NN>` |
+| `race_id` | text | `jra:<YYYY-MM-DD>:<VENUE>:<NN>`; NAR: `nar:<YYYY-MM-DD>:<VENUE>:<NN>` (venues of `nar.yaml`) |
+| `source_race_key` | text | optional; NAR rows: the 12-digit netkeiba race id (`nar/pages.py`) |
 | `pool` | text | `WIN`, `PLACE`, `QUINELLA`, ... |
 | `combination` | text | runner or combination; `__pool__` on a pool-total row |
 | `odds` | number or null | null for a scratched runner, and usually on a pool-total row |
