@@ -19,5 +19,8 @@ hooks, not here. When Claude makes the same mistake twice, add one line here.
 - `.githooks/`: `pre-commit` (format and lint on staged files, no commits on main) and `pre-push` (no pushes to main, no force pushes).
 - `<path>`: <what lives there>
 
+## Modeling governance
+- [docs/ledger.md](docs/ledger.md) labels every modeling claim measured (with its source), single-run, or assumption. Cite its row, or add one, before relying on a claim.
+
 ## Gotchas
 - <A place where the code is misleading, a variable the tests need, a decision that is not in the repo.>
