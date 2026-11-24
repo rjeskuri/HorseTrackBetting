@@ -20,10 +20,13 @@ Contract pinned here (the coder implements what these tests call):
   or adopted; a ``holdout_open`` that is not the sha256 hex of a line (its bytes without the
   newline) of ``holdout_log`` as that file is at append time; ``adopted`` without a positive int
   ``owner_signoff``.
-- ``family_size`` counts the distinct ``(hypothesis_id, variant)`` pairs of the family: every
-  variant tried counts once whatever its status and however many runs it has, failed ones
-  included. A later decision, retry or rerun is another run (``records()`` keeps every run), not
-  another variant.
+- ``family_size`` counts the family's distinct variants, a variant being the run's specification
+  ``(hypothesis_id, variant, fold_scheme, sources, components, params)`` with mappings compared
+  whatever their key order: every variant tried counts once whatever its status and however many
+  runs it has, failed ones included. A change to params, components, fold_scheme or sources is a
+  new variant even under the same label. A later decision, a retry, or a rerun at another
+  git_sha, ticket or data build is another run (``records()`` keeps every run), not another
+  variant.
 - ``freeze_family(family_id, spec)`` returns
   ``sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")))`` as hex. The freeze persists
   in the registry and is not a run; a different spec raises ``FamilyAlreadyFrozen``.
@@ -586,43 +589,103 @@ def test_family_size_counts_failed_variants(tmp_path):
 
 
 def test_a_later_decision_on_a_variant_does_not_grow_the_family(tmp_path):
-    """A decision, retry or rerun appended for a variant already tried is another run of that
-    variant, not another variant: the family counts (hypothesis_id, variant) pairs."""
+    """A variant is the run's specification (hypothesis_id, variant, fold_scheme, sources,
+    components, params). A decision, retry or rerun (new git_sha, ticket or data build) appended
+    for a specification already tried is another run, not another variant; a change to params,
+    components, fold_scheme or sources is a new variant even under the same label."""
     reg, path, log = open_registry(tmp_path)
-    base = make_record(hypothesis_id="E1", family_id="F1", variant="v1")
+    base = make_record(
+        hypothesis_id="E1",
+        family_id="F1",
+        variant="v1",
+        components={"model": "logit-1.0", "calibration": "none"},
+        params={"C": 1.0, "penalty": "l2"},
+    )
+    sweep = make_record(hypothesis_id="P3", family_id="FP", variant="logit")
     failed = {"status": "failed", "metrics": ()}
+    adopted = {"status": "adopted", "owner_signoff": 141}
+    new_build = {"results": hashlib.sha256(b"synthetic build 2").hexdigest()}
 
-    # (family, hypothesis_id, variant, run) in append order; F2 is interleaved.
+    def c(value: float) -> dict:
+        return {"C": value, "penalty": "l2"}
+
+    # (family, spec, run, what it is) in append order, the families interleaved. ``spec`` names
+    # the run's specification by hand: runs sharing a name are one variant, a new name is a new
+    # variant. FP is a C sweep logged under the one label "logit": each C is its own variant.
     runs = [
-        ("F1", "E1", "v1", base),
-        ("F2", "E1", "v1", replace(base, family_id="F2")),
-        ("F1", "E1", "v1", replace(base, status="rejected")),  # rejected after comparison
-        ("F1", "E1", "v2", replace(base, variant="v2", **failed)),
-        ("F2", "E1", "v1", replace(base, family_id="F2", status="adopted", owner_signoff=141)),
-        ("F1", "E1", "v2", replace(base, variant="v2")),  # the retry, scored
-        ("F1", "E2", "v1", replace(base, hypothesis_id="E2")),  # same name, other hypothesis
-        ("F1", "E1", "v2", replace(base, variant="v2", status="adopted", owner_signoff=141)),
-        ("F1", "E1", "v1", replace(base, git_sha="b" * 40, params={"C": 2.0})),  # a rerun
-        ("F1", "E1", "v3", replace(base, variant="v3", **failed)),  # failed, never retried
+        ("F1", "v1", base, "first run"),
+        ("F2", "v1", replace(base, family_id="F2"), "the same spec in another family"),
+        ("FP", "C=0.01", replace(sweep, params=c(0.01)), "sweep point"),
+        ("F1", "v1", replace(base, status="rejected"), "rejected after comparison"),
+        ("FP", "C=0.1", replace(sweep, params=c(0.1)), "sweep point: only params changed"),
+        ("F1", "v2", replace(base, variant="v2", **failed), "a new label, failed"),
+        ("F2", "v1", replace(base, family_id="F2", **adopted), "adopted later"),
+        ("F1", "v2", replace(base, variant="v2"), "the retry, scored"),
+        ("FP", "C=1", replace(sweep, params=c(1.0)), "sweep point"),
+        ("F1", "E2:v1", replace(base, hypothesis_id="E2"), "the same label, other hypothesis"),
+        ("F1", "v2", replace(base, variant="v2", **adopted), "adopted later"),
+        ("F1", "v1", replace(base, git_sha="b" * 40), "rerun at a new git sha"),
+        ("FP", "C=10", replace(sweep, params=c(10.0)), "sweep point"),
+        ("F1", "v1", replace(base, data_builds=new_build, ticket=75), "rerun on a new data build"),
+        (
+            "F1",
+            "v1",
+            replace(
+                base,
+                git_sha="c" * 40,
+                params={"penalty": "l2", "C": 1.0},
+                components={"calibration": "none", "model": "logit-1.0"},
+            ),
+            "rerun with the mappings' keys in another order",
+        ),
+        ("FP", "C=100", replace(sweep, params=c(100.0)), "sweep point"),
+        ("F1", "v1 C=2", replace(base, params=c(2.0)), "only params changed under v1"),
+        ("F1", "v1 C=2", replace(base, params=c(2.0), status="rejected"), "a decision on it"),
+        (
+            "F1",
+            "v1 isotonic",
+            replace(base, components={"model": "logit-1.0", "calibration": "isotonic-0.3"}),
+            "only components changed under v1",
+        ),
+        ("FP", "C=1", replace(sweep, params=c(1.0), git_sha="d" * 40), "sweep point rerun"),
+        (
+            "F1",
+            "v1 wf-4",
+            replace(base, fold_scheme="walk-forward-4", **failed),
+            "only fold_scheme changed under v1, failed",
+        ),
+        ("F1", "v1 wf-4", replace(base, fold_scheme="walk-forward-4", git_sha="e" * 40), "retry"),
+        (
+            "F1",
+            "v1 +jra",
+            replace(base, sources=("netkeiba", "jra")),
+            "only sources changed under v1",
+        ),
+        ("FP", "C=100", replace(sweep, params=c(100.0), status="rejected"), "a decision on it"),
+        ("F1", "v3", replace(base, variant="v3", **failed), "failed, never retried"),
     ]
 
-    tried: dict[str, set[tuple[str, str]]] = {"F1": set(), "F2": set()}
-    for i, (family, hid, variant, run) in enumerate(runs):
+    tried: dict[str, set[str]] = {"F1": set(), "F2": set(), "FP": set()}
+    for i, (family, spec, run, what) in enumerate(runs):
         reg.append(run)
-        tried[family].add((hid, variant))
-        for fam, pairs in tried.items():
-            assert reg.family_size(fam) == len(pairs), f"{fam} after run {i}"
-    assert {fam: len(pairs) for fam, pairs in tried.items()} == {"F1": 4, "F2": 1}
+        tried[family].add(spec)
+        for fam, specs in tried.items():
+            assert reg.family_size(fam) == len(specs), (
+                f"family_size({fam!r}) after run {i} ({family}: {what})"
+            )
+    assert {fam: len(specs) for fam, specs in tried.items()} == {"F1": 8, "F2": 1, "FP": 5}
 
     reopened = Registry(path, holdout_log=log)
     for registry in (reg, reopened):
-        assert registry.family_size("F1") == 4
+        assert registry.family_size("F1") == 8
         assert registry.family_size("F2") == 1
+        assert registry.family_size("FP") == 5
         assert registry.family_size("F9") == 0
-        # Every run is still there, decisions and retries included, in append order.
-        assert registry.records() == [run for *_, run in runs]
-        for fam in ("F1", "F2"):
-            assert registry.records(fam) == [run for f, *_, run in runs if f == fam]
+        # Every run is still there, decisions, retries and reruns included, in append order.
+        assert registry.records() == [run for _, _, run, _ in runs]
+        assert len(registry.records("FP")) == 7
+        for fam in ("F1", "F2", "FP"):
+            assert registry.records(fam) == [run for f, _, run, _ in runs if f == fam]
     reopened.verify()
 
 

@@ -308,11 +308,22 @@ class Registry:
         return runs if family_id is None else [r for r in runs if r.family_id == family_id]
 
     def family_size(self, family_id: str) -> int:
-        """How many variants the family has tried: its distinct ``(hypothesis_id, variant)`` pairs,
-        each counted once whatever its status or number of runs, failed ones included. A later
-        decision, retry or rerun of a variant is another run in ``records()``, not another variant.
+        """How many variants the family has tried: its distinct run specifications
+        ``(hypothesis_id, variant, fold_scheme, sources, components, params)``, compared as
+        canonical JSON so mapping key order does not matter. Each counts once whatever its status
+        or number of runs, failed ones included; a change to params, components, fold_scheme or
+        sources is a new variant even under the same label. A later decision, retry or rerun
+        (another status, owner_signoff, metrics, holdout_open, git_sha, ticket or data_builds) is
+        another run in ``records()``, not another variant.
         """
-        return len({(r.hypothesis_id, r.variant) for r in self.records(family_id)})
+        return len(
+            {
+                _canonical(
+                    [r.hypothesis_id, r.variant, r.fold_scheme, r.sources, r.components, r.params]
+                )
+                for r in self.records(family_id)
+            }
+        )
 
     def freeze_family(self, family_id: str, spec: dict) -> str:
         """Freeze the family's pre-registered spec and return its hash (sha256 hex of the spec's
