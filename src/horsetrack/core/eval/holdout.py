@@ -89,6 +89,19 @@ def _load_definition(countries_dir: Path, country: str) -> tuple[date, str]:
     return start, seed
 
 
+def is_holdout_day(
+    day: date | str, country: str, *, countries_dir: Path | str = DEFAULT_COUNTRIES_DIR
+) -> bool:
+    """Whether the race day `day` (its local date) is in ``country``'s holdout: on or after
+    ``start`` and chosen by the seed. Raises ``HoldoutConfigError`` like ``split_off``."""
+    if isinstance(day, datetime):
+        raise TypeError("pass the local race date, not a datetime")
+    start, seed = _load_definition(Path(countries_dir), country)
+    label = day.isoformat() if isinstance(day, date) else str(day)
+    date.fromisoformat(label)  # refuse anything that is not a YYYY-MM-DD day
+    return label >= start.isoformat() and _is_holdout_day(seed, label)
+
+
 def _race_days(frame: pd.DataFrame, date_col: str) -> pd.Series:
     """Each row's race day as YYYY-MM-DD, from naive local dates, timestamps or strings."""
     stamps = pd.to_datetime(frame[date_col])
