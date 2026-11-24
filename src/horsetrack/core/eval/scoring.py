@@ -66,21 +66,24 @@ def per_race_log_loss(
     `p`, `won`, `race_id` and `scratched` hold one row per runner and must share one index. `p` is
     the forecast probability of the runner winning, `won` is True for the race's winner (or each
     co-winner of a dead heat), `race_id` names the race and `scratched` is True for a runner that
-    did not start. Rows do not need to be grouped by race.
+    did not start. Rows do not need to be grouped by race. A scratched runner's `p` may be missing
+    (the final-price baseline has no price for a horse that did not start); every other value
+    must be present.
 
     Scratched rows are removed first and every race's `p` is renormalised over its starters. A
     race's loss is then -(1/k) * sum ln p over its k winners: -ln p(winner) for k = 1, each
     co-winner at weight 1/k for a dead heat. A race with no winner (a void race, including one
     with no starters) is dropped and counted in `n_void_dropped`.
 
-    Raises ValueError when the inputs do not line up or have missing values, when a scratched
-    runner is marked as a winner, when a starter's probability is negative or not finite, or when
-    a winner's probability is zero.
+    Raises ValueError when the inputs do not line up, when `won`, `race_id` or `scratched` has a
+    missing value or a starter's `p` is missing, when a scratched runner is marked as a winner,
+    when a starter's probability is negative or not finite, or when a winner's probability is
+    zero.
     """
     if not all(p.index.equals(s.index) for s in (won, race_id, scratched)):
         raise ValueError("p, won, race_id and scratched must share one index")
-    if any(s.isna().any() for s in (p, won, race_id, scratched)):
-        raise ValueError("p, won, race_id and scratched must not contain missing values")
+    if any(s.isna().any() for s in (won, race_id, scratched)):
+        raise ValueError("won, race_id and scratched must not contain missing values")
 
     won = won.astype(bool)
     scratched = scratched.astype(bool)
@@ -94,6 +97,8 @@ def per_race_log_loss(
     void = n_winners[n_winners == 0].index
 
     starters = ~scratched
+    if p[starters].isna().any():  # a scratched runner's p may be missing: it is removed here
+        raise ValueError("a starter's probability must not be missing")
     p_start = p[starters].astype(float)
     if not np.isfinite(p_start).all() or (p_start < 0).any():
         raise ValueError("a starter's probability must be finite and non-negative")
