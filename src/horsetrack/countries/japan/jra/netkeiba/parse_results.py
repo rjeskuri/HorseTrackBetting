@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import date
 from typing import Any
 
 from bs4 import BeautifulSoup, Tag
@@ -30,11 +29,9 @@ from horsetrack.core.ingest.types import (
     ParsedPage,
     RawPage,
 )
-from horsetrack.countries.japan.jra import capture
-from horsetrack.countries.japan.jra.netkeiba import urls
+from horsetrack.countries.japan.jra.netkeiba import common, urls
 
 PARSER_VERSION = "2"  # 2: races.source_race_key
-COUNTRY = "japan"
 JURISDICTION = "jra"
 LB_PER_KG = 2.20462
 
@@ -72,7 +69,6 @@ _SCRATCHED_CODES = ("WV", "WX")
 _NAMED_MARGINS = {"ハナ": 0.05, "アタマ": 0.1, "クビ": 0.25, "大": 10.0, "大差": 10.0, "同着": 0.0}
 
 _CLASS_TOKEN = re.compile(r"\S*(?:" + "|".join(word for word, _ in _CLASSES) + r")\S*")
-_DATE = re.compile(r"([0-9]{4})年([0-9]{1,2})月([0-9]{1,2})日")
 _DISTANCE = re.compile(r"([0-9]{3,4})m")
 _GOING_TEXT = re.compile(r"(?:芝|ダート)\s*:\s*(\S+)")
 _POST_TIME = re.compile(r"発走\s*:\s*([0-9]{1,2}:[0-9]{2})")
@@ -111,15 +107,15 @@ def parse(page: RawPage) -> ParsedPage:
     table = doc.select_one(RESULT_TABLE_SELECTOR)
     shown_id = _shown_race_id(doc)
     netkeiba_id = urls.jra_race_id(page.key) or shown_id
-    race_date = _race_date(doc)
-    venue = _venue(netkeiba_id) if netkeiba_id else None
+    race_date = common.race_date(doc)
+    venue = common.venue_code(netkeiba_id) if netkeiba_id else None
     if table is None or race_date is None or netkeiba_id is None or venue is None:
         return out  # not a result (or not a JRA race): nothing to place in the tables
 
     race_no = int(netkeiba_id[10:12])
     meeting_id = f"{JURISDICTION}:{race_date.isoformat()}:{venue}"
-    race_id = capture.race_id(race_date, venue, race_no)
-    header = _text(doc.select_one("dl.racedata dd p span"))
+    race_id = common.store_race_id(race_date, venue, race_no)
+    header = common.text(doc.select_one("dl.racedata dd p span"))
     runners = _runners(table, race_id, jump=_surface(_course(header)) == "jump")
     race = _race(doc, header, race_id, meeting_id, race_no, runners)
     # the key other netkeiba pages of this race (pedigree card) use
@@ -139,23 +135,14 @@ def parse(page: RawPage) -> ParsedPage:
 # ---------------------------------------------------------------- text helpers
 
 
-def _clean(text: str | None) -> str:
-    """Runs of whitespace (incl. the non-breaking and ideographic spaces) collapsed to one space."""
-    return " ".join((text or "").split())
-
-
-def _text(node: Tag | None) -> str:
-    return _clean(node.get_text(" ")) if node is not None else ""
-
-
 def _int(text: str | None) -> int | None:
-    t = _clean(text).replace(",", "")
+    t = common.clean(text).replace(",", "")
     return int(t) if t.isascii() and t.isdigit() else None
 
 
 def _float(text: str | None) -> float | None:
     try:
-        return float(_clean(text).replace(",", ""))
+        return float(common.clean(text).replace(",", ""))
     except ValueError:
         return None
 
@@ -174,23 +161,6 @@ def _shown_race_id(doc: BeautifulSoup) -> str | None:
     return urls.jra_race_id(m.group(1)) if m else None
 
 
-def _race_date(doc: BeautifulSoup) -> date | None:
-    for node in (doc.select_one("p.smalltxt"), doc.find("title")):
-        m = _DATE.search(_text(node))
-        if m:
-            try:
-                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-            except ValueError:
-                return None
-    return None
-
-
-def _venue(netkeiba_id: str) -> str | None:
-    number = netkeiba_id[4:6]
-    venues = load_source(COUNTRY, JURISDICTION).venues
-    return next((code for code, venue in venues.items() if venue.number == number), None)
-
-
 # ---------------------------------------------------------------- race
 
 
@@ -206,8 +176,8 @@ def _race(
     course = _course(header)
     going = _GOING_TEXT.search(header)
     post_time = _POST_TIME.search(header)
-    name = _text(doc.select_one("dl.racedata h1")) or None
-    conditions = _text(doc.select_one("p.smalltxt"))
+    name = common.text(doc.select_one("dl.racedata h1")) or None
+    conditions = common.text(doc.select_one("p.smalltxt"))
     class_raw = next(iter(_CLASS_TOKEN.findall(conditions)), None)
     weight_type = _WEIGHT_TYPE.search(conditions)
     distance = _DISTANCE.search(course)
@@ -275,8 +245,8 @@ def _course_config(course: str) -> str | None:
 def _split_times(doc: BeautifulSoup) -> list[float]:
     """Cumulative leader times from the ラップ row ('12.2 - 10.7 - ...'); jump races print none."""
     for row in doc.select("table.result_table_02 tr"):
-        if _text(row.find("th")) == "ラップ":
-            parts = _text(row.find("td")).split("-")
+        if common.text(row.find("th")) == "ラップ":
+            parts = common.text(row.find("td")).split("-")
             laps = [lap for lap in map(_float, parts) if lap is not None]
             if not laps or len(laps) != len(parts):
                 return []
@@ -297,7 +267,7 @@ def _runners(table: Tag, race_id: str, jump: bool) -> list[dict[str, Any]]:
         return []
     columns: dict[str, int] = {}
     for i, th in enumerate(rows[0].find_all("th")):
-        columns.setdefault(_clean(th.get_text("")).replace(" ", ""), i)
+        columns.setdefault(common.clean(th.get_text("")).replace(" ", ""), i)
     at = {field: columns.get(header) for field, header in _HEADERS.items()}
     runners = [
         _runner(row.find_all("td"), at, race_id) for row in rows[1:] if row.find("td") is not None
@@ -317,7 +287,7 @@ def _runner(cells: list[Tag], at: dict[str, int | None], race_id: str) -> dict[s
         return cells[i] if i is not None and i < len(cells) else None
 
     def text(field: str) -> str:
-        return _text(cell(field))
+        return common.text(cell(field))
 
     placing = _placing(text("placing"))
     horse_id, horse_name = _linked(cell("horse"), _HORSE_LINK)
@@ -371,8 +341,9 @@ def _linked(cell: Tag | None, pattern: re.Pattern[str]) -> tuple[str | None, str
     for link in cell.find_all("a", href=True):
         m = pattern.search(str(link["href"]))
         if m:
-            return m.group(1), _text(link) or _clean(str(link.get("title") or "")) or None
-    return None, re.sub(r"^\[.\]\s*", "", _text(cell)) or None
+            title = common.clean(str(link.get("title") or ""))
+            return m.group(1), common.text(link) or title or None
+    return None, re.sub(r"^\[.\]\s*", "", common.text(cell)) or None
 
 
 def _placing(text: str) -> dict[str, Any]:
@@ -412,7 +383,7 @@ def _beaten_lengths(runners: list[dict[str, Any]]) -> None:
 
 def margin_lengths(raw: str | None) -> float | None:
     """'ハナ' 0.05, 'アタマ' 0.1, 'クビ' 0.25, '3/4', '2', '1.1/2' (= 1 1/2), '大' 10."""
-    text = _clean(raw)
+    text = common.clean(raw)
     if text in _NAMED_MARGINS:
         return _NAMED_MARGINS[text]
     m = _MARGIN.fullmatch(text)
@@ -439,11 +410,11 @@ def _seconds(text: str) -> float | None:
 def _dividends(doc: BeautifulSoup, race_id: str) -> list[dict[str, Any]]:
     """One row per paid combination; '6-15' -> '6,15' (page order kept, so ordered pools keep
     theirs)."""
-    source = load_source(COUNTRY, JURISDICTION)
+    source = load_source(common.COUNTRY, common.SOURCE)
     out = []
     for table in doc.select(PAY_TABLE_SELECTOR):
         for row in table.find_all("tr"):
-            label = _text(row.find("th"))
+            label = common.text(row.find("th"))
             cells = row.find_all("td")
             if not label or len(cells) < 2:
                 continue
@@ -465,5 +436,5 @@ def _dividends(doc: BeautifulSoup, race_id: str) -> list[dict[str, Any]]:
 
 
 def _combination(text: str) -> str | None:
-    tokens = [t for t in re.split(r"[-→>,\s]+", _clean(text)) if t]
+    tokens = [t for t in re.split(r"[-→>,\s]+", common.clean(text)) if t]
     return ",".join(str(int(t)) if t.isascii() and t.isdigit() else t for t in tokens) or None
