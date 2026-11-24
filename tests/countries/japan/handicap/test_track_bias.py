@@ -79,7 +79,7 @@ POSTERIOR_COLUMNS = ["factor", "level", "prior_mean", "prior_sd", "mean", "sd", 
 
 TRAIN_END = date(2025, 6, 8)  # every history day is on or before it; T (2025-06-15) is after
 HISTORY = weekend_days(date(2025, 1, 4), TRAIN_END)
-CELL = dict(venue="TOK", surface="turf", distance=1600, going="GOOD", course="A")
+CELL = dict(venue="TOK", surface="turf", distance=1600, going="GOOD", course="A", rail=None)
 
 NEUTRAL = ({}, {})
 # (draw log-strengths, style log-strengths) of a planted bias
@@ -187,6 +187,7 @@ def biased_race(
     return s.race(
         day, runners, race_no=race_no, venue=cell["venue"], surface=cell["surface"],
         distance=cell["distance"], going=cell["going"], course=cell["course"],
+        rail=cell["rail"],
     )  # fmt: skip
 
 
@@ -202,6 +203,7 @@ def cyclic_race(s: Store, day: date, j: int, *, n: int = 11, race_no: int | None
     return s.race(
         day, runners, race_no=race_no, venue=CELL["venue"], surface=CELL["surface"],
         distance=CELL["distance"], going=CELL["going"], course=CELL["course"],
+        rail=CELL["rail"],
     )  # fmt: skip
 
 
@@ -215,7 +217,9 @@ def history(s: Store, rng: random.Random, plant=NEUTRAL, *, days=HISTORY[-20:], 
 
 def frames(s: Store) -> tuple[pl.DataFrame, pl.DataFrame]:
     return (
-        pl.DataFrame(s.races, infer_schema_length=None),
+        pl.DataFrame(
+            s.races, infer_schema_length=None, schema_overrides={"rail_setting": pl.String}
+        ),
         pl.DataFrame(s.runners, infer_schema_length=None),
     )
 
@@ -311,7 +315,8 @@ DIMENSIONS = [
     ("venue", {"venue": "TOK"}, {"venue": "NAK"}),
     ("surface", {"surface": "turf"}, {"surface": "dirt"}),
     ("distance", {"distance": 1200}, {"distance": 2400}),
-    ("rail", {"course": "A"}, {"course": "C"}),
+    ("course_config", {"course": "A"}, {"course": "C"}),
+    ("rail_setting", {"rail": "A"}, {"rail": "C"}),  # #222: JRA's A/B/C/D rail setting
     ("going", {"going": "GOOD"}, {"going": "HEAVY"}),
 ]
 
@@ -336,6 +341,63 @@ def test_prior_recovers_the_historical_bias_of_each_cell(dim, a, b):
             pm = got[key]["prior_mean"]
             assert pm * emp > 0, (dim, target, key, pm, emp)
             assert abs(pm - emp) <= 0.5 * abs(emp), (dim, target, key, pm, emp)
+
+
+def _prior_means(s: Store, target: str, *, drop_rail_column: bool = False) -> dict:
+    races, runners = frames(s)
+    if drop_rail_column:
+        races = races.drop("rail_setting")
+    prior = fit_bias_prior(races, runners, train_end=TRAIN_END)
+    frame = within_day_posterior(
+        prior, races, runners, race_id=target, decision_time=decision_for(T, 1), published={}
+    )
+    return {k: v["prior_mean"] for k, v in by_level(frame).items()}
+
+
+def test_an_unseen_rail_setting_backs_off_to_the_parent_cell_not_the_seen_one():
+    """#222 Ruling: `rail_setting` is part of the full cell. History at rail A only: a target at
+    rail A takes the cell's own mean, one at rail C (no history) the (venue, surface, distance)
+    parent's, which is shrunk further toward 0, so it is smaller but has the same sign."""
+    rng = random.Random(6)
+    s = Store()
+    # 40 races: with PRIOR_RACES = 10 pseudo-races the cell's mean is about 1.03 times its parent's
+    history(s, rng, INNER_FRONT, days=HISTORY[-10:], per_day=4, rail="A")
+    at_a = biased_race(s, rng, T, rail="A")
+    at_c = biased_race(s, rng, T + timedelta(days=7), rail="C")
+    a, c = _prior_means(s, at_a), _prior_means(s, at_c)
+    for key, planted in zip(EXTREMES, (1, -1, 1, -1), strict=True):
+        assert a[key] * planted > 0.02, (key, a[key])
+        assert c[key] * planted > 0.0, (key, c[key])
+        assert abs(a[key]) > abs(c[key]) * 1.02, (key, a[key], c[key])
+
+
+def test_a_history_without_rail_settings_is_unchanged_and_an_absent_column_is_the_same():
+    """#222: null rail_setting everywhere leaves the prior as it was, and a races frame with no
+    `rail_setting` column at all (a store built before the column) fits the same prior."""
+    rng = random.Random(7)
+    s = Store()
+    history(s, rng, INNER_FRONT, going="GOOD")
+    history(s, rng, OUTER_CLOSER, going="HEAVY")
+    target = biased_race(s, rng, T)
+    with_column = _prior_means(s, target)
+    without_column = _prior_means(s, target, drop_rail_column=True)
+    assert with_column.keys() == without_column.keys()
+    for key in with_column:
+        assert with_column[key] == pytest.approx(without_column[key], abs=1e-12), key
+    # and the history is used: the GOOD-going history is inner/front
+    assert with_column[("draw", "inner")] > 0.05 and with_column[("style", "front")] > 0.05
+
+
+def test_a_null_rail_history_still_informs_a_target_with_a_rail_setting():
+    """History with no rail setting (null) is not a cell that a lettered target can reach, but
+    it is the parent's: the lettered target inherits its sign instead of getting 0."""
+    rng = random.Random(8)
+    s = Store()
+    history(s, rng, INNER_FRONT)  # rail None
+    target = biased_race(s, rng, T, rail="B")
+    got = _prior_means(s, target)
+    for key, planted in zip(EXTREMES, (1, -1, 1, -1), strict=True):
+        assert got[key] * planted > 0.0, (key, got[key])
 
 
 def test_no_history_at_the_venue_and_surface_gives_a_zero_prior():

@@ -12,7 +12,10 @@ what was published by a decision time. A value is usable from its publication:
 `available_utc` = `published_utc`. Text is NFKC-normalised first (full-width digits, ％, －);
 a value not printed or printed as － is NaN, never 0. Dirt has no cushion value.
 
-The columns are those of ticket #90's `track_condition` table less `rail` and `ingested_utc`.
+The columns are those of ticket #90's `track_condition` table less `ingested_utc`; `rail_setting`
+is its `rail` (ticket #222): the turf course in use (仮柵 position) printed in `.rail .value`
+('Aコース'), 'A' to 'D' on the turf row after NFKC, None on dirt and for a page that prints none,
+－, or anything else. `attach_rail_setting` puts it on the store's races.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ COLUMNS = (
     "cushion",
     "moisture_goal",
     "moisture_4c",
+    "rail_setting",
     "published_utc",
     "available_utc",
     "fetched_utc",
@@ -50,6 +54,7 @@ _PUBLISH = ".publish"
 _GOING_ROW = "table.going tr"
 _CUSHION_VALUE = ".cushion .value"
 _MOISTURE_ROW = "table.moisture tr"
+_RAIL_VALUE = ".rail .value"
 
 _SURFACES = {"芝": "turf", "ダート": "dirt"}
 _GOING = {"良": "GOOD", "稍重": "GOOD TO YIELDING", "重": "SOFT", "不良": "HEAVY"}
@@ -58,6 +63,7 @@ _MOISTURE_HEADS = (("ゴール", "moisture_goal"), ("コーナー", "moisture_4c
 
 _MEETING = re.compile(r"([0-9]{4})年([0-9]{1,2})月([0-9]{1,2})日[^0-9]*?[0-9]+回(\D+?)[0-9]+日")
 _PUBLISHED = re.compile(r"([0-9]{1,2})月([0-9]{1,2})日.*?([0-9]{1,2})時([0-9]{1,2})分\s*発表")
+_RAIL = re.compile(r"([A-D])(?:コース.*)?")
 _NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 
 
@@ -139,6 +145,12 @@ def _moistures(doc: BeautifulSoup) -> dict[str, dict[str, float]]:
     return out
 
 
+def _rail_setting(doc: BeautifulSoup) -> str | None:
+    """'Aコース' -> 'A' (a bare 'B' too); －, empty, a missing block or another letter -> None."""
+    m = _RAIL.fullmatch(_text(doc.select_one(_RAIL_VALUE)))
+    return m.group(1) if m else None
+
+
 def parse_going_page(body: bytes, *, fetched_utc: datetime) -> pd.DataFrame:
     """One row per surface the page prints (columns COLUMNS). Raises ValueError for a naive
     `fetched_utc` and for a page without a date line, a known venue or a 発表 time."""
@@ -149,6 +161,7 @@ def parse_going_page(body: bytes, *, fetched_utc: datetime) -> pd.DataFrame:
     goings = _goings(doc)
     moistures = _moistures(doc)
     cushion = _value(_text(doc.select_one(_CUSHION_VALUE)))
+    rail = _rail_setting(doc)
 
     surfaces = list(dict.fromkeys([*goings, *moistures]))
     records = [
@@ -160,6 +173,7 @@ def parse_going_page(body: bytes, *, fetched_utc: datetime) -> pd.DataFrame:
             "cushion": cushion if surface == "turf" else float("nan"),
             "moisture_goal": moistures.get(surface, {}).get("moisture_goal", float("nan")),
             "moisture_4c": moistures.get(surface, {}).get("moisture_4c", float("nan")),
+            "rail_setting": rail if surface == "turf" else None,
             "published_utc": published,
             "available_utc": published,
             "fetched_utc": fetched,
@@ -175,6 +189,40 @@ def _typed(frame: pd.DataFrame) -> pd.DataFrame:
     for column in _UTC_COLUMNS:
         frame[column] = pd.to_datetime(frame[column], utc=True)
     return frame
+
+
+def attach_rail_setting(
+    races: pd.DataFrame, going: pd.DataFrame, *, decision_utc: datetime | None = None
+) -> pd.DataFrame:
+    """`races` plus a `rail_setting` column (replacing one that is there): a turf race gets the
+    latest published non-null rail setting of its (venue, race_date) in `going` (the concatenated
+    output of `parse_going_page`), so a later page printing － does not erase it; every other race
+    gets None. With `decision_utc` (tz-aware) only pages available by then count."""
+    decision = None if decision_utc is None else _require_aware(decision_utc, "decision_utc")
+    rows = going[going["rail_setting"].notna()].copy()
+    rows["_available"] = pd.to_datetime(rows["available_utc"], utc=True)
+    rows["_fetched"] = pd.to_datetime(rows["fetched_utc"], utc=True)
+    if decision is not None:
+        rows = rows[rows["_available"] <= decision]
+    rows = rows.sort_values(["_available", "_fetched"], kind="mergesort")
+    # later rows overwrite earlier ones
+    latest = dict(
+        zip(
+            zip(rows["venue"], rows["race_date"], strict=True),
+            rows["rail_setting"],
+            strict=True,
+        )
+    )
+    out = races.copy()
+    out["rail_setting"] = pd.Series(
+        [
+            latest.get((v, d)) if s == "turf" else None
+            for v, d, s in zip(out["venue"], out["race_date"], out["surface"], strict=True)
+        ],
+        index=out.index,
+        dtype="object",
+    )
+    return out
 
 
 def as_of(frame: pd.DataFrame, decision_utc: datetime) -> pd.DataFrame:

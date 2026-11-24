@@ -85,6 +85,7 @@ class Store:
         going: str | None = "GOOD",
         cls: str | None = "C2",
         course: str | None = "outer",
+        rail: str | None = None,
         winner_time: float | None = None,
         fill_to: int | None = None,
     ) -> str:
@@ -125,7 +126,7 @@ class Store:
                 "race_date": day, "venue": venue, "race_no": race_no, "status": "run",
                 "post_time_local": f"{9 + race_no // 2:02d}:{(race_no * 25) % 60:02d}",
                 "surface": surface, "distance_m": distance, "course_config": course,
-                "going": going, "race_class": cls, "field_size": field,
+                "rail_setting": rail, "going": going, "race_class": cls, "field_size": field,
                 "finish_time_s": winner_time,
             }
         )  # fmt: skip
