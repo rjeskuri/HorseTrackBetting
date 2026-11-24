@@ -27,13 +27,13 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+
+from horsetrack.core import config
 from horsetrack.countries.japan.takeout import (
     TakeoutUnknown,
     load_boosts,
     race_takeout,
 )
-
-from horsetrack.core import config
 
 # Takeout in force from 2014-06-07, per pool (JRA's published rates; independent of jra.yaml).
 TAKEOUT = {
@@ -293,11 +293,26 @@ def test_unknown_boost_kind_fails_to_load(tmp_path: Path) -> None:
 # --- the shipped calendar ---
 
 
-def test_the_shipped_calendar_has_20_super_premium_days() -> None:
+# The dated result entries (one result PDF each) on
+# https://www.jra.go.jp/kouza/superpremium/index.html
+SUPER_PREMIUM_DAYS = {
+    date.fromisoformat(d)
+    for d in (
+        "2017-12-28", "2018-12-28", "2019-09-16", "2019-12-28", "2020-09-21", "2020-12-13",
+        "2020-12-20", "2021-09-20", "2021-12-28", "2022-09-19", "2022-12-28", "2023-07-01",
+        "2023-08-27", "2023-09-18", "2023-12-28", "2024-11-24", "2025-09-15", "2025-10-26",
+        "2026-09-21", "2026-09-22", "2026-10-10",
+    )
+}  # fmt: skip
+
+
+def test_the_shipped_calendar_has_21_super_premium_days() -> None:
+    assert len(SUPER_PREMIUM_DAYS) == 21
     shipped = load_boosts()
     days = [e.date for e in shipped.entries if e.kind == "super_premium"]
-    assert len(days) == 20
-    assert len(set(days)) == 20
+    assert len(days) == 21
+    assert len(set(days)) == 21
+    assert set(days) == SUPER_PREMIUM_DAYS
     assert all(isinstance(d, date) for d in days)
     assert min(days) == date(2017, 12, 28)
     assert max(days) == date(2026, 10, 10)
