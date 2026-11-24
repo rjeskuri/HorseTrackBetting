@@ -42,9 +42,11 @@ def read_store_table(
     start: date,
     end: date,
     touches_price: bool,
+    where: ds.Expression | None = None,
 ) -> pa.Table:
     """Rows of the store table `name` with `start <= race_date <= end`, holding exactly `columns`
-    in the order asked; holdout days are dropped."""
+    in the order asked; holdout days are dropped. `where`, a dataset expression (it may name
+    columns not read), narrows the rows further inside the scan."""
     if columns is None or len(columns) == 0:
         raise ValueError("columns are required: name the columns to read (no whole-table read)")
     columns = list(columns)
@@ -65,6 +67,8 @@ def read_store_table(
 
     day = ds.field(DATE_COLUMN)
     in_range = (day >= pa.scalar(start, pa.date32())) & (day <= pa.scalar(end, pa.date32()))
+    if where is not None:
+        in_range = in_range & where
     scan = columns if DATE_COLUMN in columns else [*columns, DATE_COLUMN]
     table = dataset.to_table(columns=scan, filter=in_range)
 
