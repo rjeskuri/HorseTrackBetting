@@ -8,13 +8,17 @@ in [the ledger](ledger.md). The system around the models (logger, store, board) 
 [the architecture](architecture.md).
 
 How to read the diagrams:
-- Every box names its ticket. A box built on main also names its module, with two short prefixes:
+- A box that stands for code or a ticket names its ticket; a box that only explains an idea (a
+  quantity, a test, a moment in the day) does not. A box built on main also names its module, with two short prefixes:
   `japan/` is `src/horsetrack/countries/japan/` and `core/` is `src/horsetrack/core/`. A box whose
   code is not on main says "planned".
 - In diagram 2, the tag in each box gives its status: `v0` is the simple first version running in
   shadow now, `built` is another piece on main, `planned` is a ticket not yet landed. Blue, green
   and dashed grey boxes match the tags.
-- A solid arrow is a data flow that exists in code on main; a dotted arrow is one a ticket plans.
+- In diagrams 1 to 4, a solid arrow is a data flow that exists in code on main and a dotted arrow
+  is one a ticket plans. Diagrams 5 and 6 show the order of steps, in a process and in a race day:
+  there a solid arrow is a step in that order, and a dotted arrow leads into a step that is planned,
+  not yet available, or still waiting on an owner decision.
 - Nothing here is adopted. Every model and rule stays in shadow until the owner adopts it through
   diagram 5, and no code places a bet.
 
@@ -172,8 +176,8 @@ flowchart TD
     EXO["Quinella, Exacta, Trio and Trifecta chances<br/>#99 planned"]
     BRK["Place and Wide values at the low and the<br/>high end of the bracket the pool shows<br/>#118 japan/models/v0/shadow_values.py"]
     POOL["Primary baseline: the pool's own final prices (D5)<br/>exotic dividend share #99 planned,<br/>Place and Wide de-vig: owner decision open"]
-    DERIV["Secondary baseline: the same ordering fed<br/>the calibrated market alone (D5)"]
-    SCORE["Top-3 order log loss and placed-set score<br/>against the pool's baseline (D6)<br/>#69 core/eval/scoring.py"]
+    DERIV["Secondary baseline: the same ordering fed<br/>the calibrated market alone (D5)<br/>#115 ordering, #114 calibrated market"]
+    SCORE["Top-3 order log loss and placed-set score<br/>against the pool's baseline (D6)<br/>planned: Place and Wide log loss per pool #99,<br/>the D6 top-3 order and placed-set scores no ticket yet"]
     BLEND["Exotic blend: start from the pool's prices,<br/>the model claims only a shrunk residual<br/>#99 planned"]
     FORM["Box, wheel and formation search<br/>#139 japan/betting/formations.py"]
     WIN --> ORD
@@ -212,7 +216,7 @@ flowchart TD
     HOLD["Holdout opening: by the owner, once per<br/>family, at its power target (D15)<br/>#71, #126 core/eval/holdout.py"]
     D16["D16 on the holdout: gain interval above 0,<br/>encompassing weight above 0, and the<br/>full-stack gain for a stack member<br/>encompassing test #87 planned"]
     subgraph TRACKS["Betting rules: two tracks (D18)"]
-        LA["Loss-avoidance, Family L: loses less than<br/>a stated alternative on the same races,<br/>never claims a profit<br/>#81, #82, #83 planned"]
+        LA["Loss-avoidance, Family L: loses less than<br/>a stated alternative on the same races,<br/>never claims a profit<br/>#81, #82, #83 planned<br/>Family L evidence standard: owner decision open"]
         PE["Positive-edge, Family P: realised return<br/>above 0 at final dividends on the holdout<br/>#88 planned"]
     end
     OWN["Owner adoption decision,<br/>with an experiment report and the model card"]
@@ -223,11 +227,11 @@ flowchart TD
     BOOT --> SNOOP
     SNOOP --> HOLD
     HOLD --> D16
-    BOOT -->|"paired, one-sided"| LA
-    D16 -->|"plus holdout return"| PE
+    HOLD -.->|"paired, one-sided"| LA
+    D16 -.->|"plus holdout return"| PE
     D16 --> OWN
-    LA --> OWN
-    PE --> OWN
+    LA -.->|"evidence standard open, #82, #83"| OWN
+    PE -.-> OWN
     OWN --> RUNG
 ```
 
@@ -236,9 +240,12 @@ sequence of tests written down before the data is looked at. Every attempt is re
 included, so the number of things tried is always known and the tests can allow for it. Models are
 fitted and scored on development days; the locked holdout days are opened by the owner once per
 pre-registered family, and a model must beat the final price there with an interval above zero.
-Rules that only avoid losses need to lose less than a stated alternative on the same races, rules
-that claim a profit must also make money at the final dividends on the holdout, and either kind
-climbs the staking rungs one at a time, starting from avoid (D18, D19).
+Betting rules are pre-registered families too, so they face the same family-wide tests (D17).
+Rules that only avoid losses must lose less than a stated alternative on the same races and never
+claim a profit (D18); how much evidence that takes before the owner can adopt one is still an open
+owner decision (the Family L evidence standard, #82, #83). Rules that claim a profit must also make
+money at the final dividends on the holdout. Whatever the owner adopts starts at the avoid rung and
+climbs one rung at a time, each on its own entry evidence (D19).
 
 ## 6. Timeline of a race day
 
@@ -252,7 +259,7 @@ flowchart TD
     T1["T-1: last grid point, about when<br/>online sales close"]
     POST["Post time: the off, betting closed"]
     FIN["Final odds posted: the price that pays,<br/>a label or conditioner, never an input at t<br/>#113, #234 japan/board/snapshot.py"]
-    RES["Result published by JRA, time logged #225"]
+    RES["Result published by JRA, time logged<br/>#225 japan/logger/schedule.py, japan/odds_log.py"]
     NEXT["Later races that day may use it once published:<br/>within-day bias #138 japan/handicap/track_bias.py"]
     EVE --> GRID
     GO -.->|"if published by t"| GRID
