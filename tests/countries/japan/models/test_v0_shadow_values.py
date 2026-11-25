@@ -582,6 +582,136 @@ def test_values_are_reproducible_with_a_seed():
 
 
 # ---------------------------------------------------------------------------------------------
+# A pool the nowcast cannot draw (#233): its rows are null, the other pools keep their values
+# ---------------------------------------------------------------------------------------------
+
+
+class GappedNowcast(ShockNowcast):
+    """Raises what the real NowcastV0.cell raises for a (pool, tau) without a fit
+    (KeyError "no training data for <pool> at tau <tau>"); other (pool, tau) draw as usual.
+    `missing` holds (pool, tau) pairs; tau None means every tau."""
+
+    def __init__(self, missing, scale: float = 0.3):
+        super().__init__(scale)
+        self.missing = set(missing)
+
+    def draws(self, board, *, pool, tau_min, shocks):
+        if (pool, None) in self.missing or (pool, tau_min) in self.missing:
+            raise KeyError(f"no training data for {pool} at tau {tau_min}")
+        return super().draws(board, pool=pool, tau_min=tau_min, shocks=shocks)
+
+
+class ScriptedNowcastWithGap:
+    """Fixed draws per pool; a pool not scripted raises the real nowcast's KeyError."""
+
+    def __init__(self, scripted: dict[str, PoolDraws]):
+        self.scripted = scripted
+
+    def draws(self, board, *, pool, tau_min, shocks):
+        if pool not in self.scripted:
+            raise KeyError(f"no training data for {pool} at tau {tau_min}")
+        return self.scripted[pool]
+
+
+GAP_CASES = [
+    # (horses, scratched, k, tau_min, missing (pool, tau) pairs)
+    (range(1, 11), (), 1.0, 5, {(WIDE, None)}),
+    (range(1, 11), (), 1.0, 5, {(WIDE, 5)}),
+    ((1, 2, 4, 5, 6, 8, 9), (3, 7), 2.0, 10, {(PLACE, None)}),
+    (range(1, 17), (), 1.3, 30, {(PLACE, None), (WIDE, None)}),
+    (range(1, 6), (), 0.6, 2, {(WIDE, 2), (WIDE, 30)}),
+]
+
+
+@pytest.mark.parametrize(("horses", "scratched", "k", "tau_min", "missing"), GAP_CASES)
+def test_a_pool_without_a_fit_does_not_take_the_other_pools_values_with_it(
+    horses, scratched, k, tau_min, missing
+):
+    board = full_board(horses, scratched, place_hi_missing=(2,))
+    nowcast = GappedNowcast(missing, scale=0.35)
+    out = shadow_values(
+        board,
+        tau_min=tau_min,
+        models=models(win=PowerWin(k), nowcast=nowcast),
+        n_draws=120,
+        seed=7,
+    )
+    rows = by_key(out)
+    gone = {pool for pool, tau in missing if tau in (None, tau_min)}
+    assert gone  # every case loses a pool, or it proves nothing about this ticket
+
+    expected_keys = {(WIN, str(h)) for h in board.win}
+    expected_keys |= {(PLACE, str(h)) for h in board.place}
+    expected_keys |= {(WIDE, pair_key(a, b)) for a, b in board.wide}
+    assert set(rows) == expected_keys  # a pool without a fit still has its rows
+
+    place_places, wide_places = places_paid(board.starters)
+    assert place_places and wide_places  # both pools pay here, so a null value is the gap
+    ref = reference(
+        board,
+        nowcast.returned,
+        k,
+        0 if PLACE in gone else place_places,
+        0 if WIDE in gone else wide_places,
+    )
+    for (pool, c), row in rows.items():
+        assert (row.race_id, row.pool, row.combination, row.tau_min) == (RACE, pool, c, tau_min)
+        if pool == WIN:
+            assert row.board_odds == board.win[int(c)] and row.board_odds_hi is None
+        else:
+            figures = board.place[int(c)] if pool == PLACE else board.wide[tuple(runners_of(c))]
+            assert (row.board_odds, row.board_odds_hi) == figures  # the board's figures are kept
+        if pool in gone:
+            assert row.value_mean is None and row.value_q05 is None and row.value_q95 is None
+            assert row.value_at_low is None and row.value_at_high is None
+        elif pool == WIN:
+            x = ref[(pool, c)]["x"]
+            assert row.value_mean == pytest.approx(float(x.mean()), abs=TOL)
+            assert_quantile(row.value_q05, x, 0.05)
+            assert_quantile(row.value_q95, x, 0.95)
+        else:
+            assert row.value_at_low == pytest.approx(ref[(pool, c)]["low"], abs=TOL)
+            if ref[(pool, c)]["high"] is None:
+                assert row.value_at_high is None
+            else:
+                assert row.value_at_high == pytest.approx(ref[(pool, c)]["high"], abs=TOL)
+
+
+def test_a_win_and_place_only_nowcast_on_a_three_pool_board():
+    """The ticket's case with hand-checkable numbers: draws for WIN and PLACE only."""
+    horses = (1, 2, 3, 4, 5, 6)  # six starters: Place pays 2, Wide pays 3
+    board = make_board(
+        {h: 2.0 + h for h in horses},
+        {h: (1.2 + 0.1 * h, 1.6 + 0.2 * h) for h in horses},
+        {(a, b): (2.0 + a + b, 3.0 + a + b) for a, b in pairs_of(horses, 2)},
+    )
+    q = np.full((2, 6), 1 / 6)  # p = q = 1/6 in both draws, and O = 6
+    win = PoolDraws(WIN, tuple(str(h) for h in horses), odds_from_q(q, 1.0), None)
+    low = np.array([[1.5, 1.6, 1.7, 1.8, 1.9, 2.0], [2.5, 2.6, 2.7, 2.8, 2.9, 3.0]])
+    place = PoolDraws(PLACE, tuple(str(h) for h in horses), low, low + 0.5)
+    out = by_key(
+        shadow_values(
+            board,
+            tau_min=5,
+            models=models(nowcast=ScriptedNowcastWithGap({WIN: win, PLACE: place})),
+            n_draws=2,
+            seed=0,
+        )
+    )
+    p_place = 1 - (1 - 1 / 6) ** 2
+    for j, h in enumerate(horses):
+        assert out[(WIN, str(h))].value_mean == pytest.approx(1.0, abs=TOL)
+        row = out[(PLACE, str(h))]
+        assert row.value_at_low == pytest.approx(p_place * low[:, j].mean(), abs=TOL)
+        assert row.value_at_high == pytest.approx(p_place * (low[:, j] + 0.5).mean(), abs=TOL)
+    wide_rows = [v for v in out.values() if v.pool == WIDE]
+    assert len(wide_rows) == 15
+    for v in wide_rows:
+        assert v.value_at_low is None and v.value_at_high is None
+        assert (v.board_odds, v.board_odds_hi) == board.wide[tuple(runners_of(v.combination))]
+
+
+# ---------------------------------------------------------------------------------------------
 # Shape of a value
 # ---------------------------------------------------------------------------------------------
 
@@ -605,7 +735,8 @@ def test_no_value_field_names_a_stake():
         names = {f.name for f in dataclasses.fields(ShadowValue)}
     else:
         names = set(ShadowValue._fields)
-    assert names == FIELDS
+    # `reason` is the one optional extra (#233: why a pool's rows carry no value).
+    assert names - {"reason"} == FIELDS
     for name in names:
         for word in ("stake", "bet", "kelly", "amount", "wager"):
             assert word not in name.lower(), f"{name} names a {word}"
