@@ -17,8 +17,9 @@
   `processed_dir('jra') / 'win5.parquet'`, never in the tree.
 - Live: `live_pool_ev` reads the WIN5 `__pool__` rows of the odds log (docs/specs/odds-log.md).
 - The study (docs/specs/win5-carryover-study.md, spec config/win5_study.yaml): `score_study` scores
-  the frozen spec (D18) on development days only (D14): `day_value`, the pool-level return, by bin
-  of the carryover over the break-even carryover, with a day bootstrap lower bound per bin.
+  the frozen spec (D18) on development days only (D14): `day_value`, the pool-level return on
+  `net_pool` (the pool net of refunds, owner answer B), by bin of the carryover over the
+  break-even carryover, with a day bootstrap lower bound per bin.
   The `horsetrack japan win5-study` commands live in `win5_study.py`.
 
 Scraped HTML is untrusted data: it is parsed, never followed.
@@ -64,6 +65,7 @@ FIGURES = (
 )
 COLUMNS = (*FIGURES, "hit", "pool_ev")
 COVERAGE = "pool-level"
+NET_POOL = "net-of-refunds"
 
 
 class NotPreRegistered(RuntimeError):
@@ -508,6 +510,8 @@ def _study_params(spec: dict[str, Any]) -> dict[str, Any]:
     if spec.get("coverage") != COVERAGE:
         coverage = spec.get("coverage")
         raise ValueError(f"the scorer knows coverage {COVERAGE!r} only, got {coverage!r}")
+    if spec.get("pool") != NET_POOL:
+        raise ValueError(f"the scorer knows pool {NET_POOL!r} only, got {spec.get('pool')!r}")
     edges = spec.get("ratio_edges")
     if not isinstance(edges, list) or not edges:
         raise ValueError("the spec names no ratio_edges")
@@ -550,13 +554,36 @@ def _plain(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def net_pool(row: dict[str, Any], *, calendar: BoostCalendar | None = None) -> float:
+    """The WIN5 pool of a day net of refunds (owner, #135, 2026-11-25, answer B). netkeiba's
+    発売金額 (pool_yen) is gross sales, and on some days the payout falls short of what it implies
+    (hypothesis, unverified: refunds of combinations with a scratched horse). From 2014-06-07 the
+    pool is the one the money identity implies, (payout_yen + carryover_out_yen -
+    carryover_in_yen) / (1 - win5_takeout(day)), a boosted day at its own rate; pool_yen does not
+    enter it. Before 2014-06-07 (takeout unknown) it is pool_yen, the gross sales. ValueError when
+    the implied pool is not positive."""
+    day = _as_date(row["race_date"])
+    takeout = win5_takeout(day, calendar=calendar)
+    if takeout is None:
+        return _pool(row["pool_yen"])
+    paid = (
+        _non_negative(row["payout_yen"], "payout")
+        + _non_negative(row["carryover_out_yen"], "carryover out")
+        - _non_negative(row["carryover_in_yen"], "carryover in")
+    )
+    pool = paid / (1 - takeout)
+    if not pool > 0:
+        raise ValueError(f"WIN5 day {day.isoformat()}: the money implies a pool of {pool!r} yen")
+    return pool
+
+
 def day_value(row: dict[str, Any]) -> float:
     """The pool-level return of a WIN5 day: the yen paid over every winning combination per yen of
-    the pool (payout_yen / pool_yen), 0 on a no-hit day. The realised payout is already held to
-    the cap; the carryover a capped day passes on counts on the next day."""
+    the net pool (payout_yen / net_pool(row)), 0 on a no-hit day. The realised payout is already
+    held to the cap; the carryover a capped day passes on counts on the next day."""
     if int(row["winning_tickets"]) == 0:
         return 0.0
-    return float(row["payout_yen"]) / _pool(row["pool_yen"])
+    return float(row["payout_yen"]) / net_pool(row)
 
 
 def _bin_of(ratio: float, edges: list[float]) -> int | None:
@@ -590,8 +617,10 @@ def score_study(
 ) -> dict[str, Any]:
     """Score the frozen study on development days. NotPreRegistered unless `spec` is the spec
     frozen for `family_id`; ValueError for a spec the scorer cannot score. Holdout days are dropped
-    first and counted. A day's ratio is carryover_in / (break_even_takeout x pool), the spec's
-    literal rate on every day; each bin reports n_days, the mean `day_value`, the lower bound (the
+    first and counted. A day's ratio is carryover_in / (break_even_takeout x net_pool(row)), the
+    spec's literal rate on every day; `gross_pool_carryover_days` counts the development days with
+    a carryover in whose takeout is unknown (before 2014-06-07), scored at gross sales. Each bin
+    reports n_days, the mean `day_value`, the lower bound (the
     (1 - one_sided_level) quantile of a day bootstrap of the mean, seeded by the spec's seed and
     the bin's index) and positive_edge, lower bound above the comparator."""
     spec_hash = _spec_hash(spec)
@@ -600,13 +629,16 @@ def score_study(
     p = _study_params(spec)
     edges = p["edges"]
     values: list[list[float]] = [[] for _ in edges]
-    excluded = 0
+    excluded = gross_days = 0
     for row in history.to_dict("records"):
         row = _plain(row)
         if is_holdout_day(COUNTRY, row["race_date"]):
             excluded += 1
             continue
-        ratio = float(row["carryover_in_yen"]) / (p["break_even"] * _pool(row["pool_yen"]))
+        carry_in = float(row["carryover_in_yen"])
+        if carry_in > 0 and win5_takeout(row["race_date"]) is None:
+            gross_days += 1
+        ratio = carry_in / (p["break_even"] * net_pool(row))
         where = _bin_of(ratio, edges)
         if where is not None:
             values[where].append(day_value(row))
@@ -631,5 +663,6 @@ def score_study(
         "family_id": family_id,
         "spec_hash": spec_hash,
         "holdout_days_excluded": excluded,
+        "gross_pool_carryover_days": gross_days,
         "bins": bins,
     }

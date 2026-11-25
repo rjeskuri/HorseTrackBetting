@@ -27,12 +27,12 @@ the final dividend, above 1 after the takeout, and how does it depend on carryov
 ## The owner's decisions (answered on #135, 2026-11-25)
 
 1. **Coverage**: the pool-level return, the pool's own return to its bettors: a day's value is
-   `day_value(row) = payout_yen / pool_yen` (dividend x winning tickets / pool, every combination
-   of a dead heat counted), 0 on a no-hit day. A live ticket rule (top-k per leg) is a later
-   follow-up once WIN5 legs are logged (#130).
+   `day_value(row) = payout_yen / net_pool(row)` (dividend x winning tickets / the net pool below,
+   every combination of a dead heat counted), 0 on a no-hit day. A live ticket rule (top-k per
+   leg) is a later follow-up once WIN5 legs are logged (#130).
 2. **Metric and comparator**: the mean per-day value of a bin against 1.0 (`comparator: 1.0`).
 3. **Carryover bins**: multiples of the break-even carryover `0.30 x pool`. A day's ratio is
-   `carryover_in_yen / (0.30 x pool_yen)`, with 0.30 on every day (`break_even_takeout`); edges
+   `carryover_in_yen / (0.30 x net_pool(row))`, with 0.30 on every day (`break_even_takeout`); edges
    `[0, 0.5, 1, 2]` give the bins (0, 0.5), [0.5, 1), [1, 2) and [2, inf). A day with no carryover
    is in no bin.
 4. **Estimand**: the 6億円 per 100-yen payout cap is modelled (`payout_cap_yen: 600000000`): the
@@ -45,12 +45,25 @@ the final dividend, above 1 after the takeout, and how does it depend on carryov
    mean, `n_boot: 10000` resamples under `seed: 20261125`; the lower bound is the 5th percentile of
    the bootstrap means (`one_sided_level: 0.95`). A positive edge is a bin whose one-sided 95%
    lower bound is above 1.0, stated here before scoring.
+6. **The pool (answer B)**: netkeiba's 発売金額 (`pool_yen`) is gross sales. The payout check of
+   #135 (2026-11-25) found the money short of `pool_yen x (1 - t_day) + carryover in` on 122 of
+   743 days from 2014-06-07, never over; the hypothesis, unverified from a JRA page, is refunds of
+   combinations with a scratched horse (docs/ledger.md). The pool is therefore net of refunds
+   (`pool: net-of-refunds`), implied from the money identity for days from 2014-06-07:
+   `net_pool = (payout_yen + carryover_out_yen - carryover_in_yen) / (1 - t_day)`, with the day's
+   own takeout (`win5_takeout`, a boosted day at its own rate). It is used in both the day value
+   and the bin ratio; a day whose implied pool is not positive is an error. Before 2014-06-07 no
+   takeout is known, so the pool stays the gross sales; the 8 carryover days among them are
+   reported as a separate count (`gross_pool_carryover_days`).
 
 ## Output and recording
 
 `score_study` returns, per bin, `n_days`, `mean_value`, `lower_bound` and `positive_edge` (an
-empty bin: no mean, no bound, no edge), with the family id, the spec hash and the holdout days
-excluded. `horsetrack japan win5-study score` appends one RunRecord (status `scored`, ticket 135,
-the frozen spec as params, one metric per non-empty bin with its n and lower bound); a scoring run
+empty bin: no mean, no bound, no edge), with the family id, the spec hash, the holdout days
+excluded and `gross_pool_carryover_days`, the development days before 2014-06-07 with a carryover
+in, scored at gross sales. `horsetrack japan win5-study score` prints that count and appends one
+RunRecord (status `scored`, ticket 135, the frozen spec as params, one metric per non-empty bin
+with its n and lower bound, and one metric `gross_pool_carryover_days` whose value and n are the
+count); a scoring run
 that fails after the freeze is recorded as `failed`. The PR that scores the study carries an
 experiment report (docs/experiment-report.md) that notes the 17 carryover days.

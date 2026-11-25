@@ -37,20 +37,34 @@ B. Takeout, cap, consistency.
 C. The study.
 - The spec is committed at src/horsetrack/countries/japan/config/win5_study.yaml, read with
   `core.config.load_country_yaml("japan", "win5_study")`, and holds: `family_id` (non-blank),
-  `coverage: pool-level`, `comparator: 1.0`, `ratio_edges: [0, 0.5, 1, 2]`,
+  `coverage: pool-level`, `pool: net-of-refunds`, `comparator: 1.0`, `ratio_edges: [0, 0.5, 1, 2]`,
   `break_even_takeout: 0.30`, `one_sided_level: 0.95`, `payout_cap_yen: 600000000`, an int `seed`
   and an int `n_boot` (>= 1000). docs/specs/win5-carryover-study.md is no longer a draft and names
   the family id.
-- `day_value(row) -> float`: payout_yen / pool_yen (0 on a no-hit day); a dead-heat day counts
-  every combination's payout.
+- The pool is net of refunds (owner, #135, 2026-11-25, answer B): netkeiba's 発売金額 (pool_yen) is
+  gross sales; on some days the payout falls short of pool x (1 - t_day) + carryover in, never
+  over (hypothesis: refunds of combinations with a scratched horse). `net_pool(row, *,
+  calendar=None) -> float`: from 2014-06-07, the pool the money identity implies, (payout_yen +
+  carryover_out_yen - carryover_in_yen) / (1 - win5_takeout(day, calendar=calendar)), a boosted day
+  at its own rate, pool_yen not entering it; on a no-hit day that is (carryover_out -
+  carryover_in) / (1 - t), the history's carryover out holding the carryover in plus the day's net
+  sales after takeout. Before 2014-06-07 (takeout unknown) it is pool_yen, the gross sales.
+  ValueError when the implied pool is not positive (money that cannot add up).
+- `day_value(row) -> float`: payout_yen / net_pool(row) (0 on a no-hit day); a dead-heat day counts
+  every combination's payout. A hit day that carries nothing out scores exactly (1 - t_day) +
+  carryover_in / net_pool, whatever the refunds.
+- The spec names the pool: `pool: net-of-refunds`; a spec without it, or with another value, is
+  refused by `check_study_spec` and `score_study` (ValueError), so the frozen spec records it.
 - `score_study(history, spec, *, registry, family_id) -> dict`: NotPreRegistered unless `spec` is
   the spec frozen for `family_id`; ValueError for a spec it cannot score (no, empty, unsorted or
   negative ratio_edges, n_boot < 1, one_sided_level outside (0, 1), coverage other than
-  pool-level). Holdout days (`is_holdout_day("japan", d)`) are dropped first and counted. A day's
-  ratio r = carryover_in_yen / (break_even_takeout x pool_yen), with the spec's literal 0.30 (not
-  the day's boosted takeout). Bins from edges e0 = 0 < e1 < ... < en: (e0, e1) open at 0, then
-  [e_i, e_i+1), then [en, inf); r = 0 is in no bin. Result: `{family_id, spec_hash,
-  holdout_days_excluded, bins}`, bins in edge order, each `{lo_ratio, hi_ratio (None for the open
+  pool-level, pool other than net-of-refunds). Holdout days (`is_holdout_day("japan", d)`) are
+  dropped first and counted. A day's ratio r = carryover_in_yen / (break_even_takeout x
+  net_pool(row)), with the spec's literal 0.30 (not the day's boosted takeout). Bins from edges
+  e0 = 0 < e1 < ... < en: (e0, e1) open at 0, then [e_i, e_i+1), then [en, inf); r = 0 is in no
+  bin. Result: `{family_id, spec_hash, holdout_days_excluded, gross_pool_carryover_days, bins}`:
+  `gross_pool_carryover_days` counts the development days before 2014-06-07 with a carryover in,
+  scored at gross sales; bins in edge order, each `{lo_ratio, hi_ratio (None for the open
   bin), n_days, mean_value, lower_bound, positive_edge}`: mean_value the mean day_value;
   lower_bound the (1 - one_sided_level) quantile of n_boot bootstrap means, the bin's days
   resampled with replacement (the WIN5 day is the unit) under the spec's seed; positive_edge
@@ -306,8 +320,9 @@ def test_payout_mismatches_uses_the_calendar_it_is_given():
 
 # ---------------------------------------------------------------- C: the shipped spec
 
-SHIPPED_KEYS = {"family_id", "coverage", "comparator", "ratio_edges", "break_even_takeout",
+SHIPPED_KEYS = {"family_id", "coverage", "pool", "comparator", "ratio_edges", "break_even_takeout",
                 "one_sided_level", "payout_cap_yen", "seed", "n_boot"}  # fmt: skip
+NET_POOL = "net-of-refunds"
 
 
 def shipped_spec() -> dict:
@@ -319,6 +334,7 @@ def test_the_shipped_spec_holds_the_owners_answers():
     assert SHIPPED_KEYS <= set(spec)
     assert isinstance(spec["family_id"], str) and spec["family_id"].strip()
     assert spec["coverage"] == "pool-level"
+    assert spec["pool"] == NET_POOL
     assert spec["comparator"] == 1.0
     assert spec["ratio_edges"] == [0, 0.5, 1, 2]
     assert spec["break_even_takeout"] == 0.30
@@ -335,20 +351,107 @@ def test_the_study_doc_is_signed_and_names_the_family():
     assert shipped_spec()["family_id"] in text
 
 
-# ---------------------------------------------------------------- C: the per-day value
+# ---------------------------------------------------------------- C: the net pool and day value
+
+KNOWN_FROM = date(2014, 6, 7)  # jra.yaml: WIN5 takeout unknown before
+BOOSTED = {date(2024, 9, 16), date(2025, 5, 4)}  # shipped ultra premium days: takeout 15%
 
 
-def test_day_value_is_the_pool_level_return_and_counts_every_combination():
-    rows = [
-        row(date(2019, 3, 3), 1_234_567_800, 0, 25, 3_456_780 * 25, 0),
-        row(DEAD_HEAT, 1_800_000_000, 300_000_000, 1_020, 1_559_994_000, 0,
-            dividend=6_500_000, combos=2),
-        row(date(2019, 3, 24), 987_654_300, 0, 0, 0, 691_358_010),
-        row(date(2019, 3, 31), 2_000_000_000, 300_000_000, 1, CAP, 1_100_000_000),
-    ]  # fmt: skip
-    want = [3_456_780 * 25 / 1_234_567_800, 1_559_994_000 / 1_800_000_000, 0.0, 0.3]
-    for record, value in zip(win5.build_history(rows).to_dict("records"), want, strict=True):
-        assert math.isclose(win5.day_value(record), value, rel_tol=1e-12, abs_tol=1e-15), record
+def takeout_pct(d: date) -> int | None:
+    """WIN5's takeout in percent on a day, from the facts above (not from the module)."""
+    if d < KNOWN_FROM:
+        return None
+    return 15 if d in BOOSTED else 30
+
+
+def netted(d, net, gross, carry_in, tickets, payout, *, combos=None, dividend=None) -> dict:
+    """A day whose money adds up on the net pool `net` at the day's own takeout: payout + carry out
+    = net x (1 - t) + carry in, while the page's pool_yen is the gross sales `gross`."""
+    carry_out = carry_in + net * (100 - takeout_pct(d)) // 100 - payout
+    assert carry_out >= 0 and net * (100 - takeout_pct(d)) % 100 == 0, (d, net, payout)
+    return row(d, gross, carry_in, tickets, payout, carry_out, combos=combos, dividend=dividend)
+
+
+# id -> (row, expected net pool); gross sales above the net pool on every day from 2014-06-07
+NET_POOL_CASES = {
+    "hit, no carryover, refunds": (
+        netted(date(2016, 5, 8), 1_000_000_000, 1_031_234_500, 0, 40, 700_000_000),
+        1_000_000_000),
+    "hit after a carryover, refunds": (
+        netted(date(2019, 3, 3), 1_234_567_800, 1_300_000_000, 250_000_000, 25, 1_114_197_460),
+        1_234_567_800),
+    "no hit after a carryover: (out - in) / (1 - t)": (
+        netted(date(2016, 5, 15), 987_654_300, 1_000_000_000, 300_000_000, 0, 0), 987_654_300),
+    "capped hit, excess carried": (
+        netted(date(2018, 4, 1), 2_000_000_000, 2_050_000_000, 300_000_000, 1, CAP),
+        2_000_000_000),
+    "dead heat, both combinations": (
+        netted(DEAD_HEAT, 1_799_990_000, 1_800_000_000, 300_000_000, 1_020, 1_559_993_000,
+               combos=2, dividend=6_500_000), 1_799_990_000),
+    "first day of a known takeout": (
+        netted(KNOWN_FROM, 800_000_000, 820_000_000, 0, 12, 560_000_000), 800_000_000),
+    "boosted day, its own 15%": (
+        netted(date(2025, 5, 4), 2_000_000_000, 2_100_000_000, 0, 400, 1_700_000_000),
+        2_000_000_000),
+    "boosted day after a carryover, its own 15%": (
+        netted(date(2024, 9, 16), 1_500_000_000, 1_560_000_000, 200_000_000, 3, 1_475_000_000),
+        1_500_000_000),
+    # takeout unknown: the gross sales, whatever the money says at 30%
+    "2014-06-01, gross": (row(date(2014, 6, 1), 900_000_000, 100_000_000, 10, 400_000_000, 0),
+                          900_000_000),
+    "2013 no hit, gross": (row(date(2013, 12, 22), 1_000_000_000, 200_000_000, 0, 0, 800_000_000),
+                           1_000_000_000),
+    "the first WIN5 day, gross": (row(date(2011, 4, 24), 1_200_000_000, 0, 9, 500_000_000, 0),
+                                  1_200_000_000),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("day, want", NET_POOL_CASES.values(), ids=NET_POOL_CASES.keys())
+def test_net_pool_is_implied_by_the_money_from_2014_06_07_and_gross_before(day, want):
+    record = win5.build_history([day]).to_dict("records")[0]
+    assert win5.net_pool(record) == pytest.approx(want, rel=1e-9)
+    assert win5.net_pool(day) == pytest.approx(want, rel=1e-9)  # a plain dict row too
+    if day["race_date"] >= KNOWN_FROM:
+        # the gross sales do not enter it
+        tripled = dict(day, pool_yen=3 * day["pool_yen"])
+        assert win5.net_pool(tripled) == pytest.approx(want, rel=1e-9)
+    else:
+        # the gross sales are the pool, not what the money implies at 30%
+        implied = (day["payout_yen"] + day["carryover_out_yen"] - day["carryover_in_yen"]) / 0.7
+        assert not math.isclose(implied, want, rel_tol=1e-3)
+
+
+def test_net_pool_takes_the_takeout_from_the_calendar_it_is_given():
+    boosted = NET_POOL_CASES["boosted day, its own 15%"][0]  # 2025-05-04, 1.7e9 paid out
+    plain = BoostCalendar(())
+    assert win5.net_pool(boosted, calendar=plain) == pytest.approx(1.7e9 / 0.7, rel=1e-9)
+    ordinary = row(date(2025, 5, 11), 2_100_000_000, 0, 400, 1_700_000_000, 0)
+    assert win5.net_pool(ordinary) == pytest.approx(1.7e9 / 0.7, rel=1e-9)
+    ultra = BoostCalendar((Boost(kind="ultra_premium", date=date(2025, 5, 11)),))
+    assert win5.net_pool(ordinary, calendar=ultra) == pytest.approx(2e9, rel=1e-9)
+
+
+@pytest.mark.parametrize(
+    "carry_in, carry_out",
+    [(300_000_000, 300_000_000), (300_000_000, 0), (300_000_000, 100_000_000)],
+    ids=["nothing-added", "carryover-lost", "carryover-shrank"],
+)
+def test_net_pool_refuses_money_that_implies_no_pool(carry_in, carry_out):
+    day = row(date(2017, 6, 4), 1_000_000_000, carry_in, 0, 0, carry_out)
+    with pytest.raises(ValueError):
+        win5.net_pool(day)
+
+
+def test_day_value_is_the_payout_over_the_net_pool_and_counts_every_combination():
+    for name, (day, net) in NET_POOL_CASES.items():
+        got = win5.day_value(win5.build_history([day]).to_dict("records")[0])
+        want = day["payout_yen"] / net if day["winning_tickets"] else 0.0
+        assert math.isclose(got, want, rel_tol=1e-9, abs_tol=1e-15), name
+        t = takeout_pct(day["race_date"])
+        if t is not None and day["winning_tickets"] and day["carryover_out_yen"] == 0:
+            # a refund day scores the pool's own return, not the smaller gross figure
+            assert math.isclose(got, 1 - t / 100 + day["carryover_in_yen"] / net, rel_tol=1e-9)
+            assert got > day["payout_yen"] / day["pool_yen"] + 1e-6, name
     # the dead heat's largest dividend times all its tickets would be 3.68, not 0.87
     assert 6_500_000 * 1_020 / 1_800_000_000 > 3
 
@@ -359,6 +462,7 @@ HOLDOUT_A, HOLDOUT_B = date(2026, 11, 29), date(2026, 12, 1)
 SPEC = {
     "family_id": "F-test-win5",
     "coverage": "pool-level",
+    "pool": NET_POOL,
     "comparator": 1.0,
     "ratio_edges": [0, 0.5, 1, 2],
     "break_even_takeout": 0.30,
@@ -369,25 +473,42 @@ SPEC = {
 }
 EDGES = [(0, 0.5), (0.5, 1), (1, 2), (2, None)]
 P = 1_000_000_000
-# carryovers on a 1e9 pool: ratio 0.25, 0.75, 1.5 and 3 (break-even carryover 3e8)
+# carryovers on a 1e9 net pool: ratio 0.25, 0.75, 1.5 and 3 (break-even carryover 3e8); a hit day
+# that carries nothing out scores 0.7 + 0.3 x ratio, the most a day of the bin can score:
+# 0.775, 0.925, 1.15 and 1.6
 C_BIN = [75_000_000, 225_000_000, 450_000_000, 900_000_000]
+REFUNDS = 0.03  # gross sales above the net pool, on every day from 2014-06-07 unless given
+GROSS_START = date(2012, 1, 8)  # Sundays before 2014-06-07: the gross pool, takeout unknown
 
 
 def sundays(n: int, start: date = date(2016, 1, 3)) -> list[date]:
     return [start + timedelta(weeks=i) for i in range(n)]
 
 
-def valued(d, pool, carry, value) -> dict:
-    """A day whose pool-level return is `value` (payout = value x pool)."""
+def valued(d, pool, carry, value, *, gross=None) -> dict:
+    """A day whose pool-level return is `value` (payout = value x pool). From 2014-06-07 `pool` is
+    the net pool: the money adds up on it at the day's own takeout and the page's pool_yen is the
+    gross sales (`gross`, else 3% above). Before, `pool` is the gross pool_yen itself."""
     payout = round(value * pool)
     tickets = 0 if payout == 0 else 7
-    return row(d, pool, carry, tickets, payout, 0 if tickets else 1)
+    t = takeout_pct(d)
+    if t is None:
+        return row(d, pool, carry, tickets, payout, max(0, carry + pool * 7 // 10 - payout))
+    carry_out = carry + pool * (100 - t) // 100 - payout
+    assert carry_out >= 0, f"{value} is above what a day of ratio {carry / (0.3 * pool)} can pay"
+    gross = round(pool * (1 + REFUNDS)) if gross is None else gross
+    return row(d, gross, carry, tickets, payout, carry_out)
 
 
-def history_of(groups: list[tuple[int, int, list[float]]], extra: list[dict] = ()) -> list[dict]:
-    """groups: (pool, carryover, values), one development day per value, consecutive Sundays."""
+def history_of(
+    groups: list[tuple[int, int, list[float]]],
+    extra: list[dict] = (),
+    start: date = date(2016, 1, 3),
+) -> list[dict]:
+    """groups: (pool, carryover, values), one development day per value, consecutive Sundays from
+    `start`."""
     flat = [(pool, carry, v) for pool, carry, values in groups for v in values]
-    rows = [valued(d, *f) for d, f in zip(sundays(len(flat)), flat, strict=True)]
+    rows = [valued(d, *f) for d, f in zip(sundays(len(flat), start), flat, strict=True)]
     return rows + list(extra)
 
 
@@ -404,10 +525,11 @@ def score(rows, spec, registry, family) -> dict:
 def test_the_holdout_days_used_here_are_holdout_days():
     assert is_holdout_day("japan", HOLDOUT_A) and is_holdout_day("japan", HOLDOUT_B)
     assert not any(is_holdout_day("japan", d) for d in sundays(60))
+    assert not any(is_holdout_day("japan", d) for d in sundays(30, start=GROSS_START))
 
 
 def test_scoring_refuses_a_spec_that_is_not_the_frozen_one(tmp_path):
-    rows = history_of([(P, C_BIN[0], [1.2, 1.3])])
+    rows = history_of([(P, C_BIN[0], [0.7, 0.75])])
     registry = Registry(tmp_path / "r.jsonl", holdout_log=tmp_path / "h.jsonl")
     with pytest.raises(win5.NotPreRegistered):
         score(rows, SPEC, registry, "F-test-win5")  # nothing frozen
@@ -420,12 +542,12 @@ def test_scoring_refuses_a_spec_that_is_not_the_frozen_one(tmp_path):
 
 
 def test_a_frozen_study_reports_each_ratio_bin_with_its_bootstrap_lower_bound(tmp_path):
-    above = [1.15, 1.2, 1.25, 1.3, 1.18, 1.22]
-    below = [0.6, 0.8, 1.0, 0.9, 0.7]
-    lucky = [0, 0, 0, 0, 0, 7.2]  # mean 1.2, but most resamples hold no hit
+    below = [0.3, 0.5, 0.7, 0.6, 0.4]
+    lucky = [0, 0, 0, 0, 0, 0.9]  # most resamples hold no hit
+    above = [1.45, 1.5, 1.55, 1.58, 1.48, 1.52]
     rows = history_of(
-        [(P, C_BIN[0], above), (P, C_BIN[1], below), (P, C_BIN[2], lucky), (P, 0, [3.0] * 3)],
-        extra=[valued(HOLDOUT_A, P, C_BIN[3], 5.0), valued(HOLDOUT_B, P, C_BIN[0], 0.0)],
+        [(P, C_BIN[0], below), (P, C_BIN[1], lucky), (P, C_BIN[3], above), (P, 0, [0.7] * 3)],
+        extra=[valued(HOLDOUT_A, P, C_BIN[2], 1.1), valued(HOLDOUT_B, P, C_BIN[0], 0.0)],
     )
     registry = frozen(tmp_path, SPEC, "F-test-win5")
     same_spec = json.loads(json.dumps(SPEC, sort_keys=True))  # other key order, same spec
@@ -435,20 +557,22 @@ def test_a_frozen_study_reports_each_ratio_bin_with_its_bootstrap_lower_bound(tm
     assert got["family_id"] == "F-test-win5"
     assert got["spec_hash"] == spec_hash(SPEC)
     assert got["holdout_days_excluded"] == 2
+    assert got["gross_pool_carryover_days"] == 0  # every day here is from 2014-06-07
     bins = got["bins"]
     assert [(b["lo_ratio"], b["hi_ratio"]) for b in bins] == EDGES
-    assert [b["n_days"] for b in bins] == [6, 5, 6, 0]  # the no-carryover days in no bin
-    for b, values in zip(bins[:3], (above, below, lucky), strict=True):
+    # the no-carryover days in no bin; the holdout day that would fill [1, 2) dropped
+    assert [b["n_days"] for b in bins] == [5, 6, 0, 6]
+    for b, values in zip((bins[0], bins[1], bins[3]), (below, lucky, above), strict=True):
         mean = sum(values) / len(values)
-        assert math.isclose(b["mean_value"], mean, rel_tol=1e-9), b
-        assert min(values) - 1e-12 <= b["lower_bound"] <= mean + 1e-12, b
-    assert bins[0]["lower_bound"] > 1.0 and bins[0]["positive_edge"] is True
-    assert bins[1]["lower_bound"] < 1.0 and bins[1]["positive_edge"] is False
+        assert math.isclose(b["mean_value"], mean, rel_tol=1e-8), b
+        assert min(values) - 1e-9 <= b["lower_bound"] <= mean + 1e-9, b
+    assert bins[0]["lower_bound"] < 1.0 and bins[0]["positive_edge"] is False
     # a third of the resamples miss the one hit: the 5th percentile of the means is 0
-    assert bins[2]["lower_bound"] == pytest.approx(0.0, abs=1e-12)
+    assert bins[1]["lower_bound"] == pytest.approx(0.0, abs=1e-12)
+    assert bins[1]["positive_edge"] is False
+    assert bins[2]["mean_value"] is None and bins[2]["lower_bound"] is None
     assert bins[2]["positive_edge"] is False
-    assert bins[3]["mean_value"] is None and bins[3]["lower_bound"] is None
-    assert bins[3]["positive_edge"] is False
+    assert bins[3]["lower_bound"] > 1.0 and bins[3]["positive_edge"] is True
 
 
 EDGE_CASES = {
@@ -467,7 +591,9 @@ def test_a_positive_edge_needs_the_lower_bound_above_the_comparator(
 ):
     spec = dict(SPEC, comparator=comparator, n_boot=500)
     registry = frozen(tmp_path, spec, "F-edge")
-    (first, *rest) = score(history_of([(P, C_BIN[0], values)]), spec, registry, "F-edge")["bins"]
+    # on days before 2014-06-07 (the gross pool) a value of exactly 1.0 is exact in floats
+    days = history_of([(P, C_BIN[0], values)], start=GROSS_START)
+    (first, *rest) = score(days, spec, registry, "F-edge")["bins"]
     assert first["n_days"] == len(values)
     assert first["positive_edge"] is want, first
     if len(set(values)) == 1:  # every resample has the same mean
@@ -475,21 +601,35 @@ def test_a_positive_edge_needs_the_lower_bound_above_the_comparator(
     assert all(b["n_days"] == 0 and b["positive_edge"] is False for b in rest)
 
 
-# (pool, carryover, day, expected bin index or None); the ratio uses 0.30 x pool on every day
+# (pool, carryover, day, expected bin index or None, gross sales if given), the ratio carryover
+# over 0.30 x pool on every day; `pool` is the gross pool_yen on a "gross" day (before
+# 2014-06-07), else the net pool (gross sales 3% above unless given)
 RATIO_CASES = [
+    # before 2014-06-07, the gross pool: the edges exactly
+    (P, 0, "gross", None),  # no carryover
+    (P, 3_000_000, "gross", 0),  # r = 0.01
+    (P, 149_999_000, "gross", 0),  # r just under 0.5
+    (P, 150_000_000, "gross", 1),  # r = 0.5 exactly
+    (2 * P, 300_000_000, "gross", 1),  # the same yen on twice the pool: r = 0.5
+    (P, 300_000_000, "gross", 2),  # r = 1 exactly
+    (P, 597_000_000, "gross", 2),  # r = 1.99
+    (P, 600_000_000, "gross", 3),  # r = 2 exactly
+    # from 2014-06-07, the net pool
     (P, 0, None, None),  # no carryover
-    (P, 3_000_000, None, 0),  # r = 0.01
     (P, 90_000_000, None, 0),  # r = 0.3
-    (P, 149_999_000, None, 0),  # r just under 0.5
-    (P, 150_000_000, None, 1),  # r = 0.5 exactly
-    (2 * P, 300_000_000, None, 1),  # the same yen on twice the pool: r = 0.5
-    (P, 300_000_000, None, 2),  # r = 1 exactly
-    (P, 597_000_000, None, 2),  # r = 1.99
-    (P, 600_000_000, None, 3),  # r = 2 exactly
+    (P, 149_000_000, None, 0),  # r = 0.497
+    (P, 151_000_000, None, 1),  # r = 0.503
+    (2 * P, 302_000_000, None, 1),  # the same ratio on twice the pool
+    (P, 301_000_000, None, 2),  # r = 1.003
     (400_000_000, 300_000_000, None, 3),  # r = 2.5
     (P, 9_000_000_000, None, 3),  # r = 30
-    # boosted days (takeout 0.15): still 0.30 x pool, not the day's rate
-    (P, 225_000_000, date(2025, 5, 4), 1),  # r = 0.75 (1.5 at the day's rate)
+    # the net pool, not the gross sales: r = 0.53, 1.05, 2.1 (on the gross: 0.48, 0.95, 1.9)
+    (950_000_000, 150_000_000, None, 1, 1_050_000_000),
+    (950_000_000, 300_000_000, None, 2, 1_050_000_000),
+    (950_000_000, 600_000_000, None, 3, 1_050_000_000),
+    # boosted days: the net pool at the day's own 15%, the ratio still at 0.30 x pool
+    # r = 0.53 (0.44 on the pool the money implies at 30%, 0.48 on the gross, 1.07 at 15%)
+    (P, 160_000_000, date(2025, 5, 4), 1, 1_100_000_000),
     (P, 450_000_000, date(2024, 9, 16), 2),  # r = 1.5 (3.0 at the day's rate)
 ]
 
@@ -497,29 +637,58 @@ RATIO_CASES = [
 def test_days_go_to_the_bin_of_their_carryover_over_the_break_even_carryover(tmp_path):
     spec = dict(SPEC, n_boot=200)
     registry = frozen(tmp_path, spec, "F-ratio")
-    plain_days = iter(sundays(len(RATIO_CASES)))
+    gross_days, net_days = iter(sundays(30, start=GROSS_START)), iter(sundays(30))
     rows, want = [], [[] for _ in EDGES]
-    for i, (pool, carry, day, where) in enumerate(RATIO_CASES):
-        value = 0.1 * (i + 1)  # each day's value names it
-        rows.append(valued(day or next(plain_days), pool, carry, value))
+    for i, (pool, carry, day, where, *gross) in enumerate(RATIO_CASES):
+        value = 0.02 * (i + 1)  # each day's value names it
+        d = next(gross_days) if day == "gross" else day or next(net_days)
+        rows.append(valued(d, pool, carry, value, gross=gross[0] if gross else None))
         if where is not None:
             want[where].append(value)
+    # a no-hit day is binned on its net pool too: (carry out - carry in) / 0.7 = 9.5e8, r = 0.53
+    rows.append(valued(next(net_days), 950_000_000, 150_000_000, 0.0, gross=1_050_000_000))
+    want[1].append(0.0)
 
-    bins = score(rows, spec, registry, "F-ratio")["bins"]
+    got = score(rows, spec, registry, "F-ratio")
+    bins = got["bins"]
 
-    assert [b["n_days"] for b in bins] == [len(w) for w in want] == [3, 3, 3, 3]
+    assert [b["n_days"] for b in bins] == [len(w) for w in want] == [4, 7, 5, 4]
     for b, values in zip(bins, want, strict=True):
-        assert math.isclose(b["mean_value"], sum(values) / len(values), rel_tol=1e-9), b
+        assert math.isclose(b["mean_value"], sum(values) / len(values), rel_tol=1e-8), b
+    assert got["gross_pool_carryover_days"] == 7
+
+
+@pytest.mark.parametrize("n_gross", [0, 2, 5])
+def test_carryover_days_before_2014_06_07_score_at_gross_sales_and_are_counted(tmp_path, n_gross):
+    spec = dict(SPEC, n_boot=200)
+    registry = frozen(tmp_path, spec, f"F-gross-{n_gross}")
+    # before 2014-06-07: a carryover of 4e8 on 1e9 gross sales (r = 1.33) paying 0.9 of them, a
+    # no-hit day among them; at 30% the money would imply a pool of 7.1e8 and a value of 1.26
+    early = [0.0 if i % 3 == 1 else 0.9 for i in range(n_gross)]
+    gross_days = sundays(n_gross + 2, start=GROSS_START)
+    rows = [row(d, P, 400_000_000, 7 if v else 0, round(v * P), 0 if v else 1_100_000_000)
+            for d, v in zip(gross_days[:n_gross], early, strict=True)]  # fmt: skip
+    rows += [valued(d, P, 0, 0.6) for d in gross_days[n_gross:]]  # no carryover: not counted
+    late = [1.0, 1.1, 0.0]  # from 2014-06-07, on the net pool, the same bin
+    rows += history_of([(P, 400_000_000, late)], extra=[valued(HOLDOUT_A, P, 400_000_000, 1.1)])
+
+    got = score(rows, spec, registry, f"F-gross-{n_gross}")
+
+    assert got["gross_pool_carryover_days"] == n_gross
+    assert got["holdout_days_excluded"] == 1
+    scored = early + late
+    assert [b["n_days"] for b in got["bins"]] == [0, 0, len(scored), 0]
+    assert math.isclose(got["bins"][2]["mean_value"], sum(scored) / len(scored), rel_tol=1e-8)
 
 
 def test_the_lower_bound_is_the_fifth_percentile_of_the_day_bootstrap_and_repeats(tmp_path):
     values = [0.6 + 0.02 * i for i in range(40)]
     spec = dict(SPEC, n_boot=4000)
     registry = frozen(tmp_path, spec, "F-boot")
-    rows = history_of([(P, C_BIN[1], values)])
+    rows = history_of([(P, C_BIN[3], values)])
 
-    first = score(rows, spec, registry, "F-boot")["bins"][1]
-    again = score(rows, spec, registry, "F-boot")["bins"][1]
+    first = score(rows, spec, registry, "F-boot")["bins"][3]
+    again = score(rows, spec, registry, "F-boot")["bins"][3]
 
     n = len(values)
     mean = sum(values) / n
@@ -535,10 +704,12 @@ def test_a_dead_heat_day_counts_every_combination_in_the_study(tmp_path):
     registry = frozen(tmp_path, spec, "F-dead-heat")
     dead_heat = row(DEAD_HEAT, 1_800_000_000, 300_000_000, 1_020, 1_559_994_000, 0,
                     dividend=6_500_000, combos=2)  # fmt: skip
-    # r = 3e8 / 5.4e8 = 0.56: the [0.5, 1) bin, alone
+    net = (1_559_994_000 - 300_000_000) / 0.7  # the money identity: 1.79999e9, not the 1.8e9 sold
+    # r = 3e8 / (0.3 x net) = 0.56: the [0.5, 1) bin, alone
     bins = score([dead_heat], spec, registry, "F-dead-heat")["bins"]
     assert [b["n_days"] for b in bins] == [0, 1, 0, 0]
-    assert bins[1]["mean_value"] == pytest.approx(1_559_994_000 / 1_800_000_000, rel=1e-12)
+    assert bins[1]["mean_value"] == pytest.approx(1_559_994_000 / net, rel=1e-9)
+    assert bins[1]["mean_value"] != pytest.approx(1_559_994_000 / 1_800_000_000, rel=1e-7)
 
 
 @pytest.mark.parametrize(
@@ -551,25 +722,29 @@ def test_a_dead_heat_day_counts_every_combination_in_the_study(tmp_path):
         {"n_boot": 0},
         {"one_sided_level": 1.5},
         {"coverage": "top-k per leg"},
+        {"pool": None},
+        {"pool": "gross"},
     ],
     ids=["no-edges", "empty-edges", "unsorted", "negative", "no-resamples", "bad-level",
-         "other-coverage"],
+         "other-coverage", "no-pool", "gross-pool"],
 )  # fmt: skip
 def test_a_frozen_spec_the_scorer_cannot_score_is_refused(tmp_path, change):
     spec = {k: v for k, v in {**SPEC, **change}.items() if v is not None}
+    with pytest.raises(ValueError):
+        win5.check_study_spec(spec)  # refused before a freeze
     registry = frozen(tmp_path, spec, "F-bad")
     with pytest.raises(ValueError):
-        score(history_of([(P, C_BIN[0], [1.2, 1.3])]), spec, registry, "F-bad")
+        score(history_of([(P, C_BIN[0], [0.7, 0.75])]), spec, registry, "F-bad")
 
 
 # ---------------------------------------------------------------- C: the command
 
 # development days by bin (ratio 0.25, 0.75, 1.5), no-carryover days, and one holdout day that
 # would fill the open bin if it were scored
-CLI_GROUPS = [(P, C_BIN[0], [1.1, 1.3, 1.5]), (P, C_BIN[1], [0.5, 0.9]), (P, C_BIN[2], [2.0]),
+CLI_GROUPS = [(P, C_BIN[0], [0.5, 0.6, 0.7]), (P, C_BIN[1], [0.5, 0.9]), (P, C_BIN[2], [1.1]),
               (P, 0, [0.7, 0.7, 0.7, 0.7])]  # fmt: skip
-CLI_BINS = [(3, 1.3), (2, 0.7), (1, 2.0)]  # (n_days, mean) per non-empty bin
-CLI_HOLDOUT_VALUE = 4.0
+CLI_BINS = [(3, 0.6), (2, 0.7), (1, 1.1)]  # (n_days, mean) per non-empty bin
+CLI_HOLDOUT_VALUE = 1.55
 
 
 def registry_at(data_dir: Path, tmp_path: Path) -> Registry:

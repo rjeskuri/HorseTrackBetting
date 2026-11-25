@@ -5,7 +5,9 @@ loaded, in the japan registry (`default_registry("japan")`); `score` scores the 
 (`win5.read_history()`) with it on development days only and appends one RunRecord. A scoring run
 that fails after the freeze is recorded as "failed". Scoring the same spec on the same history at
 the same commit gives the same record, which the registry holds once: the command says so and
-exits 0. The command prints aggregates only.
+exits 0. The command prints aggregates only. The count of carryover days scored at gross sales
+(before 2014-06-07, takeout unknown) is printed and recorded as one more metric
+(`GROSS_POOL_FOLD`), its value and n the count, next to one metric per non-empty bin.
 """
 
 from __future__ import annotations
@@ -34,6 +36,8 @@ HYPOTHESIS_ID = "P1"
 SOURCES = ("netkeiba",)
 FOLD_SCHEME = "development-days"
 METRIC = "mean_day_value"
+GROSS_POOL_FOLD = "carryover days before 2014-06-07"
+GROSS_POOL_METRIC = "gross_pool_carryover_days"
 
 win5_study_app = typer.Typer(no_args_is_help=True, help="The WIN5 carryover study (#135).")
 
@@ -100,6 +104,9 @@ def _metrics(result: dict[str, Any]) -> tuple[FoldMetric, ...]:
         out.append(FoldMetric(fold=f"ratio {b['lo_ratio']}..{hi}", metric=METRIC,
                               value=b["mean_value"], lo=b["lower_bound"], hi=None,
                               n=b["n_days"]))  # fmt: skip
+    gross = result["gross_pool_carryover_days"]
+    out.append(FoldMetric(fold=GROSS_POOL_FOLD, metric=GROSS_POOL_METRIC, value=float(gross),
+                          lo=None, hi=None, n=gross))  # fmt: skip
     return tuple(out)
 
 
@@ -139,7 +146,8 @@ def score_command() -> None:
                    f"{'recorded' if new else 'already recorded'} as failed", err=True)  # fmt: skip
         raise typer.Exit(1) from None
     typer.echo(f"family={family} spec_hash={result['spec_hash']} "
-               f"holdout_days_excluded={result['holdout_days_excluded']}")  # fmt: skip
+               f"holdout_days_excluded={result['holdout_days_excluded']} "
+               f"gross_pool_carryover_days={result['gross_pool_carryover_days']}")  # fmt: skip
     for b in result["bins"]:
         typer.echo(" ".join(f"{k}={v}" for k, v in b.items()))
     if _append(registry, record):
