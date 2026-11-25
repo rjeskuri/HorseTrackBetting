@@ -95,7 +95,8 @@ cache=None) -> dict`
  races: [{race_id, venue, race_no, post_utc, minutes_to_post, tau_bucket_min, board_capture_utc,
           pools: {WIN:            {"7":   {value_mean, value_q05, value_q95, flags}},
                   PLACE:          {"7":   {value_at_low, value_at_high, flags}},
-                  QUINELLA_PLACE: {"3,7": {value_at_low, value_at_high, flags}}}}]}
+                  QUINELLA_PLACE: {"3,7": {value_at_low, value_at_high, flags}}}}],
+ win5: {race_date, capture_utc, investment, carryover, pool_ev} | null}
 ```
 
 - Input: the same logs as the plain feed, read on with `odds_log.LogTail`, and the post times of
@@ -116,6 +117,14 @@ cache=None) -> dict`
   none. Every WIN runner, PLACE runner and Wide pair on the board has an entry.
 - `models`: the ids of the fits in use, or null when `load_shadow_models` found none; then every
   value is null and the flags still show.
+- `win5` (ticket #135): on a WIN5 day, `research.win5.live_pool_ev` over the log's WIN5 `__pool__`
+  rows (race_id `jra:<date>:WIN5`, docs/specs/odds-log.md) available as of `now()`: `capture_utc`
+  is the latest such row's `snapshot_utc`, `investment` and `carryover` the latest figures any such
+  row carries (yen), and `pool_ev` = `(investment * (1 - 0.30) + carryover) / investment`, the
+  whole pool's gross return per 1 yen with the carryover (a carryover not printed counts as 0 and
+  `carryover` stays null; null without an `investment`). Null on a day without WIN5 rows. WIN5 rows
+  never become a race in `races`. The shadow page draws it as one line (`data-win5`) above the
+  board; the plain feed and board page stay free of it.
 - No key names a stake, a bet, Kelly, an amount or a wager.
 
 Recompute: `cache` is a mapping the caller keeps between builds (the server keeps one). A race's

@@ -865,6 +865,15 @@ built on a licensed source shows no values here.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | E256 | per_level-vs-pooled | scored | all | winner_logloss_gain_update_per_level_vs_pooled | -1.77831e-05 | [-0.000135462, 9.96157e-05] | 22887 |
 
+## win5-carryover-v1
+
+| E id | Variant | Status | Fold | Metric | Value | CI | n |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| P1 | pool-level | scored | ratio 0..0.5 | mean_day_value | 0.816418 | [0.801953, -] | 7 |
+| P1 | pool-level | scored | ratio 0.5..1 | mean_day_value | 0.949312 | [0.929979, -] | 6 |
+| P1 | pool-level | scored | ratio 1..2 | mean_day_value | 1.05931 | [1.04581, -] | 4 |
+| P1 | pool-level | scored | carryover days before 2014-06-07 | gross_pool_carryover_days | 8 | - | 8 |
+
 ## japan-entropy-gradient-tail-conditioned
 
 | E id | Variant | Status | Fold | Metric | Value | CI | n |
