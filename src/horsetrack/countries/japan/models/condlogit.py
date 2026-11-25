@@ -15,6 +15,11 @@ it. `se` is sqrt(diag((I + diag(ridge))^-1)), I the information at `coef` (the s
 the p-weighted covariance of the race's X rows): at ridge 0 the inverse information. `loglik` is
 the unpenalised log-likelihood at `coef`.
 
+`se_cluster` (with `cluster`, one label per row, constant within a race; D7's unit is the meeting)
+is the cluster sandwich sqrt(diag(H^-1 B H^-1)): H = I + diag(ridge), the bread of `se`, and
+B = sum over clusters of g_c g_c^T, g_c the sum over the cluster's races of the unpenalised race
+score sum_i (w_i - p_i) x_i. A race with no winner adds nothing; there is no small-sample factor.
+
 Memory: flat arrays sorted by race (np.add.reduceat over race segments); nothing is quadratic in
 the rows.
 """
@@ -33,13 +38,14 @@ HALVINGS = 60
 
 @dataclass(frozen=True)
 class CLFit:
-    """The fitted coefficients, their standard errors, the unpenalised log-likelihood there and
-    the number of races in the likelihood."""
+    """The fitted coefficients, their standard errors, the unpenalised log-likelihood there, the
+    number of races in the likelihood and, with `cluster`, the cluster-sandwich standard errors."""
 
     coef: np.ndarray
     se: np.ndarray
     loglik: float
     n_races: int
+    se_cluster: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +57,7 @@ class _Races:
     w: np.ndarray  # 1/k on each of a race's k winners, else 0
     starts: np.ndarray
     sizes: np.ndarray
+    cluster: np.ndarray | None  # each race's cluster code, in race order; None without `cluster`
 
 
 def _as_float(values, name: str, n: int) -> np.ndarray:
@@ -62,7 +69,23 @@ def _as_float(values, name: str, n: int) -> np.ndarray:
     return out
 
 
-def _races(X, race_id, won, offset) -> _Races:
+def _cluster_codes(cluster, codes: np.ndarray) -> np.ndarray:
+    """One cluster code per race code from one label per row; a label missing, a race with two
+    labels or an array of another length is a ValueError."""
+    cluster = np.asarray(cluster, dtype=object)
+    if cluster.shape != codes.shape:
+        raise ValueError(f"cluster has shape {cluster.shape}, the race ids ({len(codes)},)")
+    unit = pd.factorize(cluster)[0]  # a missing label (None, NaN) is -1
+    if (unit < 0).any():
+        raise ValueError("cluster has missing labels; every row needs its cluster")
+    by_race = pd.Series(unit).groupby(codes)
+    low, high = by_race.min().to_numpy(), by_race.max().to_numpy()
+    if (low != high).any():
+        raise ValueError("a race's rows carry more than one cluster label")
+    return low
+
+
+def _races(X, race_id, won, offset, cluster=None) -> _Races:
     race_id = np.asarray(race_id, dtype=object)
     n = len(race_id)
     if pd.isna(race_id).any():
@@ -82,6 +105,7 @@ def _races(X, race_id, won, offset) -> _Races:
         raise ValueError(f"offset must be one value per row, got shape {offset.shape}")
 
     codes = pd.factorize(race_id)[0]
+    race_cluster = None if cluster is None else _cluster_codes(cluster, codes)
     winners = np.bincount(codes, weights=won)
     rows = np.flatnonzero(winners[codes] > 0)
     rows = rows[np.argsort(codes[rows], kind="stable")]
@@ -95,6 +119,7 @@ def _races(X, race_id, won, offset) -> _Races:
         w=won[rows] / winners[race],
         starts=starts,
         sizes=np.diff(np.r_[starts, len(rows)]),
+        cluster=None if race_cluster is None else race_cluster[race[starts]],
     )
 
 
@@ -113,6 +138,19 @@ def _evaluate(coef: np.ndarray, races: _Races) -> tuple[float, np.ndarray, np.nd
     return loglik, score, info
 
 
+def _cluster_meat(coef: np.ndarray, races: _Races) -> np.ndarray:
+    """B: the sum over clusters of g_c g_c^T, g_c the summed unpenalised race scores."""
+    u = races.offset + races.X @ coef
+    top = np.maximum.reduceat(u, races.starts)
+    e = np.exp(u - np.repeat(top, races.sizes))
+    p = e / np.repeat(np.add.reduceat(e, races.starts), races.sizes)
+    race_score = np.add.reduceat((races.w - p)[:, None] * races.X, races.starts, axis=0)
+    unit = pd.factorize(races.cluster)[0]
+    g = np.zeros((unit.max() + 1, races.X.shape[1]))
+    np.add.at(g, unit, race_score)
+    return g.T @ g
+
+
 def _penalty(ridge, k: int) -> np.ndarray:
     penalty = np.broadcast_to(np.asarray(ridge, dtype=float), (k,)).copy()
     if not np.all(np.isfinite(penalty)) or np.any(penalty < 0):
@@ -127,16 +165,19 @@ def fit_conditional_logit(
     *,
     offset: np.ndarray | None = None,
     ridge: float | np.ndarray = 0.0,
+    cluster: np.ndarray | None = None,
 ) -> CLFit:
     """The (ridge-penalised) conditional-logit maximum likelihood of u = offset + X @ coef.
 
     `X` is (rows, k), `race_id` one label per row (rows need not be grouped by race), `won` a bool
-    per row and `offset` None or one float per row. Raises ValueError on missing or non-finite X
-    or offset, inputs of different lengths, a negative ridge, no race with a winner, or a design
+    per row, `offset` None or one float per row and `cluster` None or one label per row, constant
+    within a race (it fills `se_cluster` and changes nothing else). Raises ValueError on missing
+    or non-finite X or offset, inputs of different lengths, a negative ridge, a missing cluster
+    label or a race with two, no race with a winner, or a design
     the races cannot identify (singular information at ridge 0); RuntimeError when Newton does not
     converge (no finite maximum, as when a column separates the winners perfectly).
     """
-    races = _races(X, race_id, won, offset)
+    races = _races(X, race_id, won, offset, cluster)
     k = races.X.shape[1]
     penalty = _penalty(ridge, k)
 
@@ -171,9 +212,13 @@ def fit_conditional_logit(
         cov = np.linalg.inv(info + np.diag(penalty))
     except np.linalg.LinAlgError as exc:
         raise ValueError("the design is not identified: singular information") from exc
+    se_cluster = None
+    if races.cluster is not None:
+        se_cluster = np.sqrt(np.diag(cov @ _cluster_meat(coef, races) @ cov))
     return CLFit(
         coef=coef,
         se=np.sqrt(np.diag(cov)),
         loglik=loglik,
         n_races=len(races.starts),
+        se_cluster=se_cluster,
     )

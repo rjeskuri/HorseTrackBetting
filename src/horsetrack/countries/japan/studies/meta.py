@@ -23,6 +23,14 @@ race of the scored folds, from the store alone.
 Order: freeze the family's spec in the run registry (before any outcome is read), read the store
 and the members, score, append one registry record per variant (failures included) and write the
 report. CLI: `python -m horsetrack.countries.japan.studies.meta --run --members PATH [--out DIR]`.
+
+Added after the outcomes were read (review findings on PR #308), outside the frozen spec, which
+is unchanged: the meeting-clustered coefficient bounds (D7's unit and level, 95% one-sided; the
+`meeting_clustered:` variants, one registry record each) beside the frozen 95% two-sided Wald
+intervals; the report's mechanical reading of each frozen rule under both; and the level-2
+training window per scored fold against D9's 5-season minimum, which no scored fold meets (put to
+the owner on #87). A rerun appends only records the family does not already hold: a record equal
+to one in the registry but for its git commit is the same run reproduced and is not appended.
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
+from statistics import NormalDist
 
 import numpy as np
 import pandas as pd
@@ -76,7 +85,13 @@ FAMILY_ID = "japan-c4-meta-final-win"
 STORE_SOURCES = ("jra",)
 MEMBER_SOURCES = ("jra", "jrdb")
 BOOTSTRAP_SEED = 87  # reproducibility only; scoring.yaml signs no seed
-WALD_Z = 1.959963984540054  # 95% two-sided Wald intervals on coefficients, as in #77
+WALD_Z = 1.959963984540054  # the frozen spec's 95% two-sided Wald intervals, as in #77
+CLUSTER = "meeting_id"  # D7's unit, the meeting (venue x day): the ΔLL bootstrap's clusters too
+CLUSTERED = "meeting_clustered"  # the prefix of the D7 coefficient-bound variants
+D9_SIGNED = (  # D9 as signed (docs/problem-statement.md, decisions table)
+    "Quarter folds, quarterly refit, expanding, 5 seasons minimum, nested OOF, 1-week embargo"
+)
+D9_MIN_SEASONS = 5  # D9: "5 seasons minimum"
 MEMBER_FILE = "m-v1-20261115-6102e309.parquet"  # under HKTrack's outputs/oof/
 MEMBERS = {
     "form": (
@@ -108,7 +123,10 @@ FORMS = {  # variant prefix -> (form, the market column the meta conditions on)
 OVERLAY_RATIOS = (1.0, 1.1, None, 1.5, 2.0)  # None: break-even, 1 / (1 - Win takeout)
 RUNNER_COLUMNS = ["race_id", "race_date", "horse_id", "win_odds", "finish_pos", "is_scratched"]
 RACE_COLUMNS = ["race_id", "race_date", "meeting_id", "status"]
-DECISIONS = {
+# The owner decisions exactly as the family's spec froze them on 2026-11-25 (`build_spec`). The
+# registry refuses the run if a byte of the spec changes, so this stays as it is; the report
+# renders DECISIONS below, which quotes D9 in full and states where this run departs from it.
+SPEC_DECISIONS = {
     "D1": "A: condition on the final price; this family conditions on the final Win price",
     "D4": "the Win baseline is the calibrated market (spline in ln q), fitted in-fold",
     "D6": "winner log loss per race, a dead heat at 1/k per co-winner (#69 answer); pseudo-R2 "
@@ -120,6 +138,28 @@ DECISIONS = {
     "D11-D15": "holdout A2 from 2026-11-28, fully locked; no holdout row is read; not opened",
     "D16": "adoption needs a holdout gain lower bound above 0 and a positive encompassing "
     "weight: nothing is adopted here",
+    "D21": "no figure derived from JRDB in the repository: every member-based figure is withheld",
+    "#87": "the owner's comment of 2026-11-24: JRDB as a model input in private models on this "
+    "Mac only, results never published; the shrinkage target is alpha = 0, the market alone",
+}
+DECISIONS = {
+    "D1": "A: condition on the final price; this family conditions on the final Win price",
+    "D4": "the Win baseline is the calibrated market (spline in ln q), fitted in-fold",
+    "D6": "winner log loss per race, a dead heat at 1/k per co-winner (#69 answer); pseudo-R2 "
+    "against equal chances beside nats per race",
+    "D7": "meeting (venue x day) clusters, 95% one-sided (config/scoring.yaml): the ΔLL and "
+    "ceiling bootstraps and the meeting-clustered coefficient bounds; the frozen spec's "
+    "coefficient rules read 95% two-sided Wald intervals instead (see Decision rules)",
+    "D9": f'"{D9_SIGNED}" (problem statement §4; config/folds.yaml; #70 answer). The baseline '
+    "and the level-2 meta follow its folds, refit, window, nesting and embargo. The 5-season "
+    "minimum holds for the baseline (store rows from 2014-06-07) but not at level 2 on any "
+    "scored fold: the member file starts on 2023-01-05 (see D9 at level 2). Level 1 is HKTrack's "
+    "season walk-forward, not D9's quarters. Whether this window is accepted for the "
+    "replication is put to the owner on #87",
+    "D10": "no price before 2014-06-07",
+    "D11-D15": "holdout A2 from 2026-11-28, fully locked; no holdout row is read; not opened",
+    "D16": "adoption needs a holdout gain lower bound above 0 (D7 level) and a positive "
+    "encompassing weight with its interval above 0: nothing is adopted here",
     "D21": "no figure derived from JRDB in the repository: every member-based figure is withheld",
     "#87": "the owner's comment of 2026-11-24: JRDB as a model input in private models on this "
     "Mac only, results never published; the shrinkage target is alpha = 0, the market alone",
@@ -230,7 +270,7 @@ def build_spec(scheme: FoldScheme, bootstrap: dict, thresholds: list[float], dig
         "bootstrap": bootstrap,
         "adoption": "none (D16): no holdout is opened and nothing is adopted",
         "price_era_start": PRICE_ERA_START.isoformat(),
-        "decisions": DECISIONS,
+        "decisions": SPEC_DECISIONS,
         "sources": list(MEMBER_SOURCES),
     }
 
@@ -467,13 +507,14 @@ def _try(compute: Callable[[], object]) -> _Outcome:
 
 
 def _meta_oof(rows: pd.DataFrame, folds: list[Fold], spec: MetaSpec, market: str):
-    """The meta's out-of-fold probabilities on `rows` and each fold's fit, in fold order."""
+    """The meta's out-of-fold probabilities on `rows` and each fold's fit (with its meeting-
+    clustered se), in fold order."""
     member = spec.members[0]
-    data = rows[["race_id", "won", member]].assign(ln_q_final=rows[market])
+    data = rows[["race_id", "won", CLUSTER, member]].assign(ln_q_final=rows[market])
     fits: list[MetaFit] = []
 
     def fit(train: pd.DataFrame) -> MetaFit:
-        fits.append(fit_meta(train, spec))
+        fits.append(fit_meta(train, spec, cluster_col=CLUSTER))
         return fits[-1]
 
     def predict(model: MetaFit, test: pd.DataFrame) -> np.ndarray:
@@ -482,52 +523,155 @@ def _meta_oof(rows: pd.DataFrame, folds: list[Fold], spec: MetaSpec, market: str
     return oof_predictions(data, folds, fit, predict), fits
 
 
+def _pooled(scored: Scored, spec: MetaSpec, market: str) -> MetaFit:
+    """The offset form's in-sample fit over the scored rows, with its meeting-clustered se."""
+    member = spec.members[0]
+    rows = scored.rows[["race_id", "won", CLUSTER, member]].assign(ln_q_final=scored.rows[market])
+    return fit_meta(rows, spec, cluster_col=CLUSTER)
+
+
+def _one_sided_z(spec: dict) -> float:
+    """D7's one-sided normal quantile at scoring.yaml's level: 1.645 at 95%."""
+    return NormalDist().inv_cdf(spec["bootstrap"]["level"])
+
+
+def _cells(c: float, s: float, s_meeting: float, z: float, coef: str = "coef") -> dict:
+    """A coefficient's report cells: the frozen spec's Wald interval, then D7's meeting bounds."""
+    return (
+        {coef: c, "se": s, "lower 95% (Wald)": c - WALD_Z * s, "upper 95% (Wald)": c + WALD_Z * s}
+        | {"se (meeting)": s_meeting, "lower (meeting, one-sided 95%)": c - z * s_meeting}
+        | {"upper (meeting, one-sided 95%)": c + z * s_meeting}
+    )
+
+
+def _d7(fold: str, term: str, c: float, s_meeting: float, n: int, z: float) -> list:
+    """A coefficient with D7's meeting bounds (each one-sided 95%) and its meeting-clustered se."""
+    return [
+        _metric(fold, f"coef[{term}]", c, n, c - z * s_meeting, c + z * s_meeting),
+        _metric(fold, f"se_meeting[{term}]", s_meeting, n),
+    ]
+
+
 def _meta_metrics(
-    outcome: _Outcome, folds: list[Fold], scored: Scored, spec: dict, name: str, market: str
+    outcome: _Outcome,
+    pooled: _Outcome | None,
+    folds: list[Fold],
+    scored: Scored,
+    spec: dict,
+    name: str,
 ) -> tuple[list, dict]:
     """ΔLL, each fold's coefficients (R13: unbounded, Wald CI) and, for the offset form, the
-    pooled in-sample delta over the scored rows."""
+    pooled in-sample delta over the scored rows. The tables also show D7's meeting bounds, whose
+    registry metrics are the `meeting_clustered:` variant's (`_clustered_metrics`)."""
     p, fits = outcome.get()
     metrics, tables = _delta(p, scored, spec, name)
+    z = _one_sided_z(spec)
     tables["coefficients"] = []
     for fit, fold in zip(fits, folds, strict=True):
         label = fold.test_start.isoformat()
         for term in fit.coef.index:
-            c, s = float(fit.coef[term]), float(fit.se[term])
+            c, s, sm = (float(v[term]) for v in (fit.coef, fit.se, fit.se_cluster))
             metrics.append(_wald(label, f"coef[{term}]", c, s, fit.n_races))
             tables["coefficients"].append(
                 {"variant": name, "fold": label, "train to": fold.train_end}
-                | {"train races": fit.n_races, "term": term, "coef": c, "se": s}
-                | {"lower 95%": c - WALD_Z * s, "upper 95%": c + WALD_Z * s}
+                | {"train races": fit.n_races, "term": term}
+                | _cells(c, s, sm, z)
             )
-    mspec = fits[0].spec
-    if mspec.form == "offset":
-        member = mspec.members[0]
-        rows = scored.rows[["race_id", "won", member]].assign(ln_q_final=scored.rows[market])
-        pooled = fit_meta(rows, mspec)
-        c, s = float(pooled.coef[member]), float(pooled.se[member])
-        metrics.append(_wald("scored_rows_in_sample", f"coef[{member}]", c, s, pooled.n_races))
+    if pooled is not None:
+        fit = pooled.get()
+        member = fit.spec.members[0]
+        c, s, sm = (float(v[member]) for v in (fit.coef, fit.se, fit.se_cluster))
+        metrics.append(_wald("scored_rows_in_sample", f"coef[{member}]", c, s, fit.n_races))
         tables["pooled"] = [
-            {"variant": name, "races": pooled.n_races, "delta": c, "se": s}
-            | {"lower 95%": c - WALD_Z * s, "upper 95%": c + WALD_Z * s}
+            {"variant": name, "races": fit.n_races, "meetings": int(scored.clusters.nunique())}
+            | _cells(c, s, sm, z, coef="delta")
         ]
     return metrics, tables
 
 
-def _encompassing(scored: Scored, member: str) -> tuple[list, dict]:
-    rows = scored.rows[["race_id", "won", member]].assign(ln_q_final=scored.rows["ln_q"])
-    c, s = encompassing(rows, member)
-    row = {"member": member, "races": scored.n_races, "coef": c, "se": s}
-    row |= {"lower 95%": c - WALD_Z * s, "upper 95%": c + WALD_Z * s}
+def _clustered_metrics(
+    outcome: _Outcome, pooled: _Outcome | None, folds: list[Fold], spec: dict
+) -> tuple[list, dict]:
+    """The `meeting_clustered:` variant of a meta variant: each fold's coefficients and the pooled
+    delta with D7's meeting bounds (added after the outcomes were read; not in the frozen spec)."""
+    _, fits = outcome.get()
+    z = _one_sided_z(spec)
+    metrics = []
+    for fit, fold in zip(fits, folds, strict=True):
+        for term in fit.coef.index:
+            c, sm = float(fit.coef[term]), float(fit.se_cluster[term])
+            metrics += _d7(fold.test_start.isoformat(), term, c, sm, fit.n_races, z)
+    if pooled is not None:
+        fit = pooled.get()
+        member = fit.spec.members[0]
+        c, sm = float(fit.coef[member]), float(fit.se_cluster[member])
+        metrics += _d7("scored_rows_in_sample", member, c, sm, fit.n_races, z)
+    return metrics, {}
+
+
+def _encompassing_fits(scored: Scored, member: str) -> tuple[tuple, tuple]:
+    """The member's encompassing coefficient with its inverse-information se, then with its
+    meeting-clustered se (the same coefficient)."""
+    rows = scored.rows[["race_id", "won", CLUSTER, member]].assign(ln_q_final=scored.rows["ln_q"])
+    return encompassing(rows, member), encompassing(rows, member, cluster_col=CLUSTER)
+
+
+def _encompassing(outcome: _Outcome, scored: Scored, member: str, spec: dict) -> tuple[list, dict]:
+    (c, s), (_, sm) = outcome.get()
+    row = {"member": member, "races": scored.n_races, "meetings": int(scored.clusters.nunique())}
+    row |= _cells(c, s, sm, _one_sided_z(spec))
     return [_wald("scored_rows_in_sample", "encompassing_coef", c, s, scored.n_races)], {
         "encompassing": [row]
     }
 
 
+def _clustered_encompassing(outcome: _Outcome, scored: Scored, spec: dict) -> tuple[list, dict]:
+    (c, _), (_, sm) = outcome.get()
+    z = _one_sided_z(spec)
+    return _d7("scored_rows_in_sample", "encompassing_coef", c, sm, scored.n_races, z), {}
+
+
+def _level2_window(rows: pd.DataFrame, folds: list[Fold]) -> list[dict]:
+    """Each scored fold's level-2 training rows (the member rows on or before train_end) against
+    D9's 5-season minimum: a coverage count of the store and the member file, no outcome."""
+    out = []
+    for fold in folds:
+        train = rows.iloc[fold.train_idx]
+        dates = pd.to_datetime(train["race_date"])
+        first, last = (None, None) if train.empty else (dates.min().date(), dates.max().date())
+        years = 0.0 if first is None else ((last - first).days + 1) / 365.25
+        out.append(
+            {"fold": fold.test_start.isoformat(), "test to": fold.test_end.isoformat()}
+            | {"train from": first, "train to": last, "train end": fold.train_end.isoformat()}
+            | {"years": round(years, 2), "train races": int(train["race_id"].nunique())}
+            | {"train meetings": int(train[CLUSTER].nunique())}
+            | {f"D9 {D9_MIN_SEASONS} seasons met": years >= D9_MIN_SEASONS}
+        )
+    return out
+
+
+def _clustered_variant(variant: MetaVariant) -> MetaVariant:
+    """The `meeting_clustered:` twin of a variant: the same components, D7's bounds."""
+    return MetaVariant(
+        variant.hypothesis_id,
+        f"{CLUSTERED}:{variant.name}",
+        variant.fold_scheme,
+        {**variant.components, "se": "meeting_clustered"},
+        {
+            **variant.params,
+            "inference": "meeting-clustered sandwich (models.condlogit), no small-sample factor",
+            "level": "95% one-sided per bound (D7)",
+            "added": "after the outcomes were read: review finding on PR #308; not in the "
+            "frozen spec",
+        },
+    )
+
+
 def compute_study(frame: pd.DataFrame, meta: pd.DataFrame, folds: list[Fold], spec: dict) -> Study:
-    """Every variant of the frozen spec. `frame` is the store frame with the out-of-fold baseline
-    `p_cal`; `meta` its member rows (store positions as index, a log-probability column per
-    member); `folds` the scored folds as store positions. Pure: no I/O."""
+    """Every variant of the frozen spec, then each meta and encompassing variant's
+    `meeting_clustered:` twin. `frame` is the store frame with the out-of-fold baseline `p_cal`;
+    `meta` its member rows (store positions as index, a log-probability column per member);
+    `folds` the scored folds as store positions. Pure: no I/O."""
     scheme = "walk_forward:" + json.dumps(spec["folds"]["scheme"], sort_keys=True)
     study = Study(counts={})
     store = Scored.of(frame, folds)
@@ -548,6 +692,7 @@ def compute_study(frame: pd.DataFrame, meta: pd.DataFrame, folds: list[Fold], sp
     rows = rows.reset_index(drop=True)
     scored = Scored.of(rows, meta_folds)
     study.counts["member_scored_races"] = scored.n_races
+    study.tables["level2_window"] = _level2_window(rows, meta_folds)
     for member in MEMBERS:
         base = {"member": member, "score": "winner_log_loss", "baseline": "calibrated_market"}
         name = f"member_alone:{member}"
@@ -564,19 +709,31 @@ def compute_study(frame: pd.DataFrame, meta: pd.DataFrame, folds: list[Fold], sp
             outcome = _try(
                 lambda mspec=mspec, market=market: _meta_oof(rows, meta_folds, mspec, market)
             )
+            pooled = None
+            if form == "offset":
+                pooled = _try(lambda mspec=mspec, market=market: _pooled(scored, mspec, market))
+            variant = MetaVariant("E40", name, scheme, components, params)
             study.attempt(
-                MetaVariant("E40", name, scheme, components, params),
-                lambda o=outcome, n=name, m=market: _meta_metrics(
-                    o, meta_folds, scored, spec, n, m
+                variant,
+                lambda o=outcome, pl=pooled, n=name: _meta_metrics(
+                    o, pl, meta_folds, scored, spec, n
                 ),
             )
             study.attempt(
                 MetaVariant("E9", f"ceiling:{name}", scheme, components, params),
                 lambda o=outcome, n=name: _ceiling(o.get()[0], scored, spec, f"ceiling:{n}"),
             )
+            study.attempt(
+                _clustered_variant(variant),
+                lambda o=outcome, pl=pooled: _clustered_metrics(o, pl, meta_folds, spec),
+            )
+        fits = _try(lambda member=member: _encompassing_fits(scored, member))
+        variant = MetaVariant(
+            "E40", f"encompassing:{member}", scheme, {**base, "market": "ln_q"}, {}
+        )
+        study.attempt(variant, lambda f=fits, member=member: _encompassing(f, scored, member, spec))
         study.attempt(
-            MetaVariant("E40", f"encompassing:{member}", scheme, {**base, "market": "ln_q"}, {}),
-            lambda member=member: _encompassing(scored, member),
+            _clustered_variant(variant), lambda f=fits: _clustered_encompassing(f, scored, spec)
         )
     return study
 
@@ -595,10 +752,22 @@ SECTIONS = (
     (
         "coefficients",
         "Each fold's coefficients (R13: unbounded; fitted against the final Win price)",
-        "Wald 95% two-sided from the inverse information on the fold's training rows. No bounds.",
+        "On the fold's training rows. No bounds. The frozen spec's interval is the Wald 95%"
+        " two-sided from the inverse information (races independent). Beside it, D7's: the"
+        " meeting-clustered sandwich se and the 95% one-sided bounds coef -/+ 1.645 se (meeting),"
+        " added after the outcomes were read.",
     ),
-    ("pooled", "Offset form: delta pooled over the scored rows (in-sample, 95% Wald)", ""),
-    ("encompassing", "Encompassing: the member beside ln q (scored rows, in-sample, 95% Wald)", ""),
+    (
+        "pooled",
+        "Offset form: delta pooled over the scored rows (in-sample)",
+        "The frozen rule reads the Wald 95% two-sided lower bound; D7's is the meeting one-sided"
+        " 95% lower bound.",
+    ),
+    (
+        "encompassing",
+        "Encompassing: the member beside ln q (scored rows, in-sample)",
+        "As the pooled delta: Wald 95% two-sided (frozen) and meeting one-sided 95% (D7).",
+    ),
     (
         "ceiling",
         "E9 ceiling: ln(pi / q) of the out-of-fold pi against the final Win q",
@@ -609,8 +778,115 @@ SECTIONS = (
 )
 
 
-def render_report(study: Study, spec: dict, about: dict) -> str:
+ADDED_AFTER = (
+    "**Added after the outcomes were read** (review finding on PR #308): the meeting-clustered"
+    " coefficient bounds (D7: meetings, 95% one-sided) beside the frozen spec's 95% two-sided"
+    " Wald intervals, which treat races as independent. The clustered bound is the interval that"
+    " matches D7. The frozen spec is unchanged and names Wald, so the outcomes of its Wald rules"
+    " (alpha_T > 0, encompassing positive) are provisional. The rules are read under both below."
+)
+
+
+def _rows_by(study: Study, key: str, by: str) -> dict[str, dict]:
+    return {row[by]: row for row in study.tables.get(key, [])}
+
+
+def _verdict(bound: float | None, holds: str, fails: str) -> str:
+    return "not computed (the variant failed)" if bound is None else holds if bound > 0 else fails
+
+
+def apply_rules(study: Study, spec: dict) -> list[dict]:
+    """Each frozen decision rule read mechanically: its bound and outcome as frozen, then at D7
+    (meetings, 95% one-sided). The replication's ΔLL bound is the meeting bootstrap, D7's own."""
+    delta = _rows_by(study, "delta", "variant")
+    pooled = _rows_by(study, "pooled", "variant")
+    covering = _rows_by(study, "encompassing", "member")
+    wald, d7 = "lower 95% (Wald)", "lower (meeting, one-sided 95%)"
+    out = []
+    name = "stage2:q:form"
+    lo = delta.get(name, {}).get("lower")
+    verdict = _verdict(lo, "replicated", "a documented failure")
+    if lo is None:
+        verdict += ": a documented failure"
+    out.append(
+        {"rule": "E40 replication", "variant": name}
+        | {"statistic": "ΔLL lower bound (meeting bootstrap, one-sided 95%)"}
+        | {"frozen bound": lo, "outcome (frozen)": verdict, "D7 bound": lo, "outcome (D7)": verdict}
+    )
+    for member in MEMBERS:
+        for prefix, (form, _) in FORMS.items():
+            if form != "offset":
+                continue
+            name, row = f"{prefix}:{member}", pooled.get(f"{prefix}:{member}", {})
+            out.append(
+                {"rule": "E40 offset", "variant": name, "statistic": "pooled delta, lower bound"}
+                | {"frozen bound": row.get(wald), "D7 bound": row.get(d7)}
+                | {"outcome (frozen)": _verdict(row.get(wald), "alpha_T > 0", "not shown")}
+                | {"outcome (D7)": _verdict(row.get(d7), "alpha_T > 0", "not shown")}
+            )
+    for member in MEMBERS:
+        row = covering.get(member, {})
+        out.append(
+            {"rule": "encompassing", "variant": f"encompassing:{member}"}
+            | {"statistic": "coefficient, lower bound"}
+            | {"frozen bound": row.get(wald), "D7 bound": row.get(d7)}
+            | {"outcome (frozen)": _verdict(row.get(wald), "positive", "not shown")}
+            | {"outcome (D7)": _verdict(row.get(d7), "positive", "not shown")}
+        )
+    out.append(
+        {"rule": "E9", "variant": "ceiling:*", "statistic": "-"}
+        | {"outcome (frozen)": "descriptive", "outcome (D7)": "descriptive"}
+    )
+    return out
+
+
+def _bounded(what: str, lo: float, hi: float, unit: str = "") -> str:
+    """What a pair of one-sided 95% bounds rules out about `what`."""
+    above, below = f"{what} above {hi:+.6g}{unit}", f"{what} below {lo:+.6g}{unit}"
+    if lo > 0:
+        return f"rules out {what} <= 0 (and {above})"
+    if hi < 0:
+        return f"rules out {what} >= 0 (and {below})"
+    return f"rules out neither sign, only {above} and {below}"
+
+
+def rules_out(study: Study, spec: dict) -> list[str]:
+    """What the run rules out, read from its one-sided 95% bounds at D7 (meetings): each ΔLL, each
+    pooled delta and encompassing weight, and each E9 q-mass above the break-even ratio."""
+    lines = [
+        "- Every statement is at D7's level (meetings, 95% one-sided per bound), on development"
+        " folds only, and conditional on the level-2 window being below D9's 5-season minimum (see"
+        " D9 at level 2). Nothing is tested on the holdout, so nothing is adopted (D16)."
+    ]
+    for row in study.tables.get("delta", []):
+        lines.append(
+            f"- `{row['variant']}`: "
+            + _bounded("ΔLL against the calibrated market", row["lower"], row["upper"], " nats")
+        )
+    d7 = ("lower (meeting, one-sided 95%)", "upper (meeting, one-sided 95%)")
+    for row in study.tables.get("pooled", []):
+        lines.append(f"- `{row['variant']}`: " + _bounded("delta", row[d7[0]], row[d7[1]]))
+    for row in study.tables.get("encompassing", []):
+        lines.append(
+            f"- `encompassing:{row['member']}`: "
+            + _bounded("the encompassing weight", row[d7[0]], row[d7[1]])
+        )
+    even = spec["ceiling"]["thresholds"][OVERLAY_RATIOS.index(None)]
+    for row in study.tables.get("ceiling", []):
+        if row["threshold"] == even:
+            lines.append(
+                f"- `{row['variant']}`: a q-mass above the break-even ratio {math.exp(even):.4g}"
+                f" greater than {row['upper']:.4g} is ruled out (point {row['q-mass']:.4g})"
+            )
+    return lines
+
+
+def render_report(
+    study: Study, spec: dict, about: dict, record_ids: dict[str, str] | None = None
+) -> str:
     """The full report: aggregate tables only, never a runner or race row."""
+    window = study.tables.get("level2_window", [])
+    met = sum(bool(row[f"D9 {D9_MIN_SEASONS} seasons met"]) for row in window)
     lines = [
         f"# C4 meta-model at the final Win price ({COUNTRY}, #{TICKET})",
         "",
@@ -618,26 +894,77 @@ def render_report(study: Study, spec: dict, about: dict) -> str:
         "- development rows only: holdout days are never read and the holdout is not opened",
         "- built on JRDB (D21): private, never published",
         "",
+        ADDED_AFTER,
+        "",
         "## Owner decisions used",
         "",
-        *(f"- {key}: {value}" for key, value in spec["decisions"].items()),
+        *(f"- {key}: {value}" for key, value in DECISIONS.items()),
+        "",
+        "The frozen spec holds these decisions in its own earlier wording (its `decisions`);"
+        " the spec is unchanged.",
         "",
         "## Data",
         "",
         _markdown_table([{"count": k, "n": v} for k, v in study.counts.items()]),
+        "",
+        "## D9 at level 2",
+        "",
+        f'D9, as signed: "{D9_SIGNED}".',
+        "",
+        f"The level-2 meta trains on the member rows on or before each fold's train end. D9's"
+        f" {D9_MIN_SEASONS}-season minimum is met on {met} of the {len(window)} scored folds"
+        + (
+            ", so the frozen spec's note that only the first folds fall short understates it."
+            if met == 0
+            else "."
+        )
+        + " Whether this window is accepted for the replication is put to the owner on #87."
+        " A coverage count of the store and the member file, no outcome:",
+        "",
+        _markdown_table(window) if window else "_Not computed._",
+        "",
+        "## Decision rules (frozen), read mechanically",
+        "",
+        "The rules as frozen:",
+        "",
+        *(f"- {key}: {rule}" for key, rule in spec["decision_rules"].items()),
+        "",
+        "Each applied as written (the frozen bound) and at D7 (meetings, 95% one-sided). The"
+        " replication's bound is the meeting bootstrap, which is already D7's, so its two"
+        " outcomes are one. The Wald outcomes are provisional (see above).",
+        "",
+        _markdown_table(apply_rules(study, spec)),
+        "",
+        "## What this rules out",
+        "",
+        *rules_out(study, spec),
     ]
     for key, title, note in SECTIONS:
         rows = study.tables.get(key)
         lines += ["", f"## {title}", ""]
         lines += [note, ""] if note else []
         lines.append(_markdown_table(rows) if rows else "_Not computed: see the variants below._")
+    ids = record_ids or {}
     variants = [
         {"E": v.hypothesis_id, "variant": v.name, "status": "failed" if v.error else "scored"}
+        | ({"record": ids[v.name][:16]} if v.name in ids else {})
         | ({"error": v.error} if v.error else {})
         for v in study.variants
     ]
     lines += ["", "## Variants (one registry record each)", "", _markdown_table(variants), ""]
     return "\n".join(lines)
+
+
+def _run_id(record: RunRecord) -> str:
+    """The registry's run id: the sha256 of the record's canonical JSON."""
+    canonical = json.dumps(
+        dataclasses.asdict(record),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 
 def _record(variant: MetaVariant, git_sha: str, builds: dict[str, str], member_build: str):
@@ -688,18 +1015,28 @@ def run_study(members_path: Path, out_dir: Path | None = None) -> dict:
     del frame, meta
 
     existing = registry.records(FAMILY_ID)
-    records = [_record(v, git_sha, builds, member_build) for v in study.variants]
-    appended = [registry.append(r) for r in records if r not in existing]
+    reproduced = {_run_id(dataclasses.replace(r, git_sha="")): r for r in existing}
+    record_ids, appended = {}, []
+    for variant in study.variants:
+        record = _record(variant, git_sha, builds, member_build)
+        same = reproduced.get(_run_id(dataclasses.replace(record, git_sha="")))
+        if same is None:  # a new run: appended
+            record_ids[variant.name] = registry.append(record)
+            appended.append(variant.name)
+        else:  # the same run reproduced at another commit: not a new record
+            record_ids[variant.name] = _run_id(same)
     about = {
         "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
         "store": ", ".join(builds.values()),
         "members": member_build,
+        "records": f"{len(appended)} appended by this run; {len(record_ids) - len(appended)} "
+        "already in the registry (the same run reproduced, not appended again)",
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     report = write_report(
         out_dir / f"meta-{COUNTRY}-{spec_hash[:12]}.md",
-        render_report(study, spec, about),
+        render_report(study, spec, about, record_ids),
         sources=MEMBER_SOURCES,
     )
     return {
@@ -708,7 +1045,9 @@ def run_study(members_path: Path, out_dir: Path | None = None) -> dict:
         "report_path": str(report),
         "registry_path": str(registry.path),
         "records_appended": len(appended),
-        "records_already_present": len(records) - len(appended),
+        "appended_variants": appended,
+        "records_already_present": len(record_ids) - len(appended),
+        "record_ids": {name: run_id[:16] for name, run_id in record_ids.items()},
         "failed_variants": [v.name for v in study.variants if v.error],
     }
 

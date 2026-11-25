@@ -17,6 +17,10 @@ taken, at fit and at predict, so only ratios of q within a race matter.
 `ridge` shrinks the member terms (alpha_k0, alpha_kj) toward 0. The owner's shrinkage target
 (2026-11-24, #87) is alpha = 0, the market alone, so the market terms are never shrunk: under a
 huge ridge the stage-2 model is a power of q (with its bend, if quadratic) and the offset model q.
+
+`cluster_col` (fit_meta, encompassing) names a column constant within each race, the cluster of
+its rows (D7's unit is the meeting, venue x day): the fit then carries `se_cluster`, the
+cluster-sandwich standard errors of `condlogit` on the same terms. Nothing else depends on it.
 """
 
 from __future__ import annotations
@@ -114,13 +118,15 @@ def _softmax(u: np.ndarray, codes: np.ndarray) -> np.ndarray:
 
 @dataclass(frozen=True, eq=False)
 class MetaFit:
-    """A fitted meta-model: coef and se are Series on the term names; predict reads coef."""
+    """A fitted meta-model: coef, se and se_cluster (None without a cluster column) are Series on
+    the term names; predict reads coef."""
 
     spec: MetaSpec
     coef: pd.Series
     se: pd.Series
     loglik: float
     n_races: int
+    se_cluster: pd.Series | None = None
 
     def predict(self, frame: pd.DataFrame, q: np.ndarray) -> np.ndarray:
         """P(win | x, q) per frame row, in row order, for any price vector q (one positive value
@@ -137,10 +143,13 @@ class MetaFit:
         return _softmax(u, codes)
 
 
-def fit_meta(frame: pd.DataFrame, spec: MetaSpec) -> MetaFit:
-    """The meta-model's conditional-logit maximum likelihood on `frame` (see the module doc)."""
+def fit_meta(frame: pd.DataFrame, spec: MetaSpec, *, cluster_col: str | None = None) -> MetaFit:
+    """The meta-model's conditional-logit maximum likelihood on `frame` (see the module doc).
+    A `cluster_col` the frame lacks is a KeyError; one that splits a race a ValueError."""
     if not isinstance(spec, MetaSpec):
         raise TypeError(f"spec must be a MetaSpec, got {type(spec).__name__}")
+    if cluster_col is not None and cluster_col not in frame.columns:
+        raise KeyError(f"the frame has no cluster column {cluster_col!r}")
     codes = _race_codes(frame)
     ln_q = _log_normalised(frame[Q].to_numpy(dtype=float), codes)
     X, names = _design(frame, spec, ln_q)
@@ -151,6 +160,7 @@ def fit_meta(frame: pd.DataFrame, spec: MetaSpec) -> MetaFit:
         frame["won"].to_numpy(),
         offset=ln_q if spec.form == "offset" else None,
         ridge=penalty,
+        cluster=None if cluster_col is None else frame[cluster_col].to_numpy(dtype=object),
     )
     return MetaFit(
         spec=spec,
@@ -158,6 +168,9 @@ def fit_meta(frame: pd.DataFrame, spec: MetaSpec) -> MetaFit:
         se=pd.Series(fit.se, index=names, dtype=float),
         loglik=fit.loglik,
         n_races=fit.n_races,
+        se_cluster=None
+        if fit.se_cluster is None
+        else pd.Series(fit.se_cluster, index=names, dtype=float),
     )
 
 
@@ -197,13 +210,19 @@ def oof_predictions(
     return pd.Series(out, index=frame.index, dtype=float)
 
 
-def encompassing(frame: pd.DataFrame, member: str) -> tuple[float, float]:
+def encompassing(
+    frame: pd.DataFrame, member: str, *, cluster_col: str | None = None
+) -> tuple[float, float]:
     """The member's coefficient and standard error in an unpenalised stage-2 fit on that member
-    and ln_q_final alone (Fair-Shiller encompassing)."""
+    and ln_q_final alone (Fair-Shiller encompassing); with `cluster_col`, the standard error is
+    the cluster-sandwich one (`fit_meta`)."""
     fit = fit_meta(
-        frame, MetaSpec([member], quadratic=False, segment_cols=[], form="stage2", ridge=0.0)
+        frame,
+        MetaSpec([member], quadratic=False, segment_cols=[], form="stage2", ridge=0.0),
+        cluster_col=cluster_col,
     )
-    return float(fit.coef[member]), float(fit.se[member])
+    se = fit.se if fit.se_cluster is None else fit.se_cluster
+    return float(fit.coef[member]), float(se[member])
 
 
 def ceiling_table(
