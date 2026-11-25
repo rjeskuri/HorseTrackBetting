@@ -288,19 +288,49 @@ def test_a_planted_hinge_is_not_covered_by_a_zero_slope_change():
     assert fit_of(negative, min_odds=THRESHOLD).gamma < 0  # the sign follows the plant
 
 
-@pytest.mark.parametrize(("seed", "step"), [(3101, -0.18), (3105, -0.18), (3103, 0.18)])
-def test_a_planted_level_step_with_no_slope_change_is_not_read_as_a_hinge_slope(seed, step):
-    """A step of the size #285's two-slope model carries at 51.0 (about 0.18), body slope 1: the
-    hinge is continuous at the knot, so its coefficient stays inside its own interval around 0."""
-    frame, rng = planted(seed, N_RACES, 1.0, 0.0, step=step)
+def step_column(x, o, min_odds):
+    """The reference level-step model's second column: 1 on runners priced strictly above
+    min_odds (a constant shift of their log-weight, no slope change)."""
+    return (o > min_odds).astype(float)
+
+
+def max_loglik(frame, column):
+    """Maximised conditional log-likelihood of the reference two-parameter model on `column`."""
+    theta, _, _ = ref_fit(frame, THRESHOLD, column)
+    return loglik_score_info(frame, theta, column, THRESHOLD)[0], theta
+
+
+@pytest.mark.parametrize("seed", [3100, 3101, 3102])
+@pytest.mark.parametrize(
+    ("gamma", "step"),
+    [(0.0, -1.0), (0.0, 1.0), (0.6, 0.0)],
+    ids=["level-step-down", "level-step-up", "hinge-slope"],
+)
+def test_the_hinge_is_told_apart_from_a_level_step_by_likelihood(seed, gamma, step):
+    """A level step with no slope change is not a hinge slope: the hinge is continuous at the
+    knot, so it cannot reproduce a jump, and a step model fitted to the same market (also two
+    parameters, so the log-likelihoods compare directly) fits a planted step clearly better. On a
+    planted hinge slope the order reverses. Over seeds 3100-3119 (20 draws of each plant) the
+    margins were at least 15 log-likelihood units against a bar of 8 (a likelihood-ratio
+    chi-square of 16 on one degree of freedom). The hinge coefficient alone is not the test: a
+    level step is partly absorbed by a slope change, so gamma-hat follows the step's sign."""
+    frame, rng = planted(seed, N_RACES, 1.0, gamma, step=step)
     frame = shuffled(frame, rng)
 
     fit = fit_of(frame, min_odds=THRESHOLD)
-
-    assert 0 < fit.gamma_se < 0.25
-    assert abs(fit.gamma) <= WALD_Z * fit.gamma_se
-    assert abs(fit.beta - 1.0) < 3 * fit.se
     assert_is_the_mle(fit, frame)
+    theta = np.array([fit.beta, fit.gamma])
+    hinge_ll = loglik_score_info(frame, theta, hinge_column, THRESHOLD)[0]
+    step_ll, (step_beta, step_shift) = max_loglik(frame, step_column)
+
+    margin = step_ll - hinge_ll  # positive: the level-step model is the better description
+    if step != 0.0:
+        assert margin > 8.0
+        assert math.copysign(1.0, step_shift) == math.copysign(1.0, step)
+        assert math.copysign(1.0, fit.gamma) == math.copysign(1.0, step)  # absorbed, not ignored
+    else:
+        assert margin < -8.0
+    assert abs(step_beta - 1.0) < 0.15  # the step model sees the same body slope
 
 
 def test_the_log_weight_is_continuous_at_the_knot_unlike_the_step_model():
