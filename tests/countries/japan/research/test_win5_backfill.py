@@ -32,6 +32,21 @@ Contract pinned here, modules `horsetrack.countries.japan.research.win5` and `.w
    for no hit, 先週までのキャリーオーバー, 次週へのキャリーオーバー); the year list links
    `win5.html?date=YYYYMMDD`.
 
+4. Dead heats (round 2). When a leg dead-heats, netkeiba's day page lists several winning
+   combinations, each its own `table.Win5_Table` of 的中馬番 / 払戻金 / 的中票数 rows (seen on a
+   real 2019 page; the pages below copy that structure with invented figures). `parse_day_page`
+   reads every combination:
+   - `winning_tickets`: the total tickets over the combinations (0 on a no-hit page);
+   - `payout_yen` (int): sum over the combinations of dividend x tickets, the yen the pool paid
+     (0 on a no-hit page); one combination gives dividend x tickets;
+   - `winning_combinations` (int): how many combinations have tickets (0 on a no-hit page);
+   - `dividend_yen`: the LARGEST dividend per 100 yen over the combinations (one combination: its
+     dividend; None when nobody hit).
+   `build_history` keeps `payout_yen` and `winning_combinations` (int64 columns, through
+   `write_history` / `read_history`); a row without them (e.g. from `parse_results_page`) gets
+   `payout_yen = dividend_yen x winning_tickets` (0 without a hit) and `winning_combinations` 1
+   with a hit, 0 without. A day given twice with another payout_yen is refused (ValueError).
+
 Every page, row and figure here is synthetic; HORSETRACK_DATA_DIR points at tmp_path; the network
 is an httpx.MockTransport behind the real ingest Fetcher.
 """
@@ -46,6 +61,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
@@ -122,6 +138,7 @@ def day_cells(pool, carry_in, tickets, dividend, carry_out, *, units=False) -> d
 
 
 def figures(d, pool, carry_in, tickets, dividend, carry_out) -> dict:
+    """A one-combination day's parsed row (round 2 adds payout_yen and winning_combinations)."""
     return {
         "race_date": d,
         "pool_yen": pool,
@@ -129,6 +146,8 @@ def figures(d, pool, carry_in, tickets, dividend, carry_out) -> dict:
         "carryover_out_yen": carry_out,
         "winning_tickets": tickets,
         "dividend_yen": dividend,
+        "payout_yen": 0 if dividend is None else dividend * tickets,
+        "winning_combinations": 1 if tickets > 0 else 0,
     }
 
 
@@ -170,6 +189,130 @@ def test_synthetic_day_page_with_an_unreadable_amount_raises():
     cells["発売金額"] = "集計中"
     with pytest.raises(ValueError):
         win5.parse_day_page(day_page(cells), D)
+
+
+# ---------------------------------------------------------------- dead heats (round 2)
+
+
+def combination_page(pool, carry_in, combos, carry_out, *, units=True) -> bytes:
+    """A SYNTHETIC day page in the per-combination shape (invented figures): a carryover-in table
+    when there is one, a sales table (発売票数 and 発売金額 in one row), one table per winning
+    combination (的中馬番, 払戻金, 的中票数) and a carryover-out table when there is one.
+    `combos`: (dividend per 100 yen or None, tickets) per combination, in page order."""
+    yen = oku_man if units else (lambda v: f"{v:,}円")
+    tables = []
+    if carry_in:
+        tables.append(f'<tr><th class="Win5TextSmall W136">先週までのキャリーオーバー</th>'
+                      f"<td> {yen(carry_in)} </td></tr>")  # fmt: skip
+    tables.append(f'<tr><th class="W136">発売票数</th><td>{pool // 100:,}票</td>'
+                  f'<th class="W136">発売金額</th><td>{yen(pool)}</td></tr>')  # fmt: skip
+    for n, (dividend, tickets) in enumerate(combos):
+        horses = " ".join(str((n + k) % 16 + 1) for k in range(5))
+        paid = "-円" if dividend is None else yen(dividend)
+        tables.append(f"<tr><th>的中馬番</th><td> {horses} </td></tr>"
+                      f"<tr><th>払戻金</th><td>{paid}</td></tr>"
+                      f"<tr><th>的中票数</th><td>{tickets:,}票</td></tr>")  # fmt: skip
+    if carry_out:
+        tables.append(f"<tr><th> 次週への キャリーオーバー </th><td>{yen(carry_out)}</td></tr>")
+    body = "".join(f'<table class="Win5_Table">{t}</table>' for t in tables)
+    return f"<html><body><h1>WIN5 (synthetic)</h1>{body}</body></html>".encode()
+
+
+# (pool, carry_in, [(dividend, tickets), ...], carry_out). The dead-heat days split the pool after
+# takeout plus the carryover between the combinations, each dividend rounded down to 10 yen.
+COMBO_CASES = {
+    # 1.8e9 * 0.7 + 3e8 = 1.56e9, halves of 7.8e8: 7.8e8 / 120 = 6.5e6; 7.8e8 / 900 -> 866,660
+    "two combinations, larger first": (1_800_000_000, 300_000_000,
+                                       [(6_500_000, 120), (866_660, 900)], 0),
+    "two combinations, smaller first": (1_800_000_000, 300_000_000,
+                                        [(866_660, 900), (6_500_000, 120)], 0),
+    # 2.4e9 * 0.7 = 1.68e9, thirds of 5.6e8: / 350, / 70, / 1,400
+    "three combinations, largest in the middle": (2_400_000_000, 0,
+                                                  [(1_600_000, 350), (8_000_000, 70),
+                                                   (400_000, 1_400)], 0),
+    "one combination": (1_234_567_800, 0, [(3_456_780, 25)], 0),
+    "one combination after a carryover": (1_500_000_100, 120_000_000, [(87_650, 1_204)], 0),
+    "no hit": (987_654_300, 0, [(None, 0)], 691_358_010),
+    "no hit after a carryover": (900_000_000, 691_358_010, [(None, 0)], 1_321_358_010),
+}  # fmt: skip
+
+
+def combination_figures(d, pool, carry_in, combos, carry_out) -> dict:
+    """The row the page must give, from the test's own sums."""
+    hits = [(div, n) for div, n in combos if n > 0]
+    return {
+        "race_date": d,
+        "pool_yen": pool,
+        "carryover_in_yen": carry_in,
+        "carryover_out_yen": carry_out,
+        "winning_tickets": sum(n for _, n in hits),
+        "dividend_yen": max(div for div, _ in hits) if hits else None,
+        "payout_yen": sum(div * n for div, n in hits),
+        "winning_combinations": len(hits),
+    }
+
+
+@pytest.mark.parametrize("units", [True, False], ids=["oku-man", "commas"])
+@pytest.mark.parametrize("case", COMBO_CASES.values(), ids=COMBO_CASES.keys())
+def test_a_day_page_reads_every_winning_combination(case, units):
+    got = win5.parse_day_page(combination_page(*case, units=units), D)
+    assert got == combination_figures(D, *case)
+
+
+def test_a_dead_heat_day_pays_the_sum_of_its_combinations_not_the_first():
+    pool, carry_in, combos, carry_out = COMBO_CASES["two combinations, larger first"]
+    got = win5.parse_day_page(combination_page(pool, carry_in, combos, carry_out), D)
+    assert got["winning_tickets"] == 1_020
+    assert got["winning_combinations"] == 2
+    assert got["payout_yen"] == 6_500_000 * 120 + 866_660 * 900 == 1_559_994_000
+    assert got["dividend_yen"] == 6_500_000  # the largest, here first
+    # the payouts add up to the pool after takeout plus the carryover, short only by the rounding
+    # of each dividend down to 10 yen per 100-yen ticket
+    net = pool * 7 // 10 + carry_in
+    assert 0 <= net - got["payout_yen"] < 10 * got["winning_tickets"]
+
+    flipped = win5.parse_day_page(combination_page(pool, carry_in, combos[::-1], carry_out), D)
+    assert flipped == got  # the order of the combinations on the page does not matter
+
+
+def test_history_keeps_the_payout_and_the_number_of_combinations(data_dir):
+    days = [date(2019, 3, 3) + timedelta(weeks=i) for i in range(len(COMBO_CASES))]
+    rows = [
+        win5.parse_day_page(combination_page(*case), d)
+        for d, case in zip(days, COMBO_CASES.values(), strict=True)
+    ]
+    table = win5.build_history(rows[::-1])
+    assert {"payout_yen", "winning_combinations"} <= set(table.columns)
+    win5.write_history(table)
+    for frame in (table, win5.read_history()):
+        got = frame.set_index(pd.to_datetime(frame["race_date"]).dt.date)
+        for d, case in zip(days, COMBO_CASES.values(), strict=True):
+            want = combination_figures(d, *case)
+            assert int(got.loc[d, "payout_yen"]) == want["payout_yen"], d
+            assert int(got.loc[d, "winning_combinations"]) == want["winning_combinations"], d
+            assert int(got.loc[d, "winning_tickets"]) == want["winning_tickets"], d
+
+
+def test_history_derives_the_payout_of_a_row_without_one():
+    """Rows in the older six-figure shape (parse_results_page): one combination per hit day."""
+    six = [
+        {k: v for k, v in figures(DAYS[i], *case).items()
+         if k not in ("payout_yen", "winning_combinations")}
+        for i, case in enumerate(DAY_CASES)
+    ]  # fmt: skip
+    table = win5.build_history(six)
+    for row, case in zip(table.to_dict("records"), DAY_CASES, strict=True):
+        _, _, tickets, dividend, _ = case
+        assert int(row["payout_yen"]) == (0 if dividend is None else dividend * tickets), case
+        assert int(row["winning_combinations"]) == (1 if tickets else 0), case
+
+
+def test_a_day_given_twice_with_another_payout_is_refused():
+    pool, carry_in, combos, carry_out = COMBO_CASES["two combinations, larger first"]
+    full = win5.parse_day_page(combination_page(pool, carry_in, combos, carry_out), D)
+    first_only = dict(full, payout_yen=6_500_000 * 120)
+    with pytest.raises(ValueError, match=D.isoformat()):
+        win5.build_history([full, first_only])
 
 
 # ---------------------------------------------------------------- parse_year_list (synthetic)

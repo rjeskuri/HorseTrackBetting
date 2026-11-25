@@ -55,16 +55,11 @@ Live:
   `win5` is not null, and no such element otherwise. The plain feed and board page (#40, #42) stay
   free of any expected value, so the figure lives on the shadow page and feed.
 
-The study (D18 positive-edge family, pre-registered, development days only, D14):
-- `score_study(history, spec, *, registry, family_id, day_value) -> dict`. Refuses with
-  `NotPreRegistered` (before any day is scored) unless `registry.frozen_spec_hash(family_id)` is
-  the hash `freeze_family` gives for `spec`. Holdout days (`core.eval.holdout.is_holdout_day(
-  'japan', d)`) are dropped before scoring: `day_value` is never called on one. `spec` names
-  `carryover_edges_yen`, strictly increasing edges e0 < ... < en; bins are [e_i, e_i+1) and a last
-  open bin [en, inf), on `carryover_in_yen`; a day below e0 is in no bin. `day_value(row: dict)`
-  is the caller's per-day return (the coverage rule and metric are owner decisions, not fixed
-  here). Result: `{family_id, spec_hash, holdout_days_excluded, bins: [{lo_yen, hi_yen (None for
-  the open bin), n_days, mean_value (None for an empty bin)}]}`.
+The study (D18 positive-edge family, pre-registered, development days only, D14): round 2 froze
+the owner's spec (carryover bins as multiples of the break-even carryover, a day-block bootstrap)
+and superseded the yen-edge `score_study` tests that lived here; its contract is pinned in
+test_win5_study.py. The history table also carries `payout_yen` and `winning_combinations`
+(test_win5_backfill.py, dead heats).
 
 Every page, row and figure here is synthetic; HORSETRACK_DATA_DIR points at tmp_path.
 """
@@ -85,8 +80,6 @@ import pytest
 from bs4 import BeautifulSoup
 
 from horsetrack.core import paths
-from horsetrack.core.eval.holdout import is_holdout_day
-from horsetrack.core.eval.registry import Registry
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board.flags import FlagRules
 from horsetrack.countries.japan.board.shadow_feed import build_shadow
@@ -366,6 +359,8 @@ HISTORY_COLUMNS = {
     "carryover_out_yen",
     "winning_tickets",
     "dividend_yen",
+    "payout_yen",
+    "winning_combinations",
     "hit",
     "pool_ev",
 }
@@ -651,140 +646,3 @@ def test_the_shadow_page_shows_the_win5_pool_ev_only_when_the_feed_has_one(tmp_p
         assert want in found[0].get_text(" "), found[0]
     assert pages[2].select("[data-win5]") == []
     assert pages[3].select("[data-win5]") == []
-
-
-# ---------------------------------------------------------------- the pre-registered study
-
-# Invented 2026 days around the holdout start (2026-11-28): 11-29 and 12-01 are holdout days.
-STUDY_DAYS = [
-    day_row(date(2026, 11, 7), 1_000_000_000, 0, 5, 14_000_000, 0),
-    day_row(date(2026, 11, 8), 800_000_000, 120_000_000, 0, None, 680_000_000),
-    day_row(date(2026, 11, 14), 1_500_000_000, 680_000_000, 2, 850_000_000, 0),
-    day_row(date(2026, 11, 22), 900_000_000, 350_000_000, 3, 300_000_000, 0),
-    day_row(date(2026, 11, 28), 1_200_000_000, 40_000_000, 10, 90_000_000, 0),
-    day_row(date(2026, 11, 29), 2_000_000_000, 500_000_000, 1, 1_900_000_000, 0),
-    day_row(date(2026, 12, 1), 1_000_000_000, 200_000_000, 0, None, 900_000_000),
-]
-HOLDOUT = {date(2026, 11, 29), date(2026, 12, 1)}
-
-
-def realised_return(row: dict) -> float:
-    """The test's own per-day figure (not the study's design): what the pool's bettors got back
-    per yen at the final dividend. Refuses a holdout day, so scoring one fails the test."""
-    d = as_date(row["race_date"])
-    assert d not in HOLDOUT, f"holdout day {d} was scored"
-    paid = 0 if int(row["winning_tickets"]) == 0 else float(row["dividend_yen"])
-    return paid * int(row["winning_tickets"]) / float(row["pool_yen"])
-
-
-def expected_bins(edges: list[int]) -> list[dict]:
-    dev = [d for d in STUDY_DAYS if d["race_date"] not in HOLDOUT]
-    out = []
-    for i, lo in enumerate(edges):
-        hi = edges[i + 1] if i + 1 < len(edges) else None
-        inside = [
-            d
-            for d in dev
-            if d["carryover_in_yen"] >= lo and (hi is None or d["carryover_in_yen"] < hi)
-        ]
-        values = [realised_return(d) for d in inside]
-        mean = sum(values) / len(values) if values else None
-        out.append({"lo_yen": lo, "hi_yen": hi, "n_days": len(inside), "mean_value": mean})
-    return out
-
-
-def make_registry(tmp_path: Path) -> Registry:
-    return Registry(tmp_path / "registry" / "japan.jsonl", holdout_log=tmp_path / "holdout.jsonl")
-
-
-def test_the_study_days_straddle_the_holdout_start_as_assumed():
-    for d in STUDY_DAYS:
-        assert is_holdout_day("japan", d["race_date"]) is (d["race_date"] in HOLDOUT), d
-
-
-def test_scoring_refuses_a_study_that_is_not_pre_registered(tmp_path):
-    registry = make_registry(tmp_path)
-    history = win5.build_history(STUDY_DAYS)
-    spec = {"carryover_edges_yen": [1, 300_000_000]}
-
-    def never(row):
-        raise AssertionError("a day was scored before the study was frozen")
-
-    with pytest.raises(win5.NotPreRegistered):
-        win5.score_study(history, spec, registry=registry, family_id="F-win5", day_value=never)
-
-    registry.freeze_family("F-win5", {"carryover_edges_yen": [1, 500_000_000]})
-    with pytest.raises(win5.NotPreRegistered):  # frozen, but with another spec
-        win5.score_study(history, spec, registry=registry, family_id="F-win5", day_value=never)
-    with pytest.raises(win5.NotPreRegistered):  # another family's freeze does not count
-        win5.score_study(
-            history,
-            {"carryover_edges_yen": [1, 500_000_000]},
-            registry=registry,
-            family_id="F-other",
-            day_value=never,
-        )
-
-
-@pytest.mark.parametrize(
-    "edges",
-    [[1, 300_000_000], [100_000_000, 400_000_000, 600_000_000], [1]],
-    ids=["two-bins", "three-bins", "one-open-bin"],
-)
-def test_a_frozen_study_is_scored_by_carryover_bin_on_development_days_only(tmp_path, edges):
-    registry = make_registry(tmp_path)
-    frozen = {"note": "synthetic", "carryover_edges_yen": edges}
-    spec_hash = registry.freeze_family("F-win5", frozen)
-    history = win5.build_history(STUDY_DAYS)
-    same_spec = {"carryover_edges_yen": list(edges), "note": "synthetic"}  # other key order
-
-    got = win5.score_study(
-        history, same_spec, registry=registry, family_id="F-win5", day_value=realised_return
-    )
-
-    assert got["family_id"] == "F-win5"
-    assert got["spec_hash"] == spec_hash
-    assert got["holdout_days_excluded"] == len(HOLDOUT)
-    want = expected_bins(edges)
-    assert len(got["bins"]) == len(want)
-    for bin_got, bin_want in zip(got["bins"], want, strict=True):
-        assert bin_got["lo_yen"] == bin_want["lo_yen"]
-        assert bin_got["hi_yen"] == bin_want["hi_yen"]
-        assert bin_got["n_days"] == bin_want["n_days"], (edges, bin_got)
-        if bin_want["mean_value"] is None:
-            assert bin_got["mean_value"] is None
-        else:
-            assert math.isclose(bin_got["mean_value"], bin_want["mean_value"], rel_tol=1e-9)
-
-
-def test_the_bins_follow_the_spec_and_skip_days_below_the_first_edge(tmp_path):
-    registry = make_registry(tmp_path)
-    history = win5.build_history(STUDY_DAYS)
-    spec = {"carryover_edges_yen": [300_000_000]}
-    registry.freeze_family("F-big", spec)
-    got = win5.score_study(
-        history, spec, registry=registry, family_id="F-big", day_value=realised_return
-    )
-    # development days with carryover >= 300M: 11-14 (680M) and 11-22 (350M); 11-29 is holdout
-    (only,) = got["bins"]
-    assert (only["lo_yen"], only["hi_yen"], only["n_days"]) == (300_000_000, None, 2)
-    want = (850_000_000 * 2 / 1_500_000_000 + 300_000_000 * 3 / 900_000_000) / 2
-    assert math.isclose(only["mean_value"], want, rel_tol=1e-9)
-
-
-@pytest.mark.parametrize(
-    "spec",
-    [{}, {"carryover_edges_yen": []}, {"carryover_edges_yen": [300, 100]}],
-    ids=["no-edges", "empty-edges", "not-increasing"],
-)
-def test_a_frozen_spec_without_usable_edges_is_refused(tmp_path, spec):
-    registry = make_registry(tmp_path)
-    registry.freeze_family("F-bad", spec)
-    with pytest.raises(ValueError):
-        win5.score_study(
-            win5.build_history(STUDY_DAYS),
-            spec,
-            registry=registry,
-            family_id="F-bad",
-            day_value=realised_return,
-        )

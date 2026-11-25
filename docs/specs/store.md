@@ -164,9 +164,14 @@ backfill can keep writing).
 per-day WIN5 pages through `core.ingest` (raw pages under `raw/jra/win5_year` and
 `raw/jra/win5_day`), outside the store build. Columns: `race_date, pool_yen` (sales),
 `carryover_in_yen` (from the previous WIN5; 0 when none), `carryover_out_yen` (to the next; 0 when
-none), `winning_tickets, dividend_yen` (per 100 yen; null when nobody hit), `hit`, `pool_ev`
-(`(pool * 0.70 + carryover_in) / pool`). Read with `research.win5.read_history()`. Holdout days are
-in the table; no analysis reads them (`score_study` drops them).
+none), `winning_tickets` (over every winning combination), `dividend_yen` (per 100 yen, the
+largest over the combinations; null when nobody hit), `payout_yen` (the yen paid: dividend x
+tickets summed over the combinations; 0 when nobody hit), `winning_combinations` (more than 1 on a
+dead-heat day; 0 when nobody hit), `hit`, `pool_ev` (`(pool * 0.70 + carryover_in) / pool`). Read
+with `research.win5.read_history()`. `research.win5.payout_mismatches(table)` names the days whose
+`payout_yen + carryover_out_yen` is not `pool * (1 - takeout) + carryover_in_yen` at the day's own
+WIN5 takeout (boosts applied) within 10 yen per winning ticket; days before 2014-06-07 are skipped.
+Holdout days are in the table; no analysis reads them (`score_study` drops them).
 
 A year list (`raw/jra/win5_year`) counts as final only when its cached copy was fetched after the
 year ended (1 January JST of the next year); an earlier copy, and the current year's, is fetched
