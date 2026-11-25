@@ -1,0 +1,122 @@
+# The pre-registered weather family of ticket #89 (08 §4 E27, 03 H8; docs/specs/weather.md,
+# "Pre-registration"): two terms, their inputs relative to the decision time, and the home-straight
+# bearings T2 reads. Written 2026-11-25, before any weather row was joined to a race.
+#
+# OWNER DECISIONS (CLAUDE.md, Modeling governance), never implementation rulings. The owner's answer
+# (c) on #89 (2026-11-25) approved both terms as drafted; the keys below that are null are details
+# the draft left open, asked on #89. The weather study embeds this file verbatim in the family's
+# spec and freezes it in the run registry (core.eval.registry.freeze_family, family
+# `japan-weather-e27-final-win`) before it joins any weather row to a race; it refuses to freeze
+# while any key here is null. Change a value only through a ticket the owner approves.
+
+family_id: japan-weather-e27-final-win
+family_size: 2  # T1 and T2; nothing else is tried in this family
+
+# t: the race's post time, the as-of views' post_utc (races.post_time_local in Asia/Tokyo,
+# docs/specs/as-of.md). Both terms condition on the final Win price.
+decision_time: post_utc
+
+# The C4 offset form (models/meta.py, #87): u_i = ln q_i + sum_k coef_k * x_ik over the race's
+# priced runners, a conditional logit on the winner, q_i the normalised final Win price, ln q_i
+# an offset with coefficient fixed at 1. Fitted and scored on D9's development folds
+# (config/folds.yaml) over #87's development races (D10 price era, holdout days dropped); the
+# holdout is never opened. Each term is fitted on its own: the market, plus that term's columns.
+form: c4_offset
+
+# Which weather rows a race at t reads. The store's `weather` table (jra), read through the as-of
+# views: a row is visible at t when available_utc = obs_utc + publication_lag_min (120,
+# config/weather.yaml) is at or before t. h0 is the latest whole JST hour with
+# obs_utc <= t - publication_lag_min, the newest row a view at t can hold (a post at 15:40 JST
+# reads h0 = 13:00 JST). "The 3 hourly rows before t" are the rows at h0, h0 - 1 h and h0 - 2 h,
+# exactly those obs_utc: an absent row is missing, never replaced by an older one. Station: the
+# venue's (jma/stations.yaml); sunshine from its `sunshine_station` where one is set (NII: 新潟,
+# HSN: 神戸), at the same obs_utc.
+weather_rows:
+  hours: [0, -1, -2]  # h0 + this many hours
+  temperature_and_sunshine_row: 0  # "latest": the row at h0
+  wind_row: 0
+
+terms:
+  T1:
+    what: good-mood weather x ln q, a shift of the market's slope (beta = 1 + gamma on good-mood
+      races)
+    indicator: >-
+      G_r = 1 when all three hold, else 0: precip_mm = 0.0 in each of the rows at h0, h0 - 1 h and
+      h0 - 2 h (no rain in the three hours to h0; JMA's 0.0 for rain below the gauge's step counts
+      as rain-free, as printed); 10.0 <= temp_c(h0) <= 25.0 (degrees C, both ends included);
+      sunshine_h(h0) >= 0.5 (hours of sun in the hour to h0, from the sunshine station where set)
+    member: G_r * ln q_i  # coefficient gamma
+    nuisance: going band x ln q_i, one column per band but the reference, fitted with T1
+    going_from: races.going at t (in the views from post_utc - 60 min; GOOD, GOOD TO YIELDING,
+      SOFT, HEAVY for 良, 稍重, 重, 不良)
+    going_bands: null  # OPEN, asked on #89: the bands and the reference band
+    missing: the race is left out when any of the five weather values (three precip_mm,
+      temp_c, sunshine_h) is null or its row is absent, or the going is null
+    sidedness: null  # OPEN, asked on #89: the test on gamma
+    # The draft's comparator: delta LL of the market + going nuisance + T1 fit against the market
+    # alone. The market + going nuisance fit is reported beside it (descriptive), so the share the
+    # nuisance takes shows.
+    comparator: market_alone
+  T2:
+    what: home-straight tailwind x run style
+    tailwind: >-
+      T_r = wind_ms(h0) * cos(radians(wind_dir_deg(h0) + 180 - b_v)), in m/s. JMA's wind_dir_deg
+      is the direction the wind blows FROM, degrees clockwise from true north (16 points), so the
+      wind blows toward wind_dir_deg + 180; b_v is the running bearing of venue v's home straight
+      (home_straight below). T_r > 0 is a tailwind (blowing toward the finish), T_r < 0 a headwind
+    calm: 静穏 (wind_dir_deg null with wind_ms <= 0.2) gives T_r = 0
+    style: >-
+      c_i = style_code - 1.5 with style_code 0 front, 1 stalker, 2 midpack, 3 closer, the runner's
+      `style` in handicap/factors.py (#129: the most frequent first-corner style over its newest 5
+      starts with corner positions, ties forward), as of t; front -1.5 ... closer +1.5
+    member: T_r * c_i  # coefficient delta
+    sidedness: two-sided  # the owner's answer (c) on #89
+    null_style: null  # OPEN, asked on #89: c_i = 0 "plus a flag"; how the flag enters the fit
+    missing: the race is left out when wind_ms(h0) is null or its row is absent, or when
+      wind_dir_deg(h0) is null with wind_ms(h0) > 0.2
+
+# The direction runners travel along each venue's home straight (the straight in front of the
+# stands that ends at the finish post), degrees clockwise from true north, to within about
+# +-3 degrees. One value serves every course of a venue: turf and dirt run concentric with parallel
+# home straights, inner and outer turf courses (NII, NAK, KYO, HSN) share theirs, jump races finish
+# on it, and Niigata's straight 1000 m runs along it (NAK's turf and dirt measured apart: 15.0 and
+# 15.1 and 15.0).
+#
+# Measured 2026-11-25. Axis: from GSI aerial photos (地理院タイル 全国最新写真（シームレス）, zoom 16,
+# zoom 17 for NAK and KYO; 出典：国土地理院), the angle at which the rails and track edges along
+# the straight project sharpest, checked by drawing the line over the photo; where OpenStreetMap
+# maps the track (© OpenStreetMap contributors, ODbL), its straight agrees to 0.5 degree.
+# Direction: JRA's course plans (コース紹介, コース平面図, www.jra.go.jp/facilities/race/<venue>/course/)
+# give the handedness and draw the stands, the finish post and the direction of running; the
+# photos place the stands. Right-handed: the infield on the runners' right; left-handed: left.
+home_straight:
+  SAP: {bearing_deg: 359.0, hand: right, stands: west, photo_axis: 178.8-180.0}
+  HAK: {bearing_deg: 123.0, hand: right, stands: northeast, photo_axis: 122.5-123.4}
+  FKS: {bearing_deg: 22.0, hand: right, stands: west, photo_axis: 20.4-22.5}
+  NII:
+    bearing_deg: 241.5
+    hand: left
+    stands: northwest
+    photo_axis: 61.5-63.5
+    osm: way 332008108 (inner turf, 1,623 m) 241.4
+  TOK:
+    bearing_deg: 267.5
+    hand: left
+    stands: north
+    photo_axis: 86.8-87.7
+    osm: ways 155529613, 566666116, 566666123 (three concentric courses) 267.3-267.6
+  NAK: {bearing_deg: 15.0, hand: right, stands: west, photo_axis: 14.9-15.3}
+  CKY: {bearing_deg: 234.0, hand: left, stands: northwest, photo_axis: 53.5-54.4}
+  KYO:
+    bearing_deg: 52.7
+    hand: right
+    stands: northwest
+    photo_axis: 51.4-52.9
+    osm: way 526656541 (untagged, 3,098 m) runs at 42 degrees, off the rails in the photo; not used
+  HSN: {bearing_deg: 287.5, hand: right, stands: south, photo_axis: 106.8-108.5}
+  KOK:
+    bearing_deg: 156.5
+    hand: right
+    stands: east
+    photo_axis: 156.0-157.5
+    osm: way 137541144 (1,609 m) 156.5

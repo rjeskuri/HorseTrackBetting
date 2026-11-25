@@ -3,10 +3,11 @@
 
 # Minutes from an hourly value's obs_utc to the time it counts as published: every weather row's
 # available_utc = obs_utc + this lag, and the as-of views open a row at its available_utc.
-# OWNER DECISION (CLAUDE.md, Modeling governance; asked on #89), never an implementation ruling.
-# It stays null until the owner answers: jma.parse.publication_lag() refuses to run while it is
-# null, so no weather row can be stamped.
-publication_lag_min: null
+# OWNER DECISION (CLAUDE.md, Modeling governance), never an implementation ruling: 120 min, the
+# owner's answer on #89 (2026-11-25), padded over the live pages' hourly update for their
+# undocumented latency. #343 logs live AMeDAS values with their fetch times to measure an exact
+# rule; change this only through a ticket the owner approves.
+publication_lag_min: 120
 
 # The fetch adapter's politeness (jma/fetch.py, through core.ingest): one request every 5 s to
 # JMA's data host, a stop on 403 or 429, and three failures in a row open the circuit.

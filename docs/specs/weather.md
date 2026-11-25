@@ -1,13 +1,15 @@
 # Weather: JMA AMeDAS observations per JRA venue
 
 Ticket #89 (epic #72). Code: `src/horsetrack/countries/japan/jma/` (`parse.py`, `fetch.py`,
-`stations.yaml`) and `countries/japan/config/weather.yaml`. Tests:
-`tests/countries/japan/test_jma.py` over the synthetic `tests/fixtures/synthetic/jma_amedas_hourly.csv`.
+`stations.yaml`), `countries/japan/config/weather.yaml` and the pre-registered terms in
+`countries/japan/config/weather_terms.yaml`. Tests: `tests/countries/japan/test_jma.py` over the
+synthetic `tests/fixtures/synthetic/jma_amedas_hourly.csv`.
 
-Status: the table, the parser, the station map and the fetch adapter exist; no request has been
-sent to JMA and no weather row is stored. Two owner decisions gate the ingest (asked on #89):
-whether to ingest JMA at all, and the publication lag. Until the lag is set,
-`parse.publication_lag()` raises, so no row can be stamped with an `available_utc`.
+Status: the owner's answers on #89 (2026-11-25) set the publication lag (120 min), approved the
+ingest under PDL1.0 (the 2014-2026 backfill, one request per 5 s, a stop on 403 or 429) and the two
+terms as drafted. `horsetrack japan jma-backfill` fills the `weather` table; the terms are
+pre-registered below, with three details still open (asked on #89), and the family is not frozen
+yet.
 
 ## The table
 
@@ -26,8 +28,8 @@ whether to ingest JMA at all, and the publication lag. Until the lag is set,
 | `available_utc` | utc | when the value counts as published: `obs_utc` + the configured lag |
 | `ingested_utc` | utc | when this copy was fetched |
 
-The page build (`core.store.build`) never writes it. No code writes it yet; the writer comes with
-the go-ahead.
+The page build (`core.store.build`) never writes it; `horsetrack japan jma-backfill` does (Fetch,
+below), as `processed/jra/weather.parquet` through the store's writer.
 
 ## Parse rules (`parse.parse_amedas_csv(text, *, station_id)`)
 
@@ -90,7 +92,10 @@ station master (地域気象観測所一覧).
 
 `stations.yaml` names the stations passed over (rain gauges, an airport station without sunshine
 at a tie) and the nearest station with sunshine where the choice has none (NII: 新潟, 16.2 km;
-HSN: 神戸, 16.7 km). 大府 has observed since 2012-10-17. Any other venue code is a KeyError.
+HSN: 神戸, 16.7 km). Those two are `sunshine_station` entries: T1 borrows their sunshine (the
+owner's answer (c) on #89), so the backfill fetches them too and their rows sit in the table under
+their own ids (`47604`, `47770`). 大府 has observed since 2012-10-17. Any other venue code is a
+KeyError.
 
 ## Availability
 
@@ -100,7 +105,13 @@ exactly the rows whose `available_utc` is at or before t, whatever their `obs_ut
 `ingested_utc`, and a row without `available_utc` is never in a view. `asof_join` on
 `station_id` takes the latest such row per key.
 
-The lag is an owner decision and is unset. What JMA says about publication (read 2026-11-25):
+The lag is an owner decision: `publication_lag_min: 120` (the owner's answer (a) on #89,
+2026-11-25), the live pages' hourly update padded for their undocumented latency, so every row's
+`available_utc` is `obs_utc` + 2 h and a view at 15:40 JST holds the 13:00 JST row at the latest.
+The stored values come from the next-day download and may carry corrections the live page did not
+show yet; #343 logs the live AMeDAS values with their fetch times to measure an exact rule. The
+backfill recomputes `available_utc` on every row whenever it writes, so a changed lag reaches the
+whole table on the next run. What JMA says about publication (read 2026-11-25):
 
 - 過去の気象データ・ダウンロード: 「前日分のデータまで表示、ダウンロードが可能です。当日のデータは
   利用できません。」 and 「データは、その後の品質管理等により、値が修正になる場合があります。」
@@ -119,17 +130,114 @@ live pages showed a preliminary value within the hour, which a later correction 
 
 Through `horsetrack.core.ingest.fetcher.Fetcher` (cache-first, per-host rate, circuit breaker),
 with `config/weather.yaml`'s http block: one request every 5 s to `www.data.jma.go.jp`, a stop on
-403 or 429, three failures in a row open the circuit. `month_task(venue, year, month)` posts the
-download form for one station-month (hourly 気温, 降水量, 日照時間, 風向・風速; quality columns;
-dates as literals). The form's names come from the page's script (2026-11-25), not from
-documentation, and hold until the first wired fetch confirms them. A month not yet ended in JST is
-refetched; an ended one is cached for good. `fetch_month` quarantines a body without the CSV
-header and raises `FetchError`; `parse_page` parses a fetched page and adds `ingested_utc`.
+403 or 429, three failures in a row open the circuit. `month_task(entry, year, month)` posts the
+download form for one station-month (`entry` a `stations.yaml` entry; hourly 気温, 降水量, 日照時間,
+風向・風速; quality columns; dates as literals). The form's names come from the page's script, not
+from documentation; the first wired fetch confirmed them (2026-11-25: 府中, 新潟 and 神戸 for
+2024-06, one POST each, no session or cookie, HTTP 200, 720 hourly rows each). `fetch_month`
+quarantines a body without the CSV header and raises `FetchError`; `parse_page` parses a fetched
+page and adds `ingested_utc`, the download time JMA prints on the file's first line (JST, to the
+second), so a rerun from the cache writes the same value.
+
+Caching: a month not yet ended in JST is refetched on every run (`mutable`). An ended month is
+fetched once, unless the cached copy stops short of the month's end (its last hourly line is not
+the month's 24時, because it was downloaded while the month ran): then it is fetched again, once.
+
+`horsetrack japan jma-backfill [--start YYYY-MM] [--end YYYY-MM] [--venues TOK,NII]`
+(`fetch.backfill`) fetches every month of the span, station by station: each venue's station, then
+the sunshine station it borrows (default: all ten venues, twelve stations). The default span runs
+from the price era's month (2014-06, D10: no race before 2014-06-07 has a price; the jra store's
+races start in 2010) to the current JST month. It prints one line per month sent to JMA and per
+failure, then a summary. It stops early on an open circuit (403, 429, or failed requests in a
+row), after three failed months in a row (a body that is not the CSV, a parse error) or on Ctrl-C,
+and exits 1 with "rerun the same command to resume". Whatever it fetched, from the network or the
+cache, is merged into the table before it exits: a row of the same `(station_id, obs_utc)` is
+replaced, every other row kept, `available_utc` recomputed from the configured lag on every row,
+sorted by `station_id, obs_utc`, written through the store's writer (`core.store.build`, a tmp
+file moved into place). A rerun over cached months sends no request and writes identical bytes.
 
 JMA caps the data volume of one download (help1: no download above 100% of its gauge). By the
 page's own gauge one station-month of the four elements is about 1.5% and a station-year about
-17.5%. A 2014-2026 backfill of the ten stations is 10 × 156 = 1,560 monthly requests, about
-2.2 hours at one request every 5 s. Nothing runs on a race-day command, and no CLI exists.
+17.5%. The default backfill is 12 stations × 150 months (2014-06 to 2026-11) = 1,800 requests,
+about 2.5 hours at one request every 5 s; 300 of them are the two sunshine stations. A later rerun
+costs one request per station for the current month (and one more per station for a month that
+ended since the last run). Nothing runs on a race-day command.
+
+## Pre-registration (E27: two terms)
+
+`config/weather_terms.yaml` holds the family as the owner approved it (answer (c) on #89,
+2026-11-25: both terms as drafted), written 2026-11-25 before any weather row was joined to a race.
+That file is the definition; this section restates it.
+
+- **Decision time and rows.** t = the race's `post_utc`; both terms condition on the final Win
+  price. A row is visible at t when its `available_utc` (obs_utc + 120 min) is at or before t. h0
+  is the latest whole JST hour with obs_utc <= t - 120 min (a post at 15:40 JST reads h0 =
+  13:00 JST). "The 3 hourly rows before t" are the rows at h0, h0 - 1 h and h0 - 2 h exactly, and
+  "the latest" temperature, sunshine and wind are the row at h0; an absent row is missing, never
+  replaced by an older one. Sunshine at NII and HSN comes from 新潟 and 神戸 at the same hour.
+- **Form.** The C4 offset form (`models/meta.py`, #87): u_i = ln q_i + Σ coef·x_i, a conditional
+  logit on the winner, q_i the normalised final Win price, on D9's development folds over #87's
+  development races; the holdout is never opened. Each term is fitted on its own.
+- **T1, good-mood weather × ln q.** G_r = 1 when no rain fell in the three rows (precip_mm = 0.0 in
+  each), 10.0 <= temp_c(h0) <= 25.0 °C and sunshine_h(h0) >= 0.5 h; else 0. Member G_r · ln q_i
+  (coefficient γ: the market's slope is 1 + γ on good-mood races), with a going-band × ln q_i
+  nuisance term (`races.going`, in the views from post_utc - 60 min). Reported as the draft has
+  it, ΔLL against the market alone, with the market + nuisance fit beside it (descriptive). A null
+  value among the five, an absent row or a null going leaves the race out.
+- **T2, home-straight tailwind × run style.** T_r = wind_ms(h0) · cos(radians(wind_dir_deg(h0) +
+  180 − b_v)) m/s, where JMA's direction is the one the wind blows from (clockwise from true
+  north), so +180 is the direction it blows to, and b_v is the venue's running bearing (below):
+  T_r > 0 is a tailwind toward the finish. 静穏 (no direction, wind_ms <= 0.2) is T_r = 0; a null
+  speed, or a null direction above 0.2 m/s, leaves the race out. Runner score c_i = style_code −
+  1.5 from `handicap/factors.py`'s `style` (front 0, stalker 1, midpack 2, closer 3: front −1.5 …
+  closer +1.5). Member T_r · c_i (coefficient δ), tested two-sided.
+- **Open (asked on #89), null in the file:** T1's going bands and reference band, T1's test
+  (sidedness; the draft fixed T2's only), and how T2's null-style flag enters the fit (c_i = 0
+  "plus a flag").
+- **Freeze.** Family `japan-weather-e27-final-win`, size 2. The weather study embeds
+  `weather_terms.yaml` verbatim in the spec it freezes with `core.eval.registry.freeze_family`
+  (with the fold scheme and the scoring settings it uses, as #77 and #87 do), before it reads any
+  race outcome or joins any weather row to a race, and refuses to freeze while a key in the file is
+  null. Not frozen yet: the open details above.
+- **Caveats, as drafted.** AMeDAS sunshine at TOK, NAK, CKY, KYO and KOK is a satellite estimate
+  from 2021-03-02 (a series break, not adjusted). AMeDAS sunshine is blank at night (NaN), so a race
+  whose h0 falls before sunrise at an AMeDAS station is left out by the missing rule. Because of the
+  lag, h0 is 2 to 3 hours before the off.
+- **Sources.** Weather from JMA; the final price, the going and the run style from the jra store
+  (netkeiba results; style from #128's PP lines and #129's factors). No JRDB or JRA-VAN input
+  (`WITHHELD_SOURCES`).
+
+### Home-straight bearings (T2's b_v)
+
+The direction runners travel along the straight in front of the stands that ends at the finish,
+degrees clockwise from true north, to within about ±3°. One value per venue: turf and dirt are
+concentric with parallel home straights, inner and outer turf courses share theirs, jump races
+finish on it and Niigata's straight 1000 m runs along it (NAK's turf and dirt, measured apart,
+agree within 0.5°). Measured 2026-11-25:
+
+- **Axis**: GSI aerial photos (地理院タイル 全国最新写真（シームレス）, zoom 16; zoom 17 for NAK and KYO):
+  the angle at which the rails and track edges along the straight project sharpest, then the line
+  drawn over the photo to check it follows them. Where OpenStreetMap maps the track, its straight
+  agrees within 0.5°.
+- **Direction**: JRA's course plans (コース紹介, コース平面図, `www.jra.go.jp/facilities/race/<venue>/course/`,
+  fetched through `core.ingest`) give the handedness and draw the stands, the finish post and the
+  direction of running; the photos place the stands.
+
+| venue | bearing | hand | stands | photo axis | OpenStreetMap |
+| --- | --- | --- | --- | --- | --- |
+| SAP | 359.0 | right | west | 178.8–180.0 | no track mapped |
+| HAK | 123.0 | right | northeast | 122.5–123.4 | no straight mapped |
+| FKS | 22.0 | right | west | 20.4–22.5 | no straight mapped |
+| NII | 241.5 | left | northwest | 61.5–63.5 | way 332008108: 241.4 |
+| TOK | 267.5 | left | north | 86.8–87.7 | ways 155529613, 566666116, 566666123: 267.3–267.6 |
+| NAK | 15.0 | right | west | 14.9–15.3 | not fetched (server busy) |
+| CKY | 234.0 | left | northwest | 53.5–54.4 | no track mapped |
+| KYO | 52.7 | right | northwest | 51.4–52.9 | way 526656541 runs at 42°, off the rails: not used |
+| HSN | 287.5 | right | south | 106.8–108.5 | no track mapped |
+| KOK | 156.5 | right | east | 156.0–157.5 | way 137541144: 156.5 |
+
+Sources: 出典：国土地理院（地理院タイル、全国最新写真（シームレス））を加工して作成 (bearings measured
+from the photos); © OpenStreetMap contributors (ODbL); JRA コース紹介 (handedness and the plans).
 
 ## Attribution and licence
 

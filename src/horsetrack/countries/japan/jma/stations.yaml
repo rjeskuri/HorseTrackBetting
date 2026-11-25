@@ -15,6 +15,9 @@
 #   station master 地域気象観測所一覧 (ame_master_20260324.csv). 出典：気象庁ホームページ.
 # km: great-circle distance from the racecourse's coordinates on Wikipedia to the station's
 #   (its temperature site where JMA lists several), rounded; good to a few hundred metres.
+# sunshine_station: where the venue's station has no sunshine, the station whose sunshine the
+#   weather study's T1 borrows (the owner's answer (c) on #89, 2026-11-25); the backfill
+#   (jma/fetch.py) fetches it too, and its rows are in the weather table under its own id.
 venues:
   SAP:
     station_id: "47412"
@@ -50,6 +53,7 @@ venues:
     km: 6.7
     sunshine: none (新潟航空気象観測所; the station master says 日照・湿度・気圧を除く)
     note: the nearest station with sunshine is 新潟 (official, block 47604, 16.2 km)
+    sunshine_station: {station_id: "47604", name: 新潟, kind: s, prec_no: "54", km: 16.2}
   TOK:
     station_id: "1133"
     name: 府中
@@ -95,6 +99,7 @@ venues:
       etrn page flags sunshine)
     passed_over: 西宮 (block 1588, 4.3 km) is a rain gauge only
     note: the nearest station with sunshine is 神戸 (official, block 47770, 16.7 km)
+    sunshine_station: {station_id: "47770", name: 神戸, kind: s, prec_no: "63", km: 16.7}
   KOK:
     station_id: "0780"
     name: 八幡
