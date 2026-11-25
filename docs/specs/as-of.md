@@ -225,6 +225,7 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 | `horse_runs` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 1440 min (the next day) | none |
 | `jrdb_pre_race` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | every column starting `tyb_` (`label_prefixes: [tyb_]`) |
 | `jrdb_post_race` | `label_only` | never; `read_label` only | n/a |
+| `win_sales` | `column` | `published_utc`: a live page's clock, a final (最終オッズ) page's printed post + 30 min, its fetch when it prints none (the owner's answer on #278, 2026-11-25) | none |
 
 - Nothing else is banned. JRDB tables are inputs to private models only (D21: no JRDB-derived
   figure in the public repository).

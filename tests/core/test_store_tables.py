@@ -31,7 +31,7 @@ from horsetrack.core.store import schemas, tables
 VAR = "HORSETRACK_DATA_DIR"
 TABLE_NAMES = (
     "meetings", "races", "runners", "dividends", "sectionals", "incidents", "running_comments",
-    "horses", "horse_runs", "horse_pedigree", "jrdb_pre_race", "jrdb_post_race",
+    "horses", "horse_runs", "horse_pedigree", "jrdb_pre_race", "jrdb_post_race", "win_sales",
 )  # fmt: skip
 
 # kind -> the Arrow type the store writes it as (independent of the code under test)

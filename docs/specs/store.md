@@ -51,6 +51,7 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
 | `horse_pedigree` | one horse's pedigree | `horse_id` |
 | `jrdb_pre_race` | one JRDB pre-race row matched to a runner | `race_id, horse_no` |
 | `jrdb_post_race` | one JRDB post-race row matched to a runner | `race_id, horse_no` |
+| `win_sales` | one publication of a race's Win pool sales | `race_id, published_utc` |
 
 - **meetings**: `meeting_id, race_date, venue, season, day_night, surface_mix, status` (`run` or
   `abandoned`).
@@ -103,6 +104,15 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   `<data dir>/jrdb/specs`) are written by `horsetrack japan jrdb build`
   (`countries/japan/jrdb/tables.py`), which also writes `jurisdiction`; a family not delivered
   still has its columns, all null.
+- **win_sales** (ticket #278): written only for sources with `win_sales` pages (JRA's: JRADB
+  単勝・複勝 pages fetched by `horsetrack japan fetch-win-sales`, `jra.win_sales_fetch`, forward
+  only). `race_id, race_date, venue, race_no` from the page's own date line and race number,
+  `win_tickets` (the 単勝 row of the page's 発売票数 block), `win_sales_yen` (tickets x the unit
+  stake, 100 yen), `is_final` (the page says 最終オッズ), `published_utc` (a live page's clock,
+  dated like `official_pages.source_update_utc`; a page without a clock: its printed post time +
+  30 min, or `fetched_utc` when it prints none; the owner's answer on #278), `fetched_utc` (the
+  manifest's). A page without a whole-number Win figure adds no row. As-of rule: `column` on
+  `published_utc` (`docs/specs/as-of.md`).
 
 Withdrawals and placing codes differ by site: each source adapter maps its own codes before rows
 reach the store, and documents the mapping.
@@ -137,7 +147,8 @@ backfill can keep writing).
   a partial run never drops rows an earlier run parsed.
 - **Page types feed tables** as `schemas.FED_BY` says (`fixture` and `results` feed `meetings`;
   `results` races, runners, dividends, incidents; `sectional` sectionals; `corunning`
-  running_comments; `horse` horses and horse_runs; `pedigree_card` horse_pedigree). Any other
+  running_comments; `horse` horses and horse_runs; `pedigree_card` horse_pedigree; `win_sales`
+  win_sales). Any other
   page type, or one whose adapter has no parser version, is skipped and counted.
 - **Assembly**: pages whose parser flags a key mismatch are dropped, with every page sharing that
   key. Two pages claiming one race: the smaller page key wins; one horse: the latest
@@ -154,9 +165,11 @@ backfill can keep writing).
   the results: `run`, `abandoned`, or `scheduled` without results. Runners take `rating` and
   `gear_raw` from `horse_runs` on `(horse_id, race_date)`, withdrawals excluded and one run per
   key. `horse_pedigree` keeps one row per horse, each column's first non-null value, newest
-  card first. A bad cell becomes null, never a broken build.
-- **Output**: the nine tables fed by `fixture` .. `horse` on every build, `horse_pedigree` only
-  when the manifest holds pedigree pages (`schemas.SOURCE_TABLES`), never the JRDB tables; each
+  card first. `win_sales` keeps one row per `(race_id, published_utc)`, the latest `fetched_utc`
+  (`schemas.LATEST_FETCH`): a publication fetched twice is one row. A bad cell becomes null, never a broken build.
+- **Output**: the nine tables fed by `fixture` .. `horse` on every build, `horse_pedigree` and
+  `win_sales` only when the manifest holds their pages (`schemas.SOURCE_TABLES`), never the JRDB
+  tables; each
   written to a tmp file and moved into place. `processed_dir(source)/_build.json` holds the
   summary's fields (page counts, failures, rows per table, enrichment stats, `snapshot_id`: sha1
   over the included pages' `(page_type, key, sha256)`) plus `built_utc`; a report goes to

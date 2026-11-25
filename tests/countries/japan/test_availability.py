@@ -21,7 +21,9 @@ owner accepted the proposed defaults, each conservative relative to JRA's public
    TYB file: race-day body weight, the board, same-day going, paddock) kept out through
    `label_prefixes: [tyb_]` (the orchestrator's answer on #80, 2026-11-25, extending answer 3);
    the kyi_, cyb_ and joa_ columns stay in the view. 8. jrdb_post_race: label_only.
-9. Nothing banned.
+9. Nothing banned. 10. win_sales (#278): column on published_utc, each publication of a race's
+   Win sales from its own time: a live page's clock, a final page's post + 30 min (the owner's
+   answer on #278).
 
 The expected rules below are written from that answer, never read back from the config. The
 leakage tests run the shipped rules over small synthetic tables built from the store's column
@@ -108,6 +110,9 @@ OWNER: dict[str, dict] = {
     # the TYB columns are named tyb_<field> and come from licensed specs (not in schemas.TABLES)
     "jrdb_pre_race": _offset(0, prefixes=("tyb_",)),
     "jrdb_post_race": {"kind": "label_only"},
+    # per-race Win sales (#278): each publication from its own time; a final figure's time is its
+    # post + 30 min (tests/countries/japan/test_win_sales_store.py pins the view)
+    "win_sales": {"kind": "column", "column": "published_utc"},
 }
 VIEW_TABLES = [t for t, o in OWNER.items() if o["kind"] == "offset"]
 LABEL_ONLY = [t for t, o in OWNER.items() if o["kind"] == "label_only"]
@@ -129,7 +134,7 @@ def rules():
 
 
 def test_the_shipped_config_has_one_rule_per_table_and_nothing_else(rules):
-    assert len(schemas.TABLES) == 12
+    assert len(schemas.TABLES) == 13
     assert set(OWNER) == set(schemas.TABLES) | {"odds_timeseries"}
     assert set(rules) == set(OWNER)
     for table, rule in rules.items():
