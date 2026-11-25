@@ -795,3 +795,9 @@ built on a licensed source shows no values here.
 | E15 | step2:decision_time:T-2:ranks_2_3 | failed | logged_days | qualifying_races | 1 | - | 1 |
 | E15 | step3:mechanism:stake_back_share | failed | logged_days | races_with_place_total | 24 | - | 24 |
 | E15 | step3:mechanism:stake_back_share | failed | logged_days | place_runner_money_rows | 0 | - | 0 |
+
+## japan-track-bias-day-sd
+
+| E id | Variant | Status | Fold | Metric | Value | CI | n |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| E256 | per_level-vs-pooled | scored | all | winner_logloss_gain_update_per_level_vs_pooled | -1.77831e-05 | [-0.000135462, 9.96157e-05] | 22887 |
