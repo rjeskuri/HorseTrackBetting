@@ -21,7 +21,7 @@ JRA results store (netkeiba race results; no JRDB, no JRA-VAN). No runner or rac
 - Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
   called. No holdout outcome or price was read.
 - The full report is under the data directory, at `reports/beta-clustered-japan-d7bf2d8a9ee9.md`. The 11 records are
-  in `docs/experiments/registry-japan.md`.
+  in `docs/experiments/registry/japan/japan-beta-clustered-final-win.md`.
 
 ## The clustered interval
 
