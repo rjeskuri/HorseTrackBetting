@@ -65,7 +65,9 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   parsers), `result_published_utc` (when the race's official result was first seen published,
   ticket #225; null for history without a logged time), `result_unpublished_utc` (its lower bound,
   the last logger poll that did not show the result; null when unknown: a late sighting, shown on a
-  run's first poll, or no logged time).
+  run's first poll, or no logged time). All seven are `schemas.OPTIONAL_COLUMNS['races']`:
+  `scripts/check_store_rebuild.py` accepts one that a copied table lacks and the rebuild holds all
+  null (HKTrack's copy has neither `rail_setting` nor the two `result_*_utc` columns).
 - **runners**: the meeting keys as on races, then `horse_id, horse_no, horse_name, brand_raw`,
   jockey and trainer `*_key, *_code, *_name`, `actual_wt_lb, declared_horse_wt_lb, draw,
   placing_raw, finish_pos` (null when not placed), `placing_code, dead_heat, lbw_raw, lbw_lengths`

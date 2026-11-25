@@ -238,7 +238,7 @@ def test_a_row_count_difference_is_reported(tmp_path, n_a, n_b):
 #
 # * `horsetrack.core.store.schemas.OPTIONAL_COLUMNS: dict[str, tuple[str, ...]]`: for each
 #   table that has optional columns, their names (a subset of `TABLES[name].columns`). Tables
-#   without optional columns need no entry (readers use `.get(name, ())`). races has 4, runners 8.
+#   without optional columns need no entry (readers use `.get(name, ())`). races has 7, runners 8.
 # * `compare_tables(a, b, key=None, *, expected_extra=(), optional=())`: `optional` is the table's
 #   optional column names. A column in `optional` that `b` has and `a` lacks, holding only nulls in
 #   `b`, is not an extra column: it is left out of `extra_columns` and recorded as
@@ -251,7 +251,13 @@ def test_a_row_count_difference_is_reported(tmp_path, n_a, n_b):
 #   optional part comes after the `added` and `all-null` parts, parts joined with "; ".
 # * `main` passes `schemas.OPTIONAL_COLUMNS` to `compare_stores`.
 
-RACES_OPTIONAL = ("weight_type", "race_class_raw", "going_raw", "source_race_key")
+RACES_OPTIONAL = (
+    "weight_type", "race_class_raw", "going_raw", "source_race_key",
+    "rail_setting", "result_published_utc", "result_unpublished_utc",
+)  # fmt: skip
+# the three that came into the races schema from main (#222, #225): absent from HKTrack's copy and
+# null on every HK row, so the real HK rebuild reports them as new unless they are optional
+RACES_FROM_MAIN = ("rail_setting", "result_published_utc", "result_unpublished_utc")
 RUNNERS_OPTIONAL = (
     "bracket", "actual_wt_kg", "horse_wt_kg", "horse_wt_change_kg", "last_3f_s", "win_fav_rank",
     "sex", "age",
@@ -263,6 +269,7 @@ ARROW_TYPES = {
     "float64": pa.float64(),
     "bool": pa.bool_(),
     "float-list": pa.list_(pa.float64()),
+    "timestamp-utc": pa.timestamp("us", tz="UTC"),
 }
 SAMPLE_VALUES = {
     "string": "x",
@@ -270,6 +277,7 @@ SAMPLE_VALUES = {
     "float64": 2.5,
     "bool": True,
     "float-list": [1.0, 2.0],
+    "timestamp-utc": dt.datetime(2026, 11, 28, 6, 30, tzinfo=dt.timezone.utc),
 }
 
 
@@ -297,7 +305,8 @@ def test_schema_optional_columns_are_the_documented_ones():
 
     assert set(schemas.OPTIONAL_COLUMNS["races"]) == set(RACES_OPTIONAL)
     assert set(schemas.OPTIONAL_COLUMNS["runners"]) == set(RUNNERS_OPTIONAL)
-    assert len(schemas.OPTIONAL_COLUMNS["races"]) == 4
+    assert len(schemas.OPTIONAL_COLUMNS["races"]) == 7
+    assert set(RACES_FROM_MAIN) <= set(schemas.OPTIONAL_COLUMNS["races"])
     assert len(schemas.OPTIONAL_COLUMNS["runners"]) == 8
     for table, names in schemas.OPTIONAL_COLUMNS.items():
         assert set(names) <= set(schemas.TABLES[table].columns), table
@@ -485,9 +494,59 @@ def test_compare_stores_notes_accepted_optional_columns_and_matches(tmp_path):
     assert ok is True
     assert _line(lines, "races") == (
         "races: match rows 4 / 4 (accepted: optional all-null: "
-        "weight_type, race_class_raw, going_raw, source_race_key)"
+        "weight_type, race_class_raw, going_raw, source_race_key, "
+        "rail_setting, result_published_utc, result_unpublished_utc)"
     )
     assert _line(lines, "runners") == "runners: match rows 6 / 6"  # no note when nothing accepted
+
+
+def test_hk_races_columns_from_main_are_accepted_when_absent_and_all_null(tmp_path):
+    """The real HK run: HKTrack's races copy lacks the three columns, the rebuild has them null."""
+    from horsetrack.core.store import schemas
+
+    copied, rebuilt = _two_stores(tmp_path)
+    types = {c: pa.timestamp("us", tz="UTC") for c in RACES_FROM_MAIN}
+    types["rail_setting"] = pa.string()
+    for c in RACES_FROM_MAIN:  # the names are really in the races table
+        assert c in schemas.TABLES["races"].columns
+    _store_table(copied / "races.parquet", 5)
+    _store_table(rebuilt / "races.parquet", 5, {c: (t, _nulls(5)) for c, t in types.items()})
+
+    lines, ok = _script().compare_stores(
+        copied, rebuilt, {"races": KEY}, optional=schemas.OPTIONAL_COLUMNS
+    )
+
+    assert ok is True
+    assert _line(lines, "races") == (
+        "races: match rows 5 / 5 (accepted: optional all-null: "
+        "rail_setting, result_published_utc, result_unpublished_utc)"
+    )
+
+
+@pytest.mark.parametrize("column", RACES_FROM_MAIN)
+def test_hk_races_columns_from_main_still_fail_when_they_hold_a_value(tmp_path, column):
+    from horsetrack.core.store import schemas
+
+    copied, rebuilt = _two_stores(tmp_path)
+    typ = pa.string() if column == "rail_setting" else pa.timestamp("us", tz="UTC")
+    value = SAMPLE_VALUES["string" if column == "rail_setting" else "timestamp-utc"]
+    extra = {
+        c: (pa.string() if c == "rail_setting" else pa.timestamp("us", tz="UTC"), _nulls(4))
+        for c in RACES_FROM_MAIN
+    }
+    extra[column] = (typ, [None, value, None, None])
+    _store_table(copied / "races.parquet")
+    _store_table(rebuilt / "races.parquet", extra=extra)
+
+    lines, ok = _script().compare_stores(
+        copied, rebuilt, {"races": KEY}, optional=schemas.OPTIONAL_COLUMNS
+    )
+
+    assert ok is False
+    races = _line(lines, "races")
+    assert "MISMATCH" in races and f"new: {column}" in races
+    for other in set(RACES_FROM_MAIN) - {column}:
+        assert other not in races.split("new:")[1]
 
 
 def test_compare_stores_names_only_the_accepted_columns(tmp_path):
