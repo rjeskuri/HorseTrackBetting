@@ -6,6 +6,7 @@ from horsetrack import __version__
 from horsetrack.core.ingest.cli import scrape_app
 from horsetrack.core.store.cli import store_app
 from horsetrack.countries.japan.board.server import board_serve_command
+from horsetrack.countries.japan.jra.going_fetch import fetch_going_command
 from horsetrack.countries.japan.jrdb.tables import build_command as jrdb_build_command
 from horsetrack.countries.japan.logger.compact import compact
 from horsetrack.countries.japan.logger.compare import compare_logs_command
@@ -13,6 +14,8 @@ from horsetrack.countries.japan.logger.launchd import launchd_command
 from horsetrack.countries.japan.logger.log_day import log_day
 from horsetrack.countries.japan.logger.pull_vm import pull_vm_command
 from horsetrack.countries.japan.logger.systemd import systemd_command
+from horsetrack.countries.japan.research.win5_backfill import win5_history_command
+from horsetrack.countries.japan.research.win5_study import win5_study_app
 from horsetrack.countries.japan.shadow.day import shadow_day_command
 
 app = typer.Typer(no_args_is_help=True)
@@ -27,6 +30,9 @@ japan.command("systemd")(systemd_command)
 japan.command("pull-vm")(pull_vm_command)
 japan.command("board-serve")(board_serve_command)
 japan.command("shadow-day")(shadow_day_command)
+japan.command("win5-history")(win5_history_command)
+japan.add_typer(win5_study_app, name="win5-study")
+japan.command("fetch-going")(fetch_going_command)
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
 japan.add_typer(jrdb, name="jrdb")
 jrdb.command("build")(jrdb_build_command)

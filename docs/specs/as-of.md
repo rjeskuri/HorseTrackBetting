@@ -11,9 +11,9 @@ Every table that is read needs a rule. A table without one raises `NoAvailabilit
 
 | kind | a row is available at | `read_asof` / `asof_join` | `read_label` |
 | --- | --- | --- | --- |
-| `column` | `row[column]`, or `coalesce(row[column], row[fallback])` with a `fallback` | yes | refused (`ValueError`) |
-| `offset` | `row[anchor] + offset`; on a DATE anchor, 00:00 of the date in `tz` + offset | yes | refused (`ValueError`) |
-| `static` | always, at any t | yes, every row | refused (`ValueError`) |
+| `column` | `row[column]`, or `coalesce(row[column], row[fallback])` with a `fallback` | yes | refused (`ValueError`), unless `label_readable` |
+| `offset` | `row[anchor] + offset`; on a DATE anchor, 00:00 of the date in `tz` + offset; with `via`, the anchor of another table's matching row + offset | yes | refused (`ValueError`), unless `label_readable` |
+| `static` | always, at any t | yes, every row | refused (`ValueError`), unless `label_readable` |
 | `label_only` | never, at any t | `LabelOnlyTable` | the whole table |
 | `current_value` | never: the values are as of the scrape, not as of t | `CurrentValueTable` | refused (`ValueError`) |
 
@@ -47,6 +47,48 @@ every row is in every view at any t, and `asof_join` matches on `on` alone. It t
 field (`column`, `anchor`, `offset`, `tz`, `fallback`), only `label_columns`. It is not a label
 table: `read_label` refuses it.
 
+### Via (offset rules)
+
+A table without a time column of its own (the result tables carry `race_id`, not the post) reads
+its anchor from another table: `via = Via(table, on)` takes the `anchor` of the `via.table` rows
+whose `on` columns equal the row's. The anchor may be a timezone-aware or a derived column of that
+table (see Derived columns), never one of its label or gated columns; the via table needs a view
+rule of its own, without a `via`.
+
+- The row is available at `max(anchor + offset, the via row's own availability)`: a time read
+  from a row counts only once that row is known.
+- A row with no matching via row, or whose matching row has a null anchor or is never available,
+  is never available. Several matching rows: the latest time counts, and a null among them makes
+  it null.
+- A `via` rule takes no `tz`; `via` on any kind but `offset` is a `ValueError`.
+
+## Derived columns
+
+A `column`, `offset` or `static` rule takes `derived`, a tuple of `LocalTime(name, date, time,
+tz)`: a column the view adds to the table's own, the UTC instant of the `DATE` column `date` at
+the wall-clock time in the string column `time` (`H:MM` or `HH:MM`, a one-digit hour too) in the
+IANA zone `tz`. A null date or time, or a time of any other form (`25:00`, `9:5`, an ISO
+string), gives null: the conservative side, since a null time never opens anything.
+
+- `read_asof` and `asof_join` return it, timezone-aware, in UTC, from the row's own availability.
+- It can be a `via` anchor or a gate's anchor (`races.post_utc`).
+- A derived name the table already has, a `date` that is not a `DATE`, a `time` that is not a
+  string, or a derived name listed as a label or gated column is a `ValueError`.
+
+## Gated columns
+
+A `column`, `offset` or `static` rule takes `gates`, a tuple of `Gate(columns, anchor, offset,
+via=None)`: those columns stay in the frame of an available row, null until `anchor + offset`,
+then the stored value. The anchor is the row's own timezone-aware or derived column, or, with
+`via`, the anchor of another table's matching row, as for an offset rule's `via` (including the
+via row's own availability).
+
+- In `read_asof` a gated column is shown where its gate time is at or before `at_utc`; in
+  `asof_join`, where it is at or before the key's `t_col`. A null gate time never shows it.
+- A gated column the table does not have is a `ValueError` at query time. A gated column that is
+  also a label column, the rule's time column, a derived column, or in two gates is a
+  `ValueError` at construction. Joining `on` a gated column is a `ValueError`.
+
 ## Label columns
 
 The rule kinds above apply per row, so a `column` or `offset` rule alone makes every column of an
@@ -61,8 +103,11 @@ takes `label_columns`, a tuple of column names (default `()`).
   `ValueError`.
 - A `label_only` or `current_value` rule with label columns, or label columns that list the rule's
   own `column`, `fallback` or `anchor`, is a `ValueError`.
-- `read_label` still refuses every table that is not `label_only`: label columns of a `column`,
-  `offset` or `static` table are not readable as labels through it.
+- `read_label` refuses every table that is neither `label_only` nor `label_readable`: label
+  columns of a `column`, `offset` or `static` table are not readable as labels through it.
+- `label_readable` (YAML `read_label: true`) on a `column`, `offset` or `static` rule lets
+  `read_label` return the table whole as well: for result tables that enter the views after the
+  post and are also read as labels.
 
 ### Label prefixes
 
@@ -90,8 +135,8 @@ column whose name starts with one of them is a label column too.
   time is at or before the key's `t_col`. A key with no such row is kept with those columns null.
   `t_col` must be timezone-aware. A table column that the keys also carry (other than `on`) is a
   `ValueError`. At equal availability times the row taken is unspecified.
-- `read_label(con, table, *, rules)`: a `label_only` table whole, for labels and conditioners
-  only.
+- `read_label(con, table, *, rules)`: a `label_only` or `label_readable` table whole, for labels
+  and conditioners only.
 
 Timezone-aware columns of the table come back in UTC, whatever the connection's time zone.
 Table and column names come from config: the SQL quotes them as identifiers, and times and
@@ -126,21 +171,34 @@ tables:
     anchor: <name>        # kind offset only, required
     offset_min: <number>  # kind offset only, required; minutes, int or float
     tz: <IANA zone>       # kind offset only, optional; required at query time on a DATE anchor
+    via: {table: <table>, match: [<name>, ...]}  # kind offset only, optional; no tz
     label_columns: [<name>, ...]  # kinds column, offset and static only, optional
     label_prefixes: [<prefix>, ...]  # kinds column, offset and static only, optional
+    derived:              # kinds column, offset and static only, optional
+      <name>: {date: <name>, time: <name>, tz: <IANA zone>}
+    gated_columns:        # kinds column, offset and static only, optional
+      - columns: [<name>, ...]
+        anchor: <name>
+        offset_min: <number>
+        via: {table: <table>, match: [<name>, ...]}  # optional
+    read_label: true | false  # kinds column, offset and static only, optional (default false)
 ```
+
+`via` names its key columns `match`, not `on`: YAML 1.1 reads a bare `on` key as `true`.
 
 The result maps each table to an `Availability(table, kind, column, anchor, offset,
 label_columns, tz, fallback, label_prefixes)` with `offset = timedelta(minutes=offset_min)` and
 `label_columns` and `label_prefixes` tuples (`()` when the key is absent; flow or block lists both
-work). A key that does not belong to
+work), `via = Via(table, match)`, `derived` a tuple of `LocalTime`, `gates` a tuple of `Gate`
+and `label_readable = read_label`. A key that does not belong to
 the entry's kind, an unknown key, an unknown kind, a missing required key, a non-numeric
 `offset_min`, a `fallback` or `tz` that is not a non-empty string, an unknown zone, a
 `label_columns` that is not a list of strings (a string, null, a mapping, nested lists) or that
 lists the entry's `column`, `fallback` or `anchor`, `label_columns` on `label_only` or
 `current_value`, a `label_prefixes` that is not a list of non-empty strings or that has a prefix
 matching the entry's `column`, `fallback` or `anchor`, `label_prefixes` on `label_only` or
-`current_value`, a file without a top-level `tables:` mapping or an entry that is not a mapping is
+`current_value`, a `via`, `derived`, `gated_columns` or `read_label` entry of the wrong shape
+or on a kind that does not take it, a file without a top-level `tables:` mapping or an entry that is not a mapping is
 a `ValueError`; a missing file is a `FileNotFoundError`. With no file, every view is refused: the
 safe default.
 
@@ -156,34 +214,51 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 | --- | --- | --- | --- |
 | `odds_timeseries` | `column` | `fetched_utc`, else `fallback` `snapshot_utc` (HKTrack rows) | `dividend`, `is_refund`, `is_final_capture` |
 | `meetings` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | none |
-| `races` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | `finish_time_s`, `split_times_s`, `going`, `going_raw`, `result_published_utc`, `result_unpublished_utc` |
-| `runners` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | `finish_pos`, `placing_raw`, `placing_code`, `dead_heat`, `finish_time_s`, `lbw_raw`, `lbw_lengths`, `running_positions`, `last_3f_s`, `win_odds`, `win_fav_rank`, `horse_wt_kg`, `horse_wt_change_kg`, `declared_horse_wt_lb` |
-| `dividends` | `label_only` | never; `read_label` only | n/a |
-| `sectionals` | `label_only` | never; `read_label` only | n/a |
-| `incidents` | `label_only` | never; `read_label` only | n/a |
-| `running_comments` | `label_only` | never; `read_label` only | n/a |
+| `races` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min; derives `post_utc`; `going`, `going_raw` null until `post_utc` − 60 min; `finish_time_s` null until `post_utc` + 30 min | `split_times_s`, `result_published_utc`, `result_unpublished_utc` |
+| `runners` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min; `horse_wt_kg`, `horse_wt_change_kg`, `declared_horse_wt_lb` null until the race's `post_utc` − 60 min, `finish_pos`, `dead_heat`, `finish_time_s` null until the race's `post_utc` + 30 min (both `via` races on `race_id`) | `placing_raw`, `placing_code`, `lbw_raw`, `lbw_lengths`, `running_positions`, `last_3f_s`, `win_odds`, `win_fav_rank` |
+| `dividends` | `offset` | the race's `post_utc` + 30 min (`via` races on `race_id`); also `read_label` | none |
+| `sectionals` | `offset` | the race's `post_utc` + 30 min (`via` races on `race_id`); also `read_label` | none |
+| `incidents` | `offset` | the race's `post_utc` + 30 min (`via` races on `race_id`); also `read_label` | none |
+| `running_comments` | `offset` | the race's `post_utc` + 30 min (`via` races on `race_id`); also `read_label` | none |
 | `horses` | `current_value` | never: profile pages show today's values | n/a |
 | `horse_pedigree` | `static` | always: sire, dam and broodmare sire never change | `source_race_id`, `scraped_utc` |
 | `horse_runs` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 1440 min (the next day) | none |
 | `jrdb_pre_race` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | every column starting `tyb_` (`label_prefixes: [tyb_]`) |
 | `jrdb_post_race` | `label_only` | never; `read_label` only | n/a |
+| `track_condition` | `column` | `available_utc` (= `published_utc`, the 発表 time printed on the going page or the yearly record; #90) | none |
 
 - Nothing else is banned. JRDB tables are inputs to private models only (D21: no JRDB-derived
   figure in the public repository).
-- Same-day results may be used once JRA has officially published them, but the store has no UTC
-  post time yet: `races` has `post_time_local` (a string) and no `post_utc`. Until follow-up #227
-  derives `post_utc`, the rules stay on the conservative side:
-  - `dividends`, `sectionals`, `incidents` and `running_comments` are `label_only`; the owner's
-    rule once `post_utc` exists is post + 30 min.
-  - `horse_wt_kg`, `horse_wt_change_kg` and `declared_horse_wt_lb` (runners; the last is
-    `horse_wt_kg` in pounds) and the same-day `going` and `going_raw`
-    (races) are label columns; the owner's rule once `post_utc` exists is post − 60 min.
-  - The result columns of `races` and `runners` stay label columns.
+- The post-anchored rules (#227, the owner's answer on #80, 2026-11-24, points 3 and 4) hang on
+  `races.post_utc`, which the races view derives (`derived`): `post_time_local` (`H:MM` or
+  `HH:MM`, as the results parser writes it) on the Asia/Tokyo wall clock of `race_date`, so
+  15:40 on 2026-11-28 is 2026-11-28 06:40 UTC and 9:50 is 00:50 UTC. The store has no `post_utc`
+  column: `read_table` and the table names are unchanged. A null or malformed `post_time_local`
+  (the official card's ISO string included) gives a null `post_utc`.
+  - Horse weights (`horse_wt_kg`, `horse_wt_change_kg`, `declared_horse_wt_lb`; the last is
+    `horse_wt_kg` in pounds) and the same-day `going` and `going_raw` are gated columns: in the
+    frame from 00:00 JST, null before `post_utc` − 60 min of their race (absent at post − 60 min
+    − 1 µs, present at post − 60 min).
+  - `dividends`, `sectionals`, `incidents` and `running_comments` rows enter the views at the
+    race's `post_utc` + 30 min (absent at + 30 min − 1 µs, present at + 30 min); `read_label`
+    still returns them whole.
+  - The finish (`races.finish_time_s`; `runners` `finish_pos`, `dead_heat` and `finish_time_s`)
+    is a gated column on the same rule as same-day dividends (#305; the owner's answer on #96,
+    2026-11-25): in the frame from 00:00 JST, null before the race's `post_utc` + 30 min
+    (absent at + 30 min − 1 µs, present at + 30 min); runners read their race's `post_utc` by
+    `race_id`. A same-day variant at t can read the finishes of the races resulted by t, never
+    the current race's before its post + 30 min. `read_label` still refuses races and runners
+    (#80).
+  - A race without a post time, and a row whose `race_id` has no races row, never shows its
+    weights, going, finish or results.
+  - The other result columns of `races` (`split_times_s`) and `runners` (`placing_raw`,
+    `placing_code`, `lbw_raw`, `lbw_lengths`, `running_positions`, `last_3f_s`, `win_odds`,
+    `win_fav_rank`) stay label columns.
   - `result_published_utc` and `result_unpublished_utc` (races, #225: the odds logger's sighting
     of the published result and its lower bound) are label columns, never in a view at t: the
-    owner's answer on #80 (2026-11-25), an owner decision, not an implementation ruling. Follow-up
-    #227 may give them a rule that makes each available at its own value. `rail_setting` (races,
-    #222) stays in the view: JRA announces the rail position in advance.
+    owner's answer on #80 (2026-11-25), an owner decision, not an implementation ruling; #227
+    left them labels. `rail_setting` (races, #222) stays in the view: JRA announces the rail
+    position in advance.
 - `jrdb_pre_race` merges JRDB's TYB family, the day-of file: race-day body weight, the board
   (`tyb_win_odds`, `tyb_odds_time`), same-day going, the paddock. Under the race-date rule those
   would be in every view from 00:00 JST, before they exist. The owner's answer on #80 (2026-11-25),
@@ -194,11 +269,17 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 - A race-date rule opens a whole day's card at 00:00 JST of the race date: a column JRA changes
   later that day (a late scratch, a jockey change) is a trap the rule does not catch (see Known
   traps).
+- `track_condition` (#90) follows the owner's rule, not a ruling: his #136 request ("Ingest them
+  as of their publication time", 2026-11-24), #228's outline step 4 ("available_utc =
+  published_utc as in #136") and his answer on #87 (usable once JRA has officially published it,
+  with its publication timestamp). A yearly record's rows count from the record's own 発表 time,
+  so a race-day view never sees them; `asof_join` on (venue, race_date, surface) takes the latest
+  publication at t.
 - A table outside the file is refused with `NoAvailabilityRule`.
 
 ### Accepted leak: results-derived card columns (owner decision, 2026-11-25)
 
-Four columns that are not label columns are derived from the results page
+Four columns that are neither label nor gated columns are derived from the results page
 (`countries/japan/jra/netkeiba/parse_results.py`), not from the card as it stood before the race:
 
 | table | column | derived from |
@@ -211,9 +292,10 @@ Four columns that are not label columns are derived from the results page
 The owner's answer on #80 (2026-11-25) keeps all four in the views under the `race_date` 00:00
 JST rule of their table, as an owner choice, not an implementation ruling. So a scratch or an
 abandonment that happens on race day is visible in every view from 00:00 JST of the race date,
-before it happened: a known, accepted leak. Follow-up #227 is to give these columns a post-based
-rule once `races.post_utc` exists; until then a feature or model that reads them carries this
-leak.
+before it happened: a known, accepted leak. `races.post_utc` exists since #227, but whether these
+four columns can change on race day after 00:00 JST, and so need a post-based rule, still awaits
+an owner decision; until then they stay under the race-date rule, and a feature or model that
+reads them carries this leak.
 
 ## Known traps (07 §6)
 
@@ -233,4 +315,4 @@ leak.
   accepted: `runners.is_scratched`, `races.field_size`, `races.status` and `meetings.status` come
   from the results page and are in the views from 00:00 JST of the race date, so a race-day
   scratch or abandonment shows before it happened (owner decision, 2026-11-25; see Accepted leak:
-  results-derived card columns). #227 is to give them a post-based rule.
+  results-derived card columns). Whether they get a post-based rule awaits an owner decision.

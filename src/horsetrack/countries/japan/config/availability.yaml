@@ -4,10 +4,14 @@
 # change one only through a ticket the owner approves. Each rule is conservative relative to
 # JRA's actual publication.
 #
-# Until #227 derives races.post_utc, everything that becomes known only around the post stays out
-# of the views: the result tables are label_only, and the result columns, the horse weights
-# (post - 60 min) and the same-day going (post - 60 min) of races and runners are label_columns.
-# A table without an entry here is refused.
+# races derive post_utc from race_date and post_time_local (Asia/Tokyo; #227). Since then the horse
+# weights and the same-day going are in the views, null until post_utc - 60 min of their race, and
+# the result tables enter the views at post_utc + 30 min of their race, read by race_id from races
+# (the owner's answer on #80, 2026-11-24). Since #305 the finish (races finish_time_s; runners
+# finish_pos, dead_heat, finish_time_s) is in the views too, null until post_utc + 30 min of its
+# race, the same rule as same-day dividends (the owner's answer on #96, 2026-11-25). A race without
+# a post time never shows any of these. The other result columns of races and runners stay
+# label_columns. A table without an entry here is refused.
 tables:
   # The board at t: the latest capture fetched by t. HKTrack rows have no fetched_utc, so their
   # snapshot_utc counts. The payout and the final-capture flag come from the whole day's log.
@@ -20,8 +24,9 @@ tables:
   # The card: known from 00:00 JST of the race date.
   # Accepted leak (owner decision, 2026-11-25): meetings.status, races.field_size, races.status
   # and runners.is_scratched come from the results page, so a race-day scratch or abandonment is
-  # in the views from 00:00 JST. They stay in the views until #227 gives them a post-based rule
-  # (docs/specs/as-of.md, "Accepted leak: results-derived card columns").
+  # in the views from 00:00 JST. They stay under that rule until the owner decides whether they
+  # need a post-based one (#227; docs/specs/as-of.md, "Accepted leak: results-derived card
+  # columns").
   meetings:
     kind: offset
     anchor: race_date
@@ -32,15 +37,25 @@ tables:
     anchor: race_date
     tz: Asia/Tokyo
     offset_min: 0
-    # field_size and status stay in the view: accepted leak until #227 (see above)
-    # results; same-day going until post_utc (#227)
-    # result_published_utc and result_unpublished_utc (#225): never in a view (owner decision,
-    # answer on #80, 2026-11-25); #227 may give them a rule of their own. rail_setting stays in.
+    # the post as a UTC instant: post_time_local ("H:MM" or "HH:MM") on the JST wall clock of the
+    # race date; null where the post time is missing or malformed
+    derived:
+      post_utc: {date: race_date, time: post_time_local, tz: Asia/Tokyo}
+    # same-day going: in the view, null until post_utc - 60 min
+    gated_columns:
+      - columns: [going, going_raw]
+        anchor: post_utc
+        offset_min: -60
+      # the finish: in the view, null until post_utc + 30 min, the same-day dividends rule
+      # (#305; the owner's answer on #96, 2026-11-25)
+      - columns: [finish_time_s]
+        anchor: post_utc
+        offset_min: 30
+    # field_size and status stay in the view: accepted leak (see above)
+    # the other results; result_published_utc and result_unpublished_utc (#225): never in a view
+    # (owner decision, answer on #80, 2026-11-25). rail_setting stays in.
     label_columns:
-      - finish_time_s
       - split_times_s
-      - going
-      - going_raw
       - result_published_utc
       - result_unpublished_utc
   runners:
@@ -48,33 +63,57 @@ tables:
     anchor: race_date
     tz: Asia/Tokyo
     offset_min: 0
-    # is_scratched stays in the view: accepted leak until #227 (see above)
-    # results; horse weights (kg and the lb copy) until post_utc (#227)
+    # horse weights (kg, the change, the lb copy): in the view, null until post_utc - 60 min of the
+    # runner's race
+    gated_columns:
+      - columns: [horse_wt_kg, horse_wt_change_kg, declared_horse_wt_lb]
+        via: {table: races, match: [race_id]}
+        anchor: post_utc
+        offset_min: -60
+      # the finish: in the view, null until post_utc + 30 min of the runner's race, the same-day
+      # dividends rule (#305; the owner's answer on #96, 2026-11-25)
+      - columns: [finish_pos, dead_heat, finish_time_s]
+        via: {table: races, match: [race_id]}
+        anchor: post_utc
+        offset_min: 30
+    # is_scratched stays in the view: accepted leak (see above)
+    # the other results
     label_columns:
-      - finish_pos
       - placing_raw
       - placing_code
-      - dead_heat
-      - finish_time_s
       - lbw_raw
       - lbw_lengths
       - running_positions
       - last_3f_s
       - win_odds
       - win_fav_rank
-      - horse_wt_kg
-      - horse_wt_change_kg
-      - declared_horse_wt_lb
 
-  # Results: post + 30 min once post_utc exists (#227); labels only until then.
+  # Same-day results: from post_utc + 30 min of their race, read from races by race_id (#227).
+  # read_label still returns them whole, as before #227.
   dividends:
-    kind: label_only
+    kind: offset
+    via: {table: races, match: [race_id]}
+    anchor: post_utc
+    offset_min: 30
+    read_label: true
   sectionals:
-    kind: label_only
+    kind: offset
+    via: {table: races, match: [race_id]}
+    anchor: post_utc
+    offset_min: 30
+    read_label: true
   incidents:
-    kind: label_only
+    kind: offset
+    via: {table: races, match: [race_id]}
+    anchor: post_utc
+    offset_min: 30
+    read_label: true
   running_comments:
-    kind: label_only
+    kind: offset
+    via: {table: races, match: [race_id]}
+    anchor: post_utc
+    offset_min: 30
+    read_label: true
 
   # Profile pages show today's values, not the values at t.
   horses:
@@ -102,3 +141,12 @@ tables:
     label_prefixes: [tyb_]
   jrdb_post_race:
     kind: label_only
+
+  # JRA's going measurements (#90): a row counts from its publication, available_utc (=
+  # published_utc, the page's or yearly record's own 発表 time). The owner's rule, not a ruling:
+  # his #136 request ("Ingest them as of their publication time", 2026-11-24), #228's outline step
+  # 4 ("available_utc = published_utc as in #136") and his answer on #87 (usable once JRA has
+  # officially published it, with its publication timestamp, 2026-11-24). No label columns.
+  track_condition:
+    kind: column
+    column: available_utc

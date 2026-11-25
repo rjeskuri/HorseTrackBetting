@@ -17,7 +17,7 @@ race results; no JRDB, no JRA-VAN). No runner or race row appears.
   `uv run python -m horsetrack.countries.japan.studies.calibration --run`.
 - Store: `processed/jra/runners.parquet@b3226f2a22bfce26`, `processed/jra/races.parquet@4e6a394a57e3101a`.
 - The full report is under the data directory, at `reports/crowd-calibration-japan-4816f067ab5a.md`. Every record
-  is in `docs/experiments/registry-japan.md`.
+  is in `docs/experiments/registry/japan/`.
 
 ## Owner decisions used
 
@@ -152,6 +152,10 @@ per scored race, with meeting-clustered one-sided bounds. O / E is a point estim
 | no floor-bound races | power-β | 110,885 | 653 | 750.1 | 0.871 | -0.00410 | -0.00577 | -0.00234 |
 | no floor-bound races | Shin | 110,885 | 653 | 297.8 | 2.193 | +0.01500 | +0.01332 | +0.01676 |
 
+The tail β fitted beside this table is #285's: see "Experiment report: the tail β (#285)" at the end of this file.
+D4's spline on the same folds and tail table is #275's: see "Experiment report: D4's calibrated market on the
+crowd-calibration folds (#275)" after it.
+
 ### E4: β in vs out of each segment (in-sample, every development race)
 
 Δβ = β_in - β_out is derived from the two rows. Its Wald CI treats the two fits as independent (they cover disjoint
@@ -254,3 +258,514 @@ Each is filed under epic #72, `status:proposed` unless marked.
 - Carry R12, handicap and the entropy gradient into A6's pre-registered family (max-statistic, holdout) as
   candidates, not findings. No new ticket: this is #88's scope, and A6 already takes segment β from #77's
   `segment_beta`.
+
+---
+
+# Experiment report: the tail β (Japan, #285)
+
+Ticket #285 (epic #72), the owner's answer (c) on #77 of 2026-11-25. #77 measured the tail above decimal 51.0 as
+observed over expected winners per de-vig. This study fits the slope a tail runner gets: a conditional logit on
+x = ln(1/odds) with a body slope β for every runner and an increment added for runners priced strictly above 51.0.
+`tail β` = β + increment. **Nothing is adopted.** Every figure is an aggregate over the JRA results store (netkeiba
+race results; no JRDB, no JRA-VAN). No runner or race row appears.
+
+- Registry family `japan-tail-beta-final-win`, spec sha256
+  `ee2e0cc5602402ed118302c9f1645e732191784c8c406d3f6ef0708fc34c232d`. It is its own family, not #77's. The spec was
+  frozen in the registry before any development row was read. It holds the model, the comparators, the ΔLL rule, the
+  fit and its CI, the tail threshold, the floor, the fold scheme, the bootstrap and the owner decisions.
+- Code: `countries/japan/studies/tail_beta.py`; the records carry git `3250795`, and the next commit changes only the
+  hypothesis id written to the records (see Variants tried). To reproduce, run
+  `uv run python -m horsetrack.countries.japan.studies.tail_beta`.
+- Store: `processed/jra/runners.parquet@b3226f2a22bfce26`, `processed/jra/races.parquet@4e6a394a57e3101a`, the
+  builds #77 read. The full report is under the data directory, at `reports/tail-beta-japan-ee2e0cc56024.md`. The
+  four records are in `docs/experiments/registry/japan/`.
+- Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
+  called. No holdout outcome or price was read.
+
+## Owner decisions used
+
+| Decision | What it fixes here | Where it was signed |
+| --- | --- | --- |
+| #77 answer (c) (2026-11-25) | The tail measure is a tail β: the conditional-logit slope with a separate slope above 51.0, pre-registered as its own family, beside the observed over expected winners. | #77, owner answer of 2026-11-25 (listed as (6) above) |
+| #77 (4) | The no-floor-bound subset drops races with a runner at odds 1.1 or under from fitting and from scoring. | #77, 2026-11-25 |
+| #77 (5) | The tail is a runner priced above decimal 51.0 (`tail_min_odds` in `config/calibration.yaml`). | #77, 2026-11-25 |
+| Floor 1.1 | A priced runner at or under odds 1.1 + 1e-9 is floor-bound (the Win pool's minimum dividend over the unit stake). | `config/jra.yaml`; #77 (4) |
+| D6 | Winner log loss per race; a dead heat scores each of its k co-winners at 1/k. | §3, #14; the #69 answer (2026-11-24) |
+| D7 | Bootstrap clusters are meetings (venue x day); bounds are 95% one-sided; 10,000 replicates (`config/scoring.yaml`). | §3, #14 |
+| D9 | Walk-forward quarters, refit quarterly, expanding window, 1-week embargo; the first scored quarter is 2020-Q1 (`config/folds.yaml`). | §4, #14; the #70 answer |
+| D10 | Races before 2014-06-07 are excluded wherever the price enters. | §4, #14 |
+| D11, D12, D14, D15 | Holdout A2 from 2026-11-28, fully locked for outcomes and prices, opened only by the owner. Not opened here. | §5, #14; the #71 answer (`config/holdout.yaml`) |
+| D21 | No figure derived from a licensed source appears in the repository. None is used here. | #14 |
+
+The comparators (normalised 1/odds and power-β refit per fold) and ΔLL against both are the ticket's own outline. The
+bootstrap seed (285) is an implementation choice for reproducibility: `scoring.yaml` signs no seed.
+
+## Hypothesis
+
+The null is the starting point: the price is one-slope, so the increment is 0 and the tail β equals the body slope.
+The frozen spec pre-registered the measures (the tail β and its increment, overall, by year, with and without
+floor-bound races, and ΔLL against normalised and power-β), not their directions. The direction below was written
+after #77's tail table, which looked at the same development races, so this study cannot confirm it independently.
+
+- **Direction.** #77 found tail runners winning less often than either de-vig says (O/E 0.83 under normalised, 0.87
+  under power-β). A single slope that is too flat in the tail would show as an increment above 0, a tail β above the
+  body slope.
+- **Failure rule** (written with this report): it fails if the increment's 95% Wald CI covers 0. It also fails to add
+  to power-β if the lower bound of ΔLL against power-β is at or below 0.
+
+## Variants tried
+
+The family has 4 variants (`Registry.family_size`) and 4 records, all scored: a walk-forward variant and an in-sample
+by-year variant, each on all races and on no floor-bound races.
+
+**One aborted attempt, no record lost.** The first run froze the family, read the development rows and scored all four
+variants. The registry then refused the first record, because a hypothesis id must be E, L or P followed by digits,
+and the code had used `T1`. Nothing was appended. The family stays frozen with its spec, which still names its
+hypothesis `T1`. The spec cannot change, so the fix writes the records under `E1` (08 §4 E1, whose tail measure this
+is) and leaves the spec as frozen. The rerun is the same family and wrote the four records above.
+
+Data and split:
+- The rows are #77's: development days from 2014-06-07 to 2026-11-15, 43,058 races and 600,231 priced starters. 2,150
+  scratched runners are out; 66 dead heats. 195 floor-bound runners sit in 195 races (0.45%).
+- Out of fold covers 28 quarterly folds from 2020-Q1 to 2026-Q4 (the last is partial). That makes 23,799 scored races
+  in 1,985 meetings (23,680 without floor-bound races).
+- In-sample slopes are one fit per group on every development race of the subset.
+- CIs on slopes are 95% two-sided Wald (estimate ± 1.96 se, inverse observed information; tail β's se uses the full
+  covariance). They treat races as independent, as #77's β CIs do. The ΔLL bounds are the one-sided 5% and 95%
+  quantiles of the paired bootstrap over meetings (D7, seed 285).
+
+### The slopes, overall (in-sample, every development race)
+
+| Subset | Races | Tail runners | Tail winners | Body β | Increment | Tail β |
+| --- | ---: | ---: | ---: | --- | --- | --- |
+| all races | 43,058 | 204,012 | 1,218 | 0.9999 [0.9877, 1.0121] | +0.0450 [+0.0302, +0.0599] | 1.0449 [1.0316, 1.0582] |
+| no floor-bound races | 42,863 | 202,917 | 1,215 | 0.9987 [0.9864, 1.0109] | +0.0453 [+0.0304, +0.0601] | 1.0439 [1.0306, 1.0573] |
+
+### The slopes by year (in-sample)
+
+2014 runs from 2014-06-07 and 2026 to 2026-11-15. Races are of the all-races subset; the no-floor-bound counts are
+lower by 5 to 27 per year.
+
+| Year | Races | Tail winners | Increment | Tail β | Increment (no floor-bound) | Tail β (no floor-bound) |
+| --- | ---: | ---: | --- | --- | --- | --- |
+| 2014 | 1,990 | 65 | +0.0151 [-0.0504, +0.0807] | 1.0233 [0.9644, 1.0821] | +0.0148 [-0.0508, +0.0803] | 1.0224 [0.9635, 1.0813] |
+| 2015 | 3,454 | 99 | +0.0624 [+0.0103, +0.1145] | 1.0411 [0.9938, 1.0884] | +0.0631 [+0.0110, +0.1152] | 1.0400 [0.9927, 1.0873] |
+| 2016 | 3,454 | 106 | +0.0440 [-0.0065, +0.0945] | 1.0345 [0.9892, 1.0798] | +0.0460 [-0.0047, +0.0968] | 1.0347 [0.9891, 1.0802] |
+| 2017 | 3,455 | 111 | +0.0248 [-0.0253, +0.0749] | 1.0327 [0.9879, 1.0775] | +0.0264 [-0.0240, +0.0767] | 1.0342 [0.9892, 1.0793] |
+| 2018 | 3,454 | 98 | +0.0530 [+0.0008, +0.1052] | 1.0449 [0.9983, 1.0915] | +0.0531 [+0.0008, +0.1054] | 1.0431 [0.9964, 1.0897] |
+| 2019 | 3,452 | 85 | +0.0866 [+0.0318, +0.1414] | 1.0562 [1.0062, 1.1061] | +0.0859 [+0.0311, +0.1408] | 1.0549 [1.0050, 1.1049] |
+| 2020 | 3,456 | 109 | +0.0288 [-0.0214, +0.0791] | 1.0084 [0.9635, 1.0534] | +0.0282 [-0.0221, +0.0785] | 1.0077 [0.9627, 1.0526] |
+| 2021 | 3,456 | 88 | +0.0629 [+0.0082, +0.1177] | 1.0679 [1.0182, 1.1176] | +0.0617 [+0.0070, +0.1165] | 1.0675 [1.0178, 1.1172] |
+| 2022 | 3,456 | 93 | +0.0192 [-0.0346, +0.0730] | 1.0663 [1.0185, 1.1141] | +0.0197 [-0.0341, +0.0735] | 1.0646 [1.0167, 1.1124] |
+| 2023 | 3,456 | 81 | +0.0912 [+0.0350, +0.1473] | 1.0769 [1.0259, 1.1279] | +0.0912 [+0.0350, +0.1474] | 1.0754 [1.0244, 1.1265] |
+| 2024 | 3,454 | 98 | +0.0146 [-0.0384, +0.0676] | 1.0524 [1.0057, 1.0990] | +0.0170 [-0.0360, +0.0700] | 1.0483 [1.0016, 1.0950] |
+| 2025 | 3,455 | 99 | +0.0419 [-0.0106, +0.0944] | 1.0414 [0.9946, 1.0881] | +0.0415 [-0.0113, +0.0942] | 1.0421 [0.9951, 1.0892] |
+| 2026 | 3,066 | 86 | +0.0342 [-0.0216, +0.0901] | 1.0384 [0.9886, 1.0881] | +0.0322 [-0.0238, +0.0882] | 1.0362 [0.9864, 1.0860] |
+
+The increment is above 0 in every year, with a CI that excludes 0 in 5 of 13 (2015, 2018, 2019, 2021, 2023). The tail
+β's CI excludes 1 in 5 of 13 (2019, 2021 to 2024). Floor-bound races change no figure by more than the third decimal.
+These are 13 CIs with no family-wise correction. The year-by-year spread (tail β from 1.008 to 1.077) is within what
+the CIs allow.
+
+### Walk-forward: the slopes of each fold's training rows
+
+The first fold trains to 2019-12-29 (19,259 races): body β 0.9900 [0.9720, 1.0080], increment +0.0493 [+0.0274,
++0.0711], tail β 1.0393 [1.0196, 1.0590]. Across the 28 folds the increment runs from +0.0445 to +0.0493 and the tail
+β from 1.0346 to 1.0462, with the last fold (trained to 2026-09-26) at +0.0452 and 1.0449. The no-floor-bound folds
+run from +0.0452 to +0.0500 and 1.0340 to 1.0454. Every fold's increment CI excludes 0. The per-fold figures are
+registry metrics, one per fold, named `*[test_year=Y]`.
+
+### Out-of-fold winner log loss, ΔLL of the tail β
+
+ΔLL is the comparator's mean log loss minus the tail β's, in nats per race. Positive means the tail β is better.
+
+| Subset | Races | Mean log loss (tail β) | ΔLL vs normalised | Lower (5%) | Upper (95%) | ΔLL vs power-β | Lower (5%) | Upper (95%) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| all races | 23,799 | 1.92770 | +0.000590 | +0.000245 | +0.000933 | +0.000321 | +0.000005 | +0.000629 |
+| no floor-bound races | 23,680 | 1.93342 | +0.000560 | +0.000215 | +0.000903 | +0.000318 | -0.000001 | +0.000630 |
+
+The comparators' means are 1.92829 (normalised) and 1.92802 (power-β) on all races, as in #77.
+
+### Out-of-fold tail, runners above decimal 51.0
+
+Observed against expected winners under the tail β, beside #77's table. This is a point estimate, with no bounds.
+
+| Subset | Model | Tail runners | Observed | Expected | O / E |
+| --- | --- | ---: | ---: | ---: | ---: |
+| all races | tail β | 111,564 | 654 | 651.9 | 1.003 |
+| no floor-bound races | tail β | 110,885 | 653 | 649.1 | 1.006 |
+
+## Alternatives rejected and why
+
+- **A hinge slope, continuous at 51.0.** The model is the ticket's and the tests': the extra slope multiplies x
+  itself, so at 51.0 the model also steps the log-weight down by increment × ln 51 (about 0.18 at the increment of
+  0.045). The increment therefore mixes a slope change and a level step in the tail. A hinge (x - ln(1/51) above 51.0)
+  separates them. It was not pre-registered, so it is not run here: it would be its own family. It is the main
+  follow-up below.
+- **A spline in ln q** (D4's calibrated market). That is #275, on the same folds and tail table.
+- **Meeting-clustered slope CIs.** The pre-registered CI is Wald from the observed information, as in #77. The ΔLL
+  bounds do resample meetings. Clustered slope intervals would be wider: #276.
+- **A threshold other than 51.0, or several thresholds.** The owner signed 51.0 (#77 (5)). The threshold is in the
+  frozen spec, so another value is another family.
+- **ΔLL by year.** The ticket asks for the slopes by year and ΔLL overall and by subset. Per-year ΔLL was not
+  pre-registered.
+- **Dropping a year with no tail winner.** On real data every year has 65 to 111 tail winners, so each year is
+  identified. The code records a year without any tail winner as a table row, not a failed variant, because its
+  increment has no maximum.
+
+## What this rules out
+
+- **A single slope for the whole price.** The increment is +0.0450 [+0.0302, +0.0599], so a zero increment is out and
+  the tail's slope is at least 1.032 at the lower CI. The sign is the one #77's O/E pointed to: tail runners are
+  over-priced, so the model gives them less than a slope-1 price does.
+- **The body being off.** The body slope is 0.9999 [0.9877, 1.0121]: the CI rules out a body β above 1.012. #77's
+  power β of 1.0206 [1.0104, 1.0308] is mostly the tail pulling one exponent up: with a separate tail slope the body
+  is not distinguishable from 1. This is a statement about this two-slope form, with its step at 51.0.
+- **A sizeable out-of-fold gain.** The tail β beats power-β by +0.000321 nats per race [+0.000005, +0.000629], and
+  without floor-bound races the lower bound is -0.000001. The upper bound rules out a gain above about 0.0006 nats per
+  race. Against normalised the gain is +0.000590 [+0.000245, +0.000933]. These are far below any MDE and do not argue
+  for adopting the slope on log loss.
+- **A tail bias left in the price after the tail β.** Observed over expected tail winners is 1.003 (654 against 651.9),
+  against 0.83 and 0.87 under #77's de-vigs. That point estimate carries no bounds, and it is on the data that set the
+  slope's scale.
+- **Floor-bound races driving the tail.** Without them the increment is +0.0453 [+0.0304, +0.0601].
+- **What is not ruled out.** The tail β is not stable by year to better than about ±0.05, and its CIs treat races as
+  independent. These are the same races as #77's tail table, so the two tables are one observation, not two. The
+  result does not show that the tail β adds anything a calibrated market (D4) lacks.
+
+## Follow-ups filed
+
+Each is proposed under epic #72, `status:proposed`; the orchestrator files them.
+
+- A tail slope that is continuous at 51.0 (a hinge on x - ln(1/51)), its own family, to separate the slope change from
+  the level step.
+- #275: D4's spline on the same folds and tail table (already filed).
+- #276: meeting-clustered CIs for the slopes (already filed).
+
+---
+
+# Experiment report: D4's calibrated market on the crowd-calibration folds (Japan, #275)
+
+Ticket #275 (epic #72), from #77's review. #77 compared the normalised, power-β and Shin de-vigs of the final Win
+price out of fold. This study scores D4's calibrated market beside them on the same folds, with the same ΔLL and the
+same tail table. The calibrated market is the natural cubic spline in ln q of `models.v0.calibration`
+(`fit_win_calibration`, reused, 5 knots), q the normalised share of the race's priced runners, refitted on each fold's
+training rows. **Nothing is adopted.** The owner picks the baseline de-vig (08 §9.4). Every figure is an aggregate
+over the JRA results store (netkeiba race results; no JRDB, no JRA-VAN). No runner or race row appears.
+
+- Registry family `japan-calibrated-market-final-win`, spec sha256
+  `46f53f0b0fc33aa562a6efa9062b8d00ddd71cfb79ead9f28e30ed81022aa9d9`. It is its own family, not #77's. The spec was
+  frozen in the registry before any development row was read. It holds the spline (model, knots, knot quantile range,
+  dead-heat rows), the de-vigs, the comparator, the ΔLL rule, the subsets, the tail, the floor, the fold scheme, the
+  bootstrap and the owner decisions.
+- Code: `countries/japan/studies/calibrated_market.py`; the records carry git `19deb19`. To reproduce, run
+  `uv run python -m horsetrack.countries.japan.studies.calibrated_market`. A rerun on the same store finds its
+  records already present and appends none.
+- Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`. These are
+  later builds than #77's (`b3226f2a22bfce26`, `4e6a394a57e3101a`): the store was rebuilt after #77, and it adds
+  three development days (see Data and split). The full report is under the data directory, at
+  `reports/calibrated-market-japan-46f53f0b0fc3.md`. The eight records are in `docs/experiments/registry/japan/`.
+- Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
+  called. No holdout outcome or price was read.
+
+## Owner decisions used
+
+| Decision | What it fixes here | Where it was signed |
+| --- | --- | --- |
+| D4 | The Win baseline is the calibrated market (a spline in ln q), fitted in-fold. This study scores it beside the de-vigs and adopts nothing. | `docs/problem-statement.md` §2, #14 |
+| #77 (4) | The no-floor-bound subset drops races with a runner at odds 1.1 or under from fitting and from scoring. | #77, 2026-11-25 |
+| #77 (5) | The tail is a runner priced above decimal 51.0 (`tail_min_odds` in `config/calibration.yaml`). | #77, 2026-11-25 |
+| Floor 1.1 | A priced runner at or under odds 1.1 + 1e-9 is floor-bound (the Win pool's minimum dividend over the unit stake). | `config/jra.yaml`; #77 (4) |
+| D6 | Winner log loss per race; a dead heat scores each of its k co-winners at 1/k. | §3, #14; the #69 answer (2026-11-24) |
+| D7 | Bootstrap clusters are meetings (venue x day); bounds are 95% one-sided; 10,000 replicates (`config/scoring.yaml`). | §3, #14 |
+| D9 | Walk-forward quarters, refit quarterly, expanding window, 1-week embargo; the first scored quarter is 2020-Q1 (`config/folds.yaml`). | §4, #14; the #70 answer |
+| D10 | Races before 2014-06-07 are excluded wherever the price enters. | §4, #14 |
+| D11, D12, D14, D15 | Holdout A2 from 2026-11-28, fully locked for outcomes and prices, opened only by the owner. Not opened here. | §5, #14; the #71 answer (`config/holdout.yaml`) |
+| D21 | No figure derived from a licensed source appears in the repository. None is used here. | #14 |
+
+The comparison itself (the spline beside #77's three de-vigs, ΔLL against normalised, #77's tail table) is the
+ticket's outline. The bootstrap seed (275) is an implementation choice for reproducibility: `scoring.yaml` signs no
+seed. The spline's knot count (5) and knot quantile range (0.05 to 0.95) are `fit_win_calibration`'s defaults, D4's
+live model.
+
+## Hypothesis
+
+The null is the starting point: the spline adds nothing to normalised 1/odds, so its ΔLL is 0 and its tail O/E is
+normalised's. The frozen spec pre-registered the measures (each de-vig's and the spline's out-of-fold ΔLL against
+normalised, and the tail's observed vs expected winners, with and without floor-bound races), not their directions.
+The direction and failure rules below were written with this report, after the run. #77 and #285 had already looked
+at the same development races and found the tail over-priced, so this study cannot confirm the direction
+independently.
+
+- **Direction.** A spline in ln q can bend where one exponent cannot, so it should take up the tail bias #77 found
+  (O/E 0.83 under normalised, 0.87 under power-β) and gain at least power-β's ΔLL.
+- **Failure rules** (written after the run): the spline fails to beat normalised if its ΔLL lower bound is at or
+  below 0. It fails to absorb the tail if the (O - E) per race bounds exclude 0.
+
+## Variants tried
+
+The family has 8 variants (`Registry.family_size`) and 8 records, all scored, on one run: normalised, the D4 spline,
+power-β and Shin, each on all races and on no floor-bound races. No variant failed and no run was repeated.
+
+Data and split:
+- Development days from 2014-06-07 to 2026-11-23: 43,130 races and 601,265 priced starters. 2,156 scratched runners
+  are out; 66 dead heats. 195 floor-bound runners sit in 195 races (0.45%). That is #77's rows plus 72 races on three
+  development days after #77's run (2026-11-21, 22 and 23, 24 races each), all before the holdout start.
+- Out of fold covers 28 quarterly folds from 2020-Q1 to 2026-Q4 (the last is partial, to 2026-11-23). That makes
+  23,871 scored races in 1,991 meetings (23,752 without floor-bound races). The first fold trains on 19,259 races to
+  2019-12-29, the last on 42,578 races to 2026-09-26.
+- Dead heats: the spline is fitted on #77's development rows, so a race with a dead heat for first is kept and each
+  co-winner counts as a winner in the fit, as in power-β's fit. D4's live `run_fit`
+  (`models/v0/calibration.py`, `_development_frame`) leaves those races out of its fit. The spec states this, and all
+  four de-vigs see the same races.
+- The ΔLL and tail bounds are the one-sided 5% and 95% quantiles of the paired bootstrap over meetings (D7, seed
+  275).
+
+### Out-of-fold winner log loss, ΔLL against normalised
+
+ΔLL is normalised's log loss minus the de-vig's, in nats per race. Positive means better than normalised.
+
+| Subset | De-vig | Races | Mean log loss | ΔLL vs normalised | Lower (5%) | Upper (95%) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| all races | normalised | 23,871 | 1.92850 | | | |
+| all races | D4 spline (refit per fold) | 23,871 | 1.92752 | +0.000977 | +0.000499 | +0.001446 |
+| all races | power-β (refit per fold) | 23,871 | 1.92823 | +0.000267 | +0.000105 | +0.000426 |
+| all races | Shin | 23,871 | 1.93974 | -0.01125 | -0.01350 | -0.00901 |
+| no floor-bound races | normalised | 23,752 | 1.93417 | | | |
+| no floor-bound races | D4 spline (refit per fold) | 23,752 | 1.93324 | +0.000927 | +0.000445 | +0.001399 |
+| no floor-bound races | power-β (refit per fold) | 23,752 | 1.93393 | +0.000240 | +0.000086 | +0.000392 |
+| no floor-bound races | Shin | 23,752 | 1.94561 | -0.01144 | -0.01369 | -0.00920 |
+
+Power-β and Shin match #77's figures (+0.000269 and -0.01125 on all races) on the rebuilt store with the 72 added
+races. That is the same backtest recomputed, not an independent sample: per-fold mean log loss for normalised,
+power-β and Shin equals #77's to 1e-9 in 27 of 28 folds, and only the last fold differs, by the 72 added races. #77's
+ledger rows stay single-run. The per-fold training β runs from 1.0096 to 1.0213 as in #77. The spline's per-fold mean log loss is a
+registry metric, one per fold.
+
+### Out-of-fold tail, runners above decimal 51.0
+
+#77's layout. Observed against expected winners under each de-vig. (O - E) per race is the tail's observed minus
+expected winners per scored race, with meeting-clustered one-sided bounds. O / E is a point estimate only.
+
+| Subset | De-vig | Tail runners | Observed | Expected | O / E | (O - E) per race | Lower (5%) | Upper (95%) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| all races | normalised | 111,905 | 655 | 790.7 | 0.828 | -0.00568 | -0.00742 | -0.00396 |
+| all races | D4 spline | 111,905 | 655 | 643.7 | 1.018 | +0.00048 | -0.00125 | +0.00220 |
+| all races | power-β | 111,905 | 655 | 754.6 | 0.868 | -0.00417 | -0.00590 | -0.00245 |
+| all races | Shin | 111,905 | 655 | 299.8 | 2.185 | +0.01488 | +0.01315 | +0.01661 |
+| no floor-bound races | normalised | 111,226 | 654 | 786.3 | 0.832 | -0.00557 | -0.00731 | -0.00383 |
+| no floor-bound races | D4 spline | 111,226 | 654 | 641.1 | 1.020 | +0.00054 | -0.00119 | +0.00228 |
+| no floor-bound races | power-β | 111,226 | 654 | 752.2 | 0.869 | -0.00414 | -0.00587 | -0.00240 |
+| no floor-bound races | Shin | 111,226 | 654 | 298.6 | 2.190 | +0.01496 | +0.01322 | +0.01670 |
+
+## Alternatives rejected and why
+
+- **ΔLL of the spline against power-β, with its own bounds.** The spec's comparator is normalised, as in #77. The
+  point difference of the means is 0.00071 nats per race on all races (1.92823 - 1.92752), with no bounds: it is
+  derived, not a pre-registered measure. A paired comparison is a follow-up.
+- **The spline against #285's tail β.** #285 scored on #77's store builds, not these, so the races differ by 72 and
+  the two cannot be paired here. The paired comparison is a follow-up.
+- **Dropping dead-heat races, as D4's live `run_fit` does.** Not run. The spec keeps #77's rows so the four de-vigs
+  score the same races. 66 of 43,130 races have a dead heat, so the effect on the fit is likely small, but it is not
+  measured.
+- **Another knot count or knot range.** The spec freezes D4's live defaults (5 knots, quantiles 0.05 to 0.95).
+  Another setting is another family.
+- **Pinning #77's store builds.** The store is rebuilt in place, so #77's builds are not available to read. The
+  study reads the current development rows through `read_development`, and power-β and Shin recompute #77's figures on them.
+
+## What this rules out
+
+- **The spline adding nothing over normalised.** Its ΔLL is +0.000977 nats per race [+0.000499, +0.001446]; without
+  floor-bound races +0.000927 [+0.000445, +0.001399]. The upper bound rules out a gain above about 0.0015 nats per
+  race. That is far below any MDE: the gain is real in sign and small in size.
+- **A tail bias left after the spline.** Its tail O/E is 1.018 (655 against 643.7), and the (O - E) per race bounds
+  cover 0 [-0.00125, +0.00220]. Scaled to the 23,871 scored races, the bounds are about -30 to +53 tail winners
+  against 655 observed. Normalised and power-β leave the tail over-priced, with bounds below 0. Shin over-corrects.
+- **Floor-bound races driving any of this.** Without them the spline's ΔLL moves by 0.00005 and its tail O/E by
+  0.002.
+- **What is not ruled out.** Whether the spline beats power-β or #285's tail β by more than chance is not tested
+  here (no paired bounds). The spline's fit and #77's and #285's tables use the same development races, so they
+  are one look at the data, not independent confirmations. The direction written above came after those looks. The
+  holdout is untouched, so nothing here is an out-of-sample confirmation in 08 §5's sense.
+
+## Follow-ups filed
+
+Each is filed under epic #72, `status:proposed`.
+
+- #320: a paired comparison of D4's spline against power-β and #285's tail β, on one store build, as its own family
+  (ΔLL with meeting-clustered bounds).
+- #321: the spline fitted on `run_fit`'s rows (dead-heat races left out), to check the study's spline matches D4's
+  live fit, or align the two.
+
+---
+
+# Experiment report: the entropy gradient conditioned on the tail (Japan, #277)
+
+Ticket #277 (epic #72). #77's E3 bins each race by its normalised market entropy and finds the power β falling from
+bin 1 (the most concentrated markets) to bin 5: Δβ = β(bin 1) − β(bin 5) = +0.089 [+0.055, +0.123]. #285 found the
+far tail (runners above decimal 51.0) over-priced, and the number of such runners moves with the entropy, so the
+gradient could be the tail count's alone. This study refits the bins' β with the tail conditioned on. **Nothing is
+adopted.** Every figure is an aggregate over the JRA results store (netkeiba race results; no JRDB, no JRA-VAN). No
+runner or race row appears.
+
+- Registry family `japan-entropy-gradient-tail-conditioned`, spec sha256
+  `4eb7e26f48d2a135737ce1fa8bc6af30cc86d7170019339c920829f19dc135bf`. It is its own family, not #77's or #285's. The
+  spec was frozen in the registry before any development row was read. It holds the three methods, the cut points
+  (#77's, from `config/calibration.yaml`), the tail threshold, the tail-count strata, the minimum cell size, and the
+  survival rule.
+- Code: `countries/japan/studies/entropy_tail.py`; the records carry git `895ca69`, and the next commit only adds this
+  report, the registry rows and a ledger row. To reproduce, run
+  `uv run python -m horsetrack.countries.japan.studies.entropy_tail`. The three records are in
+  `docs/experiments/registry/japan/japan-entropy-gradient-tail-conditioned.md`, run ids `dd04cf13045a`, `3ea61d1a5671` and `bad5f5001e28`.
+- Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`. This is a
+  newer build than #77's and #285's, so the counts differ slightly: 43,130 development races and 601,265 priced
+  starters, against 43,058 and 600,231. The full report is under the data directory, at
+  `reports/entropy-tail-japan-4eb7e26f48d2.md`.
+- Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
+  called. No holdout outcome or price was read.
+
+## Owner decisions used
+
+| Decision | What it fixes here | Where it was signed |
+| --- | --- | --- |
+| #77 (2) | The entropy bins are the quintiles of the per-race normalised entropy over the first training window, frozen as four cut points in `config/calibration.yaml`. Not recomputed here. | #77, 2026-11-25 |
+| #77 (5) | The tail is a runner priced strictly above decimal 51.0 (`tail_min_odds`). | #77, 2026-11-25 |
+| D6, D9, D10 | D10 applies (no price before 2014-06-07). D6 and D9 do not bind: this study has no out-of-fold score. | §3, §4, #14 |
+| D11, D12, D14, D15 | Holdout A2 from 2026-11-28, fully locked, opened only by the owner. Not opened here. | §5, #14 |
+| D21 | No figure derived from a licensed source appears in the repository. None is used here. | #14 |
+
+The tail-count strata `[0, 1, 2, 3, 4, 5+]`, the 30-race minimum cell, the share's definition and the rule for
+"survives" are implementation choices recorded in the frozen spec, not owner decisions, and were written before any
+race was scored.
+
+## Hypothesis
+
+The null is the starting point: after the tail is conditioned on, the entropy bins have the same β and Δβ = 0. The
+gradient is the tail's alone if Δβ's 95% Wald CI covers 0 under both conditioned methods.
+
+- **Direction.** More tail runners go with a more concentrated market (a lower entropy bin, below), and tail runners are over-priced, so a
+  tail-driven gradient would shrink toward 0 when the tail is conditioned on.
+- **Failure rule** (the frozen spec's): the gradient *survives* conditioning on the tail, for each conditioned method,
+  when Δβ's 95% CI excludes 0. It is written after #77's E3 table, which looked at the same development races, so this
+  study cannot confirm a gradient independently.
+
+## Variants tried
+
+The family has 3 variants and 3 records, all scored. Each is one in-sample fit on every development race (no fold, no
+bootstrap), with Wald CIs (estimate ± 1.96 se, inverse observed information) that treat races as independent. The
+model in all three is the conditional logit P(i wins) ∝ exp(slope × ln(1/odds)) over each race's priced runners.
+
+- **unconditioned**: one β per bin, #77's E3.
+- **tail_share**: slope = β(bin) + γ × share, one joint fit over the five bins, where share is the race's runners
+  priced above 51.0 divided by its priced runners. The bin β is a race with no tail runner.
+- **tail_count_strata**: races cut by their count of runners above 51.0 into 0, 1, 2, 3, 4 and 5 or more; within each
+  stratum bin 1 and bin 5 get their own slope; Δβ is pooled over the strata by inverse variance (a stratum is used
+  when both cells hold at least 30 races; all six were).
+
+### The confounder: the tail count by entropy bin
+
+| Bin | Races | Mean tail runners | Mean tail share | Races with none |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 9,199 | 6.32 | 0.438 | 43 |
+| 2 | 8,656 | 5.39 | 0.371 | 74 |
+| 3 | 8,506 | 4.82 | 0.329 | 91 |
+| 4 | 8,156 | 4.12 | 0.282 | 138 |
+| 5 | 8,613 | 2.91 | 0.201 | 576 |
+
+The tail count falls steadily across the bins, as the premise said. The overlap is thin at the low end: bin 1 has 43
+races with no tail runner and bin 5 has 576.
+
+### Δβ = β(bin 1) − β(bin 5), three ways
+
+| Method | Races | Δβ | 95% CI | Excludes 0 |
+| --- | ---: | ---: | --- | --- |
+| unconditioned | 43,130 | +0.0879 | [+0.0540, +0.1217] | yes |
+| tail_share | 43,130 | +0.0473 | [+0.0067, +0.0878] | yes |
+| tail_count_strata | 17,812 | +0.0879 | [+0.0468, +0.1291] | yes |
+
+The share's coefficient is γ = +0.176 [+0.079, +0.274]: a race with every runner in the tail would have a slope 0.18
+higher than the bin's β. The strata method's races are the bin 1 and bin 5 cells only.
+
+### β by entropy bin, unconditioned and with the share
+
+| Bin | Unconditioned β | 95% CI | With the share (β at share 0) | 95% CI |
+| --- | ---: | --- | ---: | --- |
+| 1 | 1.0575 | [1.0387, 1.0763] | 0.9804 | [0.9339, 1.0268] |
+| 2 | 1.0199 | [0.9984, 1.0414] | 0.9552 | [0.9136, 0.9968] |
+| 3 | 1.0159 | [0.9925, 1.0394] | 0.9584 | [0.9190, 0.9978] |
+| 4 | 0.9972 | [0.9715, 1.0229] | 0.9477 | [0.9102, 0.9851] |
+| 5 | 0.9696 | [0.9415, 0.9978] | 0.9331 | [0.8985, 0.9677] |
+
+### Tail-count strata: β of bin 1 and bin 5 within each
+
+| Tail runners | Bin 1 races | Bin 5 races | β bin 1 | β bin 5 | Δβ | se |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 43 | 576 | 0.9475 | 0.9136 | +0.034 | 0.155 |
+| 1 | 204 | 1,316 | 1.2560 | 0.9749 | +0.281 | 0.088 |
+| 2 | 431 | 1,719 | 1.0424 | 0.9606 | +0.082 | 0.057 |
+| 3 | 703 | 1,932 | 1.0332 | 1.0116 | +0.022 | 0.047 |
+| 4 | 793 | 1,515 | 1.0419 | 0.9480 | +0.094 | 0.047 |
+| 5 or more | 7,025 | 1,555 | 1.0585 | 0.9630 | +0.095 | 0.034 |
+
+Every stratum has a positive Δβ, from +0.022 to +0.281, and the stratum with one tail
+runner (se 0.088) sits well above the rest. These are six CIs with no correction.
+
+## Does the gradient survive conditioning on the tail?
+
+**By the pre-registered rule, yes, under both conditioned methods; under the share model only just, and at about half
+its size.**
+
+- Within strata of the tail count, Δβ is +0.0879 [+0.0468, +0.1291], the same point estimate as unconditioned
+  (+0.0879) with a CI that excludes 0 by a wide margin. Conditioning this way removes none of it.
+- With the share as a covariate, Δβ falls to +0.0473 [+0.0067, +0.0878]: the point estimate drops by 46% and the
+  lower bound is 0.007, so the CI excludes 0 but is also consistent with a gradient near 0.007. The drop is bin 1's β
+  falling from 1.058 to 0.980 once the share is allowed to act on it, while bin 5's falls from 0.970 to 0.933. The
+  share's coefficient is positive and its CI excludes 0 (γ = +0.176), so the tail does move the slope
+  in the direction #285 found.
+
+The two conditioned methods disagree on size (+0.047 against +0.088), and each is an incomplete control. The strata
+are coarse at the top: the 5-or-more stratum holds 7,025 of bin 1's 9,199 races and carries the largest weight in the
+pool, and tail counts above 5 still differ between bins 1 and 5 within it (bin 1 averages 6.3 across all its races).
+The share model assumes the tail acts linearly in the share on the slope, the same way in every bin, and the share
+is also a function of field size. Neither method makes the tail count and the entropy independent. What is shown is
+that a gradient remains after both controls, not how large the entropy's own gradient is.
+
+## Alternatives rejected and why
+
+- **Fitting the bins on runners at or under 51.0 only.** Dropping the tail runners from each race's choice set
+  changes the winners a race can have and the entropy's meaning, and it was not pre-registered. It is a follow-up.
+- **A tail-share covariate centred on its mean.** The β by bin would then be a race of average share, not one with no
+  tail. The frozen share is uncentred, which makes the bin β a no-tail-runner slope; Δβ and its CI do not depend on
+  the centring because the share enters with one γ in every bin.
+- **Entropy bins recomputed within the body.** #77's cut points were signed on the full-field entropy. New cuts are an
+  owner decision, so they are not made here.
+- **A matched or reweighted design on the tail count.** Not pre-registered; strata and a covariate were the ticket's
+  two routes.
+- **Out-of-fold scoring of the conditioned β.** The ticket asks whether the gradient survives, an in-sample
+  estimation question, not whether it helps the price. A gradient that survives is still a screen, as in #77.
+- **Holdout.** Not read, not opened.
+
+## What this rules out
+
+- **The entropy gradient being the tail count's alone.** Under both conditioned methods Δβ's CI excludes 0 (the lower
+  bounds are +0.007 and +0.047), so a zero gradient after conditioning is out, at the resolution of these two
+  controls. The upper bounds (+0.088 with the share; +0.129 in strata) rule out a conditioned gradient much above
+  #77's unconditioned +0.089 [+0.055, +0.123].
+- **A tail effect that is negligible.** γ's CI excludes 0 (+0.079 to +0.274): races with more tail runners get a higher
+  slope, and conditioning on that takes about half of the gradient's point estimate in the share model.
+- **Not ruled out.** A gradient between 0.007 and about 0.05, the share model's range, cannot be told from the tail's
+  residual effect; the strata method has no such shrinkage but is coarse at the top. Neither CI is clustered by
+  meeting (#276), so both are likely too narrow. The result is in-sample on the same development races as #77, with
+  no family-wise correction, and it is not a finding for the holdout.
+
+## Follow-ups filed
+
+None filed. Proposed under epic #72, `status:proposed`; the orchestrator files them.
+
+- Refit the bins with the entropy computed on the runners at or under 51.0 (the body), so the bins cannot track the
+  tail count by construction; this needs new cut points from the owner.
+- Tail control by a flexible function of the tail count and field size (a spline, or the count within each field-size
+  band) in the joint fit, instead of a linear share, and finer strata at the top (6, 7, 8 and more tail runners).
+- Meeting-clustered CIs for Δβ under each method (the same need as #276).
+- When A6's pre-registered family (#88) takes the entropy gradient as a candidate, take the conditioned size (about
+  +0.05 to +0.09), not the unconditioned one.

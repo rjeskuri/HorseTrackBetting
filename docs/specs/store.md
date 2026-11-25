@@ -30,7 +30,8 @@ that folder is not a store table.
 Missing values are null, never sentinel numbers. Where parsing can lose information the page's
 text is kept next to the parsed value (`*_raw`). Timestamps are UTC and only appear in `*_utc`
 columns that come from the pages' fetch times (or, for `races.result_published_utc` and
-`races.result_unpublished_utc`, the odds logger's poll times).
+`races.result_unpublished_utc`, the odds logger's poll times; for `track_condition.published_utc`
+and `available_utc`, the publication time the page prints).
 
 ## Tables
 
@@ -51,6 +52,7 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
 | `horse_pedigree` | one horse's pedigree | `horse_id` |
 | `jrdb_pre_race` | one JRDB pre-race row matched to a runner | `race_id, horse_no` |
 | `jrdb_post_race` | one JRDB post-race row matched to a runner | `race_id, horse_no` |
+| `track_condition` | one JRA publication of a venue's going for a race date and surface | `race_date, venue, surface, published_utc` |
 
 - **meetings**: `meeting_id, race_date, venue, season, day_night, surface_mix, status` (`run` or
   `abandoned`).
@@ -93,13 +95,24 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   placing_raw, race_id`.
 - **horse_pedigree**: written only for sources with pedigree pages. `sire_name, dam_name,
   dam_sire_name` as printed, their `*_norm` forms (NFKC and casefold), `sire_id, dam_id,
-  dam_sire_id` (null where the page does not link them), `source_race_id, scraped_utc`.
+  dam_sire_id` (null where the page does not link them), `source_race_id, scraped_utc`. For jra,
+  `horsetrack japan jrdb build` rewrites it when JRDB UKC is delivered: UKC's rows, plus the
+  netkeiba rows for horses UKC lacks, in `jrdb.pedigree.OUTPUT_COLUMNS` (the netkeiba-only
+  columns dropped; see `countries/japan/jrdb/tables.py`).
 - **jrdb_pre_race**, **jrdb_post_race**: JRDB rows matched to the store's races and runners. Declared
   here: the key columns `race_id, race_date, horse_no, horse_id, race_key, jrdb_horse_id,
   matched_by`. The per-family data columns (`<family>_<column>`, from each family's spec under
   `<data dir>/jrdb/specs`) are written by `horsetrack japan jrdb build`
   (`countries/japan/jrdb/tables.py`), which also writes `jurisdiction`; a family not delivered
   still has its columns, all null.
+- **track_condition** (#90): JRA's going measurements as published, `venue, race_date, surface`
+  (`turf`, `dirt`), `going` (the code, as on races), `rail` (the turf course in use, `A` to `D`;
+  null on dirt and when not printed), `cushion` (turf only), `moisture_goal, moisture_4c` (%),
+  `published_utc` (the 発表 time printed on the page or the yearly record, not a fetch time),
+  `available_utc` (= `published_utc`), `ingested_utc` (the fetch). A meeting republishes its page,
+  so a key has one row per publication; `jra.track_condition.as_of` (or the as-of views) takes the
+  latest at t. A value not printed is null, never 0. Parsed by `countries/japan/jra/
+  track_condition.py`; the store build does not write it (the backfill is #228).
 
 Withdrawals and placing codes differ by site: each source adapter maps its own codes before rows
 reach the store, and documents the mapping.
@@ -161,13 +174,35 @@ backfill can keep writing).
 - **Byte-stable**: two builds of the same inputs write identical Parquet bytes; `_build.json`
   differs only in `built_utc` and `seconds`.
 
+## The WIN5 history (ticket #135)
+
+`processed_dir("jra")/win5.parquet`, one row per WIN5 day (sort key `race_date`), written by
+`horsetrack japan win5-history` (`countries/japan/research/win5_backfill.py`) from netkeiba's
+per-day WIN5 pages through `core.ingest` (raw pages under `raw/jra/win5_year` and
+`raw/jra/win5_day`), outside the store build. Columns: `race_date, pool_yen` (sales),
+`carryover_in_yen` (from the previous WIN5; 0 when none), `carryover_out_yen` (to the next; 0 when
+none), `winning_tickets` (over every winning combination), `dividend_yen` (per 100 yen, the
+largest over the combinations; null when nobody hit), `payout_yen` (the yen paid: dividend x
+tickets summed over the combinations; 0 when nobody hit), `winning_combinations` (more than 1 on a
+dead-heat day; 0 when nobody hit), `hit`, `pool_ev` (`(pool * 0.70 + carryover_in) / pool`). Read
+with `research.win5.read_history()`. `research.win5.payout_mismatches(table)` names the days whose
+`payout_yen + carryover_out_yen` is not `pool * (1 - takeout) + carryover_in_yen` at the day's own
+WIN5 takeout (boosts applied) within 10 yen per winning ticket; days before 2014-06-07 are skipped.
+Holdout days are in the table; no analysis reads them (`score_study` drops them).
+
+A year list (`raw/jra/win5_year`) counts as final only when its cached copy was fetched after the
+year ended (1 January JST of the next year); an earlier copy, and the current year's, is fetched
+again. `research.win5.carryover_chain_breaks(table)` names the days that break the carryover chain
+(a no-winner day with no carryover out, or a carryover in that is not the previous row's carryover
+out; a capped winner's carryover out is not a break); the command prints their count as
+`carryover_breaks=<n>` and lists them, and does not change its exit code for them.
+
 ## Not here yet
 
 Upcoming race cards and the odds snapshots (`docs/specs/odds-log.md`) are outside this spec.
 The one reader of the cards here is `horsetrack japan jrdb build` (#186): it joins JRDB rows to
 every `processed_dir("jra")/upcoming/<meeting>/` holding both `races.parquet` and
-`racecard_runners.parquet` as well as to history, so not-yet-run races reach `jrdb_pre_race`. It
-skips JRDB's UKC and never writes `horse_pedigree` (#209 owns that merge).
+`racecard_runners.parquet` as well as to history, so not-yet-run races reach `jrdb_pre_race`.
 
 The post-build reconciliation checks live in `core/store/checks.py` (`run_checks(source, config=...)`,
 ported from HKTrack with its tolerances); the report goes to `reports_dir()/store-check-<source>.md`.

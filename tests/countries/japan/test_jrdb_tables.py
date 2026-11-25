@@ -30,12 +30,17 @@ Contract pinned here (the coder follows it), module `horsetrack.countries.japan.
   card race carries `meeting_id` (`jra:<YYYY-MM-DD>:<venue>`), `race_no`, `kai` and `nichi` (回, 日)
   but no `venue` or `race_date` (the columns are absent or null): both come from its `meeting_id`.
   History wins a race_id: a stale card for a race already in history changes nothing.
-- UKC (ticket #186, Ruling: skip it; #209 owns the UKC horse-master merge): a UKC archive under
-  `raw/jrdb/UKC/` (.zip, .txt or only .lzh) does not stop the build and is not read;
-  `processed/jra/horse_pedigree.parquet` is neither written nor touched (a netkeiba-built one stays
-  byte for byte; none stays none). The skip is stated: `jrdb-build.json` has
-  `"horse_pedigree": {"skipped": <reason>}`, the reason naming UKC and #209, and the build prints a
-  line naming both.
+- The UKC horse master (ticket #209, HKTrack's `_build_horse_pedigree`; it replaces #186's skip):
+  when `raw/jrdb/UKC/` holds readable deliveries (.zip, .txt), the build parses them, builds
+  `pedigree.build_horse_pedigree`, merges it over the `horse_pedigree.parquet` already in
+  `processed/jra` (the netkeiba one; absent or unreadable counts as none) with
+  `pedigree.merge_pedigree`, and writes it back: exactly `pedigree.OUTPUT_COLUMNS`, text columns
+  Arrow `string` and birth years `int64` whatever the data (the copied store's schema, so the #59
+  rebuild check matches). jrdb-build.json gets a `horse_pedigree` entry: `pedigree.coverage` of
+  the written table plus `ukc_rows`, `netkeiba_rows` (fallback rows kept) and `path`, and the
+  build prints a `horse_pedigree:` line. No UKC delivery (no folder, an empty one, or only .lzh):
+  horse_pedigree is neither created nor rewritten, the report has no such entry, and the build
+  still completes. A build that stops writes nothing.
 
 The families' fields, offsets and lengths below are invented (only the family names and the
 race-key part names come from the ported code); every race, horse and id is invented. Expected rows
@@ -764,65 +769,360 @@ def test_history_wins_over_a_stale_card(tmp_path: Path, monkeypatch) -> None:
         assert_table(table, set(ALL_FAMILIES))
 
 
-def write_netkeiba_pedigree() -> Path:
-    """A netkeiba-built horse_pedigree (invented horses and names)."""
-    rows = [
-        {
-            "jurisdiction": "jra",
-            "horse_id": hid,
-            "sire_name": f"シンセティック{i}",
-            "sire_name_norm": f"シンセティック{i}",
-            "dam_name": f"ダミー{i}",
-            "dam_name_norm": f"ダミー{i}",
-            "source_race_id": R1.race_id,
-        }
-        for i, hid in enumerate(R1.horses[:3], 1)
-    ]
-    write_store_table("horse_pedigree", rows)
-    return paths.processed_dir("jra") / "horse_pedigree.parquet"
+# ------------------------------------------------------------------------------------------------
+# The UKC horse master merged into horse_pedigree (ticket #209)
+# ------------------------------------------------------------------------------------------------
+# An invented UKC layout (no race key: UKC is keyed by the horse) and invented horses. The
+# expected table is written out by hand from the merge rule in the module docstring.
+
+HORSE_PEDIGREE = "horse_pedigree"
+UKC_LAYOUT: list[tuple[str, int, str]] = [
+    ("jrdb_horse_id", 8, "code"),
+    ("horse_name", 20, "text"),
+    ("sire_name", 20, "text"),
+    ("dam_name", 20, "text"),
+    ("dam_sire_name", 20, "text"),
+    ("sire_birth_year", 4, "num"),
+    ("dam_birth_year", 4, "num"),
+    ("dam_sire_birth_year", 4, "num"),
+    ("sire_line_code", 4, "code"),
+    ("dam_sire_line_code", 4, "code"),
+    ("coat_code", 2, "code"),  # parsed, but not a horse_pedigree column
+    ("data_date", 8, "date"),
+]
+# The copied store's horse_pedigree schema (HKTrack's build): the rebuild must match it.
+_TEXT = (
+    "horse_id", "sire_name", "sire_name_norm", "dam_name", "dam_name_norm",
+    "dam_sire_name", "dam_sire_name_norm", "sire_line_code", "dam_sire_line_code",
+)  # fmt: skip
+_YEARS = ("sire_birth_year", "dam_birth_year", "dam_sire_birth_year")
+_HOPS = ("paternal_grandsire_name_norm", "paternal_great_grandsire_name_norm")
+COPY_SCHEMA = pa.schema(
+    [(c, pa.string()) for c in _TEXT] + [(c, pa.int64()) for c in _YEARS]
+    + [(c, pa.string()) for c in _HOPS]
+)  # fmt: skip
 
 
-@pytest.mark.parametrize(
-    ("ukc", "netkeiba"),
-    [("zip", True), ("txt", True), ("lzh", True), ("zip", False), ("lzh", False)],
-)
-def test_a_ukc_archive_is_skipped_with_its_reason(
-    tmp_path: Path, monkeypatch, ukc: str, netkeiba: bool
-) -> None:
-    """Ruling: the build skips UKC (#209 owns the horse-master merge). With a UKC archive present
-    (a .zip, a bare .txt, or only .lzh) the build completes, both JRDB tables are as without it,
-    horse_pedigree.parquet is untouched (a netkeiba-built one byte for byte and mtime, none stays
-    none), and the skip is stated in jrdb-build.json and in the output, naming UKC and #209."""
-    data = world(tmp_path, monkeypatch)
-    write_day_files(ALL_FAMILIES)
+def ukc(jid: str, name: str, sire: str, dam: str, dam_sire: str | None, years, lines, when):
+    """One UKC record as the fields print it (None or a blank prints blanks)."""
+    return {
+        "jrdb_horse_id": jid, "horse_name": name, "sire_name": sire, "dam_name": dam,
+        "dam_sire_name": dam_sire, "sire_birth_year": years[0], "dam_birth_year": years[1],
+        "dam_sire_birth_year": years[2], "sire_line_code": lines[0],
+        "dam_sire_line_code": lines[1], "coat_code": "03", "data_date": when,
+    }  # fmt: skip
+
+
+# A's own name is B's sire (in other letter case) and C's name is A's sire: B's grandsire is
+# A's sire and its great-grandsire C's sire. D is printed twice: the newer record (by data_date)
+# sits in the earlier delivery file. E is in UKC and in netkeiba (UKC wins).
+U_A = ukc("15104001", "Sire Stone", "Old Stone", "Dam A", "DS A", (1998, 2001, 1990),
+          ("0101", "0202"), "20240110")  # fmt: skip
+U_B = ukc("20104002", "Runner B", "SIRE STONE", "Dam B", "DS B", (2015, 2016, 2000),
+          ("0101", "0404"), "20240110")  # fmt: skip
+U_C = ukc("99104003", "Old Stone", "Ancient Stone", "Dam C", "DS C", (1985, 1987, 1980),
+          ("0101", "0303"), "20240110")  # fmt: skip
+U_D_NEW = ukc("21104004", "Runner D", "ﾐﾅﾄﾉｶｾﾞ", "ハナノミチ", "DS D", (2012, None, 1999),
+              ("0505", None), "20250601")  # fmt: skip
+U_D_OLD = ukc("21104004", "Runner D", "Wrong Sire", "Wrong Dam", "Wrong DS", (1900, 1900, 1900),
+              ("9999", "9999"), "20230101")  # fmt: skip
+U_E = ukc("19104005", "Runner E", "Sire E", "Dam E", "DS E", (2008, 2010, 1995),
+          (None, "0606"), "20240110")  # fmt: skip
+U_BAD = ukc("ABCD1234", "No Id", "Sire X", "Dam X", "DS X", (2000, 2000, 2000),
+            ("0101", "0101"), "20240110")  # fmt: skip
+UKC_FILES = {  # delivery name -> records; the first as a .zip, the second as a bare .txt
+    "UKC261128": [U_A, U_B, U_D_NEW, U_BAD],
+    "UKC261129": [U_C, U_E, U_D_OLD],
+}
+
+
+def _ped(hid, sire, sire_n, dam, dam_n, ds, ds_n, lines=(None, None), years=(None,) * 3,
+         hops=(None, None)) -> dict[str, Any]:  # fmt: skip
+    row = dict(zip(_TEXT, (hid, sire, sire_n, dam, dam_n, ds, ds_n, *lines), strict=True))
+    row.update(zip(_YEARS, years, strict=True))
+    row.update(zip(_HOPS, hops, strict=True))
+    return row
+
+
+UKC_EXPECTED = {
+    "2015104001": _ped("2015104001", "Old Stone", "old stone", "Dam A", "dam a", "DS A", "ds a",
+                       ("0101", "0202"), (1998, 2001, 1990), ("ancient stone", None)),
+    "2020104002": _ped("2020104002", "SIRE STONE", "sire stone", "Dam B", "dam b", "DS B",
+                       "ds b", ("0101", "0404"), (2015, 2016, 2000),
+                       ("old stone", "ancient stone")),
+    "1999104003": _ped("1999104003", "Ancient Stone", "ancient stone", "Dam C", "dam c", "DS C",
+                       "ds c", ("0101", "0303"), (1985, 1987, 1980)),
+    "2021104004": _ped("2021104004", "ﾐﾅﾄﾉｶｾﾞ", "ミナトノカゼ", "ハナノミチ", "ハナノミチ", "DS D",
+                       "ds d", ("0505", None), (2012, None, 1999)),
+    "2019104005": _ped("2019104005", "Sire E", "sire e", "Dam E", "dam e", "DS E", "ds e",
+                       (None, "0606"), (2008, 2010, 1995)),
+}  # fmt: skip
+
+# The netkeiba-built table already on disk (the store's horse_pedigree schema). Its *_norm values
+# are stale on purpose: the merge re-normalises the fallback rows' names.
+NETKEIBA_ROWS = [
+    {"horse_id": "2019104005", "sire_name": "Netkeiba Sire E", "sire_name_norm": "netkeiba sire e",
+     "dam_name": "Netkeiba Dam E", "dam_name_norm": "netkeiba dam e", "dam_sire_name": "NK DS E",
+     "dam_sire_name_norm": "nk ds e", "sire_id": "nk-s-e", "source_race_id": "nk-r-1"},
+    {"horse_id": "2018105001", "sire_name": "ｱｵｿﾞﾗ", "sire_name_norm": "stale",
+     "dam_name": "Dam N1", "dam_name_norm": "stale dam", "dam_sire_name": "DS N1",
+     "dam_sire_name_norm": "ds n1", "sire_id": "nk-s-1", "source_race_id": "nk-r-2"},
+    {"horse_id": "2017105002", "sire_name": "Sire N2", "sire_name_norm": "sire n2",
+     "dam_name": "Dam N2", "dam_name_norm": "dam n2", "dam_sire_name": None,
+     "dam_sire_name_norm": "leftover", "sire_id": "nk-s-2", "source_race_id": "nk-r-3"},
+]  # fmt: skip
+NETKEIBA_EXPECTED = {
+    "2018105001": _ped("2018105001", "ｱｵｿﾞﾗ", "アオゾラ", "Dam N1", "dam n1", "DS N1", "ds n1"),
+    "2017105002": _ped("2017105002", "Sire N2", "sire n2", "Dam N2", "dam n2", None, None),
+}
+
+
+def ukc_layout() -> list[tuple[str, int, int, str]]:
+    out, pos = [], 1
+    for name, length, kind in [*UKC_LAYOUT, ("eol", 2, "skip")]:
+        out.append((name, pos, length, kind))
+        pos += length
+    return out
+
+
+def write_ukc_spec(data: Path) -> None:
+    rows = ["# synthetic: an invented layout for tests, not a JRDB spec"]
+    rows.append("name,start,length,kind,added,label")
+    rows += [f"{n},{s},{ln},{k},2020-01-01,synthetic {n}" for n, s, ln, k in ukc_layout()]
+    (data / "jrdb" / "specs" / "ukc.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def ukc_record(fields: dict[str, Any]) -> bytes:
+    out = bytearray()
+    for name, _start, length, _kind in ukc_layout()[:-1]:
+        v = fields[name]
+        raw = b"" if v is None else str(v).encode("cp932")
+        assert len(raw) <= length, (name, raw)
+        out += raw.ljust(length, b" ")
+    return bytes(out)
+
+
+def write_ukc(data: Path, files: dict[str, list[dict[str, Any]]] = UKC_FILES) -> None:
+    write_ukc_spec(data)
     folder = data / "raw" / "jrdb" / "UKC"
-    folder.mkdir(parents=True)
-    records = b"".join(f"{hid[2:]}synthetic horse master\r\n".encode() for hid in R1.horses)
-    if ukc == "zip":
-        zip_of(folder / "UKC261128.zip", {"UKC261128.txt": records})
-    elif ukc == "txt":
-        (folder / "UKC261128.txt").write_bytes(records)
-    else:
-        (folder / "UKC_2026.lzh").write_bytes(b"-lh5- not a zip UKC")
-    pedigree_path = paths.processed_dir("jra") / "horse_pedigree.parquet"
+    for i, (name, records) in enumerate(files.items()):
+        body = b"".join(ukc_record(r) + b"\r\n" for r in records)
+        if i % 2 == 0:
+            zip_of(folder / f"{name}.zip", {f"{name}.txt": body})
+        else:
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / f"{name}.txt").write_bytes(body)
+
+
+def pedigree_path() -> Path:
+    return paths.processed_dir("jra") / f"{HORSE_PEDIGREE}.parquet"
+
+
+def write_netkeiba_pedigree() -> None:
+    write_store_table(HORSE_PEDIGREE, [{"jurisdiction": "jra", **r} for r in NETKEIBA_ROWS])
+
+
+def assert_pedigree(want: dict[str, dict[str, Any]]) -> None:
+    """The written horse_pedigree: the copied store's schema exactly, and these rows (any order)."""
+    path = pedigree_path()
+    assert path.exists(), f"{path} was not written"
+    table = pq.read_table(path)
+    assert [(f.name, f.type) for f in table.schema] == [(f.name, f.type) for f in COPY_SCHEMA]
+    rows = table.to_pylist()
+    got = {r["horse_id"]: r for r in rows}
+    assert len(got) == len(rows), "one row per horse_id"
+    assert sorted(got) == sorted(want)
+    wrong = {
+        f"{hid}.{c}": (got[hid][c], w[c])
+        for hid, w in want.items()
+        for c in w
+        if got[hid][c] != w[c]
+    }
+    assert wrong == {}, wrong
+
+
+def test_the_ukc_fixture_is_what_the_tests_claim() -> None:
+    """Guards the fixtures: the half-width names fold to the expected keys, D's newer record is in
+    the earlier file, and the line-code / grandsire counts the report test expects vary by row."""
+    import unicodedata
+
+    assert unicodedata.normalize("NFKC", "ﾐﾅﾄﾉｶｾﾞ") == "ミナトノカゼ"
+    assert unicodedata.normalize("NFKC", "ｱｵｿﾞﾗ") == "アオゾラ"
+    assert U_D_NEW in UKC_FILES["UKC261128"] and U_D_OLD in UKC_FILES["UKC261129"]
+    assert U_D_NEW["data_date"] > U_D_OLD["data_date"]
+    with_code = [r for r in UKC_EXPECTED.values() if r["sire_line_code"]]
+    assert 0 < len(with_code) < len(UKC_EXPECTED)
+    assert set(NETKEIBA_EXPECTED).isdisjoint(UKC_EXPECTED)
+    assert {r["horse_id"] for r in NETKEIBA_ROWS} - set(NETKEIBA_EXPECTED) <= set(UKC_EXPECTED)
+
+
+def test_ukc_merges_over_the_netkeiba_pedigree(tmp_path: Path, monkeypatch) -> None:
+    """UKC deliveries plus a netkeiba horse_pedigree on disk -> every UKC horse (its record with the
+    latest data_date, line codes, birth years, paternal grandsire and great-grandsire) plus the
+    netkeiba-only horses (names re-normalised, UKC-only columns null); a horse in both is UKC's;
+    netkeiba-only columns (jurisdiction, sire_id, ...) are gone; a record without a valid id is
+    dropped. A second build over the merged table gives the same table."""
+    data = world(tmp_path, monkeypatch)
+    write_day_files(["KYI", "SED"])
+    write_ukc(data)
+    write_netkeiba_pedigree()
+    build_ok()
+    want = {**UKC_EXPECTED, **NETKEIBA_EXPECTED}
+    assert_pedigree(want)
+    assert_table(PRE, {"KYI", "SED"})  # the race tables are built as before
+
+    build_ok()
+    assert_pedigree(want)
+
+
+@pytest.mark.parametrize("existing", ["absent", "unreadable"])
+def test_ukc_without_a_netkeiba_pedigree_is_ukc_only(
+    tmp_path: Path, monkeypatch, existing: str
+) -> None:
+    """No horse_pedigree on disk, or one that is not a readable parquet: UKC's table alone."""
+    data = world(tmp_path, monkeypatch)
+    write_ukc(data)
+    if existing == "unreadable":
+        pedigree_path().write_bytes(b"not a parquet file")
+    outcome = tables.run()
+    assert outcome.error is None, outcome.error
+    assert_pedigree(UKC_EXPECTED)
+
+
+def test_the_schema_holds_when_a_column_is_all_null(tmp_path: Path, monkeypatch) -> None:
+    """One UKC horse with no resolvable grandsire and blank codes and years: every column keeps
+    its Arrow type (string / int64), so a rebuild of a sparse delivery still matches the copy."""
+    data = world(tmp_path, monkeypatch)
+    sparse = ukc("21104004", "Runner D", "ﾐﾅﾄﾉｶｾﾞ", "ハナノミチ", None, (None, None, None),
+                 (None, None), "20250601")  # fmt: skip
+    write_ukc(data, {"UKC261128": [sparse]})
+    build_ok()
+    assert_pedigree(
+        {
+            "2021104004": _ped(
+                "2021104004", "ﾐﾅﾄﾉｶｾﾞ", "ミナトノカゼ", "ハナノミチ", "ハナノミチ", None, None
+            )
+        }  # fmt: skip
+    )
+
+
+@pytest.mark.parametrize("netkeiba", [True, False], ids=["netkeiba", "no-netkeiba"])
+@pytest.mark.parametrize("ukc_folder", ["absent", "empty", "lzh-only"])
+def test_no_readable_ukc_delivery_leaves_horse_pedigree_alone(
+    tmp_path: Path, monkeypatch, netkeiba: bool, ukc_folder: str
+) -> None:
+    """No UKC delivery (no folder, an empty one, or only a .lzh): the build succeeds, horse_pedigree
+    keeps its bytes (or is still absent), and the report has no horse_pedigree entry (the #186
+    skip entry is gone too). Then a readable UKC arrives and the next build merges it."""
+    data = world(tmp_path, monkeypatch)
+    write_day_files(["KYI", "SED"])
+    if ukc_folder != "absent":
+        (data / "raw" / "jrdb" / "UKC").mkdir(parents=True)
+    if ukc_folder == "lzh-only":
+        (data / "raw" / "jrdb" / "UKC" / "UKC_2026.lzh").write_bytes(b"-lh5- not a zip UKC")
     if netkeiba:
         write_netkeiba_pedigree()
-        stamp = 1_700_000_000
-        os.utime(pedigree_path, (stamp, stamp))
-        before = (pedigree_path.read_bytes(), pedigree_path.stat().st_mtime_ns)
+    before = pedigree_path().read_bytes() if netkeiba else None
+    build_ok()
+    assert (pedigree_path().read_bytes() if pedigree_path().exists() else None) == before
+    assert HORSE_PEDIGREE not in report_json()
+    assert_table(PRE, {"KYI", "SED"})
 
-    result = invoke_build()
-    assert result.exit_code == 0, result.output
-    assert "ERROR" not in result.output, result.output
-    for table in (PRE, POST):
-        assert_table(table, set(ALL_FAMILIES))
+    write_ukc(data)
+    build_ok()
+    assert_pedigree({**UKC_EXPECTED, **(NETKEIBA_EXPECTED if netkeiba else {})})
 
+
+@pytest.mark.parametrize("netkeiba", [True, False], ids=["netkeiba", "no-netkeiba"])
+def test_the_report_gets_a_horse_pedigree_entry(
+    tmp_path: Path, monkeypatch, netkeiba: bool
+) -> None:
+    """jrdb-build.json's `horse_pedigree`: the coverage of the written table plus `ukc_rows`,
+    `netkeiba_rows` and `path` (and no `skipped`); the race tables' entries are still there; the
+    build prints a horse_pedigree line."""
+    data = world(tmp_path, monkeypatch)
+    write_day_files(["KYI", "SED"])
+    write_ukc(data)
     if netkeiba:
-        assert (pedigree_path.read_bytes(), pedigree_path.stat().st_mtime_ns) == before
-    else:
-        assert not pedigree_path.exists()
+        write_netkeiba_pedigree()
+    result = invoke_build()
+    assert result.exit_code == 0 and "ERROR" not in result.output, result.output
+    assert any(line.strip().startswith("horse_pedigree:") for line in result.output.splitlines())
+    want = {**UKC_EXPECTED, **(NETKEIBA_EXPECTED if netkeiba else {})}
+    with_code = sum(1 for r in want.values() if r["sire_line_code"] is not None)
+    with_grandsire = sum(1 for r in want.values() if r["paternal_grandsire_name_norm"] is not None)
+    assert (with_code, with_grandsire) == (4, 2)  # by hand: A B C D; A B
 
-    reason = report_json()["horse_pedigree"]["skipped"]
-    assert isinstance(reason, str) and "UKC" in reason and "209" in reason, reason
-    lines = result.output.splitlines()
-    assert any("UKC" in line and "209" in line for line in lines), result.output
+    report = report_json()
+    assert {PRE, POST} <= set(report)
+    entry = report[HORSE_PEDIGREE]
+    assert "skipped" not in entry
+    assert entry["rows"] == len(want)
+    assert entry["distinct_horse_ids"] == len(want)
+    assert entry["ukc_rows"] == len(UKC_EXPECTED)
+    assert entry["netkeiba_rows"] == (len(NETKEIBA_EXPECTED) if netkeiba else 0)
+    assert entry["with_sire_line_code"] == with_code
+    assert entry["sire_line_code_rate"] == pytest.approx(with_code / len(want))
+    assert entry["with_paternal_grandsire"] == with_grandsire
+    assert Path(entry["path"]) == pedigree_path()
+
+
+def test_a_build_that_stops_leaves_horse_pedigree_alone(tmp_path: Path, monkeypatch) -> None:
+    """A race family held only as .lzh stops the build: the netkeiba horse_pedigree keeps its bytes
+    though UKC is delivered. With the .zip in place the next build merges UKC."""
+    data = world(tmp_path, monkeypatch)
+    write_day_files(["SED"])
+    write_ukc(data)
+    write_netkeiba_pedigree()
+    folder = data / "raw" / "jrdb" / "KYI"
+    folder.mkdir(parents=True)
+    (folder / "KYI_2026.lzh").write_bytes(b"-lh5- not a zip")
+    before = pedigree_path().read_bytes()
+    assert invoke_build().exit_code == 1
+    assert pedigree_path().read_bytes() == before
+
+    write_day_files(["KYI"])
+    build_ok()
+    assert_pedigree({**UKC_EXPECTED, **NETKEIBA_EXPECTED})
+
+
+def _rebuild_script():
+    """scripts/check_store_rebuild.py loaded as a module (scripts/ is not a package)."""
+    import importlib.util
+    import sys
+
+    name = "check_store_rebuild"
+    if name not in sys.modules:
+        script = Path(__file__).resolve().parents[3] / "scripts" / f"{name}.py"
+        spec = importlib.util.spec_from_file_location(name, script)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module  # dataclasses look their module up here
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            del sys.modules[name]
+            raise
+    return sys.modules[name]
+
+
+def test_the_rebuild_check_matches_the_copied_horse_pedigree(tmp_path: Path, monkeypatch) -> None:
+    """#59's comparison: a copy written the way HKTrack's build left it (UKC merged over netkeiba,
+    the copied schema) and this build's horse_pedigree compare as a match."""
+    copied = tmp_path / "copy" / "processed" / "jra"
+    copied.mkdir(parents=True)
+    rows = [{**r} for r in {**UKC_EXPECTED, **NETKEIBA_EXPECTED}.values()]
+    pq.write_table(
+        pa.Table.from_pylist(rows, schema=COPY_SCHEMA), copied / "horse_pedigree.parquet"
+    )
+
+    data = world(tmp_path / "work", monkeypatch)
+    write_ukc(data)
+    write_netkeiba_pedigree()
+    build_ok()
+
+    script = _rebuild_script()
+    key = schemas.TABLES[HORSE_PEDIGREE].sort_by
+    diff = script.compare_tables(copied / "horse_pedigree.parquet", pedigree_path(), key=key)
+    assert diff.failed_checks() == [], (diff.missing_columns, diff.extra_columns, diff.dtype_diffs)
+    lines, ok = script.compare_stores(copied, paths.processed_dir("jra"), {HORSE_PEDIGREE: key})
+    assert ok, lines
