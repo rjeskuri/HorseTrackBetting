@@ -18,11 +18,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
-from horsetrack.core import paths
 from horsetrack.countries.japan import odds_log
-from horsetrack.countries.japan.board.snapshot import SCRATCHED, post_times_for
+from horsetrack.countries.japan.board.snapshot import SCRATCHED, jra_day_dir, post_times_for
 from horsetrack.countries.japan.odds_log import POOL_TOTAL
 
 _JST = timezone(timedelta(hours=9))  # Japan keeps no daylight saving time
@@ -78,11 +78,11 @@ def _runners(combination: Any) -> set[str]:
     return {str(int(part)) if part.isdigit() else part for part in parts}
 
 
-def _venues_logged(race_date: date) -> list[str]:
-    day_dir = paths.odds_snapshot_path("jra", race_date.isoformat(), "_").parent
-    if not day_dir.is_dir():
+def _venues_logged(race_date: date, day_dir: Path | None = None) -> list[str]:
+    folder = jra_day_dir(race_date, day_dir)
+    if not folder.is_dir():
         return []
-    return sorted(p.name[: -len(_LOG_SUFFIX)] for p in day_dir.glob(f"*{_LOG_SUFFIX}"))
+    return sorted(p.name[: -len(_LOG_SUFFIX)] for p in folder.glob(f"*{_LOG_SUFFIX}"))
 
 
 def _row_feed(
@@ -200,19 +200,21 @@ def build_board(
     venues: Iterable[str] | None = None,
     now: Callable[[], datetime] = utc_now,
     morning_from: str = "07:00",
+    day_dir: Path | None = None,
 ) -> dict[str, Any]:
     """The board of `race_date` as of `now()`: every venue logged that day (or only `venues`),
-    races in number order, each pool's lines with their morning and T-20 moves."""
+    races in number order, each pool's lines with their morning and T-20 moves. The logs are read
+    from `day_dir` when given (a pulled VM folder), else the Mac's own day folder."""
     now_utc = now().astimezone(timezone.utc)
     morning_start = datetime.combine(race_date, time.fromisoformat(morning_from), _JST)
     morning_end = datetime.combine(race_date + timedelta(days=1), time(0, 0), _JST)
-    logged = _venues_logged(race_date)
+    logged = _venues_logged(race_date, day_dir)
     if venues is not None:
         wanted = set(venues)
         logged = [venue for venue in logged if venue in wanted]
     out = []
     for venue in logged:
-        log_path = paths.odds_snapshot_path("jra", race_date.isoformat(), venue)
+        log_path = jra_day_dir(race_date, day_dir) / f"{venue}{_LOG_SUFFIX}"
         rows = [
             row
             for member in odds_log.iter_members(log_path)
@@ -220,7 +222,11 @@ def build_board(
             if row.get("pool") in BOARD_POOLS
         ]
         races = _venue_races(
-            rows, post_times_for(race_date, venue), now_utc, morning_start, morning_end
+            rows,
+            post_times_for(race_date, venue, day_dir=day_dir),
+            now_utc,
+            morning_start,
+            morning_end,
         )
         out.append({"venue": venue, "races": races})
     return {"race_date": race_date.isoformat(), "generated_utc": _iso(now_utc), "venues": out}
