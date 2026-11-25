@@ -7,6 +7,7 @@ from horsetrack.core.ingest.cli import scrape_app
 from horsetrack.core.store.cli import store_app
 from horsetrack.countries.japan.board.server import board_serve_command
 from horsetrack.countries.japan.jra.going_fetch import fetch_going_command
+from horsetrack.countries.japan.jra.win_sales_fetch import fetch_win_sales_command
 from horsetrack.countries.japan.jrdb.tables import build_command as jrdb_build_command
 from horsetrack.countries.japan.logger.compact import compact
 from horsetrack.countries.japan.logger.compare import compare_logs_command
@@ -34,6 +35,7 @@ japan.command("shadow-day")(shadow_day_command)
 japan.command("win5-history")(win5_history_command)
 japan.add_typer(win5_study_app, name="win5-study")
 japan.command("fetch-going")(fetch_going_command)
+japan.command("fetch-win-sales")(fetch_win_sales_command)
 japan.command("exacta-impact")(exacta_impact_command)
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
 japan.add_typer(jrdb, name="jrdb")

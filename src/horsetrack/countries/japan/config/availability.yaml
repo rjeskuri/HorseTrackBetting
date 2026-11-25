@@ -150,3 +150,11 @@ tables:
   track_condition:
     kind: column
     column: available_utc
+
+  # Per-race Win sales (#278): each publication from its own time, published_utc. A live page's
+  # figure is published at the page's clock, a final (最終オッズ) page's at its printed post + 30
+  # min, or at its fetch when it prints no post time (the owner's answer on #278, rule A,
+  # 2026-11-25).
+  win_sales:
+    kind: column
+    column: published_utc

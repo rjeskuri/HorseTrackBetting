@@ -30,6 +30,8 @@ owner accepted the proposed defaults, each conservative relative to JRA's public
     and use them as features', 2026-11-24), #228's outline step 4 from his option-A split
     ('available_utc = published_utc as in #136') and his answer on #87 (usable 'once JRA has
     officially published it (with its publication timestamp)', 2026-11-24).
+11. win_sales (#278): column on published_utc, each publication of a race's Win sales from its
+    own time: a live page's clock, a final page's post + 30 min (the owner's answer on #278).
 
 The expected rules below are written from that answer, never read back from the config. The
 leakage tests run the shipped rules over small synthetic tables built from the store's column
@@ -123,6 +125,9 @@ OWNER: dict[str, dict] = {
     "jrdb_post_race": {"kind": "label_only"},
     # a published value counts from its 発表 time (#90)
     "track_condition": {"kind": "column", "column": "available_utc"},
+    # per-race Win sales (#278): each publication from its own time; a final figure's time is its
+    # post + 30 min (tests/countries/japan/test_win_sales_store.py pins the view)
+    "win_sales": {"kind": "column", "column": "published_utc"},
 }
 VIEW_TABLES = [t for t, o in OWNER.items() if o["kind"] == "offset"]
 LABEL_ONLY = [t for t, o in OWNER.items() if o["kind"] == "label_only"]
@@ -144,7 +149,7 @@ def rules():
 
 
 def test_the_shipped_config_has_one_rule_per_table_and_nothing_else(rules):
-    assert len(schemas.TABLES) == 13
+    assert len(schemas.TABLES) == 14  # 12, + track_condition (#90), + win_sales (#278)
     assert set(OWNER) == set(schemas.TABLES) | {"odds_timeseries"}
     assert set(rules) == set(OWNER)
     for table, rule in rules.items():
