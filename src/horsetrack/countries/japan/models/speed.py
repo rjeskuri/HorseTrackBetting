@@ -24,7 +24,20 @@ variants of the days it ran on are told apart only by the variants' prior mean, 
 prior with a non-zero mean would shift the par of every cell linked to that day. The par is the
 cell's time on a day of average going.
 
-`variant(day, *group, at_utc)` is the posterior of that day's v given the residuals from par of
+`fit(races)` estimates the pars, sigma and tau and nothing else: the races it is fitted on never
+feed `variant`. `observe(results)` gives it the results of races on the days to be predicted, each
+one's residual taken against the frozen fitted par; the pars, sigma and tau never change. The split
+is what keeps the same-day variant as of t: a par is a mean over every race of its cell in the fit
+frame, whatever its `result_available_utc`, so had the variant read residuals from a par fitted on
+the day itself, a race resulted after t (the target race included) would move the variant at t
+through the par. For the same reason `observe` refuses a race on a (day, group) the fit frame had;
+that (day, group) stays at the prior. Observations add up over calls, and a race id observed twice
+is refused; a race in a cell the fit never saw has no par to take a residual from, so it is skipped
+and counted in `n_unseen`; a race without a top-3 time is left out. The whole frame is checked
+before anything is kept, so a refused frame leaves the model as it was. Fitting again clears the
+observations.
+
+`variant(day, *group, at_utc)` is the posterior of that day's v given the observed residuals of
 that day's races in the group whose `result_available_utc` is strictly before `at_utc` (a null
 time is never available), from the prior `variant_prior(race_date, *group) -> (mean, sd)` when one
 is injected and N(0, tau^2) otherwise. With `same_day_variant=False` the day's own races never
@@ -33,8 +46,8 @@ the posterior mean is the mode found by the same reweighting, started from the p
 SD is that of the reweighted normal posterior.
 
 `expected_top3_time(race, at_utc)` is par(cell) + the variant's mean at t. #97 adds pace terms.
-`par` of a cell the fit never saw raises KeyError; the variant of a day or group it never saw is
-the prior. No layer here is adopted (D16).
+`par` of a cell the fit never saw raises KeyError; the variant of a (day, group) with nothing
+observed is the prior. No layer here is adopted (D16).
 """
 
 from __future__ import annotations
@@ -155,21 +168,28 @@ def _codes(keys: list[tuple]) -> tuple[np.ndarray, list[tuple]]:
 
 
 class SpeedModel:
-    """Par per cell and a (day, group) variant; `fit` returns the fitted model itself."""
+    """Par per cell and a (day, group) variant; `fit` and `observe` return the model itself."""
 
     def __init__(self, spec: SpeedSpec, *, variant_prior: Callable | None = None) -> None:
         self.spec = spec
         self._prior = variant_prior
         self._par: dict[tuple, float] | None = None
+        self._fit_days: frozenset[tuple] = frozenset()  # the (day, *group) keys of the fit frame
+        # observed (day, *group) -> (result times, residuals from par), in result-time order
         self._days: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
+        self._observed_ids: set = set()
         self.sigma: float | None = None  # the error's scale (its SD when t_df is None), s
         self.tau: float | None = None  # the default variant prior's SD (the random effect's), s
         self.n_races = 0
         self.n_iter = 0
+        self.n_observed = 0  # observed races with a top-3 time in a fitted cell
+        self.n_unseen = 0  # observed races skipped: their cell has no par
 
     # -- fit ------------------------------------------------------------------------------------
 
-    def fit(self, races: pd.DataFrame) -> SpeedModel:
+    def _checked(self, races: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple], list[tuple]]:
+        """The races with a top-3 time, after checking the frame, and their cells and
+        (day, *group) keys."""
         spec = self.spec
         keys = list(dict.fromkeys((*spec.par_keys, *spec.variant_keys)))
         missing = [c for c in (*RESULT_COLUMNS, *keys) if c not in races.columns]
@@ -178,36 +198,75 @@ class SpeedModel:
         if not races["race_id"].is_unique:
             raise ValueError("races has duplicate race ids")
         frame = races[races["top3_time_s"].notna()]
-        if frame.empty:
-            raise ValueError("no race has a top-3 time to fit on")
         nulls = [k for k in (*keys, "race_utc") if frame[k].isna().any()]
         if nulls:
             raise ValueError(f"null value(s) in {', '.join(nulls)}")
-        y = frame["top3_time_s"].to_numpy(dtype=float)
-        if not np.isfinite(y).all():
+        if not np.isfinite(frame["top3_time_s"].to_numpy(dtype=float)).all():
             raise ValueError("top3_time_s has a non-finite value")
         _utc_ns(frame["race_utc"], "race_utc")
-        avail, known = _utc_ns(frame["result_available_utc"], "result_available_utc")
+        _utc_ns(frame["result_available_utc"], "result_available_utc")
+        if frame.empty:
+            return frame, [], []
+        cells = list(zip(*(frame[k].tolist() for k in spec.par_keys), strict=True))
+        days = pd.to_datetime(frame["race_utc"]).dt.tz_convert(JST).dt.date.tolist()
+        groups = list(zip(days, *(frame[k].tolist() for k in spec.variant_keys), strict=True))
+        return frame, cells, groups
 
-        cell, cells = _codes(list(zip(*(frame[k].tolist() for k in spec.par_keys), strict=True)))
-        days = frame["race_utc"].dt.tz_convert(JST).dt.date.tolist()
-        group_keys = zip(days, *(frame[k].tolist() for k in spec.variant_keys), strict=True)
-        group, groups = _codes(list(group_keys))
+    def fit(self, races: pd.DataFrame) -> SpeedModel:
+        frame, cell_keys, group_keys = self._checked(races)
+        if frame.empty:
+            raise ValueError("no race has a top-3 time to fit on")
+        y = frame["top3_time_s"].to_numpy(dtype=float)
+        cell, cells = _codes(cell_keys)
+        group, groups = _codes(group_keys)
 
         par, sigma2, tau2, n_iter = self._solve(y, cell, group, len(cells), len(groups))
         self._par = {c: float(p) for c, p in zip(cells, par, strict=True)}
         self.sigma, self.tau = math.sqrt(sigma2), math.sqrt(tau2)
         self.n_races, self.n_iter = len(y), n_iter
-        # each (day, group)'s residuals from par in the order their results became available
-        resid = y - par[cell]
-        rows = np.flatnonzero(known)
-        rows = rows[np.lexsort((avail[rows], group[rows]))]
-        starts = np.flatnonzero(np.diff(group[rows], prepend=-1))
-        self._days = {
-            groups[group[chunk[0]]]: (avail[chunk], resid[chunk])
-            for chunk in np.split(rows, starts[1:])
-            if chunk.size
-        }
+        self._fit_days = frozenset(groups)
+        self._days, self._observed_ids = {}, set()
+        self.n_observed = self.n_unseen = 0
+        return self
+
+    def observe(self, results: pd.DataFrame) -> SpeedModel:
+        """Keep the residuals from the fitted par of races on days to be predicted (see the module
+        docstring); added to earlier observations."""
+        pars = self._fitted()
+        frame, cell_keys, group_keys = self._checked(results)
+        if frame.empty:
+            return self
+        in_fit = sorted({g for g in group_keys if g in self._fit_days}, key=repr)
+        if in_fit:
+            raise ValueError(
+                f"{len(in_fit)} (day, {', '.join(self.spec.variant_keys)}) of the results were in "
+                f"the fit frame, e.g. {in_fit[0]}: their residuals would carry their own results "
+                "back through the par"
+            )
+        ids = frame["race_id"].tolist()
+        again = self._observed_ids.intersection(ids)
+        if again:
+            raise ValueError(f"{len(again)} race(s) already observed, e.g. {next(iter(again))!r}")
+        y = frame["top3_time_s"].to_numpy(dtype=float)
+        avail, known = _utc_ns(frame["result_available_utc"], "result_available_utc")
+        seen = [c in pars for c in cell_keys]
+        rows: dict[tuple, list[int]] = {}
+        for i, g in enumerate(group_keys):
+            if seen[i] and known[i]:
+                rows.setdefault(g, []).append(i)
+        merged = {}
+        for g, idx in rows.items():
+            a = avail[idx]
+            r = y[idx] - np.array([pars[cell_keys[i]] for i in idx])
+            if g in self._days:
+                a, r = np.r_[self._days[g][0], a], np.r_[self._days[g][1], r]
+            order = np.argsort(a, kind="stable")
+            merged[g] = (a[order], r[order])
+        # everything is checked: keep it
+        self._days.update(merged)
+        self._observed_ids.update(ids)
+        self.n_observed += sum(seen)
+        self.n_unseen += len(seen) - sum(seen)
         return self
 
     def _solve(self, y, cell, group, n_cells, n_groups):
