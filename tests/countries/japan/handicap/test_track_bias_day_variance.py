@@ -8,25 +8,37 @@ Contract pinned here (`horsetrack.countries.japan.handicap.track_bias`), on top 
   are ignored; a holdout race day on or before it is a ValueError, D14). `.per_level` maps each
   of the seven (factor, level) keys (draw inner/middle/outer, style front/stalker/midpack/closer)
   to a finite day sd >= 0; `.pooled` is one finite day sd >= 0 for every level.
+  (#258, owner 2026-11-25) The same object carries `.predictive_per_level` and
+  `.predictive_pooled`: the predictive sd, of a day's deviation from the shrunk prior fitted
+  without that day (the day variance plus the prior mean's own error), pinned against the planted
+  truth in test_track_bias_day_variance_cells.py. `.per_level` / `.pooled` keep #224's meaning.
   The estimate is what a (day, venue, surface) group's races share beyond the race-to-race
   spread of the level's race means within the group, so it must not lean on #138's
   race-independence (places-shuffled) null: a level whose race means barely vary in some groups
   (the "pinned" style case below, far below that null) still gets its planted day variance.
 - `fit_bias_prior(..., day_sd=...)`: `None` (as before, estimated) is the same as `"pooled"`,
-  every level's prior sd the pooled estimate; `"per_level"` gives each level its own estimate; a
-  float > 0 is every level's prior sd (#138, unchanged); a mapping from all seven (factor, level)
-  keys to floats > 0 gives each level that sd. Anything else (an unknown string, a missing level,
+  every level's prior sd the pooled predictive estimate; `"per_level"` gives each level its own
+  predictive estimate (#258: the prior sd of today's deviation is the predictive sd); a float
+  > 0 is every level's prior sd (#138, unchanged); a mapping from all seven (factor, level) keys
+  to floats > 0 gives each level that sd. Anything else (an unknown string, a missing level,
   a value <= 0) is a ValueError.
 - `within_day_posterior` / `track_bias_features` use each level's own prior sd (`prior_sd`).
-- `track_bias_report(..., day_sd=...)` passes the same values to every fold's prior.
+- `track_bias_report(..., day_sd=...)` passes the same values to every fold's prior; per fold,
+  `day_sd_estimate` names both estimates: `per_level`, `pooled`, `predictive_per_level`,
+  `predictive_pooled` (levels keyed "factor:level"), and `day_sd` is the predictive one.
 
 Rulings (reversible choices this file pins):
 
 - Ruling: the estimator is `track_bias.estimate_day_variance`, returning an object with
   `.per_level` (dict keyed by (factor, level)) and `.pooled` (float), both unfloored sds >= 0.
 - Ruling: the day-sd modes are the strings "pooled" and "per_level"; None means "pooled".
-- Ruling: a fitted prior's level sd equals the estimate whenever the estimate is at least 0.02;
-  below that it may be floored, but stays in (0, 0.02].
+- Ruling: a fitted prior's level sd equals the predictive estimate whenever it is at least 0.02;
+  below that it may be floored, but stays in (0, 0.02]. (#258 changed "the estimate" to "the
+  predictive estimate", per the owner's answer of 2026-11-25.)
+- Ruling (#258): the predictive sd is exposed as `DayVariance.predictive_per_level` (dict keyed
+  by (factor, level)) and `DayVariance.predictive_pooled` (float), unfloored sds >= 0, returned
+  by the same `estimate_day_variance` call; the report's per-fold `day_sd_estimate` uses the same
+  four names.
 
 Tolerances. The planted effect is compared with the planted effects' realised sd (around each
 venue and surface's mean, which the prior absorbs), not the nominal sd. A per-group nested moment
@@ -423,11 +435,13 @@ def share(row: dict, scores: list[float]) -> float:
     return (row["mean"] - row["prior_mean"]) / evidence
 
 
-def test_per_level_prior_sd_is_each_levels_estimate():
-    races, runners, _, _ = world("midpack_10")
+def test_estimated_prior_sd_is_each_levels_predictive_estimate():
+    """The posterior's prior_sd in the estimated modes is the predictive sd (#258), per level or
+    pooled, not the day sd."""
     est = estimate("midpack_10")
     races_t, runners_t, s, ids = with_today("midpack_10", [(T, MIDPACK, 0.0)], n_races=3)
-    for mode, want in (("per_level", est.per_level), ("pooled", dict.fromkeys(LEVELS, est.pooled))):
+    for mode, want in (("per_level", est.predictive_per_level),
+                       ("pooled", dict.fromkeys(LEVELS, est.predictive_pooled))):  # fmt: skip
         prior = fit_bias_prior(races_t, runners_t, train_end=TRAIN_END, day_sd=mode)
         got = posterior_at(prior, races_t, runners_t, s, ids[T][0])  # nothing entered yet
         for key in LEVELS:
@@ -567,3 +581,18 @@ def test_report_measures_the_pooled_and_the_per_level_modes(tmp_path, monkeypatc
     assert out["per_level"]["ll_prior"] == pytest.approx(out["pooled"]["ll_prior"], rel=1e-12)
     assert abs(out["per_level"]["ll_update"] - out["pooled"]["ll_update"]) > 1e-6
     assert out[None]["ll_update"] == pytest.approx(out["pooled"]["ll_update"], rel=1e-12)
+    # per fold, the report names both estimates, and the prior's day sd is the predictive one
+    names = [f"{f}:{lv}" for f, lv in LEVELS]
+    for mode, rep in out.items():
+        assert len(rep["day_sd_estimate"]) == len(rep["day_sd"]) > 1, mode
+        for est, day_sd in zip(rep["day_sd_estimate"], rep["day_sd"], strict=True):
+            assert {"per_level", "pooled", "predictive_per_level", "predictive_pooled"} <= set(est)
+            for key in ("per_level", "predictive_per_level"):
+                assert set(est[key]) == set(names), (mode, key, est[key])
+            want = (est["predictive_per_level"] if mode == "per_level"
+                    else dict.fromkeys(names, est["predictive_pooled"]))  # fmt: skip
+            for name in names:
+                if want[name] >= FLOOR_ZONE:
+                    assert day_sd[name] == pytest.approx(want[name], rel=1e-9), (mode, name)
+                else:
+                    assert 0 < day_sd[name] <= FLOOR_ZONE, (mode, name, day_sd[name])
