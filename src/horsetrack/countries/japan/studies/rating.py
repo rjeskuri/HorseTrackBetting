@@ -20,9 +20,12 @@ alpha (Wald and meeting-clustered intervals), and alpha pooled over the scored r
 Order: freeze the spec in the run registry, read the store, score, append one registry record per
 variant (failures included), write the report through `write_report` and the per-runner export
 (race_id, horse_id, race_date, fold, the pair, mu_before, sigma_before and the member) for the
-meld under the data directory. The JRA store is netkeiba results: no JRDB, no JRA-VAN. Nothing is
-adopted (D16) and the holdout is never read. CLI: `python -m
-horsetrack.countries.japan.studies.rating --run [--out DIR]`.
+meld under the data directory. A rerun appends only records the family does not hold: one equal
+to a held record but for its git commit is the same run reproduced. The `meeting_clustered:`
+stage-2 record (D7's bound, which the frozen stage-2 weight rule reads) was added after the first
+run; the frozen spec is unchanged. The JRA store is netkeiba results: no JRDB, no JRA-VAN.
+Nothing is adopted (D16) and the holdout is never read.
+CLI: `python -m horsetrack.countries.japan.studies.rating --run [--out DIR]`.
 """
 
 from __future__ import annotations
@@ -56,10 +59,13 @@ from horsetrack.countries.japan.studies.calibration import (
 )
 from horsetrack.countries.japan.studies.meta import (
     CLUSTER,
+    CLUSTERED,
     Scored,
+    _clustered_metrics,
     _delta,
     _ll,
     _meta_metrics,
+    _run_id,
     _try,
     baseline_oof,
     read_development,
@@ -283,15 +289,24 @@ def compute_study(
     )
     pooled = _try(lambda: fit_meta(pooled_rows, STAGE2, cluster_col=CLUSTER))
     meta_params = params | {"ridge": 0.0, "bounds": "none", "quadratic": False, "segments": []}
+    components = base | {"form": "stage2", "market": "ln_q"}
+    name = f"stage2:q:{MEMBER}"
+    study.attempt(
+        Variant("E38", name, fold_scheme, components, meta_params),
+        lambda: _meta_metrics(outcome, pooled, folds, scored, spec, name),
+    )
+    # The frozen stage-2 weight rule reads D7's meeting bound, which _meta_metrics puts in the
+    # report only: this record carries it (added after the first run, as #87's twins).
+    clustered = meta_params | {
+        "inference": "meeting-clustered sandwich (models.condlogit), no small-sample factor",
+        "level": "95% one-sided per bound (D7)",
+        "added": "after the first run: the frozen rule's own bound as a registry metric",
+    }
     study.attempt(
         Variant(
-            "E38",
-            f"stage2:q:{MEMBER}",
-            fold_scheme,
-            base | {"form": "stage2", "market": "ln_q"},
-            meta_params,
+            "E38", f"{CLUSTERED}:{name}", fold_scheme, components | {"se": CLUSTERED}, clustered
         ),
-        lambda: _meta_metrics(outcome, pooled, folds, scored, spec, f"stage2:q:{MEMBER}"),
+        lambda: _clustered_metrics(outcome, pooled, folds, spec),
     )
     return study
 
@@ -405,14 +420,17 @@ def run_study(out_dir: Path | None = None) -> dict:
     study = compute_study(frame, members, folds, spec, scheme)
     study.counts = {**counts, "scored_folds": len(folds), **study.counts}
 
-    existing = registry.records(FAMILY_ID)
+    # A record equal to one in the registry but for its git commit is the same run reproduced.
+    blank = {_run_id(dataclasses.replace(r, git_sha="")): r for r in registry.records(FAMILY_ID)}
     record_ids, appended = {}, []
     for variant in study.variants:
         record = _record(variant, git_sha, builds)
-        if record in existing:
-            continue
-        record_ids[variant.name] = registry.append(record)
-        appended.append(variant.name)
+        same = blank.get(_run_id(dataclasses.replace(record, git_sha="")))
+        if same is None:
+            record_ids[variant.name] = registry.append(record)
+            appended.append(variant.name)
+        else:
+            record_ids[variant.name] = _run_id(same)
     about = {
         "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
