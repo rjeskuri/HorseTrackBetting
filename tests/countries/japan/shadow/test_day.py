@@ -44,7 +44,9 @@ synthetic logger would have written by then; nothing really waits.
 # block is written in its final order and I001 is waived so lint passes before and after.
 from __future__ import annotations  # noqa: I001
 
+import dataclasses
 import json
+import logging
 import math
 import os
 import re
@@ -638,6 +640,159 @@ def test_the_day_log_is_sealed_after_the_last_race(case):
         assert clock.now() <= POST2 + timedelta(minutes=5), "the runner waited past the day"
     else:
         assert sealed_utc == start
+
+
+# ---------------------------------------------------------------- a pool without a fit (#233)
+
+
+def gapped(models: ShadowModels, missing: set) -> ShadowModels:
+    """The same fits, with the real nowcast lacking (pool, tau) cells (None: every tau): its
+    `cell` then raises KeyError("no training data for <pool> at tau <tau>")."""
+    sigma0 = {
+        (p, t): s
+        for (p, t), s in models.nowcast.sigma0.items()
+        if (p, None) not in missing and (p, t) not in missing
+    }
+    return dataclasses.replace(models, nowcast=dataclasses.replace(models.nowcast, sigma0=sigma0))
+
+
+RECORD_KEYS = {  # the shadow log's record format as it is today: no field is added by #233
+    "race_id",
+    "tau_min",
+    "decision_utc",
+    "written_utc",
+    "mode",
+    "git_sha",
+    "pool",
+    "combination",
+    "board_capture_utc",
+    "status",
+    "models",
+    "board_odds",
+    "board_odds_hi",
+    *VALUE_FIELDS,
+    "flags",
+    "n_draws",
+    "seed",
+    "day_status",
+}
+POOL_PATTERNS = {  # the pool as the config and the log name it, not as a part of another name
+    WIN: r"(?<![A-Z_])WIN(?![A-Z_])",
+    PLACE: r"(?<![A-Z_])PLACE(?![A-Z_])",
+    WIDE: r"(?<![A-Z_])QUINELLA_PLACE(?![A-Z_])",
+}
+GAP_DAY_CASES = {
+    "no Wide fit": {(WIDE, None)},
+    "no Place fit": {(PLACE, None)},
+    "neither Place nor Wide": {(PLACE, None), (WIDE, None)},
+    "Wide lacks two taus, Place one": {(WIDE, 60), (WIDE, 2), (PLACE, 16)},
+    "no fit for any pool": {(WIN, None), (PLACE, None), (WIDE, None)},
+}
+
+
+def gap_warnings(caplog, race_id: str, tau: int, pool: str) -> list[logging.LogRecord]:
+    """The WARNING records of the package that name this race, tau and pool."""
+    found = []
+    for rec in caplog.records:
+        if rec.levelno != logging.WARNING or not rec.name.startswith("horsetrack"):
+            continue
+        text = rec.getMessage()
+        if race_id not in text or not re.search(POOL_PATTERNS[pool], text):
+            continue
+        if re.search(rf"(?<!\d){tau}(?!\d)", text.replace(race_id, "")):
+            found.append(rec)
+    return found
+
+
+@pytest.mark.parametrize("missing", list(GAP_DAY_CASES.values()), ids=list(GAP_DAY_CASES))
+def test_a_pool_without_a_fit_keeps_the_other_pools_values_and_the_log_seals(
+    models, caplog, missing
+):
+    races = [race_one(), race_two()]
+    world = World(races)
+    clock = Clock(world, EARLY)
+    caplog.set_level(logging.INFO, logger="horsetrack")
+
+    summary = run(clock, models=gapped(models, missing))
+
+    assert summary.records == total_keys(races) and summary.no_board == 0 and summary.sealed
+    verdict = open_log().verify()
+    assert verdict.sealed
+    records = open_log().read()
+    assert len(records) == total_keys(races)
+
+    lost = {
+        (race.race_id, tau, pool)
+        for race in races
+        for tau in GRID
+        for pool in (WIN, PLACE, WIDE)
+        if (pool, None) in missing or (pool, tau) in missing
+    }
+    assert lost
+    for (race_id, tau), group in decided(records).items():
+        race = world.race(race_id)
+        board = world.board(race, tau)
+        assert_point_decided_once(world, decided(records), race, tau)
+        healthy = None  # the point's values from a run with every fit, once its seed is known
+        for record in group:
+            assert record["status"] == "ok"
+            assert set(record) == RECORD_KEYS  # no new field, a reason included
+            assert (record["board_odds"], record["board_odds_hi"]) == figures(
+                board, record["pool"], record["combination"]
+            )
+            assert record["flags"] == expected_flags(board, record)
+            if (race_id, tau, record["pool"]) in lost:
+                assert all(record[f] is None for f in VALUE_FIELDS), (race_id, tau, record["pool"])
+                continue
+            assert record["n_draws"] == N_DRAWS and type(record["seed"]) is int
+            assert record["models"] == models.ids
+            if healthy is None:
+                healthy = {
+                    (v.pool, v.combination): v
+                    for v in shadow_values(
+                        board, tau_min=tau, models=models, n_draws=N_DRAWS, seed=record["seed"]
+                    )
+                }
+            wanted = healthy[(record["pool"], record["combination"])]
+            assert (
+                record["value_mean"] if record["pool"] == WIN else record["value_at_low"]
+            ) is not None
+            for field in VALUE_FIELDS:
+                assert close(record[field], getattr(wanted, field)), (race_id, tau, field)
+
+    # health reads: one WARNING per (race, tau, pool) without values, no ERROR for the point
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    for race in races:
+        for tau in GRID:
+            for pool in (WIN, PLACE, WIDE):
+                found = gap_warnings(caplog, race.race_id, tau, pool)
+                want_n = 1 if (race.race_id, tau, pool) in lost else 0
+                assert len(found) == want_n, (race.race_id, tau, pool, len(found))
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.name.startswith("horsetrack")
+    ]
+    assert len(warnings) == len(lost)
+
+
+def test_a_nowcast_without_wide_still_logs_win_and_place_values_and_seals(models):
+    """The smoke test of 2026-11-25 in miniature: Wide has no fit, WIN and PLACE keep values."""
+    races = [race_one(), race_two()]
+    world = World(races)
+    clock = Clock(world, EARLY)
+
+    summary = run(clock, models=gapped(models, {(WIDE, None)}))
+
+    assert summary.sealed and open_log().verify().sealed
+    by_pool = defaultdict(list)
+    for record in open_log().read():
+        by_pool[record["pool"]].append(record)
+    assert len(by_pool[WIN]) == sum(len(r.base) for r in races) * len(GRID)
+    assert all(r["value_mean"] is not None and r["value_q05"] is not None for r in by_pool[WIN])
+    assert all(r["value_at_low"] is not None for r in by_pool[PLACE])
+    assert len(by_pool[WIDE]) > 0
+    assert all(r["value_at_low"] is None and r["value_at_high"] is None for r in by_pool[WIDE])
 
 
 # ---------------------------------------------------------------- records without models
