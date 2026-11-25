@@ -15,6 +15,7 @@ Research and tooling for pari-mutuel horse racing, one folder per country (Japan
 - Real-page tests (marker `local`, need `$HORSETRACK_DATA_DIR/fixtures`, skipped when absent): `uv run pytest -m local -q`
 
 ## Where things live
+- [docs/architecture.md](docs/architecture.md): Mermaid diagrams of the system, the race-day flow, the store, governance and the harness workflow. When an epic changes one of these flows, its last ticket updates this file.
 - `tests/`: the test suite.
 - `scripts/verify.sh`: the checks behind the verify command; `.github/workflows/ci.yml` runs it.
 - `.githooks/`: `pre-commit` (format and lint on staged files, no commits on main) and `pre-push` (no pushes to main, no force pushes).
