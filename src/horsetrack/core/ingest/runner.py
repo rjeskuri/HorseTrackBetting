@@ -21,6 +21,8 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
+import httpx
+
 from horsetrack.core.ingest.adapters import SourceAdapter, get_adapter
 from horsetrack.core.ingest.fetcher import CircuitOpen, Fetcher, FetchError
 from horsetrack.core.ingest.queue import STATUS_FAILED, FetchQueue
@@ -194,6 +196,14 @@ def plan_backfill(
             queue.close()
 
 
+def _host_of_url(url: str) -> str:
+    """The host the Fetcher's per-host breaker files the task under (httpx's parse)."""
+    try:
+        return httpx.URL(url).host
+    except httpx.InvalidURL:
+        return ""
+
+
 class _Run:
     """State of one run_backfill call; split out so the loop body stays readable."""
 
@@ -203,7 +213,7 @@ class _Run:
         self.log, self.summary = log, summary
         self.max_failures, self.max_marker_misses = _breaker_limits(http)
         self.failure_streak = 0
-        self.marker_miss_streak = 0
+        self.marker_miss_streaks: dict[str, int] = {}  # per URL host, like the Fetcher's breaker
         self.parse_errors = 0
         self.handled: set[tuple[str, str]] = set()
 
@@ -270,11 +280,12 @@ class _Run:
             if quarantine is not None:
                 quarantine(task)  # a block page must not be served from the cache on the retry
             self._fail(task, "blocked: expected content marker missing", **outcome)
-            self.marker_miss_streak += 1
-            if self.marker_miss_streak >= self.max_marker_misses:
+            host = _host_of_url(task.url)
+            streak = self.marker_miss_streaks[host] = self.marker_miss_streaks.get(host, 0) + 1
+            if streak >= self.max_marker_misses:
                 return (
-                    f"{REASON_CIRCUIT}: {self.marker_miss_streak} consecutive pages without"
-                    " content marker"
+                    f"{REASON_CIRCUIT}: {streak} consecutive pages without content marker"
+                    f" from {host}"
                 )
             return None
         if status not in (STATUS_FETCHED, STATUS_EMPTY, STATUS_ABANDONED):
@@ -284,7 +295,7 @@ class _Run:
         # a cache hit says nothing about the site (or the disk), so it must not reset a breaker
         if not from_cache:
             self.failure_streak = 0
-            self.marker_miss_streak = 0
+            self.marker_miss_streaks[_host_of_url(task.url)] = 0
         error = None
         if status in _FOLLOWED_STATUSES:
             # An abandoned page is parsed too: what it still leads to (the rest of a card whose
@@ -328,7 +339,8 @@ def run_backfill(
     max_requests counts tasks that went to the network (cache hits are free). `quiet`, asked
     before every task, returns a reason while the site must not be contacted. `http` is the
     mapping the Fetcher takes; the run reads its own limits from its `circuit_breaker`
-    (`max_consecutive_failures`, default 5; `max_consecutive_marker_misses`, default 10), and
+    (`max_consecutive_failures`, default 5; `max_consecutive_marker_misses`, default 10, counted
+    per URL host), and
     builds the Fetcher from it when none is passed. Progress goes to
     logs/<source>/scrape-<UTC>.log under the data directory only; the caller prints the summary.
     """
