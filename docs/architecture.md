@@ -118,7 +118,7 @@ flowchart LR
 | `logs/japan/` | log-day's health lines and block markers (`countries/japan/logger/health.py`, `countries/japan/logger/log_day.py`) | the owner |
 | `models/japan/v0/` | `countries/japan/models/v0/calibration.py`, `countries/japan/models/v0/nowcast.py`, `countries/japan/models/v0/ordering.py`, `countries/japan/models/v0/residual.py` | `countries/japan/models/v0/loader.py` |
 | `shadow/japan/{date}.jsonl` | `countries/japan/shadow/log.py` | settling against final dividends, planned (#101); the shadow page never reads it |
-| `registry/{country}.jsonl` | `core/eval/registry.py`, from the studies and fits | its committed summary `docs/experiments/registry-japan.md` |
+| `registry/{country}.jsonl` | `core/eval/registry.py`, from the studies and fits | its committed summary `docs/experiments/registry/japan/` |
 | `reports/` | `core/eval/reports.py` (`write_report`), `core/store/checks.py` | the owner |
 | `features/`, `jrdb/`, `fixtures/` | `countries/japan/handicap/` feature sets; JRDB specs; real pages for `local` tests | the fits; `countries/japan/jrdb/parse.py`; the `local` tests |
 | board page, shadow page | `countries/japan/board/server.py` (`board-serve`, bound to localhost), `countries/japan/board/web/` | the owner's browser |
@@ -314,7 +314,7 @@ flowchart TD
 | pre-registered study | e.g. `countries/japan/studies/calibration.py` |
 | scoring and paired bootstrap | `core/eval/scoring.py`, `core/eval/bootstrap.py` |
 | SPA / StepM, segment shrinkage | `core/eval/snooping.py`, `core/eval/segment_roi.py` (D17) |
-| run registry | `core/eval/registry.py`; summary `docs/experiments/registry-japan.md` |
+| run registry | `core/eval/registry.py`; summary `docs/experiments/registry/japan/` |
 | experiment report | template `docs/experiment-report.md`; reports in `docs/experiments/`; licensed-source outputs through `core/eval/reports.py` into the data dir |
 | ledger | `docs/ledger.md` |
 | adoption decision | owner sign-off per D16 |
