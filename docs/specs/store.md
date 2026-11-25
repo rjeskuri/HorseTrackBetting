@@ -65,15 +65,19 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   parsers), `result_published_utc` (when the race's official result was first seen published,
   ticket #225; null for history without a logged time), `result_unpublished_utc` (its lower bound,
   the last logger poll that did not show the result; null when unknown: a late sighting, shown on a
-  run's first poll, or no logged time).
+  run's first poll, or no logged time). All seven are `schemas.OPTIONAL_COLUMNS['races']`:
+  `scripts/check_store_rebuild.py` accepts one that a copied table lacks and the rebuild holds all
+  null (HKTrack's copy has neither `rail_setting` nor the two `result_*_utc` columns).
 - **runners**: the meeting keys as on races, then `horse_id, horse_no, horse_name, brand_raw`,
   jockey and trainer `*_key, *_code, *_name`, `actual_wt_lb, declared_horse_wt_lb, draw,
   placing_raw, finish_pos` (null when not placed), `placing_code, dead_heat, lbw_raw, lbw_lengths`
   (0 for the winner), `running_positions, finish_time_s, win_odds` (final, decimal including the
   stake), `is_scratched`, and `rating, gear_raw` (the rating and gear at that run, where a source
   prints them). Optional: `bracket, actual_wt_kg, horse_wt_kg, horse_wt_change_kg, last_3f_s,
-  win_fav_rank, sex, age`. A source that weighs in kg keeps the exact values in the kg columns; how
-  it fills the lb columns is that source's own rule, stated in its adapter.
+  win_fav_rank, sex, age` (`schemas.OPTIONAL_COLUMNS`; `scripts/check_store_rebuild.py` accepts
+  one that a copied table lacks and the rebuild holds all null). A source that weighs in kg keeps
+  the exact values in the kg columns; how it fills the lb columns is that source's own rule,
+  stated in its adapter.
 - **dividends**: `race_id, pool` (a normalised pool code), `combination` (`"4"`, `"4,7"`,
   `"4,7,9"`), `dividend` (per the source's unit stake, from its config), `is_refund`.
 - **sectionals**: `race_id, horse_id, horse_no, section_no, section_pos, section_margin_lengths,
