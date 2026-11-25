@@ -1,0 +1,34 @@
+# The crowd-calibration study's pre-registered inputs (ticket #77; read by
+# countries/japan/studies/calibration.py, owner_inputs). Every value is the owner's, answered on #77
+# on 2026-11-25, and is frozen in the run registry (family japan-crowd-calibration-final-win) before
+# any race is scored. Changing a value is an owner decision and needs a new family, not a code
+# change.
+
+# E4: the full candidate list (08 §4), with the definitions in calibration.SEGMENTS. Each segment is
+# fitted in vs out; venue is one beta per venue code. Low turnover is not here: it needs per-race
+# sales, which are not ingested.
+segments:
+  - R12
+  - R11pm1
+  - g1_day_undercard
+  - field_16_plus
+  - debut
+  - venue
+  - heavy_going
+  - handicap
+
+# E3: the owner's rule is quintiles of the per-race normalised entropy over the development races
+# of the first training window (D9, #70: 2014-06-07 to 2019-12-31), frozen before any scored fold.
+# Computed from the final Win odds alone (columns race_id, race_date, win_odds, is_scratched; no
+# outcome column read), development days only, holdout days dropped: the 20th, 40th, 60th and 80th
+# percentiles (numpy.quantile, linear interpolation) of 19,259 races with two or more priced
+# starters on 608 race days (2014-06-07 to 2019-12-28), by
+#   uv run python -m horsetrack.countries.japan.studies.calibration --entropy-cut-points
+# Each run recomputes them and refuses this file if they differ (calibration.check_cut_points).
+entropy_cut_points: [0.6952092433071905, 0.7467255002267639, 0.7851488760086348, 0.8215443360884407]
+
+# The tail: a runner priced above decimal 51.0 (above 50/1).
+tail_min_odds: 51.0
+
+# Where the owner signed these answers.
+owner_signoff: 77

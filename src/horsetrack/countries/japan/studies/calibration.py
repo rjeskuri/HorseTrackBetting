@@ -28,13 +28,19 @@ over `compute_study(frame, spec)`, which is pure. Its pre-registered inputs are 
     tail_min_odds: 51.0                # the tail is a runner priced above this (50/1 = 51.0)
     owner_signoff: <issue>             # where the owner signed these answers
 
+The cut points follow the owner's rule, ENTROPY_CUT_RULE (quintiles of the first training
+window's per-race entropy, from the final Win odds alone); `--entropy-cut-points` prints them
+(`first_window_cut_points`, over the pure `entropy_cut_points`), and every run recomputes them
+and refuses a yaml that disagrees, so the rule and the numbers frozen in the spec agree.
+
 The floor is the Win pool's minimum dividend over the unit stake (`jra.yaml`, 110 / 100 = 1.1);
 the bootstrap's unit, level and replicates come from `config/scoring.yaml` (D7) and the folds from
-`config/folds.yaml` (D9). Order: read the owner's inputs, freeze the family's spec in the run
-registry (`FamilyAlreadyFrozen` on another spec stops the run), read the development rows of the
-price era (`read_store_table`: column- and date-scoped, holdout days dropped, nothing before
-2014-06-07; then `split_off`'s development rows; the holdout is never opened), score, append one
-registry record per variant (failures included) and write the report through `write_report`.
+`config/folds.yaml` (D9). Order: read the owner's inputs, check the cut points (prices only),
+freeze the family's spec in the run registry (`FamilyAlreadyFrozen` on another spec stops the
+run), read the development rows of the price era (`read_store_table`: column- and date-scoped,
+holdout days dropped, nothing before 2014-06-07; then `split_off`'s development rows; the holdout
+is never opened), score, append one registry record per variant (failures included) and write the
+report through `write_report`.
 """
 
 from __future__ import annotations
@@ -290,6 +296,18 @@ def flag_floor_bound(odds: pd.Series, *, floor: float) -> pd.Series:
     return pd.Series(flagged, index=odds.index, dtype=bool)
 
 
+def entropy_cut_points(
+    odds: pd.Series, race_id: pd.Series, *, quantiles: Sequence[float]
+) -> list[float]:
+    """The `quantiles` of the per-race normalised entropy of `odds` (E3's cut points), races with
+    fewer than two priced runners left out; numpy's linear interpolation. Prices only: no outcome
+    enters. Raises ValueError when no race has two priced runners."""
+    entropy = normalised_entropy(odds, race_id).dropna().to_numpy()
+    if len(entropy) == 0:
+        raise ValueError("no race has two or more priced runners")
+    return [float(c) for c in np.quantile(entropy, list(quantiles))]
+
+
 # =========================================================================== the study
 
 COUNTRY = "japan"
@@ -306,18 +324,42 @@ RACE_COLUMNS = ["race_id", "race_date", "meeting_id", "venue", "race_no", "race_
 RACE_COLUMNS += ["surface", "going", "weight_type", "field_size", "status"]
 DEVIGS = ("normalised", "power", "shin")  # normalised first: the others' comparator
 PARAMETER_FREE = {"normalised": devig_normalised, "shin": devig_shin}
+SUBSETS = ("all_races", "no_floor_bound_races")
 OWNER_KEYS = {
     "segments": "the E4 segment family (08 §4): which named segments to fit",
     "entropy_cut_points": "the E3 entropy cut points: four increasing numbers in (0, 1)",
     "tail_min_odds": "the tail threshold in decimal odds (the ticket's 'above 50/1')",
     "owner_signoff": "the issue where the owner signed these answers",
 }
+# E3's cut-point rule (the owner's answer on #77): quintiles of the per-race normalised entropy
+# over the development races of D9's first training window, from the final Win odds alone.
+ENTROPY_WINDOW = (PRICE_ERA_START, date(2019, 12, 31))
+ENTROPY_QUANTILES = (0.2, 0.4, 0.6, 0.8)
+CUT_POINT_COLUMNS = ["race_id", "race_date", "win_odds", "is_scratched"]  # no outcome column
+ENTROPY_CUT_RULE = {
+    "rule": "quintiles of the per-race normalised entropy of the final Win odds "
+    "(numpy.quantile, linear interpolation), races with two or more priced starters",
+    "window": [d.isoformat() for d in ENTROPY_WINDOW],
+    "quantiles": list(ENTROPY_QUANTILES),
+    "rows": "priced starters of the development race days in the window; columns read: "
+    + ", ".join(CUT_POINT_COLUMNS),
+    "computed_by": "python -m horsetrack.countries.japan.studies.calibration --entropy-cut-points",
+}
+CUT_POINT_TOLERANCE = 1e-12  # the yaml's cut points against the rule's, recomputed at each run
 DECISIONS = {
+    "D4": "the Win baseline is the calibrated market (spline in ln q), fitted in-fold; this study "
+    "measures the de-vigs beneath it and adopts none (section 2)",
     "D6": "winner log loss per race, a dead heat at 1/k per co-winner (section 3; #69 answer)",
     "D7": "meeting (venue x day) clusters, 95% one-sided (config/scoring.yaml)",
     "D9": "walk-forward quarters, expanding, 1-week embargo (config/folds.yaml; #70 answer)",
     "D10": "races before 2014-06-07 excluded wherever the price enters (section 4)",
-    "D12": "development rows only; the locked holdout is not opened (config/holdout.yaml, #71)",
+    "D11": "Japan holdout A2: a seeded half of race days from the start (config/holdout.yaml, #71)",
+    "D12": "holdout start 2026-11-28, opened only by the owner at a power target (section 5)",
+    "D14": "holdout days fully locked, outcomes and prices: no holdout row is read (section 5)",
+    "D15": "a holdout opening is the owner's, once per family: the holdout is not opened here",
+    "#77": "the owner's answers of 2026-11-25: the full E4 list; E3 quintiles of the first "
+    "training window; the era table post-reform only; floor-bound races out of fit and score in "
+    "the no-floor-bound subset; the tail above decimal 51.0",
 }
 
 
@@ -459,7 +501,8 @@ def build_spec(owner: dict, scheme: FoldScheme, bootstrap: dict, floor: float) -
         "family_id": FAMILY_ID,
         "ticket": TICKET,
         "hypotheses": {
-            "E1": "the power beta of the final Win price, by year, era and tail; de-vig ΔLL",
+            "E1": "the power beta of the final Win price by year and era; each de-vig's ΔLL "
+            "against normalised and its tail calibration (observed vs expected winners)",
             "E3": "the power beta by bin of the race's normalised market entropy",
             "E4": "the power beta in vs out of each pre-registered segment",
         },
@@ -470,17 +513,25 @@ def build_spec(owner: dict, scheme: FoldScheme, bootstrap: dict, floor: float) -
             "shin": "Shin (1993), z solved per race; clamped to 0 (normalised) without overround",
         },
         "comparator": "normalised",
+        "delta_ll": "per scored race, normalised's winner log loss minus the de-vig's "
+        "(core.eval.scoring.gain), out of fold; meeting-clustered paired bootstrap bounds",
         "beta_fit": "conditional logit on ln(1/O), MLE; se = observed information^-1/2; "
         "races with a priced winner; a dead heat counts each co-winner",
         "beta_ci": "95% two-sided Wald, beta +/- 1.96 se",
+        "in_sample": "beta by year, era, E4 segment and E3 entropy bin: one fit per group on "
+        "every development race of the subset, descriptive, no fold",
+        "adoption": "none: the owner picks the baseline de-vig; judged by the beta CI, not by "
+        "ΔLL (08 §4 E1)",
         "score": "winner log loss per race (core.eval.scoring.per_race_log_loss)",
         "rows": "priced starters of run races with a priced winner; development days only",
         "subsets": {
             "all_races": "every development race",
-            "no_floor_bound_races": "races holding a floor-bound runner left out, fit and score",
+            "no_floor_bound_races": "races holding a floor-bound runner left out of fitting and "
+            "scoring alike (E1 de-vigs, tail, beta by year and era)",
         },
         "segments": {name: SEGMENTS[name].definition for name in owner["segments"]},
         "entropy_cut_points": owner["entropy_cut_points"],
+        "entropy_cut_rule": ENTROPY_CUT_RULE,
         "tail": {"min_odds": owner["tail_min_odds"], "rule": "a runner priced above min_odds"},
         "floor": {"odds": floor, "rule": "a priced runner at or under odds + 1e-9 (jra.yaml)"},
         "fold_scheme": dataclasses.asdict(scheme),
@@ -506,6 +557,40 @@ def read_development() -> tuple[pd.DataFrame, pd.DataFrame]:
         development, _ = split_off(table.to_pandas(date_as_object=False), "race_date", COUNTRY)
         frames.append(development)
     return frames[0], frames[1]
+
+
+def first_window_cut_points() -> dict:
+    """E3's cut points by ENTROPY_CUT_RULE: the development race days of ENTROPY_WINDOW, read
+    column-scoped (prices and the scratch flag; no outcome column), holdout days dropped."""
+    start, end = ENTROPY_WINDOW
+    table = read_store_table(
+        "runners", columns=CUT_POINT_COLUMNS, start=start, end=end, touches_price=True
+    )
+    runners, _ = split_off(table.to_pandas(date_as_object=False), "race_date", COUNTRY)
+    starters = runners.loc[~runners["is_scratched"].eq(True).to_numpy(dtype=bool, na_value=False)]
+    odds = starters["win_odds"].astype(float)
+    entropy = normalised_entropy(odds, starters["race_id"])
+    return {
+        "entropy_cut_points": entropy_cut_points(
+            odds, starters["race_id"], quantiles=ENTROPY_QUANTILES
+        ),
+        "races": int(entropy.notna().sum()),
+        "race_days": int(starters["race_date"].nunique()),
+        "first_race_day": str(starters["race_date"].min().date()),
+        "last_race_day": str(starters["race_date"].max().date()),
+        "rule": ENTROPY_CUT_RULE,
+    }
+
+
+def check_cut_points(cuts: Sequence[float]) -> None:
+    """Refuse cut points in config/calibration.yaml that are not ENTROPY_CUT_RULE's on the store,
+    so the frozen spec's rule and numbers agree."""
+    expected = first_window_cut_points()["entropy_cut_points"]
+    if not np.allclose(cuts, expected, rtol=0.0, atol=CUT_POINT_TOLERANCE):
+        raise ValueError(
+            f"entropy_cut_points {list(cuts)} are not the rule's {expected} "
+            f"({ENTROPY_CUT_RULE['computed_by']})"
+        )
 
 
 def store_builds() -> dict[str, str]:
@@ -694,6 +779,7 @@ def _devig_variants(frame: pd.DataFrame, spec: dict, subset: str, study: Study) 
         tables["tail"] = [
             {"subset": subset, "de-vig": name, "tail runners": int(tail.sum())}
             | {"observed winners": observed, "expected winners": expected}
+            | {"O / E": observed / expected if expected > 0 else None}
             | {"(O - E) per race": iv.mean, "lower": iv.lo, "upper": iv.hi}
         ]
         return metrics, tables
@@ -705,11 +791,11 @@ def _devig_variants(frame: pd.DataFrame, spec: dict, subset: str, study: Study) 
         study.attempt(variant, lambda name=name: score(name))
 
 
-def _year_and_era(frame: pd.DataFrame) -> tuple[list, dict]:
+def _year_and_era(frame: pd.DataFrame, subset: str) -> tuple[list, dict]:
     fit_rows = frame[["race_id", "odds", "won"]].assign(year=frame["race_date"].dt.year)
-    metrics, by_year = _beta_table(segment_beta(fit_rows, "year"), "year", "year")
+    metrics, by_year = _beta_table(segment_beta(fit_rows, "year"), "year", "year", subset=subset)
     era = segment_beta(fit_rows.assign(era=f"{PRICE_ERA_START.isoformat()} onward"), "era")
-    era_metrics, by_era = _beta_table(era, "era", "era")
+    era_metrics, by_era = _beta_table(era, "era", "era", subset=subset)
     return metrics + era_metrics, {"beta_by_year": by_year, "beta_by_era": by_era}
 
 
@@ -747,26 +833,31 @@ def _entropy_bins(frame: pd.DataFrame, cuts: list[float]) -> tuple[list, dict]:
 def compute_study(frame: pd.DataFrame, spec: dict) -> Study:
     """Every variant and table of the frozen `spec` on `frame` (development_frame's shape).
 
-    E1 walk-forward for each subset (every race; races without a floor-bound runner): normalised,
-    out-of-fold power and Shin winner log loss, ΔLL against normalised and the tail, each with
-    meeting-clustered bootstrap bounds. In-sample on every development race: beta by year and
-    era, by E4 segment (in vs out) and by E3 entropy bin, with 95% CIs. Pure: no I/O.
+    For each subset (every race; races without a floor-bound runner, left out of fitting and
+    scoring alike): E1 walk-forward normalised, out-of-fold power and Shin winner log loss, ΔLL
+    against normalised and the tail, each with meeting-clustered bootstrap bounds, and the
+    in-sample beta by year and era with 95% CIs. In-sample on every development race: beta by E4
+    segment (in vs out) and by E3 entropy bin, with 95% CIs. Pure: no I/O.
     """
     floor = flag_floor_bound(frame["odds"], floor=spec["floor"]["odds"])
     floor_race = floor.groupby(frame["race_id"].to_numpy()).transform("any").to_numpy()
     study = Study(counts={"floor_bound_runners": int(floor.sum())})
     study.counts["races_holding_a_floor_bound_runner"] = int(frame["race_id"][floor_race].nunique())
-    _devig_variants(frame, spec, "all_races", study)
-    columns = ["race_id", "race_date", "meeting_id", "odds", "won"]
-    without = frame.loc[~floor_race, columns].reset_index(drop=True)
-    _devig_variants(without, spec, "no_floor_bound_races", study)
-    del without
-
     components = {"fit": FIT}
-    study.attempt(
-        Variant("E1", "power_beta:by_year_and_era", IN_SAMPLE, components, {"by": ["year", "era"]}),
-        lambda: _year_and_era(frame),
-    )
+    columns = ["race_id", "race_date", "meeting_id", "odds", "won"]
+    for subset in SUBSETS:
+        rows = frame if subset == "all_races" else frame.loc[~floor_race, columns]
+        rows = rows.reset_index(drop=True)
+        _devig_variants(rows, spec, subset, study)
+        variant = Variant(
+            "E1",
+            f"power_beta:by_year_and_era:{subset}",
+            IN_SAMPLE,
+            components,
+            {"by": ["year", "era"], "subset": subset},
+        )
+        study.attempt(variant, lambda rows=rows, subset=subset: _year_and_era(rows, subset))
+        del rows
     races = frame.drop_duplicates("race_id").set_index("race_id")
     for name, definition in spec["segments"].items():
         variant = Variant(
@@ -803,10 +894,11 @@ SECTIONS = (
     (
         "tail",
         "Tail: runners priced above the tail threshold (out of fold)",
-        "(O - E) per race is the tail's observed minus expected winners per scored race, with the"
-        " same meeting-clustered bounds; a dead heat counts each co-winner.",
+        "O / E is the tail's observed over expected winners (point only). (O - E) per race is the"
+        " tail's observed minus expected winners per scored race, with the same meeting-clustered"
+        " bounds; a dead heat counts each co-winner.",
     ),
-    ("beta_by_year", "Beta by year (in-sample, development races)", ""),
+    ("beta_by_year", "Beta by year (in-sample, development races, 95% CI)", ""),
     (
         "beta_by_era",
         "Beta by era (in-sample)",
@@ -889,11 +981,14 @@ def run_study(out_dir: Path | None = None) -> dict:
     """Run the pre-registered study on Japan's development data and write its report.
 
     Raises `MissingOwnerDecision` before the store is read when config/calibration.yaml lacks an
-    input, `paths.DataDirInsideRepo` for an `out_dir` inside the repository, and
-    `FamilyAlreadyFrozen` when the family is frozen with another spec."""
+    input, `paths.DataDirInsideRepo` for an `out_dir` inside the repository, ValueError before
+    the freeze when the yaml's cut points are not ENTROPY_CUT_RULE's (recomputed from the first
+    window's prices alone), and `FamilyAlreadyFrozen` when the family is frozen with another
+    spec."""
     owner = owner_inputs()
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     spec = build_spec(owner, load_country_scheme(COUNTRY), bootstrap_settings(), win_floor())
+    check_cut_points(owner["entropy_cut_points"])  # prices only: no outcome before the freeze
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
     spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any likelihood is evaluated
@@ -936,9 +1031,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m horsetrack.countries.japan.studies.calibration"
     )
-    parser.add_argument("--run", action="store_true", required=True, help="run the study")
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--run", action="store_true", help="run the study")
+    action.add_argument(
+        "--entropy-cut-points",
+        action="store_true",
+        help="print E3's cut points by the owner's rule (prices of the first window only)",
+    )
     parser.add_argument("--out", type=Path, default=None, help="report directory, outside the repo")
     args = parser.parse_args(argv)
+    if args.entropy_cut_points:
+        print(json.dumps(first_window_cut_points(), indent=2))
+        return 0
     print(json.dumps(run_study(args.out), indent=2))
     return 0
 
