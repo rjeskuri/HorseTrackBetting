@@ -26,6 +26,8 @@ fail a table, and every other difference still does:
   and jrdb_post_race, added after the copy was made).
 - every table: a column the copy types as Arrow `null` (it was all null when written) that the
   rebuild types otherwise but holds only nulls in. One value in the rebuild is still a difference.
+- `schemas.OPTIONAL_COLUMNS` (#215): a column the copy lacks and the rebuild has with only nulls. A
+  column with values, or one the rebuild lacks, still fails.
 """
 
 from __future__ import annotations
@@ -54,6 +56,7 @@ EXPECTED_ADDITIONS: dict[str, tuple[str, ...]] = {
 }
 ADDED = "added"
 ALL_NULL = "all-null"
+OPTIONAL = "optional"
 _BITS_AS_INT = {16: pa.int16(), 32: pa.int32(), 64: pa.int64()}
 
 
@@ -151,15 +154,21 @@ def _all_null(path: Path, name: str) -> bool:
 
 
 def compare_tables(
-    a: Path, b: Path, key: Sequence[str] | None = None, *, expected_extra: Sequence[str] = ()
+    a: Path,
+    b: Path,
+    key: Sequence[str] | None = None,
+    *,
+    expected_extra: Sequence[str] = (),
+    optional: Sequence[str] = (),
 ) -> TableDiff:
     """Compare two Parquet tables; reads them (one after the other) and writes nothing.
 
     The content hashes cover the columns both sides have with the same type, so a schema
     difference does not hide whether the rest of the content matches. `key` None: sort by every
-    column. Two kinds of difference are accepted and recorded in `TableDiff.accepted`: a column of
-    `expected_extra` that only b has, and a column typed `null` in a whose values in b are all
-    null (b's type is any other)."""
+    column. Three kinds of difference are accepted and recorded in `TableDiff.accepted`: a column of
+    `expected_extra` that only b has; a column of `optional` that only b has and holds only nulls in
+    (with a value, or missing from b, it still fails); and a column typed `null` in a whose values
+    in b are all null (b's type is any other)."""
     schema_a, schema_b = pq.read_schema(a), pq.read_schema(b)
     names_a, names_b = set(schema_a.names), set(schema_b.names)
     diff = TableDiff(
@@ -169,6 +178,10 @@ def compare_tables(
         extra_columns=[c for c in schema_b.names if c not in names_a and c not in expected_extra],
         accepted={c: ADDED for c in schema_b.names if c not in names_a and c in expected_extra},
     )
+    for name in [c for c in diff.extra_columns if c in optional]:
+        if _all_null(b, name):
+            diff.extra_columns.remove(name)
+            diff.accepted[name] = OPTIONAL
     shared = []
     for name in schema_a.names:
         if name not in names_b:
@@ -263,9 +276,14 @@ def rebuild(work: Path, source: str, workers: int) -> list[str]:
 
 
 def _accepted_note(diff: TableDiff) -> str:
-    """` (accepted: a added; all-null: b, c)` for the accepted columns, or nothing."""
+    """` (accepted: a added; all-null: b, c; optional all-null: d)` for the accepted columns, or
+    nothing."""
     parts = []
-    for reason, label in ((ADDED, "{} added"), (ALL_NULL, "all-null: {}")):
+    for reason, label in (
+        (ADDED, "{} added"),
+        (ALL_NULL, "all-null: {}"),
+        (OPTIONAL, "optional all-null: {}"),
+    ):
         names = [c for c, why in diff.accepted.items() if why == reason]
         if names:
             parts.append(label.format(", ".join(names)))
@@ -273,10 +291,14 @@ def _accepted_note(diff: TableDiff) -> str:
 
 
 def compare_stores(
-    copied: Path, rebuilt: Path, tables: Mapping[str, Sequence[str]]
+    copied: Path,
+    rebuilt: Path,
+    tables: Mapping[str, Sequence[str]],
+    optional: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[list[str], bool]:
     """One line per table, match / MISMATCH with the failed checks (no row contents), and whether
-    every table matched. A table neither side has is skipped."""
+    every table matched. A table neither side has is skipped. `optional` maps a table to its
+    optional columns (see `compare_tables`); one accepted there is named on the `match` line."""
     lines, ok = [], True
     for name, key in tables.items():
         a, b = copied / f"{name}.parquet", rebuilt / f"{name}.parquet"
@@ -287,7 +309,13 @@ def compare_stores(
                 )
                 ok = False
             continue
-        diff = compare_tables(a, b, key=key, expected_extra=EXPECTED_ADDITIONS.get(name, ()))
+        diff = compare_tables(
+            a,
+            b,
+            key=key,
+            expected_extra=EXPECTED_ADDITIONS.get(name, ()),
+            optional=(optional or {}).get(name, ()),
+        )
         rows = "" if name.startswith("jrdb_") else f" rows {diff.rows_a} / {diff.rows_b}"
         if diff.equal:
             lines.append(f"{name}: match{rows}{_accepted_note(diff)}")
@@ -331,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(line)
         tables = {name: spec.sort_by for name, spec in schemas.TABLES.items()}
         copied, rebuilt = data / "processed" / args.source, work / "processed" / args.source
-        result = compare_stores(copied, rebuilt, tables)
+        result = compare_stores(copied, rebuilt, tables, schemas.OPTIONAL_COLUMNS)
     except Refused as exc:
         print(f"ERROR {exc}")
     finally:  # also when the build raised
