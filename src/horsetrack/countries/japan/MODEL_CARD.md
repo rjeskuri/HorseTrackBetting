@@ -34,13 +34,49 @@ None adopted.
 
 None adopted.
 
+### C3: race-level finish speed (#96, scored by #305; not adopted)
+
+C3 forecasts a race's top-3 time at the decision time.
+- **Code:** the model is `countries/japan/models/speed.py` (#96). The run is `countries/japan/studies/speed_run.py` (#305).
+- **Data:** the store's JRA races and runners (netkeiba results), column-scoped. No JRDB or JRA-VAN input is read.
+  Holdout days are dropped before anything else, and jump races are excluded.
+- **Target:** `top3_time_s`, the mean finish time of the runners placed 1–3 (owner, #96).
+  - It is read per runner: each runner placed 1 or 2 counts once, and the runners placed 3rd share one slot at their
+    mean.
+  - A race with no 3rd-placed runner uses the runners placed 1–2. There are 110 such races.
+- **Model:** a linear mixed model, `top3_time = par(cell) + v(day, track, surface) + ε`.
+  - The cell is track × surface × distance × layout × rail × class. Class is a category with no scale imposed (the
+    class scale is the owner's), and a missing key is the level `unknown`.
+  - The day effect v is a random effect, N(0, τ²). ε is Student-t (5 df in #305's primary run, df not signed) or
+    normal.
+  - The model is fitted by maximum likelihood (conditional maximisation: Student-t reweighting, then σ² and τ²
+    profiled with v integrated out) on each fold's training races only.
+- **Prediction at t:** E[top-3 time] = par + the posterior mean of the day's v.
+  - The posterior uses the residuals, against the frozen par, of the same (day, track, surface) races whose result is
+    available strictly before t.
+  - A result is available at post_utc + 30 min, the owner's same-day results rule (#80, #96).
+  - With no result by t, v is its prior, so the forecast is the par. No variant prior is injected yet; the cushion and
+    moisture prior is E29 (#90, #230).
+- **Evaluation:** #70's quarterly expanding walk-forward folds (D9). The decision time is T-2 (D2). The metric is the
+  time RMSE against the par-only baseline on the same races, with meeting-clustered paired one-sided 95% bounds (D7).
+- **Result (#305):** RMSE 1.009 s against the par's 1.242 s, a gain of +0.233 s (lower bound +0.224). That is 37,047
+  development races, 2015-Q4 to 2026-11-23 ([docs/experiments/speed-japan.md](../../../../docs/experiments/speed-japan.md)).
+  The gain is 0 on the 26% of races with no same-day result by t.
+- **Limitations:**
+  - Rail is unknown on every race in the store and layout on 88%, so the 'course' part of the owner's request is not
+    resolved yet (#90, #329).
+  - The 30-minute publication rule is an assumption in the ledger.
+  - C3 has no test against the final price yet (E39 marginal, #97).
+
 ## Evaluation
 
 Splits, metric and confidence interval: not decided, see [the problem statement](../../../../docs/problem-statement.md). Holdout use is recorded in [the holdout log](../../../../docs/holdout-log.md).
 
 ## Results
 
-None yet.
+None adopted.
+
+- C3 time test (#305): the same-day variant lowers the time RMSE of E[top-3 time] by +0.233 s against the par alone (one-sided 95% lower bound +0.224). This is a time result only, not a result at the final price. See the C3 entry under Model.
 
 ## Known limitations
 
