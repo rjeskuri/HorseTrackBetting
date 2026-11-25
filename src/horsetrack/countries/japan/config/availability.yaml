@@ -7,8 +7,11 @@
 # races derive post_utc from race_date and post_time_local (Asia/Tokyo; #227). Since then the horse
 # weights and the same-day going are in the views, null until post_utc - 60 min of their race, and
 # the result tables enter the views at post_utc + 30 min of their race, read by race_id from races
-# (the owner's answer on #80, 2026-11-24). A race without a post time never shows either. The
-# result columns of races and runners stay label_columns. A table without an entry here is refused.
+# (the owner's answer on #80, 2026-11-24). Since #305 the finish (races finish_time_s; runners
+# finish_pos, dead_heat, finish_time_s) is in the views too, null until post_utc + 30 min of its
+# race, the same rule as same-day dividends (the owner's answer on #96, 2026-11-25). A race without
+# a post time never shows any of these. The other result columns of races and runners stay
+# label_columns. A table without an entry here is refused.
 tables:
   # The board at t: the latest capture fetched by t. HKTrack rows have no fetched_utc, so their
   # snapshot_utc counts. The payout and the final-capture flag come from the whole day's log.
@@ -43,11 +46,15 @@ tables:
       - columns: [going, going_raw]
         anchor: post_utc
         offset_min: -60
+      # the finish: in the view, null until post_utc + 30 min, the same-day dividends rule
+      # (#305; the owner's answer on #96, 2026-11-25)
+      - columns: [finish_time_s]
+        anchor: post_utc
+        offset_min: 30
     # field_size and status stay in the view: accepted leak (see above)
-    # results; result_published_utc and result_unpublished_utc (#225): never in a view (owner
-    # decision, answer on #80, 2026-11-25). rail_setting stays in.
+    # the other results; result_published_utc and result_unpublished_utc (#225): never in a view
+    # (owner decision, answer on #80, 2026-11-25). rail_setting stays in.
     label_columns:
-      - finish_time_s
       - split_times_s
       - result_published_utc
       - result_unpublished_utc
@@ -63,14 +70,17 @@ tables:
         via: {table: races, match: [race_id]}
         anchor: post_utc
         offset_min: -60
+      # the finish: in the view, null until post_utc + 30 min of the runner's race, the same-day
+      # dividends rule (#305; the owner's answer on #96, 2026-11-25)
+      - columns: [finish_pos, dead_heat, finish_time_s]
+        via: {table: races, match: [race_id]}
+        anchor: post_utc
+        offset_min: 30
     # is_scratched stays in the view: accepted leak (see above)
-    # results
+    # the other results
     label_columns:
-      - finish_pos
       - placing_raw
       - placing_code
-      - dead_heat
-      - finish_time_s
       - lbw_raw
       - lbw_lengths
       - running_positions
