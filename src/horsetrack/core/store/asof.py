@@ -239,7 +239,8 @@ def _available_sql(con: duckdb.DuckDBPyConnection, rule: Availability) -> tuple[
         if rule.tz is None:
             raise ValueError(f"{rule.table}.{rule.anchor} is a DATE: its rule needs a tz")
         try:  # DuckDB's zone database, which may differ from Python's
-            con.execute("SELECT timezone(?, TIMESTAMP '2000-01-01')", [rule.tz])
+            # fetched, so no unfinished result blocks the connection's next statement (DuckDB 2)
+            con.execute("SELECT timezone(?, TIMESTAMP '2000-01-01')", [rule.tz]).fetchall()
         except duckdb.Error as exc:
             raise ValueError(f"{rule.table}: DuckDB does not know the zone {rule.tz!r}") from exc
         local = f"timezone(?, CAST({_ident(rule.anchor)} AS TIMESTAMP))"
