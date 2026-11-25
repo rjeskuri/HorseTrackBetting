@@ -30,7 +30,8 @@ that folder is not a store table.
 Missing values are null, never sentinel numbers. Where parsing can lose information the page's
 text is kept next to the parsed value (`*_raw`). Timestamps are UTC and only appear in `*_utc`
 columns that come from the pages' fetch times (or, for `races.result_published_utc` and
-`races.result_unpublished_utc`, the odds logger's poll times).
+`races.result_unpublished_utc`, the odds logger's poll times; for `track_condition.published_utc`
+and `available_utc`, the publication time the page prints).
 
 ## Tables
 
@@ -51,6 +52,7 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
 | `horse_pedigree` | one horse's pedigree | `horse_id` |
 | `jrdb_pre_race` | one JRDB pre-race row matched to a runner | `race_id, horse_no` |
 | `jrdb_post_race` | one JRDB post-race row matched to a runner | `race_id, horse_no` |
+| `track_condition` | one JRA publication of a venue's going for a race date and surface | `race_date, venue, surface, published_utc` |
 
 - **meetings**: `meeting_id, race_date, venue, season, day_night, surface_mix, status` (`run` or
   `abandoned`).
@@ -103,6 +105,14 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   `<data dir>/jrdb/specs`) are written by `horsetrack japan jrdb build`
   (`countries/japan/jrdb/tables.py`), which also writes `jurisdiction`; a family not delivered
   still has its columns, all null.
+- **track_condition** (#90): JRA's going measurements as published, `venue, race_date, surface`
+  (`turf`, `dirt`), `going` (the code, as on races), `rail` (the turf course in use, `A` to `D`;
+  null on dirt and when not printed), `cushion` (turf only), `moisture_goal, moisture_4c` (%),
+  `published_utc` (the 発表 time printed on the page or the yearly record, not a fetch time),
+  `available_utc` (= `published_utc`), `ingested_utc` (the fetch). A meeting republishes its page,
+  so a key has one row per publication; `jra.track_condition.as_of` (or the as-of views) takes the
+  latest at t. A value not printed is null, never 0. Parsed by `countries/japan/jra/
+  track_condition.py`; the store build does not write it (the backfill is #228).
 
 Withdrawals and placing codes differ by site: each source adapter maps its own codes before rows
 reach the store, and documents the mapping.
