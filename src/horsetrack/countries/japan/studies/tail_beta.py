@@ -54,7 +54,8 @@ COUNTRY = calibration.COUNTRY
 TICKET = 285
 SOURCE = calibration.SOURCE  # the store's JRA results, from netkeiba; no JRDB, no JRA-VAN
 FAMILY_ID = "japan-tail-beta-final-win"
-HYPOTHESIS = "T1"
+HYPOTHESIS = "T1"  # the label in the frozen spec (its bytes must not change)
+RECORD_HYPOTHESIS = "E1"  # the registry takes E, L or P ids; the tail is 08 §4 E1's tail measure
 FIT = "conditional_logit_ln_inv_odds_tail_slope"
 IN_SAMPLE = calibration.IN_SAMPLE
 SUBSETS = calibration.SUBSETS
@@ -436,7 +437,9 @@ def compute_study(frame: pd.DataFrame, spec: dict) -> Study:
             if name == "walk_forward":
                 parts["score"] = "winner_log_loss"
             params = {"subset": subset, "tail_min_odds": min_odds}
-            variant = Variant(HYPOTHESIS, f"tail_beta:{name}:{subset}", fold_scheme, parts, params)
+            variant = Variant(
+                RECORD_HYPOTHESIS, f"tail_beta:{name}:{subset}", fold_scheme, parts, params
+            )
             study.attempt(variant, compute)
         del rows
     return study
