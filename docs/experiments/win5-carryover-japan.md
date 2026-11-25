@@ -97,13 +97,13 @@ this study does not show that one exists.
 
 ## Follow-ups filed
 
-None filed by this report; proposed for the owner to file or decline (each `status:proposed` under #135's epic):
+Filed as `status:proposed` tickets under epic #72, for the owner to promote or decline:
 
-1. A live WIN5 ticket rule (top-k per leg) scored at the final dividend on future carryover days, pre-registered,
-   once WIN5 legs are logged (#130).
-2. A pre-registered estimate of the WIN5 no-hit probability from all development days (by pool size and leg
-   favourites), so a carryover day's expected value carries the rollover risk the day bootstrap cannot see.
-3. Verify the refund hypothesis behind the net pool from a JRA page (返還 on a scratched horse), as the ledger's row
-   asks.
-4. Record each new carryover day's pool-level return prospectively (the [1, 2) bin has 1 net-pool day; the
-   [2, inf) bin has none).
+1. #322: pre-register a live WIN5 ticket rule (top-k per leg) on carryover days, scored at the final dividend on
+   future carryover days; it needs WIN5 legs logged (#130).
+2. #323: estimate the WIN5 rollover (no-hit) risk on carryover days from all development days (by pool size and
+   leg favourites), so a carryover day's expected value carries the risk the day bootstrap cannot see.
+3. #324: verify the refund hypothesis behind the net pool from a JRA page (返還 on a scratched horse), as the
+   ledger's row asks.
+4. #325: grow the WIN5 carryover sample, recording each new carryover day's pool-level return as new days run (the
+   [1, 2) bin has 1 net-pool day; the [2, inf) bin has none).
