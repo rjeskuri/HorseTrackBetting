@@ -20,14 +20,17 @@ store alone, and their figures are below.
   the variants, the folds, the bootstrap, the ceiling thresholds and the owner decisions.
 - Code at `30e5bc9`: `countries/japan/models/condlogit.py` and `models/meta.py` (the model, tested in
   `tests/countries/japan/test_condlogit.py` and `test_meta.py`), and `countries/japan/studies/meta.py` (the run).
-  To reproduce, run
+  The meeting-clustered bounds, the report's rule and rules-out sections and the level-2 window table were added at
+  `647879c`, after the outcomes were read (review findings on PR #308; see Hypothesis). To reproduce, run
   `uv run python -m horsetrack.countries.japan.studies.meta --run --members ~/Projects/HKTrack/outputs/oof/m-v1-20261115-6102e309.parquet`.
 - Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`. Members:
   `HKTrack:outputs/oof/m-v1-20261115-6102e309.parquet@b0c5a8298e0befe8`, read by column (keys and the three member
   columns only). HKTrack was read, never written or run.
 - The full report, with every table, is under the data directory at `$HORSETRACK_DATA_DIR/reports/meta-japan-690d41225b38.md`
-  (written through `write_report` with the sources jra and jrdb). The records are in
-  `docs/experiments/registry-japan.md`, where the 24 member-based records show as withheld.
+  (written through `write_report` with the sources jra and jrdb), re-rendered at `647879c`. The records are in
+  `docs/experiments/registry-japan.md`, where the 36 member-based records show as withheld. The re-run reproduced
+  the 26 first-run records exactly and did not append them again; it appended only the 12 `meeting_clustered:`
+  records.
 
 ## Owner decisions used
 
@@ -36,11 +39,11 @@ store alone, and their figures are below.
 | D1 | A: condition on the final price. Every variant conditions on the final Win price. | `docs/problem-statement.md` §1, #14 |
 | D4 | The Win baseline is the calibrated market (#114's spline in ln q), fitted in-fold. It is fitted on each fold's training rows of the store, with dead-heat races left out of its fit as #114's `run_fit` does. | §2, #14 |
 | D6 | Winner log loss per race, a dead heat at 1/k per co-winner (the #69 answer). Pseudo-R² against equal chances is reported beside nats per race. | §3, #14 |
-| D7 | Meeting (venue x day) clusters, 95% one-sided (`config/scoring.yaml`; 10,000 replicates, seed 87). | §3, #14 |
-| D9 | Walk-forward quarters, expanding, 1-week embargo, nested out-of-fold (`config/folds.yaml`). The fold calendar is computed over the store's development starters from 2014-06-07. | §4, #14; the #70 answer |
+| D7 | Meeting (venue x day) clusters, 95% one-sided (`config/scoring.yaml`; 10,000 replicates, seed 87). The ΔLL and ceiling bootstraps resample meetings. The coefficient rules were frozen with 95% two-sided Wald intervals instead; the meeting-clustered one-sided bounds were added after the outcomes were read (see Hypothesis). | §3, #14 |
+| D9 | "Quarter folds, quarterly refit, expanding, 5 seasons minimum, nested OOF, 1-week embargo" (`config/folds.yaml`). The fold calendar is computed over the store's development starters from 2014-06-07. The baseline and the level-2 meta follow the folds, refit, window, nesting and embargo. The 5-season minimum holds for the baseline but **not at level 2 on any scored fold** (see Data). Level 1 is HKTrack's season walk-forward. Whether this window is accepted for the replication is put to the owner on #87. | §4, #14; the #70 answer |
 | D10 | No price before 2014-06-07. | §4, #14 |
 | D11-D15 | Holdout A2 from 2026-11-28, fully locked. No holdout row is read, and the holdout is not opened. | §5, #14; the #71 answer |
-| D16 | Adoption needs a holdout gain lower bound above 0 and a positive encompassing weight. Nothing is adopted here. | §6, #14 |
+| D16 | Adoption needs a holdout gain lower bound above 0 at the D7 level and a positive encompassing weight with its interval above 0. Nothing is adopted here. | §6, #14 |
 | D21 | No figure derived from a licensed source appears in the repository. | §8, #14 |
 | #87 | JRDB may be a model input in private models on this Mac only, and its results are never published. The meta-model's shrinkage target is α = 0, the calibrated market alone. | #87, owner comment of 2026-11-24 |
 
@@ -78,8 +81,27 @@ store alone, and their figures are below.
   - `lgbm_top12`, one of the form model's ten members, drops features ranked by a file whose tree count was chosen on
     2023. 2023 is not scored here, but it trains every fold's meta.
   - HKTrack embargoes nothing between seasons beyond the year-end break.
-- **The level-2 window.** The member file starts on 2023-01-05, so the first folds' meta trains on one season, fewer
-  than D9's five. The fold calendar is D9's. The member file cannot give more. The spec states this.
+- **The level-2 window is below D9's 5-season minimum on every scored fold.** The member file starts on 2023-01-05,
+  and each fold's meta trains on the member rows from then to its `train_end`. The frozen spec says only "the first
+  folds" fall short; in fact all 12 do, from 0.98 to 3.73 years. The fold calendar is otherwise D9's, and the member
+  file cannot give more. Whether this window is accepted for the replication is put to the owner on #87; until then
+  every member result carries this caveat. The level-2 training span per scored fold (a coverage count of the store
+  and the member file, no outcome):
+
+  | Scored fold | Level-2 training rows | Years | Training races (meetings) |
+  | --- | --- | --- | --- |
+  | 2024-Q1 | 2023-01-05 to 2023-12-28 | 0.98 | 3,456 (288) |
+  | 2024-Q2 | 2023-01-05 to 2024-03-30 | 1.23 | 4,344 (362) |
+  | 2024-Q3 | 2023-01-05 to 2024-06-29 | 1.48 | 5,220 (435) |
+  | 2024-Q4 | 2023-01-05 to 2024-09-28 | 1.73 | 6,047 (504) |
+  | 2025-Q1 | 2023-01-05 to 2024-12-28 | 1.98 | 6,910 (576) |
+  | 2025-Q2 | 2023-01-05 to 2025-03-29 | 2.23 | 7,738 (645) |
+  | 2025-Q3 | 2023-01-05 to 2025-06-28 | 2.48 | 8,601 (717) |
+  | 2025-Q4 | 2023-01-05 to 2025-09-27 | 2.73 | 9,501 (792) |
+  | 2026-Q1 | 2023-01-05 to 2025-12-28 | 2.98 | 10,365 (864) |
+  | 2026-Q2 | 2023-01-05 to 2026-03-28 | 3.23 | 11,187 (933) |
+  | 2026-Q3 | 2023-01-05 to 2026-06-27 | 3.48 | 12,051 (1,005) |
+  | 2026-Q4 | 2023-01-05 to 2026-09-26 | 3.73 | 12,951 (1,080) |
 
 ## Hypothesis
 
@@ -98,6 +120,14 @@ The decision rules were frozen with them:
 - An encompassing coefficient is positive when its 95% Wald CI lies above 0.
 - E9 is descriptive, with the break-even threshold at ln 1/(1 − 0.20) = ln 1.25 (`jra.yaml` Win takeout).
 
+**The Wald rules are provisional.** The α_T and encompassing rules were frozen with 95% two-sided Wald intervals from
+the inverse information, which treat races as independent. The owner's D7 fixes the inference unit (meetings, venue
+x day) and level (95% one-sided), and D16 reads the encompassing interval as an adoption leg. The meeting-clustered
+bound, coef − 1.645 × the meeting sandwich se, was added **after the outcomes were read** (review finding on PR
+#308). It is the interval that matches D7. The frozen spec is unchanged, so the private report reads each rule both
+ways: as frozen (Wald) and at D7 (clustered). The Wald-rule outcomes are provisional. The replication rule needs no
+second reading: its ΔLL lower bound is already the meeting bootstrap's one-sided 95% bound.
+
 The null is the starting point: the members add nothing beside the final price (α = 0, δ = 0, the owner's shrinkage
 target). 08's E40 and E9 rows give expected sizes. They are not quoted here, since they come from research-24's
 licensed-source fit.
@@ -106,10 +136,13 @@ E40's third clause, "estimand A beats B on shadow EV calibration", needs the C6 
 
 ## Variants tried
 
-There are 26 variants (`Registry.family_size`), one record each, and every one scored. ΔLL is the D4 baseline's
-winner log loss minus the variant's, in nats per race (positive: better than the calibrated market). Bounds are the
-5% and 95% quantiles of the meeting bootstrap. Coefficient CIs are 95% two-sided Wald, per fold on the fold's training
-rows, with no bounds (08 R13). The market snapshot is the final Win price from the JRA store.
+There are 38 variants (`Registry.family_size`), one record each, and every one scored: the 26 of the frozen spec
+and 12 `meeting_clustered:` variants added after the outcomes were read. ΔLL is the D4 baseline's winner log loss
+minus the variant's, in nats per race (positive: better than the calibrated market). Bounds are the 5% and 95%
+quantiles of the meeting bootstrap. Coefficients are fitted per fold on the fold's training rows, with no bounds (08
+R13). The frozen spec's CIs on them are 95% two-sided Wald. Each `meeting_clustered:` record holds the same
+coefficients with D7's bounds instead: coef ∓ 1.645 × the meeting-clustered sandwich se (`models.condlogit`, no
+small-sample factor), each one-sided 95%. The market snapshot is the final Win price from the JRA store.
 
 ### Store only (publishable)
 
@@ -139,6 +172,14 @@ The E9 ceiling record of each meta variant:
 | `lgbm_no_jrdb` | `32ceaf6b323fb100` | `52119bca9fe64fee` | `47e3cd7416eb2e14` |
 | `clogit_no_jrdb` | `73a73ff0b7d3d691` | `28d317bf261fcfa8` | `ae086c38d607fe52` |
 
+The `meeting_clustered:` record of each meta and encompassing variant (added after the outcomes were read):
+
+| Member | `stage2:q` | `offset:q` | `offset:cal` | `encompassing` |
+| --- | --- | --- | --- | --- |
+| `form` | `ce83d75662f8f8df` | `9aa931c8377b9399` | `953b4012786ec1de` | `f3d839ea734c92d5` |
+| `lgbm_no_jrdb` | `6f2619105302ab55` | `0ae748a019de3c35` | `f5e691f5dc044c08` | `b8000c7f6bd4c164` |
+| `clogit_no_jrdb` | `e5b88f730ca19d65` | `14335d32291f5624` | `eea4081f05420809` | `a996cf59ecbdcb70` |
+
 What each form is:
 - `member_alone`: the member's own probability.
 - `stage2:q`: u = α·m + β·ln q, α and β unbounded.
@@ -166,8 +207,10 @@ What each form is:
 - **Precision-weighted α (E41).** It needs the horse model's σ_i (#98).
 - **One fit on all three members together.** The form model already blends the other two, which are two of its ten
   members.
-- **Meeting-clustered coefficient CIs.** The pre-registered coefficient CI is Wald, so races count as independent.
-  ΔLL and the ceiling do resample meetings. A clustered interval would be wider (proposed below).
+- **Wald as the only coefficient interval.** The frozen spec's coefficient CI is Wald, so races count as
+  independent, which D7 does not sign. The meeting-clustered bound is now reported beside it (added after the
+  outcomes were read; see Hypothesis). A meeting bootstrap of the coefficients was not used: it would refit every
+  meta 10,000 times, and the sandwich is the same unit and level.
 - **A member without JRDB** (#91's dynamic rating). It does not exist yet. It is the publishable replication.
 
 ## What this rules out
@@ -181,8 +224,12 @@ What each form is:
   races. It lifts runners holding 77% of the q-mass above q (the favourites), with a q-weighted RMS of ln(p_cal/q) of
   0.058. Any E9 overlay at the 1.25 break-even must therefore come from a member, not from the market's own
   calibration.
-- **The member variants.** What they rule out is not stated here (D21). The private report states it against the
-  pre-registered rules above.
+- **The member variants.** What they rule out is not stated here (D21). The private report states it. Its "Decision
+  rules" section applies each frozen rule mechanically: the replication verdict for `stage2:q:form` from its ΔLL
+  lower bound (replicated, or a documented failure), α_T > 0 for each offset variant, and a positive encompassing
+  weight for each member, each read both as frozen (Wald) and at D7 (meeting-clustered). Its "What this rules out"
+  section reads each ΔLL, δ, encompassing and break-even q-mass bound at D7. Every statement there is conditional on
+  the level-2 window above, which is below D9's minimum and awaits the owner on #87.
 
 ## Follow-ups filed
 
@@ -191,5 +238,6 @@ What each form is:
 - #88 (`status:ready`): the selection study reads α_s from segment interaction columns.
 - #99 (`status:ready`): the ceiling table for the other pools.
 - #103 (`status:ready`): the quadratic market term on the board (E2).
-- Proposed, to be filed under #73 (`status:proposed`): meeting-clustered (sandwich) CIs on the meta coefficients and
-  the encompassing weight, the counterpart of #276 for β.
+- Meeting-clustered (sandwich) bounds on the meta coefficients and the encompassing weight: done in this PR (the
+  `meeting_clustered:` records), so no follow-up ticket is needed. #276 is the counterpart for #77's β.
+- D9's 5-season minimum at level 2: put to the owner on #87 (accept this window for the replication, or not).

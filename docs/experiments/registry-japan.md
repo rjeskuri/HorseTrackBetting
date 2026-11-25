@@ -846,3 +846,15 @@ built on a licensed source shows no values here.
 | E40 | offset:cal:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
 | E9 | ceiling:offset:cal:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
 | E40 | encompassing:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
+| E40 | meeting_clustered:stage2:q:form | scored | withheld (licensed source) | | | | |
+| E40 | meeting_clustered:offset:q:form | scored | withheld (licensed source) | | | | |
+| E40 | meeting_clustered:offset:cal:form | scored | withheld (licensed source) | | | | |
+| E40 | meeting_clustered:encompassing:form | scored | withheld (licensed source) | | | | |
+| E40 | meeting_clustered:stage2:q:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
+| E40 | meeting_clustered:offset:q:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
+| E40 | meeting_clustered:offset:cal:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
+| E40 | meeting_clustered:encompassing:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
+| E40 | meeting_clustered:stage2:q:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
+| E40 | meeting_clustered:offset:q:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
+| E40 | meeting_clustered:offset:cal:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
+| E40 | meeting_clustered:encompassing:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
