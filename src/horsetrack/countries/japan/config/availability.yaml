@@ -96,5 +96,9 @@ tables:
     anchor: race_date
     tz: Asia/Tokyo
     offset_min: 0
+    # TYB is JRDB's day-of file (race-day body weight, the board, same-day going, paddock): its
+    # tyb_ columns are labels until a JRDB release-time rule exists (owner decision, answer on
+    # #80, 2026-11-25). The kyi_, cyb_ and joa_ columns stay in the view.
+    label_prefixes: [tyb_]
   jrdb_post_race:
     kind: label_only

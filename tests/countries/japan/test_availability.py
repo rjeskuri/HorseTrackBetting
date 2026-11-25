@@ -14,7 +14,10 @@ owner accepted the proposed defaults, each conservative relative to JRA's public
 5. horses: current_value. horse_pedigree: static (sire, dam and broodmare sire never change),
    with source_race_id and scraped_utc kept out as label columns.
 6. horse_runs: offset on race_date + 1 day (00:00 JST of the next day).
-7. jrdb_pre_race: offset on race_date, 0 (00:00 JST). 8. jrdb_post_race: label_only.
+7. jrdb_pre_race: offset on race_date, 0 (00:00 JST), with every `tyb_` column (JRDB's day-of
+   TYB file: race-day body weight, the board, same-day going, paddock) kept out through
+   `label_prefixes: [tyb_]` (the orchestrator's answer on #80, 2026-11-25, extending answer 3);
+   the kyi_, cyb_ and joa_ columns stay in the view. 8. jrdb_post_race: label_only.
 9. Nothing banned.
 
 The expected rules below are written from that answer, never read back from the config. The
@@ -72,9 +75,9 @@ ODDS_LABELS = frozenset({"dividend", "is_refund", "is_final_capture"})
 PEDIGREE_LABELS = frozenset({"source_race_id", "scraped_utc"})
 
 
-def _offset(minutes: int, labels=frozenset()) -> dict:
+def _offset(minutes: int, labels=frozenset(), prefixes: tuple[str, ...] = ()) -> dict:
     return {"kind": "offset", "anchor": "race_date", "offset_min": minutes, "tz": JST,
-            "labels": labels}  # fmt: skip
+            "labels": labels, "prefixes": prefixes}  # fmt: skip
 
 
 OWNER: dict[str, dict] = {
@@ -94,7 +97,8 @@ OWNER: dict[str, dict] = {
     "horses": {"kind": "current_value"},
     "horse_pedigree": {"kind": "static", "labels": PEDIGREE_LABELS},
     "horse_runs": _offset(1440),
-    "jrdb_pre_race": _offset(0),
+    # the TYB columns are named tyb_<field> and come from licensed specs (not in schemas.TABLES)
+    "jrdb_pre_race": _offset(0, prefixes=("tyb_",)),
     "jrdb_post_race": {"kind": "label_only"},
 }
 VIEW_TABLES = [t for t, o in OWNER.items() if o["kind"] == "offset"]
@@ -136,6 +140,7 @@ def test_each_shipped_rule_is_the_owners(rules, table):
     assert rule.tz == want.get("tz")
     assert set(rule.label_columns) == set(want.get("labels", ()))
     assert len(rule.label_columns) == len(set(rule.label_columns))  # no repeats
+    assert tuple(rule.label_prefixes) == want.get("prefixes", ())
 
 
 @pytest.mark.parametrize("table", list(OWNER))
@@ -144,6 +149,9 @@ def test_every_column_a_shipped_rule_names_is_in_its_table(rules, table):
     rule = rules[table]
     missing = set(rule.label_columns) - set(schema.names)
     assert not missing, f"{table}: label columns not in the schema: {sorted(missing)}"
+    # a label prefix never drops a column of the store's contract (the keys, the anchor)
+    dropped = [c for c in schema.names if any(c.startswith(p) for p in rule.label_prefixes)]
+    assert not dropped, f"{table}: label prefixes drop contract columns {dropped}"
     for name in (rule.column, rule.fallback):
         if name is not None:
             field = schema.field(name)
@@ -328,6 +336,81 @@ def test_a_runner_view_on_race_day_never_carries_the_body_weight_in_any_unit(rul
         assert stored == [tuple(r) for r in runners]
         with pytest.raises(ValueError):
             read_label(one, "runners", rules=rules)
+    finally:
+        one.close()
+
+
+# JRDB's day-of TYB columns (tyb_<field>) are not in schemas.TABLES: they come from licensed field
+# specs. These stand in for them, with a made-up tyb_ field a future spec could add, beside KYI,
+# CYB and JOA columns that stay in the view.
+TYB_FIELDS = [
+    ("tyb_body_weight", pa.int64()),
+    ("tyb_body_weight_change", pa.int64()),
+    ("tyb_win_odds", pa.float64()),
+    ("tyb_place_odds", pa.float64()),
+    ("tyb_odds_time", pa.string()),
+    ("tyb_going_code", pa.string()),
+    ("tyb_paddock_index", pa.float64()),
+    ("tyb_future_field", pa.string()),
+]
+PRE_RACE_KEPT = [
+    ("kyi_idm", pa.float64()),
+    ("joa_base_odds", pa.float64()),
+    ("cyb_training_index", pa.float64()),
+    ("cyb_finish_mark", pa.string()),
+]
+
+
+def test_a_jrdb_pre_race_view_never_carries_the_day_of_tyb_columns(rules):
+    # Two runners on 2026-11-28 (opens 2026-11-27 15:00 UTC). From 00:00 JST to long after the race
+    # the view keeps the rows and the kyi_/joa_/cyb_ columns and drops every tyb_ column; the
+    # stored rows still hold the tyb values.
+    runners = {  # horse_no: (the TYB_FIELDS values, then the PRE_RACE_KEPT values)
+        3: (486, 4, 3.4, 1.3, "1530", "11", 52.5, "x3", 61.0, 4.1, 55.5, "A"),
+        7: (502, -2, 12.8, 3.6, "1532", "12", 47.0, "x7", 48.5, 15.2, 49.0, "B"),
+    }
+    extra = [*TYB_FIELDS, *PRE_RACE_KEPT]
+    schema = _schema("jrdb_pre_race")
+    for name, dtype in extra:
+        schema = schema.append(pa.field(name, dtype))
+    rows = []
+    for horse_no, values in runners.items():
+        row = {f.name: _value(f.type, f.name, 2) for f in _schema("jrdb_pre_race")}
+        row |= {"race_id": "jra:2026-11-28:TOK:11", "horse_no": horse_no}
+        row |= dict(zip([name for name, _ in extra], values, strict=True))
+        rows.append(row)
+    kept = set(schema.names) - {name for name, _ in TYB_FIELDS}
+    one = duckdb.connect(":memory:")
+    try:
+        one.register("_arrow", pa.Table.from_pylist(rows, schema=schema))
+        one.execute('CREATE TABLE "jrdb_pre_race" AS SELECT * FROM _arrow')
+        one.unregister("_arrow")
+        opens = datetime(2026, 11, 27, 15, tzinfo=UTC)
+        assert read_asof(one, "jrdb_pre_race", opens - US, rules=rules).empty
+        for t in (opens, datetime(2026, 11, 28, 6, 50, tzinfo=UTC), opens + timedelta(days=30)):
+            view = read_asof(one, "jrdb_pre_race", t, rules=rules)
+            leaked = sorted(c for c in view.columns if c.startswith("tyb_"))
+            assert not leaked, f"jrdb_pre_race at {t.isoformat()} carries {leaked}"
+            assert set(view.columns) == kept, t.isoformat()
+            view = view.sort_values("horse_no")
+            assert [int(v) for v in view["horse_no"]] == [3, 7], t.isoformat()
+            assert list(view["kyi_idm"]) == [61.0, 48.5], t.isoformat()
+            assert list(view["joa_base_odds"]) == [4.1, 15.2], t.isoformat()
+            assert list(view["cyb_finish_mark"]) == ["A", "B"], t.isoformat()
+
+            keys = pd.DataFrame({"race_id": ["jra:2026-11-28:TOK:11"] * 2, "horse_no": [7, 3],
+                                 "t_utc": pd.to_datetime([t, t], utc=True)})  # fmt: skip
+            got = asof_join(keys, "jrdb_pre_race", on=["race_id", "horse_no"], rules=rules, con=one)
+            leaked = sorted(c for c in got.columns if c.startswith("tyb_"))
+            assert not leaked, f"jrdb_pre_race joined at {t.isoformat()} carries {leaked}"
+            assert set(got.columns) == kept | {"t_utc"}, t.isoformat()
+            assert list(got["kyi_idm"]) == [48.5, 61.0], t.isoformat()
+            assert list(got["cyb_training_index"]) == [49.0, 55.5], t.isoformat()
+        stored = one.execute(
+            "SELECT horse_no, tyb_body_weight, tyb_win_odds, tyb_going_code, tyb_future_field"
+            ' FROM "jrdb_pre_race" ORDER BY horse_no'
+        ).fetchall()
+        assert stored == [(3, 486, 3.4, "11", "x3"), (7, 502, 12.8, "12", "x7")]
     finally:
         one.close()
 

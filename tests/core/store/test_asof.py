@@ -33,6 +33,11 @@ Pinned semantics, derived here by brute force rather than from the code under te
   coalesce(column, fallback). A non-null column wins even when the fallback is earlier; both null
   is never available. A fallback of another type, one listed in `label_columns`, or `fallback` on
   any other kind is a ValueError.
+- label prefixes: a 'column', 'offset' or 'static' rule may list `label_prefixes` (a tuple of
+  non-empty strings, default ()). A view drops every column whose name starts with one of them
+  (a prefix, not a substring), beside the label columns. A prefix that matches no column is fine.
+  A prefix on a 'label_only' or 'current_value' rule, or one that matches the rule's own
+  `column`, `anchor` or `fallback`, is a ValueError; so is joining on a column a prefix matches.
 - kind 'static': every row is available at any t (no time field; `label_columns` allowed).
   `read_asof`/`asof_join` return it without its label columns; `read_label` refuses it.
 - the session time zone of the connection never changes what a view returns.
@@ -48,9 +53,11 @@ YAML format of `load_availability` (pinned below):
         offset_min: <number>  # kind offset only, required; minutes, int or float
         tz: <IANA zone>       # kind offset only, optional (required at query time on a DATE anchor)
         label_columns: [<name>, ...]  # kinds column, offset and static only, optional
+        label_prefixes: [<prefix>, ...]  # kinds column, offset and static only, optional
 
 A key that does not belong to the entry's kind, an unknown key, an unknown kind or a missing
-required key is a ValueError, and so is a `label_columns` that is not a list of strings.
+required key is a ValueError, and so is a `label_columns` or `label_prefixes` that is not a list
+of non-empty strings.
 """
 
 from __future__ import annotations
@@ -1516,3 +1523,261 @@ def test_asof_join_on_a_label_column_is_refused(con, fields):
     got = asof_join(keys, "runners", on=["race_id", "horse_no"], rules=rules, con=con)
     assert [int(v) for v in got["row_id"]] == [1, 2]
     assert list(got["finish_pos"]) == [1, 2]  # the keys' own column, untouched
+
+
+# --- label prefixes: every column whose name starts with one never reaches a view ---------------
+
+PREFIX_RULE_CASES = [
+    *RULE_CASES,
+    pytest.param("horse_pedigree", "static", "scraped_utc", None, id="static"),
+]
+PREFIX_SETS = [  # (label_prefixes, label_columns)
+    pytest.param(("tyb_",), (), id="one-prefix"),
+    pytest.param(("tyb_", "res_"), (), id="two-prefixes"),
+    pytest.param(("tyb_weight",), (), id="a-whole-name"),
+    pytest.param(("zzz_",), (), id="matches-nothing"),
+    pytest.param(("tyb_",), ("settled",), id="with-a-label-column"),
+]
+ALWAYS = datetime(1900, 1, 1, tzinfo=UTC)  # a static row's availability, for the brute force
+
+
+def _prefixed(table, kind, stamp, offset_min, prefixes, labels) -> Availability:
+    if kind == "static":
+        return Availability(table, "static", label_columns=labels, label_prefixes=prefixes)
+    base = _rule(table, kind, stamp, offset_min)
+    return Availability(
+        table, kind, column=base.column, anchor=base.anchor, offset=base.offset,
+        label_columns=labels, label_prefixes=prefixes,
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(("prefixes", "labels"), PREFIX_SETS)
+@pytest.mark.parametrize(("table", "kind", "stamp", "offset_min"), PREFIX_RULE_CASES)
+def test_label_prefixes_drop_every_matching_column_from_every_view(
+    con, table, kind, stamp, offset_min, prefixes, labels
+):
+    rng = np.random.default_rng(17)
+    frame = _history(rng, stamp, n=50)
+    n = len(frame)
+    frame["tyb_weight"] = rng.integers(400, 560, n).astype("int64")  # day-of: known only on t
+    frame["tyb_odds"] = rng.uniform(1.1, 80.0, n)
+    frame["res_paid"] = rng.uniform(100, 5000, n)
+    frame["kyi_tyb_ref"] = rng.normal(size=n)  # holds "tyb_" but does not start with it
+    frame["tyb"] = rng.integers(0, 9, n).astype("int64")  # the prefix without its underscore
+    frame["settled"] = rng.integers(0, 2, n).astype(bool)
+    put(con, table, frame)
+    rules = {table: _prefixed(table, kind, stamp, offset_min, prefixes, labels)}
+    shift = timedelta(minutes=offset_min or 0.0)
+
+    def avail(row):
+        if kind == "static":
+            return ALWAYS
+        return None if pd.isna(row[stamp]) else row[stamp].to_pydatetime() + shift
+
+    kept = {c for c in frame.columns if not any(c.startswith(p) for p in prefixes)} - set(labels)
+    assert "kyi_tyb_ref" in kept and "tyb" in kept and stamp in kept
+    by_id = frame.set_index("row_id")
+    for t in [at(5), at(9, 30), at(12), at(23, 59)]:
+        view = read_asof(con, table, t, rules=rules)
+        assert set(view.columns) == kept, f"t={t.isoformat()}"
+        expected = sorted(
+            int(r.row_id) for _, r in frame.iterrows() if avail(r) is not None and avail(r) <= t
+        )
+        assert ids(view) == expected, f"t={t.isoformat()}"
+        for _, r in view.iterrows():
+            assert r["kyi_tyb_ref"] == pytest.approx(by_id.loc[int(r["row_id"]), "kyi_tyb_ref"])
+
+    n_keys = 25
+    keys = pd.DataFrame(
+        {
+            "race_id": [f"jra:2026-11-22:TOK:{1 + int(r):02d}" for r in rng.integers(0, 7, n_keys)],
+            "horse_no": rng.integers(1, 10, n_keys).astype("int64"),
+            "t_utc": utc_series(
+                DAY + timedelta(hours=5, minutes=int(m)) for m in rng.integers(0, 720, n_keys)
+            ),
+        }
+    )
+    on = ["race_id", "horse_no"]
+    expected = _brute_force(frame, keys, on, "t_utc", avail)
+    got = asof_join(keys, table, on=on, rules=rules, con=con).reset_index(drop=True)
+    assert set(got.columns) == set(keys.columns) | (kept - set(on))
+    assert any(e is not None for e in expected)
+    for j, want in enumerate(expected):
+        if want is None:
+            assert pd.isna(got["row_id"].iloc[j]), f"key {j}"
+        else:
+            assert int(got["row_id"].iloc[j]) == want, f"key {j}"
+            assert got["value"].iloc[j] == pytest.approx(by_id.loc[want, "value"])
+
+
+def test_availability_label_prefixes_default_and_refusals():
+    assert Availability("runners", "column", column="post_utc").label_prefixes == ()
+    accepted = [
+        Availability("t", "column", column="fetched_utc", label_prefixes=("tyb_",)),
+        Availability("t", "offset", anchor="post_utc", offset=timedelta(0),
+                     label_prefixes=("tyb_", "res_")),
+        Availability("t", "static", label_prefixes=("scrape_",)),
+    ]  # fmt: skip
+    assert [r.label_prefixes for r in accepted] == [("tyb_",), ("tyb_", "res_"), ("scrape_",)]
+    bad = [
+        {"kind": "label_only", "label_prefixes": ("tyb_",)},
+        {"kind": "current_value", "label_prefixes": ("tyb_",)},
+        {"kind": "column", "column": "fetched_utc", "label_prefixes": ("",)},
+        {"kind": "column", "column": "fetched_utc", "label_prefixes": ("tyb_", "")},
+        {"kind": "column", "column": "fetched_utc", "label_prefixes": ("tyb_", 3)},
+        {"kind": "column", "column": "fetched_utc", "label_prefixes": ["tyb_"]},
+        {"kind": "column", "column": "fetched_utc", "label_prefixes": "tyb_"},
+        {"kind": "column", "column": "fetched_utc", "label_prefixes": ("fetched",)},
+        {"kind": "column", "column": "fetched_utc", "label_prefixes": ("tyb_", "fetched_utc")},
+        {
+            "kind": "column",
+            "column": "fetched_utc",
+            "fallback": "snapshot_utc",
+            "label_prefixes": ("snap",),
+        },
+        {
+            "kind": "offset",
+            "anchor": "post_utc",
+            "offset": timedelta(minutes=20),
+            "label_prefixes": ("res_", "post_"),
+        },
+    ]
+    for fields in bad:
+        with pytest.raises(ValueError):
+            Availability("t", **fields)
+
+
+@pytest.mark.parametrize("fields", JOIN_ON_LABEL_RULES)
+def test_asof_join_on_a_column_a_label_prefix_matches_is_refused(con, fields):
+    put_typed(
+        con,
+        "runners",
+        pd.DataFrame(
+            {
+                "row_id": [1, 2],
+                "race_id": ["jra:2026-11-22:TOK:01"] * 2,
+                "horse_no": [1, 2],
+                "race_date": [date(2026, 11, 22)] * 2,
+                "fetched_utc": utc_series([at(1), at(1)]),
+                "res_finish_pos": [2, 1],
+                "tyb_weight": [480, 502],
+            }
+        ),
+        {"race_date": "DATE"},
+    )
+    rules = {"runners": Availability("runners", label_prefixes=("res_", "tyb_"), **fields)}
+    keys = pd.DataFrame(
+        {
+            "race_id": ["jra:2026-11-22:TOK:01"] * 2,
+            "horse_no": [1, 2],
+            "res_finish_pos": [1, 2],
+            "t_utc": utc_series([at(23), at(23)]),
+        }
+    )
+    with pytest.raises(ValueError):
+        asof_join(keys, "runners", on=["race_id", "res_finish_pos"], rules=rules, con=con)
+    got = asof_join(keys, "runners", on=["race_id", "horse_no"], rules=rules, con=con)
+    assert [int(v) for v in got["row_id"]] == [1, 2]
+    assert list(got["res_finish_pos"]) == [1, 2]  # the keys' own column, untouched
+    assert "tyb_weight" not in got.columns
+
+
+def test_load_availability_reads_label_prefixes(tmp_path: Path, con):
+    path = tmp_path / "availability.yaml"
+    path.write_text(
+        "tables:\n"
+        "  odds_timeseries:\n"
+        "    kind: column\n"
+        "    column: fetched_utc\n"
+        "    label_prefixes: [tyb_, res_]\n"
+        "  runners:\n"
+        "    kind: offset\n"
+        "    anchor: post_utc\n"
+        "    offset_min: 0\n"
+        "    label_columns: [finish_pos]\n"
+        "    label_prefixes:\n"
+        "      - tyb_\n"
+        "  horse_pedigree:\n"
+        "    kind: static\n"
+        "    label_prefixes: [scrape_]\n"
+        "  sectionals:\n"
+        "    kind: offset\n"
+        "    anchor: off_utc\n"
+        "    offset_min: 0\n"
+        "  dividends:\n"
+        "    kind: label_only\n",
+        encoding="utf-8",
+    )
+    rules = load_availability("japan", path=path)
+    assert rules["odds_timeseries"].label_prefixes == ("tyb_", "res_")
+    assert isinstance(rules["odds_timeseries"].label_prefixes, tuple)
+    assert rules["runners"].label_prefixes == ("tyb_",)
+    assert rules["runners"].label_columns == ("finish_pos",)
+    assert rules["horse_pedigree"].label_prefixes == ("scrape_",)
+    assert rules["sectionals"].label_prefixes == ()
+    assert rules["dividends"].label_prefixes == ()
+
+    put(
+        con,
+        "runners",
+        pd.DataFrame(
+            {
+                "row_id": [1, 2],
+                "post_utc": utc_series([at(3), at(4)]),
+                "draw": [4, 6],
+                "finish_pos": [1, 2],
+                "tyb_weight": [480, 502],
+                "tyb_paddock": ["A", "B"],
+                "kyi_tyb": [0.5, 0.7],
+            }
+        ),
+    )
+    view = read_asof(con, "runners", at(3), rules=rules)
+    assert ids(view) == [1] and set(view.columns) == {"row_id", "post_utc", "draw", "kyi_tyb"}
+
+
+GOOD_PREFIXED = "kind: column\n    column: post_utc\n    label_prefixes: [tyb_]"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param("kind: column\n    column: post_utc\n    label_prefixes: tyb_", id="a-string"),
+        pytest.param("kind: column\n    column: post_utc\n    label_prefixes:", id="null"),
+        pytest.param("kind: column\n    column: post_utc\n    label_prefixes: ['']", id="empty"),
+        pytest.param(
+            "kind: column\n    column: post_utc\n    label_prefixes: [tyb_, '']", id="one-empty"
+        ),
+        pytest.param(
+            "kind: column\n    column: post_utc\n    label_prefixes: [1, 2]", id="not-strings"
+        ),
+        pytest.param(
+            "kind: column\n    column: post_utc\n    label_prefixes: [tyb_, [x]]", id="nested-list"
+        ),
+        pytest.param(
+            "kind: column\n    column: post_utc\n    label_prefixes: {tyb_: 1}", id="a-mapping"
+        ),
+        pytest.param("kind: label_only\n    label_prefixes: [tyb_]", id="on-label_only"),
+        pytest.param("kind: current_value\n    label_prefixes: [tyb_]", id="on-current_value"),
+        pytest.param(
+            "kind: column\n    column: post_utc\n    label_prefixes: [post_]",
+            id="matches-the-column",
+        ),
+        pytest.param(
+            "kind: column\n    column: fetched_utc\n    fallback: snapshot_utc\n"
+            "    label_prefixes: [snap]",
+            id="matches-the-fallback",
+        ),
+        pytest.param(
+            "kind: offset\n    anchor: post_utc\n    offset_min: 20\n"
+            "    label_prefixes: [res_, post]",
+            id="matches-the-anchor",
+        ),
+    ],
+)
+def test_load_availability_refuses_malformed_label_prefixes(tmp_path: Path, entry: str):
+    # the same file with a well-formed label_prefixes loads: only the malformed one is refused
+    path = tmp_path / "availability.yaml"
+    path.write_text("tables:\n  runners:\n    " + GOOD_PREFIXED + "\n", encoding="utf-8")
+    assert load_availability("japan", path=path)["runners"].label_prefixes == ("tyb_",)
+    _refuse_entry(tmp_path, entry)

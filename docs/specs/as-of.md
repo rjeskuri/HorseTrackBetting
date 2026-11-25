@@ -64,6 +64,21 @@ takes `label_columns`, a tuple of column names (default `()`).
 - `read_label` still refuses every table that is not `label_only`: label columns of a `column`,
   `offset` or `static` table are not readable as labels through it.
 
+### Label prefixes
+
+A family of columns the store's schema does not name (JRDB's `tyb_` columns come from licensed
+field specs outside the repository) cannot be listed column by column. A `column`, `offset` or
+`static` rule also takes `label_prefixes`, a tuple of non-empty strings (default `()`): every
+column whose name starts with one of them is a label column too.
+
+- `read_asof` and `asof_join` drop every such column, beside the `label_columns`. It is a prefix,
+  not a substring: `tyb_` drops `tyb_body_weight`, not `kyi_tyb_ref` or `tyb`.
+- A prefix that matches no column of the table is fine (a family the source has not sent yet).
+  Joining `on` a column a prefix matches is a `ValueError`.
+- A `label_only` or `current_value` rule with label prefixes, a prefix that is empty or not a
+  string, a `label_prefixes` that is not a tuple, or a prefix that matches the rule's own
+  `column`, `fallback` or `anchor` is a `ValueError` at construction.
+
 ## Views
 
 - `read_asof(con, table, at_utc, *, rules)`: every row available at or before `at_utc`, the whole
@@ -112,15 +127,19 @@ tables:
     offset_min: <number>  # kind offset only, required; minutes, int or float
     tz: <IANA zone>       # kind offset only, optional; required at query time on a DATE anchor
     label_columns: [<name>, ...]  # kinds column, offset and static only, optional
+    label_prefixes: [<prefix>, ...]  # kinds column, offset and static only, optional
 ```
 
 The result maps each table to an `Availability(table, kind, column, anchor, offset,
-label_columns, tz, fallback)` with `offset = timedelta(minutes=offset_min)` and `label_columns` a
-tuple (`()` when the key is absent; flow or block lists both work). A key that does not belong to
+label_columns, tz, fallback, label_prefixes)` with `offset = timedelta(minutes=offset_min)` and
+`label_columns` and `label_prefixes` tuples (`()` when the key is absent; flow or block lists both
+work). A key that does not belong to
 the entry's kind, an unknown key, an unknown kind, a missing required key, a non-numeric
 `offset_min`, a `fallback` or `tz` that is not a non-empty string, an unknown zone, a
 `label_columns` that is not a list of strings (a string, null, a mapping, nested lists) or that
 lists the entry's `column`, `fallback` or `anchor`, `label_columns` on `label_only` or
+`current_value`, a `label_prefixes` that is not a list of non-empty strings or that has a prefix
+matching the entry's `column`, `fallback` or `anchor`, `label_prefixes` on `label_only` or
 `current_value`, a file without a top-level `tables:` mapping or an entry that is not a mapping is
 a `ValueError`; a missing file is a `FileNotFoundError`. With no file, every view is refused: the
 safe default.
@@ -146,7 +165,7 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 | `horses` | `current_value` | never: profile pages show today's values | n/a |
 | `horse_pedigree` | `static` | always: sire, dam and broodmare sire never change | `source_race_id`, `scraped_utc` |
 | `horse_runs` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 1440 min (the next day) | none |
-| `jrdb_pre_race` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | none |
+| `jrdb_pre_race` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | every column starting `tyb_` (`label_prefixes: [tyb_]`) |
 | `jrdb_post_race` | `label_only` | never; `read_label` only | n/a |
 
 - Nothing else is banned. JRDB tables are inputs to private models only (D21: no JRDB-derived
@@ -165,6 +184,13 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
     owner's answer on #80 (2026-11-25), an owner decision, not an implementation ruling. Follow-up
     #227 may give them a rule that makes each available at its own value. `rail_setting` (races,
     #222) stays in the view: JRA announces the rail position in advance.
+- `jrdb_pre_race` merges JRDB's TYB family, the day-of file: race-day body weight, the board
+  (`tyb_win_odds`, `tyb_odds_time`), same-day going, the paddock. Under the race-date rule those
+  would be in every view from 00:00 JST, before they exist. The owner's answer on #80 (2026-11-25),
+  an owner decision, makes every `tyb_` column a label (`label_prefixes: [tyb_]`) until a JRDB
+  release-time rule exists; the `kyi_`, `cyb_` and `joa_` columns stay in the view. The TYB names
+  come from licensed specs outside the repository, so the rule matches the prefix rather than
+  listing columns.
 - A race-date rule opens a whole day's card at 00:00 JST of the race date: a column JRA changes
   later that day (a late scratch, a jockey change) is a trap the rule does not catch (see Known
   traps).
@@ -197,6 +223,8 @@ leak.
   rule, never from the whole day.
 - JRDB data is revised, and each file has a release time: a rule must use when a version was
   released, not the race date, and a later revision must not overwrite what was known at t.
+  Until such a rule exists, `jrdb_pre_race` opens at 00:00 JST of the race date and its day-of
+  TYB columns (`tyb_`) are kept out as labels (see Rules per table).
 - Final odds are a label or a conditioner only, never a feature at t.
 - Bets processed after the start move the 'final' price, so the final board is not a board any
   bettor saw before the off.
