@@ -15,6 +15,7 @@ Research and tooling for pari-mutuel horse racing, one folder per country (Japan
 - Real-page tests (marker `local`, need `$HORSETRACK_DATA_DIR/fixtures`, skipped when absent): `uv run pytest -m local -q`
 
 ## Where things live
+- [docs/architecture.md](docs/architecture.md): Mermaid diagrams of the system, the race-day flow, the store, governance and the harness workflow. When an epic changes one of these flows, its last ticket updates this file.
 - `tests/`: the test suite.
 - `scripts/verify.sh`: the checks behind the verify command; `.github/workflows/ci.yml` runs it.
 - `.githooks/`: `pre-commit` (format and lint on staged files, no commits on main) and `pre-push` (no pushes to main, no force pushes).
@@ -29,6 +30,7 @@ Research and tooling for pari-mutuel horse racing, one folder per country (Japan
 - `src/horsetrack/countries/japan/board/`: the board at a decision time and the final board (`docs/specs/board-at-t.md`); `feed.py`, the live-board feed (`docs/specs/board-feed.md`).
 - `src/horsetrack/countries/hongkong/hkjc/` (planned): Hong Kong source.
 - `docs/problem-statement.md`, `docs/ledger.md`, `docs/experiment-report.md` (planned): the signed problem statement, the known-vs-assumed ledger, the report template.
+- `docs/modeling.md`: the modeling in six Mermaid diagrams (decision, C0-C6 stack, meta-model members, Place/Wide/exotics, adoption, race-day timeline), each box with its ticket and module.
 - `tests/fixtures/synthetic/` (planned): the only fixtures committed.
 
 ## Modeling governance
