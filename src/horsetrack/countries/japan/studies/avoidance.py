@@ -673,18 +673,23 @@ def board_view(files: Mapping[str, Path], rules, minutes: int) -> Callable[[str]
     return view
 
 
-def read_development(minutes: int) -> StudyData:
+def read_development(
+    minutes: int,
+    *,
+    pools: Sequence[str] = STUDY_POOLS,
+    race_columns: Sequence[str] = RACE_COLUMNS,
+) -> StudyData:
     """Column- and date-scoped store reads from 2014-06-07, holdout days dropped, then
-    `split_off`'s development rows; dividends of the study's pools for those races only."""
+    `split_off`'s development rows; dividends of `pools` for those races only."""
     frames = {}
-    for name, columns in (("races", RACE_COLUMNS), ("runners", RUNNER_COLUMNS)):
+    for name, columns in (("races", race_columns), ("runners", RUNNER_COLUMNS)):
         table = read_store_table(
             name, columns=columns, start=PRICE_ERA_START, end=date.max, touches_price=True
         )
         frames[name], _ = split_off(table.to_pandas(date_as_object=False), "race_date", COUNTRY)
     races = frames["races"]
     run = races.loc[races["status"].eq("run"), "race_id"].tolist()
-    scope = ds.field("pool").isin(list(STUDY_POOLS)) & ds.field("race_id").isin(run)
+    scope = ds.field("pool").isin(list(pools)) & ds.field("race_id").isin(run)
     dataset = ds.dataset(_store_file("dividends"), format="parquet")
     dividends = dataset.to_table(columns=DIVIDEND_COLUMNS, filter=scope).to_pandas()
     logged, files = logged_boards(set(run))
@@ -720,9 +725,9 @@ Paired = tuple[list[str], dict[str, tuple[float, float]], dict[str, str]]
 
 
 class _Context:
-    """The run races, their meetings, starters and dividends, and the frozen spec."""
+    """The run races, their meetings, starters and dividends of `pools`, and the frozen spec."""
 
-    def __init__(self, data: StudyData, spec: dict) -> None:
+    def __init__(self, data: StudyData, spec: dict, pools: Sequence[str] = STUDY_POOLS) -> None:
         self.data, self.spec = data, spec
         self.races = data.races.loc[data.races["status"].eq("run")]
         self.race_ids = sorted(self.races["race_id"])
@@ -731,7 +736,7 @@ class _Context:
         scratched = runners["is_scratched"].eq(True).to_numpy(dtype=bool, na_value=False)
         self.starters = runners.loc[~scratched]
         div = data.dividends
-        self.dividends = div.loc[div["race_id"].isin(known) & div["pool"].isin(STUDY_POOLS)]
+        self.dividends = div.loc[div["race_id"].isin(known) & div["pool"].isin(pools)]
         self.clusters = self.races.set_index("race_id")["meeting_id"]
         self.n_starters = self.starters.groupby("race_id").size()
         self.at_t = f"{BOARD_AT_T} (T-{spec['decision_time_min']})"
@@ -1320,12 +1325,19 @@ def render_report(study: Study, spec: dict, about: dict) -> str:
     return "\n".join(lines)
 
 
-def _record(variant: Variant, git_sha: str, builds: dict[str, str]) -> RunRecord:
+def _record(
+    variant: Variant,
+    git_sha: str,
+    builds: dict[str, str],
+    *,
+    family_id: str = FAMILY_ID,
+    ticket: int = TICKET,
+) -> RunRecord:
     return RunRecord(
         hypothesis_id=variant.hypothesis_id,
-        family_id=FAMILY_ID,
+        family_id=family_id,
         variant=variant.name,
-        ticket=TICKET,
+        ticket=ticket,
         git_sha=git_sha,
         data_builds=builds,
         sources=(SOURCE,),
