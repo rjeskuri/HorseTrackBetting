@@ -224,6 +224,13 @@ def _point_records(
         try:
             found = shadow_values(board, tau_min=tau, models=models, n_draws=s.n_draws, seed=seed)
             values = {(v.pool, v.combination): v for v in found}
+            lacking = {v.pool: v.reason for v in found if v.reason is not None}
+            for pool, reason in lacking.items():
+                logger.warning(
+                    "%s T-%d %s: logged without shadow values (%s)", race.race_id, tau, pool, reason
+                )
+            if len(lacking) == len({v.pool for v in found}):
+                models = None  # no pool has values: the point is logged as without models
         except Exception:
             logger.exception("%s T-%d: shadow values failed; logged without", race.race_id, tau)
             models = None
