@@ -168,6 +168,13 @@ none), `winning_tickets, dividend_yen` (per 100 yen; null when nobody hit), `hit
 (`(pool * 0.70 + carryover_in) / pool`). Read with `research.win5.read_history()`. Holdout days are
 in the table; no analysis reads them (`score_study` drops them).
 
+A year list (`raw/jra/win5_year`) counts as final only when its cached copy was fetched after the
+year ended (1 January JST of the next year); an earlier copy, and the current year's, is fetched
+again. `research.win5.carryover_chain_breaks(table)` names the days that break the carryover chain
+(a no-winner day with no carryover out, or a carryover in that is not the previous row's carryover
+out; a capped winner's carryover out is not a break); the command prints their count as
+`carryover_breaks=<n>` and lists them, and does not change its exit code for them.
+
 ## Not here yet
 
 Upcoming race cards and the odds snapshots (`docs/specs/odds-log.md`) are outside this spec.

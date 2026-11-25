@@ -4,9 +4,10 @@ Source: netkeiba's WIN5 pages (private use; aggregates may be quoted, rows never
 year list per year (`/top/win5_results.html?year=YYYY`) names the WIN5 days; one page per day
 (`/top/win5.html?date=YYYYMMDD`) prints its sales, winning tickets, dividend and carryovers. Every
 request goes through `core.ingest` (cache-first, rate-limited, circuit breaker); past pages are
-cached for good, so a rerun only asks for what is new. No request while the jra.yaml quiet hours
-cover the host. The table goes to `processed_dir('jra') / 'win5.parquet'`; the command prints
-aggregate counts only.
+cached for good, so a rerun only asks for what is new. A year list is final only when fetched after
+its year ended (1 January JST); one cached earlier is fetched again. No request while the
+jra.yaml quiet hours cover the host. The table goes to `processed_dir('jra') / 'win5.parquet'`;
+the command prints aggregate counts only.
 """
 
 from __future__ import annotations
@@ -73,6 +74,13 @@ def _get(fetcher: Fetcher, task: FetchTask, quiet: Callable[[], str | None]) -> 
     return fetcher.fetch(task)
 
 
+def _stale_year_list(fetcher: Fetcher, year: int) -> bool:
+    """A cached year list fetched before its year ended (1 January JST of the next year) misses
+    the year's last WIN5 days, so it is fetched again; one fetched after is final."""
+    cached = fetcher.read_cached(YEAR_PAGE, year, str(year))
+    return cached is not None and cached.fetched_utc < datetime(year + 1, 1, 1, tzinfo=JST)
+
+
 def backfill(
     *,
     years: range,
@@ -85,7 +93,7 @@ def backfill(
     expected: list[date] = []
     for year in years:
         task = FetchTask(win5.SOURCE, YEAR_PAGE, str(year), year_url(year), year,
-                         mutable=year >= today.year)  # fmt: skip
+                         mutable=year >= today.year or _stale_year_list(fetcher, year))  # fmt: skip
         days = [d for d in win5.parse_year_list(_get(fetcher, task, quiet).body) if d < today]
         expected += [d for d in days if d.year == year]
     rows, failed = [], 0
@@ -140,8 +148,11 @@ def win5_history_command(
     counts = win5.history_counts(table)
     gaps = win5.missing_days(table, expected)
     typer.echo(" ".join(f"{k}={v}" for k, v in counts.items()))
+    breaks = win5.carryover_chain_breaks(table)
     typer.echo(f"expected_days={len(expected)} missing_days={len(gaps)} failed_pages={failed} "
-               f"requests_sent={sent}")  # fmt: skip
+               f"carryover_breaks={len(breaks)} requests_sent={sent}")  # fmt: skip
     if gaps:
         typer.echo("missing: " + ", ".join(d.isoformat() for d in gaps[:20]))
+    if breaks:
+        typer.echo("carryover breaks: " + ", ".join(d.isoformat() for d in breaks[:20]))
     raise typer.Exit(code)

@@ -290,6 +290,28 @@ def history_counts(table: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def carryover_chain_breaks(table: pd.DataFrame) -> list[date]:
+    """The days that break the carryover chain, sorted, each once: a no-winner day with no
+    carryover out, or a day whose carryover in is not the previous row's carryover out (the first
+    row is not checked on that rule). A winner day with a carryover out (the payout cap) is not a
+    break. Catches carryover labels the day-page parser no longer finds (read as 0)."""
+    breaks: set[date] = set()
+    previous_out: int | None = None
+    for day, tickets, carry_in, carry_out in zip(
+        _dates(table),
+        table["winning_tickets"],
+        table["carryover_in_yen"],
+        table["carryover_out_yen"],
+        strict=True,
+    ):
+        if tickets == 0 and not carry_out > 0:
+            breaks.add(day)
+        if previous_out is not None and carry_in != previous_out:
+            breaks.add(day)
+        previous_out = carry_out
+    return sorted(breaks)
+
+
 def missing_days(table: pd.DataFrame, expected_days: Iterable[date]) -> list[date]:
     """The expected days without a row, sorted."""
     have = set(_dates(table))
