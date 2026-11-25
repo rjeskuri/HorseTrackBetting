@@ -1187,3 +1187,12 @@ built on a licensed source shows no values here.
 | E1 | shin:no_floor_bound_races | scored | all_folds | tail_observed_winners | 654 | - | 111226 |
 | E1 | shin:no_floor_bound_races | scored | all_folds | tail_expected_winners | 298.631 | - | 111226 |
 | E1 | shin:no_floor_bound_races | scored | all_folds | tail_o_minus_e_per_race | 0.0149616 | [0.0132227, 0.0167021] | 23752 |
+
+## win5-carryover-v1
+
+| E id | Variant | Status | Fold | Metric | Value | CI | n |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| P1 | pool-level | scored | ratio 0..0.5 | mean_day_value | 0.816418 | [0.801953, -] | 7 |
+| P1 | pool-level | scored | ratio 0.5..1 | mean_day_value | 0.949312 | [0.929979, -] | 6 |
+| P1 | pool-level | scored | ratio 1..2 | mean_day_value | 1.05931 | [1.04581, -] | 4 |
+| P1 | pool-level | scored | carryover days before 2014-06-07 | gross_pool_carryover_days | 8 | - | 8 |
