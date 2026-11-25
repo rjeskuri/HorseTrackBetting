@@ -16,17 +16,53 @@ no share (NaN) and each race's priced runners sum to 1.
 Memory: everything works on flat arrays (np.bincount and np.add.reduceat over race segments);
 Shin's z is one vectorised bisection over every race at once, and the beta fit is a Newton
 iteration whose steps each cost a few passes over the rows. Nothing is quadratic.
+
+The study (`run_study`; CLI `python -m horsetrack.countries.japan.studies.calibration --run
+[--out DIR]`, an `--out` inside the repository refused by `paths.outside_repo`) is a thin I/O layer
+over `compute_study(frame, spec)`, which is pure. Its pre-registered inputs are the owner's, in
+`countries/japan/config/calibration.yaml` (no defaults; a missing file or key raises
+`MissingOwnerDecision` before the store is read, and an unknown key is refused):
+
+    segments: [R12, venue, ...]        # E4: names from SEGMENTS, each fitted in vs out
+    entropy_cut_points: [a, b, c, d]   # E3: increasing, in (0, 1); five bins, the last closed
+    tail_min_odds: 51.0                # the tail is a runner priced above this (50/1 = 51.0)
+    owner_signoff: <issue>             # where the owner signed these answers
+
+The floor is the Win pool's minimum dividend over the unit stake (`jra.yaml`, 110 / 100 = 1.1);
+the bootstrap's unit, level and replicates come from `config/scoring.yaml` (D7) and the folds from
+`config/folds.yaml` (D9). Order: read the owner's inputs, freeze the family's spec in the run
+registry (`FamilyAlreadyFrozen` on another spec stops the run), read the development rows of the
+price era (`read_store_table`: column- and date-scoped, holdout days dropped, nothing before
+2014-06-07; then `split_off`'s development rows; the holdout is never opened), score, append one
+registry record per variant (failures included) and write the report through `write_report`.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import argparse
+import dataclasses
+import hashlib
+import json
+import sys
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from horsetrack.core import paths
+from horsetrack.core.config import load_country_yaml, load_source
+from horsetrack.core.eval.bootstrap import Interval, paired_bootstrap
+from horsetrack.core.eval.folds import Fold, FoldScheme, load_country_scheme, walk_forward
+from horsetrack.core.eval.holdout import _git_sha, split_off
+from horsetrack.core.eval.registry import FoldMetric, RunRecord, default_registry
+from horsetrack.core.eval.reports import write_report
+from horsetrack.core.eval.scoring import gain, per_race_log_loss
 from horsetrack.core.pricing import _EPS as FLOOR_TOLERANCE
 from horsetrack.core.pricing import clean_odds
+from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
 
 SHIN_BISECTIONS = 60  # halvings of [0, 1]: z to below 1e-17
 NEWTON_MAX_STEPS = 50
@@ -252,3 +288,660 @@ def flag_floor_bound(odds: pd.Series, *, floor: float) -> pd.Series:
     with np.errstate(invalid="ignore"):
         flagged = ~np.isnan(cleaned) & (cleaned <= floor + FLOOR_TOLERANCE)
     return pd.Series(flagged, index=odds.index, dtype=bool)
+
+
+# =========================================================================== the study
+
+COUNTRY = "japan"
+TICKET = 77
+SOURCE = "jra"  # the store's JRA results, from netkeiba; no JRDB, no JRA-VAN
+FAMILY_ID = "japan-crowd-calibration-final-win"
+CONFIG_NAME = "calibration"
+BOOTSTRAP_SEED = 77  # reproducibility only; scoring.yaml signs no seed
+BETA_CI_Z = 1.959963984540054  # the ticket's 95% two-sided Wald interval, beta +/- z se
+FIT = "conditional_logit_ln_inv_odds"
+IN_SAMPLE = "in_sample:development"
+RUNNER_COLUMNS = ["race_id", "race_date", "win_odds", "finish_pos", "is_scratched"]
+RACE_COLUMNS = ["race_id", "race_date", "meeting_id", "venue", "race_no", "race_class"]
+RACE_COLUMNS += ["surface", "going", "weight_type", "field_size", "status"]
+DEVIGS = ("normalised", "power", "shin")  # normalised first: the others' comparator
+PARAMETER_FREE = {"normalised": devig_normalised, "shin": devig_shin}
+OWNER_KEYS = {
+    "segments": "the E4 segment family (08 §4): which named segments to fit",
+    "entropy_cut_points": "the E3 entropy cut points: four increasing numbers in (0, 1)",
+    "tail_min_odds": "the tail threshold in decimal odds (the ticket's 'above 50/1')",
+    "owner_signoff": "the issue where the owner signed these answers",
+}
+DECISIONS = {
+    "D6": "winner log loss per race, a dead heat at 1/k per co-winner (section 3; #69 answer)",
+    "D7": "meeting (venue x day) clusters, 95% one-sided (config/scoring.yaml)",
+    "D9": "walk-forward quarters, expanding, 1-week embargo (config/folds.yaml; #70 answer)",
+    "D10": "races before 2014-06-07 excluded wherever the price enters (section 4)",
+    "D12": "development rows only; the locked holdout is not opened (config/holdout.yaml, #71)",
+}
+
+
+class MissingOwnerDecision(RuntimeError):
+    """A pre-registered input the owner has not signed in config/calibration.yaml."""
+
+
+# --------------------------------------------------------------------------- E4 segments
+
+
+@dataclass(frozen=True)
+class Segment:
+    """A named E4 candidate: its definition (frozen in the spec) and its value per race, from
+    one row per race of the study frame; missing where the attribute it reads is missing."""
+
+    definition: str
+    values: Callable[[pd.DataFrame], pd.Series]
+
+
+def _in_out(read: pd.Series, inside: pd.Series) -> pd.Series:
+    return pd.Series(np.where(inside, "in", "out"), index=read.index, dtype=object).where(
+        read.notna()
+    )
+
+
+def _g1_day_undercard(races: pd.DataFrame) -> pd.Series:
+    flat_g1 = races["race_class"].eq("G1") & races["surface"].ne("jump")
+    g1_meeting = flat_g1.groupby(races["meeting_id"]).transform("any")
+    return _in_out(races["meeting_id"], g1_meeting & ~flat_g1).where(~flat_g1)
+
+
+SEGMENTS = {
+    "R12": Segment(
+        "in: race_no 12; out: every other race",
+        lambda r: _in_out(r["race_no"], r["race_no"].eq(12)),
+    ),
+    "R11pm1": Segment(
+        "in: race_no 10, 11 or 12 (R11 +/- 1); out: every other race",
+        lambda r: _in_out(r["race_no"], r["race_no"].isin([10, 11, 12])),
+    ),
+    "g1_day_undercard": Segment(
+        "in: the other races of a meeting (venue x day) that holds a flat G1; out: the races "
+        "of meetings without one; the G1 itself is in neither",
+        _g1_day_undercard,
+    ),
+    "field_16_plus": Segment(
+        "in: field_size (starters) 16 or more; out: fewer",
+        lambda r: _in_out(r["field_size"], r["field_size"].ge(16)),
+    ),
+    "debut": Segment(
+        "in: race_class DEBUT (新馬); out: every other class",
+        lambda r: _in_out(r["race_class"], r["race_class"].eq("DEBUT")),
+    ),
+    "venue": Segment("one beta per venue code", lambda r: r["venue"]),
+    "heavy_going": Segment(
+        "in: going HEAVY (不良); out: any other going",
+        lambda r: _in_out(r["going"], r["going"].eq("HEAVY")),
+    ),
+    "handicap": Segment(
+        "in: weight_type handicap (ハンデ); out: any other weight type",
+        lambda r: _in_out(r["weight_type"], r["weight_type"].eq("handicap")),
+    ),
+}
+
+
+# --------------------------------------------------------------------------- inputs and spec
+
+
+def owner_inputs() -> dict:
+    """The owner's pre-registered inputs from config/calibration.yaml, validated."""
+    where = f"countries/{COUNTRY}/config/{CONFIG_NAME}.yaml"
+    try:
+        raw, problem = load_country_yaml(COUNTRY, CONFIG_NAME), "lacks"
+    except FileNotFoundError:
+        raw, problem = {}, "does not exist; it carries"
+    if not isinstance(raw, dict):
+        raise ValueError(f"{where} must be a mapping of {sorted(OWNER_KEYS)}")
+    missing = [key for key in OWNER_KEYS if key not in raw]
+    if missing:
+        needed = "; ".join(f"{key}: {OWNER_KEYS[key]}" for key in missing)
+        raise MissingOwnerDecision(f"{where} {problem} the owner decision(s) {needed}")
+    unknown = sorted(set(raw) - set(OWNER_KEYS))
+    if unknown:
+        raise ValueError(f"{where} has unknown key(s): {', '.join(unknown)}")
+
+    segments, cuts = raw["segments"], raw["entropy_cut_points"]
+    if not (isinstance(segments, list) and segments and len(set(segments)) == len(segments)):
+        raise ValueError(f"segments must be a non-empty list of distinct names, got {segments!r}")
+    strange = [s for s in segments if s not in SEGMENTS]
+    if strange:
+        raise ValueError(f"unknown segment(s) {strange}; the candidates are {list(SEGMENTS)}")
+    if not (
+        isinstance(cuts, list)
+        and len(cuts) == 4
+        and all(_real(c) and 0.0 < c < 1.0 for c in cuts)
+        and bool(np.all(np.diff(cuts) > 0))
+    ):
+        raise ValueError(f"entropy_cut_points must be four increasing numbers in (0, 1): {cuts!r}")
+    tail, signoff = raw["tail_min_odds"], raw["owner_signoff"]
+    if not (_real(tail) and tail > 1.0):
+        raise ValueError(f"tail_min_odds must be decimal odds above 1.0, got {tail!r}")
+    if not (isinstance(signoff, int) and not isinstance(signoff, bool) and signoff > 0):
+        raise ValueError(f"owner_signoff must be a positive issue number, got {signoff!r}")
+    return {
+        "segments": list(segments),
+        "entropy_cut_points": [float(c) for c in cuts],
+        "tail_min_odds": float(tail),
+        "owner_signoff": signoff,
+    }
+
+
+def _real(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and np.isfinite(value)
+
+
+def bootstrap_settings() -> dict:
+    """D7's bootstrap from config/scoring.yaml, with the study's fixed seed."""
+    boot = load_country_yaml(COUNTRY, "scoring")["bootstrap"]
+    if boot["cluster_unit"] != "meeting" or boot["sided"] != "one-sided":
+        raise ValueError(f"this study implements meeting clusters, one-sided; scoring.yaml: {boot}")
+    return {
+        "cluster_unit": "meeting",
+        "sided": "one-sided",
+        "level": float(boot["level"]),
+        "n_boot": int(boot["n_boot"]),
+        "seed": BOOTSTRAP_SEED,
+    }
+
+
+def win_floor() -> float:
+    """The Win pool's floor in decimal odds: its minimum dividend over the unit stake."""
+    jra = load_source(COUNTRY, SOURCE)
+    return float(jra.pools["WIN"].min_dividend) / jra.unit_stake
+
+
+def build_spec(owner: dict, scheme: FoldScheme, bootstrap: dict, floor: float) -> dict:
+    """The family's pre-registered spec, frozen in the registry before anything is scored."""
+    return {
+        "family_id": FAMILY_ID,
+        "ticket": TICKET,
+        "hypotheses": {
+            "E1": "the power beta of the final Win price, by year, era and tail; de-vig ΔLL",
+            "E3": "the power beta by bin of the race's normalised market entropy",
+            "E4": "the power beta in vs out of each pre-registered segment",
+        },
+        "target": "the race's winner (Win pool) at the final Win odds",
+        "devigs": {
+            "normalised": "q_i = (1/O_i) / sum_j (1/O_j)",
+            "power": "p_i proportional to (1/O_i)^beta, beta fitted on each fold's training rows",
+            "shin": "Shin (1993), z solved per race; clamped to 0 (normalised) without overround",
+        },
+        "comparator": "normalised",
+        "beta_fit": "conditional logit on ln(1/O), MLE; se = observed information^-1/2; "
+        "races with a priced winner; a dead heat counts each co-winner",
+        "beta_ci": "95% two-sided Wald, beta +/- 1.96 se",
+        "score": "winner log loss per race (core.eval.scoring.per_race_log_loss)",
+        "rows": "priced starters of run races with a priced winner; development days only",
+        "subsets": {
+            "all_races": "every development race",
+            "no_floor_bound_races": "races holding a floor-bound runner left out, fit and score",
+        },
+        "segments": {name: SEGMENTS[name].definition for name in owner["segments"]},
+        "entropy_cut_points": owner["entropy_cut_points"],
+        "tail": {"min_odds": owner["tail_min_odds"], "rule": "a runner priced above min_odds"},
+        "floor": {"odds": floor, "rule": "a priced runner at or under odds + 1e-9 (jra.yaml)"},
+        "fold_scheme": dataclasses.asdict(scheme),
+        "bootstrap": bootstrap,
+        "price_era_start": PRICE_ERA_START.isoformat(),
+        "decisions": DECISIONS,
+        "owner_signoff": owner["owner_signoff"],
+        "sources": [SOURCE],
+    }
+
+
+# --------------------------------------------------------------------------- development rows
+
+
+def read_development() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Development runners and races of the price era: column- and date-scoped store reads that
+    drop holdout days, then `split_off`'s development rows. The holdout is never opened."""
+    frames = []
+    for name, columns in (("runners", RUNNER_COLUMNS), ("races", RACE_COLUMNS)):
+        table = read_store_table(
+            name, columns=columns, start=PRICE_ERA_START, end=date.max, touches_price=True
+        )
+        development, _ = split_off(table.to_pandas(date_as_object=False), "race_date", COUNTRY)
+        frames.append(development)
+    return frames[0], frames[1]
+
+
+def store_builds() -> dict[str, str]:
+    """Each store table read, as '<path>@<sha256 prefix>' of its file."""
+    builds = {}
+    for name in ("runners", "races"):
+        digest = hashlib.sha256()
+        with open(paths.processed_dir(SOURCE) / f"{name}.parquet", "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+        builds[f"{SOURCE}_{name}"] = f"processed/{SOURCE}/{name}.parquet@{digest.hexdigest()[:16]}"
+    return builds
+
+
+def development_frame(runners: pd.DataFrame, races: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """The study frame: one row per priced starter of a run race with a priced winner (race_id,
+    race_date, odds cleaned, won = finish_pos 1, each co-winner of a dead heat, and the race's
+    RACE_COLUMNS), with the races and runners each rule dropped."""
+    void = races["status"].ne("run")
+    known = runners["race_id"].isin(races["race_id"])
+    in_void = runners["race_id"].isin(races.loc[void, "race_id"])
+    kept = runners.loc[known & ~in_void]
+    scratched = kept["is_scratched"].eq(True)
+    odds = pd.Series(clean_odds(kept["win_odds"].to_numpy()), index=kept.index)
+    unpriced = ~scratched & odds.isna()
+    starting = ~scratched & ~unpriced
+    starters = kept.loc[starting, ["race_id", "race_date"]].assign(
+        odds=odds[starting], won=kept.loc[starting, "finish_pos"].eq(1)
+    )
+    has_winner = starters.groupby("race_id")["won"].transform("any")
+    attributes = races.loc[~void].drop(columns=["race_date", "status"])
+    frame = starters.loc[has_winner, ["race_id", "race_date", "odds", "won"]].merge(
+        attributes, on="race_id", how="left", validate="many_to_one"
+    )
+    winners = frame.groupby("race_id")["won"].sum()
+    counts = {
+        "races_read": len(races),
+        "void_races": int(void.sum()),
+        "runners_read": len(runners),
+        "runners_without_a_race_row": int((~known).sum()),
+        "runners_in_void_races": int(in_void.sum()),
+        "scratched_runners": int(scratched.sum()),
+        "unpriced_runners": int(unpriced.sum()),
+        "races_without_a_priced_winner": int(kept["race_id"].nunique() - len(winners)),
+        "dead_heat_races": int((winners >= 2).sum()),
+        "races": len(winners),
+        "runners": len(frame),
+    }
+    return frame, counts
+
+
+# --------------------------------------------------------------------------- the pure study
+
+
+@dataclass(frozen=True)
+class Variant:
+    """One registry record's identity, its metrics, and its error when it failed."""
+
+    hypothesis_id: str
+    name: str
+    fold_scheme: str
+    components: dict[str, str]
+    params: dict
+    metrics: tuple[FoldMetric, ...] = ()
+    error: str | None = None
+
+
+@dataclass
+class Study:
+    counts: dict[str, int]
+    tables: dict[str, list[dict]] = field(default_factory=dict)
+    variants: list[Variant] = field(default_factory=list)
+
+    def attempt(self, variant: Variant, compute: Callable[[], tuple[list, dict]]) -> None:
+        """Run one variant: its metrics and table rows, or its error as a failed variant."""
+        try:
+            metrics, tables = compute()
+        except Exception as exc:  # every failure is a registry record, never dropped
+            self.variants.append(replace(variant, error=f"{type(exc).__name__}: {exc}"))
+            return
+        self.variants.append(replace(variant, metrics=tuple(metrics)))
+        for key, rows in tables.items():
+            self.tables.setdefault(key, []).extend(rows)
+
+
+def _metric(fold: str, metric: str, value: float, n: int, lo=None, hi=None) -> FoldMetric:
+    """A registry metric in plain floats and ints; a non-finite value fails its variant."""
+    value, lo, hi = (None if v is None else float(v) for v in (value, lo, hi))
+    if not all(np.isfinite(v) for v in (value, lo, hi) if v is not None):
+        raise ValueError(f"{metric} on {fold} is not finite: {value}, [{lo}, {hi}]")
+    return FoldMetric(str(fold), metric, value, lo, hi, int(n))
+
+
+def _bounds(per_race: pd.Series, clusters: pd.Series, spec: dict) -> Interval:
+    boot = spec["bootstrap"]
+    return paired_bootstrap(
+        per_race, clusters, n_boot=boot["n_boot"], level=boot["level"], seed=boot["seed"]
+    )
+
+
+def _beta_table(table: pd.DataFrame, column: str, header: str, **label) -> tuple[list, list]:
+    """Registry metrics and report rows of a segment_beta table, with 95% CIs."""
+    metrics, rows = [], []
+    for value, beta, se, n in table[[column, "beta", "se", "n_races"]].itertuples(index=False):
+        lo, hi = beta - BETA_CI_Z * se, beta + BETA_CI_Z * se
+        metrics.append(_metric("development", f"beta[{column}={value}]", beta, n, lo, hi))
+        rows.append(
+            {**label, header: value, "races": int(n), "beta": beta, "se": se}
+            | {"lower 95%": lo, "upper 95%": hi}
+        )
+    return metrics, rows
+
+
+def _walk_forward_power(fit_rows: pd.DataFrame, folds: list[Fold], subset: str):
+    """Out-of-fold power probabilities, each fold's beta from its training rows."""
+    parts, metrics, rows = [], [], []
+    for fold in folds:
+        train, test = fit_rows.iloc[fold.train_idx], fit_rows.iloc[fold.test_idx]
+        fit = fit_power_beta(train["odds"], train["race_id"], train["won"])
+        parts.append(devig_power(test["odds"], test["race_id"], fit.beta))
+        lo, hi = fit.beta - BETA_CI_Z * fit.se, fit.beta + BETA_CI_Z * fit.se
+        label = fold.test_start.isoformat()
+        metrics.append(_metric(label, "beta", fit.beta, fit.n_races, lo, hi))
+        rows.append(
+            {"subset": subset, "fold": label, "train to": fold.train_end, "test to": fold.test_end}
+            | {"train races": fit.n_races, "beta": fit.beta, "se": fit.se}
+            | {"test races": test["race_id"].nunique()}
+        )
+    return pd.concat(parts), metrics, rows
+
+
+def _devig_variants(frame: pd.DataFrame, spec: dict, subset: str, study: Study) -> None:
+    """E1 on one subset: each de-vig's walk-forward winner log loss, ΔLL against normalised and
+    the tail's observed vs expected winners, with meeting-clustered bounds."""
+    folds = walk_forward(frame["race_date"], scheme=FoldScheme.from_mapping(spec["fold_scheme"]))
+    scored = frame.iloc[np.concatenate([f.test_idx for f in folds] or [np.zeros(0, int)])]
+    race = scored["race_id"].to_numpy()
+    sizes = [len(f.test_idx) for f in folds]
+    fold_of = pd.Series(np.repeat([f.test_start.isoformat() for f in folds], sizes), index=race)
+    fold_of = fold_of.groupby(level=0).first()
+    clusters = scored["meeting_id"].groupby(race).first()
+    tail = (scored["odds"] > spec["tail"]["min_odds"]).to_numpy()
+    won = scored["won"].to_numpy(dtype=float)
+    comparator: dict[str, pd.Series] = {}
+
+    def score(name: str) -> tuple[list, dict]:
+        if not folds:
+            raise ValueError("the fold scheme gives no walk-forward fold on these dates")
+        if name != "normalised" and "ll" not in comparator:
+            raise RuntimeError("the normalised comparator failed, so there is no ΔLL")
+        metrics, tables = [], {}
+        if name in PARAMETER_FREE:
+            p = PARAMETER_FREE[name](scored["odds"], scored["race_id"])
+        else:
+            fit_rows = frame[["race_id", "odds", "won"]]
+            p, metrics, tables["folds"] = _walk_forward_power(fit_rows, folds, subset)
+        no = pd.Series(False, index=scored.index)
+        ll = per_race_log_loss(p, scored["won"], scored["race_id"], no).per_race
+        for label, part in ll.groupby(fold_of.reindex(ll.index).to_numpy()):
+            metrics.append(_metric(label, "mean_log_loss", part.mean(), len(part)))
+        metrics.append(_metric("all_folds", "mean_log_loss", ll.mean(), len(ll)))
+        row = {"subset": subset, "de-vig": name, "races": len(ll), "mean log loss": ll.mean()}
+        if name == "normalised":
+            comparator["ll"] = ll
+        else:
+            g = gain(ll, comparator["ll"])
+            iv = _bounds(g.per_race, clusters, spec)
+            metrics.append(
+                _metric("all_folds", "delta_ll_vs_normalised", iv.mean, g.n_common, iv.lo, iv.hi)
+            )
+            row |= {
+                "ΔLL vs normalised": iv.mean,
+                "lower": iv.lo,
+                "upper": iv.hi,
+                "meetings": iv.n_clusters,
+            }
+        gap = pd.Series(np.where(tail, won - p.to_numpy(), 0.0)).groupby(race).sum()
+        iv = _bounds(gap, clusters, spec)
+        observed, expected = won[tail].sum(), p.to_numpy()[tail].sum()
+        metrics += [
+            _metric("all_folds", "tail_observed_winners", observed, tail.sum()),
+            _metric("all_folds", "tail_expected_winners", expected, tail.sum()),
+            _metric("all_folds", "tail_o_minus_e_per_race", iv.mean, len(gap), iv.lo, iv.hi),
+        ]
+        tables["headline"] = [row]
+        tables["tail"] = [
+            {"subset": subset, "de-vig": name, "tail runners": int(tail.sum())}
+            | {"observed winners": observed, "expected winners": expected}
+            | {"(O - E) per race": iv.mean, "lower": iv.lo, "upper": iv.hi}
+        ]
+        return metrics, tables
+
+    scheme = "walk_forward:" + json.dumps(spec["fold_scheme"], sort_keys=True)
+    for name in DEVIGS:
+        components = {"devig": name, "score": "winner_log_loss", "comparator": "normalised"}
+        variant = Variant("E1", f"{name}:{subset}", scheme, components, {"subset": subset})
+        study.attempt(variant, lambda name=name: score(name))
+
+
+def _year_and_era(frame: pd.DataFrame) -> tuple[list, dict]:
+    fit_rows = frame[["race_id", "odds", "won"]].assign(year=frame["race_date"].dt.year)
+    metrics, by_year = _beta_table(segment_beta(fit_rows, "year"), "year", "year")
+    era = segment_beta(fit_rows.assign(era=f"{PRICE_ERA_START.isoformat()} onward"), "era")
+    era_metrics, by_era = _beta_table(era, "era", "era")
+    return metrics + era_metrics, {"beta_by_year": by_year, "beta_by_era": by_era}
+
+
+def _compared(table: pd.DataFrame, column: str) -> pd.DataFrame:
+    """The table, when it has two or more values to compare; otherwise the variant fails."""
+    if len(table) < 2:
+        raise ValueError(f"{column} has {table[column].tolist()} only: nothing to compare")
+    return table
+
+
+def _segment(frame: pd.DataFrame, races: pd.DataFrame, name: str) -> tuple[list, dict]:
+    values = SEGMENTS[name].values(races)
+    fit_rows = frame[["race_id", "odds", "won"]].assign(**{name: frame["race_id"].map(values)})
+    table = _compared(segment_beta(fit_rows, name), name)
+    metrics, rows = _beta_table(table, name, "value", segment=name)
+    left_out = [{"segment": name, "races in neither side": int(values.isna().sum())}]
+    return metrics, {"segments": rows, "segment_left_out": left_out}
+
+
+def _entropy_bins(frame: pd.DataFrame, cuts: list[float]) -> tuple[list, dict]:
+    entropy = normalised_entropy(frame["odds"], frame["race_id"])
+    edges = [0.0, *cuts, 1.0]
+    labels = [f"{k + 1}: [{edges[k]:g}, {edges[k + 1]:g}{']' if k == 4 else ')'}" for k in range(5)]
+    k = np.searchsorted(np.asarray(cuts), entropy.to_numpy(), side="right")
+    values = pd.Series(np.asarray(labels, dtype=object)[k], index=entropy.index)
+    values = values.where(entropy.notna())
+    fit_rows = frame[["race_id", "odds", "won"]].assign(bin=frame["race_id"].map(values))
+    table = _compared(segment_beta(fit_rows, "bin"), "bin")
+    metrics, rows = _beta_table(table, "bin", "entropy bin")
+    rows.append({"entropy bin": "left out (under two priced runners)"})
+    rows[-1]["races"] = int(entropy.isna().sum())
+    return metrics, {"entropy": rows}
+
+
+def compute_study(frame: pd.DataFrame, spec: dict) -> Study:
+    """Every variant and table of the frozen `spec` on `frame` (development_frame's shape).
+
+    E1 walk-forward for each subset (every race; races without a floor-bound runner): normalised,
+    out-of-fold power and Shin winner log loss, ΔLL against normalised and the tail, each with
+    meeting-clustered bootstrap bounds. In-sample on every development race: beta by year and
+    era, by E4 segment (in vs out) and by E3 entropy bin, with 95% CIs. Pure: no I/O.
+    """
+    floor = flag_floor_bound(frame["odds"], floor=spec["floor"]["odds"])
+    floor_race = floor.groupby(frame["race_id"].to_numpy()).transform("any").to_numpy()
+    study = Study(counts={"floor_bound_runners": int(floor.sum())})
+    study.counts["races_holding_a_floor_bound_runner"] = int(frame["race_id"][floor_race].nunique())
+    _devig_variants(frame, spec, "all_races", study)
+    columns = ["race_id", "race_date", "meeting_id", "odds", "won"]
+    without = frame.loc[~floor_race, columns].reset_index(drop=True)
+    _devig_variants(without, spec, "no_floor_bound_races", study)
+    del without
+
+    components = {"fit": FIT}
+    study.attempt(
+        Variant("E1", "power_beta:by_year_and_era", IN_SAMPLE, components, {"by": ["year", "era"]}),
+        lambda: _year_and_era(frame),
+    )
+    races = frame.drop_duplicates("race_id").set_index("race_id")
+    for name, definition in spec["segments"].items():
+        variant = Variant(
+            "E4",
+            f"segment:{name}",
+            IN_SAMPLE,
+            {**components, "segment": name},
+            {"definition": definition},
+        )
+        study.attempt(variant, lambda name=name: _segment(frame, races, name))
+    cuts = spec["entropy_cut_points"]
+    variant = Variant(
+        "E3",
+        "entropy_bins",
+        IN_SAMPLE,
+        {**components, "entropy": "normalised"},
+        {"cut_points": cuts},
+    )
+    study.attempt(variant, lambda: _entropy_bins(frame, cuts))
+    return study
+
+
+# --------------------------------------------------------------------------- report and runner
+
+SECTIONS = (
+    ("folds", "Walk-forward folds: the power beta of each fold's training rows", ""),
+    (
+        "headline",
+        "Winner log loss and ΔLL against normalised (out of fold)",
+        "ΔLL is normalised's log loss minus the variant's, per race, in nats (positive: better than"
+        " normalised). lower and upper are the (1 - level) and level quantiles of the paired"
+        " bootstrap over meetings (D7: one-sided). Judge by the beta CI, not by ΔLL (08 §4 E1).",
+    ),
+    (
+        "tail",
+        "Tail: runners priced above the tail threshold (out of fold)",
+        "(O - E) per race is the tail's observed minus expected winners per scored race, with the"
+        " same meeting-clustered bounds; a dead heat counts each co-winner.",
+    ),
+    ("beta_by_year", "Beta by year (in-sample, development races)", ""),
+    (
+        "beta_by_era",
+        "Beta by era (in-sample)",
+        "D10, signed: races before 2014-06-07 are excluded wherever the price enters. No"
+        " pre-reform price was read, so the table covers the post-reform era only.",
+    ),
+    ("segments", "E4 segments: beta in vs out (in-sample, 95% CI = beta +/- 1.96 se)", ""),
+    (
+        "segment_left_out",
+        "E4 races in neither side of a segment",
+        "A race whose attribute is missing is in neither side; for g1_day_undercard nor is the G1.",
+    ),
+    ("entropy", "E3 market-entropy bins (in-sample, 95% CI)", ""),
+)
+
+
+def _cell(value: object) -> str:
+    if isinstance(value, (float, np.floating)):
+        return f"{value:.6g}"
+    return "" if value is None else str(value).replace("|", "\\|")
+
+
+def _markdown_table(rows: list[dict]) -> str:
+    head = list(dict.fromkeys(key for row in rows for key in row))
+    lines = ["| " + " | ".join(head) + " |", "|" + " --- |" * len(head)]
+    lines += ["| " + " | ".join(_cell(row.get(k)) for k in head) + " |" for row in rows]
+    return "\n".join(lines)
+
+
+def render_report(study: Study, spec: dict, about: dict) -> str:
+    """The full report: aggregate tables only, never a runner or race row."""
+    lines = [
+        f"# Crowd calibration at the final Win price ({COUNTRY}, #{TICKET})",
+        "",
+        *(f"- {key}: {value}" for key, value in about.items()),
+        f"- owner sign-off of the pre-registered inputs: #{spec['owner_signoff']}",
+        f"- tail: above {spec['tail']['min_odds']:g}; floor: {spec['floor']['odds']:g}",
+        "- development rows only: holdout days are never read and the holdout is not opened",
+        "",
+        "## Owner decisions used",
+        "",
+        *(f"- {key}: {value}" for key, value in spec["decisions"].items()),
+        "",
+        "## Data",
+        "",
+        _markdown_table([{"count": k, "n": v} for k, v in study.counts.items()]),
+    ]
+    for key, title, note in SECTIONS:
+        rows = study.tables.get(key)
+        lines += ["", f"## {title}", ""]
+        lines += [note, ""] if note else []
+        lines.append(_markdown_table(rows) if rows else "_Not computed: see the variants below._")
+    variants = [
+        {"E": v.hypothesis_id, "variant": v.name, "status": "failed" if v.error else "scored"}
+        | ({"error": v.error} if v.error else {})
+        for v in study.variants
+    ]
+    lines += ["", "## Variants (one registry record each)", "", _markdown_table(variants), ""]
+    return "\n".join(lines)
+
+
+def _record(variant: Variant, git_sha: str, builds: dict[str, str]) -> RunRecord:
+    return RunRecord(
+        hypothesis_id=variant.hypothesis_id,
+        family_id=FAMILY_ID,
+        variant=variant.name,
+        ticket=TICKET,
+        git_sha=git_sha,
+        data_builds=builds,
+        sources=(SOURCE,),
+        fold_scheme=variant.fold_scheme,
+        components=variant.components,
+        params=variant.params,
+        metrics=variant.metrics,
+        status="failed" if variant.error else "scored",
+    )
+
+
+def run_study(out_dir: Path | None = None) -> dict:
+    """Run the pre-registered study on Japan's development data and write its report.
+
+    Raises `MissingOwnerDecision` before the store is read when config/calibration.yaml lacks an
+    input, `paths.DataDirInsideRepo` for an `out_dir` inside the repository, and
+    `FamilyAlreadyFrozen` when the family is frozen with another spec."""
+    owner = owner_inputs()
+    out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
+    spec = build_spec(owner, load_country_scheme(COUNTRY), bootstrap_settings(), win_floor())
+    git_sha = _git_sha()
+    registry = default_registry(COUNTRY)
+    spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any likelihood is evaluated
+
+    builds = store_builds()
+    runners, races = read_development()
+    frame, counts = development_frame(runners, races)
+    del runners, races
+    study = compute_study(frame, spec)
+    study.counts = {**counts, **study.counts}
+    del frame
+
+    existing = registry.records(FAMILY_ID)
+    records = [_record(v, git_sha, builds) for v in study.variants]
+    appended = [registry.append(r) for r in records if r not in existing]
+    about = {
+        "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
+        "git": git_sha,
+        "store": ", ".join(builds.values()),
+        "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    report = write_report(
+        out_dir / f"crowd-calibration-{COUNTRY}-{spec_hash[:12]}.md",
+        render_report(study, spec, about),
+        sources=(SOURCE,),
+    )
+    return {
+        "family_id": FAMILY_ID,
+        "spec_hash": spec_hash,
+        "report_path": str(report),
+        "registry_path": str(registry.path),
+        "counts": study.counts,
+        "records_appended": len(appended),
+        "records_already_present": len(records) - len(appended),
+        "failed_variants": [v.name for v in study.variants if v.error],
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m horsetrack.countries.japan.studies.calibration"
+    )
+    parser.add_argument("--run", action="store_true", required=True, help="run the study")
+    parser.add_argument("--out", type=Path, default=None, help="report directory, outside the repo")
+    args = parser.parse_args(argv)
+    print(json.dumps(run_study(args.out), indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
