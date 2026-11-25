@@ -17,7 +17,7 @@ race results; no JRDB, no JRA-VAN). No runner or race row appears.
   `uv run python -m horsetrack.countries.japan.studies.calibration --run`.
 - Store: `processed/jra/runners.parquet@b3226f2a22bfce26`, `processed/jra/races.parquet@4e6a394a57e3101a`.
 - The full report is under the data directory, at `reports/crowd-calibration-japan-4816f067ab5a.md`. Every record
-  is in `docs/experiments/registry-japan.md`.
+  is in `docs/experiments/registry/japan/`.
 
 ## Owner decisions used
 
@@ -153,6 +153,8 @@ per scored race, with meeting-clustered one-sided bounds. O / E is a point estim
 | no floor-bound races | Shin | 110,885 | 653 | 297.8 | 2.193 | +0.01500 | +0.01332 | +0.01676 |
 
 The tail β fitted beside this table is #285's: see "Experiment report: the tail β (#285)" at the end of this file.
+D4's spline on the same folds and tail table is #275's: see "Experiment report: D4's calibrated market on the
+crowd-calibration folds (#275)" after it.
 
 ### E4: β in vs out of each segment (in-sample, every development race)
 
@@ -276,7 +278,7 @@ race results; no JRDB, no JRA-VAN). No runner or race row appears.
   `uv run python -m horsetrack.countries.japan.studies.tail_beta`.
 - Store: `processed/jra/runners.parquet@b3226f2a22bfce26`, `processed/jra/races.parquet@4e6a394a57e3101a`, the
   builds #77 read. The full report is under the data directory, at `reports/tail-beta-japan-ee2e0cc56024.md`. The
-  four records are in `docs/experiments/registry-japan.md`.
+  four records are in `docs/experiments/registry/japan/`.
 - Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
   called. No holdout outcome or price was read.
 
@@ -439,3 +441,158 @@ Each is proposed under epic #72, `status:proposed`; the orchestrator files them.
   the level step.
 - #275: D4's spline on the same folds and tail table (already filed).
 - #276: meeting-clustered CIs for the slopes (already filed).
+
+---
+
+# Experiment report: D4's calibrated market on the crowd-calibration folds (Japan, #275)
+
+Ticket #275 (epic #72), from #77's review. #77 compared the normalised, power-β and Shin de-vigs of the final Win
+price out of fold. This study scores D4's calibrated market beside them on the same folds, with the same ΔLL and the
+same tail table. The calibrated market is the natural cubic spline in ln q of `models.v0.calibration`
+(`fit_win_calibration`, reused, 5 knots), q the normalised share of the race's priced runners, refitted on each fold's
+training rows. **Nothing is adopted.** The owner picks the baseline de-vig (08 §9.4). Every figure is an aggregate
+over the JRA results store (netkeiba race results; no JRDB, no JRA-VAN). No runner or race row appears.
+
+- Registry family `japan-calibrated-market-final-win`, spec sha256
+  `46f53f0b0fc33aa562a6efa9062b8d00ddd71cfb79ead9f28e30ed81022aa9d9`. It is its own family, not #77's. The spec was
+  frozen in the registry before any development row was read. It holds the spline (model, knots, knot quantile range,
+  dead-heat rows), the de-vigs, the comparator, the ΔLL rule, the subsets, the tail, the floor, the fold scheme, the
+  bootstrap and the owner decisions.
+- Code: `countries/japan/studies/calibrated_market.py`; the records carry git `19deb19`. To reproduce, run
+  `uv run python -m horsetrack.countries.japan.studies.calibrated_market`. A rerun on the same store finds its
+  records already present and appends none.
+- Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`. These are
+  later builds than #77's (`b3226f2a22bfce26`, `4e6a394a57e3101a`): the store was rebuilt after #77, and it adds
+  three development days (see Data and split). The full report is under the data directory, at
+  `reports/calibrated-market-japan-46f53f0b0fc3.md`. The eight records are in `docs/experiments/registry/japan/`.
+- Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
+  called. No holdout outcome or price was read.
+
+## Owner decisions used
+
+| Decision | What it fixes here | Where it was signed |
+| --- | --- | --- |
+| D4 | The Win baseline is the calibrated market (a spline in ln q), fitted in-fold. This study scores it beside the de-vigs and adopts nothing. | `docs/problem-statement.md` §2, #14 |
+| #77 (4) | The no-floor-bound subset drops races with a runner at odds 1.1 or under from fitting and from scoring. | #77, 2026-11-25 |
+| #77 (5) | The tail is a runner priced above decimal 51.0 (`tail_min_odds` in `config/calibration.yaml`). | #77, 2026-11-25 |
+| Floor 1.1 | A priced runner at or under odds 1.1 + 1e-9 is floor-bound (the Win pool's minimum dividend over the unit stake). | `config/jra.yaml`; #77 (4) |
+| D6 | Winner log loss per race; a dead heat scores each of its k co-winners at 1/k. | §3, #14; the #69 answer (2026-11-24) |
+| D7 | Bootstrap clusters are meetings (venue x day); bounds are 95% one-sided; 10,000 replicates (`config/scoring.yaml`). | §3, #14 |
+| D9 | Walk-forward quarters, refit quarterly, expanding window, 1-week embargo; the first scored quarter is 2020-Q1 (`config/folds.yaml`). | §4, #14; the #70 answer |
+| D10 | Races before 2014-06-07 are excluded wherever the price enters. | §4, #14 |
+| D11, D12, D14, D15 | Holdout A2 from 2026-11-28, fully locked for outcomes and prices, opened only by the owner. Not opened here. | §5, #14; the #71 answer (`config/holdout.yaml`) |
+| D21 | No figure derived from a licensed source appears in the repository. None is used here. | #14 |
+
+The comparison itself (the spline beside #77's three de-vigs, ΔLL against normalised, #77's tail table) is the
+ticket's outline. The bootstrap seed (275) is an implementation choice for reproducibility: `scoring.yaml` signs no
+seed. The spline's knot count (5) and knot quantile range (0.05 to 0.95) are `fit_win_calibration`'s defaults, D4's
+live model.
+
+## Hypothesis
+
+The null is the starting point: the spline adds nothing to normalised 1/odds, so its ΔLL is 0 and its tail O/E is
+normalised's. The frozen spec pre-registered the measures (each de-vig's and the spline's out-of-fold ΔLL against
+normalised, and the tail's observed vs expected winners, with and without floor-bound races), not their directions.
+The direction and failure rules below were written with this report, after the run. #77 and #285 had already looked
+at the same development races and found the tail over-priced, so this study cannot confirm the direction
+independently.
+
+- **Direction.** A spline in ln q can bend where one exponent cannot, so it should take up the tail bias #77 found
+  (O/E 0.83 under normalised, 0.87 under power-β) and gain at least power-β's ΔLL.
+- **Failure rules** (written after the run): the spline fails to beat normalised if its ΔLL lower bound is at or
+  below 0. It fails to absorb the tail if the (O - E) per race bounds exclude 0.
+
+## Variants tried
+
+The family has 8 variants (`Registry.family_size`) and 8 records, all scored, on one run: normalised, the D4 spline,
+power-β and Shin, each on all races and on no floor-bound races. No variant failed and no run was repeated.
+
+Data and split:
+- Development days from 2014-06-07 to 2026-11-23: 43,130 races and 601,265 priced starters. 2,156 scratched runners
+  are out; 66 dead heats. 195 floor-bound runners sit in 195 races (0.45%). That is #77's rows plus 72 races on three
+  development days after #77's run (2026-11-21, 22 and 23, 24 races each), all before the holdout start.
+- Out of fold covers 28 quarterly folds from 2020-Q1 to 2026-Q4 (the last is partial, to 2026-11-23). That makes
+  23,871 scored races in 1,991 meetings (23,752 without floor-bound races). The first fold trains on 19,259 races to
+  2019-12-29, the last on 42,578 races to 2026-09-26.
+- Dead heats: the spline is fitted on #77's development rows, so a race with a dead heat for first is kept and each
+  co-winner counts as a winner in the fit, as in power-β's fit. D4's live `run_fit`
+  (`models/v0/calibration.py`, `_development_frame`) leaves those races out of its fit. The spec states this, and all
+  four de-vigs see the same races.
+- The ΔLL and tail bounds are the one-sided 5% and 95% quantiles of the paired bootstrap over meetings (D7, seed
+  275).
+
+### Out-of-fold winner log loss, ΔLL against normalised
+
+ΔLL is normalised's log loss minus the de-vig's, in nats per race. Positive means better than normalised.
+
+| Subset | De-vig | Races | Mean log loss | ΔLL vs normalised | Lower (5%) | Upper (95%) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| all races | normalised | 23,871 | 1.92850 | | | |
+| all races | D4 spline (refit per fold) | 23,871 | 1.92752 | +0.000977 | +0.000499 | +0.001446 |
+| all races | power-β (refit per fold) | 23,871 | 1.92823 | +0.000267 | +0.000105 | +0.000426 |
+| all races | Shin | 23,871 | 1.93974 | -0.01125 | -0.01350 | -0.00901 |
+| no floor-bound races | normalised | 23,752 | 1.93417 | | | |
+| no floor-bound races | D4 spline (refit per fold) | 23,752 | 1.93324 | +0.000927 | +0.000445 | +0.001399 |
+| no floor-bound races | power-β (refit per fold) | 23,752 | 1.93393 | +0.000240 | +0.000086 | +0.000392 |
+| no floor-bound races | Shin | 23,752 | 1.94561 | -0.01144 | -0.01369 | -0.00920 |
+
+Power-β and Shin match #77's figures (+0.000269 and -0.01125 on all races) on the rebuilt store with the 72 added
+races. That is the same backtest recomputed, not an independent sample: per-fold mean log loss for normalised,
+power-β and Shin equals #77's to 1e-9 in 27 of 28 folds, and only the last fold differs, by the 72 added races. #77's
+ledger rows stay single-run. The per-fold training β runs from 1.0096 to 1.0213 as in #77. The spline's per-fold mean log loss is a
+registry metric, one per fold.
+
+### Out-of-fold tail, runners above decimal 51.0
+
+#77's layout. Observed against expected winners under each de-vig. (O - E) per race is the tail's observed minus
+expected winners per scored race, with meeting-clustered one-sided bounds. O / E is a point estimate only.
+
+| Subset | De-vig | Tail runners | Observed | Expected | O / E | (O - E) per race | Lower (5%) | Upper (95%) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| all races | normalised | 111,905 | 655 | 790.7 | 0.828 | -0.00568 | -0.00742 | -0.00396 |
+| all races | D4 spline | 111,905 | 655 | 643.7 | 1.018 | +0.00048 | -0.00125 | +0.00220 |
+| all races | power-β | 111,905 | 655 | 754.6 | 0.868 | -0.00417 | -0.00590 | -0.00245 |
+| all races | Shin | 111,905 | 655 | 299.8 | 2.185 | +0.01488 | +0.01315 | +0.01661 |
+| no floor-bound races | normalised | 111,226 | 654 | 786.3 | 0.832 | -0.00557 | -0.00731 | -0.00383 |
+| no floor-bound races | D4 spline | 111,226 | 654 | 641.1 | 1.020 | +0.00054 | -0.00119 | +0.00228 |
+| no floor-bound races | power-β | 111,226 | 654 | 752.2 | 0.869 | -0.00414 | -0.00587 | -0.00240 |
+| no floor-bound races | Shin | 111,226 | 654 | 298.6 | 2.190 | +0.01496 | +0.01322 | +0.01670 |
+
+## Alternatives rejected and why
+
+- **ΔLL of the spline against power-β, with its own bounds.** The spec's comparator is normalised, as in #77. The
+  point difference of the means is 0.00071 nats per race on all races (1.92823 - 1.92752), with no bounds: it is
+  derived, not a pre-registered measure. A paired comparison is a follow-up.
+- **The spline against #285's tail β.** #285 scored on #77's store builds, not these, so the races differ by 72 and
+  the two cannot be paired here. The paired comparison is a follow-up.
+- **Dropping dead-heat races, as D4's live `run_fit` does.** Not run. The spec keeps #77's rows so the four de-vigs
+  score the same races. 66 of 43,130 races have a dead heat, so the effect on the fit is likely small, but it is not
+  measured.
+- **Another knot count or knot range.** The spec freezes D4's live defaults (5 knots, quantiles 0.05 to 0.95).
+  Another setting is another family.
+- **Pinning #77's store builds.** The store is rebuilt in place, so #77's builds are not available to read. The
+  study reads the current development rows through `read_development`, and power-β and Shin recompute #77's figures on them.
+
+## What this rules out
+
+- **The spline adding nothing over normalised.** Its ΔLL is +0.000977 nats per race [+0.000499, +0.001446]; without
+  floor-bound races +0.000927 [+0.000445, +0.001399]. The upper bound rules out a gain above about 0.0015 nats per
+  race. That is far below any MDE: the gain is real in sign and small in size.
+- **A tail bias left after the spline.** Its tail O/E is 1.018 (655 against 643.7), and the (O - E) per race bounds
+  cover 0 [-0.00125, +0.00220]. Scaled to the 23,871 scored races, the bounds are about -30 to +53 tail winners
+  against 655 observed. Normalised and power-β leave the tail over-priced, with bounds below 0. Shin over-corrects.
+- **Floor-bound races driving any of this.** Without them the spline's ΔLL moves by 0.00005 and its tail O/E by
+  0.002.
+- **What is not ruled out.** Whether the spline beats power-β or #285's tail β by more than chance is not tested
+  here (no paired bounds). The spline's fit and #77's and #285's tables use the same development races, so they
+  are one look at the data, not independent confirmations. The direction written above came after those looks. The
+  holdout is untouched, so nothing here is an out-of-sample confirmation in 08 §5's sense.
+
+## Follow-ups filed
+
+Each is filed under epic #72, `status:proposed`.
+
+- #320: a paired comparison of D4's spline against power-β and #285's tail β, on one store build, as its own family
+  (ΔLL with meeting-clustered bounds).
+- #321: the spline fitted on `run_fit`'s rows (dead-heat races left out), to check the study's spline matches D4's
+  live fit, or align the two.

@@ -1,0 +1,5 @@
+# Append-only docs: parallel PRs only add rows, files or sections, so a union merge keeps both
+# sides. Never list code here. See "Where things live" in CLAUDE.md.
+docs/ledger.md merge=union
+docs/experiments/registry/** merge=union
+docs/experiments/*.md merge=union

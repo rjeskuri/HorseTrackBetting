@@ -20,7 +20,7 @@ licensed source (JRDB, JRA-VAN) enters the study, no per-day row appears here, a
   (`countries/japan/research/win5.py`, `win5_study.py`).
 - Data build: `processed/jra/win5.parquet@60be24d31bd95181a6fb272a6ab24333b7346db2d9571f6f9b2cf9cb380dc655`, the
   backfill of 2026-11-25: 910 WIN5 days from 2011-04-24 to 2026-11-23, 17 with a carryover in.
-- The run is listed in `docs/experiments/registry-japan.md`.
+- The run is listed in `docs/experiments/registry/japan/`.
 
 ## Owner decisions used
 
