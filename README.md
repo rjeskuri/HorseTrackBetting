@@ -10,6 +10,8 @@ Research and tooling for pari-mutuel horse racing. A bet pays at the final odds,
 
 Code moves into `core` only when two countries use it identically.
 
+How the pieces fit (sources, machines, race-day flow, store, evaluation and workflow): [docs/architecture.md](docs/architecture.md).
+
 ## Data
 No data lives in this repository. Set `HORSETRACK_DATA_DIR` to a directory outside the checkout. Raw caches, stores, models, reports and real page fixtures go there. Committed test fixtures are synthetic.
 
