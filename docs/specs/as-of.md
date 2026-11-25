@@ -225,6 +225,7 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 | `horse_runs` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 1440 min (the next day) | none |
 | `jrdb_pre_race` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | every column starting `tyb_` (`label_prefixes: [tyb_]`) |
 | `jrdb_post_race` | `label_only` | never; `read_label` only | n/a |
+| `track_condition` | `column` | `available_utc` (= `published_utc`, the 発表 time printed on the going page or the yearly record; #90) | none |
 
 - Nothing else is banned. JRDB tables are inputs to private models only (D21: no JRDB-derived
   figure in the public repository).
@@ -268,6 +269,12 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 - A race-date rule opens a whole day's card at 00:00 JST of the race date: a column JRA changes
   later that day (a late scratch, a jockey change) is a trap the rule does not catch (see Known
   traps).
+- `track_condition` (#90) follows the owner's rule, not a ruling: his #136 request ("Ingest them
+  as of their publication time", 2026-11-24), #228's outline step 4 ("available_utc =
+  published_utc as in #136") and his answer on #87 (usable once JRA has officially published it,
+  with its publication timestamp). A yearly record's rows count from the record's own 発表 time,
+  so a race-day view never sees them; `asof_join` on (venue, race_date, surface) takes the latest
+  publication at t.
 - A table outside the file is refused with `NoAvailabilityRule`.
 
 ### Accepted leak: results-derived card columns (owner decision, 2026-11-25)
