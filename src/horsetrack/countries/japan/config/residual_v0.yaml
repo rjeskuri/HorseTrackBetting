@@ -1,0 +1,19 @@
+# Segments of the v0 Win residual (read by countries/japan/models/v0/residual.py, read_segments).
+# Each segment s adds a slope gamma_s on ln q in the races where it is on, shrunk toward 0 (#125).
+# The list is the owner's (answered 2026-11-24 on #125: field of 16 or more, race 12, races 10 to
+# 12, venue), frozen before scoring (D17). "Venue" is every JRA venue code in jra.yaml `venues`.
+# An empty list (`segments: []`) gives no residual: the calibrated market alone.
+segments:
+  - field_16_plus
+  - race_12
+  - races_10_12
+  - venue:SAP
+  - venue:HAK
+  - venue:FKS
+  - venue:NII
+  - venue:TOK
+  - venue:NAK
+  - venue:CKY
+  - venue:KYO
+  - venue:HSN
+  - venue:KOK

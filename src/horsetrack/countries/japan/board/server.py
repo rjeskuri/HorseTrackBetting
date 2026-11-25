@@ -41,6 +41,8 @@ from horsetrack.core import paths
 from horsetrack.countries.japan.board.feed import build_board
 from horsetrack.countries.japan.board.flags import FlagRules, load_flag_rules
 from horsetrack.countries.japan.board.shadow_feed import build_shadow
+from horsetrack.countries.japan.board.snapshot import jra_day_dir
+from horsetrack.countries.japan.logger.pull_vm import vm_day_dir
 from horsetrack.countries.japan.models.v0.loader import load_shadow_models
 from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels
 
@@ -64,8 +66,8 @@ class Feed:
 
     name = "board feed"
 
-    def __init__(self, race_date: date, min_rebuild_s: float):
-        self.race_date, self.min_rebuild_s = race_date, min_rebuild_s
+    def __init__(self, race_date: date, min_rebuild_s: float, day_dir: Path | None = None):
+        self.race_date, self.min_rebuild_s, self.day_dir = race_date, min_rebuild_s, day_dir
         self._lock = threading.Lock()
         self._checked: float | None = None
         self._fingerprint: Fingerprint | None = None
@@ -74,7 +76,7 @@ class Feed:
         self._etag: str | None = None
 
     def _day_files(self) -> Fingerprint:
-        day_dir = paths.odds_snapshot_path("jra", self.race_date.isoformat(), "_").parent
+        day_dir = jra_day_dir(self.race_date, self.day_dir)
         if not day_dir.is_dir():
             return ()
         out = []
@@ -104,7 +106,7 @@ class Feed:
         fingerprint = self._day_files()
         if fingerprint == self._fingerprint and self._body is not None:
             return None
-        board = build_board(self.race_date)
+        board = build_board(self.race_date, day_dir=self.day_dir)
         self._fingerprint = fingerprint
         return board
 
@@ -139,15 +141,20 @@ class ShadowFeed(Feed):
         min_rebuild_s: float,
         models: ShadowModels | None,
         flag_rules: FlagRules,
+        day_dir: Path | None = None,
     ):
-        super().__init__(race_date, min_rebuild_s)
+        super().__init__(race_date, min_rebuild_s, day_dir)
         self.models, self.flag_rules = models, flag_rules
         self._cache: dict = {}
         self._shown: dict[str, Any] | None = None
 
     def _build(self) -> dict[str, Any] | None:
         shadow = build_shadow(
-            self.race_date, models=self.models, flag_rules=self.flag_rules, cache=self._cache
+            self.race_date,
+            models=self.models,
+            flag_rules=self.flag_rules,
+            cache=self._cache,
+            day_dir=self.day_dir,
         )
         shown = _without_clock(shadow)
         if shown == self._shown and self._body is not None:
@@ -234,12 +241,14 @@ def make_server(
     min_rebuild_s: float = 5,
     models: ShadowModels | None = None,
     flag_rules: FlagRules | None = None,
+    day_dir: Path | None = None,
 ) -> ThreadingHTTPServer:
     """A server for the board of `race_date`, bound to (host, port) but not yet serving. Without
-    `models` the shadow feed's values are null; `flag_rules` defaults to the shipped rules."""
-    feed = Feed(race_date, min_rebuild_s)
+    `models` the shadow feed's values are null; `flag_rules` defaults to the shipped rules. Both
+    feeds read the odds logs from `day_dir` when given (a pulled VM folder), else the Mac's own."""
+    feed = Feed(race_date, min_rebuild_s, day_dir)
     rules = load_flag_rules() if flag_rules is None else flag_rules
-    shadow_feed = ShadowFeed(race_date, min_rebuild_s, models, rules)
+    shadow_feed = ShadowFeed(race_date, min_rebuild_s, models, rules, day_dir)
     server = ThreadingHTTPServer((host, port), _make_handler(Path(page_path), feed, shadow_feed))
     server.daemon_threads = True
     return server
@@ -254,6 +263,12 @@ def board_serve_command(
         "--page",
         help="The board page served at / (default: web/board.html beside server.py).",
     ),
+    from_vm: str | None = typer.Option(
+        None,
+        "--from-vm",
+        help="Read the day's odds logs pulled from this VM (ssh alias; `pull-vm --every`) from "
+        "$HORSETRACK_DATA_DIR/vm/<alias>/ instead of the Mac's own odds_snapshots/.",
+    ),
 ) -> None:
     """Serve the board page at / and the day's live feed at /feed, and the shadow page at /shadow
     and its feed at /shadow-feed."""
@@ -266,6 +281,12 @@ def board_serve_command(
     except (paths.DataDirNotSet, paths.DataDirInsideRepo) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
+    day_dir = None
+    if from_vm is not None:
+        try:
+            day_dir = vm_day_dir(from_vm, day)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--from-vm") from exc
     if host != LOCALHOST:
         typer.echo(
             f"warning: binding {host}, not {LOCALHOST}: the board is reachable from other "
@@ -281,7 +302,9 @@ def board_serve_command(
         typer.echo(f"error: shadow models: {' '.join(str(exc).split())[:300]}", err=True)
         raise typer.Exit(1) from exc
     fits = ",".join(f"{k}={v}" for k, v in models.ids.items()) if models else "none (values null)"
-    server = make_server(day, host=host, port=port, page_path=page_path, models=models)
+    server = make_server(
+        day, host=host, port=port, page_path=page_path, models=models, day_dir=day_dir
+    )
     bound_host, bound_port = server.server_address[:2]
     typer.echo(f"serving the board of {day} on http://{bound_host}:{bound_port}/")
     typer.echo(f"shadow page on http://{bound_host}:{bound_port}/shadow, models={fits}")

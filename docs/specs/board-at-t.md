@@ -34,10 +34,24 @@ Code: `src/horsetrack/countries/japan/board/snapshot.py`. Input: rows of the odd
 - A capture is the set of rows of the race sharing one `snapshot_utc`. Its WIN rows are final when
   it has at least one priced WIN row and every priced WIN row is final; `SCR` rows do not count
   either way, and a capture with no priced WIN row is never final.
-- `final_board` takes the first such capture by `snapshot_utc` (log order does not matter) and
-  builds the board from that capture's rows alone, with the rules above. Its `at_utc` is the
-  latest availability time among the capture's rows (when the whole capture was in hand) and its
-  `capture_utc` the oldest among its price rows. No final capture gives None.
+- `final_board` takes each pool's final capture (owner sign-off on #234, 2026-11-25), because
+  HKTrack-format logs split a round into captures (WIN+PLACE, QUINELLA ~1 s on, Wide ~2 s on) and
+  a pool can turn final a round after WIN. Log order does not matter.
+  1. The anchor is the first capture by `snapshot_utc` whose WIN rows are final; none gives None.
+  2. A capture is final for a pool when it holds at least one priced row of that pool and every
+     priced row of that pool is final (`SCR` rows do not count): the WIN test applied per pool.
+  3. The board starts from the anchor's rows, so WIN and the other pools' totals (QUINELLA's
+     `__pool__`) are the anchor's. PLACE and QUINELLA_PLACE, each with its prices, `SCR` rows and
+     `__pool__` total, are replaced by that pool's rows from its first final capture at or after
+     the anchor, with no round bound; when there is none, from its latest final capture before the
+     anchor; when the pool has no final capture at all, it is empty and has no total. A pool final
+     in the anchor comes from the anchor.
+  4. The rules above apply unchanged (scratched runners from WIN and PLACE rows; Wide pairs naming
+     a scratched runner dropped). `at_utc` is the latest availability time among the rows taken,
+     `capture_utc` the oldest among its price rows, and `final` is True.
+
+  A one-capture round whose pools are all final (horsetrack's own logs) gives that capture's board
+  alone, as before #234.
 - `board_at(...).final` is True when the WIN rows it uses meet the same rule.
 
 ## Post times

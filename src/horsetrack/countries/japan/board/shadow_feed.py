@@ -20,12 +20,12 @@ import logging
 import math
 from collections.abc import Callable, MutableMapping
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
-from horsetrack.core import paths
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board import snapshot
-from horsetrack.countries.japan.board.feed import _race_no, _venues_logged, utc_now
+from horsetrack.countries.japan.board.feed import _LOG_SUFFIX, _race_no, _venues_logged, utc_now
 from horsetrack.countries.japan.board.flags import FlagRules, avoid_flags
 from horsetrack.countries.japan.board.snapshot import (
     PLACE,
@@ -34,6 +34,7 @@ from horsetrack.countries.japan.board.snapshot import (
     RaceBoard,
     board_at,
     bucket_for,
+    jra_day_dir,
     load_decision_grid,
     post_times_for,
 )
@@ -65,8 +66,8 @@ class _DayRows:
     last now, plus every row available after it (a replay's later captures). A clock that goes
     back reads the logs again from the start."""
 
-    def __init__(self, race_date: date) -> None:
-        self.race_date = race_date
+    def __init__(self, race_date: date, day_dir: Path | None = None) -> None:
+        self.race_date, self.day_dir = race_date, day_dir
         self._reset()
 
     def _reset(self) -> None:
@@ -88,7 +89,7 @@ class _DayRows:
         if self.horizon is not None and now_utc < self.horizon:
             self._reset()
         for venue in venues:
-            path = paths.odds_snapshot_path("jra", self.race_date.isoformat(), venue)
+            path = jra_day_dir(self.race_date, self.day_dir) / f"{venue}{_LOG_SUFFIX}"
             tail = self.tails.setdefault(venue, odds_log.LogTail(path))
             for row in tail.poll():
                 race_id, available = row.get("race_id"), snapshot._available(row)
@@ -198,24 +199,26 @@ def build_shadow(
     n_draws: int = 400,
     seed: int = 0,
     cache: MutableMapping | None = None,
+    day_dir: Path | None = None,
 ) -> dict[str, Any]:
     """The shadow values and avoid flags of every race of `race_date` with a board as of now()."""
     now_utc = now().astimezone(timezone.utc)
     grid = load_decision_grid()
-    logged = _venues_logged(race_date)
+    logged = _venues_logged(race_date, day_dir)
     if venues is not None:
         wanted = set(venues)
         logged = [venue for venue in logged if venue in wanted]
-    day_rows = cache.get(("logs", race_date)) if cache is not None else None
+    key = ("logs", race_date, day_dir)
+    day_rows = cache.get(key) if cache is not None else None
     if day_rows is None:
-        day_rows = _DayRows(race_date)
+        day_rows = _DayRows(race_date, day_dir)
         if cache is not None:
-            cache[("logs", race_date)] = day_rows
+            cache[key] = day_rows
     day_rows.update(logged, now_utc)
 
     races = []
     for venue in logged:
-        posts = post_times_for(race_date, venue)
+        posts = post_times_for(race_date, venue, day_dir=day_dir)
         for race_id in day_rows.race_ids(venue):
             race_no = _race_no(race_id)
             if race_no is None:

@@ -30,3 +30,6 @@ CLAUDE.local.md
 
 # Data: scraped and licensed data never enters git (public repository)
 /data/
+
+# Browser tool snapshots (Playwright MCP): page text, never committed
+.playwright-mcp/

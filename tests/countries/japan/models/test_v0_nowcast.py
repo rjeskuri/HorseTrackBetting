@@ -15,6 +15,10 @@ Contract pinned here (`horsetrack.countries.japan.models.v0.nowcast`):
 - training_examples refuses a holdout day (HoldoutDayError); stale boards are dropped and counted in
   `examples.attrs["dropped"]` ({tau_min: examples dropped}); the fit records its days in
   `model.days`.
+- Split captures (#234): on an HKTrack day whose rounds are WIN+PLACE, QUINELLA 1 s on and Wide 2 s
+  on, the final Wide price is Wide's first final capture at or after the anchor (`final_board` over
+  the whole log): the anchor round's own Wide capture when it is final, else the next round's. The
+  examples and a refit carry QUINELLA_PLACE at every grid tau.
 
 Every expected value is derived here from the formulas above, never from the code under test. All
 data is synthetic; HORSETRACK_DATA_DIR points at tmp_path.
@@ -29,6 +33,7 @@ import json
 import math
 from bisect import bisect_right
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -37,7 +42,12 @@ from scipy import stats
 
 from horsetrack.core import config, paths
 from horsetrack.countries.japan import odds_log
-from horsetrack.countries.japan.board.snapshot import DecisionGrid, RaceBoard
+from horsetrack.countries.japan.board.snapshot import (
+    DecisionGrid,
+    RaceBoard,
+    final_board,
+    load_decision_grid,
+)
 from horsetrack.countries.japan.models.v0 import nowcast
 from horsetrack.countries.japan.models.v0.nowcast import (
     HoldoutDayError,
@@ -600,6 +610,208 @@ def test_the_real_holdout_rule_decides_which_days_are_refused(data_dir):
         training_examples(held, VENUE, grid=GRID, max_board_age_s=limits)
     examples = training_examples(open_day, VENUE, grid=GRID, max_board_age_s=limits)
     assert len(examples) == 102
+
+
+# ---------------------------------------------------------------- split captures (#234)
+# HKTrack logged each round as separate captures: WIN+PLACE at s, QUINELLA 1 s on, Wide 2 s on.
+# Owner sign-off 2026-11-25: the final board takes each pool's final capture, so Wide's first final
+# capture at or after the anchor (the first final WIN+PLACE capture) prices the final Wide: the
+# anchor round's own Wide capture when it is final, else the next round's (2026-11-22 KYO races 01,
+# 04 and 09: the anchor round's Wide still pre-final). The round before's final Wide never does
+# while one at or after exists. Each capture's prices differ (`price` by index).
+
+QUINELLA = "QUINELLA"
+SPLIT_POOLS = (
+    (WIN, PLACE),
+    (QUINELLA,),
+    (WIDE,),
+)  # a round's captures, 0, 1 and 2 s from its start
+PRE_INDEX = 8  # the round 20 s before the final one: WIN not final yet, Wide already final
+SPLIT_WIDE_INDEX = 10  # the final round's Wide capture (its WIN+PLACE capture is FINAL_INDEX)
+LATER_INDEXES = (11, 12)  # final rounds 20 s and 40 s after the final one
+NO_LIMIT = {10: 1e6, 5: 1e6, 2: 1e6}
+# the final round's Wide capture per race: "final", "pre_final" (the KYO shape) or "missing"
+ANCHOR_WIDE = {1: "final", 2: "pre_final"}
+
+
+def wide_final_index(mode: str) -> int:
+    """The capture index Wide's final price comes from: the first final Wide at or after the
+    anchor, the final round's own when it is final, else the next round's."""
+    return SPLIT_WIDE_INDEX if mode == "final" else LATER_INDEXES[0]
+
+
+# live rounds each within the shipped max_board_age_s of one tau of the shipped grid
+SHIPPED_LIVE = [-61.0, -31.0, -17.0, -5.5, -2.5, -1.25]
+SHIPPED_RACES = {
+    1: {"post": POST, "runners": 4, "live": SHIPPED_LIVE, "final": 2.0},
+    2: {"post": POST + timedelta(minutes=30), "runners": 5, "live": SHIPPED_LIVE, "final": 2.5},
+}
+
+
+def write_split_day(day: date, *, races=RACES, grid=GRID, anchor_wide=None) -> dict:
+    """write_day with every round split into HKTrack's three captures, a round before the final one
+    whose Wide is already final, and two later final rounds; `anchor_wide` (default ANCHOR_WIDE)
+    sets each race's final-round Wide capture. Returns the expected examples as write_day does."""
+    anchor_wide = ANCHOR_WIDE if anchor_wide is None else anchor_wide
+    shift = datetime.combine(day, POST.timetz()) - POST
+    log = paths.odds_snapshot_path("jra", day.isoformat(), VENUE)
+    captures = []
+    for race_no, race in races.items():
+        post = race["post"] + shift
+        final_at = post + timedelta(minutes=race["final"])
+        mode = anchor_wide[race_no]
+        wide_index = None if mode == "missing" else SPLIT_WIDE_INDEX
+        rounds = [
+            (post + timedelta(minutes=m), (i, i, i), (False, False, False))
+            for i, m in enumerate(race["live"])
+        ]
+        rounds.append((final_at - timedelta(seconds=20), (PRE_INDEX,) * 3, (False, True, True)))
+        rounds.append(
+            (final_at, (FINAL_INDEX, FINAL_INDEX, wide_index), (True, True, mode == "final"))
+        )
+        for k, index in enumerate(LATER_INDEXES, start=1):
+            rounds.append((final_at + timedelta(seconds=20 * k), (index,) * 3, (True, True, True)))
+        for start, indexes, finals in rounds:
+            parts = zip(SPLIT_POOLS, indexes, finals, strict=True)
+            for offset, (pools, index, final) in enumerate(parts):
+                if index is not None:
+                    snap = start + timedelta(seconds=offset)
+                    captures.append((snap, race_no, pools, index, final))
+    for snap, race_no, pools, index, final in sorted(captures):
+        rows = capture_rows(day, race_no, races[race_no]["runners"], snap, index, final)
+        odds_log.append_capture(log, [r for r in rows if r["pool"] in pools])
+    posts = {no: race["post"] + shift for no, race in races.items()}
+    odds_log.write_post_times(log.with_name(f"{VENUE}.races.json"), posts, POST + shift)
+
+    expected = {}
+    for race_no, race in races.items():
+        race_id = f"jra:{day.isoformat()}:{VENUE}:{race_no:02d}"
+        live_s = [m * 60.0 for m in race["live"]]
+        for tau in grid.minutes:
+            at = -60.0 * tau  # seconds from the post
+            used = max(i for i, s in enumerate(live_s) if s <= at)  # WIN+PLACE capture
+            used_wide = max(i for i, s in enumerate(live_s) if s + 2.0 <= at)  # Wide capture
+            age = at - min(live_s[used], live_s[used_wide] + 2.0)
+            for pool, keys in combos(race["runners"]).items():
+                if pool == QUINELLA:
+                    continue
+                index_t = used_wide if pool == WIDE else used
+                index_final = (
+                    wide_final_index(anchor_wide[race_no]) if pool == WIDE else FINAL_INDEX
+                )
+                for runners in keys:
+                    combination = ",".join(str(h) for h in runners)
+                    expected[(race_id, pool, combination, tau)] = (
+                        price(race_no, pool, runners, index_t)[0],
+                        price(race_no, pool, runners, index_final)[0],
+                        age,
+                    )
+    return expected
+
+
+def expected_frame(expected: dict) -> pd.DataFrame:
+    """The expected examples as the columns ref_cells reads."""
+    return pd.DataFrame(
+        [
+            {"pool": k[1], "tau_min": k[3], "odds_t": v[0], "odds_final": v[1]}
+            for k, v in expected.items()
+        ]
+    )
+
+
+def wide_per_tau(pools, taus) -> dict[int, int]:
+    out: dict[int, int] = {}
+    for pool, tau in zip(pools, taus, strict=True):
+        if pool == WIDE:
+            out[int(tau)] = out.get(int(tau), 0) + 1
+    return out
+
+
+def test_training_examples_take_wide_from_its_first_final_capture(data_dir):
+    """Race 1's final-round Wide capture is final and prices its Wide finals; race 2's is still
+    pre-final (the KYO 01/04/09 shape), so the next round's final Wide capture prices race 2's."""
+    expected = write_split_day(DEV_DAY)
+    assert len(expected) == 3 * (4 + 4 + 6) + 3 * (5 + 5 + 10)
+    examples = training_examples(DEV_DAY, VENUE, grid=GRID, max_board_age_s=NO_LIMIT)
+    assert wide_per_tau(examples["pool"], examples["tau_min"]) == {
+        tau: 6 + 10 for tau in GRID.minutes
+    }
+    # Wide's final price: index 10 for race 1, 11 for race 2; WIN and PLACE are the anchor's
+    assert_examples_match(examples, expected)
+    assert examples.attrs["skipped"]["no_final_board"] == 0
+    assert sum(examples.attrs["dropped"].values()) == 0
+
+
+def test_the_streamed_final_board_is_final_board_over_the_whole_log(data_dir):
+    """training_examples reads only some rows of the log; its final prices must be final_board's
+    over every row: the first final Wide capture at or after the anchor in, the others out."""
+    write_split_day(DEV_DAY)
+    rows = odds_log.read_rows(paths.odds_snapshot_path("jra", DEV_DAY.isoformat(), VENUE))
+    got = keyed(training_examples(DEV_DAY, VENUE, grid=GRID, max_board_age_s=NO_LIMIT))
+    for race_no, race in RACES.items():
+        race_id = f"jra:{DEV_DAY.isoformat()}:{VENUE}:{race_no:02d}"
+        board = final_board(rows, race_id)
+        keys = combos(race["runners"])
+        index = wide_final_index(ANCHOR_WIDE[race_no])
+        assert board.wide == {pair: price(race_no, WIDE, pair, index) for pair in keys[WIDE]}
+        assert board.win == {h: price(race_no, WIN, (h,), FINAL_INDEX)[0] for (h,) in keys[WIN]}
+        assert board.place == {h: price(race_no, PLACE, (h,), FINAL_INDEX) for (h,) in keys[PLACE]}
+        on_board = {(WIN, str(h)): odds for h, odds in board.win.items()}
+        on_board |= {(PLACE, str(h)): lo for h, (lo, _) in board.place.items()}
+        on_board |= {(WIDE, f"{a},{b}"): lo for (a, b), (lo, _) in board.wide.items()}
+        streamed = {(k[1], k[2]): v[1] for k, v in got.items() if k[0] == race_id}
+        assert streamed == on_board, race_id
+
+
+def test_a_race_without_wide_in_its_final_round_takes_wide_from_the_next_final_capture(data_dir):
+    """Race 2 logs no Wide capture in its final round: its Wide finals come from the next round's
+    final Wide capture (index 11), not from the final Wide capture of the round before (8) nor a
+    later one (12); race 1 keeps its own (10)."""
+    expected = write_split_day(DEV_DAY, anchor_wide={1: "final", 2: "missing"})
+    examples = training_examples(DEV_DAY, VENUE, grid=GRID, max_board_age_s=NO_LIMIT)
+    wide = examples[examples["pool"] == WIDE]
+    assert set(wide["race_id"]) == {f"jra:{DEV_DAY.isoformat()}:{VENUE}:{no:02d}" for no in (1, 2)}
+    race_2 = wide[wide["race_id"] == f"jra:{DEV_DAY.isoformat()}:{VENUE}:02"]
+    for r in race_2.itertuples(index=False):
+        pair = tuple(int(h) for h in r.combination.split(","))
+        assert r.odds_final == price(2, WIDE, pair, LATER_INDEXES[0])[0], r.combination
+    assert_examples_match(examples, expected)
+    assert examples.attrs["skipped"]["no_final_board"] == 0
+
+
+def test_a_fit_on_split_capture_examples_has_wide_cells_at_every_tau(data_dir):
+    expected = write_split_day(DEV_DAY)
+    examples = training_examples(DEV_DAY, VENUE, grid=GRID, max_board_age_s=NO_LIMIT)
+    model = NowcastV0.fit(examples, bands=BANDS, grid=GRID, prior_n=PRIOR_N)
+    assert {tau for pool, tau, _ in model.cells if pool == WIDE} == set(GRID.minutes)
+    cells, sigma0 = ref_cells(expected_frame(expected), BANDS, PRIOR_N)
+    assert set(model.cells) == set(cells)
+    for key, (n, mu, sigma) in cells.items():
+        cell = model.cell(*key)
+        assert cell.n == n, key
+        assert cell.mu == pytest.approx(mu, abs=1e-12), key
+        assert cell.sigma == pytest.approx(sigma, rel=1e-9), key
+    for tau in GRID.minutes:
+        assert model.sigma0[(WIDE, tau)] == pytest.approx(sigma0[(WIDE, tau)], rel=1e-9), tau
+
+
+def test_a_refit_lists_wide_cells_for_every_shipped_grid_tau(data_dir, tmp_path):
+    """run_fit on a split-capture development day, the shipped grid and config: the fit and its
+    manifest hold QUINELLA_PLACE cells at every grid tau."""
+    grid = load_decision_grid()
+    expected = write_split_day(DEV_DAY, races=SHIPPED_RACES, grid=grid)
+    manifest = nowcast.run_fit([(DEV_DAY, VENUE)], out_dir=tmp_path / "fit")
+    wide_n: dict[int, int] = {}
+    for c in manifest["examples_per_cell"]:
+        if c["pool"] == WIDE:
+            wide_n[int(c["tau_min"])] = wide_n.get(int(c["tau_min"]), 0) + int(c["n"])
+    assert wide_n == {tau: 6 + 10 for tau in grid.minutes}
+    assert manifest["n_examples"] == len(expected)
+    label = f"{DEV_DAY.isoformat()}:{VENUE}"
+    assert manifest["dropped_stale_examples"] == {label: {str(t): 0 for t in grid.minutes}}
+    model = NowcastV0.from_json(Path(manifest["fit_path"]).read_text())
+    assert {tau for pool, tau, _ in model.cells if pool == WIDE} == set(grid.minutes)
+    assert wide_per_tau([k[1] for k in expected], [k[3] for k in expected]) == wide_n
 
 
 # ---------------------------------------------------------------- scores
