@@ -44,7 +44,6 @@ from horsetrack.countries.japan.models.v0 import ordering as v0_ordering
 WIN, PLACE, QUINELLA, WIDE = "WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE"
 EXACTA, TRIO, TRIFECTA = "FORECAST", "TRIO", "TIERCE"
 POOLS = (WIN, PLACE, QUINELLA, WIDE, EXACTA, TRIO, TRIFECTA)
-JOINT_POOLS = (QUINELLA, WIDE, EXACTA, TRIO, TRIFECTA)
 
 UNIT_STAKE = 100.0  # yen: dividends are quoted per 100 yen
 MEAN_BREAKAGE = 5.0  # yen per winning 100-yen ticket: dividends are floored to 10 yen (04 §1.3)
@@ -106,7 +105,7 @@ def dividend_shares(
     for race_id, pool, label, dividend in zip(
         dividends["race_id"], dividends["pool"], classes, dividends["dividend"], strict=True
     ):
-        label = None if label is None or (isinstance(label, float) and math.isnan(label)) else label
+        label = None if pd.isna(label) else str(label)
         key = (race_id, pool, label)
         if key not in rates:
             rates[key] = takeout.race_takeout(
@@ -184,9 +183,7 @@ def winning_combinations(finish: Mapping[int, int], pool: str) -> list[str]:
     if places == 0:
         return []
     placed = sorted(
-        (int(pos), int(h))
-        for h, pos in finish.items()
-        if pos is not None and not (isinstance(pos, float) and math.isnan(pos)) and pos <= places
+        (int(pos), int(h)) for h, pos in finish.items() if not pd.isna(pos) and pos <= places
     )
     groups = [[h for _, h in g] for _, g in groupby(placed, key=lambda item: item[0])]
     if sum(len(g) for g in groups) < places:
