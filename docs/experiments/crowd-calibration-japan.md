@@ -17,7 +17,7 @@ race results; no JRDB, no JRA-VAN). No runner or race row appears.
   `uv run python -m horsetrack.countries.japan.studies.calibration --run`.
 - Store: `processed/jra/runners.parquet@b3226f2a22bfce26`, `processed/jra/races.parquet@4e6a394a57e3101a`.
 - The full report is under the data directory, at `reports/crowd-calibration-japan-4816f067ab5a.md`. Every record
-  is in `docs/experiments/registry-japan.md`.
+  is in `docs/experiments/registry/japan/`.
 
 ## Owner decisions used
 
@@ -278,7 +278,7 @@ race results; no JRDB, no JRA-VAN). No runner or race row appears.
   `uv run python -m horsetrack.countries.japan.studies.tail_beta`.
 - Store: `processed/jra/runners.parquet@b3226f2a22bfce26`, `processed/jra/races.parquet@4e6a394a57e3101a`, the
   builds #77 read. The full report is under the data directory, at `reports/tail-beta-japan-ee2e0cc56024.md`. The
-  four records are in `docs/experiments/registry-japan.md`.
+  four records are in `docs/experiments/registry/japan/`.
 - Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
   called. No holdout outcome or price was read.
 
@@ -464,7 +464,7 @@ over the JRA results store (netkeiba race results; no JRDB, no JRA-VAN). No runn
 - Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`. These are
   later builds than #77's (`b3226f2a22bfce26`, `4e6a394a57e3101a`): the store was rebuilt after #77, and it adds
   three development days (see Data and split). The full report is under the data directory, at
-  `reports/calibrated-market-japan-46f53f0b0fc3.md`. The eight records are in `docs/experiments/registry-japan.md`.
+  `reports/calibrated-market-japan-46f53f0b0fc3.md`. The eight records are in `docs/experiments/registry/japan/`.
 - Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
   called. No holdout outcome or price was read.
 

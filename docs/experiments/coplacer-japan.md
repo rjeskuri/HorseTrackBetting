@@ -30,7 +30,7 @@ appears. No figure from the research reports is reproduced here.
 - Logs: `odds_snapshots/jra/2026-11-21/KYO.jsonl.gz@e36a723de2948d4a`,
   `odds_snapshots/jra/2026-11-22/KYO.jsonl.gz@c07e4cfe887e48af`.
 - The full report is under the data directory, at `reports/coplacer-japan-4a54f12ea0d6.md`. Every record is in
-  `docs/experiments/registry-japan.md`.
+  `docs/experiments/registry/japan/`.
 
 ## Owner decisions used
 

@@ -36,7 +36,7 @@ store alone, and their figures are below.
   (written through `write_report` with the sources jra and jrdb), re-rendered at `647879c`. Its D9 text was edited
   in place on 2026-11-25 to record the owner's answer on #87 (no figure changed), and `studies/meta.py` now renders
   that text. The records are in
-  `docs/experiments/registry-japan.md`, where the 36 member-based records show as withheld. The re-run reproduced
+  `docs/experiments/registry/japan/`, where the 36 member-based records show as withheld. The re-run reproduced
   the 26 first-run records exactly and did not append them again; it appended only the 12 `meeting_clustered:`
   records.
 
@@ -165,7 +165,7 @@ small-sample factor), each one-sided 95%. The market snapshot is the final Win p
 | `ceiling:calibrated_market` (E9): the D4 baseline's own ln(p_cal / q) | `b5a0f5de1c7aa4b0` | 10,047 (838) | q-mass with p_cal above q 0.7747 [0.7698, 0.7795]; above ratio 1.1, 1.25, 1.5 and 2: 0 [0, 0]; q-weighted RMS 0.0582 [0.0577, 0.0587] |
 
 By fold, `market:normalised`'s ΔLL runs from −0.00301 (2025-Q3) to +0.00153 (2024-Q2), above 0 in 3 of the 12
-quarters (`docs/experiments/registry-japan.md`).
+quarters (`docs/experiments/registry/japan/`).
 
 ### Member-based (withheld, D21)
 
