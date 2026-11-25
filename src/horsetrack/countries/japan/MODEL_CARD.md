@@ -54,7 +54,9 @@ C3 forecasts a race's top-3 time at the decision time.
 - **Prediction at t:** E[top-3 time] = par + the posterior mean of the day's v.
   - The posterior uses the residuals, against the frozen par, of the same (day, track, surface) races whose result is
     available strictly before t.
-  - A result is available at post_utc + 30 min, the owner's same-day results rule (#80, #96).
+  - A result is available at post_utc + 30 min, the owner's same-day results rule (#80, #96). The as-of views carry
+    the same rule for the finish columns of races and runners since #305 (`config/availability.yaml`); the study
+    applies it itself.
   - With no result by t, v is its prior, so the forecast is the par. No variant prior is injected yet; the cushion and
     moisture prior is E29 (#90, #230).
 - **Evaluation:** #70's quarterly expanding walk-forward folds (D9). The decision time is T-2 (D2). The metric is the

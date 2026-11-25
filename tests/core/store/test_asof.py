@@ -1803,6 +1803,9 @@ def test_load_availability_refuses_malformed_label_prefixes(tmp_path: Path, entr
 #   stored value.
 # - dividends, sectionals, incidents and running_comments rows enter the views at post_utc + 30
 #   min of their race.
+# - the finish (races' finish_time_s; runners' finish_pos, dead_heat and finish_time_s) is in the
+#   frame from 00:00 JST, null until post_utc + 30 min of the row's own race (#305, the owner's
+#   answer on #96, 2026-11-25); the other result columns stay labels.
 # - a race with no post time (or a row whose race_id has no races row) never shows those values.
 
 POST_JST = "Asia/Tokyo"
@@ -1827,12 +1830,13 @@ ORPHAN = ("jra:2026-11-28:NAK:03", date(2026, 11, 28))  # runners and results, n
 HORSES = (1, 2)
 FAR_FUTURE = datetime(2030, 1, 1, tzinfo=UTC)
 RUNNER_RESULT_LABELS = (
-    "finish_pos", "placing_raw", "placing_code", "dead_heat", "finish_time_s", "lbw_raw",
-    "lbw_lengths", "running_positions", "last_3f_s", "win_odds", "win_fav_rank",
+    "placing_raw", "placing_code", "lbw_raw", "lbw_lengths", "running_positions", "last_3f_s",
+    "win_odds", "win_fav_rank",
 )  # fmt: skip
-RACE_RESULT_LABELS = (
-    "finish_time_s", "split_times_s", "result_published_utc", "result_unpublished_utc",
-)  # fmt: skip
+RACE_RESULT_LABELS = ("split_times_s", "result_published_utc", "result_unpublished_utc")
+# null until post_utc + 30 min of the row's race (#305)
+RUNNER_FINISH = ("finish_pos", "dead_heat", "finish_time_s")
+RACE_FINISH = ("finish_time_s",)
 
 
 def expected_post(race_date: date, hhmm: str | None) -> datetime | None:
@@ -1873,6 +1877,8 @@ def runner_values(rid: str, horse_no: int) -> dict:
         "actual_wt_kg": 55.0 + horse_no,
         "is_scratched": horse_no == 2 and r % 2 == 0,
         "finish_pos": horse_no,
+        "dead_heat": (horse_no + r) % 2 == 0,
+        "finish_time_s": 71.0 + r + horse_no / 10,
         "placing_raw": str(horse_no),
         "win_odds": 2.5 * horse_no + r,
         "last_3f_s": 34.0 + r / 10,
@@ -2080,6 +2086,12 @@ def test_post_gated_views_match_a_point_in_time_lookup_at_every_boundary(post_co
                 (r, h): runner_values(r, h)[column] if r in weighed else None
                 for r in open_races for h in HORSES
             }, f"{column}, {where}"  # fmt: skip
+        assert set(RUNNER_FINISH) <= set(runners.columns), where
+        for column in RUNNER_FINISH:
+            assert by_runner(runners, column) == {
+                (r, h): runner_values(r, h)[column] if r in resulted else None
+                for r in open_races for h in HORSES
+            }, f"runners.{column}, {where}"  # fmt: skip
 
         races = read_asof(post_con, "races", t, rules=japan)
         assert set(races["race_id"]) == open_races - {ORPHAN[0]}, where
@@ -2088,6 +2100,12 @@ def test_post_gated_views_match_a_point_in_time_lookup_at_every_boundary(post_co
                 r: race_values(r)[column] if r in weighed else None
                 for r in open_races - {ORPHAN[0]}
             }, f"{column}, {where}"  # fmt: skip
+        assert set(RACE_FINISH) <= set(races.columns), where
+        for column in RACE_FINISH:
+            assert by_race(races, column) == {
+                r: race_values(r)[column] if r in resulted else None
+                for r in open_races - {ORPHAN[0]}
+            }, f"races.{column}, {where}"  # fmt: skip
 
         for table in RESULT_TABLES:
             view = read_asof(post_con, table, t, rules=japan)
@@ -2174,7 +2192,14 @@ def test_card_columns_open_at_midnight_jst_and_result_labels_stay_out(post_con, 
             r: race_values(r)[column] for r in same_day if r != ORPHAN[0]
         }, column
 
-    # the result columns stay labels: never in a view, at any t
+    # the finish is in the frame from 00:00 JST, null until post_utc + 30 min (#305)
+    assert set(RUNNER_FINISH) <= set(runners.columns) and set(RACE_FINISH) <= set(races.columns)
+    for column in RUNNER_FINISH:
+        assert by_runner(runners, column) == {(r, h): None for r in same_day for h in HORSES}
+    for column in RACE_FINISH:
+        assert by_race(races, column) == {r: None for r in same_day if r != ORPHAN[0]}
+
+    # the other result columns stay labels: never in a view, at any t
     for t in boundary_probes():
         runners = read_asof(post_con, "runners", t, rules=japan)
         assert not set(RUNNER_RESULT_LABELS) & set(runners.columns), t.isoformat()

@@ -45,7 +45,7 @@ times). No JRDB, no JRA-VAN, and no race row appears.
 | --- | --- | --- |
 | Estimand | `top3_time_s` is the mean finish time of the runners placed 1–3, dead heats averaged. A race with no 3rd-placed runner uses the placed runners present, and is counted. Read per runner: each runner placed 1 or 2 counts once, and the runners placed 3rd share one slot at their mean. | #96 (2026-11-25); the dead-heat reading on #305 (2026-11-25) |
 | Jump races | Excluded from the speed model, and counted. | #96 (2026-11-25) |
-| Availability | A same-day result is available at the race's post_utc + 30 min, the same-day dividends rule. The variant at t reads only results available strictly before t. | #96 and #80 (2026-11-24/25); `config/availability.yaml`, #227 |
+| Availability | A same-day result is available at the race's post_utc + 30 min, the same-day dividends rule. The variant at t reads only results available strictly before t. The as-of layer carries the same rule for the finish (races `finish_time_s`; runners `finish_pos`, `dead_heat`, `finish_time_s`), added by this ticket; the study applies it itself as `result_available_utc`, and the two agree on the instant (the view shows a finish from post + 30 min on; the study, reading strictly before t, is the stricter at that one instant). | #96 and #80 (2026-11-24/25); `config/availability.yaml` and `docs/specs/as-of.md`: the dividends #227, the finish #305 |
 | D2 | The decision time is T-2, the primary point of the grid (`config/decision.yaml`). | `docs/problem-statement.md` §1, #14 |
 | D7 | Bounds are meeting-clustered (venue x day), 95% one-sided (`config/scoring.yaml`; 10,000 replicates, seed 305). | §3, #14 |
 | D9 | #70's quarterly expanding walk-forward folds, `min_train` 22 quarters, 1-week embargo (`config/folds.yaml`). | §4, #14; #70 |
@@ -273,11 +273,6 @@ Rail is `unknown` on every cell, so the rail column is left out of this table.
 
 - **The Student-t degrees of freedom of C3's error.** #96's outline signs a Student-t error but no df. This run used
   5, the df of #96's tests, and ran the normal error beside it. It is the owner's choice which one C3 carries forward.
-- **Availability of finish times.** `availability.yaml` and `docs/specs/as-of.md` keep `finish_time_s` and
-  `finish_pos` as label columns of races and runners, never in an as-of view. They are not on a post_utc + 30 min rule
-  of their own, unlike dividends, sectionals, incidents and running comments. This study applies the post + 30 min
-  rule itself (`result_available_utc`), as the owner answered on #96. Putting finish times on that rule in the as-of
-  layer would be a change to `availability.yaml`, which is an owner decision.
 
 ## Follow-ups filed
 
