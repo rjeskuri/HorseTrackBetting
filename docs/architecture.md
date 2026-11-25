@@ -97,6 +97,9 @@ flowchart LR
   odds --> spage
   mdl --> spage
   odds --> shd
+  odds -->|"compact"| proc
+  odds -->|"results sidecars"| scr
+  odds -->|"nowcast fit"| fits
   mdl --> shd --> shlog
   board -.-> phone
   spage -.-> phone
@@ -109,7 +112,7 @@ flowchart LR
 | `raw/{source}/` (pages, `manifest.sqlite`) | `core/ingest/fetcher.py`, `core/ingest/queue.py`; the one-time HKTrack copy `scripts/port_hktrack_data.py` | `core/store/build.py` |
 | `interim/{source}/` (parse cache) | `core/store/cache.py` | `core/store/build.py` |
 | `processed/{source}/` | `core/store/build.py`, `countries/japan/jrdb/tables.py`, `countries/japan/logger/compact.py` (`odds_timeseries/`) | `core/store/tables.py`, `core/store/asof.py`, the model fits |
-| `odds_snapshots/{source}/{date}/` | `countries/japan/odds_log.py` from log-day | `countries/japan/board/`, `countries/japan/shadow/day.py` |
+| `odds_snapshots/{source}/{date}/` | `countries/japan/odds_log.py` from log-day | `countries/japan/board/`, `countries/japan/shadow/day.py`; `countries/japan/logger/compact.py` (into `processed/jra/odds_timeseries/`); `countries/japan/jra/adapter.py` (`_logged_results`: the #225 results sidecars, so the store build fills `races.result_published_utc`); `countries/japan/models/v0/nowcast.py` (`training_examples` fits from it); `countries/japan/logger/compare.py` (the HKTrack cutover comparison) |
 | `vm/{alias}/` | `countries/japan/logger/pull_vm.py` | `board-serve` and `shadow-day` with `--from-vm` |
 | `logs/japan/` | log-day's health lines and block markers (`countries/japan/logger/health.py`, `countries/japan/logger/log_day.py`) | the owner |
 | `models/japan/v0/` | `countries/japan/models/v0/calibration.py`, `countries/japan/models/v0/nowcast.py`, `countries/japan/models/v0/ordering.py`, `countries/japan/models/v0/residual.py` | `countries/japan/models/v0/loader.py` |
@@ -233,7 +236,10 @@ flowchart TD
   asof["as-of views,<br>availability.yaml"]
   feat["handicap features"]
   fits["model fits"]
+  olog[("odds logs,<br>results sidecars")]
   scrape --> adap --> fet --> raw
+  olog --> comp
+  olog -->|"results sidecars,<br>JRA adapter hook"| build
   raw --> pw --> build --> tables
   jrdbb --> tables
   comp --> tables
@@ -253,7 +259,8 @@ flowchart TD
 | parse worker, parse cache | `core/store/parse_worker.py`, `core/store/cache.py` |
 | store build | `core/store/build.py`, `core/store/cli.py` (`horsetrack store ...`); spec `docs/specs/store.md` |
 | JRDB build | `countries/japan/jrdb/tables.py` (`horsetrack japan jrdb build`) |
-| compact odds logs | `countries/japan/logger/compact.py` (`horsetrack japan compact`) |
+| odds logs, results sidecars | `odds_snapshots/{source}/{date}/` from log-day (view 2a); the store build reads the sidecars through `countries/japan/jra/adapter.py` (`result_published_utc()`, `result_unpublished_utc()`) |
+| compact odds logs | `countries/japan/logger/compact.py` (`horsetrack japan compact`), into `processed/jra/odds_timeseries/` |
 | store tables | `core/store/schemas.py`, `core/store/tables.py` |
 | store checks, rebuild check | `core/store/checks.py`, `scripts/check_store_rebuild.py` |
 | as-of views | `core/store/asof.py`, `countries/japan/config/availability.yaml` (owner decisions); spec `docs/specs/as-of.md` |
