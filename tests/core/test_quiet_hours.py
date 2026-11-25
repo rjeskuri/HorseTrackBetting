@@ -20,6 +20,7 @@ returns the aware UTC wall clock the quiet check reads, looked up at call time, 
 from __future__ import annotations
 
 import copy
+import random
 from datetime import datetime, time, timedelta, timezone
 from statistics import mean
 from zoneinfo import ZoneInfo
@@ -30,6 +31,7 @@ from scrape_fakes import PlainAdapter, lines, offline_env, register_adapter
 from typer.testing import CliRunner
 
 from horsetrack.core.config import load_country_yaml
+from horsetrack.core.ingest.fetcher import Fetcher
 from horsetrack.core.ingest.queue import FetchQueue
 from horsetrack.core.ingest.types import FetchTask
 from horsetrack.core.paths import manifest_path
@@ -185,10 +187,32 @@ RATE_CASES = [
 ]
 
 
+JITTER_SEED = 232
+
+
+@pytest.fixture
+def seeded_jitter(monkeypatch, starts):
+    """Every Fetcher the runner builds draws its jitter from random.Random(JITTER_SEED), so the
+    gaps below are the same on every run (`starts` first: it installs the offline Fetcher)."""
+    wired = Fetcher.__init__
+
+    def seeded_init(self, *args, rng=None, **kwargs):
+        wired(self, *args, rng=rng or random.Random(JITTER_SEED), **kwargs)
+
+    monkeypatch.setattr(Fetcher, "__init__", seeded_init)
+
+
 @pytest.mark.parametrize(("source", "host"), RATE_CASES)
-def test_real_config_rates_per_host(starts, site, source, host):
+def test_real_config_rates_per_host(seeded_jitter, starts, site, source, host):
     """40 requests to one host are paced by that host's yaml entry (else the default), jitter
-    included: gaps stay within gap * (1 +/- jitter) and average out near the gap."""
+    included: gaps stay within gap * (1 +/- jitter) and average out near the gap.
+
+    The jitter RNG is seeded, so this is deterministic (an unseeded mean of 39 draws failed in CI
+    by chance). The first gap is the exact gap, the other 38 are gap * (1 + U(-j, j)); with the
+    fixed seed the mean sits well inside gap * jitter / 3. A wrong gap shifts every gap, so it
+    breaks the min/max bounds or the mean bound (a 10 % wrong gap moves the mean by 0.1 * gap,
+    above the allowed gap * jitter / 3 on every real host); jitter not applied collapses the
+    spread to 0."""
     http = JRA_HTTP if source == "jra" else HKJC_HTTP
     gap, jitter = _rate(http, host)
     _queue_pages(site, source, [host] * 40)
