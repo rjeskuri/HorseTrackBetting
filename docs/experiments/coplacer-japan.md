@@ -183,6 +183,15 @@ things.
 
 ### Step 2: the decision-time test (frozen; data pending)
 
+**The step-2 spec is frozen in the registry but pending owner sign-off.** It is a pre-registered spec for the owner
+to approve (CLAUDE.md, Modeling governance), not an approved one. Three of its choices are proposals, not owner
+decisions:
+- the expectation is matched on the runner's final Win odds, with the all-fields step-1 frame as the reference;
+- the qualifying favourite is at or under 1.5 at t;
+- it is scored once the selections with a result span two or more meetings.
+
+Whatever step 2 shows, nothing enters Family P from it: that is the owner's decision (08 §5.4 Decision).
+
 - Spec:
   - selection: on the board at T-2 (`board.snapshot.board_at`; rows available at or before t; post times from the
     sidecar, else HKTrack's card), WIN ranks 2 and 3 in races with five or more priced starters and a unique
@@ -246,7 +255,8 @@ favourite among its co-placers ('fav_places') or unplaced ('fav_misses').
 None filed by this run. Proposed, for the orchestrator to file under epic #72 as `status:proposed`:
 
 - Re-run step 2 once logged days have results in the store: a store rebuild after each race day, or same-day
-  results once JRA publishes them. The frozen spec scores the same variant.
+  results once JRA publishes them. The frozen spec scores the same variant, once the owner signs off the step-2
+  spec.
 - Find a public source of per-runner Place money, or show that none exists, so that step 3 can run. Until then
   step 3 stays data pending on #4.
 - E15 on the JRDB 10am board is #84 (existing; it reuses this module's selection).
