@@ -983,3 +983,12 @@ built on a licensed source shows no values here.
 | E3 | entropy_bins_clustered | scored | development | beta_clustered[bin=4: [0.785149, 0.821544)] | 0.99719 | [0.971958, 1.02242] | 8156 |
 | E3 | entropy_bins_clustered | scored | development | beta[bin=5: [0.821544, 1]] | 0.969648 | [0.941534, 0.997762] | 8613 |
 | E3 | entropy_bins_clustered | scored | development | beta_clustered[bin=5: [0.821544, 1]] | 0.969648 | [0.94205, 0.997245] | 8613 |
+
+## win5-carryover-v1
+
+| E id | Variant | Status | Fold | Metric | Value | CI | n |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| P1 | pool-level | scored | ratio 0..0.5 | mean_day_value | 0.816418 | [0.801953, -] | 7 |
+| P1 | pool-level | scored | ratio 0.5..1 | mean_day_value | 0.949312 | [0.929979, -] | 6 |
+| P1 | pool-level | scored | ratio 1..2 | mean_day_value | 1.05931 | [1.04581, -] | 4 |
+| P1 | pool-level | scored | carryover days before 2014-06-07 | gross_pool_carryover_days | 8 | - | 8 |
