@@ -19,12 +19,13 @@ alpha (Wald and meeting-clustered intervals), and alpha pooled over the scored r
 
 Order: freeze the spec in the run registry, read the store, score, append one registry record per
 variant (failures included), write the report through `write_report` and the per-runner export
-(race_id, horse_id, race_date, fold, the pair, mu_before, sigma_before and the member) for the
-meld under the data directory. A rerun appends only records the family does not hold: one equal
-to a held record but for its git commit is the same run reproduced. The `meeting_clustered:`
-stage-2 record (D7's bound, which the frozen stage-2 weight rule reads) was added after the first
-run; the frozen spec is unchanged. The JRA store is netkeiba results: no JRDB, no JRA-VAN.
-Nothing is adopted (D16) and the holdout is never read.
+for the meld under the data directory: every priced starter at each selected pair (race_id,
+horse_id, race_date, the pair, the folds that selected it, the fold the row is out of fold for,
+mu_before, sigma_before and the member's logp; see `export_frame`). A rerun appends only records
+the family does not hold: one equal to a held record but for its git commit is the same run
+reproduced. The `meeting_clustered:` stage-2 record (D7's bound, which the frozen stage-2 weight
+rule reads) was added after the first run; the frozen spec is unchanged. The JRA store is
+netkeiba results: no JRDB, no JRA-VAN. Nothing is adopted (D16) and the holdout is never read.
 CLI: `python -m horsetrack.countries.japan.studies.rating --run [--out DIR]`.
 """
 
@@ -77,6 +78,8 @@ TICKET = 91
 FAMILY_ID = "japan-c2-rating-final-win"
 SOURCES = ("jra",)
 BOOTSTRAP_SEED = 91  # reproducibility only; scoring.yaml signs no seed
+# RATING_FROM and INNER_MIN_TRAIN are splits, an owner decision: part of the frozen spec,
+# awaiting the owner's sign-off (docs/experiments/rating-japan.md), never a Ruling.
 RATING_FROM = date(2010, 1, 1)  # results only: the store's first year, for the burn-in
 FIXED = {"perf_var": 1.0, "prior_mean": 0.0, "prior_var": 1.0, "spell_var": 0.25, "spell_days": 90}
 DRIFT_GRID = (0.0, 1e-4, 3e-4, 1e-3, 3e-3)  # ability variance per day, perf_var = 1
@@ -384,16 +387,36 @@ def _record(variant: Variant, git_sha: str, builds: dict[str, str]) -> RunRecord
 def export_frame(
     frame: pd.DataFrame, members: dict, states: dict, picks: list[dict], folds: list[Fold]
 ) -> pd.DataFrame:
-    """Per scored runner, for the meld (#98): its fold, the fold's pair, the filtered state
-    (mu_before, sigma_before: sigma_h(t)) and the member's log-probability."""
-    parts = []
+    """For the meld (#98): every priced starter at every (drift, scale) some fold selected, with
+    the filtered state (mu_before, sigma_before: sigma_h(t)) and the member's log-probability
+    `logp`. Every value is forward-filtered: it reads earlier races only, at a fixed pair.
+
+    `selected_by` lists the folds whose inner selection chose the row's pair; that selection read
+    those folds' training rows, so a row in a fold's training window is never out of fold for
+    it. `oof_fold` is the one fold the row is out of fold for: the fold whose test quarter holds
+    it, when that fold selected the row's pair (the study's scored value); null otherwise, as for
+    every row before the first scored quarter. For fold k the meld trains on k's training rows
+    at k's pair and tests on the rows with oof_fold k."""
+    keys = frame[["race_id", "horse_id", "race_date"]].reset_index(drop=True)
+    test_fold = np.full(len(frame), None, dtype=object)
     for pick, fold in zip(picks, folds, strict=True):
-        drift, scale = pick["drift_var_per_day"], pick["scale"]
-        test = frame.iloc[fold.test_idx][["race_id", "horse_id", "race_date"]]
+        test_fold[fold.test_idx] = pick["fold"]
+    pairs: dict[tuple, list[str]] = {}
+    for pick in picks:
+        pairs.setdefault((pick["drift_var_per_day"], pick["scale"]), []).append(pick["fold"])
+    parts = []
+    for (drift, scale), chosen in pairs.items():
+        oof = np.where(np.isin(test_fold, chosen), test_fold, None)
         parts.append(
-            test.assign(fold=pick["fold"], drift_var_per_day=drift, scale=scale)
-            .join(states[drift])
-            .assign(**{MEMBER: members[(drift, scale)].iloc[fold.test_idx]})
+            keys.assign(
+                drift_var_per_day=drift,
+                scale=scale,
+                selected_by=",".join(chosen),
+                oof_fold=pd.Series(oof, dtype="string"),
+                mu_before=states[drift]["mu_before"].to_numpy(),
+                sigma_before=states[drift]["sigma_before"].to_numpy(),
+                logp=members[(drift, scale)].to_numpy(),
+            )
         )
     return pd.concat(parts, ignore_index=True)
 
