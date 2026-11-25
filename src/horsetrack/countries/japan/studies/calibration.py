@@ -77,11 +77,16 @@ NEWTON_STEP_TOL = 1e-10
 
 @dataclass(frozen=True)
 class BetaFit:
-    """The power de-vig's beta (maximum likelihood), its standard error and the races fitted."""
+    """The power de-vig's beta (maximum likelihood), its standard error and the races fitted.
+
+    With a `cluster` (#276) it also carries `se_cluster`, the cluster-robust (sandwich) standard
+    error, and `n_clusters`, the clusters of the fitted races; both are None without one."""
 
     beta: float
     se: float
     n_races: int
+    se_cluster: float | None = None
+    n_clusters: int | None = None
 
 
 # --------------------------------------------------------------------------- inputs
@@ -178,6 +183,8 @@ class _ChoiceSets:
     sizes: np.ndarray  # each race's priced runners
     winners: np.ndarray  # each race's priced winners (2+ on a dead heat)
     x_won: float  # sum of x over every priced winner
+    x_won_race: np.ndarray  # each race's sum of x over its priced winners
+    first_row: np.ndarray  # each race's first fitted row, as a position in the inputs
 
 
 def _choice_sets(odds: pd.Series, race_id: pd.Series, won: pd.Series) -> _ChoiceSets:
@@ -200,11 +207,16 @@ def _choice_sets(odds: pd.Series, race_id: pd.Series, won: pd.Series) -> _Choice
         sizes=np.diff(np.r_[starts, len(rows)]),
         winners=winners[race[starts]],
         x_won=float(x[won_priced[rows]].sum()),
+        x_won_race=np.add.reduceat(x * won_priced[rows], starts),
+        first_row=rows[starts],
     )
 
 
-def _loglik(beta: float, sets: _ChoiceSets) -> tuple[float, float, float]:
-    """The conditional-logit log-likelihood, its score and the observed information at beta."""
+def _race_moments(
+    beta: float, sets: _ChoiceSets
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per race at beta: the log-sum-exp's shift and total, and the mean and variance of x under
+    the race's choice probabilities."""
     s = beta * sets.x
     top = np.maximum.reduceat(s, sets.starts)
     e = np.exp(s - np.repeat(top, sets.sizes))
@@ -212,12 +224,52 @@ def _loglik(beta: float, sets: _ChoiceSets) -> tuple[float, float, float]:
     mean = np.add.reduceat(e * sets.x, sets.starts) / total
     spread = sets.x - np.repeat(mean, sets.sizes)
     var = np.add.reduceat(e * spread * spread, sets.starts) / total
+    return top, total, mean, var
+
+
+def _loglik(beta: float, sets: _ChoiceSets) -> tuple[float, float, float]:
+    """The conditional-logit log-likelihood, its score and the observed information at beta."""
+    top, total, mean, var = _race_moments(beta, sets)
     w = sets.winners
     loglik = beta * sets.x_won - float((w * (np.log(total) + top)).sum())
     return loglik, sets.x_won - float((w * mean).sum()), float((w * var).sum())
 
 
-def fit_power_beta(odds: pd.Series, race_id: pd.Series, won: pd.Series) -> BetaFit:
+def _cluster_codes(cluster: pd.Series, race_id: pd.Series) -> np.ndarray:
+    """0..G-1 cluster codes per row. A missing label, or a label that varies within a race, is a
+    ValueError."""
+    codes, _ = pd.factorize(cluster.to_numpy())
+    if (codes < 0).any():
+        raise ValueError("cluster has missing labels; every race needs its meeting")
+    race, _ = _race_codes(race_id)
+    low = np.full(race.max() + 1, codes.max(), dtype=codes.dtype)
+    high = np.full(race.max() + 1, -1, dtype=codes.dtype)
+    np.minimum.at(low, race, codes)
+    np.maximum.at(high, race, codes)
+    if (low != high).any():
+        raise ValueError(f"cluster varies within {int((low != high).sum())} race(s)")
+    return codes
+
+
+def _cluster_se(beta: float, sets: _ChoiceSets, codes: np.ndarray) -> tuple[float, int]:
+    """The sandwich standard error of beta-hat with clusters `codes` (per input row) and the
+    number of clusters of the fitted races: sqrt(G / (G - 1) * sum_c S_c^2) / information, S_c the
+    sum of the cluster's race scores x_won - winners * mean (each race's score at beta-hat)."""
+    _, _, mean, var = _race_moments(beta, sets)
+    score = sets.x_won_race - sets.winners * mean
+    _, group = np.unique(codes[sets.first_row], return_inverse=True)
+    n_groups = int(group.max()) + 1
+    if n_groups < 2:
+        raise ValueError("a clustered standard error needs two or more clusters among the races")
+    by_cluster = np.bincount(group, weights=score, minlength=n_groups)
+    information = float((sets.winners * var).sum())
+    meat = n_groups / (n_groups - 1) * float((by_cluster**2).sum())
+    return float(np.sqrt(meat) / information), n_groups
+
+
+def fit_power_beta(
+    odds: pd.Series, race_id: pd.Series, won: pd.Series, *, cluster: pd.Series | None = None
+) -> BetaFit:
     """The maximum-likelihood beta of P(i wins) proportional to exp(beta * ln(1/O_i)) over each
     race's priced runners, a conditional logit on ln(1/odds).
 
@@ -227,10 +279,20 @@ def fit_power_beta(odds: pd.Series, race_id: pd.Series, won: pd.Series) -> BetaF
     log-likelihood is concave in beta; Newton steps, halved whenever one would lower it, run
     until a step is under 1e-10. `se` is the observed information at beta-hat to the power -1/2.
 
+    `cluster` (#276), a Series on the odds' index naming each row's meeting (constant within a
+    race), adds the cluster-robust se: sqrt(G / (G - 1) * sum over the G clusters of the fitted
+    races of (the sum of the cluster's race scores at beta-hat)^2) over the observed information.
+    It leaves beta, se and n_races as they are; a label missing or varying within a race, an
+    index that is not the odds' or fewer than two fitted clusters is a ValueError.
+
     Raises ValueError when no race has a priced winner or no race's runners differ in price
     (beta is not identified), and RuntimeError when Newton does not converge (no finite maximum,
     for example when every race went to its favourite).
     """
+    codes = None
+    if cluster is not None:
+        _check_aligned(odds, cluster)
+        codes = _cluster_codes(cluster, race_id)
     sets = _choice_sets(odds, race_id, won)
     beta = 1.0
     loglik, score, info = _loglik(beta, sets)
@@ -251,22 +313,34 @@ def fit_power_beta(odds: pd.Series, race_id: pd.Series, won: pd.Series) -> BetaF
         raise RuntimeError(f"the beta fit did not converge in {NEWTON_MAX_STEPS} Newton steps")
     if not (np.isfinite(beta) and info > 0):
         raise RuntimeError(f"the beta fit stopped at beta={beta}, information={info}")
-    return BetaFit(beta=float(beta), se=float(info**-0.5), n_races=len(sets.starts))
+    fit = BetaFit(beta=float(beta), se=float(info**-0.5), n_races=len(sets.starts))
+    if codes is None:
+        return fit
+    se_cluster, n_clusters = _cluster_se(fit.beta, sets, codes)
+    return replace(fit, se_cluster=se_cluster, n_clusters=n_clusters)
 
 
-def segment_beta(frame: pd.DataFrame, segment: str) -> pd.DataFrame:
+def segment_beta(frame: pd.DataFrame, segment: str, *, cluster: str | None = None) -> pd.DataFrame:
     """The beta fit on each value's races of `frame[segment]` (constant within a race): one row
     per value, in sorted order, with columns `segment`, beta, se and n_races. `frame` has
     race_id, odds and won; other columns are ignored, and rows with a missing segment value are
-    left out."""
+    left out. `cluster` (#276) names a column of meeting labels: the table then also has
+    se_cluster and n_clusters (`fit_power_beta`'s)."""
     varies = frame.groupby("race_id", observed=True)[segment].nunique(dropna=False) > 1
     if varies.any():
         raise ValueError(f"{segment!r} varies within {int(varies.sum())} race(s)")
     rows = []
     for value, part in frame.groupby(segment, sort=True, observed=True):
-        fit = fit_power_beta(part["odds"], part["race_id"], part["won"])
-        rows.append({segment: value, "beta": fit.beta, "se": fit.se, "n_races": fit.n_races})
-    return pd.DataFrame(rows, columns=[segment, "beta", "se", "n_races"])
+        labels = None if cluster is None else part[cluster]
+        fit = fit_power_beta(part["odds"], part["race_id"], part["won"], cluster=labels)
+        row = {segment: value, "beta": fit.beta, "se": fit.se, "n_races": fit.n_races}
+        if cluster is not None:
+            row |= {"se_cluster": fit.se_cluster, "n_clusters": fit.n_clusters}
+        rows.append(row)
+    columns = [segment, "beta", "se", "n_races"]
+    return pd.DataFrame(
+        rows, columns=columns + ([] if cluster is None else ["se_cluster", "n_clusters"])
+    )
 
 
 # --------------------------------------------------------------------------- entropy, floor

@@ -1188,6 +1188,125 @@ built on a licensed source shows no values here.
 | E1 | shin:no_floor_bound_races | scored | all_folds | tail_expected_winners | 298.631 | - | 111226 |
 | E1 | shin:no_floor_bound_races | scored | all_folds | tail_o_minus_e_per_race | 0.0149616 | [0.0132227, 0.0167021] | 23752 |
 
+## japan-beta-clustered-final-win
+
+| E id | Variant | Status | Fold | Metric | Value | CI | n |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2014] | 1.01514 | [0.968637, 1.06164] | 1990 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2014] | 1.01514 | [0.973052, 1.05722] | 1990 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2015] | 1.00788 | [0.971776, 1.04398] | 3454 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2015] | 1.00788 | [0.973299, 1.04246] | 3454 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2016] | 1.01106 | [0.97612, 1.046] | 3454 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2016] | 1.01106 | [0.977235, 1.04489] | 3454 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2017] | 1.01961 | [0.984281, 1.05494] | 3455 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2017] | 1.01961 | [0.984454, 1.05477] | 3455 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2018] | 1.01679 | [0.981207, 1.05238] | 3454 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2018] | 1.01679 | [0.985744, 1.04784] | 3454 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2019] | 1.00705 | [0.971218, 1.04288] | 3452 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2019] | 1.00705 | [0.968817, 1.04528] | 3452 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2020] | 0.993422 | [0.957833, 1.02901] | 3456 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2020] | 0.993422 | [0.960606, 1.02624] | 3456 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2021] | 1.03252 | [0.995861, 1.06918] | 3456 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2021] | 1.03252 | [0.997824, 1.06722] | 3456 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2022] | 1.05583 | [1.01874, 1.09292] | 3456 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2022] | 1.05583 | [1.0189, 1.09277] | 3456 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2023] | 1.02548 | [0.989022, 1.06195] | 3456 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2023] | 1.02548 | [0.990448, 1.06052] | 3456 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2024] | 1.04461 | [1.00792, 1.0813] | 3454 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2024] | 1.04461 | [1.01206, 1.07716] | 3454 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2025] | 1.01901 | [0.983033, 1.05499] | 3455 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2025] | 1.01901 | [0.98287, 1.05515] | 3455 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[year=2026] | 1.01905 | [0.981138, 1.05697] | 3138 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[year=2026] | 1.01905 | [0.98116, 1.05694] | 3138 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta[era=2014-06-07 onward] | 1.02053 | [1.01034, 1.03071] | 43130 |
+| E1 | power_beta_clustered:by_year_and_era:all_races | scored | development | beta_clustered[era=2014-06-07 onward] | 1.02053 | [1.01072, 1.03033] | 43130 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2014] | 1.01452 | [0.967873, 1.06117] | 1983 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2014] | 1.01452 | [0.972456, 1.05658] | 1983 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2015] | 1.00652 | [0.970388, 1.04265] | 3449 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2015] | 1.00652 | [0.971832, 1.0412] | 3449 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2016] | 1.01016 | [0.975074, 1.04524] | 3440 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2016] | 1.01016 | [0.976331, 1.04398] | 3440 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2017] | 1.02033 | [0.984833, 1.05583] | 3439 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2017] | 1.02033 | [0.984849, 1.05582] | 3439 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2018] | 1.01504 | [0.979304, 1.05077] | 3435 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2018] | 1.01504 | [0.983677, 1.04639] | 3435 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2019] | 1.00636 | [0.970399, 1.04233] | 3437 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2019] | 1.00636 | [0.967892, 1.04483] | 3437 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2020] | 0.993033 | [0.95737, 1.02869] | 3448 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2020] | 0.993033 | [0.960273, 1.02579] | 3448 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2021] | 1.03284 | [0.996069, 1.06961] | 3446 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2021] | 1.03284 | [0.997898, 1.06778] | 3446 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2022] | 1.05387 | [1.0167, 1.09103] | 3445 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2022] | 1.05387 | [1.01683, 1.0909] | 3445 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2023] | 1.02417 | [0.9876, 1.06074] | 3444 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2023] | 1.02417 | [0.988913, 1.05943] | 3444 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2024] | 1.03932 | [1.00249, 1.07615] | 3427 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2024] | 1.03932 | [1.00662, 1.07202] | 3427 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2025] | 1.02004 | [0.983807, 1.05626] | 3431 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2025] | 1.02004 | [0.983547, 1.05652] | 3431 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[year=2026] | 1.01809 | [0.979886, 1.05629] | 3111 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[year=2026] | 1.01809 | [0.979926, 1.05626] | 3111 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta[era=2014-06-07 onward] | 1.0195 | [1.00928, 1.02972] | 42935 |
+| E1 | power_beta_clustered:by_year_and_era:no_floor_bound_races | scored | development | beta_clustered[era=2014-06-07 onward] | 1.0195 | [1.00965, 1.02935] | 42935 |
+| E4 | segment_clustered:R12 | scored | development | beta[R12=in] | 1.0814 | [1.04335, 1.11945] | 3584 |
+| E4 | segment_clustered:R12 | scored | development | beta_clustered[R12=in] | 1.0814 | [1.04348, 1.11932] | 3584 |
+| E4 | segment_clustered:R12 | scored | development | beta[R12=out] | 1.01566 | [1.00509, 1.02622] | 39546 |
+| E4 | segment_clustered:R12 | scored | development | beta_clustered[R12=out] | 1.01566 | [1.00543, 1.02589] | 39546 |
+| E4 | segment_clustered:R11pm1 | scored | development | beta[R11pm1=in] | 1.02365 | [1.0023, 1.045] | 10772 |
+| E4 | segment_clustered:R11pm1 | scored | development | beta_clustered[R11pm1=in] | 1.02365 | [1.00268, 1.04462] | 10772 |
+| E4 | segment_clustered:R11pm1 | scored | development | beta[R11pm1=out] | 1.01961 | [1.00802, 1.03119] | 32358 |
+| E4 | segment_clustered:R11pm1 | scored | development | beta_clustered[R11pm1=out] | 1.01961 | [1.00845, 1.03076] | 32358 |
+| E4 | segment_clustered:g1_day_undercard | scored | development | beta[g1_day_undercard=in] | 1.05271 | [1.01487, 1.09054] | 3201 |
+| E4 | segment_clustered:g1_day_undercard | scored | development | beta_clustered[g1_day_undercard=in] | 1.05271 | [1.01612, 1.0893] | 3201 |
+| E4 | segment_clustered:g1_day_undercard | scored | development | beta[g1_day_undercard=out] | 1.01706 | [1.00645, 1.02767] | 39635 |
+| E4 | segment_clustered:g1_day_undercard | scored | development | beta_clustered[g1_day_undercard=out] | 1.01706 | [1.00685, 1.02727] | 39635 |
+| E4 | segment_clustered:field_16_plus | scored | development | beta[field_16_plus=in] | 1.01629 | [1.00111, 1.03148] | 17742 |
+| E4 | segment_clustered:field_16_plus | scored | development | beta_clustered[field_16_plus=in] | 1.01629 | [1.00156, 1.03103] | 17742 |
+| E4 | segment_clustered:field_16_plus | scored | development | beta[field_16_plus=out] | 1.02396 | [1.01024, 1.03768] | 25388 |
+| E4 | segment_clustered:field_16_plus | scored | development | beta_clustered[field_16_plus=out] | 1.02396 | [1.01062, 1.0373] | 25388 |
+| E4 | segment_clustered:debut | scored | development | beta[debut=in] | 1.00659 | [0.973419, 1.03976] | 3741 |
+| E4 | segment_clustered:debut | scored | development | beta_clustered[debut=in] | 1.00659 | [0.974324, 1.03886] | 3741 |
+| E4 | segment_clustered:debut | scored | development | beta[debut=out] | 1.02196 | [1.01126, 1.03266] | 39389 |
+| E4 | segment_clustered:debut | scored | development | beta_clustered[debut=out] | 1.02196 | [1.01159, 1.03234] | 39389 |
+| E4 | segment_clustered:venue | scored | development | beta[venue=CKY] | 1.01534 | [0.983425, 1.04726] | 4404 |
+| E4 | segment_clustered:venue | scored | development | beta_clustered[venue=CKY] | 1.01534 | [0.984668, 1.04602] | 4404 |
+| E4 | segment_clustered:venue | scored | development | beta[venue=FKS] | 0.986967 | [0.948264, 1.02567] | 3000 |
+| E4 | segment_clustered:venue | scored | development | beta_clustered[venue=FKS] | 0.986967 | [0.951252, 1.02268] | 3000 |
+| E4 | segment_clustered:venue | scored | development | beta[venue=HAK] | 1.02265 | [0.970907, 1.07439] | 1872 |
+| E4 | segment_clustered:venue | scored | development | beta_clustered[venue=HAK] | 1.02265 | [0.97333, 1.07197] | 1872 |
+| E4 | segment_clustered:venue | scored | development | beta[venue=HSN] | 1.01876 | [0.992118, 1.0454] | 6252 |
+| E4 | segment_clustered:venue | scored | development | beta_clustered[venue=HSN] | 1.01876 | [0.992486, 1.04503] | 6252 |
+| E4 | segment_clustered:venue | scored | development | beta[venue=KOK] | 1.00686 | [0.969827, 1.0439] | 3335 |
+| E4 | segment_clustered:venue | scored | development | beta_clustered[venue=KOK] | 1.00686 | [0.970396, 1.04333] | 3335 |
+| E4 | segment_clustered:venue | scored | development | beta[venue=KYO] | 0.990658 | [0.962317, 1.019] | 5411 |
+| E4 | segment_clustered:venue | scored | development | beta_clustered[venue=KYO] | 0.990658 | [0.963525, 1.01779] | 5411 |
+| E4 | segment_clustered:venue | scored | development | beta[venue=NAK] | 1.03315 | [1.0063, 1.06] | 5997 |
+| E4 | segment_clustered:venue | scored | development | beta_clustered[venue=NAK] | 1.03315 | [1.00819, 1.05811] | 5997 |
+| E4 | segment_clustered:venue | scored | development | beta[venue=NII] | 1.02746 | [0.993872, 1.06105] | 4055 |
+| E4 | segment_clustered:venue | scored | development | beta_clustered[venue=NII] | 1.02746 | [0.994123, 1.0608] | 4055 |
+| E4 | segment_clustered:venue | scored | development | beta[venue=SAP] | 1.00892 | [0.960917, 1.05691] | 2064 |
+| E4 | segment_clustered:venue | scored | development | beta_clustered[venue=SAP] | 1.00892 | [0.964968, 1.05286] | 2064 |
+| E4 | segment_clustered:venue | scored | development | beta[venue=TOK] | 1.05656 | [1.03096, 1.08216] | 6740 |
+| E4 | segment_clustered:venue | scored | development | beta_clustered[venue=TOK] | 1.05656 | [1.03163, 1.0815] | 6740 |
+| E4 | segment_clustered:heavy_going | scored | development | beta[heavy_going=in] | 0.979117 | [0.927386, 1.03085] | 1577 |
+| E4 | segment_clustered:heavy_going | scored | development | beta_clustered[heavy_going=in] | 0.979117 | [0.92639, 1.03184] | 1577 |
+| E4 | segment_clustered:heavy_going | scored | development | beta[heavy_going=out] | 1.02215 | [1.01177, 1.03254] | 41553 |
+| E4 | segment_clustered:heavy_going | scored | development | beta_clustered[heavy_going=out] | 1.02215 | [1.01217, 1.03213] | 41553 |
+| E4 | segment_clustered:handicap | scored | development | beta[handicap=in] | 0.959385 | [0.914959, 1.00381] | 2454 |
+| E4 | segment_clustered:handicap | scored | development | beta_clustered[handicap=in] | 0.959385 | [0.914958, 1.00381] | 2454 |
+| E4 | segment_clustered:handicap | scored | development | beta[handicap=out] | 1.02381 | [1.01335, 1.03428] | 40676 |
+| E4 | segment_clustered:handicap | scored | development | beta_clustered[handicap=out] | 1.02381 | [1.0138, 1.03383] | 40676 |
+| E3 | entropy_bins_clustered | scored | development | beta[bin=1: [0, 0.695209)] | 1.05751 | [1.03871, 1.0763] | 9199 |
+| E3 | entropy_bins_clustered | scored | development | beta_clustered[bin=1: [0, 0.695209)] | 1.05751 | [1.03891, 1.0761] | 9199 |
+| E3 | entropy_bins_clustered | scored | development | beta[bin=2: [0.695209, 0.746726)] | 1.0199 | [0.998442, 1.04136] | 8656 |
+| E3 | entropy_bins_clustered | scored | development | beta_clustered[bin=2: [0.695209, 0.746726)] | 1.0199 | [0.998857, 1.04095] | 8656 |
+| E3 | entropy_bins_clustered | scored | development | beta[bin=3: [0.746726, 0.785149)] | 1.01591 | [0.992452, 1.03937] | 8506 |
+| E3 | entropy_bins_clustered | scored | development | beta_clustered[bin=3: [0.746726, 0.785149)] | 1.01591 | [0.993585, 1.03823] | 8506 |
+| E3 | entropy_bins_clustered | scored | development | beta[bin=4: [0.785149, 0.821544)] | 0.99719 | [0.971526, 1.02285] | 8156 |
+| E3 | entropy_bins_clustered | scored | development | beta_clustered[bin=4: [0.785149, 0.821544)] | 0.99719 | [0.971958, 1.02242] | 8156 |
+| E3 | entropy_bins_clustered | scored | development | beta[bin=5: [0.821544, 1]] | 0.969648 | [0.941534, 0.997762] | 8613 |
+| E3 | entropy_bins_clustered | scored | development | beta_clustered[bin=5: [0.821544, 1]] | 0.969648 | [0.94205, 0.997245] | 8613 |
+
 ## win5-carryover-v1
 
 | E id | Variant | Status | Fold | Metric | Value | CI | n |
