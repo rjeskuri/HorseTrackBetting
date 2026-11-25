@@ -176,7 +176,11 @@ def test_the_loop_runs_until_interrupted_without_an_until(data_dir):
         pass
     assert len(rec.calls) == 3
     assert clock.sleeps == [20, 20, 20]
-    assert [t - START for t in rec.times] == [timedelta(0), timedelta(seconds=20), timedelta(40)]
+    assert [t - START for t in rec.times] == [
+        timedelta(0),
+        timedelta(seconds=20),
+        timedelta(seconds=40),
+    ]
 
 
 def test_a_failing_round_prints_an_error_and_the_loop_goes_on(data_dir, capsys):
