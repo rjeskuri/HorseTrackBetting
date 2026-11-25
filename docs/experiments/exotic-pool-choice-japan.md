@@ -20,7 +20,7 @@ race or runner row.
   `processed/jra/dividends.parquet@b3d635352bb007df`, `processed/jra/odds_timeseries (2 days)@7bd8e900bd0a1e6e`.
 - The full report is under the data directory, at `reports/exotic-pool-choice-japan-211b05e12eed.md`. Each
   dropped race and its reason is beside it, in `-dropped.csv`. Every record is in
-  `docs/experiments/registry-japan.md`.
+  `docs/experiments/registry/japan/japan-family-l-exotic-pool-choice.md`.
 
 ## Owner decisions used
 
