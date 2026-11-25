@@ -33,6 +33,7 @@ from horsetrack.core.config import SourceConfig, load_source
 
 POOL_TOTAL = "__pool__"  # `combination` of a pool-total row (as in odds_log)
 ODDS_PATH = "/JRADB/accessO.html"  # the odds pages (and the オッズ menu)
+RESULTS_PATH = "/JRADB/accessS.html"  # the result pages (and the レース結果 menu, race lists)
 SCRATCHED = "SCR"  # status_raw of a scratched horse's line
 SCRATCH_WORDS = ("取消", "除外")
 PAIR_POOLS = ("QUINELLA", "QUINELLA_PLACE")
@@ -208,6 +209,18 @@ def pool_links(row: Tag) -> dict[str, Link]:
             pool = config.pool_by_label(word) if word else None
             if pool is not None:
                 out.setdefault(pool.code, link)
+    return out
+
+
+def result_races(results_race_list: BeautifulSoup) -> set[int]:
+    """Race numbers whose row on a レース結果 race list links a page on RESULTS_PATH: the race's
+    result is out (ticket #225). A row linking only other pages (its card), or no row, is not; a
+    link outside the race rows (the site's navigation) marks nothing."""
+    out = set()
+    for race_no, row in race_rows(results_race_list):
+        links = (link_of(a) for a in row.find_all("a"))
+        if any(link is not None and link.path == RESULTS_PATH for link in links):
+            out.add(race_no)
     return out
 
 

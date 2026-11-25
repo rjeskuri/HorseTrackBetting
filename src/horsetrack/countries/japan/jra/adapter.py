@@ -10,6 +10,9 @@ and dam sire) are planned, not discovered: the adapter only builds, classifies a
 Priorities give a newest-first, complete-by-date backfill: the calendar months come first (newest
 month first), then every task of a race date outranks every task of an older date, the day's race
 list before its results. Registered as "jra" in `core.ingest.adapters.ADAPTERS`.
+
+Store hooks: `result_published_utc()` and `result_unpublished_utc()` give the store build the odds
+logger's first-seen result publication times and their lower bounds (ticket #225).
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 
+from horsetrack.core import paths
 from horsetrack.core.config import load_source
 from horsetrack.core.ingest.types import (
     STATUS_BLOCKED,
@@ -30,6 +34,7 @@ from horsetrack.core.ingest.types import (
     ParsedPage,
     RawPage,
 )
+from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.jra.netkeiba import (
     common,
     parse_fixture,
@@ -48,6 +53,7 @@ FIXTURE_PRIORITY = 10_000_000
 # Rank within one race date: the list first, it is what discovers the results.
 _RANK = {"racelist": 6, "results": 5}
 PEDIGREE_PAGE_TYPE = "pedigree_card"
+RESULTS_SIDECAR = ".results.json"  # <VENUE>.results.json beside a day's odds log (#225)
 
 
 class JRAAdapter:
@@ -144,18 +150,63 @@ class JRAAdapter:
 
     def parse(self, page: RawPage) -> ParsedPage:
         """Dispatch to netkeiba.parse_<page_type>, so new parser modules plug in untouched."""
-        module_name = f"{PARSERS}.parse_{page.page_type}"
-        try:
-            module = import_module(module_name) if page.page_type.isidentifier() else None
-        except ModuleNotFoundError as exc:
-            if exc.name != module_name:
-                raise  # the parser exists but one of ITS imports is missing: do not hide that
-            module = None
+        module = _parser_module(page.page_type)
         if module is not None:
             return module.parse(page)
         raise NotImplementedError(
-            f"no JRA parser for page_type {page.page_type!r} (expected {module_name})"
+            f"no JRA parser for page_type {page.page_type!r} (expected {PARSERS}.parse_"
+            f"{page.page_type})"
         )
+
+    def parser_version(self, page_type: str) -> str | None:
+        """PARSER_VERSION of netkeiba.parse_<page_type> ("0" when it declares none); None when the
+        page type has no parser, which the store build skips."""
+        module = _parser_module(page_type)
+        return None if module is None else str(getattr(module, "PARSER_VERSION", "0"))
+
+    # ------------------------------------------------------------ store hooks
+
+    def result_published_utc(self) -> dict[str, datetime]:
+        """race_id -> when its official result was first seen published (aware UTC): every
+        results sidecar the odds logger wrote under odds_snapshots/jra (ticket #225). The store
+        build fills `races.result_published_utc` from it."""
+        return _logged_results(odds_log.read_published)
+
+    def result_unpublished_utc(self) -> dict[str, datetime]:
+        """race_id -> its lower bound (aware UTC), the last logger poll that did not show its
+        result, for the bounded races of every results sidecar only (a late sighting has none).
+        The store build fills `races.result_unpublished_utc` from it."""
+        return _logged_results(odds_log.read_unpublished)
+
+
+def _logged_results(read) -> dict[str, datetime]:
+    """race_id -> the non-null instant `read(sidecar)` gives per race, over every results sidecar
+    the odds logger wrote under odds_snapshots/jra."""
+    root = paths.data_dir() / "odds_snapshots" / SOURCE
+    out: dict[str, datetime] = {}
+    for sidecar in sorted(root.glob(f"*/*{RESULTS_SIDECAR}")):
+        venue = sidecar.name.removesuffix(RESULTS_SIDECAR)
+        try:
+            race_day = date.fromisoformat(sidecar.parent.name)
+        except ValueError:
+            continue  # not a race-date folder
+        for number, at in read(sidecar).items():
+            if at is not None:
+                out[common.store_race_id(race_day, venue, number)] = at
+    return out
+
+
+def _parser_module(page_type: str):
+    """The netkeiba `parse_<page_type>` module, None when there is none."""
+    module_name = f"{PARSERS}.parse_{page_type}"
+    if not page_type.isidentifier():
+        return None
+    try:
+        return import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != module_name:
+            raise  # the parser exists but one of ITS imports is missing: do not hide that
+        return None
 
 
 def _task(page_type: str, key: str, url: str, race_date: date, today: date) -> FetchTask:

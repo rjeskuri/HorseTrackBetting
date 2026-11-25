@@ -1,5 +1,5 @@
-"""Builders for minimal synthetic JRADB pages (ticket #21): menus, race lists and odds pages, and
-(ticket #53) the race card (出馬表, `card`).
+"""Builders for minimal synthetic JRADB pages (ticket #21): menus, race lists and odds pages,
+(ticket #53) the race card (出馬表, `card`) and (ticket #225) the レース結果 race list.
 
 Each page holds only the structure `official_pages` reads (the selectors of HKTrack's
 `sources/jra/official.py`) and the labels it matches (pool names, 取消 / 除外, 発走済, the clock
@@ -17,6 +17,8 @@ from datetime import date
 ODDS_PATH = "/JRADB/accessO.html"
 CARD_PATH = "/JRADB/accessD.html"
 OTHER_PATH = "/JRADB/access5.html"
+RESULTS_PATH = "/JRADB/accessS.html"  # レース結果: the results menu, race lists and result pages
+RESULTS_MENU_CNAME = "pw01sli00/AF"  # the レース結果 menu, the site's fixed entry (ticket #225)
 SCRATCH_WORDS = ("取消", "除外")
 _WEEKDAY = "月火水木金土日"
 
@@ -149,6 +151,28 @@ def card_race_list(day: date, meeting: str, times: Mapping[int, str]) -> bytes:
             f'<td class="syutsuba">{href_link(CARD_PATH, cname, "<span>x</span>")}</td></tr>'
         )
     return page(list_header(day, meeting) + _table(rows, columns=1))
+
+
+def results_race_list(day: date, meeting: str, results: Mapping[int, str | None]) -> bytes:
+    """レース結果 race list (ticket #225): the date line, the site's navigation (its レース結果
+    menu link, on the results path but in no race row), then one row per race of `results`.
+    `results[n]` is the cname of race n's result page: its race-number image links that page on
+    RESULTS_PATH. None is a race whose result is not out yet: its image links nothing and its row
+    links only its card (出馬表, on CARD_PATH), so only a row's RESULTS_PATH link marks a result."""
+    menu_link = action_link(RESULTS_PATH, RESULTS_MENU_CNAME, "レース結果")
+    nav = f'<ul class="nav"><li>{menu_link}</li></ul>'
+    rows = []
+    for race_no, cname in results.items():
+        img = f'<img alt="{race_no}レース" src="r.png">'
+        card = f"pw01dde{race_no:02d}{day:%Y%m%d}/{race_no:02X}"
+        if cname is None:
+            number = img
+            cell = f'<td class="result">{href_link(CARD_PATH, card, "出馬表")}</td>'
+        else:
+            number = action_link(RESULTS_PATH, cname, img)
+            cell = f'<td class="result">{action_link(RESULTS_PATH, cname, "結果")}</td>'
+        rows.append(f'<tr><th class="race_num" scope="row">{number}</th>{cell}</tr>')
+    return page(nav + list_header(day, meeting) + _table(rows, columns=1))
 
 
 def _table(rows: Sequence[str], *, columns: int) -> str:

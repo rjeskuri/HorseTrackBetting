@@ -342,7 +342,8 @@ def health_bytes() -> bytes | None:
 
 HEALTH_STOP = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2}) (?P<venue>\S+) snapshots=.* stopped=(?P<stopped>\S+)"
-    r"(?: tier2_skipped=\d+)?$"  # with logger.yaml's tier2 on (#130)
+    r"(?: tier2_skipped=\d+)?"  # with logger.yaml's tier2 on (#130)
+    r"(?: source=[a-z]+)?$"  # the line's source, last (#38)
 )
 
 
@@ -766,7 +767,10 @@ def test_a_venue_stopped_for_another_meeting_leaves_the_day_open(
     """A run in which any venue stopped as wrong_meeting (max_wrong_meeting answers in a row for
     another meeting) has not finished the day: no day-done line, and a later start that day, the
     site answering for the right meeting again, logs that venue."""
-    world = World({today: meetings})
+    # Every result of a venue that logs normally is out (#225), so its results poll is complete at
+    # once and it ends with its odds: the first run returns when the last such venue's odds end.
+    published = {(today, m.venue): range(1, m.races + 1) for m in meetings if m.venue not in wrong}
+    world = World({today: meetings}, published=published)
     venues = [m.venue for m in meetings]
     bad = dict(world.pages)
     for venue, (day, meeting) in wrong.items():

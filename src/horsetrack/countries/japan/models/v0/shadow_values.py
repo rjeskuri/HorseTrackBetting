@@ -13,6 +13,10 @@ board's runners and p = win.predict(q, board.context()).
   value_at_high = mean_m P_i high_i. A Wide pair works the same way with
   ordering.pair_probs(p, places) at the Wide places. Places come from the jra config; 0 places,
   or no ordering model, leaves both values None.
+- A pool whose nowcast raises KeyError (no fit for its (pool, tau) cell) gets its rows with every
+  value None and `reason` set; the other pools keep their values. Without WIN draws there is no
+  p, so every pool's rows are null. `reason` is for the caller's logs and is not part of the
+  shadow log's record.
 
 v0 limits:
 - no own stake in the dividend: the final price is taken as unmoved by our ticket;
@@ -85,6 +89,7 @@ class ShadowValue:
     value_q95: float | None
     value_at_low: float | None
     value_at_high: float | None
+    reason: str | None = None  # why the row has no value when its pool could not be drawn
 
 
 def _shocks(runners: list[int], n_draws: int, seed: int) -> dict[int, np.ndarray]:
@@ -135,8 +140,12 @@ def shadow_values(
     shocks = _shocks(runners, n_draws, seed)
     context = board.context()
 
-    def draws(pool: str) -> PoolDraws:
-        return models.nowcast.draws(board, pool=pool, tau_min=tau_min, shocks=shocks)
+    def draws(pool: str) -> PoolDraws | str:
+        """The pool's draws, or the reason the nowcast has none (a missing fit cell)."""
+        try:
+            return models.nowcast.draws(board, pool=pool, tau_min=tau_min, shocks=shocks)
+        except KeyError as exc:
+            return str(exc.args[0]) if exc.args else f"no fit for {pool} at tau {tau_min}"
 
     def row(pool: str, combination: str, figures: tuple[float, float | None], **values):
         fields = dict.fromkeys(
@@ -149,7 +158,28 @@ def shadow_values(
     if not runners:
         return out
 
-    win_odds, _ = _columns(draws(WIN), [str(h) for h in runners], n_draws)
+    pools = load_source("japan", "jra").pools
+    place_horses = sorted(board.place)
+    wide_pairs = sorted(board.wide)
+    keyed = {
+        PLACE: ([str(h) for h in place_horses], [board.place[h] for h in place_horses]),
+        WIDE: ([_key(a, b) for a, b in wide_pairs], [board.wide[k] for k in wide_pairs]),
+    }
+
+    def null_rows(pool: str, why: str) -> list[ShadowValue]:
+        if pool == WIN:
+            return [row(WIN, str(h), (board.win[h], None), reason=why) for h in runners]
+        keys, figures = keyed[pool]
+        return [row(pool, c, f, reason=why) for c, f in zip(keys, figures, strict=True)]
+
+    win_draws = draws(WIN)
+    if isinstance(win_draws, str):  # without WIN draws there is no p for any pool
+        out.extend(null_rows(WIN, win_draws))
+        out.extend(null_rows(PLACE, "no win draws"))
+        out.extend(null_rows(WIDE, "no win draws"))
+        return out
+
+    win_odds, _ = _columns(win_draws, [str(h) for h in runners], n_draws)
     p = np.empty_like(win_odds)
     for m in range(n_draws):
         inv = 1.0 / win_odds[m]
@@ -171,19 +201,17 @@ def shadow_values(
             )
         )
 
-    pools = load_source("japan", "jra").pools
     position = {h: j for j, h in enumerate(runners)}
-    place_horses = sorted(board.place)
-    wide_pairs = sorted(board.wide)
-    for pool, keys, figures in (
-        (PLACE, [str(h) for h in place_horses], [board.place[h] for h in place_horses]),
-        (WIDE, [_key(a, b) for a, b in wide_pairs], [board.wide[k] for k in wide_pairs]),
-    ):
+    for pool, (keys, figures) in keyed.items():
         places = pools[pool].places_for(board.starters)
         if models.ordering is None or places == 0 or not keys:
             out.extend(row(pool, c, f) for c, f in zip(keys, figures, strict=True))
             continue
-        low, high = _columns(draws(pool), keys, n_draws)
+        pool_draws = draws(pool)
+        if isinstance(pool_draws, str):
+            out.extend(null_rows(pool, pool_draws))
+            continue
+        low, high = _columns(pool_draws, keys, n_draws)
         prob = np.empty_like(low)
         for m in range(n_draws):
             if pool == PLACE:

@@ -254,11 +254,20 @@ def _card_post_times(path: Path) -> dict[int, datetime]:
     return out
 
 
-def post_times_for(race_date: date, venue: str) -> dict[int, datetime]:
+def jra_day_dir(race_date: date, day_dir: Path | None = None) -> Path:
+    """The folder of the day's JRA odds logs: `day_dir` when given (a pulled VM folder, ticket
+    #236), else the Mac's own `odds_snapshots/jra/<date>/`."""
+    if day_dir is not None:
+        return day_dir
+    return paths.odds_snapshot_path("jra", race_date.isoformat(), "_").parent
+
+
+def post_times_for(
+    race_date: date, venue: str, *, day_dir: Path | None = None
+) -> dict[int, datetime]:
     """Race number -> post time (aware UTC) of one meeting: the `<VENUE>.races.json` sidecar beside
-    the odds log, else HKTrack's stored card, else empty."""
-    log = paths.odds_snapshot_path("jra", race_date.isoformat(), venue)
-    sidecar = odds_log.read_post_times(log.with_name(f"{venue}.races.json"))
+    the odds log (in `day_dir` when given), else HKTrack's stored card, else empty."""
+    sidecar = odds_log.read_post_times(jra_day_dir(race_date, day_dir) / f"{venue}.races.json")
     if sidecar:
         return sidecar
     card = _card_path(race_date, venue)
