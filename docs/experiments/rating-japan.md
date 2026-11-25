@@ -15,15 +15,29 @@ aggregate over the JRA results store (netkeiba race results; no JRDB, no JRA-VAN
   it, and the frozen run reproduces the dry run's figures exactly. The one change made after the first frozen run is
   the `meeting_clustered:stage2:q:rating` record (below), which puts the frozen stage-2 rule's own bound into the
   registry; the spec is unchanged.
+- **Splits in the spec, awaiting the owner's sign-off.** Two choices in the frozen spec define splits, an owner
+  decision, and are not settled by D9 or D10: the inner selection folds use D9's scheme over each outer fold's
+  training rows with min_train cut from 22 to 4 quarters (some cut is forced: 22 quarters inside a 22-quarter window
+  leaves no inner fold), and the rating reads results (placings only, no price) from the store's first day,
+  2010-01-05, for its burn-in. Both were in the dry run above and are unchanged; both stand only with the owner's
+  approval.
 - Code: `countries/japan/models/rating.py` (the model, tested in `tests/countries/japan/test_rating.py`) and
   `countries/japan/studies/rating.py` (the run), at `bd4422c` for the first four records and at `e8a089a` for the
   fifth. To reproduce, run `uv run python -m horsetrack.countries.japan.studies.rating --run`.
-  A rerun appends only records the family does not hold.
+  A rerun appends only records the family does not hold. The export was widened at `e233bf2` (below); the rerun
+  there reproduced all five records and appended none.
 - Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`.
-- The full report is under the data directory, at `reports/rating-japan-7ec8931213c6.md`. The per-runner export for
-  the meld (#98: fold, drift, scale, mu_before, sigma_before = σ_h(t), and the member) is at
-  `features/japan/rating-7ec8931213c6.parquet` (328,114 scored runners). Every record is in
+- The full report is under the data directory, at `reports/rating-japan-7ec8931213c6.md`. Every record is in
   `docs/experiments/registry-japan.md`.
+- The per-runner export for the meld (#98) is at `features/japan/rating-7ec8931213c6.parquet`: every priced starter
+  (601,265 rows, 2014-06-07 to 2026-11-23) at each (drift, scale) some fold selected (one pair here, drift 0 and
+  scale 1.5), with `race_id`, `horse_id`, `race_date`, `drift_var_per_day`, `scale`, `selected_by` (the folds whose
+  inner selection chose the pair), `oof_fold`, `mu_before`, `sigma_before` (σ_h(t)) and the member's `logp`. Every
+  value is forward-filtered: it reads earlier races only, at a fixed pair. `oof_fold` names the one fold a row is out
+  of fold for, the fold whose test quarter holds it (328,114 rows in 28 folds); it is null for the 273,151 rows
+  before 2020-Q1. A row in a fold's training window is not out of fold for that fold, since the fold's pair was
+  selected on those rows. For fold k the meld trains on k's training rows at k's pair and tests on the rows with
+  `oof_fold` k, as the stage-2 fit here does.
 
 ## Owner decisions used
 
@@ -34,7 +48,7 @@ aggregate over the JRA results store (netkeiba race results; no JRDB, no JRA-VAN
 | D6 | Winner log loss per race, a dead heat at 1/k per co-winner; pseudo-R² against equal chances. |
 | D7 | Meeting (venue x day) clusters, 95% one-sided bounds (`config/scoring.yaml`). |
 | D9 | Walk-forward quarters, quarterly refit, expanding, 1-week embargo; first scored quarter 2020-Q1 (`config/folds.yaml`). Every training window is at least 5.5 seasons (from 2014-06-07). |
-| D10 | No price before 2014-06-07. The rating reads results only (placings, no price) from 2010-01-05, so it has a burn-in. |
+| D10 | No price before 2014-06-07: the rating reads no price before it. Its results window from 2010-01-05 awaits sign-off (above). |
 | D11-D15 | Holdout A2 from 2026-11-28, fully locked. No holdout day is read; not opened. |
 | D16 | Nothing is adopted. |
 | #87 (2026-11-24) | The meta-model shrinkage target is α = 0, the market alone; here α is unbounded and unshrunk (08 R13). |
@@ -65,7 +79,7 @@ The null, the starting point: the rating carries nothing the final price lacks (
   sigma_before²), over the race's priced starters.
 - Selection: drift in {0, 1e-4, 3e-4, 1e-3, 3e-3} per day and scale in {0.5, 0.75, 1, 1.5, 2, 3}. For each D9 fold
   the pair with the lowest mean winner log loss over the inner folds (D9's quarters over the fold's training rows,
-  min_train cut to 4 quarters) scores the fold's test quarter.
+  min_train cut to 4 quarters, a split awaiting sign-off) scores the fold's test quarter.
 - Stage 2 (#87's `fit_meta`): u = α · m + β · ln q, unbounded, ridge 0, fitted on each fold's training rows with the
   member at the fold's pair and predicting its test quarter; α is also pooled over the scored rows in-sample.
 - Scored: 28 folds, 2020-Q1 to 2026-Q4 (to 2026-11-23), 23,871 races in 1,991 meetings, from 43,130 development races
