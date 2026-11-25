@@ -1,0 +1,47 @@
+# The WIN5 carryover study's pre-registered spec (ticket #135; docs/specs/win5-carryover-study.md),
+# read by `horsetrack japan win5-study freeze|score` (countries/japan/research/win5_study.py).
+#
+# Owner's answers on #135, 2026-11-25 (modeling governance: owner decisions, not Rulings):
+#   (1) coverage = the pool-level return (dividend x winning tickets / pool; 0 on a no-hit day); a
+#       live ticket rule (top-k per leg) is a later follow-up once WIN5 legs are logged (#130);
+#   (2) metric = per-day value vs 1.0;
+#   (3) carryover bins = multiples of the break-even carryover 0.30 x pool (edges: just above 0,
+#       0.5x, 1x, 2x);
+#   (4) model the 6億円 per 100-yen payout cap (the excess carries over even on a hit);
+#       boosted-takeout days at their own rate from config/takeout_boosts.yaml;
+#   (5) day-block bootstrap; a positive edge = one-sided 95% lower bound above 1.0, stated before
+#       scoring.
+# And (B), the pool: netkeiba's 発売金額 (pool_yen) is gross sales, and on some days the money
+#   falls short of it (the hypothesis, unverified: refunds of combinations with a scratched horse;
+#   docs/ledger.md). From 2014-06-07 the pool is the net pool the money identity implies,
+#   (payout + carryover_out - carryover_in) / (1 - t_day), used in both the day value and the bin
+#   ratio; the days before 2014-06-07 (takeout unknown) stay at gross sales, and the carryover days
+#   among them are reported as a separate count (gross_pool_carryover_days).
+#
+# `horsetrack japan win5-study freeze` freezes this file, as loaded, in the japan registry
+# (append-only: a freeze cannot be undone). Any edit after the freeze is another spec, which
+# `score` refuses: a changed study is a new family_id, frozen again before it is scored.
+#
+# Keys:
+#   family_id:          the registry family the study is frozen and scored under.
+#   coverage:           pool-level: a day's value is payout_yen / net pool (every winning
+#                       combination of a dead heat counted; 0 on a no-hit day).
+#   pool:               net-of-refunds: the net pool above (research.win5.net_pool).
+#   comparator:         a bin shows a positive edge when its lower bound is above this.
+#   ratio_edges:        bins of carryover_in / (break_even_takeout x net pool): (0, 0.5),
+#                       [0.5, 1), [1, 2), [2, inf); a day with no carryover is in no bin.
+#   break_even_takeout: the rate of the break-even carryover, 0.30 on every day (a boosted day's
+#                       own rate enters its payout, not its bin).
+#   one_sided_level:    the lower bound is the (1 - level) quantile of the bootstrap means.
+#   payout_cap_yen:     the cap per 100-yen ticket the realised payouts are held to.
+#   seed, n_boot:       the bootstrap's seed and number of resamples (the WIN5 day is the unit).
+family_id: win5-carryover-v1
+coverage: pool-level
+pool: net-of-refunds
+comparator: 1.0
+ratio_edges: [0, 0.5, 1, 2]
+break_even_takeout: 0.30
+one_sided_level: 0.95
+payout_cap_yen: 600000000
+seed: 20261125
+n_boot: 10000

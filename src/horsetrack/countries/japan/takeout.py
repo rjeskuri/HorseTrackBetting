@@ -24,6 +24,7 @@ was given. Entries without `age` ignore the label.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from functools import cache
@@ -153,7 +154,8 @@ def _date(item: dict[str, Any], key: str) -> date:
 
 
 @cache
-def _shipped() -> BoostCalendar:
+def shipped_boosts() -> BoostCalendar:
+    """The shipped calendar, loaded once."""
     return load_boosts()
 
 
@@ -193,16 +195,31 @@ def race_takeout(
         raise TakeoutUnknown(f"{pool} takeout on {day} is unknown (no single rate before history)")
     base = 1 - takeout
 
-    cal = calendar if calendar is not None else _shipped()
+    cal = calendar if calendar is not None else shipped_boosts()
     matched = cal.matching(day, venue, race_no, pool)
     if race_class_raw is None and any(e.age is not None for e in matched):
         raise RaceConditionsNeeded(
             f"{race_id} {pool}: an age-restricted boost matches; pass race_class_raw"
         )
     kinds = {e.kind for e in matched if race_class_raw is None or e.age_matches(race_class_raw)}
+    rate, boost = combine_boosts(base, kinds)
+    return RaceTakeout(
+        pool=pool,
+        base_rate=round(base, 6),  # drops float noise only (JRA quotes rates to 0.01%)
+        payout_rate=rate,
+        boost=boost,
+        boost_may_be_withheld=bool(kinds & _TOPS_UP),
+    )
+
+
+def combine_boosts(base_rate: float, kinds: Iterable[str]) -> tuple[float, str | None]:
+    """(payout rate rounded to 6 places, boost) for a pool paying `base_rate` when entries of
+    `kinds` match it: a super_premium or ultra_premium entry sets the rate to SUPER_PREMIUM_RATE,
+    a premium or ultra_premium entry adds PREMIUM_TOP_UP to the rate in force."""
+    kinds = set(kinds)
     sets_80 = bool(kinds & _SETS_80)
     tops_up = bool(kinds & _TOPS_UP)
-    rate = SUPER_PREMIUM_RATE if sets_80 else base
+    rate = SUPER_PREMIUM_RATE if sets_80 else base_rate
     if tops_up:
         rate += PREMIUM_TOP_UP
     if sets_80 and tops_up:
@@ -213,10 +230,4 @@ def race_takeout(
         boost = "premium"
     else:
         boost = None
-    return RaceTakeout(
-        pool=pool,
-        base_rate=round(base, 6),  # drops float noise only (JRA quotes rates to 0.01%)
-        payout_rate=round(rate, 6),
-        boost=boost,
-        boost_may_be_withheld=tops_up,
-    )
+    return round(rate, 6), boost

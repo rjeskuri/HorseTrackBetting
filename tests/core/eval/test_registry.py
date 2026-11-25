@@ -33,7 +33,8 @@ Contract pinned here (the coder implements what these tests call):
 - ``freeze_family(family_id, spec)`` returns
   ``sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")))`` as hex. The freeze persists
   in the registry and is not a run; a different spec raises ``FamilyAlreadyFrozen``.
-- ``write_summary(registry, path)`` writes the family, E id, variant, status and per-fold metric,
+- ``write_summary(registry, directory)`` writes one file per family (``<family_id>.md``) plus an
+  index ``README.md``; the family files hold the family, E id, variant, status and per-fold metric,
   value, CI and n of each run, and nothing else from the record. A run with a source in
   ``WITHHELD_SOURCES`` (in any spelling) shows ``withheld (licensed source)`` in place of its
   values, or is refused at append.
@@ -170,10 +171,13 @@ def expect_tampered(registry: Registry, what: str) -> None:
 
 
 def summary_of(registry: Registry, tmp_path: Path) -> str:
-    out = tmp_path / "docs" / "experiments" / "registry-japan.md"
-    out.parent.mkdir(parents=True, exist_ok=True)
+    """The summary as written for ``registry``: every family file's text, joined (the index
+    ``README.md`` is not a family, so it is left out)."""
+    out = tmp_path / "docs" / "experiments" / "registry" / "japan"
+    out.mkdir(parents=True, exist_ok=True)
     write_summary(registry, out)
-    return out.read_text(encoding="utf-8")
+    families = sorted(p for p in out.glob("*.md") if p.name != "README.md")
+    return "\n".join(p.read_text(encoding="utf-8") for p in families)
 
 
 def shows_number(text: str, number: str) -> bool:

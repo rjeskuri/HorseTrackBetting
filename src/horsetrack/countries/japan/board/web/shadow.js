@@ -7,6 +7,9 @@
  * shadow feed (#121) is joined on (race_id, pool, combination) and never sorts, highlights or
  * colours a row (a selection rule is the owner's, D19). Values are gross return per 1 yen at the
  * final price: information only, nothing here is a bet.
+ * On a WIN5 day (#135) a line above the board, the element with data-win5, shows the shadow feed's
+ * `win5`: the whole WIN5 pool's gross return per 1 yen with the carryover (two decimals), the
+ * carryover and the tickets sold so far. No such element when `win5` is null.
  * Feed text is untrusted: every feed string goes through esc() before it reaches the markup.
  */
 (function () {
@@ -70,6 +73,23 @@
     return tau === null ? DASH : "@T-" + tau;
   }
 
+  /* 1234567 -> '¥1,234,567'; '-' for a null figure. */
+  function yen(value) {
+    var n = num(value);
+    if (n === null) return DASH;
+    return "¥" + String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  /* The WIN5 line of the shadow feed, or '' when the feed has none. */
+  function win5Line(shadowFeed) {
+    var w = own(shadowFeed, "win5");
+    if (!w || typeof w !== "object") return "";
+    return '<p class="win5 small" data-win5>WIN5 pool, gross return per ¥1 with the carryover: ' +
+      '<b class="mono">' + esc(figure(own(w, "pool_ev"))) + "</b> · carryover " +
+      '<span class="mono">' + esc(yen(own(w, "carryover"))) + "</span> · sold so far " +
+      '<span class="mono">' + esc(yen(own(w, "investment"))) + "</span></p>";
+  }
+
   var HEAD = '<th scope="col" class="num">Since T-2</th>' +
     '<th scope="col" class="num">Value</th><th scope="col">Read at</th>' +
     '<th scope="col">Flags</th>';
@@ -91,7 +111,8 @@
           "</td>" + '<td data-col="flags" class="flags">' + flagChips(entry) + "</td>";
       },
     };
-    return board.renderBoard(feed, { now: opts.now, venue: opts.venue, columns: columns });
+    return win5Line(shadowFeed) +
+      board.renderBoard(feed, { now: opts.now, venue: opts.venue, columns: columns });
   }
 
   /* ------------------------------------------------------------ the browser glue */

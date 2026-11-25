@@ -214,8 +214,8 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 | --- | --- | --- | --- |
 | `odds_timeseries` | `column` | `fetched_utc`, else `fallback` `snapshot_utc` (HKTrack rows) | `dividend`, `is_refund`, `is_final_capture` |
 | `meetings` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | none |
-| `races` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min; derives `post_utc`; `going`, `going_raw` null until `post_utc` − 60 min | `finish_time_s`, `split_times_s`, `result_published_utc`, `result_unpublished_utc` |
-| `runners` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min; `horse_wt_kg`, `horse_wt_change_kg`, `declared_horse_wt_lb` null until the race's `post_utc` − 60 min (`via` races on `race_id`) | `finish_pos`, `placing_raw`, `placing_code`, `dead_heat`, `finish_time_s`, `lbw_raw`, `lbw_lengths`, `running_positions`, `last_3f_s`, `win_odds`, `win_fav_rank` |
+| `races` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min; derives `post_utc`; `going`, `going_raw` null until `post_utc` − 60 min; `finish_time_s` null until `post_utc` + 30 min | `split_times_s`, `result_published_utc`, `result_unpublished_utc` |
+| `runners` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min; `horse_wt_kg`, `horse_wt_change_kg`, `declared_horse_wt_lb` null until the race's `post_utc` − 60 min, `finish_pos`, `dead_heat`, `finish_time_s` null until the race's `post_utc` + 30 min (both `via` races on `race_id`) | `placing_raw`, `placing_code`, `lbw_raw`, `lbw_lengths`, `running_positions`, `last_3f_s`, `win_odds`, `win_fav_rank` |
 | `dividends` | `offset` | the race's `post_utc` + 30 min (`via` races on `race_id`); also `read_label` | none |
 | `sectionals` | `offset` | the race's `post_utc` + 30 min (`via` races on `race_id`); also `read_label` | none |
 | `incidents` | `offset` | the race's `post_utc` + 30 min (`via` races on `race_id`); also `read_label` | none |
@@ -225,6 +225,7 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 | `horse_runs` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 1440 min (the next day) | none |
 | `jrdb_pre_race` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | every column starting `tyb_` (`label_prefixes: [tyb_]`) |
 | `jrdb_post_race` | `label_only` | never; `read_label` only | n/a |
+| `track_condition` | `column` | `available_utc` (= `published_utc`, the 発表 time printed on the going page or the yearly record; #90) | none |
 | `win_sales` | `column` | `published_utc`: a live page's clock, a final (最終オッズ) page's printed post + 30 min, its fetch when it prints none (the owner's answer on #278, 2026-11-25) | none |
 
 - Nothing else is banned. JRDB tables are inputs to private models only (D21: no JRDB-derived
@@ -242,9 +243,18 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
   - `dividends`, `sectionals`, `incidents` and `running_comments` rows enter the views at the
     race's `post_utc` + 30 min (absent at + 30 min − 1 µs, present at + 30 min); `read_label`
     still returns them whole.
+  - The finish (`races.finish_time_s`; `runners` `finish_pos`, `dead_heat` and `finish_time_s`)
+    is a gated column on the same rule as same-day dividends (#305; the owner's answer on #96,
+    2026-11-25): in the frame from 00:00 JST, null before the race's `post_utc` + 30 min
+    (absent at + 30 min − 1 µs, present at + 30 min); runners read their race's `post_utc` by
+    `race_id`. A same-day variant at t can read the finishes of the races resulted by t, never
+    the current race's before its post + 30 min. `read_label` still refuses races and runners
+    (#80).
   - A race without a post time, and a row whose `race_id` has no races row, never shows its
-    weights, going or results.
-  - The result columns of `races` and `runners` stay label columns.
+    weights, going, finish or results.
+  - The other result columns of `races` (`split_times_s`) and `runners` (`placing_raw`,
+    `placing_code`, `lbw_raw`, `lbw_lengths`, `running_positions`, `last_3f_s`, `win_odds`,
+    `win_fav_rank`) stay label columns.
   - `result_published_utc` and `result_unpublished_utc` (races, #225: the odds logger's sighting
     of the published result and its lower bound) are label columns, never in a view at t: the
     owner's answer on #80 (2026-11-25), an owner decision, not an implementation ruling; #227
@@ -260,11 +270,17 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 - A race-date rule opens a whole day's card at 00:00 JST of the race date: a column JRA changes
   later that day (a late scratch, a jockey change) is a trap the rule does not catch (see Known
   traps).
+- `track_condition` (#90) follows the owner's rule, not a ruling: his #136 request ("Ingest them
+  as of their publication time", 2026-11-24), #228's outline step 4 ("available_utc =
+  published_utc as in #136") and his answer on #87 (usable once JRA has officially published it,
+  with its publication timestamp). A yearly record's rows count from the record's own 発表 time,
+  so a race-day view never sees them; `asof_join` on (venue, race_date, surface) takes the latest
+  publication at t.
 - A table outside the file is refused with `NoAvailabilityRule`.
 
 ### Accepted leak: results-derived card columns (owner decision, 2026-11-25)
 
-Four columns that are not label columns are derived from the results page
+Four columns that are neither label nor gated columns are derived from the results page
 (`countries/japan/jra/netkeiba/parse_results.py`), not from the card as it stood before the race:
 
 | table | column | derived from |
