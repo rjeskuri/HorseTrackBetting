@@ -329,6 +329,85 @@ def test_displayed_odds_are_the_floored_dividend(config, odds, dividend, violati
     assert (check.violations, check.checked) == (int(violation), 1)
 
 
+@pytest.mark.parametrize(
+    ("odds", "dividend", "violation"),
+    [
+        (5.5, 550.0, False),  # exactly the floored dividend
+        (5.4, 550.0, True),  # one 0.1 step low: 5.5 would have been shown
+        (5.5, 559.0, False),  # a dividend is floored to 0.1: 5.59 shows as 5.5
+        (5.5, 560.0, True),  # 5.6 would have been shown
+        (5.3, 550.0, True),  # two steps low
+        (5.6, 550.0, True),  # odds above the dividend are impossible
+        (1.1, 110.0, False),  # the 110-yen floor at the lowest odds
+        (1.1, 120.0, True),
+        (9.9, 999.0, False),
+        (9.9, 1000.0, True),  # crossing 10: no integer display, still a 0.1 step
+        (10.0, 1000.0, False),
+        (10.0, 1010.0, True),  # HKJC's 1.0 of slack above its threshold must not apply
+        (10.0, 1050.0, True),
+        (25.3, 2530.0, False),
+        (25.3, 2540.0, True),
+        (25.3, 2590.0, True),
+        (123.5, 12350.0, False),
+        (123.4, 12350.0, True),
+        (123.5, 12359.0, False),
+        (123.5, 12360.0, True),
+        (123.5, 12450.0, True),  # a whole point of slack is gone at high odds
+        (987.6, 98760.0, False),
+        (987.5, 98760.0, True),
+        (9999.9, 1_000_000.0, False),  # the display stops at the cap from config
+        (9999.9, 5_000_000.0, False),
+    ],
+)
+def test_jra_winner_odds_may_differ_from_the_dividend_by_less_than_one_display_step(
+    odds, dividend, violation
+):
+    frames = _frames([_race("x:2026-01-01:TOK:01", odds, dividend)])
+    check = checks.check_win_dividend(*frames, JRA)
+    assert (check.violations, check.checked) == (int(violation), 1)
+    assert check.level == (checks.WARN if violation else checks.OK)
+
+
+def test_jra_slack_is_applied_per_race_not_once_for_the_whole_frame():
+    rows = [
+        _race("x:2026-01-01:TOK:01", 5.5, 550.0),  # fine
+        _race("x:2026-01-01:TOK:02", 5.4, 550.0),  # low by a step, odds in the low range
+        _race("x:2026-01-01:TOK:03", 123.5, 12350.0),  # fine
+        _race("x:2026-01-01:TOK:04", 123.4, 12350.0),  # low by a step, odds in the high range
+        _race("x:2026-01-01:TOK:05", 12.3, 1239.0),  # fine
+        _race("x:2026-01-01:TOK:06", 12.3, 1260.0),  # two steps high
+    ]
+    check = checks.check_win_dividend(*_frames(rows), JRA)
+    assert (check.violations, check.checked) == (3, 6)
+    assert [e.split()[0] for e in check.examples] == [
+        "x:2026-01-01:TOK:02", "x:2026-01-01:TOK:04", "x:2026-01-01:TOK:06",
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("odds", "dividend", "violation"),
+    [  # HKJC's rule stays: 0.06 of slack below the threshold of 10, 1.0 at or above it
+        (9.9, 99.5, False),
+        (9.9, 100.0, True),  # 10.0 would have been shown
+        (5.4, 54.0, False),
+        (5.4, 55.0, True),
+        (10.0, 109.0, False),  # whole-number display from 10 up
+        (10.0, 109.9, False),
+        (10.0, 110.0, True),
+        (50.0, 509.5, False),
+        (50.0, 510.0, True),
+        (50.0, 499.0, True),  # odds above the dividend are impossible
+        (98.0, 989.0, False),
+        (98.0, 990.0, True),
+        (99.0, 5000.0, False),  # capped
+    ],
+)
+def test_hkjc_slack_is_unchanged(odds, dividend, violation):
+    frames = _frames([_race("x:2026-01-01:HV:01", odds, dividend)])
+    check = checks.check_win_dividend(*frames, HKJC)
+    assert (check.violations, check.checked) == (int(violation), 1)
+
+
 def test_dead_heats_refunds_and_missing_dividends_are_out_of_scope():
     rows = [
         _race("x:2026-01-01:HV:01", 5.4, 54.5),  # a dead heat once its twin is added below

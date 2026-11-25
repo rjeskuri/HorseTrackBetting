@@ -2,7 +2,8 @@
 
 `odds_snapshots/jra/<YYYY-MM-DD>/<VENUE>.jsonl.gz` holds one gzip member per capture, one JSON
 object per line; pool totals are rows whose `combination` is "__pool__". Each meeting's post times
-sit beside the log in `<VENUE>.races.json`. The row keys and the sidecar shape are in
+sit beside the log in `<VENUE>.races.json`, and the instant each race's official result was first
+seen published in `<VENUE>.results.json` (ticket #225). The row keys and the sidecar shapes are in
 docs/specs/odds-log.md.
 """
 
@@ -239,7 +240,12 @@ def write_post_times(path: Path, post_times: dict[int, datetime], updated_utc: d
         "updated_utc": _utc_iso(updated_utc),
         "post_times": {str(int(no)): _utc_iso(at) for no, at in sorted(post_times.items())},
     }
-    text = json.dumps(document, indent=2) + "\n"  # serialise before touching the disk
+    _write_atomic(path, json.dumps(document, indent=2) + "\n")  # serialised before the disk
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """`text` to `path`: a temporary file beside it, fsynced, then os.replace; a failure leaves
+    the previous file as it was and no temporary file behind."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     try:
@@ -266,3 +272,70 @@ def read_post_times(path: Path) -> dict[int, datetime]:
             raise ValueError(f"post-time sidecar {path}: race {no} has no readable time: {text!r}")
         out[int(no)] = at
     return out
+
+
+# ---------------------------------------------------------------- results sidecar (ticket #225)
+
+
+def _read_results(path: Path) -> tuple[dict[int, datetime], dict[int, datetime | None]]:
+    """(race -> first seen, race -> lower bound or None) from the results sidecar; both empty
+    when there is no sidecar. A sidecar written before the bound reads every race as None."""
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}, {}
+
+    def instants(key: str) -> dict[int, datetime]:
+        out: dict[int, datetime] = {}
+        for no, text in document.get(key, {}).items():
+            at = _instant(text)
+            if at is None:
+                raise ValueError(f"results sidecar {path}: race {no}: unreadable {key} {text!r}")
+            out[int(no)] = at
+        return out
+
+    published, bounds = instants("published_utc"), instants("unpublished_utc")
+    return published, {no: bounds.get(no) for no in published}
+
+
+def read_published(path: Path) -> dict[int, datetime]:
+    """Race number -> the instant its official result was first seen published, as an aware UTC
+    datetime; empty when there is no sidecar."""
+    return _read_results(path)[0]
+
+
+def read_unpublished(path: Path) -> dict[int, datetime | None]:
+    """Race number -> its lower bound: the instant of the last poll of the same run that did not
+    show its result (aware UTC), or None for a late sighting (shown on a run's first poll, or in a
+    sidecar written before the bound). One entry per race of read_published; empty when there is
+    no sidecar."""
+    return _read_results(path)[1]
+
+
+def record_published(
+    path: Path,
+    races: Iterable[int],
+    seen_utc: datetime,
+    unpublished_utc: datetime | None = None,
+) -> dict[int, datetime]:
+    """Merge `races` into the results sidecar, each new race at `seen_utc` with the lower bound
+    `unpublished_utc` (None: a late sighting): a race already there keeps its first instant and
+    its bound. Written as write_post_times writes (temporary file, fsync, os.replace), only when
+    a race is new. Returns the sidecar's first-seen mapping after the write."""
+    path = Path(path)
+    published, bounds = _read_results(path)
+    new = {int(no) for no in races} - set(published)
+    if not new:
+        return published
+    seen = _instant(seen_utc)
+    bound = None if unpublished_utc is None else _instant(unpublished_utc)
+    published.update(dict.fromkeys(new, seen))
+    bounds.update(dict.fromkeys(new, bound))
+    document = {
+        "published_utc": {str(no): _utc_iso(at) for no, at in sorted(published.items())},
+        "unpublished_utc": {
+            str(no): _utc_iso(at) for no, at in sorted(bounds.items()) if at is not None
+        },
+    }
+    _write_atomic(path, json.dumps(document, indent=2) + "\n")
+    return published

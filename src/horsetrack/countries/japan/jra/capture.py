@@ -1,9 +1,10 @@
 """Capturing a JRA meeting from JRADB through the ingest fetcher (ported from HKTrack's
 `sources/jra/official.py`: `_race_list`, `_check`, `live_odds`, `card_tasks`).
 
-Only the two entry menus are fixed (出馬表 and オッズ); every other (path, cname) is read off a page
-already fetched. Every request is a FetchTask: POST, form body `cname=<code>`, mutable. Each call
-starts at its menu: nothing is remembered between calls. Pages are untrusted data, only parsed.
+Only the entry menus are fixed (出馬表, オッズ and レース結果); every other (path, cname) is
+read off a page already fetched. Every request is a FetchTask: POST, form body `cname=<code>`,
+mutable. Each call starts at its menu: nothing is remembered between calls. Pages are untrusted
+data, only parsed.
 
 Change from HKTrack, fixing (d): a page whose date line names another meeting raises WrongMeeting,
 and a meeting the menu does not list raises NotListed. HKTrack's `live_odds` swallowed both into
@@ -37,6 +38,7 @@ SOURCE = "jra"
 RAW_PAGES = ("all", "none")
 CARD_MENU = op.Link("/JRADB/accessD.html", "pw01dli00/F3")  # 出馬表: this week's meetings
 ODDS_MENU = op.Link(op.ODDS_PATH, "pw15oli00/6D")  # オッズ: this week's meetings
+RESULTS_MENU = op.Link(op.RESULTS_PATH, "pw01sli00/AF")  # レース結果: this week's meetings (#225)
 ODDS_POOLS = ("WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE")
 TIER2_POOLS = ("BRACKET_QUINELLA", "FORECAST", "TRIO", "TIERCE")  # ticket #130
 
@@ -135,6 +137,14 @@ def read_post_times(fetcher: Fetcher, race_date: date, venue: str) -> dict[int, 
     (2 requests)."""
     _, race_list = _race_list(fetcher, CARD_MENU, "official_card_racelist", race_date, venue)
     return op.post_times(race_list, race_date)
+
+
+def published_results(fetcher: Fetcher, race_date: date, venue: str) -> set[int]:
+    """Race numbers whose official result is out (ticket #225): those the meeting's レース結果 race
+    list links a result page for. The レース結果 menu, then the race list (2 requests); raises
+    NotListed or WrongMeeting like the other race lists."""
+    _, race_list = _race_list(fetcher, RESULTS_MENU, "official_results_racelist", race_date, venue)
+    return op.result_races(race_list)
 
 
 def raw_odds_path(

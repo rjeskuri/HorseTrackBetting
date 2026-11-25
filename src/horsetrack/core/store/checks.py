@@ -34,7 +34,8 @@ SYSTEMATIC_RATE = 0.01  # countable problems: a fail above this share of what wa
 SYSTEMATIC_MIN = 5  # ... but never for a handful of cases
 # Displayed odds are the dividend per unit, floored: to 1 decimal below the threshold, to an integer
 # at or above it. So dividend / unit - odds must fall in [0, step), with a little slack for the 0.05
-# dividend steps.
+# dividend steps. These are the defaults (HKJC's); a source's `odds_display` overrides them with
+# `slack_below` / `slack_at_or_above`, e.g. JRA floors to 0.1 at every level.
 ODDS_SLACK_BELOW = 0.06
 ODDS_SLACK_AT_OR_ABOVE = 1.0
 _EPS = 1e-9
@@ -160,6 +161,8 @@ def check_win_dividend(
     win_code = next((code for code, pool in config.pools.items() if pool.kind == "win"), "WIN")
     threshold = float(config.odds_display.get("threshold", 10))
     cap = config.odds_display.get("cap")
+    slack_below = float(config.odds_display.get("slack_below", ODDS_SLACK_BELOW))
+    slack_above = float(config.odds_display.get("slack_at_or_above", ODDS_SLACK_AT_OR_ABOVE))
 
     run = set(races.loc[races["status"].eq("run"), "race_id"])
     first = runners.loc[_flag(runners["finish_pos"].eq(1)) & runners["race_id"].isin(run)]
@@ -179,12 +182,12 @@ def check_win_dividend(
     per_unit = dividend / float(config.unit_stake)
     missing = np.isnan(odds) | np.isnan(per_unit)
     gap = per_unit - odds
-    slack = np.where(odds < threshold, ODDS_SLACK_BELOW, ODDS_SLACK_AT_OR_ABOVE)
+    slack = np.where(odds < threshold, slack_below, slack_above)
     if cap is not None:  # the display stops at the cap: any larger dividend is consistent with it
         slack = np.where(odds >= float(cap), np.inf, slack)
     paid_on = both["combination"].astype("string")
     other_horse = _flag(paid_on.notna() & (paid_on != both["horse_no"].astype("string")))
-    wrong = ~missing & ((gap < -_EPS) | (gap >= slack) | other_horse.to_numpy(dtype=bool))
+    wrong = ~missing & ((gap < -_EPS) | (gap >= slack - _EPS) | other_horse.to_numpy(dtype=bool))
     n, n_missing, n_checked = int(wrong.sum()), int(missing.sum()), int((~missing).sum())
     detail = f"single-winner run races; {n_missing} more without odds or a {win_code} dividend"
     shown = both.loc[wrong].head(_MAX_EXAMPLES)
