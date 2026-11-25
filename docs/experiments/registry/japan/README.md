@@ -4,6 +4,7 @@ Written by `horsetrack.core.eval.registry.write_summary`; do not edit by hand. O
 per family, each holding that family's runs.
 
 - [japan-beta-clustered-final-win](japan-beta-clustered-final-win.md)
+- [japan-c2-rating-final-win](japan-c2-rating-final-win.md)
 - [japan-c4-meta-final-win](japan-c4-meta-final-win.md)
 - [japan-calibrated-market-final-win](japan-calibrated-market-final-win.md)
 - [japan-coplacer-place-e15](japan-coplacer-place-e15.md)
