@@ -479,7 +479,6 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
         lines = [
             *_PREAMBLE,
             "",
-            "",
             f"## {_cell(family)}",
             "",
             "| E id | Variant | Status | Fold | Metric | Value | CI | n |",

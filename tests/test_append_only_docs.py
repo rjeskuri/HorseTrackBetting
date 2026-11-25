@@ -138,6 +138,20 @@ def table_rows(text: str) -> tuple[list[str], list[str]]:
     return rows, problems
 
 
+def duplicate_claims(text: str) -> list[str]:
+    """Claim cells (first column) that appear in more than one row of the same pipe table.
+    A union merge of two amendments to one row keeps both versions; this finds that."""
+    duplicates, block = [], []
+    for line in text.splitlines() + [""]:
+        if line.startswith("|"):
+            block.append(line)
+            continue
+        claims = [cells(row)[0].strip() for row in block[2:]]
+        duplicates += sorted({claim for claim in claims if claims.count(claim) > 1})
+        block = []
+    return duplicates
+
+
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
@@ -366,6 +380,60 @@ def test_the_committed_registry_directory_matches_its_index():
     for stem, path in family_files(directory).items():
         rows, problems = table_rows(path.read_text(encoding="utf-8"))
         assert rows and problems == [], stem
+
+
+def test_the_committed_ledger_claims_are_unique_within_each_table():
+    text = (REPO_ROOT / LEDGER_REL).read_text(encoding="utf-8")
+    assert duplicate_claims(text) == []
+
+
+def test_claim_check_finds_the_duplicate_a_union_merge_of_two_amendments_leaves(tmp_path):
+    repo, merge = build_and_merge(tmp_path, attributes=True)
+    assert merge.returncode == 0, merge.stdout + merge.stderr
+    merged = (repo / LEDGER_REL).read_text(encoding="utf-8")
+    assert duplicate_claims(merged) == []  # appending rows is not a duplicate
+
+    # Two branches amend the label cell of the same existing row, differently.
+    original = "| Seed claim one. | measured | report a | none |"
+    for tag in ("x", "y"):
+        git(repo, "checkout", "-q", "-b", f"amend-{tag}", "main")
+        text = (repo / LEDGER_REL).read_text(encoding="utf-8")
+        assert original in text
+        amended = f"| Seed claim one. | single-run {tag} | report a | none |"
+        (repo / LEDGER_REL).write_text(text.replace(original, amended), encoding="utf-8")
+        git(repo, "commit", "-q", "-am", f"amend {tag}")
+    git(repo, "checkout", "-q", "amend-x")
+    result = git(repo, "merge", "--no-edit", "amend-y", check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr  # union: no conflict, silently
+    text = (repo / LEDGER_REL).read_text(encoding="utf-8")
+    assert "single-run x" in text and "single-run y" in text
+    assert duplicate_claims(text) == ["Seed claim one."]
+    assert "| Rules claim. |" in text  # only the amended row is reported
+
+
+def test_claim_check_scopes_uniqueness_to_one_table():
+    text = (
+        "| Claim | Label |\n|---|---|\n| Same. | measured |\n| Other. | measured |\n\n"
+        "| Claim | Label |\n|---|---|\n| Same. | assumption |\n"
+    )
+    assert duplicate_claims(text) == []
+    assert duplicate_claims(text + "| Same. | single-run |\n") == ["Same."]
+    assert duplicate_claims(text.replace("| Other. |", "| Same. |", 1)) == ["Same."]
+
+
+def test_the_committed_family_files_start_as_the_writer_writes_them(tmp_path):
+    out = tmp_path / "out"
+    families = sorted(family_files(REPO_ROOT / REGISTRY_REL))
+    assert families
+    # a fresh family rendered through the real writer; the preamble does not depend on the family
+    render(tmp_path, "pre", [run_record("fam-pre", "p1", 0.4)], out)
+    written = (out / "fam-pre.md").read_text(encoding="utf-8")
+    expected = written[: written.index("\n## ") + 1]
+    assert expected.startswith(PREAMBLE_TITLE)
+    for family in families:
+        committed = (REPO_ROOT / REGISTRY_REL / f"{family}.md").read_text(encoding="utf-8")
+        assert committed[: committed.index("\n## ") + 1] == expected, family
 
 
 def test_the_single_file_registry_summary_is_gone():
