@@ -24,9 +24,11 @@ from datetime import date, datetime, time, timedelta
 
 import numpy as np
 import polars as pl
+import pyarrow.parquet as pq
 
 from horsetrack.core.config import load_country_yaml
 from horsetrack.core.eval.folds import FoldScheme, load_country_scheme, walk_forward
+from horsetrack.core.paths import processed_dir
 from horsetrack.countries.japan.handicap.factors import (
     COUNTRY,
     STYLES,
@@ -41,6 +43,7 @@ from horsetrack.countries.japan.handicap.track_bias import (
     fit_bias_prior,
     track_bias_features,
 )
+from horsetrack.countries.japan.models.v0.store import SOURCE
 
 PUBLISH_LAG = timedelta(minutes=30)
 DECISION_LEAD = timedelta(minutes=2)
@@ -50,8 +53,21 @@ RACE_COLUMNS = ("race_id", "race_date", "meeting_id", "race_no", "post_time_loca
                 *CELL)  # fmt: skip
 RUNNER_COLUMNS = ("race_id", "race_date", "horse_no", "horse_id", "draw", "finish_pos",
                   "running_positions", "is_scratched")  # fmt: skip
+OPTIONAL_RACE_COLUMNS = (
+    "rail_setting",
+    LOGGED,
+    BOUND,
+)  # a store built before #222 / #225 lacks them
 VARIANTS = ("prior", "update")
 FEATURES = ("draw_adj", "style_adj")
+
+
+def _read_races(date_from: date, date_to: date) -> pl.DataFrame:
+    """The races, leaving out the optional columns the store was built without (#253): the rest
+    of the module reads a missing column as null (`_column`, `track_bias._with_rail`)."""
+    have = set(pq.read_schema(processed_dir(SOURCE) / "races.parquet").names)
+    columns = [c for c in RACE_COLUMNS if c in have or c not in OPTIONAL_RACE_COLUMNS]
+    return _read("races", columns, date_from, date_to)
 
 
 def _post(day: date, hhmm: str | None) -> datetime | None:
@@ -224,7 +240,7 @@ def track_bias_report(
     the priors' day sd per level ("factor:level"), the unfloored estimate behind it (when
     estimated) and the observation variance. `day_sd` (None or "pooled": the pooled estimate;
     "per_level"; a float or a per-level mapping, #224) goes to every fold's prior."""
-    races = _read("races", RACE_COLUMNS, date_from, date_to)
+    races = _read_races(date_from, date_to)
     runners = _read("runners", RUNNER_COLUMNS, date_from, date_to)
     folds = walk_forward(races.get_column("race_date").to_list(),
                          scheme=scheme or load_country_scheme(COUNTRY))  # fmt: skip

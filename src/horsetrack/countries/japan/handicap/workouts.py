@@ -1,7 +1,7 @@
 """Miho and Ritto workouts as of decision time, and the workout features (#137).
 
 Source and licence: JRDB, a paid subscription. CHA gives each runner's main pre-race workout
-(本追切) for a race, CYB the per-course workout fields merged into `jrdb_pre_race` by #57. The
+(本追切) for a race, CYB the per-course presence flags merged into `jrdb_pre_race` by #57. The
 archives are the member downloads under `raw_dir("jrdb")`. JRDB's terms allow private use only:
 no publication of the data, and predictions built on JRDB inputs may not be shown to third parties
 (owner decision D21; `docs/ledger.md`). So this is an opt-in feature set behind
@@ -28,8 +28,9 @@ the race day, whose workout date is not after it, and that were published strict
 - `ff_trend_s`: the least-squares slope of those relative times, oldest to newest, in seconds per
   workout (null unless there are `N_RECENT`).
 - `days_since_hard`: days from the newest hard workout (`HARD_EFFORTS`) to the race day.
-- `workouts_since_last_race`: the sum of CYB's per-course fields of the runner's own row (JRDB
-  documents them as per-course flags, so this counts course kinds: `docs/ledger.md`).
+- `course_kinds_since_last_race`: the sum of CYB's per-course presence flags of the runner's own
+  row. It counts the course kinds used since the last race, not workouts (`docs/ledger.md`; a true
+  workout count waits for another source, #229).
 
 Every store read goes through #114's `read_store_table`, so holdout days are never read.
 `write_logloss_report()` scores the v0 calibrated-market Win model with and without these features
@@ -80,7 +81,12 @@ HARD_EFFORTS = frozenset({"all_out", "strong"})
 PARTNERS = ("ahead", "level", "behind")
 N_RECENT = 3
 PAR_MIN_WORKOUTS = 30
-FEATURE_COLUMNS = ("ff_best_vs_par_s", "ff_trend_s", "days_since_hard", "workouts_since_last_race")
+FEATURE_COLUMNS = (
+    "ff_best_vs_par_s",
+    "ff_trend_s",
+    "days_since_hard",
+    "course_kinds_since_last_race",
+)
 CYB_COUNT_COLUMNS = tuple(
     f"cyb_course_{c}" for c in ("slope", "wood", "dirt", "turf", "pool", "jump", "poly")
 )
@@ -380,14 +386,14 @@ def _features_from(entries, records, pool, counts, day: date, as_of: datetime) -
             pl.when(pl.any_horizontal(known))
             .then(total.round())
             .otherwise(None)
-            .alias("workouts_since_last_race"),
+            .alias("course_kinds_since_last_race"),
         ).unique(["race_id", "horse_no"], keep="last")
     else:
         cyb = pl.DataFrame(
             schema={
                 "race_id": pl.String,
                 "horse_no": pl.Int64,
-                "workouts_since_last_race": pl.Int64,
+                "course_kinds_since_last_race": pl.Int64,
             }
         )
     out = (
