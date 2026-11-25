@@ -1,0 +1,142 @@
+# The Family P selection family (ticket #88; 08 §5.1 Family P, §5.2, §5.3), read by
+# countries/japan/studies/selection.py, load_family.
+#
+# A PROPOSAL FOR THE OWNER. Nothing here is signed, and the family is not frozen. Every value below
+# (the rules, their thresholds, the decision time, the cluster unit, the max-statistic settings)
+# is an owner decision (08 §5.2, §9): the owner edits or approves it, sets owner_signoff, and only
+# then is dataclasses.asdict(load_family("japan")) frozen in the run registry, before any
+# development row is scored. load_family refuses this file while owner_signoff is null.
+#
+# Thresholds restate 08 §5.1's rule definitions; no result figure (returns, intervals, counts) is
+# copied here (D21: several are built on JRDB). Each rule is one RuleSpec: claim 'beta' | 'omega'
+# ('alpha' is refused until the owner names a C4 member), segment {column: level}, selection
+# columns read from the board at the decision time or from as-of features, thresholds
+# {column: [lo, hi]} with both ends inclusive and null an open end.
+status: "proposed — awaiting owner approval; not frozen"
+owner_signoff: null
+
+family_id: japan-family-p-selection-v1
+
+# D2's primary decision time (config/decision.yaml: primary_min 2). Every *_t column below is read
+# from the board at this time (docs/specs/board-at-t.md).
+decision_time: T-2
+
+# D7's resampling unit, the meeting (venue x day), as a column: the paired bootstrap of the
+# log-loss stage and the SPA/StepM bootstrap both resample it (08 §5.2: an owner decision).
+cluster_unit: meeting_id
+
+# The normalised final Win price (08 §5.2 step 3: the final-price baseline for log loss).
+benchmark: final_price
+
+# Romano-Wolf StepM's family-wise level, the stationary bootstrap's mean block length (in
+# meetings, time-ordered) and the replicates of SPA and StepM. Owner decisions with no default
+# (#75). Proposed: 0.05 (D7's 95% read family-wise); 6 meetings (about one JRA weekend: three
+# venues on two days); 10000 (scoring.yaml's precision setting).
+max_stat:
+  level: 0.05
+  block_size: 6
+  n_boot: 10000
+
+rules:
+  # P3 (E7): handicap runners at 5-50. Claim: the power beta of handicap races differs from 1
+  # (E7: handicaps reverse the favourite-longshot bias). Segment: races.weight_type 'handicap'
+  # (calibration.SEGMENTS 'handicap'). Selection: Win odds at t from 5.0 to 50.0.
+  - rule_id: P3-handicap-5-50
+    claim: beta
+    segment: {weight_type: handicap}
+    selection_cols: [odds_t]
+    thresholds: {odds_t: [5.0, 50.0]}
+
+  # P4 (E4, E8, E42), the segment-beta form: R12 favourites. #77's note carries R12 into this
+  # family as a candidate, not a finding. Claim: beta in R12 races differs from 1 (E4). Segment:
+  # races.race_no 12 as the 'in' side of calibration.SEGMENTS 'R12'. Selection: the favourite at t
+  # (rank_t, the min-rank of odds_t within the race, joint favourites both 1): the side a beta
+  # above 1 favours (E4's R12 hypothesis). 08 §5.1 gives P4 no threshold; this one is proposed.
+  # P4's alpha_s and omega_s forms are under `deferred`.
+  - rule_id: P4-r12-favourite
+    claim: beta
+    segment: {R12: in}
+    selection_cols: [rank_t]
+    thresholds: {rank_t: [1, 1]}
+
+  # P6 (E3): concentrated-market favourites. Claim: beta in the most concentrated races differs
+  # from 1 (E3). Segment: entropy_t_bin 1, the lowest-entropy bin of the normalised entropy of the
+  # Win board at t, cut at E3's signed cut points (config/calibration.yaml entropy_cut_points;
+  # signed on the final odds, proposed here for the board at t). Final-odds entropy is look-ahead
+  # for a bet (08 §5.2), so the segment is read at t. Selection: the favourite at t.
+  - rule_id: P6-concentrated-favourite
+    claim: beta
+    segment: {entropy_t_bin: 1}
+    selection_cols: [rank_t]
+    thresholds: {rank_t: [1, 1]}
+
+# Variants screened before the freeze and not carried: to be recorded as failed variants of this
+# family before it is frozen, so its family size counts them (08 §5.2 step 1). #77's in-sample E4
+# screen fitted every segment of config/calibration.yaml; handicap is P3 and R12 is P4 above. If
+# the owner prefers to carry them, each becomes a P4 beta rule instead.
+dropped:
+  - {variant: P4-r11pm1, why: "E4 segment screened in-sample by #77; not carried"}
+  - {variant: P4-g1-day-undercard, why: "E4 segment screened in-sample by #77; not carried"}
+  - {variant: P4-field-16-plus, why: "E4 segment screened in-sample by #77; not carried"}
+  - {variant: P4-debut, why: "E4 segment screened in-sample by #77; not carried"}
+  - {variant: P4-venue, why: "E4 segment screened in-sample by #77; not carried"}
+  - {variant: P4-heavy-going, why: "E4 segment screened in-sample by #77; not carried"}
+
+# Candidates the current RuleSpec and data contract cannot express (Win pool, winner log loss,
+# one winner per race, a beta or omega claim). Each says what is missing and how it could be
+# added; none is a rule of the family until the owner approves a mechanism.
+deferred:
+  P1:
+    hypotheses: [E14]
+    rule: "heavy-favourite Place where P(top 3) > 0.91 and the payout is forecast at 110, not 100"
+    missing: >-
+      A Place-pool rule: the study pays Win dividends and scores the winner only (D6's top-3
+      order score for Place is not in core.eval.scoring). P(top 3) at t needs C5's ordering on
+      the board at t, and the 110-vs-100 forecast (Plus 10) has no model.
+    proposal: >-
+      A pool field on RuleSpec, Place dividends and the top-3 score, then P(top 3) at t from C5
+      as a selection column; the Plus-10 forecast as its own ticket.
+  P2:
+    hypotheses: [E15]
+    rule: "ranks 2-3 Place behind a favourite at or under 1.5 at t"
+    missing: >-
+      A Place-pool rule, as P1. E15 has its own frozen family (#83, japan-coplacer-place-e15,
+      step 2 at t pending sign-off).
+    proposal: "Keep E15 in #83's family; bring it here only with P1's Place mechanism."
+  P4-alpha:
+    hypotheses: [E42]
+    rule: "segments with alpha_s > 0 in C4 (experienced handicaps; debut races)"
+    missing: >-
+      The member: alpha_s is the '<member>:<segment>' weight of #87's meta-model, and neither
+      RuleSpec nor the data names which member's out-of-fold column. #87's members read JRDB
+      or are not confirmed JRDB-free; #91 and #98 build JRDB-free members.
+    proposal: >-
+      The owner names the member (a JRDB-free one from #91 or #98 keeps the figures
+      publishable); the data then carry its out-of-fold column and an 'alpha' claim fits
+      u = ln q + alpha_0 m + alpha_s m z per fold.
+  P4-omega:
+    hypotheses: [E8]
+    rule: "segments with omega_s > 1/(1 - t) in the hierarchical model"
+    missing: >-
+      The study fits #78's omega model on every runner of a segment. For a race-level segment
+      (track, class, field: 08 §5.2 step 4's u terms) every runner is a bet, one of them wins,
+      so omega_s sits at its null by construction; and a within-race omega claim cannot be
+      identified for a race-level segment.
+    proposal: >-
+      Fit the omega model on each rule's selected bets at t (the segment ROI of the bets the rule
+      makes), or restrict omega rules to runner-level segments (jockey, trainer, sire).
+  P5:
+    hypotheses: [E9]
+    rule: "C4 residual overlays with ln(pi/q) above ln 1/(1 - t)"
+    missing: >-
+      C4 at t: #87's meta-model conditions on the final price, so pi at t does not exist; and its
+      claim is the model's gain over the price (E40, #87's family), not a segment beta or omega.
+    proposal: >-
+      A claim type for a model's out-of-fold probabilities (its gain over the final price) and
+      a selection column overlay_t = ln(pi_t / q_t) with threshold [ln 1/(1 - t), null], once C4
+      runs at the decision time.
+  P7:
+    hypotheses: [E24]
+    rule: "path-informed bets, if E24 ever finds ex-ante value"
+    missing: "E24 has not run; path data need months of odds logs or a bought history."
+    proposal: "Out of scope until E24 reports."
