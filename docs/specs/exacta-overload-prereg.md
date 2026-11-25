@@ -8,10 +8,10 @@
 
 | Family | Role | Members (family size) | Spec hash |
 |---|---|---|---|
-| `japan/131-exacta-category-v1` | E1: B2 category returns, the max test | λ2 {in-fold, 1} × 3 categories × 14 cells (84) | `9ac3b740d1bbdde9645091d3fd14247442b1a210b2d109c5e58ade0983769a8f` |
+| `japan/131-exacta-category-v1` | E1: B2 category returns, the max test | λ2 {`in_fold`, 1} × 3 categories × 14 cells (84) | `9ac3b740d1bbdde9645091d3fd14247442b1a210b2d109c5e58ade0983769a8f` |
 | `japan/131-exacta-category-b1-v1` | E1′: B1 flat box, reported | 3 × 14 (42) | `f0e915f51cc13c7b40ef478076f6c44b1b5d22b52722b321c46359e5c2bf5e8f` |
-| `japan/131-exacta-category-b3-v1` | E1″: B3 Harville calibration, reported | λ2 {in-fold, 1} × 3 × 14 (84) | `07721b74cc11fd7181b812c42450ac523371e07435047c623cd9d159d0d3fbcb` |
-| `japan/131-exacta-logscore-v1` | C: log-score total | λ2 {in-fold, 1} (2) | `0af318b97297b3085d82434921cf4c2f651864321a3e63ae03560b3e2b81c715` |
+| `japan/131-exacta-category-b3-v1` | E1″: B3 Harville calibration, reported | λ2 {`in_fold`, 1} × 3 × 14 (84) | `07721b74cc11fd7181b812c42450ac523371e07435047c623cd9d159d0d3fbcb` |
+| `japan/131-exacta-logscore-v1` | C: log-score total | λ2 {`in_fold`, 1} (2) | `0af318b97297b3085d82434921cf4c2f651864321a3e63ae03560b3e2b81c715` |
 | `japan/131-exacta-rule-v1` | E2: ratio-cut rules | 2 categories × 4 cuts × 2 scopes (16) | `b1577fd3765d5f72b0c0643235aca7cd69317d467470a0a31949da50c65a019f` |
 
 Registry hypothesis id: `E43` (08 §4, "exotic pools are efficient relative to the Win pool and
@@ -20,6 +20,20 @@ the ordering model"). E1 and E2 are this spec's family labels, not 08's E1 and E
 Code: `src/horsetrack/countries/japan/research/exacta_consistency.py` (pure maths),
 `exacta_study.py` (the scoring maths and the frozen specs) and `exacta_run.py` (freeze, the row
 count and the scored run).
+
+## Deviations from the signed spec, for owner confirmation
+
+Found after the scored run (2026-11-25); the frozen specs and their hashes are unchanged.
+
+- (a) λ2. The owner signed "λ2 in-fold fitted" (answer 8). The run used #115's full-development
+  fit (λ2 = 0.8104, partly in-sample; fit `2b822d643cf7`): one fit over the development
+  out-of-fold races, which saw the scored races' first two places. The registry label `in_fold`
+  in the frozen specs stays as frozen and means this fit. Effect: B3 (E1″) and C at λ2 = 0.8104
+  are partly in-sample. B2's null (ρ = 1 under π = q) does not depend on p, so the E1 SPA and
+  StepM outcome stands. A per-fold refit for B3 and C is #284.
+- (b) Scored span. The signed scope runs from 2014-06-07 (section 2). The scored races start
+  2020-01-05: 23,629 of the 43,058 development races, forced by #114's out-of-fold span (its
+  walk-forward test quarters from 2020-Q1), since B2, B3 and C need #114's p.
 
 ## 1. Question and null
 
@@ -47,8 +61,9 @@ then returns the race's payout rate less breakage, so it loses about 25%.
 - Win probabilities `p`: #114's out-of-fold calibrated Win probabilities, renormalised over the
   starters. They exist for #114's walk-forward test quarters only (2020-Q1 onward), so the scored
   races are the development races from 2020-01-01 that have them. Ordering model: discounted
-  Harville with λ2 fitted in-fold (#115, `ordering_v0.yaml`: one fit on the development
-  out-of-fold races; its fit id is recorded with each run), and plain Harville (λ2 = 1) as a
+  Harville at #115's full-development fit (λ2 = 0.8104, partly in-sample; registry label
+  `in_fold`; `ordering_v0.yaml`: one fit on the development out-of-fold races; its fit id is
+  recorded with each run; see deviation (a)), and plain Harville (λ2 = 1) as a
   registered variant. `harville_exacta` reuses `ordering._order_probs`, so the study and the v0
   model share one formula.
 - Precondition, checked by counting rows only (no scoring): the store holds `FORECAST` dividend
@@ -114,7 +129,8 @@ a segment.
 
 **Family E1, category returns on history** (`japan/131-exacta-category-v1`).
 
-- Members: 2 ordering variants (λ2 in-fold, and plain Harville λ2 = 1) × 3 categories × 14
+- Members: 2 ordering variants (λ2 `in_fold`, #115's full-development fit, and plain Harville
+  λ2 = 1) × 3 categories × 14
   segment cells (section 6), using estimator B2. **Family size 84**: SPA and StepM run over all 84.
   Plain Harville is in the family because the owner registered it as a variant (answer 8), and a
   registered variant counts toward the multiple-testing burden.

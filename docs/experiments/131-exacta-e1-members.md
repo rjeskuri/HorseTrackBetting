@@ -10,6 +10,12 @@ report is [131-exacta-overload.md](131-exacta-overload.md). Development races 20
 - 95% lo and 95% hi: the one-sided 95% lower and upper bounds of a meeting bootstrap (10,000
   replicates, seed 131), each a one-sided bound, not a two-sided interval. Not adjusted for
   multiplicity: the family-wise result is SPA and StepM in the report.
+- lambda2: `in_fold` is the registry label frozen in the spec, kept as written; it means #115's
+  full-development fit (λ2 = 0.8104, partly in-sample), one fit over the development out-of-fold
+  races that saw these races' first two places, not a per-fold fit. `1.0` is plain Harville. B1
+  does not use p, so its `in_fold` label carries no λ2. B3 at 0.8104 is partly in-sample; B2's
+  null (ρ = 1 under π = q) does not depend on p. The deviation awaits the owner's confirmation
+  (spec, "Deviations from the signed spec").
 - EB: B2 only, the empirical-Bayes estimate shrunk across the 14 cells of its category and λ2.
 - n: races in the cell (each race is scored in all three categories).
 
