@@ -90,6 +90,9 @@ def build_spec(owner: dict, scheme: FoldScheme, bootstrap: dict, floor: float) -
             "exp(f(ln q_i)), f a natural cubic spline, q_i = (1/O_i) / sum_j (1/O_j) over the "
             "race's priced runners; MLE; knots evenly spaced over the training rows' ln q "
             "quantiles",
+            "dead_heats": "fitted on #77's development rows, so a race with a dead heat for first "
+            "is kept and each co-winner counts as a winner (D4's live run_fit leaves those races "
+            "out)",
             "n_knots": N_KNOTS,
             "knot_quantile_range": list(d4.QUANTILE_RANGE),
         },
@@ -106,7 +109,8 @@ def build_spec(owner: dict, scheme: FoldScheme, bootstrap: dict, floor: float) -
         "scored on its test races; normalised and Shin need no fit",
         "adoption": "none: the owner picks the baseline de-vig (08 §9.4)",
         "score": "winner log loss per race (core.eval.scoring.per_race_log_loss)",
-        "rows": "priced starters of run races with a priced winner; development days only",
+        "rows": "priced starters of run races with a priced winner; development days only; a "
+        "dead heat counts each co-winner",
         "subsets": {
             "all_races": "every development race",
             "no_floor_bound_races": "races holding a floor-bound runner left out of fitting and "
