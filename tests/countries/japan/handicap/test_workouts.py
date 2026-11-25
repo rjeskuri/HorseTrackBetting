@@ -13,7 +13,7 @@ Contract pinned here (`horsetrack.countries.japan.handicap.workouts`):
   dirt). `EFFORTS`, a tuple of distinct effort descriptors containing "other", and
   `HARD_EFFORTS`, a non-empty subset of it that leaves at least one effort that is neither hard nor
   "other". `N_RECENT == 3`. `FEATURE_COLUMNS == ("ff_best_vs_par_s", "ff_trend_s",
-  "days_since_hard", "workouts_since_last_race")`.
+  "days_since_hard", "course_kinds_since_last_race")`.
 - Hooks, all looked up as module attributes at call time (the tests monkeypatch them):
   `PAR_MIN_WORKOUTS` (int), `CYB_COUNT_COLUMNS` (the `jrdb_pre_race` columns holding CYB's
   per-course workout counts), and `cha_workouts(parsed: pandas.DataFrame) -> pandas.DataFrame`,
@@ -57,8 +57,11 @@ Contract pinned here (`horsetrack.countries.japan.handicap.workouts`):
     seconds per workout ((newest - oldest) / 2); null unless recent holds exactly 3.
   - `days_since_hard`: race day minus the newest counted workout_date whose effort is in
     `HARD_EFFORTS`, in days (Int64); null when there is none.
-  - `workouts_since_last_race`: the sum of the non-null `CYB_COUNT_COLUMNS` of the runner's own
-    `jrdb_pre_race` row (race_id, horse_no), counted only when published_at(race day) is before
+  - `course_kinds_since_last_race`: the number of course kinds used since the last race, the sum
+    of the non-null `CYB_COUNT_COLUMNS` of the runner's own `jrdb_pre_race` row (CYB's per-course
+    fields are presence flags, one per course kind, so this is not a workout count; it was named
+    `workouts_since_last_race` before #241). Row (race_id, horse_no), counted only when
+    published_at(race day) is before
     `as_of`; null when there is no row, every count is null, or it is not yet published (Int64).
 - The flag: `jrdb_features_enabled()` reads `HORSETRACK_JRDB_FEATURES` through
   `core.env.get_setting` (process environment, else the repo-root `.env`): unset, "1", "true",
@@ -120,7 +123,7 @@ FLAG = "HORSETRACK_JRDB_FEATURES"
 JST = ZoneInfo("Asia/Tokyo")
 UTC = timezone.utc
 REPO = Path(__file__).resolve().parents[4]
-FEATURES = ("ff_best_vs_par_s", "ff_trend_s", "days_since_hard", "workouts_since_last_race")
+FEATURES = ("ff_best_vs_par_s", "ff_trend_s", "days_since_hard", "course_kinds_since_last_race")
 KEYS = ["race_id", "horse_no", "horse_id"]
 TABLE_COLUMNS = [
     "race_id", "horse_no", "horse_id", "workout_race_id", "workout_date", "centre", "course",
@@ -489,7 +492,7 @@ class Expect:
             "ff_best_vs_par_s": min(recent) if recent else None,
             "ff_trend_s": (recent[0] - recent[2]) / 2 if len(recent) == 3 else None,
             "days_since_hard": (self.day - max(hard_dates)).days if hard_dates else None,
-            "workouts_since_last_race": count,
+            "course_kinds_since_last_race": count,
         }
 
 
@@ -530,6 +533,34 @@ def test_vocabularies_and_feature_names():
     assert hard_set and hard_set < set(efforts) - {"other"}
     assert workouts.N_RECENT == 3
     assert tuple(workouts.FEATURE_COLUMNS) == FEATURES
+
+
+OLD_NAME = "workouts_since_last_race"
+NEW_NAME = "course_kinds_since_last_race"
+
+
+def test_old_feature_name_is_gone(main_world):
+    """#241: the feature counts course kinds, so the misleading old name is retired."""
+    assert NEW_NAME in workouts.FEATURE_COLUMNS
+    assert OLD_NAME not in workouts.FEATURE_COLUMNS
+    frame = workouts.workout_features(TARGET, as_of=AS_OF, enabled=True)
+    assert NEW_NAME in frame.columns
+    assert OLD_NAME not in frame.columns
+
+
+REPO = Path(__file__).resolve().parents[4]
+
+
+def test_ledger_and_model_card_use_the_new_name():
+    """#241: name and definition agree in the ledger and the model card; none of the docs that
+    describe the feature keeps the old name."""
+    ledger = (REPO / "docs" / "ledger.md").read_text()
+    card = (REPO / "src/horsetrack/countries/japan/MODEL_CARD.md").read_text()
+    modeling = (REPO / "docs" / "modeling.md").read_text()
+    assert NEW_NAME in ledger
+    assert NEW_NAME in card
+    for name, text in (("ledger", ledger), ("model card", card), ("modeling", modeling)):
+        assert OLD_NAME not in text, f"{name} still uses {OLD_NAME}"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -594,7 +625,7 @@ def test_publication_boundary_is_strictly_before(main_world):
         got = feature_rows(workouts.workout_features(TARGET, as_of=as_of, enabled=True))
         for horse_id, horse_no in DECLARED.items():
             assert_features(got[horse_id], expect.features(horse_id, horse_no), (as_of, horse_id))
-        assert (got["h:alpha"]["workouts_since_last_race"] is not None) is own
+        assert (got["h:alpha"]["course_kinds_since_last_race"] is not None) is own
 
 
 @pytest.mark.parametrize("as_of", [AS_OF, LATE, at_jst(T + timedelta(days=400), 12)])
@@ -633,12 +664,12 @@ def test_a_naive_as_of_is_refused(main_world, call):
 HAND = {  # at AS_OF: pars miho hill 12.5, miho wood 12.2, ritto hill 12.5, ritto wood 12.1,
     # ritto poly none (2 times < PAR_MIN); 02-26 to 06-15 is 109 days
     "h:alpha": {"ff_best_vs_par_s": -0.5, "ff_trend_s": -0.2, "days_since_hard": 109,
-                "workouts_since_last_race": 3},
+                "course_kinds_since_last_race": 3},
     "h:bravo": dict.fromkeys(FEATURES),
     "h:charlie": {"ff_best_vs_par_s": -0.1, "ff_trend_s": None, "days_since_hard": None,
-                  "workouts_since_last_race": 4},
+                  "course_kinds_since_last_race": 4},
     "h:delta": {"ff_best_vs_par_s": -0.2, "ff_trend_s": None, "days_since_hard": 3,
-                "workouts_since_last_race": None},
+                "course_kinds_since_last_race": None},
 }  # fmt: skip
 
 
@@ -652,7 +683,7 @@ def test_features_by_hand(main_world):
     assert dict(zip(frame["horse_id"], frame["horse_no"], strict=True)) == DECLARED
     for c in ("ff_best_vs_par_s", "ff_trend_s"):
         assert frame.schema[c].is_float(), c
-    for c in ("days_since_hard", "workouts_since_last_race"):
+    for c in ("days_since_hard", "course_kinds_since_last_race"):
         assert frame.schema[c].is_integer(), c
     got = feature_rows(frame)
     for horse_id in DECLARED:
@@ -706,7 +737,7 @@ def test_a_holdout_day_is_never_read(main_world, monkeypatch):
     assert table_rows(frame) == Expect(main_world, TARGET, as_of=AS_OF, hidden={hidden}).table()
     got = feature_rows(workouts.workout_features(TARGET, as_of=AS_OF, enabled=True))
     want = {"ff_best_vs_par_s": -0.4, "ff_trend_s": -0.3, "days_since_hard": 109,
-            "workouts_since_last_race": 3}  # fmt: skip
+            "course_kinds_since_last_race": 3}  # fmt: skip
     assert_features(got["h:alpha"], want, "h:alpha")
     expect = Expect(main_world, TARGET, as_of=AS_OF, hidden={hidden})
     for horse_id, horse_no in DECLARED.items():
