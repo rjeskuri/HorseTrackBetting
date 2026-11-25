@@ -11,8 +11,9 @@ Conventions in every diagram:
 - A thick-bordered box (class `owner`) is an owner decision: nothing downstream of it moves without
   the owner's answer on a ticket.
 
-Simplified diagrams of the models themselves belong to `docs/modeling.md` (planned, #299); view 4
-here stays at the level of the evaluation harness and governance.
+Simplified diagrams of the models themselves, in six views from the decision to the race-day
+timeline, are in [docs/modeling.md](modeling.md); view 4 here stays at the level of the evaluation
+harness and governance.
 
 When an epic changes one of these flows, its last ticket updates this file.
 
