@@ -12,6 +12,14 @@ Contract pinned here (`horsetrack.countries.japan.board.snapshot`):
 - A row is final when `source_update_utc` is null and '最終オッズ' is in `page_state` (#21 rows) or
   `status_raw` (HKTrack rows). `final_board` uses the first capture (by snapshot_utc) whose WIN rows
   are final; a race never final gives None.
+- Split captures (#234, owner sign-off 2026-11-25: "each pool's latest final capture"). A pool's
+  final capture holds at least one priced row of that pool, every one final (SCR rows do not
+  count). The board starts from the anchor capture's rows (WIN, other pools' totals); PLACE and
+  Wide, each with its prices and pool total, come from that pool's first final capture at or after
+  the anchor, else its latest final capture before it, else nothing. So HKTrack's final Wide
+  capture ~2 s after WIN+PLACE prices the board's Wide, and a one-capture round whose pools are all
+  final gives that capture's board as before. `at_utc` is the latest availability among the rows
+  taken, `capture_utc` the oldest price row's.
 - `post_times_for(date, venue)`: the `<VENUE>.races.json` sidecar beside the odds log, else
   HKTrack's stored card `processed/jra/upcoming/jra_<date>_<VENUE>/races.parquet`, else {}; times
   are aware UTC.
@@ -23,6 +31,7 @@ All rows are synthetic and built here; HORSETRACK_DATA_DIR points at tmp_path.
 
 from __future__ import annotations
 
+import random
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -514,6 +523,386 @@ def test_a_race_never_final_gives_none():
     assert all(r["source_update_utc"] is not None for r in rows if r["pool"] == "WIN")
     assert snapshot.final_board(rows, RACE) is None
     assert snapshot.final_board([], RACE) is None
+
+
+# ---------------------------------------------------------------- final_board over split captures
+# Ticket #234. HKTrack logged a round as separate captures (WIN+PLACE at s, QUINELLA about 1 s on,
+# Wide about 2 s on, the next round about 20 s later); a race keeps being captured with final prices
+# for hours. Wide's rows can turn final a round before WIN's, or, as on 2026-11-22 KYO races 01, 04
+# and 09, a round after (the anchor round's Wide capture still pre-final). Every capture prices
+# differently (`sp` reads the capture's stamp), so each assertion names the capture a price came
+# from; on the real logs every final capture of a pool repeats one price set.
+
+WIN, PLACE, WIDE, QUINELLA = "WIN", "PLACE", "QUINELLA_PLACE", "QUINELLA"
+SPLIT_RACE = "jra:2026-11-22:KYO:05"  # a development day, before the Japan holdout start
+SPLIT_POST = datetime(2026, 11, 22, 6, 0, tzinfo=UTC)
+POOL_ORDER = (WIN, PLACE, QUINELLA, WIDE)  # horsetrack fetches the pages in this order
+FETCH_DELAY_S = {WIN: 3, PLACE: 4, QUINELLA: 5, WIDE: 6}  # new-shape fetched_utc after snapshot_utc
+RUNNERS = (1, 2, 3, 4, 5)
+PAIRS = [(a, b) for a in range(1, 5) for b in range(a + 1, 5)]  # Wide and QUINELLA pairs logged
+WIN_BASE = {1: 2.4, 2: 3.9, 3: 6.5, 4: 12.0, 5: 30.0}
+_EPOCH = datetime(2026, 11, 22, 5, 0, tzinfo=UTC)
+
+
+def kt(hh: int, mm: int, ss: int = 0) -> datetime:
+    return datetime(2026, 11, 22, hh, mm, ss, tzinfo=UTC)
+
+
+def sec(value: datetime, seconds: float) -> datetime:
+    return value + timedelta(seconds=seconds)
+
+
+def sp(pool: str, runners: tuple[int, ...], snap: datetime) -> tuple[float, float | None]:
+    """(low, high) of one combination in the capture stamped `snap`: no two captures share one."""
+    drift = 1.0 + 0.0001 * (snap - _EPOCH).total_seconds()
+    win = [WIN_BASE[r] * drift for r in runners]
+    if pool == WIN:
+        return round(win[0], 6), None
+    if pool == PLACE:
+        lo = 1.0 + (win[0] - 1.0) / 3.0
+        return round(lo, 6), round(lo * 1.3, 6)
+    if pool == WIDE:
+        lo = 1.0 + win[0] * win[1] / 4.0
+        return round(lo, 6), round(lo * 1.25, 6)
+    return round(win[0] * win[1], 6), None  # QUINELLA
+
+
+def pool_total(pool: str, snap: datetime) -> float:
+    return float(10_000_000 * (POOL_ORDER.index(pool) + 1) + (snap - _EPOCH).total_seconds())
+
+
+def _logged(pool, combination, odds, snap, *, final, hktrack, odds_hi=None, investment=None):
+    live = f"{snap.hour + 9}時{snap.minute:02d}分現在"
+    if hktrack:
+        status, page = (FINAL if final else live), None
+    else:
+        status, page = (None if final else live), (FINAL if final else "発売中")
+    r = row(
+        pool,
+        combination,
+        odds,
+        fetched=None if hktrack else sec(snap, FETCH_DELAY_S[pool]),
+        snap=snap,
+        race_id=SPLIT_RACE,
+        odds_hi=odds_hi,
+        status_raw=status,
+        page_state=page,
+        investment=investment,
+        hktrack=hktrack,
+    )
+    if final:
+        r["source_update_utc"] = None
+    return r
+
+
+def capture(snap: datetime, pools: dict[str, bool], *, hktrack=True, scratched=(5,)) -> list[dict]:
+    """One capture stamped `snap`: per pool (pool -> final) its rows and its pool-total row. WIN and
+    PLACE list every runner, a scratched one as SCR; Wide and QUINELLA every pair of 1-4."""
+    rows = []
+    for pool, final in pools.items():
+        keys = [(h,) for h in RUNNERS] if pool in (WIN, PLACE) else PAIRS
+        for runners in keys:
+            scratch = pool in (WIN, PLACE) and runners[0] in scratched
+            lo, hi = (None, None) if scratch else sp(pool, runners, snap)
+            combination = ",".join(str(h) for h in runners)
+            rows.append(
+                _logged(pool, combination, lo, snap, final=final, hktrack=hktrack, odds_hi=hi)
+            )
+        total = pool_total(pool, snap)
+        rows.append(
+            _logged(pool, "__pool__", None, snap, final=final, hktrack=hktrack, investment=total)
+        )
+    return rows
+
+
+def split_round(start, *, final, wide_final=None, wide_at=(2,), quinella=True, scratched=(5,)):
+    """An HKTrack round: WIN+PLACE at `start`, QUINELLA 1 s on, one Wide capture per offset (s)."""
+    wide_final = final if wide_final is None else wide_final
+    rows = capture(start, {WIN: final, PLACE: final}, scratched=scratched)
+    if quinella:
+        rows += capture(sec(start, 1), {QUINELLA: wide_final}, scratched=scratched)
+    for offset in wide_at:
+        rows += capture(sec(start, offset), {WIDE: wide_final}, scratched=scratched)
+    return rows
+
+
+def single_round(start, *, final, wide_final=None, hktrack):
+    """A round in one capture: every pool shares one snapshot_utc."""
+    wide_final = final if wide_final is None else wide_final
+    pools = {WIN: final, PLACE: final, QUINELLA: wide_final, WIDE: wide_final}
+    return capture(start, pools, hktrack=hktrack)
+
+
+def board_prices(win_snap, wide_snap, *, scratched=(5,)):
+    """(win, place, wide) as the board shows them: WIN and PLACE from the capture at `win_snap`,
+    Wide from the one at `wide_snap` (None: no Wide), pairs naming a scratched runner left out."""
+    win = {h: sp(WIN, (h,), win_snap)[0] for h in RUNNERS if h not in scratched}
+    place = {h: sp(PLACE, (h,), win_snap) for h in RUNNERS if h not in scratched}
+    wide = {}
+    if wide_snap is not None:
+        wide = {p: sp(WIDE, p, wide_snap) for p in PAIRS if not set(p) & set(scratched)}
+    return win, place, wide
+
+
+def orders(rows: list[dict]) -> list[list[dict]]:
+    """The log as written, reversed and shuffled: log order never decides the board."""
+    shuffled = list(rows)
+    random.Random(234).shuffle(shuffled)
+    return [rows, rows[::-1], shuffled]
+
+
+def pre_final(rows: list[dict], pool: str, combination: str) -> list[dict]:
+    """The rows with `pool`'s `combination` row set back to a pre-final state (an as-of time)."""
+    out = []
+    for r in rows:
+        if r["pool"] == pool and r["combination"] == combination:
+            r = dict(r, status_raw="15時02分現在", source_update_utc=r["snapshot_utc"])
+        out.append(r)
+    return out
+
+
+ANCHOR = kt(6, 2)  # the first capture whose priced WIN rows are all final
+LIVE = split_round(kt(5, 58), final=False)
+BEFORE = kt(6, 1, 40)  # the round before the anchor's
+PRE_ROUND = split_round(BEFORE, final=False)  # nothing final yet
+EARLY_WIDE = split_round(BEFORE, final=False, wide_final=True)  # Wide final, WIN not yet
+NEXT = split_round(kt(6, 2, 20), final=True)  # the next round: final too, other prices
+HOURS_ON = split_round(kt(8, 30), final=True)
+ANCHOR_ONLY = split_round(ANCHOR, final=True, quinella=False, wide_at=())  # no Wide capture
+PRE_FINAL_WIDE = split_round(ANCHOR, final=True, wide_final=False)  # the KYO 01/04/09 shape
+PARTLY_FINAL_WIDE = pre_final(split_round(ANCHOR, final=True), WIDE, "2,3")  # 5 of 6 pairs final
+EARLY, NEXT_WIDE = sec(BEFORE, 2), sec(kt(6, 2, 20), 2)
+
+# (rows, the capture Wide comes from (None: no Wide), at_utc, capture_utc)
+SPLIT_CASES = [
+    pytest.param(
+        LIVE + EARLY_WIDE + split_round(ANCHOR, final=True) + NEXT + HOURS_ON,
+        *(sec(ANCHOR, 2), sec(ANCHOR, 2), ANCHOR),
+        id="final-wide-2s-after-the-anchor",
+    ),
+    pytest.param(
+        LIVE
+        + EARLY_WIDE
+        + split_round(ANCHOR, final=True, quinella=False, wide_at=(1,))
+        + NEXT
+        + HOURS_ON,
+        *(sec(ANCHOR, 1), sec(ANCHOR, 1), ANCHOR),
+        id="final-wide-1s-after-no-quinella",
+    ),
+    pytest.param(
+        LIVE + EARLY_WIDE + split_round(ANCHOR, final=True, wide_at=(19,)) + NEXT + HOURS_ON,
+        *(sec(ANCHOR, 19), sec(ANCHOR, 19), ANCHOR),
+        id="final-wide-19s-after",
+    ),
+    pytest.param(
+        LIVE + EARLY_WIDE + split_round(ANCHOR, final=True, wide_at=(2, 9)) + NEXT + HOURS_ON,
+        *(sec(ANCHOR, 2), sec(ANCHOR, 2), ANCHOR),
+        id="two-final-wide-captures-in-the-round-the-first",
+    ),
+    pytest.param(
+        LIVE
+        + split_round(kt(6, 1, 20), final=False, wide_final=True)
+        + EARLY_WIDE
+        + split_round(ANCHOR, final=True)
+        + NEXT,
+        *(sec(ANCHOR, 2), sec(ANCHOR, 2), ANCHOR),
+        id="two-early-final-wide-rounds",
+    ),
+    pytest.param(
+        LIVE + split_round(ANCHOR, final=True),
+        *(sec(ANCHOR, 2), sec(ANCHOR, 2), ANCHOR),
+        id="the-anchor-round-ends-the-log",
+    ),
+    pytest.param(
+        LIVE + PRE_ROUND + PRE_FINAL_WIDE + NEXT + HOURS_ON,
+        *(NEXT_WIDE, NEXT_WIDE, ANCHOR),
+        id="pre-final-wide-in-the-anchor-round",
+    ),
+    pytest.param(
+        LIVE + EARLY_WIDE + PRE_FINAL_WIDE + NEXT + HOURS_ON,
+        *(NEXT_WIDE, NEXT_WIDE, ANCHOR),
+        id="pre-final-in-round-next-final-beats-an-early-final",
+    ),
+    pytest.param(
+        LIVE + PRE_ROUND + PARTLY_FINAL_WIDE + NEXT + HOURS_ON,
+        *(NEXT_WIDE, NEXT_WIDE, ANCHOR),
+        id="partly-final-wide-in-the-anchor-round",
+    ),
+    pytest.param(
+        LIVE + EARLY_WIDE + ANCHOR_ONLY + NEXT + HOURS_ON,
+        *(NEXT_WIDE, NEXT_WIDE, ANCHOR),
+        id="no-wide-capture-in-the-anchor-round",
+    ),
+    pytest.param(
+        EARLY_WIDE + ANCHOR_ONLY + single_round(kt(6, 2, 20), final=True, hktrack=True) + HOURS_ON,
+        *(kt(6, 2, 20), kt(6, 2, 20), ANCHOR),
+        id="next-round-in-one-capture",
+    ),
+    pytest.param(
+        LIVE + EARLY_WIDE + PRE_FINAL_WIDE,
+        *(EARLY, ANCHOR, EARLY),
+        id="an-early-final-wide-when-none-at-or-after",
+    ),
+    pytest.param(
+        LIVE + split_round(kt(6, 1, 20), final=False, wide_final=True) + EARLY_WIDE + ANCHOR_ONLY,
+        *(EARLY, ANCHOR, EARLY),
+        id="the-latest-early-final-wide-when-none-after",
+    ),
+    pytest.param(
+        LIVE + PRE_ROUND + PRE_FINAL_WIDE + split_round(kt(6, 2, 20), final=True, wide_final=False),
+        *(None, ANCHOR, ANCHOR),
+        id="no-final-wide-anywhere",
+    ),
+]
+
+
+@pytest.mark.parametrize(("rows", "wide_snap", "at_utc", "capture_utc"), SPLIT_CASES)
+def test_a_split_final_board_takes_wide_from_its_first_final_capture(
+    rows, wide_snap, at_utc, capture_utc
+):
+    """WIN and PLACE (final in the anchor) from the anchor. Wide, prices and total, from its first
+    final capture at or after the anchor, of whatever round; else its latest final capture before
+    the anchor; else none. at_utc: when the last row taken was in hand."""
+    win, place, wide = board_prices(ANCHOR, wide_snap)
+    assert len(wide) == (0 if wide_snap is None else 6)
+    expected_totals = {WIN: pool_total(WIN, ANCHOR), PLACE: pool_total(PLACE, ANCHOR)}
+    if wide_snap is not None:
+        expected_totals[WIDE] = pool_total(WIDE, wide_snap)
+    for given in orders(rows):
+        board = snapshot.final_board(given, SPLIT_RACE, post_utc=SPLIT_POST)
+        assert board is not None
+        assert board.wide == wide
+        assert board.win == win
+        assert board.place == place
+        assert board.totals == expected_totals
+        assert board.final is True
+        assert board.scratched == frozenset({5})
+        assert board.at_utc == at_utc
+        assert board.capture_utc == capture_utc
+        assert board.post_utc == SPLIT_POST
+        assert board.race_id == SPLIT_RACE
+        assert board.starters == 4
+
+
+def test_a_split_wide_capture_still_drops_the_pairs_of_a_scratched_runner():
+    """Runner 4 is scratched after the live round (SCR in WIN and PLACE); the Wide captures go on
+    pricing its pairs. They are not on the final board, and the SCR rows come from the anchor."""
+    late = (4, 5)
+    rows = (
+        LIVE
+        + split_round(kt(6, 1, 40), final=False, wide_final=True, scratched=late)
+        + split_round(ANCHOR, final=True, scratched=late)
+        + split_round(kt(6, 2, 20), final=True, scratched=late)
+    )
+    in_round_wide = [
+        r for r in rows if r["pool"] == WIDE and r["snapshot_utc"] == iso(sec(ANCHOR, 2))
+    ]
+    assert any("4" in r["combination"].split(",") and r["odds"] is not None for r in in_round_wide)
+    win, place, wide = board_prices(ANCHOR, sec(ANCHOR, 2), scratched=late)
+    assert set(wide) == {(1, 2), (1, 3), (2, 3)}
+    for given in orders(rows):
+        board = snapshot.final_board(given, SPLIT_RACE)
+        assert board.wide == wide
+        assert board.scratched == frozenset(late)
+        assert board.win == win and board.place == place
+        assert board.starters == 3
+        assert board.capture_utc == ANCHOR
+
+
+@pytest.mark.parametrize("hktrack", [True, False], ids=["hktrack-shape", "horsetrack-shape"])
+def test_single_capture_rounds_give_the_anchor_captures_board(hktrack):
+    """One snapshot_utc per round across pools (horsetrack's own log-day, and the HKTrack row shape
+    in the same layout): the final board is the first final capture's alone, as before #234, though
+    the Wide of the round before is already final and later final rounds price differently."""
+    rows = (
+        single_round(kt(5, 58), final=False, hktrack=hktrack)
+        + single_round(kt(6, 1, 40), final=False, wide_final=True, hktrack=hktrack)
+        + single_round(ANCHOR, final=True, hktrack=hktrack)
+        + single_round(kt(6, 2, 20), final=True, hktrack=hktrack)
+        + single_round(kt(8, 30), final=True, hktrack=hktrack)
+    )
+    assert sp(WIN, (1,), ANCHOR) != sp(WIN, (1,), kt(6, 2, 20))
+    assert sp(WIDE, (1, 2), ANCHOR) != sp(WIDE, (1, 2), kt(6, 1, 40))
+    win, place, wide = board_prices(ANCHOR, ANCHOR)
+    expected = snapshot.RaceBoard(
+        race_id=SPLIT_RACE,
+        post_utc=SPLIT_POST,
+        # the capture's last row in hand (Wide's page, fetched last), and its oldest price row
+        at_utc=ANCHOR if hktrack else sec(ANCHOR, FETCH_DELAY_S[WIDE]),
+        capture_utc=ANCHOR if hktrack else sec(ANCHOR, FETCH_DELAY_S[WIN]),
+        final=True,
+        win=win,
+        place=place,
+        wide=wide,
+        totals={pool: pool_total(pool, ANCHOR) for pool in POOL_ORDER},
+        scratched=frozenset({5}),
+    )
+    assert len(expected.wide) == 6
+    for given in orders(rows):
+        assert snapshot.final_board(given, SPLIT_RACE, post_utc=SPLIT_POST) == expected
+
+
+@pytest.mark.parametrize("hktrack", [True, False], ids=["hktrack-shape", "horsetrack-shape"])
+@pytest.mark.parametrize("pool", [WIDE, PLACE])
+def test_a_pool_still_pre_final_in_the_anchor_capture_comes_from_its_next_final_capture(
+    pool, hktrack
+):
+    """The one deliberate change from the board before #234. The anchor capture's WIN rows are
+    final but `pool`'s rows in the same capture are not yet: the old board put those pre-final
+    prices on the final board, the target the nowcast trains against. Now that pool, prices and
+    total, comes from its first final capture after the anchor (the next round here); the rest of
+    the board is the anchor capture's, as before."""
+    nxt = kt(6, 2, 20)
+    at_anchor = {WIN: True, PLACE: True, QUINELLA: True, WIDE: True}
+    at_anchor[pool] = False
+    rows = (
+        single_round(kt(5, 58), final=False, hktrack=hktrack)
+        + capture(ANCHOR, at_anchor, hktrack=hktrack)
+        + single_round(nxt, final=True, hktrack=hktrack)
+        + single_round(kt(8, 30), final=True, hktrack=hktrack)
+    )
+    win, place, wide = board_prices(ANCHOR, ANCHOR)
+    _, next_place, next_wide = board_prices(nxt, nxt)
+    totals = {p: pool_total(p, ANCHOR) for p in POOL_ORDER}
+    totals[pool] = pool_total(pool, nxt)
+    expected = snapshot.RaceBoard(
+        race_id=SPLIT_RACE,
+        post_utc=SPLIT_POST,
+        at_utc=nxt if hktrack else sec(nxt, FETCH_DELAY_S[pool]),  # the replacement's rows
+        capture_utc=ANCHOR if hktrack else sec(ANCHOR, FETCH_DELAY_S[WIN]),
+        final=True,
+        win=win,
+        place=next_place if pool == PLACE else place,
+        wide=next_wide if pool == WIDE else wide,
+        totals=totals,
+        scratched=frozenset({5}),
+    )
+    for given in orders(rows):
+        assert snapshot.final_board(given, SPLIT_RACE, post_utc=SPLIT_POST) == expected
+
+
+@pytest.mark.parametrize("pool", [WIDE, PLACE])
+def test_a_pool_never_final_is_left_off_the_final_board(pool):
+    """WIN is final from the anchor on but `pool` never turns final in any capture: the board shows
+    none of its prices and no total for it, where the old board showed the anchor's pre-final
+    ones."""
+    at_anchor = {WIN: True, PLACE: True, QUINELLA: True, WIDE: True}
+    at_anchor[pool] = False
+    rows = (
+        single_round(kt(5, 58), final=False, hktrack=True)
+        + capture(ANCHOR, at_anchor)
+        + capture(kt(6, 2, 20), at_anchor)
+    )
+    win, place, wide = board_prices(ANCHOR, ANCHOR)
+    for given in orders(rows):
+        board = snapshot.final_board(given, SPLIT_RACE)
+        assert board.place == ({} if pool == PLACE else place)
+        assert board.wide == ({} if pool == WIDE else wide)
+        assert board.totals == {p: pool_total(p, ANCHOR) for p in POOL_ORDER if p != pool}
+        assert board.win == win
+        assert board.scratched == frozenset({5})
+        assert board.final is True
+        assert board.at_utc == ANCHOR
 
 
 # ---------------------------------------------------------------- post times
