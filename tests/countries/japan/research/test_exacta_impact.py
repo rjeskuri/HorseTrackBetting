@@ -330,10 +330,12 @@ def test_the_summary_groups_logged_exacta_races_by_pool_size(data_dir):
 def test_the_stake_and_takeout_arguments_move_the_summary(data_dir, stake):
     build_data(data_dir)
     assert_bins(
-        ei.summarize_impact(stake=stake, bin_edges=EDGES), expected_bins(EDGES, stake=stake)
+        ei.summarize_impact(stake=stake, bin_edges=EDGES)["bins"],
+        expected_bins(EDGES, stake=stake),
     )
     assert_bins(
-        ei.summarize_impact(takeout=0.20, bin_edges=EDGES), expected_bins(EDGES, takeout=0.20)
+        ei.summarize_impact(takeout=0.20, bin_edges=EDGES)["bins"],
+        expected_bins(EDGES, takeout=0.20),
     )
 
 
