@@ -6,11 +6,14 @@ owner accepted the proposed defaults, each conservative relative to JRA's public
 1. odds_timeseries: column on fetched_utc, falling back to snapshot_utc (HKTrack rows have no
    fetched_utc); dividend, is_refund and is_final_capture are label columns.
 2. meetings: offset on race_date, 0 (00:00 JST of the race date).
-3. races and runners: offset on race_date, 0 (00:00 JST); the result columns, the horse weights
-   and the same-day going are label columns (until a post_utc exists). races.result_published_utc
-   and races.result_unpublished_utc are label columns too (the owner's answer on #80,
-   2026-11-25); races.rail_setting stays in the view.
-4. dividends, sectionals, incidents, running_comments: label_only.
+3. races and runners: offset on race_date, 0 (00:00 JST); the result columns are label columns.
+   races.result_published_utc and races.result_unpublished_utc are label columns too (the owner's
+   answer on #80, 2026-11-25); races.rail_setting stays in the view. Since #227 races carry a
+   derived post_utc, and the horse weights (runners horse_wt_kg, horse_wt_change_kg,
+   declared_horse_wt_lb) and the same-day going (races going, going_raw) are in the view, null
+   until post_utc - 60 min of their race.
+4. dividends, sectionals, incidents, running_comments: available from post_utc + 30 min of their
+   race (#227). Their boundaries are pinned in tests/core/store/test_asof.py.
 5. horses: current_value. horse_pedigree: static (sire, dam and broodmare sire never change),
    with source_race_id and scraped_utc kept out as label columns.
 6. horse_runs: offset on race_date + 1 day (00:00 JST of the next day).
@@ -59,18 +62,26 @@ RUNNER_LABELS = frozenset(
     {
         "finish_pos", "placing_raw", "placing_code", "dead_heat", "finish_time_s", "lbw_raw",
         "lbw_lengths", "running_positions", "last_3f_s", "win_odds", "win_fav_rank",
-        "horse_wt_kg", "horse_wt_change_kg", "declared_horse_wt_lb",
     }
 )  # fmt: skip
-# declared_horse_wt_lb is horse_wt_kg in pounds (the race-day body weight), so a label column too.
+# The race-day body weight (horse_wt_kg, horse_wt_change_kg and declared_horse_wt_lb, its copy in
+# pounds) and the same-day going (going, going_raw) left the label columns in #227: they are in the
+# view, null until post_utc - 60 min (the owner's answer on #80, 2026-11-24).
+POST_GATED = {
+    "runners": ("horse_wt_kg", "horse_wt_change_kg", "declared_horse_wt_lb"),
+    "races": ("going", "going_raw"),
+}
 # result_published_utc and result_unpublished_utc (#225): never in a view at t (the owner's answer
-# on #80, 2026-11-25), until #227 may give them a rule of their own. rail_setting stays in.
+# on #80, 2026-11-25); #227 left them labels. rail_setting stays in.
 RACE_LABELS = frozenset(
-    {
-        "finish_time_s", "split_times_s", "going", "going_raw", "result_published_utc",
-        "result_unpublished_utc",
-    }
-)  # fmt: skip
+    {"finish_time_s", "split_times_s", "result_published_utc", "result_unpublished_utc"}
+)
+# the columns a view adds to a table's own: races' post_utc, derived from race_date and
+# post_time_local in Asia/Tokyo (#227)
+VIEW_EXTRA = {"races": frozenset({"post_utc"})}
+# available from post_utc + 30 min of their race (#227); how the rule reaches the race's post_utc
+# is the implementation's, so only the behaviour is pinned (tests/core/store/test_asof.py)
+POST_RESULTS = ("dividends", "sectionals", "incidents", "running_comments")
 ODDS_LABELS = frozenset({"dividend", "is_refund", "is_final_capture"})
 PEDIGREE_LABELS = frozenset({"source_race_id", "scraped_utc"})
 
@@ -90,10 +101,7 @@ OWNER: dict[str, dict] = {
     "meetings": _offset(0),
     "races": _offset(0, RACE_LABELS),
     "runners": _offset(0, RUNNER_LABELS),
-    "dividends": {"kind": "label_only"},
-    "sectionals": {"kind": "label_only"},
-    "incidents": {"kind": "label_only"},
-    "running_comments": {"kind": "label_only"},
+    **{table: {"kind": "post + 30 min"} for table in POST_RESULTS},
     "horses": {"kind": "current_value"},
     "horse_pedigree": {"kind": "static", "labels": PEDIGREE_LABELS},
     "horse_runs": _offset(1440),
@@ -131,6 +139,10 @@ def test_the_shipped_config_has_one_rule_per_table_and_nothing_else(rules):
 @pytest.mark.parametrize("table", list(OWNER))
 def test_each_shipped_rule_is_the_owners(rules, table):
     want, rule = OWNER[table], rules[table]
+    if table in POST_RESULTS:  # they enter the views; their post + 30 min rule is pinned in
+        # tests/core/store/test_asof.py by behaviour, whatever form the rule takes
+        assert rule.kind not in ("label_only", "current_value")
+        return
     assert rule.kind == want["kind"]
     assert rule.column == want.get("column")
     assert rule.fallback == want.get("fallback")
@@ -152,6 +164,8 @@ def test_every_column_a_shipped_rule_names_is_in_its_table(rules, table):
     # a label prefix never drops a column of the store's contract (the keys, the anchor)
     dropped = [c for c in schema.names if any(c.startswith(p) for p in rule.label_prefixes)]
     assert not dropped, f"{table}: label prefixes drop contract columns {dropped}"
+    if table in POST_RESULTS:
+        return  # their time is the race's post_utc, not a column of their own table
     for name in (rule.column, rule.fallback):
         if name is not None:
             field = schema.field(name)
@@ -172,6 +186,8 @@ def _value(dtype: pa.DataType, column: str, i: int):
         return i + 1
     if pa.types.is_floating(dtype):
         return 1.5 * (i + 1)
+    if column == "post_time_local":  # "HH:MM" on the JST wall clock, as the results parser writes
+        return f"{10 + i}:{5 * i:02d}"
     if pa.types.is_string(dtype):
         return f"{column}-{i}"
     if pa.types.is_boolean(dtype):
@@ -230,7 +246,7 @@ def _opens(table: str, i: int) -> datetime | None:
 @pytest.mark.parametrize("table", VIEW_TABLES)
 def test_a_race_date_view_opens_at_the_owners_time_and_never_carries_a_label(rules, con, table):
     key = ROW_ID.get(table, "race_id")
-    kept = set(_schema(table).names) - set(OWNER[table]["labels"])
+    kept = set(_schema(table).names) - set(OWNER[table]["labels"]) | VIEW_EXTRA.get(table, set())
     opens = {i: _opens(table, i) for i in range(len(RACE_DATES))}
     times = sorted(a for a in opens.values() if a is not None)
     probes = [datetime(2026, 1, 1, tzinfo=UTC), datetime(2027, 6, 1, tzinfo=UTC)]
@@ -297,43 +313,56 @@ def test_a_race_view_never_carries_its_result_publication_times_but_keeps_the_ra
         one.close()
 
 
-def test_a_runner_view_on_race_day_never_carries_the_body_weight_in_any_unit(rules):
-    # Two runners on 2026-11-28 (opens 2026-11-27 15:00 UTC), weighed at 485 kg (1069 lb) and
-    # 502 kg (1107 lb). From 00:00 JST to long after the race the view keeps the card (draw) and
-    # drops the body weight in kg and in lb; the stored rows still hold both.
+def test_a_runner_view_carries_the_body_weight_in_every_unit_from_post_minus_60(rules):
+    # Two runners on 2026-11-28 (opens 2026-11-27 15:00 UTC) in a race posted 15:40 JST (06:40
+    # UTC), weighed at 485 kg (1069 lb) and 502 kg (1107 lb). From 00:00 JST the view keeps the
+    # card (draw) and holds the body weight, in kg and in lb, null until 05:40 UTC (post - 60 min,
+    # the owner's answer on #80, 2026-11-24), then the stored values.
+    race_id = "jra:2026-11-28:TOK:11"
     runners = [(3, 485, 1069, 4), (7, 502, 1107, -2)]  # (horse_no, kg, lb, change kg)
     rows = []
     for horse_no, kg, lb, change in runners:
         row = {f.name: _value(f.type, f.name, 2) for f in _schema("runners")}
-        row |= {"race_id": "jra:2026-11-28:TOK:11", "horse_no": horse_no, "draw": horse_no}
+        row |= {"race_id": race_id, "horse_no": horse_no, "draw": horse_no}
         row |= {"horse_wt_kg": kg, "declared_horse_wt_lb": lb, "horse_wt_change_kg": change}
         rows.append(row)
-    weights = {"horse_wt_kg", "horse_wt_change_kg", "declared_horse_wt_lb"}
+    race = {f.name: _value(f.type, f.name, 2) for f in _schema("races")}
+    race |= {"race_id": race_id, "post_time_local": "15:40"}
+    weights = ("horse_wt_kg", "declared_horse_wt_lb", "horse_wt_change_kg")
     one = duckdb.connect(":memory:")
     try:
-        one.register("_arrow", pa.Table.from_pylist(rows, schema=_schema("runners")))
-        one.execute('CREATE TABLE "runners" AS SELECT * FROM _arrow')
-        one.unregister("_arrow")
+        for table, table_rows in (("runners", rows), ("races", [race])):
+            one.register("_arrow", pa.Table.from_pylist(table_rows, schema=_schema(table)))
+            one.execute(f'CREATE TABLE "{table}" AS SELECT * FROM _arrow')
+            one.unregister("_arrow")
         opens = datetime(2026, 11, 27, 15, tzinfo=UTC)
-        for t in (opens, datetime(2026, 11, 28, 7, tzinfo=UTC), opens + timedelta(days=30)):
-            view = read_asof(one, "runners", t, rules=rules)
-            leaked = weights & set(view.columns)
-            assert not leaked, f"runners at {t.isoformat()} carries {sorted(leaked)}"
-            assert sorted(view["horse_no"]) == [3, 7], t.isoformat()
-            assert sorted(view["draw"]) == [3, 7], t.isoformat()
-            keys = pd.DataFrame({"race_id": ["jra:2026-11-28:TOK:11"] * 2, "horse_no": [3, 7],
+        gate = datetime(2026, 11, 28, 5, 40, tzinfo=UTC)
+        for t in (
+            opens,
+            gate - US,
+            gate,
+            datetime(2026, 11, 28, 7, tzinfo=UTC),
+            opens + timedelta(30),
+        ):
+            want = [r[1:] if t >= gate else (None, None, None) for r in runners]
+            view = read_asof(one, "runners", t, rules=rules).sort_values("horse_no")
+            assert set(weights) <= set(view.columns), t.isoformat()
+            assert [int(v) for v in view["horse_no"]] == [3, 7], t.isoformat()
+            assert [int(v) for v in view["draw"]] == [3, 7], t.isoformat()
+            got = [
+                tuple(None if pd.isna(v) else int(v) for v in values)
+                for values in view[list(weights)].itertuples(index=False)
+            ]
+            assert got == want, f"runners at {t.isoformat()}"
+            keys = pd.DataFrame({"race_id": [race_id] * 2, "horse_no": [7, 3],
                                  "t_utc": pd.to_datetime([t, t], utc=True)})  # fmt: skip
-            got = asof_join(keys, "runners", on=["race_id", "horse_no"], rules=rules, con=one)
-            leaked = weights & set(got.columns)
-            assert not leaked, f"runners joined at {t.isoformat()} carries {sorted(leaked)}"
-            assert [int(v) for v in got["draw"]] == [3, 7], t.isoformat()
-        # read_label refuses an offset table (as-of.md), so the label values are read from the
-        # stored rows: the weights are kept in the store, only kept out of the view.
-        stored = one.execute(
-            'SELECT horse_no, horse_wt_kg, declared_horse_wt_lb, horse_wt_change_kg FROM "runners"'
-            " ORDER BY horse_no"
-        ).fetchall()
-        assert stored == [tuple(r) for r in runners]
+            joined = asof_join(keys, "runners", on=["race_id", "horse_no"], rules=rules, con=one)
+            assert [int(v) for v in joined["draw"]] == [7, 3], t.isoformat()
+            got = [
+                tuple(None if pd.isna(v) else int(v) for v in values)
+                for values in joined[list(weights)].itertuples(index=False)
+            ]
+            assert got == want[::-1], f"runners joined at {t.isoformat()}"
         with pytest.raises(ValueError):
             read_label(one, "runners", rules=rules)
     finally:
