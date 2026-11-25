@@ -16,6 +16,11 @@ times whose bracket (`result_unpublished_utc`, the last poll that did not show t
 narrow, leaving out late sightings and wide brackets. The decision time is the target's post
 time - DECISION_LEAD. Holdout days are never read (#114's scoped reader); only aggregates are
 returned and nothing is written. Measurement only: nothing here is adopted (D16).
+
+`versus=` (#256) compares two day_sd modes head to head: each fold also fits a prior with
+`day_sd=versus` on the same `train_end`, the update variant built from it is scored through its
+own form (fitted on the same training rows) on the same races, and the per-race difference
+against `day_sd`'s update gets the same meeting bootstrap.
 """
 
 from __future__ import annotations
@@ -51,6 +56,8 @@ RACE_COLUMNS = ("race_id", "race_date", "meeting_id", "race_no", "post_time_loca
 RUNNER_COLUMNS = ("race_id", "race_date", "horse_no", "horse_id", "draw", "finish_pos",
                   "running_positions", "is_scratched")  # fmt: skip
 VARIANTS = ("prior", "update")
+VERSUS_VARIANT = "update_versus"
+NO_VERSUS = object()  # `versus`'s default: None already means the pooled estimate
 FEATURES = ("draw_adj", "style_adj")
 
 
@@ -155,9 +162,12 @@ def _pick_style(suffix: str) -> pl.Expr:
     return expr.alias(f"style_adj_{suffix}")
 
 
-def _day_rows(prior, races: pl.DataFrame, runners: pl.DataFrame, day: date) -> list[pl.DataFrame]:
+def _day_rows(
+    prior, races: pl.DataFrame, runners: pl.DataFrame, day: date, versus_prior=None
+) -> list[pl.DataFrame]:
     """Both variants' features, the winner flag and the update's race count per declared runner of
-    the day's races that have a post time."""
+    the day's races that have a post time; with `versus_prior`, also the update built from it
+    (`update_versus`)."""
     posts = {
         rid: _post(day, hhmm) for rid, hhmm in races.select("race_id", "post_time_local").rows()
     }
@@ -169,8 +179,11 @@ def _day_rows(prior, races: pl.DataFrame, runners: pl.DataFrame, day: date) -> l
             continue
         kw = dict(race_id=rid, decision_time=posts[rid] - DECISION_LEAD)
         cols = []
-        for variant, pub in (("prior", {}), ("update", published)):
-            f = track_bias_features(prior, races, runners, **kw, published=pub).join(
+        builds = [("prior", prior, {}), ("update", prior, published)]
+        if versus_prior is not None:
+            builds.append((VERSUS_VARIANT, versus_prior, published))
+        for variant, source, pub in builds:
+            f = track_bias_features(source, races, runners, **kw, published=pub).join(
                 style, on=["race_id", "horse_no"], how="left", maintain_order="left"
             )
             cols += [f.get_column("draw_adj").alias(f"draw_adj_{variant}")]
@@ -218,26 +231,37 @@ def track_bias_report(
     n_boot: int = 2000,
     seed: int = 0,
     day_sd: DaySd = None,
+    versus: DaySd | object = NO_VERSUS,
 ) -> dict:
     """Aggregates only: per-variant log loss and pseudo-R² against equal chances, the update's
     gain over the prior with meeting-bootstrap bounds overall and by races entered, and per fold
     the priors' day sd per level ("factor:level"), the unfloored estimate behind it (when
     estimated) and the observation variance. `day_sd` (None or "pooled": the pooled estimate;
-    "per_level"; a float or a per-level mapping, #224) goes to every fold's prior."""
+    "per_level"; a float or a per-level mapping, #224) goes to every fold's prior. `versus` (any
+    `day_sd` value; the default NO_VERSUS adds nothing) adds the paired comparison of #256:
+    `ll_update_versus`, `gain_update_vs_versus` (the bootstrap of ll_update_versus - ll_update per
+    race, positive = `day_sd`'s update is better) and `day_sd_versus` (per fold, as `day_sd`);
+    every other key is unchanged."""
+    compare = versus is not NO_VERSUS
+    variants = (*VARIANTS, VERSUS_VARIANT) if compare else VARIANTS
     races = _read("races", RACE_COLUMNS, date_from, date_to)
     runners = _read("runners", RUNNER_COLUMNS, date_from, date_to)
     folds = walk_forward(races.get_column("race_date").to_list(),
                          scheme=scheme or load_country_scheme(COUNTRY))  # fmt: skip
     dates = races.get_column("race_date")
-    parts, priors = [], []
+    parts, priors, versus_priors = [], [], []
     for k, fold in enumerate(folds):
         prior = fit_bias_prior(races, runners, train_end=fold.train_end, day_sd=day_sd)
         priors.append(prior)
+        versus_prior = None
+        if compare:
+            versus_prior = fit_bias_prior(races, runners, train_end=fold.train_end, day_sd=versus)
+            versus_priors.append(versus_prior)
         for day in sorted(dates.gather(fold.test_idx).unique().to_list()):
             day_races = races.filter(pl.col("race_date") == day)
             day_runners = runners.filter(pl.col("race_date") == day)
-            parts += [p.with_columns(pl.lit(k).alias("fold"))
-                      for p in _day_rows(prior, day_races, day_runners, day)]  # fmt: skip
+            day_rows = _day_rows(prior, day_races, day_runners, day, versus_prior)
+            parts += [p.with_columns(pl.lit(k).alias("fold")) for p in day_rows]
     rows = pl.concat(parts)
 
     scored = []
@@ -248,7 +272,7 @@ def track_bias_report(
         test = rows.filter(pl.col("fold") == k)
         if test.height == 0:
             continue
-        for variant in VARIANTS:
+        for variant in variants:
             names = {f"{f}_{variant}": f for f in FEATURES}
             model = fit_handicap_score(train.rename(names), features=FEATURES)
             test = test.with_columns(model.predict(test.rename(names)).alias(f"p_{variant}"))
@@ -262,7 +286,7 @@ def track_bias_report(
             pl.col("won").sum().alias("k"),
             *[
                 (-pl.col(f"p_{v}").filter(pl.col("won")).log().mean()).alias(f"ll_{v}")
-                for v in VARIANTS
+                for v in variants
             ],  # fmt: skip
         )
         .filter(pl.col("k") > 0)
@@ -293,6 +317,13 @@ def track_bias_report(
     gain = (per_race.get_column("ll_prior") - per_race.get_column("ll_update")).to_numpy()
     entered = per_race.get_column("bias_races_n").to_numpy()
     out["gain_update_vs_prior"] = _bootstrap(gain, meeting, n_boot, seed)
+    if compare:
+        ll_versus = per_race.get_column(f"ll_{VERSUS_VARIANT}").to_numpy()
+        out["ll_update_versus"] = float(ll_versus.mean())
+        out["gain_update_vs_versus"] = _bootstrap(
+            ll_versus - per_race.get_column("ll_update").to_numpy(), meeting, n_boot, seed
+        )
+        out["day_sd_versus"] = [_by_level(p.day_sd) for p in versus_priors]
     for name, mask in (("0", entered == 0), ("1-3", (entered >= 1) & (entered <= 3)),
                        ("4+", entered >= 4)):  # fmt: skip
         if mask.any():
