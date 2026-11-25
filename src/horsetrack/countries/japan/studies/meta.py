@@ -28,9 +28,12 @@ Added after the outcomes were read (review findings on PR #308), outside the fro
 is unchanged: the meeting-clustered coefficient bounds (D7's unit and level, 95% one-sided; the
 `meeting_clustered:` variants, one registry record each) beside the frozen 95% two-sided Wald
 intervals; the report's mechanical reading of each frozen rule under both; and the level-2
-training window per scored fold against D9's 5-season minimum, which no scored fold meets (put to
-the owner on #87). A rerun appends only records the family does not already hold: a record equal
-to one in the registry but for its git commit is the same run reproduced and is not appended.
+training window per scored fold against D9's 5-season minimum, which no scored fold meets. The
+owner's answer (b) on #87 (2026-11-25) records the run as a documented failure to meet D9 (level 2
+below the 5-season minimum; level 1 refit once a season, not quarterly): it supports no adoption
+claim, and the D9-compliant run comes with #91's and #98's members. A rerun appends only records
+the family does not already hold: a record equal to one in the registry but for its git commit is
+the same run reproduced and is not appended.
 """
 
 from __future__ import annotations
@@ -154,8 +157,9 @@ DECISIONS = {
     "and the level-2 meta follow its folds, refit, window, nesting and embargo. The 5-season "
     "minimum holds for the baseline (store rows from 2014-06-07) but not at level 2 on any "
     "scored fold: the member file starts on 2023-01-05 (see D9 at level 2). Level 1 is HKTrack's "
-    "season walk-forward, not D9's quarters. Whether this window is accepted for the "
-    "replication is put to the owner on #87",
+    "season walk-forward, refit once a season, not quarterly. The owner's answer (b) on #87 "
+    "(2026-11-25): the replication run is a documented failure to meet D9 at both levels and "
+    "supports no adoption claim; the D9-compliant run comes with #91's and #98's members",
     "D10": "no price before 2014-06-07",
     "D11-D15": "holdout A2 from 2026-11-28, fully locked; no holdout row is read; not opened",
     "D16": "adoption needs a holdout gain lower bound above 0 (D7 level) and a positive "
@@ -855,8 +859,9 @@ def rules_out(study: Study, spec: dict) -> list[str]:
     pooled delta and encompassing weight, and each E9 q-mass above the break-even ratio."""
     lines = [
         "- Every statement is at D7's level (meetings, 95% one-sided per bound), on development"
-        " folds only, and conditional on the level-2 window being below D9's 5-season minimum (see"
-        " D9 at level 2). Nothing is tested on the holdout, so nothing is adopted (D16)."
+        " folds only, and from a run that is a documented failure to meet D9 (the owner's answer"
+        " (b) on #87, 2026-11-25; see D9 at level 2), so none of it supports an adoption claim."
+        " Nothing is tested on the holdout, so nothing is adopted (D16)."
     ]
     for row in study.tables.get("delta", []):
         lines.append(
@@ -918,7 +923,10 @@ def render_report(
             if met == 0
             else "."
         )
-        + " Whether this window is accepted for the replication is put to the owner on #87."
+        + " Level 1 is HKTrack's season walk-forward, refit once a season, not quarterly. The"
+        " owner's answer (b) on #87 (2026-11-25) records the replication run as a documented"
+        " failure to meet D9 at both levels: it supports no adoption claim, and the D9-compliant"
+        " run comes with #91's and #98's members."
         " A coverage count of the store and the member file, no outcome:",
         "",
         _markdown_table(window) if window else "_Not computed._",
@@ -931,7 +939,9 @@ def render_report(
         "",
         "Each applied as written (the frozen bound) and at D7 (meetings, 95% one-sided). The"
         " replication's bound is the meeting bootstrap, which is already D7's, so its two"
-        " outcomes are one. The Wald outcomes are provisional (see above).",
+        " outcomes are one. The Wald outcomes are provisional (see above). Whatever these"
+        " outcomes read, the run is a documented failure to meet D9 (the owner's answer (b) on"
+        " #87, 2026-11-25; see D9 at level 2), so none of them supports an adoption claim.",
         "",
         _markdown_table(apply_rules(study, spec)),
         "",

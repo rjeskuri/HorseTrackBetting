@@ -6,6 +6,12 @@ on the D4 calibrated market. It takes each member's encompassing coefficient bes
 variant's out-of-fold ΔLL per race against the D4 baseline, and tabulates the E9 information ceiling for Win.
 **Nothing is adopted** (D16): no holdout is opened.
 
+**The replication run is a documented failure to meet D9** (the owner's answer (b) on #87, 2026-11-25). Level 2
+trains on 0.98 to 3.73 seasons against D9's 5-season minimum, and level 1 is refit once a season, not quarterly
+(see Data). The run therefore supports no adoption claim, whatever its frozen rules read. This is a failure of the
+fold design, not an outcome of the frozen replication rule, which stays in the private report (D21). The
+D9-compliant run comes with #91's and #98's members. The two store-only variants read no member and follow D9.
+
 **Every member-based figure is withheld (D21).** The members are HKTrack's stored out-of-fold predictions. The
 research-24 form model reads JRDB. The two "no JRDB" members are not confirmed JRDB-free (see Data). The owner allows
 JRDB as an input to private models on this Mac only, with every JRDB-fed result kept out of the repository, pull
@@ -27,7 +33,9 @@ store alone, and their figures are below.
   `HKTrack:outputs/oof/m-v1-20261115-6102e309.parquet@b0c5a8298e0befe8`, read by column (keys and the three member
   columns only). HKTrack was read, never written or run.
 - The full report, with every table, is under the data directory at `$HORSETRACK_DATA_DIR/reports/meta-japan-690d41225b38.md`
-  (written through `write_report` with the sources jra and jrdb), re-rendered at `647879c`. The records are in
+  (written through `write_report` with the sources jra and jrdb), re-rendered at `647879c`. Its D9 text was edited
+  in place on 2026-11-25 to record the owner's answer on #87 (no figure changed), and `studies/meta.py` now renders
+  that text. The records are in
   `docs/experiments/registry-japan.md`, where the 36 member-based records show as withheld. The re-run reproduced
   the 26 first-run records exactly and did not append them again; it appended only the 12 `meeting_clustered:`
   records.
@@ -40,7 +48,7 @@ store alone, and their figures are below.
 | D4 | The Win baseline is the calibrated market (#114's spline in ln q), fitted in-fold. It is fitted on each fold's training rows of the store, with dead-heat races left out of its fit as #114's `run_fit` does. | §2, #14 |
 | D6 | Winner log loss per race, a dead heat at 1/k per co-winner (the #69 answer). Pseudo-R² against equal chances is reported beside nats per race. | §3, #14 |
 | D7 | Meeting (venue x day) clusters, 95% one-sided (`config/scoring.yaml`; 10,000 replicates, seed 87). The ΔLL and ceiling bootstraps resample meetings. The coefficient rules were frozen with 95% two-sided Wald intervals instead; the meeting-clustered one-sided bounds were added after the outcomes were read (see Hypothesis). | §3, #14 |
-| D9 | "Quarter folds, quarterly refit, expanding, 5 seasons minimum, nested OOF, 1-week embargo" (`config/folds.yaml`). The fold calendar is computed over the store's development starters from 2014-06-07. The baseline and the level-2 meta follow the folds, refit, window, nesting and embargo. The 5-season minimum holds for the baseline but **not at level 2 on any scored fold** (see Data). Level 1 is HKTrack's season walk-forward. Whether this window is accepted for the replication is put to the owner on #87. | §4, #14; the #70 answer |
+| D9 | "Quarter folds, quarterly refit, expanding, 5 seasons minimum, nested OOF, 1-week embargo" (`config/folds.yaml`). The fold calendar is computed over the store's development starters from 2014-06-07. The baseline and the level-2 meta follow the folds, refit, window, nesting and embargo. The 5-season minimum holds for the baseline but **not at level 2 on any scored fold** (see Data). Level 1 is HKTrack's season walk-forward, refit once a season, not quarterly. The owner's answer (b) on #87: the replication run is a documented failure to meet D9 at both levels and supports no adoption claim; the D9-compliant run comes with #91's and #98's members. | §4, #14; the #70 answer; #87, owner answer of 2026-11-25 |
 | D10 | No price before 2014-06-07. | §4, #14 |
 | D11-D15 | Holdout A2 from 2026-11-28, fully locked. No holdout row is read, and the holdout is not opened. | §5, #14; the #71 answer |
 | D16 | Adoption needs a holdout gain lower bound above 0 at the D7 level and a positive encompassing weight with its interval above 0. Nothing is adopted here. | §6, #14 |
@@ -71,11 +79,11 @@ store alone, and their figures are below.
   lacks would be dropped. The counts each way are in the private report. Member probabilities enter as logs,
   normalised over the race's starters. The final price and outcomes come from this repository's store, never from
   HKTrack's `win_odds` or `is_winner`.
-- **Level 1 is out of fold.** HKTrack's walk-forward is by season, expanding (`src/hktrack/eval/walkforward.py`:
-  "Nothing fitted for test season S ever sees S or later"). The run checked that every row's `fold_season` is its
-  race's calendar year. Level 2 is out of fold through `models.meta.oof_predictions` on D9's folds: each fold's meta is
-  fitted on the member rows on or before its `train_end` and predicts its test quarter. Three leaks are stated, not
-  hidden:
+- **Level 1 is out of fold, but refit once a season, not quarterly as D9 says.** HKTrack's walk-forward is by
+  season, expanding (`src/hktrack/eval/walkforward.py`: "Nothing fitted for test season S ever sees S or later").
+  The run checked that every row's `fold_season` is its race's calendar year. Level 2 is out of fold through
+  `models.meta.oof_predictions` on D9's folds: each fold's meta is fitted on the member rows on or before its
+  `train_end` and predicts its test quarter. Three leaks are stated, not hidden:
   - HKTrack chose its member set, features and hyperparameters with these seasons visible (ledger: research-24's
     test seasons were also used for model selection).
   - `lgbm_top12`, one of the form model's ten members, drops features ranked by a file whose tree count was chosen on
@@ -84,9 +92,10 @@ store alone, and their figures are below.
 - **The level-2 window is below D9's 5-season minimum on every scored fold.** The member file starts on 2023-01-05,
   and each fold's meta trains on the member rows from then to its `train_end`. The frozen spec says only "the first
   folds" fall short; in fact all 12 do, from 0.98 to 3.73 years. The fold calendar is otherwise D9's, and the member
-  file cannot give more. Whether this window is accepted for the replication is put to the owner on #87; until then
-  every member result carries this caveat. The level-2 training span per scored fold (a coverage count of the store
-  and the member file, no outcome):
+  file cannot give more. The owner's answer (b) on #87 (2026-11-25): with level 1's season refit (above), the
+  replication run is a documented failure to meet D9 and supports no adoption claim; the D9-compliant run comes with
+  #91's and #98's members. The level-2 training span per scored fold (a coverage count of the store and the member
+  file, no outcome):
 
   | Scored fold | Level-2 training rows | Years | Training races (meetings) |
   | --- | --- | --- | --- |
@@ -127,6 +136,10 @@ bound, coef − 1.645 × the meeting sandwich se, was added **after the outcomes
 #308). It is the interval that matches D7. The frozen spec is unchanged, so the private report reads each rule both
 ways: as frozen (Wald) and at D7 (clustered). The Wald-rule outcomes are provisional. The replication rule needs no
 second reading: its ΔLL lower bound is already the meeting bootstrap's one-sided 95% bound.
+
+**No rule outcome supports adoption.** Whatever the frozen rules read, Wald or clustered, the member run is a
+documented failure to meet D9 (the owner's answer (b) on #87, 2026-11-25; see Data), so none of its outcomes
+supports an adoption claim.
 
 The null is the starting point: the members add nothing beside the final price (α = 0, δ = 0, the owner's shrinkage
 target). 08's E40 and E9 rows give expected sizes. They are not quoted here, since they come from research-24's
@@ -228,16 +241,19 @@ What each form is:
   rules" section applies each frozen rule mechanically: the replication verdict for `stage2:q:form` from its ΔLL
   lower bound (replicated, or a documented failure), α_T > 0 for each offset variant, and a positive encompassing
   weight for each member, each read both as frozen (Wald) and at D7 (meeting-clustered). Its "What this rules out"
-  section reads each ΔLL, δ, encompassing and break-even q-mass bound at D7. Every statement there is conditional on
-  the level-2 window above, which is below D9's minimum and awaits the owner on #87.
+  section reads each ΔLL, δ, encompassing and break-even q-mass bound at D7. Both sections record the owner's answer
+  (b) on #87 (2026-11-25): whatever the rules read, the run is a documented failure to meet D9 (level 2 below the
+  5-season minimum, level 1 refit once a season) and supports no adoption claim.
 
 ## Follow-ups filed
 
 - #91 and #98 (both `status:ready`): a member without JRDB inputs, then the meta over the horse, speed and rating
-  members. Both rerun this family's design with publishable figures.
+  members. Both rerun this family's design with publishable figures, and they are the D9-compliant run (the owner's
+  answer (b) on #87).
 - #88 (`status:ready`): the selection study reads α_s from segment interaction columns.
 - #99 (`status:ready`): the ceiling table for the other pools.
 - #103 (`status:ready`): the quadratic market term on the board (E2).
 - Meeting-clustered (sandwich) bounds on the meta coefficients and the encompassing weight: done in this PR (the
   `meeting_clustered:` records), so no follow-up ticket is needed. #276 is the counterpart for #77's β.
-- D9's 5-season minimum at level 2: put to the owner on #87 (accept this window for the replication, or not).
+- D9 at level 2 (the 5-season minimum) and level 1 (the season refit): answered (b) on #87, 2026-11-25. The
+  replication run is a documented failure to meet D9; the D9-compliant run is #91/#98.
