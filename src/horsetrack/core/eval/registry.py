@@ -125,6 +125,19 @@ def _record_from(data: dict) -> RunRecord:
     return RunRecord(**fields)
 
 
+def _feature_tables(builds: dict[str, str]) -> dict[str, list]:
+    """Each build name's feature-table identity, the part of its value that counts toward a
+    variant. ``"<identity>@<refresh>"`` splits at its last ``@`` and keeps ``[identity, True]``:
+    a newer refresh of the same table is the same variant. A value with no ``@``, or with nothing
+    on one side of its last ``@``, is identity in full, ``[value, False]``, so ``"X"``, ``"X@"``
+    and ``"@r"`` each differ from ``"X@r"`` and from one another."""
+    tables = {}
+    for name, value in builds.items():
+        identity, _, refresh = value.rpartition("@")
+        tables[name] = [identity, True] if identity and refresh else [value, False]
+    return tables
+
+
 def _licensed(record: RunRecord) -> bool:
     """Fails closed: a withheld name among the sources, or naming a data build or a component,
     makes the run licensed."""
@@ -309,17 +322,27 @@ class Registry:
 
     def family_size(self, family_id: str) -> int:
         """How many variants the family has tried: its distinct run specifications
-        ``(hypothesis_id, variant, fold_scheme, sources, components, params)``, compared as
-        canonical JSON so mapping key order does not matter. Each counts once whatever its status
-        or number of runs, failed ones included; a change to params, components, fold_scheme or
-        sources is a new variant even under the same label. A later decision, retry or rerun
-        (another status, owner_signoff, metrics, holdout_open, git_sha, ticket or data_builds) is
-        another run in ``records()``, not another variant.
+        ``(hypothesis_id, variant, fold_scheme, sources, components, params)`` plus the
+        feature-table identity of each data build (``_feature_tables``), compared as canonical
+        JSON so mapping key order does not matter. Each counts once whatever its status or number
+        of runs, failed ones included; a change to params, components, fold_scheme, sources or a
+        build's identity, or an added, removed or renamed build, is a new variant even under the
+        same label. A later decision, retry or rerun (another status, owner_signoff, metrics,
+        holdout_open, git_sha or ticket, or a refresh of the same builds) is another run in
+        ``records()``, not another variant.
         """
         return len(
             {
                 _canonical(
-                    [r.hypothesis_id, r.variant, r.fold_scheme, r.sources, r.components, r.params]
+                    [
+                        r.hypothesis_id,
+                        r.variant,
+                        r.fold_scheme,
+                        r.sources,
+                        r.components,
+                        r.params,
+                        _feature_tables(r.data_builds),
+                    ]
                 )
                 for r in self.records(family_id)
             }

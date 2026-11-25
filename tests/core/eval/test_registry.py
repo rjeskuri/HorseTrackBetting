@@ -21,12 +21,15 @@ Contract pinned here (the coder implements what these tests call):
   newline) of ``holdout_log`` as that file is at append time; ``adopted`` without a positive int
   ``owner_signoff``.
 - ``family_size`` counts the family's distinct variants, a variant being the run's specification
-  ``(hypothesis_id, variant, fold_scheme, sources, components, params)`` with mappings compared
-  whatever their key order: every variant tried counts once whatever its status and however many
-  runs it has, failed ones included. A change to params, components, fold_scheme or sources is a
-  new variant even under the same label. A later decision, a retry, or a rerun at another
-  git_sha, ticket or data build is another run (``records()`` keeps every run), not another
-  variant.
+  ``(hypothesis_id, variant, fold_scheme, sources, components, params)`` plus the feature-table
+  identity of its ``data_builds``, with mappings compared whatever their key order: every variant
+  tried counts once whatever its status and however many runs it has, failed ones included. A
+  ``data_builds`` value ``"<identity>@<refresh>"`` splits at its last ``@``: the build name and
+  the identity part name the feature table, the refresh id does not; a value without ``@`` is
+  identity in full. A change to params, components, fold_scheme, sources or a build's identity,
+  or an added, removed or renamed build, is a new variant even under the same label. A later
+  decision, a retry, a rerun at another git_sha or ticket, or a refresh of the same builds is
+  another run (``records()`` keeps every run), not another variant.
 - ``freeze_family(family_id, spec)`` returns
   ``sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")))`` as hex. The freeze persists
   in the registry and is not a run; a different spec raises ``FamilyAlreadyFrozen``.
@@ -590,9 +593,13 @@ def test_family_size_counts_failed_variants(tmp_path):
 
 def test_a_later_decision_on_a_variant_does_not_grow_the_family(tmp_path):
     """A variant is the run's specification (hypothesis_id, variant, fold_scheme, sources,
-    components, params). A decision, retry or rerun (new git_sha, ticket or data build) appended
-    for a specification already tried is another run, not another variant; a change to params,
-    components, fold_scheme or sources is a new variant even under the same label."""
+    components, params) plus the feature-table identity of each data build. A data_builds value
+    ``"<identity>@<refresh>"`` splits at its last ``@``: the build name and the identity part
+    count, the refresh id does not; a value with no ``@`` is identity in full. A decision, retry
+    or rerun (new git_sha or ticket, or a refresh of the same builds) appended for a
+    specification already tried is another run, not another variant; a change to params,
+    components, fold_scheme, sources or a build's identity, or an added, removed or renamed
+    build, is a new variant even under the same label. Mapping key order never matters."""
     reg, path, log = open_registry(tmp_path)
     base = make_record(
         hypothesis_id="E1",
@@ -609,24 +616,84 @@ def test_a_later_decision_on_a_variant_does_not_grow_the_family(tmp_path):
     def c(value: float) -> dict:
         return {"C": value, "penalty": "l2"}
 
+    # FD compares feature tables under the one label "logit", all else equal. Identities and
+    # refresh ids are both hex, so only the last "@" tells them apart.
+    def hexid(seed: bytes) -> str:
+        return hashlib.sha256(seed).hexdigest()
+
+    RES, FEAT_A, FEAT_B, ODDS = (hexid(s) for s in (b"results", b"feat A", b"feat B", b"odds"))
+    R1, R2 = hexid(b"rows to 2026-10-31")[:12], hexid(b"rows to 2026-11-24")[:12]
+
+    def at(identity: str, refresh: str) -> str:
+        return f"{identity}@{refresh}"
+
+    def builds(features: str, results_refresh: str = R1, features_refresh: str = R1) -> dict:
+        # Not in sorted key order, so an order-sensitive comparison has something to trip on.
+        return {"results": at(RES, results_refresh), "features": at(features, features_refresh)}
+
+    feat = make_record(
+        hypothesis_id="P5", family_id="FD", variant="logit", data_builds=builds(FEAT_A)
+    )
+
     # (family, spec, run, what it is) in append order, the families interleaved. ``spec`` names
     # the run's specification by hand: runs sharing a name are one variant, a new name is a new
     # variant. FP is a C sweep logged under the one label "logit": each C is its own variant.
     runs = [
         ("F1", "v1", base, "first run"),
+        ("FD", "A", feat, "feature table A"),
         ("F2", "v1", replace(base, family_id="F2"), "the same spec in another family"),
         ("FP", "C=0.01", replace(sweep, params=c(0.01)), "sweep point"),
+        ("FD", "B", replace(feat, data_builds=builds(FEAT_B)), "feature table B, all else equal"),
         ("F1", "v1", replace(base, status="rejected"), "rejected after comparison"),
         ("FP", "C=0.1", replace(sweep, params=c(0.1)), "sweep point: only params changed"),
+        (
+            "FD",
+            "A",
+            replace(feat, data_builds=builds(FEAT_A, R2, R2), ticket=75),
+            "A refreshed: the same identities, newer rows",
+        ),
         ("F1", "v2", replace(base, variant="v2", **failed), "a new label, failed"),
         ("F2", "v1", replace(base, family_id="F2", **adopted), "adopted later"),
         ("F1", "v2", replace(base, variant="v2"), "the retry, scored"),
+        (
+            "FD",
+            "B",
+            replace(feat, data_builds=builds(FEAT_B, results_refresh=R2), status="rejected"),
+            "B with only its results build refreshed, rejected",
+        ),
         ("FP", "C=1", replace(sweep, params=c(1.0)), "sweep point"),
         ("F1", "E2:v1", replace(base, hypothesis_id="E2"), "the same label, other hypothesis"),
+        (
+            "FD",
+            "A",
+            replace(
+                feat,
+                data_builds={"features": at(FEAT_A, R1), "results": at(RES, R1)},
+                git_sha="f" * 40,
+            ),
+            "A rerun with the build names in another key order",
+        ),
         ("F1", "v2", replace(base, variant="v2", **adopted), "adopted later"),
         ("F1", "v1", replace(base, git_sha="b" * 40), "rerun at a new git sha"),
+        (
+            "FD",
+            "A +odds",
+            replace(feat, data_builds={**builds(FEAT_A), "odds": at(ODDS, R1)}),
+            "a build name added",
+        ),
         ("FP", "C=10", replace(sweep, params=c(10.0)), "sweep point"),
-        ("F1", "v1", replace(base, data_builds=new_build, ticket=75), "rerun on a new data build"),
+        (
+            "F1",
+            "v1 build 2",
+            replace(base, data_builds=new_build, ticket=75),
+            "another bare build hash: a value without @ is identity in full",
+        ),
+        (
+            "FD",
+            "A -results",
+            replace(feat, data_builds={"features": at(FEAT_A, R1)}),
+            "a build name removed",
+        ),
         (
             "F1",
             "v1",
@@ -639,8 +706,20 @@ def test_a_later_decision_on_a_variant_does_not_grow_the_family(tmp_path):
             "rerun with the mappings' keys in another order",
         ),
         ("FP", "C=100", replace(sweep, params=c(100.0)), "sweep point"),
+        (
+            "FD",
+            "A renamed",
+            replace(feat, data_builds={"results": at(RES, R1), "feature_table": at(FEAT_A, R1)}),
+            "identity A under another build name",
+        ),
         ("F1", "v1 C=2", replace(base, params=c(2.0)), "only params changed under v1"),
         ("F1", "v1 C=2", replace(base, params=c(2.0), status="rejected"), "a decision on it"),
+        (
+            "FD",
+            "A@lag-7",
+            replace(feat, data_builds=builds(f"{FEAT_A}@lag-7")),
+            "an identity holding an @: only the last @ splits off the refresh id",
+        ),
         (
             "F1",
             "v1 isotonic",
@@ -648,6 +727,12 @@ def test_a_later_decision_on_a_variant_does_not_grow_the_family(tmp_path):
             "only components changed under v1",
         ),
         ("FP", "C=1", replace(sweep, params=c(1.0), git_sha="d" * 40), "sweep point rerun"),
+        (
+            "FD",
+            "A@lag-7",
+            replace(feat, data_builds=builds(f"{FEAT_A}@lag-7", R2, R2), git_sha="9" * 40),
+            "that identity refreshed",
+        ),
         (
             "F1",
             "v1 wf-4",
@@ -665,26 +750,39 @@ def test_a_later_decision_on_a_variant_does_not_grow_the_family(tmp_path):
         ("F1", "v3", replace(base, variant="v3", **failed), "failed, never retried"),
     ]
 
-    tried: dict[str, set[str]] = {"F1": set(), "F2": set(), "FP": set()}
+    tried: dict[str, set[str]] = {"F1": set(), "F2": set(), "FP": set(), "FD": set()}
+    want_before = got_before = {fam: reg.family_size(fam) for fam in tried}
+    assert got_before == dict.fromkeys(tried, 0)
+    # Every row is checked against every family, and every miscounted row is reported: a row
+    # miscounts when a family grows by other than what the spec names say.
+    miscounted = []
     for i, (family, spec, run, what) in enumerate(runs):
         reg.append(run)
         tried[family].add(spec)
-        for fam, specs in tried.items():
-            assert reg.family_size(fam) == len(specs), (
-                f"family_size({fam!r}) after run {i} ({family}: {what})"
-            )
-    assert {fam: len(specs) for fam, specs in tried.items()} == {"F1": 8, "F2": 1, "FP": 5}
+        want = {fam: len(specs) for fam, specs in tried.items()}
+        got = {fam: reg.family_size(fam) for fam in tried}
+        for fam in tried:
+            grew, should = got[fam] - got_before[fam], want[fam] - want_before[fam]
+            if grew != should:
+                miscounted.append(
+                    f"run {i} ({family}: {what}): family_size({fam!r}) grew by {grew}, not {should}"
+                )
+        want_before, got_before = want, got
+    assert not miscounted, "\n".join(miscounted)
+    assert want == {"F1": 9, "F2": 1, "FP": 5, "FD": 6}
 
     reopened = Registry(path, holdout_log=log)
     for registry in (reg, reopened):
-        assert registry.family_size("F1") == 8
+        assert registry.family_size("F1") == 9
         assert registry.family_size("F2") == 1
         assert registry.family_size("FP") == 5
+        assert registry.family_size("FD") == 6
         assert registry.family_size("F9") == 0
         # Every run is still there, decisions, retries and reruns included, in append order.
         assert registry.records() == [run for _, _, run, _ in runs]
         assert len(registry.records("FP")) == 7
-        for fam in ("F1", "F2", "FP"):
+        assert len(registry.records("FD")) == 10
+        for fam in ("F1", "F2", "FP", "FD"):
             assert registry.records(fam) == [run for f, _, run, _ in runs if f == fam]
     reopened.verify()
 
