@@ -7,7 +7,9 @@ owner accepted the proposed defaults, each conservative relative to JRA's public
    fetched_utc); dividend, is_refund and is_final_capture are label columns.
 2. meetings: offset on race_date, 0 (00:00 JST of the race date).
 3. races and runners: offset on race_date, 0 (00:00 JST); the result columns, the horse weights
-   and the same-day going are label columns (until a post_utc exists).
+   and the same-day going are label columns (until a post_utc exists). races.result_published_utc
+   and races.result_unpublished_utc are label columns too (the owner's answer on #80,
+   2026-11-25); races.rail_setting stays in the view.
 4. dividends, sectionals, incidents, running_comments: label_only.
 5. horses: current_value. horse_pedigree: static (sire, dam and broodmare sire never change),
    with source_race_id and scraped_utc kept out as label columns.
@@ -57,7 +59,14 @@ RUNNER_LABELS = frozenset(
         "horse_wt_kg", "horse_wt_change_kg",
     }
 )  # fmt: skip
-RACE_LABELS = frozenset({"finish_time_s", "split_times_s", "going", "going_raw"})
+# result_published_utc and result_unpublished_utc (#225): never in a view at t (the owner's answer
+# on #80, 2026-11-25), until #227 may give them a rule of their own. rail_setting stays in.
+RACE_LABELS = frozenset(
+    {
+        "finish_time_s", "split_times_s", "going", "going_raw", "result_published_utc",
+        "result_unpublished_utc",
+    }
+)  # fmt: skip
 ODDS_LABELS = frozenset({"dividend", "is_refund", "is_final_capture"})
 PEDIGREE_LABELS = frozenset({"source_race_id", "scraped_utc"})
 
@@ -253,6 +262,30 @@ def test_a_runner_or_race_joined_at_t_carries_its_card_and_never_its_result(rule
     races = asof_join(keys[["race_id", "t_utc"]], "races", on=["race_id"], rules=rules, con=con)
     assert not RACE_LABELS & set(races.columns)
     assert [None if pd.isna(v) else int(v) for v in races["distance_m"]] == [None, 3, 1]
+
+
+def test_a_race_view_never_carries_its_result_publication_times_but_keeps_the_rail(rules):
+    # One race on 2026-11-28 (opens 2026-11-27 15:00 UTC), its result published at 07:10 UTC and
+    # withdrawn at 07:40 UTC. Even after both, the view keeps rail_setting and drops both stamps.
+    published = datetime(2026, 11, 28, 7, 10, tzinfo=UTC)
+    unpublished = datetime(2026, 11, 28, 7, 40, tzinfo=UTC)
+    row = {f.name: _value(f.type, f.name, 2) for f in _schema("races")}
+    row |= {"race_id": "jra:2026-11-28:TOK:11", "rail_setting": "C",
+            "result_published_utc": published, "result_unpublished_utc": unpublished}  # fmt: skip
+    one = duckdb.connect(":memory:")
+    try:
+        one.register("_arrow", pa.Table.from_pylist([row], schema=_schema("races")))
+        one.execute('CREATE TABLE "races" AS SELECT * FROM _arrow')
+        one.unregister("_arrow")
+        opens = datetime(2026, 11, 27, 15, tzinfo=UTC)
+        for t in (opens, published - US, published, unpublished, unpublished + timedelta(days=30)):
+            view = read_asof(one, "races", t, rules=rules)
+            gone = {"result_published_utc", "result_unpublished_utc"} & set(view.columns)
+            assert not gone, f"races at {t.isoformat()} carries {sorted(gone)}"
+            assert list(view["race_id"]) == ["jra:2026-11-28:TOK:11"], t.isoformat()
+            assert list(view["rail_setting"]) == ["C"], t.isoformat()
+    finally:
+        one.close()
 
 
 @pytest.mark.parametrize("table", LABEL_ONLY)

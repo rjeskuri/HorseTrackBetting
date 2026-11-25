@@ -34,7 +34,15 @@ tables:
     offset_min: 0
     # field_size and status stay in the view: accepted leak until #227 (see above)
     # results; same-day going until post_utc (#227)
-    label_columns: [finish_time_s, split_times_s, going, going_raw]
+    # result_published_utc and result_unpublished_utc (#225): never in a view (owner decision,
+    # answer on #80, 2026-11-25); #227 may give them a rule of their own. rail_setting stays in.
+    label_columns:
+      - finish_time_s
+      - split_times_s
+      - going
+      - going_raw
+      - result_published_utc
+      - result_unpublished_utc
   runners:
     kind: offset
     anchor: race_date
