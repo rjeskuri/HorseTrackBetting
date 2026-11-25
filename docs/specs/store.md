@@ -157,6 +157,17 @@ backfill can keep writing).
 - **Byte-stable**: two builds of the same inputs write identical Parquet bytes; `_build.json`
   differs only in `built_utc` and `seconds`.
 
+## The WIN5 history (ticket #135)
+
+`processed_dir("jra")/win5.parquet`, one row per WIN5 day (sort key `race_date`), written by
+`horsetrack japan win5-history` (`countries/japan/research/win5_backfill.py`) from netkeiba's
+per-day WIN5 pages through `core.ingest` (raw pages under `raw/jra/win5_year` and
+`raw/jra/win5_day`), outside the store build. Columns: `race_date, pool_yen` (sales),
+`carryover_in_yen` (from the previous WIN5; 0 when none), `carryover_out_yen` (to the next; 0 when
+none), `winning_tickets, dividend_yen` (per 100 yen; null when nobody hit), `hit`, `pool_ev`
+(`(pool * 0.70 + carryover_in) / pool`). Read with `research.win5.read_history()`. Holdout days are
+in the table; no analysis reads them (`score_study` drops them).
+
 ## Not here yet
 
 Upcoming race cards and the odds snapshots (`docs/specs/odds-log.md`) are outside this spec.

@@ -13,6 +13,7 @@ from horsetrack.countries.japan.logger.launchd import launchd_command
 from horsetrack.countries.japan.logger.log_day import log_day
 from horsetrack.countries.japan.logger.pull_vm import pull_vm_command
 from horsetrack.countries.japan.logger.systemd import systemd_command
+from horsetrack.countries.japan.research.win5_backfill import win5_history_command
 from horsetrack.countries.japan.shadow.day import shadow_day_command
 
 app = typer.Typer(no_args_is_help=True)
@@ -27,6 +28,7 @@ japan.command("systemd")(systemd_command)
 japan.command("pull-vm")(pull_vm_command)
 japan.command("board-serve")(board_serve_command)
 japan.command("shadow-day")(shadow_day_command)
+japan.command("win5-history")(win5_history_command)
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
 japan.add_typer(jrdb, name="jrdb")
 jrdb.command("build")(jrdb_build_command)

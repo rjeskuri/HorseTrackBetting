@@ -7,6 +7,8 @@ Rules (docs/specs/board-feed.md, "The shadow feed"):
   (`bucket_for`: 0 at or after the post), `shadow_values` at that bucket and `avoid_flags`.
 - Values are the gross return per 1 yen at the final price (1.0 is break-even). No key names a
   stake, a bet, Kelly, an amount or a wager.
+- `win5` (ticket #135): on a WIN5 day the WIN5 pool total, carryover and pool EV as of now()
+  (`research.win5.live_pool_ev` over the log's WIN5 `__pool__` rows); None on any other day.
 - `cache`: a mapping the caller keeps between builds. A race's values are recomputed only when its
   board (capture time and figures) or its bucket changed; flags read the clock on every build. The
   log readers live in the same mapping, so a rebuild parses only the members appended since.
@@ -36,6 +38,7 @@ from horsetrack.countries.japan.board.snapshot import (
     post_times_for,
 )
 from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels, shadow_values
+from horsetrack.countries.japan.research.win5 import live_pool_ev
 from horsetrack.countries.japan.shadow.day import point_seed
 
 log = logging.getLogger(__name__)
@@ -72,6 +75,7 @@ class _DayRows:
         self.later: dict[str, list[Entry]] = {}
         self.horizon: datetime | None = None
         self.seq = 0
+        self.win5: list[dict[str, Any]] = []  # the WIN5 rows read so far, whatever their time
 
     def _offer(self, race_id: str, entry: Entry) -> None:
         slot = self.latest.setdefault(race_id, {})
@@ -89,6 +93,9 @@ class _DayRows:
             for row in tail.poll():
                 race_id, available = row.get("race_id"), snapshot._available(row)
                 if not isinstance(race_id, str) or available is None:
+                    continue
+                if race_id.endswith(":WIN5"):
+                    self.win5.append(row)
                     continue
                 if snapshot._key(row) is None:
                     continue
@@ -242,4 +249,5 @@ def build_shadow(
         "generated_utc": _iso(now_utc),
         "models": None if models is None else dict(models.ids),
         "races": races,
+        "win5": live_pool_ev(day_rows.win5, race_date, now=now_utc),
     }
