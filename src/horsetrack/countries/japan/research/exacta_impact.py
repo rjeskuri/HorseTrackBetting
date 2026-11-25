@@ -111,19 +111,44 @@ def _day_folders() -> list[tuple[date, list[Any]]]:
     return days
 
 
+def _merge_latest(best: dict[tuple, dict[str, Any]], newer: dict[tuple, dict[str, Any]]) -> None:
+    """Fold the latest rows of a later member (`newer`) into `best`: the later snapshot_utc wins,
+    and at the same instant the later row in the log wins, as in `odds_log.latest_*` (whose rows
+    all have a readable snapshot_utc)."""
+    for key, row in newer.items():
+        current = best.get(key)
+        if current is None or odds_log._instant(row["snapshot_utc"]) >= odds_log._instant(
+            current["snapshot_utc"]
+        ):
+            best[key] = row
+
+
 def _races_of(log_path: Any) -> tuple[dict[str, float | None], dict[str, list[float]], bool]:
-    """(latest FORECAST pool by race, latest valid odds by race, whether any FORECAST row)."""
-    rows = [r for r in odds_log.read_rows(log_path) if r.get("pool") == POOL]
+    """(latest FORECAST pool by race, latest valid odds by race, whether any FORECAST row).
+
+    The log is streamed one decompressed member at a time (docs/specs/odds-log.md: a tier-2 day
+    runs to millions of rows). Only a member's FORECAST rows are kept, and across members only the
+    latest row per key."""
+    latest_total: dict[tuple, dict[str, Any]] = {}
+    latest_price: dict[tuple, dict[str, Any]] = {}
+    seen = False
+    for member in odds_log.iter_members(log_path):
+        rows = [r for r in member if r.get("pool") == POOL]
+        if not rows:
+            continue
+        seen = True
+        _merge_latest(latest_total, odds_log.latest_totals(rows))
+        _merge_latest(latest_price, odds_log.latest_prices(rows))
     totals: dict[str, float | None] = {}
-    for (race_id, _), row in odds_log.latest_totals(rows).items():
+    for (race_id, _), row in latest_total.items():
         totals[race_id] = _number(row.get("investment"))
     odds: dict[str, list[float]] = {}
-    for (race_id, _, _), row in odds_log.latest_prices(rows).items():
+    for (race_id, _, _), row in latest_price.items():
         odds.setdefault(race_id, [])
         value = _number(row.get("odds"))
         if value is not None:
             odds[race_id].append(value)
-    return totals, odds, bool(rows)
+    return totals, odds, seen
 
 
 def summarize_impact(
