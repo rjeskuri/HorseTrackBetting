@@ -48,13 +48,17 @@ KEY = ("venue", "race_date", "surface")
 _UTC_COLUMNS = ("published_utc", "available_utc", "fetched_utc")
 _VALUE_COLUMNS = ("cushion", "moisture_goal", "moisture_4c")
 
-# Every CSS selector the parser reads.
-_DATE_LINE = ".date_line"
-_PUBLISH = ".publish"
-_GOING_ROW = "table.going tr"
+# Every CSS selector the parser reads: the first of each pair is the structure of the synthetic
+# fixtures, the second the real page https://www.jra.go.jp/keiba/baba/ (checked 2026-11-25, #253).
+# The real page has no `.rail .value`: the course in use is `.course .content p`, 'Cコース（Aコース
+# から6メートル外に内柵を設置）' with the letter in a <strong>. Its cushion value and measurement
+# times are filled in by the page's script, so only the synthetic `.cushion .value` is read.
+_DATE_LINE = ".date_line, #condition .contents_header h2"
+_PUBLISH = ".publish, #course_condition .block_header .time"
+_GOING_ROW = "table.going tr, #course_condition .data_list_unit"
 _CUSHION_VALUE = ".cushion .value"
-_MOISTURE_ROW = "table.moisture tr"
-_RAIL_VALUE = ".rail .value"
+_MOISTURE_ROW = "table.moisture tr, #moist_data table.basic tr"
+_RAIL_VALUE = ".rail .value, .course .content p"
 
 _SURFACES = {"芝": "turf", "ダート": "dirt"}
 _GOING = {"良": "GOOD", "稍重": "GOOD TO YIELDING", "重": "SOFT", "不良": "HEAVY"}
@@ -62,8 +66,15 @@ _GOING = {"良": "GOOD", "稍重": "GOOD TO YIELDING", "重": "SOFT", "不良": 
 _MOISTURE_HEADS = (("ゴール", "moisture_goal"), ("コーナー", "moisture_4c"))
 
 _MEETING = re.compile(r"([0-9]{4})年([0-9]{1,2})月([0-9]{1,2})日[^0-9]*?[0-9]+回(\D+?)[0-9]+日")
-_PUBLISHED = re.compile(r"([0-9]{1,2})月([0-9]{1,2})日.*?([0-9]{1,2})時([0-9]{1,2})分\s*発表")
-_RAIL = re.compile(r"([A-D])(?:コース.*)?")
+# the real page's order: '第5回東京競馬第6日 （2026年11月23日（月曜））'
+_MEETING_FIRST = re.compile(
+    r"[0-9]+回(\D+?)(?:競馬)?第?[0-9]+日\D*([0-9]{4})年([0-9]{1,2})月([0-9]{1,2})日"
+)
+# '11月27日（金曜）15時00分 発表' (synthetic) or '（11月21日（土曜）10時現在）' (real: no minutes)
+_PUBLISHED = re.compile(
+    r"([0-9]{1,2})月([0-9]{1,2})日.*?([0-9]{1,2})時(?:([0-9]{1,2})分)?\s*(?:発表|現在)"
+)
+_RAIL = re.compile(r"([A-D])\s*(?:コース.*)?")
 _NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 
 
@@ -87,14 +98,24 @@ def _require_aware(when: datetime, name: str) -> pd.Timestamp:
 
 
 def _meeting(doc: BeautifulSoup) -> tuple[date, str]:
-    m = _MEETING.search(_text(doc.select_one(_DATE_LINE)))
-    if not m:
+    text = _text(doc.select_one(_DATE_LINE))
+    if m := _MEETING.search(text):
+        year, month, day, name = m.groups()
+    elif m := _MEETING_FIRST.search(text):
+        name, year, month, day = m.groups()
+    else:
         raise ValueError("going page has no date line (an error page?)")
-    race_date = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    venue = venue_code(m.group(4))
+    race_date = date(int(year), int(month), int(day))
+    venue = venue_code(name)
     if venue is None:
-        raise ValueError(f"going page venue {m.group(4)!r} is not in jra.yaml")
+        raise ValueError(f"going page venue {name!r} is not in jra.yaml")
     return race_date, venue
+
+
+def meeting(body: bytes) -> tuple[date, str]:
+    """(race date, venue code) the page's date line names; ValueError for a page without one or
+    with a venue not in jra.yaml (an error page)."""
+    return _meeting(soup(body))
 
 
 def _published(doc: BeautifulSoup, race_date: date) -> datetime:
@@ -103,7 +124,7 @@ def _published(doc: BeautifulSoup, race_date: date) -> datetime:
     m = _PUBLISHED.search(_text(doc.select_one(_PUBLISH)))
     if not m:
         raise ValueError("going page has no publication time (発表)")
-    month, day, hour, minute = (int(g) for g in m.groups())
+    month, day, hour, minute = (int(g or 0) for g in m.groups())
     year = (
         race_date.year if (month, day) <= (race_date.month, race_date.day) else race_date.year - 1
     )
@@ -113,7 +134,7 @@ def _published(doc: BeautifulSoup, race_date: date) -> datetime:
 
 
 def _surface(row: Tag) -> str | None:
-    return _SURFACES.get(_text(row.find("th")))
+    return _SURFACES.get(_text(row.find(["th", "h4"])))  # h4: the real page's going unit
 
 
 def _goings(doc: BeautifulSoup) -> dict[str, str | None]:
@@ -121,7 +142,7 @@ def _goings(doc: BeautifulSoup) -> dict[str, str | None]:
     for row in doc.select(_GOING_ROW):
         surface = _surface(row)
         if surface is not None:
-            out[surface] = _GOING.get(_text(row.find("td")))
+            out[surface] = _GOING.get(_text(row.find(["td", "p"])))
     return out
 
 
