@@ -52,7 +52,7 @@ from horsetrack.core.eval.registry import (
     FoldMetric,
     RunRecord,
     default_registry,
-    summary_path,
+    summary_dir,
     write_summary,
 )
 from horsetrack.core.eval.reports import write_report
@@ -950,7 +950,7 @@ def run_study(out_dir: Path | None = None) -> dict:
         for v in study.variants
     ]
     appended = [registry.append(r) for r in records if r not in existing]
-    write_summary(registry, summary_path(COUNTRY))
+    write_summary(registry, summary_dir(COUNTRY))
     about = {
         "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
         "git": git_sha,

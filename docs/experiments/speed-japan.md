@@ -24,10 +24,8 @@ times). No JRDB, no JRA-VAN, and no race row appears.
   column-scoped.
 - The full report, with every cell of every variant, is under the data directory at
   `reports/speed-japan-72f5c802e96e.md`.
-- This family's records are in `docs/experiments/registry-japan.md`, under `japan-speed-top3-c3`.
-  - The section is the one `write_summary` rendered, added to main's copy.
-  - The fully regenerated summary now runs to about 326 KB, over the public-tree guard's 256 KB cap. Most of that is
-    other tickets' families in the shared registry, so the full file was not committed (#330).
+- This family's records are in `docs/experiments/registry/japan/japan-speed-top3-c3.md`.
+  - The file is the one `write_summary` renders for this family, which since #334 writes one file per family.
 - Run ids:
 
   | Variant | Run id |
