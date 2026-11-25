@@ -536,8 +536,10 @@ Data and split:
 | no floor-bound races | power-β (refit per fold) | 23,752 | 1.93393 | +0.000240 | +0.000086 | +0.000392 |
 | no floor-bound races | Shin | 23,752 | 1.94561 | -0.01144 | -0.01369 | -0.00920 |
 
-Power-β and Shin reproduce #77's figures (+0.000269 and -0.01125 on all races) on the rebuilt store with the 72 added
-races. The per-fold training β runs from 1.0096 to 1.0213 as in #77. The spline's per-fold mean log loss is a
+Power-β and Shin match #77's figures (+0.000269 and -0.01125 on all races) on the rebuilt store with the 72 added
+races. That is the same backtest recomputed, not an independent sample: per-fold mean log loss for normalised,
+power-β and Shin equals #77's to 1e-9 in 27 of 28 folds, and only the last fold differs, by the 72 added races. #77's
+ledger rows stay single-run. The per-fold training β runs from 1.0096 to 1.0213 as in #77. The spline's per-fold mean log loss is a
 registry metric, one per fold.
 
 ### Out-of-fold tail, runners above decimal 51.0
@@ -569,7 +571,7 @@ expected winners per scored race, with meeting-clustered one-sided bounds. O / E
 - **Another knot count or knot range.** The spec freezes D4's live defaults (5 knots, quantiles 0.05 to 0.95).
   Another setting is another family.
 - **Pinning #77's store builds.** The store is rebuilt in place, so #77's builds are not available to read. The
-  study reads the current development rows through `read_development`, and power-β and Shin reproduce #77 on them.
+  study reads the current development rows through `read_development`, and power-β and Shin recompute #77's figures on them.
 
 ## What this rules out
 
@@ -586,11 +588,11 @@ expected winners per scored race, with meeting-clustered one-sided bounds. O / E
   are one look at the data, not independent confirmations. The direction written above came after those looks. The
   holdout is untouched, so nothing here is an out-of-sample confirmation in 08 §5's sense.
 
-## Follow-ups proposed
+## Follow-ups filed
 
-Each is proposed under epic #72, `status:proposed`; the orchestrator files them.
+Each is filed under epic #72, `status:proposed`.
 
-- A paired comparison of D4's spline against power-β and #285's tail β, on one store build, as its own family
+- #320: a paired comparison of D4's spline against power-β and #285's tail β, on one store build, as its own family
   (ΔLL with meeting-clustered bounds).
-- The spline fitted on `run_fit`'s rows (dead-heat races left out), to check the study's spline matches D4's live
-  fit, or align the two.
+- #321: the spline fitted on `run_fit`'s rows (dead-heat races left out), to check the study's spline matches D4's
+  live fit, or align the two.
