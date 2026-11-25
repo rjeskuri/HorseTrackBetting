@@ -1,16 +1,17 @@
 # Experiment report: crowd calibration at the final Win price (Japan, #77)
 
 Ticket #77 (epic #72; 08 §8 A3, §4 E1, E3, E4). The study fits three de-vigs of the final Win price (normalised,
-power-β, Shin) and measures the power β by year, by era, in the tail, by a pre-registered segment family (E4) and by
-market-entropy bins (E3). It reports each de-vig's out-of-fold winner log loss against normalised. **Nothing is
+power-β, Shin) and measures the power β by year, by era, by a pre-registered segment family (E4) and by
+market-entropy bins (E3). It measures the tail as observed over expected winners above decimal 51.0 under each de-vig,
+the owner's choice (#77 (6)). It reports each de-vig's out-of-fold winner log loss against normalised. **Nothing is
 adopted.** The owner picks the baseline de-vig (08 §9.4), and D4 already signs the calibrated market (a spline in
 ln q, fitted in-fold) as the Win baseline. Every figure here is an aggregate over the JRA results store (netkeiba
 race results; no JRDB, no JRA-VAN). No runner or race row appears.
 
 - Registry family `japan-crowd-calibration-final-win`, spec sha256
   `4816f067ab5a50cb7dc07cd3dff85292532aa76a7b6b07d938f4c30dd5563c36`. The spec was frozen before any outcome was
-  read. It holds the hypotheses, the de-vigs, the β fit, the E4 definitions, the E3 cut points and their rule, the
-  tail, the floor, the fold scheme, the bootstrap and the owner decisions.
+  read. It holds the measure each hypothesis names (not its direction), the de-vigs, the β fit, the E4 definitions,
+  the E3 cut points and their rule, the tail, the floor, the fold scheme, the bootstrap and the owner decisions.
 - Code at `25594e8` (`countries/japan/studies/calibration.py`). Owner inputs are in
   `countries/japan/config/calibration.yaml`. To reproduce, run
   `uv run python -m horsetrack.countries.japan.studies.calibration --run`.
@@ -34,6 +35,7 @@ race results; no JRDB, no JRA-VAN). No runner or race row appears.
 | #77 (3) | The era table covers the post-reform era only, stated as such. β by year carries the drift. D10 is unchanged. | #77, 2026-11-25 |
 | #77 (4) | In the no-floor-bound subset, races with a runner at odds 1.1 or under are dropped from fitting and from scoring. | #77, 2026-11-25 |
 | #77 (5) | The tail is a runner priced above decimal 51.0 (above 50/1). | #77, 2026-11-25 |
+| #77 (6) | The tail is measured as observed over expected winners above 51.0 under each de-vig, with meeting-clustered bounds, not as a β. The frozen family stands. A tail β is #285, pre-registered as its own family. | #77, owner answer of 2026-11-25 (c) |
 
 The E3 cut points are 0.69521, 0.74673, 0.78515 and 0.82154. They come from the final Win odds alone: the columns
 read were race_id, race_date, win_odds and is_scratched, and no outcome column. They cover 19,259 races on 608
@@ -42,16 +44,25 @@ refuses a config that disagrees.
 
 ## Hypothesis
 
-These hypotheses were pre-registered in the frozen spec before any outcome was read. The null is the starting point:
-normalised 1/odds is calibrated (β = 1), and no segment or entropy bin differs.
+The frozen spec pre-registered the measures, not their directions. Its `hypotheses` read, in full: E1, "the power
+beta of the final Win price by year and era; each de-vig's ΔLL against normalised and its tail calibration (observed
+vs expected winners)"; E3, "the power beta by bin of the race's normalised market entropy"; E4, "the power beta in vs
+out of each pre-registered segment". Its `adoption` adds "judged by the beta CI, not by ΔLL (08 §4 E1)". Each
+direction below is quoted from 08 §4 or 06, both written before the freeze (2026-11-25 03:24 UTC). The failure rules
+were written after the run, with this report, and are marked so. The null is the starting point: normalised 1/odds is
+calibrated (β = 1), and no segment or entropy bin differs.
 
-- **E1.** At the final Win price, the power de-vig p ∝ (1/O)^β has β > 1: a mild favourite-longshot bias, drifting
-  by year. The bias is concentrated in the tail. Power-β beats normalised out of fold by a small amount. The result
-  is judged by the β CI, not by ΔLL (08 §4 E1). The hypothesis fails if the β CI covers 1.
-- **E3.** β varies with market concentration. It is above 1 in concentrated races (the favourite understated) and
-  below 1 in flat ones. The hypothesis fails if the bins' CIs overlap 1 and one another.
-- **E4.** β differs in vs out of each pre-registered segment. The hypothesis fails for a segment if its in and out
-  CIs overlap.
+- **E1.** Direction (08 §4 E1): "The final Win price is FLB-miscalibrated, p ∝ q^β with β > 1, concentrated above
+  50/1, drifting by era." 08 §4 E1 and 06 §1 expect power-β's gain over normalised to be small, measured in sample.
+  No out-of-fold size was written before the run. Failure rule (written after the run): it fails if the β CI covers
+  1.
+- **E3.** Direction (08 §4 E3, from 06 H1): "the favourite is under-stated in concentrated races and over-stated in
+  flat ones". Its restatement as β above 1 in concentrated races and below 1 in flat ones was written after the run.
+  Failure rule (written after the run): it fails if the bins' CIs overlap 1 and one another.
+- **E4.** Direction (08 §4 E4): "β differs across pre-registered crowd-composition segments", two-sided, with no
+  sign per segment. 06 H2 (handicaps reverse the FLB) and H8 (venue and race-number differences) name signs for
+  handicap, R12 and venue; the spec froze none. Failure rule (written after the run): it fails for a segment if its in
+  and out CIs overlap.
 
 ## Variants tried
 
@@ -129,7 +140,8 @@ The no-floor-bound race counts are lower by 5 to 27 per year.
 ### E1: the tail (runners above decimal 51.0, out of fold)
 
 Observed against expected winners under each de-vig. (O - E) per race is the tail's observed minus expected winners
-per scored race, with meeting-clustered one-sided bounds. O / E is a point estimate only.
+per scored race, with meeting-clustered one-sided bounds. O / E is a point estimate only. The owner chose this, not a
+β, as the ticket's tail measure (#77 (6)); the tail β is #285, pre-registered as its own family.
 
 | Subset | De-vig | Tail runners | Observed | Expected | O / E | (O - E) per race | Lower (5%) | Upper (95%) |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -190,18 +202,18 @@ priced runners.
 
 - **Before and after 2014-06-07 (the ticket's era comparison).** It is not run. D10 excludes pre-reform prices, and
   the owner confirmed the post-reform era only (#77, answer 3).
-- **A β fitted within the tail** (for example a second slope above 51.0, or a spline in ln q). This would be a new
-  estimand, and none was pre-registered. The tail is reported as observed against expected winners under each
-  de-vig, the measure the spec froze. D4's spline is the signed way to model the curve, and comparing it here is a
-  follow-up.
+- **A β fitted within the tail** (a separate slope above 51.0, or a spline in ln q). The owner chose observed over
+  expected winners under each de-vig, with meeting-clustered bounds, as this ticket's tail measure, and the frozen
+  family stands (#77 (6)). The tail β is #285, pre-registered as its own family. D4's spline is the signed way to
+  model the curve; #275 scores it on the same folds and tail table.
 - **Meeting-clustered β CIs.** The pre-registered β CI is Wald from the observed information, so races count as
-  independent. The ΔLL and tail bounds do resample meetings (D7). A clustered β interval would be wider. It is a
-  follow-up.
+  independent. The ΔLL and tail bounds do resample meetings (D7). A clustered β interval would be wider. It is
+  #276.
 - **A family-wise test over E4 and E3** (SPA, StepM, D17). That belongs to A6's pre-registered Family P study with
   the holdout. Here the segment and entropy β are in-sample screens.
 - **Walk-forward segment and entropy β.** Not pre-registered. These β select nothing, so in-sample was the frozen
   choice.
-- **Low turnover (E4).** It needs per-race sales, which are not ingested.
+- **Low turnover (E4).** It needs per-race sales, which are not ingested; #278 ingests them.
 - **E2 (the board at t).** It needs a JRDB board; it is #103.
 - **De-truncating floored odds.** The odds are used as displayed. Floor-bound races are handled by the
   no-floor-bound subset, and that subset changes β only in the third decimal.
@@ -229,13 +241,16 @@ priced runners.
 
 ## Follow-ups filed
 
-These are filed as proposed tickets under epic #72; the numbers are added on filing.
+Each is filed under epic #72, `status:proposed` unless marked.
 
-- Score D4's calibrated market (the spline in ln q) on the same folds, races and tail table as normalised and
+- #275: score D4's calibrated market (the spline in ln q) on the same folds, races and tail table as normalised and
   power-β.
-- Meeting-clustered CIs for the power β (a cluster bootstrap or sandwich se), to check the Wald width.
-- Separate the entropy gradient from the tail bias: β by entropy bin on runners at or under 51.0, or with the
+- #276: meeting-clustered CIs for the power β (a cluster bootstrap or sandwich se), to check the Wald width.
+- #277: separate the entropy gradient from the tail bias: β by entropy bin on runners at or under 51.0, or with the
   tail share controlled.
+- #278: ingest JRA per-race Win sales, so E4's low-turnover segment can be tested.
+- #285 (`status:ready`, by the owner's answer #77 (6)): fit a tail β, the conditional-logit slope with a separate
+  slope above 51.0, pre-registered as its own family.
 - Carry R12, handicap and the entropy gradient into A6's pre-registered family (max-statistic, holdout) as
-  candidates, not findings.
-- Ingest JRA per-race Win sales, so E4's low-turnover segment can be tested.
+  candidates, not findings. No new ticket: this is #88's scope, and A6 already takes segment β from #77's
+  `segment_beta`.
