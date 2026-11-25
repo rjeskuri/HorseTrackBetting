@@ -216,7 +216,7 @@ flowchart TD
     HOLD["Holdout opening: by the owner, once per<br/>family, at its power target (D15)<br/>#71, #126 core/eval/holdout.py"]
     D16["D16 on the holdout: gain interval above 0,<br/>encompassing weight above 0, and the<br/>full-stack gain for a stack member<br/>encompassing test #87 planned"]
     subgraph TRACKS["Betting rules: two tracks (D18)"]
-        LA["Loss-avoidance, Family L: loses less than<br/>a stated alternative on the same races,<br/>never claims a profit<br/>#81, #82, #83 planned<br/>Family L evidence standard: owner decision open"]
+        LA["Loss-avoidance, Family L: loses less than<br/>a stated alternative on the same races,<br/>never claims a profit<br/>#81, #82, #83 planned<br/>evidence standard, holdout use included:<br/>owner decision open"]
         PE["Positive-edge, Family P: realised return<br/>above 0 at final dividends on the holdout<br/>#88 planned"]
     end
     OWN["Owner adoption decision,<br/>with an experiment report and the model card"]
@@ -226,11 +226,11 @@ flowchart TD
     OOF --> BOOT
     BOOT --> SNOOP
     SNOOP --> HOLD
+    SNOOP -.->|"paired, one-sided on the same races;<br/>evidence standard open, #81, #82, #83"| LA
     HOLD --> D16
-    HOLD -.->|"paired, one-sided"| LA
     D16 -.->|"plus holdout return"| PE
     D16 --> OWN
-    LA -.->|"evidence standard open, #82, #83"| OWN
+    LA -.->|"evidence standard open"| OWN
     PE -.-> OWN
     OWN --> RUNG
 ```
@@ -241,10 +241,12 @@ included, so the number of things tried is always known and the tests can allow 
 fitted and scored on development days; the locked holdout days are opened by the owner once per
 pre-registered family, and a model must beat the final price there with an interval above zero.
 Betting rules are pre-registered families too, so they face the same family-wide tests (D17).
-Rules that only avoid losses must lose less than a stated alternative on the same races and never
-claim a profit (D18); how much evidence that takes before the owner can adopt one is still an open
-owner decision (the Family L evidence standard, #82, #83). Rules that claim a profit must also make
-money at the final dividends on the holdout. Whatever the owner adopts starts at the avoid rung and
+Rules that only avoid losses are compared with a stated alternative on the same races, by a
+one-sided paired difference, and never claim a profit (D18). How much evidence that takes before the
+owner can adopt one, including whether it is measured on the holdout, is still an open owner
+decision (the Family L evidence standard, #81, #82, #83), so the diagram draws no holdout step for
+them. Rules that claim a profit must also make money at the final dividends on the holdout, on top
+of the log-loss evidence (D18). Whatever the owner adopts starts at the avoid rung and
 climbs one rung at a time, each on its own entry evidence (D19).
 
 ## 6. Timeline of a race day
