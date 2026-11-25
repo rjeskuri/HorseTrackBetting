@@ -1,0 +1,104 @@
+# Japan's availability rules: when each store table's rows are known at a decision time t
+# (docs/specs/as-of.md, read by core.store.asof.load_availability). Every value here is an owner
+# decision (08 §9.18; the owner's answer on #80, 2026-11-24), never an implementation ruling;
+# change one only through a ticket the owner approves. Each rule is conservative relative to
+# JRA's actual publication.
+#
+# Until #227 derives races.post_utc, everything that becomes known only around the post stays out
+# of the views: the result tables are label_only, and the result columns, the horse weights
+# (post - 60 min) and the same-day going (post - 60 min) of races and runners are label_columns.
+# A table without an entry here is refused.
+tables:
+  # The board at t: the latest capture fetched by t. HKTrack rows have no fetched_utc, so their
+  # snapshot_utc counts. The payout and the final-capture flag come from the whole day's log.
+  odds_timeseries:
+    kind: column
+    column: fetched_utc
+    fallback: snapshot_utc
+    label_columns: [dividend, is_refund, is_final_capture]
+
+  # The card: known from 00:00 JST of the race date.
+  # Accepted leak (owner decision, 2026-11-25): meetings.status, races.field_size, races.status
+  # and runners.is_scratched come from the results page, so a race-day scratch or abandonment is
+  # in the views from 00:00 JST. They stay in the views until #227 gives them a post-based rule
+  # (docs/specs/as-of.md, "Accepted leak: results-derived card columns").
+  meetings:
+    kind: offset
+    anchor: race_date
+    tz: Asia/Tokyo
+    offset_min: 0
+  races:
+    kind: offset
+    anchor: race_date
+    tz: Asia/Tokyo
+    offset_min: 0
+    # field_size and status stay in the view: accepted leak until #227 (see above)
+    # results; same-day going until post_utc (#227)
+    # result_published_utc and result_unpublished_utc (#225): never in a view (owner decision,
+    # answer on #80, 2026-11-25); #227 may give them a rule of their own. rail_setting stays in.
+    label_columns:
+      - finish_time_s
+      - split_times_s
+      - going
+      - going_raw
+      - result_published_utc
+      - result_unpublished_utc
+  runners:
+    kind: offset
+    anchor: race_date
+    tz: Asia/Tokyo
+    offset_min: 0
+    # is_scratched stays in the view: accepted leak until #227 (see above)
+    # results; horse weights (kg and the lb copy) until post_utc (#227)
+    label_columns:
+      - finish_pos
+      - placing_raw
+      - placing_code
+      - dead_heat
+      - finish_time_s
+      - lbw_raw
+      - lbw_lengths
+      - running_positions
+      - last_3f_s
+      - win_odds
+      - win_fav_rank
+      - horse_wt_kg
+      - horse_wt_change_kg
+      - declared_horse_wt_lb
+
+  # Results: post + 30 min once post_utc exists (#227); labels only until then.
+  dividends:
+    kind: label_only
+  sectionals:
+    kind: label_only
+  incidents:
+    kind: label_only
+  running_comments:
+    kind: label_only
+
+  # Profile pages show today's values, not the values at t.
+  horses:
+    kind: current_value
+  # Sire, dam and broodmare sire never change; the scrape's own columns stay out.
+  horse_pedigree:
+    kind: static
+    label_columns: [source_race_id, scraped_utc]
+  # A past run is known from 00:00 JST of the day after its race date.
+  horse_runs:
+    kind: offset
+    anchor: race_date
+    tz: Asia/Tokyo
+    offset_min: 1440
+
+  # JRDB: inputs in private models only (D21).
+  jrdb_pre_race:
+    kind: offset
+    anchor: race_date
+    tz: Asia/Tokyo
+    offset_min: 0
+    # TYB is JRDB's day-of file (race-day body weight, the board, same-day going, paddock): its
+    # tyb_ columns are labels until a JRDB release-time rule exists (owner decision, answer on
+    # #80, 2026-11-25). The kyi_, cyb_ and joa_ columns stay in the view.
+    label_prefixes: [tyb_]
+  jrdb_post_race:
+    kind: label_only
