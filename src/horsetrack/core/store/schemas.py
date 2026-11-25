@@ -142,6 +142,16 @@ _SPECS = (
 TABLES: dict[str, TableSpec] = {spec.name: spec for spec in _SPECS}
 TABLE_NAMES: tuple[str, ...] = tuple(TABLES)
 
+# The columns only some sources fill (null for the others); the rest of the schema is required.
+# The store rebuild check accepts one that is new and all null (scripts/check_store_rebuild.py).
+OPTIONAL_COLUMNS: dict[str, tuple[str, ...]] = {
+    "races": ("weight_type", "race_class_raw", "going_raw", "source_race_key"),
+    "runners": (
+        "bracket", "actual_wt_kg", "horse_wt_kg", "horse_wt_change_kg", "last_3f_s",
+        "win_fav_rank", "sex", "age",
+    ),
+}  # fmt: skip
+
 # The tables the store build writes and the page types whose parsed rows feed each (HKTrack's
 # TableSpec.sources); a page's rows for any other table are ignored. The JRDB tables are built
 # elsewhere, so no page type feeds them.

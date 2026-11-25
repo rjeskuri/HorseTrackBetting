@@ -231,6 +231,409 @@ def test_a_row_count_difference_is_reported(tmp_path, n_a, n_b):
     assert not diff.missing_columns and not diff.extra_columns
 
 
+# ------------------------------------------------ optional columns that are new and all null (#215)
+#
+# Contract pinned here for the optional-column rule. It folds into the accepted-differences
+# mechanism of #210 (tests/scripts/test_check_store_rebuild_accepted.py), it does not sit beside it:
+#
+# * `horsetrack.core.store.schemas.OPTIONAL_COLUMNS: dict[str, tuple[str, ...]]`: for each
+#   table that has optional columns, their names (a subset of `TABLES[name].columns`). Tables
+#   without optional columns need no entry (readers use `.get(name, ())`). races has 4, runners 8.
+# * `compare_tables(a, b, key=None, *, expected_extra=(), optional=())`: `optional` is the table's
+#   optional column names. A column in `optional` that `b` has and `a` lacks, holding only nulls in
+#   `b`, is not an extra column: it is left out of `extra_columns` and recorded as
+#   `diff.accepted[column] = OPTIONAL` (module constant `OPTIONAL = "optional"`, beside ADDED and
+#   ALL_NULL), and `equal` can be True. Every other difference is reported as before. There is no
+#   `TableDiff.forgiven_columns`.
+# * `compare_stores(copied, rebuilt, tables, optional=None) -> (lines, ok)`: `optional` maps a table
+#   name to its optional columns (None: no table has any). A table whose only differences are
+#   accepted ones reads `<table>: match rows A / B (accepted: optional all-null: a, b)`; the
+#   optional part comes after the `added` and `all-null` parts, parts joined with "; ".
+# * `main` passes `schemas.OPTIONAL_COLUMNS` to `compare_stores`.
+
+RACES_OPTIONAL = ("weight_type", "race_class_raw", "going_raw", "source_race_key")
+RUNNERS_OPTIONAL = (
+    "bracket", "actual_wt_kg", "horse_wt_kg", "horse_wt_change_kg", "last_3f_s", "win_fav_rank",
+    "sex", "age",
+)  # fmt: skip
+
+ARROW_TYPES = {
+    "string": pa.string(),
+    "int64": pa.int64(),
+    "float64": pa.float64(),
+    "bool": pa.bool_(),
+    "float-list": pa.list_(pa.float64()),
+}
+SAMPLE_VALUES = {
+    "string": "x",
+    "int64": 3,
+    "float64": 2.5,
+    "bool": True,
+    "float-list": [1.0, 2.0],
+}
+
+
+def _store_table(path: Path, n: int = 4, extra: dict | None = None, **kwargs) -> Path:
+    """A small table: race_id, horse_no, odds, plus `extra` columns (name -> (type, values))."""
+    data = {
+        "race_id": [f"r{i // 2}" for i in range(n)],
+        "horse_no": [i % 2 + 1 for i in range(n)],
+        "odds": [1.5 + i for i in range(n)],
+    }
+    fields = [("race_id", pa.string()), ("horse_no", pa.int64()), ("odds", pa.float64())]
+    for name, (typ, values) in (extra or {}).items():
+        data[name] = values
+        fields.append((name, typ))
+    pq.write_table(pa.table(data, schema=pa.schema(fields)), path, **kwargs)
+    return path
+
+
+def _nulls(n: int) -> list:
+    return [None] * n
+
+
+def test_schema_optional_columns_are_the_documented_ones():
+    from horsetrack.core.store import schemas
+
+    assert set(schemas.OPTIONAL_COLUMNS["races"]) == set(RACES_OPTIONAL)
+    assert set(schemas.OPTIONAL_COLUMNS["runners"]) == set(RUNNERS_OPTIONAL)
+    assert len(schemas.OPTIONAL_COLUMNS["races"]) == 4
+    assert len(schemas.OPTIONAL_COLUMNS["runners"]) == 8
+    for table, names in schemas.OPTIONAL_COLUMNS.items():
+        assert set(names) <= set(schemas.TABLES[table].columns), table
+        assert len(set(names)) == len(names)
+    # the other tables, and the key columns, are never optional
+    others = set(schemas.OPTIONAL_COLUMNS) - {"races", "runners"}
+    assert not others, others
+    assert not {"race_id", "horse_no", "horse_id"} & set(schemas.OPTIONAL_COLUMNS["runners"])
+
+
+def test_optional_is_its_own_accepted_reason():
+    script = _script()
+
+    assert script.OPTIONAL == "optional"
+    assert len({script.OPTIONAL, script.ADDED, script.ALL_NULL}) == 3
+
+
+@pytest.mark.parametrize("type_name", list(ARROW_TYPES))
+@pytest.mark.parametrize("n", [1, 4])
+def test_new_all_null_optional_column_is_accepted(tmp_path, type_name, n):
+    a = _store_table(tmp_path / "a.parquet", n)
+    b = _store_table(
+        tmp_path / "b.parquet", n, {"gear": (ARROW_TYPES[type_name], _nulls(n))}, row_group_size=2
+    )
+    script = _script()
+
+    diff = script.compare_tables(a, b, key=KEY, optional=("gear",))
+
+    assert diff.equal is True
+    assert diff.failed_checks() == []
+    assert (diff.rows_a, diff.rows_b) == (n, n)
+    assert not diff.extra_columns and not diff.missing_columns and not diff.dtype_diffs
+    assert diff.accepted == {"gear": script.OPTIONAL}
+    assert not hasattr(diff, "forgiven_columns")  # folded into `accepted`
+    assert diff.hash_a == diff.hash_b
+
+
+@pytest.mark.parametrize("type_name", list(ARROW_TYPES))
+@pytest.mark.parametrize("position", [0, 2, 3])
+def test_new_optional_column_with_any_value_is_still_new(tmp_path, type_name, position):
+    n = 4
+    values = _nulls(n)
+    values[position] = SAMPLE_VALUES[type_name]
+    a = _store_table(tmp_path / "a.parquet", n)
+    b = _store_table(tmp_path / "b.parquet", n, {"gear": (ARROW_TYPES[type_name], values)})
+
+    diff = _script().compare_tables(a, b, key=KEY, optional=("gear",))
+
+    assert diff.equal is False
+    assert diff.failed_checks() == ["columns"]
+    assert set(diff.extra_columns) == {"gear"}
+    assert not diff.accepted
+
+
+def test_without_optional_an_all_null_new_column_is_still_new(tmp_path):
+    a = _store_table(tmp_path / "a.parquet")
+    b = _store_table(tmp_path / "b.parquet", extra={"gear": (pa.string(), _nulls(4))})
+    script = _script()
+
+    for diff in (
+        script.compare_tables(a, b, key=KEY),
+        script.compare_tables(a, b, key=KEY, optional=()),
+        script.compare_tables(a, b, key=KEY, optional=("other",)),  # another column's allowance
+        script.compare_tables(a, b, key=KEY, expected_extra=("other",)),
+    ):
+        assert diff.equal is False
+        assert set(diff.extra_columns) == {"gear"}
+        assert not diff.accepted
+
+
+def test_only_the_optional_columns_are_accepted(tmp_path):
+    a = _store_table(tmp_path / "a.parquet")
+    new = {"gear": (pa.string(), _nulls(4)), "extra": (pa.int64(), _nulls(4))}
+    b = _store_table(tmp_path / "b.parquet", extra=new)
+    script = _script()
+
+    diff = script.compare_tables(a, b, key=KEY, optional=("gear",))
+
+    assert diff.equal is False
+    assert set(diff.extra_columns) == {"extra"}
+    assert diff.accepted == {"gear": script.OPTIONAL}
+
+
+def test_an_optional_column_missing_from_the_rebuild_is_still_reported(tmp_path):
+    for nulls in (True, False):  # even when the copy's column is all null: only "new" is accepted
+        values = _nulls(4) if nulls else [1, 2, 3, 4]
+        a = _store_table(tmp_path / f"a{nulls}.parquet", extra={"gear": (pa.int64(), values)})
+        b = _store_table(tmp_path / f"b{nulls}.parquet")
+
+        diff = _script().compare_tables(a, b, key=KEY, optional=("gear",))
+
+        assert diff.equal is False
+        assert set(diff.missing_columns) == {"gear"}
+        assert not diff.extra_columns and not diff.accepted
+
+
+def test_an_optional_column_both_sides_have_is_compared_as_usual(tmp_path):
+    a = _store_table(tmp_path / "a.parquet", extra={"gear": (pa.int64(), [1, 2, 3, 4])})
+    same = _store_table(tmp_path / "same.parquet", extra={"gear": (pa.int64(), [1, 2, 3, 4])})
+    other = _store_table(tmp_path / "other.parquet", extra={"gear": (pa.int64(), [1, 2, 3, 5])})
+    nulls = _store_table(tmp_path / "nulls.parquet", extra={"gear": (pa.int64(), _nulls(4))})
+    script = _script()
+
+    assert script.compare_tables(a, same, key=KEY, optional=("gear",)).equal is True
+    assert not script.compare_tables(a, same, key=KEY, optional=("gear",)).accepted
+    assert script.compare_tables(a, other, key=KEY, optional=("gear",)).equal is False
+    assert script.compare_tables(a, nulls, key=KEY, optional=("gear",)).equal is False
+
+
+@pytest.mark.parametrize("change", ["rows", "content", "dtype", "missing-column"])
+def test_other_differences_still_fail_next_to_an_accepted_optional_column(tmp_path, change):
+    new = {"gear": (pa.string(), _nulls(4))}
+    a = _store_table(tmp_path / "a.parquet")
+    b = _store_table(tmp_path / "b.parquet", extra=new)
+    if change == "rows":
+        b = _store_table(tmp_path / "b.parquet", 3, {"gear": (pa.string(), _nulls(3))})
+    elif change == "content":
+        table = pq.read_table(b)
+        odds = table.column("odds").to_pylist()
+        odds[0] += 1.0
+        table = table.set_column(2, "odds", pa.array(odds, pa.float64()))
+        pq.write_table(table, b)
+    elif change == "dtype":
+        table = pq.read_table(b)
+        table = table.set_column(1, "horse_no", table.column("horse_no").cast(pa.float64()))
+        pq.write_table(table, b)
+    else:
+        pq.write_table(pq.read_table(b).drop_columns(["odds"]), b)
+    script = _script()
+
+    diff = script.compare_tables(a, b, key=KEY, optional=("gear",))
+
+    assert diff.equal is False
+    assert not diff.extra_columns  # the optional column is not what fails
+    assert diff.accepted == {"gear": script.OPTIONAL}
+
+
+def test_optional_sits_beside_the_other_accepted_reasons(tmp_path):
+    a = _store_table(tmp_path / "a.parquet", extra={"cyb": (pa.null(), _nulls(4))})
+    new = {
+        "cyb": (pa.string(), _nulls(4)),
+        "jurisdiction": (pa.string(), ["x"] * 4),
+        "gear": (pa.string(), _nulls(4)),
+    }
+    b = _store_table(tmp_path / "b.parquet", extra=new)
+    script = _script()
+
+    diff = script.compare_tables(
+        a, b, key=KEY, expected_extra=("jurisdiction",), optional=("gear",)
+    )
+
+    assert diff.equal is True
+    assert diff.accepted == {
+        "cyb": script.ALL_NULL,
+        "jurisdiction": script.ADDED,
+        "gear": script.OPTIONAL,
+    }
+
+
+def _two_stores(tmp_path: Path) -> tuple[Path, Path]:
+    copied, rebuilt = tmp_path / "copied", tmp_path / "rebuilt"
+    copied.mkdir()
+    rebuilt.mkdir()
+    return copied, rebuilt
+
+
+def _line(lines: list[str], table: str) -> str:
+    (line,) = [x for x in lines if x.startswith(f"{table}:")]
+    return line
+
+
+def test_compare_stores_notes_accepted_optional_columns_and_matches(tmp_path):
+    copied, rebuilt = _two_stores(tmp_path)
+    race_new = {c: (pa.string(), _nulls(4)) for c in RACES_OPTIONAL}
+    _store_table(copied / "races.parquet")
+    _store_table(rebuilt / "races.parquet", extra=race_new)
+    _store_table(copied / "runners.parquet", 6)  # a table with no new columns beside it
+    _store_table(rebuilt / "runners.parquet", 6)
+    tables = {"races": KEY, "runners": KEY}
+
+    lines, ok = _script().compare_stores(
+        copied, rebuilt, tables, optional={"races": RACES_OPTIONAL, "runners": RUNNERS_OPTIONAL}
+    )
+
+    assert ok is True
+    assert _line(lines, "races") == (
+        "races: match rows 4 / 4 (accepted: optional all-null: "
+        "weight_type, race_class_raw, going_raw, source_race_key)"
+    )
+    assert _line(lines, "runners") == "runners: match rows 6 / 6"  # no note when nothing accepted
+
+
+def test_compare_stores_names_only_the_accepted_columns(tmp_path):
+    copied, rebuilt = _two_stores(tmp_path)
+    _store_table(copied / "races.parquet", 3)
+    extra = {"going_raw": (pa.string(), _nulls(3)), "weight_type": (pa.string(), _nulls(3))}
+    _store_table(rebuilt / "races.parquet", 3, extra)
+
+    lines, ok = _script().compare_stores(
+        copied, rebuilt, {"races": KEY}, optional={"races": RACES_OPTIONAL}
+    )
+
+    assert ok is True
+    assert _line(lines, "races") == (
+        "races: match rows 3 / 3 (accepted: optional all-null: going_raw, weight_type)"
+    )
+
+
+def test_compare_stores_puts_the_optional_part_after_the_other_accepted_parts(tmp_path):
+    copied, rebuilt = _two_stores(tmp_path)
+    _store_table(copied / "jrdb_pre_race.parquet", extra={"cyb": (pa.null(), _nulls(4))})
+    new = {
+        "cyb": (pa.string(), _nulls(4)),
+        "jurisdiction": (pa.string(), ["x"] * 4),
+        "gear": (pa.string(), _nulls(4)),
+    }
+    _store_table(rebuilt / "jrdb_pre_race.parquet", extra=new)
+
+    lines, ok = _script().compare_stores(
+        copied, rebuilt, {"jrdb_pre_race": KEY}, optional={"jrdb_pre_race": ("gear",)}
+    )
+
+    assert ok is True
+    assert _line(lines, "jrdb_pre_race") == (
+        "jrdb_pre_race: match "
+        "(accepted: jurisdiction added; all-null: cyb; optional all-null: gear)"
+    )
+
+
+def test_compare_stores_reports_a_non_null_optional_column_as_new(tmp_path):
+    copied, rebuilt = _two_stores(tmp_path)
+    _store_table(copied / "races.parquet")
+    values = _nulls(4)
+    values[2] = "A"
+    extra = {"weight_type": (pa.string(), values), "going_raw": (pa.string(), _nulls(4))}
+    _store_table(rebuilt / "races.parquet", extra=extra)
+
+    lines, ok = _script().compare_stores(
+        copied, rebuilt, {"races": KEY}, optional={"races": RACES_OPTIONAL}
+    )
+
+    assert ok is False
+    races = _line(lines, "races")
+    assert "MISMATCH" in races
+    assert "failed columns" in races
+    assert "new: weight_type" in races
+    assert "going_raw" not in races  # the all-null one is accepted, not named as a failure
+
+
+def test_compare_stores_without_optional_is_as_before(tmp_path):
+    copied, rebuilt = _two_stores(tmp_path)
+    _store_table(copied / "races.parquet")
+    _store_table(rebuilt / "races.parquet", extra={"weight_type": (pa.string(), _nulls(4))})
+    script = _script()
+
+    for kwargs in (
+        {},
+        {"optional": None},
+        {"optional": {}},
+        {"optional": {"runners": ("weight_type",)}},
+    ):
+        lines, ok = script.compare_stores(copied, rebuilt, {"races": KEY}, **kwargs)
+        assert ok is False, kwargs
+        assert _line(lines, "races") == (
+            "races: MISMATCH rows 4 / 4; failed columns; new: weight_type"
+        ), kwargs
+
+
+def test_compare_stores_scopes_optional_columns_per_table(tmp_path):
+    copied, rebuilt = _two_stores(tmp_path)
+    for name in ("races", "runners"):
+        _store_table(copied / f"{name}.parquet")
+        extra = {"weight_type": (pa.string(), _nulls(4))}
+        _store_table(rebuilt / f"{name}.parquet", extra=extra)
+
+    lines, ok = _script().compare_stores(
+        copied, rebuilt, {"races": KEY, "runners": KEY}, optional={"races": ("weight_type",)}
+    )
+
+    assert ok is False
+    assert "MISMATCH" not in _line(lines, "races")
+    assert "MISMATCH" in _line(lines, "runners") and "new: weight_type" in _line(lines, "runners")
+
+
+def test_compare_stores_still_reports_not_rebuilt_and_other_failures(tmp_path):
+    copied, rebuilt = _two_stores(tmp_path)
+    _store_table(copied / "races.parquet", extra={"weight_type": (pa.string(), _nulls(4))})
+    _store_table(rebuilt / "races.parquet")
+    _store_table(copied / "runners.parquet", 4)
+    _store_table(rebuilt / "runners.parquet", 5, {"bracket": (pa.int64(), _nulls(5))})
+    optional = {"races": RACES_OPTIONAL, "runners": RUNNERS_OPTIONAL}
+
+    lines, ok = _script().compare_stores(
+        copied, rebuilt, {"races": KEY, "runners": KEY}, optional=optional
+    )
+
+    assert ok is False
+    assert "MISMATCH" in _line(lines, "races") and "not rebuilt: weight_type" in _line(
+        lines, "races"
+    )
+    assert "MISMATCH" in _line(lines, "runners") and "rows 4 / 5" in _line(lines, "runners")
+
+
+@pytest.mark.parametrize(
+    ("table", "optional"), [("races", RACES_OPTIONAL), ("runners", RUNNERS_OPTIONAL)]
+)
+@pytest.mark.parametrize("filled", [False, True])
+def test_main_compare_only_exit_code(tmp_path, capsys, table, optional, filled):
+    """The whole script on synthetic dirs: the schema's optional columns drive the exit status."""
+    source = "hkjc"
+    data, work = tmp_path / "data", tmp_path / "work"
+    copied, rebuilt = data / "processed" / source, work / "processed" / source
+    copied.mkdir(parents=True)
+    rebuilt.mkdir(parents=True)
+    columns = {c: (pa.int64(), _nulls(4)) for c in optional}
+    if filled:
+        columns[optional[-1]] = (pa.int64(), [None, None, 7, None])
+    _store_table(copied / f"{table}.parquet")
+    _store_table(rebuilt / f"{table}.parquet", extra=columns)
+
+    code = _script().main(
+        ["--source", source, "--data-dir", str(data), "--work-dir", str(work), "--compare-only"]
+    )
+
+    out = capsys.readouterr().out
+    line = _line(out.splitlines(), table)
+    if filled:
+        assert code == 1
+        assert "MISMATCH" in line and "new:" in line
+        assert optional[-1] in line.split("new:")[1]
+    else:
+        assert code == 0
+        assert "MISMATCH" not in line
+        assert f"(accepted: optional all-null: {', '.join(optional)})" in line
+
+
 # --- prepare_work_dir exposes the upcoming cards (ticket #210 fix round) ---------------------
 #
 # The JRDB build (`jrdb/tables.py::_store`) also reads `processed/jra/upcoming/<meeting>/` when it

@@ -72,8 +72,10 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   (0 for the winner), `running_positions, finish_time_s, win_odds` (final, decimal including the
   stake), `is_scratched`, and `rating, gear_raw` (the rating and gear at that run, where a source
   prints them). Optional: `bracket, actual_wt_kg, horse_wt_kg, horse_wt_change_kg, last_3f_s,
-  win_fav_rank, sex, age`. A source that weighs in kg keeps the exact values in the kg columns; how
-  it fills the lb columns is that source's own rule, stated in its adapter.
+  win_fav_rank, sex, age` (`schemas.OPTIONAL_COLUMNS`; `scripts/check_store_rebuild.py` accepts
+  one that a copied table lacks and the rebuild holds all null). A source that weighs in kg keeps
+  the exact values in the kg columns; how it fills the lb columns is that source's own rule,
+  stated in its adapter.
 - **dividends**: `race_id, pool` (a normalised pool code), `combination` (`"4"`, `"4,7"`,
   `"4,7,9"`), `dividend` (per the source's unit stake, from its config), `is_refund`.
 - **sectionals**: `race_id, horse_id, horse_no, section_no, section_pos, section_margin_lengths,
