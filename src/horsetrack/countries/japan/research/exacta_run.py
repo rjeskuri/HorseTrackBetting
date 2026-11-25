@@ -54,6 +54,7 @@ COUNTRY = "japan"
 FIRST_DAY = date(2014, 6, 7)
 SOURCES = ("jra",)
 MAX_TEST_ID = f"{study.E1_ID}/max-test"
+STEPM_FWER = 0.05  # the spec's 95% level as a family-wise error rate
 RACE_COLUMNS = ["race_id", "meeting_id", "race_date", "race_no", "race_class", "race_class_raw"]
 
 
@@ -273,10 +274,7 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
         if registry.frozen_spec_hash(family_id) is None:
             raise RuntimeError(f"{family_id} is not frozen; run `freeze` first")
     lambdas = {"in_fold": meta["lambda2_in_fold"], 1.0: 1.0}
-    frames = {
-        key: study.score_races(races, holdout_day=is_holdout_day, lambda2=value)
-        for key, value in lambdas.items()
-    }
+    frames = score_frames(races, meta)
     meta["excluded"] = frames["in_fold"].attrs["excluded"]
     meta["scored_races"] = int(frames["in_fold"]["race_id"].nunique())
     meta["scored_meetings"] = int(frames["in_fold"]["meeting_id"].nunique())
@@ -339,11 +337,30 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
             meta, sha,
         ))  # fmt: skip
 
-    # SPA and StepM over E1's members (lambda2 x category x cell).
+    return {
+        "meta": meta,
+        **max_test(registry, frames, meta, sha, n_boot=n_boot),
+        "members": table.to_dict(orient="records"),
+        "log_score": c_rows,
+    }
+
+
+def score_frames(races: list[dict], meta: dict) -> dict[object, pd.DataFrame]:
+    lambdas = {"in_fold": meta["lambda2_in_fold"], 1.0: 1.0}
+    return {
+        key: study.score_races(races, holdout_day=is_holdout_day, lambda2=value)
+        for key, value in lambdas.items()
+    }
+
+
+def max_test(registry, frames, meta, sha, *, n_boot: int = 10000, note: str | None = None):
+    """SPA and StepM over E1's members (lambda2 x category x cell), one registry record.
+
+    The spec's level 0.95 is the confidence level: StepM's family-wise error (snooping.stepm's
+    ``level``, arch's ``size``) is 0.05."""
     first = frames["in_fold"].drop_duplicates("race_id").set_index("race_id")
     losses = {}
-    for key in lambdas:
-        frame = frames[key]
+    for key, frame in frames.items():
         for category in CATEGORIES:
             sub = frame[frame["category"] == category].set_index("race_id")
             for cell in study.SEGMENT_CELLS:
@@ -352,14 +369,17 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
     losses = pd.DataFrame(losses)
     bench = pd.Series(0.0, index=losses.index)
     kw = {"clusters": first["meeting_id"], "order": pd.to_datetime(first["race_date"]),
-          "block_size": 5, "n_boot": n_boot, "seed": seed, "registry": registry,
+          "block_size": 5, "n_boot": n_boot, "seed": 131, "registry": registry,
           "family_id": study.E1_ID}  # fmt: skip
     spa = snooping.spa(bench, losses, **kw)
-    stepm = snooping.stepm(bench, losses, level=0.95, **kw)
+    stepm = snooping.stepm(bench, losses, level=STEPM_FWER, **kw)
+    params = {"family": study.E1_ID, "superior": sorted(stepm.superior), "block_size": 5,
+              "stepm_fwer": STEPM_FWER}  # fmt: skip
+    if note:
+        params["note"] = note
     registry.append(_record(
-        MAX_TEST_ID, "spa+stepm",
-        {"family": study.E1_ID, "superior": sorted(stepm.superior), "block_size": 5},
-        {**components, "ordering": meta["ordering_fit"]},
+        MAX_TEST_ID, "spa+stepm", params,
+        {"win": meta["win_fit"], "ordering": meta["ordering_fit"]},
         [FoldMetric("development", "spa_pvalue", spa.pvalue, spa.pvalue_lower,
                     spa.pvalue_upper, spa.n_clusters),
          FoldMetric("development", "stepm_superior", float(len(stepm.superior)), None, None,
@@ -368,16 +388,13 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
                     spa.n_rules)],
         meta, sha,
     ))  # fmt: skip
-    summary = {
-        "meta": meta,
+    return {
         "spa": {"pvalue": spa.pvalue, "lower": spa.pvalue_lower, "upper": spa.pvalue_upper,
                 "n_rules": spa.n_rules, "family_size": spa.family_size,
                 "n_clusters": spa.n_clusters},
-        "stepm": {"superior": stepm.superior, "family_size": stepm.family_size},
-        "members": table.to_dict(orient="records"),
-        "log_score": c_rows,
+        "stepm": {"superior": stepm.superior, "family_size": stepm.family_size,
+                  "fwer": STEPM_FWER},
     }  # fmt: skip
-    return summary
 
 
 def write_outputs(summary: dict, sha: str, out: Path) -> None:
@@ -406,12 +423,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m horsetrack.countries.japan.research.exacta_run"
     )
-    parser.add_argument("action", choices=["freeze", "count", "score"])
+    parser.add_argument("action", choices=["freeze", "count", "score", "max-test"])
+    parser.add_argument("--note", help="max-test: why the max test is re-run (recorded)")
     args = parser.parse_args(argv)
     if args.action == "freeze":
         result = freeze()
     elif args.action == "count":
         result = count()
+    elif args.action == "max-test":  # SPA and StepM alone, on E1's recorded members
+        sha, registry = _git_sha(), default_registry(COUNTRY)
+        races, meta = load_races()
+        result = max_test(registry, score_frames(races, meta), meta, sha, note=args.note)
+        out = paths.reports_dir() / "japan" / "131-exacta" / f"max-test-{sha[:12]}.json"
+        write_report(out, json.dumps(result, indent=1), sources=SOURCES)
+        write_summary(registry, summary_path(COUNTRY))
     else:
         sha, registry = _git_sha(), default_registry(COUNTRY)
         races, meta = load_races()
