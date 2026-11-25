@@ -131,3 +131,12 @@ tables:
     label_prefixes: [tyb_]
   jrdb_post_race:
     kind: label_only
+
+  # JRA's going measurements (#90): a row counts from its publication, available_utc (=
+  # published_utc, the page's or yearly record's own 発表 time). The owner's rule, not a ruling:
+  # his #136 request ("Ingest them as of their publication time", 2026-11-24), #228's outline step
+  # 4 ("available_utc = published_utc as in #136") and his answer on #87 (usable once JRA has
+  # officially published it, with its publication timestamp, 2026-11-24). No label columns.
+  track_condition:
+    kind: column
+    column: available_utc

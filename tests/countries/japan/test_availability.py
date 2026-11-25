@@ -22,6 +22,11 @@ owner accepted the proposed defaults, each conservative relative to JRA's public
    `label_prefixes: [tyb_]` (the orchestrator's answer on #80, 2026-11-25, extending answer 3);
    the kyi_, cyb_ and joa_ columns stay in the view. 8. jrdb_post_race: label_only.
 9. Nothing banned.
+10. track_condition (#90): column on available_utc (= published_utc, the page's 発表 time), no
+    label columns. The owner's words: #136's request ('ingest them as of their publication time
+    and use them as features', 2026-11-24), #228's outline step 4 from his option-A split
+    ('available_utc = published_utc as in #136') and his answer on #87 (usable 'once JRA has
+    officially published it (with its publication timestamp)', 2026-11-24).
 
 The expected rules below are written from that answer, never read back from the config. The
 leakage tests run the shipped rules over small synthetic tables built from the store's column
@@ -108,6 +113,8 @@ OWNER: dict[str, dict] = {
     # the TYB columns are named tyb_<field> and come from licensed specs (not in schemas.TABLES)
     "jrdb_pre_race": _offset(0, prefixes=("tyb_",)),
     "jrdb_post_race": {"kind": "label_only"},
+    # a published value counts from its 発表 time (#90)
+    "track_condition": {"kind": "column", "column": "available_utc"},
 }
 VIEW_TABLES = [t for t, o in OWNER.items() if o["kind"] == "offset"]
 LABEL_ONLY = [t for t, o in OWNER.items() if o["kind"] == "label_only"]
@@ -129,7 +136,7 @@ def rules():
 
 
 def test_the_shipped_config_has_one_rule_per_table_and_nothing_else(rules):
-    assert len(schemas.TABLES) == 12
+    assert len(schemas.TABLES) == 13
     assert set(OWNER) == set(schemas.TABLES) | {"odds_timeseries"}
     assert set(rules) == set(OWNER)
     for table, rule in rules.items():
@@ -514,6 +521,76 @@ def test_a_table_outside_the_shipped_config_is_refused(rules, con):
     con.execute('CREATE TABLE IF NOT EXISTS "final_board" AS SELECT 1 AS row_id')
     with pytest.raises(NoAvailabilityRule):
         read_asof(con, "final_board", SCRAPED, rules=rules)
+
+
+def _going_at(day: int, h: int, m: int) -> datetime:
+    return datetime(2026, 11, day, h, m, tzinfo=UTC)
+
+
+# (venue, surface, available_utc) of each track_condition row, all for race day 2026-11-28
+TRACK_ROWS = [
+    ("TOK", "turf", _going_at(27, 6, 0)),  # Tokyo's day-before page, 15:00 JST
+    ("TOK", "turf", _going_at(28, 0, 30)),  # its race-morning update, 09:30 JST
+    ("TOK", "turf", _going_at(28, 3, 40)),  # a mid-day update, 12:40 JST
+    ("KYO", "turf", _going_at(27, 23, 0)),  # Kyoto's race-morning page, 08:00 JST
+    ("TOK", "dirt", None),  # no publication time: never
+]
+
+
+def test_track_condition_rows_open_at_their_publication(rules):
+    # The rule is on available_utc: each row fetched (ingested) 10 minutes after it was published
+    # still opens at its publication. read_asof keeps the whole history; asof_join takes the
+    # latest row of the key at t, so a mid-day update replaces the morning's from its 発表 time.
+    schema = _schema("track_condition")
+    rows = []
+    for i, (venue, surface, available) in enumerate(TRACK_ROWS):
+        ingested = None if available is None else available + timedelta(minutes=10)
+        row = {f.name: _value(f.type, f.name, i) for f in schema}  # going is "going-<i>"
+        row |= {"jurisdiction": "jra", "venue": venue, "race_date": date(2026, 11, 28),
+                "surface": surface, "published_utc": available, "available_utc": available,
+                "ingested_utc": ingested}  # fmt: skip
+        rows.append(row)
+    one = duckdb.connect(":memory:")
+    try:
+        one.register("_arrow", pa.Table.from_pylist(rows, schema=schema))
+        one.execute('CREATE TABLE "track_condition" AS SELECT * FROM _arrow')
+        one.unregister("_arrow")
+
+        def shown(t: datetime) -> list[int]:
+            view = read_asof(one, "track_condition", t, rules=rules)
+            assert set(view.columns) == set(schema.names), t.isoformat()  # no label columns
+            return sorted(int(v.rsplit("-", 1)[1]) for v in view["going"])
+
+        day_before, morning, midday, kyoto = (TRACK_ROWS[i][2] for i in (0, 1, 2, 3))
+        assert shown(day_before - US) == []
+        assert shown(day_before) == [0]  # published at exactly t: usable
+        assert shown(kyoto - US) == [0]
+        assert shown(kyoto) == [0, 3]
+        assert shown(morning - US) == [0, 3]
+        assert shown(morning) == [0, 1, 3]
+        assert shown(midday - US) == [0, 1, 3]  # the mid-day update is not out yet
+        assert shown(midday) == [0, 1, 2, 3]
+        assert shown(datetime(2027, 6, 1, tzinfo=UTC)) == [0, 1, 2, 3]  # a null time never opens
+
+        times = [day_before - US, day_before, morning - US, morning, midday - US, midday]
+        keys = pd.DataFrame(
+            {
+                "venue": ["TOK"] * len(times),
+                "race_date": [date(2026, 11, 28)] * len(times),
+                "surface": ["turf"] * len(times),
+                "t_utc": pd.to_datetime(times, utc=True),
+            }
+        )
+        got = asof_join(
+            keys, "track_condition", on=["venue", "race_date", "surface"], rules=rules, con=one
+        )
+        assert [None if pd.isna(v) else v for v in got["going"]] == [
+            None, "going-0", "going-0", "going-1", "going-1", "going-2",
+        ]  # fmt: skip
+        with pytest.raises(ValueError):
+            read_label(one, "track_condition", rules=rules)
+    finally:
+        one.close()
 
 
 # --- every view documents its availability rule ------------------------------------------------
