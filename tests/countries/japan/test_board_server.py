@@ -22,6 +22,7 @@ from __future__ import annotations
 import gzip
 import http.client
 import json
+import math
 import re
 import threading
 from collections.abc import Callable, Iterator
@@ -34,6 +35,19 @@ from typer.testing import CliRunner
 
 from horsetrack.core import paths
 from horsetrack.countries.japan import odds_log
+from horsetrack.countries.japan.board.flags import FlagRules
+
+# isort: split
+from shadow_fakes import (
+    IDS,
+    WIN,
+    Race,
+    SyntheticDay,
+    all_keys,
+    expected_values,
+    fake_models,
+    instant,
+)
 
 UTC = timezone.utc
 JST = timezone(timedelta(hours=9))
@@ -361,3 +375,137 @@ def test_board_serve_command_is_registered():
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", result.output)
     for option in ("--date", "--port", "--host"):
         assert option in text
+
+
+# ---------------------------------------------------------------- the shadow page and feed (#121)
+#
+# `make_server(..., models=None, flag_rules=None)` also serves `/shadow` (board/web/shadow.html),
+# `/shadow.js` (the script shadow.html loads beside it) and `/shadow-feed` (`build_shadow` of the
+# day as JSON) with the same headers, ETag, 304 and rebuild throttle as /feed. The models are the
+# fakes of shadow_fakes.py; the race day is in the past, so every race is after its post.
+
+WEB = Path(__file__).resolve().parents[3] / "src/horsetrack/countries/japan/board/web"
+SHADOW_RULES = FlagRules(floor_max_odds=1.3, tail_min_odds=50.0, tail_rank=6, stale_s=40.0)
+SHADOW_BASE = (1.25, 2.9, 4.6, 7.3, 11.8, 26.0, 64.0, 152.0)
+
+
+def shadow_day() -> tuple[SyntheticDay, list[Race]]:
+    races = [
+        Race(DAY, "TOK", 1, jst(10, 5).astimezone(UTC), SHADOW_BASE),
+        Race(DAY, "TOK", 2, jst(10, 40).astimezone(UTC), SHADOW_BASE[:6]),
+        Race(DAY, "KYO", 3, jst(11, 15).astimezone(UTC), SHADOW_BASE),
+    ]
+    day = SyntheticDay(DAY, races)
+    for r in races:
+        day.capture(r, r.post - timedelta(minutes=6), 1.0)
+        day.capture(r, r.post - timedelta(minutes=1), 1.04)
+    return day, races
+
+
+def test_shadow_path_serves_the_shadow_page(serve):
+    srv = serve(page_path=WEB / "board.html", models=fake_models(), flag_rules=SHADOW_RULES)
+
+    page = get(srv, "/shadow")
+    script = get(srv, "/shadow.js")
+    board = get(srv, "/")
+
+    assert page.status == 200
+    assert page.body == (WEB / "shadow.html").read_bytes()
+    assert page.headers["Content-Type"].split(";")[0].strip() == "text/html"
+    assert script.status == 200, "shadow.html loads shadow.js beside it"
+    assert script.body == (WEB / "shadow.js").read_bytes()
+    assert script.headers["Content-Type"].split(";")[0].strip() == "text/javascript"
+    assert board.body == (WEB / "board.html").read_bytes()
+    for reply in (page, script):
+        for header, value in SECURITY_HEADERS.items():
+            assert (reply.headers[header] or "").strip().lower() == value
+    for path in ("/shadow/", "/shadow-feed/", "/shadow.json", "/shadows", "/shadow-feeds"):
+        assert get(srv, path).status == 404, path
+
+
+def test_shadow_feed_has_an_etag_and_304(serve):
+    day, races = shadow_day()
+    srv = serve(models=fake_models(), flag_rules=SHADOW_RULES, min_rebuild_s=3600)
+    live = serve(models=fake_models(), flag_rules=SHADOW_RULES, min_rebuild_s=0)
+
+    first = get(srv, "/shadow-feed")
+
+    assert first.status == 200
+    assert first.headers["Content-Type"].split(";")[0].strip() == "application/json"
+    etag = first.headers["ETag"]
+    assert etag and etag.strip('"W/'), f"no usable ETag: {etag!r}"
+    feed = first.json()
+    assert feed["race_date"] == DAY.isoformat()
+    assert feed["models"] == IDS
+    got = {r["race_id"]: r for r in feed["races"]}
+    assert set(got) == {r.race_id for r in races}
+    for r in races:
+        assert got[r.race_id]["tau_bucket_min"] == 0  # the day is past: every race is after post
+        want = expected_values(r, 1.04, 0)
+        assert set(got[r.race_id]["pools"][WIN]) == set(want[WIN])
+        for combination, values in want[WIN].items():
+            entry = got[r.race_id]["pools"][WIN][combination]
+            assert math.isclose(entry["value_mean"], values["value_mean"], rel_tol=1e-9)
+            assert "stale" in entry["flags"]
+
+    again = get(srv, "/shadow-feed", {"If-None-Match": etag})
+    assert again.status == 304
+    assert again.body == b""
+    assert again.headers["ETag"] == etag
+    other = get(srv, "/shadow-feed", {"If-None-Match": '"not-the-current-tag"'})
+    assert other.status == 200
+    assert other.headers["ETag"] == etag
+    zipped = get(srv, "/shadow-feed", {"Accept-Encoding": "gzip"})
+    assert zipped.status == 200
+    assert zipped.json()["races"] == feed["races"]
+    for name, reply in {"200": first, "304": again}.items():
+        for header, value in SECURITY_HEADERS.items():
+            assert (reply.headers[header] or "").strip().lower() == value, (name, header)
+        robots = re.split(r"[,\s]+", (reply.headers["X-Robots-Tag"] or "").strip().lower())
+        assert {"noindex", "nofollow"} <= set(robots), name
+
+    # the rebuild throttle of /feed: a new capture is seen at min_rebuild_s 0, not within 3600 s
+    live_tag = get(live, "/shadow-feed").headers["ETag"]
+    late = races[0].post + timedelta(minutes=3)
+    day.capture(races[0], late, 1.2)
+
+    fresh = get(live, "/shadow-feed", {"If-None-Match": live_tag})
+    assert fresh.status == 200
+    assert fresh.headers["ETag"] != live_tag
+    race = next(r for r in fresh.json()["races"] if r["race_id"] == races[0].race_id)
+    assert instant(race["board_capture_utc"]) == late
+    want = expected_values(races[0], 1.2, 0)[WIN]["1"]["value_mean"]
+    assert math.isclose(race["pools"][WIN]["1"]["value_mean"], want, rel_tol=1e-9)
+
+    held = get(srv, "/shadow-feed", {"If-None-Match": etag})
+    assert held.status == 304
+    assert held.headers["ETag"] == etag
+
+
+def test_the_plain_feed_has_no_value_fields(serve):
+    from horsetrack.countries.japan.board.feed import build_board
+
+    day, races = shadow_day()
+    srv = serve(models=fake_models(), flag_rules=SHADOW_RULES)
+
+    reply = get(srv, "/feed")
+    shadow = get(srv, "/shadow-feed")
+
+    assert reply.status == 200 and shadow.status == 200
+    plain = reply.json()
+    named = sorted(
+        {
+            key
+            for key in all_keys(plain)
+            for word in ("prob", "value", "bet", "stake", "kelly", "wager", "flag", "tau")
+            if word in key.lower()
+        }
+    )
+    assert named == [], named
+    board = build_board(DAY)
+    plain.pop("generated_utc")
+    board.pop("generated_utc")
+    assert plain == json.loads(json.dumps(board))  # /feed is #40's board, unchanged
+    assert {r.race_id for r in races} == {
+        race["race_id"] for venue in plain["venues"] for race in venue["races"]
+    }

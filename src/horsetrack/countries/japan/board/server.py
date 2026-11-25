@@ -1,8 +1,11 @@
-"""Serve the board page and its live feed on localhost (ticket #41).
+"""Serve the board page and its live feed on localhost (ticket #41), and the shadow page and its
+feed beside them (ticket #121).
 
-Three paths only: `/` (the page at `page_path`, read on every request), `/board.js` (the page's
-script, `board.js` beside `page_path`, ticket #42) and `/feed` (`build_board` of the day as JSON,
-docs/specs/board-feed.md) with an ETag, so the page's poll costs a 304 when nothing changed.
+Six paths only: `/` (the page at `page_path`, read on every request), `/board.js` (the page's
+script, `board.js` beside `page_path`, ticket #42), `/feed` (`build_board` of the day as JSON,
+docs/specs/board-feed.md) with an ETag, so the page's poll costs a 304 when nothing changed;
+`/shadow` and `/shadow.js` (`shadow.html` and `shadow.js` beside `page_path`, ticket #122) and
+`/shadow-feed` (`build_shadow` of the day, with the same ETag, gzip and throttle as /feed).
 Anything else is 404: no listings, no other files. Every response carries
 Cache-Control no-store, X-Robots-Tag noindex nofollow, Referrer-Policy no-referrer and
 X-Content-Type-Options nosniff.
@@ -10,7 +13,10 @@ X-Content-Type-Options nosniff.
 The feed is rebuilt at most every `min_rebuild_s`, and only when a file of the day folder (an odds
 log or a post-time sidecar) appeared, went away, or changed size or mtime. A log being appended
 reads safely: `odds_log` counts whole gzip members only, so a torn last member is ignored. A build
-that fails keeps the last good feed. The default bind is 127.0.0.1; the board has no login.
+that fails keeps the last good feed. The shadow feed is rebuilt at most every `min_rebuild_s` too,
+whether or not a file changed (its buckets and stale flags follow the clock), and its body and
+ETag change only when something other than `generated_utc` and `minutes_to_post` did. The default
+bind is 127.0.0.1; the board has no login.
 
     horsetrack japan board-serve --date 2026-11-29 [--port 8765] [--host 127.0.0.1] [--page P]
 """
@@ -27,11 +33,16 @@ import time
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import typer
 
 from horsetrack.core import paths
 from horsetrack.countries.japan.board.feed import build_board
+from horsetrack.countries.japan.board.flags import FlagRules, load_flag_rules
+from horsetrack.countries.japan.board.shadow_feed import build_shadow
+from horsetrack.countries.japan.models.v0.loader import load_shadow_models
+from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +61,8 @@ Fingerprint = tuple[tuple[str, int, int], ...]
 
 class Feed:
     """The day's board as JSON bytes and its ETag, rebuilt only when the day folder changed."""
+
+    name = "board feed"
 
     def __init__(self, race_date: date, min_rebuild_s: float):
         self.race_date, self.min_rebuild_s = race_date, min_rebuild_s
@@ -86,18 +99,61 @@ class Feed:
                 self._gzipped = gzip.compress(self._body, 6)
             return (self._gzipped if gzipped else self._body), self._etag
 
+    def _build(self) -> dict[str, Any] | None:
+        """The new feed, or None when nothing changed since the last one."""
+        fingerprint = self._day_files()
+        if fingerprint == self._fingerprint and self._body is not None:
+            return None
+        board = build_board(self.race_date)
+        self._fingerprint = fingerprint
+        return board
+
     def _refresh(self) -> None:
         try:
-            fingerprint = self._day_files()
-            if fingerprint == self._fingerprint and self._body is not None:
-                return
-            board = build_board(self.race_date)
+            built = self._build()
         except Exception:  # keep the last good feed; try again on the next check
-            log.exception("board feed for %s: build failed", self.race_date)
+            log.exception("%s for %s: build failed", self.name, self.race_date)
             return
-        body = json.dumps(board, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        self._fingerprint, self._body, self._gzipped = fingerprint, body, None
+        if built is None:
+            return
+        body = json.dumps(built, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self._body, self._gzipped = body, None
         self._etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
+
+
+def _without_clock(shadow: dict[str, Any]) -> dict[str, Any]:
+    """The shadow feed less the fields that move with the clock alone."""
+    races = [{k: v for k, v in r.items() if k != "minutes_to_post"} for r in shadow["races"]]
+    return {**{k: v for k, v in shadow.items() if k != "generated_utc"}, "races": races}
+
+
+class ShadowFeed(Feed):
+    """The day's shadow values and flags, rebuilt on every check: buckets and stale flags follow
+    the clock. The values cache and the log readers persist between builds."""
+
+    name = "shadow feed"
+
+    def __init__(
+        self,
+        race_date: date,
+        min_rebuild_s: float,
+        models: ShadowModels | None,
+        flag_rules: FlagRules,
+    ):
+        super().__init__(race_date, min_rebuild_s)
+        self.models, self.flag_rules = models, flag_rules
+        self._cache: dict = {}
+        self._shown: dict[str, Any] | None = None
+
+    def _build(self) -> dict[str, Any] | None:
+        shadow = build_shadow(
+            self.race_date, models=self.models, flag_rules=self.flag_rules, cache=self._cache
+        )
+        shown = _without_clock(shadow)
+        if shown == self._shown and self._body is not None:
+            return None
+        self._shown = shown
+        return shadow
 
 
 def _etag_matches(header: str | None, etag: str) -> bool:
@@ -106,7 +162,13 @@ def _etag_matches(header: str | None, etag: str) -> bool:
     return etag in asked or "*" in asked
 
 
-def _make_handler(page_path: Path, feed: Feed) -> type[BaseHTTPRequestHandler]:
+def _make_handler(
+    page_path: Path, feed: Feed, shadow_feed: ShadowFeed
+) -> type[BaseHTTPRequestHandler]:
+    pages = {"/": page_path, "/shadow": page_path.with_name("shadow.html")}
+    scripts = {"/board.js": "board.js", "/shadow.js": "shadow.js"}
+    feeds = {"/feed": feed, "/shadow-feed": shadow_feed}
+
     class Handler(BaseHTTPRequestHandler):
         def _send(
             self,
@@ -130,21 +192,21 @@ def _make_handler(page_path: Path, feed: Feed) -> type[BaseHTTPRequestHandler]:
 
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
             path = self.path.split("?", 1)[0]
-            if path == "/":
+            if path in pages:
                 try:
-                    html = page_path.read_bytes()
+                    html = pages[path].read_bytes()
                 except OSError:
                     return self._send(503, b"page not built\n", "text/plain; charset=utf-8")
                 return self._send(200, html, "text/html; charset=utf-8")
-            if path == "/board.js":
+            if path in scripts:
                 try:
-                    script = page_path.with_name("board.js").read_bytes()
+                    script = page_path.with_name(scripts[path]).read_bytes()
                 except OSError:
                     return self._send(404, b"not found\n", "text/plain; charset=utf-8")
                 return self._send(200, script, "text/javascript; charset=utf-8")
-            if path == "/feed":
+            if path in feeds:
                 gzipped = self._wants_gzip()
-                body, etag = feed.current(gzipped=gzipped)
+                body, etag = feeds[path].current(gzipped=gzipped)
                 if body is None or etag is None:
                     return self._send(503, b"no feed yet\n", "text/plain; charset=utf-8")
                 if _etag_matches(self.headers.get("If-None-Match"), etag):
@@ -170,10 +232,15 @@ def make_server(
     port: int = DEFAULT_PORT,
     page_path: Path,
     min_rebuild_s: float = 5,
+    models: ShadowModels | None = None,
+    flag_rules: FlagRules | None = None,
 ) -> ThreadingHTTPServer:
-    """A server for the board of `race_date`, bound to (host, port) but not yet serving."""
+    """A server for the board of `race_date`, bound to (host, port) but not yet serving. Without
+    `models` the shadow feed's values are null; `flag_rules` defaults to the shipped rules."""
     feed = Feed(race_date, min_rebuild_s)
-    server = ThreadingHTTPServer((host, port), _make_handler(Path(page_path), feed))
+    rules = load_flag_rules() if flag_rules is None else flag_rules
+    shadow_feed = ShadowFeed(race_date, min_rebuild_s, models, rules)
+    server = ThreadingHTTPServer((host, port), _make_handler(Path(page_path), feed, shadow_feed))
     server.daemon_threads = True
     return server
 
@@ -188,7 +255,8 @@ def board_serve_command(
         help="The board page served at / (default: web/board.html beside server.py).",
     ),
 ) -> None:
-    """Serve the board page at / and the day's live feed at /feed."""
+    """Serve the board page at / and the day's live feed at /feed, and the shadow page at /shadow
+    and its feed at /shadow-feed."""
     try:
         day = date.fromisoformat(race_date)
     except ValueError as exc:
@@ -207,9 +275,16 @@ def board_serve_command(
     page_path = DEFAULT_PAGE if page is None else Path(page).expanduser()
     if not page_path.is_file():
         typer.echo(f"warning: no page at {page_path} yet: / answers 503 until it exists", err=True)
-    server = make_server(day, host=host, port=port, page_path=page_path)
+    try:  # once, at start: a pointer that names a broken fit stops here, as in shadow-day
+        models = load_shadow_models()
+    except Exception as exc:
+        typer.echo(f"error: shadow models: {' '.join(str(exc).split())[:300]}", err=True)
+        raise typer.Exit(1) from exc
+    fits = ",".join(f"{k}={v}" for k, v in models.ids.items()) if models else "none (values null)"
+    server = make_server(day, host=host, port=port, page_path=page_path, models=models)
     bound_host, bound_port = server.server_address[:2]
     typer.echo(f"serving the board of {day} on http://{bound_host}:{bound_port}/")
+    typer.echo(f"shadow page on http://{bound_host}:{bound_port}/shadow, models={fits}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

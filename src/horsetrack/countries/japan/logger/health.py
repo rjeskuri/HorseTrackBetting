@@ -7,8 +7,11 @@ to the post. A race with no capture inside its window has the whole window as it
 
 A health line: `<venue> snapshots=N rows=N failures=N wrong_meeting=N max_gap_t20_s=N
 stopped=<reason>`, with `<date> ` in front when the date is given; max_gap_t20_s is in whole
-seconds, `-` when the venue has no post time. A venue that logged 0 rows, stopped other than
-'ended', or whose max_gap_t20_s is over 120 also gets `ALERT [<date> ]<venue> <reasons>`.
+seconds, `-` when the venue has no post time; with tier 2 on (ticket #130) the line ends
+` tier2_skipped=N`, the venue's tier-2 grid points not captured; with the source given (ticket
+#38) it ends ` source=<key>` (`jra`, `nar`). A venue that logged 0 rows, stopped other than
+'ended', or whose max_gap_t20_s is over 120 also gets
+`ALERT [<date> ]<venue> [source=<key> ]<reasons>`.
 """
 
 from __future__ import annotations
@@ -72,11 +75,13 @@ def health_lines(
     post_times: Mapping[str, datetime],
     *,
     race_date: date | None = None,
+    source: str | None = None,
 ) -> list[str]:
     """One health line per venue of `summary`, each followed by its ALERT line when it has one.
     `post_times` is race_id -> aware UTC post, for any venue: each venue's races are picked out by
-    the venue in their race_id."""
+    the venue in their race_id. With `source`, every line names it."""
     head = f"{race_date.isoformat()} " if race_date is not None else ""
+    tail = f" source={source}" if source is not None else ""
     lines = []
     for venue, v in summary.venues.items():
         posts = {rid: at for rid, at in post_times.items() if _venue_of(rid) == venue}
@@ -86,8 +91,10 @@ def health_lines(
             f"{head}{venue} snapshots={v.snapshots} rows={v.rows} failures={v.failures}"
             f" wrong_meeting={v.wrong_meeting} max_gap_t20_s={'-' if gap_s is None else gap_s}"
             f" stopped={v.stopped or '-'}"
+            + (f" tier2_skipped={v.tier2_skipped}" if v.tier2_skipped is not None else "")
+            + tail
         )
         reasons = _alert_reasons(v, gap_s)
         if reasons:
-            lines.append(f"ALERT {head}{venue} {'; '.join(reasons)}")
+            lines.append(f"ALERT {head}{venue}{tail} {'; '.join(reasons)}")
     return lines

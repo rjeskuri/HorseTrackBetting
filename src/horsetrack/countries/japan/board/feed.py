@@ -10,6 +10,8 @@ Rules (docs/specs/board-feed.md):
 - A runner whose current WIN or PLACE row is `SCR` is scratched on every combination of its race
   that contains its number, listed or not since.
 - The feed is JSON-ready and carries prices only: no probability, value or bet field.
+- Tier-1 pools only (BOARD_POOLS): the log also holds tier-2 and WIN5 rows (ticket #130), dropped
+  row by row as each member is read, so a day's trifecta boards are never held in memory.
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ from horsetrack.countries.japan.odds_log import POOL_TOTAL
 _JST = timezone(timedelta(hours=9))  # Japan keeps no daylight saving time
 _LOG_SUFFIX = ".jsonl.gz"
 _RUNNER_POOLS = ("WIN", "PLACE")  # one runner per combination: where a scratch shows
+# The board's pools: tier 1 (logger.yaml `pools`). Tier-2 and WIN5 rows never reach the feed.
+BOARD_POOLS = frozenset({"WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE"})
 T20 = timedelta(minutes=20)
 
 _instant = odds_log._instant
@@ -208,7 +212,13 @@ def build_board(
         logged = [venue for venue in logged if venue in wanted]
     out = []
     for venue in logged:
-        rows = odds_log.read_rows(paths.odds_snapshot_path("jra", race_date.isoformat(), venue))
+        log_path = paths.odds_snapshot_path("jra", race_date.isoformat(), venue)
+        rows = [
+            row
+            for member in odds_log.iter_members(log_path)
+            for row in member
+            if row.get("pool") in BOARD_POOLS
+        ]
         races = _venue_races(
             rows, post_times_for(race_date, venue), now_utc, morning_start, morning_end
         )
