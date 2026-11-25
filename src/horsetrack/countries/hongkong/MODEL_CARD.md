@@ -2,6 +2,8 @@
 
 The current pipeline for this country, end to end, in data-science terms. This is a skeleton: nothing below is decided until the problem statement and the adoption history say so.
 
+Diagrams of the modeling: [docs/modeling.md](../../../../docs/modeling.md). They draw the Japan stack; Hong Kong has no model while its model work is paused.
+
 ## Status
 
 Status: data ported, otherwise paused (2026-11-24)
