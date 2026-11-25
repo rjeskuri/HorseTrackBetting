@@ -22,6 +22,20 @@ Contract pinned here (the coder follows it), module `horsetrack.countries.japan.
   ERROR line naming the family. A .lzh beside a readable .zip is skipped, not an error.
 - `paths.reports_dir() / "jrdb-build.json"`: per table its `rows` (JRDB rows after the merge),
   `table_rows` (rows kept), `race_unmatched_rate` and `horse_unmatched_rate` (as `JoinReport`).
+- A `date`-kind field is a date32 column, whether its family was delivered or not (ticket #186).
+- Upcoming cards (ticket #186, HKTrack's `_store` + `with_meeting_keys`): the store the JRDB rows
+  join to is the history races and runners plus every upcoming meeting folder
+  `paths.processed_dir("jra") / "upcoming" / <meeting_id with ':' as '_'>/` that holds both
+  `races.parquet` and `racecard_runners.parquet` (a folder with only one of them is not read). A
+  card race carries `meeting_id` (`jra:<YYYY-MM-DD>:<venue>`), `race_no`, `kai` and `nichi` (回, 日)
+  but no `venue` or `race_date` (the columns are absent or null): both come from its `meeting_id`.
+  History wins a race_id: a stale card for a race already in history changes nothing.
+- UKC (ticket #186, Ruling: skip it; #209 owns the UKC horse-master merge): a UKC archive under
+  `raw/jrdb/UKC/` (.zip, .txt or only .lzh) does not stop the build and is not read;
+  `processed/jra/horse_pedigree.parquet` is neither written nor touched (a netkeiba-built one stays
+  byte for byte; none stays none). The skip is stated: `jrdb-build.json` has
+  `"horse_pedigree": {"skipped": <reason>}`, the reason naming UKC and #209, and the build prints a
+  line naming both.
 
 The families' fields, offsets and lengths below are invented (only the family names and the
 race-key part names come from the ported code); every race, horse and id is invented. Expected rows
@@ -35,8 +49,8 @@ import json
 import math
 import os
 import zipfile
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, replace
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -58,7 +72,7 @@ from horsetrack.countries.japan.jrdb import tables
 PRE, POST = "jrdb_pre_race", "jrdb_post_race"
 TABLE_FAMILIES = {PRE: ("KYI", "CYB", "JOA", "TYB"), POST: ("SED", "SKB")}
 ALL_FAMILIES = (*TABLE_FAMILIES[PRE], *TABLE_FAMILIES[POST])
-VENUE_NO = {"KYO": "08", "TOK": "05"}
+VENUE_NO = {"KYO": "08", "TOK": "05", "HSN": "09"}
 UNPREFIXED = ("race_key", "horse_no", "jrdb_horse_id")
 
 _KEY = [("venue_code", 2, "skip"), ("year", 2, "skip"), ("kai", 1, "skip")]
@@ -66,14 +80,15 @@ _KEY += [("nichi", 1, "skip"), ("race_no", 2, "skip")]
 # (name, length, kind): invented layouts; starts are cumulative, the 2-byte terminator is added.
 LAYOUTS: dict[str, list[tuple[str, int, str]]] = {
     "KYI": [("horse_no", 2, "num"), ("jrdb_horse_id", 8, "code"), ("idm", 5, "num")]
-    + [("mark", 2, "code")],
+    + [("mark", 2, "code"), ("card_date", 8, "date")],
     "CYB": [("horse_no", 2, "num"), ("tune", 3, "num")],
     "JOA": [("horse_no", 2, "num"), ("jrdb_horse_id", 8, "code"), ("idm", 5, "num")],
     "TYB": [("horse_no", 2, "num"), ("paddock_index", 5, "num")],
     "SED": [("horse_no", 2, "num"), ("jrdb_horse_id", 8, "code"), ("finish", 2, "num")]
-    + [("note", 8, "text")],
+    + [("note", 8, "text"), ("run_date", 8, "date")],
     "SKB": [("horse_no", 2, "num"), ("jrdb_horse_id", 8, "code"), ("comment_code", 3, "code")],
 }
+DATE_COLUMNS = {PRE: "kyi_card_date", POST: "sed_run_date"}  # the date-kind fields, prefixed
 DATA_COLUMNS = {
     fam: [name for name, _, kind in layout if kind != "skip" and name not in UNPREFIXED]
     for fam, layout in LAYOUTS.items()
@@ -103,7 +118,8 @@ class Race:
     nichi: int
     no: int
     horses: tuple[str, ...]  # store horse_id by horse_no (1-based)
-    in_store: bool
+    in_store: bool  # in the history store
+    card: bool = False  # on an upcoming card that has its racecard_runners
 
     @property
     def race_id(self) -> str:
@@ -129,7 +145,18 @@ R2 = Race("KYO", DAY1, 5, 7, 2, _ids(2022, 200, 5), True)
 R3 = Race("KYO", DAY1, 5, 7, 3, _ids(2021, 300, 4), False)  # JRDB prints it, the store lacks it
 R11 = Race("TOK", DAY2, 4, 10, 11, _ids(2020, 400, 4), True)  # nichi 10 is printed as 'a'
 RACES = (R1, R2, R3, R11)
+
+# Upcoming meetings: not in history, on a card written under processed/jra/upcoming/.
+DAY3, DAY4 = date(2026, 12, 5), date(2026, 12, 6)
+U1 = Race("KYO", DAY3, 5, 9, 1, _ids(2024, 500, 5), False, card=True)
+U2 = Race("KYO", DAY3, 5, 9, 2, _ids(2023, 600, 4), False, card=True)
+U11 = Race("TOK", DAY4, 5, 12, 11, _ids(2022, 700, 6), False, card=True)  # nichi 12 is 'c'
+U_HALF = Race("HSN", DAY4, 3, 4, 5, _ids(2021, 800, 3), False)  # its folder has no runners file
+CARD_RACES = (U1, U2, U11)
+UPCOMING = (*CARD_RACES, U_HALF)
+
 MISMATCH = {("KYI", R2, 3): "99999999", ("SED", R11, 2): "88888888"}  # ids naming another horse
+MISMATCH[("KYI", U2, 3)] = "77777777"
 
 
 def selection(family: str, race: Race) -> list[int]:
@@ -137,9 +164,10 @@ def selection(family: str, race: Race) -> list[int]:
     n = len(race.horses)
     every = list(range(1, n + 1))
     if family == "KYI":  # R1's last horse only in JOA (its id from there); R11's 4 only by number
-        return [h for h in every if (race, h) not in ((R1, 6), (R11, 4))]
+        # U11's 6 has its id from JOA; U1's 5 is in neither, so it is matched by number
+        return [h for h in every if (race, h) not in ((R1, 6), (R11, 4), (U11, 6), (U1, 5))]
     if family == "JOA":
-        return [h for h in every if (race, h) != (R11, 4)]
+        return [h for h in every if (race, h) not in ((R11, 4), (U1, 5))]
     if family == "CYB":
         return [*every, n + 1]  # a horse number the store's race does not have
     if family == "TYB":
@@ -182,6 +210,12 @@ def value(family: str, column: str, race: Race, h: int, stale: bool = False) -> 
     if column == "comment_code":
         text = f"{(race.no * 7 + h) % 1000:03d}"
         return text, text
+    if column in ("card_date", "run_date"):  # a blank date is None
+        if (column == "card_date" and h == 2) or (column == "run_date" and h % 4 == 0):
+            return "", None
+        back = (30 if stale else 1 + h % 3) if column == "card_date" else 0
+        d = race.day - timedelta(days=back)
+        return f"{d:%Y%m%d}", d
     raise AssertionError(column)
 
 
@@ -202,9 +236,15 @@ def record(family: str, race: Race, h: int, stale: bool = False) -> bytes:
     return bytes(out)
 
 
-def day_records(family: str, day: date, stale: bool = False, extra: bool = False) -> bytes:
+def day_records(
+    family: str,
+    day: date,
+    stale: bool = False,
+    extra: bool = False,
+    races: tuple[Race, ...] = RACES,
+) -> bytes:
     rows = []
-    for race in RACES:
+    for race in races:
         if race.day != day:
             continue
         horses = selection(family, race)
@@ -274,12 +314,62 @@ def zip_of(path: Path, members: dict[str, bytes]) -> None:
             archive.writestr(name, data)
 
 
-def write_day_files(families: tuple[str, ...] | list[str]) -> None:
+def write_day_files(
+    families: tuple[str, ...] | list[str],
+    days: tuple[date, ...] = (DAY1, DAY2),
+    races: tuple[Race, ...] = RACES,
+) -> None:
     root = paths.raw_dir("jrdb")
     for family in families:
-        for day in (DAY1, DAY2):
+        for day in days:
             name = delivery(family, day)
-            zip_of(root / family / f"{name}.zip", {f"{name}.txt": day_records(family, day)})
+            data = day_records(family, day, races=races)
+            zip_of(root / family / f"{name}.zip", {f"{name}.txt": data})
+
+
+def meeting_id(race: Race) -> str:
+    return f"jra:{race.day.isoformat()}:{race.venue}"
+
+
+def write_card(meeting: list[Race], keys: str = "absent", runners: bool = True) -> Path:
+    """One upcoming meeting's card in the shape HKTrack's card writer leaves it: races.parquet
+    without venue and race_date (``keys`` "absent": no such columns; "null": the columns, all
+    null) but with the meeting's kai and nichi; and racecard_runners.parquet (unless ``runners``
+    is False). Returns the meeting folder."""
+    mid = meeting_id(meeting[0])
+    folder = paths.processed_dir("jra") / "upcoming" / mid.replace(":", "_")
+    folder.mkdir(parents=True, exist_ok=True)
+    n = len(meeting)
+    columns: dict[str, pa.Array] = {
+        "jurisdiction": pa.array(["jra"] * n, pa.string()),
+        "race_id": pa.array([r.race_id for r in meeting], pa.string()),
+        "meeting_id": pa.array([mid] * n, pa.string()),
+        "race_no": pa.array([r.no for r in meeting], pa.int64()),
+        "race_name": pa.array([f"synthetic race {r.no}" for r in meeting], pa.string()),
+        "post_time_local": pa.array(
+            [f"{r.day.isoformat()}T{9 + r.no % 8:02d}:45:00+09:00" for r in meeting], pa.string()
+        ),
+        "status": pa.array(["declared"] * n, pa.string()),
+        "kai": pa.array([r.kai for r in meeting], pa.int64()),
+        "nichi": pa.array([r.nichi for r in meeting], pa.int64()),
+    }
+    if keys == "null":
+        columns["venue"] = pa.nulls(n, pa.string())
+        columns["race_date"] = pa.nulls(n, pa.date32())
+    pq.write_table(pa.table(columns), folder / "races.parquet")
+    if runners:
+        rows = [(r, i, hid) for r in meeting for i, hid in enumerate(r.horses, 1)]
+        card = {
+            "jurisdiction": pa.array(["jra"] * len(rows), pa.string()),
+            "race_id": pa.array([r.race_id for r, _, _ in rows], pa.string()),
+            "meeting_id": pa.array([mid] * len(rows), pa.string()),
+            "horse_no": pa.array([i for _, i, _ in rows], pa.int64()),
+            "horse_id": pa.array([hid for _, _, hid in rows], pa.string()),
+            "horse_name": pa.array([f"synthetic {hid}" for _, _, hid in rows], pa.string()),
+            "is_scratched": pa.array([False] * len(rows), pa.bool_()),
+        }
+        pq.write_table(pa.table(card), folder / "racecard_runners.parquet")
+    return folder
 
 
 def world(base: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -309,11 +399,14 @@ def _horse_id(jid: str) -> str:
     return ("19" if int(jid[:2]) >= 70 else "20") + jid
 
 
-def expected(table: str, delivered: set[str]) -> tuple[list[dict[str, Any]], dict[str, float]]:
-    """The table's rows in (race_id, horse_no) order, and its counts for jrdb-build.json."""
+def expected(
+    table: str, delivered: set[str], races: tuple[Race, ...] = RACES
+) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    """The table's rows in (race_id, horse_no) order, and its counts for jrdb-build.json. A race is
+    found when it is in history or on a card with its runners."""
     families = [f for f in TABLE_FAMILIES[table] if f in delivered]
     keys: list[tuple[Race, int]] = []
-    for race in RACES:
+    for race in races:
         for family in families:
             keys += [(race, h) for h in selection(family, race) if (race, h) not in keys]
     rows, race_matched = [], 0
@@ -321,7 +414,7 @@ def expected(table: str, delivered: set[str]) -> tuple[list[dict[str, Any]], dic
         printed = [f for f in families if h in selection(f, race)]
         ids = [jrdb_id(f, race, h) for f in printed]
         jid = next((i for i in ids if i is not None), None)
-        if not race.in_store:
+        if not (race.in_store or race.card):
             continue
         race_matched += 1
         if h > len(race.horses):
@@ -381,10 +474,10 @@ def built(table: str) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
-def assert_table(table: str, delivered: set[str]) -> None:
+def assert_table(table: str, delivered: set[str], races: tuple[Race, ...] = RACES) -> None:
     """The written table has exactly the expected columns, rows, order and values, and the store
     reader reads its key columns."""
-    want, _ = expected(table, delivered)
+    want, _ = expected(table, delivered, races)
     frame = built(table)
     assert set(frame.columns) == table_columns(table)
     got = [{c: _plain(v) for c, v in row.items()} for row in frame.to_dict("records")]
@@ -578,3 +671,158 @@ def test_an_lzh_only_family_is_one_error_line(
     build_ok()
     for table in (PRE, POST):
         assert_table(table, set(ALL_FAMILIES))
+
+
+# ------------------------------------------------------------------------------------------------
+# Ticket #186: date columns, upcoming cards, UKC
+# ------------------------------------------------------------------------------------------------
+
+
+def report_json() -> dict[str, Any]:
+    return json.loads((paths.reports_dir() / "jrdb-build.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "delivered",
+    [tuple(ALL_FAMILIES), ("KYI", "SED"), ("TYB", "SKB"), ("KYI", "SKB"), ("CYB", "SED")],
+    ids="+".join,
+)
+def test_a_date_column_is_date32_delivered_or_missing(
+    tmp_path: Path, monkeypatch, delivered: tuple[str, ...]
+) -> None:
+    """KYI's card_date and SED's run_date are date-kind fields: in the written file each is a
+    date32 column, both when its family is delivered (dates, and None where the field is blank)
+    and when it is not (all null)."""
+    world(tmp_path, monkeypatch)
+    write_day_files(delivered)
+    build_ok()
+    for table in (PRE, POST):
+        assert_table(table, set(delivered))
+        column = DATE_COLUMNS[table]
+        path = paths.processed_dir("jra") / f"{table}.parquet"
+        assert pq.read_schema(path).field(column).type == pa.date32(), (table, column)
+        values = [_plain(v) for v in built(table)[column]]
+        family = column.split("_", 1)[0].upper()
+        if family in delivered:
+            assert any(isinstance(v, date) for v in values) and None in values, (column, values)
+        else:
+            assert values and all(v is None for v in values), (column, values)
+
+
+def test_the_upcoming_world_is_what_the_tests_claim() -> None:
+    """Guards the fixtures: the card races keep rows matched by id and by number and drop a
+    mismatched id and an unknown number; the race whose folder has no runners keeps none."""
+    rows, counts = expected(PRE, set(ALL_FAMILIES), UPCOMING)
+    kept = {(r["race_id"], r["horse_no"]): r for r in rows}
+    assert {r["matched_by"] for r in rows} == {"horse_id", "horse_no"}
+    assert {r["race_id"] for r in rows} == {u.race_id for u in CARD_RACES}
+    assert (U2.race_id, 3) not in kept and (U1.race_id, len(U1.horses) + 1) not in kept
+    assert kept[(U1.race_id, 5)]["matched_by"] == "horse_no"
+    assert kept[(U11.race_id, 6)]["kyi_idm"] is None and kept[(U11.race_id, 6)]["jrdb_horse_id"]
+    assert all(r["race_date"] in (DAY3, DAY4) for r in rows)
+    assert counts["table_rows"] < counts["rows"]
+
+
+def test_upcoming_card_races_get_their_pre_race_rows(tmp_path: Path, monkeypatch) -> None:
+    """Evening-before KYI/CYB/JOA/TYB for two upcoming meetings whose cards carry no venue or
+    race_date (absent at one meeting, null at the other) reach jrdb_pre_race, matched to the
+    card's runners, with race_id from the card and race_date from its meeting_id, beside the
+    history rows. A meeting folder holding races.parquet but no racecard_runners.parquet adds
+    nothing and does not stop the build. jrdb_post_race is the history's alone."""
+    world(tmp_path, monkeypatch)
+    write_day_files(ALL_FAMILIES)
+    write_day_files(TABLE_FAMILIES[PRE], days=(DAY3, DAY4), races=UPCOMING)
+    write_card([U1, U2], keys="absent")
+    write_card([U11], keys="null")
+    write_card([U_HALF], runners=False)
+    build_ok()
+
+    races = (*RACES, *UPCOMING)
+    assert_table(PRE, set(ALL_FAMILIES), races)
+    assert_table(POST, set(ALL_FAMILIES))
+    frame = built(PRE)
+    for race in CARD_RACES:
+        assert frame["race_id"].eq(race.race_id).any(), race.race_id
+    assert not frame["race_id"].eq(U_HALF.race_id).any()
+
+    report = report_json()
+    _, counts = expected(PRE, set(ALL_FAMILIES), races)
+    got = report[PRE]
+    assert (got["rows"], got["table_rows"]) == (counts["rows"], counts["table_rows"])
+
+
+def test_history_wins_over_a_stale_card(tmp_path: Path, monkeypatch) -> None:
+    """A card left on disk for a meeting already in history, naming other horses at R1's 1 and
+    R2's 2, changes nothing: both tables are as from history alone."""
+    world(tmp_path, monkeypatch)
+    write_day_files(ALL_FAMILIES)
+    stale_r1 = replace(R1, horses=("2025109001", *R1.horses[1:]))
+    stale_r2 = replace(R2, horses=(R2.horses[0], "2025109002", *R2.horses[2:]))
+    write_card([stale_r1, stale_r2])
+    build_ok()
+    for table in (PRE, POST):
+        assert_table(table, set(ALL_FAMILIES))
+
+
+def write_netkeiba_pedigree() -> Path:
+    """A netkeiba-built horse_pedigree (invented horses and names)."""
+    rows = [
+        {
+            "jurisdiction": "jra",
+            "horse_id": hid,
+            "sire_name": f"シンセティック{i}",
+            "sire_name_norm": f"シンセティック{i}",
+            "dam_name": f"ダミー{i}",
+            "dam_name_norm": f"ダミー{i}",
+            "source_race_id": R1.race_id,
+        }
+        for i, hid in enumerate(R1.horses[:3], 1)
+    ]
+    write_store_table("horse_pedigree", rows)
+    return paths.processed_dir("jra") / "horse_pedigree.parquet"
+
+
+@pytest.mark.parametrize(
+    ("ukc", "netkeiba"),
+    [("zip", True), ("txt", True), ("lzh", True), ("zip", False), ("lzh", False)],
+)
+def test_a_ukc_archive_is_skipped_with_its_reason(
+    tmp_path: Path, monkeypatch, ukc: str, netkeiba: bool
+) -> None:
+    """Ruling: the build skips UKC (#209 owns the horse-master merge). With a UKC archive present
+    (a .zip, a bare .txt, or only .lzh) the build completes, both JRDB tables are as without it,
+    horse_pedigree.parquet is untouched (a netkeiba-built one byte for byte and mtime, none stays
+    none), and the skip is stated in jrdb-build.json and in the output, naming UKC and #209."""
+    data = world(tmp_path, monkeypatch)
+    write_day_files(ALL_FAMILIES)
+    folder = data / "raw" / "jrdb" / "UKC"
+    folder.mkdir(parents=True)
+    records = b"".join(f"{hid[2:]}synthetic horse master\r\n".encode() for hid in R1.horses)
+    if ukc == "zip":
+        zip_of(folder / "UKC261128.zip", {"UKC261128.txt": records})
+    elif ukc == "txt":
+        (folder / "UKC261128.txt").write_bytes(records)
+    else:
+        (folder / "UKC_2026.lzh").write_bytes(b"-lh5- not a zip UKC")
+    pedigree_path = paths.processed_dir("jra") / "horse_pedigree.parquet"
+    if netkeiba:
+        write_netkeiba_pedigree()
+        stamp = 1_700_000_000
+        os.utime(pedigree_path, (stamp, stamp))
+        before = (pedigree_path.read_bytes(), pedigree_path.stat().st_mtime_ns)
+
+    result = invoke_build()
+    assert result.exit_code == 0, result.output
+    assert "ERROR" not in result.output, result.output
+    for table in (PRE, POST):
+        assert_table(table, set(ALL_FAMILIES))
+
+    if netkeiba:
+        assert (pedigree_path.read_bytes(), pedigree_path.stat().st_mtime_ns) == before
+    else:
+        assert not pedigree_path.exists()
+
+    reason = report_json()["horse_pedigree"]["skipped"]
+    assert isinstance(reason, str) and "UKC" in reason and "209" in reason, reason
+    lines = result.output.splitlines()
+    assert any("UKC" in line and "209" in line for line in lines), result.output

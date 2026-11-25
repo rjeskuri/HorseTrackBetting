@@ -54,6 +54,8 @@ _SPECS = (
             "post_time_local": STR, "field_size": INT, "finish_time_s": FLOAT,
             "split_times_s": FLOAT_LIST, "status": STR,
             "weight_type": STR, "race_class_raw": STR, "going_raw": STR, "source_race_key": STR,
+            "rail_setting": STR,
+            "result_published_utc": UTC, "result_unpublished_utc": UTC,
         },
         ("race_id",),
     ),
@@ -139,3 +141,25 @@ _SPECS = (
 
 TABLES: dict[str, TableSpec] = {spec.name: spec for spec in _SPECS}
 TABLE_NAMES: tuple[str, ...] = tuple(TABLES)
+
+# The tables the store build writes and the page types whose parsed rows feed each (HKTrack's
+# TableSpec.sources); a page's rows for any other table are ignored. The JRDB tables are built
+# elsewhere, so no page type feeds them.
+FED_BY: dict[str, tuple[str, ...]] = {
+    "meetings": ("fixture", "results"),  # a calendar without venues: meetings from the results
+    "races": ("results",),
+    "runners": ("results",),
+    "dividends": ("results",),
+    "sectionals": ("sectional",),
+    "incidents": ("results",),
+    "running_comments": ("corunning",),
+    "horses": ("horse",),
+    "horse_runs": ("horse",),
+    "horse_pedigree": ("pedigree_card",),
+}
+# Written only for a source whose manifest holds pages of their page types, so a source without
+# them gets no empty file. One row per id: the first sort column.
+SOURCE_TABLES: tuple[str, ...] = ("horse_pedigree",)
+# Page types the build places. Upcoming-meeting pages (race cards, entries) are deliberately not
+# here: they would leak future races into `races`.
+PAGE_TYPES: tuple[str, ...] = tuple(sorted({t for types in FED_BY.values() for t in types}))

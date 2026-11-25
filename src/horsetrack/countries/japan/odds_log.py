@@ -2,7 +2,8 @@
 
 `odds_snapshots/jra/<YYYY-MM-DD>/<VENUE>.jsonl.gz` holds one gzip member per capture, one JSON
 object per line; pool totals are rows whose `combination` is "__pool__". Each meeting's post times
-sit beside the log in `<VENUE>.races.json`. The row keys and the sidecar shape are in
+sit beside the log in `<VENUE>.races.json`, and the instant each race's official result was first
+seen published in `<VENUE>.results.json` (ticket #225). The row keys and the sidecar shapes are in
 docs/specs/odds-log.md.
 """
 
@@ -16,7 +17,7 @@ import zlib
 from collections.abc import Iterable, Iterator
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 log = logging.getLogger(__name__)
 
@@ -62,48 +63,122 @@ def append_capture(path: Path, rows: Iterable[dict[str, Any]]) -> int:
     return len(rows)
 
 
-def _complete_members(raw: bytes, path: Path) -> Iterator[bytes]:
-    """Decompressed gzip members, in order. Only whole, CRC-checked members count: a capture is all
-    or nothing. A torn or damaged member costs that capture only: reading resumes at the next member
-    header, since the logger is restarted and keeps appending after it."""
-    start = 0
-    while start < len(raw):
-        member = zlib.decompressobj(wbits=31)
-        try:
-            data = member.decompress(memoryview(raw)[start:])
-            complete = member.eof
-        except zlib.error:
-            data, complete = b"", False
-        if complete:
-            yield data
-            start = len(raw) - len(member.unused_data)
-            continue
-        resume = raw.find(_GZIP_MEMBER_HEADER, start + 1)
-        if resume < 0:
-            log.warning("odds log %s: damaged data after byte %d ignored", path, start)
-            return
-        log.warning("odds log %s: damaged member at %d skipped, on at %d", path, start, resume)
-        start = resume
+# zlib is fed bounded chunks, so a member's unused_data is at most one chunk and a scan stays linear
+_CHUNK = 1 << 16
 
 
-def iter_members(path: Path) -> Iterator[list[dict[str, Any]]]:
-    """The rows of each whole member (one capture), in log order; nothing when there is no log
-    yet. Only one decompressed member is held at a time, so a reader can filter as it goes."""
-    path = Path(path)
+def _next_header(fh: BinaryIO, after: int) -> int | None:
+    """The offset of the first member header at or after byte `after`, or None."""
+    fh.seek(after)
+    offset, carry = after, b""
+    while True:
+        chunk = fh.read(_CHUNK)
+        if not chunk:
+            return None
+        window = carry + chunk
+        found = window.find(_GZIP_MEMBER_HEADER)
+        if found >= 0:
+            return offset - len(carry) + found
+        carry = window[-(len(_GZIP_MEMBER_HEADER) - 1) :]
+        offset += len(chunk)
+
+
+def _complete_members(path: Path, start: int) -> Iterator[tuple[int, bytes]]:
+    """(end offset, decompressed bytes) of each gzip member from byte `start`, in order. Only whole,
+    CRC-checked members count: a capture is all or nothing. A torn or damaged member costs that
+    capture only: reading resumes at the next member header, since the logger is restarted and
+    keeps appending after it. A torn trailing member is not yielded and no end offset passes it."""
     try:
-        raw = path.read_bytes()
+        fh = open(path, "rb")
     except FileNotFoundError:
         return
-    for data in _complete_members(raw, path):
-        rows: list[dict[str, Any]] = []
-        for line in data.decode("utf-8", errors="replace").splitlines():
+    with fh:
+        fh.seek(start)
+        pos, pending = start, b""  # pending: bytes read from `pos` on, not yet fed to zlib
+        while True:
+            member = zlib.decompressobj(wbits=31)
+            parts: list[bytes] = []
+            fed = 0
             try:
-                row = json.loads(line)
-            except ValueError:
+                while not member.eof:
+                    data = pending or fh.read(_CHUNK)
+                    pending = b""
+                    if not data:
+                        break
+                    fed += len(data)
+                    parts.append(member.decompress(data))
+            except zlib.error:
+                pass
+            if member.eof:
+                end = pos + fed - len(member.unused_data)
+                yield end, b"".join(parts)
+                pos, pending = end, member.unused_data
                 continue
-            if isinstance(row, dict):
-                rows.append(row)
+            if fed == 0:
+                return  # the end of the log, on a member boundary
+            resume = _next_header(fh, pos + 1)
+            if resume is None:
+                log.warning("odds log %s: damaged or unfinished data after byte %d", path, pos)
+                return
+            log.warning("odds log %s: damaged member at %d skipped, on at %d", path, pos, resume)
+            fh.seek(resume)
+            pos, pending = resume, b""
+
+
+def _member_rows(data: bytes) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def iter_members_with_offsets(
+    path: Path, *, start: int = 0
+) -> Iterator[tuple[int, list[dict[str, Any]]]]:
+    """(end offset, rows) of each whole member from byte offset `start`, in log order. The end
+    offset is the byte just after the member, where a later read can resume; nothing when there is
+    no log yet. The file is read in bounded chunks and one member is held at a time."""
+    for end, data in _complete_members(Path(path), start):
+        yield end, _member_rows(data)
+
+
+def iter_members(path: Path, *, start: int = 0) -> Iterator[list[dict[str, Any]]]:
+    """The rows of each whole member (one capture) from byte offset `start`, in log order; nothing
+    when there is no log yet. Only one decompressed member is held at a time, so a reader can
+    filter as it goes."""
+    for _, rows in iter_members_with_offsets(path, start=start):
         yield rows
+
+
+class LogTail:
+    """A growing log read on: each poll returns the rows of the members appended since the previous
+    poll, reading from where the last whole member ended. A torn trailing member (a write still in
+    progress) is read on the poll after it is complete. Polling a missing log creates nothing."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.offset = 0
+
+    def poll(self) -> list[dict[str, Any]]:
+        try:
+            size = os.stat(self.path).st_size
+        except FileNotFoundError:
+            return []
+        if size < self.offset:  # the log is append-only; a shorter file is a replaced one
+            log.warning("odds log %s shrank below byte %d: read from 0", self.path, self.offset)
+            self.offset = 0
+        if size == self.offset:
+            return []
+        rows: list[dict[str, Any]] = []
+        for end, member in iter_members_with_offsets(self.path, start=self.offset):
+            rows.extend(member)
+            self.offset = end
+        return rows
 
 
 def read_rows(path: Path) -> list[dict[str, Any]]:
@@ -165,7 +240,12 @@ def write_post_times(path: Path, post_times: dict[int, datetime], updated_utc: d
         "updated_utc": _utc_iso(updated_utc),
         "post_times": {str(int(no)): _utc_iso(at) for no, at in sorted(post_times.items())},
     }
-    text = json.dumps(document, indent=2) + "\n"  # serialise before touching the disk
+    _write_atomic(path, json.dumps(document, indent=2) + "\n")  # serialised before the disk
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """`text` to `path`: a temporary file beside it, fsynced, then os.replace; a failure leaves
+    the previous file as it was and no temporary file behind."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     try:
@@ -192,3 +272,70 @@ def read_post_times(path: Path) -> dict[int, datetime]:
             raise ValueError(f"post-time sidecar {path}: race {no} has no readable time: {text!r}")
         out[int(no)] = at
     return out
+
+
+# ---------------------------------------------------------------- results sidecar (ticket #225)
+
+
+def _read_results(path: Path) -> tuple[dict[int, datetime], dict[int, datetime | None]]:
+    """(race -> first seen, race -> lower bound or None) from the results sidecar; both empty
+    when there is no sidecar. A sidecar written before the bound reads every race as None."""
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}, {}
+
+    def instants(key: str) -> dict[int, datetime]:
+        out: dict[int, datetime] = {}
+        for no, text in document.get(key, {}).items():
+            at = _instant(text)
+            if at is None:
+                raise ValueError(f"results sidecar {path}: race {no}: unreadable {key} {text!r}")
+            out[int(no)] = at
+        return out
+
+    published, bounds = instants("published_utc"), instants("unpublished_utc")
+    return published, {no: bounds.get(no) for no in published}
+
+
+def read_published(path: Path) -> dict[int, datetime]:
+    """Race number -> the instant its official result was first seen published, as an aware UTC
+    datetime; empty when there is no sidecar."""
+    return _read_results(path)[0]
+
+
+def read_unpublished(path: Path) -> dict[int, datetime | None]:
+    """Race number -> its lower bound: the instant of the last poll of the same run that did not
+    show its result (aware UTC), or None for a late sighting (shown on a run's first poll, or in a
+    sidecar written before the bound). One entry per race of read_published; empty when there is
+    no sidecar."""
+    return _read_results(path)[1]
+
+
+def record_published(
+    path: Path,
+    races: Iterable[int],
+    seen_utc: datetime,
+    unpublished_utc: datetime | None = None,
+) -> dict[int, datetime]:
+    """Merge `races` into the results sidecar, each new race at `seen_utc` with the lower bound
+    `unpublished_utc` (None: a late sighting): a race already there keeps its first instant and
+    its bound. Written as write_post_times writes (temporary file, fsync, os.replace), only when
+    a race is new. Returns the sidecar's first-seen mapping after the write."""
+    path = Path(path)
+    published, bounds = _read_results(path)
+    new = {int(no) for no in races} - set(published)
+    if not new:
+        return published
+    seen = _instant(seen_utc)
+    bound = None if unpublished_utc is None else _instant(unpublished_utc)
+    published.update(dict.fromkeys(new, seen))
+    bounds.update(dict.fromkeys(new, bound))
+    document = {
+        "published_utc": {str(no): _utc_iso(at) for no, at in sorted(published.items())},
+        "unpublished_utc": {
+            str(no): _utc_iso(at) for no, at in sorted(bounds.items()) if at is not None
+        },
+    }
+    _write_atomic(path, json.dumps(document, indent=2) + "\n")
+    return published
