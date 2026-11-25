@@ -1,0 +1,19 @@
+# JMA weather (ticket #89; docs/specs/weather.md). Read with
+# `core.config.load_country_yaml("japan", "weather")`; the http block is the Fetcher's own format.
+
+# Minutes from an hourly value's obs_utc to the time it counts as published: every weather row's
+# available_utc = obs_utc + this lag, and the as-of views open a row at its available_utc.
+# OWNER DECISION (CLAUDE.md, Modeling governance; asked on #89), never an implementation ruling.
+# It stays null until the owner answers: jma.parse.publication_lag() refuses to run while it is
+# null, so no weather row can be stamped.
+publication_lag_min: null
+
+# The fetch adapter's politeness (jma/fetch.py, through core.ingest): one request every 5 s to
+# JMA's data host, a stop on 403 or 429, and three failures in a row open the circuit.
+http:
+  hosts:
+    default: {requests_per_second: 0.2, jitter: 0.2}
+    www.data.jma.go.jp: {requests_per_second: 0.2, jitter: 0.2}
+  max_retries: 2
+  timeout_s: 60
+  circuit_breaker: {stop_on_status: [403, 429], max_consecutive_failures: 3}

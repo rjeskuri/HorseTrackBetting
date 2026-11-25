@@ -1,0 +1,108 @@
+# One JMA AMeDAS station per JRA venue (ticket #89; docs/specs/weather.md), read by
+# jma.parse.station_for_venue. The rule: the active station nearest the racecourse that observes
+# temperature, precipitation and wind; where two are within 1 km of each other (inside the error
+# of the coordinates), the one that also has sunshine. A rain-only gauge is passed over
+# (`passed_over`). Sunshine is taken where the station has it and is NaN where it has none
+# (`sunshine`): measured at an official station (kind s), a satellite estimate (推計) at an AMeDAS
+# station since 2021-03-02, none at an airport station.
+#
+# station_id: JMA's block_no (地点番号) as the 過去の気象データ pages use it: five digits for an
+#   official station (kind s), four for an AMeDAS one (kind a); quoted, so a leading zero stays.
+#   prec_no: the 都府県・地方 number of the same pages. amedas_code: the station master's
+#   観測所番号 (the live AMeDAS page's code). Ids, names, positions and start dates from JMA's
+#   public station lists, read 2026-11-25: the etrn station pages
+#   (https://www.data.jma.go.jp/stats/etrn/select/prefecture.php?prec_no=<prec_no>) and the
+#   station master 地域気象観測所一覧 (ame_master_20260324.csv). 出典：気象庁ホームページ.
+# km: great-circle distance from the racecourse's coordinates on Wikipedia to the station's
+#   (its temperature site where JMA lists several), rounded; good to a few hundred metres.
+venues:
+  SAP:
+    station_id: "47412"
+    name: 札幌
+    kind: s
+    prec_no: "14"
+    amedas_code: "14163"
+    km: 2.0
+    sunshine: measured
+  HAK:
+    station_id: "47430"
+    name: 函館
+    kind: s
+    prec_no: "23"
+    amedas_code: "23232"
+    km: 4.2
+    sunshine: measured
+    passed_over: 高松 (函館空港, block 1462, 4.1 km) observes no sunshine; a tie on distance
+  FKS:
+    station_id: "47595"
+    name: 福島
+    kind: s
+    prec_no: "36"
+    amedas_code: "36127"
+    km: 1.3
+    sunshine: measured
+  NII:
+    station_id: "1469"
+    name: 松浜
+    kind: a
+    prec_no: "54"
+    amedas_code: "54236"
+    km: 6.7
+    sunshine: none (新潟航空気象観測所; the station master says 日照・湿度・気圧を除く)
+    note: the nearest station with sunshine is 新潟 (official, block 47604, 16.2 km)
+  TOK:
+    station_id: "1133"
+    name: 府中
+    kind: a
+    prec_no: "44"
+    amedas_code: "44116"
+    km: 2.4
+    sunshine: estimated since 2021-03-02
+  NAK:
+    station_id: "1236"
+    name: 船橋
+    kind: a
+    prec_no: "45"
+    amedas_code: "45106"
+    km: 7.5
+    sunshine: estimated since 2021-03-02
+  CKY:
+    station_id: "1638"
+    name: 大府
+    kind: a
+    prec_no: "51"
+    amedas_code: "51216"
+    km: 9.0
+    sunshine: estimated since 2021-03-02
+    note: observing since 2012-10-17 (平24.10.17); 名古屋 (official, block 47636) is 11.3 km
+  KYO:
+    station_id: "0598"
+    name: 京田辺
+    kind: a
+    prec_no: "61"
+    amedas_code: "61326"
+    km: 9.1
+    sunshine: estimated since 2021-03-02
+    passed_over: 長岡京 (block 1025, 5.0 km) is a rain gauge only
+  HSN:
+    station_id: "0602"
+    name: 豊中
+    kind: a
+    prec_no: "62"
+    amedas_code: "62051"
+    km: 6.9
+    sunshine: none (大阪航空気象観測所; the station master says 日照・湿度・気圧を除く, though the
+      etrn page flags sunshine)
+    passed_over: 西宮 (block 1588, 4.3 km) is a rain gauge only
+    note: the nearest station with sunshine is 神戸 (official, block 47770, 16.7 km)
+  KOK:
+    station_id: "0780"
+    name: 八幡
+    kind: a
+    prec_no: "82"
+    amedas_code: "82056"
+    km: 12.2
+    sunshine: estimated since 2021-03-02
+    passed_over: 東谷 (block 1637, 7.2 km) is a rain gauge only
+    note: a near tie with 下関 (official, block 47762, prec_no 81, 12.6 km, across the Kanmon
+      Strait); both have sunshine, so the nearer is taken

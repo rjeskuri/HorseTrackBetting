@@ -131,3 +131,9 @@ tables:
     label_prefixes: [tyb_]
   jrdb_post_race:
     kind: label_only
+
+  # JMA weather (#89, docs/specs/weather.md): a row is known from the publication time the ingest
+  # stamps (obs_utc + the configured lag), never from obs_utc; a row without one is never known.
+  weather:
+    kind: column
+    column: available_utc

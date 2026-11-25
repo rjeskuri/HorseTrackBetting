@@ -22,6 +22,9 @@ owner accepted the proposed defaults, each conservative relative to JRA's public
    `label_prefixes: [tyb_]` (the orchestrator's answer on #80, 2026-11-25, extending answer 3);
    the kyi_, cyb_ and joa_ columns stay in the view. 8. jrdb_post_race: label_only.
 9. Nothing banned.
+10. weather (ticket #89, not the answer on #80): column on available_utc, the JMA publication time
+   the ingest stamps, with no fallback (never obs_utc). Its view is pinned by behaviour in
+   tests/countries/japan/test_jma.py, which leaves its label columns open.
 
 The expected rules below are written from that answer, never read back from the config. The
 leakage tests run the shipped rules over small synthetic tables built from the store's column
@@ -108,6 +111,8 @@ OWNER: dict[str, dict] = {
     # the TYB columns are named tyb_<field> and come from licensed specs (not in schemas.TABLES)
     "jrdb_pre_race": _offset(0, prefixes=("tyb_",)),
     "jrdb_post_race": {"kind": "label_only"},
+    # ticket #89: a weather row is known from its publication time; see test_jma.py
+    "weather": {"kind": "column", "column": "available_utc"},
 }
 VIEW_TABLES = [t for t, o in OWNER.items() if o["kind"] == "offset"]
 LABEL_ONLY = [t for t, o in OWNER.items() if o["kind"] == "label_only"]
@@ -129,7 +134,7 @@ def rules():
 
 
 def test_the_shipped_config_has_one_rule_per_table_and_nothing_else(rules):
-    assert len(schemas.TABLES) == 12
+    assert len(schemas.TABLES) == 13
     assert set(OWNER) == set(schemas.TABLES) | {"odds_timeseries"}
     assert set(rules) == set(OWNER)
     for table, rule in rules.items():
@@ -142,6 +147,9 @@ def test_each_shipped_rule_is_the_owners(rules, table):
     if table in POST_RESULTS:  # they enter the views; their post + 30 min rule is pinned in
         # tests/core/store/test_asof.py by behaviour, whatever form the rule takes
         assert rule.kind not in ("label_only", "current_value")
+        return
+    if table == "weather":  # its label columns are not pinned here (test_jma.py pins the view)
+        assert (rule.kind, rule.column, rule.fallback) == ("column", "available_utc", None)
         return
     assert rule.kind == want["kind"]
     assert rule.column == want.get("column")
@@ -227,6 +235,8 @@ def _synthetic(table: str) -> pa.Table:
 def con():
     connection = duckdb.connect(":memory:")
     for table in OWNER:
+        if table == "weather":  # its view is tested in test_jma.py, over rows of its own
+            continue
         connection.register("_arrow", _synthetic(table))
         connection.execute(f'CREATE TABLE "{table}" AS SELECT * FROM _arrow')
         connection.unregister("_arrow")

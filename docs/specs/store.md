@@ -51,6 +51,7 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
 | `horse_pedigree` | one horse's pedigree | `horse_id` |
 | `jrdb_pre_race` | one JRDB pre-race row matched to a runner | `race_id, horse_no` |
 | `jrdb_post_race` | one JRDB post-race row matched to a runner | `race_id, horse_no` |
+| `weather` | one JMA AMeDAS station's hourly observation | `station_id, obs_utc` |
 
 - **meetings**: `meeting_id, race_date, venue, season, day_night, surface_mix, status` (`run` or
   `abandoned`).
@@ -103,6 +104,9 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   `<data dir>/jrdb/specs`) are written by `horsetrack japan jrdb build`
   (`countries/japan/jrdb/tables.py`), which also writes `jurisdiction`; a family not delivered
   still has its columns, all null.
+- **weather** (#89): `station_id, obs_utc, temp_c, precip_mm, wind_ms, wind_dir_deg, sunshine_h`
+  parsed from JMA's hourly download, plus `available_utc` (the publication time) and
+  `ingested_utc`. Not written by the page build; see `docs/specs/weather.md`.
 
 Withdrawals and placing codes differ by site: each source adapter maps its own codes before rows
 reach the store, and documents the mapping.
@@ -156,7 +160,7 @@ backfill can keep writing).
   key. `horse_pedigree` keeps one row per horse, each column's first non-null value, newest
   card first. A bad cell becomes null, never a broken build.
 - **Output**: the nine tables fed by `fixture` .. `horse` on every build, `horse_pedigree` only
-  when the manifest holds pedigree pages (`schemas.SOURCE_TABLES`), never the JRDB tables; each
+  when the manifest holds pedigree pages (`schemas.SOURCE_TABLES`), never the JRDB tables or `weather`; each
   written to a tmp file and moved into place. `processed_dir(source)/_build.json` holds the
   summary's fields (page counts, failures, rows per table, enrichment stats, `snapshot_id`: sha1
   over the included pages' `(page_type, key, sha256)`) plus `built_utc`; a report goes to

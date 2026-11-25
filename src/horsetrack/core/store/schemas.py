@@ -137,6 +137,17 @@ _SPECS = (
     ),
     TableSpec("jrdb_pre_race", dict(_JRDB_KEYS), ("race_id", "horse_no")),
     TableSpec("jrdb_post_race", dict(_JRDB_KEYS), ("race_id", "horse_no")),
+    # JMA AMeDAS hourly observations per station (#89, docs/specs/weather.md); not a page build's
+    # table: obs_utc is the observation, available_utc its publication, ingested_utc the fetch
+    TableSpec(
+        "weather",
+        {
+            "jurisdiction": STR, "station_id": STR, "obs_utc": UTC, "temp_c": FLOAT,
+            "precip_mm": FLOAT, "wind_ms": FLOAT, "wind_dir_deg": FLOAT, "sunshine_h": FLOAT,
+            "available_utc": UTC, "ingested_utc": UTC,
+        },
+        ("station_id", "obs_utc"),
+    ),
 )  # fmt: skip
 
 TABLES: dict[str, TableSpec] = {spec.name: spec for spec in _SPECS}

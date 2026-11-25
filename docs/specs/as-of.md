@@ -225,6 +225,7 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 | `horse_runs` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 1440 min (the next day) | none |
 | `jrdb_pre_race` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | every column starting `tyb_` (`label_prefixes: [tyb_]`) |
 | `jrdb_post_race` | `label_only` | never; `read_label` only | n/a |
+| `weather` | `column` | `available_utc`, the JMA publication time the ingest stamps (`obs_utc` + the configured lag; #89, `docs/specs/weather.md`); no `fallback`, never `obs_utc` | none |
 
 - Nothing else is banned. JRDB tables are inputs to private models only (D21: no JRDB-derived
   figure in the public repository).
@@ -259,6 +260,9 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 - A race-date rule opens a whole day's card at 00:00 JST of the race date: a column JRA changes
   later that day (a late scratch, a jockey change) is a trap the rule does not catch (see Known
   traps).
+- `weather` (#89) is not part of the answer on #80: its rule is the ticket's definition of done (a
+  view at t sees only rows published by t). The lag behind `available_utc` is an owner decision,
+  kept in `countries/japan/config/weather.yaml`, not in this file.
 - A table outside the file is refused with `NoAvailabilityRule`.
 
 ### Accepted leak: results-derived card columns (owner decision, 2026-11-25)
