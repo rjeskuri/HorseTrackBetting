@@ -9,8 +9,9 @@ opened to read or to append, under an exclusive lock, so concurrent writers cann
 
 A run's id is the sha256 hex of its record's canonical JSON: the same run twice is refused. A
 family's pre-registered spec is frozen with ``freeze_family``; the freeze is a line of its own,
-not a run. ``write_summary`` writes the committed, aggregate-only view: family, E id, variant,
-status and per-fold metric, value, CI and n, with the values of licensed-source runs withheld.
+not a run. ``write_summary`` writes the committed, aggregate-only view, one file per family: E id,
+variant, status and per-fold metric, value, CI and n, with the values of licensed-source runs
+withheld.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ __all__ = [
     "RegistryTampered",
     "RunRecord",
     "default_registry",
-    "summary_path",
+    "summary_dir",
     "write_summary",
 ]
 
@@ -59,6 +60,15 @@ WITHHELD_LABEL = "withheld (licensed source)"
 GENESIS = "0" * 64
 
 _HYPOTHESIS_ID = re.compile(r"[ELP][0-9]+")
+_FAMILY_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a family id that is a safe file stem
+_INDEX_STEM = "README"
+_PREAMBLE = (
+    "# Experiment registry summary",
+    "",
+    "Written by `horsetrack.core.eval.registry.write_summary` from the run registry under",
+    "the data directory; do not edit by hand. Every run is listed, failures included. A run",
+    "built on a licensed source shows no values here.",
+)
 _COUNTRY = re.compile(r"[a-z][a-z0-9_]*")
 
 
@@ -434,9 +444,10 @@ def default_registry(country: str) -> Registry:
     return Registry(path, holdout_log=DEFAULT_COUNTRIES_DIR / country / LOG_NAME)
 
 
-def summary_path(country: str) -> Path:
-    """Where the committed summary of ``country``'s registry lives."""
-    return env.repo_root() / "docs" / "experiments" / f"registry-{country}.md"
+def summary_dir(country: str) -> Path:
+    """The folder of the committed summary of ``country``'s registry: one file per family and an
+    index, so parallel study PRs add files instead of editing one shared file."""
+    return env.repo_root() / "docs" / "experiments" / "registry" / country
 
 
 # --------------------------------------------------------------------------- summary
@@ -450,24 +461,23 @@ def _number(value: float | None) -> str:
     return "-" if value is None else f"{value:.6g}"
 
 
-def write_summary(registry: Registry, path: Path | str) -> None:
-    """Write the aggregate-only summary of ``registry`` to ``path`` (normally
-    ``summary_path(country)``): per run its family, E id, variant, status and per-fold metric,
-    value, CI and n, and nothing else. A licensed-source run shows only its identity and
-    ``withheld (licensed source)``."""
+def write_summary(registry: Registry, directory: Path | str) -> None:
+    """Write the aggregate-only summary of ``registry`` into ``directory`` (normally
+    ``summary_dir(country)``): one ``<family_id>.md`` per family, holding per run its E id,
+    variant, status and per-fold metric, value, CI and n, and nothing else, and ``README.md``,
+    the index of the families. A licensed-source run shows only its identity and
+    ``withheld (licensed source)``. A family's file depends on that family's records alone."""
     families: dict[str, list[RunRecord]] = {}
     for record in registry.records():
         families.setdefault(record.family_id, []).append(record)
+    for family in families:
+        if not _FAMILY_FILE.fullmatch(family) or family == _INDEX_STEM:
+            raise ValueError(f"family {family!r} cannot be a summary file name")
 
-    lines = [
-        "# Experiment registry summary",
-        "",
-        "Written by `horsetrack.core.eval.registry.write_summary` from the run registry under",
-        "the data directory; do not edit by hand. Every run is listed, failures included. A run",
-        "built on a licensed source shows no values here.",
-    ]
+    directory = Path(directory)
     for family, records in families.items():
-        lines += [
+        lines = [
+            *_PREAMBLE,
             "",
             f"## {_cell(family)}",
             "",
@@ -485,4 +495,14 @@ def write_summary(registry: Registry, path: Path | str) -> None:
                 ci = "-" if m.lo is None and m.hi is None else f"[{_number(m.lo)}, {_number(m.hi)}]"
                 values = f"{_number(m.value)} | {ci} | {m.n}"
                 lines.append(f"{who} {_cell(m.fold)} | {_cell(m.metric)} | {values} |")
-    write_report(Path(path), "\n".join(lines) + "\n", sources=())
+        write_report(directory / f"{family}.md", "\n".join(lines) + "\n", sources=())
+
+    index = [
+        "# Experiment registry index",
+        "",
+        "Written by `horsetrack.core.eval.registry.write_summary`; do not edit by hand. One file",
+        "per family, each holding that family's runs.",
+        "",
+    ]
+    index += [f"- [{family}]({family}.md)" for family in sorted(families)]
+    write_report(directory / f"{_INDEX_STEM}.md", "\n".join(index) + "\n", sources=())
