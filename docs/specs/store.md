@@ -93,7 +93,10 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   placing_raw, race_id`.
 - **horse_pedigree**: written only for sources with pedigree pages. `sire_name, dam_name,
   dam_sire_name` as printed, their `*_norm` forms (NFKC and casefold), `sire_id, dam_id,
-  dam_sire_id` (null where the page does not link them), `source_race_id, scraped_utc`.
+  dam_sire_id` (null where the page does not link them), `source_race_id, scraped_utc`. For jra,
+  `horsetrack japan jrdb build` rewrites it when JRDB UKC is delivered: UKC's rows, plus the
+  netkeiba rows for horses UKC lacks, in `jrdb.pedigree.OUTPUT_COLUMNS` (the netkeiba-only
+  columns dropped; see `countries/japan/jrdb/tables.py`).
 - **jrdb_pre_race**, **jrdb_post_race**: JRDB rows matched to the store's races and runners. Declared
   here: the key columns `race_id, race_date, horse_no, horse_id, race_key, jrdb_horse_id,
   matched_by`. The per-family data columns (`<family>_<column>`, from each family's spec under
@@ -166,8 +169,7 @@ backfill can keep writing).
 Upcoming race cards and the odds snapshots (`docs/specs/odds-log.md`) are outside this spec.
 The one reader of the cards here is `horsetrack japan jrdb build` (#186): it joins JRDB rows to
 every `processed_dir("jra")/upcoming/<meeting>/` holding both `races.parquet` and
-`racecard_runners.parquet` as well as to history, so not-yet-run races reach `jrdb_pre_race`. It
-skips JRDB's UKC and never writes `horse_pedigree` (#209 owns that merge).
+`racecard_runners.parquet` as well as to history, so not-yet-run races reach `jrdb_pre_race`.
 
 The post-build reconciliation checks live in `core/store/checks.py` (`run_checks(source, config=...)`,
 ported from HKTrack with its tolerances); the report goes to `reports_dir()/store-check-<source>.md`.
