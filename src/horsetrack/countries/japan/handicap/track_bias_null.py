@@ -31,15 +31,17 @@ Nulls:
   every level), and its tau2 low by about that over r.
 
 `run_report` is the development-data run (CLI `python -m
-horsetrack.countries.japan.handicap.track_bias_null`): the scoped JRA store (holdout days dropped,
-#114), each variant at TRAIN_END, one registry record per variant; it prints aggregates only and
-writes nothing else. Measurement only: nothing here is adopted (D16).
+horsetrack.countries.japan.handicap.track_bias_null [FIRST_DAY]`): the scoped JRA store (holdout
+days dropped, #114) from HISTORY_FROM (#224's first day) or FIRST_DAY, each variant at TRAIN_END,
+one registry record per variant; it prints aggregates only and writes nothing else. Measurement
+only: nothing here is adopted (D16).
 """
 
 from __future__ import annotations
 
 import json
 import math
+import sys
 from dataclasses import dataclass
 from datetime import date
 
@@ -47,7 +49,7 @@ import polars as pl
 
 from horsetrack.core.eval.holdout import _git_sha
 from horsetrack.core.eval.registry import FoldMetric, RunRecord, default_registry
-from horsetrack.countries.japan.handicap.pp import HISTORY_START, _read
+from horsetrack.countries.japan.handicap.pp import _read
 from horsetrack.countries.japan.handicap.track_bias import (
     CELL,
     GROUP,
@@ -185,6 +187,7 @@ FAMILY_ID = "japan-track-bias-null-diagnostic"
 HYPOTHESIS = "E32"  # 08 §4 E32: the same-day draw and position bias
 SOURCE = "jra"  # the store's JRA results and corner positions; no JRDB, no JRA-VAN
 TRAIN_END = date(2026, 9, 26)  # the last #70 fold's train_end, #224's diagnostic
+HISTORY_FROM = date(2014, 6, 7)  # #224's first day; the store now starts earlier
 RACE_COLUMNS = ("race_id", "race_date", *CELL)
 RUNNER_COLUMNS = ("race_id", "race_date", "draw", "finish_pos", "running_positions", "is_scratched")
 METRICS = ("observed_var", "null_var", "ratio", "lam", "tau2")
@@ -215,19 +218,22 @@ VARIANTS = (
 )
 
 
-def run_report(train_end: date = TRAIN_END) -> dict:
-    """Every variant on the JRA store's development days up to `train_end`, one registry record
-    each (failures included); returns the aggregates."""
+def run_report(train_end: date = TRAIN_END, date_from: date = HISTORY_FROM) -> dict:
+    """Every variant on the JRA store's development days from `date_from` to `train_end`, one
+    registry record each (failures included); returns the aggregates."""
     git_sha, builds = _git_sha(), store_builds()
     registry = default_registry(COUNTRY)
-    races = _read("races", RACE_COLUMNS, HISTORY_START, train_end)
-    runners = _read("runners", RUNNER_COLUMNS, HISTORY_START, train_end)
+    races = _read("races", RACE_COLUMNS, date_from, train_end)
+    runners = _read("runners", RUNNER_COLUMNS, date_from, train_end)
     obs, _ = _history(races, runners, train_end)
     del races, runners
     terms = _race_terms(obs)
-    out: dict = {"train_end": train_end.isoformat(), "races": obs.get_column("race_id").n_unique()}
+    out: dict = {
+        "history": [date_from.isoformat(), train_end.isoformat()],
+        "races": obs.get_column("race_id").n_unique(),
+    }
     del obs
-    fold = f"history<={train_end.isoformat()}"
+    fold = f"history {date_from.isoformat()}..{train_end.isoformat()}"
     for variant in VARIANTS:
         switches = {s: getattr(variant, s) for s in SWITCHES}
         metrics, error = [], None
@@ -254,7 +260,12 @@ def run_report(train_end: date = TRAIN_END) -> dict:
             sources=(SOURCE,),
             fold_scheme=f"in_sample:{fold}",
             components={"estimator": "track_bias_null.null_diagnostic"},
-            params={**switches, "null": variant.null, "train_end": train_end.isoformat()},
+            params={
+                **switches,
+                "null": variant.null,
+                "date_from": date_from.isoformat(),
+                "train_end": train_end.isoformat(),
+            },  # fmt: skip
             metrics=tuple(metrics),
             status="failed" if error else "scored",
         )
@@ -264,4 +275,5 @@ def run_report(train_end: date = TRAIN_END) -> dict:
 
 
 if __name__ == "__main__":
-    print(json.dumps(run_report(), indent=1, default=str))
+    first = date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else HISTORY_FROM
+    print(json.dumps(run_report(date_from=first), indent=1, default=str))
