@@ -1,0 +1,13 @@
+# Evaluation settings for Japan: the values callers pass to
+# horsetrack.core.eval.bootstrap.paired_bootstrap (nothing in core defaults them).
+# Signed in docs/problem-statement.md, section 3 (Metric), decision D7:
+# "Resample meetings (venue x day); 95%, one-sided."
+bootstrap:
+  # D7: the resampling unit is the meeting, one venue on one day.
+  cluster_unit: meeting
+  # D7: 95%, one-sided; a gain claim rests on the lower bound.
+  level: 0.95
+  sided: one-sided
+  # Number of bootstrap replicates. A precision setting (Monte Carlo error of the bounds), not a
+  # signed decision: the problem statement does not fix it.
+  n_boot: 10000
