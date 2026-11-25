@@ -1,0 +1,78 @@
+# The odds logger's settings.
+# raw_pages: "all" keeps every odds page a capture fetches (gzip, under raw/jra/official_odds/),
+# so a parser bug found later can be re-run over a logged day; "none" keeps nothing.
+raw_pages: all
+
+# The sources `log-day` logs when `--sources` is not given (ticket #38): jra, nar or both, each
+# with its own site, rate and schedule, all at once in one process. The top-level keys below are
+# JRA's schedule; NAR's is the `nar` block at the end.
+sources: [jra]
+
+# The JRA odds logger's schedule (ticket #24): what it captures, when, and how many requests it may
+# spend per round. Read by horsetrack.countries.japan.logger.schedule. Times are JRA local time
+# (Asia/Tokyo) on the race date; keep them quoted, or YAML reads 07:00 as a base-60 number.
+pools: [WIN, PLACE, QUINELLA, QUINELLA_PLACE]
+# No venue is captured more often than this, whatever the window.
+min_poll_interval_s: 20
+# A round starts every `every_s` from `from`; its budget is every_s x the host's requests per
+# second. Nothing is requested before the first window.
+windows:
+  - {from: "07:00", every_s: 300}
+  - {from: "09:30", every_s: 20}
+# A venue whose post times are unknown ends here.
+stop: "16:45"
+# A venue whose post times are known is logged until its last post + this, even past `stop`.
+after_last_race_min: 10
+# A race is hot from post - within_min to post + after_post_min; hot races come first, nearest
+# post first. Spare budget runs each venue's full cycle (every race) race by race, one cycle
+# starting at most every all_every_s.
+hot_races: {within_min: 20, after_post_min: 5, all_every_s: 300}
+# What a capture costs: `navigation` once (the odds menu and the race list), `per_race` per race.
+requests: {navigation: 2, per_race: 3}
+# Tier 2 (ticket #130): 枠連, 馬単, 3連複 and 3連単, each race captured once per grid point
+# (minutes before post: decision.yaml's D2 grid), only from what tier 1 leaves of a round's budget.
+# A grid point with no capture by the next one counts as tier2_skipped on the health line. On a WIN5
+# day the WIN5 page comes with the tier-2 captures of its five races. Without this block: tier 1 only.
+tier2:
+  pools: [BRACKET_QUINELLA, FORECAST, TRIO, TIERCE]
+  grid_min: [60, 30, 16, 5, 2, 1]
+  # the odds menu and the race list, then one page per pool of each race
+  requests: {navigation: 2, per_race: 4}
+# A venue answering for another meeting this many captures in a row stops (that venue only).
+max_wrong_meeting: 3
+# After a 403/429 (or any open circuit): null stops the host for the rest of the day and the
+# block marker keeps a restart from sending anything; N resumes once after N minutes (on a fresh
+# Fetcher at `resume_requests_per_second` where that is given, as NAR's below). Owner's call.
+on_block: {cooldown_min: null}
+# Result publication (ticket #225): each venue's レース結果 race list is polled at most every every_s
+# from its first post to its last post + until_min (past the odds' end), and each race's first
+# sighting of its official result is kept in <VENUE>.results.json beside the odds log. every_s 60
+# gives minute resolution; until_min past 30 lets the log see lags beyond the 30-minute proxy.
+# Without this block: no results polling. JRA only: NAR never inherits it.
+results: {every_s: 60, until_min: 60}
+
+# NAR's schedule (ticket #38; night racing per docs/research/nar-data-access.md): nar.netkeiba.com
+# at nar.yaml's rate (0.1 requests a second, one host for every venue), so a round's budget is
+# every_s / 10 requests. Meetings run from about 10:40 to 21:00 JST, the nighters last. Keys left
+# out here are the top level's; tier 2 and results are never inherited (NAR has neither).
+nar:
+  # Win/Place/Wide first (D3): the b1 page (WIN, PLACE) and the b5 page (QUINELLA_PLACE).
+  pools: [WIN, PLACE, QUINELLA_PLACE]
+  min_poll_interval_s: 20
+  # From 10:00 a 60 s round (6 requests) fits a hot race of each of two meetings' nearest posts.
+  windows:
+    - {from: "09:00", every_s: 300}
+    - {from: "10:00", every_s: 60}
+  # A venue whose post times are unknown ends here; the others at their last post + 10 min.
+  stop: "21:15"
+  after_last_race_min: 10
+  # A full cycle of a 12-race meeting is 25 requests (about 4 minutes): at most every 15 minutes.
+  hot_races: {within_min: 20, after_post_min: 5, all_every_s: 900}
+  # The race list (one page for every meeting), then per race one page per page type: b1, b5.
+  requests: {navigation: 1, per_race: 2}
+  max_wrong_meeting: 3
+  # The owner's NAR block policy (docs/research/nar-data-access.md): on a 403/429, NAR alone pauses
+  # 15 minutes, then resumes once on a fresh Fetcher at half nar.yaml's rate (20 s between
+  # requests); a second block stops NAR for the day (venues circuit_open, an ALERT each). Every
+  # block appends a line to nar-block.txt, and a restart that finds one sends NAR nothing that day.
+  on_block: {cooldown_min: 15, resume_requests_per_second: 0.05}

@@ -1,1 +1,1 @@
-"""Country-independent core of HorseTrackBetting."""
+"""Core library code shared by every country."""

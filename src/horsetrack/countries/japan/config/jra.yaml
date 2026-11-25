@@ -130,8 +130,12 @@ pools:
     min_dividend: 110
     enabled: false        # carries over; out of scope
 
-# Displayed odds are floored to 0.1 at every level: add back half a step everywhere.
+# Displayed odds are floored to 0.1 at every level: add back half a step everywhere. `slack_below` and
+# `slack_at_or_above` are the store check's tolerance (dividend / unit - odds must stay under it); they
+# default to HKJC's 0.06 and 1.0, so JRA sets one display step (0.1) at every level.
 odds_display:
+  slack_below: 0.1
+  slack_at_or_above: 0.1
   cap: 9999.9
   threshold: 0
   detruncate_below: 0.05
@@ -148,3 +152,11 @@ http:
   circuit_breaker:
     stop_on_status: [403, 429]
     max_consecutive_failures: 5
+  # HKTrack's window: no history request to netkeiba while JRA is racing. Never www.jra.go.jp, the
+  # odds logger's host. Times stay quoted: YAML 1.1 reads an unquoted 17:00 as an integer.
+  quiet_hours:
+    - days: [sat, sun]
+      start: "09:00"
+      end: "17:00"
+      timezone: Asia/Tokyo
+      hosts: [db.netkeiba.com, race.netkeiba.com]

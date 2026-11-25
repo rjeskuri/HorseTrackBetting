@@ -47,4 +47,7 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra"
+addopts = "-ra --strict-markers"
+markers = [
+    "local: needs real scraped pages under $HORSETRACK_DATA_DIR/fixtures; skipped when absent",
+]

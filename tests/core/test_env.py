@@ -13,6 +13,7 @@ Seam the implementation must honour (pinned by these tests):
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -83,3 +84,64 @@ def test_only_the_first_equals_splits_and_names_match_exactly(fake_root):
     (fake_root / ".env").write_text(f"{NAME}_EXTRA=wrong\n{NAME}=a=b=c\n")
     assert env.get_setting(NAME) == "a=b=c"
     assert env.get_setting(f"{NAME}_EXTRA") == "wrong"
+
+
+# .env values: one pair of matching surrounding quotes is stripped, as python-dotenv does.
+# (raw .env text after the `=`, value the setting must read back as)
+QUOTE_CASES = [
+    ('"abc"', "abc"),
+    ("'abc'", "abc"),
+    ("abc", "abc"),
+    (
+        '"Mozilla/5.0 (X11; Linux) Gecko/2010 Firefox/115.0"',
+        "Mozilla/5.0 (X11; Linux) Gecko/2010 Firefox/115.0",
+    ),
+    ("'two words here'", "two words here"),
+    ('"a=b=c"', "a=b=c"),
+    ('a"b', 'a"b'),
+    ("a'b", "a'b"),
+    ('"a"b"', 'a"b'),
+    ('"it\'s"', "it's"),
+    ("'say \"hi\"'", 'say "hi"'),
+    ('"abc', '"abc'),
+    ('abc"', 'abc"'),
+    ("'abc", "'abc"),
+    ("abc'", "abc'"),
+    ("\"abc'", "\"abc'"),
+    ("'abc\"", "'abc\""),
+    ('""x""', '"x"'),
+    ("''x''", "'x'"),
+    ('"', '"'),
+    ("'", "'"),
+]
+
+
+@pytest.mark.parametrize(("raw", "expected"), QUOTE_CASES)
+def test_dot_env_value_loses_one_pair_of_surrounding_quotes(fake_root, raw, expected):
+    (fake_root / ".env").write_text(f"{NAME}={raw}\n")
+    assert env.get_setting(NAME) == expected
+
+
+def test_quote_stripping_applies_per_line_and_leaves_other_settings_alone(fake_root):
+    (fake_root / ".env").write_text(f'FIRST="one"\n{NAME}=\'two\'\nTHIRD=three\nFOURTH="a\'b"\n')
+    assert env.get_setting("FIRST") == "one"
+    assert env.get_setting(NAME) == "two"
+    assert env.get_setting("THIRD") == "three"
+    assert env.get_setting("FOURTH") == "a'b"
+
+
+def test_quoted_user_agent_reads_back_without_quotes_for_the_header(fake_root):
+    ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+    (fake_root / ".env").write_text(f'HORSETRACK_USER_AGENT="{ua}"\n')
+    assert env.get_setting("HORSETRACK_USER_AGENT") == ua
+
+
+@pytest.mark.parametrize("raw", ['"quoted"', "'quoted'", 'a"b'])
+def test_process_environment_wins_and_is_returned_verbatim(fake_root, monkeypatch, raw):
+    (fake_root / ".env").write_text(f'{NAME}="from-file"\n')
+    monkeypatch.setenv(NAME, raw)
+    assert env.get_setting(NAME) == raw
+    # the file is never copied into the process environment
+    monkeypatch.delenv(NAME)
+    assert env.get_setting(NAME) == "from-file"
+    assert NAME not in os.environ

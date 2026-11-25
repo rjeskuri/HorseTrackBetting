@@ -4,7 +4,7 @@ The current pipeline for this country, end to end, in data-science terms. This i
 
 ## Status
 
-Status: data ported, otherwise paused
+Status: data ported, otherwise paused (2026-11-24)
 
 ## Decision problem
 
