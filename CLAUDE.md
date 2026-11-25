@@ -23,7 +23,7 @@ Research and tooling for pari-mutuel horse racing, one folder per country (Japan
 - `src/horsetrack/core/{env,paths}.py`: settings from the environment or the repo-root `.env`; `HORSETRACK_DATA_DIR` resolution and the on-disk layout under it (see `.env.example`).
 - `src/horsetrack/core/{config,pricing}.py` (`config.py` exists, `pricing.py` planned): configuration, pari-mutuel pricing maths.
 - `src/horsetrack/core/ingest/`, `core/store/`: HTTP/ingest, storage (the store's tables and readers: `docs/specs/store.md`).
-- `src/horsetrack/core/eval/`: the evaluation harness; `holdout.py` splits off the locked final holdout.
+- `src/horsetrack/core/eval/`: the evaluation harness; `holdout.py` splits off the locked final holdout; `registry.py`, the append-only, hash-chained run registry (`$HORSETRACK_DATA_DIR/registry/<country>.jsonl`) and its committed aggregate summary (`docs/experiments/registry-<country>.md`); `reports.py`, `write_report`, which keeps licensed-source outputs out of the tree.
 - `src/horsetrack/countries/<country>/config/holdout.yaml` (`japan`, `hongkong`): each country's holdout start and seed, read through `core.config.load_country_yaml`. Each eval ticket owns one file there: `scoring.yaml` (#69), `folds.yaml` (#70), `holdout.yaml` (#71).
 - `src/horsetrack/countries/japan/{jra,nar,jrdb,logger}/` (planned): Japan sources, odds logger.
 - `src/horsetrack/countries/japan/board/`: the board at a decision time and the final board (`docs/specs/board-at-t.md`); `feed.py`, the live-board feed (`docs/specs/board-feed.md`).
@@ -40,6 +40,7 @@ These are owner decisions: target and estimand, loss and metric, baseline, split
 - `docs/ledger.md` labels every claim measured (with its source), single-run, or assumption.
 - Carry over no HKTrack assumption without a ticket that tests it.
 - The null result is the starting point, not something to explain away.
+- Every run, failures included, is a registry record (`core.eval.registry.default_registry(country).append`), and every output built on a licensed source (`WITHHELD_SOURCES`: JRDB, JRA-VAN) is written through `core.eval.reports.write_report`, which refuses the repository.
 
 ## Layout
 - `src/horsetrack/core` holds only HTTP/ingest, storage, pari-mutuel pricing maths and the eval harness.
