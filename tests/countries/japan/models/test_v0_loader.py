@@ -10,6 +10,9 @@ Contract pinned here (`horsetrack.countries.japan.models.v0.loader`):
 - No "ordering" entry (absent or null) gives `ordering=None`; the other two still load.
 - A missing pointer, or a missing win or nowcast file, returns None with exactly one WARNING log
   record and no exception.
+- (#125) An optional "residual" entry names a ResidualFit file (its own `to_json`, base embedded).
+  When it is present (not absent, not null) `win` is that ResidualFit, in place of the plain
+  calibration, and `ids` gains "residual": its fit_id; "win" stays the calibration's fit_id.
 
 The fits are tiny, built here and written with each class's own `to_json`. All data is synthetic.
 """
@@ -21,10 +24,11 @@ import logging
 from datetime import date
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from horsetrack.core import paths
-from horsetrack.countries.japan.board.snapshot import DecisionGrid
+from horsetrack.countries.japan.board.snapshot import DecisionGrid, RaceContext
 from horsetrack.countries.japan.models.v0.calibration import WinCalibration
 from horsetrack.countries.japan.models.v0.nowcast import DriftCell, NowcastV0
 from horsetrack.countries.japan.models.v0.ordering import OrderingFit
@@ -155,3 +159,63 @@ def test_load_shadow_models_returns_none_when_a_file_is_missing(tmp_path, caplog
     assert got is None
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1, [r.getMessage() for r in warnings]
+
+
+RESIDUAL_CASES = {
+    "residual named": dict(tag="r1e5d0", gamma=0.2, named=True, ordering=True),
+    "residual named, no ordering": dict(tag="r2c4a8", gamma=-0.15, named=True, ordering=False),
+    "residual null": dict(tag="r3b7f1", gamma=0.2, named=None, ordering=True),
+    "no residual key": dict(tag="r4d9e2", gamma=0.2, named=False, ordering=True),
+}
+
+
+@pytest.mark.parametrize("case", list(RESIDUAL_CASES.values()), ids=list(RESIDUAL_CASES))
+def test_load_shadow_models_prefers_the_residual_when_named(case):
+    # imported here so the other loader tests still collect before the module exists
+    from horsetrack.countries.japan.models.v0.residual import ResidualFit
+
+    objects = fits(case["tag"], 1.1)
+    win, ordering, nowcast = objects
+    residual = ResidualFit(
+        base=win,
+        segments=("field_16_plus",),
+        gamma=(case["gamma"],),
+        ridge=1.0,
+        fit_id=f"res-{case['tag']}",
+    )
+    names = {
+        "win": f"win_calibration-{case['tag']}.json",
+        "ordering": f"ordering-{case['tag']}.json",
+        "nowcast": f"nowcast-{case['tag']}.json",
+    }
+    if not case["ordering"]:
+        del names["ordering"]
+    folder = default_folder()
+    pointer = write_fits(folder, names, objects, pointer_name="current.json")
+    if case["named"] is not None:
+        res_name = f"residual-{case['tag']}.json"
+        (folder / res_name).write_text(residual.to_json(), encoding="utf-8")
+        if case["named"]:
+            pointer.write_text(json.dumps({**names, "residual": res_name}), encoding="utf-8")
+    else:
+        pointer.write_text(json.dumps({**names, "residual": None}), encoding="utf-8")
+
+    got = load(None)
+
+    assert isinstance(got, ShadowModels)
+    assert got.nowcast == nowcast
+    assert got.ordering == (ordering if case["ordering"] else None)
+    want_ids = {"win": win.fit_id, "nowcast": nowcast.fit_id}
+    if case["ordering"]:
+        want_ids["ordering"] = ordering.fit_id
+    race = RaceContext(race_id="jra:2026-11-28:TOK:12", venue="TOK", race_no=12, starters=16)
+    q = np.array([0.3, 0.2, 0.15, 0.1, 0.1, 0.05, 0.05, 0.05])
+    if case["named"]:
+        assert isinstance(got.win, ResidualFit) and got.win == residual
+        assert got.win.base == win
+        assert got.ids == {**want_ids, "residual": residual.fit_id}
+        # the residual is what the shadow values will call: it moves p in a 16-runner race
+        assert np.abs(got.win.predict(q, race) - win.predict(q)).max() > 1e-3
+    else:
+        assert isinstance(got.win, WinCalibration) and got.win == win
+        assert got.ids == want_ids
