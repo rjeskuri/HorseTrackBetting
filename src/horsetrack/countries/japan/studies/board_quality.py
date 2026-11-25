@@ -29,6 +29,9 @@ development day's compacted odds log (`logger/compact.py`); the final board from
 final-state rule (`board.snapshot.final_board`: compaction drops `source_update_utc` and
 `page_state`, which the rule reads); post times from `board.snapshot.post_times_for`; winners from
 the store's runners (holdout days dropped by `read_store_table`; the holdout is never opened).
+The power de-vig's beta is fitted out of sample (POWER_FIT, `fit_power_window`): on the store's
+development races of the D9 fold whose test window holds the earliest logged day, never on the
+boards it scores; its value, fit window and races go into the record's params and the report.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ import pandas as pd
 from horsetrack.core import paths
 from horsetrack.core.config import load_country_yaml, load_source
 from horsetrack.core.eval.bootstrap import paired_bootstrap
+from horsetrack.core.eval.folds import FoldScheme, load_country_scheme, walk_forward
 from horsetrack.core.eval.holdout import _git_sha, is_holdout_day
 from horsetrack.core.eval.registry import RunRecord, default_registry
 from horsetrack.core.eval.reports import write_report
@@ -63,10 +67,13 @@ from horsetrack.countries.japan.studies.calibration import (
     Variant,
     _markdown_table,
     _metric,
+    development_frame,
     devig_normalised,
     devig_power,
     devig_shin,
     fit_power_beta,
+    read_development,
+    store_builds,
 )
 
 COUNTRY = "japan"
@@ -255,10 +262,17 @@ SEGMENTS = {
     "low_turnover": "in: the race's latest logged WIN pool total before the post is under the "
     "median of the run's races that have one; out: at or above it; neither without a total",
 }
+POWER_FIT = (
+    "#77's fit_power_beta (conditional logit on ln(1/O), all races) on the training rows of the D9 "
+    "fold (config/folds.yaml: expanding, 1-week embargo) whose test window holds the earliest "
+    "logged day: the store's final Win prices of development race days from 2014-06-07 (D10), "
+    "#77's development_frame (void races, scratched and unpriced runners out), all strictly "
+    "before the earliest logged day; a diagnostic candidate until the owner picks the de-vig"
+)
 DEVIGS = {
     "normalised": "q_i = (1/O_i) / sum_j (1/O_j)",
-    "power": "p_i proportional to (1/O_i)^beta, beta fitted in-sample on the scored races' final "
-    "Win boards (#77's conditional logit), the same beta for every board",
+    "power": "p_i proportional to (1/O_i)^beta, the same beta for every board, fitted out of "
+    "sample by POWER_FIT",
     "shin": "Shin (1993), z solved per race (#77)",
 }
 
@@ -292,6 +306,7 @@ def build_spec() -> dict:
         },
         "grid_min": _grid(),
         "devigs": DEVIGS,
+        "power_fit": POWER_FIT,
         "segments": SEGMENTS,
         "rates": payout_rates(),
         "bootstrap": bootstrap_settings(),
@@ -412,6 +427,40 @@ def _sha16(path: Path) -> str:
     return digest.hexdigest()[:16]
 
 
+def fit_power_window(fit_rows: pd.DataFrame, first_day: date, scheme: FoldScheme) -> dict:
+    """POWER_FIT on `fit_rows` (#77's development_frame: race_id, race_date, odds, won): beta,
+    its SE and races, and the training window of the scheme's fold whose test window holds
+    `first_day`; every row fitted is dated on or before that fold's train_end < `first_day`."""
+    dates = pd.concat(
+        [pd.Series(fit_rows["race_date"].to_numpy()), pd.Series([pd.Timestamp(first_day)])],
+        ignore_index=True,
+    )
+    folds = walk_forward(dates, scheme=scheme)
+    fold = next((f for f in folds if f.test_start <= first_day <= f.test_end), None)
+    if fold is None:
+        raise ValueError(f"no D9 fold's test window holds {first_day}")
+    train = fit_rows.iloc[fold.train_idx[fold.train_idx < len(fit_rows)]]
+    if train.empty:
+        raise ValueError(f"no development race on or before {fold.train_end} to fit beta on")
+    fit = fit_power_beta(train["odds"], train["race_id"], train["won"])
+    return {"beta": fit.beta, "beta_se": fit.se, "fit_races": fit.n_races} | {
+        "fit_from": str(pd.Timestamp(train["race_date"].min()).date()),
+        "fit_to": str(pd.Timestamp(train["race_date"].max()).date()),
+        "fit_train_end": str(fold.train_end),
+        "fold_test_start": str(fold.test_start),
+    }
+
+
+def power_beta_out_of_sample(first_day: date) -> dict:
+    """POWER_FIT on the store (#77's development reads: holdout days dropped, never opened)."""
+    runners, races = read_development()
+    frame, _ = development_frame(runners, races)
+    del runners, races
+    return fit_power_window(
+        frame[["race_id", "race_date", "odds", "won"]], first_day, load_country_scheme(COUNTRY)
+    )
+
+
 # --------------------------------------------------------------------------- the pure study
 
 
@@ -427,7 +476,9 @@ def with_segments(frame: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _board_quality(frame: pd.DataFrame, spec: dict, name: str) -> tuple[list, dict]:
+def _board_quality(
+    frame: pd.DataFrame, spec: dict, name: str, power: dict | None
+) -> tuple[list, dict]:
     has_result = frame["won"].notna().groupby(frame["race_id"]).transform("any")
     win = frame.loc[frame["pool"].eq(snapshot.WIN) & has_result]
     if win.empty:
@@ -435,10 +486,10 @@ def _board_quality(frame: pd.DataFrame, spec: dict, name: str) -> tuple[list, di
     win = win.assign(won=win["won"].fillna(False).astype(int))  # a logged runner the store lacks
     params = {}
     if name == "power":
-        final = win.loc[win["is_final"]]
-        fit = fit_power_beta(final["odds"], final["race_id"], final["won"])
-        params = {"beta": fit.beta, "beta_se": fit.se}
-        devig = lambda o, r: devig_power(o, r, fit.beta)  # noqa: E731
+        if power is None:
+            raise ValueError("no out-of-sample beta: POWER_FIT was not run")
+        params = {"beta": power["beta"], "beta_se": power["beta_se"]}
+        devig = lambda o, r: devig_power(o, r, power["beta"])  # noqa: E731
     else:
         devig = {"normalised": devig_normalised, "shin": devig_shin}[name]
     gaps = board_vs_final(win, taus=spec["grid_min"], devig=devig)
@@ -473,6 +524,11 @@ def _ev(frame: pd.DataFrame, spec: dict) -> tuple[list, dict]:
 
 def _segment(frame: pd.DataFrame, name: str) -> tuple[list, dict]:
     if frame[name].isna().all():
+        if name == "low_turnover":
+            raise ValueError(
+                "no race has a WIN pool total logged before the post: the compacted logs' WIN "
+                "totals all sit after it (pre-post per-race Win sales: #278)"
+            )
         raise ValueError(f"no race has a value for {name}")
     table = drift_sd_by_segment(frame, name)
     metrics = [
@@ -485,13 +541,16 @@ def _segment(frame: pd.DataFrame, name: str) -> tuple[list, dict]:
     }
 
 
-def compute_study(frame: pd.DataFrame, spec: dict) -> Study:
+def compute_study(frame: pd.DataFrame, spec: dict, power: dict | None = None) -> Study:
     """E18 under each de-vig, E10 by pool and tau and by segment, and E21 with its simulation
-    check, on `read_day`'s frames with `won` joined and `with_segments` applied. Pure: no I/O."""
+    check, on `read_day`'s frames with `won` joined and `with_segments` applied. `power` is
+    `fit_power_window`'s out-of-sample beta with its fit window; the power variant fails
+    without it. Pure: no I/O."""
     study = Study(counts={})
     for name in DEVIGS:
-        variant = Variant("E18", f"board_vs_final:{name}", IN_SAMPLE, {"devig": name}, {})
-        study.attempt(variant, lambda name=name: _board_quality(frame, spec, name))
+        params = ({"power_fit": POWER_FIT} | (power or {})) if name == "power" else {}
+        variant = Variant("E18", f"board_vs_final:{name}", IN_SAMPLE, {"devig": name}, params)
+        study.attempt(variant, lambda name=name: _board_quality(frame, spec, name, power))
     variant = Variant("E21", "spurious_ev:by_pool_and_tau", IN_SAMPLE, {"drift": "sd"}, {})
     study.attempt(variant, lambda: _ev(frame, spec))
     for name, definition in SEGMENTS.items():
@@ -574,9 +633,7 @@ def run_study(out_dir: Path | None = None) -> dict:
     frame = pd.concat(frames, ignore_index=True)
     days = sorted({date.fromisoformat(r.split(":")[1]) for r in frame["race_id"].unique()})
     won = read_results(days)
-    builds["jra_runners"] = (
-        f"processed/jra/runners.parquet@{_sha16(paths.processed_dir(SOURCE) / 'runners.parquet')}"
-    )
+    builds |= store_builds()
     key = pd.MultiIndex.from_arrays([frame["race_id"], frame["horse_id"]])
     frame = with_segments(frame.assign(won=won.reindex(key).to_numpy()))
     races = frame.drop_duplicates("race_id")
@@ -585,7 +642,11 @@ def run_study(out_dir: Path | None = None) -> dict:
     counts |= {"races_with_a_final_board": len(with_final)}
     counts |= {"races_with_a_stored_result": int(frame.groupby("race_id")["won"].any().sum())}
 
-    study = compute_study(frame, spec)
+    try:
+        power, power_error = power_beta_out_of_sample(min(days)), None
+    except ValueError as exc:  # the power variant then fails and is recorded
+        power, power_error = None, str(exc)
+    study = compute_study(frame, spec, power)
     study.counts = counts
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
@@ -596,6 +657,14 @@ def run_study(out_dir: Path | None = None) -> dict:
         "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
         "days": ", ".join(str(d) for d in days),
+        "power beta": (
+            f"{power['beta']:.4f} (SE {power['beta_se']:.4f}) on {power['fit_races']} development "
+            f"races, {power['fit_from']} to {power['fit_to']} (the D9 fold of "
+            f"{power['fold_test_start']}, train_end {power['fit_train_end']}), out of sample; a "
+            "diagnostic candidate pending the owner's de-vig pick"
+            if power
+            else f"not fitted: {power_error}"
+        ),
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     report = write_report(
@@ -609,6 +678,7 @@ def run_study(out_dir: Path | None = None) -> dict:
         "counts": counts,
         "records_appended": len(appended),
         "failed_variants": {v.name: v.error for v in study.variants if v.error},
+        "power_beta": power,
         "tables": {k: study.tables.get(k) for k in ("board_quality", "ev")},
     }
 
