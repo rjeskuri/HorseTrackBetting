@@ -2,7 +2,8 @@
 
 Pure data, no pandas or pyarrow imports, so every store module and test can share it cheaply. The
 tables and columns are HKTrack's (its SPEC section 5), plus `jurisdiction` and the key columns on
-the two JRDB tables, whose per-family columns are declared by the ticket that builds them.
+the two JRDB tables, whose per-family columns are declared by the ticket that builds them, and
+JRA's `track_condition` (#90).
 """
 
 from __future__ import annotations
@@ -137,6 +138,17 @@ _SPECS = (
     ),
     TableSpec("jrdb_pre_race", dict(_JRDB_KEYS), ("race_id", "horse_no")),
     TableSpec("jrdb_post_race", dict(_JRDB_KEYS), ("race_id", "horse_no")),
+    # JRA's going pages and yearly records (#90): one row per (venue, race_date, surface) and
+    # publication; built by `countries/japan/jra/track_condition.py`, not by the store build
+    TableSpec(
+        "track_condition",
+        {
+            "jurisdiction": STR, "venue": STR, "race_date": DATE, "surface": STR, "going": STR,
+            "rail": STR, "cushion": FLOAT, "moisture_goal": FLOAT, "moisture_4c": FLOAT,
+            "published_utc": UTC, "available_utc": UTC, "ingested_utc": UTC,
+        },
+        ("race_date", "venue", "surface", "published_utc"),
+    ),
 )  # fmt: skip
 
 TABLES: dict[str, TableSpec] = {spec.name: spec for spec in _SPECS}
