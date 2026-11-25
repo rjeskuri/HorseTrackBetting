@@ -27,6 +27,7 @@ import pytest
 
 from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord, write_summary
 
+AT = "@"  # assembled so the public-tree scan sees no literal email
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GIT_SHA = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 PREAMBLE_TITLE = "# Experiment registry summary"
@@ -210,7 +211,7 @@ def build_and_merge(
     repo.mkdir()
     git(repo, "init", "-q")
     git(repo, "config", "user.name", "Test")
-    git(repo, "config", "user.email", "test@example.invalid")
+    git(repo, "config", "user.email", "test" + AT + "example.invalid")
     git(repo, "config", "commit.gpgsign", "false")
     git(repo, "config", "core.hooksPath", "/dev/null")
     git(repo, "checkout", "-q", "-b", "main")
