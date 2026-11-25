@@ -138,7 +138,7 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 | `odds_timeseries` | `column` | `fetched_utc`, else `fallback` `snapshot_utc` (HKTrack rows) | `dividend`, `is_refund`, `is_final_capture` |
 | `meetings` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | none |
 | `races` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | `finish_time_s`, `split_times_s`, `going`, `going_raw`, `result_published_utc`, `result_unpublished_utc` |
-| `runners` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | `finish_pos`, `placing_raw`, `placing_code`, `dead_heat`, `finish_time_s`, `lbw_raw`, `lbw_lengths`, `running_positions`, `last_3f_s`, `win_odds`, `win_fav_rank`, `horse_wt_kg`, `horse_wt_change_kg` |
+| `runners` | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min | `finish_pos`, `placing_raw`, `placing_code`, `dead_heat`, `finish_time_s`, `lbw_raw`, `lbw_lengths`, `running_positions`, `last_3f_s`, `win_odds`, `win_fav_rank`, `horse_wt_kg`, `horse_wt_change_kg`, `declared_horse_wt_lb` |
 | `dividends` | `label_only` | never; `read_label` only | n/a |
 | `sectionals` | `label_only` | never; `read_label` only | n/a |
 | `incidents` | `label_only` | never; `read_label` only | n/a |
@@ -156,7 +156,8 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
   derives `post_utc`, the rules stay on the conservative side:
   - `dividends`, `sectionals`, `incidents` and `running_comments` are `label_only`; the owner's
     rule once `post_utc` exists is post + 30 min.
-  - `horse_wt_kg` and `horse_wt_change_kg` (runners) and the same-day `going` and `going_raw`
+  - `horse_wt_kg`, `horse_wt_change_kg` and `declared_horse_wt_lb` (runners; the last is
+    `horse_wt_kg` in pounds) and the same-day `going` and `going_raw`
     (races) are label columns; the owner's rule once `post_utc` exists is post − 60 min.
   - The result columns of `races` and `runners` stay label columns.
   - `result_published_utc` and `result_unpublished_utc` (races, #225: the odds logger's sighting

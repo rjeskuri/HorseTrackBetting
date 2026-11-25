@@ -56,9 +56,10 @@ RUNNER_LABELS = frozenset(
     {
         "finish_pos", "placing_raw", "placing_code", "dead_heat", "finish_time_s", "lbw_raw",
         "lbw_lengths", "running_positions", "last_3f_s", "win_odds", "win_fav_rank",
-        "horse_wt_kg", "horse_wt_change_kg",
+        "horse_wt_kg", "horse_wt_change_kg", "declared_horse_wt_lb",
     }
 )  # fmt: skip
+# declared_horse_wt_lb is horse_wt_kg in pounds (the race-day body weight), so a label column too.
 # result_published_utc and result_unpublished_utc (#225): never in a view at t (the owner's answer
 # on #80, 2026-11-25), until #227 may give them a rule of their own. rail_setting stays in.
 RACE_LABELS = frozenset(
@@ -284,6 +285,49 @@ def test_a_race_view_never_carries_its_result_publication_times_but_keeps_the_ra
             assert not gone, f"races at {t.isoformat()} carries {sorted(gone)}"
             assert list(view["race_id"]) == ["jra:2026-11-28:TOK:11"], t.isoformat()
             assert list(view["rail_setting"]) == ["C"], t.isoformat()
+    finally:
+        one.close()
+
+
+def test_a_runner_view_on_race_day_never_carries_the_body_weight_in_any_unit(rules):
+    # Two runners on 2026-11-28 (opens 2026-11-27 15:00 UTC), weighed at 485 kg (1069 lb) and
+    # 502 kg (1107 lb). From 00:00 JST to long after the race the view keeps the card (draw) and
+    # drops the body weight in kg and in lb; the stored rows still hold both.
+    runners = [(3, 485, 1069, 4), (7, 502, 1107, -2)]  # (horse_no, kg, lb, change kg)
+    rows = []
+    for horse_no, kg, lb, change in runners:
+        row = {f.name: _value(f.type, f.name, 2) for f in _schema("runners")}
+        row |= {"race_id": "jra:2026-11-28:TOK:11", "horse_no": horse_no, "draw": horse_no}
+        row |= {"horse_wt_kg": kg, "declared_horse_wt_lb": lb, "horse_wt_change_kg": change}
+        rows.append(row)
+    weights = {"horse_wt_kg", "horse_wt_change_kg", "declared_horse_wt_lb"}
+    one = duckdb.connect(":memory:")
+    try:
+        one.register("_arrow", pa.Table.from_pylist(rows, schema=_schema("runners")))
+        one.execute('CREATE TABLE "runners" AS SELECT * FROM _arrow')
+        one.unregister("_arrow")
+        opens = datetime(2026, 11, 27, 15, tzinfo=UTC)
+        for t in (opens, datetime(2026, 11, 28, 7, tzinfo=UTC), opens + timedelta(days=30)):
+            view = read_asof(one, "runners", t, rules=rules)
+            leaked = weights & set(view.columns)
+            assert not leaked, f"runners at {t.isoformat()} carries {sorted(leaked)}"
+            assert sorted(view["horse_no"]) == [3, 7], t.isoformat()
+            assert sorted(view["draw"]) == [3, 7], t.isoformat()
+            keys = pd.DataFrame({"race_id": ["jra:2026-11-28:TOK:11"] * 2, "horse_no": [3, 7],
+                                 "t_utc": pd.to_datetime([t, t], utc=True)})  # fmt: skip
+            got = asof_join(keys, "runners", on=["race_id", "horse_no"], rules=rules, con=one)
+            leaked = weights & set(got.columns)
+            assert not leaked, f"runners joined at {t.isoformat()} carries {sorted(leaked)}"
+            assert [int(v) for v in got["draw"]] == [3, 7], t.isoformat()
+        # read_label refuses an offset table (as-of.md), so the label values are read from the
+        # stored rows: the weights are kept in the store, only kept out of the view.
+        stored = one.execute(
+            'SELECT horse_no, horse_wt_kg, declared_horse_wt_lb, horse_wt_change_kg FROM "runners"'
+            " ORDER BY horse_no"
+        ).fetchall()
+        assert stored == [tuple(r) for r in runners]
+        with pytest.raises(ValueError):
+            read_label(one, "runners", rules=rules)
     finally:
         one.close()
 

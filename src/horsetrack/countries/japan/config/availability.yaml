@@ -49,7 +49,7 @@ tables:
     tz: Asia/Tokyo
     offset_min: 0
     # is_scratched stays in the view: accepted leak until #227 (see above)
-    # results; horse weights until post_utc (#227)
+    # results; horse weights (kg and the lb copy) until post_utc (#227)
     label_columns:
       - finish_pos
       - placing_raw
@@ -64,6 +64,7 @@ tables:
       - win_fav_rank
       - horse_wt_kg
       - horse_wt_change_kg
+      - declared_horse_wt_lb
 
   # Results: post + 30 min once post_utc exists (#227); labels only until then.
   dividends:
