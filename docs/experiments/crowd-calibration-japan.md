@@ -596,3 +596,176 @@ Each is filed under epic #72, `status:proposed`.
   (ΔLL with meeting-clustered bounds).
 - #321: the spline fitted on `run_fit`'s rows (dead-heat races left out), to check the study's spline matches D4's
   live fit, or align the two.
+
+---
+
+# Experiment report: the entropy gradient conditioned on the tail (Japan, #277)
+
+Ticket #277 (epic #72). #77's E3 bins each race by its normalised market entropy and finds the power β falling from
+bin 1 (the most concentrated markets) to bin 5: Δβ = β(bin 1) − β(bin 5) = +0.089 [+0.055, +0.123]. #285 found the
+far tail (runners above decimal 51.0) over-priced, and the number of such runners moves with the entropy, so the
+gradient could be the tail count's alone. This study refits the bins' β with the tail conditioned on. **Nothing is
+adopted.** Every figure is an aggregate over the JRA results store (netkeiba race results; no JRDB, no JRA-VAN). No
+runner or race row appears.
+
+- Registry family `japan-entropy-gradient-tail-conditioned`, spec sha256
+  `4eb7e26f48d2a135737ce1fa8bc6af30cc86d7170019339c920829f19dc135bf`. It is its own family, not #77's or #285's. The
+  spec was frozen in the registry before any development row was read. It holds the three methods, the cut points
+  (#77's, from `config/calibration.yaml`), the tail threshold, the tail-count strata, the minimum cell size, and the
+  survival rule.
+- Code: `countries/japan/studies/entropy_tail.py`; the records carry git `895ca69`, and the next commit only adds this
+  report, the registry rows and a ledger row. To reproduce, run
+  `uv run python -m horsetrack.countries.japan.studies.entropy_tail`. The three records are in
+  `docs/experiments/registry/japan/japan-entropy-gradient-tail-conditioned.md`, run ids `dd04cf13045a`, `3ea61d1a5671` and `bad5f5001e28`.
+- Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`. This is a
+  newer build than #77's and #285's, so the counts differ slightly: 43,130 development races and 601,265 priced
+  starters, against 43,058 and 600,231. The full report is under the data directory, at
+  `reports/entropy-tail-japan-4eb7e26f48d2.md`.
+- Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
+  called. No holdout outcome or price was read.
+
+## Owner decisions used
+
+| Decision | What it fixes here | Where it was signed |
+| --- | --- | --- |
+| #77 (2) | The entropy bins are the quintiles of the per-race normalised entropy over the first training window, frozen as four cut points in `config/calibration.yaml`. Not recomputed here. | #77, 2026-11-25 |
+| #77 (5) | The tail is a runner priced strictly above decimal 51.0 (`tail_min_odds`). | #77, 2026-11-25 |
+| D6, D9, D10 | D10 applies (no price before 2014-06-07). D6 and D9 do not bind: this study has no out-of-fold score. | §3, §4, #14 |
+| D11, D12, D14, D15 | Holdout A2 from 2026-11-28, fully locked, opened only by the owner. Not opened here. | §5, #14 |
+| D21 | No figure derived from a licensed source appears in the repository. None is used here. | #14 |
+
+The tail-count strata `[0, 1, 2, 3, 4, 5+]`, the 30-race minimum cell, the share's definition and the rule for
+"survives" are implementation choices recorded in the frozen spec, not owner decisions, and were written before any
+race was scored.
+
+## Hypothesis
+
+The null is the starting point: after the tail is conditioned on, the entropy bins have the same β and Δβ = 0. The
+gradient is the tail's alone if Δβ's 95% Wald CI covers 0 under both conditioned methods.
+
+- **Direction.** More tail runners go with a more concentrated market (a lower entropy bin, below), and tail runners are over-priced, so a
+  tail-driven gradient would shrink toward 0 when the tail is conditioned on.
+- **Failure rule** (the frozen spec's): the gradient *survives* conditioning on the tail, for each conditioned method,
+  when Δβ's 95% CI excludes 0. It is written after #77's E3 table, which looked at the same development races, so this
+  study cannot confirm a gradient independently.
+
+## Variants tried
+
+The family has 3 variants and 3 records, all scored. Each is one in-sample fit on every development race (no fold, no
+bootstrap), with Wald CIs (estimate ± 1.96 se, inverse observed information) that treat races as independent. The
+model in all three is the conditional logit P(i wins) ∝ exp(slope × ln(1/odds)) over each race's priced runners.
+
+- **unconditioned**: one β per bin, #77's E3.
+- **tail_share**: slope = β(bin) + γ × share, one joint fit over the five bins, where share is the race's runners
+  priced above 51.0 divided by its priced runners. The bin β is a race with no tail runner.
+- **tail_count_strata**: races cut by their count of runners above 51.0 into 0, 1, 2, 3, 4 and 5 or more; within each
+  stratum bin 1 and bin 5 get their own slope; Δβ is pooled over the strata by inverse variance (a stratum is used
+  when both cells hold at least 30 races; all six were).
+
+### The confounder: the tail count by entropy bin
+
+| Bin | Races | Mean tail runners | Mean tail share | Races with none |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 9,199 | 6.32 | 0.438 | 43 |
+| 2 | 8,656 | 5.39 | 0.371 | 74 |
+| 3 | 8,506 | 4.82 | 0.329 | 91 |
+| 4 | 8,156 | 4.12 | 0.282 | 138 |
+| 5 | 8,613 | 2.91 | 0.201 | 576 |
+
+The tail count falls steadily across the bins, as the premise said. The overlap is thin at the low end: bin 1 has 43
+races with no tail runner and bin 5 has 576.
+
+### Δβ = β(bin 1) − β(bin 5), three ways
+
+| Method | Races | Δβ | 95% CI | Excludes 0 |
+| --- | ---: | ---: | --- | --- |
+| unconditioned | 43,130 | +0.0879 | [+0.0540, +0.1217] | yes |
+| tail_share | 43,130 | +0.0473 | [+0.0067, +0.0878] | yes |
+| tail_count_strata | 17,812 | +0.0879 | [+0.0468, +0.1291] | yes |
+
+The share's coefficient is γ = +0.176 [+0.079, +0.274]: a race with every runner in the tail would have a slope 0.18
+higher than the bin's β. The strata method's races are the bin 1 and bin 5 cells only.
+
+### β by entropy bin, unconditioned and with the share
+
+| Bin | Unconditioned β | 95% CI | With the share (β at share 0) | 95% CI |
+| --- | ---: | --- | ---: | --- |
+| 1 | 1.0575 | [1.0387, 1.0763] | 0.9804 | [0.9339, 1.0268] |
+| 2 | 1.0199 | [0.9984, 1.0414] | 0.9552 | [0.9136, 0.9968] |
+| 3 | 1.0159 | [0.9925, 1.0394] | 0.9584 | [0.9190, 0.9978] |
+| 4 | 0.9972 | [0.9715, 1.0229] | 0.9477 | [0.9102, 0.9851] |
+| 5 | 0.9696 | [0.9415, 0.9978] | 0.9331 | [0.8985, 0.9677] |
+
+### Tail-count strata: β of bin 1 and bin 5 within each
+
+| Tail runners | Bin 1 races | Bin 5 races | β bin 1 | β bin 5 | Δβ | se |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 43 | 576 | 0.9475 | 0.9136 | +0.034 | 0.155 |
+| 1 | 204 | 1,316 | 1.2560 | 0.9749 | +0.281 | 0.088 |
+| 2 | 431 | 1,719 | 1.0424 | 0.9606 | +0.082 | 0.057 |
+| 3 | 703 | 1,932 | 1.0332 | 1.0116 | +0.022 | 0.047 |
+| 4 | 793 | 1,515 | 1.0419 | 0.9480 | +0.094 | 0.047 |
+| 5 or more | 7,025 | 1,555 | 1.0585 | 0.9630 | +0.095 | 0.034 |
+
+Every stratum has a positive Δβ, from +0.022 to +0.281, and the stratum with one tail
+runner (se 0.088) sits well above the rest. These are six CIs with no correction.
+
+## Does the gradient survive conditioning on the tail?
+
+**By the pre-registered rule, yes, under both conditioned methods; under the share model only just, and at about half
+its size.**
+
+- Within strata of the tail count, Δβ is +0.0879 [+0.0468, +0.1291], the same point estimate as unconditioned
+  (+0.0879) with a CI that excludes 0 by a wide margin. Conditioning this way removes none of it.
+- With the share as a covariate, Δβ falls to +0.0473 [+0.0067, +0.0878]: the point estimate drops by 46% and the
+  lower bound is 0.007, so the CI excludes 0 but is also consistent with a gradient near 0.007. The drop is bin 1's β
+  falling from 1.058 to 0.980 once the share is allowed to act on it, while bin 5's falls from 0.970 to 0.933. The
+  share's coefficient is positive and its CI excludes 0 (γ = +0.176), so the tail does move the slope
+  in the direction #285 found.
+
+The two conditioned methods disagree on size (+0.047 against +0.088), and each is an incomplete control. The strata
+are coarse at the top: the 5-or-more stratum holds 7,025 of bin 1's 9,199 races and carries the largest weight in the
+pool, and tail counts above 5 still differ between bins 1 and 5 within it (bin 1 averages 6.3 across all its races).
+The share model assumes the tail acts linearly in the share on the slope, the same way in every bin, and the share
+is also a function of field size. Neither method makes the tail count and the entropy independent. What is shown is
+that a gradient remains after both controls, not how large the entropy's own gradient is.
+
+## Alternatives rejected and why
+
+- **Fitting the bins on runners at or under 51.0 only.** Dropping the tail runners from each race's choice set
+  changes the winners a race can have and the entropy's meaning, and it was not pre-registered. It is a follow-up.
+- **A tail-share covariate centred on its mean.** The β by bin would then be a race of average share, not one with no
+  tail. The frozen share is uncentred, which makes the bin β a no-tail-runner slope; Δβ and its CI do not depend on
+  the centring because the share enters with one γ in every bin.
+- **Entropy bins recomputed within the body.** #77's cut points were signed on the full-field entropy. New cuts are an
+  owner decision, so they are not made here.
+- **A matched or reweighted design on the tail count.** Not pre-registered; strata and a covariate were the ticket's
+  two routes.
+- **Out-of-fold scoring of the conditioned β.** The ticket asks whether the gradient survives, an in-sample
+  estimation question, not whether it helps the price. A gradient that survives is still a screen, as in #77.
+- **Holdout.** Not read, not opened.
+
+## What this rules out
+
+- **The entropy gradient being the tail count's alone.** Under both conditioned methods Δβ's CI excludes 0 (the lower
+  bounds are +0.007 and +0.047), so a zero gradient after conditioning is out, at the resolution of these two
+  controls. The upper bounds (+0.088 with the share; +0.129 in strata) rule out a conditioned gradient much above
+  #77's unconditioned +0.089 [+0.055, +0.123].
+- **A tail effect that is negligible.** γ's CI excludes 0 (+0.079 to +0.274): races with more tail runners get a higher
+  slope, and conditioning on that takes about half of the gradient's point estimate in the share model.
+- **Not ruled out.** A gradient between 0.007 and about 0.05, the share model's range, cannot be told from the tail's
+  residual effect; the strata method has no such shrinkage but is coarse at the top. Neither CI is clustered by
+  meeting (#276), so both are likely too narrow. The result is in-sample on the same development races as #77, with
+  no family-wise correction, and it is not a finding for the holdout.
+
+## Follow-ups filed
+
+None filed. Proposed under epic #72, `status:proposed`; the orchestrator files them.
+
+- Refit the bins with the entropy computed on the runners at or under 51.0 (the body), so the bins cannot track the
+  tail count by construction; this needs new cut points from the owner.
+- Tail control by a flexible function of the tail count and field size (a spline, or the count within each field-size
+  band) in the joint fit, instead of a linear share, and finer strata at the top (6, 7, 8 and more tail runners).
+- Meeting-clustered CIs for Δβ under each method (the same need as #276).
+- When A6's pre-registered family (#88) takes the entropy gradient as a candidate, take the conditioned size (about
+  +0.05 to +0.09), not the unconditioned one.
