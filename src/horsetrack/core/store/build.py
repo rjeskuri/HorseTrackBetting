@@ -48,6 +48,7 @@ BUILD_FILE = "_build.json"
 PAGE_KEY = "_page_key"  # transient column: which page a row came from (dropped before writing)
 
 _PANDAS_TYPES = {pa.int64(): pd.Int64Dtype(), pa.bool_(): pd.BooleanDtype()}
+_UTC_DTYPE = "datetime64[us, UTC]"  # a `utc` column as pandas holds it (tables.py)
 
 # horse_runs lists withdrawals as rows (placing WV, WV-A, WX, ...): not runs, never in the join
 _WITHDRAWN_PREFIXES = ("WV", "WX", "WR")
@@ -163,6 +164,25 @@ def season_start_month(source: str) -> int:
     if not 1 <= month <= 12:
         raise ValueError(f"season_start_month() of {source!r} is {month}, not a month")
     return month
+
+
+def _race_instants(source: str, hook_name: str) -> dict[str, datetime]:
+    """race_id -> instant in UTC from the adapter's optional `<hook_name>()` hook, else none."""
+    hook = getattr(get_adapter(source), hook_name, None)
+    logged = dict(hook()) if callable(hook) else {}
+    return {str(rid): _coerce_value(at, schemas.UTC) for rid, at in logged.items()}
+
+
+def result_published_utc(source: str) -> dict[str, datetime]:
+    """race_id -> when the race's official result was first seen published, in UTC: the adapter's
+    optional `result_published_utc()` hook (ticket #225), else none."""
+    return _race_instants(source, "result_published_utc")
+
+
+def result_unpublished_utc(source: str) -> dict[str, datetime]:
+    """race_id -> the race's lower bound, the last logger poll that did not show its result, in
+    UTC: the adapter's optional `result_unpublished_utc()` hook (ticket #225), else none."""
+    return _race_instants(source, "result_unpublished_utc")
 
 
 def _season_of(race_date: date, start_month: int) -> str:
@@ -499,6 +519,13 @@ def _assemble(
     )
     races["race_no"] = races["race_no"].fillna(keys["race_no"])
     races["season"] = _season(races["race_date"], start_month)
+    for column, instants in (
+        ("result_published_utc", result_published_utc(source)),
+        ("result_unpublished_utc", result_unpublished_utc(source)),
+    ):
+        races[column] = pd.Series(
+            [instants.get(rid) for rid in races["race_id"]], index=races.index, dtype=_UTC_DTYPE
+        )
 
     keys = _race_keys(runners["race_id"])
     for column in ("meeting_id", "race_date", "venue", "race_no"):

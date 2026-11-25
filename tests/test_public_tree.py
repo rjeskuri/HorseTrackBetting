@@ -169,6 +169,48 @@ def test_a_tracked_data_path_is_refused(cpt):
     assert_refused_exactly(cpt, files, refused, DATA)
 
 
+def test_a_tracked_playwright_mcp_path_is_refused_as_data(cpt):
+    files = {
+        ".playwright-mcp/page-2026-11-24T10-00-00.yml": b"- text: Win 3.4\n",
+        ".playwright-mcp/console-2026-11-24T10-00-01.log": b"[LOG] ok\n",
+        ".playwright-mcp/traces/2026/odds.json": b"{}\n",
+        ".playwright-mcp/shot.png": b"\x89PNG\r\n\x1a\n",
+        ".playwright-mcp/.gitkeep": b"",
+        "docs/playwright-mcp.md": b"# Playwright MCP notes\n",
+        "src/x/playwright_mcp.py": b"X = 1\n",
+        ".playwright-mcp.md": b"# near miss\n",
+        "playwright-mcp/page.yml": b"- text: x\n",
+        "docs/.playwright-mcp/page.yml": b"- text: x\n",
+        "tests/test_playwright_mcp.py": b"def test_x():\n    pass\n",
+    }
+    refused = {p for p in files if p.startswith(".playwright-mcp/")}
+    assert_refused_exactly(cpt, files, refused, DATA)
+    detail = " ".join(v.detail for v in run(cpt, files) if v.path in refused)
+    assert ".playwright-mcp/" in detail
+
+
+def test_the_playwright_mcp_folder_is_git_ignored():
+    def ignored(path: str) -> bool:
+        proc = subprocess.run(
+            ["git", "check-ignore", "-q", "--", path],
+            cwd=REPO,
+            env=clean_env(),
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode in (0, 1), proc.stderr
+        return proc.returncode == 0
+
+    for path in (
+        ".playwright-mcp/x.yml",
+        ".playwright-mcp/page-2026-11-24T10-00-00.yml",
+        ".playwright-mcp/nested/dir/shot.png",
+    ):
+        assert ignored(path), f"{path} is not git-ignored"
+    for path in ("docs/playwright-mcp.md", "playwright-mcp/x.yml", ".playwright-mcp.md"):
+        assert not ignored(path), f"{path} is wrongly git-ignored"
+
+
 def test_a_fixture_outside_synthetic_is_refused(cpt):
     marked = (MARKER + " hand-built -->\n<html></html>\n").encode()
     files = {

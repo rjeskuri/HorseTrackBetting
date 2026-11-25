@@ -6,8 +6,10 @@ Rules (docs/specs/board-at-t.md):
   before t; `capture_utc` is the oldest availability time among the price rows on the board and
   the SCR rows (a stale row dropped for naming a scratched runner does not count).
 - A row is final when `source_update_utc` is null and '最終オッズ' is in `page_state` or
-  `status_raw`. The final board is the first capture (rows sharing a snapshot_utc) whose priced WIN
-  rows are all final.
+  `status_raw`. A capture (rows sharing a snapshot_utc) is final for a pool when it holds a priced
+  row of that pool and every one is final. The final board starts from the anchor, the first
+  capture final for WIN; PLACE and Wide come from each pool's first final capture at or after the
+  anchor, else its latest one before it (HKTrack logs Wide as its own capture ~2 s after WIN+PLACE).
 - `bucket_for` maps minutes to post onto the smallest grid horizon at or above it.
 """
 
@@ -101,10 +103,15 @@ def _priced(row: dict[str, Any]) -> bool:
     return row.get("odds") is not None and row.get("status_raw") != SCRATCHED
 
 
+def _pool_rows_final(rows: Iterable[dict[str, Any]], pool: str) -> bool:
+    """Every priced row of `pool` is final, and there is at least one."""
+    priced = [r for r in rows if r.get("pool") == pool and _priced(r)]
+    return bool(priced) and all(_is_final(r) for r in priced)
+
+
 def _win_rows_final(rows: Iterable[dict[str, Any]]) -> bool:
     """Every priced WIN row is final, and there is at least one."""
-    priced = [r for r in rows if r.get("pool") == WIN and _priced(r)]
-    return bool(priced) and all(_is_final(r) for r in priced)
+    return _pool_rows_final(rows, WIN)
 
 
 def _latest(rows: Iterable[tuple[datetime, dict[str, Any]]]) -> dict[tuple, tuple[datetime, dict]]:
@@ -210,20 +217,29 @@ def final_board(
     *,
     post_utc: datetime | None = None,
 ) -> RaceBoard | None:
-    """The board of the first capture whose WIN rows are final, from that capture's rows alone;
-    None when the race never shows a final capture. `at_utc` is when the last row of that capture
-    was available."""
+    """The final board of `race_id`; None when no capture's priced WIN rows are all final.
+
+    The anchor is the first capture (by snapshot_utc) whose priced WIN rows are all final, and the
+    board starts from its rows. PLACE and Wide, each with its SCR rows and pool total, come instead
+    from that pool's first final capture at or after the anchor, else its latest final capture
+    before it, else are left off. `at_utc` is when the last row taken was available."""
     captures: dict[datetime, list[tuple[datetime, dict[str, Any]]]] = {}
     for available, row in _race_rows(rows, race_id):
         snap = _instant(row.get("snapshot_utc"))
         if snap is not None:
             captures.setdefault(snap, []).append((available, row))
-    for snap in sorted(captures):
-        capture = captures[snap]
-        if _win_rows_final(row for _, row in capture):
-            at_utc = max(available for available, _ in capture)
-            return _build(race_id, _latest(capture), at_utc, post_utc)
-    return None
+    snaps = sorted(captures)
+    anchor = next((s for s in snaps if _win_rows_final(row for _, row in captures[s])), None)
+    if anchor is None:
+        return None
+    taken = [(a, row) for a, row in captures[anchor] if row.get("pool") not in (PLACE, WIDE)]
+    for pool in (PLACE, WIDE):
+        finals = [s for s in snaps if _pool_rows_final((row for _, row in captures[s]), pool)]
+        source = next((s for s in finals if s >= anchor), finals[-1] if finals else None)
+        if source is not None:
+            taken += [(a, row) for a, row in captures[source] if row.get("pool") == pool]
+    at_utc = max(available for available, _ in taken)
+    return _build(race_id, _latest(taken), at_utc, post_utc)
 
 
 # ---------------------------------------------------------------- post times
@@ -254,11 +270,20 @@ def _card_post_times(path: Path) -> dict[int, datetime]:
     return out
 
 
-def post_times_for(race_date: date, venue: str) -> dict[int, datetime]:
+def jra_day_dir(race_date: date, day_dir: Path | None = None) -> Path:
+    """The folder of the day's JRA odds logs: `day_dir` when given (a pulled VM folder, ticket
+    #236), else the Mac's own `odds_snapshots/jra/<date>/`."""
+    if day_dir is not None:
+        return day_dir
+    return paths.odds_snapshot_path("jra", race_date.isoformat(), "_").parent
+
+
+def post_times_for(
+    race_date: date, venue: str, *, day_dir: Path | None = None
+) -> dict[int, datetime]:
     """Race number -> post time (aware UTC) of one meeting: the `<VENUE>.races.json` sidecar beside
-    the odds log, else HKTrack's stored card, else empty."""
-    log = paths.odds_snapshot_path("jra", race_date.isoformat(), venue)
-    sidecar = odds_log.read_post_times(log.with_name(f"{venue}.races.json"))
+    the odds log (in `day_dir` when given), else HKTrack's stored card, else empty."""
+    sidecar = odds_log.read_post_times(jra_day_dir(race_date, day_dir) / f"{venue}.races.json")
     if sidecar:
         return sidecar
     card = _card_path(race_date, venue)

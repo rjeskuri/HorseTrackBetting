@@ -15,6 +15,7 @@ Research and tooling for pari-mutuel horse racing, one folder per country (Japan
 - Real-page tests (marker `local`, need `$HORSETRACK_DATA_DIR/fixtures`, skipped when absent): `uv run pytest -m local -q`
 
 ## Where things live
+- [docs/architecture.md](docs/architecture.md): Mermaid diagrams of the system, the race-day flow, the store, governance and the harness workflow. When an epic changes one of these flows, its last ticket updates this file.
 - `tests/`: the test suite.
 - `scripts/verify.sh`: the checks behind the verify command; `.github/workflows/ci.yml` runs it.
 - `.githooks/`: `pre-commit` (format and lint on staged files, no commits on main) and `pre-push` (no pushes to main, no force pushes).
@@ -22,13 +23,14 @@ Research and tooling for pari-mutuel horse racing, one folder per country (Japan
 - `src/horsetrack/`: the package. Entries marked (planned) do not exist until a ticket creates them.
 - `src/horsetrack/core/{env,paths}.py`: settings from the environment or the repo-root `.env`; `HORSETRACK_DATA_DIR` resolution and the on-disk layout under it (see `.env.example`).
 - `src/horsetrack/core/{config,pricing}.py` (`config.py` exists, `pricing.py` planned): configuration, pari-mutuel pricing maths.
-- `src/horsetrack/core/ingest/`, `core/store/`: HTTP/ingest, storage (the store's tables and readers: `docs/specs/store.md`).
-- `src/horsetrack/core/eval/`: the evaluation harness; `holdout.py` splits off the locked final holdout.
+- `src/horsetrack/core/ingest/`, `core/store/`: HTTP/ingest, storage (the store's tables and readers: `docs/specs/store.md`; as-of views at a decision time: `docs/specs/as-of.md`).
+- `src/horsetrack/core/eval/`: the evaluation harness; `holdout.py` splits off the locked final holdout; `registry.py`, the append-only, hash-chained run registry (`$HORSETRACK_DATA_DIR/registry/<country>.jsonl`) and its committed aggregate summary (`docs/experiments/registry-<country>.md`); `reports.py`, `write_report`, which keeps licensed-source outputs out of the tree.
 - `src/horsetrack/countries/<country>/config/holdout.yaml` (`japan`, `hongkong`): each country's holdout start and seed, read through `core.config.load_country_yaml`. Each eval ticket owns one file there: `scoring.yaml` (#69), `folds.yaml` (#70), `holdout.yaml` (#71).
 - `src/horsetrack/countries/japan/{jra,nar,jrdb,logger}/` (planned): Japan sources, odds logger.
 - `src/horsetrack/countries/japan/board/`: the board at a decision time and the final board (`docs/specs/board-at-t.md`); `feed.py`, the live-board feed (`docs/specs/board-feed.md`).
 - `src/horsetrack/countries/hongkong/hkjc/` (planned): Hong Kong source.
 - `docs/problem-statement.md`, `docs/ledger.md`, `docs/experiment-report.md` (planned): the signed problem statement, the known-vs-assumed ledger, the report template.
+- `docs/modeling.md`: the modeling in six Mermaid diagrams (decision, C0-C6 stack, meta-model members, Place/Wide/exotics, adoption, race-day timeline), each box with its ticket and module.
 - `tests/fixtures/synthetic/` (planned): the only fixtures committed.
 
 ## Modeling governance
@@ -40,6 +42,7 @@ These are owner decisions: target and estimand, loss and metric, baseline, split
 - `docs/ledger.md` labels every claim measured (with its source), single-run, or assumption.
 - Carry over no HKTrack assumption without a ticket that tests it.
 - The null result is the starting point, not something to explain away.
+- Every run, failures included, is a registry record (`core.eval.registry.default_registry(country).append`), and every output built on a licensed source (`WITHHELD_SOURCES`: JRDB, JRA-VAN) is written through `core.eval.reports.write_report`, which refuses the repository.
 
 ## Layout
 - `src/horsetrack/core` holds only HTTP/ingest, storage, pari-mutuel pricing maths and the eval harness.

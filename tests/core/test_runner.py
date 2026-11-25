@@ -496,6 +496,101 @@ def test_isolated_blocked_pages_do_not_open_the_circuit(site, adapter, fetcher, 
     assert site.total_hits == 9
 
 
+def _enqueue_script(site, queue, script: str) -> int:
+    """One task per letter, in queue order (keys k00, k01, ...): a/b = host a.test / b.test, upper
+    case serves a good page, lower case a block page (HTTP 200, no marker)."""
+    tasks = []
+    for i, letter in enumerate(script):
+        task = make_task("results", f"k{i:02d}", base=A if letter.lower() == "a" else B)
+        site.add(task.url, "MARKER ok" if letter.isupper() else "<html>Access denied</html>")
+        tasks.append(task)
+    queue.enqueue(tasks)
+    return len(tasks)
+
+
+# (limit, script, tasks processed when the run stops, host named in the stop reason)
+_MARKER_STOPS = [
+    (3, "Ab" * 10, 6, "b.test"),  # b's 3rd block page; a succeeds in between every time
+    (2, "AAAb" * 5, 8, "b.test"),  # a succeeds three times per b page
+    (1, "AAb" * 4, 3, "b.test"),  # limit 1: the first block page stops it
+    (3, "bA" * 10, 5, "b.test"),  # b is the first task of every pair
+    (3, "ab" * 10, 5, "a.test"),  # both hosts block: a reaches 3 first (task 5), b has only 2
+    (3, "Abab" * 4, 6, "b.test"),  # b's 3rd miss is task 6; a's streak was cut by its own success
+    (3, "bAbABAbAbAbA", 11, "b.test"),  # b: 2 misses, own success, then 3 misses
+    (2, "BBbAbAbA", 5, "b.test"),  # b's early successes do not count; 2 misses then stop
+]
+
+
+@pytest.mark.parametrize(
+    ("limit", "script", "processed", "host"),
+    _MARKER_STOPS,
+    ids=[f"{limit}-{script[:8]}-{host}" for limit, script, _, host in _MARKER_STOPS],
+)
+def test_a_marker_miss_streak_is_counted_per_host(
+    site, adapter, fetcher, queue, http, limit, script, processed, host
+):
+    """One streak per URL host: a host that only serves block pages stops the run after `limit`
+    of its own pages, whatever the other hosts return in between, and the reason names it."""
+    http["circuit_breaker"]["max_consecutive_marker_misses"] = limit
+    total = _enqueue_script(site, queue, script)
+
+    summary = _run(adapter, fetcher, queue, http=http)
+
+    other = "a.test" if host == "b.test" else "b.test"
+    assert summary.circuit_opened and summary.stopped_reason.startswith("circuit open")
+    assert host in summary.stopped_reason and other not in summary.stopped_reason
+    assert "marker" in summary.stopped_reason
+    assert site.total_hits == summary.processed == processed
+    done = script[:processed]
+    assert summary.failed == sum(c.islower() for c in done)
+    assert summary.fetched == sum(c.isupper() for c in done)
+    assert queue.counts()[("results", "pending")] == total - processed
+
+
+@pytest.mark.parametrize(
+    ("limit", "script"),
+    [
+        (3, "bAbAB" * 4),  # b: miss, miss, own success, repeated: never 3 in a row
+        (2, "bABAbABA" * 3),  # b alternates miss / own success, a healthy
+        (3, "bbaaBA" * 3),  # both hosts miss twice in a row, each reset by its own success
+        (2, "aABB" * 4),  # a misses every other page of its own, b's pages are all good
+    ],
+    ids=["b-resets-itself", "alternating", "both-hosts-reset", "interleaved-misses"],
+)
+def test_a_hosts_own_success_resets_its_streak_and_other_hosts_do_not_add_to_it(
+    site, adapter, fetcher, queue, http, limit, script
+):
+    """The streak is the host's own consecutive pages: misses on a host broken by that host's
+    success never reach the limit, and pages from other hosts neither add to nor clear it."""
+    http["circuit_breaker"]["max_consecutive_marker_misses"] = limit
+    _enqueue_script(site, queue, script)
+
+    summary = _run(adapter, fetcher, queue, http=http)
+
+    assert summary.stopped_reason == "queue empty" and not summary.circuit_opened
+    assert summary.failed == sum(c.islower() for c in script)
+    assert summary.fetched == sum(c.isupper() for c in script)
+
+
+def test_a_blocked_host_cannot_be_worked_through_the_queue_beside_a_healthy_one(
+    site, adapter, fetcher, queue, http
+):
+    """The case behind the ticket: with the run-wide streak, a.test's successes kept resetting it
+    and b.test's block pages were collected for the whole queue."""
+    http["circuit_breaker"]["max_consecutive_marker_misses"] = 4
+    _enqueue_script(site, queue, "Ab" * 30)
+
+    summary = _run(adapter, fetcher, queue, http=http)
+
+    assert summary.circuit_opened and "b.test" in summary.stopped_reason
+    assert (site.hits_on("a.test"), site.hits_on("b.test")) == (4, 4)
+    assert queue.counts() == {
+        ("results", "fetched"): 4,
+        ("results", "failed"): 4,
+        ("results", "pending"): 52,
+    }
+
+
 def test_parse_exception_is_tolerated_and_the_raw_page_kept(site, adapter, fetcher, queue):
     broken, fine = make_task("results", "broken", priority=9), make_task("results", "fine")
     site.add(broken.url, "MARKER BROKEN\nhorse:H1\n")

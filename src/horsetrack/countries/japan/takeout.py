@@ -1,4 +1,4 @@
-"""Per-race payout rates with the JRA Premium boosts (ticket #76).
+"""Per-race payout rates with the JRA Premium boosts (tickets #76, #197).
 
 Takeout comes from a per-race lookup (date x pool x boost), never a constant. The base rate is
 1 - Pool.takeout_on(date) from jra.yaml; the boost calendar (config/takeout_boosts.yaml) lists the
@@ -13,6 +13,13 @@ Several entries may match one race and pool. A super_premium or ultra_premium en
 to 80%, and a premium or ultra_premium entry adds 5% to the rate in force, so a premium on a Super
 Premium day stacks to 85% (JRA's result PDFs for 2022-12-28 and 2023-12-28 show this). `boost` names
 the effect: "ultra_premium" for 80% + 5%, else "super_premium" or "premium".
+
+An entry covers one day, or every day from `date` to `until` (both included). An entry with `age: N`
+matches only races restricted to N-year-olds: the race's conditions label (the store's
+`race_class_raw`, e.g. "2歳未勝利") starts with "N歳" and is not an "N歳以上" label. The race id
+cannot tell those races apart, so `race_takeout` takes the label as `race_class_raw` and raises
+RaceConditionsNeeded when an age entry matches the race's date, venue, race and pool and no label
+was given. Entries without `age` ignore the label.
 """
 
 from __future__ import annotations
@@ -33,11 +40,15 @@ PREMIUM_TOP_UP = 0.05
 
 _SETS_80 = {"super_premium", "ultra_premium"}
 _TOPS_UP = {"premium", "ultra_premium"}
-_FIELDS = {"kind", "date", "venue", "race_no", "pools"}
+_FIELDS = {"kind", "date", "until", "age", "venue", "race_no", "pools"}
 
 
 class TakeoutUnknown(LookupError):
     """No single takeout applied on that date (before 2014-06-07): use the race's overround."""
+
+
+class RaceConditionsNeeded(ValueError):
+    """An age-restricted entry matches the race: pass its conditions label as race_class_raw."""
 
 
 @dataclass(frozen=True)
@@ -47,14 +58,24 @@ class Boost:
     venue: str | None = None
     race_no: int | None = None
     pools: tuple[str, ...] | None = None
+    until: date | None = None  # the last day covered, inclusive; None means `date` alone
+    age: int | None = None  # only races restricted to this age (see age_matches)
 
     def matches(self, day: date, venue: str, race_no: int, pool: str) -> bool:
+        """Date, venue, race and pool; the age restriction is age_matches'."""
         return (
-            self.date == day
+            self.date <= day <= (self.until or self.date)
             and self.venue in (None, venue)
             and self.race_no in (None, race_no)
             and (self.pools is None or pool in self.pools)
         )
+
+    def age_matches(self, race_class_raw: str) -> bool:
+        """True without `age`; else the label starts with "<age>歳" and not with "<age>歳以上"."""
+        if self.age is None:
+            return True
+        prefix = f"{self.age}歳"
+        return race_class_raw.startswith(prefix) and not race_class_raw.startswith(f"{prefix}以上")
 
 
 @dataclass(frozen=True)
@@ -96,11 +117,13 @@ def _entry(item: Any, jra: config.SourceConfig) -> Boost:
     kind = item.get("kind")
     if kind not in KINDS:
         raise ValueError(f"boost entry {item!r}: kind must be one of {KINDS}")
-    day = item.get("date")
-    if isinstance(day, str):
-        day = date.fromisoformat(day)
-    if not isinstance(day, date):
-        raise ValueError(f"boost entry {item!r}: date must be YYYY-MM-DD")
+    day = _date(item, "date")
+    until = _date(item, "until") if "until" in item else None
+    if until is not None and until < day:
+        raise ValueError(f"boost entry {item!r}: until is before date")
+    age = item.get("age")
+    if age is not None and (type(age) is not int or age < 1):
+        raise ValueError(f"boost entry {item!r}: age must be a positive integer")
     venue = item.get("venue")
     if venue is not None and venue not in jra.venues:
         raise ValueError(f"boost entry {item!r}: unknown venue {venue!r}")
@@ -112,7 +135,21 @@ def _entry(item: Any, jra: config.SourceConfig) -> Boost:
         if not isinstance(pools, list) or not pools or any(p not in jra.pools for p in pools):
             raise ValueError(f"boost entry {item!r}: pools must be a non-empty list of pool codes")
         pools = tuple(pools)
-    return Boost(kind=kind, date=day, venue=venue, race_no=race_no, pools=pools)
+    return Boost(
+        kind=kind, date=day, venue=venue, race_no=race_no, pools=pools, until=until, age=age
+    )
+
+
+def _date(item: dict[str, Any], key: str) -> date:
+    value = item.get(key)
+    if isinstance(value, str):
+        try:
+            value = date.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f"boost entry {item!r}: {key} must be YYYY-MM-DD") from None
+    if not isinstance(value, date):
+        raise ValueError(f"boost entry {item!r}: {key} must be YYYY-MM-DD")
+    return value
 
 
 @cache
@@ -133,11 +170,19 @@ def _parse_race_id(race_id: str, jra: config.SourceConfig) -> tuple[date, str, i
     return date.fromisoformat(day), venue, int(number)
 
 
-def race_takeout(race_id: str, pool: str, *, calendar: BoostCalendar | None = None) -> RaceTakeout:
+def race_takeout(
+    race_id: str,
+    pool: str,
+    *,
+    calendar: BoostCalendar | None = None,
+    race_class_raw: str | None = None,
+) -> RaceTakeout:
     """The payout rate `pool` paid in `race_id`; calendar None means the shipped calendar.
 
-    Raises TakeoutUnknown before 2014-06-07, and ValueError for a malformed race id or an unknown
-    pool code.
+    `race_class_raw` is the race's conditions label (the store's column); only age entries read it.
+    Raises TakeoutUnknown before 2014-06-07, RaceConditionsNeeded when an age entry matches the race
+    and pool and race_class_raw is None, and ValueError for a malformed race id or an unknown pool
+    code.
     """
     jra = config.load_source("japan", "jra")
     day, venue, race_no = _parse_race_id(race_id, jra)
@@ -149,7 +194,12 @@ def race_takeout(race_id: str, pool: str, *, calendar: BoostCalendar | None = No
     base = 1 - takeout
 
     cal = calendar if calendar is not None else _shipped()
-    kinds = {e.kind for e in cal.matching(day, venue, race_no, pool)}
+    matched = cal.matching(day, venue, race_no, pool)
+    if race_class_raw is None and any(e.age is not None for e in matched):
+        raise RaceConditionsNeeded(
+            f"{race_id} {pool}: an age-restricted boost matches; pass race_class_raw"
+        )
+    kinds = {e.kind for e in matched if race_class_raw is None or e.age_matches(race_class_raw)}
     sets_80 = bool(kinds & _SETS_80)
     tops_up = bool(kinds & _TOPS_UP)
     rate = SUPER_PREMIUM_RATE if sets_80 else base

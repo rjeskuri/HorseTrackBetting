@@ -13,6 +13,12 @@ lists and three odds pages per race (単勝・複勝, 馬連, ワイド). Every 
 carries a checksum the code under test cannot derive: it is only readable off the pages.
 `scramble` swaps every checksum for another, in the pages and the routing alike.
 
+Results (ticket #225): the week also has the レース結果 menu (RESULTS_MENU, a fixed entry code like
+the other two) and one results race list per meeting (`jradb_pages.results_race_list`). A World's
+`published` gives, per (day, venue), the races whose result is out (default: none);
+`results_page(day, venue, races)` builds the list as it reads with `races` out, so a test can
+serve it changing over time. Result pages themselves are linked, never served.
+
 Tier 2 (ticket #130): every race list also links 枠連, 馬単, 3連複 and 3連単. Their pages exist only
 for the pools a World is given in `tier2` (built with `jradb_pages.legs`, prices from
 `exotic_board`), so a request for any other pool's page gets the error page (`served` False). A
@@ -25,7 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -33,7 +39,7 @@ from urllib.parse import parse_qs
 
 import httpx
 import jradb_pages as pages
-from jradb_pages import CARD_PATH, ODDS_PATH
+from jradb_pages import CARD_PATH, ODDS_PATH, RESULTS_MENU_CNAME, RESULTS_PATH
 
 from horsetrack.core.ingest.fetcher import Fetcher
 from horsetrack.core.ingest.types import FetchTask
@@ -42,7 +48,8 @@ HOST = "www.jra.go.jp"
 SOURCE = "jra"
 CARD_MENU = (CARD_PATH, "pw01dli00/F3")  # 出馬表: the week's meetings (fixed entry point)
 ODDS_MENU = (ODDS_PATH, "pw15oli00/6D")  # オッズ: the week's meetings (fixed entry point)
-ENTRY_CNAMES = {CARD_MENU[1], ODDS_MENU[1]}
+RESULTS_MENU = (RESULTS_PATH, RESULTS_MENU_CNAME)  # レース結果: the week's meetings (#225)
+ENTRY_CNAMES = {CARD_MENU[1], ODDS_MENU[1], RESULTS_MENU[1]}
 LIVE_STATE = "14時00分現在"
 JST = timezone(timedelta(hours=9))
 UTC = timezone.utc
@@ -257,6 +264,7 @@ class World:
         *,
         tier2: Sequence[str] = (),
         win5: Mapping[date, Win5Day] | None = None,
+        published: Mapping[tuple[date, str], Iterable[int]] | None = None,
     ):
         self.days = {day: list(meetings) for day, meetings in days.items()}
         unknown = set(tier2) - set(TIER2)
@@ -266,17 +274,22 @@ class World:
         self.win5_links: dict[date, Link] = {}
         self._card_lists: dict[tuple[date, str], Link] = {}
         self._odds_lists: dict[tuple[date, str], Link] = {}
+        self._results_lists: dict[tuple[date, str], Link] = {}
+        self._result_cnames: dict[tuple[date, str], dict[int, str]] = {}
         self._odds: dict[tuple[date, str, int, str], Link] = {}
         self._meetings: dict[tuple[date, str], Meeting] = {}
         card_menu: dict[date, list[tuple[str, str]]] = {}
         odds_menu: dict[date, list[tuple[str, str]]] = {}
+        results_menu: dict[date, list[tuple[str, str]]] = {}
         for day, meetings in self.days.items():
-            card_menu[day], odds_menu[day] = [], []
+            card_menu[day], odds_menu[day], results_menu[day] = [], [], []
             for m in meetings:
                 self._meetings[(day, m.venue)] = m
                 card, odds = self._build_meeting(day, m)
                 card_menu[day].append((m.name, card[1]))
                 odds_menu[day].append((m.name, odds[1]))
+                results = self._build_results(day, m, (published or {}).get((day, m.venue), ()))
+                results_menu[day].append((m.name, results[1]))
         extra: dict[date, list[tuple[str, str]]] = {}
         for day, w5 in (win5 or {}).items():
             link = (ODDS_PATH, _cname(f"pw15w5ou10{day:%Y%m%d}Z"))
@@ -288,6 +301,7 @@ class World:
             )
         self.pages[CARD_MENU] = pages.menu(card_menu, CARD_PATH)
         self.pages[ODDS_MENU] = pages.menu(odds_menu, ODDS_PATH, extra=extra)
+        self.pages[RESULTS_MENU] = pages.menu(results_menu, RESULTS_PATH)
 
     def _codes(self, day: date, m: Meeting) -> str:
         return f"{VENUES[m.venue][0]}{day.year}{m.kai:02d}{m.nichi:02d}"
@@ -335,6 +349,23 @@ class World:
         self.pages[odds] = pages.odds_race_list(day, m.name, buttons, times)
         return card, odds
 
+    def _build_results(self, day: date, m: Meeting, published: Iterable[int]) -> Link:
+        mid, ymd = self._codes(day, m), f"{day:%Y%m%d}"
+        link = (RESULTS_PATH, _cname(f"pw01srl10{mid}{ymd}"))
+        self._results_lists[(day, m.venue)] = link
+        self._result_cnames[(day, m.venue)] = {
+            n: _cname(f"pw01sde10{mid}{n:02d}{ymd}") for n in range(1, m.races + 1)
+        }
+        self.pages[link] = self.results_page(day, m.venue, published)
+        return link
+
+    def results_page(self, day: date, venue: str, published: Iterable[int]) -> bytes:
+        """The meeting's results race list with the results of `published` out (#225)."""
+        out = set(published)
+        cnames = self._result_cnames[(day, venue)]
+        rows = {n: (cname if n in out else None) for n, cname in cnames.items()}
+        return pages.results_race_list(day, self.meeting(day, venue).name, rows)
+
     @staticmethod
     def odds_page(race: Race, kind: str, day: date, meeting: str) -> bytes:
         """The `kind` odds page of `race`, its date line saying `day` and `meeting`."""
@@ -357,6 +388,9 @@ class World:
 
     def odds_list(self, day: date, venue: str) -> Link:
         return self._odds_lists[(day, venue)]
+
+    def results_list(self, day: date, venue: str) -> Link:
+        return self._results_lists[(day, venue)]
 
     def odds_link(self, day: date, venue: str, number: int, kind: str) -> Link:
         return self._odds[(day, venue, number, kind)]

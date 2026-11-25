@@ -6,6 +6,11 @@ through its class's `from_json` (WinCalibration #114, OrderingFit #115, NowcastV
 pointer, win file or nowcast file gives None and one warning, so the runner logs boards and flags
 without values; a pointer without an ordering fit gives `ordering=None`. A file that exists but
 does not parse raises: a broken deploy is not hidden as a day of null values.
+
+An optional "residual" entry (#125) names a ResidualFit file (base embedded). When present, `win`
+is that residual in place of the plain calibration and `ids` gains "residual"; "win" stays the
+calibration's fit_id. A named residual file that is missing gives None and one warning like the
+others, and one built on another calibration than the named win fit raises.
 """
 
 from __future__ import annotations
@@ -18,9 +23,11 @@ from horsetrack.core import paths
 from horsetrack.countries.japan.models.v0.calibration import WinCalibration
 from horsetrack.countries.japan.models.v0.nowcast import NowcastV0
 from horsetrack.countries.japan.models.v0.ordering import OrderingFit
+from horsetrack.countries.japan.models.v0.residual import ResidualFit
 from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels
 
 log = logging.getLogger(__name__)
+OPTIONAL = ("ordering", "residual")
 
 
 def current_pointer() -> Path:
@@ -41,10 +48,10 @@ def load_shadow_models(pointer: Path | None = None) -> ShadowModels | None:
         raise ValueError(f"{pointer}: expected a JSON object naming the fit files")
 
     texts: dict[str, str | None] = {}
-    for kind in ("win", "ordering", "nowcast"):
+    for kind in ("win", "ordering", "nowcast", "residual"):
         name = names.get(kind)
         if name is None:
-            if kind == "ordering":
+            if kind in OPTIONAL:
                 texts[kind] = None
                 continue
             log.warning("shadow models: %s names no %s fit; values are left null", pointer, kind)
@@ -63,4 +70,13 @@ def load_shadow_models(pointer: Path | None = None) -> ShadowModels | None:
     if ordering is not None:
         ids["ordering"] = ordering.fit_id
     ids["nowcast"] = nowcast.fit_id
-    return ShadowModels(win=win, ordering=ordering, nowcast=nowcast, ids=ids)
+    if texts["residual"] is None:
+        return ShadowModels(win=win, ordering=ordering, nowcast=nowcast, ids=ids)
+    residual = ResidualFit.from_json(texts["residual"])
+    if residual.base != win:
+        raise ValueError(
+            f"{pointer}: the residual {residual.fit_id} is built on calibration "
+            f"{residual.base.fit_id}, not on the named win fit {win.fit_id}"
+        )
+    ids["residual"] = residual.fit_id
+    return ShadowModels(win=residual, ordering=ordering, nowcast=nowcast, ids=ids)

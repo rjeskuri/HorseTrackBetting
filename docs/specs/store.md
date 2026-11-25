@@ -29,7 +29,8 @@ that folder is not a store table.
 
 Missing values are null, never sentinel numbers. Where parsing can lose information the page's
 text is kept next to the parsed value (`*_raw`). Timestamps are UTC and only appear in `*_utc`
-columns that come from the pages' fetch times.
+columns that come from the pages' fetch times (or, for `races.result_published_utc` and
+`races.result_unpublished_utc`, the odds logger's poll times).
 
 ## Tables
 
@@ -58,15 +59,25 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   post_time_local, field_size, finish_time_s, split_times_s` (cumulative leader times), `status`.
   Denormalised meeting keys: `meeting_id, race_date, venue, race_no, season`. Optional:
   `weight_type, race_class_raw, going_raw, source_race_key` (the key of the results page the race
-  came from, for sources whose other race pages use it).
+  came from, for sources whose other race pages use it), `rail_setting` (JRA's turf rail position,
+  `A`, `B`, `C` or `D`, from the going page's 使用コース; null when not published and for every
+  non-turf race, never a guess; filled by `jra.going.attach_rail_setting`, not by the results
+  parsers), `result_published_utc` (when the race's official result was first seen published,
+  ticket #225; null for history without a logged time), `result_unpublished_utc` (its lower bound,
+  the last logger poll that did not show the result; null when unknown: a late sighting, shown on a
+  run's first poll, or no logged time). All seven are `schemas.OPTIONAL_COLUMNS['races']`:
+  `scripts/check_store_rebuild.py` accepts one that a copied table lacks and the rebuild holds all
+  null (HKTrack's copy has neither `rail_setting` nor the two `result_*_utc` columns).
 - **runners**: the meeting keys as on races, then `horse_id, horse_no, horse_name, brand_raw`,
   jockey and trainer `*_key, *_code, *_name`, `actual_wt_lb, declared_horse_wt_lb, draw,
   placing_raw, finish_pos` (null when not placed), `placing_code, dead_heat, lbw_raw, lbw_lengths`
   (0 for the winner), `running_positions, finish_time_s, win_odds` (final, decimal including the
   stake), `is_scratched`, and `rating, gear_raw` (the rating and gear at that run, where a source
   prints them). Optional: `bracket, actual_wt_kg, horse_wt_kg, horse_wt_change_kg, last_3f_s,
-  win_fav_rank, sex, age`. A source that weighs in kg keeps the exact values in the kg columns; how
-  it fills the lb columns is that source's own rule, stated in its adapter.
+  win_fav_rank, sex, age` (`schemas.OPTIONAL_COLUMNS`; `scripts/check_store_rebuild.py` accepts
+  one that a copied table lacks and the rebuild holds all null). A source that weighs in kg keeps
+  the exact values in the kg columns; how it fills the lb columns is that source's own rule,
+  stated in its adapter.
 - **dividends**: `race_id, pool` (a normalised pool code), `combination` (`"4"`, `"4,7"`,
   `"4,7,9"`), `dividend` (per the source's unit stake, from its config), `is_refund`.
 - **sectionals**: `race_id, horse_id, horse_no, section_no, section_pos, section_margin_lengths,
@@ -82,10 +93,7 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   placing_raw, race_id`.
 - **horse_pedigree**: written only for sources with pedigree pages. `sire_name, dam_name,
   dam_sire_name` as printed, their `*_norm` forms (NFKC and casefold), `sire_id, dam_id,
-  dam_sire_id` (null where the page does not link them), `source_race_id, scraped_utc`. For jra,
-  `horsetrack japan jrdb build` rewrites it when JRDB UKC is delivered: UKC's rows, plus the
-  netkeiba rows for horses UKC lacks, in `jrdb.pedigree.OUTPUT_COLUMNS` (the netkeiba-only
-  columns dropped; see `countries/japan/jrdb/tables.py`).
+  dam_sire_id` (null where the page does not link them), `source_race_id, scraped_utc`.
 - **jrdb_pre_race**, **jrdb_post_race**: JRDB rows matched to the store's races and runners. Declared
   here: the key columns `race_id, race_date, horse_no, horse_id, race_key, jrdb_horse_id,
   matched_by`. The per-family data columns (`<family>_<column>`, from each family's spec under
@@ -133,7 +141,13 @@ backfill can keep writing).
   `profile_scraped_utc` wins; the loser's rows leave every table its page type feeds. Races and
   runners get `meeting_id, race_date, venue, race_no` from the race id and a `season` label
   (`YYYY/YY`) starting in the month of the adapter's optional `season_start_month()` hook
-  (default 1). Meetings start from the calendar pages (the newer page wins) and are upgraded by
+  (default 1). Races take `result_published_utc` from the adapter's optional
+  `result_published_utc()` hook (race_id -> aware datetime, stored as that instant in UTC; JRA's
+  reads the odds logger's `<VENUE>.results.json` sidecars, `docs/specs/odds-log.md`): a race it
+  does not name is null, a race_id no page holds adds no row, and an adapter without the hook gets
+  an all-null column. `result_unpublished_utc` comes the same way, independently, from the
+  optional `result_unpublished_utc()` hook (JRA's: the bounded races of the same sidecars only).
+  Meetings start from the calendar pages (the newer page wins) and are upgraded by
   the results: `run`, `abandoned`, or `scheduled` without results. Runners take `rating` and
   `gear_raw` from `horse_runs` on `(horse_id, race_date)`, withdrawals excluded and one run per
   key. `horse_pedigree` keeps one row per horse, each column's first non-null value, newest
@@ -150,6 +164,10 @@ backfill can keep writing).
 ## Not here yet
 
 Upcoming race cards and the odds snapshots (`docs/specs/odds-log.md`) are outside this spec.
+The one reader of the cards here is `horsetrack japan jrdb build` (#186): it joins JRDB rows to
+every `processed_dir("jra")/upcoming/<meeting>/` holding both `races.parquet` and
+`racecard_runners.parquet` as well as to history, so not-yet-run races reach `jrdb_pre_race`. It
+skips JRDB's UKC and never writes `horse_pedigree` (#209 owns that merge).
 
 The post-build reconciliation checks live in `core/store/checks.py` (`run_checks(source, config=...)`,
 ported from HKTrack with its tolerances); the report goes to `reports_dir()/store-check-<source>.md`.

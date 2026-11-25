@@ -43,9 +43,11 @@ from horsetrack.countries.japan.board.snapshot import (
     WIN,
     RaceBoard,
     board_at,
+    jra_day_dir,
     load_decision_grid,
     post_times_for,
 )
+from horsetrack.countries.japan.logger.pull_vm import vm_day_dir
 from horsetrack.countries.japan.models.v0.loader import load_shadow_models
 from horsetrack.countries.japan.models.v0.ordering import _git_sha
 from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels, shadow_values
@@ -222,6 +224,13 @@ def _point_records(
         try:
             found = shadow_values(board, tau_min=tau, models=models, n_draws=s.n_draws, seed=seed)
             values = {(v.pool, v.combination): v for v in found}
+            lacking = {v.pool: v.reason for v in found if v.reason is not None}
+            for pool, reason in lacking.items():
+                logger.warning(
+                    "%s T-%d %s: logged without shadow values (%s)", race.race_id, tau, pool, reason
+                )
+            if len(lacking) == len({v.pool for v in found}):
+                models = None  # no pool has values: the point is logged as without models
         except Exception:
             logger.exception("%s T-%d: shadow values failed; logged without", race.race_id, tau)
             models = None
@@ -249,13 +258,13 @@ def _point_records(
 # ---------------------------------------------------------------- the day
 
 
-def _log_folder(race_date: date) -> Path:
-    return paths.odds_snapshot_path(SOURCE, race_date.isoformat(), "X").parent
+def _log_folder(race_date: date, day_dir: Path | None = None) -> Path:
+    return jra_day_dir(race_date, day_dir)
 
 
-def _discover(race_date: date) -> list[str]:
+def _discover(race_date: date, day_dir: Path | None = None) -> list[str]:
     """The venues with a log file for the day, re-read on every poll."""
-    folder = _log_folder(race_date)
+    folder = _log_folder(race_date, day_dir)
     try:
         names = [p.name for p in folder.iterdir()]
     except FileNotFoundError:
@@ -289,9 +298,11 @@ def run_shadow_day(
     flag_rules: FlagRules,
     n_draws: int = 400,
     seed: int = 0,
+    day_dir: Path | None = None,
 ) -> ShadowSummary:
     """Log every grid point of the day as it falls due, then seal the log. `once` decides every
-    point due now and returns, sealing only when the day's last point is due."""
+    point due now and returns, sealing only when the day's last point is due. The odds logs are read
+    from `day_dir` when given (a pulled VM folder), else the Mac's own day folder."""
     clock = now if now is not None else utc_now
     grid = tuple(sorted(load_decision_grid().minutes, reverse=True))
     settings = _Settings(
@@ -314,10 +325,10 @@ def run_shadow_day(
     def refresh() -> None:
         """New venues' logs, the post times, then the rows appended since the last poll."""
         nonlocal seq
-        for venue in venues if venues is not None else _discover(race_date):
-            tails.setdefault(venue, odds_log.LogTail(odds_log_path(race_date, venue)))
+        for venue in venues if venues is not None else _discover(race_date, day_dir):
+            tails.setdefault(venue, odds_log.LogTail(odds_log_path(race_date, venue, day_dir)))
         for venue in tails:
-            for no, post in post_times_for(race_date, venue).items():
+            for no, post in post_times_for(race_date, venue, day_dir=day_dir).items():
                 race_id = f"{SOURCE}:{race_date.isoformat()}:{venue}:{int(no):02d}"
                 race = races.setdefault(race_id, _Race(race_id))
                 race.done |= {tau for tau in grid if (race_id, tau) in done}
@@ -398,8 +409,8 @@ def run_shadow_day(
         sleep(poll_s)
 
 
-def odds_log_path(race_date: date, venue: str) -> Path:
-    return paths.odds_snapshot_path(SOURCE, race_date.isoformat(), venue)
+def odds_log_path(race_date: date, venue: str, day_dir: Path | None = None) -> Path:
+    return _log_folder(race_date, day_dir) / f"{venue}{LOG_SUFFIX}"
 
 
 # ---------------------------------------------------------------- the command
@@ -450,12 +461,19 @@ def shadow_day_command(
         None, "--venues", help="Venue codes, e.g. TOK,KYO; default: every venue logged that day."
     ),
     once: bool = typer.Option(False, "--once", help="Decide every point due now, then exit."),
+    from_vm: str | None = typer.Option(
+        None,
+        "--from-vm",
+        help="Read the day's odds logs pulled from this VM (ssh alias; `pull-vm --every`) from "
+        "$HORSETRACK_DATA_DIR/vm/<alias>/ instead of the Mac's own odds_snapshots/.",
+    ),
 ) -> None:
     """Log shadow values at each grid point of a day's races, then seal the day's shadow log."""
     try:
         day = _day(race_date)
         codes = _venues(venues)
-    except _Usage as exc:
+        day_dir = None if from_vm is None else vm_day_dir(from_vm, day)
+    except ValueError as exc:  # _Usage, or a --from-vm that is not an ssh alias
         typer.echo(f"ERROR {exc}", err=True)
         raise typer.Exit(EXIT_ERROR) from exc
     detail = paths.logs_dir("japan") / f"shadow-day-{day.isoformat()}.log"
@@ -476,6 +494,7 @@ def shadow_day_command(
             models=models,
             log=ShadowLog(path, day=day),
             flag_rules=load_flag_rules(),
+            day_dir=day_dir,
         )
         typer.echo(
             f"done: records={summary.records} no_board={summary.no_board}"
