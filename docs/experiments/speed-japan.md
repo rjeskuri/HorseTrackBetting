@@ -86,6 +86,8 @@ The exclusions apply in order, and each is counted.
 
 Every race kept has a post time and a timed top 3. In the copied store `rail_setting` is empty and `course_config`
 is null on most races, so the rail key is `unknown` on every race and the layout key on 88% (see Follow-ups).
+The run predates #253, which now fills `rail_setting` in the store build from the cached JRA going pages; historical
+rail still needs #90, and the rerun by rail and layout is #329.
 
 ## Variants tried
 

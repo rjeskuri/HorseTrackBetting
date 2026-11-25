@@ -19,6 +19,14 @@ Contract pinned here (`horsetrack.countries.japan.studies.calibration`, not the 
   beta in P(i wins) proportional to exp(beta * ln(1/O_i)) over the race's priced runners; se is
   the observed information at beta-hat to the power -1/2; only races with a priced winner enter
   and `n_races` counts them.
+- `fit_power_beta(odds, race_id, won, *, cluster=None)` (#276): `cluster` is a Series on the same
+  index labelling each row's meeting, constant within a race. With it the fit also carries
+  `BetaFit.se_cluster`, the meeting-clustered sandwich standard error of beta-hat
+  (sqrt(sum over clusters of (sum of the cluster's race scores)^2) / information, up to a
+  small-sample factor G / (G - 1)), and `BetaFit.n_clusters`, the clusters of the fitted races.
+  Without it both are None; `beta`, `se` and `n_races` do not depend on `cluster`. A label that
+  varies within a race, is missing, an index that is not the odds', or fewer than two clusters
+  among the fitted races is a ValueError.
 - `normalised_entropy(odds, race_id)`: one value per race, indexed by race id: the Shannon entropy
   of the race's normalised probabilities over its n priced runners, divided by ln n.
 - `segment_beta(frame, segment)`: `frame` has race_id, odds, won and the `segment` column (constant
@@ -547,6 +555,202 @@ def test_beta_fit_is_the_mle_over_races_with_a_priced_winner():
     assert fit.n_races == 800
     assert math.isfinite(fit.beta) and math.isfinite(fit.se)
     assert_is_the_mle(fit.beta, fit.se, frame)
+
+
+# ----- the meeting-clustered standard error (#276) ----------------------------------------------
+
+RACES_PER_MEETING = 12
+SANDWICH_RTOL = 0.02  # G / (G - 1) and the like: a correct sandwich is within 2% of the plain one
+
+
+def meeting_frame(seed, n_meetings, sigma, *, beta0=1.0, n_max=12):
+    """(frame, meeting): races of 8..n_max runners, 12 races a meeting. Each meeting draws its
+    winners at its own beta_m = beta0 + u_m, u_m ~ N(0, sigma^2), so the races of a meeting have
+    scores that move together (sigma = 0: one common beta, independent races). `meeting` is the
+    cluster label per row, on the frame's index."""
+    rng = np.random.default_rng(seed)
+    n_races = n_meetings * RACES_PER_MEETING
+    odds = board(rng, n_races, n_max, n_min=8)
+    beta_m = beta0 + sigma * rng.standard_normal(n_meetings)
+    inv = 1.0 / odds
+    q = inv / np.nansum(inv, axis=1, keepdims=True)
+    p = q ** np.repeat(beta_m, RACES_PER_MEETING)[:, None]
+    p = p / np.nansum(p, axis=1, keepdims=True)
+    frame = fit_rows(odds, draw_winners(rng, p), prefix="r")
+    race_no = frame["race_id"].str[1:].astype(int)
+    return frame, (race_no // RACES_PER_MEETING).map("m{:04d}".format).rename("meeting")
+
+
+def ref_sandwich_se(frame, beta, cluster):
+    """The cluster-robust standard error of beta-hat from first principles: the conditional-logit
+    score of each race at `beta` summed within its cluster, squared and summed over clusters, over
+    the observed information (the sandwich I^-1 (sum_c s_c^2) I^-1, square-rooted). Returns the
+    se and the number of clusters holding a race with a priced winner."""
+    odds = frame["odds"].to_numpy(dtype=float)
+    keep = priced(odds)
+    d = pd.DataFrame(
+        {
+            "race": frame["race_id"].to_numpy()[keep],
+            "x": -np.log(odds[keep]),
+            "won": frame["won"].to_numpy(dtype=bool)[keep],
+            "cluster": cluster.to_numpy()[keep],
+        }
+    )
+    d = d[d.groupby("race")["won"].transform("any")]
+    e = np.exp(beta * d["x"])
+    p = e / e.groupby(d["race"]).transform("sum")
+    mean = (p * d["x"]).groupby(d["race"]).sum()
+    var = (p * d["x"] ** 2).groupby(d["race"]).sum() - mean**2
+    n_won = d["won"].groupby(d["race"]).sum()
+    x_won = (d["x"] * d["won"]).groupby(d["race"]).sum()
+    score = x_won - n_won * mean
+    by_cluster = score.groupby(d.groupby("race")["cluster"].first()).sum()
+    information = float((n_won * var).sum())
+    return float(math.sqrt((by_cluster**2).sum()) / information), int(by_cluster.shape[0])
+
+
+def fit_clustered(frame, cluster):
+    return fit_power_beta(frame["odds"], frame["race_id"], frame["won"], cluster=cluster)
+
+
+def test_beta_fit_without_a_cluster_carries_no_clustered_se():
+    frame, _ = meeting_frame(2761, 60, 0.4)
+
+    fit = fit_power_beta(frame["odds"], frame["race_id"], frame["won"])
+
+    assert fit.se_cluster is None
+    assert fit.n_clusters is None
+
+
+def test_the_cluster_leaves_beta_se_and_the_race_count_alone():
+    frame, meeting = meeting_frame(2762, 80, 0.4)
+    plain = fit_power_beta(frame["odds"], frame["race_id"], frame["won"])
+
+    fit = fit_clustered(frame, meeting)
+
+    assert isinstance(fit, BetaFit)
+    assert fit.beta == pytest.approx(plain.beta, rel=1e-12)
+    assert fit.se == pytest.approx(plain.se, rel=1e-12)
+    assert fit.n_races == plain.n_races == 80 * RACES_PER_MEETING
+
+
+def test_clustered_se_exceeds_the_wald_se_under_planted_within_meeting_correlation():
+    frame, meeting = meeting_frame(2763, 200, 0.4)
+
+    fit = fit_clustered(frame, meeting)
+
+    assert fit.n_clusters == 200
+    assert fit.se_cluster / fit.se > 1.3  # planted: about 1.5
+    want, groups = ref_sandwich_se(frame, fit.beta, meeting)
+    assert groups == 200
+    assert fit.se_cluster == pytest.approx(want, rel=SANDWICH_RTOL)
+    assert_is_the_mle(fit.beta, fit.se, frame)
+
+
+@pytest.mark.parametrize("seed", [2764, 2765])
+def test_clustered_se_matches_the_wald_se_without_correlation(seed):
+    frame, meeting = meeting_frame(seed, 200, 0.0)
+
+    fit = fit_clustered(frame, meeting)
+
+    assert fit.n_clusters == 200
+    assert 0.85 <= fit.se_cluster / fit.se <= 1.15
+    want, _ = ref_sandwich_se(frame, fit.beta, meeting)
+    assert fit.se_cluster == pytest.approx(want, rel=SANDWICH_RTOL)
+
+
+def test_clustered_se_follows_the_clustering_not_just_the_data():
+    """The same rows, three labellings: meetings (correlated, wide), each race alone (the race-
+    level sandwich, near Wald) and pairs of meetings (fewer, larger clusters)."""
+    frame, meeting = meeting_frame(2766, 200, 0.4)
+    race_id = frame["race_id"].rename("meeting")
+    pairs = (frame["race_id"].str[1:].astype(int) // (2 * RACES_PER_MEETING)).rename("meeting")
+
+    by_meeting = fit_clustered(frame, meeting)
+    by_race = fit_clustered(frame, race_id)
+    by_pair = fit_clustered(frame, pairs)
+
+    assert by_meeting.n_clusters == 200
+    assert by_race.n_clusters == 200 * RACES_PER_MEETING
+    assert by_pair.n_clusters == 100
+    for fit, labels in ((by_meeting, meeting), (by_race, race_id), (by_pair, pairs)):
+        want, _ = ref_sandwich_se(frame, fit.beta, labels)
+        assert fit.se_cluster == pytest.approx(want, rel=SANDWICH_RTOL)
+    assert by_race.se_cluster / by_race.se == pytest.approx(1.0, abs=0.08)
+    assert by_race.se_cluster < 0.85 * by_meeting.se_cluster
+
+
+def test_clustered_se_ignores_row_order_index_and_label_type():
+    frame, meeting = meeting_frame(2767, 100, 0.4)
+    base = fit_clustered(frame, meeting)
+
+    shuffled = relabel(frame, np.random.default_rng(27))
+    by_race = pd.Series(meeting.to_numpy(), index=frame["race_id"].to_numpy())
+    by_race = by_race.groupby(level=0).first()  # each race's meeting, whatever its rows' order
+    labels = pd.Series(shuffled["race_id"].map(by_race).to_numpy(), index=shuffled.index)
+    as_ints = labels.str[1:].astype(int)  # a different label per meeting, as integers
+
+    for cluster in (labels, as_ints):
+        fit = fit_clustered(shuffled, cluster)
+        assert fit.n_clusters == 100
+        assert fit.se_cluster == pytest.approx(base.se_cluster, rel=1e-9)
+        assert fit.beta == pytest.approx(base.beta, rel=1e-9)
+
+
+def test_clusters_are_counted_over_the_fitted_races_only():
+    frame, meeting = meeting_frame(2768, 100, 0.4)
+    base = fit_clustered(frame, meeting)
+
+    junk = add_races_without_a_priced_winner(frame.iloc[:0], prefix="junk")
+    void_of = {"junkx0": "void-a", "junkx1": "void-b", "junkx2": "void-c"}
+    extra = junk["race_id"].map(void_of).rename("meeting")
+    both = pd.concat([frame, junk], ignore_index=True)
+    labels = pd.concat([meeting, extra], ignore_index=True)
+
+    fit = fit_clustered(both, labels)
+
+    assert fit.n_races == base.n_races
+    assert fit.n_clusters == 100  # the winnerless races' meetings are not fitted clusters
+    assert fit.se_cluster == pytest.approx(base.se_cluster, rel=1e-9)
+
+
+def test_a_cluster_label_that_varies_within_a_race_is_refused():
+    frame, meeting = meeting_frame(2769, 50, 0.4)
+    bad = meeting.copy()
+    bad.loc[frame.index[0]] = "elsewhere"  # one runner of the first race sits in another meeting
+
+    with pytest.raises(ValueError):
+        fit_clustered(frame, bad)
+
+
+def test_a_cluster_that_is_not_on_the_odds_index_is_refused():
+    frame, meeting = meeting_frame(2770, 50, 0.4)
+
+    with pytest.raises(ValueError):
+        fit_clustered(frame, meeting.set_axis(meeting.index + 1))
+    with pytest.raises(ValueError):
+        fit_clustered(frame, meeting.iloc[1:])
+
+
+def test_fewer_than_two_clusters_are_refused():
+    frame, meeting = meeting_frame(2771, 50, 0.4)
+
+    with pytest.raises(ValueError):
+        fit_clustered(frame, pd.Series("only", index=frame.index))
+    # Two meetings are labelled, but only the first holds a race with a priced winner: one
+    # fitted cluster.
+    two = meeting.where(meeting.eq("m0000"), "m0001")
+    only_first = frame.assign(won=frame["won"] & meeting.eq("m0000"))
+    with pytest.raises(ValueError):
+        fit_clustered(only_first, two)
+
+
+def test_a_missing_cluster_label_is_refused():
+    frame, meeting = meeting_frame(2772, 50, 0.4)
+    bad = meeting.astype(object).where(frame["race_id"] != frame["race_id"].iloc[0], None)
+
+    with pytest.raises(ValueError):
+        fit_clustered(frame, bad)
 
 
 # ---------------------------------------------------------------------------------------------
