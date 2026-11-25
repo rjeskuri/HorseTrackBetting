@@ -858,3 +858,9 @@ built on a licensed source shows no values here.
 | E40 | meeting_clustered:offset:q:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
 | E40 | meeting_clustered:offset:cal:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
 | E40 | meeting_clustered:encompassing:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
+
+## japan-track-bias-day-sd
+
+| E id | Variant | Status | Fold | Metric | Value | CI | n |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| E256 | per_level-vs-pooled | scored | all | winner_logloss_gain_update_per_level_vs_pooled | -1.77831e-05 | [-0.000135462, 9.96157e-05] | 22887 |
