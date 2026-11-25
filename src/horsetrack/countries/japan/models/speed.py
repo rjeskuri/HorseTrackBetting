@@ -45,7 +45,9 @@ count and the answer is the prior, as it is when nothing is available. Under the
 the posterior mean is the mode found by the same reweighting, started from the prior mean, and the
 SD is that of the reweighted normal posterior.
 
-`expected_top3_time(race, at_utc)` is par(cell) + the variant's mean at t. #97 adds pace terms.
+`expected_top3_time(race, at_utc, pace_s=0.0)` is par(cell) + the variant's mean at t + pace_s,
+the race's pace term in seconds (#97): the caller computes it (#97's `speed_horse` passes its
+fitted race-level pace term), and a pace_s that is not a finite number is a ValueError.
 `par` of a cell the fit never saw raises KeyError; the variant of a (day, group) with nothing
 observed is the prior. No layer here is adopted (D16).
 """
@@ -356,8 +358,10 @@ class SpeedModel:
                 break
         return float(mean), float(1.0 / math.sqrt(prec))
 
-    def expected_top3_time(self, race: Mapping, *, at_utc: datetime) -> float:
+    def expected_top3_time(self, race: Mapping, *, at_utc: datetime, pace_s: float = 0.0) -> float:
+        if isinstance(pace_s, bool) or not isinstance(pace_s, Real) or not math.isfinite(pace_s):
+            raise ValueError(f"pace_s must be a finite number of seconds: {pace_s!r}")
         par = self.par(**{k: race[k] for k in self.spec.par_keys})
         group = tuple(race[k] for k in self.spec.variant_keys)
         mean, _ = self.variant(_jst_date(race["race_utc"]), *group, at_utc=at_utc)
-        return par + mean
+        return par + mean + pace_s
