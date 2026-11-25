@@ -164,6 +164,25 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
   traps).
 - A table outside the file is refused with `NoAvailabilityRule`.
 
+### Accepted leak: results-derived card columns (owner decision, 2026-11-25)
+
+Four columns that are not label columns are derived from the results page
+(`countries/japan/jra/netkeiba/parse_results.py`), not from the card as it stood before the race:
+
+| table | column | derived from |
+| --- | --- | --- |
+| `runners` | `is_scratched` | `placing_code` in (`WV`, `WX`) |
+| `races` | `field_size` | the count of runners not scratched on the results page |
+| `races` | `status` | `run` or `abandoned`, from the results page |
+| `meetings` | `status` | whether any race of the meeting ran |
+
+The owner's answer on #80 (2026-11-25) keeps all four in the views under the `race_date` 00:00
+JST rule of their table, as an owner choice, not an implementation ruling. So a scratch or an
+abandonment that happens on race day is visible in every view from 00:00 JST of the race date,
+before it happened: a known, accepted leak. Follow-up #227 is to give these columns a post-based
+rule once `races.post_utc` exists; until then a feature or model that reads them carries this
+leak.
+
 ## Known traps (07 §6)
 
 - Profile pages show current values (career record, retirement, current rating), not the values
@@ -176,4 +195,8 @@ entry per store table in `schemas.TABLES` and for `odds_timeseries` (the compact
 - Bets processed after the start move the 'final' price, so the final board is not a board any
   bettor saw before the off.
 - Scratches: a runner scratched after t was on the board at t, and one scratched before t was
-  not; a view must not read the scratch list as of the scrape.
+  not; in general a view must not read the scratch list as of the scrape. One exception is
+  accepted: `runners.is_scratched`, `races.field_size`, `races.status` and `meetings.status` come
+  from the results page and are in the views from 00:00 JST of the race date, so a race-day
+  scratch or abandonment shows before it happened (owner decision, 2026-11-25; see Accepted leak:
+  results-derived card columns). #227 is to give them a post-based rule.

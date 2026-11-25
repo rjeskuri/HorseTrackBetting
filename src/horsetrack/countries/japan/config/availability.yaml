@@ -18,6 +18,10 @@ tables:
     label_columns: [dividend, is_refund, is_final_capture]
 
   # The card: known from 00:00 JST of the race date.
+  # Accepted leak (owner decision, 2026-11-25): meetings.status, races.field_size, races.status
+  # and runners.is_scratched come from the results page, so a race-day scratch or abandonment is
+  # in the views from 00:00 JST. They stay in the views until #227 gives them a post-based rule
+  # (docs/specs/as-of.md, "Accepted leak: results-derived card columns").
   meetings:
     kind: offset
     anchor: race_date
@@ -28,6 +32,7 @@ tables:
     anchor: race_date
     tz: Asia/Tokyo
     offset_min: 0
+    # field_size and status stay in the view: accepted leak until #227 (see above)
     # results; same-day going until post_utc (#227)
     label_columns: [finish_time_s, split_times_s, going, going_raw]
   runners:
@@ -35,6 +40,7 @@ tables:
     anchor: race_date
     tz: Asia/Tokyo
     offset_min: 0
+    # is_scratched stays in the view: accepted leak until #227 (see above)
     # results; horse weights until post_utc (#227)
     label_columns:
       - finish_pos
