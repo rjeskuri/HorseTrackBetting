@@ -8,7 +8,8 @@ Checks every file `git ls-files` lists in the repository, prints one line per vi
 files. `tests/test_public_tree.py` runs the same checks on every pull request. Stdlib only.
 
 Rules, by id:
-  data      a tracked path under the root data/ directory
+  data      a tracked path under the root data/ directory, or under the root .playwright-mcp/
+            directory (browser-tool snapshots hold scraped page text)
   fixture   a file under tests/fixtures/ outside tests/fixtures/synthetic/, or an .html/.htm
             there that does not start with the synthetic marker (see that folder's README)
   size      a file over 256 KB, except uv.lock (whose content is still scanned)
@@ -87,6 +88,8 @@ def check(paths: list[str], read: Callable[[str], bytes]) -> list[Violation]:
 def _path_violations(path: str, data: bytes) -> Iterator[Violation]:
     if path.startswith("data/"):
         yield Violation(path, DATA, "tracked under data/; data lives under $HORSETRACK_DATA_DIR")
+    if path.startswith(".playwright-mcp/"):
+        yield Violation(path, DATA, "tracked under .playwright-mcp/; snapshots hold page text")
     if path.startswith(FIXTURES):
         if not path.startswith(SYNTHETIC):
             yield Violation(path, FIXTURE, "fixture outside " + SYNTHETIC)
