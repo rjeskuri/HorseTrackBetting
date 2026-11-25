@@ -28,7 +28,7 @@ aggregate over the JRA results store (netkeiba race results; no JRDB, no JRA-VAN
   there reproduced all five records and appended none.
 - Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`.
 - The full report is under the data directory, at `reports/rating-japan-7ec8931213c6.md`. Every record is in
-  `docs/experiments/registry-japan.md`.
+  `docs/experiments/registry/japan/japan-c2-rating-final-win.md`.
 - The per-runner export for the meld (#98) is at `features/japan/rating-7ec8931213c6.parquet`: every priced starter
   (601,265 rows, 2014-06-07 to 2026-11-23) at each (drift, scale) some fold selected (one pair here, drift 0 and
   scale 1.5), with `race_id`, `horse_id`, `race_date`, `drift_var_per_day`, `scale`, `selected_by` (the folds whose
