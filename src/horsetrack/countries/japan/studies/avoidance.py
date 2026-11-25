@@ -384,11 +384,14 @@ TRIFECTA_COMPARATORS = {
     "box": "the six TIERCE orders of the same three horses, the stake split evenly",
 }
 L5_MODES = ("report", "same_race")
+GRID_KEYS = {"TRIO": "l1_threshold_trio", "QUINELLA": "l1_threshold_quinella"}
 OWNER_KEYS = {
-    "l1_threshold_trio": "L1 (E11) X for TRIO sets, decimal odds above 1.0: a set priced under X "
-    "on the board is bet in TRIO, at X or above as its six TIERCE orders",
-    "l1_threshold_quinella": "L1 X for QUINELLA pairs, decimal odds above 1.0: under X the "
-    "QUINELLA, at X or above its two FORECAST orders",
+    "l1_threshold_trio": "L1 (E11) grid of X for TRIO sets, a list of distinct decimal odds above "
+    "1.0 ([x] for one), each its own variant (D17): a set priced under X on the board is bet in "
+    "TRIO, at X or above as its six TIERCE orders",
+    "l1_threshold_quinella": "L1 grid of X for QUINELLA pairs, a list of distinct decimal odds "
+    "above 1.0 ([x] for one), each its own variant: under X the QUINELLA, at X or above its two "
+    "FORECAST orders",
     "sets": f"which sets L1 and L4 bet, one of {list(SETS)}: every combination of the race's "
     "starters flat (04 §3.4), and for L4 every same-bracket pair of a bracket with two starters",
     "l4_market_order_ties": f"one of {list(TIES)}: how the market-order trifecta ranks equal Win "
@@ -431,6 +434,29 @@ def _choice(raw: dict, key: str, allowed: Sequence[str]) -> str:
     return raw[key]
 
 
+def _grid(raw: dict, key: str) -> list[float]:
+    """An L1 threshold grid, ascending: a non-empty list of distinct decimal odds above 1.0. A
+    bare number is refused (a one-member grid is [x]), so a stale config cannot shrink the
+    family the owner registered."""
+    grid = raw[key]
+    if not (
+        isinstance(grid, list)
+        and grid
+        and all(_real(x) and x > 1.0 for x in grid)
+        and len({float(x) for x in grid}) == len(grid)
+    ):
+        raise ValueError(
+            f"{key} must be a non-empty list of distinct decimal odds above 1.0 ([x] for one), "
+            f"got {grid!r}"
+        )
+    return sorted(float(x) for x in grid)
+
+
+def _number(x: float) -> str:
+    """A threshold as written in a variant name: no exponent, no trailing '.0'."""
+    return str(int(x)) if float(x).is_integer() else repr(float(x))
+
+
 def owner_inputs() -> dict:
     """The owner's pre-registered inputs from config/avoidance.yaml, validated."""
     where = f"countries/{COUNTRY}/config/{CONFIG_NAME}.yaml"
@@ -447,9 +473,7 @@ def owner_inputs() -> dict:
     unknown = sorted(set(raw) - set(OWNER_KEYS))
     if unknown:
         raise ValueError(f"{where} has unknown key(s): {', '.join(unknown)}")
-    for key in ("l1_threshold_trio", "l1_threshold_quinella"):
-        if not (_real(raw[key]) and raw[key] > 1.0):
-            raise ValueError(f"{key} must be decimal odds above 1.0, got {raw[key]!r}")
+    grids = {key: _grid(raw, key) for key in GRID_KEYS.values()}
     comparators = raw["l4_trifecta_comparators"]
     if not (
         isinstance(comparators, list)
@@ -464,8 +488,7 @@ def owner_inputs() -> dict:
     if not (isinstance(signoff, int) and not isinstance(signoff, bool) and signoff > 0):
         raise ValueError(f"owner_signoff must be a positive issue number, got {signoff!r}")
     return {
-        "l1_threshold_trio": float(raw["l1_threshold_trio"]),
-        "l1_threshold_quinella": float(raw["l1_threshold_quinella"]),
+        **grids,
         "sets": _choice(raw, "sets", SETS),
         "l4_market_order_ties": _choice(raw, "l4_market_order_ties", TIES),
         "l4_trifecta_comparators": [c for c in TRIFECTA_COMPARATORS if c in comparators],
@@ -479,9 +502,19 @@ def bootstrap_settings() -> dict:
     return {**calibration.bootstrap_settings(), "seed": BOOTSTRAP_SEED}
 
 
+def _l1_name(pool: str, threshold: float, tag: str) -> str:
+    return f"L1:{pool}:threshold_{_number(threshold)}:{tag}"
+
+
 def variant_names(owner: dict) -> list[str]:
-    """Every variant of the family, in the order the study scores them."""
-    names = [f"L1:{pool}:{tag}" for pool in SYNTHETIC for tag in ("final_look_ahead", "board_at_t")]
+    """Every variant of the family, in the order the study scores them: L1 per pool, per member
+    of its threshold grid, per selection (D17: each grid member counts)."""
+    names = [
+        _l1_name(pool, x, tag)
+        for pool, key in GRID_KEYS.items()
+        for x in owner[key]
+        for tag in ("final_look_ahead", "board_at_t")
+    ]
     names.append("L4:same_bracket_vs_quinellas:card_only")
     names += [
         f"L4:market_order_trifecta_vs_{c}:{tag}"
@@ -496,7 +529,7 @@ def variant_names(owner: dict) -> list[str]:
 
 def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
     """The family's pre-registered spec, frozen in the registry before any race is read."""
-    unit = _unit()
+    unit, variants = _unit(), variant_names(owner)
     return {
         "family_id": FAMILY_ID,
         "ticket": TICKET,
@@ -509,12 +542,10 @@ def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
         },
         "rules": {
             "L1": {
-                "thresholds": {
-                    "TRIO": owner["l1_threshold_trio"],
-                    "QUINELLA": owner["l1_threshold_quinella"],
-                },
-                "rule": "a set priced under its threshold: the direct pool (TRIO, QUINELLA); at or "
-                "above it: its ordered synthetic (six TIERCE, two FORECAST), stake split evenly",
+                "thresholds": {pool: list(owner[key]) for pool, key in GRID_KEYS.items()},
+                "rule": "a set priced under the threshold: the direct pool (TRIO, QUINELLA); at or "
+                "above it: its ordered synthetic (six TIERCE, two FORECAST), stake split evenly. "
+                "Each member of a pool's threshold grid is its own variant",
                 "comparator": "always the direct pool, on the same sets",
                 "sets": owner["sets"],
                 "sets_rule": "every combination of the race's starters, the same stake per set; "
@@ -570,7 +601,8 @@ def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
         "starters": "runners not is_scratched; a scratched horse's combinations are never bet",
         "refunds": "refund rows concern scratched horses' combinations only, which no side bets",
         "races": "development races with status 'run' from 2014-06-07 (D10); holdout days unread",
-        "variants": variant_names(owner),
+        "variants": variants,
+        "family_size": len(variants),  # D17: every grid member counts
         "bootstrap": bootstrap,
         "price_era_start": PRICE_ERA_START.isoformat(),
         "adoption": "none: no rule is adopted here (the owner's, 08 §9.11)",
@@ -1108,14 +1140,21 @@ def compute_study(data: StudyData, spec: dict) -> Study:
         | {f"races_with_a_logged_{p}_board": len(ctx.logged(p)) for p in ("WIN", *SYNTHETIC)}
     )
     l1 = spec["rules"]["L1"]
-    for pool in SYNTHETIC:
-        threshold, stake = l1["thresholds"][pool], l1["stake_yen"][pool]
-        components = {"rule": f"{pool} under {threshold:g}, else its {SYNTHETIC[pool]} orders"}
+    for pool, threshold in ((p, x) for p in SYNTHETIC for x in l1["thresholds"][p]):
+        stake = l1["stake_yen"][pool]
+        components = {
+            "rule": f"{pool} under {_number(threshold)}, else its {SYNTHETIC[pool]} orders"
+        }
         components |= {"comparator": f"always {pool}", "sets": l1["sets"]}
         params = {"pool": pool, "threshold": threshold, "stake_yen": stake}
         comparator = f"always {pool}, the same sets"
-        history = Variant("L1", f"L1:{pool}:final_look_ahead", SCHEME, components, params)
-        history = replace(history, components={**components, "selection": LOOK_AHEAD})
+        history = Variant(
+            "L1",
+            _l1_name(pool, threshold, "final_look_ahead"),
+            SCHEME,
+            {**components, "selection": LOOK_AHEAD},
+            params,
+        )
         _score(
             study,
             history,
@@ -1123,7 +1162,11 @@ def compute_study(data: StudyData, spec: dict) -> Study:
             lambda pool=pool, x=threshold: ctx.paired(_l1_history(ctx, pool, x), LOOK_AHEAD),
         )
         at_t = Variant(
-            "L1", f"L1:{pool}:board_at_t", SCHEME, {**components, "selection": ctx.at_t}, params
+            "L1",
+            _l1_name(pool, threshold, "board_at_t"),
+            SCHEME,
+            {**components, "selection": ctx.at_t},
+            params,
         )
         sides = _l1_sides(ctx, pool, threshold, stake)
         _score(
