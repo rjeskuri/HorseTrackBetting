@@ -34,6 +34,10 @@ None adopted.
 
 None adopted.
 
+### C2: dynamic rating (#91; not adopted)
+
+- C2 dynamic rating (#91, `models/rating.py`): each horse's ability is a Gaussian random walk, N(prior_mean, prior_var) at its debut, with drift_var_per_day times the days off added between races and spell_var added after more than spell_days off. A race updates every runner by Weng and Lin's Bradley-Terry full-pair rule (performance variance perf_var, a dead heat at 1/2), in race order, so the state before a race (mu_before, sigma_before = σ_h(t)) reads earlier races only; no smoothed (TTT) value is used. `rating_member` gives the within-race log-probability softmax((mu_before − race mean) / sqrt(scale² + sigma_before²)). It is not adopted. Its run (`studies/rating.py`, `docs/experiments/rating-japan.md`) reads only placings from the JRA results store, picks drift and scale per D9 fold by inner-fold log loss (drift 0, scale 1.5 in every fold), and exports mu_before, sigma_before and the member's logp for every priced starter at each selected pair, with the fold each row is out of fold for (`oof_fold`), under the data dir for the meld (#98). On development folds the member correlates 0.72 with ln q_final, has pseudo-R² 0.12 against the market's 0.26, and takes a negative stage-2 weight beside ln q (α −0.045, meeting-clustered bounds −0.064 and −0.026).
+
 ### C3: race-level finish speed (#96, scored by #305; not adopted)
 
 C3 forecasts a race's top-3 time at the decision time.
