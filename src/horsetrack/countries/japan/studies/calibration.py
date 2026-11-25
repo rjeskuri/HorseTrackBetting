@@ -617,8 +617,9 @@ def development_frame(runners: pd.DataFrame, races: pd.DataFrame) -> tuple[pd.Da
     odds = pd.Series(clean_odds(kept["win_odds"].to_numpy()), index=kept.index)
     unpriced = ~scratched & odds.isna()
     starting = ~scratched & ~unpriced
+    placing = kept.loc[starting, "finish_pos"]  # nullable: missing for a starter not placed
     starters = kept.loc[starting, ["race_id", "race_date"]].assign(
-        odds=odds[starting], won=kept.loc[starting, "finish_pos"].eq(1)
+        odds=odds[starting], won=placing.eq(1).fillna(False).astype(bool)
     )
     has_winner = starters.groupby("race_id")["won"].transform("any")
     attributes = races.loc[~void].drop(columns=["race_date", "status"])
@@ -634,6 +635,7 @@ def development_frame(runners: pd.DataFrame, races: pd.DataFrame) -> tuple[pd.Da
         "runners_in_void_races": int(in_void.sum()),
         "scratched_runners": int(scratched.sum()),
         "unpriced_runners": int(unpriced.sum()),
+        "starters_not_placed": int(placing.isna().sum()),
         "races_without_a_priced_winner": int(kept["race_id"].nunique() - len(winners)),
         "dead_heat_races": int((winners >= 2).sum()),
         "races": len(winners),
