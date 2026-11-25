@@ -16,7 +16,7 @@ is summed by category: the favourite first, the favourite second, and without th
   per-race category ratio needs the whole final exacta board, logged only from #130 onward.
 
 Pure functions only: no data reads, no registry, no CLI. The study's design is
-docs/specs/exacta-overload-prereg.md, which is a proposal until the owner signs it off.
+docs/specs/exacta-overload-prereg.md (approved by the owner 2026-11-25, frozen).
 """
 
 from __future__ import annotations
