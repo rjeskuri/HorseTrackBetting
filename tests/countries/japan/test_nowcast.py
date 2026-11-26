@@ -55,10 +55,29 @@ Folds and scores
   `gaussian_log_score` on the ln-share draws, CRPS uses `crps_ensemble`; how a case aggregates its
   runners is left to the module). `<gain>_lo` and `<gain>_hi` bound a bootstrap interval that
   resamples race days. A frame holding a holdout day is refused with `HoldoutDayError`.
+- A late scratch (owner's #69 rule, core/eval/scoring.py: scratched runners are removed and the
+  probabilities renormalised over the starters). The store writes a scratched runner's rows with
+  no price (null odds, the raw text in `status_raw`; jravan/odds.py), so a runner priced on the
+  board at t whose latest row at the close has no price is not on the final board. That case is
+  kept and scored at its (pool, tau): every forecaster gets the board at t, the scratched runner
+  included, and its drawn shares are restricted to the combinations on the final board and
+  renormalised to sum to 1. Scored that way, a forecaster whose draws over the starters do not
+  depend on the scratched runner scores what it scores on the same race without that runner.
+  `extract(frame)`'s counts report the renormalised cases (one count, expected `renormalised`).
+
+The study: `studies/nowcast.py`, `horsetrack japan nowcast-study`
+- `wide_coverage()` lists our own logged days, `processed/jra/odds_timeseries/<YYYY-MM-DD>.parquet`,
+  under `own_logged_days` with `day`, `wide_races` and `wide_races_with_post_time`. D14: a holdout
+  day (`is_holdout_day`) is fully locked, so its file is never opened or read and the coverage has
+  no entry for it; every development day is listed.
+- `run_study(trial=True)` that scores folds still appends registry records (CLAUDE.md: every run,
+  failures included, is a registry record), each marked as a trial; a full run's are not. The
+  registry has no trial status, so a marker is "trial" in the family id or the variant,
+  `params["trial"] is True`, or a params value "trial".
 
 Expected values are derived here from first principles (money, the stated formulas, scipy), never
-from the module under test. All data are synthetic and in memory, and HORSETRACK_DATA_DIR points at
-a tmp dir.
+from the module under test. All data are synthetic and in memory or under tmp, and
+HORSETRACK_DATA_DIR points at a tmp dir.
 """
 
 # Ruff reads the module under test as third-party until it exists, then as first-party; the
@@ -66,11 +85,15 @@ a tmp dir.
 from __future__ import annotations  # noqa: I001
 
 import math
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset as ds
+import pyarrow.parquet as pq
 import pytest
 from scipy import stats
 
@@ -78,7 +101,8 @@ from horsetrack.core import config, paths
 from horsetrack.core.eval.distributional import pit
 from horsetrack.core.eval.folds import FoldScheme, walk_forward
 from horsetrack.core.eval.holdout import is_holdout_day
-from horsetrack.countries.japan.board.snapshot import PLACE, WIN
+from horsetrack.core.eval.registry import default_registry
+from horsetrack.countries.japan.board.snapshot import PLACE, WIDE, WIN
 from horsetrack.countries.japan.logger.compact import SCHEMA
 from horsetrack.countries.japan.models.nowcast import (
     Draws,
@@ -87,10 +111,13 @@ from horsetrack.countries.japan.models.nowcast import (
     PoolBoard,
     RaceView,
     compare,
+    extract,
     fit_folds,
     late_composition,
     race_view,
+    score_cases,
 )
+from horsetrack.countries.japan.studies import nowcast as study
 
 UTC = timezone.utc
 COUNTRY = "japan"
@@ -721,3 +748,304 @@ def test_compare_resamples_race_days(fitted, scored_frame):
     several = compare(oracle, rw, scored_frame, n=100, seed=9, n_boot=300, level=0.95)
     win = several[several["pool"] == WIN]
     assert (win["log_score_gain_hi"] - win["log_score_gain_lo"] > 0).any()
+
+
+# ---------------------------------------------------------------- late scratches
+
+
+SCRATCHED = "7"  # the runner scratched in the late-scratch tests; every synthetic field has one
+K_MAX = max(RUNNERS)
+
+
+def scratch(rows: list[dict], race_id: str, *, from_minute: float) -> list[dict]:
+    """`rows` with runner SCRATCHED of `race_id` scratched `from_minute` before the post: its WIN
+    and PLACE rows from then on, the final capture included, carry no price, as the store writes a
+    scratched runner (null odds, the raw text in status_raw)."""
+    out = []
+    for r in rows:
+        if (
+            r["race_id"] == race_id
+            and r["pool"] in (WIN, PLACE)
+            and r["combination"] == SCRATCHED
+            and r["minutes_to_post"] <= from_minute
+        ):
+            r = {**r, "odds": None, "odds_hi": None, "status_raw": "----"}
+        out.append(r)
+    return out
+
+
+def without_runner(rows: list[dict], race_id: str) -> list[dict]:
+    """`rows` as if runner SCRATCHED of `race_id` had never been entered."""
+    return [
+        r
+        for r in rows
+        if not (
+            r["race_id"] == race_id and r["pool"] in (WIN, PLACE) and r["combination"] == SCRATCHED
+        )
+    ]
+
+
+def final_shares(frame: pd.DataFrame) -> dict[tuple[str, str], dict[str, float]]:
+    """Each (race, pool)'s 1/O shares over the combinations priced at the close: the final WIN
+    shares; for PLACE only a forecast's centre (from the low figures)."""
+    rows = frame[
+        frame["is_final_capture"]
+        & frame["pool"].isin([WIN, PLACE])
+        & (frame["combination"] != POOL_ROW)
+        & (frame["odds"] > 0)
+    ]
+    out = {}
+    for (race_id, pool), g in rows.groupby(["race_id", "pool"]):
+        inverse = 1.0 / g["odds"].to_numpy(float)
+        out[(race_id, pool)] = dict(zip(g["combination"], inverse / inverse.sum(), strict=True))
+    return out
+
+
+def starter_forecaster(weight, scratched_weight: float, sigma: float, races, seen=None):
+    """Draws softmax(ln v + sigma eps) over the board's combinations: v = weight(race, pool, c),
+    except `scratched_weight` for runner SCRATCHED of a race in `races`, and eps by runner number
+    (a runner's noise is the same whatever the field). Restricted to the starters and renormalised,
+    the draws are softmax(ln v + sigma eps) over the starters alone, whatever `scratched_weight`:
+    exactly the draws it makes on the race without the scratched runner. `seen` collects each
+    view's (race, pool, tau, combinations)."""
+
+    def forecast(view, *, pool, n, seed):
+        combinations = view.pools[pool].combinations
+        if seen is not None:
+            seen.append((view.race_id, pool, float(view.tau_min), combinations))
+        eps = np.random.default_rng(seed).standard_normal((n, K_MAX))
+        eps = eps[:, [int(c) - 1 for c in combinations]]
+        v = np.array(
+            [
+                scratched_weight
+                if c == SCRATCHED and view.race_id in races
+                else weight(view.race_id, pool, c)
+                for c in combinations
+            ]
+        )
+        return Draws(shares=softmax(np.log(v) + sigma * eps), v_final=np.full(n, 1e8))
+
+    return forecast
+
+
+def assert_same_gains(got: pd.DataFrame, expected: pd.DataFrame) -> None:
+    key = ["pool", "tau_min"]
+    got = got.sort_values(key).reset_index(drop=True)
+    expected = expected.sort_values(key).reset_index(drop=True)
+    assert list(zip(got["pool"], got["tau_min"], strict=True)) == list(
+        zip(expected["pool"], expected["tau_min"], strict=True)
+    )
+    for column in GAIN_COLUMNS:
+        np.testing.assert_allclose(
+            got[column].to_numpy(float),
+            expected[column].to_numpy(float),
+            rtol=1e-9,
+            atol=1e-10,
+            err_msg=column,
+        )
+
+
+def test_a_late_scratch_is_scored_on_the_starters_renormalised():
+    """#69: a runner priced at t and scratched by the close is removed and the draws renormalised
+    over the starters, for every forecaster alike; the case is scored, not dropped. Race 1 of the
+    day is scratched after T-1, so its board changes by the close at every tau; race 2 from T-21,
+    so at T-60 and T-30 only (from T-16 the board at t no longer prices it)."""
+    late, early = race_id_of(TEST_DAYS[0], 1), race_id_of(TEST_DAYS[0], 2)
+    rows = day_rows(TEST_DAYS[0]) + day_rows(TEST_DAYS[1])
+    scratched = to_frame(scratch(scratch(rows, late, from_minute=0), early, from_minute=21))
+    clean = to_frame(without_runner(without_runner(rows, late), early))
+    races = {late, early}
+    truth = final_shares(clean)
+    assert set(truth[(late, WIN)]) == {str(j) for j in range(1, RUNNERS[0] + 1)} - {SCRATCHED}
+
+    def informed(race_id, pool, c):
+        return truth[(race_id, pool)][c]
+
+    def flat(race_id, pool, c):
+        return 1.0
+
+    def pair(seen=None):
+        # The candidate is centred on the final shares, the baseline is flat. The weight on the
+        # scratched runner differs between them, so it cancels only once the draws are restricted
+        # to the starters and renormalised.
+        return (
+            starter_forecaster(informed, 0.25, 0.1, races, seen),
+            starter_forecaster(flat, 3.0, 0.3, races),
+        )
+
+    kw = {"n": 200, "seed": 11, "n_boot": 200, "level": 0.95}
+
+    # The late-scratched race alone: a scored case at every (pool, tau), on the board at t.
+    seen = []
+    alone = compare(*pair(seen), scratched[scratched["race_id"] == late], **kw)
+    views = [(pool, int(tau), combos) for race, pool, tau, combos in seen if race == late]
+    assert {(pool, tau) for pool, tau, _ in views} == {(p, t) for p in (WIN, PLACE) for t in GRID}
+    assert all(SCRATCHED in combos for _, _, combos in views)  # the board at t still prices it
+    assert len(alone) == 2 * len(GRID)
+    assert_same_gains(alone, compare(*pair(), clean[clean["race_id"] == late], **kw))
+
+    # Two days, both scratches and unchanged races: the gains of the same races without the runner.
+    reference = compare(*pair(), clean, **kw)
+    assert_same_gains(compare(*pair(), scratched, **kw), reference)
+    win = reference[reference["pool"] == WIN]
+    assert (win["log_score_gain"] > 0).all()  # not a vacuous equality: the candidate is better
+
+    # The study's scoring path (extract, then score_cases): per case and forecaster, the scores of
+    # the same race without the runner.
+    def per_case(frame):
+        cases, _, _ = extract(frame)
+        forecasters = dict(zip(("candidate", "baseline"), pair(), strict=True))
+        table, _ = score_cases(forecasters, cases, n=200, seed=11)
+        keys = ["race_id", "pool", "tau_min", "forecaster"]
+        return table.set_index(keys)[["log_score", "crps"]].sort_index()
+
+    got, expected = per_case(scratched), per_case(clean)
+    assert got.index.equals(expected.index)
+    np.testing.assert_allclose(got.to_numpy(float), expected.to_numpy(float), rtol=1e-9, atol=1e-10)
+
+    # The renormalised cases are counted: race 1 at every (pool, tau), race 2 where t precedes
+    # the scratch (the latest snapshot at or before t is earlier than T-21).
+    early_taus = sum(1 for tau in GRID if min(m for m in MINUTES if m >= tau) > 21)
+    assert early_taus == 2
+    _, _, counts = extract(scratched)
+    named = {k: v for k, v in counts.items() if "renormal" in k or "scratch" in k}
+    assert 2 * len(GRID) + 2 * early_taus in named.values(), counts
+
+
+# ---------------------------------------------------------------- the study
+
+
+def own_logged_rows(day: date, wide_posts: Sequence[bool]) -> list[dict]:
+    """One of our own logged days: a Wide race per entry of `wide_posts` (with a post time or
+    not), each with two pairs and a pool row, and a race selling only WIN."""
+    rows = []
+    for race_no, has_post in enumerate(wide_posts, start=1):
+        race_id, post = race_id_of(day, race_no), post_of(day, race_no)
+        for combination in ("1,2", "1,3", POOL_ROW):
+            r = row(
+                race_id,
+                race_no,
+                WIDE,
+                combination,
+                post,
+                10,
+                odds=None if combination == POOL_ROW else 3.5,
+                investment=2e7 if combination == POOL_ROW else None,
+            )
+            if not has_post:
+                r = {**r, "post_utc": None, "minutes_to_post": None}
+            rows.append(r)
+    race_no = len(wide_posts) + 1
+    rows.append(
+        row(race_id_of(day, race_no), race_no, WIN, "1", post_of(day, race_no), 10, odds=2.0)
+    )
+    return rows
+
+
+def write_day(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist(rows, schema=SCHEMA), path)
+
+
+def test_wide_coverage_never_reads_a_holdout_day(data_dir, monkeypatch):
+    """D14: logged holdout days are untouched. One holdout day's file is a valid logged day with
+    Wide races, the other is not parquet, so any read of it raises; every parquet read is watched.
+    The development days around them, two after the holdout start, are listed with their counts."""
+    held = (date(2026, 11, 29), date(2026, 12, 1))
+    dev = {
+        date(2026, 11, 22): (True,),
+        date(2026, 11, 28): (True, False, True),
+        date(2026, 11, 30): (False, True),
+    }
+    assert all(is_holdout_day(COUNTRY, d) for d in held)
+    assert not any(is_holdout_day(COUNTRY, d) for d in dev)
+    folder = data_dir / "processed" / "jra" / "odds_timeseries"
+    for day, posts in dev.items():
+        write_day(folder / f"{day.isoformat()}.parquet", own_logged_rows(day, posts))
+    write_day(folder / f"{held[0].isoformat()}.parquet", own_logged_rows(held[0], (True, True)))
+    (folder / f"{held[1].isoformat()}.parquet").write_bytes(b"a locked holdout day\n")
+
+    opened = []
+    for module, name in ((pq, "read_table"), (pq, "ParquetFile"), (pq, "read_metadata"),
+                         (pq, "read_schema"), (ds, "dataset")):  # fmt: skip
+        real = getattr(module, name)
+
+        def spy(source, *args, _real=real, **kwargs):
+            opened.append(str(source))
+            return _real(source, *args, **kwargs)
+
+        monkeypatch.setattr(module, name, spy)
+
+    try:
+        coverage = study.wide_coverage()
+    except Exception as exc:  # the second holdout file is not parquet: reading it raises
+        pytest.fail(f"wide_coverage read a holdout day's file: {exc!r}")
+    touched = [p for p in opened if any(d.isoformat() in p for d in held)]
+    assert not touched, touched
+    listed = {entry["day"]: entry for entry in coverage["own_logged_days"]}
+    assert set(listed) == {d.isoformat() for d in dev}
+    for day, posts in dev.items():
+        entry = listed[day.isoformat()]
+        assert (entry["wide_races"], entry["wide_races_with_post_time"]) == (len(posts), sum(posts))
+
+
+def write_jravan_store(data_dir: Path, days, *, scratched: Sequence[str] = ()) -> None:
+    """The jravan store the study reads: an odds_timeseries day file per day (two races each, with
+    runner SCRATCHED of each race in `scratched` scratched at the close) and races.parquet."""
+    race_ids = []
+    for day in days:
+        rows = day_rows(day, races=2)
+        for race_id in scratched:
+            rows = scratch(rows, race_id, from_minute=0)
+        write_day(data_dir / "processed" / "jravan" / "odds_timeseries" / f"{day}.parquet", rows)
+        race_ids += sorted({r["race_id"] for r in rows})
+    races = pa.table(
+        {
+            "race_id": race_ids,
+            "race_class": ["G3" if i % 3 == 0 else None for i in range(len(race_ids))],
+            "race_date": [date.fromisoformat(race_day(r)) for r in race_ids],
+        }
+    )
+    pq.write_table(races, data_dir / "processed" / "jravan" / "races.parquet")
+
+
+def marked_trial(record) -> bool:
+    """Whether a registry record says it is a trial. The registry has no trial status; expected:
+    `params["trial"] is True` or a trial suffix on the variant."""
+    if "trial" in record.family_id.lower() or "trial" in record.variant.lower():
+        return True
+    return any(
+        (str(key).lower() == "trial" and value is True)
+        or (isinstance(value, str) and value.lower() == "trial")
+        for key, value in record.params.items()
+    )
+
+
+def test_a_trial_run_is_a_registry_record_marked_as_a_trial(data_dir, tmp_path, monkeypatch):
+    """CLAUDE.md: every run, failures included, is a registry record. A --trial run that scores
+    folds appends records marked as a trial; the full run after it appends unmarked ones. One
+    fold (FOLD_SCHEME: weekly, three weeks' training) scores the last day; a late scratch on a
+    training day and on the scored day keeps the run on the renormalised path."""
+    late = (race_id_of(TRAIN_DAYS[2], 1), race_id_of(TEST_DAYS[0], 2))
+    write_jravan_store(data_dir, TRAIN_DAYS + TEST_DAYS[:1], scratched=late)
+    monkeypatch.setattr(study, "load_country_scheme", lambda country: FOLD_SCHEME)
+    summary = tmp_path / "summary"  # the run regenerates the registry summary: not the repo's
+    monkeypatch.setattr(study, "summary_dir", lambda country: summary)
+    monkeypatch.setattr("horsetrack.core.eval.registry.summary_dir", lambda country: summary)
+    kw = {
+        "test_days_per_fold": 1,
+        "n_draws": 30,
+        "out_dir": tmp_path / "out",
+        "log": lambda *a: None,
+    }
+
+    study.run_study(trial=True, **kw)
+    registry = default_registry(COUNTRY)
+    trial = registry.records()
+    assert trial, "a --trial run appended no registry record"
+    assert all(marked_trial(r) for r in trial), [(r.family_id, r.variant, r.params) for r in trial]
+
+    study.run_study(trial=False, **kw)
+    full = registry.records()[len(trial) :]
+    assert full
+    assert not any(marked_trial(r) for r in full), [(r.variant, r.params) for r in full]

@@ -18,12 +18,20 @@ structural fit's. Each test day's cases are scored by every forecaster with the 
 seed (`models.nowcast.score_cases`); with `--test-days-per-fold N`, a seeded sample of N test
 days per fold is scored (training is never sampled).
 
+A late scratch follows the owner's #69 rule: the case is scored with every forecaster's drawn
+shares renormalised over the combinations priced at the close, and counted (`renormalised`). The
+fits, the drift's included, train on the cases whose board at t is the final board.
+
 Report (through `write_report`; every figure is withheld, D21): per comparison and (pool, tau),
 the log-score, CRPS and KL gains with one-sided 95% bounds resampling race days (the ticket) and
 meetings (D7); PIT deciles and 50% / 90% coverage per forecaster; sigma_t and beta per pool and
 tau across folds; the phi_t profile against the observed V_t / V_final; the board's age at t; the
-Place rule's check; Wide coverage; counts. One registry record per comparison (E19), failures
-included, then `write_summary` regenerates the committed summary.
+Place rule's check; Wide coverage (development days only: a holdout day's file is never read,
+D14); counts. One registry record per comparison (E19), failures included, then `write_summary`
+regenerates the committed summary. Family `japan-c1-nowcast-final-shares-v2` supersedes
+`japan-c1-nowcast-final-shares`, whose spec dropped late-scratch cases against #69. A `--trial`
+run is a run too: its records go to the family's `-trial` family with `params["trial"] = True`,
+and it never freezes or alters the family's spec.
 """
 
 from __future__ import annotations
@@ -65,7 +73,9 @@ COUNTRY = "japan"
 TICKET = 85
 SOURCE = "jravan"
 HYPOTHESIS = "E19"
-FAMILY_ID = "japan-c1-nowcast-final-shares"
+FAMILY_ID = "japan-c1-nowcast-final-shares-v2"
+TRIAL_FAMILY_ID = f"{FAMILY_ID}-trial"  # trial runs' records; a trial never freezes FAMILY_ID
+SUPERSEDES = "japan-c1-nowcast-final-shares"
 COLUMNS = [
     "race_id",
     "venue",
@@ -138,16 +148,18 @@ def data_builds(files: list[tuple[str, Path]]) -> dict[str, str]:
 
 
 def wide_coverage() -> dict:
-    """Our own logged days (processed/jra/odds_timeseries): Wide rows and post times."""
+    """Our own logged development days (processed/jra/odds_timeseries): Wide rows and post times.
+    A holdout day is fully locked (D14): it is skipped by its file name, before any read."""
     folder = paths.processed_dir("jra") / "odds_timeseries"
     days = []
     for path in sorted(folder.glob("*.parquet")) if folder.is_dir() else []:
+        if is_holdout_day(COUNTRY, date.fromisoformat(path.stem)):
+            continue
         t = pq.read_table(path, columns=["race_id", "pool", "post_utc"]).to_pandas()
         wide = t[t["pool"] == nc.WIDE]
         days.append(
             {
                 "day": path.stem,
-                "holdout": is_holdout_day(COUNTRY, date.fromisoformat(path.stem)),
                 "wide_races": int(wide["race_id"].nunique()),
                 "wide_races_with_post_time": int(
                     wide.dropna(subset=["post_utc"])["race_id"].nunique()
@@ -161,6 +173,8 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
     """The family's design, frozen before any development row is read."""
     return {
         "family_id": FAMILY_ID,
+        "supersedes": f"{SUPERSEDES}: its spec dropped late-scratch cases, against the owner's "
+        "#69 rule (core/eval/scoring.py); found in #85's review",
         "ticket": TICKET,
         "hypotheses": {
             HYPOTHESIS: "the structural nowcast (phi_t x s_late, logistic-normal late composition "
@@ -176,7 +190,14 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
             "pools": [nc.WIN, nc.PLACE, nc.WIDE],
             "snapshot_rule": "a row counts from its snapshot_utc (owner 2026-11-26: no lag)",
             "final": "each combination's latest row (is_final_capture), V_final the latest total",
-            "dropped": "cases whose combinations change between t and the close (late scratches)",
+            "late_scratches": "the owner's #69 rule (core/eval/scoring.py): a combination priced "
+            "on the board at t and not at the close is removed; every forecaster gets the board "
+            "at t, its drawn shares are restricted to the combinations priced at the close and "
+            "renormalised, and the case is scored and counted (renormalised); the fits train on "
+            "the cases whose board at t is the final board",
+            "dropped": "cases with no board at t or no final board, and cases whose final board "
+            "prices a combination the board at t does not (added_by_close), each counted; a race "
+            "without a post time gives no case",
             "place_shares": "the low figures inverted by the stake-back-share rule (no per-runner "
             "money in the series); the rule's money total at t is reported, and where it is not "
             "1 Place shares are not money shares and Place results are a diagnostic (ticket: "
@@ -215,7 +236,8 @@ def drift_examples(cases: nc.Cases, days: list[str]) -> pd.DataFrame:
     """#116's training examples from the boards of `days`: one per combination and tau, with
     the columns `NowcastV0.fit` reads."""
     rep = cases.row_case()
-    ok = np.repeat(nc._in_days(cases.day, days), cases.k) & (cases.odds_t > 0) & (cases.odds_f > 0)
+    fitted = nc._in_days(cases.day, days) & (cases.scratched == 0)  # as the structural fits
+    ok = np.repeat(fitted, cases.k) & (cases.odds_t > 0) & (cases.odds_f > 0)
     rep = rep[ok]
     return pd.DataFrame(
         {
@@ -365,10 +387,13 @@ def run_study(
     bootstrap = {"n_boot": int(scoring["n_boot"]), "level": float(scoring["level"]), "seed": SEED}
     v0_config = config.load_country_yaml(COUNTRY, "nowcast_v0")
     spec = build_spec(grid, scheme, bootstrap, v0_config)
-    spec_hash = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
-    registry = None
-    if not trial:
-        registry = default_registry(COUNTRY)
+    # The registry's spec hash (sorted, compact JSON), so a trial's names the spec it would freeze.
+    spec_hash = hashlib.sha256(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    registry = default_registry(COUNTRY)
+    family = TRIAL_FAMILY_ID if trial else FAMILY_ID
+    if not trial:  # a trial's spec may still change, so it is not frozen
         spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any development row is read
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     git_sha = _git_sha()
@@ -457,22 +482,22 @@ def run_study(
             offset += len(test_cases)
             log(f"  fold {label}: {len(test_cases)} cases scored ({_progress(started)})")
     except Exception as exc:
-        if registry is not None:
-            for a, b in COMPARISONS:
-                record = _record(
-                    a,
-                    b,
-                    (),
-                    git_sha,
-                    builds,
-                    spec_hash,
-                    test_days_per_fold,
-                    n_draws,
-                    status="failed",
-                    error=f"{type(exc).__name__}: {exc}",
-                )
-                registry.append(record)
-            write_summary(registry, summary_dir(COUNTRY))
+        for a, b in COMPARISONS:
+            record = _record(
+                a,
+                b,
+                (),
+                git_sha,
+                builds,
+                spec_hash,
+                test_days_per_fold,
+                n_draws,
+                trial=trial,
+                status="failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            registry.append(record)
+        write_summary(registry, summary_dir(COUNTRY))
         raise
 
     scores = pd.concat(scores, ignore_index=True)
@@ -519,6 +544,7 @@ def run_study(
                 spec_hash,
                 test_days_per_fold,
                 n_draws,
+                trial=trial,
             )
         )
 
@@ -540,7 +566,7 @@ def run_study(
         "wide": wide_coverage(),
     }
     about = {
-        "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
+        "family": f"`{family}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
         "data": ", ".join(builds.values()),
         "sampling": "every test day"
@@ -548,7 +574,7 @@ def run_study(
         else f"{test_days_per_fold} seeded test days per fold (seed {SEED}); training unsampled",
         "draws per case": n_draws,
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "trial (no registry records)": trial,
+        "trial (records marked params.trial, spec not frozen)": trial,
     }
     stem = f"nowcast-{COUNTRY}-{spec_hash[:12]}" + ("-trial" if trial else "")
     report = write_report(
@@ -572,18 +598,18 @@ def run_study(
         out_dir / f"{stem}.json", json.dumps(dump, indent=1, default=str), sources=(SOURCE,)
     )
     appended = 0
-    if registry is not None:
-        existing = registry.records(FAMILY_ID)
-        for record in records:
-            if record not in existing:
-                registry.append(record)
-                appended += 1
-        write_summary(registry, summary_dir(COUNTRY))
+    existing = registry.records(family)
+    for record in records:
+        if record not in existing:
+            registry.append(record)
+            appended += 1
+    write_summary(registry, summary_dir(COUNTRY))
     return {
         "report_path": str(report),
+        "family_id": family,
         "spec_hash": spec_hash,
         "records_appended": appended,
-        "registry_path": None if registry is None else str(registry.path),
+        "registry_path": str(registry.path),
     }
 
 
@@ -671,6 +697,7 @@ def _record(
     days_per_fold,
     n_draws,
     *,
+    trial: bool = False,
     status: str = "scored",
     error: str | None = None,
 ) -> RunRecord:
@@ -682,11 +709,13 @@ def _record(
         "seed": SEED,
         "test_days_per_fold": days_per_fold,
     }
+    if trial:
+        params["trial"] = True
     if error is not None:
         params["error"] = error
     return RunRecord(
         hypothesis_id=HYPOTHESIS,
-        family_id=FAMILY_ID,
+        family_id=TRIAL_FAMILY_ID if trial else FAMILY_ID,
         variant=f"{candidate}_vs_{baseline}",
         ticket=TICKET,
         git_sha=git_sha,
@@ -835,7 +864,12 @@ def nowcast_study_command(
     ] = None,
     n_draws: Annotated[int, typer.Option("--n-draws", help="Draws per case.")] = N_DRAWS,
     trial: Annotated[
-        bool, typer.Option("--trial", help="No registry records; the report is suffixed -trial.")
+        bool,
+        typer.Option(
+            "--trial",
+            help=f"Records go to {TRIAL_FAMILY_ID} marked trial; the spec is not frozen; the "
+            "report is suffixed -trial.",
+        ),
     ] = False,
 ) -> None:
     """Fit the C1 nowcast on D9's folds of the JRA-VAN paths and write the private report."""

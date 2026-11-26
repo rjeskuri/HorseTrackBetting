@@ -49,8 +49,16 @@ Folds and scores
   same view, n and a seed derived from (seed, race, pool, tau); per case the score is the mean over
   combinations of the Gaussian log score and CRPS of the final ln-share (and the KL of the final
   shares from the mean draw). Gains are positive when the candidate is better, with one-sided
-  bootstrap bounds (`core.eval.bootstrap.paired_bootstrap`) resampling race days. A case whose
-  combinations change between t and the close (a late scratch) is not scored.
+  bootstrap bounds (`core.eval.bootstrap.paired_bootstrap`) resampling race days.
+- A late scratch follows the owner's #69 rule (`core.eval.scoring`): scratched runners are removed
+  and the probabilities renormalised over the starters. A combination priced on the board at t
+  whose latest row at the close has no price (the store writes a scratch with null odds) is off
+  the final board: every forecaster still gets the board at t, and `score_cases` restricts its
+  drawn shares to the combinations on the final board and renormalises them. `extract` counts
+  these cases (`renormalised`, per case) and keeps the scratched rows with NaN final shares
+  (`Cases.scratched` per case); the fits train on the cases whose board at t is the final board
+  only. A case whose final board prices a combination the board at t does not is dropped and
+  counted (`added_by_close`).
 """
 
 from __future__ import annotations
@@ -473,18 +481,19 @@ class Cases:
     total_f: np.ndarray
     board_min: np.ndarray
     rule_sum: np.ndarray  # the stake-back money's total at t (NaN when the rule was not used)
+    scratched: np.ndarray  # board combinations off the final board (> 0: renormalised, #69)
     combination: np.ndarray  # runner rows from here
     s_t: np.ndarray
     lag5: np.ndarray
     lag15: np.ndarray
-    s_f: np.ndarray
+    s_f: np.ndarray  # the final share, NaN for a combination scratched by the close
     odds_t: np.ndarray
     odds_hi_t: np.ndarray
     odds_f: np.ndarray
 
     CASE = (
         "race_id", "day", "venue", "race_no", "grade", "pool", "tau", "k", "total_t", "total_f",
-        "board_min", "rule_sum",
+        "board_min", "rule_sum", "scratched",
     )  # fmt: skip
     ROW = ("combination", "s_t", "lag5", "lag15", "s_f", "odds_t", "odds_hi_t", "odds_f")
 
@@ -503,7 +512,7 @@ class Cases:
         def column(name, values):
             if name in obj:
                 return np.array(values, dtype=object)
-            if name in ("race_no", "k"):
+            if name in ("race_no", "k", "scratched"):
                 return np.array(values, dtype=np.int64)
             return np.array(values, dtype=float)
 
@@ -633,10 +642,11 @@ def extract(
     grades: Mapping[str, str | None] | None = None,
 ) -> tuple[Cases, Growth, dict]:
     """The cases at every tau (default: the decision grid) and the growth observations of every
-    race of `frame`, with counts of what could not be used."""
+    race of `frame`, with counts of what could not be used and of the cases renormalised over the
+    starters after a late scratch (#69)."""
     taus = _grid() if taus is None else tuple(taus)
     case_rows, runner_rows, obs, finals = [], [], [], []
-    counts = {"races": 0, "no_final": 0, "no_board": 0, "changed_by_close": 0}
+    counts = {"races": 0, "no_final": 0, "no_board": 0, "added_by_close": 0, "renormalised": 0}
     for race in _races(frame, grades):
         counts["races"] += 1
         for pool, series in race.series.items():
@@ -662,10 +672,14 @@ def extract(
                     counts["no_board"] += 1
                     continue
                 board, rule_sum = built
-                if set(board.combinations) != set(f_combos):
-                    counts["changed_by_close"] += 1
+                on_final = [c in f_index for c in board.combinations]
+                if sum(on_final) < len(f_combos):  # priced at the close, not on the board at t
+                    counts["added_by_close"] += 1
                     continue
-                order = [f_index[c] for c in board.combinations]
+                scratched = len(on_final) - sum(on_final)
+                counts["renormalised"] += int(scratched > 0)
+                order = [f_index.get(c, -1) for c in board.combinations]
+                missing = np.array(order) < 0
                 case_rows.append(
                     {
                         "race_id": race.race_id,
@@ -680,6 +694,7 @@ def extract(
                         "total_f": v_final,
                         "board_min": board.board_min,
                         "rule_sum": rule_sum,
+                        "scratched": scratched,
                     }
                 )
                 k = len(board.combinations)
@@ -690,10 +705,10 @@ def extract(
                         "s_t": board.shares,
                         "lag5": nan if board.shares_lag5 is None else board.shares_lag5,
                         "lag15": nan if board.shares_lag15 is None else board.shares_lag15,
-                        "s_f": f_shares[order],
+                        "s_f": np.where(missing, np.nan, f_shares[order]),
                         "odds_t": board.odds,
                         "odds_hi_t": board.odds_hi,
-                        "odds_f": f_odds[order],
+                        "odds_f": np.where(missing, np.nan, f_odds[order]),
                     }
                 )
     return Cases.build(case_rows, runner_rows), Growth.build(obs, finals), counts
@@ -1036,6 +1051,7 @@ class Nowcast:
             if fitted is not None:
                 pool_growth[pool] = fitted
         cells: dict[tuple[str, int], Cell] = {}
+        in_fit = in_fit & (cases.scratched == 0)  # a late-scratch case is scored, not fitted
         for pool in POOLS:
             if pool not in pool_growth:
                 continue
@@ -1233,14 +1249,23 @@ def score_cases(
     keep_pit: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     """Per case and forecaster: log score, CRPS and KL on the final ln-shares (and, with
-    `keep_pit`, one PIT row per combination). Every forecaster gets the same view, n and seed."""
+    `keep_pit`, one PIT row per combination). Every forecaster gets the same view, n and seed.
+    After a late scratch (#69) each forecaster's drawn shares are restricted to the combinations
+    on the final board and renormalised."""
     records, pits = [], []
     for i in range(len(cases)):
         view, pool = cases.view(i), str(cases.pool[i])
         s_final = cases.s_f[cases.rows(i)]
+        starters = np.flatnonzero(np.isfinite(s_final)) if cases.scratched[i] else None
+        if starters is not None:
+            s_final = s_final[starters]
         seed_i = case_seed(seed, view.race_id, pool, view.tau_min)
         for name, forecast in forecasters.items():
-            scores = case_scores(forecast(view, pool=pool, n=n, seed=seed_i).shares, s_final)
+            shares = forecast(view, pool=pool, n=n, seed=seed_i).shares
+            if starters is not None:
+                shares = shares[:, starters]
+                shares = shares / shares.sum(axis=1, keepdims=True)
+            scores = case_scores(shares, s_final)
             records.append((i, name, scores["log_score"], scores["crps"], scores["kl"]))
             if keep_pit:
                 pits.append((np.full(len(s_final), i), [name] * len(s_final), scores["pit"]))
