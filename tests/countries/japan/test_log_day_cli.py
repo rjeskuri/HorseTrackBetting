@@ -11,6 +11,10 @@ The command lives in `horsetrack.countries.japan.logger.log_day` and registers o
 - `make_fetcher(...) -> Fetcher`: the ingest Fetcher every JRADB request goes through (any
   arguments; the tests' replacement ignores them and serves the JRADB double).
 
+Since #358 the default date is tomorrow once today is over for the source (past its stop) and
+the time is at or after tomorrow's day-before probe start (logger.yaml `day_before.probe_from`,
+today); tier 1 holds bracket quinella (test_day_before_cli.py has the rest of #358).
+
 `log-day [--date YYYY-MM-DD] [--venues KYO,TOK] [--pools WIN,...] [--dry-run]`:
 - wires the JRA site (discover_venues, read_post_times, capture_meeting with the pools asked, the
   default being logger.yaml's), the odds log (odds_snapshot_path('jra', date, venue)) and run_day
@@ -95,7 +99,8 @@ from thread_clock import ThreadClock
 
 UTC = timezone.utc
 SAT = date(2026, 11, 28)
-ALL_POOLS = ["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE"]
+# tier 1, every round: bracket quinella joined the four in #358
+ALL_POOLS = ["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE", "BRACKET_QUINELLA"]
 MODULE = "horsetrack.countries.japan.logger.log_day"
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 HEALTH = re.compile(
@@ -465,10 +470,13 @@ def test_a_venue_that_logged_nothing_raises_an_alert_and_exit_2(
     "now, today",
     [
         (datetime(2026, 11, 27, 16, 0, tzinfo=UTC), date(2026, 11, 28)),  # 01:00 in Tokyo
-        (datetime(2026, 11, 27, 14, 59, 59, tzinfo=UTC), date(2026, 11, 27)),  # 23:59:59
+        # #358: 23:59:59 is past Friday's stop and after Saturday's day-before probe start
+        # (17:00 Friday): the race date is tomorrow, Saturday
+        (datetime(2026, 11, 27, 14, 59, 59, tzinfo=UTC), date(2026, 11, 28)),  # 23:59:59
+        (datetime(2026, 11, 27, 7, 50, tzinfo=UTC), date(2026, 11, 27)),  # 16:50: before 17:00
         (datetime(2026, 11, 28, 15, 0, tzinfo=UTC), date(2026, 11, 29)),  # midnight in Tokyo
     ],
-    ids=["01h00-next-day", "23h59-same-day", "midnight"],
+    ids=["01h00-next-day", "23h59-past-the-stop-tomorrow", "16h50-before-the-probe", "midnight"],
 )
 def test_the_default_date_is_today_in_tokyo(monkeypatch, data_dir, late_posts, now, today):
     # TOK races on the UTC date, the Tokyo date and the day after alike: only the date in the

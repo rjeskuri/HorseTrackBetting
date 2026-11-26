@@ -39,8 +39,10 @@ RAW_PAGES = ("all", "none")
 CARD_MENU = op.Link("/JRADB/accessD.html", "pw01dli00/F3")  # 出馬表: this week's meetings
 ODDS_MENU = op.Link(op.ODDS_PATH, "pw15oli00/6D")  # オッズ: this week's meetings
 RESULTS_MENU = op.Link(op.RESULTS_PATH, "pw01sli00/AF")  # レース結果: this week's meetings (#225)
-ODDS_POOLS = ("WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE")
-TIER2_POOLS = ("BRACKET_QUINELLA", "FORECAST", "TRIO", "TIERCE")  # ticket #130
+# Tier 1, every round: the four of #23 and, since #358, 枠連 on a page of its own
+ODDS_POOLS = ("WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE", "BRACKET_QUINELLA")
+TIER2_POOLS = ("FORECAST", "TRIO", "TIERCE")  # ticket #130 (枠連 moved to tier 1 in #358)
+_BOARD_POOLS = ("BRACKET_QUINELLA", *TIER2_POOLS)  # pages read by exotic_pages, a pool each
 
 
 class WrongMeeting(RuntimeError):
@@ -127,6 +129,13 @@ def _race_list(
     return menu, race_list
 
 
+def sales_open(fetcher: Fetcher, race_date: date) -> bool:
+    """Whether the オッズ menu lists a meeting under `race_date`'s heading (ticket #358): the race
+    date's sales are open, the day-before sales from the evening before (1 request). A menu that
+    lists no meeting at all raises ValueError (an error page?), as for the other menus."""
+    return bool(op.meetings_on(_menu(fetcher, ODDS_MENU, race_date), race_date, ODDS_MENU.path))
+
+
 def discover_venues(fetcher: Fetcher, race_date: date) -> list[str]:
     """Venue codes of every meeting under `race_date`'s heading of the 出馬表 menu (1 request)."""
     return list(op.meetings_on(_menu(fetcher, CARD_MENU, race_date), race_date, CARD_MENU.path))
@@ -181,23 +190,51 @@ def capture_meeting(
     now: Callable[[], datetime] = utc_now,
     raw_pages: str | None = None,
 ) -> MeetingCapture:
-    """The odds rows of `pools` for every race of the meeting (or `races` only), in race-list
-    order: the オッズ menu, the race list, then one request per distinct odds page of each race.
-    `raw_pages` "all" keeps each odds page body (see raw_odds_path), "none" nothing; None reads
-    logger.yaml. A page that cannot be written never fails the capture: one warning is logged.
-    Raises NotListed, WrongMeeting, or ValueError (an unknown pool or raw_pages, before any
-    request)."""
+    """The odds rows of `pools` (of ODDS_POOLS) for every race of the meeting (or `races` only),
+    in race-list order: the オッズ menu, the race list, then one request per distinct odds page of
+    each race. The BRACKET_QUINELLA page is read by `exotic_pages`, its rows in tier 2's shape
+    (#358). `raw_pages` "all" keeps each odds page body (see raw_odds_path), "none" nothing; None
+    reads logger.yaml. A page that cannot be written never fails the capture: one warning is
+    logged. Raises NotListed, WrongMeeting, or ValueError (an unknown pool or raw_pages, before
+    any request)."""
 
     def read(page: RawPage, what: str, number: int, page_pools: list[str], snapshot_utc) -> list:
+        boards = [p for p in page_pools if p in _BOARD_POOLS]
+        rows = _board_rows(page, what, race_date, venue, number, boards, snapshot_utc)
+        classic = [p for p in page_pools if p not in boards]
+        if not classic:
+            return rows
         doc = op.soup(page.body)
         _check(doc, race_date, venue, what)
         _check_race(op.race_number(doc), number, what)
         rid = race_id(race_date, venue, number)
-        return op.odds_rows(
-            doc, rid, page_pools, snapshot_utc=snapshot_utc, fetched_utc=page.fetched_utc
+        return rows + op.odds_rows(
+            doc, rid, classic, snapshot_utc=snapshot_utc, fetched_utc=page.fetched_utc
         )
 
     return _capture(fetcher, race_date, venue, pools, ODDS_POOLS, races, now, raw_pages, read)
+
+
+def _board_rows(
+    page: RawPage,
+    what: str,
+    race_date: date,
+    venue: str,
+    number: int,
+    pools: Sequence[str],
+    snapshot_utc: datetime,
+) -> list[dict[str, Any]]:
+    """The rows of `pools` off an odds page read by `exotic_pages` (one pool per page on JRADB; a
+    shared page is read per pool), each board's date line and race number checked."""
+    rows: list[dict[str, Any]] = []
+    for pool in pools:
+        board = ep.read_board(page.body, pool)
+        _verdict(board.meeting, race_date, venue, what)
+        _check_race(board.race_no, number, what)
+        rid = race_id(race_date, venue, number)
+        at = {"snapshot_utc": snapshot_utc, "fetched_utc": page.fetched_utc}
+        rows += ep.board_rows(board, rid, pool, **at)
+    return rows
 
 
 def capture_tier2(
@@ -217,15 +254,7 @@ def capture_tier2(
     its legs are kept in `win5`, its row added when the page is for `race_date`."""
 
     def read(page: RawPage, what: str, number: int, page_pools: list[str], snapshot_utc) -> list:
-        rows: list[dict[str, Any]] = []
-        for pool in page_pools:  # one pool per page on JRADB; a shared page is read per pool
-            board = ep.read_board(page.body, pool)
-            _verdict(board.meeting, race_date, venue, what)
-            _check_race(board.race_no, number, what)
-            rid = race_id(race_date, venue, number)
-            at = {"snapshot_utc": snapshot_utc, "fetched_utc": page.fetched_utc}
-            rows += ep.board_rows(board, rid, pool, **at)
-        return rows
+        return _board_rows(page, what, race_date, venue, number, page_pools, snapshot_utc)
 
     def win5_rows(menu: BeautifulSoup, snapshot_utc: datetime) -> list[dict[str, Any]]:
         asked = {race_id(race_date, venue, n) for n in races}
