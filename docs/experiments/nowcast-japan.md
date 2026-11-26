@@ -6,27 +6,55 @@ which are a licensed source. This report therefore says what ran, where its repo
 hold it. It gives no count, span, score, rate, sign or bound derived from that data. The figures for our own logged
 days (Wide coverage, below) are not JRA-VAN data and are given.
 
-- Registry family `japan-c1-nowcast-final-shares`, spec sha256
-  `c652ebf9d5da87478f3281ab66e8db9f960b5c0ce326af05019f0a345d41a0dd`. The spec was frozen when the full run
-  started, before that run read any row. It holds the hypothesis, the null, the data rules, the variants, the
-  comparisons, the scores, the D2 grid, D9's fold scheme, D7's bootstrap and the model constants. Two runs with
-  `--trial` came first. They wrote no records and read days up to 2020-03-31 and 2020-06-30, so they scored the
-  2020-Q1 and 2020-Q2 folds. They sized memory and run time, and they showed the Place rule's check failing
-  (below). After them the spec gained its `place_shares` clause, which makes Place a diagnostic when that check
-  fails. The code then changed only to save memory: fits take a day list instead of a copy of the cases, and
-  Arrow's pool is released after each day. No model, constant or score changed after the trial scores were read.
-- Code at `819b99b`: `core/eval/distributional.py` (CRPS, PIT, Gaussian log score), `countries/japan/models/nowcast.py`
+- Registry family `japan-c1-nowcast-final-shares-v2`, spec sha256
+  `6cc31a7fc685deebc6b05a31c515007da3d3000c3d0839621df936a48a5997f9`. The spec was frozen when the full run
+  started, before that run read any row. It holds the hypothesis, the null, the data rules (the #69 late-scratch
+  rule among them), the variants, the comparisons, the scores, the D2 grid, D9's fold scheme, D7's bootstrap and the
+  model constants.
+- **v2 supersedes the v1 family** `japan-c1-nowcast-final-shares` (spec sha256
+  `c652ebf9d5da87478f3281ab66e8db9f960b5c0ce326af05019f0a345d41a0dd`, git `819b99b`, run ids `e8c261a0882090ba`,
+  `f90461967e915071`, `d7f6cc3bb7e0d2a2`, `28b378db8473dd2f`, `13ab926148e96f76`; private report
+  `nowcast-japan-c652ebf9d5da.md`). #85's review found that v1's spec and code dropped every late-scratch case
+  whole, which breaks the owner's #69 rule in `core/eval/scoring.py`: scratched runners are removed and the
+  probabilities renormalised over the starters, void races are dropped and counted, and model and baseline are
+  scored on their common races, with the drops counted. The frozen v1 spec could not take the fix, so the fixed
+  study is a new family. The registry is append-only, so v1's freeze and records stay as they are. They are
+  superseded and are not evidence. v2 changes only the scratch clause (and the `dropped` list it implies) and adds
+  a `supersedes` field. No model, constant, score, fold or grid changed. The fix came from the review against an
+  existing owner rule, and v1's scores were not consulted for it.
+- **Trial runs.** Two `--trial` runs came before the v1 freeze. They read days up to 2020-03-31 and 2020-06-30, so
+  they scored the 2020-Q1 and 2020-Q2 folds. At the time `--trial` wrote no registry record. They sized memory and
+  run time, and they showed the Place rule's check failing (below). **The spec's `place_shares` clause was added
+  after those trial runs had scored folds.** That clause makes Place a diagnostic when the check fails, and v2
+  keeps it. The code then changed only to save memory: fits take a day list instead of a copy of the cases, and
+  Arrow's pool is released after each day.
+  - The run up to 2020-03-31 is now in the registry, recorded after the fact. Its private report JSON
+    (`$HORSETRACK_DATA_DIR/reports/nowcast-japan-cf21829add59-trial.json`) holds what a record needs: the gains,
+    the git sha, the data builds (its odds build is the day files up to 2020-03-31), the spec hash, the sampling
+    and the draws. Its five comparisons were appended through the registry API to family
+    `japan-c1-nowcast-final-shares-trial`, with `params.trial = true` and a `params.recorded_after_the_fact` note.
+    The run ids are `047d1f1a0272043f`, `a00893ac0cd5785d`, `22568a2dce18cf08`, `3572ab0903c12455` and
+    `10904eca4c2ea311`. Their git sha is `ea5d0b4`, the HEAD the run named, but `studies/nowcast.py` was not yet
+    committed then (it was first committed in `819b99b`). The JSON does not state the seed, so the records carry
+    none.
+  - The run up to 2020-06-30 is not recorded. The other trial wrote its report to the same file name, so nothing
+    of this run survives to rebuild a record from. It is disclosed here instead.
+  - From this review on, a `--trial` run appends its records to the family's `-trial` family
+    (`japan-c1-nowcast-final-shares-v2-trial`), with `params.trial = true`. It never freezes or alters the family's
+    spec. No v2 trial has been run.
+- Code at `be905f8`: `core/eval/distributional.py` (CRPS, PIT, Gaussian log score), `countries/japan/models/nowcast.py`
   (the model, tested in `tests/countries/japan/test_nowcast.py` and `tests/core/eval/test_distributional.py`) and
   `countries/japan/studies/nowcast.py` (the run). To reproduce, run `uv run horsetrack japan nowcast-study`. It
-  scores every test day with 200 draws per case. On this 16 GB Mac it took about 20 minutes, with a peak
-  resident memory of about 2.3 GB, one day file in memory at a time. `--test-days-per-fold N` scores a seeded sample
-  of test days. `--trial` writes no records.
-- Data builds: `processed/jravan/odds_timeseries@0fd1381d81daf570`, `processed/jravan/races.parquet@8c0dfc18f1894406`.
+  scores every test day with 200 draws per case. On this 16 GB Mac it took about 17 minutes, with a peak resident
+  memory of about 2 GB, one day file in memory at a time. `--test-days-per-fold N` scores a seeded sample of test
+  days. `--trial` records its runs as trials (above).
+- Data builds: `processed/jravan/odds_timeseries@0fd1381d81daf570`, `processed/jravan/races.parquet@8c0dfc18f1894406`,
+  the same as v1's.
 - The full report is under the data directory at
-  `$HORSETRACK_DATA_DIR/reports/nowcast-japan-c652ebf9d5da.md`, with its tables as JSON beside it
-  (`nowcast-japan-c652ebf9d5da.json`). Both were written through `write_report` with the source `jravan`. The
-  records are in `docs/experiments/registry/japan/japan-c1-nowcast-final-shares.md`, where every one shows as
-  withheld.
+  `$HORSETRACK_DATA_DIR/reports/nowcast-japan-6cc31a7fc685.md`, with its tables as JSON beside it
+  (`nowcast-japan-6cc31a7fc685.json`). Both were written through `write_report` with the source `jravan`. The
+  records are in `docs/experiments/registry/japan/japan-c1-nowcast-final-shares-v2.md`, and the after-the-fact
+  trial records are in `japan-c1-nowcast-final-shares-trial.md`. Every one shows as withheld.
 
 ## Owner decisions used
 
@@ -53,24 +81,34 @@ days (Wide coverage, below) are not JRA-VAN data and are given.
   `__pool__` total at or before t. Pools other than WIN, PLACE and QUINELLA_PLACE are ignored.
 - **The final board** is each combination's latest row (the store's `is_final_capture`). V_final is the latest
   pool total.
-- **Cases.** A case is one (race, pool, τ). It is dropped when its combinations change between t and the close (a
-  late scratch). It is also dropped when there is no board at t, no final board or no post time. The private report
-  counts each kind of drop.
+- **Cases.** A case is one (race, pool, τ). A late scratch follows the owner's #69 rule (`core/eval/scoring.py`:
+  scratched runners are removed and the probabilities renormalised over the starters). The store writes a scratched
+  runner's rows with no price, so a combination priced on the board at t whose latest row at the close has no price
+  is off the final board. Such a case is kept: every forecaster gets the board at t, the scratched runner included,
+  its drawn shares are restricted to the combinations priced at the close and renormalised, and the case is scored.
+  The private report counts these cases (`renormalised`). The fits (pool growth aside, which reads every race's
+  totals) train only on the cases whose board at t is the final board, and #116's drift does the same. A case is
+  dropped when its final board prices a combination the board at t does not (`added_by_close`), or when there is
+  no board at t or no final board. The private report counts each kind of drop. A race without a post time gives
+  no case.
 - **Grades** are the jravan races table's `race_class`, and they enter only the pool-growth profile.
 - **Place shares.** The series carries no per-runner Place money, so Place shares invert the low figures in closed
   form by the stake-back-share rule of `config/jra.yaml`. Where the rule holds, the inverted money totals 1 in units
   of the pool. The run reports that total on every development board, and **the check does not hold on JRA-VAN
   boards** (the private report has the figures). Place shares from the low figure are therefore not money shares
   there, and every Place row of the run is a diagnostic, not evidence. In the ticket's words, Win is shipped. Before
-  the frozen run, the high figures were also inverted by the same rule and did not total 1 either, so neither end of
+  the v1 frozen run, the high figures were also inverted by the same rule and did not total 1 either, so neither end of
   the Place range follows the simple rule. The final per-runner votes (H1, #368) were checked against the final WIN
   board on one day and did not reconcile with it exactly, so they were not used as Place money. That check was an
-  exploration and is not part of the frozen run.
-- **Wide.** The JRA-VAN series has no Wide pool. Our own logged days (`processed/jra/odds_timeseries`) are
-  2026-11-21 and 2026-11-22, each with 12 Wide races, and neither file has a post time (`post_utc` is null, as the
-  logger writes no race-card sidecar for them). So no Wide board at t can be placed, Wide is neither fitted nor
+  exploration and is not part of either frozen run.
+- **Wide.** The JRA-VAN series has no Wide pool. Our own logged development days (`processed/jra/odds_timeseries`)
+  are 2026-11-21 and 2026-11-22, each with 12 Wide races, and neither file has a post time (`post_utc` is null, as
+  the logger writes no race-card sidecar for them). So no Wide board at t can be placed, Wide is neither fitted nor
   scored, and the model's Wide path is exercised only by its code. Both days also fall in the last scored quarter,
-  which no fold trains on. Our own WIN and PLACE days duplicate JRA-VAN days and are not read.
+  which no fold trains on. Our own WIN and PLACE days duplicate JRA-VAN days and are not read. A logged holdout
+  day's file is skipped by its name and never read (D14). v1's code read every logged file and tagged holdout days
+  only afterwards, which the review found. No logged day was a holdout day when either run read them, since the
+  holdout starts 2026-11-28 and the logged days are the two above, so no holdout file was opened.
 - **Board age at t.** The JRA-VAN paths are 5-6 minutes apart, so the board at a near-post τ can be minutes old.
   The run measures the age at t per pool and τ (from the board's oldest row to t) and reports it. Pool growth uses
   the board's own minutes to post, not τ. #116's drift is fitted on the same boards without its `max_board_age_s`
@@ -105,15 +143,16 @@ with the same view, n and seed:
   are read back into shares by the pool's share rule.
 
 There is one registry record per comparison. Each holds, per pool and τ, the log-score, CRPS and KL gains with
-race-day and meeting bounds, and the per-fold gains at T-2. All figures are withheld.
+race-day and meeting bounds, and the per-fold gains at T-2. All figures are withheld. The v1 records are listed for
+the trail only: they are superseded (above).
 
-| Comparison | Record |
-| --- | --- |
-| `structural_vs_random_walk` (E19, primary) | `e8c261a0882090ba` |
-| `structural_vs_drift_v0` (D8's price baseline) | `f90461967e915071` |
-| `no_features_vs_random_walk` | `d7f6cc3bb7e0d2a2` |
-| `structural_vs_no_features` (what the features add) | `28b378db8473dd2f` |
-| `drift_v0_vs_random_walk` | `13ab926148e96f76` |
+| Comparison | v2 record | v1 record (superseded) |
+| --- | --- | --- |
+| `structural_vs_random_walk` (E19, primary) | `03c2a06563491ea5` | `e8c261a0882090ba` |
+| `structural_vs_drift_v0` (D8's price baseline) | `bd887ac5e5959224` | `f90461967e915071` |
+| `no_features_vs_random_walk` | `25a351d57949f866` | `d7f6cc3bb7e0d2a2` |
+| `structural_vs_no_features` (what the features add) | `2337943e84865262` | `28b378db8473dd2f` |
+| `drift_v0_vs_random_walk` | `e750e055f87e0d06` | `13ab926148e96f76` |
 
 The private report also holds, per forecaster, pool and τ, the PIT deciles and the 50% and 90% coverage. It holds
 σ_t, σ_rw and β per pool and τ in every fold, the pool-growth profile against the observed V_t / V_final, the board
@@ -124,15 +163,23 @@ age at t and the Place rule's check.
 - Place: the stake-back inversion of the low figure fails its money-total check on JRA-VAN boards (see Data), so
   Place is a diagnostic. Only Win stands as a result.
 - Wide: no case can be built (see Data). This is a coverage failure, not a modelling result.
-- The command exited 1 at its last step. The report and all five records were written first. `write_summary` then
-  raised on records of another ticket in the shared registry: #131's family ids (`japan/131-exacta-category-v1`
-  and others) contain `/`, which cannot be a summary file name. The registry verifies and was not altered. The
-  committed summary was regenerated by `write_summary` itself, over the registry restricted to the families already
-  committed plus this one. That changed only `japan-c1-nowcast-final-shares.md` and one line of the index. No
-  record failed, and every variant scored on every fold.
+- v1's scratch handling: v1 dropped late-scratch cases against the owner's #69 rule, so its five records are
+  superseded by v2's (above). This is a failure of the v1 study design, found in review, not a modelling result.
+- The command exited 1 at its last step, in both the v1 and the v2 full runs. Each time the report and all five
+  records were written first. `write_summary` then raised on records of another ticket in the shared registry:
+  #131's family ids (`japan/131-exacta-category-v1` and others) contain `/`, which cannot be a summary file name
+  (tickets #344 and #391). The registry verifies and was not altered. The committed summary was regenerated by
+  `write_summary` itself, over the registry restricted to the families already committed plus this ticket's. For v2
+  that added `japan-c1-nowcast-final-shares-v2.md`, `japan-c1-nowcast-final-shares-trial.md` and their two lines of
+  the index, and changed no other file. No record failed, and every variant scored on every fold.
 
 ## Alternatives rejected and why
 
+- **Dropping late-scratch cases (the v1 family):** rejected in #85's review. It breaks the owner's #69 rule, under
+  which scratched runners are removed and the probabilities renormalised over the starters.
+- **Training on the renormalised cases too:** not done. A scratched runner has no final share, so its late-money
+  ratio, which β's least squares reads, is undefined. The #69 rule is a scoring rule, and the fits keep the cases
+  whose board at t is the final board, as in v1.
 - **σ from the residual SD of ln r** (r = the late-money ratio): rejected. Where 1 − φ_t is small, rounded odds make
   r noisy and sometimes non-positive. A floor then gives outliers that would set σ. σ is instead fitted by the
   scoring rule the run reports (minimum-score estimation, consistent for a proper score). The random walk gets the
