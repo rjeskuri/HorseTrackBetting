@@ -20,8 +20,13 @@ test_log_day_cli.py: `utc_now`, `sleep` and `make_fetcher`, looked up at call ti
     today's date (ISO). Its lines are `<race date> at=<UTC instant>`, appended;
   - the day-done marker logs_dir('japan')/jra-day-done.txt has a line whose first field is today's
     date (ISO). Its lines are `<race date> at=<UTC instant>`, appended;
-  - the time is past today's stop.
+  - the time is past today's stop (#358: and before tomorrow's day-before probe start,
+    logger.yaml `day_before.probe_from` today; from then on the race date is tomorrow, see
+    test_day_before_cli.py).
   The markers are read under the lock.
+- #358: a start in the night (after the evening's probe span, before the first window) reads the
+  オッズ menu once, the day-before probe; on a day without racing that is its one request before
+  the first window.
 - Otherwise it runs the day as log-day does (run_day with logger.yaml and the block marker above);
   as logger.yaml says, nothing is requested before the first window. The venues come from one
   discovery request; when it answers with no venue, the start appends today's no-meeting line and
@@ -133,9 +138,6 @@ HOST = dbl.HOST  # jra.yaml hosts.official
 TESTS_DIR = Path(__file__).resolve().parent
 SRC = Path(__file__).resolve().parents[3] / "src"
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-
-_STOP_H, _STOP_M = (int(x) for x in str(load_country_yaml("japan", "logger")["stop"]).split(":"))
-TO_LAST_SECOND_S = 24 * 3600 - 1 - (_STOP_H * 3600 + _STOP_M * 60)  # stop -> 23:59:59
 
 
 @pytest.fixture(autouse=True)
@@ -265,6 +267,22 @@ def first_window(day: date) -> datetime:
 
 def stop(day: date) -> datetime:
     return wall(day, load_country_yaml("japan", "logger")["stop"])
+
+
+def no_racing_requests(t: datetime) -> int:
+    """What a start at `t` (between midnight and the first window, or later) sends on a day
+    without racing: its one discovery, at the first window; and, when it starts before that window,
+    one read of the オッズ menu first (#358: the day-before probe of a start after the evening's
+    probe span, which finds no sales open for today)."""
+    return 2 if t < first_window(t.astimezone(TOKYO).date()) else 1
+
+
+def probe_start_after_stop_s() -> float:
+    """Seconds from today's stop to tomorrow's day-before probe start (#358: logger.yaml
+    `day_before.probe_from`, a Tokyo time today)."""
+    config = load_country_yaml("japan", "logger")
+    probe_from = config["day_before"]["probe_from"]
+    return (wall(SAT, probe_from) - wall(SAT, config["stop"])).total_seconds()
 
 
 def week() -> World:
@@ -518,7 +536,9 @@ def test_a_running_logger_holds_the_lock_and_a_second_start_exits_0(monkeypatch,
     assert lock.is_file()
     after = start(monkeypatch, Clock(at(MON, 5, 0)), monday)
     assert after.code == 0, after.output
-    assert after.requests == 1, f"{after.requests} requests once the lock was free"
+    assert after.requests == no_racing_requests(at(MON, 5, 0)), (
+        f"{after.requests} requests once the lock was free"
+    )
 
 
 def one_error_naming_the_lock(stderr: str) -> list[str]:
@@ -560,7 +580,9 @@ def test_an_attended_log_day_takes_the_same_lock(monkeypatch, args):
     # The flock, not the file: once the holder lets go, the same kind of run goes on.
     after = start(monkeypatch, Clock(at(MON, 5, 0)), world, args=["--date", MON.isoformat()])
     assert after.code in (0, 2), after.output
-    assert after.requests == 1, f"{after.requests} requests once the lock was free"
+    assert after.requests == no_racing_requests(at(MON, 5, 0)), (
+        f"{after.requests} requests once the lock was free"
+    )
 
 
 @pytest.mark.parametrize(
@@ -637,10 +659,11 @@ def test_a_block_marker_for_today_exits_0_without_a_request(monkeypatch, today, 
         assert s.requests == 0, f"a start at {t:%H:%M}Z sent {s.requests} request(s) after a block"
         assert s.waited == 0.0, f"a start at {t:%H:%M}Z waited {s.waited} s instead of exiting"
 
-    # The block is for today and that host only: Monday, without racing, has its one discovery.
+    # The block is for today and that host only: Monday, without racing, has its one discovery
+    # (and, at 05:00, one probe before it: #358).
     s = start(monkeypatch, Clock(at(MON, 5, 0)), world)
     assert s.code == 0, s.output
-    assert s.requests == 1, f"Monday sent {s.requests} requests"
+    assert s.requests == no_racing_requests(at(MON, 5, 0)), f"Monday sent {s.requests} requests"
 
 
 # ---------------------------------------------------------------- a day without racing
@@ -654,12 +677,17 @@ def test_a_block_marker_for_today_exits_0_without_a_request(monkeypatch, today, 
     ],
     ids=["first-start-before-the-window", "first-start-mid-morning"],
 )
-def test_a_day_without_racing_costs_one_request_per_day(monkeypatch, today, first, later):
+def test_a_day_without_racing_costs_one_discovery_per_day(monkeypatch, today, first, later):
+    """One discovery a day; a first start in the night also reads the オッズ menu once before it
+    (#358: the day-before probe of a start after the evening's probe span), and nothing else."""
     world = week()
-    s = start(monkeypatch, Clock(at(today, *first)), world)
+    t = at(today, *first)
+    s = start(monkeypatch, Clock(t), world)
     assert s.code == 0, s.output
-    assert s.requests == 1, f"the first start sent {s.requests} requests, not one discovery"
-    assert min(s.site.at) >= first_window(today), "a request before the first window"
+    assert s.requests == no_racing_requests(t), f"the first start sent {s.requests} requests"
+    early = [seen.link for seen, when in zip(s.site.seen, s.site.at, strict=True)
+             if when < first_window(today)]  # fmt: skip
+    assert early == ([dbl.ODDS_MENU] if t < first_window(today) else []), early
     assert no_meeting_days() == [today.isoformat()]
     total = s.requests
 
@@ -669,13 +697,14 @@ def test_a_day_without_racing_costs_one_request_per_day(monkeypatch, today, firs
         assert s.requests == 0, f"a start at {hh:02d}:{mm:02d} sent {s.requests} request(s)"
         assert s.waited == 0.0, f"a start at {hh:02d}:{mm:02d} waited instead of exiting"
         total += s.requests
-    assert total == 1
+    assert total == no_racing_requests(t)
 
-    # The next day is a day of its own: one discovery again, then nothing.
+    # The next day is a day of its own: one discovery again (after one probe at 00:10), then
+    # nothing.
     nxt = today + timedelta(days=1)
     s = start(monkeypatch, Clock(at(nxt, 0, 10)), world)
     assert s.code == 0, s.output
-    assert s.requests == 1, f"the next day's first start sent {s.requests} requests"
+    assert s.requests == no_racing_requests(at(nxt, 0, 10)), f"the next day sent {s.requests}"
     assert sorted(no_meeting_days()) == [today.isoformat(), nxt.isoformat()]
     s = start(monkeypatch, Clock(at(nxt, 11, 0)), world)
     assert (s.code, s.requests, s.waited) == (0, 0, 0.0), s.output
@@ -731,10 +760,11 @@ def test_a_start_after_the_day_has_finished_exits_0_without_a_request(
         assert health_bytes() == health, f"a start at {when} appended health lines"
     assert day_done_days().count(today.isoformat()) == 1, day_done_lines()
 
-    # The day-done line is for today only: Monday, without racing, has its one discovery.
+    # The day-done line is for today only: Monday, without racing, has its one discovery (and,
+    # at 05:00, one probe before it: #358).
     s = start(monkeypatch, Clock(at(MON, 5, 0)), world)
     assert s.code == 0, s.output
-    assert s.requests == 1, f"Monday sent {s.requests} requests"
+    assert s.requests == no_racing_requests(at(MON, 5, 0)), f"Monday sent {s.requests} requests"
 
 
 @pytest.mark.parametrize(
@@ -852,23 +882,32 @@ def test_a_run_interrupted_mid_day_is_resumed_by_the_next_start(monkeypatch, dea
 
 
 @pytest.mark.parametrize(
-    "day, after_stop_s, runs",
+    "day, when, runs",
     [
-        (SAT, 1, False),
-        (SAT, 95 * 60, False),
-        (TUE, TO_LAST_SECOND_S, False),
-        (SUN, -60, True),
-        (TUE, -60, True),
+        (SAT, "a-second-past", False),
+        (SAT, "halfway-to-the-probe", False),
+        (TUE, "a-second-before-the-probe", False),
+        (SUN, "a-minute-before", True),
+        (TUE, "a-minute-before", True),
     ],
     ids=[
         "racing-day-a-second-past",
-        "racing-day-95-min-past",
-        "no-racing-last-second",
+        "racing-day-halfway-to-the-probe",
+        "no-racing-a-second-before-the-probe",
         "racing-day-a-minute-before",
         "no-racing-a-minute-before",
     ],
 )
-def test_after_the_stop_time_it_exits_0(monkeypatch, day, after_stop_s, runs):
+def test_after_the_stop_time_it_exits_0(monkeypatch, day, when, runs):
+    """Past today's stop and before tomorrow's day-before probe start a start sends nothing. From
+    the probe start on it logs tomorrow (#358), so the former cases 95 minutes past the stop and
+    23:59:59 are now test_day_before_cli.py's (a start the evening before logs tomorrow)."""
+    after_stop_s = {
+        "a-second-past": lambda: 1,
+        "halfway-to-the-probe": lambda: probe_start_after_stop_s() / 2,
+        "a-second-before-the-probe": lambda: probe_start_after_stop_s() - 1,
+        "a-minute-before": lambda: -60,
+    }[when]()
     now = stop(day) + timedelta(seconds=after_stop_s)
     assert now.astimezone(TOKYO).date() == day
     s = start(monkeypatch, Clock(now), week())
@@ -1027,8 +1066,10 @@ def test_the_real_sleep_of_no_time_returns_without_sleeping(monkeypatch, no_real
 def test_a_start_before_a_night_asleep_wakes_with_the_mac_and_logs_the_morning(
     monkeypatch, no_real_wait
 ):
-    """launchd's 00:30 start waits for the 07:00 window through log_day's own sleep; the lid is
-    closed 01:00-08:00. The wait ends when the Mac wakes, and the morning's race is logged."""
+    """launchd's 00:30 start waits between rounds through log_day's own sleep; the lid is closed
+    01:00-08:00. The wait ends when the Mac wakes, and the morning's race is logged. (#358: the
+    00:30 start reads the オッズ menu once, finds Saturday's sales open and logs the night's
+    rounds until the lid closes; before #358 it waited for the 07:00 window.)"""
     world = week()  # Saturday: TOK's one race, off at 09:35
     closes, opens = at(SAT, 1, 0), at(SAT, 8, 0)
     wall = WallClock(at(SAT, 0, 30), lid=(closes, opens))
@@ -1038,9 +1079,12 @@ def test_a_start_before_a_night_asleep_wakes_with_the_mac_and_logs_the_morning(
     s = start(monkeypatch, wall, world, site=site, real_sleep=True)
     assert s.code in (0, 2), s.output
     assert s.site.at, "nothing was sent"
-    woke = min(s.site.at)
+    asleep = [t for t in s.site.at if closes < t < opens]
+    assert asleep == [], f"{len(asleep)} requests while the Mac slept"
+    woke = min(t for t in s.site.at if t > closes)
     assert opens <= woke <= opens + timedelta(seconds=60), (
-        f"the first request at {woke.astimezone(TOKYO):%H:%M:%S}: the wait did not end at 08:00"
+        f"the first request after 01:00 at {woke.astimezone(TOKYO):%H:%M:%S}: the wait did not"
+        " end at 08:00"
     )
     [post] = world.expected_post_times(SAT, "TOK").values()
     t20 = [
@@ -1076,21 +1120,39 @@ RACING_SAT = {FRI: [("KYO", 1)], SAT: [("TOK", 1)]}
 
 
 @pytest.mark.parametrize(
-    "tz, now, days, expect",
+    "tz, now, days, race_date, expect",
     [
         # Tokyo Sat 01:30; Friday in UTC and in Los Angeles
-        ("America/Los_Angeles", datetime(2026, 11, 27, 16, 30, tzinfo=UTC), NO_RACING_SAT, "none"),
+        ("America/Los_Angeles", datetime(2026, 11, 27, 16, 30, tzinfo=UTC), NO_RACING_SAT, SAT,
+         "none"),
         # Tokyo Sat 10:00; Los Angeles Fri 17:00, past 16:45 there
-        ("America/Los_Angeles", datetime(2026, 11, 28, 1, 0, tzinfo=UTC), NO_RACING_SAT, "none"),
-        # Tokyo Sat 20:30, past the stop; Auckland Sun 00:30, the day Sunday's racing
-        ("Pacific/Auckland", datetime(2026, 11, 28, 11, 30, tzinfo=UTC), NO_RACING_SAT, "stop"),
+        ("America/Los_Angeles", datetime(2026, 11, 28, 1, 0, tzinfo=UTC), NO_RACING_SAT, SAT,
+         "none"),
+        # Tokyo Sat 16:45:01, past the stop and before Sunday's probe start; Los Angeles Fri 23:45
+        ("America/Los_Angeles", datetime(2026, 11, 28, 7, 45, 1, tzinfo=UTC), NO_RACING_SAT, SAT,
+         "stop"),
+        # #358: Tokyo Sat 19:00, past the stop, after Sunday's probe start: the race date is
+        # Tokyo's tomorrow, Sunday (racing at NAK); Los Angeles Fri 02:00 (racing at KYO)
+        ("America/Los_Angeles", datetime(2026, 11, 28, 10, 0, tzinfo=UTC), NO_RACING_SAT, SUN,
+         "NAK"),
+        # Tokyo Sat 20:30, the same; Auckland Sun 00:30
+        ("Pacific/Auckland", datetime(2026, 11, 28, 11, 30, tzinfo=UTC), NO_RACING_SAT, SUN,
+         "NAK"),
         # Tokyo Sat 08:55, racing at TOK; Friday (racing at KYO) in UTC and in Los Angeles
-        ("America/Los_Angeles", datetime(2026, 11, 27, 23, 55, tzinfo=UTC), RACING_SAT, "TOK"),
+        ("America/Los_Angeles", datetime(2026, 11, 27, 23, 55, tzinfo=UTC), RACING_SAT, SAT,
+         "TOK"),
     ],
-    ids=["la-tokyo-ahead-a-day", "la-past-its-local-stop", "auckland-ahead-of-tokyo", "la-racing"],
-)
+    ids=[
+        "la-tokyo-ahead-a-day",
+        "la-past-its-local-stop",
+        "la-past-the-tokyo-stop",
+        "la-tokyo-evening-tomorrow",
+        "auckland-tokyo-evening-tomorrow",
+        "la-racing",
+    ],
+)  # fmt: skip
 def test_the_race_date_is_tokyo_today_whatever_the_mac_time_zone(
-    monkeypatch, mac_time_zone, tz, now, days, expect
+    monkeypatch, mac_time_zone, tz, now, days, race_date, expect
 ):
     mac_time_zone(tz)
     today = now.astimezone(TOKYO).date()
@@ -1099,21 +1161,21 @@ def test_the_race_date_is_tokyo_today_whatever_the_mac_time_zone(
 
     s = start(monkeypatch, Clock(now), world)
 
-    others = [(d, v) for d, meetings in days.items() for v, _ in meetings if d != today]
+    others = [(d, v) for d, meetings in days.items() for v, _ in meetings if d != race_date]
     for d, venue in others:
-        assert not logged_rows(d, venue), f"{d} {venue} logged: the race date was not {today}"
+        assert not logged_rows(d, venue), f"{d} {venue} logged: the race date was not {race_date}"
     if expect == "none":
         assert s.code == 0, s.output
-        assert s.requests == 1, f"{s.requests} requests, not one discovery"
-        assert no_meeting_days() == [today.isoformat()]
+        assert s.requests == no_racing_requests(now), f"{s.requests} requests"
+        assert no_meeting_days() == [race_date.isoformat()]
     elif expect == "stop":
         assert (s.code, s.requests, s.waited) == (0, 0, 0.0), s.output
         assert no_meeting_days() == []
     else:
         assert s.code in (0, 2), s.output
-        rows = logged_rows(today, expect)
-        assert rows, f"{today} {expect} logged nothing"
-        assert {r["race_id"].rsplit(":", 1)[0] for r in rows} == {f"jra:{today}:{expect}"}
+        rows = logged_rows(race_date, expect)
+        assert rows, f"{race_date} {expect} logged nothing"
+        assert {r["race_id"].rsplit(":", 1)[0] for r in rows} == {f"jra:{race_date}:{expect}"}
         assert no_meeting_days() == []
 
 
