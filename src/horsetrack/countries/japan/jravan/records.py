@@ -8,7 +8,7 @@ fixed-width view of its columns, an `S<length>` array shaped (n,), (n, repeat) o
 and the record separator (the layout's last item) are left out. Records split on LF (a CR before
 it is dropped), empty lines are skipped and the last record may lack its separator. Each record
 must be `spec.length - 2` bytes (else `RecordLengthError`) and start with `spec.record_type` (else
-`ValueError`).
+`RecordTypeError`); both are `ValueError`s carrying the 1-based `record` number.
 
 `iter_file` streams a file in chunks of whole records, so a multi-GB file decodes in bounded
 memory. `text`, `integer` and `scaled` convert each distinct value once and keep the input shape.
@@ -56,6 +56,18 @@ class RecordLengthError(ValueError):
         self.record = record
         self.length = length
         self.expected = expected
+
+
+class RecordTypeError(ValueError):
+    """A record of the layout's width that does not start with the layout's record type."""
+
+    def __init__(self, record_type: str, record: int, found: str) -> None:
+        super().__init__(
+            f"{record_type} record {record}: the record type is {found!r}, not {record_type!r}"
+        )
+        self.record_type = record_type
+        self.record = record
+        self.found = found
 
 
 # ------------------------------------------------------------------------------------------------
@@ -116,6 +128,11 @@ def _leaves(spec: RecordSpec) -> tuple[_Leaf, ...]:
     return tuple(leaves)
 
 
+def leaf_axes(spec: RecordSpec) -> dict[str, int]:
+    """Each `decode` key of `spec`, in layout order, with its number of repeat axes (0-2)."""
+    return {leaf.key: (leaf.repeat > 1) + (leaf.sub_repeat > 1) for leaf in _leaves(spec)}
+
+
 def _lines(data: bytes) -> list[bytes]:
     lines = (line[:-1] if line.endswith(b"\r") else line for line in data.split(b"\n"))
     return [line for line in lines if line]
@@ -136,10 +153,7 @@ def _decode_lines(lines: list[bytes], spec: RecordSpec, first: int = 1) -> Array
     if other.size:
         i = int(other[0])
         found = bytes(matrix[i, : prefix.size]).decode("ascii", errors="replace")
-        raise ValueError(
-            f"{spec.record_type} record {first + i}: the record type is {found!r}, "
-            f"not {spec.record_type!r}"
-        )
+        raise RecordTypeError(spec.record_type, first + i, found)
     out: Arrays = {}
     for leaf in _leaves(spec):
         block = matrix[:, leaf.base : leaf.base + leaf.repeat * leaf.stride]
