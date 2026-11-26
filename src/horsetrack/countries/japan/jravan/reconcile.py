@@ -17,6 +17,10 @@ pushed into the scan. Per year it counts:
 - rows whose key occurs more than once in one store (`<table>.<source>_duplicate`); they are still
   matched row by row.
 
+Each one-store and repeated-key count is also broken down by the race's `status` in that store's
+`races` (`<check>.<status>`; `no_race` when that store's races lack the race), so the report shows
+whether a race in one store only is, say, abandoned there.
+
 Equal means both values equal or both null. A match rate is `both` over the union (`both +
 jravan_only + jra_only`); an equal or agree rate is over the matched count of its table. Every
 figure comes from a licensed source (D21): `summary()` (the CLI's text) holds overall counts and
@@ -107,7 +111,7 @@ class Reconciliation:
             equal = _of(o, p + "equal", p + "both")
             lines.append(f"{_presence_line(f'dividends {pool}', o, p)}; equal: {equal}")
         repeats = "; ".join(
-            f"{table} " + " ".join(f"{_n(o.get(f'{table}.{s}_duplicate', 0))} {s}" for s in SOURCES)
+            f"{table} " + ", ".join(_with_status(o, f"{table}.{s}_duplicate", s) for s in SOURCES)
             for table in ("races", "runners", "dividends")
         )
         lines.append(f"rows whose key repeats in one store: {repeats}")
@@ -129,7 +133,9 @@ class Reconciliation:
             "agree rates: over the matched count of the table (races, runners, or the pool's "
             "dividends). Equal means both values equal or both null; `post_time_local` compares "
             "as minutes of the day, `finish_time_s` and `win_odds` at the tenth. "
-            "`<table>.<source>_duplicate` counts the rows whose key repeats in that store.",
+            "`<table>.<source>_duplicate` counts the rows whose key repeats in that store. "
+            "`<check>.<status>` breaks a one-store or repeated-key count down by the race's "
+            "`status` in that store's races (`no_race`: not in that store's races).",
             "",
             "## Counts",
             "",
@@ -194,17 +200,19 @@ def _compare_year(lo: date, hi: date) -> tuple[Counter[str], dict[str, set[str]]
         if ids:
             bad.setdefault(key, set()).update(ids)
 
-    frames = _read("races", RACE_KEY + list(RACE_FIELDS), lo, hi)
-    races = _merge("races", frames, RACE_KEY, counts, fail)
-    _presence("races.", races, counts, fail)
+    frames = _read("races", [*RACE_KEY, *RACE_FIELDS, "status"], lo, hi)
+    status = {s: _status_by_race(frames[s]) for s in SOURCES}
+    frames = {s: frame.drop(columns="status") for s, frame in frames.items()}
+    races = _merge("races", frames, RACE_KEY, counts, fail, status)
+    _presence("races.", races, counts, fail, status)
     matched = races[races["_merge"] == "both"]
     for f in RACE_FIELDS:
         _equal_count(f"races.equal.{f}", matched, f, counts, fail)
     matched_ids = set(matched["race_id"])
 
     frames = _read("runners", RUNNER_KEY + list(RUNNER_FIELDS), lo, hi)
-    runners = _merge("runners", frames, RUNNER_KEY, counts, fail)
-    _presence("runners.", runners, counts, fail)
+    runners = _merge("runners", frames, RUNNER_KEY, counts, fail, status)
+    _presence("runners.", runners, counts, fail, status)
     both = runners[runners["_merge"] == "both"]
     for f in RUNNER_FIELDS:
         _equal_count(f"runners.equal.{f}", both, f, counts, fail)
@@ -214,12 +222,12 @@ def _compare_year(lo: date, hi: date) -> tuple[Counter[str], dict[str, set[str]]
 
     ids = sorted(set(races["race_id"]))
     frames = {s: _read_dividends(s, ids) for s in SOURCES}
-    dividends = _merge("dividends", frames, DIVIDEND_KEY, counts, fail)
+    dividends = _merge("dividends", frames, DIVIDEND_KEY, counts, fail, status)
     pools = sorted(set(dividends["pool"]), key=_pool_rank)
     for pool in pools:
         rows = dividends[dividends["pool"] == pool]
         prefix = f"dividends.{pool}."
-        _presence(prefix, rows, counts, fail)
+        _presence(prefix, rows, counts, fail, status)
         _equal_count(prefix + "equal", rows[rows["_merge"] == "both"], "dividend", counts, fail)
     pay_bad = set(dividends.loc[dividends["_merge"] != "both", "race_id"])
     paired = dividends[dividends["_merge"] == "both"]
@@ -244,23 +252,36 @@ def _read_dividends(source: str, race_ids: list[str]) -> pd.DataFrame:
     return dataset.to_table(columns=DIVIDEND_KEY + ["dividend"], filter=wanted).to_pandas()
 
 
-def _merge(table, frames, key, counts, fail) -> pd.DataFrame:
+def _status_by_race(races: pd.DataFrame) -> dict[str, str]:
+    """race_id -> the race's `status` in that store (`null` for a missing status)."""
+    pairs = zip(races["race_id"], races["status"], strict=True)
+    return {r: s if isinstance(s, str) else "null" for r, s in pairs}
+
+
+def _by_status(key, race_ids, status: Mapping[str, str], counts) -> None:
+    for value, n in Counter(status.get(r, "no_race") for r in race_ids).items():
+        counts[f"{key}.{value}"] += n
+
+
+def _merge(table, frames, key, counts, fail, status) -> pd.DataFrame:
     """The two stores' rows outer-joined on `key` (`_merge`: both, left_only = jravan, right_only
     = jra), after counting the rows whose key repeats within a store."""
     for s in SOURCES:
-        repeated = frames[s].duplicated(key, keep=False)
-        counts[f"{table}.{s}_duplicate"] += int(repeated.sum())
-        fail(f"{table}.{s}_duplicate", frames[s].loc[repeated, "race_id"])
+        repeated = frames[s].loc[frames[s].duplicated(key, keep=False), "race_id"]
+        counts[f"{table}.{s}_duplicate"] += len(repeated)
+        _by_status(f"{table}.{s}_duplicate", repeated, status[s], counts)
+        fail(f"{table}.{s}_duplicate", repeated)
     return frames["jravan"].merge(
         frames["jra"], on=key, how="outer", suffixes=("_jravan", "_jra"), indicator=True
     )
 
 
-def _presence(prefix, merged, counts, fail) -> None:
+def _presence(prefix, merged, counts, fail, status) -> None:
     for state, check in PRESENCE.items():
         rows = merged[merged["_merge"] == state]
         counts[prefix + check] += len(rows)
         if check != "both":
+            _by_status(prefix + check, rows["race_id"], status[check.removesuffix("_only")], counts)
             fail(prefix + check, rows["race_id"])
 
 
@@ -276,16 +297,21 @@ def _agree(key, matched_ids, bad_ids, counts, fail) -> None:
 
 
 def _equal(matched: pd.DataFrame, f: str) -> np.ndarray:
-    """Per row, whether `f` is equal in both stores (both null counts as equal)."""
+    """Per row, whether `f` is equal in both stores (both null counts as equal). Values are
+    compared only where both are present, so a nullable dtype's `pd.NA` never reaches `==`."""
     a, b = (_comparable(f, matched[f"{f}_{s}"]) for s in SOURCES)
     a_null, b_null = a.isna().to_numpy(), b.isna().to_numpy()
-    same = np.asarray(a.to_numpy(dtype=object) == b.to_numpy(dtype=object), dtype=bool)
-    return (a_null & b_null) | (~a_null & ~b_null & same)
+    present = ~a_null & ~b_null
+    same = np.zeros(len(matched), dtype=bool)
+    left, right = a.to_numpy(dtype=object)[present], b.to_numpy(dtype=object)[present]
+    same[present] = np.asarray(left == right, dtype=bool)
+    return (a_null & b_null) | same
 
 
 def _comparable(f: str, values: pd.Series) -> pd.Series:
     if f in TENTHS:
-        return np.rint(values.astype(float) * 10)
+        tenths = np.rint(values.to_numpy(dtype=float, na_value=np.nan) * 10)
+        return pd.Series(tenths, index=values.index)
     if f == "post_time_local":
         return values.map(_minutes)
     return values
@@ -293,7 +319,7 @@ def _comparable(f: str, values: pd.Series) -> pd.Series:
 
 def _minutes(value):
     """'9:50' and '09:50' -> 590; a null stays null; any other text is compared as written."""
-    if value is None or (isinstance(value, float) and np.isnan(value)):
+    if pd.isna(value):
         return None
     match = _CLOCK.fullmatch(str(value).strip())
     return int(match[1]) * 60 + int(match[2]) if match else str(value)
@@ -308,8 +334,8 @@ def _pool_rank(pool: str) -> tuple[int, str]:
 
 
 def _pools(counts: Mapping[str, int]) -> list[str]:
-    pools = {k.split(".")[1] for k in counts if k.startswith("dividends.") and k.count(".") == 2}
-    return sorted(pools, key=_pool_rank)
+    parts = (k.split(".") for k in counts if k.startswith("dividends."))
+    return sorted({p[1] for p in parts if len(p) == 3 and p[2] == "both"}, key=_pool_rank)
 
 
 def _ordered_keys(counts: Mapping[str, int]) -> list[str]:
@@ -323,7 +349,18 @@ def _ordered_keys(counts: Mapping[str, int]) -> list[str]:
     for pool in _pools(counts):
         keys += [f"dividends.{pool}.{c}" for c in (*PRESENCE.values(), "equal")]
     keys += [f"dividends.{s}_duplicate" for s in SOURCES]
+    # each count's status breakdown (`<check>.<status>`) right after it
+    keys = [k for key in keys for k in (key, *_breakdown(counts, key))]
     return keys + sorted(set(counts) - set(keys))
+
+
+def _breakdown(counts: Mapping[str, int], key: str) -> list[str]:
+    """The `<key>.<status>` keys of a one-store or repeated-key count."""
+    if not key.endswith(("_only", "_duplicate")):
+        return []
+    return sorted(
+        k for k in counts if k.startswith(key + ".") and k.count(".") == key.count(".") + 1
+    )
 
 
 def _rate_keys(counts: Mapping[str, int]) -> list[tuple[str, str | tuple[str, ...], str]]:
@@ -359,9 +396,20 @@ def _of(counts: Mapping[str, int], num: str, den: str) -> str:
 
 
 def _presence_line(label: str, counts: Mapping[str, int], prefix: str) -> str:
-    both, jv, nk = (_n(counts.get(prefix + c, 0)) for c in PRESENCE.values())
+    both, jv, nk = (
+        _with_status(counts, prefix + c, what)
+        for c, what in zip(PRESENCE.values(), ("in both", "jravan only", "jra only"), strict=True)
+    )
     match = _rate(counts, prefix + "both", _union(prefix))
-    return f"{label}: {both} in both; {jv} jravan only; {nk} jra only; match {match}"
+    return f"{label}: {both}; {jv}; {nk}; match {match}"
+
+
+def _with_status(counts: Mapping[str, int], key: str, what: str) -> str:
+    """'3 jravan only', with the status breakdown when it has one: '3 jravan only (2 abandoned,
+    1 run)'."""
+    parts = [f"{_n(counts[k])} {k.rsplit('.', 1)[1]}" for k in _breakdown(counts, key) if counts[k]]
+    text = f"{_n(counts.get(key, 0))} {what}"
+    return f"{text} ({', '.join(parts)})" if parts else text
 
 
 def _n(value: int) -> str:
