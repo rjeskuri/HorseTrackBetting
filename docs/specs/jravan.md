@@ -53,7 +53,56 @@ line per folder (`stored/RACE/RA: ok, 62 files`, or the failure with both widths
 and exits 1 on any failure, a missing workbook or a missing export. It reads only each first line
 and prints no record content.
 
-## Decoding (planned, #362)
+## Decoding (#362)
+
+`horsetrack.countries.japan.jravan.records` turns a record type's bytes into named byte arrays,
+so each family maps fields instead of slicing bytes:
+
+- `decode(data, spec) -> dict[str, ndarray]`: the records become one uint8 matrix and every leaf
+  item a fixed-width view of its columns, an `S<length>` array. Keys are a top-level item's name
+  (`開催年`) or `group/sub` (`単勝オッズ/オッズ`); a name that occurs again at the same level is
+  `name#2`, `name#3` (inside a group too). Shapes are (n,), (n, repeat) or
+  (n, repeat, sub-repeat), a repeat of 1 adding no axis. Items named `予備` (at any level) and
+  the record separator (the layout's last item) are left out. Records split on LF (a CR before it
+  is dropped), empty lines are skipped, and the last record may lack its separator. A record that
+  is not `spec.length - 2` bytes is a `RecordLengthError` (a `ValueError` with `record_type`,
+  `record` (1-based), `length` and `expected`); one of the right width that does not start with
+  the record type is a `ValueError`.
+- `iter_file(path, spec, *, chunk_records=20_000)`: the same dicts, lazily, for at most
+  `chunk_records` records each and at most `CHUNK_BYTES` (16 MiB) of records, so a 7 GB H6 or CK
+  file streams in constant memory (about 300 MB above the interpreter on a 2.4 GB synthetic file
+  of 100 KB records). Record numbers in errors count the whole file.
+- `text(raw)` (cp932, half- and full-width spaces trimmed at both ends, blank is None),
+  `integer(raw)` (digits with an optional sign and space padding as float64, anything else such
+  as `----`, `****`, blank or `12A4` is NaN) and `scaled(raw, places)` (`integer` with implied
+  decimals: `b'0123'`, 1 is 12.3). Each converts every distinct value once and keeps the input's
+  shape.
+- `latest_versions(frame, key, *, created='データ作成年月日', kubun='データ区分')`: one row per
+  key, the latest creation date (a tie goes to the later row); a key whose kept row is a deletion
+  (`kubun` `'0'`) is dropped. Kept rows stay in input order with their index labels.
+- Output helpers every family uses: `write_parquet(table, path)` writes through a tmp file in the
+  same folder and `os.replace` (zstd, no wall-clock metadata, so the same table gives the same
+  bytes); `BuildReport(name, counts, by_year, unmapped, failures)` with `to_json()` (sorted keys,
+  counts and codes only, no record content); `write_build_report(report)` writes
+  `<reports dir>/jravan-<name>.json` through `core.eval.reports.write_report` with
+  `sources=('jravan',)`, which refuses a path inside the repository.
+
+`horsetrack.countries.japan.jravan.keys` maps race keys and times to the store's:
+
+- `race_id(year, mmdd, venue_code, race_no)`: the jra store's id, `jra:2026-11-28:KYO:11`
+  (`jra.netkeiba.common.store_race_id`), the venue's short code looked up by number in
+  `config/jra.yaml`; `meeting_id(year, mmdd, venue_code)`: `jra:2026-11-28:KYO`. None for a venue
+  outside JRA, an invalid date or race number.
+- `source_race_key(year, venue_code, kai, nichi, race_no)`: the 12-digit netkeiba race id
+  (`202608050711`) the jra store keeps in `races.source_race_key`; None for a non-JRA venue or a
+  malformed part.
+- `jurisdiction(venue_code)`: `'jra'` for 01-10, `'nar'` for any other two-digit number,
+  `'overseas'` for any other non-blank code, None for `'00'` or blank.
+- `announced_utc(year, race_mmdd, mmddhhmm)`: a JST minute (UTC+9, no DST) as an aware UTC
+  datetime; a month after the race's month is in the year before (a December announcement for a
+  January race). None for `00000000`, blank or an invalid time.
+- `post_time_local(hhmm)`: `'HH:MM'`, zero-padded, JST wall clock (the netkeiba results parser
+  keeps the page's text, which may read `9:50`); None for `0000`, blank or an invalid time.
 
 ## RA: races and meetings (planned, #364)
 
