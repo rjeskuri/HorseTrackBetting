@@ -8,6 +8,9 @@ from horsetrack.core.store.cli import store_app
 from horsetrack.countries.japan.board.server import board_serve_command
 from horsetrack.countries.japan.jra.going_fetch import fetch_going_command
 from horsetrack.countries.japan.jra.win_sales_fetch import fetch_win_sales_command
+from horsetrack.countries.japan.jravan.bloodlines import (
+    bloodlines_command as jravan_bloodlines_command,
+)
 from horsetrack.countries.japan.jravan.check import check_command as jravan_check_command
 from horsetrack.countries.japan.jravan.dividends import (
     dividends_command as jravan_dividends_command,
@@ -19,6 +22,7 @@ from horsetrack.countries.japan.jravan.runners import runners_command as jravan_
 from horsetrack.countries.japan.jravan.timeseries import (
     timeseries_command as jravan_timeseries_command,
 )
+from horsetrack.countries.japan.jravan.votes import votes_command as jravan_votes_command
 from horsetrack.countries.japan.jrdb.tables import build_command as jrdb_build_command
 from horsetrack.countries.japan.logger.compact import compact
 from horsetrack.countries.japan.logger.compare import compare_logs_command
@@ -53,6 +57,7 @@ japan.add_typer(jrdb, name="jrdb")
 jrdb.command("build")(jrdb_build_command)
 jravan = typer.Typer(no_args_is_help=True, help="JRA-VAN DataLab (JV-Data) commands.")
 japan.add_typer(jravan, name="jravan")
+jravan.command("bloodlines")(jravan_bloodlines_command)
 jravan.command("check")(jravan_check_command)
 jravan.command("dividends")(jravan_dividends_command)
 jravan.command("dump")(jravan_dump_command)
@@ -60,6 +65,7 @@ jravan.command("final-odds")(jravan_final_odds_command)
 jravan.command("races")(jravan_races_command)
 jravan.command("runners")(jravan_runners_command)
 jravan.command("timeseries")(jravan_timeseries_command)
+jravan.command("votes")(jravan_votes_command)
 
 
 def _version_callback(value: bool) -> None:
