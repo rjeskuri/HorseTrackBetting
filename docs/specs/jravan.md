@@ -166,7 +166,87 @@ Rows per pool, with the first year that has any (the pools' start of sale):
 | TRIO | 84,592 | 84,387 | 2002 |
 | TIERCE | 68,306 | 67,917 | 2004 |
 
-## O1-O6: final odds (planned, #367)
+## O1-O6: final odds (#367)
+
+`horsetrack.countries.japan.jravan.odds` writes `processed/jravan/final_odds.parquet`: the final
+price of every combination of every sold pool, the pool's own baseline for Place, Wide and the
+exotics (D5, C5). It is a jravan-only table, not in `schemas.TABLES`.
+
+- `build_final_odds(*, years=None, raw=None, out=None) -> BuildReport` reads
+  `<raw>/stored/RACE/<O1..O6>/<YYYY>.jvd` one year at a time (`years` None reads every year file
+  of every type; a type with no file for a year, named or not, adds nothing), streaming each file
+  with `records.iter_file` in chunks of at most 2,000 records (fewer for O5 and O6, capped at
+  `CHUNK_BYTES`). It keeps JRA venues (競馬場コード 01-10) and one version per race and record
+  type (`latest_versions` on 開催年, 開催月日, 競馬場コード, 開催回, 開催日目, レース番号; a race whose
+  latest record of a type is a deletion has no rows of that type). Each year is sorted by
+  `race_id, pool, combination` (plain string order, so a pool row sorts after its slots) and
+  written as one row group through a `ParquetWriter` (zstd) into a tmp file, then `os.replace`;
+  the same inputs give the same bytes. A year file holding a race of another year is a
+  `ValueError`.
+- `odds_rows(record_type, cols)` maps decoded O1-O6 arrays to long rows (the time-series ticket,
+  #369, reuses it for O1 and O2): one per record and filled slot of each sold pool, plus one pool
+  row per sold pool.
+
+| column | type | from |
+|---|---|---|
+| `jurisdiction` | string | `jra` |
+| `race_id`, `race_date`, `venue`, `race_no` | string, date32, string, int64 | `keys.race_id(開催年, 開催月日, 競馬場コード, レース番号)` and its parts |
+| `pool` | string | the record type and group (below) |
+| `combination` | string | the group's 馬番 or 組番; `__pool__` on a pool row |
+| `odds` | float64 | オッズ, or 最低オッズ for PLACE and QUINELLA_PLACE, one implied decimal place (stake included) |
+| `odds_hi` | float64 | 最高オッズ for PLACE and QUINELLA_PLACE, else null |
+| `fav_rank` | int64 | 人気順, null when not a positive integer (`--`, `**`, blank) |
+| `investment` | float64 | on a pool row, the pool's 票数合計 x 100 (yen); null on slot rows |
+| `status_raw` | string | the low price's text as printed when `odds` is null, else null |
+| `published_utc` | timestamp[us, UTC] | `keys.announced_utc(開催年, 開催月日, 発表月日時分)` |
+| `data_kubun` | string | データ区分 of the kept record |
+
+Pools, per record type and sale flag: O1 発売フラグ単勝 `WIN`, 発売フラグ複勝 `PLACE`, 発売フラグ枠連
+`BRACKET_QUINELLA` (複勝着払キー unused); O2 `QUINELLA`; O3 `QUINELLA_PLACE`; O4 `FORECAST`; O5
+`TRIO`; O6 `TIERCE`. A pool is sold when its flag is `7`. Flags `0` (not sold), `1` (cancelled
+before sale) and `3` (cancelled after sale, the tickets refunded) write no row, pool row
+included: none of them has a final price that pays.
+
+- The combination: the number item split into its 1, 2 or 3 equal-width legs (a bracket one
+  digit, a horse two), leading zeros dropped, joined with `,`; FORECAST and TIERCE in the printed
+  order, the others ascending (`0704` is `4,7` on O2 and `7,4` on O4, `070401` is `7,4,1` on O6).
+  A slot whose number is blank, or not all positive integers, writes no row.
+- A price that is not a positive number (`0000` no votes, `----` cancelled before sale, `****`
+  cancelled after sale, blank) is null with its text in `status_raw`, untrimmed. The low and high
+  ends of a ranged price are read independently: a bad low with a valid high keeps `odds_hi`, and
+  `status_raw` carries the low's text. A capped price (`9999`, 999.9 or more; lower caps before
+  2004-08-13) is kept as the cap.
+- A sold pool with a blank vote total still has its pool row, with null `investment`.
+- `published_utc`: in the stored export 発表月日時分 is `00000000` on every record (the workbook
+  sets it for intermediate odds only), so it is null throughout `final_odds`; it is set on the
+  time series (#369).
+- データ区分 in the export: 5 (確定, Monday) on almost every record, 9 (race cancelled) on 102
+  races in each of O1-O5 (O6 not surveyed), whose prices print `****`.
+
+No availability rule: `final_odds` is a label or a conditioner, never a feature at t
+(docs/specs/as-of.md, Known traps). The rule is an owner decision (the epic's open question
+proposes `label_only`, #376); until it ships, `read_asof` on a view of the table raises
+`NoAvailabilityRule`.
+
+`horsetrack japan jravan final-odds [--year YYYY ...]` runs the build and writes
+`reports/jravan-final-odds.json` through `write_build_report`, counts only: `records` (kept JRA
+records over the six types), `rows` and rows per pool, in total (`counts`) and per race year
+(`by_year`, the years that have rows).
+
+The build on the export (2026-11-26, O1 and O2 from 1993, O3 from 1999, O4 and O5 from 2002, O6
+from 2004, to 2026-11-23): 558,526 records, 251,200,511 rows in 34 row groups (1.4 GB), 318 s
+wall, peak RSS 2.96 GB (`/usr/bin/time -l`). Rows per pool, slots and pool rows together:
+
+| pool | rows | first year |
+|---|---|---|
+| WIN | 1,713,230 | 1993 |
+| PLACE | 1,713,201 | 1993 |
+| BRACKET_QUINELLA | 3,926,923 | 1993 |
+| QUINELLA | 10,716,653 | 1993 |
+| QUINELLA_PLACE | 9,043,121 | 1999 |
+| FORECAST | 16,385,001 | 2002 |
+| TRIO | 35,576,717 | 2002 |
+| TIERCE | 172,125,665 | 2004 |
 
 ## H1 and H6: pool votes (planned, #368)
 

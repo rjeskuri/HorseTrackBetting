@@ -13,6 +13,7 @@ from horsetrack.countries.japan.jravan.dividends import (
     dividends_command as jravan_dividends_command,
 )
 from horsetrack.countries.japan.jravan.dump import dump_command as jravan_dump_command
+from horsetrack.countries.japan.jravan.odds import final_odds_command as jravan_final_odds_command
 from horsetrack.countries.japan.jrdb.tables import build_command as jrdb_build_command
 from horsetrack.countries.japan.logger.compact import compact
 from horsetrack.countries.japan.logger.compare import compare_logs_command
@@ -50,6 +51,7 @@ japan.add_typer(jravan, name="jravan")
 jravan.command("check")(jravan_check_command)
 jravan.command("dividends")(jravan_dividends_command)
 jravan.command("dump")(jravan_dump_command)
+jravan.command("final-odds")(jravan_final_odds_command)
 
 
 def _version_callback(value: bool) -> None:
