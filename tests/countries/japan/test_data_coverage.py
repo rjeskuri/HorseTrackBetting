@@ -26,10 +26,19 @@ How `coverage(inputs) -> Coverage` reads a supply:
   (`is_holdout_day("japan", d)`) is dropped by its file name and never opened.
 - `records/<DATASPEC>/<RT>`: the files `interim/jravan/records/<DATASPEC>/<RT>/*.parquet`, by
   file and row count; the span is the years of the `<YYYY>` file stems (an `all` file gives none).
+  A family that carries the JV-Data race key (the top-level text columns `開催年`, YYYY, and
+  `開催月日`, MMDD, as `dump` writes every race-keyed record type) never counts a record whose
+  race day is a holdout day (D14), in a year file or an `all` file; the day is the race key's,
+  not `データ作成年月日`. A file without those columns is counted from its footer.
 - Any other table, `processed/<source>/<table>.parquet`: with a `race_date` column, read through
   `read_store_table(..., source=)`, column-scoped, the filter applied, holdout days dropped, and no
   D10 cut (the audit reports what exists, so price rows before 2014-06-07 count). Without a
-  `race_date` column the table is a master, counted by rows only (no span).
+  `race_date` column the table is counted by rows only (no span pinned): a per-race table (one
+  with `race_id`: `dividends`, `sectionals`, ...) counts only the rows of races not on a holdout
+  day (D14; the store builders keep holdout days, only readers drop them), the day being the
+  date in the race id (`jra:<YYYY-MM-DD>:<VENUE>:<NN>` in both stores) or, equivalently, the
+  races `read_store_table("races", source=)` returns; a master with no race key (`horses`,
+  `jockeys`) counts every row.
 - A table, folder or file that does not exist gives 0 rows and no span, and is not an error.
 
 `Coverage.supplies` holds one `SupplyCoverage` per (input, supply), with:
@@ -130,7 +139,8 @@ def data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def race_id(day: date, race_no: int = 1) -> str:
-    return f"jra:{day.isoformat()}:{VENUE}:{race_no}"
+    """The store's race id, `jra:<YYYY-MM-DD>:<VENUE>:<NN>` (`keys.race_id`, both stores)."""
+    return f"jra:{day.isoformat()}:{VENUE}:{race_no:02d}"
 
 
 def write_parquet(path: Path, table: pa.Table) -> Path:
@@ -396,6 +406,38 @@ def test_the_inputs_the_request_names_are_listed() -> None:
     assert not leaks, f"final_odds is never a feature at t: {leaks}"
 
 
+BRACKET_POOLS = ("PLACE", "QUINELLA_PLACE")  # the pools that show a lo-hi range (odds, odds_hi)
+
+
+def test_the_bracket_high_end_is_an_input() -> None:
+    """docs/modeling.md diagram 4, box BRK (#118 shadow_values.py): Place and Wide are valued at
+    the low and the high end of the bracket the pool shows, and the nowcast reads the high end too.
+    So `odds_hi` of PLACE and QUINELLA_PLACE is an input of C5 and C6: on the board at t
+    (`odds_timeseries`, jra and jravan; a feature at t) and in jravan's `final_odds`."""
+    inputs = cv.load_inputs()
+    wanted = [
+        *(("jra", "odds_timeseries", pool) for pool in BRACKET_POOLS),
+        *(("jravan", "odds_timeseries", pool) for pool in BRACKET_POOLS),
+        *(("jravan", "final_odds", pool) for pool in BRACKET_POOLS),
+    ]
+    missing = []
+    for source, table, pool in wanted:
+        holders = [
+            inp
+            for inp in inputs
+            for s in inp.supplies
+            if (s.source, s.table, s.column) == (source, table, "odds_hi")
+            and dict(s.filter or {}) == {"pool": pool}
+        ]
+        if not any({"C5", "C6"} <= set(inp.layers) for inp in holders):
+            missing.append(f"{source} {table}.odds_hi where pool = {pool} (in: {holders})")
+    assert not missing, "no C5 and C6 input reads the bracket's high end:\n" + "\n".join(missing)
+    board_high = sorted({inp.name for inp in inputs for s in inp.supplies
+                         if s.table == "odds_timeseries" and s.column == "odds_hi"
+                         and inp.role != "feature_at_t"})  # fmt: skip
+    assert not board_high, f"the board's high end at t is a feature at t: {board_high}"
+
+
 # ------------------------------------------------------------------------------------------------
 # Coverage over synthetic stores
 
@@ -644,6 +686,189 @@ def test_a_dumped_family_is_reported_by_files_and_rows_with_year_spans(
     assert (jg.first_date.year, jg.last_date.year) == (2019, 2021)
     tk = entry(cov, "special", "jravan")
     assert (tk.files, tk.rows, tk.first_date, tk.last_date) == (1, 4, None, None)
+
+
+# Development and holdout race days on and after the holdout start, under the committed seed
+DEV_DAYS = (date(2024, 6, 1), date(2025, 12, 27), date(2026, 5, 16), DEV_LATE, date(2026, 12, 5),
+            date(2027, 1, 9))  # fmt: skip
+HOLDOUT_DAYS = (HOLDOUT_A, HOLDOUT_B, date(2026, 12, 6), date(2027, 1, 16), date(2027, 1, 17))
+
+
+def assert_holdout_split() -> None:
+    assert not any(is_holdout_day("japan", d) for d in DEV_DAYS), DEV_DAYS
+    assert all(is_holdout_day("japan", d) for d in HOLDOUT_DAYS), HOLDOUT_DAYS
+
+
+DIVIDENDS = pa.schema(
+    [("jurisdiction", pa.string()), ("race_id", pa.string()), ("pool", pa.string()),
+     ("combination", pa.string()), ("dividend", pa.float64()), ("is_refund", pa.bool_())]
+)  # fmt: skip
+SECTIONALS = pa.schema(
+    [("jurisdiction", pa.string()), ("race_id", pa.string()), ("horse_id", pa.string()),
+     ("horse_no", pa.int64()), ("section_no", pa.int64()), ("section_time_s", pa.float64())]
+)  # fmt: skip
+
+
+def dividends_of(day: date, race_no: int, pools: list[str]) -> list[dict]:
+    return [
+        {"jurisdiction": "jra", "race_id": race_id(day, race_no), "pool": pool,
+         "combination": str(k + 1), "dividend": 110.0 + 10 * k, "is_refund": False}
+        for k, pool in enumerate(pools)
+    ]  # fmt: skip
+
+
+def sectionals_of(day: date, race_no: int, horses_run: int, sections: int) -> list[dict]:
+    return [
+        {"jurisdiction": "jra", "race_id": race_id(day, race_no), "horse_id": f"{h:010d}",
+         "horse_no": h, "section_no": s, "section_time_s": 12.0 + s / 10}
+        for h in range(1, horses_run + 1)
+        for s in range(1, sections + 1)
+    ]  # fmt: skip
+
+
+def races_of(source: str, race_ids: set[str]) -> Path:
+    """The store's races for `race_ids`, holdout days included, as the builders write them."""
+    rows = [
+        {"race_id": r, "race_date": date.fromisoformat(r.split(":")[1]), "going": None,
+         "rail_setting": None}
+        for r in sorted(race_ids)
+    ]  # fmt: skip
+    return store_table(source, "races", RACES, rows)
+
+
+def test_a_per_race_table_never_counts_a_holdout_race(data: Path, tmp_path: Path) -> None:
+    """A per-race table without `race_date` (dividends, and sectionals, counted by rows) keeps
+    the holdout races' rows in the store; the audit counts only the development races' rows,
+    filtered or not. A master with no race key still counts every row."""
+    assert_holdout_split()
+    jra_div = [
+        *dividends_of(date(2025, 12, 27), 1, ["WIN", "PLACE", "PLACE"]),
+        *dividends_of(DEV_LATE, 1, ["WIN", "PLACE", "PLACE", "PLACE"]),
+        *dividends_of(DEV_LATE, 2, ["WIN", "QUINELLA"]),
+        *dividends_of(date(2026, 12, 5), 11, ["WIN", "WIN", "PLACE"]),  # a dead heat
+        *dividends_of(HOLDOUT_A, 1, ["WIN", "PLACE", "PLACE", "PLACE", "QUINELLA"]),
+        *dividends_of(HOLDOUT_B, 3, ["WIN", "WIN", "PLACE"]),
+        *dividends_of(date(2026, 12, 6), 12, ["WIN", "PLACE", *["QUINELLA_PLACE"] * 3]),
+    ]
+    jravan_div = [
+        *dividends_of(date(2024, 6, 1), 3, ["WIN", "PLACE"]),
+        *dividends_of(date(2027, 1, 9), 5, ["WIN"]),
+        *dividends_of(HOLDOUT_B, 5, ["WIN", "PLACE", "PLACE", "PLACE", "QUINELLA", "TRIO"]),
+        *dividends_of(date(2027, 1, 16), 2, ["WIN", "PLACE"]),
+    ]
+    jra_sections = [*sectionals_of(DEV_LATE, 1, 1, 2), *sectionals_of(HOLDOUT_A, 1, 2, 2)]
+    store_table("jra", "dividends", DIVIDENDS, jra_div)
+    store_table("jravan", "dividends", DIVIDENDS, jravan_div)
+    store_table("jra", "sectionals", SECTIONALS, jra_sections)
+    races_of("jra", {r["race_id"] for r in (*jra_div, *jra_sections)})
+    races_of("jravan", {r["race_id"] for r in jravan_div})
+    horses("jra", [f"Horse {i}" for i in range(5)])
+    jockeys(6)
+    cov = run_coverage(tmp_path, {
+        "dividends": an_input(["C5"], "label", [supply("jra", "dividends", "dividend"),
+                                                supply("jravan", "dividends", "dividend")], [926]),
+        "win_dividends": an_input(["C5"], "label",
+                                  [supply("jra", "dividends", "dividend", pool="WIN")], [927]),
+        "sections": an_input(["C3"], "feature_at_t",
+                             [supply("jra", "sectionals", "section_time_s")], [928]),
+        "horse": an_input(["C2"], "feature_at_t", [supply("jra", "horses", "name")], [929]),
+        "jockey": an_input(["C2"], "feature_at_t",
+                           [supply("jravan", "jockeys", "jockey_code")], [930]),
+    })  # fmt: skip
+    # the development races' rows only: jra 3 + 4 + 2 + 3 of 25 (WIN 1 + 1 + 1 + 2 of 9),
+    # jravan 2 + 1 of 11, sectionals 2 of 6; the masters every row
+    expected = {
+        ("dividends", "jra"): 12,
+        ("dividends", "jravan"): 3,
+        ("win_dividends", "jra"): 5,
+        ("sections", "jra"): 2,
+        ("horse", "jra"): 5,
+        ("jockey", "jravan"): 6,
+    }
+    got = {(name, source): entry(cov, name, source).rows for name, source in expected}
+    assert got == expected, "holdout races' rows were counted (or a master's rows were not)"
+    for name, source in (("horse", "jra"), ("jockey", "jravan")):
+        e = entry(cov, name, source)
+        assert (e.first_date, e.last_date, list(e.gap_years)) == (None, None, []), (name, e)
+
+
+RACE_KEY = ("レコード種別ID", "データ区分", "データ作成年月日", "開催年", "開催月日",
+            "競馬場コード", "開催回[第N回]", "開催日目[N日目]", "レース番号")  # fmt: skip
+
+
+def race_keyed_dump(family: str, stem: str, records: list[tuple[date, date]]) -> Path:
+    """A dumped race-keyed family as `dump` writes it: the JV-Data race key as top-level text
+    columns, then `_file` and `_record`. Each record is (race day, creation day): the creation
+    day (`データ作成年月日`) is not the race day."""
+    n = len(records)
+    values = {
+        "レコード種別ID": [family.split("/")[1]] * n,
+        "データ区分": ["1"] * n,
+        "データ作成年月日": [created.strftime("%Y%m%d") for _, created in records],
+        "開催年": [f"{day.year:04d}" for day, _ in records],
+        "開催月日": [day.strftime("%m%d") for day, _ in records],
+        "競馬場コード": ["05"] * n,
+        "開催回[第N回]": ["05"] * n,
+        "開催日目[N日目]": ["08"] * n,
+        "レース番号": [f"{i % 12 + 1:02d}" for i in range(n)],
+    }
+    table = pa.table(
+        {
+            **{key: pa.array(values[key], pa.string()) for key in RACE_KEY},
+            "_file": pa.array([f"stored/{family}/{stem}.jvd"] * n, pa.string()),
+            "_record": pa.array(range(1, n + 1), pa.int64()),
+        }
+    )
+    return write_parquet(
+        paths.interim_dir("jravan") / "records" / family / f"{stem}.parquet", table
+    )
+
+
+def test_a_dumped_family_never_counts_holdout_day_records(data: Path, tmp_path: Path) -> None:
+    """The year files from the holdout start on (and an `all` file) hold holdout-day records;
+    only the development days' records count, by the race key's day."""
+    assert_holdout_split()
+    d = date
+    # (race day, creation day) x count; a development record created on a holdout day and a
+    # holdout record created on a development day, so the creation day decides nothing
+    race_keyed_dump("RACE/JG", "2025", [(d(2025, 12, 27), d(2025, 12, 26))] * 4)
+    race_keyed_dump("RACE/JG", "2026", [
+        *[(d(2026, 5, 16), d(2026, 5, 15))] * 2,
+        *[(DEV_LATE, HOLDOUT_A)] * 2,
+        (d(2026, 12, 5), d(2026, 12, 6)),
+        *[(HOLDOUT_A, d(2026, 11, 27))] * 2,
+        (HOLDOUT_B, d(2026, 11, 27)),
+        (d(2026, 12, 6), d(2026, 12, 5)),
+    ])  # fmt: skip
+    race_keyed_dump("RACE/JG", "2027", [
+        (d(2027, 1, 9), d(2027, 1, 10)),
+        *[(d(2027, 1, 16), d(2027, 1, 14))] * 3,
+        *[(d(2027, 1, 17), d(2027, 1, 14))] * 2,
+    ])  # fmt: skip
+    race_keyed_dump("MING/DM", "2026", [
+        *[(DEV_LATE, d(2026, 11, 27))] * 2,
+        *[(HOLDOUT_A, d(2026, 11, 27))] * 6,
+    ])  # fmt: skip
+    race_keyed_dump("TOKU/TK", "all", [
+        (d(2019, 4, 6), d(2019, 3, 25)),
+        *[(DEV_LATE, d(2026, 11, 16))] * 2,
+        *[(HOLDOUT_B, d(2026, 11, 16))] * 4,
+    ])  # fmt: skip
+    cov = run_coverage(tmp_path, {
+        "exclusions": an_input(["C0"], "feature_at_t",
+                               [supply("jravan", "records/RACE/JG", "_record")], [931]),
+        "mining": an_input(["C4"], "feature_at_t",
+                           [supply("jravan", "records/MING/DM", "_record")], [932]),
+        "special": an_input(["C2"], "feature_at_t",
+                            [supply("jravan", "records/TOKU/TK", "_record")], [933]),
+    })  # fmt: skip
+    jg, dm, tk = (entry(cov, n, "jravan") for n in ("exclusions", "mining", "special"))
+    # JG: 4 (2025) + 5 of 9 (2026) + 1 of 6 (2027); DM: 2 of 8; TK: 3 of 7
+    got = {"JG": jg.rows, "DM": dm.rows, "TK": tk.rows}
+    assert got == {"JG": 10, "DM": 2, "TK": 3}, f"holdout-day records were counted: {got}"
+    assert (jg.files, jg.first_date.year, jg.last_date.year) == (3, 2025, 2027), jg
+    assert (dm.files, dm.first_date.year, dm.last_date.year) == (1, 2026, 2026), dm
+    assert tk.files == 1, tk
 
 
 def test_a_supply_whose_table_is_missing_has_no_rows(data: Path, tmp_path: Path) -> None:

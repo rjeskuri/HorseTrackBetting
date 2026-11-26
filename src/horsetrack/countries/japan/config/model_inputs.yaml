@@ -148,6 +148,22 @@ inputs:
       - {source: jravan, table: odds_timeseries, column: investment, filter: {combination: __pool__}}
     tickets: []
     note: The pool totals on the board at t, per pool and capture; the own-stake impact of C6 reads them.
+  bracket_high_end_at_t:
+    layers: [C1, C5, C6]
+    role: feature_at_t
+    d10: true
+    supplies:
+      - {source: jra, table: odds_timeseries, column: odds_hi, filter: {pool: PLACE}}
+      - {source: jravan, table: odds_timeseries, column: odds_hi, filter: {pool: PLACE}}
+      - {source: jra, table: odds_timeseries, column: odds_hi, filter: {pool: QUINELLA_PLACE}}
+      - {source: jravan, table: odds_timeseries, column: odds_hi, filter: {pool: QUINELLA_PLACE}}
+    tickets: [400]
+    note: >-
+      The high end of the lo-hi range the Place and Wide (QUINELLA_PLACE) boards show (the low end
+      is `odds` in board_at_t and board_wide_and_exotics). The nowcast moves it by the low figure's
+      factor (#116) and the shadow values value Place and Wide at both ends (#118, docs/modeling.md
+      diagram 4). JV-Data's 0B41 (O1) records carry the Place range; no history holds the Wide one
+      (#400).
 
   # ---------------------------------------------------------------------------------------------
   # C2: per-horse ability and interactions
@@ -306,7 +322,8 @@ inputs:
       - {source: jra, table: races, column: finish_time_s}
       - {source: jravan, table: races, column: finish_time_s}
     tickets: [404]
-    note: The speed model's target (#96, #97); a feature of the horse's later races once published.
+    note: >-
+      The speed model's target (#96, #97); a feature of the horse's later races once published.
   last_3f:
     layers: [C3]
     role: feature_at_t
@@ -528,13 +545,29 @@ inputs:
       - {source: jravan, table: dividends, column: dividend}
     tickets: []
     note: Every pool's dividends; a per-race table without race_date, so rows only (its span is races').
-  brackets:
+  final_bracket_high_end:
+    layers: [C5, C6]
+    role: label
+    d10: true
+    supplies:
+      - {source: jravan, table: final_odds, column: odds_hi, filter: {pool: PLACE}}
+      - {source: jravan, table: final_odds, column: odds_hi, filter: {pool: QUINELLA_PLACE}}
+    tickets: [376]
+    note: >-
+      The high end of the final Place and Wide ranges, beside the low end in final_prices: what the
+      shadow values at the high end (#118) are scored against. netkeiba holds no final range; the
+      logger's final captures hold it forward (bracket_high_end_at_t).
+  bracket_number:
     layers: [C5]
     role: feature_at_t
     supplies:
       - {source: jra, table: runners, column: bracket}
       - {source: jravan, table: runners, column: bracket}
     tickets: [404]
+    note: >-
+      Each runner's frame (枠番, 1 to 8), on which the bracket quinella (BRACKET_QUINELLA) is bet
+      and paid; not the price range of Place and Wide (bracket_high_end_at_t,
+      final_bracket_high_end).
   pool_votes:
     layers: [C5, C6]
     role: conditioner

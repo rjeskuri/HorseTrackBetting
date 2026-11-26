@@ -10,13 +10,21 @@ table is read once for all its supplies:
   holdout day (`is_holdout_day("japan", d)`, D14) is dropped by its file name and never opened;
   anything that is not a day file is ignored. A day's rows count under its file's date.
 - `records/<DATASPEC>/<RT>`: a dumped JV-Data family, `interim/jravan/records/<DATASPEC>/<RT>/
-  *.parquet`, counted by file and by the row count in each file's footer (no column is read, so
-  no value and no race day is); the span is the years of the `<YYYY>` stems (`all` gives none).
+  *.parquet`, counted by file and by record; the span is the years of the `<YYYY>` stems (`all`
+  gives none). A file that carries the JV-Data race key (`開催年`, `開催月日`, as `dump` writes
+  every race-keyed record type) is counted from a scan of those two columns only, without the
+  records whose race day is a holdout day (D14; `データ作成年月日` decides nothing). A file without
+  them is counted from its footer: a family dated by another day (the workouts' `調教年月日`) or by
+  none, from which the audit reads no value.
 - any other table, `processed/<source>/<table>.parquet`: with a `race_date` column it is read one
   calendar year at a time through `read_store_table(..., source=, touches_price=False)`, so holdout
   days are dropped and no D10 cut applies (the audit reports what exists, not what a model may use);
-  the year range comes from the `race_date` statistics in the footer. Without `race_date` it is a
-  master (or a per-race table such as `dividends`), counted by rows only.
+  the year range comes from the `race_date` statistics in the footer. Without `race_date` it is
+  counted by rows only. A per-race table (one with `race_id`: `dividends`, `sectionals`, ...) keeps
+  its holdout races' rows in the store, so it is counted from a scan of `race_id` and the filter's
+  columns, without the rows whose race id (`<source>:<YYYY-MM-DD>:<VENUE>:<NN>`) is dated on a
+  holdout day (D14). A master with no race key (`horses`, `jockeys`) counts every row, from the
+  footer or a filtered count.
 
 A missing table, folder or file gives 0 rows and no span. Per supply: the first and last date, the
 rows after the filter (null or not), the non-null share of the column per year (NaN counts as
@@ -63,6 +71,8 @@ GAP_SHARE = 0.5
 BOARD_TABLE = "odds_timeseries"
 DUMP_PREFIX = "records/"
 DATE_COLUMN = "race_date"
+RACE_ID = "race_id"
+RACE_DAY_KEY = ("開催年", "開催月日")  # the JV-Data race key's YYYY and MMDD, as `dump` writes them
 WITHHELD = "withheld (D21)"
 
 _INPUT_KEYS = frozenset({"layers", "role", "supplies", "tickets", "note", "d10"})
@@ -70,6 +80,8 @@ _SUPPLY_KEYS = frozenset({"source", "table", "column", "filter"})
 _DAY_FILE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _YEAR_FILE = re.compile(r"\d{4}")
 _DUMP_TABLE = re.compile(r"records/[A-Z]{4}/[0-9A-Z]{2}")
+_RACE_ID_DAY = r"^[^:]*:(?P<day>\d{4}-\d{2}-\d{2}):"  # `<source>:<YYYY-MM-DD>:...`
+_RACE_DAY = re.compile(r"(\d{4})-?(\d{2})-?(\d{2})")
 
 
 @dataclass(frozen=True)
@@ -112,7 +124,7 @@ class SupplyCoverage:
     input: str
     supply: Supply
     found: bool  # the table, folder or day files exist
-    kind: str  # 'dated', 'days', 'dump' or 'master'
+    kind: str  # 'dated', 'days', 'dump', 'per_race' or 'master'
     first_date: date | None
     last_date: date | None
     rows: int
@@ -377,7 +389,7 @@ def _read_dump(source: str, table: str, tallies: list[_Tally]) -> None:
     if not folder.is_dir():
         return
     for path in sorted(folder.glob("*.parquet")):
-        rows = pq.read_metadata(path).num_rows  # the footer only: no column, no value
+        rows = _dump_rows(path)
         year = int(path.stem) if _YEAR_FILE.fullmatch(path.stem) else None
         for t in tallies:
             t.found = True
@@ -390,6 +402,53 @@ def _read_dump(source: str, table: str, tallies: list[_Tally]) -> None:
                 t.add_span(date(year, 1, 1), date(year, 12, 31))
 
 
+def _dump_rows(path: Path) -> int:
+    """The records of a dump file, without those of a holdout race day (D14) when the file carries
+    the race key: a scan of `開催年` and `開催月日` only, so the race key's day decides, never
+    `データ作成年月日`. A file without the race key is counted from its footer: a family dated by
+    another day (the workouts' `調教年月日`) or by none. D14 locks the race days' outcomes and odds
+    paths, and the audit reads no value from such a file, only its row count."""
+    with pq.ParquetFile(path) as handle:
+        schema = handle.schema_arrow
+        keyed = all(
+            name in schema.names and pa.types.is_string(schema.field(name).type)
+            for name in RACE_DAY_KEY
+        )
+        if not keyed:
+            return handle.metadata.num_rows
+        days: Counter[str] = Counter()
+        for batch in handle.iter_batches(columns=list(RACE_DAY_KEY)):
+            year, mmdd = (batch.column(name) for name in RACE_DAY_KEY)
+            _count_values(days, pc.binary_join_element_wise(year, mmdd, ""))
+    open_days = _development_days(days)
+    return sum(n for text, n in days.items() if text in open_days)
+
+
+def _count_values(counts: Counter[str], values: pa.Array | pa.ChunkedArray) -> None:
+    """Add each non-null value of `values` and its count to `counts`."""
+    for item in pc.value_counts(values).to_pylist():
+        if item["values"] is not None:
+            counts[item["values"]] += item["counts"]
+
+
+def _development_days(texts: Iterable[str]) -> set[str]:
+    """The race days among `texts` (YYYY-MM-DD or YYYYMMDD) that are a valid date and not a
+    holdout day (D14). A text that is no date is left out: it cannot be shown to be off the
+    holdout."""
+    out: set[str] = set()
+    for text in texts:
+        match = _RACE_DAY.fullmatch(text)
+        if match is None:
+            continue
+        try:
+            day = date(*(int(g) for g in match.groups()))
+        except ValueError:
+            continue
+        if not is_holdout_day(COUNTRY, day):
+            out.add(text)
+    return out
+
+
 def _read_table(source: str, table: str, supplies: list[Supply], tallies: list[_Tally]) -> None:
     path = paths.processed_dir(source) / f"{table}.parquet"
     if not path.is_file():
@@ -399,7 +458,10 @@ def _read_table(source: str, table: str, supplies: list[Supply], tallies: list[_
         t.found = True
         t.missing = _missing(s, available)
     if DATE_COLUMN not in available:
-        _read_master(path, supplies, tallies, available)
+        if RACE_ID in available:
+            _read_per_race(path, supplies, tallies, available)
+        else:
+            _read_master(path, supplies, tallies, available)
         return
     for t in tallies:
         t.kind = "dated"
@@ -427,10 +489,35 @@ def _read_table(source: str, table: str, supplies: list[Supply], tallies: list[_
         del rows_of_year
 
 
+def _read_per_race(
+    path: Path, supplies: list[Supply], tallies: list[_Tally], available: list[str]
+) -> None:
+    """Rows only, without the rows of holdout races (D14): a streamed scan of `race_id` and the
+    filters' columns, each row dated by the day in its race id. A row whose race id carries no
+    date is not counted, since it cannot be shown to be off the holdout."""
+    usable = [all(k in available for k in s.filter) for s in supplies]
+    keys = [k for s in supplies for k in s.filter if k in available and k != RACE_ID]
+    columns = [RACE_ID, *dict.fromkeys(keys)]
+    seen: list[Counter[str]] = [Counter() for _ in supplies]
+    for batch in ds.dataset(path, format="parquet").to_batches(columns=columns):
+        table = pa.Table.from_batches([batch])
+        for s, days, ok in zip(supplies, seen, usable, strict=True):
+            rows = _selected(table, s) if ok else None
+            if rows is None or rows.num_rows == 0:
+                continue
+            matched = pc.extract_regex(_plain(rows.column(RACE_ID)), _RACE_ID_DAY)
+            _count_values(days, pc.struct_field(matched, "day"))
+    open_days = _development_days(set().union(*seen))
+    for t, days in zip(tallies, seen, strict=True):
+        t.kind = "per_race"
+        t.total_rows = sum(n for text, n in days.items() if text in open_days)
+
+
 def _read_master(
     path: Path, supplies: list[Supply], tallies: list[_Tally], available: list[str]
 ) -> None:
-    """Rows only: the footer's count, or a filter's count pushed into a scan of its columns."""
+    """Rows only, for a table with no race key: the footer's count, or a filter's count pushed
+    into a scan of its columns."""
     total = pq.read_metadata(path).num_rows
     for s, t in zip(supplies, tallies, strict=True):
         t.kind = "master"
@@ -493,14 +580,18 @@ inputs. Per input: its layers, its role at the decision time t (`feature_at_t`, 
 `conditioner`), the tickets that cover its gaps, and per supply (source, `table.column`, filter)
 the first and last race date, the rows and the gap years: the years from the first to the last
 with no row, or with fewer than half of the year's rows non-null. A dumped JV-Data family
-(`records/...`) is counted by files and rows, its span the years of its files; a master is
-counted by rows only.
+(`records/...`) is counted by files and rows, its span the years of its files; a table without
+race dates is counted by rows only: a per-race table (`dividends`, `sectionals`) by the rows of its
+races, a master (`horses`, `jockeys`) by every row.
 
 A supply from a licensed source (JRA-VAN, JRDB) shows `withheld (D21)` and no figure: its
 dates, counts, shares and gap years are in the private report
 `$HORSETRACK_DATA_DIR/reports/data-coverage.md`. The inventory says what exists, not what a model
-may use: D10 and D14 decide that, and the holdout days are never read. A `D10` line marks an input
-that is a price, a pool or a dividend: its rows before 2014-06-07 enter no component (D10)."""
+may use: D10 and D14 decide that. No holdout race day counts (D14): its odds day files are never
+opened, and the rows of its races, in a table or in a dumped family keyed by race, are left out;
+a dumped family dated otherwise (the workouts) is counted from its file footers. A `D10` line marks
+an input that is a price, a pool or a dividend: its rows before 2014-06-07 enter no component
+(D10)."""
 
 
 def _tickets(tickets: Iterable[int]) -> str:
@@ -535,6 +626,8 @@ def _figures(e: SupplyCoverage) -> str:
     parts.append(f"{e.rows:,} row{'' if e.rows == 1 else 's'}")
     if e.kind == "master":
         parts.append("a master: rows only")
+    elif e.kind == "per_race":
+        parts.append("a per-race table: rows only")
     elif e.kind == "dump" and e.rows and span == "":
         parts.append("no year files")
     return ", ".join(parts)

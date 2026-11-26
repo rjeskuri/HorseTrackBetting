@@ -7,14 +7,18 @@ inputs. Per input: its layers, its role at the decision time t (`feature_at_t`, 
 `conditioner`), the tickets that cover its gaps, and per supply (source, `table.column`, filter)
 the first and last race date, the rows and the gap years: the years from the first to the last
 with no row, or with fewer than half of the year's rows non-null. A dumped JV-Data family
-(`records/...`) is counted by files and rows, its span the years of its files; a master is
-counted by rows only.
+(`records/...`) is counted by files and rows, its span the years of its files; a table without
+race dates is counted by rows only: a per-race table (`dividends`, `sectionals`) by the rows of its
+races, a master (`horses`, `jockeys`) by every row.
 
 A supply from a licensed source (JRA-VAN, JRDB) shows `withheld (D21)` and no figure: its
 dates, counts, shares and gap years are in the private report
 `$HORSETRACK_DATA_DIR/reports/data-coverage.md`. The inventory says what exists, not what a model
-may use: D10 and D14 decide that, and the holdout days are never read. A `D10` line marks an input
-that is a price, a pool or a dividend: its rows before 2014-06-07 enter no component (D10).
+may use: D10 and D14 decide that. No holdout race day counts (D14): its odds day files are never
+opened, and the rows of its races, in a table or in a dumped family keyed by race, are left out;
+a dumped family dated otherwise (the workouts) is counted from its file footers. A `D10` line marks
+an input that is a price, a pool or a dividend: its rows before 2014-06-07 enter no component
+(D10).
 
 ## card_races
 
@@ -132,6 +136,19 @@ The pool totals on the board at t, per pool and capture; the own-stake impact of
 
 - jra `odds_timeseries.investment` where combination = __pool__: 2 day files, 2026-11-21 to 2026-11-22, 3,828 rows; no gap year
 - jravan `odds_timeseries.investment` where combination = __pool__: withheld (D21)
+
+## bracket_high_end_at_t
+
+Layers C1, C5, C6; role `feature_at_t`; tickets #400.
+
+D10: a price, pool or dividend; its rows before 2014-06-07 enter no component.
+
+The high end of the lo-hi range the Place and Wide (QUINELLA_PLACE) boards show (the low end is `odds` in board_at_t and board_wide_and_exotics). The nowcast moves it by the low figure's factor (#116) and the shadow values value Place and Wide at both ends (#118, docs/modeling.md diagram 4). JV-Data's 0B41 (O1) records carry the Place range; no history holds the Wide one (#400).
+
+- jra `odds_timeseries.odds_hi` where pool = PLACE: 2 day files, 2026-11-21 to 2026-11-22, 46,201 rows; no gap year
+- jravan `odds_timeseries.odds_hi` where pool = PLACE: withheld (D21)
+- jra `odds_timeseries.odds_hi` where pool = QUINELLA_PLACE: 2 day files, 2026-11-21 to 2026-11-22, 291,482 rows; no gap year
+- jravan `odds_timeseries.odds_hi` where pool = QUINELLA_PLACE: withheld (D21)
 
 ## past_placings
 
@@ -278,7 +295,7 @@ JV-Data CK (each runner's placings so far, by surface, distance, going and venue
 
 Layers C3; role `label`; tickets #404.
 
-The speed model's target (#96,
+The speed model's target (#96, #97); a feature of the horse's later races once published.
 
 - jra `runners.finish_time_s`: 2010-01-05 to 2026-11-23, 824,386 rows; no gap year
 - jravan `runners.finish_time_s`: withheld (D21)
@@ -488,12 +505,25 @@ D10: a price, pool or dividend; its rows before 2014-06-07 enter no component.
 
 Every pool's dividends; a per-race table without race_date, so rows only (its span is races').
 
-- jra `dividends.dividend`: 699,150 rows, a master: rows only; no gap year
+- jra `dividends.dividend`: 699,150 rows, a per-race table: rows only; no gap year
 - jravan `dividends.dividend`: withheld (D21)
 
-## brackets
+## final_bracket_high_end
+
+Layers C5, C6; role `label`; tickets #376.
+
+D10: a price, pool or dividend; its rows before 2014-06-07 enter no component.
+
+The high end of the final Place and Wide ranges, beside the low end in final_prices: what the shadow values at the high end (#118) are scored against. netkeiba holds no final range; the logger's final captures hold it forward (bracket_high_end_at_t).
+
+- jravan `final_odds.odds_hi` where pool = PLACE: withheld (D21)
+- jravan `final_odds.odds_hi` where pool = QUINELLA_PLACE: withheld (D21)
+
+## bracket_number
 
 Layers C5; role `feature_at_t`; tickets #404.
+
+Each runner's frame (枠番, 1 to 8), on which the bracket quinella (BRACKET_QUINELLA) is bet and paid; not the price range of Place and Wide (bracket_high_end_at_t, final_bracket_high_end).
 
 - jra `runners.bracket`: 2010-01-05 to 2026-11-23, 824,386 rows; no gap year
 - jravan `runners.bracket`: withheld (D21)
