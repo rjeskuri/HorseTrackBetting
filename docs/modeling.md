@@ -70,7 +70,7 @@ flowchart TB
     end
     subgraph L1["C1: final-price nowcast"]
         NC0["Drift by pool, odds band and horizon<br/>#116 japan/models/v0/nowcast.py<br/>v0"]
-        NC1["Structural nowcast for Win and Place #85,<br/>board quality by horizon #86<br/>planned"]
+        NC1["Structural nowcast φ_t × s_late, scored for Win (Place diagnostic)<br/>#85 japan/models/nowcast.py; board quality by horizon #86<br/>built, not adopted"]
     end
     subgraph L2["C2: per-horse ability and interactions"]
         ABIL["Dynamic rating #91, Plackett-Luce ability #92,<br/>jockey, trainer and track #93,<br/>competition #94, lineage #95<br/>planned"]
@@ -114,8 +114,8 @@ flowchart TB
     classDef built fill:#dcfce7,stroke:#15803d,color:#052e16
     classDef planned fill:#f3f4f6,stroke:#6b7280,stroke-dasharray: 5 5,color:#111827
     class NC0,CAL,RES,ORD,SV v0
-    class ASOF,BOARD,SLOG built
-    class NC1,ABIL,SPEED,META,EXO,STAKE planned
+    class ASOF,BOARD,SLOG,NC1 built
+    class ABIL,SPEED,META,EXO,STAKE planned
 ```
 
 The work is split into seven layers, and each is tested both on its own and for what it adds

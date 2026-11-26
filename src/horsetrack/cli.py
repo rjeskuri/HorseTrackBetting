@@ -39,6 +39,7 @@ from horsetrack.countries.japan.research.exacta_impact import exacta_impact_comm
 from horsetrack.countries.japan.research.win5_backfill import win5_history_command
 from horsetrack.countries.japan.research.win5_study import win5_study_app
 from horsetrack.countries.japan.shadow.day import shadow_day_command
+from horsetrack.countries.japan.studies.nowcast import nowcast_study_command
 
 app = typer.Typer(no_args_is_help=True)
 japan = typer.Typer(no_args_is_help=True, help="Japan commands.")
@@ -57,6 +58,7 @@ japan.add_typer(win5_study_app, name="win5-study")
 japan.command("fetch-going")(fetch_going_command)
 japan.command("fetch-win-sales")(fetch_win_sales_command)
 japan.command("exacta-impact")(exacta_impact_command)
+japan.command("nowcast-study")(nowcast_study_command)
 japan.command("coverage")(coverage_command)
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
 japan.add_typer(jrdb, name="jrdb")
