@@ -104,7 +104,51 @@ so each family maps fields instead of slicing bytes:
 - `post_time_local(hhmm)`: `'HH:MM'`, zero-padded, JST wall clock (the netkeiba results parser
   keeps the page's text, which may read `9:50`); None for `0000`, blank or an invalid time.
 
-## RA: races and meetings (planned, #364)
+## RA: races and meetings (#364)
+
+`horsetrack.countries.japan.jravan.races`; `horsetrack japan jravan races [--year YYYY ...]`.
+
+- `build_races(*, years=None, raw=None, out=None)` reads `stored/RACE/RA/<YYYY>.jvd` one year at
+  a time (only the items it maps), keeps one version per race (`records.latest_versions` on the
+  layout's key items), keeps the JRA venues (01-10) and writes `processed/jravan/races.parquet`
+  (sorted by `race_id`) and `meetings.parquet` (by `race_date`, `venue`) in the store's columns
+  and types. The same inputs give the same bytes. The report, `<reports dir>/jravan-races.json`,
+  holds per year `records`, `versions_dropped`, `deletions`, `races_written`, `non_jra_nar`,
+  `non_jra_overseas`, `non_jra_unknown` and `unmapped` (a count), and `unmapped` as store column
+  (`race_class`, `weight_type`, `surface`, `going`) -> code -> count over the races written.
+- Columns use the jra store's vocabulary (`jra/netkeiba/parse_results.py`): ids and keys from
+  `keys.py`; `season` the calendar-year label; `race_class` from the youngest-age condition code,
+  then the grade for an open or unknown class (jump grades as their flat code); `surface` and
+  `course_config` from the track code; `going` from the going code of the race's own surface
+  (turf for a jump race); `prize` the winner's prize in yen; `split_times_s` cumulative leader
+  times (blank and zero laps dropped); `status` `abandoned` for data kubun 9, else `run`;
+  `rail_setting` the course letter A-D of a turf race, else null. `race_index`, `rating_*`,
+  `finish_time_s` and the `result_*_utc` columns are null. Each mapping's code values are
+  constants in `races.py`; a code a mapping lacks is null and counted. A blank or all-zero
+  code is JV-Data's "unset": null (its `*_raw` column too), counted only on a race that was run.
+- Meetings: one row per `meeting_id`, `run` when any race ran, else `abandoned`; `day_night` and
+  `surface_mix` null.
+
+The run on the export (2026-11-26; the export ends 2026-11-23), counts only:
+
+| | records | versions dropped | deletions | races written | NAR | overseas | unmapped |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1954-1985 (21 year files) | 156 | 0 | 0 | 156 | 0 | 0 | 132 |
+| 1986-2009 | 136,041 | 474 | 0 | 81,985 | 51,559 | 2,023 | 12,741 |
+| 2010-2026 | 107,385 | 79 | 0 | 58,750 | 46,933 | 1,623 | 0 |
+| all 62 year files | 243,582 | 553 | 0 | 140,891 | 98,492 | 3,646 | 12,873 |
+
+140,891 races (422 abandoned) on 11,970 meetings (30 abandoned), race ids unique. Every race has
+a surface. Unmapped codes, all before 2002 (the last in 2001):
+
+- `race_class` (condition codes the mapping lacks): `009` 6,742, `004` 4,542, `015` 867, `014`
+  373, `003` 132, `007` 63, `008` 19, `006` 12, `001` 1 and the unset `000` 1 (12,752 races
+  without a class).
+- `weight_type`: the unset `0` 121 (races before 1986).
+- `going`: none counted; the 273 abandoned races with an unset going are null.
+- Not counted (`rail_setting` is not a counted column): the turf course letters `A1` (2,277)
+  and `A2` (321), all before 2010, give a null `rail_setting`. 76 races before 1986 have no post
+  time.
 
 ## SE: runners (planned, #365)
 
