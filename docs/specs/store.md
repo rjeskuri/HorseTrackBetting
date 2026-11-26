@@ -11,7 +11,8 @@ tables; anything one source alone needs is an optional column, null for the othe
 One Parquet file per table and source:
 `$HORSETRACK_DATA_DIR/processed/<source>/<table>.parquet`
 (`core.paths.processed_dir(source) / f"{table}.parquet"`), where `<source>` is the data-source key
-(`jra`, `nar`, `hkjc`). The data directory is resolved on every call. A file of any other name in
+(`jra`, `nar`, `hkjc`, `jravan`; the last is the JRA-VAN DataLab export, see "The jravan source"
+below). The data directory is resolved on every call. A file of any other name in
 that folder is not a store table.
 
 ## Column kinds
@@ -209,6 +210,39 @@ again. `research.win5.carryover_chain_breaks(table)` names the days that break t
 (a no-winner day with no carryover out, or a carryover in that is not the previous row's carryover
 out; a capped winner's carryover out is not a break); the command prints their count as
 `carryover_breaks=<n>` and lists them, and does not change its exit code for them.
+
+## The jravan source
+
+`processed/jravan/` holds the store's tables for the JRA-VAN DataLab export (the JV-Data files under
+`raw/jravan/`, #196), written by the commands `horsetrack japan jravan ...`
+(`countries/japan/jravan/`, epic #359). It is not written by `build.build_tables`: there is no
+manifest and no page cache, the parsers read the export's records directly, and `build_tables`
+does not accept the key. The tables, their columns, the mapping from JV-Data and the builds'
+rules are in [docs/specs/jravan.md](jravan.md); this section says only how they sit beside the
+store's.
+
+- **Shared tables** are in `schemas.TABLES` with the declared columns, so `read_table`,
+  `connect` and `models/v0/store.read_store_table(..., source="jravan")` serve them like another
+  source's: `meetings`, `races`, `runners`, `dividends`, `horses`, `horse_pedigree`. JRA venues
+  only (JV-Data venue codes 01-10). Where JV-Data has no value the column is null, never a guess
+  (e.g. `rating`, `gear_raw` and `brand_raw` on runners).
+- **Jravan-only tables** are outside `schemas.TABLES`: `final_odds`, `pool_votes` (final odds and
+  pool votes per combination), `jockeys`, `trainers` (the masters), `breeding_horses`, `produce`
+  and `lineages` (bloodlines). Each is a Parquet file in `processed/jravan/` whose schema is
+  its builder module's, so `read_table` and `connect` refuse or ignore them; a reader opens the
+  file itself.
+- **`processed/jravan/odds_timeseries/<YYYY-MM-DD>.parquet`**: the time-series odds, one file per
+  race day in the odds log's own schema (`logger.compact.SCHEMA`, `docs/specs/odds-log.md`), so
+  the readers of the logger's days read these too.
+- **Availability**: every table above has a rule in `availability.yaml` (`countries/japan/config/
+  availability.yaml`, docs/specs/as-of.md), the shared ones by their own entries and the
+  jravan-only ones by the owner's request on #376: `final_odds` and `pool_votes` are `label_only`,
+  `jockeys` and `trainers` are `current_value` with `in_view`, `breeding_horses`, `produce` and
+  `lineages` are `static`. A table without an entry is refused by the as-of views, so no
+  jravan-only table is readable at t by accident. The dump of unmapped families
+  (`interim/jravan/records/`) is not a store table and has no rule.
+- **Guards**: the holdout (D14) and D10 apply to a jravan read as to any other: `read_store_table`
+  drops holdout days and refuses a price read before 2014-06-07 (D10) whatever the source.
 
 ## Not here yet
 
