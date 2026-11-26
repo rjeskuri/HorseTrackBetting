@@ -55,10 +55,12 @@ value is `records.text` (cp932, both ends trimmed of half- and full-width spaces
   `licence_issued`: 調教師免許交付年月日; `licence_revoked`: 調教師免許抹消年月日; `is_retired`:
   調教師抹消区分 `1`; `affiliation`: 調教師東西所属コード, as for jockeys.
 
-Store rules (`countries/japan/config/availability.yaml`, unchanged here): `horses` is
-`current_value` (never in a view), `horse_pedigree` is `static` with labels `source_race_id` and
-`scraped_utc`; `jockeys` and `trainers` have no rule, so `read_asof` raises `NoAvailabilityRule`
-(owner note 2026-11-26: a later ticket adds their rule and changes that assertion).
+Store rules (`countries/japan/config/availability.yaml`): `horses` is `current_value` (never in a
+view), `horse_pedigree` is `static` with labels `source_race_id` and `scraped_utc`. `jockeys` and
+`trainers` are `current_value` with `in_view` (#376, the owner's request of 2026-11-26: "the
+master row as exported is used, with no history"): every master row is in every view at any t,
+unchanged, `asof_join` attaches it by key alone, and `read_label` refuses them. The row carries
+the export's look-ahead: a jockey retired since shows as retired at a t before his licence.
 
 The UM, KS and CH sections built here (`jravan_workbook`) use the workbook's item names with
 invented widths, order and companions; every value and every code-table meaning is made up (D21:
@@ -88,9 +90,10 @@ from horsetrack.core import paths
 from horsetrack.core.store import schemas, tables
 from horsetrack.core.store.asof import (
     CurrentValueTable,
-    NoAvailabilityRule,
+    asof_join,
     load_availability,
     read_asof,
+    read_label,
 )
 from horsetrack.countries.japan.jravan import records, runners, spec
 
@@ -684,7 +687,8 @@ def test_horses_stay_out_of_every_view_and_pedigree_is_static(data: Path) -> Non
     assert pedigree["source_race_id"].isna().all() and pedigree["scraped_utc"].isna().all()
 
     rules = load_availability("japan")
-    assert "jockeys" not in rules and "trainers" not in rules
+    # #376 leaves horses refused (the owner's #80 decision): no in_view
+    assert (rules["horses"].kind, rules["horses"].in_view) == ("current_value", False)
     times = [
         datetime(1990, 1, 1, tzinfo=UTC),
         datetime(2009, 3, 1, 12, 0, tzinfo=UTC),
@@ -705,17 +709,92 @@ def test_horses_stay_out_of_every_view_and_pedigree_is_static(data: Path) -> Non
     finally:
         con.close()
 
-    # jockeys and trainers have no rule: a view of either is refused
+
+# Before any birth date or licence of the masters below, between them, after the 2014 and 2020
+# revocations, after the export (created 2025-06-02), long after.
+MASTER_TIMES = [
+    datetime(1960, 1, 1, tzinfo=UTC),
+    datetime(2012, 6, 1, 3, 0, tzinfo=UTC),
+    datetime(2021, 1, 1, tzinfo=UTC),
+    datetime(2025, 6, 1, 6, 40, tzinfo=UTC),
+    datetime(2031, 12, 31, tzinfo=UTC),
+]
+
+
+def test_jockey_and_trainer_masters_are_in_every_view_as_exported(data: Path) -> None:
+    write_build_inputs(data / "raw" / "jravan")
+    masters.build_masters()
     processed = data / "processed" / "jravan"
+    stored = {
+        "jockeys": by_key(pq.read_table(processed / "jockeys.parquet").to_pandas(), "jockey_code"),
+        "trainers": by_key(
+            pq.read_table(processed / "trainers.parquet").to_pandas(), "trainer_code"
+        ),
+    }
+    assert sorted(stored["jockeys"]) == JOCKEY_CODES and sorted(stored["trainers"]) == TRAINER_CODES
+
+    rules = load_availability("japan")
+    for table in ("jockeys", "trainers"):
+        rule = rules[table]
+        assert (rule.kind, rule.in_view) == ("current_value", True), table
+        assert (rule.label_columns, rule.label_prefixes) == ((), ()), table
+    assert "jockeys" not in schemas.TABLES and "trainers" not in schemas.TABLES
+
     con = duckdb.connect(":memory:")
     try:
         for table in ("jockeys", "trainers"):
             con.execute(
                 f"CREATE VIEW {table} AS SELECT * FROM read_parquet('{processed / table}.parquet')"
             )
-            for t in times:
-                with pytest.raises(NoAvailabilityRule):
-                    read_asof(con, table, t, rules=rules)
+        names = {"jockeys": set(JOCKEY_TYPES), "trainers": set(TRAINER_TYPES)}
+        keys_of = {"jockeys": "jockey_code", "trainers": "trainer_code"}
+        for t in MASTER_TIMES:
+            for table in ("jockeys", "trainers"):
+                view = read_asof(con, table, t, rules=rules)
+                assert set(view.columns) == names[table], (table, t)
+                # every master row at every t, unchanged: no history, no label column
+                assert by_key(view, keys_of[table]) == stored[table], (table, t)
+            # the export's look-ahead: 00666 retired with his licence revoked on 2014-12-31, and
+            # 00420's revoked on 2020-02-29, show so at every t, before either too
+            j = by_key(read_asof(con, "jockeys", t, rules=rules), "jockey_code")
+            assert_subset(j["00666"], {"is_retired": True, "licence_revoked": date(2014, 12, 31),
+                                       "affiliation": "nar"}, ("00666", t))  # fmt: skip
+            assert_subset(j["01126"], {"is_retired": False, "licence_revoked": None,
+                                       "name_short": "架空一"}, ("01126", t))  # fmt: skip
+            tr = by_key(read_asof(con, "trainers", t, rules=rules), "trainer_code")
+            assert_subset(tr["00420"], {"is_retired": True, "licence_revoked": date(2020, 2, 29),
+                                        "affiliation": "ritto"}, ("00420", t))  # fmt: skip
+
+        # asof_join attaches the master row by key alone, whatever the key's t (the runner
+        # tables carry jockey_key and trainer_key); an unknown key gets nulls
+        keys = pd.DataFrame(
+            {
+                "jockey_key": ["jockey:05339", "jockey:00666", "jockey:09999", "jockey:01126"],
+                "t_utc": pd.to_datetime(MASTER_TIMES[:4], utc=True),
+            }
+        )
+        got = asof_join(keys, "jockeys", on=["jockey_key"], rules=rules, con=con)
+        assert list(got["jockey_key"]) == list(keys["jockey_key"])
+        assert [plain(v) for v in got["jockey_code"]] == ["05339", "00666", None, "01126"]
+        assert [plain(v) for v in got["name_short"]] == ["架空次", "架空三", None, "架空一"]
+        assert [plain(v) for v in got["is_retired"]] == [False, True, None, False]
+        assert [plain(v) for v in got["trainer_code"]] == ["01061", None, None, None]
+        keys = pd.DataFrame(
+            {
+                "trainer_key": ["trainer:00420", "trainer:01061", "trainer:00000"],
+                "t_utc": pd.to_datetime([MASTER_TIMES[0], MASTER_TIMES[4], MASTER_TIMES[2]],
+                                        utc=True),
+            }
+        )  # fmt: skip
+        got = asof_join(keys, "trainers", on=["trainer_key"], rules=rules, con=con)
+        assert [plain(v) for v in got["name_short"]] == ["架空師", "架空調", None]
+        assert [plain(v) for v in got["licence_revoked"]] == [date(2020, 2, 29), None, None]
+        assert [plain(v) for v in got["affiliation"]] == ["ritto", "miho", None]
+
+        # masters, not labels: read_label refuses them
+        for table in ("jockeys", "trainers"):
+            with pytest.raises(ValueError):
+                read_label(con, table, rules=rules)
     finally:
         con.close()
 

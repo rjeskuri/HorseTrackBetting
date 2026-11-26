@@ -14,8 +14,9 @@ Contract pinned here (the coder follows it), module `horsetrack.countries.japan.
   race year (ascending), sorted by `race_id, pool, combination` (plain string order), the same
   bytes for the same inputs, through a tmp file and `os.replace`.
 - `FINAL_ODDS_SCHEMA`: equal to `EXPECTED_SCHEMA` below. `final_odds` is not in
-  `schemas.TABLES` and has no availability rule: `read_asof` on a view of it raises
-  `NoAvailabilityRule`.
+  `schemas.TABLES`. Its availability rule is `label_only` (#376, the owner's request of
+  2026-11-26: a label or a conditioner, never a feature at t): `read_asof` and `asof_join` on a
+  view of it raise `LabelOnlyTable` at any t, and `read_label` returns it whole.
 - `horsetrack japan jravan final-odds [--year Y ...]`: the same build, then
   `records.write_build_report`, written as `<reports dir>/jravan-final-odds.json` (counts only;
   `by_year` keyed by the years that have rows).
@@ -72,6 +73,7 @@ from pathlib import Path
 
 import duckdb
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -80,7 +82,13 @@ from typer.testing import CliRunner
 from horsetrack.cli import app
 from horsetrack.core import paths
 from horsetrack.core.store import schemas
-from horsetrack.core.store.asof import NoAvailabilityRule, load_availability, read_asof
+from horsetrack.core.store.asof import (
+    LabelOnlyTable,
+    asof_join,
+    load_availability,
+    read_asof,
+    read_label,
+)
 
 # isort: split
 # (its own block: the sibling helper module, then the module this ticket creates)
@@ -846,22 +854,92 @@ def test_build_writes_final_odds_year_by_year_in_race_order(data: Path, tmp_path
     assert full_rows(pq.read_table(path)) == expected[2024]
 
 
-def test_final_odds_has_no_availability_rule_so_views_refuse_it(data: Path) -> None:
-    recs, _ = race_set("2024", "0601", "05", "11", 1)
-    write_year(data, 2024, recs)
+def plain(v: object) -> object:
+    """A frame cell as plain Python: None for any null, a naive timestamp (a DuckDB DATE) as a
+    date, an aware one as a UTC datetime."""
+    if v is None or v is pd.NA or v is pd.NaT:
+        return None
+    if isinstance(v, pd.Timestamp):
+        return v.date() if v.tzinfo is None else v.tz_convert("UTC").to_pydatetime()
+    if isinstance(v, np.generic):
+        return plain(v.item())
+    if isinstance(v, float) and np.isnan(v):
+        return None
+    return v
+
+
+def label_rows(frame: pd.DataFrame) -> list[FullRow]:
+    """`full_rows` of a frame read back through DuckDB."""
+    out = []
+    for d in frame.to_dict("records"):
+        values = [plain(d[c]) for c in EXPECTED_SCHEMA.names]
+        for c in ("odds", "odds_hi", "investment"):
+            i = EXPECTED_SCHEMA.names.index(c)
+            values[i] = _num(values[i])
+        out.append(tuple(values))
+    return out
+
+
+ANNOUNCED_RACE = "jra:2024-06-01:TOK:12"  # announced 2024-06-01 15:40 JST = 06:40 UTC
+ANNOUNCED_UTC = datetime(2024, 6, 1, 6, 40, tzinfo=UTC)
+
+
+def test_final_odds_is_label_only_so_views_raise_and_read_label_returns_it_whole(
+    data: Path,
+) -> None:
+    # Three years of races, and one race whose odds carry an announcement time.
+    inputs = build_inputs()
+    announced = Odds("O1", year="2024", mmdd="0601", venue="05", race="12", announced="06011540",
+                     slots={"WIN": [s("03", 4.4, 1)]}, totals={"WIN": 100})  # fmt: skip
+    for year, (recs, _) in inputs.items():
+        write_year(data, year, [*recs, announced] if year == 2024 else recs)
+    expected = in_store_order(
+        [row_ for _, rows in inputs.values() for row_ in rows]
+        + [full(row(ANNOUNCED_RACE, "WIN", "3", 4.4, rank=1), published=ANNOUNCED_UTC),
+           full(pool_row(ANNOUNCED_RACE, "WIN", 100), published=ANNOUNCED_UTC)]
+    )  # fmt: skip
     odds.build_final_odds()
     path = store_path()
-    assert pq.read_metadata(path).num_rows > 0
+    assert pq.read_metadata(path).num_rows == len(expected)
 
     assert "final_odds" not in schemas.TABLES
     rules = load_availability("japan")
-    assert "final_odds" not in rules
+    assert rules["final_odds"].kind == "label_only"
     con = duckdb.connect(":memory:")
-    con.execute(f"CREATE VIEW final_odds AS SELECT * FROM read_parquet('{path}')")
-    assert con.execute("SELECT count(*) FROM final_odds").fetchone()[0] > 0
-    for at in (datetime(2024, 6, 1, 7, 0, tzinfo=UTC), datetime(2030, 1, 1, tzinfo=UTC)):
-        with pytest.raises(NoAvailabilityRule):
-            read_asof(con, "final_odds", at, rules=rules)
+    try:
+        con.execute(f"CREATE VIEW final_odds AS SELECT * FROM read_parquet('{path}')")
+        assert con.execute("SELECT count(*) FROM final_odds").fetchone()[0] == len(expected)
+        # before the data, at the announcement, after a race day's post, long after
+        times = [
+            datetime(2000, 1, 1, tzinfo=UTC),
+            ANNOUNCED_UTC,
+            datetime(2024, 6, 2, 7, 0, tzinfo=UTC),
+            datetime(2030, 1, 1, tzinfo=UTC),
+        ]
+        keys = pd.DataFrame(
+            {
+                "race_id": [ANNOUNCED_RACE, "jra:2023-12-28:NAK:11"] * 2,
+                "pool": ["WIN", "TIERCE"] * 2,
+                "combination": ["3", POOL_ROW] * 2,
+                "t_utc": pd.to_datetime(times, utc=True),
+            }
+        )
+        for t in times:
+            with pytest.raises(LabelOnlyTable):
+                read_asof(con, "final_odds", t, rules=rules)
+        with pytest.raises(LabelOnlyTable):
+            asof_join(keys, "final_odds", on=["race_id", "pool", "combination"], rules=rules,
+                      con=con)  # fmt: skip
+        with pytest.raises(LabelOnlyTable):
+            asof_join(keys[["race_id", "t_utc"]], "final_odds", on=["race_id"], rules=rules,
+                      con=con)  # fmt: skip
+
+        # As a label the table is whole: every row and every column, the odds included.
+        labels = read_label(con, "final_odds", rules=rules)
+        assert list(labels.columns) == EXPECTED_SCHEMA.names
+        assert in_store_order(label_rows(labels)) == expected
+    finally:
+        con.close()
 
 
 def test_the_latest_version_per_race_is_kept(data: Path) -> None:

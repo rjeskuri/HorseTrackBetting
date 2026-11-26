@@ -12,8 +12,8 @@ trimmed text as printed, null when blank or all zeros; a year is an integer and 
 `YYYYMMDD`, null when blank or all zeros. `sex` is 性別コード 1/2/3 as H/M/G; `colour` the first
 content column of code table 2203 for 毛色コード, read from the workbook at run time (the meanings
 stay in the licensed workbook), null for an unset, blank or unknown code. None of the tables is a
-store table or has an availability rule (owner decision), so the views refuse them. The report
-holds counts only. See docs/specs/jravan.md.
+store table; their availability rule is `static` (owner decision, #376), in every view at any t.
+The report holds counts only. See docs/specs/jravan.md.
 """
 
 from __future__ import annotations

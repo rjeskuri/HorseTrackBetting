@@ -20,8 +20,9 @@ Contract pinned here (the coder follows it), module `horsetrack.countries.japan.
   `votes` and `counts['rows']` is the rows written; it holds counts only.
 - `horsetrack japan jravan votes`: the same build, then `records.write_build_report`
   (`<reports dir>/jravan-votes.json`).
-- `pool_votes` is not in `schemas.TABLES` and has no availability rule: the views refuse it
-  (owner decision; a later ticket of #359 adds the rule and changes that test).
+- `pool_votes` is not in `schemas.TABLES`. Its availability rule is `label_only` (#376, the
+  owner's request of 2026-11-26: a label or a conditioner, never a feature at t): `read_asof` and
+  `asof_join` raise `LabelOnlyTable` at any t, and `read_label` returns it whole.
 
 The workbook items each column comes from (H1 `５．票数１`, 28,955 bytes, and H6
 `６．票数6（3連単）`, 102,890 bytes, in the JV-Data 4.9.0.1 workbook on this Mac; names as
@@ -88,7 +89,7 @@ from horsetrack.cli import app
 from horsetrack.core import paths
 from horsetrack.core.store import schemas, tables
 from horsetrack.core.store.asof import (
-    NoAvailabilityRule,
+    LabelOnlyTable,
     asof_join,
     load_availability,
     read_asof,
@@ -811,7 +812,23 @@ def test_build_writes_pool_votes_year_by_year_in_race_order(data: Path, tmp_path
     assert parsed["counts"]["rows"] == len(ROWS_2023) + len(ROWS_2024)
 
 
-def test_pool_votes_has_no_availability_rule_so_views_refuse_it(data: Path) -> None:
+def plain(v: object) -> object:
+    """A frame cell as plain Python: None for any null, a naive timestamp (a DuckDB DATE) as a
+    date."""
+    if v is None or v is pd.NA or v is pd.NaT:
+        return None
+    if isinstance(v, pd.Timestamp):
+        return v.date() if v.tzinfo is None else v.tz_convert("UTC").to_pydatetime()
+    if isinstance(v, np.generic):
+        return plain(v.item())
+    if isinstance(v, float) and np.isnan(v):
+        return None
+    return v
+
+
+def test_pool_votes_is_label_only_so_views_raise_and_read_label_returns_it_whole(
+    data: Path,
+) -> None:
     write_build_races(data)
     votes.build_pool_votes()
     path = store_path(data)
@@ -819,7 +836,7 @@ def test_pool_votes_has_no_availability_rule_so_views_refuse_it(data: Path) -> N
 
     assert NAME not in schemas.TABLES
     rules = load_availability("japan")
-    assert NAME not in rules
+    assert rules[NAME].kind == "label_only"
     with pytest.raises(ValueError, match="not a store table"):
         tables.read_table(SOURCE, NAME)
 
@@ -827,19 +844,43 @@ def test_pool_votes_has_no_availability_rule_so_views_refuse_it(data: Path) -> N
     query = "SELECT table_name FROM information_schema.tables"
     listed = {row[0] for row in con.execute(query).fetchall()}
     assert NAME not in listed
-    # Even with the file in front of them, the views refuse it.
     con.execute(f"CREATE VIEW {NAME} AS SELECT * FROM read_parquet('{path}')")
     assert con.execute(f"SELECT count(*) FROM {NAME}").fetchone()[0] == len(ROWS_2023 + ROWS_2024)
-    at = datetime(2024, 6, 30, tzinfo=UTC)
+    # Never in a view: before the data, between the races, after them, long after.
+    times = [
+        datetime(2000, 1, 1, tzinfo=UTC),
+        datetime(2023, 12, 28, 6, 0, tzinfo=UTC),
+        datetime(2024, 6, 1, 15, 0, tzinfo=UTC),
+        datetime(2024, 6, 30, tzinfo=UTC),
+        datetime(2030, 1, 1, tzinfo=UTC),
+    ]
     keys = pd.DataFrame(
-        {"race_id": [R24C], "pool": ["WIN"], "combination": ["4"], "t_utc": pd.to_datetime([at])}
+        {
+            "race_id": [R24C, R23B, R24A, R24B, R23A],
+            "pool": ["WIN", "FORECAST", "TIERCE", "QUINELLA_PLACE", "WIN"],
+            "combination": ["4", "9,5", POOL_ROW, "2,6", "2"],
+            "t_utc": pd.to_datetime(times, utc=True),
+        }
     )
-    with pytest.raises(NoAvailabilityRule):
-        read_asof(con, NAME, at, rules=rules)
-    with pytest.raises(NoAvailabilityRule):
+    for t in times:
+        with pytest.raises(LabelOnlyTable):
+            read_asof(con, NAME, t, rules=rules)
+    with pytest.raises(LabelOnlyTable):
         asof_join(keys, NAME, on=["race_id", "pool", "combination"], rules=rules, con=con)
-    with pytest.raises(NoAvailabilityRule):
-        read_label(con, NAME, rules=rules)
+    with pytest.raises(LabelOnlyTable):
+        asof_join(keys[["race_id", "t_utc"]], NAME, on=["race_id"], rules=rules, con=con)
+
+    # As a label the table is whole: every row and column, the votes included.
+    labels = read_label(con, NAME, rules=rules)
+    assert list(labels.columns) == COLUMNS
+    whole = [{c: plain(v) for c, v in r.items()} for r in labels.to_dict("records")]
+    assert sorted(whole, key=lambda r: (r["race_id"], r["pool"], r["combination"])) == [
+        {"jurisdiction": "jra", "race_id": rid, "race_date": date.fromisoformat(rid.split(":")[1]),
+         "venue": rid.split(":")[2], "race_no": int(rid.split(":")[3]), "pool": pool,
+         "combination": combination, "votes": n, "refund_votes": refund, "fav_rank": fav,
+         "data_kubun": "5"}  # build_races keeps Rec's default データ区分
+        for rid, pool, combination, n, refund, fav in ROWS_2023 + ROWS_2024
+    ]  # fmt: skip
 
 
 def test_the_latest_version_per_race_is_kept(data: Path) -> None:
