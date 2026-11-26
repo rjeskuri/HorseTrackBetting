@@ -4,11 +4,13 @@ Every table that enters a view needs an availability rule: a `column` rule (a ro
 `row[column]`, or at `row[fallback]` where the column is null), an `offset` rule (at
 `row[anchor] + offset`; a DATE anchor is read as midnight of that date in `tz`), `static` (every
 row at any t), `label_only` (never in a view at t, only through `read_label`) or `current_value`
-(never in a view, never as a label). A `column`, `offset` or `static` rule may list
-`label_columns`, the table's result or look-ahead columns, and `label_prefixes`, name prefixes of
-such columns, which a view never returns. A row whose availability time is null is never
-available. A table without a rule is refused. The per-table rules are owner decisions,
-kept in `countries/<country>/config/availability.yaml`.
+(never in a view, never as a label). A `current_value` rule with `in_view` (the values as
+exported, with no history, their look-ahead accepted) enters the views as a `static` one does,
+and is still never a label. A view rule may list `label_columns`, the table's result or
+look-ahead columns, and `label_prefixes`, name prefixes of such columns, which a view never
+returns. A row whose availability time is null is never available. A table without a rule is
+refused. The per-table rules are owner decisions, kept in
+`countries/<country>/config/availability.yaml`.
 
 A view rule may also list `derived` columns (a UTC instant from a local DATE and a wall-clock
 "H:MM" string, such as a race's `post_utc`) and `gates` (columns kept in the frame but null until
@@ -32,7 +34,8 @@ import yaml
 from horsetrack.core.config import load_country_yaml
 
 KINDS: tuple[str, ...] = ("column", "offset", "label_only", "current_value", "static")
-_VIEW_KINDS = ("column", "offset", "static")  # the kinds that enter a view and take label columns
+# the kinds that enter a view and take label columns (and current_value with in_view, as static)
+_VIEW_KINDS = ("column", "offset", "static")
 # the fields each kind takes: (required, optional)
 _FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "column": (frozenset({"column"}), frozenset({"fallback"})),
@@ -46,10 +49,10 @@ _KEYS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "column": (frozenset({"column"}), frozenset({"fallback"})),
     "offset": (frozenset({"anchor", "offset_min"}), frozenset({"tz", "via"})),
     "label_only": (frozenset(), frozenset()),
-    "current_value": (frozenset(), frozenset()),
+    "current_value": (frozenset(), frozenset({"in_view"})),
     "static": (frozenset(), frozenset()),
 }
-# the YAML keys only the view kinds take
+# the YAML keys only the view kinds take (and current_value with in_view, all but read_label)
 _VIEW_KEYS = ("label_columns", "label_prefixes", "derived", "gated_columns", "read_label")
 _TZ = "TIMESTAMP WITH TIME ZONE"
 _DATE = "DATE"
@@ -156,10 +159,17 @@ class Availability:
     gates: tuple[Gate, ...] = ()
     # read_label also returns the table whole (column, offset and static rules)
     label_readable: bool = False
+    # the current values enter every view at any t, as a static table's rows do, with no history:
+    # their look-ahead is accepted (current_value rules only)
+    in_view: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
             raise ValueError(f"{self.table}: unknown availability kind {self.kind!r} ({KINDS})")
+        if not isinstance(self.in_view, bool):
+            raise ValueError(f"{self.table}: in_view must be a bool, got {self.in_view!r}")
+        if self.in_view and self.kind != "current_value":
+            raise ValueError(f"{self.table}: a {self.kind!r} rule takes no in_view")
         given = {
             name
             for name, value in (
@@ -188,14 +198,14 @@ class Availability:
         labels = self.label_columns
         if not isinstance(labels, tuple) or not all(isinstance(c, str) and c for c in labels):
             raise ValueError(f"{self.table}: label_columns must be a tuple of names: {labels!r}")
-        if labels and self.kind not in _VIEW_KINDS:
+        if labels and not self.enters_view:
             raise ValueError(f"{self.table}: a {self.kind!r} rule takes no label_columns")
         prefixes = self.label_prefixes
         if not isinstance(prefixes, tuple) or not all(isinstance(p, str) and p for p in prefixes):
             raise ValueError(
                 f"{self.table}: label_prefixes must be a tuple of non-empty strings: {prefixes!r}"
             )
-        if prefixes and self.kind not in _VIEW_KINDS:
+        if prefixes and not self.enters_view:
             raise ValueError(f"{self.table}: a {self.kind!r} rule takes no label_prefixes")
         for stamp in (self.column, self.anchor, self.fallback):
             if stamp is not None and stamp in labels:
@@ -221,10 +231,10 @@ class Availability:
             raise ValueError(f"{self.table}: derived must be a tuple of LocalTime: {derived!r}")
         if not isinstance(gates, tuple) or not all(isinstance(g, Gate) for g in gates):
             raise ValueError(f"{self.table}: gates must be a tuple of Gate: {gates!r}")
-        if (derived or gates or self.label_readable) and self.kind not in _VIEW_KINDS:
-            raise ValueError(
-                f"{self.table}: a {self.kind!r} rule takes no derived, gates or label_readable"
-            )
+        if (derived or gates) and not self.enters_view:
+            raise ValueError(f"{self.table}: a {self.kind!r} rule takes no derived or gates")
+        if self.label_readable and self.kind not in _VIEW_KINDS:  # in_view is never a label
+            raise ValueError(f"{self.table}: a {self.kind!r} rule takes no label_readable")
         names = [d.name for d in derived]
         gated = [c for g in gates for c in g.columns]
         stamps = {self.column, self.anchor, self.fallback} - {None}
@@ -236,6 +246,12 @@ class Availability:
                 raise ValueError(f"{self.table}: {kind} columns {bad} are labels or time columns")
         if set(names) & set(gated):
             raise ValueError(f"{self.table}: derived columns cannot be gated")
+
+    @property
+    def enters_view(self) -> bool:
+        """Whether the rows enter the views: a column, offset or static rule, or a current_value
+        rule with in_view (read as a static one)."""
+        return self.kind in _VIEW_KINDS or self.in_view
 
     @property
     def gated(self) -> dict[str, int]:
@@ -270,9 +286,13 @@ def _entry(table: str, raw: Any) -> Availability:
             f"availability of {table!r}: kind {kind!r} takes {sorted(required)}"
             f"{f' (optional {sorted(optional)})' if optional else ''}, got {sorted(keys)}"
         )
+    in_view = raw.get("in_view", False)
+    if not isinstance(in_view, bool):
+        raise ValueError(f"availability of {table!r}: in_view must be true or false")
     for key in _VIEW_KEYS:
-        if key in raw and kind not in _VIEW_KINDS:
-            raise ValueError(f"availability of {table!r}: kind {kind!r} takes no {key}")
+        if key in raw and kind not in _VIEW_KINDS and not (in_view and key != "read_label"):
+            rule = f"kind {kind!r}{' with in_view' if in_view else ''}"
+            raise ValueError(f"availability of {table!r}: {rule} takes no {key}")
     readable = raw.get("read_label", False)
     if not isinstance(readable, bool):
         raise ValueError(f"availability of {table!r}: read_label must be true or false")
@@ -300,7 +320,7 @@ def _entry(table: str, raw: Any) -> Availability:
             via=_via(table, raw["via"]) if "via" in raw else None,
             **extras,
         )
-    return Availability(table, kind, **extras)
+    return Availability(table, kind, in_view=in_view, **extras)
 
 
 def _minutes(table: str, minutes: Any) -> timedelta:
@@ -404,7 +424,7 @@ def _view_rule(table: str, rules: Mapping[str, Availability]) -> Availability:
     rule = _rule(table, rules)
     if rule.kind == "label_only":
         raise LabelOnlyTable(f"table {table!r} is label-only: read it with read_label")
-    if rule.kind == "current_value":
+    if rule.kind == "current_value" and not rule.in_view:
         raise CurrentValueTable(f"table {table!r} holds current values: it never enters a view")
     return rule
 
@@ -424,7 +444,7 @@ def _utc_column(con, table: str, column: str) -> str:
 
 def _available_sql(con: duckdb.DuckDBPyConnection, rule: Availability) -> tuple[str, list[Any]]:
     """The SQL expression of a row's availability time, with its parameters."""
-    if rule.kind == "static":
+    if rule.kind == "static" or rule.in_view:
         return "CAST('-infinity' AS TIMESTAMPTZ)", []
     if rule.kind == "column":
         assert rule.column is not None
@@ -650,7 +670,7 @@ def asof_join(
 def read_label(con, table: str, *, rules) -> pd.DataFrame:
     """A label-only table whole (final odds, results used as labels): never a feature at t, or a
     view table whose rule is `label_readable` (results that also enter the views after the post).
-    Every other kind, `static` included, is a ValueError."""
+    Every other kind, `static` and `current_value` with `in_view` included, is a ValueError."""
     rule = _rule(table, rules)
     if rule.kind != "label_only" and not rule.label_readable:
         raise ValueError(f"table {table!r} is a {rule.kind!r} table, not label-only")

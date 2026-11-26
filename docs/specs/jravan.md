@@ -318,10 +318,9 @@ included: none of them has a final price that pays.
 - データ区分 in the export: 5 (確定, Monday) on almost every record, 9 (race cancelled) on 102
   races in each of O1-O5 (O6 not surveyed), whose prices print `****`.
 
-No availability rule: `final_odds` is a label or a conditioner, never a feature at t
-(docs/specs/as-of.md, Known traps). The rule is an owner decision (the epic's open question
-proposes `label_only`, #376); until it ships, `read_asof` on a view of the table raises
-`NoAvailabilityRule`.
+Availability rule `label_only` (the owner's request on #376, 2026-11-26; docs/specs/as-of.md):
+`final_odds` is a label or a conditioner, never a feature at t, so `read_asof` and `asof_join`
+on a view of the table raise `LabelOnlyTable` and `read_label` returns it whole.
 
 `horsetrack japan jravan final-odds [--year YYYY ...]` runs the build and writes
 `reports/jravan-final-odds.json` through `write_build_report`, counts only: `records` (kept JRA
@@ -347,8 +346,9 @@ wall, peak RSS 2.96 GB (`/usr/bin/time -l`). Rows per pool, slots and pool rows 
 
 `horsetrack.countries.japan.jravan.votes` writes `processed/jravan/pool_votes.parquet`: the final
 votes on every combination of every sold pool, and each pool's total and refunds, for pool sizes
-and own-stake impact (C5, C6, #283). It is not in `schemas.TABLES` and has no availability rule
-(owner decision; a later ticket of #359 adds one), so `read_table` and the as-of views refuse it.
+and own-stake impact (C5, C6, #283). It is not in `schemas.TABLES`, so `read_table` refuses it;
+its availability rule is `label_only` (the owner's request on #376, 2026-11-26): the as-of views
+raise `LabelOnlyTable` and `read_label` returns it whole.
 
 - `build_pool_votes(*, years=None, raw=None, out=None, chunk_records=500) -> BuildReport` reads
   `<raw>/stored/RACE/H1/<YYYY>.jvd` and `H6/<YYYY>.jvd` (`raw` the export root, default
@@ -538,8 +538,9 @@ export time, not a value at t (docs/specs/as-of.md, Known traps).
   `name_short`, `birth_date`, `licence_issued`, `licence_revoked` (date32, null when blank or all
   zeros), `is_retired`, `affiliation` (`miho`, `ritto`, `nar`, `overseas` from the east/west code,
   code table 2301); jockeys also carry `trainer_code` (所属調教師コード, null for `00000`, a
-  freelance jockey) and `apprentice_code` as printed. No availability rule yet: `read_asof` on a
-  view of either raises `NoAvailabilityRule` (the rule is an owner decision, a later ticket).
+  freelance jockey) and `apprentice_code` as printed. Availability rule `current_value` with
+  `in_view` (the owner's request on #376, 2026-11-26): every master row is in every view at any
+  t, as exported, with the look-ahead docs/specs/as-of.md documents; `read_label` refuses them.
 
 The run on the export (2026-11-26, about 5 s, 0.7 GB peak), counts only:
 
@@ -560,9 +561,9 @@ but the unset `00000` (71 jockey, 27 trainer runners).
 ## HN, SK, BT: bloodlines (#371)
 
 `horsetrack.countries.japan.jravan.bloodlines` writes `processed/jravan/breeding_horses.parquet`,
-`produce.parquet` and `lineages.parquet`. None is in `schemas.TABLES` or has an availability rule
-(owner note 2026-11-26: a later ticket of #359 adds the rule), so `read_table` and the as-of views
-refuse them.
+`produce.parquet` and `lineages.parquet`. None is in `schemas.TABLES`, so `read_table` refuses
+them; their availability rule is `static` (the owner's request on #376, 2026-11-26: pedigree is
+known at any t), so every row is in every view at any t and `read_label` refuses them.
 
 - `build_bloodlines(*, raw=None, out=None) -> BuildReport` reads `<raw>/stored/BLDN/HN/all.jvd`,
   `SK/all.jvd` and `BT/all.jvd` (`raw` the export root, default `raw/jravan`; a missing file is a
