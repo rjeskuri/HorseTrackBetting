@@ -1,9 +1,10 @@
-"""A scoped reader over the copied JRA store for the v0 models (#114).
+"""A scoped reader over the copied store for the v0 models (#114).
 
-`read_store_table` reads `processed_dir('jra')/<name>.parquet` through pyarrow.dataset: only the
-named columns, with the inclusive date range pushed into the scan as a dataset expression. Holdout
-days (#71's `is_holdout_day`, looked up at call time) are never returned, and a read that touches
-prices may not start before D10's price era (2014-06-07).
+`read_store_table` reads `processed_dir(source)/<name>.parquet` through pyarrow.dataset (`source`
+defaults to `SOURCE`, 'jra'; `source='jravan'` reads the JRA-VAN copy): only the named columns,
+with the inclusive date range pushed into the scan as a dataset expression. Holdout days (#71's
+`is_holdout_day`, looked up at call time) are never returned, and a read that touches prices may
+not start before D10's price era (2014-06-07), whichever the source.
 
 When #46 lands, this may delegate to its `read_table`.
 """
@@ -43,10 +44,12 @@ def read_store_table(
     end: date,
     touches_price: bool,
     where: ds.Expression | None = None,
+    source: str = SOURCE,
 ) -> pa.Table:
     """Rows of the store table `name` with `start <= race_date <= end`, holding exactly `columns`
     in the order asked; holdout days are dropped. `where`, a dataset expression (it may name
-    columns not read), narrows the rows further inside the scan."""
+    columns not read), narrows the rows further inside the scan. `source` names the store copy under
+    `processed_dir` (default `SOURCE`, 'jra')."""
     if columns is None or len(columns) == 0:
         raise ValueError("columns are required: name the columns to read (no whole-table read)")
     columns = list(columns)
@@ -57,7 +60,7 @@ def read_store_table(
             f"got start {start.isoformat()}"
         )
 
-    dataset = ds.dataset(processed_dir(SOURCE) / f"{name}.parquet", format="parquet")
+    dataset = ds.dataset(processed_dir(source) / f"{name}.parquet", format="parquet")
     available = set(dataset.schema.names)
     missing = [c for c in columns if c not in available]
     if missing:
