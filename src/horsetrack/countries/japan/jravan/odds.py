@@ -16,8 +16,8 @@ one implied decimal place, null when it is not a positive number, the low price'
 each file in chunks (`records.iter_file`), keeps one version per race and record type
 (`records.latest_versions`) and JRA venues only, sorts the year by `race_id, pool, combination`
 and writes it as one row group of `<out>/final_odds.parquet`, through a tmp file and `os.replace`.
-The table has no availability rule (docs/specs/as-of.md): it is a label or a conditioner, never a
-feature at t, until the owner's rule ships.
+Its availability rule is `label_only` (owner decision, #376; docs/specs/as-of.md): it is a label
+or a conditioner, never a feature at t.
 """
 
 from __future__ import annotations

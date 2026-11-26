@@ -17,6 +17,36 @@ outputs built on them carry counts, dates and rates only and go through `write_r
   owner. It is a precondition, not an owner step: `horsetrack japan jravan check` fails, naming the
   path, when it is absent.
 
+## What is built
+
+Every command below is `horsetrack japan jravan <command>`, reads `raw/jravan/` and, apart from
+`check`, `dump` and `reconcile`, writes the `jravan` source's tables under `processed/jravan/`
+(how they sit beside the store's: docs/specs/store.md, "The jravan source"). None of it runs on
+its own: there is no scheduler, no manifest and no fetcher, and a rebuild is a command run by hand.
+The same inputs give the same bytes.
+
+| command | module | writes | table kind | availability rule (docs/specs/as-of.md) |
+|---|---|---|---|---|
+| `check` | `check.py` | nothing | the workbook against the export | n/a |
+| `races` | `races.py` | `races`, `meetings` | store tables | those of `races`, `meetings` |
+| `runners` | `runners.py` | `runners`; fills `races.finish_time_s` | store table | that of `runners` |
+| `dividends` | `dividends.py` | `dividends` | store table | that of `dividends` |
+| `final-odds` | `odds.py` | `final_odds` | jravan-only | `label_only` |
+| `votes` | `votes.py` | `pool_votes` | jravan-only | `label_only` |
+| `timeseries` | `timeseries.py` | `odds_timeseries/<YYYY-MM-DD>.parquet` | the odds log's schema | that of `odds_timeseries` |
+| `masters` | `masters.py` | `horses`, `horse_pedigree`; `jockeys`, `trainers` | store tables; jravan-only | `horses` refused, `horse_pedigree` `static`; `current_value` with `in_view` |
+| `bloodlines` | `bloodlines.py` | `breeding_horses`, `produce`, `lineages` | jravan-only | `static` |
+| `dump` | `dump.py` | `interim/jravan/records/` | not tables | none |
+| `reconcile` | `reconcile.py` | `reports/jravan-reconcile.md` | not a table | n/a |
+
+Order: `races` before `runners` (which rewrites the races file's `finish_time_s`); `races` and
+`dividends` before `timeseries`, whose `post_utc`, `minutes_to_post`, `dividend` and `is_refund`
+are null without them. The helper modules
+are `spec.py` (the workbook), `records.py` (decoding and the output helpers) and `keys.py` (race
+keys and times). Every command's report goes through `write_report` and carries counts only.
+The jravan-only tables are outside `schemas.TABLES`: `read_table` refuses them, and a reader opens
+their Parquet file itself.
+
 ## Layouts (#361)
 
 `horsetrack.countries.japan.jravan.spec` reads the workbook at run time, so the repository holds
@@ -278,9 +308,9 @@ exotics (D5, C5). It is a jravan-only table, not in `schemas.TABLES`.
   written as one row group through a `ParquetWriter` (zstd) into a tmp file, then `os.replace`;
   the same inputs give the same bytes. A year file holding a race of another year is a
   `ValueError`.
-- `odds_rows(record_type, cols)` maps decoded O1-O6 arrays to long rows (the time-series ticket,
-  #369, reuses it for O1 and O2): one per record and filled slot of each sold pool, plus one pool
-  row per sold pool.
+- `odds_rows(record_type, cols)` maps decoded O1-O6 arrays to long rows (the 0B41/0B42
+  time series, #369, reuses it for O1 and O2): one per record and filled slot of each sold pool,
+  plus one pool row per sold pool.
 
 | column | type | from |
 |---|---|---|
@@ -318,10 +348,9 @@ included: none of them has a final price that pays.
 - データ区分 in the export: 5 (確定, Monday) on almost every record, 9 (race cancelled) on 102
   races in each of O1-O5 (O6 not surveyed), whose prices print `****`.
 
-No availability rule: `final_odds` is a label or a conditioner, never a feature at t
-(docs/specs/as-of.md, Known traps). The rule is an owner decision (the epic's open question
-proposes `label_only`, #376); until it ships, `read_asof` on a view of the table raises
-`NoAvailabilityRule`.
+Availability rule `label_only` (the owner's request on #376, 2026-11-26; docs/specs/as-of.md):
+`final_odds` is a label or a conditioner, never a feature at t, so `read_asof` and `asof_join`
+on a view of the table raise `LabelOnlyTable` and `read_label` returns it whole.
 
 `horsetrack japan jravan final-odds [--year YYYY ...]` runs the build and writes
 `reports/jravan-final-odds.json` through `write_build_report`, counts only: `records` (kept JRA
@@ -347,8 +376,9 @@ wall, peak RSS 2.96 GB (`/usr/bin/time -l`). Rows per pool, slots and pool rows 
 
 `horsetrack.countries.japan.jravan.votes` writes `processed/jravan/pool_votes.parquet`: the final
 votes on every combination of every sold pool, and each pool's total and refunds, for pool sizes
-and own-stake impact (C5, C6, #283). It is not in `schemas.TABLES` and has no availability rule
-(owner decision; a later ticket of #359 adds one), so `read_table` and the as-of views refuse it.
+and own-stake impact (C5, C6, #283). It is not in `schemas.TABLES`, so `read_table` refuses it;
+its availability rule is `label_only` (the owner's request on #376, 2026-11-26): the as-of views
+raise `LabelOnlyTable` and `read_label` returns it whole.
 
 - `build_pool_votes(*, years=None, raw=None, out=None, chunk_records=500) -> BuildReport` reads
   `<raw>/stored/RACE/H1/<YYYY>.jvd` and `H6/<YYYY>.jvd` (`raw` the export root, default
@@ -538,8 +568,9 @@ export time, not a value at t (docs/specs/as-of.md, Known traps).
   `name_short`, `birth_date`, `licence_issued`, `licence_revoked` (date32, null when blank or all
   zeros), `is_retired`, `affiliation` (`miho`, `ritto`, `nar`, `overseas` from the east/west code,
   code table 2301); jockeys also carry `trainer_code` (所属調教師コード, null for `00000`, a
-  freelance jockey) and `apprentice_code` as printed. No availability rule yet: `read_asof` on a
-  view of either raises `NoAvailabilityRule` (the rule is an owner decision, a later ticket).
+  freelance jockey) and `apprentice_code` as printed. Availability rule `current_value` with
+  `in_view` (the owner's request on #376, 2026-11-26): every master row is in every view at any
+  t, as exported, with the look-ahead docs/specs/as-of.md documents; `read_label` refuses them.
 
 The run on the export (2026-11-26, about 5 s, 0.7 GB peak), counts only:
 
@@ -560,9 +591,9 @@ but the unset `00000` (71 jockey, 27 trainer runners).
 ## HN, SK, BT: bloodlines (#371)
 
 `horsetrack.countries.japan.jravan.bloodlines` writes `processed/jravan/breeding_horses.parquet`,
-`produce.parquet` and `lineages.parquet`. None is in `schemas.TABLES` or has an availability rule
-(owner note 2026-11-26: a later ticket of #359 adds the rule), so `read_table` and the as-of views
-refuse them.
+`produce.parquet` and `lineages.parquet`. None is in `schemas.TABLES`, so `read_table` refuses
+them; their availability rule is `static` (the owner's request on #376, 2026-11-26: pedigree is
+known at any t), so every row is in every view at any t and `read_label` refuses them.
 
 - `build_bloodlines(*, raw=None, out=None) -> BuildReport` reads `<raw>/stored/BLDN/HN/all.jvd`,
   `SK/all.jvd` and `BT/all.jvd` (`raw` the export root, default `raw/jravan`; a missing file is a
@@ -672,3 +703,36 @@ what each family holds.
 Dumps are not store tables: no reader in `core/store` serves them and they have no availability
 rule (no as-of time), so no model or feature may read them until a ticket maps the family into a
 table with one.
+
+## Reconciliation with the netkeiba store (#373)
+
+`horsetrack.countries.japan.jravan.reconcile`; `horsetrack japan jravan reconcile [--start
+YYYY-MM-DD] [--end YYYY-MM-DD]` (default 2010-01-01 to 2026-11-23). It compares the `races`,
+`runners` and `dividends` of `processed/jravan/` with those of `processed/jra/`, one calendar year
+at a time, and changes neither store:
+
+- Reads go through `read_store_table(..., source=..., touches_price=False)`, so holdout days are
+  never returned; dividends are read only for the race ids those reads returned. No D10 cut
+  applies, because the comparison is a data check that no model or fit uses.
+- Races match by `race_id`, runners by (`race_id`, `horse_no`), dividends by (`race_id`, `pool`,
+  `combination`). Over the matched rows it counts the equal fields (`RACE_FIELDS`,
+  `RUNNER_FIELDS`; post times as minutes of the day, `finish_time_s` and `win_odds` at the
+  tenth), the races whose Win odds all agree and those whose payouts all agree, and the rows whose
+  key repeats within a store. One-store and repeated-key counts are broken down by the race's
+  `status` in that store.
+- The command prints the overall counts and rates; the detail by year, with up to 20 failing race
+  ids per check, goes to `reports/jravan-reconcile.md` through `write_report`
+  (`sources=('jravan', 'jra')`), which refuses the repository. Its figures come from a licensed
+  source (D21) and are not in git.
+
+## The model-input coverage audit (#374)
+
+`horsetrack japan coverage [--write-doc]` (`countries/japan/research/coverage.py`) states, for
+every input of the C0-C6 stack (docs/modeling.md) and the evaluation's own, which source and
+table supplies it, over which dates and where the gaps are. The inputs, their supplies and the
+tickets that cover each gap are `countries/japan/config/model_inputs.yaml`. A supply may be a
+jravan table, a jravan-only table, the time-series day files or a dumped family
+(`records/<DATASPEC>/<RT>`), and it is read column-scoped with holdout days dropped. The private
+report goes to `reports/data-coverage.md`; `--write-doc` writes the committed
+[docs/data-coverage.md](../data-coverage.md), where every JRA-VAN and JRDB supply shows
+`withheld (D21)` and no figure.

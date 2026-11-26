@@ -11,7 +11,8 @@
 # finish_pos, dead_heat, finish_time_s) is in the views too, null until post_utc + 30 min of its
 # race, the same rule as same-day dividends (the owner's answer on #96, 2026-11-25). A race without
 # a post time never shows any of these. The other result columns of races and runners stay
-# label_columns. A table without an entry here is refused.
+# label_columns. The JRA-VAN-only tables at the end (#376) are not store tables: they are read
+# from processed/jravan/ parquet. A table without an entry here is refused.
 tables:
   # The board at t: the latest capture fetched by t. HKTrack rows have no fetched_utc, so their
   # snapshot_utc counts. The payout and the final-capture flag come from the whole day's log.
@@ -158,3 +159,30 @@ tables:
   win_sales:
     kind: column
     column: published_utc
+
+  # The JRA-VAN-only tables (processed/jravan/, not in schemas.TABLES), each rule the owner's
+  # request on #376 (2026-11-26). None has label columns.
+  # Final odds and pool votes: labels or conditioners only, never features at t (owner, #376,
+  # 2026-11-26).
+  final_odds:
+    kind: label_only
+  pool_votes:
+    kind: label_only
+  # The jockey and trainer masters: current values, "the master row as exported is used, with no
+  # history" (owner, #376, 2026-11-26). In every view at any t, so a view carries the export's
+  # look-ahead (retirement, licence revocation, affiliation, stable, apprentice status, name):
+  # accepted (docs/specs/as-of.md, "Accepted look-ahead: the jockey and trainer masters").
+  jockeys:
+    kind: current_value
+    in_view: true
+  trainers:
+    kind: current_value
+    in_view: true
+  # Pedigree (breeding horses, produce, lineages): static, known at any t (owner, #376,
+  # 2026-11-26).
+  breeding_horses:
+    kind: static
+  produce:
+    kind: static
+  lineages:
+    kind: static

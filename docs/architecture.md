@@ -30,12 +30,12 @@ flowchart LR
     jrdb["JRDB files<br>(licensed)"]
     hkjc["HKJC<br>(paused)"]
     jma["JMA weather<br>(#89)"]
-    jv["JRA-VAN DataLab<br>(licensed, #196)"]
+    jv["JRA-VAN DataLab<br>(licensed)"]
   end
   subgraph mach["Machines"]
     mac["The Mac<br>harness sessions, log-day,<br>store, board-serve, shadow-day"]
     vm["Ubuntu A1 VM<br>log-day under a systemd timer"]
-    win["Windows VM<br>JV-Link export (#196)"]
+    win["Windows VM<br>JV-Link export"]
     run["Ephemeral compute<br>remote runner (#288)"]
   end
   jra --> mac
@@ -46,12 +46,12 @@ flowchart LR
   jrdb --> mac
   hkjc --> mac
   jma -.-> mac
-  jv -.-> win
-  win -.-> mac
+  jv --> win
+  win -->|"export copied"| mac
   vm -->|"pull-vm"| mac
   mac -.->|"heavy fits"| run
   classDef planned stroke-dasharray: 5 5,fill:#f4f4f4,color:#666
-  class jma,jv,win,run planned
+  class jma,run planned
 ```
 
 | Box | Code |
@@ -62,7 +62,7 @@ flowchart LR
 | JRDB files | `countries/japan/jrdb/parse.py`, `countries/japan/jrdb/join.py`, `countries/japan/jrdb/pedigree.py`, `countries/japan/jrdb/tables.py`; field specs and data stay under the data dir |
 | HKJC | `countries/hongkong/hkjc/adapter.py` and the parsers beside it; config `countries/hongkong/config/hkjc.yaml` |
 | JMA weather | planned, #89 |
-| JRA-VAN DataLab, Windows VM | planned, #196; research `docs/research/jravan-cloud-windows.md` |
+| JRA-VAN DataLab, Windows VM | the export is made by JV-Link on the Windows VM (#196; no repository code runs there; research `docs/research/jravan-cloud-windows.md`) and copied to `raw/jravan/` on the Mac; the parsers are `countries/japan/jravan/` (view 3); spec `docs/specs/jravan.md` |
 | The Mac | the CLI `cli.py` (`horsetrack ...`); every request goes through `core/ingest/fetcher.py`; the LaunchAgent `countries/japan/logger/launchd.py` |
 | Ubuntu A1 VM | set up by `scripts/vm_setup.sh`; units from `countries/japan/logger/systemd.py`; its trial run is #223 |
 | pull-vm | `countries/japan/logger/pull_vm.py` (nightly, and live with `--every`, #236) |
@@ -111,8 +111,11 @@ flowchart LR
 | Folder or box | Written by | Read by |
 | --- | --- | --- |
 | `raw/{source}/` (pages, `manifest.sqlite`) | `core/ingest/fetcher.py`, `core/ingest/queue.py`; the one-time HKTrack copy `scripts/port_hktrack_data.py` | `core/store/build.py` |
+| `raw/jravan/` (the JV-Data export: `stored/`, `timeseries/`, its `README.md` and `manifest.json`; #196) | copied from the Windows VM; no code in the repository writes it | the `countries/japan/jravan/` parsers; `countries/japan/jravan/check.py` checks it against the workbook |
+| `specs/jravan/` (the JV-Data specification workbook) | placed by the owner | `countries/japan/jravan/spec.py`, at run time, so no layout is in the repository |
 | `interim/{source}/` (parse cache) | `core/store/cache.py` | `core/store/build.py` |
-| `processed/{source}/` | `core/store/build.py`, `countries/japan/jrdb/tables.py`, `countries/japan/logger/compact.py` (`odds_timeseries/`) | `core/store/tables.py`, `core/store/asof.py`, the model fits |
+| `interim/jravan/records/` (the dump: one Parquet file per file of each unmapped JV-Data family, and `_dump.json`) | `countries/japan/jravan/dump.py` (`horsetrack japan jravan dump`) | the coverage audit `countries/japan/research/coverage.py`; no model |
+| `processed/{source}/` | `core/store/build.py`, `countries/japan/jrdb/tables.py`, `countries/japan/logger/compact.py` (`odds_timeseries/`); for `jravan`, `countries/japan/jravan/{races,runners,dividends,odds,votes,masters,bloodlines,timeseries}.py` | `core/store/tables.py`, `core/store/asof.py`, the model fits (`countries/japan/models/v0/store.py` takes the source); `countries/japan/jravan/reconcile.py` |
 | `odds_snapshots/{source}/{date}/` | `countries/japan/odds_log.py` from log-day | `countries/japan/board/`, `countries/japan/shadow/day.py`; `countries/japan/logger/compact.py` (into `processed/jra/odds_timeseries/`); `countries/japan/jra/adapter.py` (`_logged_results`: the #225 results sidecars, so the store build fills `races.result_published_utc`); `countries/japan/models/v0/nowcast.py` (`training_examples` fits from it); `countries/japan/logger/compare.py` (the HKTrack cutover comparison) |
 | `vm/{alias}/` | `countries/japan/logger/pull_vm.py` | `board-serve` and `shadow-day` with `--from-vm` |
 | `logs/japan/` | log-day's health lines and block markers (`countries/japan/logger/health.py`, `countries/japan/logger/log_day.py`) | the owner |
@@ -231,6 +234,10 @@ flowchart TD
   pw["parse worker,<br>parse cache"]
   build["store build"]
   jrdbb["JRDB build"]
+  jvx[("JRA-VAN export<br>raw/jravan/")]
+  jvb["JRA-VAN build"]
+  jvt[("jravan odds_timeseries/")]
+  recon["reconciliation"]
   comp["compact odds logs"]
   tables[("store tables")]
   checks["store checks,<br>rebuild check"]
@@ -243,6 +250,9 @@ flowchart TD
   olog -->|"results sidecars,<br>JRA adapter hook"| build
   raw --> pw --> build --> tables
   jrdbb --> tables
+  jvx --> jvb --> tables
+  jvb --> jvt
+  tables --> recon
   comp --> tables
   tables --> checks
   tables --> asof
@@ -260,9 +270,12 @@ flowchart TD
 | parse worker, parse cache | `core/store/parse_worker.py`, `core/store/cache.py` |
 | store build | `core/store/build.py`, `core/store/cli.py` (`horsetrack store ...`); spec `docs/specs/store.md` |
 | JRDB build | `countries/japan/jrdb/tables.py` (`horsetrack japan jrdb build`) |
+| JRA-VAN export, JRA-VAN build | `countries/japan/jravan/` (`horsetrack japan jravan ...`): `races.py`, `runners.py`, `dividends.py`, `odds.py` (`final-odds`), `votes.py`, `masters.py`, `bloodlines.py`, `timeseries.py`, with `check.py` and `dump.py`, over `records.py`, `keys.py` and `spec.py`. It reads `raw/jravan/` and writes the `jravan` source's tables under `processed/jravan/`; spec `docs/specs/jravan.md` |
+| jravan odds_timeseries/ | `countries/japan/jravan/timeseries.py`, in the odds log's own schema (`countries/japan/logger/compact.py`), into `processed/jravan/odds_timeseries/` |
+| reconciliation | `countries/japan/jravan/reconcile.py` (`horsetrack japan jravan reconcile`): the jravan and `jra` (netkeiba) stores compared race by race, runner by runner and dividend by dividend; its detail goes through `write_report` |
 | odds logs, results sidecars | `odds_snapshots/{source}/{date}/` from log-day (view 2a); the store build reads the sidecars through `countries/japan/jra/adapter.py` (`result_published_utc()`, `result_unpublished_utc()`) |
 | compact odds logs | `countries/japan/logger/compact.py` (`horsetrack japan compact`), into `processed/jra/odds_timeseries/` |
-| store tables | `core/store/schemas.py`, `core/store/tables.py` |
+| store tables | `core/store/schemas.py`, `core/store/tables.py`; one set per source key (`jra`, `nar`, `hkjc`, `jravan`; `docs/specs/store.md`) |
 | store checks, rebuild check | `core/store/checks.py`, `scripts/check_store_rebuild.py` |
 | as-of views | `core/store/asof.py`, `countries/japan/config/availability.yaml` (owner decisions); spec `docs/specs/as-of.md` |
 | handicap features | `countries/japan/handicap/pp.py`, `countries/japan/handicap/factors.py`, `countries/japan/handicap/workouts.py`, `countries/japan/handicap/track_bias.py` |
@@ -270,6 +283,13 @@ flowchart TD
 
 The as-of views exist, but the features and fits do not read through them yet; the dashed arrows are
 that wiring, under the model-stack epic #73.
+
+The JRA-VAN build is a second path into the store, under its own source key `jravan`: it reads the
+export that is already on the Mac instead of fetching pages, so it has no fetcher, no manifest and
+no parse cache. Its tables are read through the same readers, the same availability rules and the
+same holdout and D10 guards as the netkeiba (`jra`) store; no model reads them yet. Its JRA races
+are reconciled with the netkeiba store (the reconciliation box), and `docs/data-coverage.md` states
+per model input which source and table supplies it.
 
 ## 4. Governance and evaluation
 
