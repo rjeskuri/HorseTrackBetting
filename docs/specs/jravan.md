@@ -105,11 +105,110 @@ so each family maps fields instead of slicing bytes:
 - `post_time_local(hhmm)`: `'HH:MM'`, zero-padded, JST wall clock (the netkeiba results parser
   keeps the page's text, which may read `9:50`); None for `0000`, blank or an invalid time.
 
-## RA: races and meetings (planned, #364)
+## RA: races and meetings (#364)
+
+`horsetrack.countries.japan.jravan.races`; `horsetrack japan jravan races [--year YYYY ...]`.
+
+- `build_races(*, years=None, raw=None, out=None)` reads `stored/RACE/RA/<YYYY>.jvd` one year at
+  a time (only the items it maps), keeps one version per race (`records.latest_versions` on the
+  layout's key items), keeps the JRA venues (01-10) and writes `processed/jravan/races.parquet`
+  (sorted by `race_id`) and `meetings.parquet` (by `race_date`, `venue`) in the store's columns
+  and types. The same inputs give the same bytes. The report, `<reports dir>/jravan-races.json`,
+  holds per year `records`, `versions_dropped`, `deletions`, `races_written`, `non_jra_nar`,
+  `non_jra_overseas`, `non_jra_unknown` and `unmapped` (a count), and `unmapped` as store column
+  (`race_class`, `weight_type`, `surface`, `going`) -> code -> count over the races written.
+- Columns use the jra store's vocabulary (`jra/netkeiba/parse_results.py`): ids and keys from
+  `keys.py`; `season` the calendar-year label; `race_class` from the youngest-age condition code,
+  then the grade for an open or unknown class (jump grades as their flat code); `surface` and
+  `course_config` from the track code; `going` from the going code of the race's own surface
+  (turf for a jump race); `prize` the winner's prize in yen; `split_times_s` cumulative leader
+  times (blank and zero laps dropped); `status` `abandoned` for data kubun 9, else `run`;
+  `rail_setting` the course letter A-D of a turf race, else null. `race_index`, `rating_*`,
+  `finish_time_s` and the `result_*_utc` columns are null. Each mapping's code values are
+  constants in `races.py`; a code a mapping lacks is null and counted. A blank or all-zero
+  code is JV-Data's "unset": null (its `*_raw` column too), counted only on a race that was run.
+- Meetings: one row per `meeting_id`, `run` when any race ran, else `abandoned`; `day_night` and
+  `surface_mix` null.
+
+The run on the export (2026-11-26; the export ends 2026-11-23), counts only:
+
+| | records | versions dropped | deletions | races written | NAR | overseas | unmapped |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1954-1985 (21 year files) | 156 | 0 | 0 | 156 | 0 | 0 | 132 |
+| 1986-2009 | 136,041 | 474 | 0 | 81,985 | 51,559 | 2,023 | 12,741 |
+| 2010-2026 | 107,385 | 79 | 0 | 58,750 | 46,933 | 1,623 | 0 |
+| all 62 year files | 243,582 | 553 | 0 | 140,891 | 98,492 | 3,646 | 12,873 |
+
+140,891 races (422 abandoned) on 11,970 meetings (30 abandoned), race ids unique. Every race has
+a surface. Unmapped codes, all before 2002 (the last in 2001):
+
+- `race_class` (condition codes the mapping lacks): `009` 6,742, `004` 4,542, `015` 867, `014`
+  373, `003` 132, `007` 63, `008` 19, `006` 12, `001` 1 and the unset `000` 1 (12,752 races
+  without a class).
+- `weight_type`: the unset `0` 121 (races before 1986).
+- `going`: none counted; the 273 abandoned races with an unset going are null.
+- Not counted (`rail_setting` is not a counted column): the turf course letters `A1` (2,277)
+  and `A2` (321), all before 2010, give a null `rail_setting`. 76 races before 1986 have no post
+  time.
 
 ## SE: runners (planned, #365)
 
-## HR: payouts (planned, #366)
+## HR: payouts (#366)
+
+`horsetrack.countries.japan.jravan.dividends` writes the store's `dividends` table for `jravan`
+(`processed/jravan/dividends.parquet`) in the jra store's shape, so the reconciliation compares
+row for row:
+
+- `build_dividends(*, years=None, raw=None, out=None) -> BuildReport` reads
+  `<raw>/stored/RACE/HR/<YYYY>.jvd` (`raw` the export root, default `raw/jravan`; `years` None
+  reads every year file, a named year without a file is a `FileNotFoundError`), keeps JRA venues
+  (競馬場コード 01-10) and one version per race (`latest_versions` on 開催年, 開催月日,
+  競馬場コード, 開催回, 開催日目, レース番号), and writes `<out>/dividends.parquet` (default
+  `processed/jravan`) through `write_parquet`, stable-sorted by `race_id`.
+- `dividends_from_records(cols)` maps decoded HR arrays to rows. Each paid combination is one row:
+  `jurisdiction` `jra`, `race_id` (`keys.race_id`), `pool` (`WIN`, `PLACE`, `BRACKET_QUINELLA`,
+  `QUINELLA`, `QUINELLA_PLACE`, `FORECAST`, `TRIO`, `TIERCE`, from the groups 単勝払戻,
+  複勝払戻, 枠連払戻, 馬連払戻, ワイド払戻, 馬単払戻, 3連複払戻, 3連単払戻), `combination`
+  (the group's 馬番 or 組番 split into its 1, 2 or 3 equal-width legs, joined with `,`, leading
+  zeros dropped; FORECAST and TIERCE in finishing order, the others ascending), `dividend` (払戻金,
+  yen per 100 as printed) and `is_refund` false. Within a race the pools come in that order, then
+  the record's slot order (dead heats give several slots). 人気順 is not used.
+- A slot is a row only when every leg and the payout are positive integers: blank slots, zeros
+  (an unsold pool prints zeros and a blank payout) and zero or blank payouts write nothing, so a
+  pool not yet sold in a year has no rows, never zeros.
+
+The pool flags, each `1` when set, per pool (単勝 複勝 枠連 馬連 ワイド 馬単 3連複 3連単):
+
+- 不成立フラグ (not established): the pool was not formed (no valid sales or no result to pay
+  on). The pool writes no row; its slots hold zeros or the amount paid back.
+- 特払フラグ (special payout): no ticket on the winning combination was sold, so every ticket is
+  paid a fixed amount back. The pool writes no row.
+- 返還フラグ (refund): some tickets were refunded, typically a horse scratched after sales opened.
+  It writes no row of its own; the pool's paid combinations are still rows.
+- 返還馬番情報 (one `1` per refunded horse number), 返還枠番情報 and 返還同枠情報 (brackets) write
+  no row.
+
+`horsetrack japan jravan dividends [--year YYYY ...]` runs the build and writes
+`reports/jravan-dividends.json` through `write_build_report`: per 開催年 (`by_year`) and in total
+(`counts`), over the kept JRA records, `not_established`, `special_payout` and `refund` (races x
+pools flagged), `refunded_horses` (horse numbers set), `races` (records kept) and `rows`.
+
+The build on the export (2026-11-26, 1986 to 2026-11-23, 41 year files, about 5 s): 140,313
+records, all JRA venues, one version each (データ区分 2 throughout, no deletion), 140,313 races and
+1,329,908 rows. Flags: 0 not established and 0 special payout in every year (the export never sets
+either), 23,989 refund (races x pools) and 3,205 refunded horses, all from 2002 on (none before).
+Rows per pool, with the first year that has any (the pools' start of sale):
+
+| pool | rows | races | first year |
+|---|---|---|---|
+| WIN | 140,490 | 140,313 | 1986 |
+| PLACE | 417,340 | 140,304 | 1986 |
+| BRACKET_QUINELLA | 137,918 | 137,673 | 1986 |
+| QUINELLA | 118,069 | 117,841 | 1991 |
+| QUINELLA_PLACE | 278,566 | 92,704 | 1999 |
+| FORECAST | 84,627 | 84,363 | 2002 |
+| TRIO | 84,592 | 84,387 | 2002 |
+| TIERCE | 68,306 | 67,917 | 2004 |
 
 ## O1-O6: final odds (planned, #367)
 
