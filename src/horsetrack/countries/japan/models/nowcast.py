@@ -148,19 +148,18 @@ def stake_back_money(lo: np.ndarray, places: int, payout: float) -> np.ndarray:
     With a_i = 1 / (P (lo_i - 1) + 1) the rule reads m_i = a_i (payout - T_i), T_i the P - 1
     largest other m_j. The P largest a form the top set S: for i in S, m_i = (payout - M_S)
     a_i / (1 - a_i) with M_S = payout B / (1 + B), B = sum_S a / (1 - a); outside S,
-    m_i = a_i (payout - M_S + m_min(S))."""
+    m_i = a_i (payout - M_S + m_min(S)). Rows of a 2-D `lo` are boards (or draws)."""
     lo = np.asarray(lo, dtype=float)
-    a = 1.0 / (places * (lo - 1.0) + 1.0)
-    order = np.argsort(-a, kind="stable")
-    top, rest = order[:places], order[places:]
-    ratio = a[top] / (1.0 - a[top])
-    b = float(ratio.sum())
+    a = 1.0 / (places * (np.atleast_2d(lo) - 1.0) + 1.0)
+    top = np.argsort(-a, axis=1, kind="stable")[:, :places]
+    a_top = np.take_along_axis(a, top, axis=1)
+    ratio = a_top / (1.0 - a_top)
+    b = ratio.sum(axis=1, keepdims=True)
     m_top = payout * b / (1.0 + b)
-    money = np.empty(len(lo))
-    money[top] = (payout - m_top) * ratio
-    if len(rest):
-        money[rest] = a[rest] * (payout - m_top + money[top[-1]])
-    return money
+    in_top = (payout - m_top) * ratio
+    money = a * (payout - m_top + in_top[:, -1:])
+    np.put_along_axis(money, top, in_top, axis=1)
+    return money.reshape(lo.shape)
 
 
 def stake_back_odds(shares: np.ndarray, places: int, payout: float) -> tuple[np.ndarray, ...]:
@@ -183,23 +182,25 @@ def stake_back_odds(shares: np.ndarray, places: int, payout: float) -> tuple[np.
 def pool_shares(
     pool: str, odds: np.ndarray, investment: np.ndarray | None = None
 ) -> tuple[np.ndarray | None, float]:
-    """(shares, rule_sum) of one board's priced combinations. `rule_sum` is the stake-back money's
-    total in units of the pool (1 when the rule holds), NaN when the rule was not used; shares are
-    None when the pool is not sold for this many runners."""
+    """(shares, rule_sum) of one board's priced combinations (or, for 2-D `odds`, of each row).
+    `rule_sum` is the stake-back money's total in units of the pool (1 when the rule holds), NaN
+    when the rule was not used; shares are None when the pool is not sold for this many runners
+    (Wide counts its pairs, which gives its three places from 4 runners, as `places_for` does)."""
     odds = np.asarray(odds, dtype=float)
     if investment is not None:
         money = np.asarray(investment, dtype=float)
-        if len(money) and np.all(np.isfinite(money) & (money > 0)):
-            return money / money.sum(), math.nan
+        if money.size and np.all(np.isfinite(money) & (money > 0)):
+            return money / money.sum(axis=-1, keepdims=True), math.nan
     if not _stake_back(pool):
         inverse = 1.0 / odds
-        return inverse / inverse.sum(), math.nan
-    places = _pool_config(pool).places_for(len(odds))
-    if places == 0 or len(odds) < places:
+        return inverse / inverse.sum(axis=-1, keepdims=True), math.nan
+    places = _pool_config(pool).places_for(odds.shape[-1])
+    if places == 0 or odds.shape[-1] < places:
         return None, math.nan
     payout = 1.0 - float(_pool_config(pool).takeout)
     money = stake_back_money(np.maximum(odds, _floor(pool)), places, payout)
-    return money / money.sum(), float(money.sum())
+    total = money.sum(axis=-1, keepdims=True)
+    return money / total, float(total[0]) if odds.ndim == 1 else math.nan
 
 
 # ---------------------------------------------------------------- the board at t
@@ -388,6 +389,11 @@ def _race_day(race_id: str) -> str:
     return str(race_id).split(":")[1][:10]
 
 
+def _in_days(values: np.ndarray, days: Iterable[str]) -> np.ndarray:
+    """Whether each "YYYY-MM-DD" in `values` is one of `days` (a hash lookup)."""
+    return pd.Series(values, dtype=object).isin({str(d)[:10] for d in days}).to_numpy()
+
+
 @dataclass(frozen=True, eq=False)
 class _Race:
     race_id: str
@@ -538,7 +544,7 @@ class Cases:
         return Cases(**fields)
 
     def select_days(self, days: Iterable[str]) -> Cases:
-        return self.select(np.isin(self.day, list({str(d)[:10] for d in days})))
+        return self.select(_in_days(self.day, days))
 
     def rows(self, i: int) -> slice:
         return slice(int(self.start[i]), int(self.start[i] + self.k[i]))
@@ -612,7 +618,7 @@ class Growth:
 
     def select_days(self, days: Iterable[str]) -> Growth:
         keep = list({str(d)[:10] for d in days})
-        obs, fin = np.isin(self.day, keep), np.isin(self.final_day, keep)
+        obs, fin = _in_days(self.day, keep), _in_days(self.final_day, keep)
         names = [f.name for f in dataclasses.fields(self)]
         return Growth(
             **{n: getattr(self, n)[fin if n.startswith("final") or n == "log_v_final" else obs]
@@ -1008,8 +1014,20 @@ class Nowcast:
         return cls.fit_cases(cases, growth, features=features)
 
     @classmethod
-    def fit_cases(cls, cases: Cases, growth: Growth, *, features: bool = True) -> Nowcast:
-        days = tuple(sorted({str(d) for d in cases.day} | {str(d) for d in growth.day}))
+    def fit_cases(
+        cls,
+        cases: Cases,
+        growth: Growth,
+        *,
+        features: bool = True,
+        days: Iterable[str] | None = None,
+    ) -> Nowcast:
+        """Fit on `cases` and `growth`, or on their rows of `days` only (no copy of the cases)."""
+        in_fit = np.ones(len(cases), dtype=bool)
+        if days is not None:
+            keep = list(days)
+            in_fit, growth = _in_days(cases.day, keep), growth.select_days(keep)
+        days = tuple(sorted(set(cases.day[in_fit].tolist()) | set(growth.day.tolist())))
         _refuse_holdout(days)
         grid = _grid()
         pool_growth = {}
@@ -1023,7 +1041,7 @@ class Nowcast:
                 continue
             g = pool_growth[pool]
             for tau in grid:
-                idx = np.flatnonzero((cases.pool == pool) & (cases.tau == tau))
+                idx = np.flatnonzero(in_fit & (cases.pool == pool) & (cases.tau == tau))
                 if not len(idx):
                     continue
                 phi_hat = np.array(
@@ -1186,9 +1204,7 @@ def fit_folds(
     cases, growth, _ = extract(rows, grades=grades)
     out = []
     for train, test, fold in fold_days(dev, scheme):
-        model = Nowcast.fit_cases(
-            cases.select_days(train), growth.select_days(train), features=features
-        )
+        model = Nowcast.fit_cases(cases, growth, features=features, days=train)
         out.append(
             FoldFit(
                 model, tuple(train), tuple(test), fold.train_end, fold.test_start, fold.test_end
