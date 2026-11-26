@@ -11,12 +11,12 @@ counted for Wide coverage only (see the report).
 Folds: D9's walk-forward (`config/folds.yaml`) over the development race days. Each fold fits on
 its training days only: the structural nowcast, the same with beta = 0 (`no_features`), and #116's
 drift (`NowcastV0.fit` on the same boards' (low figure at t, final low figure) pairs with
-nowcast_v0.yaml's bands and prior_n; its `max_board_age_s` limit is not applied, since on 5-6
-minute paths it would leave no example at T-5, T-2 or T-1, and all four forecasters are scored on
-the same boards). The random walk is the structural fit's. Each test day's cases are scored by
-every forecaster with the same view, n and seed (`models.nowcast.score_cases`); with
-`--test-days-per-fold N`, a seeded sample of N test days per fold is scored (training is never
-sampled).
+nowcast_v0.yaml's bands and prior_n; its `max_board_age_s` limit is not applied, since it was set
+for a logger capturing every ~30 s and on 5-6 minute paths it would drop most examples at T-2 and
+T-1, and all four forecasters are fitted and scored on the same boards). The random walk is the
+structural fit's. Each test day's cases are scored by every forecaster with the same view, n and
+seed (`models.nowcast.score_cases`); with `--test-days-per-fold N`, a seeded sample of N test
+days per fold is scored (training is never sampled).
 
 Report (through `write_report`; every figure is withheld, D21): per comparison and (pool, tau),
 the log-score, CRPS and KL gains with one-sided 95% bounds resampling race days (the ticket) and
