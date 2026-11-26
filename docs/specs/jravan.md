@@ -108,7 +108,62 @@ so each family maps fields instead of slicing bytes:
 
 ## SE: runners (planned, #365)
 
-## HR: payouts (planned, #366)
+## HR: payouts (#366)
+
+`horsetrack.countries.japan.jravan.dividends` writes the store's `dividends` table for `jravan`
+(`processed/jravan/dividends.parquet`) in the jra store's shape, so the reconciliation compares
+row for row:
+
+- `build_dividends(*, years=None, raw=None, out=None) -> BuildReport` reads
+  `<raw>/stored/RACE/HR/<YYYY>.jvd` (`raw` the export root, default `raw/jravan`; `years` None
+  reads every year file, a named year without a file is a `FileNotFoundError`), keeps JRA venues
+  (競馬場コード 01-10) and one version per race (`latest_versions` on 開催年, 開催月日,
+  競馬場コード, 開催回, 開催日目, レース番号), and writes `<out>/dividends.parquet` (default
+  `processed/jravan`) through `write_parquet`, stable-sorted by `race_id`.
+- `dividends_from_records(cols)` maps decoded HR arrays to rows. Each paid combination is one row:
+  `jurisdiction` `jra`, `race_id` (`keys.race_id`), `pool` (`WIN`, `PLACE`, `BRACKET_QUINELLA`,
+  `QUINELLA`, `QUINELLA_PLACE`, `FORECAST`, `TRIO`, `TIERCE`, from the groups 単勝払戻,
+  複勝払戻, 枠連払戻, 馬連払戻, ワイド払戻, 馬単払戻, 3連複払戻, 3連単払戻), `combination`
+  (the group's 馬番 or 組番 split into its 1, 2 or 3 equal-width legs, joined with `,`, leading
+  zeros dropped; FORECAST and TIERCE in finishing order, the others ascending), `dividend` (払戻金,
+  yen per 100 as printed) and `is_refund` false. Within a race the pools come in that order, then
+  the record's slot order (dead heats give several slots). 人気順 is not used.
+- A slot is a row only when every leg and the payout are positive integers: blank slots, zeros
+  (an unsold pool prints zeros and a blank payout) and zero or blank payouts write nothing, so a
+  pool not yet sold in a year has no rows, never zeros.
+
+The pool flags, each `1` when set, per pool (単勝 複勝 枠連 馬連 ワイド 馬単 3連複 3連単):
+
+- 不成立フラグ (not established): the pool was not formed (no valid sales or no result to pay
+  on). The pool writes no row; its slots hold zeros or the amount paid back.
+- 特払フラグ (special payout): no ticket on the winning combination was sold, so every ticket is
+  paid a fixed amount back. The pool writes no row.
+- 返還フラグ (refund): some tickets were refunded, typically a horse scratched after sales opened.
+  It writes no row of its own; the pool's paid combinations are still rows.
+- 返還馬番情報 (one `1` per refunded horse number), 返還枠番情報 and 返還同枠情報 (brackets) write
+  no row.
+
+`horsetrack japan jravan dividends [--year YYYY ...]` runs the build and writes
+`reports/jravan-dividends.json` through `write_build_report`: per 開催年 (`by_year`) and in total
+(`counts`), over the kept JRA records, `not_established`, `special_payout` and `refund` (races x
+pools flagged), `refunded_horses` (horse numbers set), `races` (records kept) and `rows`.
+
+The build on the export (2026-11-26, 1986 to 2026-11-23, 41 year files, about 5 s): 140,313
+records, all JRA venues, one version each (データ区分 2 throughout, no deletion), 140,313 races and
+1,329,908 rows. Flags: 0 not established and 0 special payout in every year (the export never sets
+either), 23,989 refund (races x pools) and 3,205 refunded horses, all from 2002 on (none before).
+Rows per pool, with the first year that has any (the pools' start of sale):
+
+| pool | rows | races | first year |
+|---|---|---|---|
+| WIN | 140,490 | 140,313 | 1986 |
+| PLACE | 417,340 | 140,304 | 1986 |
+| BRACKET_QUINELLA | 137,918 | 137,673 | 1986 |
+| QUINELLA | 118,069 | 117,841 | 1991 |
+| QUINELLA_PLACE | 278,566 | 92,704 | 1999 |
+| FORECAST | 84,627 | 84,363 | 2002 |
+| TRIO | 84,592 | 84,387 | 2002 |
+| TIERCE | 68,306 | 67,917 | 2004 |
 
 ## O1-O6: final odds (planned, #367)
 
