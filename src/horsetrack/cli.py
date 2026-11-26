@@ -13,6 +13,7 @@ from horsetrack.countries.japan.jravan.dividends import (
     dividends_command as jravan_dividends_command,
 )
 from horsetrack.countries.japan.jravan.dump import dump_command as jravan_dump_command
+from horsetrack.countries.japan.jravan.masters import masters_command as jravan_masters_command
 from horsetrack.countries.japan.jravan.odds import final_odds_command as jravan_final_odds_command
 from horsetrack.countries.japan.jravan.races import races_command as jravan_races_command
 from horsetrack.countries.japan.jravan.runners import runners_command as jravan_runners_command
@@ -54,6 +55,7 @@ jravan.command("check")(jravan_check_command)
 jravan.command("dividends")(jravan_dividends_command)
 jravan.command("dump")(jravan_dump_command)
 jravan.command("final-odds")(jravan_final_odds_command)
+jravan.command("masters")(jravan_masters_command)
 jravan.command("races")(jravan_races_command)
 jravan.command("runners")(jravan_runners_command)
 
