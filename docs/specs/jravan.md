@@ -151,7 +151,58 @@ a surface. Unmapped codes, all before 2002 (the last in 2001):
   and `A2` (321), all before 2010, give a null `rail_setting`. 76 races before 1986 have no post
   time.
 
-## SE: runners (planned, #365)
+## SE: runners (#365)
+
+`horsetrack.countries.japan.jravan.runners`; `horsetrack japan jravan runners [--year YYYY ...]`.
+
+- `build_runners(*, years=None, raw=None, out=None)` reads `stored/RACE/SE/<YYYY>.jvd` one year
+  at a time (only the items it maps), keeps one version per runner (`records.latest_versions` on
+  the layout's key items: the race key, 馬番 and 血統登録番号), keeps the JRA venues (01-10) and
+  writes `processed/jravan/runners.parquet` in the store's columns and types, sorted by
+  (`race_id`, `horse_no`, `horse_id`). It then sets `finish_time_s` in `<out>/races.parquet` to
+  the time of each race's `finish_pos` 1 runner (the lower horse number on a dead heat, null for a
+  race without one) and rewrites that file whole, every other column unchanged; a missing races
+  file is a `FileNotFoundError` before anything is read (build the races first). The same inputs
+  give the same bytes, and a second fill changes nothing. The report,
+  `<reports dir>/jravan-runners.json`, holds per year `records`, `versions_dropped`, `deletions`,
+  `runners_written`, `non_jra_nar`, `non_jra_overseas`, `non_jra_unknown` and `unmapped` (a
+  count), in `counts` the totals and `races_timed`, and `unmapped` as field (`placing`, `sex`,
+  `dead_heat`, `margin`) -> code -> count over the runners written.
+- Columns use the jra store's vocabulary (`jra/netkeiba/parse_results.py`, whose placing codes,
+  scratched codes, margin names, beaten-lengths sum and pound conversion the mapping reuses): the
+  race keys and `season` as on the jravan races; `horse_id` the top-level 血統登録番号 as printed;
+  `draw` = `horse_no`; `jockey_key` / `trainer_key` `jockey:<code>` / `trainer:<code>` from the
+  codes, the names the short names; `actual_wt_lb` and `declared_horse_wt_lb` `round(kg *
+  2.20462)`; `horse_wt_kg` null when not weighed (999) or zero, `horse_wt_change_kg` signed by
+  増減符号, null for 999 or blank. 異常区分コード gives `placing_code` WV (取消), WX (発走除外,
+  競走除外), PU (競走中止) and DISQ (失格) with no `finish_pos` and `placing_raw` `取`, `除`, `中`
+  or `失`; a demotion keeps the official place with `placing_raw` `<n>(降)`; a remount after a fall
+  is a plain place. 同着区分 gives `dead_heat` and `placing_code` DH on a placed runner;
+  `is_scratched` is true for WV and WX. `lbw_raw` is 着差コード as printed (blank or all zero
+  null); `lbw_lengths` the running sum down the placed order (by place, then horse number), 0 for
+  the winner and null from a blank or unreadable margin on. `running_positions` the four corner
+  positions without the unused ones; `finish_time_s`, `last_3f_s` (999 and zero null), `win_odds`
+  and `win_fav_rank` (zero null) in store units; `sex` H, M, G; `age` as printed. `brand_raw`,
+  `rating` and `gear_raw` are null. Each mapping's code values are constants in `runners.py`; a
+  code a mapping lacks is null and counted.
+- Runners of abandoned races (RA data kubun 9) are written, without a place; their undrawn
+  runners carry 馬番 99 as printed.
+
+The run on the export (2026-11-26; the export ends 2026-11-23, about 60 s, 2 GB peak), counts only:
+
+| | records | versions dropped | deletions | runners written | NAR | overseas | unmapped |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1954-1985 (21 year files) | 182 | 0 | 0 | 182 | 0 | 0 | 0 |
+| 1986-2009 | 1,591,680 | 831 | 0 | 1,056,283 | 530,377 | 4,189 | 0 |
+| 2010-2026 | 1,322,806 | 2,827 | 26 | 829,297 | 484,891 | 5,765 | 0 |
+| all 62 year files | 2,914,668 | 3,658 | 26 | 1,885,762 | 1,015,268 | 9,954 | 0 |
+
+Every runner's race is in `races`. Zero unmapped codes. Placing codes: 9,281 PU, 7,247 DH, 4,479
+WV, 2,891 WX, 331 DISQ. 140,429 of the 140,469 run races carry the winner's time; the other 40
+(all before 1990) have runner records but none placed first. 153 run races, all before 1990, have
+a starter count other than their field size (the early years hold only part of each field). 1,960
+placed runners have no beaten lengths: 305 placed non-winners have a blank margin (304 of them
+demoted, 1991-2023, most in 2004-2012), which leaves them and every runner behind them unknown. 164 runners of abandoned races carry 馬番 99.
 
 ## HR: payouts (#366)
 
@@ -210,7 +261,87 @@ Rows per pool, with the first year that has any (the pools' start of sale):
 | TRIO | 84,592 | 84,387 | 2002 |
 | TIERCE | 68,306 | 67,917 | 2004 |
 
-## O1-O6: final odds (planned, #367)
+## O1-O6: final odds (#367)
+
+`horsetrack.countries.japan.jravan.odds` writes `processed/jravan/final_odds.parquet`: the final
+price of every combination of every sold pool, the pool's own baseline for Place, Wide and the
+exotics (D5, C5). It is a jravan-only table, not in `schemas.TABLES`.
+
+- `build_final_odds(*, years=None, raw=None, out=None) -> BuildReport` reads
+  `<raw>/stored/RACE/<O1..O6>/<YYYY>.jvd` one year at a time (`years` None reads every year file
+  of every type; a type with no file for a year, named or not, adds nothing), streaming each file
+  with `records.iter_file` in chunks of at most 2,000 records (fewer for O5 and O6, capped at
+  `CHUNK_BYTES`). It keeps JRA venues (競馬場コード 01-10) and one version per race and record
+  type (`latest_versions` on 開催年, 開催月日, 競馬場コード, 開催回, 開催日目, レース番号; a race whose
+  latest record of a type is a deletion has no rows of that type). Each year is sorted by
+  `race_id, pool, combination` (plain string order, so a pool row sorts after its slots) and
+  written as one row group through a `ParquetWriter` (zstd) into a tmp file, then `os.replace`;
+  the same inputs give the same bytes. A year file holding a race of another year is a
+  `ValueError`.
+- `odds_rows(record_type, cols)` maps decoded O1-O6 arrays to long rows (the time-series ticket,
+  #369, reuses it for O1 and O2): one per record and filled slot of each sold pool, plus one pool
+  row per sold pool.
+
+| column | type | from |
+|---|---|---|
+| `jurisdiction` | string | `jra` |
+| `race_id`, `race_date`, `venue`, `race_no` | string, date32, string, int64 | `keys.race_id(開催年, 開催月日, 競馬場コード, レース番号)` and its parts |
+| `pool` | string | the record type and group (below) |
+| `combination` | string | the group's 馬番 or 組番; `__pool__` on a pool row |
+| `odds` | float64 | オッズ, or 最低オッズ for PLACE and QUINELLA_PLACE, one implied decimal place (stake included) |
+| `odds_hi` | float64 | 最高オッズ for PLACE and QUINELLA_PLACE, else null |
+| `fav_rank` | int64 | 人気順, null when not a positive integer (`--`, `**`, blank) |
+| `investment` | float64 | on a pool row, the pool's 票数合計 x 100 (yen); null on slot rows |
+| `status_raw` | string | the low price's text as printed when `odds` is null, else null |
+| `published_utc` | timestamp[us, UTC] | `keys.announced_utc(開催年, 開催月日, 発表月日時分)` |
+| `data_kubun` | string | データ区分 of the kept record |
+
+Pools, per record type and sale flag: O1 発売フラグ単勝 `WIN`, 発売フラグ複勝 `PLACE`, 発売フラグ枠連
+`BRACKET_QUINELLA` (複勝着払キー unused); O2 `QUINELLA`; O3 `QUINELLA_PLACE`; O4 `FORECAST`; O5
+`TRIO`; O6 `TIERCE`. A pool is sold when its flag is `7`. Flags `0` (not sold), `1` (cancelled
+before sale) and `3` (cancelled after sale, the tickets refunded) write no row, pool row
+included: none of them has a final price that pays.
+
+- The combination: the number item split into its 1, 2 or 3 equal-width legs (a bracket one
+  digit, a horse two), leading zeros dropped, joined with `,`; FORECAST and TIERCE in the printed
+  order, the others ascending (`0704` is `4,7` on O2 and `7,4` on O4, `070401` is `7,4,1` on O6).
+  A slot whose number is blank, or not all positive integers, writes no row.
+- A price that is not a positive number (`0000` no votes, `----` cancelled before sale, `****`
+  cancelled after sale, blank) is null with its text in `status_raw`, untrimmed. The low and high
+  ends of a ranged price are read independently: a bad low with a valid high keeps `odds_hi`, and
+  `status_raw` carries the low's text. A capped price (`9999`, 999.9 or more; lower caps before
+  2004-08-13) is kept as the cap.
+- A sold pool with a blank vote total still has its pool row, with null `investment`.
+- `published_utc`: in the stored export 発表月日時分 is `00000000` on every record (the workbook
+  sets it for intermediate odds only), so it is null throughout `final_odds`; it is set on the
+  time series (#369).
+- データ区分 in the export: 5 (確定, Monday) on almost every record, 9 (race cancelled) on 102
+  races in each of O1-O5 (O6 not surveyed), whose prices print `****`.
+
+No availability rule: `final_odds` is a label or a conditioner, never a feature at t
+(docs/specs/as-of.md, Known traps). The rule is an owner decision (the epic's open question
+proposes `label_only`, #376); until it ships, `read_asof` on a view of the table raises
+`NoAvailabilityRule`.
+
+`horsetrack japan jravan final-odds [--year YYYY ...]` runs the build and writes
+`reports/jravan-final-odds.json` through `write_build_report`, counts only: `records` (kept JRA
+records over the six types), `rows` and rows per pool, in total (`counts`) and per race year
+(`by_year`, the years that have rows).
+
+The build on the export (2026-11-26, O1 and O2 from 1993, O3 from 1999, O4 and O5 from 2002, O6
+from 2004, to 2026-11-23): 558,526 records, 251,200,511 rows in 34 row groups (1.4 GB), 318 s
+wall, peak RSS 2.96 GB (`/usr/bin/time -l`). Rows per pool, slots and pool rows together:
+
+| pool | rows | first year |
+|---|---|---|
+| WIN | 1,713,230 | 1993 |
+| PLACE | 1,713,201 | 1993 |
+| BRACKET_QUINELLA | 3,926,923 | 1993 |
+| QUINELLA | 10,716,653 | 1993 |
+| QUINELLA_PLACE | 9,043,121 | 1999 |
+| FORECAST | 16,385,001 | 2002 |
+| TRIO | 35,576,717 | 2002 |
+| TIERCE | 172,125,665 | 2004 |
 
 ## H1 and H6: pool votes (#368)
 

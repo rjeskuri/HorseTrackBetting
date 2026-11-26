@@ -239,7 +239,7 @@ def _year_files(folder: Path, years: list[int] | None) -> dict[int, Path]:
         return dict(sorted(found.items()))
     missing = [y for y in years if y not in found]
     if missing:
-        raise FileNotFoundError(f"no RA file for {missing} under {folder}")
+        raise FileNotFoundError(f"no year file for {missing} under {folder}")
     return {y: found[y] for y in sorted(set(years))}
 
 
