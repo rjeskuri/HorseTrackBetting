@@ -30,6 +30,7 @@ from horsetrack.core import paths
 # isort: split
 # (its own block: the sibling helper module, then the module this ticket creates)
 import jravan_workbook as wb
+
 from horsetrack.countries.japan.jravan import spec
 from horsetrack.countries.japan.jravan.spec import CodeTable, Item
 
