@@ -345,7 +345,102 @@ wall, peak RSS 2.96 GB (`/usr/bin/time -l`). Rows per pool, slots and pool rows 
 
 ## H1 and H6: pool votes (planned, #368)
 
-## The 0B41/0B42 time series (planned, #369)
+## The 0B41/0B42 time series (#369)
+
+`horsetrack.countries.japan.jravan.timeseries` writes the export's time-series odds into the
+odds log's own table, `processed/jravan/odds_timeseries/<YYYY-MM-DD>.parquet`, one file per race
+day in exactly `logger.compact.SCHEMA` (docs/specs/odds-log.md), so the readers of the logger's
+days (#102, #85, #358) read years of boards the logger never saw.
+
+- Layout: `raw/jravan/timeseries/0B41/<YYYY>/<YYYYMMDD>.jvd` holds the race day's O1 records (WIN,
+  PLACE, BRACKET_QUINELLA), `0B42/...` its O2 records (QUINELLA); either may be missing. The day
+  file is the file name's race day, so the evening-before boards are in the race day's file.
+  The folder holds the day files and `_build.json` only.
+- `build_day(race_date, *, raw=None, out=None) -> BuildReport` streams the two files
+  (`records.iter_file`), decodes each record with the O1-O6 mapping (`odds.odds_rows`, above) and
+  writes `<out>/odds_timeseries/<date>.parquet` (`out` default `processed/jravan`) through
+  `write_parquet`. `build_all(*, years=None, raw=None, out=None)` runs every day of the years
+  that have a 0B41 or 0B42 file, one day at a time in one process. A day that fails (a cut
+  record, a record of another race day, a dividend key twice) is in `failures` and the others are
+  written; a previous file of a failed day is left as it was.
+- The skip rule: `_build.json` records, per day, both inputs' size and mtime, the workbook's
+  sha256, `PARSER_VERSION` and a sha256 of the day's races and dividends rows (the joined
+  columns). A day whose record matches and whose file exists is not rebuilt; a changed input,
+  workbook, parser version or joined row rebuilds it, and so does a missing day file.
+
+| column | from |
+|---|---|
+| `race_id`, `venue`, `race_no`, `pool`, `combination` | `odds_rows`; pool rows `__pool__` |
+| `snapshot_utc` | the record's 発表月日時分 (JST) as UTC, `keys.announced_utc` (a month after the race's month is the year before) |
+| `fetched_utc` | null: the export has no fetch time |
+| `post_utc` | `races.post_time_local` (JST, on the race date) from `processed/jravan/races.parquet`; null without a race row or a post time |
+| `minutes_to_post` | (`post_utc` - `snapshot_utc`) in minutes, negative after the scheduled post |
+| `odds`, `odds_hi`, `investment`, `status_raw` | `odds_rows` (investment: the pool row's 票数合計 x 100 yen) |
+| `is_final_capture` | the latest `snapshot_utc` per (race_id, pool, combination), pool rows included |
+| `dividend`, `is_refund` | left join on (race_id, pool, combination) to `processed/jravan/dividends.parquet`; null without a match or without the table |
+
+The same (race_id, pool, combination, snapshot_utc) twice is one row, the later record's (O1
+records before O2, each file in record order). Rows are sorted on (race_id, pool, combination,
+snapshot_utc), unique after that dedupe, so the same inputs give the same bytes whatever their
+record order. A record without an announcement time (`00000000`, blank or invalid) writes no row
+and is counted (`no_snapshot_records`); the export has none.
+
+The snapshot-time rule: `snapshot_utc` is the minute JRA-VAN stamps as announced (発表), written
+as it is. Under the shipped `odds_timeseries` rule (`fetched_utc`, fallback `snapshot_utc`,
+docs/specs/as-of.md) the board at t from a jravan day holds the snapshots announced at or before
+t. **Open (owner decision, the epic's open question):** whether a 発表 minute is a fair
+availability time for a bettor, i.e. how long after it the board was actually in hand. The data
+does not answer it; until the owner rules, nothing here adds a lag.
+
+データ区分 in the export: 1 (中間, intermediate) on 98.5% of records, 2 (前日売最終, the
+day-before close) on 4,439, 3 (最終) and 4 (確定) on about one record per race and family each.
+The 確定 board is announced after the race, so `is_final_capture` is almost always a post-race
+row (12,937,159 of 12,939,954 final rows have `minutes_to_post` < 0); a reader that wants the last
+board before the off filters on `snapshot_utc`, not on `is_final_capture`.
+
+`horsetrack japan jravan timeseries [--year YYYY ...] [--day YYYY-MM-DD ...]` runs the build and
+writes `reports/jravan-timeseries.json` through `write_build_report`, counts only, even when a day
+fails (then it exits 1): days written, unchanged and failed, records per データ区分, rows and rows
+per pool, repeated rows, races and races without a post time, and per year the days, races,
+records, rows and snapshots per race (median, min, max).
+
+The build on the export (2026-11-26, 2003-10-04 to 2026-11-23, 2,493 race days, no failure):
+21,273,043 records, 1,727,457,117 rows (WIN 161,614,223, PLACE 161,613,056, BRACKET_QUINELLA
+361,867,663, QUINELLA 1,042,362,175), 79,965 races, every one with a jravan post time; 500,376
+repeated rows dropped. 1,918 s wall, peak RSS 1.04 GB (`/usr/bin/time -l`), 3.6 GB on disk, with
+21 GB free before. The rerun rewrote nothing (2,493 days unchanged, 12 s). Snapshots per race
+(distinct announcement minutes over both families), by year:
+
+| year | days | races | median | min | max |
+|---|---|---|---|---|---|
+| 2003 | 27 | 836 | 44 | 10 | 236 |
+| 2004 | 106 | 3,452 | 63 | 11 | 373 |
+| 2005 | 105 | 3,450 | 65 | 12 | 380 |
+| 2006 | 106 | 3,453 | 67 | 11 | 439 |
+| 2007 | 105 | 3,453 | 74 | 23 | 439 |
+| 2008 | 108 | 3,462 | 73 | 14 | 435 |
+| 2009 | 105 | 3,453 | 72 | 23 | 447 |
+| 2010 | 107 | 3,454 | 130 | 19 | 515 |
+| 2011 | 106 | 3,453 | 136 | 17 | 501 |
+| 2012 | 107 | 3,454 | 142 | 25 | 520 |
+| 2013 | 108 | 3,454 | 143 | 24 | 522 |
+| 2014 | 113 | 3,451 | 145 | 21 | 523 |
+| 2015 | 108 | 3,454 | 144 | 13 | 520 |
+| 2016 | 107 | 3,454 | 144 | 26 | 718 |
+| 2017 | 111 | 3,455 | 145 | 12 | 532 |
+| 2018 | 109 | 3,454 | 143 | 13 | 532 |
+| 2019 | 110 | 3,452 | 144 | 25 | 531 |
+| 2020 | 109 | 3,456 | 146 | 12 | 521 |
+| 2021 | 106 | 3,456 | 143 | 14 | 520 |
+| 2022 | 108 | 3,456 | 146 | 26 | 489 |
+| 2023 | 107 | 3,456 | 151 | 12 | 503 |
+| 2024 | 106 | 3,454 | 150 | 13 | 513 |
+| 2025 | 109 | 3,455 | 154 | 29 | 502 |
+| 2026 | 100 | 3,138 | 153 | 96 | 504 |
+
+D14: the export ends 2026-11-23, before the 2026-11-28 holdout start; readers drop holdout days
+by file name before reading. D10: pre-2014-06-07 days are kept; whether a model reads them is the
+model's business.
 
 ## UM, KS, CH: horse, jockey and trainer masters (planned, #370)
 
