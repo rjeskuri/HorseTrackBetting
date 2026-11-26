@@ -151,7 +151,58 @@ a surface. Unmapped codes, all before 2002 (the last in 2001):
   and `A2` (321), all before 2010, give a null `rail_setting`. 76 races before 1986 have no post
   time.
 
-## SE: runners (planned, #365)
+## SE: runners (#365)
+
+`horsetrack.countries.japan.jravan.runners`; `horsetrack japan jravan runners [--year YYYY ...]`.
+
+- `build_runners(*, years=None, raw=None, out=None)` reads `stored/RACE/SE/<YYYY>.jvd` one year
+  at a time (only the items it maps), keeps one version per runner (`records.latest_versions` on
+  the layout's key items: the race key, 馬番 and 血統登録番号), keeps the JRA venues (01-10) and
+  writes `processed/jravan/runners.parquet` in the store's columns and types, sorted by
+  (`race_id`, `horse_no`, `horse_id`). It then sets `finish_time_s` in `<out>/races.parquet` to
+  the time of each race's `finish_pos` 1 runner (the lower horse number on a dead heat, null for a
+  race without one) and rewrites that file whole, every other column unchanged; a missing races
+  file is a `FileNotFoundError` before anything is read (build the races first). The same inputs
+  give the same bytes, and a second fill changes nothing. The report,
+  `<reports dir>/jravan-runners.json`, holds per year `records`, `versions_dropped`, `deletions`,
+  `runners_written`, `non_jra_nar`, `non_jra_overseas`, `non_jra_unknown` and `unmapped` (a
+  count), in `counts` the totals and `races_timed`, and `unmapped` as field (`placing`, `sex`,
+  `dead_heat`, `margin`) -> code -> count over the runners written.
+- Columns use the jra store's vocabulary (`jra/netkeiba/parse_results.py`, whose placing codes,
+  scratched codes, margin names, beaten-lengths sum and pound conversion the mapping reuses): the
+  race keys and `season` as on the jravan races; `horse_id` the top-level 血統登録番号 as printed;
+  `draw` = `horse_no`; `jockey_key` / `trainer_key` `jockey:<code>` / `trainer:<code>` from the
+  codes, the names the short names; `actual_wt_lb` and `declared_horse_wt_lb` `round(kg *
+  2.20462)`; `horse_wt_kg` null when not weighed (999) or zero, `horse_wt_change_kg` signed by
+  増減符号, null for 999 or blank. 異常区分コード gives `placing_code` WV (取消), WX (発走除外,
+  競走除外), PU (競走中止) and DISQ (失格) with no `finish_pos` and `placing_raw` `取`, `除`, `中`
+  or `失`; a demotion keeps the official place with `placing_raw` `<n>(降)`; a remount after a fall
+  is a plain place. 同着区分 gives `dead_heat` and `placing_code` DH on a placed runner;
+  `is_scratched` is true for WV and WX. `lbw_raw` is 着差コード as printed (blank or all zero
+  null); `lbw_lengths` the running sum down the placed order (by place, then horse number), 0 for
+  the winner and null from a blank or unreadable margin on. `running_positions` the four corner
+  positions without the unused ones; `finish_time_s`, `last_3f_s` (999 and zero null), `win_odds`
+  and `win_fav_rank` (zero null) in store units; `sex` H, M, G; `age` as printed. `brand_raw`,
+  `rating` and `gear_raw` are null. Each mapping's code values are constants in `runners.py`; a
+  code a mapping lacks is null and counted.
+- Runners of abandoned races (RA data kubun 9) are written, without a place; their undrawn
+  runners carry 馬番 99 as printed.
+
+The run on the export (2026-11-26; the export ends 2026-11-23, about 60 s, 2 GB peak), counts only:
+
+| | records | versions dropped | deletions | runners written | NAR | overseas | unmapped |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1954-1985 (21 year files) | 182 | 0 | 0 | 182 | 0 | 0 | 0 |
+| 1986-2009 | 1,591,680 | 831 | 0 | 1,056,283 | 530,377 | 4,189 | 0 |
+| 2010-2026 | 1,322,806 | 2,827 | 26 | 829,297 | 484,891 | 5,765 | 0 |
+| all 62 year files | 2,914,668 | 3,658 | 26 | 1,885,762 | 1,015,268 | 9,954 | 0 |
+
+Every runner's race is in `races`. Zero unmapped codes. Placing codes: 9,281 PU, 7,247 DH, 4,479
+WV, 2,891 WX, 331 DISQ. 140,429 of the 140,469 run races carry the winner's time; the other 40
+(all before 1990) have runner records but none placed first. 153 run races, all before 1990, have
+a starter count other than their field size (the early years hold only part of each field). 1,960
+placed runners have no beaten lengths: 305 placed non-winners have a blank margin (304 of them
+demoted, 1991-2023, most in 2004-2012), which leaves them and every runner behind them unknown. 164 runners of abandoned races carry 馬番 99.
 
 ## HR: payouts (#366)
 
