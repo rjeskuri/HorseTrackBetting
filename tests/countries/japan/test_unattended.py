@@ -1132,8 +1132,9 @@ RACING_SAT = {FRI: [("KYO", 1)], SAT: [("TOK", 1)]}
         ("America/Los_Angeles", datetime(2026, 11, 28, 7, 45, 1, tzinfo=UTC), NO_RACING_SAT, SAT,
          "stop"),
         # #358: Tokyo Sat 19:00, past the stop, after Sunday's probe start: the race date is
-        # Tokyo's tomorrow, Sunday (racing at NAK); Los Angeles Fri 02:00 (racing at KYO)
-        ("America/Los_Angeles", datetime(2026, 11, 28, 10, 0, tzinfo=UTC), NO_RACING_SAT, SUN,
+        # Tokyo's tomorrow, Sunday (racing at NAK); Pago Pago (UTC-11) Fri 23:00, whose
+        # "tomorrow" would be Saturday (no racing)
+        ("Pacific/Pago_Pago", datetime(2026, 11, 28, 10, 0, tzinfo=UTC), NO_RACING_SAT, SUN,
          "NAK"),
         # Tokyo Sat 20:30, the same; Auckland Sun 00:30
         ("Pacific/Auckland", datetime(2026, 11, 28, 11, 30, tzinfo=UTC), NO_RACING_SAT, SUN,
@@ -1146,7 +1147,7 @@ RACING_SAT = {FRI: [("KYO", 1)], SAT: [("TOK", 1)]}
         "la-tokyo-ahead-a-day",
         "la-past-its-local-stop",
         "la-past-the-tokyo-stop",
-        "la-tokyo-evening-tomorrow",
+        "pago-pago-tokyo-evening-tomorrow",
         "auckland-tokyo-evening-tomorrow",
         "la-racing",
     ],
