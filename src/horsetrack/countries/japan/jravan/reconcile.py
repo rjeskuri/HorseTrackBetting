@@ -271,9 +271,16 @@ def _merge(table, frames, key, counts, fail, status) -> pd.DataFrame:
         counts[f"{table}.{s}_duplicate"] += len(repeated)
         _by_status(f"{table}.{s}_duplicate", repeated, status[s], counts)
         fail(f"{table}.{s}_duplicate", repeated)
-    return frames["jravan"].merge(
-        frames["jra"], on=key, how="outer", suffixes=("_jravan", "_jra"), indicator=True
-    )
+    left, right = (_text_keys_as_object(frames[s], key) for s in SOURCES)
+    return left.merge(right, on=key, how="outer", suffixes=("_jravan", "_jra"), indicator=True)
+
+
+def _text_keys_as_object(frame: pd.DataFrame, key: Sequence[str]) -> pd.DataFrame:
+    """`frame` with its text key columns as object. pandas 3 reads text as Arrow-backed `str`,
+    and its merge of two such keys both empty (a year or a race-id list with no rows) fails:
+    pyarrow cannot type a chunked array of no chunks. Object keys merge alike on pandas 2 and 3."""
+    text = [k for k in key if pd.api.types.is_string_dtype(frame[k].dtype)]
+    return frame.astype(dict.fromkeys(text, object))
 
 
 def _presence(prefix, merged, counts, fail, status) -> None:
