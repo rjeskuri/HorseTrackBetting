@@ -712,8 +712,15 @@ def test_logger_yaml_ships_a_schedule_per_source():
     assert {"jra", "nar"} >= set(shipped["sources"]) and "jra" in shipped["sources"]
 
     jra = source_config(shipped, "jra")
-    for key, value in JRA_CONFIG.items():
+    # #358: bracket quinella every round with tier 1, on a page of its own
+    shipped_jra = {
+        **JRA_CONFIG,
+        "pools": ["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE", "BRACKET_QUINELLA"],
+        "requests": {"navigation": 2, "per_race": 4},
+    }
+    for key, value in shipped_jra.items():
         assert jra.get(key) == value, f"JRA's {key} changed: {jra.get(key)!r}"
+    assert jra.get("day_before") == shipped.get("day_before") is not None, "JRA's day_before"
 
     nar = source_config(shipped, "nar")
     for t in (jst(10, 20), jst(14, 0), jst(20, 50)):
@@ -730,6 +737,7 @@ def test_logger_yaml_ships_a_schedule_per_source():
             f"at {hhmm(t)} a NAR round ({every_s_at(t, nar)} s x {rps}) fits no race"
         )
     assert not nar.get("tier2"), "NAR has no tier-2 capture"
+    assert "day_before" not in nar, "NAR has no day-before window (#358)"
     # The owner's NAR block policy: pause 15 minutes, resume once at half nar.yaml's rate. JRA's
     # stays as it was (cooldown null, checked with the rest of JRA_CONFIG above).
     assert nar["on_block"]["cooldown_min"] == 15, nar["on_block"]
