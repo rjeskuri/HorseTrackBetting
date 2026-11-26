@@ -23,6 +23,9 @@ from horsetrack.countries.japan.jravan.reconcile import (
     reconcile_command as jravan_reconcile_command,
 )
 from horsetrack.countries.japan.jravan.runners import runners_command as jravan_runners_command
+from horsetrack.countries.japan.jravan.timeseries import (
+    timeseries_command as jravan_timeseries_command,
+)
 from horsetrack.countries.japan.jravan.votes import votes_command as jravan_votes_command
 from horsetrack.countries.japan.jrdb.tables import build_command as jrdb_build_command
 from horsetrack.countries.japan.logger.compact import compact
@@ -67,6 +70,7 @@ jravan.command("masters")(jravan_masters_command)
 jravan.command("races")(jravan_races_command)
 jravan.command("reconcile")(jravan_reconcile_command)
 jravan.command("runners")(jravan_runners_command)
+jravan.command("timeseries")(jravan_timeseries_command)
 jravan.command("votes")(jravan_votes_command)
 
 
