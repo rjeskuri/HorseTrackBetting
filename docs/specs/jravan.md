@@ -462,7 +462,85 @@ stable (every one a trainer code in `trainers`); trainers: 1,291 retired. Every 
 1,885,762 jravan runners has its horse in `horses`, and every `jockey_key` and `trainer_key` joins
 but the unset `00000` (71 jockey, 27 trainer runners).
 
-## HN, SK, BT: bloodlines (planned, #371)
+## HN, SK, BT: bloodlines (#371)
+
+`horsetrack.countries.japan.jravan.bloodlines` writes `processed/jravan/breeding_horses.parquet`,
+`produce.parquet` and `lineages.parquet`. None is in `schemas.TABLES` or has an availability rule
+(owner note 2026-11-26: a later ticket of #359 adds the rule), so `read_table` and the as-of views
+refuse them.
+
+- `build_bloodlines(*, raw=None, out=None) -> BuildReport` reads `<raw>/stored/BLDN/HN/all.jvd`,
+  `SK/all.jvd` and `BT/all.jvd` (`raw` the export root, default `raw/jravan`; a missing file is a
+  `FileNotFoundError`) through `records.iter_file`, keeps one version per key
+  (`latest_versions` on 繁殖登録番号 for HN and BT, 血統登録番号 for SK; a key whose latest record
+  is a deletion has no row) and writes each table sorted by its key (plain string order) through
+  `records.write_parquet`; the same inputs give the same bytes.
+- `breeding_horses_from_records`, `produce_from_records` and `lineages_from_records` map decoded
+  HN, SK and BT arrays to rows (one per record), exported schemas `BREEDING_HORSES_SCHEMA`,
+  `PRODUCE_SCHEMA` and `LINEAGES_SCHEMA`.
+- Values: text is `records.text` (trimmed at both ends, blank null). An id (a breeding id, a
+  血統登録番号, 生産者コード) is the trimmed text as printed (leading zeros kept), null when blank
+  or all zeros. A year is an int64, null when blank or zero; a date `YYYYMMDD`, null when blank or
+  `00000000`. `sex` is 性別コード `1` H, `2` M, `3` G, anything else null. `colour` is the first
+  content column of code table 2203 for 毛色コード, read from the workbook at run time (the
+  meanings stay in the licensed workbook), null for the unset `00`, a blank code or a code the
+  table lacks. 品種コード and 馬名半角ｶﾅ are not used.
+
+`breeding_horses` (HN, key 繁殖登録番号):
+
+| column | type | from |
+|---|---|---|
+| `breeding_id` | string | 繁殖登録番号 |
+| `horse_id` | string | 血統登録番号 (null for a horse without one) |
+| `name`, `name_en` | string | 馬名, 馬名欧字 |
+| `birth_year` | int64 | 生年 |
+| `sex` | string | 性別コード |
+| `colour` | string | 毛色コード |
+| `import_type_code` | string | 繁殖馬持込区分 as printed (`0` stays `0`) |
+| `import_year` | int64 | 輸入年 |
+| `origin` | string | 産地名 |
+| `sire_breeding_id`, `dam_breeding_id` | string | 父馬繁殖登録番号, 母馬繁殖登録番号 |
+
+`produce` (SK, key 血統登録番号):
+
+| column | type | from |
+|---|---|---|
+| `horse_id` | string | 血統登録番号 |
+| `birth_date` | date32 | 生年月日 |
+| `sex`, `colour` | string | 性別コード, 毛色コード, as on HN |
+| `import_type_code` | string | 産駒持込区分 as printed |
+| `import_year` | int64 | 輸入年 |
+| `breeder_code` | string | 生産者コード |
+| `origin` | string | 産地名 |
+| `pedigree_breeding_ids` | list<string> | 3代血統繁殖登録番号, the 14 repeats in the record's order, each null in place (always 14 long) |
+
+`lineages` (BT, key 繁殖登録番号):
+
+| column | type | from |
+|---|---|---|
+| `breeding_id` | string | 繁殖登録番号 |
+| `lineage_id` | string | 系統ID |
+| `lineage_name` | string | 系統名 |
+| `lineage_description` | string | 系統説明 |
+
+`horsetrack japan jravan bloodlines` runs the build and writes `reports/jravan-bloodlines.json`
+through `write_build_report`, counts only: per record type `<RT>_records`,
+`<RT>_versions_dropped` and `<RT>_deletions`; the rows written (`breeding_horses`, `produce`,
+`lineages`); `sire_ids` (non-null `sire_breeding_id`) and `sire_ids_resolved` (equal to a written
+`breeding_id`); `pedigree_ids` (non-null pedigree values, repeats counted) and
+`pedigree_ids_resolved`; `lineages_resolved` (lineages rows whose `breeding_id` is a written
+breeding id).
+
+The build on the export (2026-11-26): 10 s wall, peak RSS 1.10 GB (`/usr/bin/time -l`).
+
+| type | records | versions dropped | deletions | rows written |
+|---|---:|---:|---:|---:|
+| HN | 162,551 | 70 | 0 | 162,481 |
+| SK | 429,886 | 342 | 0 | 429,544 |
+| BT | 92 | 0 | 0 | 92 |
+
+152,434 breeding horses have a sire id, 152,411 of them a written breeding horse (23 do not);
+all 5,892,823 non-null pedigree ids and all 92 lineages resolve to a breeding horse.
 
 ## The dump of unmapped families (#363)
 
