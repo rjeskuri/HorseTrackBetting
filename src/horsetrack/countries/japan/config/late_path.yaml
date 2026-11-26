@@ -1,0 +1,92 @@
+# The late-money path study's pre-registered design (#102, epic #73; 08 §8 B9: E23, E24, E22),
+# read by countries/japan/studies/late_path_study.py through core.config.load_country_yaml. The
+# whole file goes into the family's spec, so its sha256 is in every registry record of the run;
+# the family is frozen on the first full (non-trial) run.
+#
+# PENDING OWNER APPROVAL: two fields below are owner decisions (feature inclusion, and which
+# model's probability E22 blends), marked `status: pending owner approval`. They are never
+# Rulings: the full run waits for the owner's answer on #102; a --trial run reads them as they
+# stand and freezes nothing. Every other choice follows the ticket, D2, D4, D7, D9, D10 and D14.
+
+# The paper replicated (public figures, quoted from the ticket): arXiv 2509.14645, Hanyu, Ishii,
+# Otani & Teramoto, JRA 2004-2023, the return regression's late-change coefficient delta.
+paper:
+  arxiv: "2509.14645"
+  versions:
+    - {version: v1, spec: base, delta: -0.3559, se: 0.0381}
+    - {version: v3, date: "2026-08-20", spec: base, delta: -0.3386, se: 0.0392}
+    - {version: v3, date: "2026-08-20", spec: full controls, delta: -0.4201}
+  range: [-0.42, -0.34]
+
+# The final-price baseline of every offset test: D4's calibrated market
+# (models.v0.calibration.fit_win_calibration, the natural cubic spline in ln q, 5 knots) fitted on
+# each D9 fold's training days of the path source's own final WIN board (each starter's final
+# capture and the race's WIN dividends), dead-heat races out of its fit, predicting the fold's
+# test days. Only test days of D9's folds are scored.
+baseline:
+  model: D4 calibrated market, in-fold on the path source's final WIN board
+  n_knots: 5
+
+# E23, ex post: the paper's regression at the final price, and the final price plus the late
+# change against the final price alone.
+e23:
+  hypothesis: given the final odds, a runner whose odds shortened late returns more at those odds
+    (delta < 0), and ln q_final + late_change predicts the winner better than ln q_final
+  # The ex-post window: from each runner's last board at or before close - window to its last
+  # board strictly before the close (studies.late_path.late_change). The close is the race's
+  # scheduled post time (a Ruling in the PR: every JRA-VAN interim board is printed before it,
+  # and the closing board, equal to the final odds, at or after it).
+  close: scheduled post time
+  windows_min: [5, 10, 20]  # the paper's tau; 5 is its headline
+  primary_window_min: 5
+  regression: won * odds_final on 1, odds_final and late_change (the paper's base spec), OLS on
+    every development day's starters with a late change
+  regression_ci: 95% two-sided Wald from the cluster sandwich, by race (the paper), race day and
+    meeting (D7)
+  offset: ln q_final + coef * late_change against ln q_final, a starter without a late change at 0
+
+# E24, ex ante: information at the decision time t only.
+e24:
+  hypothesis: the observed path up to t and C1's predicted late drift predict the winner beyond
+    the final price (expected about 0, 'very limited' in the paper)
+  features:
+    status: pending owner approval
+    columns: [path_change, c1_drift]
+    path_change: O_t / O_(t-5 min) - 1, each the runner's latest price at or before
+    c1_drift: E[s_t / s_final] - 1 over C1's draws on the board at t, WIN
+    nothing_else: true
+  # D2's grid (config/decision.yaml) with its primary horizon, read at run time.
+  taus: decision.yaml
+  c1: models.nowcast.Nowcast.fit_cases(features=True) on each D9 fold's training days (WIN
+    cases and pool totals of the path source), never on a test day; C1 v0 does not use p_fund
+  n_draws: 200
+  draw_seed: 102
+  offset: ln q_final + coef . features against ln q_final, per tau; a starter not on the board at
+    t, or without a price 5 minutes before t, has that feature at 0
+
+# The offset tests' path coefficients: walk-forward over the scored quarters (each quarter's races
+# scored with coefficients fitted on the earlier scored quarters' races; the first scored quarter
+# only trains); the gain is the per-race winner log loss of the final minus that of the final
+# plus the path (core.eval.scoring, a dead heat at 1/k).
+offset_fit: walk_forward_over_scored_quarters
+
+# E22, the blend weight by tau.
+e22:
+  hypothesis: the weight alpha on the model in softmax(alpha ln p_model + beta ln q_tau) falls
+    toward the post, and a tau-indexed blend predicts better than one fixed blend
+  p_model:
+    status: pending owner approval
+    source: c2_rating_oof  # proposed; the only source the study implements so far
+    c2_rating_oof: the C2 dynamic-rating member's out-of-fold logp (#91, studies/rating.py's
+      export), the rows with oof_fold, joined to the path source's runners by horse_id
+    file: features/japan/rating-7ec8931213c6.parquet  # under $HORSETRACK_DATA_DIR
+  buckets: decision.yaml
+  q_tau: the de-vigged WIN board at tau (C1's shares at t), over the case's starters
+  test: Giacomini-White against one blend fitted on every bucket pooled, cross-fitted over five
+    groups of races, race-clustered variance, chi-squared 1 df (studies.late_path.alpha_by_tau)
+
+# D7 and config/scoring.yaml: one-sided 95% bounds of the gains, resampling race days (the
+# ticket) and meetings (D7); n_boot and level are read from scoring.yaml at run time.
+bootstrap:
+  units: [day, meeting]
+  seed: 102
