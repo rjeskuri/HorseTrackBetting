@@ -14,8 +14,8 @@ Each registered slot of a sold pool (`発売フラグ<P>` 7) is one row: `combin
 others ascending), `votes` its 票数 (100-yen tickets) and `fav_rank` its 人気順. A slot is a row
 when its combination is digits only and every leg is positive, whatever its votes. Each sold pool
 also has a `__pool__` row: `votes` its 票数合計 and `refund_votes` its 返還票数合計. A count or a
-rank that is not a number is null. The table is not a store table and has no availability rule
-(owner decision), so the views refuse it. See docs/specs/jravan.md.
+rank that is not a number is null. The table is not a store table; its availability rule is
+`label_only` (owner decision, #376), so the views refuse it. See docs/specs/jravan.md.
 """
 
 from __future__ import annotations

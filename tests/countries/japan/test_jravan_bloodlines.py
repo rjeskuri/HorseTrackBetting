@@ -26,9 +26,10 @@ Contract pinned here (the coder follows it), module `horsetrack.countries.japan.
   `lineages_resolved` (written `lineages` rows whose `breeding_id` is a written breeding id).
 - `horsetrack japan jravan bloodlines`: `build_bloodlines()` with the defaults, the report written
   by `records.write_build_report` (`<reports dir>/jravan-bloodlines.json`).
-- None of the three tables is in `schemas.TABLES` or has an availability rule, so the store and
-  the as-of views refuse them (owner note 2026-11-26: a later ticket of #359 adds the rule and
-  changes that assertion).
+- None of the three tables is in `schemas.TABLES`, so the store refuses them. Their availability
+  rule is `static` (#376, the owner's request of 2026-11-26: pedigree is known at any t): every
+  row is in every view at any t, with the same values, `asof_join` matches on its key alone, and
+  `read_label` refuses them.
 
 Each column and the workbook item it comes from (the `records.decode` key; names as
 `spec.record_spec` returns them from the JV-Data 4.9.0.1 workbook on the owner's Mac). Every text
@@ -78,7 +79,7 @@ from typer.testing import CliRunner
 from horsetrack.cli import app
 from horsetrack.core import paths
 from horsetrack.core.store import schemas, tables
-from horsetrack.core.store.asof import NoAvailabilityRule, load_availability, read_asof
+from horsetrack.core.store.asof import asof_join, load_availability, read_asof, read_label
 from horsetrack.countries.japan.jravan import records, spec
 
 # isort: split
@@ -706,11 +707,9 @@ def test_build_writes_the_three_tables_with_their_schemas(data: Path) -> None:
         assert_written_schema(table_path(out, table), table, schema)
     assert [r["breeding_id"] for r in read_rows(processed, "breeding_horses")] == BREEDING_IDS
 
-    # None of the three is a store table or has an availability rule: the views refuse them.
-    rules = load_availability("japan")
+    # None of the three is a store table: the store refuses them (their views: below).
     for table in TABLE_NAMES:
         assert table not in schemas.TABLES, table
-        assert table not in rules, table
         with pytest.raises(ValueError, match="not a store table"):
             tables.read_table(SOURCE, table)
     con = tables.connect(SOURCE)
@@ -722,14 +721,84 @@ def test_build_writes_the_three_tables_with_their_schemas(data: Path) -> None:
         assert not listed & set(TABLE_NAMES), listed
     finally:
         con.close()
+
+
+# Before every birth year and date below, inside them, after the export (2025-06-02), long after.
+STATIC_TIMES = [
+    datetime(1900, 1, 1, tzinfo=UTC),
+    datetime(2009, 3, 1, tzinfo=UTC),
+    datetime(2021, 3, 14, 15, 0, tzinfo=UTC),  # 2021-03-15 00:00 JST, a foal's birth date
+    datetime(2025, 6, 1, 6, 40, tzinfo=UTC),
+    datetime(2100, 1, 1, tzinfo=UTC),
+]
+
+
+def test_the_bloodlines_tables_are_static_in_every_view_at_any_t(data: Path) -> None:
+    write_build_inputs(data / "raw" / SOURCE)
+    bloodlines.build_bloodlines()
+    processed = data / "processed" / SOURCE
+    stored = {
+        table: by_key(pq.read_table(table_path(processed, table)).to_pandas(), SORT_KEY[table])
+        for table in TABLE_NAMES
+    }
+    written = {"breeding_horses": BREEDING_IDS, "produce": HORSE_IDS, "lineages": LINEAGE_IDS}
+
+    rules = load_availability("japan")
+    for table in TABLE_NAMES:
+        rule = rules[table]
+        assert rule.kind == "static", table
+        assert (rule.label_columns, rule.label_prefixes) == ((), ()), table
+
     con = duckdb.connect(":memory:")
     try:
         for table in TABLE_NAMES:
             path = table_path(processed, table)
             con.execute(f"CREATE VIEW {table} AS SELECT * FROM read_parquet('{path}')")
-            for t in (datetime(2009, 3, 1, tzinfo=UTC), datetime(2025, 6, 1, 6, 40, tzinfo=UTC)):
-                with pytest.raises(NoAvailabilityRule):
-                    read_asof(con, table, t, rules=rules)
+        for t in STATIC_TIMES:
+            for table in TABLE_NAMES:
+                view = read_asof(con, table, t, rules=rules)
+                assert list(view.columns) == [name for name, _ in TYPES[table]], (table, t)
+                rows = by_key(view, SORT_KEY[table])
+                assert sorted(rows) == written[table], (table, t)
+                assert rows == stored[table], (table, t)  # every row, the same values at every t
+            produce = by_key(read_asof(con, "produce", t, rules=rules), "horse_id")
+            assert produce["2022100002"]["pedigree_breeding_ids"] == list(ancestry(5)), t
+            assert produce["2021105001"]["birth_date"] == date(2021, 3, 15), t
+
+        # asof_join matches on the key alone, whatever the key's t; a key without a row (a
+        # deletion, an unknown id) gets nulls
+        keys = pd.DataFrame(
+            {
+                "breeding_id": ["1110000003", "1120000006", "1110000444", "1110000001"],
+                "t_utc": pd.to_datetime(STATIC_TIMES[:4], utc=True),
+            }
+        )
+        got = asof_join(keys, "breeding_horses", on=["breeding_id"], rules=rules, con=con)
+        assert [plain(v) for v in got["name"]] == [
+            "センノチチ", "ナゾノハハ", None, "カクウシュボバ",
+        ]  # fmt: skip
+        assert [plain(v) for v in got["sire_breeding_id"]] == [
+            "1110000005", "1110000005", None, "1110000003",
+        ]  # fmt: skip
+        got = asof_join(keys, "lineages", on=["breeding_id"], rules=rules, con=con)
+        assert [plain(v) for v in got["lineage_id"]] == ["0102", None, None, "01"]
+        keys = pd.DataFrame(
+            {
+                "horse_id": ["2021105001", "2020109999", "2022100002"],
+                "t_utc": pd.to_datetime([STATIC_TIMES[0], STATIC_TIMES[3], STATIC_TIMES[4]],
+                                        utc=True),
+            }
+        )  # fmt: skip
+        got = asof_join(keys, "produce", on=["horse_id"], rules=rules, con=con)
+        assert [plain(v) for v in got["birth_date"]] == [date(2021, 3, 15), None, date(2021, 3, 15)]
+        assert [plain(v) for v in got["pedigree_breeding_ids"]] == [
+            list(ancestry(1)), None, list(ancestry(5)),
+        ]  # fmt: skip
+
+        # pedigree, not labels: read_label refuses them
+        for table in TABLE_NAMES:
+            with pytest.raises(ValueError):
+                read_label(con, table, rules=rules)
     finally:
         con.close()
 
