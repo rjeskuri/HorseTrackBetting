@@ -409,7 +409,58 @@ null `fav_rank`. Rows per pool, with the first year sold:
 
 ## The 0B41/0B42 time series (planned, #369)
 
-## UM, KS, CH: horse, jockey and trainer masters (planned, #370)
+## UM, KS, CH: horse, jockey and trainer masters (#370)
+
+`horsetrack.countries.japan.jravan.masters`; `horsetrack japan jravan masters`.
+
+The masters are one current snapshot: the export of 2026-11-25/26 (latest データ作成年月日
+2026-11-24), not a history. Anything time-varying in them (a horse's or a person's retirement,
+the east/west affiliation, a jockey's stable and apprentice code, licence dates) is the state at
+export time, not a value at t (docs/specs/as-of.md, Known traps).
+
+- `build_masters(*, raw=None, out=None)` reads `<raw>/stored/DIFN/{UM,KS,CH}/all.jvd` chunk by
+  chunk (only the items it maps; 3代血統情報 cut to its first five occurrences), keeps one version
+  per key (`records.latest_versions` on 血統登録番号, 騎手コード, 調教師コード; a key whose latest
+  record is a deletion, データ区分 0, has no row; UM データ区分 9, a deregistration, is kept) and
+  writes `horses.parquet` and `horse_pedigree.parquet` (`schemas.TABLES`), `jockeys.parquet`
+  (`JOCKEYS_SCHEMA`) and `trainers.parquet` (`TRAINERS_SCHEMA`), sorted by key; the same inputs
+  give the same bytes. The report, `<reports dir>/jravan-masters.json`, holds per record type
+  `records`, `versions_dropped` and `deletions`, the rows written per table, and `unmapped` as
+  field (`colour`, `sex`, `mark`, `retired`, `affiliation`, `date`) -> code -> count (an impossible
+  date counts under `invalid`, never by value).
+- `horses`: `horse_id` 血統登録番号 as printed, `name` 馬名, `origin` 産地名; `colour` and
+  `import_type` are the meanings of 毛色コード and 馬記号コード in code tables 2203 and 2204, read
+  from the workbook at run time (null for the unset `00`, a blank and a code the table lacks;
+  `import_type` is null for a horse without a mark); `sex` H, M, G from 性別コード; `sire`, `dam`,
+  `dam_sire` the names of 3代血統情報 occurrences 1, 2 and 5; `is_retired` 競走馬抹消区分;
+  `jurisdiction` `jra`; `profile_scraped_utc` null. Under the shipped rules `horses` is
+  `current_value`: never in a view.
+- `horse_pedigree`: the same three names, their `*_name_norm` (NFKC then casefold, as the netkeiba
+  pedigree card) and `sire_id`, `dam_id`, `dam_sire_id` (繁殖登録番号, null when blank or all
+  zeros); `source_race_id` and `scraped_utc` null. `static`: every horse in every view.
+- `jockeys` and `trainers` (jravan-only, not in `schemas.TABLES`): `jurisdiction` `jra`, the code,
+  `jockey_key` / `trainer_key` (`jockey:<code>` / `trainer:<code>`, as on runners), `name`,
+  `name_short`, `birth_date`, `licence_issued`, `licence_revoked` (date32, null when blank or all
+  zeros), `is_retired`, `affiliation` (`miho`, `ritto`, `nar`, `overseas` from the east/west code,
+  code table 2301); jockeys also carry `trainer_code` (所属調教師コード, null for `00000`, a
+  freelance jockey) and `apprentice_code` as printed. No availability rule yet: `read_asof` on a
+  view of either raises `NoAvailabilityRule` (the rule is an owner decision, a later ticket).
+
+The run on the export (2026-11-26, about 5 s, 0.7 GB peak), counts only:
+
+| type | records | versions dropped | deletions | rows written |
+|---|---:|---:|---:|---:|
+| UM | 223,626 | 7,640 | 0 | 215,986 horses (and pedigree rows) |
+| KS | 1,923 | 357 | 0 | 1,566 jockeys |
+| CH | 2,038 | 559 | 0 | 1,479 trainers |
+
+Zero unmapped codes. Kept UM versions by データ区分: 105,413 `4`, 56,073 `1`, 54,481 `9`, 18 `3`,
+1 `2`. Horses: 109,668 H, 98,547 M, 7,771 G; 207,062 retired; every horse has a colour, 64,219 a
+mark; 24 have no 産地名. Pedigree: 1 horse has no sire, dam or dam-sire name, and about 400 per
+ancestor have no breeding id (401 sire, 407 dam, 408 dam sire). Jockeys: 1,436 retired, 47 with a
+stable (every one a trainer code in `trainers`); trainers: 1,291 retired. Every one of the
+1,885,762 jravan runners has its horse in `horses`, and every `jockey_key` and `trainer_key` joins
+but the unset `00000` (71 jockey, 27 trainer runners).
 
 ## HN, SK, BT: bloodlines (#371)
 
