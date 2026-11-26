@@ -17,6 +17,7 @@ from horsetrack.countries.japan.jravan.masters import masters_command as jravan_
 from horsetrack.countries.japan.jravan.odds import final_odds_command as jravan_final_odds_command
 from horsetrack.countries.japan.jravan.races import races_command as jravan_races_command
 from horsetrack.countries.japan.jravan.runners import runners_command as jravan_runners_command
+from horsetrack.countries.japan.jravan.votes import votes_command as jravan_votes_command
 from horsetrack.countries.japan.jrdb.tables import build_command as jrdb_build_command
 from horsetrack.countries.japan.logger.compact import compact
 from horsetrack.countries.japan.logger.compare import compare_logs_command
@@ -58,6 +59,7 @@ jravan.command("final-odds")(jravan_final_odds_command)
 jravan.command("masters")(jravan_masters_command)
 jravan.command("races")(jravan_races_command)
 jravan.command("runners")(jravan_runners_command)
+jravan.command("votes")(jravan_votes_command)
 
 
 def _version_callback(value: bool) -> None:
