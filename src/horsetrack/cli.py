@@ -9,6 +9,7 @@ from horsetrack.countries.japan.board.server import board_serve_command
 from horsetrack.countries.japan.jra.going_fetch import fetch_going_command
 from horsetrack.countries.japan.jra.win_sales_fetch import fetch_win_sales_command
 from horsetrack.countries.japan.jravan.check import check_command as jravan_check_command
+from horsetrack.countries.japan.jravan.dump import dump_command as jravan_dump_command
 from horsetrack.countries.japan.jrdb.tables import build_command as jrdb_build_command
 from horsetrack.countries.japan.logger.compact import compact
 from horsetrack.countries.japan.logger.compare import compare_logs_command
@@ -44,6 +45,7 @@ jrdb.command("build")(jrdb_build_command)
 jravan = typer.Typer(no_args_is_help=True, help="JRA-VAN DataLab (JV-Data) commands.")
 japan.add_typer(jravan, name="jravan")
 jravan.command("check")(jravan_check_command)
+jravan.command("dump")(jravan_dump_command)
 
 
 def _version_callback(value: bool) -> None:
