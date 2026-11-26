@@ -67,7 +67,8 @@ so each family maps fields instead of slicing bytes:
   is dropped), empty lines are skipped, and the last record may lack its separator. A record that
   is not `spec.length - 2` bytes is a `RecordLengthError` (a `ValueError` with `record_type`,
   `record` (1-based), `length` and `expected`); one of the right width that does not start with
-  the record type is a `ValueError`.
+  the record type is a `RecordTypeError` (a `ValueError` with `record_type`, `record` and
+  `found`). `leaf_axes(spec)` gives each key, in layout order, with its number of repeat axes.
 - `iter_file(path, spec, *, chunk_records=20_000)`: the same dicts, lazily, for at most
   `chunk_records` records each and at most `CHUNK_BYTES` (16 MiB) of records, so a 7 GB H6 or CK
   file streams in constant memory (about 300 MB above the interpreter on a 2.4 GB synthetic file
@@ -164,4 +165,38 @@ a surface. Unmapped codes, all before 2002 (the last in 2001):
 
 ## HN, SK, BT: bloodlines (planned, #371)
 
-## The dump of unmapped families (planned, #363)
+## The dump of unmapped families (#363)
+
+`horsetrack japan jravan dump [--type RT ...] [--year YYYY ...]`
+(`horsetrack.countries.japan.jravan.dump.run`) decodes every stored family that no ticket of this
+epic maps into a store table, so nothing in the export goes unread and the coverage audit can see
+what each family holds.
+
+- What is read: `raw/jravan/stored/<DATASPEC>/<RT>/*.jvd`, the files directly in the folder, of
+  every folder not in `MAPPED` (RACE RA, SE, HR, H1, H6, O1-O6; DIFN UM, KS, CH; BLDN HN, SK, BT).
+  `--type` names record types instead, in every dataspec, mapped or not. `--year` keeps
+  `<YYYY>.jvd` of those years; `all.jvd` is always read. `timeseries/` and the folders outside
+  `stored/` are never dumped.
+- The layout: `interim/jravan/records/<DATASPEC>/<RT>/<stem>.parquet` (zstd), one row per record
+  and one column per `records.decode` key holding `records.text` (cp932, trimmed, blank is null): a
+  plain leaf is `string`, a repeat `list<string>`, a nested repeat `list<list<string>>`, typed
+  from the layout so even an all-null column keeps its type. `_file` is the path relative to
+  `raw/jravan` and `_record` the 1-based record number (int64). Each `records.iter_file` chunk is a
+  row group written through a `pyarrow.ParquetWriter` into a tmp file, then `os.replace`, so a
+  multi-GB file (SNPN CK) streams in bounded memory.
+- `interim/jravan/records/_dump.json` keeps, per file written, its size, mtime and the workbook's
+  sha256; a file that matches and whose parquet exists is skipped, anything else is rewritten. Runs
+  limited by `--type` or `--year` keep the other entries.
+- A file that fails (a record of the wrong width or type, or a record type whose layout the
+  workbook lacks or cannot validate) leaves no parquet and no tmp file, loses its manifest entry so
+  the next run tries it again, and is a failure `{file, record, reason}` (`record` 1-based, null
+  for a layout failure); the other files are written and the command exits 1.
+- The report, `reports/jravan-dump.json` through `records.write_build_report`, holds counts only:
+  `counts` the totals of the files written this run (`files`, `records`, `bytes` read, and
+  `skipped`, `failed`), `unmapped["<DATASPEC>/<RT>"]` the same `files`, `records`, `bytes` and
+  `seconds` per folder with a file written, and `failures`. An output folder inside the repository
+  is refused before anything is written.
+
+Dumps are not store tables: no reader in `core/store` serves them and they have no availability
+rule (no as-of time), so no model or feature may read them until a ticket maps the family into a
+table with one.
