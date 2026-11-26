@@ -212,7 +212,69 @@ Rows per pool, with the first year that has any (the pools' start of sale):
 
 ## O1-O6: final odds (planned, #367)
 
-## H1 and H6: pool votes (planned, #368)
+## H1 and H6: pool votes (#368)
+
+`horsetrack.countries.japan.jravan.votes` writes `processed/jravan/pool_votes.parquet`: the final
+votes on every combination of every sold pool, and each pool's total and refunds, for pool sizes
+and own-stake impact (C5, C6, #283). It is not in `schemas.TABLES` and has no availability rule
+(owner decision; a later ticket of #359 adds one), so `read_table` and the as-of views refuse it.
+
+- `build_pool_votes(*, years=None, raw=None, out=None, chunk_records=500) -> BuildReport` reads
+  `<raw>/stored/RACE/H1/<YYYY>.jvd` and `H6/<YYYY>.jvd` (`raw` the export root, default
+  `raw/jravan`; `years` None reads every year file of either folder, a year without an H6 file,
+  every year before 2004, reads H1 alone; a named year with neither file is a
+  `FileNotFoundError`). Each file is streamed twice through `records.iter_file`, `chunk_records`
+  records at a time: the first pass reads the version keys and keeps one version per race
+  (`latest_versions` on 開催年, 開催月日, 競馬場コード, 開催回, 開催日目, レース番号; a race whose
+  latest record of a type is a deletion has no rows of that type), the second turns the kept
+  records of JRA venues into rows, so no more than one chunk is decoded at a time. Each year's
+  rows, H1 and H6 together, are sorted by `race_id, pool, combination` (plain string order) and
+  written as exactly one row group through a `ParquetWriter` (zstd) into a tmp file, then
+  `os.replace`; the same inputs give the same bytes, whatever the chunk size.
+- `votes_rows(record_type, cols)` maps decoded H1 or H6 arrays to rows (`POOL_VOTES_SCHEMA`):
+  `jurisdiction` `jra`, `race_id` (`keys.race_id`), `race_date`, `venue` and `race_no` from the
+  race id, `pool` and `combination`, `votes`, `refund_votes`, `fav_rank` (int64) and
+  `data_kubun` (データ区分 of the record kept: 2 前日売最終, 4 確定, 5 確定(月曜), 9 レース中止).
+- Pools, from the votes groups: H1 単勝票数 `WIN`, 複勝票数 `PLACE`, 枠連票数 `BRACKET_QUINELLA`,
+  馬連票数 `QUINELLA`, ワイド票数 `QUINELLA_PLACE`, 馬単票数 `FORECAST`, 3連複票数 `TRIO`; H6
+  3連単票数 `TIERCE`. A pool is sold when its 発売フラグ is `7`; a pool flagged `0` (not sold) or
+  `1` (cancelled before sale) writes no row.
+- A combination row per registered slot of a sold pool: the slot's 馬番 or 組番 is digits only and
+  every one of its 1, 2 or 3 equal-width legs is positive (blank slots, zeros and partly blank
+  combinations write nothing). `combination` is the legs joined with `,`, leading zeros dropped
+  (the form of `docs/specs/odds-log.md`): FORECAST and TIERCE in finishing order, the others
+  ascending (`1,1` is a same-bracket pair). `votes` is 票数 (100-yen tickets, as printed),
+  `fav_rank` 人気順 (`--`, `**` and blank are null), `refund_votes` null. A registered slot with
+  zero votes is a row.
+- A `__pool__` row per sold pool: `votes` its 票数合計 (refunded votes included), `refund_votes`
+  its 返還票数合計 (null when blank), `fav_rank` null. A count or rank that is not a number is
+  null. 登録頭数, 出走頭数, 複勝着払キー and the refunded horse and bracket items write no row.
+
+`horsetrack japan jravan votes [--year YYYY ...]` runs the build and writes
+`reports/jravan-votes.json` through `write_build_report`: per year (`by_year`) and in total
+(`counts`), `records` (H1 and H6 records read), `versions_dropped`, `deletions`, `non_jra`, `kept`,
+`races` (with a row), `rows`, and per pool `combinations_<POOL>`, `pools_<POOL>` and
+`refunds_<POOL>` (pool rows with refunded votes).
+
+The build on the export (2026-11-26, 1986 to 2026-11-23, 41 H1 and 23 H6 year files): 257 s
+wall clock, peak RSS 2.58 GB (`/usr/bin/time -l`, 2,578,612,224 bytes), a 1.1 GiB file of 41 row
+groups. 208,368 records, all JRA venues, one version each (no version dropped, no deletion),
+140,383 races and 252,897,444 rows (10.8 to 12.7 million a year from 2009 on). データ区分 is 5 on
+every race but the abandoned ones (9: 70 races in H1, 64 in H6); those 69 H1 and 63 H6 races
+(2005-2025) print no number on their combination votes, so 247,468 combination rows have a null
+`votes` (their pool totals are numbers). 1,488,188 combination rows hold 0 votes and 2,551,950 a
+null `fav_rank`. Rows per pool, with the first year sold:
+
+| pool | combination rows | sold pools (`__pool__` rows) | with refunds | first year |
+|---|---:|---:|---:|---|
+| WIN | 1,880,558 | 140,383 | 3,086 | 1986 |
+| PLACE | 1,880,514 | 140,374 | 3,081 | 1986 |
+| BRACKET_QUINELLA | 4,572,766 | 137,743 | 2,878 | 1986 |
+| QUINELLA | 10,979,725 | 117,911 | 3,084 | 1991 |
+| QUINELLA_PLACE | 8,947,799 | 92,774 | 3,084 | 1999 |
+| FORECAST | 16,295,500 | 84,433 | 3,083 | 2002 |
+| TRIO | 35,481,466 | 84,457 | 3,084 | 2002 |
+| TIERCE | 171,993,060 | 67,981 | 2,571 | 2004 |
 
 ## The 0B41/0B42 time series (planned, #369)
 
