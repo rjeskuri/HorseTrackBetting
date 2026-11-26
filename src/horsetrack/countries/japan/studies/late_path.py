@@ -33,6 +33,7 @@ E24, information at t
   `path_change` = O_t / O_ref - 1, O_t its price on the board and O_ref its latest price at or
   before t - 5 min; `c1_drift` = E[s_t / s_final] - 1 over `nowcast.draws(view, pool=WIN)`. A
   nowcast fitted on the race's day or a later one (`nowcast.days`) has seen the race: ValueError.
+  No WIN board at t (no row at or before t, or none priced) is a KeyError, as in `race_view`.
 
 E22, the blend weight by tau
 - `alpha_by_tau(frame, buckets=)`: a case is one (race_id, tau_min) softmax, and a row's bucket the
@@ -223,8 +224,10 @@ def ex_ante_features(
     rows = frame[frame["pool"] == nc.WIN]
     rows = rows[pd.to_datetime(rows["snapshot_utc"], utc=True) <= at]
     races = pd.unique(rows["race_id"])
-    if len(races) != 1:
-        raise ValueError(f"one race's rows at t are needed, got {len(races)} races")
+    if not len(races):  # as race_view without rows: there is no board at t
+        raise KeyError(f"no WIN row at or before {at.isoformat()}")
+    if len(races) > 1:
+        raise ValueError(f"one race's rows are needed, got {len(races)} races")
     race_id = str(races[0])
     day = nc._race_day(race_id)
     seen = sorted(d for d in getattr(nowcast, "days", ()) if str(d)[:10] >= day)

@@ -440,7 +440,7 @@ def e22(cases, scored, grid, plan, folder) -> tuple[list, dict]:
     rows = rows.merge(p_model, on=["race_id", "horse_id"], how="left")
     whole = rows["p_model"].notna().groupby(rows["race_id"]).transform("all")
     counts = {"races_without_a_p_model_runner": int(rows.loc[~whole, "race_id"].nunique())}
-    rows = rows[whole]
+    rows = rows[whole].copy()
     case = [rows["race_id"], rows["tau_min"]]
     for col in ("q_tau", "p_model"):
         rows[col] = rows[col] / rows.groupby(case)[col].transform("sum")
@@ -456,7 +456,8 @@ def e22(cases, scored, grid, plan, folder) -> tuple[list, dict]:
             _metric(b, "gw_pvalue", row["gw_pvalue"], n),
             _metric(b, "gw_mean_loss_diff_nats", row["gw_mean"], n),
         ]
-    counts |= {"e22_cases": int(table["n_races"].sum()), "e22_races": rows["race_id"].nunique()}
+    counts["e22_cases"] = int(table["n_races"].sum())
+    counts["e22_races"] = int(rows["race_id"].nunique())
     return metrics, {"e22": table.to_dict("records"), "e22_counts": [counts]}
 
 
