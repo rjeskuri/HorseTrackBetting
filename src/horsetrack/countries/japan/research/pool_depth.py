@@ -15,7 +15,8 @@ V and W are the money that pays: W is the combination's final votes x 100 and V 
 `__pool__` votes net of its refunded votes, (votes - refund_votes) x 100 (`pool_votes` counts
 refunded votes in the total; JRA pays (sales - refunds) x rate). `pool_totals`, a sales reader for
 #349 and the low-turnover segment, reports the gross total instead (votes x 100, which is
-`final_odds` investment), beside the time-series investment at t, which is gross too.
+`final_odds` investment), beside the time-series investment at t, which is gross too; a race with
+a capture at t but no confirmed record keeps its row, its final total NaN.
 
 Place and Wide pay by the stake-back-share rule with co-placers, so the identity does not hold for
 them. The spec registers two treatments: `depth-only` (`depth_table` gives no capacity for them)
@@ -26,26 +27,34 @@ sum over the P paying combinations; own stake s on combination i adds s to V, to
 sum, and the capacity solves (1 + e) d(s) / d(0) = 1 + k. With c = (1 + k) / (1 + e) and
 A = rV - sum W that is s = (1 - c)(A + P W_i) / ((c d(0) - 1) P + 1 - r); at P = 1 it is the
 single-winner identity again. The run checks the rule against the paid dividends, per pool, every
-eligible paid combination counting (one without its votes or final price is one not reproduced),
-and is recorded failed when either pool's share is below the spec's; the rule of
+eligible paid combination counting, sum W from the confirmed votes of the race's paying
+combinations (one without its votes or final price is one not reproduced, and only one when its
+votes are there), and is recorded failed when either pool's share is below the spec's; the rule of
 `core.pricing.stake_back_share_dividend`, r(1 + (V - sum W) / (P W_i)), is checked beside it as a
 diagnostic only. `run_exacta_impact` is #350's measure: the
 own impact of 100 yen on one exacta (FORECAST) combination by pool size
 (`research.exacta_impact.own_impact`, its POOL_BIN_EDGES), from the final votes.
 
-The readers scan `processed/jravan/{pool_votes,final_odds,races}.parquet` one row group (a year)
-at a time with only the columns named, the predicate of `core.eval.holdout.
-file_development_filter` (the span, holdout days dropped) and the reader's own pushed into the
-scan, so no row of a holdout day or from before 2014-06-07 (D10) reaches Python; `pool_votes` and
+How the scans keep holdout and pre-era rows out of Python: every read of
+`processed/jravan/{pool_votes,final_odds,races}.parquet` is `_scan`, which hands the Parquet
+scanner, one row group at a time, the predicate of `core.eval.holdout.file_development_filter`
+(race_date in a span that starts no earlier than 2014-06-07, D10, with every holdout day dropped)
+and the reader's own, so only development rows are decoded into Python; the `dividends` read
+keeps the race ids of the development races read, and a holdout day's time-series file is
+skipped by its name before it is opened (`LockedHoldout` is never opened). What the identity
+digests: a run's id is the sha256 of its RunRecord, whose data_builds hold a sha256 of the frames
+the run took from each store table and of the rows it read from each development day file (their
+row hashes sorted, no file's bytes), and whose params hold the span, date_to None being the
+store's last development day (`_last_development_day`, a `_scan` of the races table), so
+appending or refreshing holdout or pre-2014-06-07 rows leaves it unchanged. `pool_votes` and
 `final_odds` keep the confirmed records only (データ区分 4 確定 and 5 確定(月曜); a race whose
-kept record is the day before's close, 2, has no final money). A time-series day file of a
-holdout day is skipped by its name before it is opened, and `LockedHoldout` is never opened. Every
-run after the freeze is one RunRecord (failures included) in the registry, identified by what it
-read: a digest of the rows each table gave the run and of the bytes of each development day file
-read, so a refresh of holdout or pre-2014-06-07 rows leaves it unchanged. Every report built on
-the store goes through `core.eval.reports.write_report` (sources ('jravan',)), so it never lands
-in the repository, under a name carrying the run's id. `render_public_report` writes the public
-text, which holds no figure from the data.
+kept record is the day before's close, 2, has no final money). Every run after the freeze is one
+RunRecord (failures included) in the registry; a depth run with no cell (no combination with a
+final price) is recorded failed. Every report built on the store goes through
+`core.eval.reports.write_report` (sources ('jravan',)), so it never lands in the repository,
+under a name carrying the run's id. `render_public_report` writes the public text, which holds no
+figure from the data; the command merges the runs the committed report already lists into it by
+run id.
 """
 
 from __future__ import annotations
@@ -65,6 +74,7 @@ from typing import Annotated, Any
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 import typer
@@ -400,22 +410,20 @@ def _day_files(date_from: date, date_to: date) -> list[tuple[date, Path]]:
 
 
 class _Inputs:
-    """What a run read, for its identity: per store table a sha256 over the frames the run took
-    from it (their columns and pandas row hashes, in read order), and per development day file
-    read its bytes. Holdout and pre-2014-06-07 rows never reach a frame, so they never count."""
+    """What a run read, for its identity: per store table, and for the time series, a sha256 over
+    the frames the run took from it, in read order (each frame a label, its columns and its
+    pandas row hashes sorted, so the order of rows in a file, which a row added on another day
+    reshuffles, does not count). Holdout and pre-2014-06-07 rows never reach a frame, and no
+    file's bytes are hashed, so neither counts."""
 
     def __init__(self) -> None:
         self._digests: dict[str, Any] = {}
 
-    def add(self, name: str, frame: pd.DataFrame) -> None:
+    def add(self, name: str, frame: pd.DataFrame, label: str = "") -> None:
         digest = self._digests.setdefault(name, hashlib.sha256())
-        digest.update(("\x1f".join(map(str, frame.columns)) + "\n").encode())
-        digest.update(pd.util.hash_pandas_object(frame, index=False).to_numpy().tobytes())
-
-    def add_files(self, name: str, files: Sequence[tuple[date, Path]]) -> None:
-        digest = self._digests.setdefault(name, hashlib.sha256())
-        for day, path in files:
-            digest.update(f"{day.isoformat()}:{_sha16(path)}\n".encode())
+        digest.update((label + "\x1e" + "\x1f".join(map(str, frame.columns)) + "\n").encode())
+        rows = pd.util.hash_pandas_object(frame, index=False).to_numpy()
+        digest.update(np.sort(rows).tobytes())
 
     def builds(self) -> dict[str, str]:
         """data_builds: each table's path, then the digest of what the run read of it."""
@@ -429,9 +437,18 @@ class _Inputs:
 def pool_totals(*, date_from: date, date_to: date, minutes_before: float = 2.0) -> pd.DataFrame:
     """Per race and pool the store sold on a development day in date_from..date_to: race_id,
     pool, final_yen (the confirmed `__pool__` row's votes x 100, gross sales: `final_odds`
-    investment; a race whose kept record is the day before's has no row) and at_t_yen (WIN,
-    PLACE and QUINELLA: the investment of the latest time-series `__pool__` capture with
-    minutes_to_post >= minutes_before, a capture at t included; NaN otherwise)."""
+    investment; NaN for a race whose kept record is the day before's) and at_t_yen (WIN, PLACE
+    and QUINELLA: the investment of the latest time-series `__pool__` capture with
+    minutes_to_post >= minutes_before, a capture at t included; NaN otherwise). A race and pool
+    with a capture at t but no confirmed record keeps its row, final_yen NaN."""
+    return _pool_totals(date_from, date_to, minutes_before, None)
+
+
+def _pool_totals(
+    date_from: date, date_to: date, minutes_before: float, inputs: _Inputs | None
+) -> pd.DataFrame:
+    """`pool_totals`; with `inputs`, the confirmed pool rows and each development day file's
+    rows read count toward the run's pool_votes and odds_timeseries inputs."""
     _check_span(date_from, date_to)
     minutes = _finite("minutes_before", minutes_before)
     finals = []
@@ -444,6 +461,8 @@ def pool_totals(*, date_from: date, date_to: date, minutes_before: float = 2.0) 
             where=_confirmed(ds.field("combination") == POOL_ROW),
         )
         finals.append(table.to_pandas())
+        if inputs is not None:
+            inputs.add("pool_votes", finals[-1], "pool rows")
     final = pd.concat(finals, ignore_index=True)
     final = pd.DataFrame(
         {
@@ -459,10 +478,12 @@ def pool_totals(*, date_from: date, date_to: date, minutes_before: float = 2.0) 
         & (ds.field("minutes_to_post") >= minutes)
         & ds.field("investment").is_valid()
     )
-    for _, path in _day_files(date_from, date_to):
+    for day, path in _day_files(date_from, date_to):
         rows = pq.read_table(
             path, columns=["race_id", "pool", "snapshot_utc", "investment"], filters=at_t
         ).to_pandas()
+        if inputs is not None:
+            inputs.add("odds_timeseries", rows, day.isoformat())
         latest = rows.sort_values("snapshot_utc", kind="stable").drop_duplicates(
             ["race_id", "pool"], keep="last"
         )
@@ -472,7 +493,8 @@ def pool_totals(*, date_from: date, date_to: date, minutes_before: float = 2.0) 
     else:
         board = pd.DataFrame({"race_id": [], "pool": [], "at_t_yen": []})
     board = board.astype({"race_id": object, "pool": object, "at_t_yen": float})
-    out = final.merge(board, on=["race_id", "pool"], how="left")
+    final = final.astype({"race_id": object, "pool": object})
+    out = final.merge(board, on=["race_id", "pool"], how="outer")
     out["at_t_yen"] = out["at_t_yen"].astype(float)
     out = out.sort_values(["race_id", "pool"], kind="stable").reset_index(drop=True)
     return out[["race_id", "pool", "final_yen", "at_t_yen"]]
@@ -652,17 +674,38 @@ def depth_table(
     )
 
 
+def _vote_money(votes: pd.DataFrame, keys: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """For each row of `keys` (race_id, pool, combination), its votes x 100 and its race's
+    `__pool__` money that pays, from `votes` (`pool_votes` rows); NaN where there is none."""
+    _columns(votes, "votes", [*KEYS, "votes", "refund_votes"])
+    v = votes.loc[votes["pool"].isin(list(CO_PLACER)).to_numpy(dtype=bool)]
+    is_pool = v["combination"].to_numpy() == POOL_ROW
+    slots = v.loc[~is_pool, KEYS].assign(_money=UNIT * _numbers(v.loc[~is_pool, "votes"]))
+    totals = v.loc[is_pool, ["race_id", "pool"]].assign(_net=_net_yen(v.loc[is_pool]))
+    if slots.duplicated(KEYS).any() or totals.duplicated(["race_id", "pool"]).any():
+        raise ValueError("votes has a combination or a pool row twice in a race")
+    found = (
+        keys[KEYS]
+        .merge(slots.astype({c: object for c in KEYS}), on=KEYS, how="left")
+        .merge(totals.astype({"race_id": object, "pool": object}), on=["race_id", "pool"],
+               how="left")
+    )  # fmt: skip
+    return found["_money"].to_numpy(dtype=float), found["_net"].to_numpy(dtype=float)
+
+
 def coplacer_rows(
     rows: pd.DataFrame, paid: pd.DataFrame, *, rates: Mapping[str, float], edges: Sequence[float],
-    share_lost: float, rule: str = "jra",
+    share_lost: float, rule: str = "jra", votes: pd.DataFrame | None = None,
 ) -> pd.DataFrame:  # fmt: skip
     """Every paid Place and Wide combination of `paid` (`dividends` rows, refunds dropped), each
     with its `rows` row (`depth_rows` of those pools) where it has one, given the race's realised
     co-placers: the depth columns (NaN where the combination has no votes or final price), places
-    (P, the race's paying combinations), paid_yen (their money), dividend (as paid), jra_dividend
-    and core_dividend (the two rules at no own stake; NaN where a money row is missing) and
-    `capacity_{e:g}` per edge by `rule` (`jra`, `coplacer_capacities`, the rule frozen in
-    japan-pool-depth-v1; `core`, `core_coplacer_capacities`)."""
+    (P, the race's paying combinations), paid_yen (sum W, their money), dividend (as paid),
+    jra_dividend and core_dividend (the two rules at no own stake; NaN where a money row is
+    missing) and `capacity_{e:g}` per edge by `rule` (`jra`, `coplacer_capacities`, the rule
+    frozen in japan-pool-depth-v1; `core`, `core_coplacer_capacities`). W_i, sum W and V come
+    from `votes` (the races' confirmed `pool_votes` rows) where it is given, so a paying
+    combination without its final price still counts in its race's sum W; else from `rows`."""
     _columns(paid, "paid", [*KEYS, "dividend", "is_refund"])
     refund = paid["is_refund"].astype("boolean").fillna(False).to_numpy(dtype=bool)
     paid = paid.loc[paid["pool"].isin(list(CO_PLACER)).to_numpy(dtype=bool) & ~refund]
@@ -672,12 +715,16 @@ def coplacer_rows(
         rows = rows.assign(**{c: pd.Series(dtype=float) for c in ("odds", "combo_yen", "pool_yen")})
     out = paid.merge(rows, on=KEYS, how="left")
     race_pool = ["race_id", "pool"]
-    group = out.groupby(race_pool, sort=False)
-    places = group["combination"].transform("size").to_numpy(dtype=float)
-    missing = out["combo_yen"].isna().groupby([out["race_id"], out["pool"]]).transform("any")
-    paid_yen = group["combo_yen"].transform("sum").where(~missing).to_numpy(dtype=float)
-    pool_yen = group["pool_yen"].transform("max").to_numpy(dtype=float)
-    combo = out["combo_yen"].to_numpy(dtype=float)
+    if votes is None:
+        combo = out["combo_yen"].to_numpy(dtype=float)
+        pool_yen = out.groupby(race_pool, sort=False)["pool_yen"].transform("max")
+        pool_yen = pool_yen.to_numpy(dtype=float)
+    else:
+        combo, pool_yen = _vote_money(votes, out)
+    group = out[race_pool].assign(_w=combo, _none=np.isnan(combo)).groupby(race_pool, sort=False)
+    places = group["_w"].transform("size").to_numpy(dtype=float)
+    missing = group["_none"].transform("any").to_numpy(dtype=bool)
+    paid_yen = np.where(missing, np.nan, group["_w"].transform("sum").to_numpy(dtype=float))
     rate = out["pool"].map(dict(rates)).to_numpy(dtype=float)
     columns = {
         "places": places,
@@ -746,7 +793,7 @@ def _preflight(
     spec_name: str = SPEC_NAME,
 ) -> _Run:
     """NotPreRegistered before anything is read or written; then the span (D10; date_to None is
-    the store's last race day, looked up in the recorded attempt) and out_dir."""
+    the store's last development day, looked up in the recorded attempt) and out_dir."""
     family, spec = load_spec(spec_name)
     registry = default_registry(COUNTRY) if registry is None else registry
     spec_hash = _spec_hash(spec)
@@ -760,14 +807,6 @@ def _preflight(
     if is_inside(Path(out_dir), env.repo_root()):
         raise LicensedOutputInRepo(f"{out_dir} is inside the repository: the report is licensed")
     return _Run(registry, family, spec, spec_hash)
-
-
-def _sha16(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()[:16]
 
 
 def _commit() -> str:
@@ -818,15 +857,15 @@ def _recorded(
     body: Body,
 ) -> tuple[str, str, Path, Any]:
     """Run `body(inputs, date_to)` (metrics, status, report text, payload) on the span, date_to
-    None being the store's last race day (looked up here, inside the attempt), and record it:
-    the record's data_builds are what the run read (`_Inputs`), its report is written to
-    `<stem>-<first 16 hex of the run id>.md` under out_dir. Any failure after the freeze is
-    recorded as failed and raised again."""
+    None being the store's last development day (`_last_development_day`, looked up here, inside
+    the attempt, and recorded in params.date_to), and record it: the record's data_builds are
+    what the run read (`_Inputs`), its report is written to `<stem>-<first 16 hex of the run
+    id>.md` under out_dir. Any failure after the freeze is recorded as failed and raised again."""
     date_from, date_to = span
     inputs = _Inputs()
     params = {"date_from": date_from.isoformat(), "date_to": None}
     try:
-        date_to = _last_store_day() if date_to is None else date_to
+        date_to = _last_development_day(date_from) if date_to is None else date_to
         params["date_to"] = date_to.isoformat()
         _check_span(date_from, date_to)
         metrics, status, text, payload = body(inputs, date_to)
@@ -977,6 +1016,7 @@ class DepthResult:
     date_to: date
     tertiles: pd.DataFrame | None = None
     totals: pd.DataFrame | None = None
+    status: str = "scored"
 
 
 def run_depth(
@@ -987,11 +1027,11 @@ def run_depth(
     registry: Registry | None = None,
 ) -> DepthResult:
     """The depth variant on development days from date_from to date_to (None: the store's last
-    race day): `depth_table` of the run's `depth_rows` with the spec's odds bands, edges and
-    quantiles (Place and Wide depth only), the pool-size tertile cells, the flat-stake shares and
-    the pool totals at t, written to the run's private report under `out_dir` and recorded as one
-    RunRecord ("failed" when it raised). NotPreRegistered unless the registry has the shipped
-    spec frozen."""
+    development day): `depth_table` of the run's `depth_rows` with the spec's odds bands, edges
+    and quantiles (Place and Wide depth only), the pool-size tertile cells, the flat-stake shares
+    and the pool totals at t, written to the run's private report under `out_dir` and recorded as
+    one RunRecord ("failed" when the table has no cell, no combination having a final price, or
+    when it raised). NotPreRegistered unless the registry has the shipped spec frozen."""
     run = _preflight(registry, date_from, date_to, out_dir)
     spec = run.spec
 
@@ -1016,10 +1056,11 @@ def run_depth(
         table = pd.concat(tables, ignore_index=True)
         tertile_table = pd.concat(tertiles, ignore_index=True)
         totals = _totals_by_class(date_from, date_to, races, spec, inputs)
+        status = "scored" if len(table) else "failed"  # no priced combination: no cell
         result = DepthResult(table, Path(), run.family_id, run.spec_hash, "", date_from, date_to,
-                             tertile_table, totals)  # fmt: skip
+                             tertile_table, totals, status)  # fmt: skip
         text = _depth_report(result, spec, check, pd.concat(counts, ignore_index=True))
-        return _depth_metrics(table, spec), "scored", text, result
+        return _depth_metrics(table, spec), status, text, result
 
     run_id, _, report, result = _recorded(
         run, VARIANT_DEPTH, (date_from, date_to), out_dir, STEMS[VARIANT_DEPTH], body
@@ -1034,14 +1075,10 @@ def _totals_by_class(
     spec: Mapping[str, Any],
     inputs: _Inputs,
 ) -> pd.DataFrame:
-    """Per pool at t (WIN, PLACE, QUINELLA) x class group: races, races with a total at t, and the
-    quantiles of the final total, the total at t and their ratio (#349's history). The totals
-    count toward the run's pool_votes input and the day files read toward its odds_timeseries."""
-    inputs.add_files("odds_timeseries", _day_files(date_from, date_to))
-    totals = pool_totals(
-        date_from=date_from, date_to=date_to, minutes_before=spec["minutes_before"]
-    )
-    inputs.add("pool_votes", totals)
+    """Per pool at t (WIN, PLACE, QUINELLA) x class group: races, races with a final total, races
+    with a total at t, and the quantiles of the final total, the total at t and their ratio
+    (#349's history). The pool rows and day-file rows read count toward the run's inputs."""
+    totals = _pool_totals(date_from, date_to, spec["minutes_before"], inputs)
     totals = totals.loc[totals["pool"].isin(list(AT_T_POOLS)).to_numpy()]
     totals = totals.merge(_race_groups(races, spec["exclude_status"]), on="race_id")
     rows = []
@@ -1058,7 +1095,8 @@ def _totals_by_class(
             strict=True,
         ):
             rows.append({"pool": pool, "class_group": group, "quantile": q,
-                         "n_races": len(cell), "n_at_t": int(np.isfinite(at_t).sum()),
+                         "n_races": len(cell), "n_final": int(np.isfinite(final).sum()),
+                         "n_at_t": int(np.isfinite(at_t).sum()),
                          "final_yen": f, "at_t_yen": a, "at_t_share": r})  # fmt: skip
     return pd.DataFrame(rows)
 
@@ -1152,9 +1190,11 @@ def run_coplacer(
     paying combination given the race's realised co-placers by the spec's
     `place_wide.co_placer.rule` (module docstring), per pool x class group x odds band, with the
     rule checked against every eligible paid dividend (refunds and the races of an excluded
-    status aside), per pool: a paid combination without its votes or final price is one the rule
-    does not reproduce. Recorded "failed" when either pool's share is below the spec's
-    `place_wide.co_placer.min_rule_match` (or the pool has no payout), or when it raised."""
+    status aside), per pool, sum W taken from the confirmed votes of the race's paying
+    combinations: a paid combination without its votes or final price is one the rule does not
+    reproduce, and only one when its votes are there. Recorded "failed" when either pool's share
+    is below the spec's `place_wide.co_placer.min_rule_match` (or the pool has no payout), or
+    when it raised."""
     run = _preflight(registry, date_from, date_to, out_dir, spec_name)
     spec = run.spec
     bands = {p: spec["odds_bands"][p] for p in CO_PLACER}
@@ -1172,12 +1212,13 @@ def run_coplacer(
                               exclude_status=spec["exclude_status"])  # fmt: skip
             month = ((day >= pd.Timestamp(a)) & (day <= pd.Timestamp(b))).to_numpy(dtype=bool)
             parts.append(coplacer_rows(rows, paid.loc[month], rates=rates, edges=spec["edges"],
-                                       share_lost=spec["share_lost"], rule=rule))  # fmt: skip
+                                       share_lost=spec["share_lost"], rule=rule,
+                                       votes=votes))  # fmt: skip
         rows = pd.concat(parts, ignore_index=True)
         dividend = rows["dividend"].to_numpy(dtype=float)
-        priced = rows["class_group"].notna().to_numpy(dtype=bool)
-        jra = _shares(rows, rows["jra_dividend"].to_numpy(dtype=float) == dividend)
-        core = _shares(rows, rows["core_dividend"].to_numpy(dtype=float) == dividend)
+        priced = rows["class_group"].notna().to_numpy(dtype=bool)  # its votes and final price
+        jra = _shares(rows, priced & (rows["jra_dividend"].to_numpy(dtype=float) == dividend))
+        core = _shares(rows, priced & (rows["core_dividend"].to_numpy(dtype=float) == dividend))
         registered = jra if rule == "jra" else core
         coverage = _shares(rows, priced)
         n_paid = {p: int((rows["pool"].to_numpy() == p).sum()) for p in CO_PLACER}
@@ -1344,6 +1385,8 @@ def _depth_report(
             result.date_from,
             result.date_to,
         ),
+        f"Status: **{result.status}** (failed when no combination has a final price: no cell).",
+        "",
         "## The pool's definition",
         "",
         "V is the `__pool__` row's (votes - refund_votes) x 100, W the combination's votes x 100. "
@@ -1428,7 +1471,8 @@ def _coplacer_report(result, rows, spec, run, date_from, date_to, gate) -> str:
         f"The registered rule, per yen: {registered}, broken to 10 yen, at least 110, V net of "
         "refunds, P the race's paying combinations, r the base payout rate (boosted days are not "
         "adjusted). jra_rule_match and core_rule_match: the two rules' shares. Every eligible "
-        "paid combination counts; one without its votes or final price is not reproduced. Gate: "
+        "paid combination counts; sum W comes from the confirmed votes of the race's paying "
+        "combinations, and one without its votes or final price is not reproduced. Gate: "
         f"each pool's share by the registered rule >= {gate}.",
         "",
         *_markdown(check),
@@ -1481,13 +1525,16 @@ class VariantRun:
 def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] = ()) -> str:
     """The public experiment report (docs/experiment-report.md headings): what ran, the identity
     and worked arithmetic on invented numbers, every figure from the data withheld (D21).
-    `variants` lists the runs to show (every run of the family, failures included); without it,
-    the depth run of `result` alone."""
+    `variants` lists the runs to show (every run of the study's families, failures included);
+    without it, the depth run of `result` alone. `result.report_path` names the header's private
+    report (an empty name: none). The #489 follow-up says the ticket can close only when a
+    scored co-placer run of the v2 family (COPLACER_V2's) is listed."""
     runs = list(variants) or [VariantRun(VARIANT_DEPTH, "scored", result.run_id)]
 
     def line(v: VariantRun) -> str:
         other = v.family_id not in (None, result.family_id)
-        family = f" (family `{v.family_id}`, spec sha256 `{v.spec_hash}`)" if other else ""
+        spec = "" if v.spec_hash is None else f", spec sha256 `{v.spec_hash}`"
+        family = f" (family `{v.family_id}`{spec})" if other else ""
         commit = "" if v.commit is None else f" at `{v.commit[:7]}`"
         report = "" if v.report is None else f", private report `{v.report}`"
         return (
@@ -1497,11 +1544,22 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
 
     listed = [line(v) for v in runs]
     report = Path(result.report_path).name
-    validated = [v for v in runs if v.variant == VARIANT_COPLACER and v.status == "scored"]
+    where = (
+        f"in the private report `{report}` under `$HORSETRACK_DATA_DIR/reports/`"
+        if report
+        else "in the latest depth run's private report under `$HORSETRACK_DATA_DIR/reports/` "
+        "(not in the report folder this page was written from)"
+    )
+    v2_family = load_spec(COPLACER_V2)[0]  # #489: only a scored co-placer run of v2 closes it
+    validated = [
+        v
+        for v in runs
+        if v.variant == VARIANT_COPLACER and v.status == "scored" and v.family_id == v2_family
+    ]
     coplacer_follow_up = (
         [
             "- #489, the co-placer re-registration: done here by family "
-            f"`{validated[-1].family_id}`, whose co-placer run is scored; the ticket can close."
+            f"`{v2_family}`, whose co-placer run is scored; the ticket can close."
         ]
         if validated
         else [
@@ -1519,9 +1577,9 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
             f"{result.date_from.isoformat()} to the run's last day (a span of the store: "
             f"{WITHHELD}), development days only, confirmed vote and odds records only. The "
             "JRA-VAN store is licensed: every figure computed from it is "
-            f"{WITHHELD}, in the private report `{report}` under `$HORSETRACK_DATA_DIR/reports/`. "
-            "A run's private report is named in its line below where it carries the run's id "
-            "(its first 16 hex digits); the first invocation's runs named theirs by the spec hash.",
+            f"{WITHHELD}, {where}. A run's private report is named in its line below where the "
+            "report folder holds it: `<stem>-<first 16 hex digits of the run id>.md`, or for "
+            "the first invocation's runs `<stem>-<first 12 hex digits of the spec hash>.md`.",
             "",
             "## Hypothesis",
             "",
@@ -1620,16 +1678,15 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
 pool_depth_app = typer.Typer(no_args_is_help=True, help="Pool depth and stake capacity (#432).")
 
 
-def _last_store_day() -> date:
-    """The last race day the jravan races table holds, from its footer statistics (no row)."""
-    meta = pq.ParquetFile(_store_path("races")).metadata
-    days = [
-        meta.row_group(g).column(c).statistics.max
-        for g in range(meta.num_row_groups)
-        for c in range(meta.num_columns)
-        if meta.row_group(g).column(c).path_in_schema == "race_date"
-    ]
-    return max(days)
+def _last_development_day(date_from: date) -> date:
+    """The last race day of the jravan races table from date_from on that `is_holdout_day` does
+    not lock: the max of its race_date column scanned under `file_development_filter` (`_scan`),
+    so no holdout day reaches Python and none can be the open span's end; ValueError when the
+    table has no such day."""
+    last = pc.max(_scan("races", ["race_date"], date_from, date.max).column("race_date")).as_py()
+    if last is None:
+        raise ValueError(f"the races table has no development day from {date_from.isoformat()}")
+    return last
 
 
 SPEC_HELP = f"the spec file under config/ ({', '.join(SPECS)})"
@@ -1657,9 +1714,10 @@ def run_command(
 ) -> None:
     """Run the variants the spec registers (SPECS: pool_depth the three, pool_depth_coplacer_v2
     the co-placer one) on every development day from the spec's date_from to the store's last
-    race day, record each run, rewrite the public report from every run of the study's families
-    and update the spec's family's file and index entry in the committed summary, keeping every
-    other family's. The freeze is checked before the store is touched; the last race day is
+    development day, record each run, rewrite the public report from every run of the study's
+    families merged by run id into the runs it already lists (`family_runs`), and update the
+    spec's family's file and index entry in the committed summary, keeping every other
+    family's. The freeze is checked before the store is touched; the last development day is
     looked up inside each recorded attempt. Prints run identities and file names only; exits 1
     when a run failed."""
     try:
@@ -1680,7 +1738,7 @@ def run_command(
         VARIANT_COPLACER: functools.partial(run_coplacer, spec_name=spec_name),
         VARIANT_EXACTA: run_exacta_impact,
     }
-    reports, failed = {}, False
+    failed = False
     for variant in SPECS[spec_name]:
         try:
             result = runners[variant](
@@ -1695,24 +1753,26 @@ def run_command(
             continue
         status = getattr(result, "status", "scored")
         failed = failed or status == "failed"
-        reports[result.run_id] = result.report_path.name
         typer.echo(f"{variant}: {status} run_id={result.run_id} report={result.report_path.name}")
-    families = [load_spec(name)[0] for name in SPECS]
-    depth = _latest_depth(registry, reports)
-    if public and depth is not None:
+    if public:
         doc = env.repo_root() / "docs" / "experiments" / "pool-depth-japan.md"
-        runs = family_runs(registry, families, reports, folder)
-        write_report(doc, render_public_report(depth, variants=runs), sources=())
-        typer.echo(f"wrote {doc.relative_to(env.repo_root())}")
+        published = published_runs(doc.read_text(encoding="utf-8")) if doc.is_file() else []
+        families = [load_spec(name)[0] for name in SPECS]
+        runs = family_runs(registry, families, folder, published)
+        depth = _latest_depth(registry, runs)
+        if depth is not None:
+            write_report(doc, render_public_report(depth, variants=runs), sources=())
+            typer.echo(f"wrote {doc.relative_to(env.repo_root())}")
     update_summary(registry, [family], summary_dir(COUNTRY))
     typer.echo(f"updated the committed summary of {family}")
     if failed:
         raise typer.Exit(1)
 
 
-def _latest_depth(registry: Registry, reports: Mapping[str, str]) -> DepthResult | None:
-    """The study's latest scored depth run, as the public report names it (no table), or None:
-    its private report is the one `reports` names, else `pool-depth-japan-<id16>.md`."""
+def _latest_depth(registry: Registry, runs: Sequence[VariantRun]) -> DepthResult | None:
+    """The study's latest scored depth run in the registry, as the public report names it (no
+    table), or None: its private report is the one its entry of `runs` (`family_runs`) names,
+    else none (an empty name)."""
     family, _ = load_spec(SPEC_NAME)
     scored = [
         r for r in registry.records(family) if r.variant == VARIANT_DEPTH and r.status == "scored"
@@ -1721,32 +1781,74 @@ def _latest_depth(registry: Registry, reports: Mapping[str, str]) -> DepthResult
         return None
     record = scored[-1]
     run_id = _run_id(record)
-    report = Path(reports.get(run_id, f"{STEMS[VARIANT_DEPTH]}-{run_id[:16]}.md"))
+    named = next((v.report for v in runs if v.run_id == run_id), None)
     days = [date.fromisoformat(record.params[k]) for k in ("date_from", "date_to")]
-    return DepthResult(pd.DataFrame(), report, family, record.params["spec_hash"], run_id, *days)
+    return DepthResult(pd.DataFrame(), Path(named or ""), family, record.params["spec_hash"],
+                       run_id, *days)  # fmt: skip
+
+
+_HEADER = re.compile(r"^Family `(?P<family>[^`]+)`, spec sha256 `(?P<spec>[0-9a-f]{64})`", re.M)
+_RUN_LINE = re.compile(
+    r"^- `(?P<variant>[^`]+)`"
+    r"(?: \(family `(?P<family>[^`]+)`(?:, spec sha256 `(?P<spec>[0-9a-f]{64})`)?\))?"
+    r"(?: at `(?P<commit>[0-9a-f]+)`)?"
+    r": (?P<status>[a-z]+), registry run `(?P<run_id>[0-9a-f]{64})`"
+    r"(?:, private report `(?P<report>[^`]+)`)?;",
+    re.M,
+)
+
+
+def published_runs(text: str) -> list[VariantRun]:
+    """The runs a public report (`render_public_report`) lists, in its order: variant, status,
+    run id, private report and commit, and the family and spec hash (a line naming none is of
+    the header's family and spec)."""
+    header = _HEADER.search(text)
+    family, spec = (header["family"], header["spec"]) if header else (None, None)
+    out = []
+    for m in _RUN_LINE.finditer(text):
+        own = m["family"] or family
+        out.append(VariantRun(m["variant"], m["status"], m["run_id"], m["report"], own,
+                              m["spec"] or (spec if own == family else None),
+                              m["commit"]))  # fmt: skip
+    return out
+
+
+def _private_report(folder: Path | None, run: VariantRun, first: bool) -> str | None:
+    """The run's private report where `folder` holds it: `<stem>-<first 16 hex of the run
+    id>.md`, or, for the first run of its family and variant (the first invocation named its
+    reports by the spec hash), `<stem>-<first 12 hex of the spec hash>.md`; else None."""
+    if folder is None or run.variant not in STEMS:
+        return None
+    stem = STEMS[run.variant]
+    names = [f"{stem}-{run.run_id[:16]}.md"]
+    if first and run.spec_hash:
+        names.append(f"{stem}-{run.spec_hash[:12]}.md")
+    return next((n for n in names if (Path(folder) / n).is_file()), None)
 
 
 def family_runs(
     registry: Registry,
     families: Sequence[str],
-    reports: Mapping[str, str] | None = None,
     folder: Path | None = None,
+    published: Sequence[VariantRun] = (),
 ) -> list[VariantRun]:
-    """Every run of `families` in the registry, in append order, failures included, with its
-    family, spec hash and commit, and its private report's name where `reports` (run id -> file
-    name) gives it or `folder` holds `<STEMS[variant]>-<first 16 hex of the run id>.md`."""
-    reports = {} if reports is None else reports
-    out = []
+    """Every run of `families` in the registry, failures included, merged by run id into the
+    runs a public report already lists (`published`, kept in their order, each run once): a run
+    the registry holds is listed from it (its family, spec hash and commit), one only
+    `published` lists keeps its line, and the registry's other runs follow in append order.
+    Each names its private report only where `folder` holds it (`_private_report`)."""
+    runs = {v.run_id: v for v in published}
     for record in registry.records():
         if record.family_id in families:
             run_id = _run_id(record)
-            report = reports.get(run_id)
-            named = f"{STEMS[record.variant]}-{run_id[:16]}.md"
-            if report is None and folder is not None and (Path(folder) / named).is_file():
-                report = named
-            out.append(VariantRun(record.variant, record.status, run_id, report,
-                                  record.family_id, record.params.get("spec_hash"),
-                                  record.git_sha))  # fmt: skip
+            runs[run_id] = VariantRun(record.variant, record.status, run_id, None,
+                                      record.family_id, record.params.get("spec_hash"),
+                                      record.git_sha)  # fmt: skip
+    out, seen = [], set()
+    for run in runs.values():
+        first = (run.family_id, run.variant) not in seen
+        seen.add((run.family_id, run.variant))
+        out.append(replace(run, report=_private_report(folder, run, first)))
     return out
 
 

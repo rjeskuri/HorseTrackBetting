@@ -1617,8 +1617,9 @@ def n_priced(races: list[Race], pool: str) -> int:
 @pytest.mark.parametrize("table", ["pool_votes", "final_odds"])
 def test_day_before_records_are_not_final(tmp_path, data_dir, table):
     """A race whose `table` records are the day before's only (データ区分 2, 前日売最終) has no
-    final money: no final_yen in pool_totals (for pool_votes), no depth row and no exacta row.
-    Confirmed records (4 確定, and 5 確定(月曜)) count."""
+    final money: no final_yen in pool_totals (for pool_votes; its T-2 capture still gives its
+    row, final_yen NaN and at_t_yen the capture's), no depth row and no exacta row. Confirmed
+    records (4 確定, and 5 確定(月曜)) count."""
     registry, spec = frozen_registry(tmp_path)
     races = run_races(JUNE, range(9))
     races[1].votes_kubun = races[1].board_kubun = "5"
@@ -1629,6 +1630,10 @@ def test_day_before_records_are_not_final(tmp_path, data_dir, table):
         held.board_kubun = "2"
     kept = [r for r in races if r is not held]
     write_store(data_dir, races)
+    at_t = {(r.race_id, "WIN"): r.pool_yen("WIN") - 50_000 - 700 * i for i, r in enumerate(races)}
+    for day in JUNE:
+        write_day(data_dir, day, [capture(r, "WIN", 3, at_t[(r.race_id, "WIN")])
+                                  for r in races if r.day == day])  # fmt: skip
     out_dir = data_dir / "reports"
 
     if table == "pool_votes":
@@ -1639,6 +1644,15 @@ def test_day_before_records_are_not_final(tmp_path, data_dir, table):
         for r in kept:
             for p in r.pool_votes:
                 assert got[(r.race_id, p)][0] == pytest.approx(r.pool_yen(p)), (r.race_id, p)
+                want, at = at_t.get((r.race_id, p)), got[(r.race_id, p)][1]
+                assert math.isnan(at) if want is None else at == pytest.approx(want), (r.race_id, p)
+        # the day-before record drops the final total, not the race's capture at t
+        mine = totals_by_key(totals.loc[totals["race_id"] == held.race_id])
+        assert (held.race_id, "WIN") in mine, "the T-2 capture was dropped with the final total"
+        final, at = mine[(held.race_id, "WIN")]
+        assert math.isnan(final), final
+        assert at == pytest.approx(at_t[(held.race_id, "WIN")]), at
+        assert all(math.isnan(a) for (_, p), (_, a) in mine.items() if p != "WIN"), mine
 
     result = depth.run_depth(**JUNE_SPAN, out_dir=out_dir, registry=registry)
     assert_depth_table(result.table, run_expected(kept, spec), spec["edges"])
@@ -2556,3 +2570,380 @@ def test_the_shipped_v2_spec_is_v1_with_the_core_rule_alone(tmp_path):
     json.dumps(spec, allow_nan=False)
     registry = Registry(tmp_path / "r.jsonl", holdout_log=tmp_path / "h.jsonl")
     assert registry.freeze_family(V2_FAMILY, spec) == _spec_hash(spec) == V2_HASH
+
+
+# --- review fix round 2: the public run history, the gates and the private report names ---------
+#
+# Contract added here (interfaces the tests call, beyond the ones above):
+# - `horsetrack japan pool-depth run` (public) writes `<env.repo_root()>/docs/experiments/
+#   pool-depth-japan.md` (the tests point `env.repo_root` at a stand-in root). The report already
+#   there is merged by run id before rendering: a run the registry holds is listed from the
+#   registry, a run only the existing report lists keeps its line (variant, status, family), and
+#   each run id is listed once.
+# - The #489 follow-up says the ticket "can close" only when a scored co-placer run of family
+#   japan-pool-depth-coplacer-v2 is listed; otherwise the report says the Place and Wide capacity
+#   is "unvalidated".
+# - A depth run with no eligible cell (no priced combination in any pool) is recorded failed, so it
+#   never becomes the public report's latest scored depth run.
+# - The co-placer rule check takes sum W from the confirmed votes of the race's paying
+#   combinations: a paid combination without its final price is one miss, and only one.
+# - `pool_totals`: a race and pool with a capture at t but no confirmed final record keeps its row,
+#   final_yen NaN and at_t_yen the capture's.
+# - The public report names a private report only when the file is in the report folder:
+#   `<stem>-<first 16 hex of the run id>.md`, or a first-invocation run's
+#   `<stem>-<first 12 hex of the spec hash>.md`; otherwise it names none.
+# - `date_to=None` (the command's span) resolves to the store's last development day, the last
+#   race day `is_holdout_day("japan", d)` does not lock, and params.date_to records that day.
+
+V1_FAMILY = "japan-pool-depth-v1"
+PUBLIC = Path("docs") / "experiments" / "pool-depth-japan.md"
+REPORT_NAME = re.compile(
+    r"(?:pool-depth-japan|pool-depth-coplacer-japan|exacta-impact-history-japan)-[0-9a-f]{12,16}\.md"
+)
+RUN_ID_IN_LINE = re.compile(r"registry run `([0-9a-f]{64})`")
+
+
+@pytest.fixture
+def public_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> abc.Iterator[Path]:
+    """A stand-in repository root, however the command resolves it (`env.repo_root`): the public
+    report goes to its docs/experiments/pool-depth-japan.md; the repository's own report must come
+    out unchanged."""
+    import horsetrack.cli  # noqa: F401 - before the patch: some modules read the root on import
+
+    real = REPO / PUBLIC
+    before = real.read_bytes() if real.is_file() else None
+    root = (tmp_path / "repo").resolve()
+    (root / PUBLIC).parent.mkdir(parents=True)
+    monkeypatch.setattr(env, "repo_root", lambda: root)
+    yield root
+    after = real.read_bytes() if real.is_file() else None
+    assert after == before, "the command wrote the repository's public report"
+
+
+def invoke_public(*args: str):
+    from horsetrack.cli import app
+
+    result = CliRunner().invoke(app, ["japan", "pool-depth", "run", *args])
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        repr(result.exception),
+        output_of(result),
+    )
+    return result
+
+
+def run_lines(text: str) -> dict[str, tuple[str, str, bool]]:
+    """The public report's run lines: run id -> (variant, status, whether the line names the v2
+    family); a run id listed twice fails."""
+    out: dict[str, tuple[str, str, bool]] = {}
+    for line in text.splitlines():
+        ids = RUN_ID_IN_LINE.findall(line)
+        if not ids:
+            continue
+        assert len(ids) == 1, line
+        variant = re.match(r"- `([^`]+)`", line)
+        status = re.search(r": (scored|failed|rejected|adopted)\b", line)
+        assert variant and status, line
+        assert ids[0] not in out, f"run {ids[0]} listed twice"
+        out[ids[0]] = (variant.group(1), status.group(1), f"`{V2_FAMILY}`" in line)
+    return out
+
+
+def marks_489_done(text: str) -> bool:
+    """Whether the #489 follow-up says the co-placer re-registration is done (the ticket can
+    close) rather than the Place and Wide capacity unvalidated; exactly one of them holds."""
+    lines = [line for line in text.splitlines() if "#489" in line]
+    assert lines, "the public report has no #489 follow-up"
+    done = any("can close" in line for line in lines)
+    assert done != ("unvalidated" in text), lines
+    return done
+
+
+def header(text: str) -> str:
+    """The public report before its first section: where it names the latest depth run's
+    private report."""
+    return text.split("\n## ", 1)[0]
+
+
+def registry_runs(registry: Registry) -> list[tuple[str, str, str, str]]:
+    """(run id, family, variant, status) of every run in append order, from the registry file."""
+    out = []
+    for line in registry.path.read_bytes().splitlines():
+        entry = json.loads(line)
+        if entry["kind"] == "run":
+            record = entry["record"]
+            out.append((entry["run_id"], record["family_id"], record["variant"], record["status"]))
+    return out
+
+
+def finished_races() -> list[Race]:
+    return [finished(r, i) for i, r in enumerate(run_races(JUNE, range(9)))]
+
+
+def invented_history() -> str:
+    """A public report of invented runs, as an earlier invocation wrote it: v1's three variants
+    (one failed depth run), a private report named on some lines, and a scored v2 co-placer run."""
+    v1, a1, b2, c3 = _spec_hash(shipped_spec()), "a1" * 20, "b2" * 20, "c3" * 20
+    ids = [hashlib.sha256(f"t432-invented-run-{i}".encode()).hexdigest() for i in range(5)]
+    named = {i: f"pool-depth-coplacer-japan-{ids[i][:16]}.md" for i in (1, 3)}
+    runs = [
+        depth.VariantRun("depth", "scored", ids[0], None, V1_FAMILY, v1, a1),
+        depth.VariantRun("co-placer", "failed", ids[1], named[1], V1_FAMILY, v1, a1),
+        depth.VariantRun("exacta-own-impact", "scored", ids[2], None, V1_FAMILY, v1, a1),
+        depth.VariantRun("co-placer", "scored", ids[3], named[3], V2_FAMILY, V2_HASH, b2),
+        depth.VariantRun("depth", "failed", ids[4], None, V1_FAMILY, v1, c3),
+    ]
+    result = depth.DepthResult(pd.DataFrame(), Path(f"pool-depth-japan-{ids[0][:16]}.md"),
+                               V1_FAMILY, v1, ids[0], PRICE_ERA, date(2019, 6, 8))  # fmt: skip
+    return depth.render_public_report(result, variants=runs)
+
+
+@pytest.mark.parametrize("history", ["committed", "invented"])
+def test_a_public_rerun_from_a_fresh_registry_keeps_the_published_runs(
+    data_dir, summary_folder, public_repo, history
+):
+    """The public report already lists runs (the repository's committed report, or invented
+    ones) this machine's registry does not hold, a scored v2 co-placer run among them. The
+    default command, its registry holding new v1 runs only (v1's co-placer failed), keeps every
+    published run with its variant and status, keeps #489 done, adds the new runs, and a second
+    rerun lists each run once."""
+    text = (REPO / PUBLIC).read_text("utf-8") if history == "committed" else invented_history()
+    published = run_lines(text)
+    assert len(published) >= 5 and any(v2 and s == "scored" for _, s, v2 in published.values())
+    assert marks_489_done(text)
+    doc = public_repo / PUBLIC
+    doc.write_text(text, encoding="utf-8")
+    spec = shipped_spec()
+    registry = default_registry("japan")
+    registry.freeze_family(spec["family_id"], spec)
+    races = finished_races()
+    write_store(data_dir, races)
+    pay_by_core_rule(data_dir, races)  # v1's rule reproduces no payout: its co-placer run fails
+
+    for _ in range(2):
+        invoke_public()
+
+        runs = registry_runs(registry)
+        assert statuses(registry, "co-placer") == ["failed"]
+        assert {family for _, family, _, _ in runs} == {V1_FAMILY} and len(runs) == 3
+        listed = run_lines(doc.read_text("utf-8"))
+        lost = sorted(set(published) - set(listed))
+        assert not lost, f"published runs dropped from the public report: {lost}"
+        for run_id, (variant, status, v2) in published.items():
+            assert listed[run_id] == (variant, status, v2), run_id
+        new = {run_id: (variant, status) for run_id, _, variant, status in runs}
+        assert {k: listed.get(k, (None, None, False))[:2] for k in new} == new
+        assert set(listed) == set(published) | set(new)
+        assert marks_489_done(doc.read_text("utf-8")), "the v2 validation was dropped"
+
+
+V2_ID = hashlib.sha256(b"t432-v2-coplacer").hexdigest()
+V1_ID = hashlib.sha256(b"t432-v1-coplacer").hexdigest()
+
+
+CLOSES_489 = [  # the runs listed, and whether #489 is done
+    ((), False),
+    ((("co-placer", "scored", V1_ID, V1_FAMILY),), False),
+    ((("co-placer", "scored", V1_ID, None),), False),
+    ((("co-placer", "failed", V2_ID, V2_FAMILY),), False),
+    ((("co-placer", "scored", V1_ID, V1_FAMILY), ("co-placer", "failed", V2_ID, V2_FAMILY)), False),
+    ((("depth", "scored", V1_ID, V2_FAMILY),), False),
+    ((("co-placer", "scored", V2_ID, V2_FAMILY),), True),
+    ((("co-placer", "failed", V1_ID, V1_FAMILY), ("co-placer", "scored", V2_ID, V2_FAMILY),
+      ("depth", "scored", "d" * 64, V1_FAMILY)), True),
+]  # fmt: skip
+
+
+def test_only_a_scored_v2_coplacer_run_closes_489():
+    """#489 is the co-placer re-registration: a scored co-placer run of family
+    japan-pool-depth-coplacer-v2 marks it done; a scored v1 co-placer run (one that cleared v1's
+    gate on a limited export), a failed v2 run or no co-placer run does not."""
+    v1_hash = _spec_hash(shipped_spec())
+    report = Path("pool-depth-japan-0123456789abcdef.md")
+    result = depth.DepthResult(pd.DataFrame(), report, V1_FAMILY, v1_hash, "e" * 64, PRICE_ERA,
+                               date(2019, 6, 30))  # fmt: skip
+    got = []
+    for runs, _ in CLOSES_489:
+        variants = [
+            depth.VariantRun(variant, status, run_id, None, family,
+                             V2_HASH if family == V2_FAMILY else v1_hash, "f" * 40)
+            for variant, status, run_id, family in runs
+        ]  # fmt: skip
+        got.append(marks_489_done(depth.render_public_report(result, variants=variants)))
+
+    wrong = [runs for (runs, done), seen in zip(CLOSES_489, got, strict=True) if seen is not done]
+    assert not wrong, wrong
+
+
+def test_a_depth_run_without_a_priced_combination_is_recorded_failed(tmp_path, data_dir):
+    """Races and confirmed votes, but only the day before's odds: no combination has a final
+    price, so the depth table has no cell and the run is recorded failed, not scored. With one
+    race's final odds the run is scored on that race's cells."""
+    registry, spec = frozen_registry(tmp_path)
+    races = run_races(JUNE, range(9))
+    for race in races:
+        race.board_kubun = "2"
+    write_store(data_dir, races)
+    span = dict(**JUNE_SPAN, out_dir=data_dir / "reports", registry=registry)
+
+    run_quietly(depth.run_depth, **span)
+
+    assert statuses(registry, "depth") == ["failed"]
+    races[0].board_kubun = "4"
+    write_store(data_dir, races)
+    result = depth.run_depth(**span)
+    assert statuses(registry, "depth") == ["failed", "scored"]
+    assert_depth_table(result.table, run_expected([races[0]], spec), spec["edges"])
+
+
+def test_a_depth_run_without_cells_is_not_the_public_reports_latest(
+    data_dir, summary_folder, public_repo
+):
+    """A scored depth run, then a run on a store with only the day before's odds: the second is
+    recorded failed, and the public report still names the scored run's private report."""
+    spec = shipped_spec()
+    registry = default_registry("japan")
+    registry.freeze_family(spec["family_id"], spec)
+    races = finished_races()
+    write_store(data_dir, races)
+    first = invoke_public()
+    [scored] = re.findall(r"depth: scored run_id=([0-9a-f]{64})", output_of(first))
+    for race in races:
+        race.board_kubun = "2"
+    write_store(data_dir, races)
+
+    invoke_public()
+
+    assert statuses(registry, "depth") == ["scored", "failed"]
+    top = header((public_repo / PUBLIC).read_text("utf-8"))
+    assert f"pool-depth-japan-{scored[:16]}.md" in top, top
+    ids = [run_id for run_id, _, variant, _ in registry_runs(registry) if variant == "depth"]
+    assert [run_id[:16] in top for run_id in ids] == [True, False], top
+
+
+@pytest.mark.parametrize("k, status", [(3, "scored"), (8, "failed")])
+def test_a_wide_payout_without_its_final_price_is_one_miss(tmp_path, data_dir, k, status):
+    """Fifty Place and Wide races, three Wide payouts each, every payout by JRA's rule; in k of
+    them one Wide winner has its confirmed votes but no final price. sum W comes from the votes,
+    so the race's other payouts are still checked: each priceless payout is exactly one miss, Wide
+    reproduces (150 - k) / 150 and Place all. k = 3 (98%) is scored, k = 8 (94.7%) failed."""
+    registry, _ = frozen_registry(tmp_path)
+    races = coplacer_races(50)
+    assert [len(paying(r, "QUINELLA_PLACE")) for r in races] == [3] * 50
+    for i, race in enumerate(races[1::6][:k]):
+        winner = paying(race, "QUINELLA_PLACE")[i % 3]
+        race.odds["QUINELLA_PLACE"][winner] = None  # no final price; its votes stay
+    write_store(data_dir, races)
+
+    result = run_quietly(depth.run_coplacer, **JUNE_SPAN, out_dir=data_dir / "reports",
+                         registry=registry)  # fmt: skip
+
+    assert statuses(registry, "co-placer") == [status]
+    assert result is not None and result.status == status
+    assert float(result.rule_match["QUINELLA_PLACE"]) == pytest.approx((150 - k) / 150)
+    assert float(result.rule_match["PLACE"]) == 1.0
+
+
+def test_the_public_report_names_only_private_reports_that_exist(
+    data_dir, summary_folder, public_repo
+):
+    """The v2 command publishes the study's latest depth run, a v1 run. Its private report under
+    the run id's name is named; renamed to the first invocation's name (the spec hash's), that
+    file is named instead; deleted, no depth report is named. No private report the folder does
+    not hold is ever named."""
+    v1 = shipped_spec()
+    registry = default_registry("japan")
+    for spec in (v1, v2_spec()):
+        registry.freeze_family(spec["family_id"], spec)
+    races = finished_races()
+    write_store(data_dir, races)
+    pay_by_core_rule(data_dir, races)
+    folder = paths.reports_dir()
+    run = depth.run_depth(date_from=JUNE[0], date_to=JUNE[-1], out_dir=folder, registry=registry)
+    by_id = folder / f"pool-depth-japan-{run.run_id[:16]}.md"
+    legacy = folder / f"pool-depth-japan-{_spec_hash(v1)[:12]}.md"
+    assert Path(run.report_path) == by_id and not legacy.exists()
+
+    def publish() -> str:
+        invoke_public("--spec", V2)
+        text = (public_repo / PUBLIC).read_text("utf-8")
+        missing = sorted(n for n in REPORT_NAME.findall(text) if not (folder / n).is_file())
+        assert not missing, f"the public report names private reports never written: {missing}"
+        return text
+
+    assert by_id.name in header(publish())
+
+    by_id.rename(legacy)
+    text = publish()
+    assert legacy.name in header(text), header(text)
+    assert by_id.name not in text
+
+    legacy.unlink()
+    text = publish()
+    named = [n for n in REPORT_NAME.findall(text) if n.startswith("pool-depth-japan-")]
+    assert not named, named
+
+
+def trailing_store(
+    data: Path, trailing: tuple[date, ...], *, held: int = 1, after: bool = False
+) -> None:
+    """Development races on DEV_DAYS (and on DEV_AFTER with `after`), holdout races on
+    HOLDOUT_DAYS and on the `trailing` holdout days after the last development day, with their
+    time-series day files; `held` changes the holdout races' money and finishing order."""
+    development = [
+        finished(make_race(160 + i, DEV_DAYS[i % len(DEV_DAYS)], "KOK", 1 + i // len(DEV_DAYS),
+                           RUN_CLASSES[i % len(RUN_CLASSES)], 6 + i % 3), i)
+        for i in range(8)
+    ]  # fmt: skip
+    if after:
+        development.append(finished(make_race(169, DEV_AFTER, "KOK", 1, "C2", 7), 9))
+    holdout = [
+        finished(make_race(170 + i, d, "KOK", 1, ("G2", "L", "MAIDEN", "OP")[i % 4], 7,
+                           scale=1000 * held), 190 + i + 10 * held)
+        for i, d in enumerate((*HOLDOUT_DAYS, *trailing))
+    ]  # fmt: skip
+    races = [*development, *holdout]
+    write_store(data, races)
+    bump = {id(r): held for r in holdout}
+    for day in sorted({r.day for r in races}):
+        write_day(data, day, [capture(r, "WIN", 3, r.pool_yen("WIN") - 50_000 * bump.get(id(r), 1))
+                              for r in races if r.day == day])  # fmt: skip
+
+
+def test_the_open_span_ends_on_the_stores_last_development_day(
+    tmp_path, data_dir, stand_in_holdout
+):
+    """date_to None, as the command runs: the store's last race days are holdout days, after its
+    last development day. Each variant's params.date_to is the last development day, and
+    appending trailing holdout days or changing their rows and day files leaves params.date_to
+    and the run id as they were; a development day after them is the new last day."""
+    later = [DEV_DAYS[-1] + timedelta(days=k) for k in range(1, (DEV_AFTER - DEV_DAYS[-1]).days)]
+    trailing = tuple(d for d in later if stand_in_rule(d))[:2]
+    assert len(trailing) == 2 and all(holdout_module.is_holdout_day("japan", d) for d in trailing)
+
+    def identities(name: str, **store) -> dict[str, tuple[str, str]]:
+        registry, _ = frozen_registry(tmp_path, name)
+        trailing_store(data_dir, **store)
+        for variant in VARIANTS:
+            run_quietly(runner(variant), date_from=DEV_DAYS[0], date_to=None,
+                        out_dir=data_dir / "reports" / name, registry=registry)  # fmt: skip
+        out = {}
+        for line in registry.path.read_bytes().splitlines():
+            entry = json.loads(line)
+            if entry["kind"] == "run":
+                record = entry["record"]
+                assert record["status"] == "scored", (name, record["variant"], record["status"])
+                out[record["variant"]] = (entry["run_id"], record["params"]["date_to"])
+        assert set(out) == set(VARIANTS), (name, sorted(out))
+        return out
+
+    base = identities("base", trailing=trailing[:1])
+    assert {v: day for v, (_, day) in base.items()} == dict.fromkeys(
+        VARIANTS, DEV_DAYS[-1].isoformat()
+    ), base
+    assert identities("appended", trailing=trailing) == base, "a trailing holdout day changed it"
+    assert identities("refreshed", trailing=trailing, held=3) == base, "holdout rows changed it"
+
+    after = identities("development-after", trailing=trailing, after=True)
+    for variant in VARIANTS:
+        assert after[variant][1] == DEV_AFTER.isoformat(), (variant, after[variant])
+        assert after[variant][0] != base[variant][0], variant
