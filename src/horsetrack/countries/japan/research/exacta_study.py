@@ -62,20 +62,33 @@ MIN_STARTERS = 5
 # v2 (owner, 2026-11-26): the v1 families, frozen 2026-11-25, labelled #115's single
 # full-development lambda2 fit "in_fold". The relabelled specs are frozen under new ids beside
 # them; the registry is append-only, so v1 stays as frozen. Only the label and its text change.
-E1_ID = "japan/131-exacta-category-v2"
-E1_B1_ID = "japan/131-exacta-category-b1-v2"
-E1_B3_ID = "japan/131-exacta-category-b3-v2"
-C_ID = "japan/131-exacta-logscore-v2"
+E1_ID = "japan-131-exacta-category-v2"
+E1_B1_ID = "japan-131-exacta-category-b1-v2"
+E1_B3_ID = "japan-131-exacta-category-b3-v2"
+C_ID = "japan-131-exacta-logscore-v2"
 # E2 v3 (review of 0c39a8d): rule-v2 took its favourite from _COMMON's final Win odds, against
-# the signed spec's section 5 ("Selection uses only the board at t"). v3 changes only E2's
-# selection keys (_E2_SELECTION) and supersedes rule-v2, whose freeze stays in the registry.
-E2_ID = "japan/131-exacta-rule-v3"
+# the signed spec's section 5 ("Selection uses only the board at t"); v3 changed only E2's
+# selection keys. E2 v4 (review of 83684eb, owner 2026-11-27): v3's headline ranked "less
+# popular" by the lower tertile of pool totals within each logged day, so an early race was
+# classified with later races' totals. v4 takes "less popular" from the race card (E1's
+# popularity segment), reports the tertile as an agreement diagnostic only and drops the
+# 100-meeting gate. Each version supersedes the last; the v2 and v3 freezes stay in the registry.
+# Ids (#525, owner 2026-11-27): the registry refuses "/" in a family id, so the live families take
+# the "japan-131-..." form with the specs (and hashes) frozen under the legacy "japan/131-..." ids;
+# SUPERSEDES names the legacy records as they stand in the registry.
+# E2 v5 (GPT-6.2 Sol review round 5 of 2c73ca0): v4 inherited _COMMON's Win probabilities (#114's
+# out-of-fold calibration, built from final Win odds) and its eligibility (races with such rows):
+# look-ahead for a T-2 rule. v5 takes p_c(t) from the T-2 Win board's normalised implied shares
+# and scores every #130-logged development day with T-2 Win and exacta boards; nothing else
+# changes. v4's spec stays frozen under its #525 id (``superseded_specs``) and the legacy id.
+E2_V4_ID = "japan-131-exacta-rule-v4"
+E2_ID = "japan-131-exacta-rule-v5"
 SUPERSEDES = {
     E1_ID: "japan/131-exacta-category-v1",
     E1_B1_ID: "japan/131-exacta-category-b1-v1",
     E1_B3_ID: "japan/131-exacta-category-b3-v1",
     C_ID: "japan/131-exacta-logscore-v1",
-    E2_ID: "japan/131-exacta-rule-v2",
+    E2_ID: E2_V4_ID,
 }
 FITTED = "full_development"  # #115's one lambda2 fit over the development out-of-fold races
 LAMBDA2S = [FITTED, 1.0]
@@ -391,9 +404,10 @@ _SEGMENTS = {
 }
 
 
-# E2's selection keys (v3). Signed spec section 5: "at T-2 ... Selection uses only the board at
+# E2's selection keys (v4). Signed spec section 5: "at T-2 ... Selection uses only the board at
 # t. A selection variable taken from final odds is look-ahead"; section 6: the favourite's Win
-# odds are "at t for E2". primary_metric: the owner's reframe of 2026-11-27 on #131.
+# odds are "at t for E2". primary_metric: the owner's reframe of 2026-11-27 on #131. The
+# headline's "less popular" is section 6's race-card proxy, the rule segment_cells applies.
 _E2_SELECTION = {
     "selection_time": "T-2",
     "favourite": "lowest Win odds on the Win board at T-2 (the board at t), ties to the lowest "
@@ -402,16 +416,32 @@ _E2_SELECTION = {
     "Win board at T-2 (combo_category)",
     "scopes": {
         "all": "every scored race",
-        "headline": "favourite's Win odds at T-2 >= 3.0 and less popular; on #130 days, spec "
-        "section 6: 'the real exacta pool total exists (the odds log's investment row). There, "
-        'the lower tertile within each logged day defines "less popular"\'',
+        "headline": {
+            "rule": "favourite's Win odds at T-2 >= 3.0 and less popular; less popular = race_no "
+            "1-4 or a DEBUT/MAIDEN race, from the race card (E1's popularity segment)",
+            "fav_odds_min": 3.0,
+            "less_popular": {"race_no_max": 4, "race_classes": ["DEBUT", "MAIDEN"]},
+            "information_cutoff": {
+                "race_no": "race card",
+                "race_class": "race card",
+                "fav_win_odds": "T-2",
+            },
+        },
+    },
+    "diagnostics": {
+        "less_popular_agreement": "the lower tertile of exacta pool totals within each logged "
+        "day (the odds log's investment row), reported as its agreement with the race-card "
+        "proxy, not a selection variable: a whole-day tertile uses later races' totals",
     },
     "primary_metric": "expected return per 100 yen staked at the final dividend, takeout and "
     "breakage in, with its CI (owner reframe 2026-11-27 on #131: rank every option by expected "
     "return at the final price, CI beside it)",
-    "revision": "v3 (review of 0c39a8d, 2026-11-27): rule-v2 took the favourite from the lowest "
-    "final Win odds; v3 takes the favourite and the category from the board at T-2, as the "
-    "signed spec's sections 5 and 6 say, and changes nothing else",
+    "revision": 'v4 (review of 83684eb, 2026-11-27): rule-v3\'s headline took "less popular" '
+    "from the lower tertile of each logged day's pool totals, which later races set; v4 takes it "
+    "from the race card (race_no 1-4 or DEBUT/MAIDEN, E1's popularity segment), reports the "
+    "tertile as an agreement diagnostic only and scores the logged development days available "
+    "at each run with no meeting gate, and changes nothing else. v3 (review of 0c39a8d): the "
+    "favourite and the category from the board at T-2, not the final Win odds",
 }
 
 
@@ -433,6 +463,64 @@ def _e1_like(estimator: str, lambda2, estimand: str, **extra) -> dict:
         "interval": "meeting bootstrap of the estimand, 95% one-sided in each direction",
         **extra,
     }
+
+
+# E2's inputs, the keys in which v5 differs from v4. v5: p_c(t) and eligibility from the T-2
+# boards. v4's values are kept to freeze its spec under its #525 id (``superseded_specs``).
+_E2_V5_INPUTS = {
+    "win_probabilities": "normalised implied Win shares on the Win board at T-2 (1 / odds over "
+    "the race's sum of 1 / odds, over the starters on that board), fed to the discounted "
+    "Harville at the registered lambda2",
+    "data": "development race days only (is_holdout_day False, filtered before any outcome, "
+    "odds or dividend is read); every #130-logged development day whose log holds the Win "
+    "board and the exacta board at T-2, each race with both boards at T-2 scored; no row of a "
+    "fitted Win model is required",
+    "rule": "at T-2 buy exacta c of category X when q_c(t) / p_c(t) < k; q_c(t) from the exacta "
+    "board at t, p_c(t) discounted Harville on the normalised implied Win shares of the Win "
+    "board at t",
+    "revision": "v5 (GPT-6.2 Sol review round 5 of 2c73ca0, 2026-11-28): rule-v4 took p_c(t) from "
+    "#114's calibrated Win probabilities, built from final Win odds, and scored only races "
+    "with #114 rows: look-ahead for a T-2 rule. v5 takes p_c(t) from the normalised implied "
+    "Win shares on the T-2 Win board and scores every #130-logged development day with T-2 Win "
+    "and exacta boards, and changes nothing else. " + _E2_SELECTION["revision"],
+}
+_E2_V4_INPUTS = {
+    "win_probabilities": _COMMON["win_probabilities"],
+    "data": _COMMON["data"],
+    "rule": "at T-2 buy exacta c of category X when q_c(t) / p_c(t) < k; q_c(t) from the exacta "
+    "board at t, p_c(t) Harville on the Win board at t",
+    "revision": _E2_SELECTION["revision"],
+}
+
+
+def _e2(inputs: Mapping[str, str]) -> dict:
+    return {
+        **copy.deepcopy(_COMMON),
+        "estimator": "rule",
+        "members": [
+            {"category": c, "cut": k, "scope": s}
+            for c in ("fav_second", "no_fav")
+            for k in (0.6, 0.7, 0.8, 0.9)
+            for s in ("all", "headline")
+        ],
+        "cuts": [0.6, 0.7, 0.8, 0.9],
+        "stake_yen": 100,
+        "lambda2": FITTED,
+        "family_size": 16,
+        "judged_at": "final dividends, own impact from the payout identity with the race's "
+        "logged pool totals",
+        "benchmark": "no bet (loss 0)",
+        "scored_on": "#130-logged development days available at each run, with n and the CI, "
+        "re-scored as more days are logged",
+        **copy.deepcopy(_E2_SELECTION),
+        **inputs,
+    }
+
+
+def superseded_specs() -> dict[str, dict]:
+    """Superseded specs frozen again under their #525 ids, so each live ``supersedes`` names a
+    freeze in the registry: rule-v4, as frozen under "japan/131-exacta-rule-v4"."""
+    return {E2_V4_ID: {**_e2(_E2_V4_INPUTS), "supersedes": "japan/131-exacta-rule-v3"}}
 
 
 def family_specs() -> dict[str, dict]:
@@ -472,27 +560,6 @@ def family_specs() -> dict[str, dict]:
             "family_size": len(LAMBDA2S),
             "interval": "paired meeting bootstrap of the mean, 95% one-sided bounds",
         },
-        E2_ID: {
-            **copy.deepcopy(_COMMON),
-            "estimator": "rule",
-            "rule": "at T-2 buy exacta c of category X when q_c(t) / p_c(t) < k; q_c(t) from "
-            "the exacta board at t, p_c(t) Harville on the Win board at t",
-            "members": [
-                {"category": c, "cut": k, "scope": s}
-                for c in ("fav_second", "no_fav")
-                for k in (0.6, 0.7, 0.8, 0.9)
-                for s in ("all", "headline")
-            ],
-            "cuts": [0.6, 0.7, 0.8, 0.9],
-            "stake_yen": 100,
-            "min_meetings": 100,
-            "lambda2": FITTED,
-            "family_size": 16,
-            "judged_at": "final dividends, own impact from the payout identity with the race's "
-            "logged pool totals",
-            "benchmark": "no bet (loss 0)",
-            "scored_on": "#130-logged development meetings only, once there are min_meetings",
-            **copy.deepcopy(_E2_SELECTION),
-        },
+        E2_ID: _e2(_E2_V5_INPUTS),
     }
     return {fid: {**spec, "supersedes": SUPERSEDES[fid]} for fid, spec in specs.items()}

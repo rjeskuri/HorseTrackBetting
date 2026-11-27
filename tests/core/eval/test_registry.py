@@ -37,8 +37,7 @@ Contract pinned here (the coder implements what these tests call):
   index ``README.md``; the family files hold the family, E id, variant, status and per-fold metric,
   value, CI and n of each run, and nothing else from the record. A run with a source in
   ``WITHHELD_SOURCES`` (in any spelling) shows ``withheld (licensed source)`` in place of its
-  values, or is refused at append. A family id with "/" (#131) is written to the stem made by
-  joining its segments with "--"; the "summary file names" section pins the rule.
+  values, or is refused at append.
 - ``default_registry(country)`` stores at ``data_dir()/registry/<country>.jsonl`` and creates the
   directory.
 
@@ -53,7 +52,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -1149,179 +1148,6 @@ def test_a_licensed_source_in_another_spelling_is_still_withheld(tmp_path, sourc
     assert [num for num in PUBLIC_NUMBERS if shows_number(text, num)] == PUBLIC_NUMBERS
 
 
-# --------------------------------------------------------------------------- summary file names
-#
-# Ticket #131 froze families such as ``japan/131-exacta-category-v2`` in the append-only Japan
-# registry. ``write_summary`` names a family's file as follows (pinned here so the docs can name
-# the files): split the id at "/", every segment must itself be a safe stem
-# (``[A-Za-z0-9][A-Za-z0-9._-]*``), and the segments are joined with "--". An id without "/"
-# keeps its exact file name. Two families with the same stem, a family whose stem is
-# ``README``, or an id with an unsafe segment raise ``ValueError`` before any file is written.
-
-SAFE_STEM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-
-
-def write_families(tmp_path: Path, families: dict[str, float], name: str = "names") -> Path:
-    """Write the summary of a fresh registry holding one run per family (its value ``value``)
-    into a fresh directory, and return that directory."""
-    root = tmp_path / "registries" / name
-    root.mkdir(parents=True, exist_ok=True)
-    reg = Registry(root / "japan.jsonl", holdout_log=root / "holdout_log.jsonl")
-    for i, (family, value) in enumerate(families.items()):
-        reg.append(
-            make_record(
-                hypothesis_id=f"E{40 + i}",
-                family_id=family,
-                variant=f"var-{i}-x",
-                metrics=(fold("wf-1", "log_loss", value, None, None, 300 + i),),
-            )
-        )
-    out = tmp_path / "summaries" / name
-    out.mkdir(parents=True, exist_ok=True)
-    write_summary(reg, out)
-    return out
-
-
-def headings(path: Path) -> list[str]:
-    return [line for line in path.read_text(encoding="utf-8").splitlines() if line[:3] == "## "]
-
-
-SLASH_FAMILIES = [
-    ("japan/131-exacta-category-v2", "japan--131-exacta-category-v2", 0.4311),
-    ("japan/131-exacta-category-b1-v1", "japan--131-exacta-category-b1-v1", 0.5122),
-    ("japan/131-exacta-rule-v2", "japan--131-exacta-rule-v2", 0.6233),
-    ("hongkong/7", "hongkong--7", 0.7344),
-    ("a/b/c", "a--b--c", 0.8455),
-    ("Japan/E1.v2_x", "Japan--E1.v2_x", 0.9566),
-]
-
-
-@pytest.mark.parametrize(
-    ("family", "stem", "value"), SLASH_FAMILIES, ids=[s for _, s, _ in SLASH_FAMILIES]
-)
-def test_a_family_id_with_a_slash_writes_to_its_mapped_stem(tmp_path, family, stem, value):
-    out = write_families(tmp_path, {family: value})
-
-    assert sorted(p.name for p in out.iterdir()) == sorted([f"{stem}.md", "README.md"])
-    assert SAFE_STEM.fullmatch(stem)
-    assert headings(out / f"{stem}.md") == [f"## {family}"]
-    assert shows_number((out / f"{stem}.md").read_text(encoding="utf-8"), f"{value}")
-
-
-def test_the_index_lists_slash_families_under_their_id_and_links_the_mapped_file(tmp_path):
-    families = {family: value for family, _, value in SLASH_FAMILIES}
-    plain = {"FAM-alpha": 0.1177, "japan-v0-win-residual": 0.2288, "x--y": 0.3399}
-    stems = {family: stem for family, stem, _ in SLASH_FAMILIES} | {p: p for p in plain}
-    out = write_families(tmp_path, families | plain)
-
-    index = (out / "README.md").read_text(encoding="utf-8").splitlines()
-    entries = [line for line in index if line.startswith("- [")]
-    assert entries == [f"- [{f}]({stems[f]}.md)" for f in sorted(stems)]
-    on_disk = sorted(p.name for p in out.iterdir() if p.name != "README.md")
-    assert on_disk == sorted(f"{stem}.md" for stem in stems.values())
-    for family, value in (families | plain).items():
-        path = out / f"{stems[family]}.md"
-        assert headings(path) == [f"## {family}"]
-        assert shows_number(path.read_text(encoding="utf-8"), f"{value}"), family
-
-
-PLAIN_FAMILIES = [
-    "F1",
-    "FAM-alpha",
-    "japan-v0-win-residual",
-    "win5-carryover-v1",
-    "a.b_c-9",
-    "x--y",
-]
-
-
-@pytest.mark.parametrize("family", PLAIN_FAMILIES)
-def test_a_family_id_without_a_slash_keeps_its_exact_file_name(tmp_path, family):
-    alone = write_families(tmp_path, {family: 0.6421}, name="alone")
-    beside = write_families(
-        tmp_path, {family: 0.6421, "japan/131-exacta-logscore-v2": 0.1357}, name="beside"
-    )
-
-    assert sorted(p.name for p in alone.iterdir()) == sorted([f"{family}.md", "README.md"])
-    assert headings(alone / f"{family}.md") == [f"## {family}"]
-    # A slash family beside it changes neither its file name nor its bytes.
-    assert (beside / f"{family}.md").read_bytes() == (alone / f"{family}.md").read_bytes()
-
-
-SAFE_COMPANIONS = {"F-ok": 0.11, "ok/fine": 0.22}
-
-
-def assert_nothing_written(tmp_path: Path, bad: dict[str, float]) -> None:
-    """The safe companions write on their own (so the refusal is the bad ids' doing); with the
-    bad ids added, ``write_summary`` raises and leaves the directory as it was."""
-    control = write_families(tmp_path, SAFE_COMPANIONS, name="control")
-    assert sorted(p.name for p in control.iterdir()) == ["F-ok.md", "README.md", "ok--fine.md"]
-
-    families = SAFE_COMPANIONS | bad
-    root = tmp_path / "registries" / "refused"
-    root.mkdir(parents=True, exist_ok=True)
-    reg = Registry(root / "japan.jsonl", holdout_log=root / "holdout_log.jsonl")
-    for i, (family, value) in enumerate(families.items()):
-        reg.append(
-            make_record(
-                family_id=family,
-                variant=f"var-{i}-r",
-                metrics=(fold("wf-1", "log_loss", value, None, None, 200),),
-            )
-        )
-    out = tmp_path / "summaries" / "refused"
-    out.mkdir(parents=True)
-    (out / "README.md").write_text("sentinel index\n", encoding="utf-8")
-    (out / "keep.md").write_text("sentinel family\n", encoding="utf-8")
-    before = {p.name: p.read_bytes() for p in out.iterdir()}
-
-    with pytest.raises(ValueError):
-        write_summary(reg, out)
-
-    assert {p.name: p.read_bytes() for p in out.iterdir()} == before
-
-
-# Each row: families refused together; the safe companions beside them are not written either.
-COLLIDING = [
-    pytest.param(["japan/131-x", "japan--131-x"], id="slash-vs-plain"),
-    pytest.param(["a--b/c", "a/b--c"], id="slash-vs-slash"),
-    pytest.param(["README"], id="readme"),
-]
-
-
-@pytest.mark.parametrize("bad", COLLIDING)
-def test_families_with_the_same_stem_or_the_index_stem_are_refused(tmp_path, bad):
-    assert_nothing_written(tmp_path, {f: 0.33 + i / 100 for i, f in enumerate(bad)})
-
-
-UNSAFE = [
-    "/japan",
-    "japan/",
-    "/",
-    "japan//x",
-    "japan/..",
-    "japan/../x",
-    "../x",
-    "japan/.",
-    "japan/.hidden",
-    "japan/-x",
-    "japan/a b",
-    "japan/x:y",
-    "japan\\x",
-    "japan/é",
-    "japan/x\ny",
-    "a b",
-    ".x",
-    "-x",
-    "..",
-]
-
-
-@pytest.mark.parametrize("bad", UNSAFE, ids=[repr(u) for u in UNSAFE])
-def test_a_family_id_unsafe_after_the_mapping_is_refused(tmp_path, bad):
-    assert_nothing_written(tmp_path, {bad: 0.33})
-
-
 # --------------------------------------------------------------------------- default registry
 
 
@@ -1340,3 +1166,292 @@ def test_default_registry_lives_in_the_data_directory(tmp_path, monkeypatch):
         assert path.is_file()
         assert Registry(path, holdout_log=tmp_path / "no-log.jsonl").records() == [record]
         assert default_registry(country).records() == [record]
+
+
+# --------------------------------------------------------------------------- #525 family file names
+#
+# Contract (#525, owner's ruling on the ticket): ``append`` and ``freeze_family`` refuse a family id
+# the summary cannot name: one that is not a safe file stem (an ASCII letter or digit, then letters,
+# digits, ``.``, ``_`` or ``-``), or that is the index stem ``README`` in any case (macOS file names
+# ignore case). ``append`` also refuses a new family whose summary file a different family already
+# holds. Lines already in a registry are never edited: ``write_summary`` names a legacy family by
+# mapping each ``/`` to ``--``, shows the original id in its file and in the index link, and raises
+# ``ValueError`` before writing any file when a mapped name is still unsafe or two families would
+# share one file (ignoring case).
+
+UNNAMEABLE_FAMILIES = [
+    "a/b",
+    "a/b/c",
+    "japan/131-exacta-category-v1",
+    "japan/131-exacta-category-v1/max-test",
+    "/x",
+    "x/",
+    "../x",
+    "README",
+    "readme",
+    "Readme",
+    ".hidden",
+    "-lead",
+    "_lead",
+    "a b",
+    "a\\b",
+    "a:b",
+    "F1\n",
+    "ペース",
+]
+NAMEABLE_FAMILIES = [
+    "F1",
+    "0lead",
+    "japan-131-exacta-category-v2",
+    "japan-131-exacta-category-v1--max-test",
+    "x.y_z-9",
+    "READMEX",
+    "README-v2",
+]
+
+
+def seal_lines(path: Path, entries: list[dict]) -> None:
+    """Append ``entries`` as the registry writes its lines (canonical JSON linked by ``prev`` to the
+    last line's sha256, sealed with the sha256 of the line without ``seal``), bypassing every check
+    ``append`` and ``freeze_family`` make: the way records written before #525 sit in a real log."""
+
+    def canonical(value) -> str:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        )
+
+    data = path.read_bytes() if path.exists() else b""
+    head = hashlib.sha256(data[:-1].split(b"\n")[-1]).hexdigest() if data else "0" * 64
+    with open(path, "ab") as handle:
+        for i, entry in enumerate(entries):
+            body = {**entry, "prev": head, "utc": f"2026-11-2{i % 7}T08:00:00+00:00"}
+            body["seal"] = hashlib.sha256(canonical(body).encode("ascii")).hexdigest()
+            line = canonical(body).encode("ascii")
+            handle.write(line + b"\n")
+            head = hashlib.sha256(line).hexdigest()
+
+
+def legacy_run(record: RunRecord) -> dict:
+    data = asdict(record)
+    text = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return {
+        "kind": "run",
+        "run_id": hashlib.sha256(text.encode("ascii")).hexdigest(),
+        "record": data,
+    }
+
+
+def legacy_freeze(family_id: str, spec: dict) -> dict:
+    return {
+        "kind": "freeze",
+        "family_id": family_id,
+        "spec": spec,
+        "spec_hash": canonical_hash(spec),
+    }
+
+
+def written(directory: Path) -> dict[str, bytes]:
+    return (
+        {p.name: p.read_bytes() for p in sorted(directory.iterdir())} if directory.exists() else {}
+    )
+
+
+def summary_dir_in(tmp_path: Path, name: str = "summary") -> Path:
+    out = tmp_path / "docs" / "experiments" / "registry" / name
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def test_append_refuses_a_family_id_the_summary_cannot_name(tmp_path):
+    reg, path, _ = open_registry(tmp_path)
+    reg.append(make_record(family_id="F-anchor", variant="anchor"))
+
+    wrongly_accepted = []
+    for i, family in enumerate(UNNAMEABLE_FAMILIES):
+        before = path.read_bytes()
+        try:
+            reg.append(make_record(family_id=family, variant=f"bad-{i}"))
+        except RecordRefused:
+            assert path.read_bytes() == before, f"a refused {family!r} still wrote"
+            continue
+        wrongly_accepted.append(family)
+    assert wrongly_accepted == [], (
+        f"append accepted family ids the summary cannot name: {wrongly_accepted}"
+    )
+    reg.verify()
+    assert [r.family_id for r in reg.records()] == ["F-anchor"]
+
+    for i, family in enumerate(NAMEABLE_FAMILIES):
+        reg.append(make_record(family_id=family, variant=f"good-{i}"))
+    assert [r.family_id for r in reg.records()] == ["F-anchor", *NAMEABLE_FAMILIES]
+    write_summary(reg, summary_dir_in(tmp_path))  # every accepted family can be named
+
+
+def test_freeze_family_refuses_a_family_id_the_summary_cannot_name(tmp_path):
+    reg, path, _ = open_registry(tmp_path)
+    reg.freeze_family("P-anchor", SPECS[0])
+
+    wrongly_frozen = []
+    for family in UNNAMEABLE_FAMILIES:
+        before = path.read_bytes()
+        try:
+            reg.freeze_family(family, SPECS[1])
+        except RecordRefused:
+            assert path.read_bytes() == before, f"a refused freeze of {family!r} still wrote"
+            assert reg.frozen_spec_hash(family) is None
+            continue
+        wrongly_frozen.append(family)
+    assert wrongly_frozen == [], f"freeze_family accepted unnameable family ids: {wrongly_frozen}"
+
+    for i, family in enumerate(NAMEABLE_FAMILIES):
+        assert reg.freeze_family(family, SPECS[i % len(SPECS)]) == canonical_hash(
+            SPECS[i % len(SPECS)]
+        )
+    reg.verify()
+
+
+# Legacy ids already in a log, and the summary file each must get.
+LEGACY_FILES = {
+    "japan/131-exacta-category-v1": "japan--131-exacta-category-v1.md",
+    "japan/131-exacta-category-v1/max-test": "japan--131-exacta-category-v1--max-test.md",
+    "a/b": "a--b.md",
+    "X9/y.z_w": "X9--y.z_w.md",
+}
+NORMAL_FAMILIES = ["F-win", "japan-131-exacta-category-v2"]
+
+
+def test_summary_names_legacy_slash_families_by_a_safe_file(tmp_path):
+    reg, path, log = open_registry(tmp_path)
+    normal = [
+        make_record(
+            family_id=family,
+            variant=f"var-normal-{i}",
+            metrics=(fold("wf-1", "roi", 0.4 + i, 0.1, 0.9, 30 + i),),
+        )
+        for i, family in enumerate(NORMAL_FAMILIES)
+    ]
+    reg.append(normal[0])
+    legacy = {
+        family: [
+            make_record(
+                family_id=family, variant=f"var-legacy-{i}-{j}", hypothesis_id=f"E{131 + i}"
+            )
+            for j in range(2)
+        ]
+        for i, family in enumerate(LEGACY_FILES)
+    }
+    entries = [legacy_freeze("japan/131-exacta-category-v1", SPECS[2])]
+    for j in range(2):  # interleaved, as parallel runs would leave them
+        entries += [legacy_run(records[j]) for records in legacy.values()]
+    seal_lines(path, entries)
+    reg.append(normal[1])  # the chain goes on after the legacy lines
+
+    reg.verify()
+    assert reg.frozen_spec_hash("japan/131-exacta-category-v1") == canonical_hash(SPECS[2])
+    for family, records in legacy.items():
+        assert reg.records(family) == records
+
+    out = summary_dir_in(tmp_path)
+    write_summary(reg, out)
+    expected = {"README.md", *LEGACY_FILES.values(), *(f"{f}.md" for f in NORMAL_FAMILIES)}
+    assert set(written(out)) == expected
+
+    index = (out / "README.md").read_text(encoding="utf-8")
+    all_variants = {r.variant for records in legacy.values() for r in records} | {
+        r.variant for r in normal
+    }
+    for family, name in LEGACY_FILES.items():
+        text = (out / name).read_text(encoding="utf-8")
+        assert family in text, f"{name} does not show the original id {family!r}"
+        own = {r.variant for r in legacy[family]}
+        assert {v for v in all_variants if v in text} == own
+        assert re.search(r"\[" + re.escape(family) + r"\]\(" + re.escape(name) + r"\)", index), (
+            f"the index does not link {family!r} to {name}"
+        )
+
+    # A normal family's file is the same as when no legacy family is in the registry.
+    alone, _, _ = open_registry(tmp_path / "alone")
+    for record in normal:
+        alone.append(record)
+    alone_out = summary_dir_in(tmp_path / "alone")
+    write_summary(alone, alone_out)
+    for family in NORMAL_FAMILIES:
+        assert (out / f"{family}.md").read_bytes() == (alone_out / f"{family}.md").read_bytes()
+
+
+# (families whose lines are in the log before the summary is first written, the family that then
+# arrives and would share a file with one of them)
+SHARED_FILES = [
+    pytest.param(["a/b"], "a--b", id="slash-vs-dashes"),
+    pytest.param(["japan/131-x"], "JAPAN--131-X", id="slash-vs-dashes-other-case"),
+    pytest.param(["japan/ok", "a--b"], "a/b", id="dashes-then-slash"),
+    pytest.param(["japan/ok", "FAM-Case"], "fam-case", id="case-only"),
+    pytest.param(["japan/ok", "x.y"], "X.Y", id="case-only-dots"),
+]
+
+
+@pytest.mark.parametrize(("first", "colliding"), SHARED_FILES)
+def test_summary_refuses_two_families_that_share_a_file(tmp_path, first, colliding):
+    reg, path, _ = open_registry(tmp_path)
+    seal_lines(
+        path, [legacy_run(make_record(family_id=f, variant=f"v-{i}")) for i, f in enumerate(first)]
+    )
+    out = summary_dir_in(tmp_path)
+    write_summary(reg, out)
+    before = written(out)
+    assert len(before) == len(first) + 1
+
+    seal_lines(path, [legacy_run(make_record(family_id=colliding, variant="v-colliding"))])
+    reg.verify()
+    with pytest.raises(ValueError):
+        write_summary(reg, out)
+    assert written(out) == before, "a refused summary still changed the directory"
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    ["/x", "../x", "README", "readme", ".hidden/x", "-/x", "a b/c", "x/ペース"],
+)
+def test_summary_refuses_a_legacy_family_with_no_safe_file_name(tmp_path, unsafe):
+    reg, path, _ = open_registry(tmp_path)
+    seal_lines(path, [legacy_run(make_record(family_id="japan/ok", variant="v-ok"))])
+    reg.append(make_record(family_id="F-ok", variant="v-normal"))
+    out = summary_dir_in(tmp_path)
+    write_summary(reg, out)
+    before = written(out)
+    assert set(before) == {"README.md", "japan--ok.md", "F-ok.md"}
+
+    seal_lines(path, [legacy_run(make_record(family_id=unsafe, variant="v-unsafe"))])
+    reg.verify()
+    with pytest.raises(ValueError):
+        write_summary(reg, out)
+    assert written(out) == before, "a refused summary still changed the directory"
+    assert sorted(p.name for p in tmp_path.rglob("*.md")) == sorted(before), (
+        "wrote outside the summary"
+    )
+
+
+def test_append_refuses_a_family_whose_summary_file_is_taken(tmp_path):
+    reg, path, _ = open_registry(tmp_path)
+    seal_lines(path, [legacy_run(make_record(family_id="a/b", variant="v-legacy"))])
+    reg.append(make_record(family_id="FAM-Case", variant="v-first"))
+
+    wrongly_accepted = []
+    for i, family in enumerate(["a--b", "A--B", "fam-case", "FAM-CASE", "Fam-Case"]):
+        before = path.read_bytes()
+        try:
+            reg.append(make_record(family_id=family, variant=f"v-taken-{i}"))
+        except RecordRefused:
+            assert path.read_bytes() == before
+            continue
+        wrongly_accepted.append(family)
+    assert wrongly_accepted == [], (
+        f"append accepted families whose file is taken: {wrongly_accepted}"
+    )
+
+    reg.append(make_record(family_id="FAM-Case", variant="v-second"))  # the same family is fine
+    reg.append(make_record(family_id="a-b", variant="v-other"))  # a different file is fine
+    assert [r.family_id for r in reg.records()] == ["a/b", "FAM-Case", "FAM-Case", "a-b"]
+    out = summary_dir_in(tmp_path)
+    write_summary(reg, out)
+    assert set(written(out)) == {"README.md", "a--b.md", "FAM-Case.md", "a-b.md"}
