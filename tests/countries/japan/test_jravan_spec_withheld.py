@@ -32,9 +32,17 @@ end (`.`, `:` before whitespace) and the block's ends.
 - Every `## ` heading of the pre-fix doc survives.
 - Local only (`local` marker, own skip: the data dir or its reports dir absent, or the pre-fix
   commit not in this clone): under `$HORSETRACK_DATA_DIR/reports/` the eight build reports and
-  `jravan-spec-figures.md` exist, and the latter holds every figure the rules above flag anywhere
-  in the pre-fix doc (prose and table cells, every section), except a number the doc now writes
-  as a code constant (`1,234` in the pre-fix doc, `1_234` in a code span now).
+  `jravan-spec-figures.md` exist, and the latter holds, section by section, every figure the
+  rules above flag anywhere in the pre-fix doc (prose and table cells, every section):
+  - A figure is the whole number it is part of, with its unit or `%` (`3.5%`, never `5%`;
+    `1,234.5`, never `1,234`), and must stand in the archive as a whole value: not after a digit,
+    a `.` or a digit and `,`; not before a digit, or a `.`/`,` and a digit (`3.5%` is not in
+    `13.5%`, `12,345` is not in `112,345` or `12,345.6`). Backticks and line breaks do not count.
+  - A figure flagged under the pre-fix heading `## S` must be in the archive's text under a line
+    that is exactly `## S` (up to the next `## ` line; a heading written more than once has its
+    bodies joined). Text above the first `## ` pairs with the archive's text above its first.
+  - Except a number the same section of the doc now writes as a code constant (`1,234` in the
+    pre-fix doc, `1_234` in a code span now).
 
 D21: this file holds no figure from the export. Figures are found by pattern, never by value;
 every example below is made up. Every check on the doc or the private file fails through
@@ -314,11 +322,27 @@ PROSE_RULES: dict[str, Finder] = {
 }
 
 
+NUMBER_HEAD = re.compile(r"(?:\d[.,]?)+$")
+NUMBER_TAIL = re.compile(r"(?:[.,]?\d)+")
+
+
+def whole_token(text: str, start: int, end: int) -> tuple[int, int]:
+    """A hit grown to the whole number it is part of: `5%` in `3.5%`, `1,234` in `1,234.5`."""
+    if text[start : start + 1].isdecimal():
+        head = NUMBER_HEAD.search(text, 0, start)
+        start = head.start() if head else start
+    if text[end - 1 : end].isdecimal():
+        tail = NUMBER_TAIL.match(text, end)
+        end = tail.end() if tail else end
+    return start, end
+
+
 def hits(text: str, finder: Finder) -> list[tuple[int, str]]:
-    """(line number, matched text) of every figure the finder flags in the doc's blocks."""
+    """(line number, whole token) of every figure the finder flags in the doc's blocks."""
     out = []
     for first_line, block in blocks(text):
-        for start, end in finder(block):
+        for span in finder(block):
+            start, end = whole_token(block, *span)
             out.append((first_line + block.count("\n", 0, start), block[start:end]))
     return out
 
@@ -486,7 +510,7 @@ def flagged_figures(text: str) -> dict[str, set[int]]:
     return found
 
 
-GROUPED = re.compile(r"\d{1,3}(?:,\d{3})+(?!\d)")
+GROUPED = re.compile(r"\d{1,3}(?:,\d{3})+(?![.,]?\d)")
 CODE_CONSTANT = re.compile(r"`(\d{1,3}(?:_\d{3})+)`")
 
 
@@ -501,21 +525,125 @@ def written_as_constant(figure: str, constants: set[str]) -> bool:
     return m is not None and m.group().replace(",", "") in constants
 
 
+def holds(text: str, figure: str) -> bool:
+    """`figure` stands in `text` as a whole value, not as part of a longer number."""
+    whole = r"(?<![\d.])(?<!\d,)" + re.escape(figure) + r"(?![.,]?\d)"
+    return re.search(whole, text) is not None
+
+
+def section_bodies(text: str) -> dict[str, str]:
+    """`## ` heading line -> the text under it, up to the next `## ` line ("" for the text above
+    the first); a heading written more than once has its bodies joined."""
+    bodies: dict[str, list[str]] = {}
+    owner = ""
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            owner = line.rstrip()
+            bodies.setdefault(owner, [])
+        else:
+            bodies.setdefault(owner, []).append(line)
+    return {heading: "\n".join(lines) for heading, lines in bodies.items()}
+
+
+def figures_by_section(text: str) -> dict[tuple[str, str], set[int]]:
+    """(`## ` heading the figure is under, figure) -> its lines, for every flagged figure."""
+    owner, heading = [], ""
+    for line in text.split("\n"):
+        heading = line.rstrip() if line.startswith("## ") else heading
+        owner.append(heading)
+    out: dict[tuple[str, str], set[int]] = {}
+    for figure, lines in flagged_figures(text).items():
+        for line in lines:
+            out.setdefault((owner[line - 1], figure), set()).add(line)
+    return out
+
+
+def unarchived(old: str, archive: str, new: str) -> dict[tuple[str, str], set[int]]:
+    """The figures of `old` that the archive's section of the same heading does not hold as a
+    whole value, and that the same section of `new` does not write as a code constant."""
+    held = {heading: normalized(body) for heading, body in section_bodies(archive).items()}
+    constants = {heading: code_constants(body) for heading, body in section_bodies(new).items()}
+    return {
+        (heading, figure): lines
+        for (heading, figure), lines in figures_by_section(old).items()
+        if not holds(held.get(heading, ""), figure)
+        and not written_as_constant(figure, constants.get(heading, set()))
+    }
+
+
 @pytest.mark.local
 def test_private_reports_hold_the_withheld_figures(doc):
     made_up = (
         "| pool | rows |\n|---|---|\n| WIN | 12,345 |\n\nin chunks of 4,321 records, 6,789 races"
-        " on 2.5 GB (1977-1999)\n\nan ok, 17 files check, 3.5% of `81,234`"
+        " on 2.5 GB (1977-1999)\n\nan ok, 17 files check, 3.5% of `81,234`, a 1,234.5 kg mean,"
+        " 0.25 % up"
     )
     found = flagged_figures(made_up)
     expected = {"12,345", "4,321", "4,321 records", "6,789", "6,789 races", "2.5 GB", "1977"}
-    expected |= {"17 files", "5%", "81,234"}
+    expected |= {"17 files", "3.5%", "81,234", "1,234.5", "0.25 %"}
     assert set(found) == expected, sorted(found)
     assert found["6,789 races"] == {5}, found["6,789 races"]
     constants = code_constants("chunks of `4_321` (records), `12_345_678`, `9_9`, 55_555")
     assert constants == {"4321", "12345678"}, constants
     kept = [f for f in sorted(found) if written_as_constant(f, constants)]
     assert kept == ["4,321", "4,321 records"], kept
+    assert not written_as_constant("1,234.5", {"1234"})
+
+    whole_values = [
+        ("a 3.5%.", "3.5%", True),
+        ("13.5% and 8.5%", "3.5%", False),
+        ("8.5% of rows", "5%", False),
+        ("from 1977.", "1977", True),
+        ("(1977-1994)", "1977", True),
+        ("11977 or 1977.5", "1977", False),
+        ("about 12,345,", "12,345", True),
+        ("112,345 and 12,345,678 and 12,345.6", "12,345", False),
+        ("1,977", "977", False),
+        ("on 2.5 GB", "2.5 GB", True),
+        ("on 12.5 GB", "2.5 GB", False),
+        ("122 files", "22 files", False),
+    ]
+    wrong = [(text, figure) for text, figure, ok in whole_values if holds(text, figure) != ok]
+    assert not wrong, wrong
+
+    old = "intro\n\n## A (#1)\n\n3.5% of rows, 12,345 races.\n\n## B (#2)\n\nfrom 1977.\n"
+    a, b = "## A (#1)", "## B (#2)"
+    assert figures_by_section(old) == {
+        (a, "3.5%"): {5},
+        (a, "12,345"): {5},
+        (a, "12,345 races"): {5},
+        (b, "1977"): {9},
+    }, figures_by_section(old)
+    archives = [
+        # Verbatim, across a line break and with code spans: all held.
+        ("## A (#1)\n\n3.5% of\nrows, `12,345` races.\n\n## B (#2)\n\nfrom 1977.\n", "", set()),
+        # A heading written twice: its bodies joined.
+        ("## A (#1)\n\n3.5% of rows\n\n## B (#2)\n\n1977.\n\n## A (#1)\n\n12,345 races", "", set()),
+        # Held only under another section, or under a heading that is not the same text.
+        ("## A (#1)\n\n3.5%, 12,345 races, from 1977.\n\n## B (#2)\n\nnone\n", "", {(b, "1977")}),
+        ("## A (#1)\n\n3.5%, 12,345 races\n\n## B\n\nfrom 1977.\n", "", {(b, "1977")}),
+        ("1977\n\n## A (#1)\n\n3.5%, 12,345 races\n", "", {(b, "1977")}),
+        # Only a different value with the same suffix or prefix.
+        (
+            "## A (#1)\n\n13.5% and 8.5% of rows, 112,345 races, 12,345.6 kg\n\n"
+            "## B (#2)\n\nfrom 11977 and 1977.5\n",
+            "",
+            {(a, "3.5%"), (a, "12,345"), (a, "12,345 races"), (b, "1977")},
+        ),
+        # Written as a code constant in the same section of the doc, or in another one.
+        ("## A (#1)\n\n3.5%\n\n## B (#2)\n\n1977\n", "## A (#1)\n\n`12_345` races\n", set()),
+        (
+            "## A (#1)\n\n3.5%\n\n## B (#2)\n\n1977\n",
+            "## A (#1)\n\nnone\n\n## B (#2)\n\n`12_345`\n",
+            {(a, "12,345"), (a, "12,345 races")},
+        ),
+    ]
+    wrong = [
+        (archive, new, set(unarchived(old, archive, new)))
+        for archive, new, missing in archives
+        if set(unarchived(old, archive, new)) != missing
+    ]
+    assert not wrong, wrong
 
     try:
         reports = paths.reports_dir()
@@ -539,20 +667,17 @@ def test_private_reports_hold_the_withheld_figures(doc):
 
     absent = [name for name in [*SECTIONS.values(), FIGURES_FILE] if not (reports / name).is_file()]
     fail_unless(not absent, f"missing under the reports dir: {absent}")
-    archive = normalized((reports / FIGURES_FILE).read_text(encoding="utf-8"))
+    archive = (reports / FIGURES_FILE).read_text(encoding="utf-8")
 
-    published = flagged_figures(old)
+    published = figures_by_section(old)
     fail_unless(bool(published), "no figure found in the pre-fix doc: the rules have broken")
-    constants = code_constants(doc)
-    missing = [
-        figure
-        for figure in published
-        if figure not in archive and not written_as_constant(figure, constants)
-    ]
-    # Counts and pre-fix line numbers only: the values are the licensed figures themselves.
-    lines = sorted({line for figure in missing for line in published[figure]})
+    missing = unarchived(old, archive, doc)
+    # Counts, pre-fix line numbers and headings only: the values are the licensed figures.
+    lines = sorted({line for found in missing.values() for line in found})
+    absent = sorted({heading for heading, _figure in missing} - set(section_bodies(archive)))
     fail_unless(
         not missing,
-        f"{len(missing)} of {len(published)} figures the pre-fix doc published are not in "
-        f"{FIGURES_FILE} (pre-fix {DOC_REL} lines {lines})",
+        f"{len(missing)} of {len(published)} figures the pre-fix doc published are not, as whole "
+        f"values, in their section of {FIGURES_FILE} (pre-fix {DOC_REL} lines {lines}; headings "
+        f"the archive lacks: {absent})",
     )
