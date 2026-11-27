@@ -42,8 +42,9 @@ repository when any row is withheld, so a row marked licensed under a public sou
 refused too.
 
 From the registry (``rows_from_registry``, #450). The run registry is the leaderboard's source:
-every (family, variant) gets measured rows from the convention of ``docs/specs/leaderboard.md``,
-an adapter's rows, or one unmeasured row, failures included.
+every non-holdout run gives measured rows from the convention of ``docs/specs/leaderboard.md``,
+an adapter's rows, or one unmeasured row, failures included; each option's latest row in append
+order is its row.
 
 Generic, with no country input, like ``segment_roi`` and ``snooping``.
 """
@@ -617,10 +618,12 @@ def rows_from_registry(
     Each other run gives its rows: an adapter's when ``adapters`` holds its family (called with
     the run and the family size), else one measured row per development-fold ``return_per_100``
     metric under a well-formed ``params['leaderboard']`` block (``docs/specs/leaderboard.md``).
-    The latest non-holdout run of each variant, in append order, gives all of that variant's rows,
-    adapter or not: a rerun that drops a segment drops its earlier row, and a latest run that
-    gives no row (failed, no development return, a malformed block) lists the variant as one
-    unmeasured row from that run, with the reason in ``note`` when its block is malformed. Every
+    A run that gives no row (failed, no development return, a malformed block, an adapter that
+    returns none) gives one unmeasured row, the '<family>/<variant>' option, with the reason in
+    ``note`` when its block is malformed. Rows resolve per option id: each option's latest row in
+    append order is its row, adapter or not, so a rerun replaces only the options it gives (its
+    unmeasured row replaces '<family>/<variant>' alone) and an option a later run does not give
+    keeps its earlier row. Every
     row carries the family size as its variants searched, the run's ticket, sources and status
     (old 'rejected' and 'adopted' runs read like 'scored'), and ``licensed`` as
     ``is_licensed_record`` (an adapter's row also keeps its own True).
@@ -630,14 +633,12 @@ def rows_from_registry(
     for record in registry.records():
         if record.holdout_open is None:
             families.setdefault(record.family_id, []).append(record)
-    rows: list[LeaderboardRow] = []
+    latest: dict[str, LeaderboardRow] = {}
     for family_id, runs in families.items():
         size = registry.family_size(family_id)
         adapter = adapters.get(family_id)
-        latest: dict[str, RunRecord] = {}
         for record in runs:
-            latest[record.variant] = record
-        for record in latest.values():
             made, problem = _record_rows(record, size, adapter)
-            rows += made or [_unmeasured_row(record, size, problem)]
-    return rows
+            for row in made or [_unmeasured_row(record, size, problem)]:
+                latest[row.option_id] = row
+    return list(latest.values())

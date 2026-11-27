@@ -989,36 +989,61 @@ def test_adapter_rows_of_a_licensed_run_are_withheld(tmp_path):
         assert figure not in text, f"{option}'s return {figure} is in the public text"
 
 
+# The first run of R40-latest/v measures 'all' and 'class:maiden' (ticket 610); each case appends
+# later runs of v. Rows resolve per option id: a later run replaces only the options it gives.
+FIRST_ALL = ("scored", 88.75, 610)
+FIRST_MAIDEN = ("scored", 92.5, 610)
 LATEST_RUN_CASES = [
-    # (id, later runs of R40-latest/v after one measured run with 'all' and 'class:maiden',
-    #  expected {option id: (status, return or None, ticket)} for variant v)
+    # (id, later runs of R40-latest/v,
+    #  expected {option id: (status, return or None, ticket)} for every option of variant v,
+    #  words of which the 'R40-latest/v' note names one, or None)
     (
         "failed-rerun",
         [{"status": "failed", "metrics": (), "ticket": 611}],
-        {"R40-latest/v": ("failed", None, 611)},
+        {"R40-latest/v": ("failed", None, 611), "R40-latest/v[class:maiden]": FIRST_MAIDEN},
+        None,
     ),
     (
         "rerun-drops-a-segment",
         [{"metrics": (dev("return_per_100", 96.5, 91.0, 102.0, 820),), "ticket": 612}],
-        {"R40-latest/v": ("scored", 96.5, 612)},
+        {"R40-latest/v": ("scored", 96.5, 612), "R40-latest/v[class:maiden]": FIRST_MAIDEN},
+        None,
     ),
     (
-        "rerun-keeps-only-a-new-segment",
+        "rerun-adds-only-a-new-segment",
         [
             {
                 "metrics": (dev("return_per_100[class:open]", 73.25, 69.0, 77.5, 640),),
                 "ticket": 613,
             }
         ],
-        {"R40-latest/v[class:open]": ("scored", 73.25, 613)},
+        {
+            "R40-latest/v": FIRST_ALL,
+            "R40-latest/v[class:maiden]": FIRST_MAIDEN,
+            "R40-latest/v[class:open]": ("scored", 73.25, 613),
+        },
+        None,
     ),
     (
         "rerun-with-no-convention-metric",
         [{"metrics": (dev("log_loss_gain", 0.002, 0.001, 0.003, 900),), "ticket": 614}],
-        {"R40-latest/v": ("scored", None, 614)},
+        {"R40-latest/v": ("scored", None, 614), "R40-latest/v[class:maiden]": FIRST_MAIDEN},
+        None,
     ),
     (
-        "failed-then-measured-again",
+        "malformed-rerun",
+        [
+            {
+                "params": {"leaderboard": {**WIN_BLOCK, "kind": "bogus"}},
+                "metrics": (dev("return_per_100[class:maiden]", 99.5, 95.0, 104.0, 230),),
+                "ticket": 618,
+            }
+        ],
+        {"R40-latest/v": ("scored", None, 618), "R40-latest/v[class:maiden]": FIRST_MAIDEN},
+        ("kind", "bogus"),
+    ),
+    (
+        "failed-then-maiden-measured-again",
         [
             {"status": "failed", "metrics": (), "ticket": 615},
             {
@@ -1026,17 +1051,30 @@ LATEST_RUN_CASES = [
                 "ticket": 616,
             },
         ],
-        {"R40-latest/v[class:maiden]": ("scored", 101.0, 616)},
+        {
+            "R40-latest/v": ("failed", None, 615),
+            "R40-latest/v[class:maiden]": ("scored", 101.0, 616),
+        },
+        None,
+    ),
+    (
+        "failed-then-all-measured-again",
+        [
+            {"status": "failed", "metrics": (), "ticket": 615},
+            {"metrics": (dev("return_per_100", 99.0, 93.0, 105.0, 860),), "ticket": 619},
+        ],
+        {"R40-latest/v": ("scored", 99.0, 619), "R40-latest/v[class:maiden]": FIRST_MAIDEN},
+        None,
     ),
 ]
 
 
 @pytest.mark.parametrize(
-    ("later", "expected"),
+    ("later", "expected", "note_words"),
     [case[1:] for case in LATEST_RUN_CASES],
     ids=[case[0] for case in LATEST_RUN_CASES],
 )
-def test_the_latest_run_of_a_variant_replaces_all_its_rows(tmp_path, later, expected):
+def test_a_rerun_replaces_only_the_options_it_gives(tmp_path, later, expected, note_words):
     reg = open_registry(tmp_path)
     block = {"leaderboard": WIN_BLOCK}
     records = [
@@ -1060,9 +1098,8 @@ def test_the_latest_run_of_a_variant_replaces_all_its_rows(tmp_path, later, expe
     ]
     shas = ["b" * 40, "c" * 40]
     for sha, overrides in zip(shas, later, strict=False):
-        records.append(
-            make_record(family_id="R40-latest", variant="v", git_sha=sha, params=block, **overrides)
-        )
+        fields = {"params": block, **overrides}
+        records.append(make_record(family_id="R40-latest", variant="v", git_sha=sha, **fields))
     append_all(reg, records)
 
     rows = read_rows(reg)
@@ -1076,8 +1113,10 @@ def test_the_latest_run_of_a_variant_replaces_all_its_rows(tmp_path, later, expe
         assert row.ticket == ticket, option
     sibling = rows["R40-latest/sibling"]
     assert (sibling.return_per_100, sibling.ticket) == (81.5, 620)
-    # no figure of the superseded run ranks
-    assert all(r.return_per_100 not in (88.75, 92.5) for r in rows.values())
+    if note_words is not None:
+        note = rows["R40-latest/v"].note
+        assert note, "the malformed rerun's reason is not in note"
+        assert any(word in note.lower() for word in note_words), note
 
 
 def test_a_later_malformed_run_supersedes_a_measured_one(tmp_path):

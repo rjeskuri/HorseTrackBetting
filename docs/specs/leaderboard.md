@@ -91,24 +91,26 @@ A study that wants measured rows records, per variant:
 - Every row carries the family size as `variants_searched`, the run's `ticket`, `sources` and
   `status`, and `licensed = is_licensed_record(record)`, which is exactly what `write_summary`
   withholds (a withheld name among the sources, the data build names or the components).
-- Per variant, its latest non-holdout run in append order gives all of that variant's rows;
-  earlier runs give none. A rerun that drops a segment drops that segment's earlier row, and a
-  later failed, unmeasured or malformed run replaces earlier measured rows.
-- A variant whose latest run gives no row (a failed run, a legacy family whose metrics are not
-  returns, a block with no development return) gets one unmeasured row `'<family_id>/<variant>'`
-  from that run: kind from its block if valid, else `other`; pool from its block or None;
-  rule its variant text; selection `unknown`; status the run's.
+- A run that gives no row (a failed run, a legacy family whose metrics are not returns, a block
+  with no development return) gives one unmeasured row, the option `'<family_id>/<variant>'`:
+  kind from its block if valid, else `other`; pool from its block or None; rule its variant
+  text; selection `unknown`; status the run's.
 - A malformed block (not a mapping, a missing or unknown field, a value outside its vocabulary)
-  lists the variant unmeasured with the reason in `note`; the rest of the registry still reads.
+  gives that unmeasured row with the reason in `note`; the rest of the registry still reads.
+- Rows resolve per option id: the latest row of each option in append order over the
+  non-holdout runs is its row. A rerun replaces only the options it gives; an option a later run
+  does not give (a segment the rerun drops) keeps its earlier row. A later failed, unmeasured or
+  malformed run's unmeasured row replaces `'<family_id>/<variant>'` alone, so its segment rows
+  keep their earlier measured values.
 
 ### Adapters
 
 `adapters` maps a family id to `adapter(record, family_size) -> list[LeaderboardRow]`. For a
-family with an adapter, the adapter is called with each variant's latest non-holdout run (the
-same per-variant rule) and its rows replace the convention's. Each adapter row's `licensed` is
-`row.licensed or is_licensed_record(record)`, so an adapter cannot publish a run `write_summary`
-withholds. An adapter returning `[]` leaves that variant the default unmeasured row, with the
-reason in `note` when the run's block is malformed. Adapters exist for legacy families recorded before the
+family with an adapter, the adapter is called with each non-holdout run of the family and the
+family size, its rows replace the convention's, and they resolve by the same per-option rule.
+Each adapter row's `licensed` is `row.licensed or is_licensed_record(record)`, so an adapter
+cannot publish a run `write_summary` withholds. An adapter returning `[]` gives that run the
+default unmeasured row, with the reason in `note` when the run's block is malformed. Adapters exist for legacy families recorded before the
 convention (#451 backfills them).
 
 ## Outputs
