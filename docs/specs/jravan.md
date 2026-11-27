@@ -739,16 +739,17 @@ abandoned race (レース中止), `A` a NAR race (地方競馬), `B` an overseas
 - The report, `<reports dir>/jravan-card-versions.json` through `records.write_build_report`,
   holds counts, codes and years only; its figures are withheld (D21).
 
-The export holds the final version only (the run of 2026-11-27): RA holds `7`, `9`, `A` and `B`,
-SE `7`, `9`, `A`, `B` and `0`, and neither holds a record of データ区分 `1`-`6`. A key with more
-than one version holds re-issues of one code (and, in SE, an overseas runner later deleted), never
-a card before a result. So no pre-race card survives for a race already run, `latest_versions`
-always keeps the result, and `runners.is_scratched`, `races.field_size`, `races.status` and
-`meetings.status` keep the accepted leak (docs/specs/as-of.md, "Accepted leak: results-derived
-card columns"): the JRA-VAN export cannot lift it.
+The run on the export: `horsetrack japan jravan card-versions`, run 2026-11-27. What it found is
+withheld (D21), counts, codes and verdict alike, and so is whether the export holds any pre-race
+version, in two files under `$HORSETRACK_DATA_DIR/reports/`. The report `jravan-card-versions.json`
+holds the census listed above for RA and SE, `final_only` included. `jravan-spec-figures.md` holds
+the removed text: the codes of データ区分 each record type holds, what the keys with more than one
+version hold, a record-level case, and what the result means for the card columns. The
+availability rule for `runners.is_scratched`, `races.field_size`, `races.status` and
+`meetings.status` is in docs/specs/as-of.md ("Accepted leak: results-derived card columns").
 
-The card versions can only be carried forward, by reading them before the race, each with the time
-it was read; nothing does today:
+Pre-race card versions can be kept by reading them before the race, each with the time it was
+read; nothing does today:
 
 - The JRA official 出馬表 on race day is the feed for it. `jra/official_card.py` parses a race's
   出馬表 page (JRADB `pw01dde`) into `races` and `racecard_runners` rows, the scratches as printed
