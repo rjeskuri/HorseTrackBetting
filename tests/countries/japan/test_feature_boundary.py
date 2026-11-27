@@ -31,6 +31,11 @@ Contract pinned here (`horsetrack.countries.japan.feature_boundary`, new in #417
   publication time); an empty set for a column with neither (a card value known from the
   race-date rule, or a column with its own publication time, such as odds_timeseries' fetched_utc
   or track_condition's available_utc).
+- `availability_fallback(table, *, rules=None) -> tuple[str, str] | None`: `(column, fallback)` of
+  a `column` rule with a `fallback` (a row whose `column` is null is in the views at its
+  `fallback`, the `TIMESTAMP_FALLBACK` approximation), read from the rules: under the shipped
+  ones odds_timeseries' `("fetched_utc", "snapshot_utc")`; None for any other rule (an offset,
+  static, current_value or label_only rule, or a column rule without a fallback).
 - Authorized label reads are unchanged: `core.store.asof.read_label` still returns a
   `read_label: true` table whole.
 
@@ -61,10 +66,12 @@ from horsetrack.core.store.tables import ARROW_TYPES
 from horsetrack.countries.japan.feature_boundary import (
     PUBLICATION_PROXY,
     RESULTS_DERIVED,
+    TIMESTAMP_FALLBACK,
     FeatureNotApproved,
     UnclassifiedColumn,
     approved_features,
     approximations,
+    availability_fallback,
     feature_view,
 )
 from horsetrack.countries.japan.logger.compact import SCHEMA as ODDS_SCHEMA
@@ -720,3 +727,87 @@ def test_approximations_are_read_from_the_availability_rules(tmp_path):
     )
     assert RESULTS_DERIVED in got["is_withdrawn"]
     assert RESULTS_DERIVED not in got["is_scratched"]
+
+
+# ---------------------------------------------------------------------------------------------
+# availability_fallback: a column rule's stand-in timestamp stays identifiable
+# ---------------------------------------------------------------------------------------------
+
+# (table, its (column, fallback) under the shipped rules, or None): the board rule has the only
+# fallback; column rules without one, and offset, static, current_value and label_only rules
+SHIPPED_FALLBACKS = [
+    ("odds_timeseries", ("fetched_utc", "snapshot_utc")),
+    ("track_condition", None),
+    ("win_sales", None),
+    ("races", None),
+    ("runners", None),
+    ("meetings", None),
+    ("dividends", None),
+    ("horse_runs", None),
+    ("horse_pedigree", None),
+    ("horses", None),
+    ("jrdb_post_race", None),
+]
+
+
+def test_timestamp_fallback_is_a_tag_of_its_own():
+    assert TIMESTAMP_FALLBACK not in {RESULTS_DERIVED, PUBLICATION_PROXY}
+
+
+@pytest.mark.parametrize("table,expected", SHIPPED_FALLBACKS, ids=[t for t, _ in SHIPPED_FALLBACKS])
+def test_availability_fallback_under_the_shipped_rules(rules, table, expected):
+    assert availability_fallback(table, rules=rules) == expected
+    assert availability_fallback(table) == expected  # the default is the shipped rules
+
+
+# (name, edit of the shipped tables, odds_timeseries' and track_condition's expected fallbacks)
+FALLBACK_EDITS = [
+    (
+        "offset-board",
+        lambda tables: tables.update(
+            odds_timeseries={
+                "kind": "offset",
+                "anchor": "post_utc",
+                "offset_min": -5,
+                "label_columns": ["dividend", "is_refund", "is_final_capture"],
+            }
+        ),
+        None,
+        None,
+    ),
+    (
+        "no-fallback",
+        lambda tables: tables["odds_timeseries"].pop("fallback"),
+        None,
+        None,
+    ),
+    (
+        "renamed-fallback",
+        lambda tables: tables["odds_timeseries"].update(fallback="logged_utc"),
+        ("fetched_utc", "logged_utc"),
+        None,
+    ),
+    (
+        "renamed-column",
+        lambda tables: tables["odds_timeseries"].update(column="captured_utc"),
+        ("captured_utc", "snapshot_utc"),
+        None,
+    ),
+    (
+        "fallback-added",
+        lambda tables: tables["track_condition"].update(fallback="published_utc"),
+        ("fetched_utc", "snapshot_utc"),
+        ("available_utc", "published_utc"),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "name,edit,board,going", FALLBACK_EDITS, ids=[e[0] for e in FALLBACK_EDITS]
+)
+def test_availability_fallback_is_read_from_the_availability_rules(
+    tmp_path, name, edit, board, going
+):
+    edited = _availability(tmp_path, edit)
+    assert availability_fallback("odds_timeseries", rules=edited) == board
+    assert availability_fallback("track_condition", rules=edited) == going
