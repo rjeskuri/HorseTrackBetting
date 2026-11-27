@@ -28,7 +28,7 @@ The same inputs give the same bytes.
 | command | module | writes | table kind | availability rule (docs/specs/as-of.md) |
 |---|---|---|---|---|
 | `check` | `check.py` | nothing | the workbook against the export | n/a |
-| `races` | `races.py` | `races`, `meetings` | store tables | those of `races`, `meetings` |
+| `races` | `races.py` | `races`, `meetings`; `race_weather` | store tables; jravan-only | those of `races`, `meetings`; `race_weather` none yet (the owner's rule, #402) |
 | `runners` | `runners.py` | `runners`; fills `races.finish_time_s` | store table | that of `runners` |
 | `dividends` | `dividends.py` | `dividends` | store table | that of `dividends` |
 | `final-odds` | `odds.py` | `final_odds` | jravan-only | `label_only` |
@@ -146,7 +146,8 @@ so each family maps fields instead of slicing bytes:
   and types. The same inputs give the same bytes. The report, `<reports dir>/jravan-races.json`,
   holds per year `records`, `versions_dropped`, `deletions`, `races_written`, `non_jra_nar`,
   `non_jra_overseas`, `non_jra_unknown` and `unmapped` (a count), and `unmapped` as store column
-  (`race_class`, `weight_type`, `surface`, `going`) -> code -> count over the races written.
+  (`race_class`, `weight_type`, `surface`, `going`; `weather` for `race_weather`) -> code ->
+  count over the races written.
 - Columns use the jra store's vocabulary (`jra/netkeiba/parse_results.py`): ids and keys from
   `keys.py`; `season` the calendar-year label; `race_class` from the youngest-age condition code,
   then the grade for an open or unknown class (jump grades as their flat code); `surface` and
@@ -159,6 +160,13 @@ so each family maps fields instead of slicing bytes:
   code is JV-Data's "unset": null (its `*_raw` column too), counted only on a race that was run.
 - Meetings: one row per `meeting_id`, `run` when any race ran, else `abandoned`; `day_night` and
   `surface_mix` null.
+- Weather (#402): `processed/jravan/race_weather.parquet`, a jravan-only table (not in
+  `schemas.TABLES`, so `races` keeps the jra store's columns): `race_id`, `weather`,
+  `weather_raw`, all strings, one row per race in `races.parquet`, sorted by `race_id`
+  (`weather_from_records`). `weather` maps the weather code through `races.WEATHERS` (FINE,
+  CLOUDY, RAIN, LIGHT RAIN, SNOW, LIGHT SNOW); `weather_raw` is the code as printed. An unset code
+  gives both null; a code outside the table keeps its `weather_raw`, and either is counted under
+  `unmapped['weather']` on a run race only (an abandoned race's code is not counted).
 
 The run on the export (2026-11-26; the export ends 2026-11-23), counts only:
 
