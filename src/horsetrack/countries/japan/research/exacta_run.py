@@ -1,16 +1,24 @@
 """The #131 exacta study's run: freeze the families, count the inputs, score E1 on development days.
 
-`python -m horsetrack.countries.japan.research.exacta_run {freeze|count|score}`
+`python -m horsetrack.countries.japan.research.exacta_run {freeze|count|score|max-test|breakage}`
 
-- freeze: ``freeze_family`` for every spec of ``exacta_study.family_specs`` in the Japan registry,
-  then rewrite the committed registry summary.
+- freeze: ``freeze_family`` for every spec of ``exacta_study.family_specs`` in the Japan registry.
+  It records the specs only: the committed summary lists runs, and a freeze is not one.
 - count: row counts only (no outcome is scored): development races with a FORECAST dividend,
   out-of-fold Win probabilities, the ordering fit, and #130-logged meetings with exacta boards.
 - score: E1 (B2) with its variants B1, B3 and the log-score total C; every variant is a registry
   record, SPA and StepM run over E1's members, and the tables go through ``write_report``.
+- breakage: descriptive, not a test: the share of B2's paid return that rounding the dividend
+  down to 10 yen takes, per lambda2, category and cell, and rho with half a step added back.
 
-D14: race days are filtered with ``is_holdout_day`` from the races table's dates before any
-outcome, odds or dividend is read, and the readers take only the remaining race ids.
+Before writing anything, score and max-test refuse (``RunRefused``) a family frozen with a spec
+other than the one in use, and a Win or ordering fit other than the one the family's scored
+records hold: a refreshed fit needs its own frozen family. A rerun reuses identical records, so
+an interrupted run completes and a repeated one appends nothing.
+
+D14: race days are filtered with ``is_holdout_day`` from the races table's dates (the only column
+read for every row) before any outcome, odds, class or dividend is read, and the readers take only
+the remaining race ids. ``data_builds`` fingerprints those development rows, never a whole file.
 LockedHoldout is never opened. Public JRA data only (sources: jra).
 """
 
@@ -21,7 +29,8 @@ import hashlib
 import json
 import math
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 
@@ -54,8 +63,15 @@ COUNTRY = "japan"
 FIRST_DAY = date(2014, 6, 7)
 SOURCES = ("jra",)
 MAX_TEST_ID = f"{study.E1_ID}/max-test"
+SCORED_FAMILIES = (study.E1_ID, study.E1_B1_ID, study.E1_B3_ID, study.C_ID)
+BREAKAGE_ID = "japan/131-exacta-breakage"
+BREAKAGE_STEP = 10.0  # JRA pays per 100 yen rounded down to 10 yen
 STEPM_FWER = 0.05  # the spec's 95% level as a family-wise error rate
 RACE_COLUMNS = ["race_id", "meeting_id", "race_date", "race_no", "race_class", "race_class_raw"]
+
+
+class RunRefused(RuntimeError):
+    """A run refused before it computes or records anything: not a failed run."""
 
 
 def _git_sha() -> str:
@@ -66,12 +82,70 @@ def _git_sha() -> str:
     return out.stdout.strip()
 
 
-def _digest(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for block in iter(lambda: fh.read(1 << 20), b""):
-            h.update(block)
+def _fingerprint(frame: pd.DataFrame) -> str:
+    """16 hex digits of sha256 over the rows the run read (values as text, rows sorted): it
+    depends on those rows alone, not on the file's other rows, row order or layout."""
+    text = frame.astype(str)
+    text = text.sort_values(list(text.columns), kind="mergesort").reset_index(drop=True)
+    h = hashlib.sha256("\x1f".join(text.columns).encode("utf-8"))
+    h.update(pd.util.hash_pandas_object(text, index=False).to_numpy().tobytes())
     return h.hexdigest()[:16]
+
+
+def _spec_hash(spec: dict) -> str:
+    """The hash ``Registry.freeze_family`` gives ``spec``."""
+    text = json.dumps(spec, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _record_key(record: RunRecord) -> str:
+    return json.dumps(asdict(record), sort_keys=True, separators=(",", ":"))
+
+
+def _appender(registry) -> Callable[[RunRecord], None]:
+    """``registry.append`` that skips a record already in the registry, so a rerun of the same
+    commit and data reuses its records and an interrupted run completes."""
+    seen = {_record_key(r) for r in registry.records()}
+
+    def append(record: RunRecord) -> None:
+        key = _record_key(record)
+        if key not in seen:
+            registry.append(record)
+            seen.add(key)
+
+    return append
+
+
+def _check_frozen(registry, families: Iterable[str]) -> None:
+    """Refuse unless each family is frozen with the hash of the spec in use."""
+    specs = study.family_specs()
+    for family_id in families:
+        frozen = registry.frozen_spec_hash(family_id)
+        if frozen is None:
+            raise RunRefused(f"{family_id} is not frozen; run `freeze` first")
+        in_use = _spec_hash(specs[family_id])
+        if frozen != in_use:
+            raise RunRefused(
+                f"{family_id} is frozen with spec {frozen[:12]}, not the spec in use "
+                f"({in_use[:12]}): a changed design is a new family"
+            )
+
+
+def _check_fits(registry, meta: dict, families: Iterable[str]) -> None:
+    """Refuse a Win or ordering fit other than the one the families' scored records hold, so a
+    family's records (and its max test) never mix fits."""
+    families = set(families)
+    want = {"win": meta["win_fit"], "ordering": meta["ordering_fit"]}
+    for r in registry.records():
+        if r.family_id not in families or r.status != "scored":
+            continue
+        for key, fit in want.items():
+            held = r.components.get(key)
+            if held not in (None, fit, "plain_harville"):
+                raise RunRefused(
+                    f"{r.family_id} holds scored records under {key} fit {held}, not {fit}: "
+                    "a refreshed fit needs its own frozen family"
+                )
 
 
 def _fits() -> tuple[str, Path, str, float]:
@@ -90,13 +164,15 @@ def _fits() -> tuple[str, Path, str, float]:
 
 
 def development_races() -> pd.DataFrame:
-    """Races from 2014-06-07 on development days. Reads race keys and dates only."""
+    """Races from 2014-06-07 on development days. Every row's date is read to classify the day;
+    the other columns are read for development days only."""
     path = paths.processed_dir("jra") / "races.parquet"
-    races = pq.read_table(path, columns=RACE_COLUMNS).to_pandas()
-    races = races[races["race_date"] >= FIRST_DAY]
-    holdout = {d: is_holdout_day(COUNTRY, d) for d in races["race_date"].unique()}
-    races = races[~races["race_date"].map(holdout)]
-    if any(holdout[d] for d in races["race_date"].unique()):  # pragma: no cover - a guard
+    days = pc.unique(pq.read_table(path, columns=["race_date"])["race_date"]).to_pylist()
+    development = [d for d in days if d >= FIRST_DAY and not is_holdout_day(COUNTRY, d)]
+    races = pq.read_table(
+        path, columns=RACE_COLUMNS, filters=pc.field("race_date").isin(development)
+    ).to_pandas()
+    if any(is_holdout_day(COUNTRY, d) for d in races["race_date"].unique()):  # pragma: no cover
         raise AssertionError("a holdout day survived the filter")
     return races.reset_index(drop=True)
 
@@ -156,12 +232,12 @@ def load_races() -> tuple[list[dict], dict]:
     oof = _read(oof_path, ["race_id", "horse_no", "p_cal"], races["race_id"].tolist())
     races = races[races["race_id"].isin(set(oof["race_id"]))]
     ids = races["race_id"].tolist()
-    runners = _read(
+    runners_read = _read(
         paths.processed_dir("jra") / "runners.parquet",
         ["race_id", "horse_no", "win_odds", "is_scratched"],
         ids,
     )
-    runners = runners[~runners["is_scratched"].astype(bool)]
+    runners = runners_read[~runners_read["is_scratched"].astype(bool)]
     dividends = _read(
         paths.processed_dir("jra") / "dividends.parquet",
         ["race_id", "combination", "dividend", "is_refund"],
@@ -197,7 +273,9 @@ def load_races() -> tuple[list[dict], dict]:
                 "exacta": rows.get(race.race_id, []),
             }
         )
-    base = paths.processed_dir("jra")
+    # "<identity>@<digest>": the identity is the table, the digest its development rows read
+    # here (holdout rows are never read), so a data refresh is a rerun, not a new variant.
+    read = {"races": races, "runners": runners_read, "dividends": dividends}
     meta = {
         "win_fit": win_id,
         "ordering_fit": ordering_id,
@@ -205,10 +283,10 @@ def load_races() -> tuple[list[dict], dict]:
         "dropped_before_scoring": dropped,
         "data_builds": {
             **{
-                f"jra_{name}": f"processed/jra/{name}.parquet@{_digest(base / f'{name}.parquet')}"
-                for name in ("races", "runners", "dividends")
+                f"jra_{name}": f"processed/jra/{name}.parquet@{_fingerprint(frame)}"
+                for name, frame in read.items()
             },
-            "win_oof": f"{oof_path.name}@{_digest(oof_path)}",
+            "win_oof": f"{oof_path.name}@{_fingerprint(oof)}",
         },
         "first_day": min(r["race_date"] for r in out).isoformat(),
         "last_day": max(r["race_date"] for r in out).isoformat(),
@@ -269,10 +347,12 @@ def _member_metrics(sub: pd.DataFrame, column: str, ratio: bool, seed: int, n_bo
 
 def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10000) -> dict:
     """Score E1, B1, B3 and C on ``races``; append every variant to ``registry``; SPA and StepM
-    over E1's members. Refuses to run unless every family is frozen in ``registry``."""
-    for family_id in study.family_specs():
-        if registry.frozen_spec_hash(family_id) is None:
-            raise RuntimeError(f"{family_id} is not frozen; run `freeze` first")
+    over E1's members. ``RunRefused`` before anything is computed or written unless every scored
+    family is frozen with the spec in use and its scored records hold ``meta``'s fits. Records
+    already in ``registry`` are reused, not appended again."""
+    _check_frozen(registry, SCORED_FAMILIES)
+    _check_fits(registry, meta, (*SCORED_FAMILIES, MAX_TEST_ID))
+    append = _appender(registry)
     lambdas = {study.FITTED: meta["lambda2_full_development"], 1.0: 1.0}
     frames = score_frames(races, meta)
     meta["excluded"] = frames[study.FITTED].attrs["excluded"]
@@ -319,7 +399,7 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
             metrics.append(FoldMetric("development", "rho_eb", float(row.rho_eb), None, None, n))
         params = {"estimator": row.estimator, "lambda2": row.lambda2, "category": row.category,
                   "cell": row.cell, "direction": study.DIRECTIONS[row.category]}  # fmt: skip
-        registry.append(_record(row.family, variant, params, comps, metrics, meta, sha))
+        append(_record(row.family, variant, params, comps, metrics, meta, sha))
 
     # C: the log-score total, one paired comparison per lambda2.
     c_rows = []
@@ -331,7 +411,7 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
                        "n": len(gain), "meetings": ci.n_clusters})  # fmt: skip
         comps = {**components, "ordering": meta["ordering_fit"] if key == study.FITTED
                  else "plain_harville"}  # fmt: skip
-        registry.append(_record(
+        append(_record(
             study.C_ID, f"c|lambda2={key}", {"estimator": "C", "lambda2": key}, comps,
             [FoldMetric("development", "log_score_gain", ci.mean, ci.lo, ci.hi, len(gain))],
             meta, sha,
@@ -357,7 +437,11 @@ def max_test(registry, frames, meta, sha, *, n_boot: int = 10000, note: str | No
     """SPA and StepM over E1's members (lambda2 x category x cell), one registry record.
 
     The spec's level 0.95 is the confidence level: StepM's family-wise error (snooping.stepm's
-    ``level``, arch's ``size``) is 0.05."""
+    ``level``, arch's ``size``) is 0.05. ``RunRefused`` before anything is computed unless E1 is
+    frozen with the spec in use and its scored records hold ``meta``'s fits; an identical
+    record already in ``registry`` is reused."""
+    _check_frozen(registry, (study.E1_ID,))
+    _check_fits(registry, meta, (study.E1_ID, MAX_TEST_ID))
     first = frames[study.FITTED].drop_duplicates("race_id").set_index("race_id")
     losses = {}
     for key, frame in frames.items():
@@ -377,7 +461,7 @@ def max_test(registry, frames, meta, sha, *, n_boot: int = 10000, note: str | No
               "stepm_fwer": STEPM_FWER}  # fmt: skip
     if note:
         params["note"] = note
-    registry.append(_record(
+    _appender(registry)(_record(
         MAX_TEST_ID, "spa+stepm", params,
         {"win": meta["win_fit"], "ordering": meta["ordering_fit"]},
         [FoldMetric("development", "spa_pvalue", spa.pvalue, spa.pvalue_lower,
@@ -412,20 +496,89 @@ def write_outputs(summary: dict, sha: str, out: Path) -> None:
     write_report(out / f"e1-{sha[:12]}.md", "\n".join(lines) + "\n", sources=SOURCES)
 
 
+def breakage(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10000):
+    """Descriptive, not a test (review of 0c39a8d): how much of B2's return rounding takes.
+
+    JRA pays per 100 yen rounded down to 10 yen, so the unrounded dividend lies in [D, D + 10).
+    Taken at D + 5 (uniform within the step, as ``implied_share`` does), the unrounded return is
+    R' = R (D + 5) / D. Per lambda2, category and cell, ``breakage_share`` = 1 - sum R / sum R'
+    (a pool fair before rounding has a paid rho of about 1 - breakage_share) and
+    ``rho_unrounded`` = sum R' / sum rate, null 1, with E1's one-sided meeting-bootstrap bounds.
+    E1's races and frozen loss are unchanged; one registry record per lambda2. ``RunRefused``
+    unless E1 is frozen with the spec in use and ``meta``'s fits are E1's."""
+    _check_frozen(registry, (study.E1_ID,))
+    _check_fits(registry, meta, (study.E1_ID,))
+    dividend = {r["race_id"]: r["exacta"][0][1] for r in races if r["exacta"]}
+    append = _appender(registry)
+    rows = []
+    for key, frame in score_frames(races, meta).items():
+        d = frame["race_id"].map(dividend)
+        frame = frame.assign(b2_unrounded=frame["b2"] * (d + BREAKAGE_STEP / 2) / d)
+        metrics = []
+        for category in CATEGORIES:
+            for cell in study.SEGMENT_CELLS:
+                sub = frame[(frame["category"] == category) & frame[cell]]
+                share = float(1 - sub["b2"].sum() / sub["b2_unrounded"].sum())
+                m = _member_metrics(sub, "b2_unrounded", True, 131, n_boot)
+                rows.append({"lambda2": key, "category": category, "cell": cell, "n": m["n"],
+                             "rho": study.rho(sub["b2"], sub["rate"]), "breakage_share": share,
+                             "rho_unrounded": m["rho"], "lo": m["lo"], "hi": m["hi"]})  # fmt: skip
+                fold = f"development:{category}:{cell}"
+                metrics += [
+                    FoldMetric(fold, "breakage_share", share, None, None, m["n"]),
+                    FoldMetric(fold, "rho_unrounded", m["rho"], m["lo"], m["hi"], m["n"]),
+                ]
+        comps = {"win": meta["win_fit"], "ordering": meta["ordering_fit"] if key == study.FITTED
+                 else "plain_harville"}  # fmt: skip
+        params = {"estimator": "B2 breakage", "lambda2": key, "step_yen": BREAKAGE_STEP,
+                  "unrounded": "D + step / 2", "family": study.E1_ID,
+                  "role": "post-hoc descriptive (review of 0c39a8d), not a test"}  # fmt: skip
+        append(_record(BREAKAGE_ID, f"breakage|lambda2={key}", params, comps, metrics, meta, sha))
+    return rows
+
+
+def _breakage_markdown(rows: list[dict], sha: str) -> str:
+    lines = [f"# #131 exacta study: breakage of B2's paid return ({sha[:12]})", "",
+             "| lambda2 | category | cell | n | rho (paid) | breakage share | 1 - share | "
+             "rho unrounded | 95% lo | 95% hi |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]  # fmt: skip
+    for r in rows:
+        lines.append(f"| {r['lambda2']} | {r['category']} | {r['cell']} | {r['n']} | "
+                     f"{r['rho']:.4f} | {r['breakage_share']:.4f} | "
+                     f"{1 - r['breakage_share']:.4f} | {r['rho_unrounded']:.4f} | "
+                     f"{r['lo']:.4f} | {r['hi']:.4f} |")  # fmt: skip
+    return "\n".join(lines) + "\n"
+
+
 def freeze() -> dict[str, str]:
+    """Freeze every family spec; the committed summary (runs only) is left alone."""
     registry = default_registry(COUNTRY)
-    hashes = {fid: registry.freeze_family(fid, spec) for fid, spec in study.family_specs().items()}
-    write_summary(registry, summary_dir(COUNTRY))
-    return hashes
+    return {fid: registry.freeze_family(fid, spec) for fid, spec in study.family_specs().items()}
+
+
+def _recorded(registry, family: str, meta: dict, sha: str, run: Callable[[], object]):
+    """``run()``; a failure is a registry record of ``family`` too, a refusal is not (nothing
+    ran). An identical failure already recorded is not appended again."""
+    try:
+        return run()
+    except RunRefused:
+        raise
+    except Exception as exc:
+        _appender(registry)(_record(
+            family, "run", {"error": f"{type(exc).__name__}: {exc}"[:500]}, {}, [], meta, sha,
+            status="failed",
+        ))  # fmt: skip
+        raise
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m horsetrack.countries.japan.research.exacta_run"
     )
-    parser.add_argument("action", choices=["freeze", "count", "score", "max-test"])
+    parser.add_argument("action", choices=["freeze", "count", "score", "max-test", "breakage"])
     parser.add_argument("--note", help="max-test: why the max test is re-run (recorded)")
     args = parser.parse_args(argv)
+    out = paths.reports_dir() / "japan" / "131-exacta"
     if args.action == "freeze":
         result = freeze()
     elif args.action == "count":
@@ -433,22 +586,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.action == "max-test":  # SPA and StepM alone, on E1's recorded members
         sha, registry = _git_sha(), default_registry(COUNTRY)
         races, meta = load_races()
-        result = max_test(registry, score_frames(races, meta), meta, sha, note=args.note)
-        out = paths.reports_dir() / "japan" / "131-exacta" / f"max-test-{sha[:12]}.json"
-        write_report(out, json.dumps(result, indent=1), sources=SOURCES)
+        result = _recorded(registry, MAX_TEST_ID, meta, sha, lambda: max_test(
+            registry, score_frames(races, meta), meta, sha, note=args.note))  # fmt: skip
+        write_report(out / f"max-test-{sha[:12]}.json", json.dumps(result, indent=1),
+                     sources=SOURCES)  # fmt: skip
         write_summary(registry, summary_dir(COUNTRY))
+    elif args.action == "breakage":  # the committed summary is regenerated separately
+        sha, registry = _git_sha(), default_registry(COUNTRY)
+        races, meta = load_races()
+        rows = _recorded(registry, BREAKAGE_ID, meta, sha,
+                         lambda: breakage(registry, races, meta, sha))  # fmt: skip
+        write_report(out / f"breakage-{sha[:12]}.json", json.dumps(rows, indent=1, default=str),
+                     sources=SOURCES)  # fmt: skip
+        write_report(out / f"breakage-{sha[:12]}.md", _breakage_markdown(rows, sha),
+                     sources=SOURCES)  # fmt: skip
+        result = [r for r in rows if r["cell"] == "all"]
     else:
         sha, registry = _git_sha(), default_registry(COUNTRY)
         races, meta = load_races()
-        try:
-            result = score(registry, races, meta, sha)
-        except Exception as exc:  # the failed run is a registry record too
-            registry.append(_record(
-                MAX_TEST_ID, "run", {"error": f"{type(exc).__name__}: {exc}"[:500]}, {}, [],
-                meta, sha, status="failed",
-            ))  # fmt: skip
-            raise
-        write_outputs(result, sha, paths.reports_dir() / "japan" / "131-exacta")
+        result = _recorded(registry, MAX_TEST_ID, meta, sha,
+                           lambda: score(registry, races, meta, sha))  # fmt: skip
+        write_outputs(result, sha, out)
         write_summary(registry, summary_dir(COUNTRY))
         result = {k: result[k] for k in ("meta", "spa", "stepm", "log_score")}
     print(json.dumps(result, indent=1, default=str))

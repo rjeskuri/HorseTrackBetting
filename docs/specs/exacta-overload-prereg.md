@@ -23,7 +23,16 @@
 | `japan/131-exacta-category-b1-v2` | E1′: B1 flat box, reported | 3 × 14 (42) | `fb6844a9a189ee689f6390b6f2fde58a318370b9e73834ab5b28fbad735ec49b` |
 | `japan/131-exacta-category-b3-v2` | E1″: B3 Harville calibration, reported | λ2 {`full_development`, 1} × 3 × 14 (84) | `493253276d7a803446716325353bb6c18e01409868dc6dbec53eec09a9b4912f` |
 | `japan/131-exacta-logscore-v2` | C: log-score total | λ2 {`full_development`, 1} (2) | `084244a2f3cb69154da1dc97615044b58e0cf534f8077ed1cbd459a98e3650bd` |
-| `japan/131-exacta-rule-v2` | E2: ratio-cut rules | 2 categories × 4 cuts × 2 scopes (16) | `2d6678f59291476bf3d3028b2818bc00e631dea516bc0f01276ac4e0af8cdb75` |
+| `japan/131-exacta-rule-v3` | E2: ratio-cut rules | 2 categories × 4 cuts × 2 scopes (16) | `9104e173371668a34b4594b6e4970546649b886cdccc4e726ec9749188701f0d` |
+
+`japan/131-exacta-rule-v3` (frozen 2026-11-27) supersedes `japan/131-exacta-rule-v2` (hash
+`2d6678f59291476bf3d3028b2818bc00e631dea516bc0f01276ac4e0af8cdb75`, frozen 2026-11-27, not
+scored; its freeze stays in the registry): v2 took the favourite from the lowest final Win odds,
+and v3 takes the favourite and the category from the Win board at T−2, as sections 5 and 6 say.
+v3 adds `selection_time` (T−2), `category`, `scopes` (the headline: the favourite's Win odds at
+T−2 ≥ 3.0 and less popular, by section 6's logged-day tertile), `primary_metric` (expected return
+per ¥100 at the final dividend, the owner's 2026-11-27 reframe) and `revision`; nothing else
+changes, `min_meetings` included.
 
 The superseded v1 families, frozen 2026-11-25 with the label `in_fold` for the same fit, and
 scored that day (their records stay in the registry):
@@ -170,7 +179,11 @@ a segment.
 - SPA and StepM results are a registry record of their own,
   `japan/131-exacta-category-v2/max-test` (v1: `…-v1/max-test`), so they do not add a variant to E1.
 
-**Family E2, ratio-cut rules** (D18 positive-edge; `japan/131-exacta-rule-v2`).
+**Family E2, ratio-cut rules** (D18 positive-edge; `japan/131-exacta-rule-v3`, superseding
+`-rule-v2` for the decision-time favourite).
+
+- The owner's 2026-11-27 reframe on #131 ranks every member by expected return at the final
+  price with its CI and drops the 100-meeting gate; scoring E2 that way is #281.
 
 - Rule form: "at T−2, buy exacta c in category X ∈ {fav_second, no_fav} when
   `r_c(t) = q_c(t)/p_c(t) < k`".

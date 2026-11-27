@@ -56,6 +56,13 @@ API pinned here (module ``horsetrack.countries.japan.research.exacta_study``, no
   exacta_131_v1_family_specs.py, frozen 2026-11-25 with the hashes in V1_HASHES) stay in the
   append-only registry, which refuses another spec under a frozen id (FamilyAlreadyFrozen), so the
   relabelled families are frozen under new ids beside them.
+  E2 correction (review of 0c39a8d): the v2 E2 spec (tests/fixtures/synthetic/
+  exacta_131_v2_rule_spec.py, V2_RULE_HASH) took its favourite from the common "lowest final Win
+  odds". The corrected E2 is frozen under a new id (neither rule-v1 nor rule-v2, ``supersedes``
+  rule-v2) and carries "selection_time" "T-2"; "favourite" and "category" strings that name T-2
+  and never final odds; and "scopes" {"all", "headline"}, the headline naming the favourite's odds
+  at T-2 >= 3.0. It differs from v2 only in E2_SELECTION_KEYS; the four other v2 families keep
+  their frozen ids and hashes.
 """
 
 # Ruff reads the module under test as third-party until it exists, then as first-party; the
@@ -893,3 +900,90 @@ def test_the_relabel_changes_the_lambda2_label_and_not_the_design(estimator):
         assert new.get(key) == old.get(key), key
     relabelled = json.loads(json.dumps(old["lambda2"]).replace('"in_fold"', '"full_development"'))
     assert new["lambda2"] == relabelled
+
+
+# ---------------------------------------------------------------------------------------------
+# E2 v3: selection from the decision-time board (review of 0c39a8d, exacta_study.py:449)
+# ---------------------------------------------------------------------------------------------
+
+# The v2 E2 family frozen 2026-11-27 (docs/specs/exacta-overload-prereg.md), whose favourite
+# came from the common "lowest final Win odds". Signed spec section 5: "at T-2 ... Selection uses
+# only the board at t. A selection variable taken from final odds is look-ahead"; section 6: the
+# favourite's Win odds are "final for E1, at t for E2". The corrected E2 is a new family.
+V2_RULE_HASH = "2d6678f59291476bf3d3028b2818bc00e631dea516bc0f01276ac4e0af8cdb75"
+V2_RULE_FIXTURE = FIXTURES / "exacta_131_v2_rule_spec.py"
+# The four v2 families E2's correction leaves alone, with their documented frozen hashes.
+V2_HASHES = {
+    "B2": ("japan/131-exacta-category-v2",
+           "eb900ab7144a6c88b5ebf4058d6aaf22570a9a5fb06d7803dbaa7a7cf89bf247"),
+    "B1": ("japan/131-exacta-category-b1-v2",
+           "fb6844a9a189ee689f6390b6f2fde58a318370b9e73834ab5b28fbad735ec49b"),
+    "B3": ("japan/131-exacta-category-b3-v2",
+           "493253276d7a803446716325353bb6c18e01409868dc6dbec53eec09a9b4912f"),
+    "C": ("japan/131-exacta-logscore-v2",
+          "084244a2f3cb69154da1dc97615044b58e0cf534f8077ed1cbd459a98e3650bd"),
+}  # fmt: skip
+# The keys the E2 correction may change: the selection keys, their provenance note, the link.
+E2_SELECTION_KEYS = {
+    "favourite", "category", "selection_time", "scopes", "primary_metric", "supersedes",
+    "revision",
+}  # fmt: skip
+
+
+def _v2_rule() -> tuple[str, dict]:
+    loader = importlib.util.spec_from_file_location("exacta_131_v2_rule_spec", V2_RULE_FIXTURE)
+    module = importlib.util.module_from_spec(loader)
+    loader.loader.exec_module(module)
+    assert _hash(module.V2_RULE_SPEC) == V2_RULE_HASH  # the frozen v2 record
+    return module.V2_RULE_ID, module.V2_RULE_SPEC
+
+
+def _at_decision_time(text) -> bool:
+    return isinstance(text, str) and "T-2" in text and "final" not in text.lower()
+
+
+def test_e2_takes_the_favourite_and_category_from_the_decision_time_board():
+    specs = family_specs()
+    e2 = specs[_family_id(specs, "rule")]
+    assert e2["selection_time"] == "T-2"  # D2's primary decision time, section 5's "at T-2"
+    for key in ("favourite", "category"):  # no final odds in any selection variable
+        assert _at_decision_time(e2.get(key)), (key, e2.get(key))
+    assert set(e2["scopes"]) == {m["scope"] for m in e2["members"]} == {"all", "headline"}
+    headline = e2["scopes"]["headline"]  # favourite odds >= 3.0, read at t, not at the close
+    assert _at_decision_time(headline) and "3.0" in headline, headline
+    # E1 keeps the final-odds favourite: it is scored on history, where only final odds exist.
+    for estimator in ("B2", "B1", "B3", "C"):
+        assert "final" in specs[_family_id(specs, estimator)]["favourite"]
+
+
+def test_corrected_e2_freezes_under_a_new_id_beside_rule_v1_and_rule_v2(tmp_path):
+    v1 = _v1_specs()
+    v1_id = _v1_id(v1, "rule")
+    v2_id, v2 = _v2_rule()
+    specs = family_specs()
+    e2_id = _family_id(specs, "rule")
+    assert e2_id not in {v1_id, v2_id}
+    assert e2_id not in V1_HASHES and e2_id not in {fid for fid, _ in V2_HASHES.values()}
+    assert _hash(specs[e2_id]) not in {V1_HASHES[v1_id], V2_RULE_HASH}
+    assert specs[e2_id]["supersedes"] == v2_id
+
+    reg = Registry(tmp_path / "japan.jsonl", holdout_log=tmp_path / "holdout_log.jsonl")
+    assert reg.freeze_family(v1_id, v1[v1_id]) == V1_HASHES[v1_id]
+    assert reg.freeze_family(v2_id, v2) == V2_RULE_HASH
+    assert reg.freeze_family(e2_id, specs[e2_id]) == _hash(specs[e2_id])  # not already frozen
+    assert reg.frozen_spec_hash(v1_id) == V1_HASHES[v1_id]
+    assert reg.frozen_spec_hash(v2_id) == V2_RULE_HASH
+    reg.verify()
+
+
+def test_the_e2_correction_changes_only_e2_s_selection_keys():
+    _, v2 = _v2_rule()
+    specs = family_specs()
+    e2 = specs[_family_id(specs, "rule")]
+    changed = {k for k in set(v2) | set(e2) if v2.get(k) != e2.get(k)}
+    assert changed <= E2_SELECTION_KEYS, sorted(changed - E2_SELECTION_KEYS)
+    assert {"favourite", "selection_time", "supersedes"} <= changed
+    # the other four families stay the frozen v2 records (ids and hashes), favourite included
+    for estimator, (family_id, frozen) in V2_HASHES.items():
+        assert _family_id(specs, estimator) == family_id
+        assert _hash(specs[family_id]) == frozen, estimator
