@@ -458,10 +458,10 @@ The JRDB pre-race and post-race tables (#57), matched to the store's runners; pr
 
 Layers C4; role `feature_at_t`; tickets #406.
 
-JV-Data DM (time-type) and TM (match-type) data-mining predictions, published before the race; dumped but not mapped, so no publication time is known.
+JV-Data DM (time-type) and TM (match-type) data-mining predictions, published before the race; mapped into the jravan mining_predictions table (#406). Its availability rule is pending the owner, so the as-of views refuse it; created_utc is the kept record's creation stamp, not a known publication time.
 
-- jravan `records/MING/DM._record`: withheld (D21)
-- jravan `records/MING/TM._record`: withheld (D21)
+- jravan `mining_predictions.value` where kind = DM: withheld (D21)
+- jravan `mining_predictions.value` where kind = TM: withheld (D21)
 
 ## win_sales
 
