@@ -57,7 +57,7 @@ from horsetrack.core.eval.holdout import _git_sha, is_holdout_day, split_off
 from horsetrack.core.eval.registry import RunRecord, default_registry
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.pricing import clean_odds
-from horsetrack.core.store.asof import load_availability
+from horsetrack.core.store.asof import Availability, load_availability
 from horsetrack.countries.japan.feature_boundary import (
     PUBLICATION_PROXY,
     RESULTS_DERIVED,
@@ -242,7 +242,8 @@ def view_at(con, race_id: str, at_utc: datetime, *, rules, selection: str = BOAR
     BOARD_KEYS are optional: a board without `post_utc`, say, is read without it."""
     if "look-ahead" in selection:
         raise ValueError(f"the board at t is not look-ahead: {selection!r}")
-    present = set(con.table(BOARD_TABLE).columns)
+    table = '"' + BOARD_TABLE.replace('"', '""') + '"'
+    present = {d[0] for d in con.execute(f"SELECT * FROM {table} LIMIT 0").description}
     keys = [k for k in BOARD_KEYS if k in present or k not in BOARD_STAMPS]
     rows = feature_view(con, BOARD_TABLE, at_utc, features=BOARD_FEATURES, keys=keys, rules=rules)
     rows = rows.loc[rows["race_id"].eq(race_id)]
@@ -652,6 +653,16 @@ class StudyData:
     logged: dict[str, list[str]] = field(default_factory=dict)  # pool -> races
     view_at_t: Callable[[str], RaceView] | None = None
     board_files: list[Path] = field(default_factory=list)
+    # the availability rules `view_at_t` reads the board under; None: the shipped rules
+    board_rules: Mapping[str, Availability] | None = None
+
+
+@dataclass
+class BoardStudy(Study):
+    """A study with the timestamp fallback of the rule its board at t was read under: `(column,
+    stand-in)` of feature_boundary.availability_fallback, None for a rule without one."""
+
+    board_fallback: tuple[str, str] | None = None
 
 
 def _store_file(name: str) -> Path:
@@ -715,8 +726,10 @@ def read_development(minutes: int) -> StudyData:
     dataset = ds.dataset(_store_file("dividends"), format="parquet")
     dividends = dataset.to_table(columns=DIVIDEND_COLUMNS, filter=scope).to_pandas()
     logged, files = logged_boards(set(run))
-    view = board_view(files, load_availability(COUNTRY), minutes)
-    return StudyData(races, frames["runners"], dividends, logged, view, sorted(set(files.values())))
+    rules = load_availability(COUNTRY)
+    view = board_view(files, rules, minutes)
+    board_files = sorted(set(files.values()))
+    return StudyData(races, frames["runners"], dividends, logged, view, board_files, rules)
 
 
 def _digest(files: Sequence[Path]) -> str:
@@ -1156,9 +1169,11 @@ def compute_study(data: StudyData, spec: dict) -> Study:
     board-at-t reads of `data.view_at_t`."""
     ctx = _Context(data, spec)
     on_fallback: set[str] = set()
-    fallback = availability_fallback(BOARD_TABLE)
+    rules = load_availability(COUNTRY) if data.board_rules is None else data.board_rules
+    fallback = availability_fallback(BOARD_TABLE, rules=rules)
     data = replace(data, view_at_t=_noting_fallback(data.view_at_t, fallback, on_fallback))
-    study = Study(
+    study = BoardStudy(
+        board_fallback=fallback,
         counts={
             "races_read": len(data.races),
             "run_races": len(ctx.race_ids),
@@ -1167,7 +1182,7 @@ def compute_study(data: StudyData, spec: dict) -> Study:
             "dividend_rows": len(ctx.dividends),
             "refund_rows": int(ctx.dividends["is_refund"].astype(bool).sum()),
         }
-        | {f"races_with_a_logged_{p}_board": len(ctx.logged(p)) for p in ("WIN", *SYNTHETIC)}
+        | {f"races_with_a_logged_{p}_board": len(ctx.logged(p)) for p in ("WIN", *SYNTHETIC)},
     )
     l1 = spec["rules"]["L1"]
     for pool, threshold in ((p, x) for p in SYNTHETIC for x in l1["thresholds"][p]):
@@ -1345,11 +1360,11 @@ _APPROXIMATION_NOTES = {
 }
 
 
-def _approximation_lines(counts: Mapping[str, int]) -> list[str]:
+def _approximation_lines(study: Study) -> list[str]:
     """One line per column the study reads that carries a documented approximation
     (feature_boundary.approximations), with its table and its tags; the board's features too,
-    with the board rule's fallback timestamp (feature_boundary.availability_fallback) and the
-    races whose board at t used it, when the study counted them."""
+    when the rule the study read its board at t under has a timestamp fallback
+    (`BoardStudy.board_fallback`), with the races whose board at t used it."""
     used = [*CARD_FILTERS, *((BOARD_TABLE, c, "the board at t") for c in BOARD_FEATURES)]
     lines = []
     for table, column, use in used:
@@ -1357,10 +1372,10 @@ def _approximation_lines(counts: Mapping[str, int]) -> list[str]:
         if tags:
             notes = "; ".join(_APPROXIMATION_NOTES[tag] for tag in tags)
             lines.append(f"- `{table}.{column}` ({use}): {', '.join(tags)}: {notes}")
-    fallback = availability_fallback(BOARD_TABLE)
+    fallback = getattr(study, "board_fallback", None)
     if fallback is not None:
         column, stand_in = fallback
-        n = counts.get(_fallback_count(fallback))
+        n = study.counts.get(_fallback_count(fallback))
         races = "not counted" if n is None else f"{n} races whose board at t holds one"
         named = ", ".join(f"`{BOARD_TABLE}.{c}`" for c in BOARD_FEATURES)
         lines.append(
@@ -1393,7 +1408,7 @@ def render_report(study: Study, spec: dict, about: dict) -> str:
         "",
         "## Documented approximations",
         "",
-        *_approximation_lines(study.counts),
+        *_approximation_lines(study),
         "",
         "## Data",
         "",

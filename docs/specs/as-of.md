@@ -401,8 +401,11 @@ board through `feature_view` (identifiers `race_id`, `pool`, `combination`, and 
 `snapshot_utc`, `fetched_utc`, `post_utc` the table has; feature `odds`), and its report lists
 `runners.is_scratched` and `races.status`, the race and starter filters it reads from the store's
 card, under "Documented approximations" with their `RESULTS_DERIVED` tag, and `odds` with the
-board rule's `TIMESTAMP_FALLBACK` and the count of races whose board at t holds a capture without
-`fetched_utc`. The two filters are read as before from the store's card, outside
+`TIMESTAMP_FALLBACK` of the board rule its board reader uses (`StudyData.board_rules`, the
+shipped rules when unset) and the count of races whose board at t holds a capture on that
+fallback. `compute_study` carries the fallback (column and stand-in) and the count in its result,
+and the report renders the disclosure from the result alone: a board rule without a fallback (a
+column rule without one, or an offset rule) gives no fallback line. The two filters are read as before from the store's card, outside
 `feature_view`: `runners.is_scratched` is an approved feature at t (the inventory's
 `scratches_at_t`), `races.status` is no feature at all, and the inventory gains no entry for it
 (feature inclusion is the owner's).

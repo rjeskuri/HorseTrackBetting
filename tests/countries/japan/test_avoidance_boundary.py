@@ -20,6 +20,16 @@ test_feature_boundary.py):
   discloses the fallback: `render_report` on `compute_study`'s output has a line with
   `feature_boundary.TIMESTAMP_FALLBACK` that names `odds_timeseries.odds` and the number of races
   whose board at t (the latest capture per pool and combination) holds such a capture.
+- The study's real board path: `board_view(files, rules, minutes)` reads logger day files
+  (`logger.compact.SCHEMA`) and registers the race's rows as Arrow data; through it the board at
+  t has the prices its rules make, and `compute_study` scores the board-at-t variants (none
+  fails) and counts the fallback races.
+- The disclosure follows the board reader's rules: `StudyData.board_rules` (the availability
+  rules its `view_at_t` reader uses; `read_development` sets the ones it gives `board_view`)
+  decides the fallback `compute_study` counts and `render_report` names, from the study alone.
+  Without a fallback in the reader's odds_timeseries rule (a column rule without one, or an
+  offset rule) the report discloses no timestamp fallback for odds; with another fallback column
+  it names that column and the races whose board at t used it.
 
 Every frame is synthetic; no date is a Japan holdout day (on or after 2026-11-28).
 """
@@ -353,3 +363,247 @@ def test_the_report_discloses_the_board_fallback_with_its_race_count(rules, fall
     assert any(str(expected) in re.findall(r"\d+", line) for line in lines), (
         f"{expected} races on the fallback: {lines}"
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# The study's real board path: day files read by `board_view`, the rows registered as Arrow data
+# ---------------------------------------------------------------------------------------------
+
+# The unfetched TRIO capture of each fallback race (snapshot t - 2 min) carries `logged_utc` =
+# snapshot + this delay: on the board at t under a `logged_utc` fallback for the first and last
+# race only, while the shipped `snapshot_utc` fallback puts all three on it.
+LOGGED_DELAY = {
+    STUDY_RACES[0]: timedelta(minutes=1),
+    STUDY_RACES[2]: timedelta(minutes=3),
+    STUDY_RACES[3]: timedelta(seconds=30),
+}
+FALLBACK_RACES = tuple(LOGGED_DELAY)
+
+
+def _logged_utc(row) -> datetime:
+    race, pool, _, snap, fetched, _, _ = row
+    if fetched is None and pool == "TRIO":
+        return snap + LOGGED_DELAY[race]
+    return snap + timedelta(seconds=3)
+
+
+def _write_days(folder, captures, *, logged: bool = False) -> dict:
+    """The captures as logger day files (`logger.compact.SCHEMA`, one Parquet per race date,
+    each race's post from STUDY_POSTS), plus a `logged_utc` column when `logged`; race -> file."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from horsetrack.countries.japan.logger.compact import SCHEMA
+
+    schema = (
+        SCHEMA.append(pa.field("logged_utc", pa.timestamp("us", tz="UTC"))) if logged else SCHEMA
+    )
+    by_day: dict[str, list[dict]] = {}
+    for row in captures:
+        race, pool, combination, snap, fetched, odds, final = row
+        post = STUDY_POSTS[race]
+        record = {
+            "race_id": race,
+            "venue": race.split(":")[2],
+            "race_no": int(race.split(":")[3]),
+            "pool": pool,
+            "combination": combination,
+            "snapshot_utc": snap,
+            "fetched_utc": fetched,
+            "post_utc": post,
+            "minutes_to_post": (post - (fetched or snap)).total_seconds() / 60,
+            "odds": odds,
+            "odds_hi": None,
+            "investment": 1000.0,
+            "status_raw": "",
+            "is_final_capture": final,
+            "dividend": None,
+            "is_refund": None,
+        }
+        if logged:
+            record["logged_utc"] = _logged_utc(row)
+        by_day.setdefault(race.split(":")[1], []).append(record)
+    folder.mkdir(parents=True, exist_ok=True)
+    files = {}
+    for day, records in by_day.items():
+        path = folder / f"{day}.parquet"
+        pq.write_table(pa.Table.from_pylist(records, schema=schema), path)
+        files.update({r["race_id"]: path for r in records})
+    return files
+
+
+def _latest_by(captures, race: str, t: datetime, available) -> dict[tuple[str, str], tuple]:
+    """From first principles: per (pool, combination), `race`'s latest snapshot among the captures
+    with `available(row)` (None: never) at or before t."""
+    latest: dict[tuple[str, str], tuple] = {}
+    for row in captures:
+        when = available(row)
+        if row[0] != race or when is None or when > t:
+            continue
+        key = (row[1], row[2])
+        if key not in latest or row[3] > latest[key][3]:
+            latest[key] = row
+    return latest
+
+
+def _shipped(row):  # fetched_utc, or snapshot_utc where it is null
+    return row[3] if row[4] is None else row[4]
+
+
+def _study_setup(minutes: int):
+    boot = {**avoidance.bootstrap_settings(), "n_boot": 200}
+    return avoidance.build_spec(avoidance.owner_inputs(), boot, minutes)
+
+
+def _real_path_data(files, rules, minutes: int, *, board_rules=None):
+    """The study's data with its board at t read the way `read_development` reads it:
+    `board_view` over the day files under `rules`; with `board_rules`, also
+    `StudyData.board_rules`, the rules that reader uses."""
+    import dataclasses
+
+    data = dataclasses.replace(
+        _study_data(None, rules, minutes),
+        view_at_t=avoidance.board_view(files, rules, minutes),
+        board_files=sorted(set(files.values())),
+    )
+    return data if board_rules is None else dataclasses.replace(data, board_rules=board_rules)
+
+
+def _fallback_lines(report: str) -> list[str]:
+    from horsetrack.countries.japan.feature_boundary import TIMESTAMP_FALLBACK
+
+    return [
+        line
+        for line in report.splitlines()
+        if TIMESTAMP_FALLBACK in line and "odds_timeseries.odds" in line
+    ]
+
+
+def test_board_view_reads_the_board_at_t_from_registered_day_files(rules, tmp_path):
+    minutes = int(load_country_yaml("japan", "decision")["primary_min"])
+    captures = _study_captures(minutes, FALLBACK_RACES)
+    files = _write_days(tmp_path / "odds_timeseries", captures)
+    view = avoidance.board_view(files, rules, minutes)
+    for race in STUDY_RACES:
+        t = STUDY_POSTS[race] - timedelta(minutes=minutes)
+        seen = view(race)
+        assert seen.selection == f"{avoidance.BOARD_AT_T} (T-{minutes})"
+        expected = {k: row[5] for k, row in _latest_by(captures, race, t, _shipped).items()}
+        assert _prices(seen) == expected, race
+        # the unfetched TRIO capture is on a fallback race's board, at 40.0
+        assert (expected[("TRIO", "1,2,3")] == 40.0) is (race in FALLBACK_RACES)
+
+
+def test_the_study_scores_its_board_at_t_variants_on_the_registered_board(rules, tmp_path):
+    minutes = int(load_country_yaml("japan", "decision")["primary_min"])
+    spec = _study_setup(minutes)
+    captures = _study_captures(minutes, FALLBACK_RACES)
+    files = _write_days(tmp_path / "odds_timeseries", captures)
+    study = avoidance.compute_study(_real_path_data(files, rules, minutes), spec)
+
+    at_t = f"{avoidance.BOARD_AT_T} (T-{minutes})"
+    board_variants = [v for v in study.variants if v.components.get("selection") == at_t]
+    assert board_variants, "no board-at-t variant ran"
+    failed = {
+        v.name: v.error
+        for v in board_variants
+        if v.error and not v.error.startswith(("no paired race", "data pending"))
+    }
+    assert not failed, f"board-at-t variants failed on the registered board: {failed}"
+    rows = [r for r in study.tables.get("comparisons", []) if r["selection"] == at_t]
+    assert rows and all(r["status"] != "failed" for r in rows), rows
+    assert any(r["status"] == "scored" for r in rows), rows
+
+    expected = sum(
+        any(
+            row[4] is None
+            for row in _latest_by(
+                captures, race, STUDY_POSTS[race] - timedelta(minutes=minutes), _shipped
+            ).values()
+        )
+        for race in STUDY_RACES
+    )
+    assert expected == len(FALLBACK_RACES)
+    lines = _fallback_lines(avoidance.render_report(study, spec, {"git": "0000000"}))
+    assert lines and any(str(expected) in re.findall(r"\d+", line) for line in lines), lines
+
+
+# ---------------------------------------------------------------------------------------------
+# The disclosure follows the board reader's rules, not the shipped ones
+# ---------------------------------------------------------------------------------------------
+
+
+def _board_rules(rules, case: str):
+    """The shipped rules with odds_timeseries replaced: no fallback, an offset of two minutes
+    from snapshot_utc, or a `logged_utc` fallback."""
+    import dataclasses
+
+    from horsetrack.core.store.asof import Availability
+
+    board = rules["odds_timeseries"]
+    if case == "no-fallback":
+        board = dataclasses.replace(board, fallback=None)
+    elif case == "offset-2min":
+        board = Availability(
+            "odds_timeseries",
+            "offset",
+            anchor="snapshot_utc",
+            offset=timedelta(minutes=2),
+            label_columns=board.label_columns,
+        )
+    else:
+        board = dataclasses.replace(board, fallback="logged_utc")
+    return {**rules, "odds_timeseries": board}
+
+
+AVAILABLE = {  # case -> when a capture is available under it, from first principles
+    "no-fallback": lambda row: row[4],
+    "offset-2min": lambda row: row[3] + timedelta(minutes=2),
+    "logged-utc-fallback": lambda row: _logged_utc(row) if row[4] is None else row[4],
+}
+FALLBACK_COUNT = {"no-fallback": None, "offset-2min": None, "logged-utc-fallback": 2}
+
+
+@pytest.mark.parametrize("case", list(AVAILABLE))
+def test_the_fallback_disclosure_follows_the_board_readers_rules(rules, tmp_path, case):
+    minutes = int(load_country_yaml("japan", "decision")["primary_min"])
+    spec = _study_setup(minutes)
+    captures = _study_captures(minutes, FALLBACK_RACES)
+    files = _write_days(tmp_path / "odds_timeseries", captures, logged=True)
+    board_rules = _board_rules(rules, case)
+
+    # the reader's boards are the ones its rules make
+    view = avoidance.board_view(files, board_rules, minutes)
+    for race in STUDY_RACES:
+        t = STUDY_POSTS[race] - timedelta(minutes=minutes)
+        latest = _latest_by(captures, race, t, AVAILABLE[case])
+        assert _prices(view(race)) == {k: row[5] for k, row in latest.items()}, (case, race)
+
+    # From first principles: the races whose board at t holds a capture on the fallback.
+    on_fallback = sum(
+        any(
+            row[4] is None
+            for row in _latest_by(
+                captures, race, STUDY_POSTS[race] - timedelta(minutes=minutes), AVAILABLE[case]
+            ).values()
+        )
+        for race in STUDY_RACES
+    )
+    # the fixture is what the case says: without a fallback no unfetched capture is on a board;
+    # the offset rule puts three on boards, none by a fallback; `logged_utc` puts two, not three
+    assert on_fallback == {"no-fallback": 0, "offset-2min": 3, "logged-utc-fallback": 2}[case]
+    expected = FALLBACK_COUNT[case]  # the races the report discloses, None: no disclosure
+
+    study = avoidance.compute_study(
+        _real_path_data(files, board_rules, minutes, board_rules=board_rules), spec
+    )
+    lines = _fallback_lines(avoidance.render_report(study, spec, {"git": "0000000"}))
+    if expected is None:
+        # no column rule with a fallback: the report discloses no timestamp fallback for odds
+        assert not lines, f"{case}: the report discloses the shipped fallback: {lines}"
+    else:
+        assert lines, f"{case}: the reader's fallback is not disclosed"
+        assert all("logged_utc" in line for line in lines), lines
+        assert any(str(expected) in re.findall(r"\d+", line) for line in lines), (
+            f"{expected} races on the logged_utc fallback: {lines}"
+        )
