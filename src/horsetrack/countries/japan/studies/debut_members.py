@@ -1393,7 +1393,8 @@ def run_debut_members(
     one record per variant (failures included), write the private report, its JSON and the
     candidate-cell file. With the default registry, also regenerate the committed summary and
     the public report. A failed read or fold split fails every planned variant, which is
-    recorded and reported like any other failure; the result is returned, not raised."""
+    recorded and reported like any other failure, but leaves an existing public report as an
+    earlier run wrote it; the result is returned, not raised."""
     date_to = date.today() if date_to is None else date_to
     out_dir = (
         paths.reports_dir() if out_dir is None else paths.outside_repo(Path(out_dir), what="out")
@@ -1407,6 +1408,7 @@ def run_debut_members(
     builds: dict[str, str] = {}
     failed: dict[str, str] = {}
     started = clock.monotonic()
+    aborted = False  # the read or the fold split raised: the public report is left as it is
     try:
         frame, counts, failed, builds = load_inputs(date_from, date_to, log)
         folds = walk_forward(frame["race_date"], scheme=load_country_scheme(COUNTRY))
@@ -1414,6 +1416,7 @@ def run_debut_members(
         study.counts = {**counts, "folds": len(folds), **study.counts}
         del frame
     except Exception as exc:  # every planned variant fails, and is recorded and reported
+        aborted = True
         error = f"{type(exc).__name__}: {exc}"
         fold_scheme = "walk_forward:" + json.dumps(spec["folds"], sort_keys=True)
         study = Study(counts={})
@@ -1463,7 +1466,11 @@ def run_debut_members(
     )
     if committed:
         write_committed_summary(registry)
-        write_report(env.repo_root() / PUBLIC_REPORT, render_public_report(result), sources=())
+        if aborted:
+            log(f"input read aborted: {PUBLIC_REPORT} left as it is")
+        else:
+            public = env.repo_root() / PUBLIC_REPORT
+            write_report(public, render_public_report(result), sources=())
     return result
 
 

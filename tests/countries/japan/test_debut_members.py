@@ -92,6 +92,20 @@ Review round 1 (PR #559) pins five more behaviours:
   private reports (the `.md` at `DebutResult.report_path` and its `.json` beside it, same stem) to
   different paths, so a later run never overwrites an earlier one.
 
+Review round 2 (PR #559) pins one more:
+
+- Aborted read. When the run's input read (`load_inputs` raises, as with the dividends parquet
+  missing or no store at all) or its fold split (`walk_forward` on the frame's `race_date`, e.g.
+  a race without a date) aborts, `run_debut_members` with the default registry (the command's
+  run) still appends one failed record per planned variant to the default registry and writes
+  the private report, and the command exits nonzero; but the committed public report is not
+  rewritten: an existing one stays byte for byte as it was. A run that reads its inputs and
+  scores still rewrites it. Seam: the public report's path is `env.repo_root() / PUBLIC_REPORT`,
+  with `repo_root` looked up on `horsetrack.core.env` at call time (as `registry.summary_dir`
+  does, tests/core/test_env.py), so `monkeypatch.setattr("horsetrack.core.env.repo_root", ...)`
+  sends the public report and the committed summary to a scratch root. The data dir, the default
+  registry and the private reports stay under it (tmp_path/data, outside that scratch root).
+
 Not pinned here (review checks them): the members' feature engineering beyond the cases above, the
 fit's handling of missing values, the private report's layout, and `run_debut_members`' store
 reads.
@@ -1346,3 +1360,99 @@ def test_private_reports_of_different_runs_do_not_overwrite(tmp_path, monkeypatc
     for report, (text, tables) in written.items():
         assert report.read_bytes() == text, f"{report.name} was overwritten by a later run"
         assert report.with_suffix(".json").read_bytes() == tables
+
+
+# --------------------------------------------------------------------------- an aborted read
+
+REAL_PUBLIC_REPORT = REPO_ROOT / "docs" / "experiments" / "debut-members-japan.md"
+EARLIER_PUBLIC_REPORT = (
+    b"# Experiment report: newcomer and maiden members (an earlier run, kept as written)\n"
+    b"\n"
+    b"Every variant of that run scored; this text is the committed report a retry must keep.\n"
+)
+RUN_RANGE = ("--from", "2015-01-03", "--to", "2021-12-25")  # 2020-21: eight scored quarters
+
+
+@pytest.fixture
+def scratch_repo(tmp_path, monkeypatch) -> Path:
+    """A scratch repository root holding an earlier public report: `env.repo_root()` is
+    tmp_path/repo for the test (the public report and the committed summary go there), while the
+    data dir stays tmp_path/data. The repository's own public report is checked unchanged."""
+    root = tmp_path / "repo"
+    report = root / dm.PUBLIC_REPORT
+    report.parent.mkdir(parents=True)
+    report.write_bytes(EARLIER_PUBLIC_REPORT)
+    real = REAL_PUBLIC_REPORT.read_bytes() if REAL_PUBLIC_REPORT.is_file() else None
+    monkeypatch.setattr("horsetrack.core.env.repo_root", lambda: root)
+    yield root
+    after = REAL_PUBLIC_REPORT.read_bytes() if REAL_PUBLIC_REPORT.is_file() else None
+    assert after == real, "a test rewrote the repository's public report"
+
+
+def missing_dividends(date_from, date_to, log=print):
+    """The store read with the dividends parquet gone: what a retry of the command meets."""
+    from horsetrack.core import paths
+
+    where = paths.processed_dir("jra") / "dividends.parquet"
+    raise FileNotFoundError(2, "No such file or directory", str(where))
+
+
+def undated_race(date_from, date_to, log=print):
+    """The study frame read in full, one race without a date: the fold split aborts on it."""
+    frame, counts, failed, builds = fake_load_inputs(members_load=True, builds=BUILDS_A)(
+        date_from, date_to, log
+    )
+    race = frame["race_id"].iloc[len(frame) // 2]
+    frame.loc[frame["race_id"].eq(race), "race_date"] = pd.NaT
+    return frame, counts, failed, builds
+
+
+@pytest.mark.parametrize(
+    ("case", "load", "error"),
+    [
+        ("the dividends parquet is missing", missing_dividends, "FileNotFoundError"),
+        ("no store at all (the module's own load_inputs)", None, None),
+        ("the fold split aborts on a race without a date", undated_race, "ValueError"),
+    ],
+)
+def test_an_aborted_read_keeps_the_public_report(case, load, error, scratch_repo, tmp_path,
+                                                 monkeypatch):  # fmt: skip
+    """The command's run (default registry) whose input read or fold split aborts: it exits
+    nonzero, appends one failed record per planned variant to the default registry and writes
+    the private report with the error, but leaves the committed public report byte for byte as
+    an earlier run wrote it."""
+    if load is not None:
+        monkeypatch.setattr(dm, "load_inputs", load)
+    public = scratch_repo / dm.PUBLIC_REPORT
+
+    result = invoke_debut_members(*RUN_RANGE)
+
+    from horsetrack.core.eval.registry import default_registry
+
+    records = default_registry("japan").records(dm.FAMILY_ID)
+    assert sorted(r.variant for r in records) == sorted(dm.variant_names()), case
+    assert {r.status for r in records} == {"failed"}, case
+    private = sorted((tmp_path / "data" / "reports").glob("*.md"))
+    assert private, f"{case}: the private report (the run's diagnostics) is not written"
+    if error is not None:
+        assert any(error in p.read_text("utf-8") for p in private), f"{case}: no {error} shown"
+    assert result.exit_code != 0, f"{case}: no variant scored, yet the command exited 0"
+    assert public.read_bytes() == EARLIER_PUBLIC_REPORT, (
+        f"{case}: the aborted run rewrote the committed public report"
+    )
+
+
+def test_a_run_that_reads_its_inputs_rewrites_the_public_report(scratch_repo, monkeypatch):
+    """The control: the command's run whose inputs read and whose variants score rewrites the
+    committed public report, naming the family and every planned variant."""
+    monkeypatch.setattr(dm, "load_inputs", fake_load_inputs(members_load=True, builds=BUILDS_A))
+    public = scratch_repo / dm.PUBLIC_REPORT
+
+    result = invoke_debut_members(*RUN_RANGE)
+
+    assert result.exit_code == 0, result.output
+    text = public.read_text("utf-8")
+    assert public.read_bytes() != EARLIER_PUBLIC_REPORT, "a scored run left the public report"
+    assert dm.FAMILY_ID in text
+    for name in dm.variant_names():
+        assert name in text, f"variant {name} is not in the rewritten public report"
