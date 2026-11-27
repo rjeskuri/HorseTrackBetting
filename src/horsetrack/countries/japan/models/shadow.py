@@ -84,7 +84,15 @@ _MAX_DRAWS_PER_CHUNK = 2_000_000  # replicate-by-cluster draws built at once, as
 
 
 class NotEstimable(ValueError):
-    """Too few pairs, no spread in the score, or too few clusters for a slope or its interval."""
+    """Too few pairs, no spread in the score, or too few clusters for a slope or its interval.
+
+    ``slope`` is the point slope when only the interval is not estimable (one cluster, or a
+    replicate with no spread), else None; ``n`` is the number of pairs either way."""
+
+    def __init__(self, message: str, *, n: int, slope: float | None = None) -> None:
+        super().__init__(message)
+        self.n = n
+        self.slope = slope
 
 
 @dataclass(frozen=True)
@@ -285,17 +293,20 @@ def _cluster_ols(
     and level quantiles of the slope over ``n_boot`` replicates that each draw as many clusters
     as there are, with replacement, and fit the rows of the drawn clusters. NotEstimable for fewer
     than two rows, no spread in x, one cluster, or a replicate with no spread in x."""
-    if len(x) < 2:
-        raise NotEstimable(f"{len(x)} pair(s): a slope needs at least two")
+    pairs = len(x)
+    if pairs < 2:
+        raise NotEstimable(f"{pairs} pair(s): a slope needs at least two", n=pairs)
     xc, yc = x - x.mean(), y - y.mean()  # a slope with an intercept does not move with a shift
     sxx = float((xc * xc).sum())
     if not sxx > 0:
-        raise NotEstimable("the score has no spread: the slope is not defined")
+        raise NotEstimable("the score has no spread: the slope is not defined", n=pairs)
     slope = float((xc * yc).sum() / sxx)
     codes, _ = pd.factorize(pd.Series(clusters), sort=True)
     k = int(codes.max()) + 1
     if k < 2:
-        raise NotEstimable("one cluster: a bootstrap of whole clusters has no spread")
+        raise NotEstimable(
+            "one cluster: a bootstrap of whole clusters has no spread", n=pairs, slope=slope
+        )
     sums = [np.bincount(codes, weights=w, minlength=k) for w in (None, xc, yc, xc * xc, xc * yc)]
     rng = np.random.default_rng(seed)
     chunk = max(1, _MAX_DRAWS_PER_CHUNK // k)
@@ -303,11 +314,13 @@ def _cluster_ols(
     for start in range(0, n_boot, chunk):
         stop = min(start + chunk, n_boot)
         drawn = rng.integers(0, k, size=(stop - start, k))
-        n, sx, sy, sx2, sxy = (s[drawn].sum(axis=1) for s in sums)
-        spread = sx2 - sx * sx / n
+        size, sx, sy, sx2, sxy = (s[drawn].sum(axis=1) for s in sums)
+        spread = sx2 - sx * sx / size
         if not (spread > 0).all():
-            raise NotEstimable("a replicate's score has no spread: too few clusters")
-        slopes[start:stop] = (sxy - sx * sy / n) / spread
+            raise NotEstimable(
+                "a replicate's score has no spread: too few clusters", n=pairs, slope=slope
+            )
+        slopes[start:stop] = (sxy - sx * sy / size) / spread
     lo, hi = np.quantile(slopes, [1.0 - level, level])
     return slope, float(lo), float(hi), k
 
@@ -409,15 +422,16 @@ def flat_stakes(picks: pd.DataFrame, *, limits: Limits) -> pd.DataFrame:
 
 def log_growth_by_day(settled: pd.DataFrame, *, bankroll_yen: float) -> pd.DataFrame:
     """One row per race day of ``settled`` (``settle_shadow`` or ``settle_bets`` rows with
-    ``stake_yen``), in day order: ``day``, ``n_settled`` (won, lost and refunded rows),
-    ``staked_yen``, ``returned_yen``, ``ending_yen`` and ``log_growth`` = ln(ending / starting).
+    ``stake_yen``), in day order: ``day``, ``n_settled`` (won, lost and refunded rows with a
+    stake), ``staked_yen``, ``returned_yen``, ``ending_yen`` and ``log_growth`` = ln(ending /
+    starting).
 
     The day starts with ``bankroll_yen``; ending = bankroll - the stakes of won, lost and refunded
     rows + stake / 100 x ``return_per_100`` of won rows + the stakes refunded. Pending rows
-    (unsettled, no_board, holdout) are left out, so a day with nothing settled has a null
-    ``log_growth``. A day that loses all its money has -inf. ValueError for a bankroll that is not
-    positive, a frame without ``stake_yen``, or a day that staked more than its starting money and
-    lost it (no logarithm)."""
+    (unsettled, no_board, holdout) and rows with no stake (past the cap) are left out, so a day
+    with nothing staked and settled has a null ``log_growth``. A day that loses all its money has
+    -inf. ValueError for a bankroll that is not positive, a frame without ``stake_yen``, or a day
+    that staked more than its starting money and lost it (no logarithm)."""
     if isinstance(bankroll_yen, bool) or not isinstance(bankroll_yen, Real):
         raise ValueError(f"bankroll_yen must be a number, got {bankroll_yen!r}")
     if not (math.isfinite(bankroll_yen) and bankroll_yen > 0):
@@ -430,7 +444,7 @@ def log_growth_by_day(settled: pd.DataFrame, *, bankroll_yen: float) -> pd.DataF
         *columns, _numbers(settled, "return_per_100"), strict=True
     ):
         day = days.setdefault(_day_of(race_id), {"n": 0, "staked": 0.0, "returned": 0.0})
-        if outcome not in MOVED:
+        if outcome not in MOVED or not float(stake) > 0:
             continue
         day["n"] += 1
         day["staked"] += float(stake)
