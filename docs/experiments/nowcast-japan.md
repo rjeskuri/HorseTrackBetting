@@ -347,6 +347,10 @@ below. Nothing is adopted, and the holdout is not opened.
   withheld. As before, the command exited 1 at `write_summary` on #131's family ids containing `/`, after the
   report and all six records were written. The summary was regenerated the same way (committed families plus v5),
   which added the v5 file and its index line only. No v5 trial was run.
+- **The votes build in every output.** The final votes choose which Place cases enter the result gains, so from
+  this change on the comparison records and the private report also name the `pool_votes` build, as the
+  `place_rule_vs_votes` record does (#410's re-check). The v5 comparison records above name only the odds and races
+  builds; their `place_rule_vs_votes` record names the votes build they were scored with.
 - **The shadow adapter.** `ShadowNowcast` (#116's draws interface) now reads a Place board's high figures as
   `race_view` does, so its draws start from the shares the study scores (#410's review). It is not part of the
   study's scoring.

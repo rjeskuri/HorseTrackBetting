@@ -840,7 +840,8 @@ def run_study(
         write_summary(registry, summary_dir(COUNTRY))
         raise
 
-    place_measured, place_appended = _measure_place_rule(
+    # From here `builds` names the final votes too: they choose the Place cases in the gains.
+    place_measured, place_appended, builds = _measure_place_rule(
         closing, scored_place, registry, family, git_sha, builds, spec_hash, trial=trial, log=log
     )
     del closing
@@ -1135,12 +1136,13 @@ def _record(
 
 def _measure_place_rule(
     closing, scored_place, registry, family, git_sha, builds, spec_hash, *, trial: bool, log
-) -> tuple[dict, int]:
+) -> tuple[dict, int, dict[str, str]]:
     """#410's measurement on the closing boards of the scored Place cases (`scored_place`: the
     (race_id, day) of each, the folds' test cases after test-day sampling), and its registry
     record: scored when a read stands as a result (`place_result_readers`), failed (unvalidated)
-    when none does or it could not run. Returns the measurement and the records appended (0 or
-    1)."""
+    when none does or it could not run. Returns the measurement, the records appended (0 or 1)
+    and the builds it read: `builds` plus the final votes' build when that could be taken, which
+    the comparison records and the report then carry."""
     log("measuring the Place rule on the scored closing boards (#410)")
     scored = {race_id for race_id, _ in scored_place}
     boards = [b for b in closing if b[0] in scored]
@@ -1177,10 +1179,11 @@ def _measure_place_rule(
         record = _place_record(
             (), git_sha, builds, spec_hash, trial=trial, status="failed", error=measured["error"]
         )
+        place_builds = builds
     if record in registry.records(family):
-        return measured, 0
+        return measured, 0, place_builds
     registry.append(record)
-    return measured, 1
+    return measured, 1, place_builds
 
 
 def _place_record(
