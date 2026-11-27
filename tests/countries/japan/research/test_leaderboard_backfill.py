@@ -16,10 +16,17 @@ payout_rate None); the comparator row is ``'<family>/<variant>/comparator'`` (ki
 rule params['comparator'] or 'always the <pool>'). Pool: params['pool'] for L1, 'BRACKET_QUINELLA'
 for L4:same_bracket_vs_quinellas, 'TIERCE' for L4:market_order_trifecta_vs_{trio,box}. Selection
 from the variant suffix. A failed variant is its own ``'<family>/<variant>'`` row, unmeasured.
+The comparator row has its own pool and selection (fix round 1, from #81's avoidance study): the
+L1 comparator is always the direct pool on every combination of the card's starters (pool the
+rule's, selection 'card_only'); L4:same_bracket_vs_quinellas compares the QUINELLAs within the
+bracket (pool QUINELLA, card_only); L4:market_order_trifecta_vs_trio the TRIO on the same three
+horses (pool TRIO), _vs_box the six TIERCE orders (pool TIERCE), both on the rule's selection.
 
 #83: one row per 'raw[<label>]' metric of a 'step1:<fields>:raw' variant, option
 ``'<family>/<variant>[<label>]'``, segment ``'<fields>|<label>'``; other variants unmeasured.
-#135: one row per 'mean_day_value' fold, segment ``'carryover <fold>'``.
+#135: one row per 'mean_day_value' fold, segment ``'carryover <fold>'``; with params['ratio_edges']
+every bin of the edges is a row, a bin with no metric an unmeasured cell named as
+``win5_study._metrics`` names its fold ('ratio <lo>..<hi>', the last 'ratio <lo>..inf').
 
 Every registry is a temp file under ``tmp_path``; every figure is made up. The real registry is
 read only by the ``local`` test, which prints no figure.
@@ -145,14 +152,17 @@ def coplacer_record(variant: str, metrics=(), status="scored", **kw) -> RunRecor
     )
 
 
-def win5_record(metrics, *, level: float = 0.95) -> RunRecord:
+def win5_record(metrics, *, level: float = 0.95, edges=None) -> RunRecord:
+    params = {"one_sided_level": level, "takeout": 0.3}
+    if edges is not None:  # the frozen spec's bins, as config/win5_study.yaml stores them
+        params |= {"coverage": "pool-level", "ratio_edges": list(edges)}
     return record(
         hypothesis_id="P1",
         family_id=WIN5,
         variant="pool-level",
         ticket=135,
         sources=("jra", "netkeiba"),
-        params={"one_sided_level": level, "takeout": 0.3},
+        params=params,
         metrics=tuple(metrics),
     )
 
@@ -304,6 +314,96 @@ def test_family_l_comparator_rule_is_named_by_params_or_its_pool(reg):
     assert rows[f"{FAMILY_L}/{named}/comparator"].rule == "the synthetic box"
     q = f"{FAMILY_L}/L1:QUINELLA:threshold_5:final_look_ahead/comparator"
     assert rows[q].rule == "always the QUINELLA"
+
+
+# The study's own records (avoidance.compute_study): L4 market-order params carry the comparator's
+# definition (TRIFECTA_COMPARATORS); the same-bracket params carry none.
+_TRIO_DEF = "the TRIO on the same three horses, the same stake"
+_BOX_DEF = "the six TIERCE orders of the same three horses, the stake split evenly"
+_SAME_BRACKET_PARAMS = {"stake": "the same per same-bracket pair; split evenly"}
+
+L_COMPARATOR_SIDES = [
+    # (variant, params, (rule pool, rule selection), (comparator pool, comparator selection))
+    (
+        "L1:TRIO:threshold_20:final_look_ahead",
+        None,
+        ("TRIO", "look_ahead"),
+        ("TRIO", "card_only"),
+    ),
+    (
+        "L1:QUINELLA:threshold_10:final_look_ahead",
+        None,
+        ("QUINELLA", "look_ahead"),
+        ("QUINELLA", "card_only"),
+    ),
+    (
+        "L4:same_bracket_vs_quinellas:card_only",
+        _SAME_BRACKET_PARAMS,
+        ("BRACKET_QUINELLA", "card_only"),
+        ("QUINELLA", "card_only"),
+    ),
+    (
+        "L4:market_order_trifecta_vs_trio:final_look_ahead",
+        {"stake_yen": 600, "comparator": _TRIO_DEF},
+        ("TIERCE", "look_ahead"),
+        ("TRIO", "look_ahead"),
+    ),
+    (
+        "L4:market_order_trifecta_vs_box:final_look_ahead",
+        {"stake_yen": 600, "comparator": _BOX_DEF},
+        ("TIERCE", "look_ahead"),
+        ("TIERCE", "look_ahead"),
+    ),
+]
+
+
+def test_family_l_comparator_has_its_own_pool_and_selection(reg):
+    # each variant its own comparator value, so deduplication keeps every comparator row
+    for i, (variant, params, _, _) in enumerate(L_COMPARATOR_SIDES):
+        metrics = l_metrics(0.52, 0.41 + 0.02 * i, n=800 + i, meetings=64)
+        reg.append(l_record(variant, params=params, metrics=metrics))
+
+    rows = read(reg)
+
+    got = {
+        variant: (
+            (rows[f"{FAMILY_L}/{variant}"].pool, rows[f"{FAMILY_L}/{variant}"].selection),
+            (
+                rows[f"{FAMILY_L}/{variant}/comparator"].pool,
+                rows[f"{FAMILY_L}/{variant}/comparator"].selection,
+            ),
+        )
+        for variant, *_ in L_COMPARATOR_SIDES
+    }
+    want = {
+        variant: (rule_side, comp_side) for variant, _, rule_side, comp_side in L_COMPARATOR_SIDES
+    }
+    assert got == want, "((rule pool, selection), (comparator pool, selection)) by variant"
+    for i, (variant, params, _, _) in enumerate(L_COMPARATOR_SIDES):
+        comp = rows[f"{FAMILY_L}/{variant}/comparator"]
+        assert comp.return_per_100 == pytest.approx(41.0 + 2.0 * i)
+        assert comp.n == 800 + i
+        if params and "comparator" in params:
+            assert comp.rule == params["comparator"], "params['comparator'] stays the label"
+
+
+@pytest.mark.parametrize(
+    ("variant", "params", "comp_pool", "rule_pool"),
+    [
+        ("L4:same_bracket_vs_quinellas:card_only", _SAME_BRACKET_PARAMS, "QUINELLA", "BRACKET"),
+        ("L4:market_order_trifecta_vs_trio:final_look_ahead", {"stake_yen": 600}, "TRIO", "TIERCE"),
+    ],
+)
+def test_family_l4_comparator_label_names_the_comparators_pool(
+    reg, variant, params, comp_pool, rule_pool
+):
+    """Without params['comparator'], the label follows the comparator's pool, not the rule's."""
+    reg.append(l_record(variant, params=params, metrics=l_metrics(0.5, 0.56, n=900, meetings=70)))
+
+    comp = read(reg)[f"{FAMILY_L}/{variant}/comparator"]
+
+    assert comp_pool in comp.rule
+    assert rule_pool not in comp.rule, f"{comp.rule!r} names the rule's pool"
 
 
 @pytest.mark.parametrize("first", [20, 50])
@@ -574,6 +674,66 @@ def test_win5_bins_become_rows_with_a_lower_bound(reg, level):
         assert row.ticket == 135
 
 
+WIN5_EDGE_CASES = [
+    # (ratio_edges, the folds with days: {fold: (value, lo, n)}, the folds without a metric)
+    # win5_study._metrics names a bin 'ratio <lo>..<hi>' from the edges as stored, the last
+    # 'ratio <lo>..inf', and writes no metric for a bin with no days.
+    (
+        [0, 0.5, 1, 2],
+        {
+            "ratio 0..0.5": (0.8, 0.77, 7),
+            "ratio 0.5..1": (0.93, 0.9, 6),
+            "ratio 1..2": (1.05, 1.02, 4),
+        },
+        ["ratio 2..inf"],
+    ),
+    (
+        [0, 0.25, 1.5, 3],
+        {"ratio 0.25..1.5": (0.88, 0.85, 9)},
+        ["ratio 0..0.25", "ratio 1.5..3", "ratio 3..inf"],
+    ),
+]
+
+
+@pytest.mark.parametrize(("edges", "measured", "empty"), WIN5_EDGE_CASES)
+def test_win5_every_bin_of_the_edges_is_a_row(reg, edges, measured, empty):
+    metrics = [
+        FoldMetric(fold=fold, metric="mean_day_value", value=v, lo=lo, hi=None, n=n)
+        for fold, (v, lo, n) in measured.items()
+    ]
+    metrics.append(
+        FoldMetric(
+            fold="carryover days before 2014-06-07",
+            metric="gross_pool_carryover_days",
+            value=5.0,
+            lo=None,
+            hi=None,
+            n=5,
+        )
+    )
+    reg.append(win5_record(metrics, edges=edges))
+
+    rows = read(reg)
+
+    win5 = {r.segment: r for r in family_rows(rows, WIN5)}
+    assert set(win5) == {f"carryover {fold}" for fold in [*measured, *empty]}, (
+        "one row per bin of params['ratio_edges']; gross_pool_carryover_days gives none"
+    )
+    for fold, (value, lo, n) in measured.items():
+        row = win5[f"carryover {fold}"]
+        assert row.return_per_100 == pytest.approx(100 * value)
+        assert row.ci_lo == pytest.approx(100 * lo)
+        assert (row.n, row.n_unit) == (n, "days")
+    for fold in empty:
+        row = win5[f"carryover {fold}"]
+        assert row.option_id == f"{WIN5}/pool-level[carryover {fold}]"
+        assert row.kind == "cell"
+        assert row.pool == "WIN5"
+        assert row.family_id == WIN5
+        assert row.status == "scored"
+        assert_unmeasured(row)
+
+
 # --------------------------------------------------------------------------- the other families
 
 
@@ -596,9 +756,19 @@ KINDS = [
     ("japan-track-bias-day-sd", "member"),
     ("japan-track-bias-null-diagnostic", "member"),
     ("japan-late-path-jravan-trial", "member"),
+    # fix round 1: member families on the committed registry summaries
+    ("japan-c2-ability-final-win", "member"),  # #92's C2 ability member
+    ("japan-c2-ability-final-win-v2", "member"),
+    ("japan-speed-top3-c3-timing", "member"),  # #416, the C3 speed member on complete timing
+    ("japan-debut-maiden-members-v1", "member"),  # #438, member by member in debuts and maidens
+    ("japan-debut-maiden-members-v2", "member"),
+    # E25 (#435): the T-2 cross-pool signal in a conditional logit over the final Win price
+    ("japan-cross-pool-t2-v1", "model"),
+    ("japan-cross-pool-t2-trial", "model"),
     ("japan/131-exacta-category-v1", "cell"),
     ("japan/131-exacta-logscore-v1", "cell"),
     ("japan/131-exacta-breakage", "cell"),
+    ("japan-131-exacta-category-v2", "cell"),  # the hyphen ids of PR #280
     ("exacta-own-impact", "other"),
     ("japan-some-family-nobody-named", "other"),
 ]
@@ -636,11 +806,76 @@ def test_legacy_kinds_name_every_listed_family():
     kinds = backfill().LEGACY_KINDS
     assert isinstance(kinds, Mapping)
     for family, kind in KINDS:
-        if "/" not in family and family not in (
+        if kind != "cell" and family not in (
             "exacta-own-impact",
             "japan-some-family-nobody-named",
         ):
-            assert kinds[family] == kind, family
+            assert kinds.get(family) == kind, family
+
+
+SUMMARY_DIR = REPO_ROOT / "docs" / "experiments" / "registry" / "japan"
+# Summary families whose kind is an open question, not pinned: N8's spread scan (#503) holds
+# returns by segment with no leaderboard block (their rows are a follow-up, like #131's).
+UNPINNED_SUMMARY_FAMILIES = {f"japan-n8-spread-scan-{p}" for p in ("bracket", "exacta", "quinella")}
+UNPINNED_SUMMARY_FAMILIES |= {f"japan-n8-spread-scan-{p}" for p in ("trifecta", "trio", "wide")}
+
+
+def summary_families() -> list[str]:
+    """The family id of every committed Japan registry summary file (its '## <family>' line)."""
+    families = []
+    for path in sorted(SUMMARY_DIR.glob("*.md")):
+        if path.name == "README.md":
+            continue
+        heads = [
+            line[3:].strip() for line in path.read_text().splitlines() if line.startswith("## ")
+        ]
+        assert len(heads) == 1, f"{path.name}: one family heading"
+        families.append(heads[0])
+    return families
+
+
+def test_every_committed_summary_family_gets_a_justified_kind(reg):
+    """A committed family with no adapter gets the kind KINDS justifies, else 'other'."""
+    families = summary_families()
+
+    def expected(family: str) -> str:
+        if family.startswith(("japan/131-exacta-", "japan-131-exacta-")):
+            return "cell"  # #131's exacta cells, slash and hyphen ids
+        return dict(KINDS).get(family, "other")
+
+    for family in (
+        "japan-c2-ability-final-win",
+        "japan-c2-ability-final-win-v2",
+        "japan-speed-top3-c3-timing",
+        "japan-debut-maiden-members-v1",
+        "japan-debut-maiden-members-v2",
+    ):
+        assert family in families, f"{family} has no committed summary"
+    checked = [
+        f
+        for f in families
+        if f not in backfill().LEGACY_ADAPTERS and f not in UNPINNED_SUMMARY_FAMILIES
+    ]
+    assert len(checked) >= 30, "the summary directory was read"
+    for family in checked:
+        run = record(
+            family_id=family,
+            variant="v-a",
+            metrics=(dev("log_loss_gain", 0.0031, 0.0012, 0.0051, 2000),),
+        )
+        if "/" in family:
+            seal_legacy(reg, run)
+        else:
+            reg.append(run)
+
+    rows = read(reg)
+
+    wrong = {
+        family: (rows[f"{family}/v-a"].kind, expected(family))
+        for family in checked
+        if rows[f"{family}/v-a"].kind != expected(family)
+    }
+    assert not wrong, f"(got, expected) kind by family: {wrong}"
 
 
 def test_withheld_legacy_rows_never_reach_the_public_text(reg):
