@@ -6,7 +6,8 @@ The leaderboard is a view: nothing here re-runs a study or appends a record (the
 
 - ``japan-family-l-exotic-pool-choice`` (#81): per variant a rule row (100 x
   ``rule_mean_return``, no CI: the bounds belong to the paired difference) and a comparator row
-  '<family>/<variant>/comparator' (100 x ``comparator_mean_return``), n in races; a failed
+  '<family>/<variant>/comparator' (100 x ``comparator_mean_return``) with its own pool and
+  selection (``_l_comparator_side``), n in races; a failed
   variant is its own unmeasured row; 'L5:calendar_report' is unmeasured, kind 'other'. Pools mix
   within the family, so no payout rate.
 - ``japan-coplacer-place-e15`` (#83): one Place row per 'raw[<label>]' metric of a
@@ -14,7 +15,7 @@ The leaderboard is a view: nothing here re-runs a study or appends a record (the
   odds-matched variants (a difference from an expectation, not a return) and the failed step2
   and step3 variants are left to the core's unmeasured row.
 - ``win5-carryover-v1`` (#135): one WIN5 cell per ``mean_day_value`` carryover bin, a lower
-  bound only, n in days.
+  bound only, n in days; a bin of params['ratio_edges'] with no days is an unmeasured cell.
 
 Every other legacy family is unmeasured and takes its kind from ``LEGACY_KINDS``. Withheld rows
 (JRDB, JRA-VAN) are marked by the core through ``is_licensed_record``.
@@ -56,6 +57,8 @@ LEGACY_KINDS: dict[str, str] = {
             "japan-c1-nowcast-final-shares-v2",
             "japan-v0-win-residual",
             "japan-board-quality-by-horizon",
+            "japan-cross-pool-t2-v1",
+            "japan-cross-pool-t2-trial",
         ),
         "model",
     ),
@@ -67,6 +70,11 @@ LEGACY_KINDS: dict[str, str] = {
             "japan-track-bias-day-sd",
             "japan-track-bias-null-diagnostic",
             "japan-late-path-jravan-trial",
+            "japan-c2-ability-final-win",
+            "japan-c2-ability-final-win-v2",
+            "japan-speed-top3-c3-timing",
+            "japan-debut-maiden-members-v1",
+            "japan-debut-maiden-members-v2",
         ),
         "member",
     ),
@@ -115,6 +123,15 @@ _L4_POOLS = {
     "market_order_trifecta_vs_trio": "TIERCE",
     "market_order_trifecta_vs_box": "TIERCE",
 }
+# The comparator's own pool, and whether it keeps the rule's selection (#81's avoidance study):
+# L1's comparator is the direct pool on every combination of the card's starters and the
+# same-bracket comparator the QUINELLAs within the bracket, neither reading a price (card_only);
+# the market-order comparators bet the same market order as the rule, so take its selection.
+_L4_COMPARATORS = {
+    "same_bracket_vs_quinellas": ("QUINELLA", False),
+    "market_order_trifecta_vs_trio": ("TRIO", True),
+    "market_order_trifecta_vs_box": ("TIERCE", True),
+}
 _L_SELECTIONS = {
     "final_look_ahead": "look_ahead",
     "board_at_t": "decision_time",
@@ -130,6 +147,15 @@ def _l_pool(record: RunRecord) -> str | None:
     if parts[0] == "L4" and len(parts) > 1:
         return _L4_POOLS.get(parts[1])
     return None
+
+
+def _l_comparator_side(record: RunRecord, selection: str) -> tuple[str | None, str]:
+    """The comparator's (pool, selection): L1's the rule's pool, card_only; L4's per comparator."""
+    parts = record.variant.split(":")
+    if parts[0] == "L1":
+        return _l_pool(record), "card_only"
+    pool, same_selection = _L4_COMPARATORS.get(parts[1] if len(parts) > 1 else "", (None, False))
+    return pool, selection if same_selection else "card_only"
 
 
 def _family_l_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
@@ -170,15 +196,16 @@ def _family_l_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
     comparator = found.get("comparator_mean_return")
     if comparator is not None:
         named = record.params.get("comparator")
+        comp_pool, comp_selection = _l_comparator_side(record, selection)
         rows.append(
             LeaderboardRow(
                 option_id=f"{option}/comparator",
                 kind="comparator",
-                rule=named if isinstance(named, str) and named else f"always the {pool}",
+                rule=named if isinstance(named, str) and named else f"always the {comp_pool}",
                 return_per_100=_scale(comparator.value),
                 n=comparator.n,
                 n_unit="races",
-                **base,
+                **(base | {"pool": comp_pool, "selection": comp_selection}),
             )
         )
     return rows
@@ -227,13 +254,40 @@ def _coplacer_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
 # --------------------------------------------------------------------------- WIN5 (#135)
 
 
+_WIN5_METRIC = "mean_day_value"
+
+
+def _win5_folds(record: RunRecord) -> list[str]:
+    """The fold of every bin of params['ratio_edges'], named as ``win5_study._metrics`` names
+    it ('ratio <lo>..<hi>', the last 'ratio <lo>..inf'); none without a list of edges."""
+    edges = record.params.get("ratio_edges")
+    if not isinstance(edges, list):
+        return []
+    his = [f"{hi}" for hi in edges[1:]] + ["inf"]
+    return [f"ratio {lo}..{hi}" for lo, hi in zip(edges, his, strict=True)]
+
+
 def _win5_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
+    """A row per measured bin; a scored run's bins without days are unmeasured cells."""
+    measured = {m.fold: m for m in record.metrics if m.metric == _WIN5_METRIC}
+    folds = list(measured)
+    if record.status != "failed":
+        folds += [fold for fold in _win5_folds(record) if fold not in measured]
     level = record.params.get("one_sided_level")
     rows = []
-    for metric in record.metrics:
-        if metric.metric != "mean_day_value":
-            continue
-        segment = f"carryover {metric.fold}"
+    for fold in folds:
+        segment = f"carryover {fold}"
+        metric = measured.get(fold)
+        figures = {}
+        if metric is not None:
+            figures = dict(
+                return_per_100=_scale(metric.value),
+                ci_lo=_scale(metric.lo),
+                ci_hi=_scale(metric.hi),
+                ci_level=level,
+                n=metric.n,
+                n_unit="days",
+            )
         rows.append(
             LeaderboardRow(
                 option_id=f"{record.family_id}/{record.variant}[{segment}]",
@@ -247,13 +301,8 @@ def _win5_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
                 sources=tuple(record.sources),
                 variants_searched=size,
                 status=record.status,
-                return_per_100=_scale(metric.value),
-                ci_lo=_scale(metric.lo),
-                ci_hi=_scale(metric.hi),
-                ci_level=level,
-                n=metric.n,
-                n_unit="days",
                 payout_rate=payout_rate("WIN5"),
+                **figures,
             )
         )
     return rows
@@ -270,12 +319,13 @@ LEGACY_ADAPTERS: Mapping[str, Adapter] = {
 
 
 def _dedupe_comparators(rows: list[LeaderboardRow]) -> list[LeaderboardRow]:
-    """Family L's comparators once per (rule, value, n), the first in append order kept."""
+    """Family L's comparators once per (rule, pool, selection, value, n), the first in append
+    order kept: the L1 thresholds of one pool share one comparator."""
     seen: set[tuple] = set()
     kept = []
     for row in rows:
         if row.family_id == FAMILY_L and row.kind == "comparator":
-            key = (row.rule, row.return_per_100, row.n)
+            key = (row.rule, row.pool, row.selection, row.return_per_100, row.n)
             if key in seen:
                 continue
             seen.add(key)
