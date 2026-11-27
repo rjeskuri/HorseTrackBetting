@@ -1,11 +1,14 @@
 # Experiment report: #131's E2 exacta ratio-cut rules on logged boards (#281)
 
-Scores the 16 frozen members of `japan/131-exacta-rule-v4` (E2, `exacta_study.E2_ID`; spec
+Scores the 16 frozen members of `japan-131-exacta-rule-v5` (E2, `exacta_study.E2_ID`; spec
 [docs/specs/exacta-overload-prereg.md](../specs/exacta-overload-prereg.md) sections 5-7, frozen
-hash `28929cd783cd9e25ae8c7f39f30f2b0891720b60864a38fdbb13d7dcd2a8d3bc`, the sha256 of
-`exacta_study.family_specs()[E2_ID]` on #280's head `66a2338`) on the #130-logged development
-meetings that carry exacta (`FORECAST`) boards. v4 supersedes v3 (owner decision 2026-11-27 on
-#131); the owner's 2026-11-26 answer on #281 is to take the hash from #280's final head. Registry
+hash `37d8abb85db2bf8480f619b46440e0ea80a5ed68af992ef344b64e0b36dc2817`, the sha256 of
+`exacta_study.family_specs()[E2_ID]` as #131 landed it in `f792202`) on the #130-logged
+development meetings that carry exacta (`FORECAST`) boards. v5 (frozen 2026-11-28 on #131)
+supersedes v4 (hash `28929cd7…d3bc`), which superseded v3 (owner decision 2026-11-27 on #131);
+**v4 was never executed**: it stays frozen in the registry as history and no record was ever
+written under it. The owner's 2026-11-26 answer on #281 is to take the hash from #280's final
+head, which is v5's. The sections below on v4 and v3 are kept as history. Registry
 hypothesis id `E43`. Code: `countries/japan/research/exacta_rules.py`, command
 `uv run horsetrack japan exacta-rules`, which re-scores everything logged so far on each run
 (another run of the same 16 variants, not new variants; a rerun on unchanged inputs and code adds
@@ -15,11 +18,10 @@ nothing). Nothing is adopted; no rule is staked. Leaderboard rows wait for #449.
 result, no gates) holds, and v4's spec has no meeting gate: E2 is scored on whatever is logged,
 and zero meetings give an n = 0 result with its records.
 
-**The v4 real run waits for #280.** No registry family id may contain "/" (#525), so this code
-records under `japan-131-exacta-rule-v4` (`E2_RULE_ID`) and checks the freeze under that id. The
-Japan registry holds v4's freeze only under the slash id, so the command refuses ("not frozen")
-until #280 re-freezes under the dashed id; that is by design, not a failure to fix here. The
-runs below are v3 runs, kept as history.
+**The v5 real run is below** (2026-11-28, git `816693e`): #280 landed and froze v5 under the
+dashed id `japan-131-exacta-rule-v5` (#525: no "/" in a family id), which is what this code
+records under (`E2_RULE_ID`) and checks the freeze against. (Before #280 landed, the v4 run
+waited on that freeze; it never ran.) The runs under v3 further down are history.
 
 ## Hypothesis
 
@@ -31,7 +33,97 @@ headline cell (favourite at 3.0 or more at T−2 in a less popular race). The nu
 point: no member beats no bet (loss 0); SPA over the 16 members does not reject and StepM finds
 none.
 
-## The v4 contract (this code)
+## The v5 contract (this code)
+
+#131 re-froze E2 as `japan-131-exacta-rule-v5` on 2026-11-28 (spec section 2, notes under the
+family table). v5 changes two inputs of v4 and nothing else:
+
+- **`win_probabilities`:** the normalised implied Win shares on the Win board at T−2 (1 / odds
+  over the race's sum of 1 / odds, over the starters on that board), through the discounted
+  Harville at the registered λ2 (`full_development`), give `p_c(t)`. No model fit of final Win
+  odds (v4's #114 out-of-fold `p_cal`) enters a selection. This code already computed `p_c(t)`
+  this way (the v4 reading below, "`p_c(t)`"), so under v5 that reading is the spec's text.
+- **`data`:** every #130-logged development day whose log holds the Win board and the exacta
+  board at T−2 is eligible, each race with both boards at T−2 scored; no #114 row is required.
+  This is the loader's existing behaviour.
+
+The members (favourite second or no favourite × k 0.6, 0.7, 0.8, 0.9 × all or headline), the
+selection time, the favourite, the category, the stake, λ2, judging, metric, bootstrap settings
+and exclusions are v4's, so every v4 contract bullet below holds under v5 with these changes:
+
+- **The pin.** `FROZEN_E2_HASH` is v5's hash; the scorer refuses, appending nothing, unless the
+  registry's freeze under `japan-131-exacta-rule-v5` is that hash and equals the sha256 of
+  `family_specs()[E2_ID]`. A registry holding only v4's freeze (under its own id, or v4's spec
+  under the v5 id) is refused. `exacta_run freeze` freezes v5 under its id and v4 (and the
+  slashed v4) as history; the scorer never reads or appends under v4's id.
+- **Ids.** Members under `japan-131-exacta-rule-v5`, the max test and a failed run's record under
+  `japan-131-exacta-rule-v5-max-test`.
+
+## Run of 2026-11-28 (git `816693e`), v5
+
+Commands, from the worktree, with `HORSETRACK_DATA_DIR` from the repo-root `.env`:
+
+1. `uv run python -m horsetrack.countries.japan.research.exacta_run freeze`: v5 was already
+   frozen at `37d8abb8…2817` and v4 at `28929cd7…d3bc` (checked with `frozen_spec_hash` first);
+   the freeze appended nothing (registry 8,289 lines before and after).
+2. `uv run horsetrack japan exacta-rules`: exit 0, 43 s, 0.5 GB peak memory. Registry records
+   at 2026-11-27 18:58Z to 18:59Z (2026-11-28 JST).
+
+- **Inputs read:** 2 development day folders (2026-11-21 and 2026-11-22, Kyoto), 2 odds logs, 0
+  holdout folders skipped or opened (no folder on or after the A2 holdout start 2026-11-28 is
+  logged; `LockedHoldout` not opened). Neither log holds a `FORECAST` row (WIN, PLACE, QUINELLA
+  and QUINELLA_PLACE only; both days predate #130's exacta logging), so no day has the exacta
+  board at T−2 that v5's `data` requires.
+- **n = 0 races loaded, 0 scored, 0 meetings, 0 excluded** (no exclusion reason fired: no race
+  reached the exclusions), 0 races with a floor-bound winner (`impact_unavailable`).
+- **Registry:** 16 records under `japan-131-exacta-rule-v5`, status `scored`, `spec_hash` the v5
+  hash, git `816693e`, metrics `n_bets` 0, `n_meetings` 0, `shrinkage_not_attempted` 1 and
+  `shrinkage_n_bets` 0 (all n = 0), no `roi`; family size 16. Run ids (first 12 characters, in
+  member order): `aeafb309b26d`, `fa7228fc5c06`, `a207ba938c44`, `c2d1dba3fdd3`,
+  `9885c8d8376d`, `b46415ff828a`, `28520b9e8706`, `4fad3723f94c`, `96857d50f378`,
+  `19b38d518ee4`, `318500e0d06c`, `34ef3454e8cc`, `69544563e0ac`, `643aedaca4ac`,
+  `5cdcc5a97f7d`, `d65c48325bce`. No record under `japan-131-exacta-rule-v4` (v4 never
+  executed) and none under the v5 max-test id (no race scored). The committed summary
+  [registry/japan/japan-131-exacta-rule-v5.md](registry/japan/japan-131-exacta-rule-v5.md) is
+  `write_summary`'s output.
+- **Data builds:** `odds_log` `odds_snapshots/jra/FORECAST@1e51e305c697d499+ordering-2b822d643cf7-c2a71af325a3`
+  (#115's full-development ordering fit `2b822d643cf7`, λ2 = 0.8104, artifact sha
+  `c2a71af325a3`); `jra_races`, `jra_runners`, `jra_dividends` each the digest of no rows
+  (`e3b0c44298fc1c14`): with no logged race nothing is read from the store. Components
+  `ordering: discounted_harville`.
+- **Reports** (outside the tree, `write_report`): `reports/japan/281-exacta-rules/e2-816693e55ca4-1f8d2c0359f2.{json,md}`.
+
+| Category | Cut k | Scope | Bets | Races | Meetings | ROI | One-sided 95% bounds | Shrinkage |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| fav_second | 0.6 | all | 0 | 0 | 0 | - | - | not attempted |
+| fav_second | 0.6 | headline | 0 | 0 | 0 | - | - | not attempted |
+| fav_second | 0.7 | all | 0 | 0 | 0 | - | - | not attempted |
+| fav_second | 0.7 | headline | 0 | 0 | 0 | - | - | not attempted |
+| fav_second | 0.8 | all | 0 | 0 | 0 | - | - | not attempted |
+| fav_second | 0.8 | headline | 0 | 0 | 0 | - | - | not attempted |
+| fav_second | 0.9 | all | 0 | 0 | 0 | - | - | not attempted |
+| fav_second | 0.9 | headline | 0 | 0 | 0 | - | - | not attempted |
+| no_fav | 0.6 | all | 0 | 0 | 0 | - | - | not attempted |
+| no_fav | 0.6 | headline | 0 | 0 | 0 | - | - | not attempted |
+| no_fav | 0.7 | all | 0 | 0 | 0 | - | - | not attempted |
+| no_fav | 0.7 | headline | 0 | 0 | 0 | - | - | not attempted |
+| no_fav | 0.8 | all | 0 | 0 | 0 | - | - | not attempted |
+| no_fav | 0.8 | headline | 0 | 0 | 0 | - | - | not attempted |
+| no_fav | 0.9 | all | 0 | 0 | 0 | - | - | not attempted |
+| no_fav | 0.9 | headline | 0 | 0 | 0 | - | - | not attempted |
+
+- **Max test (SPA + StepM over the 16 members):** `not_run`, "no race scored"; no p-value, no
+  record. The published-payout sensitivity was not run either.
+- **D** (`Σ_S q / Σ_S p` on the final boards): 0 races in each of fav_first, fav_second and
+  no_fav, no mean or median; 0 incomplete boards.
+- **Proxy agreement** (race card against the day's lower final-pool tertile): 0 races on 0 days,
+  no agreement figure.
+- **What it rules out:** nothing. No v5 member is measured, so E2 is neither ruled in nor out.
+  The run shows the v5 freeze-then-score workflow end to end on the real registry and data dir,
+  and that no logged day yet carries exacta boards at T−2. The next scoreable run needs
+  development days logged with #130 FORECAST boards (holdout days are never read).
+
+## The v4 contract (history: v4 was never executed; the v5 contract above amends it)
 
 - **Ids.** Members under `E2_RULE_ID = E2_ID.replace("/", "-")` (`japan-131-exacta-rule-v4`),
   the SPA + StepM record and a failed run's record under `MAX_TEST_ID = E2_RULE_ID + "-max-test"`.
@@ -216,7 +308,7 @@ bets, is a meeting bootstrap with a one-sided 95% bound in each direction (as #1
   figure.
 - **Shrinkage (`core/eval/segment_roi.py`, spec section 7): not run for any member, no bet.**
 
-No v4 member has been scored on real data yet (see the top of this report).
+No v4 member was ever scored (v4 was never executed); the v5 members' run is above, also n = 0.
 
 ## Readings of the spec, for the owner
 
@@ -265,7 +357,7 @@ Modelling items the frozen text leaves open, implemented as read here; none is a
   combination is never bought.
 - SPA and StepM run over all 16 members whenever a race is scored, members that bet nothing
   included (snooping requires the full family); with fewer than 3 meetings arch cannot run and
-  the failed max test is recorded under `japan-131-exacta-rule-v4-max-test`, its reason in the
+  the failed max test is recorded under `japan-131-exacta-rule-v5-max-test`, its reason in the
   Markdown report.
 - **Shrinkage, per member:** `fit_segment_roi` on each member's own bets alone (one row per race
   × selected combination with a price on the final board, its final-board odds and outcome),
@@ -287,8 +379,9 @@ Modelling items the frozen text leaves open, implemented as read here; none is a
 
 - **Refusing E2 below 100 meetings** (v3's frozen `min_meetings`): not done. The owner's reframe
   of 2026-11-27 (rank everything, no gates) supersedes it, and v4 drops the gate.
-- **Scoring `japan/131-exacta-rule-v1`, v2 or v3 instead of v4:** not done. The owner's 2026-11-26
-  answer on #281 was to take the hash from #280's (#131's) final head, which now freezes v4.
+- **Scoring `japan/131-exacta-rule-v1`, v2, v3 or v4 instead of v5:** not done. The owner's
+  2026-11-26 answer on #281 was to take the hash from #280's (#131's) final head, which freezes
+  v5 (v4 is history there, not executed).
 - Both decisions are cited in comments in `exacta_rules.py` beside the hash check and the
   member scoring loop.
 
@@ -319,13 +412,12 @@ Modelling items the frozen text leaves open, implemented as read here; none is a
 
 ## What this rules out
 
-Nothing. With 0 logged FORECAST meetings no member is measured, so E2 is neither ruled in nor
-ruled out, and #131's E1 result (no favourite overload on history) stands alone.
+Nothing. With 0 logged FORECAST meetings no member is measured (the v5 run of 2026-11-28 as the
+v3 runs before it), so E2 is neither ruled in nor ruled out, and #131's E1 result (no favourite
+overload on history) stands alone.
 
 ## Follow-ups filed
 
-- None filed by this change. The v4 real run (`uv run horsetrack japan exacta-rules`) waits for
-  #280 to freeze v4 under `japan-131-exacta-rule-v4`; until then the command refuses by design.
-  It then reports the members, the max test, D, the proxy agreement and the shrinkage on the
-  development days logged with #130 FORECAST boards (holdout days from 2026-11-28 are never
-  read).
+- None filed by this change. Re-running `uv run horsetrack japan exacta-rules` once development
+  days are logged with #130 FORECAST boards reports the members, the max test, D, the proxy
+  agreement and the shrinkage under v5 (holdout days from 2026-11-28 are never read).
