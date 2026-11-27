@@ -9,9 +9,9 @@ and the sire, `horse_pedigree.sire_id` of the JRA-VAN store (the owner's answer 
 rating member (`studies.rating.member_grid`) at the (drift, scale) #91's rule picks for the fold,
 plus jockey, trainer and sire effects shrunk toward 0 (`models.ability.AbilityModel`). The
 comparator of E34 is the same model with #129's connection rates in place of the pooled effects:
-ln of the 365-day strike rate to the cut (the last race day before the race), shrunk
-RATE_PRIOR_RUNS runs toward that window's field rate, for jockey, trainer and sire
-(`connection_features`).
+ln of the strike rate over the race days in [day - 365, day - 1] (#129's window at cut = the
+race's day - 1), shrunk RATE_PRIOR_RUNS runs toward that window's field rate, for jockey, trainer
+and sire (`connection_features`).
 
 Splits (owner, 2026-11-26): D9's quarters (expanding, 1-week embargo) over the results from
 2010; level 1 is out of fold from 2015-Q1 (LEVEL1_FROM: five seasons, 2010-2014, the store's
@@ -30,13 +30,17 @@ Level 2 (the final Win price). The store's priced starters of the price era (`st
 store_frame`), D4's calibrated market out of fold on D9's folds (`baseline_oof`), and #87's
 stage-2 meta (u = alpha * m + beta * ln q, unbounded, ridge 0) on each D9 fold's training rows
 that have a level-1 member (from 2015-Q1, so 2020-Q1 trains on five seasons), predicting the
-fold's test quarter. Scored: every D9 fold, from 2020-Q1.
+fold's test quarter; the market-only stage-2 meta (u = beta * ln q, `market_only_oof`) on the same
+rows and folds. Scored: every D9 fold, from 2020-Q1.
 
 Variants (one registry record each, failures included): the selection; the member's correlation
 with ln q_final (raw and within race, meeting-bootstrap bounds); the member alone against the
-calibrated market; the stage-2 meta of each member (pooled, winner-only, rates) against the
-calibrated market, with each fold's alpha and the pooled alpha (Wald and D7 meeting-clustered
-bounds); E33, the paired ΔLL of the pooled top-3 meta against the winner-only meta, at level 2
+calibrated market; the stage-2 meta of each member (pooled, winner-only, rates) and the
+market-only meta against the calibrated market, with each fold's coefficients and the pooled
+alpha (Wald and D7 meeting-clustered bounds); the pooled member's C4 marginal, the paired ΔLL of
+its stage-2 meta against the market-only meta (`c4_marginal`: the same market term and training
+rows, so only the member differs); E33, the paired ΔLL of the pooled top-3 meta against the
+winner-only meta, at level 2
 and (descriptive) at level 1; E34, the paired ΔLL of the pooled meta against the rates meta on
 races with a thin-history runner (a jockey, trainer or sire with fewer than THIN_STARTS starts in
 the store on earlier race days since 2010) and over every race; and the by-class table (owner,
@@ -47,7 +51,14 @@ per-runner export (u, se_u, p_ability) go under the data dir through `write_repo
 records carry the source `jravan` and the committed summary withholds them. Holdout days are
 never read (`read_store_table`, `split_off`); the holdout is not opened; nothing is adopted
 (D16). A `--trial` run's records go to the family's `-trial` family with `params.trial` set, and
-it never freezes the family's spec.
+it never freezes the family's spec. The report, its JSON and the export are named by
+`artifact_stem` (the spec and the data builds), which each record names, so a rerun on refreshed
+data writes new files beside the earlier ones.
+
+Family `japan-c2-ability-final-win-v2` supersedes `japan-c2-ability-final-win` (#92's review,
+round 1), whose records stay in the registry: v1 reported the C4 gain only against D4 (a spline
+in ln q, fitted on another sample), which cannot isolate the member, and anchored the rates'
+window at the last race day before the race rather than #129's day - 1.
 """
 
 from __future__ import annotations
@@ -55,7 +66,9 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import re
 import resource
+import tempfile
 import time
 from collections.abc import Callable
 from datetime import date, datetime, timezone
@@ -75,7 +88,8 @@ from horsetrack.core.eval.reports import write_report
 from horsetrack.core.eval.scoring import gain
 from horsetrack.countries.japan.handicap.factors import RATE_PRIOR_RUNS, RATE_WINDOW_DAYS
 from horsetrack.countries.japan.models.ability import DISCOUNT_GRID, AbilityModel
-from horsetrack.countries.japan.models.meta import MetaSpec
+from horsetrack.countries.japan.models.condlogit import fit_conditional_logit
+from horsetrack.countries.japan.models.meta import MetaSpec, Q, oof_predictions
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
 from horsetrack.countries.japan.studies import rating as c2_rating
 from horsetrack.countries.japan.studies.calibration import (
@@ -107,8 +121,10 @@ from horsetrack.countries.japan.studies.meta import (
 
 COUNTRY = "japan"
 TICKET = 92
-FAMILY_ID = "japan-c2-ability-final-win"
+FAMILY_ID = "japan-c2-ability-final-win-v2"
 TRIAL_FAMILY_ID = f"{FAMILY_ID}-trial"  # a trial's records; a trial never freezes FAMILY_ID
+SUPERSEDES = "japan-c2-ability-final-win"
+ARTIFACTS = "ability_artifacts"  # the data_builds entry naming a run's report and export stem
 SOURCES = ("jra", "jravan")
 BOOTSTRAP_SEED = 92  # reproducibility only; scoring.yaml signs no seed
 # Splits signed by the owner on #92 (2026-11-26), never Rulings:
@@ -122,6 +138,7 @@ RATES = ("ln_jockey_rate", "ln_trainer_rate", "ln_sire_rate")
 PRIOR_STARTS = ("prior_starts_jockey", "prior_starts_trainer", "prior_starts_sire")
 WINNER_ONLY = (1.0, 0.0, 0.0)
 POOLED, WIN_ONLY, RATED = "ability", "ability_winner_only", "ability_rates"
+MARKET_ONLY = "market_only"  # the stage-2 meta without a member: u = beta * ln q
 MEMBERS = {
     POOLED: "top-3 Plackett-Luce, rating + pooled jockey, trainer and sire, discounts selected",
     WIN_ONLY: "the same at discounts (1, 0, 0): winner-only training (E33's comparator)",
@@ -156,6 +173,10 @@ def build_spec(scheme, bootstrap: dict) -> dict:
     """The family's pre-registered spec, frozen in the registry before any outcome is read."""
     return {
         "family_id": FAMILY_ID,
+        "supersedes": f"{SUPERSEDES}: its C4 gain compared the stage-2 meta (linear in ln q, "
+        "with the member) only with D4's calibrated market (a spline in ln q on another sample), "
+        "so it could not isolate the member, and its rates' window ended on the last race day "
+        "before the race, not #129's day - 1; found in #92's review (round 1)",
         "ticket": TICKET,
         "hypotheses": {
             "E33": "discounted top-3 Plackett-Luce training beats winner-only training on the "
@@ -171,8 +192,8 @@ def build_spec(scheme, bootstrap: dict) -> dict:
         "null": "the member carries nothing the final price lacks (alpha = 0); top-3 training "
         "is no better than winner-only; pooling is no better than the rates",
         "hypothesis_ids": "E33 on the selection, the pooled member's correlation, standalone "
-        "and stage-2 variants, the winner-only meta and E33's comparisons; E34 on the rates "
-        "meta, E34's comparisons and the by-class table",
+        "and stage-2 variants, the winner-only and market-only metas, the C4 marginal and E33's "
+        "comparisons; E34 on the rates meta, E34's comparisons and the by-class table",
         "decision_rules": {
             "E33": "top-3 beats winner-only when the meeting-bootstrap one-sided 95% lower bound "
             "of the paired per-race winner ΔLL of the stage-2 meta with the pooled top-3 member "
@@ -187,6 +208,14 @@ def build_spec(scheme, bootstrap: dict) -> dict:
             "the pooled member's alpha pooled over the scored rows (in-sample) lies above 0",
             "stage-2 gain": "the pooled member's stage-2 meta has an out-of-fold ΔLL against the "
             "calibrated market whose meeting-bootstrap lower bound lies above 0",
+            "C4 marginal": "the pooled member adds to the market term in C4 when the "
+            "meeting-bootstrap one-sided 95% lower bound of the paired per-race winner ΔLL of the "
+            "stage-2 meta with the pooled member against the market-only stage-2 meta (the same "
+            "market term, training rows and folds, no member), out of fold over the scored races, "
+            "lies above 0",
+            "market only": "descriptive: the market-only stage-2 meta against the calibrated "
+            "market (out-of-fold ΔLL with meeting-bootstrap bounds) and its beta per fold (Wald "
+            "95% two-sided; meeting-clustered one-sided 95% in the report)",
             "distinct": "descriptive: the pooled member's Pearson correlation with ln q_final "
             "over the scored runners, raw and within race, with meeting-bootstrap one-sided 95% "
             "bounds",
@@ -223,13 +252,14 @@ def build_spec(scheme, bootstrap: dict) -> dict:
             "predicted by the fit on its inner fold's training rows at the fold's rating pair; "
             "ties go to the earlier entry (models.ability.fit_discounts' rule)",
             "winner_only": list(WINNER_ONLY),
-            "rates": f"#129's connection rates (handicap.factors._connection_rates): over the "
-            f"not-scratched runners of the store on the race days cut - {RATE_WINDOW_DAYS - 1} .. "
-            f"cut, cut the last race day before the race, (wins + {RATE_PRIOR_RUNS} * p0) / "
+            "rates": f"#129's connection rates (handicap.factors._connection_rates at cut = the "
+            f"race's day - 1): over the not-scratched runners of the store on the race days in "
+            f"[day - {RATE_WINDOW_DAYS}, day - 1], (wins + {RATE_PRIOR_RUNS} * p0) / "
             f"(runs + {RATE_PRIOR_RUNS}) with p0 the window's win rate, for jockey_key, "
-            "trainer_key and sire_id; a missing key or a level the window lacks gets p0 as the "
-            "formula gives; features ln(rate); the store's first race day (an empty window) "
-            "gets ln rate 0 for every runner, a constant within race",
+            "trainer_key and sire_id; a level the window lacks gets p0 as the formula gives; a "
+            "missing key gets p0 too (where #129 gives null: the model needs a finite feature); "
+            "features ln(rate); a race day whose window holds no runner (the store's first) gets "
+            "ln rate 0 for every runner, a constant within race",
             "rates_member": "AbilityModel(k=3) on [rating, ln_jockey_rate, ln_trainer_rate, "
             "ln_sire_rate], no entity effects, discounts selected the same way",
         },
@@ -245,6 +275,9 @@ def build_spec(scheme, bootstrap: dict) -> dict:
             "meta": "models.meta.fit_meta stage2 on [member] and ln q, ridge 0, unbounded, on "
             "each D9 fold's training rows that have a level-1 member (from 2015-Q1); pooled "
             "in-sample over the scored rows",
+            "market_only": "u = beta * ln q (q normalised within race), beta unbounded, by "
+            "conditional logit (models.condlogit) on the same rows and folds as the members' "
+            "metas, predicting each fold's test quarter: the stage-2 meta without a member",
         },
         "by_class": "per races.race_class over the scored races: the stage-2 and member-alone "
         "ΔLL against the calibrated market, E33's and E34's ΔLL, each with meeting-bootstrap "
@@ -263,6 +296,9 @@ def build_spec(scheme, bootstrap: dict) -> dict:
         "price_era_start": PRICE_ERA_START.isoformat(),
         "export": "per level-1 out-of-fold runner (from 2015-Q1): u, se_u and p_ability of the "
         "pooled member at its fold's selection, under the data dir",
+        "artifacts": "the report, its JSON and the export are named by the spec hash and a "
+        "digest of the data builds (artifact_stem), and each record names that stem in "
+        f"data_builds.{ARTIFACTS}, so a rerun on refreshed data keeps the earlier files",
         "n5": "the N5 disagreement-tail curve is added when N5 lands (owner, 2026-11-27); not "
         "in this family",
         "owner_signoff": "#92: features, sire source, E34 comparator and splits (2026-11-26); "
@@ -335,20 +371,21 @@ def level1_frames(
 
 
 def connection_features(base: pd.DataFrame, rows: pd.DataFrame) -> pd.DataFrame:
-    """Per row of `rows` (race_date and the ENTITIES): #129's ln connection rate per entity and
-    its prior starts (starts in `base` on race days before the row's day). Index: rows'."""
+    """Per row of `rows` (race_date and the ENTITIES): #129's ln connection rate per entity over
+    the race days in [day - RATE_WINDOW_DAYS, day - 1] (`_connection_rates` at cut = day - 1),
+    and its prior starts (starts in `base` on every race day before the row's day). A missing key
+    gets p0, the window's field rate (#129 gives null). Index: rows'."""
     days = np.sort(pd.unique(base["race_date"].to_numpy()))
     b_day = np.searchsorted(days, base["race_date"].to_numpy())
-    r_day = np.searchsorted(days, rows["race_date"].to_numpy())
-    if not np.array_equal(days[np.minimum(r_day, len(days) - 1)], rows["race_date"].to_numpy()):
+    r_date = rows["race_date"].to_numpy()
+    r_day = np.searchsorted(days, r_date)
+    if not np.array_equal(days[np.minimum(r_day, len(days) - 1)], r_date):
         raise ValueError("a row's race day is not a race day of the base")
     won = base["won"].to_numpy(dtype=float)
     cum_runs = np.r_[0.0, np.cumsum(np.bincount(b_day, minlength=len(days)))]
     cum_wins = np.r_[0.0, np.cumsum(np.bincount(b_day, weights=won, minlength=len(days)))]
-    cut = r_day - 1  # the last race day before the row's day (-1: none)
-    hi = r_day  # window days are lo .. hi - 1 (cut inclusive)
-    first = days[np.maximum(cut, 0)] - np.timedelta64(RATE_WINDOW_DAYS - 1, "D")
-    lo = np.where(cut >= 0, np.searchsorted(days, first, side="left"), hi)
+    hi = r_day  # window race days are lo .. hi - 1: before the row's day, so to day - 1
+    lo = np.searchsorted(days, r_date - np.timedelta64(RATE_WINDOW_DAYS, "D"), side="left")
     runs = cum_runs[hi] - cum_runs[lo]
     with np.errstate(divide="ignore", invalid="ignore"):
         p0 = (cum_wins[hi] - cum_wins[lo]) / runs
@@ -608,6 +645,81 @@ def _comparison(label, p_a, p_b, scored, spec, races=None, metric="delta_ll") ->
     return metrics, {"comparisons": [row]}
 
 
+@dataclasses.dataclass(frozen=True)
+class MarketFit:
+    """The market-only stage-2 meta on one fold's training rows: beta of u = beta * ln q, under
+    `models.meta`'s term name Q, with its se, meeting-clustered se and race count (the fields
+    `studies.meta._meta_metrics` reads)."""
+
+    coef: pd.Series
+    se: pd.Series
+    se_cluster: pd.Series
+    n_races: int
+
+
+def _within_race_ln_q(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """(race codes, ln q normalised within race) of a frame with race_id and Q."""
+    codes = pd.factorize(frame["race_id"].to_numpy(dtype=object))[0]
+    v = frame[Q].to_numpy(dtype=float)
+    top = pd.Series(v).groupby(codes).transform("max").to_numpy()
+    return codes, v - top - np.log(np.bincount(codes, weights=np.exp(v - top))[codes])
+
+
+def _market_only(rows: pd.DataFrame, folds: list[Fold], market: str = "ln_q"):
+    """The market-only stage-2 meta out of fold on `rows` (P(win) per fold's test rows, NaN on
+    rows no fold tests) and each fold's fit, in fold order: the members' metas' market term on
+    the same training rows, with no member."""
+    data = rows[["race_id", "won", CLUSTER]].assign(**{Q: rows[market]})
+    fits: list[MarketFit] = []
+
+    def fit(train: pd.DataFrame) -> MarketFit:
+        codes, ln_q = _within_race_ln_q(train)
+        out = fit_conditional_logit(
+            ln_q[:, None],
+            codes,
+            train["won"].to_numpy(dtype=bool),
+            cluster=train[CLUSTER].to_numpy(dtype=object),
+        )
+        fits.append(
+            MarketFit(
+                *(pd.Series(v, index=[Q], dtype=float) for v in (out.coef, out.se, out.se_cluster)),
+                n_races=out.n_races,
+            )
+        )
+        return fits[-1]
+
+    def predict(model: MarketFit, test: pd.DataFrame) -> np.ndarray:
+        codes, ln_q = _within_race_ln_q(test)
+        u = float(model.coef[Q]) * ln_q
+        e = np.exp(u - pd.Series(u).groupby(codes).transform("max").to_numpy())
+        return e / np.bincount(codes, weights=e)[codes]
+
+    return oof_predictions(data, folds, fit, predict), fits
+
+
+def market_only_oof(rows: pd.DataFrame, folds: list[Fold], market: str = "ln_q") -> pd.Series:
+    """The market-only stage-2 meta's out-of-fold P(win) on rows' index: u = beta * ln q
+    (`market`, normalised within race), beta unbounded, fitted by conditional logit on each
+    fold's training rows and predicting its test rows; NaN on rows no fold tests."""
+    return _market_only(rows, folds, market)[0]
+
+
+def c4_marginal(
+    p_member: pd.Series, rows: pd.DataFrame, folds: list[Fold], scored: Scored, spec: dict
+) -> tuple[list, dict]:
+    """A member's marginal in C4: the paired per-race winner ΔLL of `p_member` (the stage-2
+    meta with the member, out of fold on `rows` and `folds`) against the market-only stage-2
+    meta on the same rows, folds and market term, positive when the member's meta is better: per
+    scored fold and over `scored`'s races with D7's meeting bounds (`spec["bootstrap"]`)."""
+    return _comparison(
+        "C4 marginal: stage-2 with the member vs stage-2 market only",
+        p_member,
+        market_only_oof(rows, folds),
+        scored,
+        spec,
+    )
+
+
 def _cluster_corr(x: np.ndarray, y: np.ndarray, cluster: np.ndarray, spec: dict):
     """Pearson's r of x and y and its meeting-bootstrap one-sided bounds (resampling clusters'
     sufficient statistics)."""
@@ -838,6 +950,19 @@ def compute_study(inputs: Inputs, spec: dict, scheme, log=print) -> tuple[Study,
         if outcomes[member].error is None:
             p[member] = outcomes[member].value[0]
 
+    market = _try(lambda: _market_only(rows, rfolds, "ln_q"))
+    market_name = f"stage2:q:{MARKET_ONLY}"
+    study.attempt(
+        Variant(
+            "E33",
+            market_name,
+            fold_scheme,
+            base | {"member": "none", "form": "stage2", "market": "ln_q"},
+            meta_params,
+        ),
+        lambda: _meta_metrics(market, None, rfolds, scored, spec, market_name),
+    )
+
     def need(*names):
         missing = [n for n in names if n not in p]
         if missing:
@@ -876,7 +1001,21 @@ def compute_study(inputs: Inputs, spec: dict, scheme, log=print) -> tuple[Study,
             "E34: stage-2 pooled vs stage-2 rates, every race", p[POOLED], p[RATED], scored, spec
         )
 
+    def marginal():
+        need(POOLED)
+        return c4_marginal(p[POOLED], rows, rfolds, scored, spec)
+
     paired = base | {"score": "paired_winner_log_loss"}
+    study.attempt(
+        Variant(
+            "E33",
+            f"marginal:stage2:{POOLED}_vs_{MARKET_ONLY}",
+            fold_scheme,
+            paired | {"comparator": f"stage2:q:{MARKET_ONLY}"},
+            params,
+        ),
+        marginal,
+    )
     study.attempt(
         Variant("E33", "E33:stage2:top3_vs_winner_only", fold_scheme, paired, params), e33
     )
@@ -949,7 +1088,10 @@ SECTIONS = (
         "delta",
         "ΔLL against the D4 calibrated market (out of fold; meeting bootstrap, 95% one-sided)",
     ),
-    ("comparisons", "E33 and E34: paired ΔLL (positive: the first beats the second)"),
+    (
+        "comparisons",
+        "The C4 marginal, E33 and E34: paired ΔLL (positive: the first beats the second)",
+    ),
     ("coefficients", "Stage 2 per fold (unbounded; Wald 95% two-sided and meeting one-sided 95%)"),
     ("pooled", "Stage-2 alpha pooled over the scored rows (in-sample)"),
     ("by_class", "By race class (scored races; meeting bootstrap, 95% one-sided)"),
@@ -1002,19 +1144,30 @@ def render_report(study: Study, spec: dict, about: dict, record_ids: dict[str, s
     )
 
 
+def artifact_stem(spec_hash: str, builds: dict, trial: bool) -> str:
+    """The file stem of a run's report, its JSON and its export: the spec hash and a digest of
+    the data builds (as a mapping: key order does not matter), "-trial" for a trial."""
+    digest = hashlib.sha256(
+        json.dumps(dict(builds), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return f"ability-{COUNTRY}-{spec_hash[:12]}-{digest[:12]}" + ("-trial" if trial else "")
+
+
 def _record(variant: Variant, git_sha: str, builds: dict, spec_hash: str, trial: bool) -> RunRecord:
     params = dict(variant.params) | {"spec_sha256": spec_hash}
     if trial:
         params["trial"] = True
     if variant.error:
         params["error"] = variant.error
+    # the run's artifacts after the '@': a data refresh is another run of the variant (#74)
+    artifacts = f"reports+features/{COUNTRY}@{artifact_stem(spec_hash, builds, trial)}"
     return RunRecord(
         hypothesis_id=variant.hypothesis_id,
         family_id=TRIAL_FAMILY_ID if trial else FAMILY_ID,
         variant=variant.name,
         ticket=TICKET,
         git_sha=git_sha,
-        data_builds=builds,
+        data_builds={**builds, ARTIFACTS: artifacts},
         sources=SOURCES,
         fold_scheme=variant.fold_scheme,
         components=variant.components,
@@ -1034,12 +1187,30 @@ class _Families:
         return [r for r in self._registry.records(family_id) if r.family_id in self._families]
 
 
+_INDEX_ENTRY = re.compile(r"- \[([^\]]+)\]\(\1\.md\)")  # a family's line in write_summary's index
+
+
 def write_committed_summary(registry) -> None:
-    """`write_summary` over the families the committed summary holds plus this study's, so no
-    other ticket's uncommitted family enters this change (and #131's '/' ids are not named)."""
+    """This study's family files, by `write_summary` over this study's families of `registry`,
+    and the committed index with their lines added: every family the index lists stays, and no
+    other family's file is written, so a fresh local registry drops nothing and no other
+    ticket's uncommitted family enters (nor #131's '/' ids, which `write_summary` refuses)."""
     directory = summary_dir(COUNTRY)
-    committed = {p.stem for p in directory.glob("*.md") if p.stem != "README"}
-    write_summary(_Families(registry, committed | {FAMILY_ID, TRIAL_FAMILY_ID}), directory)
+    mine = _Families(registry, {FAMILY_ID, TRIAL_FAMILY_ID})
+    if not mine.records():
+        return
+    with tempfile.TemporaryDirectory() as scratch:
+        write_summary(mine, scratch)
+        for path in sorted(Path(scratch).glob("*.md")):
+            if path.stem != "README":
+                write_report(directory / path.name, path.read_text("utf-8"), sources=())
+        fresh = Path(scratch, "README.md").read_text("utf-8").splitlines()
+    index = directory / "README.md"
+    committed = index.read_text("utf-8").splitlines() if index.exists() else []
+    entries = {m[1]: line for line in committed + fresh if (m := _INDEX_ENTRY.fullmatch(line))}
+    head = [line for line in fresh if not _INDEX_ENTRY.fullmatch(line)]
+    lines = [*head, *(entries[family] for family in sorted(entries))]
+    write_report(index, "\n".join(lines) + "\n", sources=())
 
 
 PLANNED = (
@@ -1051,6 +1222,8 @@ PLANNED = (
         for m, h in ((POOLED, "E33"), (WIN_ONLY, "E33"), (RATED, "E34"))
         for pre in ("", f"{CLUSTERED}:")
     ),
+    ("E33", f"stage2:q:{MARKET_ONLY}"),
+    ("E33", f"marginal:stage2:{POOLED}_vs_{MARKET_ONLY}"),
     ("E33", "E33:stage2:top3_vs_winner_only"),
     ("E33", "E33:level1:top3_vs_winner_only"),
     ("E34", "E34:stage2:pooled_vs_rates:thin"),
@@ -1074,6 +1247,7 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
     family = TRIAL_FAMILY_ID if trial else FAMILY_ID
     git_sha = _git_sha()
     builds = {**store_builds(), **pedigree_build()}
+    stem = artifact_stem(spec_hash, builds, trial)  # named in every record of this run
     started = time.monotonic()
     try:
         inputs = load_inputs(log=log)
@@ -1104,11 +1278,11 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
             appended.append(variant.name)
         else:  # the same run reproduced at another commit
             record_ids[variant.name] = _run_id(same)
-    stem = f"ability-{COUNTRY}-{spec_hash[:12]}" + ("-trial" if trial else "")
     about = {
         "family": f"`{family}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
         "data": ", ".join(builds.values()),
+        "artifacts (report, JSON, export)": f"`{stem}`",
         "records": f"{len(appended)} appended; {len(record_ids) - len(appended)} already held",
         "trial (records marked params.trial, spec not frozen)": trial,
         "run time": _progress(started),
@@ -1131,6 +1305,7 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
     return {
         "family_id": family,
         "spec_hash": spec_hash,
+        "artifact_stem": stem,
         "report_path": str(report),
         "export_path": str(export_path),
         "registry_path": str(registry.path),
