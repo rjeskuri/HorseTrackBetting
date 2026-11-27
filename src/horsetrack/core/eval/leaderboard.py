@@ -41,6 +41,10 @@ writer passes every row's sources to ``write_report`` and itself refuses a path 
 repository when any row is withheld, so a row marked licensed under a public source name is
 refused too.
 
+From the registry (``rows_from_registry``, #450). The run registry is the leaderboard's source:
+every (family, variant) gets measured rows from the convention of ``docs/specs/leaderboard.md``,
+an adapter's rows, or one unmeasured row, failures included.
+
 Generic, with no country input, like ``segment_roi`` and ``snooping``.
 """
 
@@ -49,13 +53,15 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
-from collections.abc import Iterable
+import re
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from scipy.stats import norm
 
 from horsetrack.core import env
+from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord, is_licensed_record
 from horsetrack.core.eval.reports import (
     LicensedOutputInRepo,
     is_inside,
@@ -454,3 +460,187 @@ def write_leaderboard(
                 "row (D21); write it under $HORSETRACK_DATA_DIR"
             )
     return write_report(path, text, sources=sources)
+
+
+# --------------------------------------------------------------------------- from the registry
+
+Adapter = Callable[[RunRecord, int], list[LeaderboardRow]]
+
+BLOCK_FIELDS = ("kind", "pool", "rule", "selection", "payout_rate", "ci_level", "n_unit")
+_DEVELOPMENT = "development"
+_ALL = "all"
+_CONVENTION_METRIC = re.compile(r"(return_per_100|se_per_100|n_meetings)(?:\[(.+)\])?")
+
+
+def _finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _block_problem(block: object) -> str | None:
+    """Why ``params['leaderboard']`` does not follow the convention, or None."""
+    if not isinstance(block, Mapping):
+        return (
+            f"params['leaderboard'] must be a mapping of {BLOCK_FIELDS}, got {type(block).__name__}"
+        )
+    missing = [name for name in BLOCK_FIELDS if name not in block]
+    if missing:
+        return f"params['leaderboard'] lacks {missing}"
+    unknown = sorted(str(name) for name in block if name not in BLOCK_FIELDS)
+    if unknown:
+        return f"params['leaderboard'] has unknown fields {unknown}"
+    if block["kind"] not in KINDS:
+        return f"kind {block['kind']!r} is not one of {KINDS}"
+    if block["pool"] is not None and not _is_text(block["pool"]):
+        return f"pool must be a non-blank string or None, got {block['pool']!r}"
+    if not _is_text(block["rule"]):
+        return f"rule must be a non-blank string, got {block['rule']!r}"
+    if block["selection"] not in SELECTIONS:
+        return f"selection {block['selection']!r} is not one of {SELECTIONS}"
+    if block["payout_rate"] is not None and not _finite_number(block["payout_rate"]):
+        return f"payout_rate must be a finite number or None, got {block['payout_rate']!r}"
+    level = block["ci_level"]
+    if not (_finite_number(level) and 0.5 < level < 1):
+        return f"ci_level must be a number strictly between 0.5 and 1, got {level!r}"
+    if block["n_unit"] not in N_UNITS:
+        return f"n_unit {block['n_unit']!r} is not one of {N_UNITS}"
+    return None
+
+
+def _development_metrics(record: RunRecord) -> dict[str, dict[str, FoldMetric]]:
+    """The record's development-fold convention metrics, by name then segment."""
+    found: dict[str, dict[str, FoldMetric]] = {}
+    for metric in record.metrics:
+        match = _CONVENTION_METRIC.fullmatch(metric.metric)
+        if metric.fold == _DEVELOPMENT and match is not None:
+            found.setdefault(match[1], {})[match[2] or _ALL] = metric
+    return found
+
+
+def _option_id(record: RunRecord, segment: str) -> str:
+    base = f"{record.family_id}/{record.variant}"
+    return base if segment == _ALL else f"{base}[{segment}]"
+
+
+def _meetings(metric: FoldMetric | None, segment: str) -> int | None:
+    if metric is None:
+        return None
+    if not (_finite_number(metric.value) and float(metric.value).is_integer()):
+        raise RowRefused(f"n_meetings[{segment}] is not a whole number: {metric.value}")
+    return int(metric.value)
+
+
+def _convention_rows(record: RunRecord, block: Mapping, size: int) -> list[LeaderboardRow]:
+    found = _development_metrics(record)
+    se = found.get("se_per_100", {})
+    meetings = found.get("n_meetings", {})
+    licensed = is_licensed_record(record)
+    return [
+        LeaderboardRow(
+            option_id=_option_id(record, segment),
+            family_id=record.family_id,
+            ticket=record.ticket,
+            kind=block["kind"],
+            pool=block["pool"],
+            segment=segment,
+            rule=block["rule"],
+            selection=block["selection"],
+            sources=tuple(record.sources),
+            variants_searched=size,
+            status=record.status,
+            return_per_100=metric.value,
+            ci_lo=metric.lo,
+            ci_hi=metric.hi,
+            ci_level=block["ci_level"],
+            se_per_100=se[segment].value if segment in se else None,
+            n=metric.n,
+            n_unit=block["n_unit"],
+            n_meetings=_meetings(meetings.get(segment), segment),
+            payout_rate=block["payout_rate"],
+            licensed=licensed,
+        )
+        for segment, metric in found.get("return_per_100", {}).items()
+    ]
+
+
+def _record_rows(
+    record: RunRecord, size: int, adapter: Adapter | None
+) -> tuple[list[LeaderboardRow], str | None]:
+    """The record's rows (the adapter's, else the convention's) and why it has none, if known."""
+    try:
+        if adapter is not None:
+            return list(adapter(record, size)), None
+        if "leaderboard" not in record.params:
+            return [], None
+        block = record.params["leaderboard"]
+        problem = _block_problem(block)
+        if problem is not None:
+            return [], problem
+        return _convention_rows(record, block, size), None
+    except RowRefused as exc:
+        return [], str(exc)
+
+
+def _unmeasured_row(record: RunRecord, size: int, note: str | None) -> LeaderboardRow:
+    block = record.params.get("leaderboard")
+    block = block if isinstance(block, Mapping) else {}
+    kind = block.get("kind")
+    pool = block.get("pool")
+    return LeaderboardRow(
+        option_id=_option_id(record, _ALL),
+        family_id=record.family_id,
+        ticket=record.ticket,
+        kind=kind if kind in KINDS else "other",
+        pool=pool if _is_text(pool) else None,
+        segment=_ALL,
+        rule=record.variant,
+        selection="unknown",
+        sources=tuple(record.sources),
+        variants_searched=size,
+        status=record.status,
+        licensed=is_licensed_record(record),
+        note=note,
+    )
+
+
+def rows_from_registry(
+    registry: Registry, *, adapters: Mapping[str, Adapter] | None = None
+) -> list[LeaderboardRow]:
+    """Every (family, variant) of ``registry`` as leaderboard rows, unshrunk; read through
+    ``Registry.records()``, never written.
+
+    A run with ``holdout_open`` set gives no row, so a variant run only on the holdout has none.
+    Each other run gives its rows: an adapter's when ``adapters`` holds its family (called with
+    the run and the family size), else one measured row per development-fold ``return_per_100``
+    metric under a well-formed ``params['leaderboard']`` block (``docs/specs/leaderboard.md``).
+    Per option id the latest such run in append order wins. A variant none of whose runs gave a
+    row gets one unmeasured row from its latest run, with the reason in ``note`` when its block
+    is malformed. Every row carries the family size as its variants searched, the run's ticket,
+    sources and status (old 'rejected' and 'adopted' runs read like 'scored'), and ``licensed``
+    as ``is_licensed_record``.
+    """
+    adapters = adapters or {}
+    families: dict[str, list[RunRecord]] = {}
+    for record in registry.records():
+        if record.holdout_open is None:
+            families.setdefault(record.family_id, []).append(record)
+    rows: list[LeaderboardRow] = []
+    for family_id, runs in families.items():
+        size = registry.family_size(family_id)
+        adapter = adapters.get(family_id)
+        options: dict[str, LeaderboardRow] = {}
+        latest: dict[str, tuple[RunRecord, str | None]] = {}
+        covered: set[str] = set()
+        for record in runs:
+            made, problem = _record_rows(record, size, adapter)
+            for row in made:
+                options[row.option_id] = row
+            if made:
+                covered.add(record.variant)
+            latest[record.variant] = (record, problem)
+        rows += options.values()
+        rows += [
+            _unmeasured_row(record, size, problem)
+            for variant, (record, problem) in latest.items()
+            if variant not in covered
+        ]
+    return rows
