@@ -35,8 +35,14 @@ what these tests call):
   A combination row of `pool` (not `__pool__`) with null `odds` and `status_raw` `****` once
   whitespace is stripped (cancelled after sale: sold, then refunded) is a refunded combination
   too: one row with odds NaN, won false, ret 0.0 and refunded true, once even when `paid` also has
-  an `is_refund` row for it. Null-odds rows printed `0000`, `----`, blank or null yield no row,
-  and a board without a `status_raw` column has no board-side refunds.
+  an `is_refund` row for it. A refund in `paid` is a refund whatever the board's price: any other
+  combination row of `pool` with null `odds` (printed `0000`, `----`, blank or null, or on a board
+  without a `status_raw` column) that `paid` has an `is_refund` row of `pool` for is the same
+  unpriced refunded row. The other null-odds rows yield no row, a refund in `paid` with no board
+  row yields none, and a board without a `status_raw` column has no `****` refunds.
+- `odds` may be float64, object (a missing price pd.NA, None or np.nan) or pandas' nullable
+  Float64 (pd.NA, as pyarrow reads a table into it): the result is the float64 board's, missing
+  odds NaN.
 - `race_returns(rows, *, payout_rate, band_edges) -> DataFrame`: `rows` are one pool's
   `combination_returns` rows; one row per (race_id, band), band `odds_band(odds, band_edges)`,
   with the flat-box sums of the unrefunded combinations: n_staked (combinations staked), ret_sum
@@ -66,6 +72,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from horsetrack.core.eval import segment_roi
@@ -728,7 +735,8 @@ def test_cancelled_after_sale_combinations_are_refunds_from_the_board(pool):
     and null texts, the `__pool__` row and another pool's `****` rows give no row. `race_returns`
     counts the unpriced refunds in n_refunded under the band `unpriced` and leaves every priced
     band and flat rho as they were; `grouped_bets` leaves them out. A board without `status_raw`
-    has no board-side refunds."""
+    has no `****` refunds, but the `****` slot `paid` also refunds stays an unpriced refund
+    (review round 2, finding A: a refund in `paid` is a refund whatever the board's price)."""
     rng = np.random.default_rng(4300 + POOLS.index(pool))
     rate = RATES[pool]
     ranged = pool in RANGE_POOLS
@@ -849,12 +857,231 @@ def test_cancelled_after_sale_combinations_are_refunds_from_the_board(pool):
     }
     assert got_groups == want_groups
 
-    # No `status_raw` column: no board-side refunds, the rest as before.
+    # No `status_raw` column: no `****` refunds, but `both` (null odds, an `is_refund` row in
+    # `paid`) stays one unpriced refund. Race two's `****` slots, refunded only in another pool
+    # under the same text, and race one's other `****` slots give no row.
     bare = ps.combination_returns(board_rows.drop(columns="status_raw"), shuffled, pool=pool)
+    assert not bare.duplicated(["race_id", "combination"]).any()
+    bare_rr = ps.race_returns(bare, payout_rate=rate, band_edges=EDGES)
     bare = bare.set_index(["race_id", "combination"])
-    assert set(bare.index) == set(priced)
-    assert bare["ret"].astype(float).to_dict() == pytest.approx(want_ret, abs=1e-12)
-    assert {k for k, f in bare["refunded"].astype(bool).items() if f} == refunded_priced
+    assert set(bare.index) == set(priced) | {(first, both)}
+    kept = bare.loc[(first, both)]
+    assert np.isnan(float(kept["odds"])) and not bool(kept["won"]) and bool(kept["refunded"])
+    want_bare = {**want_ret, (first, both): 0.0}
+    assert bare["ret"].astype(float).to_dict() == pytest.approx(want_bare, abs=1e-12)
+    assert {k for k, f in bare["refunded"].astype(bool).items() if f} == refunded_priced | {
+        (first, both)
+    }
+    in_unpriced = bare_rr[bare_rr["band"] == "unpriced"].groupby("race_id")["n_refunded"].sum()
+    assert in_unpriced[in_unpriced > 0].to_dict() == {first: 1}
+    assert bare_rr["n_refunded"].sum() == 1 + len(refunded_priced)
+    assert bare_rr["ret_sum"].sum() / bare_rr["rate_sum"].sum() == pytest.approx(rho, rel=1e-12)
+
+
+# Review round 2, finding A: null-odds texts other than `****`, untrimmed too, each on a horse
+# whose first combination `paid` refunds, and two on horses `paid` never refunds.
+PAID_REFUND_TEXTS = {6: "0000", 7: "0000  ", 8: "----", 9: "----  ", 10: "", 11: "    ", 12: None}
+UNREFUNDED_TEXTS = {13: "0000", 14: "----"}
+
+
+def first_with(combinations, horse: int) -> str:
+    """The first combination, by its legs, that `horse` runs in."""
+    return min((c for c in combinations if horse in legs_of(c)), key=legs_of)
+
+
+@pytest.mark.parametrize("pool", POOLS)
+def test_a_paid_refund_is_a_refund_whatever_the_board_price(pool):
+    """Review round 2, finding A: a combination row of `pool` with an `is_refund` row of `pool`
+    in `paid` is a refunded combination whatever its board price. With null `odds` printed
+    `0000`, `----`, blank (untrimmed too) or null, or on a board without `status_raw`, it is one
+    row with odds NaN, won false, ret 0.0 and refunded true, counted in n_refunded under the band
+    `unpriced`; a `****` slot refunded both ways is one row. A null-odds slot neither printed
+    `****` nor refunded in `paid` gives no row, and nor does a refund in `paid` with no board row:
+    a horse not in the field, a race not on the board, the `__pool__` row, or another pool's
+    refund of the same text. Priced bands, flat rho and `grouped_bets` are as before."""
+    rng = np.random.default_rng(4310 + POOLS.index(pool))
+    rate = RATES[pool]
+    ranged = pool in RANGE_POOLS
+    race, absent = race_id(30), race_id(31)
+    texts = {5: "****", **PAID_REFUND_TEXTS, **UNREFUNDED_TEXTS}  # 1-4, 15 and 16 are priced
+
+    slots: dict[str, tuple] = {}
+    lead: dict[str, int] = {}  # a null-odds slot's lowest unpriced leg, whose text it prints
+    for c in combinations_of(pool, range(1, 17)):
+        if dead := [h for h in legs_of(c) if h in texts]:
+            lead[c] = min(dead)
+            slots[c] = (
+                None,
+                float(rng.integers(11, 10000)) / 10 if ranged else None,
+                texts[min(dead)],
+            )
+        else:
+            low = float(rng.integers(11, 10000)) / 10
+            slots[c] = (low, round(low * 1.6, 1) if ranged else None, None)
+    priced = {(race, c): s[0] for c, s in slots.items() if s[0] is not None}
+    starred = {(race, c) for c, h in lead.items() if h == 5}
+    first_of = {h: min((c for c in lead if lead[c] == h), key=legs_of) for h in texts}
+    refunded_null = {(race, first_of[h]) for h in PAID_REFUND_TEXTS}
+    both = (race, first_of[5])  # `****` and an `is_refund` row in `paid`
+    priced_refund = (race, first_with([c for _, c in priced], 16))
+    unrefunded_null = {(race, c) for c, h in lead.items() if h != 5} - refunded_null
+    # Premises: every text is refunded once, and unrefunded null-odds slots remain.
+    assert [slots[first_of[h]][2] for h in PAID_REFUND_TEXTS] == list(PAID_REFUND_TEXTS.values())
+    assert {lead[c] for _, c in unrefunded_null} >= set(UNREFUNDED_TEXTS)
+
+    order = [3, 15, 1]
+    dividends: dict[tuple[str, str], float] = {}
+    rows = []
+    for p in POOLS:
+        for c in paying(p, order):
+            d = float(rng.integers(11, 5000) * 10)
+            rows.append((race, p, c, d))
+            if p == pool:
+                dividends[(race, c)] = d
+    assert set(dividends) <= set(priced)  # premise: only priced combinations paid
+    off_field = first_with(combinations_of(pool, range(1, 19)), 17)
+    refunds = [*sorted(refunded_null), both, priced_refund, (race, off_field), (race, POOL_ROW)]
+    refunds += [(absent, c) for c in sorted(slots)[:5]]
+    rows += [(r, pool, c, 100, True) for r, c in refunds]
+    rows += [(race, SAME_TEXT_POOL[pool], c, 100, True) for _, c in sorted(unrefunded_null)]
+    shuffled = paid(rows).sample(frac=1.0, random_state=5).reset_index(drop=True)
+    board_rows = status_board(race, pool, slots).sample(frac=1.0, random_state=6)
+    board_rows = board_rows.reset_index(drop=True)
+    want_ret = {k: dividends.get(k, 0.0) / 100 for k in priced}
+    staked = [k for k in priced if k != priced_refund]
+    rho = sum(want_ret[k] for k in staked) / (rate * len(staked))
+
+    for label, frame, unpriced in (
+        ("status_raw", board_rows, starred | refunded_null),
+        ("no status_raw", board_rows.drop(columns="status_raw"), refunded_null | {both}),
+    ):
+        out = ps.combination_returns(frame, shuffled, pool=pool)
+        assert OUT_COLUMNS <= set(out.columns), label
+        assert not out.duplicated(["race_id", "combination"]).any(), label
+        keyed = out.set_index(["race_id", "combination"])
+        assert set(keyed.index) == set(priced) | unpriced, label
+        gone = keyed.loc[sorted(unpriced)]
+        assert gone["odds"].isna().all(), label
+        assert not gone["won"].astype(bool).any(), label
+        assert (gone["ret"].astype(float) == 0.0).all(), label
+        assert gone["refunded"].astype(bool).all(), label
+        live = keyed.loc[sorted(priced)]
+        assert live["odds"].astype(float).to_dict() == pytest.approx(priced), label
+        assert live["ret"].astype(float).to_dict() == pytest.approx(want_ret, abs=1e-12), label
+        assert live["won"].astype(bool).to_dict() == {k: k in dividends for k in priced}, label
+        assert {k for k, f in live["refunded"].astype(bool).items() if f} == {priced_refund}, label
+
+        rr = ps.race_returns(out, payout_rate=rate, band_edges=EDGES)
+        expected: dict[str, tuple[float, ...]] = {"unpriced": (0, 0.0, 0.0, len(unpriced))}
+        for k, low in priced.items():
+            band = ps.odds_band(low, EDGES)
+            n, ret, rate_sum, refunded = expected.get(band, (0, 0.0, 0.0, 0))
+            if k == priced_refund:
+                expected[band] = (n, ret, rate_sum, refunded + 1)
+            else:
+                expected[band] = (n + 1, ret + want_ret[k], rate_sum + rate, refunded)
+        assert by_band(rr) == approx_bands(expected), label
+        assert rr["ret_sum"].sum() / rr["rate_sum"].sum() == pytest.approx(rho, rel=1e-12), label
+
+        grouped = ps.grouped_bets(
+            out.assign(segment="all"), by=["segment"], payout_rate=rate, band_edges=EDGES
+        )
+        assert int(grouped["count"].sum()) == len(staked), label
+        assert int(grouped["won"].sum()) == len(dividends), label
+
+
+# Review round 2, finding B: the dtypes an `odds` column may come in, missing prices as named.
+ODDS_DTYPES = ("object pd.NA", "object None", "object np.nan", "object mixed", "Float64 pyarrow")
+OBJECT_MISSING = {
+    "object pd.NA": (pd.NA,),
+    "object None": (None,),
+    "object np.nan": (np.nan,),
+    "object mixed": (pd.NA, None, np.nan),
+}
+
+
+def with_odds_dtype(frame: pd.DataFrame, kind: str) -> pd.DataFrame:
+    """`frame` (float64 `odds`, NaN when missing) with the same odds in the dtype `kind` names."""
+    if kind == "Float64 pyarrow":  # a table read through pyarrow with float64 mapped to Float64
+        table = pa.Table.from_pandas(frame, preserve_index=False)
+        out = table.to_pandas(types_mapper={pa.float64(): pd.Float64Dtype()}.get)
+        assert isinstance(out["odds"].dtype, pd.Float64Dtype)  # premise
+        assert all(v is pd.NA for v in out["odds"].astype(object) if not isinstance(v, float))
+    else:
+        missing = itertools.cycle(OBJECT_MISSING[kind])
+        values = [next(missing) if np.isnan(v) else float(v) for v in frame["odds"]]
+        out = frame.assign(odds=pd.Series(values, index=frame.index, dtype=object))
+        assert out["odds"].dtype == object  # premise
+        kinds = {type(v) for v in out["odds"] if not isinstance(v, float) or np.isnan(v)}
+        assert kinds == {type(m) for m in OBJECT_MISSING[kind]}  # premise
+    assert out["odds"].isna().tolist() == frame["odds"].isna().tolist()  # premise
+    return out
+
+
+@pytest.mark.parametrize("kind", ODDS_DTYPES)
+def test_object_and_nullable_odds_give_the_float64_result(kind):
+    """Review round 2, finding B: `combination_returns` takes an `odds` column of object dtype
+    holding pd.NA, None or np.nan for a missing price, or of pandas' nullable Float64 holding
+    pd.NA (as pyarrow reads a store table into it), and returns what the same board with a
+    float64 column returns, missing odds as NaN. Two races of Win and of Wide: a `****` slot, a
+    `0000` slot `paid` refunds, a `----` slot it does not, a priced refund and the payers."""
+    first, second = race_id(40), race_id(41)
+    texts = {5: "****", 7: "0000", 8: "----"}
+    for pool in ("WIN", "QUINELLA_PLACE"):
+        rng = np.random.default_rng(4320 + POOLS.index(pool))
+        ranged = pool in RANGE_POOLS
+        boards, rows = [], []
+        priced: dict[tuple[str, str], float] = {}
+        unpriced: set[tuple[str, str]] = set()
+        dividends: dict[tuple[str, str], float] = {}
+        for race, order, dead_texts in ((first, [2, 1, 3], texts), (second, [4, 6, 1], {})):
+            slots: dict[str, tuple] = {}
+            lead: dict[str, int] = {}
+            for c in combinations_of(pool, range(1, 9)):
+                if dead := [h for h in legs_of(c) if h in dead_texts]:
+                    lead[c] = min(dead)
+                    high = float(rng.integers(11, 9000)) / 10 if ranged else None
+                    slots[c] = (None, high, dead_texts[min(dead)])
+                else:
+                    low = float(rng.integers(11, 9000)) / 10
+                    slots[c] = (low, round(low * 1.6, 1) if ranged else None, None)
+                    priced[(race, c)] = low
+            boards.append(status_board(race, pool, slots))
+            unpriced |= {(race, c) for c, h in lead.items() if h == 5}
+            for p in POOLS:
+                for c in paying(p, order):
+                    d = float(rng.integers(11, 5000) * 10)
+                    rows.append((race, p, c, d))
+                    if p == pool:
+                        dividends[(race, c)] = d
+        # `0000` (horse 7) refunded in `paid`, `----` (horse 8) not; a priced refund in race two.
+        null_refund = (first, first_with(combinations_of(pool, (1, 2, 3, 4, 6, 7)), 7))
+        priced_refund = (second, first_with([c for r, c in priced if r == second], 3))
+        rows += [(r, pool, c, 100, True) for r, c in (null_refund, priced_refund)]
+        unpriced.add(null_refund)
+        assert set(dividends) <= set(priced)  # premise
+        floats = pd.concat(boards, ignore_index=True)
+        assert floats["odds"].dtype == np.float64  # premise
+        dividends_frame = paid(rows)
+
+        out = ps.combination_returns(with_odds_dtype(floats, kind), dividends_frame, pool=pool)
+
+        keyed = out.set_index(["race_id", "combination"])
+        assert set(keyed.index) == set(priced) | unpriced, pool
+        assert keyed["odds"].dtype == np.float64, pool  # missing odds as NaN, not pd.NA
+        assert np.isnan(keyed.loc[sorted(unpriced), "odds"].to_numpy()).all(), pool
+        assert keyed.loc[sorted(priced), "odds"].to_dict() == pytest.approx(priced), pool
+        want_ret = {k: dividends.get(k, 0.0) / 100 for k in set(priced) | unpriced}
+        assert keyed["ret"].astype(float).to_dict() == pytest.approx(want_ret, abs=1e-12), pool
+        assert keyed["won"].astype(bool).to_dict() == {k: k in dividends for k in want_ret}, pool
+        flagged = {k for k, f in keyed["refunded"].astype(bool).items() if f}
+        assert flagged == unpriced | {priced_refund}, pool
+
+        def ordered(frame: pd.DataFrame) -> pd.DataFrame:
+            return frame.sort_values(["race_id", "combination"]).reset_index(drop=True)
+
+        reference = ps.combination_returns(floats, dividends_frame, pool=pool)
+        pd.testing.assert_frame_equal(ordered(out), ordered(reference))
 
 
 DEAD_HEATS = {
