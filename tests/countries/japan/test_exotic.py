@@ -100,7 +100,23 @@ both inputs" above:
   both key checks, so a null on a combination of p_model is a missing pool price ("no pool price")
   and a priced combination outside p_model is still a ValueError. p_model must sum to 1 within
   1e-6, a ValueError naming #459 otherwise, whatever `pool`, a and b; only q_pool is
-  scale-invariant. With a=1, b=0 the blend is p_model.
+  scale-invariant. With a=1, b=0 the blend is p_model. (Which rows drop is superseded below.)
+
+Owner restart (2026-11-27), two fixes:
+- `winning_combinations` settles QUINELLA_PLACE only where it was sold: jra.yaml sells Wide from 4
+  runners at the start of sales (`field_at_sale`, None: the runners in `finish`), so a field of 3
+  at sale pays no Wide, however many finish; a field sold at 4 pays its pairs even after a late
+  scratch to 3, and with two finishers it pays their one pair. Place (not sold under 5) and the
+  other pools are unchanged.
+- `pool_blend(..., scratched: Collection[int] = ())`: the horse numbers confirmed scratched or
+  refunded. Every q_pool row whose combination holds one of them is dropped, null or priced; a
+  number with no row on the board drops nothing. Any other null q_pool row is a ValueError
+  matching "no pool price", whether or not p_model has its combination (a live runner the board
+  does not price and the model lacks never shrinks the field). The key checks then hold as
+  before: a p_model combination with no q_pool row (one with a scratched runner included) and a
+  priced q_pool combination missing from p_model are ValueErrors. A scratch that is not a
+  positive whole number (0, -8, 8.5, True, "8", None) is a ValueError; numpy integers are horse
+  numbers.
 
 Expected values are derived independently: closed-form Harville, the stage weights written out
 here, JRA's published payout rates with the boost calendar's rules, a quadrature value of Henery's
@@ -1743,12 +1759,17 @@ def test_pool_blend_drops_a_scratched_runners_refund_slots(pool, null):
     # scaled to 1.
     assert len(refunded) and set(live.index) == set(p_model.index)
     assert live.sum() < 0.99
+    # Owner restart: a null is dropped only for a confirmed scratch. Without horse 8 given as one,
+    # its null refund slots are missing pool prices.
+    for kwargs in ({}, {"pool": pool}, {"scratched": ()}, {"scratched": [3]}):
+        with pytest.raises(ValueError, match="no pool price"):
+            exotic().pool_blend(p_model, q_pool, a=0.6, b=0.5, **kwargs)
     p, q = p_model.to_numpy(), live.reindex(p_model.index).to_numpy()
     for a, b in BLEND_GRID:
         u = a * np.log(p) + b * np.log(q)
         expected = np.exp(u - u.max()) / np.exp(u - u.max()).sum()
         for kwargs in ({}, {"pool": pool}):
-            got = exotic().pool_blend(p_model, q_pool, a=a, b=b, **kwargs)
+            got = exotic().pool_blend(p_model, q_pool, a=a, b=b, scratched=[8], **kwargs)
             assert list(got.index) == list(p_model.index)
             np.testing.assert_allclose(got.to_numpy(dtype=float), expected, rtol=1e-10, atol=1e-15)
 
@@ -1757,21 +1778,23 @@ def test_pool_blend_drops_a_scratched_runners_refund_slots(pool, null):
 def test_pool_blend_still_needs_a_price_on_every_live_combination(pool):
     p_model, q_pool, refunded = _board_with_a_scratch(pool)
     # A null on a combination the model prices is a missing pool price, with or without the
-    # scratch's refund slots on the board.
+    # scratch's refund slots on the board, horse 8 confirmed scratched.
     for board in (q_pool, q_pool.drop(refunded)):
         for live in (p_model.index[0], p_model.index[-1]):
             holed = board.copy()
             holed.loc[live] = math.nan
             for a, b in BLEND_WEIGHTS:
                 with pytest.raises(ValueError, match="no pool price"):
-                    exotic().pool_blend(p_model, holed, a=a, b=b)
-    # A priced combination with the scratched runner is still one the model lacks.
+                    exotic().pool_blend(p_model, holed, a=a, b=b, scratched=[8])
+    # Horse 8 not given as a scratch: a priced combination with it is one the model lacks, the
+    # other refund slots null or priced.
     for stray in (refunded[0], refunded[-1]):
         priced = q_pool.copy()
         priced.loc[stray] = 0.004
-        for a, b in BLEND_WEIGHTS:
-            with pytest.raises(ValueError):
-                exotic().pool_blend(p_model, priced, a=a, b=b)
+        for board in (priced, q_pool.fillna(0.004)):
+            for a, b in BLEND_WEIGHTS:
+                with pytest.raises(ValueError):
+                    exotic().pool_blend(p_model, board, a=a, b=b)
 
 
 # (pool of p_model, runners, a multiplier on p_model, the `pool` argument): p_model sums to the
@@ -1830,3 +1853,258 @@ def test_pool_blend_model_only_is_the_model_at_any_board_scale(pool):
                 np.testing.assert_allclose(
                     got.to_numpy(dtype=float), expected, rtol=1e-10, atol=1e-15
                 )
+
+
+# ---------------------------------------------------------------------------------------------
+# Owner restart (2026-11-27): Wide settles only where it was sold, and the blend drops the rows of
+# a confirmed scratch alone
+# ---------------------------------------------------------------------------------------------
+
+
+def jra_wide_sold(starters: int) -> bool:
+    """Wide (QUINELLA_PLACE) by the runners at the start of sales (jra.yaml): sold from 4."""
+    return starters >= 4
+
+
+def _three_run(wide: list[str]) -> dict[str, list[str]]:
+    """The winners of {5: 1, 2: 2, 7: 3}: every pool but Place (not sold under 5) pays."""
+    return {
+        WIN: ["5"],
+        PLACE: [],
+        QUINELLA: ["2,5"],
+        WIDE: wide,
+        EXACTA: ["5,2"],
+        TRIO: ["2,5,7"],
+        TRIFECTA: ["5,2,7"],
+    }
+
+
+def _two_finish(wide: list[str]) -> dict[str, list[str]]:
+    """The winners of horse 1 first, horse 2 second, nobody else finishing, under 5 at sale."""
+    return {WIN: ["1"], PLACE: [], QUINELLA: ["1,2"], WIDE: wide, EXACTA: ["1,2"], **NO_PAY}
+
+
+def _dead_heat_second(wide: list[str]) -> dict[str, list[str]]:
+    """The winners of {4: 1, 1: 2, 3: 2}: 1 and 3 dead-heat for second, under 5 at sale."""
+    return {
+        WIN: ["4"],
+        PLACE: [],
+        QUINELLA: ["1,4", "3,4"],
+        WIDE: wide,
+        EXACTA: ["4,1", "4,3"],
+        TRIO: ["1,3,4"],
+        TRIFECTA: ["4,1,3", "4,3,1"],
+    }
+
+
+# (finish, the fields at sale that share these winners, the winners per pool). Hand-listed: Wide
+# pays only where 4 or more ran when sales opened; the other pools pay as in any field.
+WIDE_AT_SALE = {
+    "three_run_two_finish": ({1: 1, 2: 2, 3: None}, (None, 3), _two_finish([])),
+    "four_at_sale_three_run_two_finish": ({1: 1, 2: 2, 3: None}, (4,), _two_finish(["1,2"])),
+    "four_run_two_finish": ({1: 1, 2: 2, 3: None, 4: math.nan}, (None, 4), _two_finish(["1,2"])),
+    "three_run_all_finish": ({5: 1, 2: 2, 7: 3}, (None, 3), _three_run([])),
+    "four_at_sale_three_run_all_finish": (
+        {5: 1, 2: 2, 7: 3},
+        (4,),
+        _three_run(["2,5", "2,7", "5,7"]),
+    ),
+    "three_run_dead_heat_second": ({4: 1, 1: 2, 3: 2}, (None, 3), _dead_heat_second([])),
+    "four_at_sale_three_run_dead_heat_second": (
+        {4: 1, 1: 2, 3: 2},
+        (4,),
+        _dead_heat_second(["1,3", "1,4", "3,4"]),
+    ),
+    "four_run_dead_heat_third": (
+        {1: 1, 2: 2, 3: 3, 4: 3},
+        (None, 4),
+        {
+            WIN: ["1"],
+            PLACE: [],
+            QUINELLA: ["1,2"],
+            WIDE: ["1,2", "1,3", "1,4", "2,3", "2,4"],
+            EXACTA: ["1,2"],
+            TRIO: ["1,2,3", "1,2,4"],
+            TRIFECTA: ["1,2,3", "1,2,4"],
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(WIDE_AT_SALE))
+def test_wide_settles_only_where_it_was_sold(case):
+    finish, fields_at_sale, expected = WIDE_AT_SALE[case]
+    assert set(expected) == set(ALL_POOLS)  # the case's premise: every pool is listed
+    for at_sale in fields_at_sale:
+        field = len(finish) if at_sale is None else at_sale
+        assert bool(expected[WIDE]) == jra_wide_sold(field)  # the case's premise
+        for pool, winners in expected.items():
+            got = exotic().winning_combinations(finish, pool, field_at_sale=at_sale)
+            assert len(got) == len(set(got)), (pool, got)
+            assert sorted(got) == sorted(winners), (pool, at_sale)
+
+
+def test_wide_is_sold_from_four_runners_at_the_start_of_sales():
+    """Owner restart: a race of 3 at sale with 2 finishers pays no Wide, and a sold 4-runner pool
+    with 2 finishers pays 1,2; over every field at sale, Wide pays from 4."""
+    wide = config.load_source("japan", "jra").pools[WIDE]
+    assert [wide.places_for(n) for n in (2, 3, 4, 5, 8, 18)] == [0, 0, 3, 3, 3, 3]  # jra.yaml
+    settle_wide = exotic().winning_combinations
+    assert settle_wide({1: 1, 2: 2, 3: None}, WIDE, field_at_sale=3) == []
+    assert settle_wide({1: 1, 2: 2, 3: None}, WIDE) == []
+    assert settle_wide({1: 1, 2: 2, 3: None, 4: None}, WIDE, field_at_sale=4) == ["1,2"]
+    two_finish = {9: 1, 3: 2, 12: None}
+    three_finish = {9: 1, 3: 2, 12: 3}
+    for at_sale in range(3, 19):
+        sold = jra_wide_sold(at_sale)
+        got = settle_wide(two_finish, WIDE, field_at_sale=at_sale)
+        assert got == (["3,9"] if sold else []), at_sale
+        got = settle_wide(three_finish, WIDE, field_at_sale=at_sale)
+        assert sorted(got) == (sorted(["3,9", "3,12", "9,12"]) if sold else []), at_sale
+
+
+def _board_and_model(
+    pool: str, board_horses, model_horses, p_win: np.ndarray
+) -> tuple[pd.Series, pd.Series]:
+    """A Harville model over `model_horses` (Win probabilities p_win) and a Harville board over
+    `board_horses` (BOARD_P8's first n, renormalised), an object Series so a row can hold None."""
+    ordering = exotic().Ordering("harville")
+    n = len(board_horses)
+    board_p = BOARD_P8[:n] / BOARD_P8[:n].sum()
+    p_model = pd.Series(ordering.joint_probs(p_win, pool, horses=model_horses), dtype=float)
+    board = pd.Series(ordering.joint_probs(board_p, pool, horses=board_horses), dtype=object)
+    return p_model, board
+
+
+def _with(combination: str, numbers) -> bool:
+    """Whether a combination string holds one of the horse numbers, by number, not by text."""
+    return bool(set(horses(combination)) & {int(h) for h in numbers})
+
+
+def log_linear(p_model: pd.Series, q_live: pd.Series, a: float, b: float) -> np.ndarray:
+    """exp(a ln p + b ln q) normalised, on p_model's index, q aligned by label."""
+    p = p_model.to_numpy(dtype=float)
+    q = q_live.reindex(p_model.index).to_numpy(dtype=float)
+    u = a * np.log(p) + b * np.log(q)
+    w = np.exp(u - u.max())
+    return w / w.sum()
+
+
+# (the board's horse numbers, the confirmed scratches, the model's Win probabilities over the rest
+# in board order). Numbers whose digits nest (1 among 10-12, 2 among 12 and 20) are compared as
+# numbers; horse 13 was scratched before the board was logged, so it has no row to drop.
+SCRATCH_CASES = {
+    "horse_1_among_10_to_12": ((1, 2, 3, 10, 11, 12), (1,), P5),
+    "horse_2_among_12_and_20": ((2, 5, 12, 20, 7, 3), (2,), P5),
+    "two_scratched_of_eight": ((4, 9, 14, 1, 6, 11, 13, 2), (4, 14), P6_FAV4),
+    "one_scratch_off_the_board": ((1, 2, 3, 10, 11, 12), (1, 13), P5),
+}
+
+
+@pytest.mark.parametrize("shown", ["mixed", "priced"])
+@pytest.mark.parametrize("case", list(SCRATCH_CASES))
+@pytest.mark.parametrize("pool", SINGLE_WINNER_POOLS)
+def test_pool_blend_drops_every_row_of_a_confirmed_scratch(pool, case, shown):
+    """Every board row of a confirmed scratch drops, NaN, None or a stale price ("mixed": the
+    three in turn; "priced": a price on each), and the rest blends as the log-linear pool."""
+    board_horses, scratched, p_live = SCRATCH_CASES[case]
+    live_horses = tuple(h for h in board_horses if h not in scratched)
+    p_model, board = _board_and_model(pool, board_horses, live_horses, p_live)
+    dropped = [c for c in board.index if _with(c, scratched)]
+    for i, c in enumerate(dropped):
+        board.loc[c] = (math.nan, None, 0.004)[i % 3] if shown == "mixed" else 0.004 * (1 + i % 5)
+    board = board.iloc[::-1]
+    live = board.drop(dropped)
+    assert len(dropped) and set(live.index) == set(p_model.index)  # the case's premise
+    for a, b in BLEND_GRID:
+        expected = log_linear(p_model, live, a, b)
+        for given in (
+            list(scratched),
+            tuple(scratched),
+            set(scratched),
+            np.array(scratched, dtype=np.int64),
+        ):
+            got = exotic().pool_blend(p_model, board, a=a, b=b, scratched=given)
+            assert list(got.index) == list(p_model.index)
+            np.testing.assert_allclose(got.to_numpy(dtype=float), expected, rtol=1e-10, atol=1e-15)
+        got = exotic().pool_blend(p_model, board, a=a, b=b, pool=pool, scratched=list(scratched))
+        np.testing.assert_allclose(got.to_numpy(dtype=float), expected, rtol=1e-10, atol=1e-15)
+    # Not confirmed, the same rows are not dropped: a null is a missing price, a price one the
+    # model lacks.
+    with pytest.raises(ValueError):
+        exotic().pool_blend(p_model, board, a=0.6, b=0.5)
+    # A model that still prices a scratched runner has combinations with no pool price left.
+    full_p = BOARD_P8[: len(board_horses)] / BOARD_P8[: len(board_horses)].sum()
+    full = pd.Series(
+        exotic().Ordering("harville").joint_probs(full_p, pool, horses=board_horses), dtype=float
+    )
+    with pytest.raises(ValueError):
+        exotic().pool_blend(full, board, a=0.6, b=0.5, scratched=list(scratched))
+
+
+# (the live runners the board prices null and does not list as scratched, the confirmed scratches,
+# null on the board too, the model's horse numbers and Win probabilities). The board is BOARD_P8's
+# horses 1-8; the model lacks exactly the null runners.
+UNPRICED_LIVE = {
+    "seven_unpriced": ((7,), (), (1, 2, 3, 4, 5, 6, 8), P7),
+    "seven_unpriced_eight_scratched": ((7,), (8,), (1, 2, 3, 4, 5, 6), P6_FAV4),
+    "three_and_five_unpriced": ((3, 5), (), (1, 2, 4, 6, 7, 8), P6_FAV4),
+}
+
+
+@pytest.mark.parametrize("null", [math.nan, None], ids=["nan", "none"])
+@pytest.mark.parametrize("case", list(UNPRICED_LIVE))
+@pytest.mark.parametrize("pool", SINGLE_WINNER_POOLS)
+def test_pool_blend_refuses_a_null_price_on_a_live_runner_the_model_lacks(pool, case, null):
+    """Owner restart: a null-priced live runner, missing from the model too, is "no pool price",
+    never a smaller field blended as if it had been scratched."""
+    unpriced, scratched, model_horses, p_win = UNPRICED_LIVE[case]
+    p_model, board = _board_and_model(pool, tuple(range(1, 9)), model_horses, p_win)
+    nulls = [c for c in board.index if _with(c, (*unpriced, *scratched))]
+    for c in nulls:
+        board.loc[c] = null
+    board = board.iloc[::-1]
+    live = board.drop(nulls)
+    assert set(live.index) == set(p_model.index)  # the case's premise: the model lacks just them
+    for kwargs in (
+        {},
+        {"scratched": list(scratched)},
+        {"scratched": list(scratched), "pool": pool},
+    ):
+        for a, b in BLEND_WEIGHTS:
+            with pytest.raises(ValueError, match="no pool price"):
+                exotic().pool_blend(p_model, board, a=a, b=b, **kwargs)
+    # Confirmed as scratches, the same rows drop and the rest blends.
+    got = exotic().pool_blend(p_model, board, a=0.6, b=0.5, scratched=[*scratched, *unpriced])
+    np.testing.assert_allclose(
+        got.to_numpy(dtype=float), log_linear(p_model, live, 0.6, 0.5), rtol=1e-10, atol=1e-15
+    )
+    # One null combination of a live pair or trio, dropped from the model too, is no pool price.
+    for c in (p_model.index[0], p_model.index[-1]):
+        lacking = p_model.drop(c)
+        holed = live.copy()
+        holed.loc[c] = null
+        with pytest.raises(ValueError, match="no pool price"):
+            exotic().pool_blend(lacking / lacking.sum(), holed, a=0.6, b=0.5)
+
+
+# Scratches that are not horse numbers, each given beside horse 8, the real one.
+BAD_SCRATCHES = {
+    "zero": 0,
+    "negative": -8,
+    "fraction": 8.5,
+    "bool": True,
+    "text": "8",
+    "none": None,
+}
+
+
+@pytest.mark.parametrize("bad", list(BAD_SCRATCHES))
+def test_pool_blend_refuses_a_scratch_that_is_not_a_horse_number(bad):
+    p_model, q_pool, _ = _board_with_a_scratch(TRIO)
+    got = exotic().pool_blend(p_model, q_pool, a=0.5, b=0.5, scratched=[np.int64(8)])
+    assert list(got.index) == list(p_model.index)
+    value = BAD_SCRATCHES[bad]
+    for given in ([8, value], [value, 8], (8, value)):
+        with pytest.raises(ValueError):
+            exotic().pool_blend(p_model, q_pool, a=0.5, b=0.5, scratched=given)

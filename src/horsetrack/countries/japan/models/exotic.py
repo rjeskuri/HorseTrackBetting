@@ -11,8 +11,8 @@ own dividends (ticket #99, epic #73; research 08 §3.2 C5, §4 E43, E44).
   every (race_id, pool) of a dividends frame; `dividend_floor_bound` marks the race-pools where a
   dividend is the 110-yen floor rather than the formula.
 - `winning_combinations`: the combinations a result pays, dead heats per 04 §1.4 (every
-  combination some tie-break of the dead heats would make the result), Place's places by the
-  field when sales opened.
+  combination some tie-break of the dead heats would make the result), Place's and Wide's places
+  by the field when sales opened.
 - `Ordering`: the ordered first three from one race's Win probabilities, a softmax over the
   runners left at each stage. Families: "harville"; "henery" (independent unit-variance normal
   running times, means solved so the Win probabilities hold, the trifecta by quadrature);
@@ -32,7 +32,7 @@ QUINELLA_PLACE and TRIO; WIN and PLACE name one horse.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from functools import cache
 from itertools import combinations, groupby, permutations, product
 from numbers import Integral, Real
@@ -247,11 +247,12 @@ def _check_pool(pool: str) -> None:
 
 
 def _places_paid(pool: str, field_at_sale: int) -> int:
-    """The first `places` finishers a pool's combinations are drawn from; Place's by the runners
-    when sales opened (jra.yaml `places_paid`), not by those that started."""
-    if pool == PLACE:
-        return _jra_pools()[PLACE].places_for(field_at_sale)
-    return {WIN: 1, QUINELLA: 2, EXACTA: 2, WIDE: 3, TRIO: 3, TRIFECTA: 3}[pool]
+    """The first `places` finishers a pool's combinations are drawn from, 0 where it was not sold.
+    Place's and Wide's by the runners when sales opened (jra.yaml `places_paid`: Place two from 5
+    and three from 8, Wide three from 4), not by those that started; the others' are fixed."""
+    if pool in (PLACE, WIDE):
+        return _jra_pools()[pool].places_for(field_at_sale)
+    return {WIN: 1, QUINELLA: 2, EXACTA: 2, TRIO: 3, TRIFECTA: 3}[pool]
 
 
 def _field_size(field_at_sale: object, runners: int) -> int:
@@ -322,12 +323,14 @@ def winning_combinations(
     the next runner skips: 1, 2, 3, 3, 5; None or NaN for a runner that did not finish). A dead
     heat pays every combination some tie-break of it would make the result (04 §1.4): a dead heat
     for third pays both Trios and both Trifectas, and Wide pays every pair of a possible first
-    three, never the two horses that dead-heated for third. PLACE pays the first two or three by
-    `field_at_sale`, the runners when sales opened (jra.yaml; None: the runners in `finish`), so
-    a late scratch from eight to seven still pays three places; no other pool depends on it. A
-    pool not offered to the field pays nothing. With fewer finishers than its places, PLACE pays
-    every finisher and QUINELLA_PLACE every pair of finishers (none with one); the other pools pay
-    nothing (TRIO and TIERCE need three finishers, QUINELLA and FORECAST two). ValueError for an
+    three, never the two horses that dead-heated for third. PLACE and QUINELLA_PLACE are settled
+    by `field_at_sale`, the runners when sales opened (jra.yaml; None: the runners in `finish`):
+    PLACE pays the first two from 5 and three from 8, so a late scratch from eight to seven still
+    pays three places, and QUINELLA_PLACE is sold from 4, so a field of 3 at sale pays no Wide
+    however many finish; no other pool depends on it. A pool not offered to the field pays
+    nothing. With fewer finishers than its places, a sold PLACE pays every finisher and a sold
+    QUINELLA_PLACE every pair of finishers (none with one); the other pools pay nothing (TRIO and
+    TIERCE need three finishers, QUINELLA and FORECAST two). ValueError for an
     unknown pool, a position that is not a whole number from 1 (a whole float, 2.0, is one), or a
     `field_at_sale` smaller than the runners in `finish`.
     """
@@ -719,8 +722,28 @@ def _fit_stage(
 # ---------------------------------------------------------------------------------------------
 
 
+def _scratch_numbers(scratched: Collection[int]) -> set[int]:
+    """The horse numbers of the confirmed scratches. ValueError for one that is not a positive
+    whole number (a numpy integer is one; a bool, a float or a string is not)."""
+    numbers = list(scratched)
+    if any(isinstance(h, bool) or not isinstance(h, Integral) or h < 1 for h in numbers):
+        raise ValueError(f"scratched horse numbers must be positive whole numbers, got {numbers!r}")
+    return {int(h) for h in numbers}
+
+
+def _holds_any(combination: str, numbers: set[int]) -> bool:
+    """Whether a combination string holds one of the horse numbers, compared as numbers."""
+    return not numbers.isdisjoint(int(h) for h in str(combination).split(","))
+
+
 def pool_blend(
-    p_model: pd.Series, q_pool: pd.Series, *, a: float, b: float, pool: str | None = None
+    p_model: pd.Series,
+    q_pool: pd.Series,
+    *,
+    a: float,
+    b: float,
+    pool: str | None = None,
+    scratched: Collection[int] = (),
 ) -> pd.Series:
     """exp(a ln p_model(c) + b ln q_pool(c)), normalised over one race's combinations.
 
@@ -734,14 +757,19 @@ def pool_blend(
     them is #459's registered variant). A code not in POOLS is a ValueError. The keys are not
     checked against `pool`.
 
-    Both Series are indexed by combination string. A null q_pool price (a scratched runner's
-    refunded combinations) is dropped first; then both cover the same combinations: q_pool is
-    aligned to p_model by label and the result is on p_model's index, in its order. A combination
-    of p_model with no price in q_pool (no full board, or a null on a live combination), or a
-    priced one of q_pool missing from p_model (a runner the model lacks), is a ValueError, as is
-    a probability that is not finite and positive.
+    Both Series are indexed by combination string. `scratched` holds the horse numbers confirmed
+    scratched or refunded, each a positive whole number (a ValueError otherwise): every q_pool
+    row whose combination holds one of them, compared as numbers, is dropped first, null or
+    priced, and a number with no row on the board drops nothing; p_model is never trimmed. Any
+    other null q_pool price is a ValueError ("no pool price"), whether or not p_model has its
+    combination: a live runner the board does not price never shrinks the field. Then both cover
+    the same combinations: q_pool is aligned to p_model by label and the result is on p_model's
+    index, in its order. A combination of p_model with no q_pool row (no full board, or a
+    scratched runner the model still prices), or a priced one of q_pool missing from p_model (a
+    runner the model lacks), is a ValueError, as is a probability that is not finite and positive.
     """
     a, b = _real(a, "a"), _real(b, "b")
+    gone = _scratch_numbers(scratched)
     if pool is not None:
         _check_pool(pool)
         if pool in (PLACE, WIDE):
@@ -753,12 +781,19 @@ def pool_blend(
     for name, s in (("p_model", p_model), ("q_pool", q_pool)):
         if not s.index.is_unique:
             raise ValueError(f"{name} has a combination twice")
-    q_pool = q_pool[q_pool.notna()]  # a scratched runner's refund slots carry no price
+    if gone:  # a confirmed scratch's rows are refund slots, whatever price they show
+        q_pool = q_pool[np.array([not _holds_any(c, gone) for c in q_pool.index], dtype=bool)]
+    null = q_pool.index[q_pool.isna().to_numpy()]
+    if len(null):
+        raise ValueError(
+            f"{len(null)} combination(s) on the board have no pool price (a null price on a "
+            f"runner not confirmed scratched), e.g. {null[0]!r}"
+        )
     missing = p_model.index.difference(q_pool.index)
     if len(missing):
         raise ValueError(
-            f"{len(missing)} combination(s) have no pool price (no full board, or a null price), "
-            f"e.g. {missing[0]!r}"
+            f"{len(missing)} combination(s) have no pool price (no full board, or a scratched "
+            f"runner p_model still prices), e.g. {missing[0]!r}"
         )
     unpriced = q_pool.index.difference(p_model.index)
     if len(unpriced):
