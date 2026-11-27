@@ -1658,11 +1658,12 @@ def run_command(
     """Run the variants the spec registers (SPECS: pool_depth the three, pool_depth_coplacer_v2
     the co-placer one) on every development day from the spec's date_from to the store's last
     race day, record each run, rewrite the public report from every run of the study's families
-    and update their files and index entries in the committed summary. The freeze is checked
-    before the store is touched; the last race day is looked up inside each recorded attempt.
-    Prints run identities and file names only; exits 1 when a run failed."""
+    and update the spec's family's file and index entry in the committed summary, keeping every
+    other family's. The freeze is checked before the store is touched; the last race day is
+    looked up inside each recorded attempt. Prints run identities and file names only; exits 1
+    when a run failed."""
     try:
-        _, spec = load_spec(spec_name)
+        family, spec = load_spec(spec_name)
     except ValueError as exc:
         typer.echo(f"not run: {exc}", err=True)
         raise typer.Exit(1) from None
@@ -1703,8 +1704,8 @@ def run_command(
         runs = family_runs(registry, families, reports, folder)
         write_report(doc, render_public_report(depth, variants=runs), sources=())
         typer.echo(f"wrote {doc.relative_to(env.repo_root())}")
-    update_summary(registry, families, summary_dir(COUNTRY))
-    typer.echo(f"updated the committed summary of {', '.join(families)}")
+    update_summary(registry, [family], summary_dir(COUNTRY))
+    typer.echo(f"updated the committed summary of {family}")
     if failed:
         raise typer.Exit(1)
 
@@ -1766,16 +1767,19 @@ def update_summary(registry: Registry, families: Sequence[str], directory: Path 
     """The committed summary in `directory` with `families`' files and index entries written by
     `write_summary` from their records in `registry`, and every other family's file and index
     entry kept: the index is `write_summary`'s rendering of the families it already lists plus
-    these (stand-in records name the others; their files are not written)."""
+    these (stand-in records name the others; their files are not written). A family of
+    `families` with no record in `registry` is one of the others: its committed entry and file
+    stay as they are."""
     directory = Path(directory)
     index = directory / "README.md"
     listed = _INDEX_ENTRY.findall(index.read_text(encoding="utf-8")) if index.is_file() else []
     own = [r for r in registry.records() if r.family_id in families]
-    names = [*dict.fromkeys(r.family_id for r in own), "README"]
+    held = dict.fromkeys(r.family_id for r in own)
+    names = [*held, "README"]
     stand_ins = [
         RunRecord("P0", name, "-", 1, "-", {}, (), "-", {}, {}, (), "failed")
         for name in dict.fromkeys(listed)
-        if name not in families
+        if name not in held
     ]
     with tempfile.TemporaryDirectory() as tmp:
         write_summary(_Records([*own, *stand_ins]), tmp)
