@@ -27,7 +27,30 @@ headline cell (favourite at 3.0 or more at T−2 in a less popular race). The nu
 point: no member beats no bet (loss 0); SPA over the 16 members does not reject and StepM finds
 none.
 
-## Run of 2026-11-27 (git `19f32a7`)
+## Run of 2026-11-27 (git `483f790`), the current code
+
+- Inputs as in the run below: 2 development day folders, 2 odds logs, 0 `FORECAST` rows, 0
+  holdout folders opened. n = 0 races loaded, 0 scored, 0 meetings, 0 excluded, 0 races with a
+  published ¥100 winner (`impact_unavailable`).
+- Registry: 16 more records under `japan/131-exacta-rule-v3` (06:19Z), status `scored`, the
+  frozen `spec_hash`, metrics `n_bets` = 0 (n = 0) and `retrospective_cutoff` (1 for the 8
+  headline members, 0 for the 8 "all" members, n = 0), no `roi`; family size still 16 (the label
+  is a metric, not a parameter, so these are reruns of the same 16 variants). Run ids (first 12
+  characters, in member order): `9885dc541e65`, `20c42cff93ff`, `a8455718928b`, `d8095052d664`,
+  `48c7bd2f5f8e`, `22770dc3c8ca`, `e41f70799659`, `1ea8d7ad1701`, `9c4ee956c880`,
+  `c7ed5a32ad14`, `a76baf9cac5f`, `05bd08941987`, `fdeb913266a4`, `366f3e91a62b`,
+  `0e9459651379`, `8f8001b01865`.
+- Data builds: the odds log digest `aa7b950687591d09` (unchanged) and, per store table, a digest
+  of the rows the command consumed: with no logged race nothing is read from the store, so all
+  three are the digest of no rows (`e3b0c44298fc1c14`). The earlier runs fingerprinted the whole
+  parquet files, so this run's builds differ from theirs although no consumed input changed;
+  from now on a store refresh that adds only holdout or unlogged races changes no build id and
+  appends nothing.
+- No max test (no race scored); shrinkage `not_run` (no bet) for each of the 16 members.
+- The records now in the family: 48, three runs of the same 16 variants at `ac74012`,
+  `19f32a7` (both below) and `483f790`, all n = 0; the earlier two stay as reruns.
+
+## Earlier run of 2026-11-27 (git `19f32a7`)
 
 - Inputs read: 2 development day folders (2026-11-21 and 2026-11-22, Kyoto), 2 odds logs, 0
   holdout folders opened (the A2 holdout starts 2026-11-28; `LockedHoldout` not opened).
@@ -64,26 +87,27 @@ count as a failed, superseded variant run: n = 0, so no figure is affected. Thei
 
 ## Variants tried
 
-All 16 members, each on the same 0 races (development days only):
+All 16 members, each on the same 0 races (development days only). Headline rows are
+retrospective (the readings below say why):
 
-| Category | Cut k | Scope | Bets | Races | Meetings | ROI | One-sided 95% bounds |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| fav_second | 0.6 | all | 0 | 0 | 0 | - | - |
-| fav_second | 0.6 | headline | 0 | 0 | 0 | - | - |
-| fav_second | 0.7 | all | 0 | 0 | 0 | - | - |
-| fav_second | 0.7 | headline | 0 | 0 | 0 | - | - |
-| fav_second | 0.8 | all | 0 | 0 | 0 | - | - |
-| fav_second | 0.8 | headline | 0 | 0 | 0 | - | - |
-| fav_second | 0.9 | all | 0 | 0 | 0 | - | - |
-| fav_second | 0.9 | headline | 0 | 0 | 0 | - | - |
-| no_fav | 0.6 | all | 0 | 0 | 0 | - | - |
-| no_fav | 0.6 | headline | 0 | 0 | 0 | - | - |
-| no_fav | 0.7 | all | 0 | 0 | 0 | - | - |
-| no_fav | 0.7 | headline | 0 | 0 | 0 | - | - |
-| no_fav | 0.8 | all | 0 | 0 | 0 | - | - |
-| no_fav | 0.8 | headline | 0 | 0 | 0 | - | - |
-| no_fav | 0.9 | all | 0 | 0 | 0 | - | - |
-| no_fav | 0.9 | headline | 0 | 0 | 0 | - | - |
+| Category | Cut k | Scope | Bets | Races | Meetings | ROI | One-sided 95% bounds | Shrinkage |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| fav_second | 0.6 | all | 0 | 0 | 0 | - | - | not run |
+| fav_second | 0.6 | headline (retrospective) | 0 | 0 | 0 | - | - | not run |
+| fav_second | 0.7 | all | 0 | 0 | 0 | - | - | not run |
+| fav_second | 0.7 | headline (retrospective) | 0 | 0 | 0 | - | - | not run |
+| fav_second | 0.8 | all | 0 | 0 | 0 | - | - | not run |
+| fav_second | 0.8 | headline (retrospective) | 0 | 0 | 0 | - | - | not run |
+| fav_second | 0.9 | all | 0 | 0 | 0 | - | - | not run |
+| fav_second | 0.9 | headline (retrospective) | 0 | 0 | 0 | - | - | not run |
+| no_fav | 0.6 | all | 0 | 0 | 0 | - | - | not run |
+| no_fav | 0.6 | headline (retrospective) | 0 | 0 | 0 | - | - | not run |
+| no_fav | 0.7 | all | 0 | 0 | 0 | - | - | not run |
+| no_fav | 0.7 | headline (retrospective) | 0 | 0 | 0 | - | - | not run |
+| no_fav | 0.8 | all | 0 | 0 | 0 | - | - | not run |
+| no_fav | 0.8 | headline (retrospective) | 0 | 0 | 0 | - | - | not run |
+| no_fav | 0.9 | all | 0 | 0 | 0 | - | - | not run |
+| no_fav | 0.9 | headline (retrospective) | 0 | 0 | 0 | - | - | not run |
 
 No member failed; none bet. ROI is total payout over total stake; its interval, once there are
 bets, is a meeting bootstrap with a one-sided 95% bound in each direction (as #131's E1).
@@ -92,8 +116,8 @@ bets, is a meeting bootstrap with a one-sided 95% bound in each direction (as #1
   fav_first, fav_second and no_fav; no mean or median.
 - **"Less popular" proxy against the final-pool tertile:** 0 races on 0 days; no agreement
   figure.
-- **Shrinkage (`core/eval/segment_roi.py`, spec section 7): not run, no bet.** The command now
-  runs it on every scored run (below); with no bet it records `not_run` and the reason.
+- **Shrinkage (`core/eval/segment_roi.py`, spec section 7): not run for any member, no bet.**
+  The command fits it per member on every run; with no bet it records `not_run` and the reason.
 
 ## Readings of the spec, for the owner
 
@@ -106,14 +130,26 @@ Modelling items the frozen text leaves open, implemented as read here; none is a
   the race in the lower tertile (at or below the 1/3 quantile, linear interpolation) of the
   FORECAST pool total *at T−2* within its logged day, all venues of the day together, over every
   logged race of the day with a total at T−2, whatever its E2 eligibility. The final pool would
-  be look-ahead for a T−2 selection, so the total at T−2 is used. **Cross-race look-ahead, for
-  the owner:** a day's cutoff uses every race's T−2 total, and a later race's T−2 total is not
-  known at an earlier race's T−2. A strictly real-time scope would need a cutoff from earlier
-  races (or earlier days) only; this is not implemented, since the frozen text says "within each
-  logged day".
+  be look-ahead for a T−2 selection, so the total at T−2 is used. **The headline results are
+  retrospective.** A day's cutoff uses every race's T−2 total, and a later race's T−2 total is
+  not known at an earlier race's T−2, so an early race's eligibility can change when afternoon
+  captures arrive: the headline ROI could not have been earned by a bettor acting at T−2. The
+  frozen v3 definition ("within each logged day") is kept, because changing it would be a new
+  family, and it is labelled: each headline member carries `retrospective: true` in the result,
+  each record a `retrospective_cutoff` metric (1 for headline, 0 for "all"; a metric, never a
+  parameter, so the family stays 16), and the Markdown report marks every headline row
+  "retrospective". The "all" members use no cross-race information. A real-time scope (a cutoff
+  from earlier races or earlier days only) would be a new pre-registered family for the owner.
 - The race 1-4 / newcomer-or-maiden proxy is not the scope; it is only compared with the lower
   tertile of the *final* pool totals of each day, over every loaded logged race with a final
-  FORECAST capture (not only the scored races).
+  FORECAST pool total, whether or not E2 can score it (a race with no board at T−2 counts).
+- **D's sample:** every loaded logged race with final Win and FORECAST prices, whatever its pool
+  total and its boards at T−2. The ratio needs only final prices; the JRA parser writes the pool
+  total row only when the page prints a ticket count, so a final capture can hold every price
+  and no total, and such a race is kept for D (and excluded from E2 as `no_final_board`).
+- **No board at T−2:** a race whose log has FORECAST rows but nothing available at T−2 (for
+  example its first capture is the final one) is loaded with empty boards at t and its final
+  boards, counted by D and the proxy, and excluded from E2 as `no_board_at_t`.
 - **Own impact with breakage and the minimum (D18; v3's `primary_metric`, "takeout and breakage
   in"):** the winner's money is estimated from the published dividend D with its ¥10 rounding
   added back, `W = (1 − t) P / ((D + 5) / 100)` (the half-step convention of `implied_share`);
@@ -121,9 +157,19 @@ Modelling items the frozen text leaves open, implemented as read here; none is a
   that pays is that rounded down to ¥10, never below ¥110. P is the race's FORECAST pool total
   on its final capture, n the member's own number of bets in the race, t = 1 − the race's payout
   rate.
+- **JRA's Plus-10 exception:** JRA tops a winning ticket up to ¥110 only when the pool can fund
+  it; otherwise it pays ¥100. A published ¥100 therefore leaves the winning share unidentified
+  (the payout identity cannot recover W), so such a winner is settled at the published ¥100,
+  never raised to ¥110 whatever the stake, `settle` reports `impact_available: false`, and the
+  run counts those scored races as `impact_unavailable` (0 in this run).
 - **No final FORECAST capture:** the #130 scheduler can stop before the final board. Such a race
   is loaded with no pool total and no final exacta board, excluded as `no_final_board`, and left
   out of D; a pre-final total is never used in its place.
+- **Build ids:** `data_builds` has four keys, `odds_log` (the logs read and their sizes) and
+  `jra_races`, `jra_runners`, `jra_dividends`, each a digest of only the rows the command read
+  from that table for the logged development races (and, for races, their meetings' cards). Rows
+  of holdout or unlogged races change no build id, so a store refresh that adds only those
+  appends nothing; a changed consumed row is a new build of its own table only.
 - **Minimum starters:** the five-starter exclusion counts the actual starters (`runners.parquet`
   runners not scratched); the T−2 board is used only for selection. A race with no runner rows in
   the store falls back to the runners priced on the final Win board (counted in the run's `read`
@@ -136,14 +182,20 @@ Modelling items the frozen text leaves open, implemented as read here; none is a
   included (snooping requires the full family); with fewer than 3 meetings arch cannot run and
   the failed max test is recorded under `japan/131-exacta-rule-v3/max-test`, its reason in the
   Markdown report.
-- **Shrinkage:** `fit_segment_roi` on every member's bets (one row per member × race × selected
-  combination with a price on the final board, its final-board odds and outcome), fixed effects
-  exacta odds bands with edges **10, 30 and 100** (< 10, 10-30, 30-100, ≥ 100 on the final
-  board: roughly the favourite pairs, the middle of the board, the outsiders and the long shots),
-  crossed random effects category, cut and scope, seed 131. The members' bets overlap (nested
-  cuts, headline within all), so one bet enters up to eight rows and the posterior is narrower
-  than the data warrant; the spec's E1 shrinkage carries the same caveat. A fit that raises (for
-  example a band whose bets all won) is recorded as `failed` with its reason.
+- **Shrinkage, per member:** `fit_segment_roi` on each member's own bets alone (one row per race
+  × selected combination with a price on the final board, its final-board odds and outcome),
+  fixed effects exacta odds bands with edges **10, 30 and 100** (< 10, 10-30, 30-100, ≥ 100 on
+  the final board: roughly the favourite pairs, the middle of the board, the outsiders and the
+  long shots), seed 131. The members' bets overlap (nested cuts, headline within all); an
+  earlier version pooled them in one fit with crossed random effects category, cut and scope,
+  where one winning ticket entered up to eight rows and the posterior was narrower than the data
+  warrant. Fitted alone, a ticket is evidence once per member, and another member selecting the
+  same tickets cannot change a member's fit. `fit_segment_roi` requires a segment column; a
+  member's rows have no segment to shrink across, so the column is constant (`member`, the
+  variant name: one level, its random effect held near 0 by the τ prior), and the member's
+  `p_beats_takeout` covers all its bets. Each member reports `fitted` (bets, band effects,
+  `p_beats_takeout`), `not_run` (no bet) or `failed` (the fit raised, for example a band whose
+  bets all won at short odds) with the reason.
 
 ## Review requests not done, by owner decision
 
@@ -151,6 +203,8 @@ Modelling items the frozen text leaves open, implemented as read here; none is a
   of 2026-11-27 (rank everything, no gates) supersedes it; E2 is scored on any n.
 - **Scoring `japan/131-exacta-rule-v1` or v2 instead of v3:** not done. The owner's 2026-11-26
   answer on #281 was to take the hash from #280's (#131's) final head, which freezes v3.
+- Both decisions are cited in comments in `exacta_rules.py` beside the hash check and the
+  member scoring loop.
 
 ## Alternatives rejected and why
 
@@ -163,6 +217,11 @@ Modelling items the frozen text leaves open, implemented as read here; none is a
   rule's stakes.
 - A pre-final pool total when the final FORECAST capture is missing: it understates P and pairs a
   pre-final pool with the official dividend.
+- One shrinkage fit pooled over the 16 members: nested members hold the same tickets, so one
+  outcome counted up to eight times and overstated the certainty of beating takeout.
+- Raising a published ¥100 winner to ¥110: under the Plus-10 exception ¥100 means the top-up was
+  not funded, and own impact cannot be identified from it.
+- Store build ids over whole parquet files: they changed with rows the command never reads.
 
 ## What this rules out
 
