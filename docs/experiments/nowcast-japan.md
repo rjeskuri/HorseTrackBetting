@@ -45,9 +45,7 @@ days (Wide coverage, below) are not JRA-VAN data and are given.
 - Code at `be905f8`: `core/eval/distributional.py` (CRPS, PIT, Gaussian log score), `countries/japan/models/nowcast.py`
   (the model, tested in `tests/countries/japan/test_nowcast.py` and `tests/core/eval/test_distributional.py`) and
   `countries/japan/studies/nowcast.py` (the run). To reproduce, run `uv run horsetrack japan nowcast-study`. It
-  scores every test day with 200 draws per case. On this 16 GB Mac it took about 17 minutes, with a peak resident
-  memory of about 2 GB, one day file in memory at a time. `--test-days-per-fold N` scores a seeded sample of test
-  days. `--trial` records its runs as trials (above).
+  scores every test day with 200 draws per case, one day file in memory at a time. `--test-days-per-fold N` scores a seeded sample of test days. `--trial` records its runs as trials (above).
 - Data builds: `processed/jravan/odds_timeseries@0fd1381d81daf570`, `processed/jravan/races.parquet@8c0dfc18f1894406`,
   the same as v1's.
 - The full report is under the data directory at
@@ -101,8 +99,8 @@ days (Wide coverage, below) are not JRA-VAN data and are given.
   the Place range follows the simple rule. The final per-runner votes (H1, #368) were checked against the final WIN
   board on one day and did not reconcile with it exactly, so they were not used as Place money. That check was an
   exploration and is not part of either frozen run. **Superseded by #410 (below):** the inversion used a rule that
-  took the takeout off the pool, not JRA's rule, which applies the rate to the whole dividend; v3 and v4 read Place by
-  JRA's rule, and v4 measures it against the final Place votes on the scored boards.
+  took the takeout off the pool, not JRA's rule, which applies the rate to the whole dividend; v3, v4 and v5 read Place by
+  JRA's rule, and v5 measures it against the final Place votes on the scored boards.
 - **Wide.** The JRA-VAN series has no Wide pool. Our own logged development days (`processed/jra/odds_timeseries`)
   are 2026-11-21 and 2026-11-22, each with 12 Wide races, and neither file has a post time (`post_utc` is null, as
   the logger writes no race-card sidecar for them). So no Wide board at t can be placed, Wide is neither fitted nor
@@ -218,7 +216,7 @@ None by this PR. Proposed, for the orchestrator to file under epic #73 as `statu
   5-6 minute paths those horizons mostly see an older board.
 - Pre-registered model variants: σ by odds band (where #116's drift has its cells), and a random V_final.
 
-## #410: Place shares by JRA's rule (families v3 and v4)
+## #410: Place shares by JRA's rule (families v3, v4 and v5)
 
 Ticket #410 (epic #73). **Every figure is withheld (D21)**: the measurement and the re-run read JRA-VAN data. This
 section states no count, rate, share, bound or quantifier derived from them; they are in the private reports named
@@ -230,9 +228,10 @@ below. Nothing is adopted, and the holdout is not opened.
   per unit, rate = 1 − takeout applied to the whole dividend, truncated to 10 yen and floored at the minimum
   dividend. The hypothesis: under JRA's rule the printed figures follow from the money, and shares read from both
   figures are money shares within a stated tolerance. Null: they are not, and Place stays a diagnostic.
-- **Measurement, v4** (`studies/nowcast.py`, `place_rule_measurement`; run inside the study after the development
-  days are read and before the folds). It validates the boards the study scores: the closing PLACE board of every
-  race with a Place case (`models.nowcast.closing_boards`, every priced runner kept, a missing high figure kept as
+- **Measurement, v5** (`studies/nowcast.py`, `place_rule_measurement`; run inside the study after the folds). It
+  validates the boards the study scores: the closing PLACE board of every scored Place case, that is the folds'
+  test cases after any test-day sampling (v4 measured every extracted Place race, training-only days included; no
+  broader development measurement is kept) (`models.nowcast.closing_boards`, every priced runner kept, a missing high figure kept as
   missing), read exactly as the cases read it (`models.nowcast.place_shares`: P from the priced runners, and the
   read used, `joint`, `undetermined` or `low_only`). Each is set against its race's PLACE votes (H1) in
   `processed/jravan/pool_votes.parquet`, read one year at a time through the store's scoped reader
@@ -243,8 +242,19 @@ below. Nothing is adopted, and the holdout is not opened.
   coverage (validated over scored boards), whether the rule gives every printed figure from the votes, and how far
   the shares as scored are from the vote shares. Tolerance: 7.5% relative and 0.01 of the pool absolute on every
   runner. The tests derive it from the 10-yen truncation, which moves the share a figure of 2.0 implies by up to
-  6.8%. One registry record: `scored` when a board is validated; `failed` with `params.unvalidated` when none is or
-  the measurement cannot run, and the private report then calls the Place rows a diagnostic.
+  6.8%. Coverage and agreement are separate (#410's re-check): a determined read (`joint` or `low_only`) stands as
+  a result (`place_result_readers`) only when it validated boards and its shares as scored are within the tolerance
+  on at least `PLACE_MIN_WITHIN_TOLERANCE` = 0.95 of them. That value is a stated, reversible choice and a
+  data-validity check on the share read, not an adoption gate: by the tolerance's derivation a read that recovers
+  the money is within it on every board whose figures the rule prints from the votes, and the slack leaves room for
+  boards whose votes and figures disagree for reasons outside the read (`share_reproduced` counts those), while a
+  read that fails structurally misses wherever its failure applies (the low figures on the tests' synthetic
+  floored-favourite board miss it). Each score row carries its closing board's read (`reader`). The gains of the private report (day, meeting
+  and fold clusters) hold the Place cases of the reads that stand only; the `undetermined` boards' cases are reported
+  apart (`gains_undetermined`), and, when some read stands, so are every other read's (`gains_unvalidated`, by
+  read). When no read stands, the determined reads stay in the gains and the report calls their Place rows a
+  diagnostic. One registry record: `scored` when a read stands; `failed` with `params.unvalidated` when none does or
+  the measurement cannot run.
 - **Variants tried**, measured on the same validated boards:
   - `joint`, the board path wherever a board prints a high figure on every runner: `models.nowcast.place_money_fit`
     reads both figures by least squares at each figure's truncation midpoint, re-weighted by the order of the
@@ -253,8 +263,8 @@ below. Nothing is adopted, and the holdout is not opened.
     (for instance two favourites at the floor at both ends, whose swap prints the same board). An SVD rank test
     of the used equations' design, with relative tolerance `PLACE_RANK_RTOL` = 1e-9, flags it (a ruling on #410's
     review). The board keeps its minimum-norm shares and is still scored, not dropped. The measurement counts it
-    under its own read, and it is a diagnostic whatever its measurement: it neither validates the rule
-    (`place_validated` needs a validated `joint` or `low_only` board) nor stands as a result.
+    under its own read, and it is a diagnostic whatever its measurement: it never stands as a result
+    (`place_result_readers` holds `joint` and `low_only` only).
   - `low_only`, the owner's fallback for a board without high figures (and for a joint fit that leaves a runner
     without money): the low figures alone, read in closed form by the same rule (`stake_back_money`), with floored
     figures read at the floor. It is reported as the read used on its own boards, and as a counterfactual on every
@@ -269,14 +279,20 @@ below. Nothing is adopted, and the holdout is not opened.
   an empty measurement would have registered as `scored`. Its reads also filtered the days after reading each
   batch, not inside the scan; the export predates the holdout start (2026-11-28), so no holdout row existed to
   reach it. v3's records stay in the registry and support no Place claim here.
-- **Result, v4.** The measurement ran on the scored closing boards and validated boards read `joint` or
-  `low_only`, so its record `place_rule_vs_votes` `8810ca538e68f8e4` is `scored` (`place_validated`), not failed.
-  The private report therefore reads the Place rows with the rule's measurement rather than as a diagnostic, which
-  meets DoD (b). The exceptions are the Place rows of any board read `undetermined`, which stay a diagnostic. Per
-  read and per P, the coverage, the share of validated boards whose printed figures the rule reproduces from the
-  votes, the share whose shares as scored fall within the tolerance above, and the errors are in the private report
-  `$HORSETRACK_DATA_DIR/reports/nowcast-japan-3e07f46516e3.md` and are withheld here (D21); this report does not
-  assert the tolerance on every board. v3's Place rows stay superseded.
+- **Result, v4, superseded.** v4's record `place_rule_vs_votes` `8810ca538e68f8e4` is `scored` because boards read
+  `joint` or `low_only` had final votes. #410's re-check found that this took coverage for agreement (a read could
+  stand with none of its boards within the tolerance), that v4 measured every extracted Place race rather than the
+  scored ones, and that its Place gains pooled the `undetermined` boards' cases with the rest. v4's records stay in
+  the registry; its Place verdict is superseded by v5's (below) and supports no Place claim here. Its figures are in
+  the private report `$HORSETRACK_DATA_DIR/reports/nowcast-japan-3e07f46516e3.md`.
+- **Result, v5.** The measurement ran on the closing boards of the scored Place cases. The `joint` read stands as
+  a result: it meets the criterion stated above (`place_result_readers`), so the record `place_rule_vs_votes` `86795d4a880bbd20` is `scored`. The
+  private report reads the Place rows of the `joint` boards as a result, which meets DoD (b) for them, and its
+  Place gains hold only those boards' cases. Every other read is a diagnostic, not a result: the `undetermined`
+  boards' Place cases are reported apart (`gains_undetermined`), as would be those of any `low_only` board
+  (`gains_unvalidated`). Per read and per P, the coverage, the reproduction, the agreement and the errors are in
+  the private report `$HORSETRACK_DATA_DIR/reports/nowcast-japan-a07a5be8273d.md` and are withheld here (D21); this
+  report does not assert the tolerance on every board. v3's and v4's Place verdicts stay superseded.
 - **The v3 re-run.** Family `japan-c1-nowcast-final-shares-v3`, spec sha256
   `4cb84e2f74e25d5cc1de9ec471dd84912e0ec09b1c16cfba3d1dc07d387fad83`, frozen at the start of the run before any
   development row was read (the owner's 2026-11-27 reframe: Claude pre-registers and logs every variant). v3
@@ -290,8 +306,8 @@ below. Nothing is adopted, and the holdout is not opened.
   `no_features_vs_random_walk` `b8b06b6f158ae3e0`, `structural_vs_no_features` `eb239abaf9ab6446` and
   `drift_v0_vs_random_walk` `4963fec9404d273d`. They are summarised in
   `docs/experiments/registry/japan/japan-c1-nowcast-final-shares-v3.md`, where every one shows as withheld. The
-  run took about 95 minutes, with a peak resident memory of about 1.6 GB. The drift's Place draws are read through
-  the least-squares fit, which accounts for most of the extra time over v2. As in v1 and v2, the command exited 1 at
+  drift's Place draws are read through the least-squares fit, which accounts for most of the extra time over v2. As
+  in v1 and v2, the command exited 1 at
   `write_summary` on #131's family ids containing `/` (#344, #391), after the report and all six records were
   written. The summary was regenerated the same way as before: committed families plus v3, which added the v3 file
   and its index line only. No v3 trial was run. v3's Place rows are superseded by v4's (its measurement, above).
@@ -309,10 +325,28 @@ below. Nothing is adopted, and the holdout is not opened.
   `structural_vs_drift_v0` `5207a155965fe7fe`, `no_features_vs_random_walk` `07716dc7d44cb386`,
   `structural_vs_no_features` `b9a8f7775b946344` and `drift_v0_vs_random_walk` `a3fa2ccf6119a778`. They are
   summarised in `docs/experiments/registry/japan/japan-c1-nowcast-final-shares-v4.md`, where every one shows as
-  withheld. The run took about 130 minutes, with a peak resident memory of about 2.4 GB. As before, the command
-  exited 1 at `write_summary` on #131's family ids containing `/`, after the report and all six records were
-  written. The summary was regenerated the same way as for v3 (committed families plus v4), which added the v4 file
-  and its index line only. No v4 trial was run.
+  withheld. As before, the command exited 1 at `write_summary` on #131's family ids containing `/`, after the
+  report and all six records were written. The summary was regenerated the same way as for v3 (committed families
+  plus v4), which added the v4 file and its index line only. No v4 trial was run. Superseded by v5 for Place.
+- **The v5 run.** Family `japan-c1-nowcast-final-shares-v5`, spec sha256
+  `a07a5be8273d481d96742d73c06ec381e0ab00daa6dad95655c1dfd97a39cc7c`, frozen at the start of the run before any
+  development row was read. It is not a trial run. v5 supersedes v4 and changes the Place verdict and its
+  measurement (above): coverage and agreement are separate, the boards measured are the scored ones, each score row
+  carries its closing board's read, and the result gains leave out the Place cases of reads that do not stand. The
+  fit's rank is computed only where the read is named (`place_shares` and each case's closing board), never in
+  the draws; the Place share values are unchanged. Win, the folds, the grid, the scores, the bootstrap, the model
+  constants and the Place share values are v4's. The v4, v3 and v2 freezes and records are untouched. Git
+  `0f0df42`. Data builds: `processed/jravan/odds_timeseries@0fd1381d81daf570`,
+  `processed/jravan/races.parquet@8c0dfc18f1894406` and, for the measurement,
+  `processed/jravan/pool_votes.parquet@cd743283ba0f094a`. Private report
+  `$HORSETRACK_DATA_DIR/reports/nowcast-japan-a07a5be8273d.md`, with JSON beside it. Records, all `scored`:
+  `place_rule_vs_votes` `86795d4a880bbd20`, `structural_vs_random_walk` `ea2511d8a40f5a3f`,
+  `structural_vs_drift_v0` `c22f1d7b8bd8dc27`, `no_features_vs_random_walk` `65cdf0a13048b04b`,
+  `structural_vs_no_features` `f5dcf23571130cd4` and `drift_v0_vs_random_walk` `b38178e1d3825eeb`. They are
+  summarised in `docs/experiments/registry/japan/japan-c1-nowcast-final-shares-v5.md`, where every one shows as
+  withheld. As before, the command exited 1 at `write_summary` on #131's family ids containing `/`, after the
+  report and all six records were written. The summary was regenerated the same way (committed families plus v5),
+  which added the v5 file and its index line only. No v5 trial was run.
 - **The shadow adapter.** `ShadowNowcast` (#116's draws interface) now reads a Place board's high figures as
   `race_view` does, so its draws start from the shares the study scores (#410's review). It is not part of the
   study's scoring.
@@ -323,7 +357,7 @@ below. Nothing is adopted, and the holdout is not opened.
   print high figures, since they fail on floored favourites on the synthetic boards of the tests. Reading the drift's draws unprinted, since a
   midpoint read of an untruncated figure is biased by half a step.
 - **What this rules out.** v2's check failed under a rule that is not JRA's (the takeout off the pool), so that
-  failure says nothing about JRA's boards; whether JRA's rule reads them as money is v4's measurement. Nothing is
+  failure says nothing about JRA's boards; whether JRA's rule reads them as money is v5's measurement. Nothing is
   adopted (D16).
 - **Open question.** Any boards the rule does not reproduce, the 2-place boards among them: final figures
   published from a different count of starters or votes than H1's are one candidate. The measurement reports P

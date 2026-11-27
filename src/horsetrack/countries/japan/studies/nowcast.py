@@ -109,8 +109,8 @@ PLACE_ABS_TOL = 0.01
 # the money is within the tolerance on every board whose figures the rule prints from the votes,
 # so the bound is near 1; the slack leaves room for the few boards whose votes and figures
 # disagree for reasons outside the read (which `share_reproduced` counts), while a read that
-# fails structurally (the low figures on a floored favourite) misses on most of its boards. A
-# data-validity check on the share read, not an adoption gate.
+# fails structurally misses wherever its failure applies (the low figures on the tests' synthetic
+# floored favourite). A data-validity check on the share read, not an adoption gate.
 PLACE_MIN_WITHIN_TOLERANCE = 0.95
 # `models.nowcast.place_shares`'s read whose figures do not determine the money: a diagnostic
 UNDETERMINED = "undetermined"
