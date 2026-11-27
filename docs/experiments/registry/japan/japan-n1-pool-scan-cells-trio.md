@@ -8,215 +8,215 @@ built on a licensed source shows no values here.
 
 | E id | Variant | Status | Fold | Metric | Value | CI | n |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| E8 | all | scored | withheld (licensed source) | | | | |
-| E8 | band:lt10 | scored | withheld (licensed source) | | | | |
-| E8 | band:10-30 | scored | withheld (licensed source) | | | | |
-| E8 | band:30-100 | scored | withheld (licensed source) | | | | |
-| E8 | band:100-300 | scored | withheld (licensed source) | | | | |
-| E8 | band:300-1000 | scored | withheld (licensed source) | | | | |
-| E8 | band:1000-3000 | scored | withheld (licensed source) | | | | |
-| E8 | band:ge3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions | scored | withheld (licensed source) | | | | |
-| E8 | class:open | scored | withheld (licensed source) | | | | |
-| E8 | class:graded | scored | withheld (licensed source) | | | | |
-| E8 | field:le4 | scored | withheld (licensed source) | | | | |
-| E8 | field:5-10 | scored | withheld (licensed source) | | | | |
-| E8 | field:11-14 | scored | withheld (licensed source) | | | | |
-| E8 | field:15-18 | scored | withheld (licensed source) | | | | |
-| E8 | fav:le1.9 | scored | withheld (licensed source) | | | | |
-| E8 | fav:2.0-2.9 | scored | withheld (licensed source) | | | | |
-| E8 | fav:3.0-4.9 | scored | withheld (licensed source) | | | | |
-| E8 | fav:ge5.0 | scored | withheld (licensed source) | | | | |
-| E8 | pool_size:low | scored | withheld (licensed source) | | | | |
-| E8 | pool_size:mid | scored | withheld (licensed source) | | | | |
-| E8 | pool_size:high | scored | withheld (licensed source) | | | | |
-| E8 | surface:turf | scored | withheld (licensed source) | | | | |
-| E8 | surface:dirt | scored | withheld (licensed source) | | | | |
-| E8 | venue:SAP | scored | withheld (licensed source) | | | | |
-| E8 | venue:HAK | scored | withheld (licensed source) | | | | |
-| E8 | venue:FKS | scored | withheld (licensed source) | | | | |
-| E8 | venue:NII | scored | withheld (licensed source) | | | | |
-| E8 | venue:TOK | scored | withheld (licensed source) | | | | |
-| E8 | venue:NAK | scored | withheld (licensed source) | | | | |
-| E8 | venue:CKY | scored | withheld (licensed source) | | | | |
-| E8 | venue:KYO | scored | withheld (licensed source) | | | | |
-| E8 | venue:HSN | scored | withheld (licensed source) | | | | |
-| E8 | venue:KOK | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&pool_size:low | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&pool_size:mid | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&pool_size:high | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&pool_size:low | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&pool_size:mid | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&pool_size:high | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&pool_size:low | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&pool_size:mid | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&pool_size:high | scored | withheld (licensed source) | | | | |
-| E8 | class:open&pool_size:low | scored | withheld (licensed source) | | | | |
-| E8 | class:open&pool_size:mid | scored | withheld (licensed source) | | | | |
-| E8 | class:open&pool_size:high | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&pool_size:low | failed | withheld (licensed source) | | | | |
-| E8 | class:graded&pool_size:mid | failed | withheld (licensed source) | | | | |
-| E8 | class:graded&pool_size:high | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&fav:le1.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&fav:2.0-2.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&fav:3.0-4.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&fav:ge5.0 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&fav:le1.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&fav:2.0-2.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&fav:3.0-4.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&fav:ge5.0 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&fav:le1.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&fav:2.0-2.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&fav:3.0-4.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&fav:ge5.0 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&fav:le1.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&fav:2.0-2.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&fav:3.0-4.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&fav:ge5.0 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&fav:le1.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&fav:2.0-2.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&fav:3.0-4.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&fav:ge5.0 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:lt10 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:10-30 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:30-100 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:100-300 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:300-1000 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:1000-3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:ge3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:lt10 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:10-30 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:30-100 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:100-300 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:300-1000 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:1000-3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:ge3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:lt10 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:10-30 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:30-100 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:100-300 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:300-1000 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:1000-3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:ge3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:lt10 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:10-30 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:30-100 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:100-300 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:300-1000 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:1000-3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:ge3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:lt10 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:10-30 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:30-100 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:100-300 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:300-1000 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:1000-3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:ge3000 | scored | withheld (licensed source) | | | | |
-| E8 | all | scored | withheld (licensed source) | | | | |
-| E8 | band:lt10 | scored | withheld (licensed source) | | | | |
-| E8 | band:10-30 | scored | withheld (licensed source) | | | | |
-| E8 | band:30-100 | scored | withheld (licensed source) | | | | |
-| E8 | band:100-300 | scored | withheld (licensed source) | | | | |
-| E8 | band:300-1000 | scored | withheld (licensed source) | | | | |
-| E8 | band:1000-3000 | scored | withheld (licensed source) | | | | |
-| E8 | band:ge3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions | scored | withheld (licensed source) | | | | |
-| E8 | class:open | scored | withheld (licensed source) | | | | |
-| E8 | class:graded | scored | withheld (licensed source) | | | | |
-| E8 | field:le4 | scored | withheld (licensed source) | | | | |
-| E8 | field:5-10 | scored | withheld (licensed source) | | | | |
-| E8 | field:11-14 | scored | withheld (licensed source) | | | | |
-| E8 | field:15-18 | scored | withheld (licensed source) | | | | |
-| E8 | fav:le1.9 | scored | withheld (licensed source) | | | | |
-| E8 | fav:2.0-2.9 | scored | withheld (licensed source) | | | | |
-| E8 | fav:3.0-4.9 | scored | withheld (licensed source) | | | | |
-| E8 | fav:ge5.0 | scored | withheld (licensed source) | | | | |
-| E8 | pool_size:low | scored | withheld (licensed source) | | | | |
-| E8 | pool_size:mid | scored | withheld (licensed source) | | | | |
-| E8 | pool_size:high | scored | withheld (licensed source) | | | | |
-| E8 | surface:turf | scored | withheld (licensed source) | | | | |
-| E8 | surface:dirt | scored | withheld (licensed source) | | | | |
-| E8 | venue:SAP | scored | withheld (licensed source) | | | | |
-| E8 | venue:HAK | scored | withheld (licensed source) | | | | |
-| E8 | venue:FKS | scored | withheld (licensed source) | | | | |
-| E8 | venue:NII | scored | withheld (licensed source) | | | | |
-| E8 | venue:TOK | scored | withheld (licensed source) | | | | |
-| E8 | venue:NAK | scored | withheld (licensed source) | | | | |
-| E8 | venue:CKY | scored | withheld (licensed source) | | | | |
-| E8 | venue:KYO | scored | withheld (licensed source) | | | | |
-| E8 | venue:HSN | scored | withheld (licensed source) | | | | |
-| E8 | venue:KOK | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&pool_size:low | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&pool_size:mid | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&pool_size:high | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&pool_size:low | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&pool_size:mid | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&pool_size:high | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&pool_size:low | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&pool_size:mid | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&pool_size:high | scored | withheld (licensed source) | | | | |
-| E8 | class:open&pool_size:low | scored | withheld (licensed source) | | | | |
-| E8 | class:open&pool_size:mid | scored | withheld (licensed source) | | | | |
-| E8 | class:open&pool_size:high | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&pool_size:low | failed | withheld (licensed source) | | | | |
-| E8 | class:graded&pool_size:mid | failed | withheld (licensed source) | | | | |
-| E8 | class:graded&pool_size:high | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&fav:le1.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&fav:2.0-2.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&fav:3.0-4.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&fav:ge5.0 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&fav:le1.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&fav:2.0-2.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&fav:3.0-4.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&fav:ge5.0 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&fav:le1.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&fav:2.0-2.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&fav:3.0-4.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&fav:ge5.0 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&fav:le1.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&fav:2.0-2.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&fav:3.0-4.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&fav:ge5.0 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&fav:le1.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&fav:2.0-2.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&fav:3.0-4.9 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&fav:ge5.0 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:lt10 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:10-30 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:30-100 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:100-300 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:300-1000 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:1000-3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:newcomer&band:ge3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:lt10 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:10-30 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:30-100 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:100-300 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:300-1000 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:1000-3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:maiden&band:ge3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:lt10 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:10-30 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:30-100 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:100-300 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:300-1000 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:1000-3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:conditions&band:ge3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:lt10 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:10-30 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:30-100 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:100-300 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:300-1000 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:1000-3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:open&band:ge3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:lt10 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:10-30 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:30-100 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:100-300 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:300-1000 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:1000-3000 | scored | withheld (licensed source) | | | | |
-| E8 | class:graded&band:ge3000 | scored | withheld (licensed source) | | | | |
+| E8 | all | withheld (licensed source) | | | | | |
+| E8 | band:lt10 | withheld (licensed source) | | | | | |
+| E8 | band:10-30 | withheld (licensed source) | | | | | |
+| E8 | band:30-100 | withheld (licensed source) | | | | | |
+| E8 | band:100-300 | withheld (licensed source) | | | | | |
+| E8 | band:300-1000 | withheld (licensed source) | | | | | |
+| E8 | band:1000-3000 | withheld (licensed source) | | | | | |
+| E8 | band:ge3000 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer | withheld (licensed source) | | | | | |
+| E8 | class:maiden | withheld (licensed source) | | | | | |
+| E8 | class:conditions | withheld (licensed source) | | | | | |
+| E8 | class:open | withheld (licensed source) | | | | | |
+| E8 | class:graded | withheld (licensed source) | | | | | |
+| E8 | field:le4 | withheld (licensed source) | | | | | |
+| E8 | field:5-10 | withheld (licensed source) | | | | | |
+| E8 | field:11-14 | withheld (licensed source) | | | | | |
+| E8 | field:15-18 | withheld (licensed source) | | | | | |
+| E8 | fav:le1.9 | withheld (licensed source) | | | | | |
+| E8 | fav:2.0-2.9 | withheld (licensed source) | | | | | |
+| E8 | fav:3.0-4.9 | withheld (licensed source) | | | | | |
+| E8 | fav:ge5.0 | withheld (licensed source) | | | | | |
+| E8 | pool_size:low | withheld (licensed source) | | | | | |
+| E8 | pool_size:mid | withheld (licensed source) | | | | | |
+| E8 | pool_size:high | withheld (licensed source) | | | | | |
+| E8 | surface:turf | withheld (licensed source) | | | | | |
+| E8 | surface:dirt | withheld (licensed source) | | | | | |
+| E8 | venue:SAP | withheld (licensed source) | | | | | |
+| E8 | venue:HAK | withheld (licensed source) | | | | | |
+| E8 | venue:FKS | withheld (licensed source) | | | | | |
+| E8 | venue:NII | withheld (licensed source) | | | | | |
+| E8 | venue:TOK | withheld (licensed source) | | | | | |
+| E8 | venue:NAK | withheld (licensed source) | | | | | |
+| E8 | venue:CKY | withheld (licensed source) | | | | | |
+| E8 | venue:KYO | withheld (licensed source) | | | | | |
+| E8 | venue:HSN | withheld (licensed source) | | | | | |
+| E8 | venue:KOK | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&pool_size:low | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&pool_size:mid | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&pool_size:high | withheld (licensed source) | | | | | |
+| E8 | class:maiden&pool_size:low | withheld (licensed source) | | | | | |
+| E8 | class:maiden&pool_size:mid | withheld (licensed source) | | | | | |
+| E8 | class:maiden&pool_size:high | withheld (licensed source) | | | | | |
+| E8 | class:conditions&pool_size:low | withheld (licensed source) | | | | | |
+| E8 | class:conditions&pool_size:mid | withheld (licensed source) | | | | | |
+| E8 | class:conditions&pool_size:high | withheld (licensed source) | | | | | |
+| E8 | class:open&pool_size:low | withheld (licensed source) | | | | | |
+| E8 | class:open&pool_size:mid | withheld (licensed source) | | | | | |
+| E8 | class:open&pool_size:high | withheld (licensed source) | | | | | |
+| E8 | class:graded&pool_size:low | withheld (licensed source) | | | | | |
+| E8 | class:graded&pool_size:mid | withheld (licensed source) | | | | | |
+| E8 | class:graded&pool_size:high | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&fav:le1.9 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&fav:2.0-2.9 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&fav:3.0-4.9 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&fav:ge5.0 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&fav:le1.9 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&fav:2.0-2.9 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&fav:3.0-4.9 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&fav:ge5.0 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&fav:le1.9 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&fav:2.0-2.9 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&fav:3.0-4.9 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&fav:ge5.0 | withheld (licensed source) | | | | | |
+| E8 | class:open&fav:le1.9 | withheld (licensed source) | | | | | |
+| E8 | class:open&fav:2.0-2.9 | withheld (licensed source) | | | | | |
+| E8 | class:open&fav:3.0-4.9 | withheld (licensed source) | | | | | |
+| E8 | class:open&fav:ge5.0 | withheld (licensed source) | | | | | |
+| E8 | class:graded&fav:le1.9 | withheld (licensed source) | | | | | |
+| E8 | class:graded&fav:2.0-2.9 | withheld (licensed source) | | | | | |
+| E8 | class:graded&fav:3.0-4.9 | withheld (licensed source) | | | | | |
+| E8 | class:graded&fav:ge5.0 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:lt10 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:10-30 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:30-100 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:100-300 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:300-1000 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:1000-3000 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:ge3000 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:lt10 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:10-30 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:30-100 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:100-300 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:300-1000 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:1000-3000 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:ge3000 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:lt10 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:10-30 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:30-100 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:100-300 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:300-1000 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:1000-3000 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:ge3000 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:lt10 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:10-30 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:30-100 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:100-300 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:300-1000 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:1000-3000 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:ge3000 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:lt10 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:10-30 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:30-100 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:100-300 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:300-1000 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:1000-3000 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:ge3000 | withheld (licensed source) | | | | | |
+| E8 | all | withheld (licensed source) | | | | | |
+| E8 | band:lt10 | withheld (licensed source) | | | | | |
+| E8 | band:10-30 | withheld (licensed source) | | | | | |
+| E8 | band:30-100 | withheld (licensed source) | | | | | |
+| E8 | band:100-300 | withheld (licensed source) | | | | | |
+| E8 | band:300-1000 | withheld (licensed source) | | | | | |
+| E8 | band:1000-3000 | withheld (licensed source) | | | | | |
+| E8 | band:ge3000 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer | withheld (licensed source) | | | | | |
+| E8 | class:maiden | withheld (licensed source) | | | | | |
+| E8 | class:conditions | withheld (licensed source) | | | | | |
+| E8 | class:open | withheld (licensed source) | | | | | |
+| E8 | class:graded | withheld (licensed source) | | | | | |
+| E8 | field:le4 | withheld (licensed source) | | | | | |
+| E8 | field:5-10 | withheld (licensed source) | | | | | |
+| E8 | field:11-14 | withheld (licensed source) | | | | | |
+| E8 | field:15-18 | withheld (licensed source) | | | | | |
+| E8 | fav:le1.9 | withheld (licensed source) | | | | | |
+| E8 | fav:2.0-2.9 | withheld (licensed source) | | | | | |
+| E8 | fav:3.0-4.9 | withheld (licensed source) | | | | | |
+| E8 | fav:ge5.0 | withheld (licensed source) | | | | | |
+| E8 | pool_size:low | withheld (licensed source) | | | | | |
+| E8 | pool_size:mid | withheld (licensed source) | | | | | |
+| E8 | pool_size:high | withheld (licensed source) | | | | | |
+| E8 | surface:turf | withheld (licensed source) | | | | | |
+| E8 | surface:dirt | withheld (licensed source) | | | | | |
+| E8 | venue:SAP | withheld (licensed source) | | | | | |
+| E8 | venue:HAK | withheld (licensed source) | | | | | |
+| E8 | venue:FKS | withheld (licensed source) | | | | | |
+| E8 | venue:NII | withheld (licensed source) | | | | | |
+| E8 | venue:TOK | withheld (licensed source) | | | | | |
+| E8 | venue:NAK | withheld (licensed source) | | | | | |
+| E8 | venue:CKY | withheld (licensed source) | | | | | |
+| E8 | venue:KYO | withheld (licensed source) | | | | | |
+| E8 | venue:HSN | withheld (licensed source) | | | | | |
+| E8 | venue:KOK | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&pool_size:low | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&pool_size:mid | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&pool_size:high | withheld (licensed source) | | | | | |
+| E8 | class:maiden&pool_size:low | withheld (licensed source) | | | | | |
+| E8 | class:maiden&pool_size:mid | withheld (licensed source) | | | | | |
+| E8 | class:maiden&pool_size:high | withheld (licensed source) | | | | | |
+| E8 | class:conditions&pool_size:low | withheld (licensed source) | | | | | |
+| E8 | class:conditions&pool_size:mid | withheld (licensed source) | | | | | |
+| E8 | class:conditions&pool_size:high | withheld (licensed source) | | | | | |
+| E8 | class:open&pool_size:low | withheld (licensed source) | | | | | |
+| E8 | class:open&pool_size:mid | withheld (licensed source) | | | | | |
+| E8 | class:open&pool_size:high | withheld (licensed source) | | | | | |
+| E8 | class:graded&pool_size:low | withheld (licensed source) | | | | | |
+| E8 | class:graded&pool_size:mid | withheld (licensed source) | | | | | |
+| E8 | class:graded&pool_size:high | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&fav:le1.9 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&fav:2.0-2.9 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&fav:3.0-4.9 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&fav:ge5.0 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&fav:le1.9 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&fav:2.0-2.9 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&fav:3.0-4.9 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&fav:ge5.0 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&fav:le1.9 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&fav:2.0-2.9 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&fav:3.0-4.9 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&fav:ge5.0 | withheld (licensed source) | | | | | |
+| E8 | class:open&fav:le1.9 | withheld (licensed source) | | | | | |
+| E8 | class:open&fav:2.0-2.9 | withheld (licensed source) | | | | | |
+| E8 | class:open&fav:3.0-4.9 | withheld (licensed source) | | | | | |
+| E8 | class:open&fav:ge5.0 | withheld (licensed source) | | | | | |
+| E8 | class:graded&fav:le1.9 | withheld (licensed source) | | | | | |
+| E8 | class:graded&fav:2.0-2.9 | withheld (licensed source) | | | | | |
+| E8 | class:graded&fav:3.0-4.9 | withheld (licensed source) | | | | | |
+| E8 | class:graded&fav:ge5.0 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:lt10 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:10-30 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:30-100 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:100-300 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:300-1000 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:1000-3000 | withheld (licensed source) | | | | | |
+| E8 | class:newcomer&band:ge3000 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:lt10 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:10-30 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:30-100 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:100-300 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:300-1000 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:1000-3000 | withheld (licensed source) | | | | | |
+| E8 | class:maiden&band:ge3000 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:lt10 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:10-30 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:30-100 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:100-300 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:300-1000 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:1000-3000 | withheld (licensed source) | | | | | |
+| E8 | class:conditions&band:ge3000 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:lt10 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:10-30 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:30-100 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:100-300 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:300-1000 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:1000-3000 | withheld (licensed source) | | | | | |
+| E8 | class:open&band:ge3000 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:lt10 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:10-30 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:30-100 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:100-300 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:300-1000 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:1000-3000 | withheld (licensed source) | | | | | |
+| E8 | class:graded&band:ge3000 | withheld (licensed source) | | | | | |

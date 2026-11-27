@@ -10,8 +10,8 @@ opened to read or to append, under an exclusive lock, so concurrent writers cann
 A run's id is the sha256 hex of its record's canonical JSON: the same run twice is refused. A
 family's pre-registered spec is frozen with ``freeze_family``; the freeze is a line of its own,
 not a run. ``write_summary`` writes the committed, aggregate-only view, one file per family: E id,
-variant, status and per-fold metric, value, CI and n, with the values of licensed-source runs
-withheld.
+variant, status and per-fold metric, value, CI and n, with the status and values of licensed-source
+runs withheld (a status can be read off the data, e.g. a cell rule that failed for want of bets).
 """
 
 from __future__ import annotations
@@ -499,8 +499,10 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
     """Write the aggregate-only summary of ``registry`` into ``directory`` (normally
     ``summary_dir(country)``): one ``<family_id>.md`` per family, holding per run its E id,
     variant, status and per-fold metric, value, CI and n, and nothing else, and ``README.md``,
-    the index of the families. A licensed-source run shows only its identity and
-    ``withheld (licensed source)``. A family's file depends on that family's records alone."""
+    the index of the families. A licensed-source run shows only its E id and variant, with
+    ``withheld (licensed source)`` in place of its status and values: a status may be data-derived
+    (D21; #430, a cell rule failed for want of bets). A family's file depends on that family's
+    records alone."""
     families: dict[str, list[RunRecord]] = {}
     for record in registry.records():
         families.setdefault(record.family_id, []).append(record)
@@ -519,10 +521,11 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
             "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for r in records:
-            who = f"| {_cell(r.hypothesis_id)} | {_cell(r.variant)} | {_cell(r.status)} |"
             if _licensed(r):
-                lines.append(f"{who} {WITHHELD_LABEL} | | | | |")
+                ids = f"| {_cell(r.hypothesis_id)} | {_cell(r.variant)} |"
+                lines.append(f"{ids} {WITHHELD_LABEL} | | | | | |")
                 continue
+            who = f"| {_cell(r.hypothesis_id)} | {_cell(r.variant)} | {_cell(r.status)} |"
             if not r.metrics:
                 lines.append(f"{who} - | - | - | - | - |")
             for m in r.metrics:
