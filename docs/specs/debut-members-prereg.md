@@ -1,11 +1,12 @@
 # Pre-registration: newcomer and maiden members at the final Win price (#438, N7)
 
-Status: **frozen**. Claude pre-registered this spec and froze it in the Japan run registry before
-the run read any store row. There is no sign-off stop (the owner's reframe of 2026-11-27 on #438).
-The frozen JSON is `debut_members.build_spec(seed=438)` in
+Status: **frozen** in the Japan run registry, without a sign-off stop, per the owner's reframe on
+#438 (2026-11-27) under the problem statement's D15-D19 as amended: Claude pre-registers the spec
+and freezes it before the run, and the run follows with no result gate. Claude froze it before the
+run read any store row. The frozen JSON is `debut_members.build_spec(seed=438)` in
 `src/horsetrack/countries/japan/studies/debut_members.py`, registered as family
-`japan-debut-maiden-members-v1` with spec sha256
-`fee36f35aa6d81a1294ef67cecdb14c3bb71e1aa8cc81c79664684759e1e3174`. This page describes that JSON.
+`japan-debut-maiden-members-v2` with spec sha256
+`55bf539436caf585b84eccccc49be9b1c1f9b66aea1cbcc81e727a5bc85e44d3`. This page describes that JSON.
 If the two ever differ, the JSON is the record. The registry refuses a run whose spec differs by
 one byte, so a change of method needs a new family.
 
@@ -71,8 +72,12 @@ weight beside it.
   trend code.
 - **body_weight**: the stored race-day weight and its change.
 - **late_win**: ln s(T−2) − ln s(T−m) for m = 20 and m = 5. s is the Win board's normalised 1/odds
-  at that many minutes to post, taken from the day's JRA-VAN `odds_timeseries` file through #434's
-  `boards_at`. The value is missing when either board lacks the runner.
+  at T−x, taken from the day's JRA-VAN `odds_timeseries` file through #434's `boards_at`. The
+  board at T−x is each runner's latest WIN row available (`fetched_utc`, else `snapshot_utc`) at
+  or before the study's own post_utc − x, where post_utc is the JRA store's (the decision time's
+  post above). The file's own `post_utc` and `minutes_to_post` are JRA-VAN's post and never set a
+  cutoff: with JRA at 12:00 and JRA-VAN at 12:02, the 11:59 snapshot is not on the T−2 board. The
+  value is missing when either board lacks the runner or the race has no post time.
 
 ## The fit
 
@@ -102,21 +107,53 @@ the six built members and `combined:<class>`, for class DEBUT and MAIDEN.
   u = a ln p + b ln q over the scored rows (`models.meta.encompassing`), meeting-clustered, with
   one-sided bounds. It is a column beside each ranked row.
 - **N5** (`core.eval.tail.tail_curve`): the claim is p (out of fold) × the final Win odds for each
-  scored runner. The return is the store's Win dividend / 100 for a winner and 0 otherwise, at
-  flat stakes. The quantiles are 0.5, 0.8, 0.9, 0.95 and 0.99, and the curve is settled at Win.
-  Place waits for #410.
+  scored runner, at flat stakes. The quantiles are 0.5, 0.8, 0.9, 0.95 and 0.99, and the curve is
+  settled at Win. Place waits for #410.
+- **Settlement** (`settle_win`): a winner returns its own WIN dividend row / 100 (a refund row is
+  no dividend), each winner of a dead heat its own, and a loser 0. A race any of whose winners (a
+  dead heat's too) has no WIN dividend row is excluded from the N5 curve: it is not settled at the
+  final odds, nor by another pool's row, and it is not a loss. It still scores ΔLL, and its
+  ranked row counts such scored races as `n5_excluded_races`, in the private report only.
 - **Ranking**: the ranked rows order the variants by their ΔLL. Each row carries its bounds,
   encompassing weight and top N5 band.
 
 ## Outputs
 
 - Private, under `$HORSETRACK_DATA_DIR/reports/` through `write_report` with the sources `jra`,
-  `jravan` and `jrdb`: the report `debut-members-japan-<spec hash>.md`, its JSON, and the ranked
-  rows as `candidate-cells/debut-members.json`.
-- Registry: one record per variant, failures included, each naming the sources `jra`, `jravan` and
-  `jrdb`, so the committed summary withholds every value.
+  `jravan` and `jrdb`: the report `debut-members-japan-<spec hash>-<run digest>.md`, its JSON
+  beside it, and the ranked rows as `candidate-cells/<the same stem>.json`. The run digest is a
+  hash of the run's date range and input builds, so a later run never overwrites an earlier one.
+- Registry: one record per planned variant, failures included (a failed read fails every variant
+  and is recorded too), each naming the sources `jra`, `jravan` and `jrdb`, so the committed
+  summary withholds every value. The command exits nonzero when no variant scored.
 - Public: `docs/experiments/debut-members-japan.md` (`render_public_report`), which shows no
   figure (D21).
+
+## D21: where the figures go
+
+Every figure of this study is built on JRA-VAN or JRDB data, or comes from the run that reads
+them, so every figure is withheld. A numeric result reaches a file only two ways, both under the
+data directory and outside the tree:
+
+- through `write_report`, which refuses the repository: the private report, its JSON and the
+  candidate-cell file;
+- through the run registry, `default_registry("japan")` at
+  `$HORSETRACK_DATA_DIR/registry/japan.jsonl`. It is the private record of every run that
+  CLAUDE.md requires, failures included, and each record carries its variant's metrics, as every
+  study's records do (`studies/ability.py`, `meta.py` and `calibration.py` among them) and as the
+  planned leaderboard reads them. Every record names a licensed source, so `write_summary` shows
+  each one as withheld in the committed summary.
+
+The public report, the ledger row and this page carry no count, rate, span, sign or bound.
+
+## v1, kept and superseded
+
+Family `japan-debut-maiden-members-v1` (its frozen spec, its records and its committed summary)
+stays in the record, superseded by v2. v1 cut the late Win boards by the day file's
+`minutes_to_post`, which is measured to the JRA-VAN post rather than the study's JRA post, so a
+snapshot after the decision time could enter the T−2 board when the two posts differ. v1 also
+settled a race whose winner had no WIN dividend row at the final odds in the N5 curve. v2 fixes
+both, as above; nothing else in the method changed.
 
 ## Owner decisions applied
 

@@ -58,9 +58,43 @@ Contract pinned here (`horsetrack.countries.japan.studies.debut_members`, import
   figure at all (nor on a clock): a result whose study differs only in its figures, signs
   flipped, renders the very same text.
 
+Review round 1 (PR #559) pins five more behaviours:
+
+- Late Win boards. `late_win(frame) -> pd.DataFrame` on `frame.index` (the study frame's rows:
+  race_id, race_date, horse_id, horse_no, `post_utc` tz-aware UTC from the JRA store, and the
+  decision time), with the columns `late_win_move_t20` and `late_win_move_t5`: per runner
+  ln s(T-2) - ln s(T-m), s the normalised 1/odds of the race's Win board at T-x = the frame's own
+  `post_utc` - x minutes. The board at T-x is each runner's latest WIN row with `snapshot_utc` at
+  or before T-x (fetched_utc null) in the race day's jravan odds_timeseries file
+  (`processed/jravan/odds_timeseries/<YYYY-MM-DD>.parquet` under the data dir, in
+  `logger.compact.SCHEMA`). The file's own `post_utc` and `minutes_to_post` are JRA-VAN's and
+  never set a cutoff: with JRA at 12:00 and JRA-VAN at 12:02, the 11:59 snapshot is not on the T-2
+  board. The cutoffs are the same when JRA-VAN's post is earlier or missing.
+- Win settlement. `settle_win(starters, dividends) -> pd.Series`, the Win return per unit stake
+  per row on `starters.index`. `starters` has race_id, horse_no (int), won (bool) and win_odds
+  (the final odds on the board). `dividends` holds the store's dividends rows (race_id, pool,
+  combination, dividend per 100 yen, is_refund) of every pool. A winner gets its own WIN
+  dividend / 100 and a loser 0.0, except that every runner of a race in which any winner (a
+  dead heat's too) has no WIN dividend row gets NaN. Such a race is excluded: it is not settled
+  at the final odds, nor by a PLACE row, and it is not a loss.
+- N5 exclusion. In `compute_study`, a race whose `payout` is NaN (one `settle_win` excludes)
+  stays out of its variants' N5 curve (`tables["n5_curve"]`, segment "all": the bets and their
+  returns are the scored runners of the other races). The variant still scores, its ranked row's
+  `races` still counts every scored race, and that row gives the scored races left out of the
+  curve as `n5_excluded_races`.
+- Exit status. `horsetrack japan debut-members` exits nonzero when no variant scored (every one
+  failed, or none ran) and 0 when one did. Even then it still writes the failure records, one per
+  planned variant, and the private report. `run_debut_members` returns its result in that case
+  rather than raising. The command calls this module's `run_debut_members`, and the run reads the
+  store only through this module's `load_inputs(date_from, date_to, log)`, which returns (frame,
+  counts, failed members, builds). These are the seams the tests replace.
+- Report identity. Two runs that differ in `date_from`, `date_to` or an input build write their
+  private reports (the `.md` at `DebutResult.report_path` and its `.json` beside it, same stem) to
+  different paths, so a later run never overwrites an earlier one.
+
 Not pinned here (review checks them): the members' feature engineering beyond the cases above, the
-fit's handling of missing values, the private report's layout, and `run_debut_members`, which reads
-the store.
+fit's handling of missing values, the private report's layout, and `run_debut_members`' store
+reads.
 
 Every frame is synthetic and every RNG seeded. Expected values come from first principles (the
 availability rules written out below, a softmax, hand-built sire records), never from the code
@@ -79,11 +113,17 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
+from typer.testing import CliRunner
 
+from horsetrack.core.eval.folds import FoldScheme, walk_forward
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.registry import FoldMetric, Registry
+from horsetrack.core.eval.tail import ALL as ALL_BETS
 from horsetrack.countries.japan.jravan.races import CONDITION_CLASSES, GRADES
+from horsetrack.countries.japan.logger.compact import SCHEMA as BOARD_SCHEMA
 from horsetrack.countries.japan.research.pool_scan import CLASS_GROUPS
 from horsetrack.countries.japan.studies import debut_members as dm
 from horsetrack.countries.japan.studies.calibration import Study, Variant
@@ -829,3 +869,480 @@ def test_public_report_carries_no_figures():
         shown = sorted(form for form in figure_forms(figures) if form in bare)
         assert not shown, f"the public report shows figures: {shown}"
     assert other == text, "the public report changes with the study's figures"
+
+
+# --------------------------------------------------------------------------- the late Win boards
+
+# Per race: id, race day, the study's post (JST: the JRA store's post_time_local), the JRA-VAN
+# post's offset from it in minutes (None: JRA-VAN has no post time) and the snapshots' times in
+# minutes before the study's post (a negative one is after it).
+BOARD_RACES = (
+    # JRA 12:00, JRA-VAN 12:02: by JRA-VAN's minutes_to_post the 11:59 board is 3 minutes out
+    ("jra:2021-07-03:QQV:01", date(2021, 7, 3), time(12, 0), 2,
+     (40, 30, 21, 20, 15, 7, 6, 5, 4, 3, 2, 1, -1, -3)),
+    ("jra:2021-07-03:QQV:02", date(2021, 7, 3), time(12, 35), 0, (25, 19, 8, 5, 3, 2, 1)),
+    ("jra:2021-07-03:QQV:03", date(2021, 7, 3), time(13, 10), -3,
+     (30, 22, 18, 9, 6, 4, 3, 2, 1, 0)),
+    ("jra:2021-07-04:QQW:05", date(2021, 7, 4), time(11, 20), 7, (27, 20, 14, 13, 5, 2, 1, 0)),
+    ("jra:2021-07-04:QQW:06", date(2021, 7, 4), time(14, 45), None, (33, 20, 11, 5, 4, 2, 1)),
+)  # fmt: skip
+LATE_COLUMNS = {20: "late_win_move_t20", 5: "late_win_move_t5"}
+T_NOW = 2  # D2: t = post - 2 min, the late path's latest board
+
+
+def field_size(k: int) -> int:
+    return 6 + k % 4
+
+
+def write_board_days(data_dir: Path, rng: np.random.Generator) -> dict:
+    """Each race day's jravan odds_timeseries file as the builder writes it (logger.compact.SCHEMA):
+    every runner's WIN row per snapshot, post_utc the JRA-VAN post and minutes_to_post measured to
+    it. Returns the odds per (race, snapshot) as {horse_no: odds}."""
+    folder = data_dir / "processed" / "jravan" / "odds_timeseries"
+    folder.mkdir(parents=True, exist_ok=True)
+    odds_at: dict[tuple[str, int], dict[int, float]] = {}
+    by_day: dict[date, list[dict]] = {}
+    for k, (race_id, day, clock, shift, schedule) in enumerate(BOARD_RACES):
+        post = jst(day, clock)
+        jv_post = None if shift is None else post + timedelta(minutes=shift)
+        g = rng.gamma(1.2, size=field_size(k))
+        base = 0.8 / (g / g.sum())
+        for before in schedule:
+            snap = post - timedelta(minutes=before)
+            odds = np.maximum(np.round(base * np.exp(rng.normal(0.0, 0.3, size=len(g))), 1), 1.0)
+            odds_at[(race_id, before)] = {h: float(o) for h, o in enumerate(odds, start=1)}
+            for h, o in enumerate(odds, start=1):
+                by_day.setdefault(day, []).append(
+                    {
+                        "race_id": race_id,
+                        "venue": race_id.split(":")[2],
+                        "race_no": int(race_id.rsplit(":", 1)[1]),
+                        "pool": "WIN",
+                        "combination": str(h),
+                        "snapshot_utc": snap.to_pydatetime(),
+                        "fetched_utc": None,
+                        "post_utc": None if jv_post is None else jv_post.to_pydatetime(),
+                        "minutes_to_post": None
+                        if jv_post is None
+                        else (jv_post - snap).total_seconds() / 60.0,
+                        "odds": float(o),
+                        "odds_hi": None,
+                        "investment": None,
+                        "status_raw": f"{round(10 * o):04d}",
+                        "is_final_capture": before == min(schedule),
+                        "dividend": None,
+                        "is_refund": None,
+                    }
+                )
+    for day, rows in by_day.items():
+        rows = [rows[i] for i in rng.permutation(len(rows))]
+        table = pa.Table.from_pylist(rows, schema=BOARD_SCHEMA)
+        pq.write_table(table, folder / f"{day.isoformat()}.parquet")
+    return odds_at
+
+
+def late_frame(rng: np.random.Generator) -> pd.DataFrame:
+    """The study frame's rows of the board races: every runner, the study's post_utc and t."""
+    rows = []
+    for k, (race_id, day, clock, _, _) in enumerate(BOARD_RACES):
+        post = jst(day, clock)
+        for h in range(1, field_size(k) + 1):
+            rows.append(
+                {
+                    "race_id": race_id,
+                    "race_date": pd.Timestamp(day),
+                    "horse_id": f"{race_id}:h{h}",
+                    "horse_no": h,
+                    "post_utc": post,
+                    AT: post - timedelta(minutes=T_NOW),
+                }
+            )
+    frame = pd.DataFrame(rows).astype({"horse_no": "int64"})
+    for col in ("post_utc", AT):
+        frame[col] = pd.to_datetime(frame[col], utc=True)
+    return relabel(frame, rng, 500)
+
+
+def board_pick(schedule: tuple, minutes: int, shift: int = 0) -> int | None:
+    """The snapshot the board at `minutes` to post shows: the latest at or before then, measured
+    to the study's post (shift 0), or to a post `shift` minutes after it."""
+    eligible = [b for b in schedule if b + shift >= minutes]
+    return min(eligible) if eligible else None
+
+
+def shares(odds: dict[int, float]) -> dict[int, float]:
+    inv = {h: 1.0 / o for h, o in odds.items()}
+    total = sum(inv.values())
+    return {h: v / total for h, v in inv.items()}
+
+
+def expected_moves(frame: pd.DataFrame, odds_at: dict, minutes: int) -> np.ndarray:
+    """ln s(T-2) - ln s(T-minutes) per frame row, both boards cut at the study's post."""
+    races = {r[0]: r for r in BOARD_RACES}
+    out = []
+    for row in frame.itertuples():
+        schedule = races[row.race_id][4]
+        now, then = board_pick(schedule, T_NOW), board_pick(schedule, minutes)
+        s_now, s_then = shares(odds_at[(row.race_id, now)]), shares(odds_at[(row.race_id, then)])
+        out.append(np.log(s_now[row.horse_no] / s_then[row.horse_no]))
+    return np.array(out, dtype=float)
+
+
+def test_late_win_boards_are_cut_at_the_study_post(tmp_path):
+    """The late Win path's T-20, T-5 and T-2 boards are cut at the study's own post_utc (the JRA
+    store's), never by the day file's minutes_to_post (JRA-VAN's post): with JRA at 12:00 and
+    JRA-VAN at 12:02 the 11:59 snapshot stays off the T-2 board. The same holds when JRA-VAN's post
+    is 3 minutes earlier or 7 minutes later, and when JRA-VAN has none. A race whose posts agree is
+    the control."""
+    rng = np.random.default_rng(4386)
+    odds_at = write_board_days(tmp_path / "data", rng)
+    frame = late_frame(rng)
+    # the fixture tells the posts apart: JRA-VAN's minutes_to_post picks another board in every
+    # race but the control
+    for _, _, _, shift, schedule in BOARD_RACES:
+        moved = shift is None or any(
+            board_pick(schedule, m) != board_pick(schedule, m, shift) for m in (T_NOW, 5, 20)
+        )
+        assert moved == (shift != 0)
+
+    got = dm.late_win(frame)
+
+    assert got.index.sort_values().equals(frame.index.sort_values())
+    got = got.reindex(frame.index)
+    for minutes, column in LATE_COLUMNS.items():
+        want = expected_moves(frame, odds_at, minutes)
+        assert np.isfinite(want).all()
+        np.testing.assert_allclose(
+            got[column].to_numpy(dtype=float), want, rtol=0, atol=1e-9, err_msg=f"T-{minutes}"
+        )
+
+    # the reviewer's race: the 11:59 board, a minute after t = 11:58, is not the T-2 board
+    race_id, _, _, _, schedule = BOARD_RACES[0]
+    runners = frame.loc[frame["race_id"].eq(race_id)]
+    s_late, s_then = (
+        shares(odds_at[(race_id, 1)]),
+        shares(odds_at[(race_id, board_pick(schedule, 5))]),
+    )
+    leaked = np.log([s_late[h] / s_then[h] for h in runners["horse_no"]])
+    shown = got.loc[runners.index, LATE_COLUMNS[5]].to_numpy(dtype=float)
+    assert np.abs(shown - leaked).max() > 1e-3, "the 11:59 board entered as the T-2 board"
+
+
+# --------------------------------------------------------------------------- Win settlement
+
+SETTLE_KINDS = (
+    "paid",
+    "no WIN row",
+    "dead heat, both paid",
+    "dead heat, one WIN row",
+    "PLACE row only",
+    "dead heat, no WIN row",
+)
+
+
+def settlement_case(seed: int) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, set[str]]:
+    """Races of every SETTLE_KINDS kind, 6 of each: (starters, the store's dividends rows of
+    every pool, the expected return per unit stake per starter row, the excluded race ids). A
+    winner's final odds are near its dividend / 100, never equal; every race has PLACE rows (the
+    winners' among them) and a QUINELLA row."""
+    rng = np.random.default_rng(seed)
+    starters, dividends, want, excluded = [], [], [], set()
+    for k in range(6 * len(SETTLE_KINDS)):
+        kind = SETTLE_KINDS[k % len(SETTLE_KINDS)]
+        race_id = f"jra:2022-05-{1 + k % 28:02d}:QQV:{k:02d}"
+        n = int(rng.integers(5, 15))
+        heat = kind.startswith("dead heat")
+        winners = sorted(int(h) for h in rng.choice(np.arange(1, n + 1), 2 if heat else 1, False))
+        div = {h: float(10 * rng.integers(11, 400)) for h in winners}  # yen per 100 yen
+        if kind in ("paid", "dead heat, both paid"):
+            paid = winners
+        elif kind == "dead heat, one WIN row":
+            paid = [winners[k % 2]]
+        else:
+            paid = []
+        out = any(h not in paid for h in winners)
+        if out:
+            excluded.add(race_id)
+        for h in range(1, n + 1):
+            won = h in winners
+            if won:
+                odds = max(round(div[h] / 100 * rng.uniform(0.7, 0.95), 1), 1.0)
+            else:
+                odds = round(float(rng.uniform(2.0, 150.0)), 1)
+            starters.append(
+                {"race_id": race_id, "horse_id": f"{race_id}:{h}", "horse_no": h, "won": won,
+                 "win_odds": odds}
+            )  # fmt: skip
+            want.append(np.nan if out else (div[h] / 100.0 if won else 0.0))
+        for h in paid:
+            dividends.append((race_id, "WIN", str(h), div[h]))
+        others = [h for h in range(1, n + 1) if h not in winners]
+        for h in [*winners, others[0]]:
+            dividends.append((race_id, "PLACE", str(h), float(10 * rng.integers(11, 200))))
+        pair = sorted([winners[0], others[1]])
+        quinella = float(10 * rng.integers(30, 900))
+        dividends.append((race_id, "QUINELLA", f"{pair[0]},{pair[1]}", quinella))
+    frame = pd.DataFrame(starters).astype({"horse_no": "int64"})
+    order = rng.permutation(len(frame))
+    frame = frame.iloc[order].set_axis(pd.Index(700 + 3 * order))
+    div = pd.DataFrame(dividends, columns=["race_id", "pool", "combination", "dividend"])
+    div = div.assign(is_refund=False).iloc[rng.permutation(len(div))]
+    return (
+        frame,
+        div.set_axis(pd.Index(50 + 2 * np.arange(len(div)))),
+        np.array(want)[order],
+        excluded,
+    )
+
+
+def test_a_winner_is_settled_only_by_its_own_win_dividend():
+    """A winner returns its own WIN dividend / 100 and a loser 0. A race any of whose winners (a
+    dead heat's too) has no WIN dividend row is excluded: every runner NaN, never the final odds,
+    a PLACE dividend or a loss; a dead heat with both WIN rows pays each winner its own."""
+    starters, dividends, want, excluded = settlement_case(4387)
+    assert 12 <= len(excluded) < starters["race_id"].nunique()
+
+    got = dm.settle_win(starters, dividends)
+
+    assert isinstance(got, pd.Series)
+    assert got.index.sort_values().equals(starters.index.sort_values())
+    values = got.reindex(starters.index).to_numpy(dtype=float)
+    np.testing.assert_allclose(values, want, rtol=0, atol=1e-12)  # NaN exactly where excluded
+    nan_races = set(starters.loc[np.isnan(values), "race_id"])
+    assert nan_races == excluded
+
+
+# --------------------------------------------------------------------------- the N5 curve
+
+N5_SCHEME = FoldScheme(
+    unit="quarter", test_length=1, step=1, min_train=4, window="expanding", embargo_days=7,
+    anchor_month=1,
+)  # fmt: skip
+
+
+def n5_frame(seed: int) -> pd.DataFrame:
+    """A study frame (as `load_inputs` gives it) of two years of Saturdays, two meetings a day, a
+    DEBUT and a MAIDEN race at each, with the body-weight member's columns carrying signal beside
+    the final price; about a fifth of the races have no payout (a winner without a WIN row)."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for day in saturdays(date(2019, 1, 5), 104):
+        for venue in ("QQV", "QQW"):
+            for klass in dm.CLASSES:
+                race_id = f"jra:{day.isoformat()}:{venue}:{klass[0]}"
+                n = int(rng.integers(6, 13))
+                g = rng.gamma(1.0, size=n)
+                odds = np.maximum(np.round(0.8 / (g / g.sum()), 1), 1.0)
+                q = (1.0 / odds) / (1.0 / odds).sum()
+                x1, x2 = rng.normal(size=n), rng.normal(size=n)
+                u = np.log(q) + 0.9 * x1 - 0.5 * x2
+                p = np.exp(u - u.max()) / np.exp(u - u.max()).sum()
+                winner = int(rng.choice(n, p=p))
+                settled = rng.random() >= 0.2
+                dividend = round(odds[winner] * 100 * rng.uniform(0.9, 1.1), -1)
+                for h in range(n):
+                    won = h == winner
+                    payout = (dividend / 100.0 if won else 0.0) if settled else np.nan
+                    rows.append(
+                        {
+                            "race_id": race_id,
+                            "race_date": pd.Timestamp(day),
+                            "meeting_id": f"{day.isoformat()}:{venue}",
+                            "race_class": klass,
+                            "horse_no": h + 1,
+                            "won": won,
+                            "q": q[h],
+                            "ln_q": np.log(q[h]),
+                            "win_odds": odds[h],
+                            "payout": payout,
+                            f"{BODY}__horse_wt_kg": np.nan if rng.random() < 0.05 else x1[h],
+                            f"{BODY}__horse_wt_change_kg": x2[h],
+                        }
+                    )
+    frame = pd.DataFrame(rows).astype({"horse_no": "int64"})
+    return frame.sort_values(["race_date", "race_id", "horse_no"]).reset_index(drop=True)
+
+
+def test_n5_curve_leaves_out_races_without_a_win_dividend():
+    """A race whose payout is NaN (a winner without a WIN dividend row) stays out of the N5
+    curve, as no loss and no bet: the curve's bets and returns are the scored runners of the
+    other races. The variant still scores, its ΔLL still over every scored race, and its ranked
+    row counts the scored races left out of the curve."""
+    frame = n5_frame(4388)
+    folds = walk_forward(frame["race_date"], scheme=N5_SCHEME)
+    spec = dm.build_spec(seed=SEED)
+    spec["bootstrap"] = {**spec["bootstrap"], "n_boot": 200}  # a fast bootstrap; same rules
+    failed = {m: "FileNotFoundError: synthetic, not loaded" for m in dm.BUILT if m != BODY}
+
+    study = dm.compute_study(frame, folds, spec, failed)
+
+    tested = np.zeros(len(frame), dtype=bool)
+    for fold in folds:
+        tested[fold.test_idx] = True
+    for klass in dm.CLASSES:
+        name = f"member:{BODY}:{klass}"
+        variant = next(v for v in study.variants if v.name == name)
+        assert variant.error is None, f"{name} failed: {variant.error}"
+        scored = frame.loc[tested & frame["race_class"].eq(klass).to_numpy()]
+        settled = scored["payout"].notna().to_numpy()
+        left_out = scored.loc[~settled, "race_id"].nunique()
+        assert left_out >= 8 and settled.sum() >= 300  # the fixture has both in numbers
+
+        curve = [
+            r
+            for r in study.tables.get("n5_curve", [])
+            if r["variant"] == name and r["segment"] == ALL_BETS
+        ]
+        assert sum(r["n_bets"] for r in curve) == settled.sum()
+        returned = sum(r["realised"] * r["n_bets"] for r in curve if r["n_bets"])
+        assert returned == pytest.approx(scored.loc[settled, "payout"].sum(), rel=1e-9)
+
+        ranked = next(r for r in study.tables["ranked"] if r["variant"] == name)
+        assert ranked["races"] == scored["race_id"].nunique()
+        assert ranked["n5_excluded_races"] == left_out
+
+
+# --------------------------------------------------------------------------- the command's exit
+
+BUILDS_A = {
+    "jra_races": "processed/jra/races.parquet@1f0e3d2c4b5a6978",
+    "jra_dividends": "processed/jra/dividends.parquet@8a7b6c5d4e3f2a10",
+}
+BUILDS_B = BUILDS_A | {"jra_dividends": "processed/jra/dividends.parquet@0c1d2e3f4a5b6c7d"}
+
+
+def fake_load_inputs(*, members_load: bool, builds: dict):
+    """A stand-in for `load_inputs`, the run's store read: a synthetic study frame of the
+    Saturdays in [date_from, date_to] (a DEBUT and a MAIDEN race each, six runners, every built
+    member's columns), its counts, the members that failed to load (all, or none) and `builds`."""
+
+    def load_inputs(date_from, date_to, log=print):
+        rng = np.random.default_rng(4389)
+        first = date_from + timedelta(days=(5 - date_from.weekday()) % 7)
+        days = saturdays(first, (date_to - first).days // 7 + 1)
+        rows = []
+        for day in days:
+            for klass in dm.CLASSES:
+                race_id = f"jra:{day.isoformat()}:QQV:{klass[0]}"
+                odds = np.round(rng.uniform(1.5, 40.0, size=6), 1)
+                q = (1.0 / odds) / (1.0 / odds).sum()
+                winner = int(rng.integers(6))
+                for h in range(6):
+                    rows.append(
+                        {"race_id": race_id, "race_date": pd.Timestamp(day),
+                         "meeting_id": f"{day.isoformat()}:QQV", "race_class": klass,
+                         "horse_no": h + 1, "won": h == winner, "q": q[h], "ln_q": np.log(q[h]),
+                         "win_odds": odds[h], "payout": odds[h] if h == winner else 0.0}
+                    )  # fmt: skip
+        frame = pd.DataFrame(rows)
+        for member in dm.BUILT:
+            for column in dm.feature_columns(member):
+                frame[column] = rng.normal(size=len(frame))
+        failed = {} if members_load else {m: "FileNotFoundError: no store" for m in dm.BUILT}
+        counts = {"races": int(frame["race_id"].nunique()), "starters": len(frame)}
+        return frame, counts, failed, dict(builds)
+
+    return load_inputs
+
+
+def records_registry(tmp_path: Path) -> Registry:
+    return Registry(tmp_path / "registry.jsonl", holdout_log=tmp_path / "holdout_log.jsonl")
+
+
+def invoke_debut_members(*args: str):
+    from horsetrack.cli import app
+
+    result = CliRunner().invoke(app, ["japan", "debut-members", *args])
+    assert "Usage:" not in result.output, f"{list(args)} refused: {result.output}"
+    return result
+
+
+@pytest.mark.parametrize(
+    ("case", "first", "last", "members_load"),
+    [
+        ("no member loaded", date(2015, 1, 3), date(2021, 12, 25), False),
+        ("no scored fold (22 training quarters)", date(2015, 1, 3), date(2018, 12, 29), True),
+    ],
+)
+def test_the_command_exits_nonzero_when_no_variant_scores(
+    case, first, last, members_load, tmp_path, monkeypatch
+):
+    """Every variant fails (its members did not load, or a range ending in 2018 leaves no test
+    fold after D9's 22 training quarters): the command exits nonzero, and still writes one failed
+    record per planned variant and the private report."""
+    registry, out = records_registry(tmp_path), tmp_path / "reports"
+    real = dm.run_debut_members
+
+    def bound(*args, **kwargs):  # the run on a scratch registry: nothing committed is written
+        return real(*args, **{**kwargs, "registry": registry, "out_dir": out})
+
+    monkeypatch.setattr(dm, "run_debut_members", bound)
+    monkeypatch.setattr(
+        dm, "load_inputs", fake_load_inputs(members_load=members_load, builds=BUILDS_A)
+    )
+
+    result = invoke_debut_members("--from", first.isoformat(), "--to", last.isoformat())
+
+    records = registry.records(dm.FAMILY_ID)
+    assert sorted(r.variant for r in records) == sorted(dm.variant_names()), case
+    assert {r.status for r in records} == {"failed"}
+    assert list(out.glob("*.md")), "the private report (the run's diagnostics) is not written"
+    assert result.exit_code != 0, f"{case}: no variant scored, yet the command exited 0"
+
+
+def test_the_command_exit_status_says_whether_any_variant_scored(monkeypatch):
+    """The exit status follows the result: nonzero when no variant scored (all failed, one
+    failed, none ran), 0 when at least one did, whatever the failures beside it."""
+    names = dm.variant_names()
+    spec = dm.build_spec(seed=SEED)
+
+    def variant(name: str, scored: bool) -> Variant:
+        metric = (FoldMetric("all_folds", "delta_ll", 0.25, None, None, 40),) if scored else ()
+        return Variant("E34", name, "walk_forward", {"study": "synthetic"}, {}, metric,
+                       None if scored else "ValueError: synthetic failure")  # fmt: skip
+
+    cases = [
+        ([], [*names], False),
+        ([], names[:1], False),
+        ([], [], False),
+        (names[:1], names[1:], True),
+        (names[3:5], names[:3], True),
+        ([*names], [], True),
+    ]
+    for scored, failed, ok in cases:
+        study = Study(counts={}, variants=[*(variant(n, True) for n in scored),
+                                           *(variant(n, False) for n in failed)])  # fmt: skip
+        result = dm.DebutResult(spec=spec, study=study, spec_hash="ab" * 32)
+        monkeypatch.setattr(dm, "run_debut_members", lambda *a, _r=result, **k: _r)
+        got = invoke_debut_members("--to", "2021-12-25")
+        label = f"{len(scored)} scored, {len(failed)} failed"
+        assert (got.exit_code == 0) == ok, f"{label}: exit {got.exit_code}"
+
+
+# --------------------------------------------------------------------------- report identity
+
+
+def test_private_reports_of_different_runs_do_not_overwrite(tmp_path, monkeypatch):
+    """Runs that differ in date_from, date_to or an input build write their private reports (the
+    Markdown and its JSON) to different paths: after all of them each report is still the one its
+    own run wrote."""
+    registry, out = records_registry(tmp_path), tmp_path / "reports"
+    runs = (
+        (date(2015, 1, 3), date(2021, 12, 25), BUILDS_A),
+        (date(2015, 1, 3), date(2021, 6, 26), BUILDS_A),  # another --to
+        (date(2016, 1, 2), date(2021, 12, 25), BUILDS_A),  # another --from
+        (date(2015, 1, 3), date(2021, 12, 25), BUILDS_B),  # refreshed dividends
+    )
+    written: dict[Path, tuple[bytes, bytes]] = {}
+    for first, last, builds in runs:
+        monkeypatch.setattr(dm, "load_inputs", fake_load_inputs(members_load=False, builds=builds))
+        result = dm.run_debut_members(
+            date_from=first, date_to=last, out_dir=out, registry=registry, log=lambda _: None
+        )
+        report = Path(result.report_path)
+        written[report] = (report.read_bytes(), report.with_suffix(".json").read_bytes())
+
+    assert len(written) == len(runs), f"runs share a private report path: {sorted(written)}"
+    for report, (text, tables) in written.items():
+        assert report.read_bytes() == text, f"{report.name} was overwritten by a later run"
+        assert report.with_suffix(".json").read_bytes() == tables

@@ -19,8 +19,10 @@ availability rules of `config/availability.yaml` (`member_features`):
 - `jvdata_mining` (#406): not landed, so listed and left out; it is added as a counted variant
   when it lands.
 - `body_weight` (#227): the race-day weight and its change, in the views from post - 60 min.
-- `late_win` (0B41, #369): the Win share's move to T-2 from T-20 and from T-5, each board the
-  latest row at or above that many minutes to post (`studies.cross_pool.boards_at`).
+- `late_win` (0B41, #369): the Win share's move to T-2 from T-20 and from T-5 (`late_win`). The
+  board at T-x is each runner's latest WIN row available (fetched_utc, else snapshot_utc) at or
+  before the study's own post_utc - x, post_utc the JRA store's; the day file's post_utc and
+  minutes_to_post are JRA-VAN's and never set a cutoff.
 
 The fit is a conditional logit with the final-price offset: u = ln q + sum w x, q the normalised
 final Win price, so w = 0 is the market exactly (`offset_probabilities`). Each member's columns
@@ -31,15 +33,29 @@ members together, and predicts the fold's test quarter. Per variant: the per-rac
 against the market with D7's one-sided meeting bounds, each column's weight pooled over the scored
 rows (meeting-clustered, one-sided 95%), the Fair-Shiller encompassing weight of its out-of-fold
 ln p beside ln q (`models.meta.encompassing`), and N5's curve (`core.eval.tail.tail_curve`),
-every scored runner a flat Win bet settled at the store's Win dividend. Place waits for #410.
+every scored runner a flat Win bet settled by `settle_win`: a winner at its own WIN dividend, a
+loser at 0. A race any of whose winners has no WIN dividend row is left out of the curve (never
+settled at the final odds, nor a loss) and counted as the ranked row's `n5_excluded_races`; it
+still scores ΔLL. Place waits for #410.
 
 Every figure is built on JRA-VAN or JRDB data, or comes from the run that reads them, so every
-figure is withheld (D21): the report, its JSON and the candidate-cell file go under the data dir
-through `write_report`, every record names the run's sources (`jra`, `jravan`, `jrdb`), and the
+figure is withheld (D21). A figure reaches a file only two ways. The private report, its JSON and
+the candidate-cell file go under the data dir through `write_report`, which refuses the
+repository, each named per run (spec hash, date range and input builds) so no run overwrites
+another. The registry (`default_registry`, `$HORSETRACK_DATA_DIR/registry/japan.jsonl`, outside
+the tree) is the private record of every run CLAUDE.md requires, failures included, with each
+variant's metrics as every study passes them; every record names the run's sources (`jra`,
+`jravan`, `jrdb`), so `write_summary` shows each one as withheld in the committed summary. The
 public report (`render_public_report`) shows no figure. `run_debut_members` freezes the spec
 (`build_spec`) in the registry before any store row is read, appends one record per variant
-(failures included), and regenerates the committed summary and the public report. Holdout days are
-never read and the holdout is not opened. Nothing is adopted: each variant is a ranked row.
+(failures included, a failed read too), and regenerates the committed summary and the public
+report; it returns its result even when no variant scored, and the command then exits nonzero.
+Holdout days are never read and the holdout is not opened. Nothing is adopted: each variant is a
+ranked row.
+
+Family v1 (`japan-debut-maiden-members-v1`) is kept in the record, superseded by v2: v1 cut the
+late Win boards by the JRA-VAN post's minutes_to_post, and settled a race without a WIN dividend
+row at the final odds.
 """
 
 from __future__ import annotations
@@ -93,7 +109,13 @@ from horsetrack.countries.japan.studies.meta import _ll, _run_id, file_digest, r
 
 COUNTRY = "japan"
 TICKET = 438
-FAMILY_ID = "japan-debut-maiden-members-v1"
+FAMILY_ID = "japan-debut-maiden-members-v2"
+SUPERSEDES = {
+    "family_id": "japan-debut-maiden-members-v1",
+    "reason": "v1 cut the late Win boards by the day file's minutes_to_post, measured to the "
+    "JRA-VAN post rather than the study's JRA post, and settled a race whose winner had no WIN "
+    "dividend row at the final odds in the N5 curve; v1's records are kept",
+}
 SOURCES = ("jra", "jravan", "jrdb")
 SEED = 438
 CLASSES = ("DEBUT", "MAIDEN")  # the store's codes: research/pool_scan's newcomer and maiden
@@ -109,7 +131,7 @@ LATE_FROM_MIN = (20, 5)  # the late Win path: the move to T-2 from T-20 and from
 RIDGE = 1e-3  # on the standardised member columns, against near-singular fits; the offset is fixed
 N5_QUANTILES = (0.5, 0.8, 0.9, 0.95, 0.99)
 ABILITY_FAMILY = c2_ability.FAMILY_ID
-CELLS_FILE = "candidate-cells/debut-members.json"
+CELLS_DIR = "candidate-cells"
 PUBLIC_REPORT = Path("docs") / "experiments" / "debut-members-japan.md"
 SPEC_DOC = "docs/specs/debut-members-prereg.md"
 
@@ -189,7 +211,8 @@ MEMBERS = {
         tuple(
             (f"late_win_move_t{m}", f"ln_share_move_t{m}_t{DECISION_MIN}") for m in LATE_FROM_MIN
         ),
-        "the Win share's move to T-2 from T-20 and from T-5 on the JRA-VAN 0B41 boards (#369)",
+        "the Win share's move to T-2 from T-20 and from T-5 on the JRA-VAN 0B41 boards (#369), "
+        "each board cut at the JRA post",
         lead_min=DECISION_MIN,
     ),
 }
@@ -450,9 +473,12 @@ def build_spec(*, seed: int) -> dict:
         "workouts_jrdb": "#137's workout_features at race morning, identical at t (#137's "
         "records are all published at (race day - 1) 20:00 JST)",
         "late_win": f"ln s(T-{DECISION_MIN}) - ln s(T-m) per runner for m in "
-        f"{list(LATE_FROM_MIN)}, s the Win board's normalised 1/odds at that many minutes to "
-        "post (studies.cross_pool.boards_at on the jravan odds_timeseries day file); NaN where "
-        "either board lacks the runner",
+        f"{list(LATE_FROM_MIN)}, s the Win board's normalised 1/odds at T-x (studies.cross_pool."
+        "boards_at on the jravan odds_timeseries day file): each runner's latest WIN row "
+        "available (fetched_utc, else snapshot_utc) at or before the study's post_utc - x, "
+        "post_utc the JRA store's (decision_time); the file's own post_utc and minutes_to_post "
+        "(JRA-VAN's post) never set a cutoff; NaN where either board lacks the runner or the "
+        "study has no post time",
         "ability": f"u and se_u of #92's export (family {ABILITY_FAMILY}); out of fold from "
         "2015-Q1, missing before",
         "design": "per training rows: each feature standardised by its known values' mean and "
@@ -477,7 +503,12 @@ def build_spec(*, seed: int) -> dict:
         },
         "n5": {
             "claim": "p (out of fold) x final Win odds per scored runner",
-            "return": "the store's Win dividend / 100 for a winner, 0 otherwise (flat stakes)",
+            "return": "settle_win: a winner's own WIN dividend row (not a refund) / 100, a "
+            "dead heat's winners each their own; 0 for a loser (flat stakes)",
+            "excluded": "a race any of whose winners (a dead heat's too) has no WIN dividend row "
+            "is left out of the curve: not settled at the final odds, nor by another pool's "
+            "row, nor counted a loss; it still scores ΔLL, and the ranked row counts such "
+            "scored races as n5_excluded_races (private report only)",
             "quantiles": list(N5_QUANTILES),
             "settled": ["WIN"],
             "place": "after #410",
@@ -493,13 +524,21 @@ def build_spec(*, seed: int) -> dict:
             "opened",
             "D16-D19": "nothing is adopted; every variant is a ranked row, the encompassing "
             "weight beside it",
-            "D21": "every figure is withheld: built on JRA-VAN or JRDB, or read in their run",
+            "D21": "every figure is withheld: built on JRA-VAN or JRDB, or read in their run; a "
+            "figure reaches a file only through write_report (under the data dir, never the "
+            "repository) and the registry's private run record (under the data dir), whose "
+            "committed summary write_summary withholds",
             "#438": "the owner's reframe, 2026-11-27: no result gate, no sign-off stop; a "
             "member whose ticket has not landed is listed and added as a counted variant when "
             "it lands; each JRDB feature a ranked variant with private results",
         },
         "adoption": "none: ranked rows only (D16-D19)",
         "sources": list(SOURCES),
+        "supersedes": SUPERSEDES,
+        "outputs": "the private report, its JSON and the candidate-cell file under the data dir "
+        "through write_report, named by the spec hash and a digest of the run's date range and "
+        "input builds (a later run never overwrites an earlier one); one registry record per "
+        "planned variant, failures included",
     }
 
 
@@ -637,25 +676,32 @@ def _variant_metrics(name, rows, folds, features, spec) -> tuple[list, dict]:
     a, se = encompassing(data, "member", cluster_col="meeting_id")
     metrics.append(_metric("all_folds", "encompassing", a, len(gain), a - z * se, a + z * se))
 
+    # N5: a race settle_win left unsettled (a winner without a WIN dividend row) is no bet
+    unsettled = scored["payout"].isna().groupby(race).transform("any").to_numpy(dtype=bool)
+    settled = scored.loc[~unsettled]
     bets = pd.DataFrame(
         {
-            "claim": scored["p"].to_numpy() * scored["win_odds"].to_numpy(),
-            "ret": scored["payout"].to_numpy(),
-            "meeting_id": scored["meeting_id"].to_numpy(),
+            "claim": settled["p"].to_numpy() * settled["win_odds"].to_numpy(),
+            "ret": settled["payout"].to_numpy(dtype=float),
+            "meeting_id": settled["meeting_id"].to_numpy(),
         }
     )
     boot = spec["bootstrap"]
-    curve = tail_curve(
-        bets,
-        claim_col="claim",
-        return_col="ret",
-        cluster_col="meeting_id",
-        quantiles=spec["n5"]["quantiles"],
-        n_boot=boot["n_boot"],
-        level=boot["level"],
-        seed=boot["seed"],
-    )
-    n5 = curve.assign(variant=name).to_dict("records")
+    n5: list[dict] = []
+    top = {"realised": np.nan, "lo": np.nan, "n_bets": 0}
+    if len(bets):
+        curve = tail_curve(
+            bets,
+            claim_col="claim",
+            return_col="ret",
+            cluster_col="meeting_id",
+            quantiles=spec["n5"]["quantiles"],
+            n_boot=boot["n_boot"],
+            level=boot["level"],
+            seed=boot["seed"],
+        )
+        n5 = curve.assign(variant=name).to_dict("records")
+        top = curve.iloc[-1]
     for band in n5:
         if band["n_bets"]:
             metrics.append(
@@ -668,7 +714,6 @@ def _variant_metrics(name, rows, folds, features, spec) -> tuple[list, dict]:
                     band["hi"],
                 )  # fmt: skip
             )
-    top = curve.iloc[-1]
     ranked = {
         "variant": name,
         "class": klass,
@@ -683,6 +728,7 @@ def _variant_metrics(name, rows, folds, features, spec) -> tuple[list, dict]:
         "n5_top_band_realised": float(top["realised"]),
         "n5_top_band_lo": float(top["lo"]),
         "n5_top_band_bets": int(top["n_bets"]),
+        "n5_excluded_races": int(pd.unique(race[unsettled]).size),
     }
     return metrics, {"ranked": [ranked], "weights": weights, "n5_curve": n5}
 
@@ -820,27 +866,44 @@ def study_frame(date_from: date, date_to: date) -> tuple[pd.DataFrame, dict]:
     )
     div = (
         ds.dataset(path, format="parquet")
-        .to_table(columns=["race_id", "combination", "dividend", "is_refund"], filter=scope)
+        .to_table(columns=["race_id", "pool", "combination", "dividend", "is_refund"], filter=scope)
         .to_pandas()
     )
-    div = div.loc[~div["is_refund"].eq(True).to_numpy(dtype=bool, na_value=False)]
-    div = div.assign(horse_no=pd.to_numeric(div["combination"], errors="coerce"))
-    div = div.dropna(subset=["horse_no"]).astype({"horse_no": "int64"})
-    div = div.groupby(["race_id", "horse_no"], as_index=False)["dividend"].max()
-    frame = frame.merge(div, on=["race_id", "horse_no"], how="left", validate="one_to_one")
-    paid = frame["dividend"].notna().groupby(frame["race_id"]).transform("any")
-    fallback = (frame["won"] & ~paid).to_numpy(dtype=bool)
-    frame["payout"] = np.where(
-        fallback, frame["win_odds"], frame["dividend"].fillna(0.0).to_numpy() / 100.0
-    )
-    frame = frame.drop(columns="dividend")
+    frame["payout"] = settle_win(frame, div).to_numpy()
     counts = {
         "races": int(frame["race_id"].nunique()),
         "starters": len(frame),
         "races_without_a_post_time": int(frame.loc[frame["post_utc"].isna(), "race_id"].nunique()),
-        "races_settled_at_the_final_odds": int(frame.loc[fallback, "race_id"].nunique()),
+        "races_without_a_win_dividend": int(frame.loc[frame["payout"].isna(), "race_id"].nunique()),
     }
     return frame, counts
+
+
+def settle_win(starters: pd.DataFrame, dividends: pd.DataFrame) -> pd.Series:
+    """The Win return per unit stake per starter row (on starters.index): a winner its own WIN
+    dividend row / 100 (a refund row is no dividend), a loser 0.0. Every runner of a race any of
+    whose winners (a dead heat's too) has no WIN dividend row is NaN: the race is excluded, never
+    settled at the final odds, by another pool's row, or as a loss."""
+    win = dividends.loc[dividends["pool"].astype(object).eq("WIN").to_numpy(dtype=bool)]
+    win = win.loc[~win["is_refund"].astype(object).eq(True).to_numpy(dtype=bool)]
+    paid = pd.DataFrame(
+        {
+            "race_id": win["race_id"].astype(object).to_numpy(),
+            "horse_no": pd.to_numeric(win["combination"], errors="coerce").to_numpy(dtype=float),
+            "dividend": pd.to_numeric(win["dividend"], errors="coerce").to_numpy(dtype=float),
+        }
+    ).dropna()
+    paid = paid.groupby(["race_id", "horse_no"], as_index=False)["dividend"].max()
+    race = starters["race_id"].astype(object).to_numpy()
+    runners = pd.DataFrame({"race_id": race, "horse_no": starters["horse_no"].to_numpy(float)})
+    dividend = runners.merge(paid, on=["race_id", "horse_no"], how="left", validate="many_to_one")[
+        "dividend"
+    ].to_numpy(dtype=float)  # a left merge keeps the starters' order
+    won = starters["won"].to_numpy(dtype=bool)
+    unpaid = pd.Series(won & np.isnan(dividend)).groupby(race).transform("any")
+    out = np.where(won, dividend / 100.0, 0.0)
+    out[unpaid.to_numpy(dtype=bool)] = np.nan
+    return pd.Series(out, index=starters.index, dtype=float)
 
 
 def pedigree_runs(sires: pd.DataFrame) -> pd.DataFrame:
@@ -982,21 +1045,35 @@ def jravan_workouts(frame: pd.DataFrame, log: Callable[[str], None] = print) -> 
 
 def late_win(frame: pd.DataFrame) -> pd.DataFrame:
     """Per frame row: ln s(T-2) - ln s(T-m) for each m of LATE_FROM_MIN from the day's jravan
-    odds_timeseries Win rows (`boards_at`); NaN where either board lacks the runner or the
+    odds_timeseries Win rows (`boards_at`), the board at T-x cut at the frame's own post_utc - x
+    (the JRA store's post): the file's post_utc and minutes_to_post are JRA-VAN's and are
+    replaced by the minutes from each row's availability (fetched_utc, else snapshot_utc) to the
+    frame's post. NaN where either board lacks the runner, the race has no post time, or the
     day has no file."""
     columns = [f"late_win_move_t{m}" for m in LATE_FROM_MIN]
     out = pd.DataFrame(np.nan, index=frame.index, columns=columns)
     folder = paths.processed_dir("jravan") / "odds_timeseries"
-    read = ["race_id", "pool", "combination", "snapshot_utc", "fetched_utc", "minutes_to_post",
-            "odds", "status_raw"]  # fmt: skip
+    read = ["race_id", "pool", "combination", "snapshot_utc", "fetched_utc", "odds", "status_raw"]
     for day, rows in frame.groupby(pd.to_datetime(frame["race_date"]).dt.date, sort=True):
         path = folder / f"{day.isoformat()}.parquet"
         if is_holdout_day(COUNTRY, day) or not path.exists():  # a holdout day is never opened
             continue
-        ids = rows["race_id"].unique().tolist()
+        ids = rows["race_id"].astype(object).unique().tolist()
         board = pq.read_table(
             path, columns=read, filters=[("pool", "==", "WIN"), ("race_id", "in", ids)]
         ).to_pandas()
+        post = dict(
+            zip(
+                rows["race_id"].astype(object),
+                pd.to_datetime(rows["post_utc"], utc=True),
+                strict=True,
+            )
+        )
+        available = pd.to_datetime(board["fetched_utc"], utc=True).fillna(
+            pd.to_datetime(board["snapshot_utc"], utc=True)
+        )
+        race_post = pd.to_datetime(board["race_id"].astype(object).map(post), utc=True)
+        board["minutes_to_post"] = (race_post - available) / pd.Timedelta(minutes=1)
         at = {m: boards_at(board, minutes_before=m) for m in (DECISION_MIN, *LATE_FROM_MIN)}
         for rid, runners in rows.groupby("race_id"):
             now = at[DECISION_MIN].get(rid)
@@ -1108,8 +1185,20 @@ def _spec_hash(spec: dict) -> str:
     ).hexdigest()
 
 
-def report_stem(spec_hash: str) -> str:
-    return f"debut-members-{COUNTRY}-{spec_hash[:12]}"
+REPORT_STEM = f"debut-members-{COUNTRY}-<spec hash>-<run digest>"
+
+
+def report_stem(spec_hash: str, run: dict, builds: dict) -> str:
+    """The private report's stem: the spec hash and a digest of the run (its date range) and its
+    input builds, so a run that differs in either never overwrites another's report."""
+    identity = json.dumps({"run": run, "builds": builds}, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"debut-members-{COUNTRY}-{spec_hash[:12]}-{digest[:12]}"
+
+
+def scored_any(result: DebutResult) -> bool:
+    """Whether any variant scored (the command's exit status)."""
+    return any(v.error is None for v in result.study.variants)
 
 
 def render_public_report(result: DebutResult) -> str:
@@ -1151,11 +1240,14 @@ def render_public_report(result: DebutResult) -> str:
         f"any store row. The pre-registration is `{SPEC_DOC}`.",
         "- Code: `countries/japan/studies/debut_members.py`. To reproduce, run "
         "`uv run horsetrack japan debut-members`.",
-        f"- Private report: `$HORSETRACK_DATA_DIR/reports/{report_stem(spec_hash)}.md`, its "
+        f"- Private report: `$HORSETRACK_DATA_DIR/reports/{REPORT_STEM}.md` (the spec hash, then "
+        "a digest of the run's date range and input builds, so no run overwrites another), its "
         f"tables as JSON beside it, and the ranked rows in `$HORSETRACK_DATA_DIR/reports/"
-        f"{CELLS_FILE}`, all written through `write_report` with the sources "
+        f"{CELLS_DIR}/` under the same stem, all written through `write_report` with the sources "
         f"{', '.join(f'`{s}`' for s in spec['sources'])}.",
         f"- Records: `docs/experiments/registry/{COUNTRY}/{FAMILY_ID}.md`; every one is withheld.",
+        f"- Supersedes `{spec['supersedes']['family_id']}`, kept in the record with its records "
+        f"and summary: {spec['supersedes']['reason']}.",
         "",
         "## Hypothesis",
         "",
@@ -1170,7 +1262,9 @@ def render_public_report(result: DebutResult) -> str:
         "",
         "One registry record each, failures included. Each is scored by its per-race winner ΔLL "
         "against the final price with D7's one-sided meeting bounds, its weights, its "
-        "encompassing weight and N5's curve settled at Win (Place after #410).",
+        "encompassing weight and N5's curve settled at each winner's own Win dividend (a race "
+        "with a winner that has no Win dividend row is left out of the curve and counted in "
+        "the private report; Place after #410).",
         "",
         _markdown_table(variants) if variants else "_No variant has run._",
         "",
@@ -1182,6 +1276,9 @@ def render_public_report(result: DebutResult) -> str:
         "construction, and the flag keeps that apart from a value at the mean.",
         "- The JV-Data mining member (#406): not landed; it is listed and enters as a counted "
         "variant when it lands.",
+        "- Settling a race without a Win dividend row at its final odds, and cutting the late "
+        "Win boards by the JRA-VAN post's minutes to post: both were v1's, replaced in this "
+        "family (the board cut at the study's JRA post; such a race left out of the curve).",
         "",
         "## What this rules out",
         "",
@@ -1295,7 +1392,8 @@ def run_debut_members(
     """Run the pre-registered family on Japan's development data: freeze, read, score, append
     one record per variant (failures included), write the private report, its JSON and the
     candidate-cell file. With the default registry, also regenerate the committed summary and
-    the public report."""
+    the public report. A failed read or fold split fails every planned variant, which is
+    recorded and reported like any other failure; the result is returned, not raised."""
     date_to = date.today() if date_to is None else date_to
     out_dir = (
         paths.reports_dir() if out_dir is None else paths.outside_repo(Path(out_dir), what="out")
@@ -1307,25 +1405,24 @@ def run_debut_members(
     git_sha = _git_sha()
     run = {"date_from": date_from.isoformat(), "date_to": date_to.isoformat()}
     builds: dict[str, str] = {}
+    failed: dict[str, str] = {}
     started = clock.monotonic()
     try:
         frame, counts, failed, builds = load_inputs(date_from, date_to, log)
         folds = walk_forward(frame["race_date"], scheme=load_country_scheme(COUNTRY))
         study = compute_study(frame, folds, spec, failed)
         study.counts = {**counts, "folds": len(folds), **study.counts}
-    except Exception as exc:
+        del frame
+    except Exception as exc:  # every planned variant fails, and is recorded and reported
+        error = f"{type(exc).__name__}: {exc}"
         fold_scheme = "walk_forward:" + json.dumps(spec["folds"], sort_keys=True)
+        study = Study(counts={})
         for name in variant_names():
             member = name.split(":")[1] if name.startswith("member:") else COMBINED
-            failed_variant = Variant(
-                _hypothesis(member), name, fold_scheme, {"study": "studies/debut_members.py"},
-                {}, error=f"{type(exc).__name__}: {exc}",
-            )  # fmt: skip
-            registry.append(_record(failed_variant, git_sha, builds, spec_hash, run))
-        if committed:
-            write_committed_summary(registry)
-        raise
-    del frame
+            components = {"study": "studies/debut_members.py"}
+            study.variants.append(
+                Variant(_hypothesis(member), name, fold_scheme, components, {}, error=error)
+            )
     log(f"computed ({clock.monotonic() - started:.0f} s)")
 
     held = {_run_id(dataclasses.replace(r, git_sha="")): r for r in registry.records(FAMILY_ID)}
@@ -1343,7 +1440,7 @@ def run_debut_members(
         "run time (s)": round(clock.monotonic() - started),
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    stem = report_stem(spec_hash)
+    stem = report_stem(spec_hash, run, builds)
     result.report_path = str(
         write_report(out_dir / f"{stem}.md", render_report(result, about), sources=SOURCES)
     )
@@ -1359,7 +1456,9 @@ def run_debut_members(
     ]
     result.cells_path = str(
         write_report(
-            out_dir / CELLS_FILE, json.dumps(cells, indent=1, default=str), sources=SOURCES
+            out_dir / CELLS_DIR / f"{stem}.json",
+            json.dumps(cells, indent=1, default=str),
+            sources=SOURCES,
         )
     )
     if committed:
@@ -1376,7 +1475,8 @@ def debut_members_command(
     seed: Annotated[int, typer.Option(help="The bootstrap seed the spec freezes.")] = SEED,
 ) -> None:
     """Fit the newcomer and maiden members at the final Win price (#438) and write the private
-    report."""
+    report. Exits nonzero when no variant scored (the failure records and the report are still
+    written)."""
     result = run_debut_members(
         date_from=date.fromisoformat(date_from),
         date_to=None if date_to is None else date.fromisoformat(date_to),
@@ -1397,3 +1497,6 @@ def debut_members_command(
             indent=2,
         )
     )
+    if not scored_any(result):
+        typer.echo("no variant scored", err=True)
+        raise typer.Exit(1)
