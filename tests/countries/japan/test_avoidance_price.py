@@ -184,6 +184,20 @@ status; each pinned by its own test below):
 - G. The family is `japan-family-l-floor-tail-favourite-v5`, superseding v4, frozen before any race
   is read.
 
+Fix round 5 of e487d61 (each pinned by its own test below):
+
+- 1. A processed jravan directory without search permission (so even asking whether the votes
+  file exists is refused: `stat` raises PermissionError) does not abort the run, as D above: every
+  record is written, nothing the votes do not build moves, the realised counts stand, the
+  prediction is unavailable and the votes' data build names the failure.
+- 2. The votes' data build keeps one identity whatever the file's availability: its value is
+  `<identity>@<refresh>`, the identity (the part before the last '@', as the registry's
+  `family_size` reads it) the same when the file is readable, unreadable or missing, and only the
+  refresh differing (a hex digest of the file when it is read; otherwise naming the failure). The
+  same frozen family run again against one registry once the file is readable appends the
+  refreshed checks as further runs of the same variants: the registry's family size stays the
+  frozen spec's.
+
 How the run-level tests prove it without fixing the owner's betting rules: the same synthetic
 store is run under one change at a time and the registry records are compared. Rows not available
 at t, and the final odds, must not move any board-at-t record; the board at t must not move any
@@ -213,6 +227,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
@@ -1301,6 +1316,9 @@ class Scenario:
     stale_scratch: dict = field(default_factory=dict)
     # race -> minutes added to its scheduled post time, None: left out of the schedule (N1, N2)
     post_shift: dict = field(default_factory=dict)
+    # fix round 5: "untraversable": the votes file written readable, then the processed jravan
+    # directory left without search permission, so its stat is refused (PD)
+    votes_dir: str = "open"
 
 
 def store_schema(table: str) -> pa.Schema:
@@ -1333,6 +1351,8 @@ def write_store(data_dir: Path, scenario: Scenario) -> None:
         (jravan / jravan_votes.FILENAME).write_bytes(b"PAR1 a truncated download, not parquet")
     else:
         assert scenario.votes_file == "missing"
+    if scenario.votes_dir == "untraversable":  # restored by run_scenario however the run ends
+        jravan.chmod(0o600)
 
     finals = {r.race_id: {**r.final, **scenario.final.get(r.race_id, {})} for r in races}
     meetings = {race_keys(r.race_id)["meeting_id"]: race_keys(r.race_id) for r in races}
@@ -1521,11 +1541,15 @@ class Outcome:
         return out
 
 
-def run_scenario(base: Path, scenario: Scenario, owner: dict) -> Outcome:
+def run_scenario(base: Path, scenario: Scenario, owner: dict, *, again: bool = False) -> Outcome:
     """The study's command line (main --run --out) on a fresh data directory whose store appears
-    only once a family is frozen; run_study's returned summary and main's stdout are kept."""
+    only once a family is frozen; run_study's returned summary and main's stdout are kept. With
+    `again`, a rerun on the data directory already under `base` (its store and its registry as
+    they were left): nothing is written to the store. An untraversable jravan directory (PD) gets
+    its search permission back however the run ends, so the temporary directory can be removed."""
     data_dir, out_dir = base / "data", base / "out"
-    data_dir.mkdir(parents=True)
+    if not again:
+        data_dir.mkdir(parents=True)
     out_dir.mkdir()
     original, written = Registry.freeze_family, []
     real_write, writes = reports_module.write_report, []
@@ -1534,7 +1558,8 @@ def run_scenario(base: Path, scenario: Scenario, owner: dict) -> Outcome:
     def freeze(self, family_id, spec):
         spec_hash = original(self, family_id, spec)
         if not written:
-            write_store(data_dir, scenario)
+            if not again:
+                write_store(data_dir, scenario)
             written.append(family_id)
         return spec_hash
 
@@ -1562,8 +1587,12 @@ def run_scenario(base: Path, scenario: Scenario, owner: dict) -> Outcome:
             mp.setattr(module, "write_report", write_report, raising=False)
         mp.setattr(avoidance_price, "run_study", run_study)
         printed = io.StringIO()
-        with contextlib.redirect_stdout(printed):
-            code = avoidance_price.main(["--run", "--out", str(out_dir)])
+        try:
+            with contextlib.redirect_stdout(printed):
+                code = avoidance_price.main(["--run", "--out", str(out_dir)])
+        finally:
+            if scenario.votes_dir == "untraversable":
+                (data_dir / "processed" / "jravan").chmod(0o755)
     assert code == 0
     assert written, "run_study never froze its family"
     assert len(summaries) == 1, "main runs the study once"
@@ -1613,6 +1642,8 @@ SCENARIOS = {
     "PU": lambda: (Scenario(votes_file="unopenable"), owner_config()),
     "R": lambda: (Scenario(reader_fault=True), owner_config()),
     "K": lambda: (Scenario(folds=dict(LATE_FOLDS)), owner_config()),
+    # fix round 5 of e487d61
+    "PD": lambda: (Scenario(votes_dir="untraversable"), owner_config()),
 }
 LOGGED_IDS = tuple(race.race_id for race in LOGGED)
 # N: D3 TOK's captures keep their post_utc beside a stale sidecar (one minute late) that must not
@@ -3376,3 +3407,118 @@ def test_the_changed_family_is_frozen_as_v5_before_any_race_is_read(study):
     assert holds_mapping(a.spec, TEST_FOLDS) and not holds_mapping(a.spec, LATE_FOLDS)
     assert holds_mapping(k.spec, LATE_FOLDS)
     assert k.spec_hash != a.spec_hash  # another scheme, another spec
+
+
+# ---------------------------------------------------------------------------------------------
+# Fix round 5 of e487d61: an untraversable votes directory, the votes build's identity across the
+# file's availability
+# ---------------------------------------------------------------------------------------------
+
+# what each unavailable state's refresh names (D: unreadable; U0: missing; PD: its stat refused)
+FAILURE_WORDS = {
+    "PU": re.compile(r"(?i)unreadable|unopen|permission|cannot|inaccessible"),
+    "PD": re.compile(r"(?i)unreadable|unopen|permission|cannot|inaccessible"),
+    "U0": re.compile(r"(?i)missing|absent|not found|no file"),
+}
+
+
+def votes_build(record: dict) -> tuple[str, str, str]:
+    """The record's votes data build: (build name, identity, refresh), its value split at the last
+    '@' as the registry's `family_size` splits it ('' identity when the value holds no '@')."""
+    keys = [k for k in record["data_builds"] if "votes" in k.lower()]
+    assert len(keys) == 1, (record["variant"], record["data_builds"])
+    identity, _, refresh = record["data_builds"][keys[0]].rpartition("@")
+    return keys[0], identity, refresh
+
+
+def not_root() -> None:
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root reads a file and traverses a directory whatever its mode")
+
+
+def test_an_untraversable_votes_directory_does_not_abort_the_run(study):
+    """Fix round 5 (1): the processed jravan directory has no search permission, so even the
+    probe of the votes file is refused (PermissionError from stat). The run is not aborted: every
+    record is written, every record the votes do not build equals A's, the realised counts stand,
+    the prediction is unavailable and the votes' data build names the failure, under the identity
+    it has when the file is read."""
+    not_root()
+    a = study("A")
+    try:
+        pd_ = study("PD")
+    except OSError as exc:
+        pytest.fail(f"run_study aborted on a votes directory it cannot traverse: {exc!r}")
+    assert pd_.spec_hash == a.spec_hash
+    names = plus10_names(a)
+    ra, rp = a.by_variant(), pd_.by_variant()
+    assert ra.keys() == rp.keys()
+    assert len(pd_.records) == pd_.spec["family_size"]
+    votes_built = {n for n, r in ra.items() if is_withheld(r["sources"])}
+    assert set(names.values()) <= votes_built
+    for name, record in ra.items():  # nothing the votes do not build moves, its builds included
+        if name not in votes_built:
+            assert rp[name] == record, name
+
+    for tag, name in names.items():
+        record = rp[name]
+        assert record["status"] == "scored", (tag, record["metrics"])
+        assert realised_counts(record) == realised_counts(ra[name]), tag
+        assert any(value for value, _ in realised_counts(record).values()), tag
+        assert cross_tab(record) == {}, (tag, cross_tab(record))  # unavailable: no cell
+        key, identity, refresh = votes_build(record)
+        assert (key, identity) == votes_build(ra[name])[:2], (tag, record["data_builds"])
+        assert refresh != votes_build(ra[name])[2], (tag, refresh)
+        assert FAILURE_WORDS["PD"].search(refresh), (tag, refresh)
+    assert private_report(pd_)
+
+
+def rerun_readable(first: Outcome, votes_file: Path, base: Path) -> Outcome:
+    """The same frozen family run again against `first`'s registry: on a copy of `first`'s data
+    directory (its store and its registry as the first run left them), with `votes_file` copied
+    in, readable, as the jravan pool_votes.parquet."""
+    data = base / "data"
+    shutil.copytree(first.base / "data", data, ignore=shutil.ignore_patterns(jravan_votes.FILENAME))
+    shutil.copyfile(votes_file, data / "processed" / "jravan" / jravan_votes.FILENAME)
+    return run_scenario(base, Scenario(), owner_config(), again=True)
+
+
+@pytest.mark.parametrize("first_state", ["PU", "U0"])
+def test_the_votes_build_keeps_one_identity_when_the_file_comes_back(study, tmp_path, first_state):
+    """Fix round 5 (2): the same frozen family run first with the votes file unreadable (PU) or
+    missing (U0), then, against the same registry, with the file readable. The second run appends
+    the refreshed checks (A's records) as further runs of the same variants and nothing else: the
+    registry's family size stays the frozen spec's. The votes build's identity is one in the three
+    states (readable in A, unavailable in the first run, readable in the rerun); only the refresh
+    differs: the file's hex digest when it is read, a word naming the failure otherwise."""
+    if first_state == "PU":
+        not_root()
+    a = study("A")
+    ra = a.by_variant()
+    family = a.freezes[0]["family_id"]
+    votes_built = sorted(n for n, r in ra.items() if is_withheld(r["sources"]))
+    assert votes_built
+    readable = {n: votes_build(ra[n]) for n in votes_built}
+    for name, (_, identity, refresh) in readable.items():
+        assert identity and HEX_DIGEST.fullmatch(refresh), (name, identity, refresh)
+
+    first = study(first_state)
+    assert first.spec_hash == a.spec_hash
+    votes_file = a.base / "data" / "processed" / "jravan" / jravan_votes.FILENAME
+    second = rerun_readable(first, votes_file, tmp_path)
+    assert second.spec_hash == a.spec_hash  # one freeze: the same frozen family
+    new = [e["record"] for e in second.entries[len(first.entries) :] if e["kind"] == "run"]
+    assert sorted(r["variant"] for r in new) == votes_built  # the rest already present
+    assert second.summary["records_appended"] == len(votes_built)
+    for record in new:  # the refreshed checks: A's records, prediction and all
+        assert record == ra[record["variant"]], record["variant"]
+
+    registry = Registry(second.registry_path, holdout_log=tmp_path / "no-holdout.jsonl")
+    assert {r.variant for r in registry.records(family)} == set(ra)
+    assert registry.family_size(family) == a.spec["family_size"], first_state
+
+    rf = first.by_variant()
+    for name in votes_built:
+        key, identity, refresh = votes_build(rf[name])
+        assert (key, identity) == readable[name][:2], (name, rf[name]["data_builds"])
+        assert refresh and refresh != readable[name][2], (name, refresh)
+        assert FAILURE_WORDS[first_state].search(refresh), (name, refresh)

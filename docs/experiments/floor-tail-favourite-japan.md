@@ -93,8 +93,12 @@ and the changed pre-registration is a new family, v5, frozen before any read:
   filters inside the dataset scan. The tests trace the read itself (no Python frame of the package or of pyarrow ever
   holds a holdout value), not only its output.
 - **D. A votes file that cannot be opened.** A `pool_votes.parquet` that exists but cannot be read for its digest
-  aborted the run after the freeze. The votes' data build now records the failure (`(unreadable: PermissionError)`),
-  scoring goes on, the realised counts stand and the prediction is unavailable.
+  aborted the run after the freeze. The votes' data build now records the failure, scoring goes on, the realised
+  counts stand and the prediction is unavailable. After fix round 5 the probe of the file sits under the same handler
+  (a `jravan` directory the process cannot traverse no longer aborts the run either), and the build keeps the path as
+  its identity whatever the file's availability, the failure going in the refresh
+  (`processed/jravan/pool_votes.parquet@unreadable-PermissionError`, `@missing`, or the file's digest), so a rerun
+  of the same family with the file restored refreshes the two 100-vs-110 records instead of adding two variants.
 - **E. Walk-forward rows.** Every development race was scored once (`paired_same_races:development`), the first
   training span included. Each paired comparison now has, beside that descriptive record (#81's scheme and its name,
   unchanged), a walk-forward record named `<variant>:walk_forward`: the same per-race returns over the races in the

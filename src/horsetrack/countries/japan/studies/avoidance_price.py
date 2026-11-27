@@ -1759,16 +1759,17 @@ class _ScheduledPosts:
 
 
 def _votes_build(path: Path) -> dict[str, str]:
-    """The votes' data build, '<path>@<digest>'; a file that is missing or cannot be read for its
-    digest is named so, and the run goes on (the prediction is then unavailable)."""
+    """The votes' data build, '<path>@<refresh>': the path is the build's identity whatever the
+    file's availability, so the registry counts a run with the file restored as a refresh of the
+    same variant. The refresh is the file's digest, or 'missing', or 'unreadable-<error>' when even
+    probing the file is refused (an untraversable directory) or it cannot be read; the run goes on
+    (the prediction is then unavailable)."""
     where = f"processed/{VOTES_SOURCE}/{jravan_votes.FILENAME}"
-    if not path.is_file():
-        return {f"{VOTES_SOURCE}_pool_votes": f"{where} (missing)"}
     try:
-        value = f"{where}@{_digest([path])}"
+        refresh = _digest([path]) if path.is_file() else "missing"
     except OSError as exc:  # optional input: unreadable is recorded, never fatal
-        value = f"{where} (unreadable: {type(exc).__name__})"
-    return {f"{VOTES_SOURCE}_pool_votes": value}
+        refresh = f"unreadable-{type(exc).__name__}"
+    return {f"{VOTES_SOURCE}_pool_votes": f"{where}@{refresh}"}
 
 
 def run_study(out_dir: Path | None = None) -> dict:
