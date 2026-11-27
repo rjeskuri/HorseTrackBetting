@@ -38,7 +38,7 @@ from horsetrack.core.eval.registry import (
     FoldMetric,
     RunRecord,
     default_registry,
-    summary_path,
+    summary_dir,
     write_summary,
 )
 from horsetrack.core.eval.reports import write_report
@@ -415,7 +415,7 @@ def write_outputs(summary: dict, sha: str, out: Path) -> None:
 def freeze() -> dict[str, str]:
     registry = default_registry(COUNTRY)
     hashes = {fid: registry.freeze_family(fid, spec) for fid, spec in study.family_specs().items()}
-    write_summary(registry, summary_path(COUNTRY))
+    write_summary(registry, summary_dir(COUNTRY))
     return hashes
 
 
@@ -436,7 +436,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = max_test(registry, score_frames(races, meta), meta, sha, note=args.note)
         out = paths.reports_dir() / "japan" / "131-exacta" / f"max-test-{sha[:12]}.json"
         write_report(out, json.dumps(result, indent=1), sources=SOURCES)
-        write_summary(registry, summary_path(COUNTRY))
+        write_summary(registry, summary_dir(COUNTRY))
     else:
         sha, registry = _git_sha(), default_registry(COUNTRY)
         races, meta = load_races()
@@ -449,7 +449,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ))  # fmt: skip
             raise
         write_outputs(result, sha, paths.reports_dir() / "japan" / "131-exacta")
-        write_summary(registry, summary_path(COUNTRY))
+        write_summary(registry, summary_dir(COUNTRY))
         result = {k: result[k] for k in ("meta", "spa", "stepm", "log_score")}
     print(json.dumps(result, indent=1, default=str))
     return 0
