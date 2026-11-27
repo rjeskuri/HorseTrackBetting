@@ -61,7 +61,9 @@ from horsetrack.core.store.asof import load_availability
 from horsetrack.countries.japan.feature_boundary import (
     PUBLICATION_PROXY,
     RESULTS_DERIVED,
+    TIMESTAMP_FALLBACK,
     approximations,
+    availability_fallback,
     feature_view,
 )
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
@@ -234,16 +236,18 @@ def settle(tickets: Iterable[Ticket], dividends: pd.DataFrame, race_id: str) -> 
 
 def view_at(con, race_id: str, at_utc: datetime, *, rules, selection: str = BOARD_AT_T) -> RaceView:
     """The board at t: odds_timeseries rows available at `at_utc` under `rules`, read through the
-    model boundary (`feature_boundary.feature_view`: the identifiers BOARD_KEYS and the approved
-    features BOARD_FEATURES only, so no label and no unclassified column), `race_id`'s only, the
-    latest snapshot per (pool, combination) among them."""
+    model boundary (`feature_boundary.feature_view`: the identifiers BOARD_KEYS the table has and
+    the approved features BOARD_FEATURES only, so no label and no unclassified column),
+    `race_id`'s only, the latest snapshot per (pool, combination) among them. The timestamps of
+    BOARD_KEYS are optional: a board without `post_utc`, say, is read without it."""
     if "look-ahead" in selection:
         raise ValueError(f"the board at t is not look-ahead: {selection!r}")
-    rows = feature_view(
-        con, BOARD_TABLE, at_utc, features=BOARD_FEATURES, keys=BOARD_KEYS, rules=rules
-    )
+    present = set(con.table(BOARD_TABLE).columns)
+    keys = [k for k in BOARD_KEYS if k in present or k not in BOARD_STAMPS]
+    rows = feature_view(con, BOARD_TABLE, at_utc, features=BOARD_FEATURES, keys=keys, rules=rules)
     rows = rows.loc[rows["race_id"].eq(race_id)]
-    rows = rows.sort_values(["snapshot_utc", "fetched_utc"], kind="stable")
+    order = [c for c in ("snapshot_utc", "fetched_utc") if c in rows.columns]
+    rows = rows.sort_values(order, kind="stable") if order else rows
     latest = rows.drop_duplicates(["pool", "combination"], keep="last").reset_index(drop=True)
     return RaceView(race_id, latest, selection)
 
@@ -435,11 +439,13 @@ BOARD_COLUMNS = [
 # The board through the model boundary (#417): its identifiers, returned as they are, and the
 # approved features at t it reads (feature_boundary.approved_features of odds_timeseries).
 BOARD_KEYS = ["race_id", "pool", "combination", "snapshot_utc", "fetched_utc", "post_utc"]
+# the keys a board may lack (view_at reads the ones it has); race_id, pool and combination it must
+BOARD_STAMPS = frozenset({"snapshot_utc", "fetched_utc", "post_utc"})
 BOARD_FEATURES = ["odds"]
-# The card values that pick the races and the starters. They are race and starter filters, not
-# features, read from the store's card (read_store_table) rather than through feature_view, so the
-# boundary does not approve them; the report names the approximation each carries
-# (feature_boundary.approximations).
+# The card values that pick the races and the starters. They are race and starter filters read
+# from the store's card (read_store_table), not through feature_view: runners.is_scratched is an
+# approved feature at t (model_inputs.yaml, scratches_at_t), races.status is no feature at all.
+# The report names the approximation each carries (feature_boundary.approximations).
 CARD_FILTERS = (
     ("runners", "is_scratched", "the starters: runners not is_scratched"),
     ("races", "status", "the races: status 'run'"),
@@ -1149,6 +1155,9 @@ def compute_study(data: StudyData, spec: dict) -> Study:
     """Every variant of the frozen `spec` on `data`, in `variant_names` order. No I/O beyond the
     board-at-t reads of `data.view_at_t`."""
     ctx = _Context(data, spec)
+    on_fallback: set[str] = set()
+    fallback = availability_fallback(BOARD_TABLE)
+    data = replace(data, view_at_t=_noting_fallback(data.view_at_t, fallback, on_fallback))
     study = Study(
         counts={
             "races_read": len(data.races),
@@ -1268,7 +1277,31 @@ def compute_study(data: StudyData, spec: dict) -> Study:
                 f"{pool} at the base rate",
                 lambda pool=pool: ctx.paired(_same_race(ctx, pool), CALENDAR),
             )
+    if fallback is not None:
+        study.counts[_fallback_count(fallback)] = len(on_fallback)
     return study
+
+
+def _fallback_count(fallback: tuple[str, str]) -> str:
+    return f"races_with_a_board_at_t_capture_at_{fallback[1]}"
+
+
+def _noting_fallback(view, fallback: tuple[str, str] | None, races: set[str]):
+    """`view` (race -> its board at t), adding to `races` each race whose board at t holds a
+    capture with a null `fallback[0]`: in the views at its `fallback[1]` timestamp instead
+    (feature_boundary.availability_fallback)."""
+    if view is None or fallback is None:
+        return view
+    column = fallback[0]
+
+    def noted(race_id: str) -> RaceView:
+        seen = view(race_id)
+        board = seen.board
+        if column in board.columns and board[column].isna().any():
+            races.add(race_id)
+        return seen
+
+    return noted
 
 
 # --------------------------------------------------------------------------- report and runner
@@ -1312,9 +1345,11 @@ _APPROXIMATION_NOTES = {
 }
 
 
-def _approximation_lines() -> list[str]:
+def _approximation_lines(counts: Mapping[str, int]) -> list[str]:
     """One line per column the study reads that carries a documented approximation
-    (feature_boundary.approximations), with its table and its tags; the board's features too."""
+    (feature_boundary.approximations), with its table and its tags; the board's features too,
+    with the board rule's fallback timestamp (feature_boundary.availability_fallback) and the
+    races whose board at t used it, when the study counted them."""
     used = [*CARD_FILTERS, *((BOARD_TABLE, c, "the board at t") for c in BOARD_FEATURES)]
     lines = []
     for table, column, use in used:
@@ -1322,6 +1357,17 @@ def _approximation_lines() -> list[str]:
         if tags:
             notes = "; ".join(_APPROXIMATION_NOTES[tag] for tag in tags)
             lines.append(f"- `{table}.{column}` ({use}): {', '.join(tags)}: {notes}")
+    fallback = availability_fallback(BOARD_TABLE)
+    if fallback is not None:
+        column, stand_in = fallback
+        n = counts.get(_fallback_count(fallback))
+        races = "not counted" if n is None else f"{n} races whose board at t holds one"
+        named = ", ".join(f"`{BOARD_TABLE}.{c}`" for c in BOARD_FEATURES)
+        lines.append(
+            f"- {named} (the board at t): {TIMESTAMP_FALLBACK}: a capture without `{column}` is "
+            f"on the board at its `{stand_in}` instead, which may be earlier than it was fetched "
+            f"(docs/specs/as-of.md, 'Fallback (column rules)'); {races}"
+        )
     return lines or ["- none: every column the study reads carries no documented approximation"]
 
 
@@ -1347,7 +1393,7 @@ def render_report(study: Study, spec: dict, about: dict) -> str:
         "",
         "## Documented approximations",
         "",
-        *_approximation_lines(),
+        *_approximation_lines(study.counts),
         "",
         "## Data",
         "",

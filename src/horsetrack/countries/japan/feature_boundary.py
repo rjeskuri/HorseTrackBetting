@@ -14,7 +14,10 @@ narrow the approval: the boundary is per column. `feature_view` reads a table at
 `read_asof` and returns only the caller's keys and approved features; a column neither config
 names is `UnclassifiedColumn`, a classified one that is not a feature at t `FeatureNotApproved`.
 `approximations` names the documented approximations a column's availability carries, from the
-availability rules only. docs/specs/as-of.md, "The model boundary", says how a study adopts it.
+availability rules only; `availability_fallback` names a column rule's stand-in timestamp (a
+board capture without `fetched_utc` is in the views at its `snapshot_utc`), an approximation of
+some rows rather than of a column. docs/specs/as-of.md, "The model boundary", says how a study
+adopts it.
 """
 
 from __future__ import annotations
@@ -40,14 +43,19 @@ RESULTS_DERIVED = "results-derived"
 # a gated column: in the view from an anchor + offset (post_utc - 60 min, say) that stands in for
 # its unrecorded publication time (an availability rule's `gated_columns`)
 PUBLICATION_PROXY = "publication-proxy"
+# a row in the views at its column rule's `fallback` timestamp because its own `column` is null
+# (an odds_timeseries capture without its fetch time, at its snapshot time)
+TIMESTAMP_FALLBACK = "timestamp-fallback"
 
 __all__ = [
     "PUBLICATION_PROXY",
     "RESULTS_DERIVED",
+    "TIMESTAMP_FALLBACK",
     "FeatureNotApproved",
     "UnclassifiedColumn",
     "approved_features",
     "approximations",
+    "availability_fallback",
     "feature_view",
 ]
 
@@ -174,3 +182,17 @@ def approximations(
             tags.add(PUBLICATION_PROXY)
         out[column] = frozenset(tags)
     return out
+
+
+def availability_fallback(
+    table: str, *, rules: Mapping[str, Availability] | None = None
+) -> tuple[str, str] | None:
+    """`(column, fallback)` of a `column` rule with a `fallback`, read from the availability
+    rules: a row whose `column` is null is in the views at its `fallback` timestamp instead
+    (TIMESTAMP_FALLBACK); None for any other rule. The approximation is per row, so
+    `approximations` does not tag the table's columns with it: a report built on the boundary
+    discloses it, with the rows or races that use it."""
+    rule = _rule(table, _rules(rules))
+    if rule.kind != "column" or rule.fallback is None:
+        return None
+    return rule.column, rule.fallback

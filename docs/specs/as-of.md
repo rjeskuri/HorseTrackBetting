@@ -383,6 +383,12 @@ schema adds to a known table would reach a model by default. Japan's model bound
   carries, from the rules only: `RESULTS_DERIVED` for a `results_derived` column,
   `PUBLICATION_PROXY` for a gated column (its anchor + offset stands in for an unrecorded
   publication time). A report built on the boundary names the predictors that carry either.
+- `availability_fallback(table)`: `(column, fallback)` of a `column` rule with a `fallback`, else
+  None. A row whose `column` is null is in the views at its `fallback` timestamp instead
+  (`TIMESTAMP_FALLBACK`; for `odds_timeseries`, a capture without `fetched_utc` is on the board at
+  its `snapshot_utc`, before it was fetched). It approximates rows, not a column, so
+  `approximations` leaves the table's columns untagged; a report built on the boundary discloses
+  the fallback for the values it reads from such a table, with the rows or races that used it.
 - Authorized label reads (`read_label`) are unchanged.
 
 A new column becomes a feature only through a config change: a `feature_at_t` supply in the
@@ -391,12 +397,15 @@ inventory, under the availability rules.
 ### Adopting the boundary
 
 The avoidance study (`studies/avoidance.py`, #81) is the migrated caller: `view_at` reads the
-board through `feature_view` (identifiers `race_id`, `pool`, `combination`, `snapshot_utc`,
-`fetched_utc`, `post_utc`; feature `odds`), and its report lists `runners.is_scratched` and
-`races.status`, the race and starter filters it reads from the store's card, under "Documented
-approximations" with their `RESULTS_DERIVED` tag. Those two are filters, not features: they are
-read as before, outside the boundary, and the inventory gains no entry for them (feature
-inclusion is the owner's).
+board through `feature_view` (identifiers `race_id`, `pool`, `combination`, and those of
+`snapshot_utc`, `fetched_utc`, `post_utc` the table has; feature `odds`), and its report lists
+`runners.is_scratched` and `races.status`, the race and starter filters it reads from the store's
+card, under "Documented approximations" with their `RESULTS_DERIVED` tag, and `odds` with the
+board rule's `TIMESTAMP_FALLBACK` and the count of races whose board at t holds a capture without
+`fetched_utc`. The two filters are read as before from the store's card, outside
+`feature_view`: `runners.is_scratched` is an approved feature at t (the inventory's
+`scratches_at_t`), `races.status` is no feature at all, and the inventory gains no entry for it
+(feature inclusion is the owner's).
 
 Every other caller of `read_asof` or `asof_join` that builds a model or study frame (today
 `studies/board_quality.py`; `studies/speed_run.py` and the other studies read the store
