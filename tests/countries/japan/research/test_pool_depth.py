@@ -2121,6 +2121,61 @@ def test_the_command_updates_only_its_family_in_the_committed_summary(data_dir, 
     assert own.is_file() and family in own.read_text(encoding="utf-8")
 
 
+def test_update_summary_keeps_a_legacy_slash_family_line_in_the_index(tmp_path):
+    """Since #525, write_summary files a legacy '/' family id (#131's, written before #525) as
+    `- [<family id>](<id with '/' as '--'>.md)`: label and file stem differ. Updating only the
+    pool-depth family keeps those lines, ordered by label like every other line (write_summary's
+    order: '-' sorts before '/'), and leaves their files as they were."""
+    registry, spec = frozen_registry(tmp_path)
+    family = spec["family_id"]
+    registry.append(
+        RunRecord(
+            hypothesis_id="P432", family_id=family, variant="depth:fresh-variant", ticket=432,
+            git_sha="0" * 40, data_builds={}, sources=("jravan",), fold_scheme="development-days",
+            components={}, params={}, metrics=(FoldMetric("all", "m", 0.5, None, None, 3),),
+            status="scored",
+        )
+    )  # fmt: skip
+    # The committed summary, by hand: label (family id) -> file stem, in write_summary's order.
+    committed = {
+        "japan-alpha-final-win": "japan-alpha-final-win",
+        family: family,
+        "japan/131-exacta-category-v1": "japan--131-exacta-category-v1",
+        "japan/131-exacta-category-v1/max-test": "japan--131-exacta-category-v1--max-test",
+        "win5-gamma-v1": "win5-gamma-v1",
+    }
+    legacy = {label: stem for label, stem in committed.items() if "/" in label}
+    folder = tmp_path / "summary"
+    folder.mkdir()
+    for label, stem in committed.items():
+        (folder / f"{stem}.md").write_text(f"# {label}: the committed summary\n", "utf-8")
+    entries = [f"- [{label}]({stem}.md)" for label, stem in committed.items()]
+    head = [
+        "# Experiment registry index",
+        "",
+        "Written by `horsetrack.core.eval.registry.write_summary`; do not edit by hand. One file",
+        "per family, each holding that family's runs.",
+        "",
+    ]
+    (folder / "README.md").write_text("\n".join([*head, *entries]) + "\n", encoding="utf-8")
+    before = {stem: (folder / f"{stem}.md").read_bytes() for stem in committed.values()}
+
+    depth.update_summary(registry, [family], folder)
+
+    lines = (folder / "README.md").read_text(encoding="utf-8").splitlines()
+    for label, stem in legacy.items():
+        assert f"- [{label}]({stem}.md)" in lines, f"the index dropped the legacy line {label}"
+    assert [line for line in lines if line.startswith("- [")] == entries
+    assert lines[0] == "# Experiment registry index"
+    for label, stem in committed.items():
+        if label != family:
+            assert (folder / f"{stem}.md").read_bytes() == before[stem], f"{stem}.md changed"
+    assert "depth:fresh-variant" in (folder / f"{family}.md").read_text(encoding="utf-8")
+    assert {p.name for p in folder.rglob("*")} == {f"{s}.md" for s in committed.values()} | {
+        "README.md"
+    }
+
+
 # --- review round 2: the co-placer variant re-registered on the core rule (family v2) -----------
 #
 # Contract added here (interfaces the tests call, beyond the ones above):

@@ -93,6 +93,7 @@ from horsetrack.core.eval.registry import (
     _spec_hash,
     default_registry,
     summary_dir,
+    summary_stem,
     write_summary,
 )
 from horsetrack.core.eval.reports import LicensedOutputInRepo, is_inside, write_report
@@ -1852,7 +1853,7 @@ def family_runs(
     return out
 
 
-_INDEX_ENTRY = re.compile(r"^- \[([^\]]+)\]\(\1\.md\)$", re.MULTILINE)
+_INDEX_ENTRY = re.compile(r"^- \[([^\]]+)\]\(([^)]+)\.md\)$", re.MULTILINE)
 
 
 class _Records:
@@ -1874,7 +1875,9 @@ def update_summary(registry: Registry, families: Sequence[str], directory: Path 
     stay as they are."""
     directory = Path(directory)
     index = directory / "README.md"
-    listed = _INDEX_ENTRY.findall(index.read_text(encoding="utf-8")) if index.is_file() else []
+    text = index.read_text(encoding="utf-8") if index.is_file() else ""
+    # The label is the family; a legacy '/' id links its '--' file (#525's write_summary).
+    listed = [name for name, stem in _INDEX_ENTRY.findall(text) if summary_stem(name) == stem]
     own = [r for r in registry.records() if r.family_id in families]
     held = dict.fromkeys(r.family_id for r in own)
     names = [*held, "README"]
