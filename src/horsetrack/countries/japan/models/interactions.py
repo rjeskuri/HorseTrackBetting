@@ -87,7 +87,7 @@ ENTITY = "entity"  # a base entity column of the AbilityModel
 DENSE_MAX = 5_000  # a block with more parameters is fitted locally (block-Jacobi)
 MAP_TOL = 1e-8  # the largest step on any parameter when a MAP solve stops
 PROFILE_TOL = 1e-6  # the same, for the MAP at a profile point
-MAX_SWEEPS = 5_000
+MAX_SWEEPS = 1_000  # a solve that needs more fails (and its variant is recorded failed)
 EB_SWITCH = 1e-3  # an alternating fit solves its MAP fully at each update once the residual is here
 TAU_LEVEL = 0.95  # each bound of tau one-sided at this level (D7's convention)
 TAU_ZERO = 1e-5  # the prior sd at which a block counts as removed (tau = 0)
@@ -509,6 +509,105 @@ class _Model:
         loglik, score, info = _evaluate(star, pb)
         return loglik, score[: self.P], info[: self.P, : self.P]
 
+    def _w_jacobian(self, term: _Term) -> sp.csr_matrix:
+        """d u / d W of a low-rank term: U of the row's level at the row's column."""
+        U = self._u_values(term)
+        ok = np.flatnonzero((term.codes >= 0) & (term.ccodes >= 0))
+        return sp.csr_matrix(
+            (U[term.codes[ok]], (ok, term.ccodes[ok])), shape=(self.n, len(term.col_index))
+        )
+
+    def _joint_w_step(self, z: np.ndarray, tol: float, terms: list[_Term]) -> float:
+        """One Gauss-Newton step on the joint parameters and the W of `terms` (non-local
+        low-rank terms in use), each W moved in the tangent of its unit sphere (centred, and
+        orthogonal to W: the objective l(U W) - prec |U|^2 |W|^2 / (2 m) does not change along
+        the scale), halved until the objective does not worsen; then W is renormalised."""
+        prec = self._precision(z)
+        pb, star = self._joint()
+        jac = [self._w_jacobian(t) for t in terms]
+        extra = [c.shape[1] for c in jac]
+        parts = [self._D, *jac] + (
+            [sp.csr_matrix(self._offset()[:, None])] if self.has_local else []
+        )
+        star = np.r_[self.theta, np.zeros(sum(extra)), [1.0] if self.has_local else []]
+        loglik, score, info = _evaluate(star, dataclasses.replace(pb, D=sp.hstack(parts, "csr")))
+        bases = []
+        for t in terms:
+            mc = len(t.col_index)
+            q, _ = np.linalg.qr(np.column_stack([np.ones(mc), t.W, np.eye(mc)]))
+            bases.append(q[:, 2:mc])
+        P = self.P
+        T = scipy.linalg.block_diag(np.eye(P), *bases)
+        n_full = P + sum(extra)
+        H = T.T @ info[:n_full, :n_full] @ T
+        g = T.T @ np.r_[score[:P] - prec * self.theta, score[P:n_full]]
+        lam = []
+        for t in terms:
+            sl = slice(t.offset, t.offset + t.m)
+            lam.append(float(prec[sl][0] * (self.theta[sl] @ self.theta[sl])) / len(t.col_index))
+        tangent = [np.full(b.shape[1], lm) for b, lm in zip(bases, lam, strict=True)]
+        H = H + np.diag(np.concatenate([prec, *tangent]))
+        # the exact Hessian adds -d2u/dU dW times the score: the score summed per (row, column)
+        # cell, so the step is Newton's (quadratic near the MAP); Gauss-Newton's where that is
+        # not positive definite
+        exact = H.copy()
+        _, gu, _ = self._scores(self._D @ self.theta + (self._offset() if self.has_local else 0.0))
+        at = P
+        for t, basis in zip(terms, bases, strict=True):
+            mc = len(t.col_index)
+            ok = (t.codes >= 0) & (t.ccodes >= 0)
+            cell = t.codes[ok] * mc + t.ccodes[ok]
+            G = np.bincount(cell, weights=gu[ok], minlength=t.m * mc).reshape(t.m, mc) @ basis
+            exact[t.offset : t.offset + t.m, at : at + basis.shape[1]] -= G
+            exact[at : at + basis.shape[1], t.offset : t.offset + t.m] -= G.T
+            at += basis.shape[1]
+        try:
+            factor = scipy.linalg.cho_factor(exact, check_finite=False)
+            step = scipy.linalg.cho_solve(factor, g, check_finite=False)
+        except np.linalg.LinAlgError:
+            step = _solve(H, g)
+        d_theta, d_w = step[:P], []
+        at = P
+        for b in bases:
+            d_w.append(b @ step[at : at + b.shape[1]])
+            at += b.shape[1]
+        offset = self._offset() if self.has_local else 0.0
+
+        def objective(theta: np.ndarray, ws: list[np.ndarray]) -> float:
+            u = self._D @ theta + offset
+            pen = prec * theta * theta
+            for t, w in zip(terms, ws, strict=True):
+                ok = (t.codes >= 0) & (t.ccodes >= 0)
+                U = theta[t.offset : t.offset + t.m]
+                u = u + np.where(ok, U[np.maximum(t.codes, 0)] * (w - t.W)[t.ccodes], 0.0)
+                pen[t.offset : t.offset + t.m] *= float(w @ w) / len(t.col_index)
+            return -self._ll(u) + 0.5 * float(pen.sum())
+
+        current = -loglik + 0.5 * float(prec @ (self.theta * self.theta))
+        scale = 1.0
+        for _ in range(HALVINGS):
+            trial = self.theta + scale * d_theta
+            ws = [t.W + scale * d for t, d in zip(terms, d_w, strict=True)]
+            biggest = max(
+                float(np.abs(scale * d_theta).max()),
+                *(
+                    float(np.abs(scale * d).max() * np.abs(trial[t.offset : t.offset + t.m]).max())
+                    for t, d in zip(terms, d_w, strict=True)
+                ),
+            )
+            if objective(trial, ws) <= current or biggest < tol:
+                break
+            scale /= 2.0
+        self.theta = trial
+        for t, w in zip(terms, ws, strict=True):
+            norm_w = float(np.sqrt(np.mean(w * w)))
+            t.W = w / norm_w
+            self.theta[t.offset : t.offset + t.m] *= norm_w
+            t.X = self._lr_cov(t)
+        self._D = self._design(self.X, [(t, t.codes, t.X) for t in self.terms])
+        self._at = None
+        return biggest
+
     def _scores(self, u: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
         """The log-likelihood at u, its score in u and the diagonal of its information in u."""
         st = self.st
@@ -673,13 +772,24 @@ class _Model:
 
     def sweep(self, z: np.ndarray, tol: float, *, fix_w: bool = False) -> float:
         """One step on every part: the joint Newton step, each local term and, unless `fix_w`,
-        each low-rank W. Returns the largest step."""
-        biggest = self._joint_step(self._precision(z), tol) if self.P else 0.0
+        each low-rank W (a non-local term's W in the joint step, once its U is in use). Returns
+        the largest step."""
+        joint_w = []
+        if not fix_w:
+            for t in self.terms:
+                if t.kind == LOW_RANK and not t.local and t.started and len(t.col_index) > 2:
+                    U = self._u_values(t)
+                    if float(U @ U) > 1e-12:
+                        joint_w.append(t)
+        if joint_w:
+            biggest = self._joint_w_step(z, tol, joint_w)
+        else:
+            biggest = self._joint_step(self._precision(z), tol) if self.P else 0.0
         for term in self.terms:
             if term.local:
                 biggest = max(biggest, self._local_step(term, z, tol))
         for term in self.terms:
-            if term.kind == LOW_RANK and not fix_w:
+            if term.kind == LOW_RANK and not fix_w and term not in joint_w:
                 if not term.started:
                     self._init_w(term)
                     biggest = max(biggest, 1.0)
