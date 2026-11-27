@@ -13,7 +13,8 @@ The library (synthetic tests: tests/countries/japan/test_avoidance.py):
 - `trio_as_trifectas`, `quinella_as_exactas`, `same_bracket_to_quinellas`: the same event in
   another pool. `settle` settles tickets against one race's dividend rows.
 - `RaceView(race_id, board, selection)`: `view_at` is the board at t (odds_timeseries through
-  `read_asof`); a view of the final price on history carries LOOK_AHEAD.
+  the model boundary, `feature_boundary.feature_view`, #417); a view of the final price on
+  history carries LOOK_AHEAD.
 - `express_set` (L1): a set priced under the threshold goes to the direct pool, at or above it to
   the ordered synthetic. `compare`: the paired per-race difference over the races both sides
   cover, with #69's `paired_bootstrap`. `neutral_ratio` (L5): the ordered pool's payout rate over
@@ -56,7 +57,13 @@ from horsetrack.core.eval.holdout import _git_sha, is_holdout_day, split_off
 from horsetrack.core.eval.registry import RunRecord, default_registry
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.pricing import clean_odds
-from horsetrack.core.store.asof import load_availability, read_asof
+from horsetrack.core.store.asof import load_availability
+from horsetrack.countries.japan.feature_boundary import (
+    PUBLICATION_PROXY,
+    RESULTS_DERIVED,
+    approximations,
+    feature_view,
+)
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
 from horsetrack.countries.japan.odds_log import POOL_TOTAL
 from horsetrack.countries.japan.studies import calibration
@@ -226,15 +233,17 @@ def settle(tickets: Iterable[Ticket], dividends: pd.DataFrame, race_id: str) -> 
 
 
 def view_at(con, race_id: str, at_utc: datetime, *, rules, selection: str = BOARD_AT_T) -> RaceView:
-    """The board at t: odds_timeseries rows available at `at_utc` under `rules` (`read_asof`:
-    no dividend, refund or final-capture column), `race_id`'s only, the latest snapshot per
-    (pool, combination) among them."""
+    """The board at t: odds_timeseries rows available at `at_utc` under `rules`, read through the
+    model boundary (`feature_boundary.feature_view`: the identifiers BOARD_KEYS and the approved
+    features BOARD_FEATURES only, so no label and no unclassified column), `race_id`'s only, the
+    latest snapshot per (pool, combination) among them."""
     if "look-ahead" in selection:
         raise ValueError(f"the board at t is not look-ahead: {selection!r}")
-    rows = read_asof(con, BOARD_TABLE, at_utc, rules=rules)
+    rows = feature_view(
+        con, BOARD_TABLE, at_utc, features=BOARD_FEATURES, keys=BOARD_KEYS, rules=rules
+    )
     rows = rows.loc[rows["race_id"].eq(race_id)]
-    order = [c for c in ("snapshot_utc", "fetched_utc") if c in rows.columns]
-    rows = rows.sort_values(order, kind="stable") if order else rows
+    rows = rows.sort_values(["snapshot_utc", "fetched_utc"], kind="stable")
     latest = rows.drop_duplicates(["pool", "combination"], keep="last").reset_index(drop=True)
     return RaceView(race_id, latest, selection)
 
@@ -423,6 +432,18 @@ BOARD_COLUMNS = [
     "fetched_utc",
     "post_utc",
 ]
+# The board through the model boundary (#417): its identifiers, returned as they are, and the
+# approved features at t it reads (feature_boundary.approved_features of odds_timeseries).
+BOARD_KEYS = ["race_id", "pool", "combination", "snapshot_utc", "fetched_utc", "post_utc"]
+BOARD_FEATURES = ["odds"]
+# The card values that pick the races and the starters. They are race and starter filters, not
+# features, read from the store's card (read_store_table) rather than through feature_view, so the
+# boundary does not approve them; the report names the approximation each carries
+# (feature_boundary.approximations).
+CARD_FILTERS = (
+    ("runners", "is_scratched", "the starters: runners not is_scratched"),
+    ("races", "status", "the races: status 'run'"),
+)
 
 
 # --------------------------------------------------------------------------- inputs and spec
@@ -1282,6 +1303,28 @@ SECTIONS = (
 )
 
 
+_APPROXIMATION_NOTES = {
+    RESULTS_DERIVED: "taken from the results page, in the views from 00:00 JST of the race date, "
+    "so a race-day scratch or abandonment shows before it happened (docs/specs/as-of.md, "
+    "'Accepted leak: results-derived card columns')",
+    PUBLICATION_PROXY: "in the view from an anchor + offset standing in for its unrecorded "
+    "publication time (docs/specs/as-of.md, 'Gated columns')",
+}
+
+
+def _approximation_lines() -> list[str]:
+    """One line per column the study reads that carries a documented approximation
+    (feature_boundary.approximations), with its table and its tags; the board's features too."""
+    used = [*CARD_FILTERS, *((BOARD_TABLE, c, "the board at t") for c in BOARD_FEATURES)]
+    lines = []
+    for table, column, use in used:
+        tags = sorted(approximations(table, [column])[column])
+        if tags:
+            notes = "; ".join(_APPROXIMATION_NOTES[tag] for tag in tags)
+            lines.append(f"- `{table}.{column}` ({use}): {', '.join(tags)}: {notes}")
+    return lines or ["- none: every column the study reads carries no documented approximation"]
+
+
 def render_report(study: Study, spec: dict, about: dict) -> str:
     """The full report: aggregate tables only (the dropped races go to the companion CSV)."""
     lines = [
@@ -1301,6 +1344,10 @@ def render_report(study: Study, spec: dict, about: dict) -> str:
         "## Owner decisions used",
         "",
         *(f"- {key}: {value}" for key, value in spec["decisions"].items()),
+        "",
+        "## Documented approximations",
+        "",
+        *_approximation_lines(),
         "",
         "## Data",
         "",
