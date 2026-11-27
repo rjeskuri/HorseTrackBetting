@@ -7,13 +7,16 @@ whole clusters, and the result depends on the per-cluster sums only.
 
 The rules tested must be exactly the family's non-failed variants in the run registry, and the
 result reports the registry family size, failed variants included, so a family cannot be tested
-on a hand-picked subset of what was tried.
+on a hand-picked subset of what was tried. The one exception is ``reference_variants``: variants
+the family's frozen spec names as references (a re-run of an earlier result the rules are compared
+with, not a rule of the test). Each must be recorded in the family, and it leaves the test only.
 
 The cluster unit (through ``clusters``), ``block_size``, ``n_boot`` and StepM's ``level`` are owner
 decisions (08 §5.2, §9.6, §9.9) and have no defaults: callers pass them from the country's
 evaluation config.
 """
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from numbers import Integral, Real
 
@@ -107,12 +110,25 @@ def cluster_losses(losses: pd.DataFrame, clusters: pd.Series, order: pd.Series) 
     return pd.DataFrame(sums, index=labels, columns=losses.columns)
 
 
-def _check_family(losses: pd.DataFrame, registry: Registry, family_id: str) -> int:
-    """Refuse loss columns that are not the family's non-failed variants; return the family size."""
+def _check_family(
+    losses: pd.DataFrame,
+    registry: Registry,
+    family_id: str,
+    reference_variants: Collection[str] = (),
+) -> int:
+    """Refuse loss columns that are not the family's non-failed variants less its reference
+    variants (each recorded in the family); return the family size."""
     columns = list(losses.columns)
     if len(set(columns)) != len(columns):
         raise FamilySizeMismatch("losses have duplicate columns")
-    expected = {r.variant for r in registry.records(family_id) if r.status != "failed"}
+    records = registry.records(family_id)
+    reference = set(reference_variants)
+    unknown = sorted(reference - {r.variant for r in records}, key=str)
+    if unknown:
+        raise FamilySizeMismatch(
+            f"reference variants {unknown} are not recorded in family {family_id!r}"
+        )
+    expected = {r.variant for r in records if r.status != "failed" and r.variant not in reference}
     if not expected:
         raise FamilySizeMismatch(f"family {family_id!r} has no non-failed variant in the registry")
     if set(columns) != expected:
@@ -161,6 +177,7 @@ def spa(
     seed: int,
     registry: Registry,
     family_id: str,
+    reference_variants: Collection[str] = (),
 ) -> SPAResult:
     """Hansen's SPA test of "no rule in the family beats the benchmark", over whole clusters.
 
@@ -168,9 +185,10 @@ def spa(
     Both are summed per cluster (``cluster_losses``) and arch's stationary bootstrap, with mean
     block length ``block_size`` clusters and ``n_boot`` replicates seeded by ``seed``, runs on
     that series. The loss columns must be exactly ``family_id``'s non-failed variants in
-    ``registry`` (else ``FamilySizeMismatch``).
+    ``registry`` less ``reference_variants``, each recorded in the family (else
+    ``FamilySizeMismatch``).
     """
-    family_size = _check_family(losses, registry, family_id)
+    family_size = _check_family(losses, registry, family_id, reference_variants)
     bench, rules = _cluster_series(benchmark, losses, clusters, order)
     test = SPA(
         bench,
@@ -204,12 +222,13 @@ def stepm(
     level: float,
     registry: Registry,
     family_id: str,
+    reference_variants: Collection[str] = (),
 ) -> StepMResult:
     """Romano-Wolf StepM: the rules that beat the benchmark at family-wise error ``level``.
 
     The inputs, the cluster series and the registry check are as for ``spa``.
     """
-    family_size = _check_family(losses, registry, family_id)
+    family_size = _check_family(losses, registry, family_id, reference_variants)
     bench, rules = _cluster_series(benchmark, losses, clusters, order)
     test = StepM(
         bench,
