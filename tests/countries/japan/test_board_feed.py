@@ -482,6 +482,86 @@ def test_t2_reference_and_the_t20_to_t2_move():
         assert (got["t2_odds"], got["move_t20_t2_pct"]) == want, combination
 
 
+def test_t10_and_t5_references():
+    """t10_odds / t5_odds (#499): picked exactly as t20_odds is, at post - 10 / post - 5 min: the
+    latest row at or before it (null when that row is unpriced, while now is before it, and
+    without a post time), on the low figure of a ranged pool, in every pool of the board."""
+    r11, r12, r13 = rid("TOK", 11), rid("TOK", 12), rid("TOK", 13)
+    # race 11: post 15:01, T-10 14:51, T-5 14:56; race 12: post 14:31, T-10 14:21, T-5 14:26
+    write_sidecar("TOK", {11: jst(15, 1).astimezone(UTC), 12: jst(14, 31).astimezone(UTC)})
+    seven = [
+        (jst(7, 5), 4.1),
+        (jst(14, 40), 3.6),
+        (jst(14, 50), 3.4),
+        (jst(14, 51), 3.3),  # exactly post - 10 in race 11: used
+        (jst(14, 53), 3.1),
+        (jst(14, 56), 2.9),  # exactly post - 5 in race 11: used
+        (jst(14, 56, 30), 2.8),  # after post - 5: not used
+        (jst(15, 5), 2.7),  # after the post
+    ]
+    rows = []
+    for race in (r11, r12, r13):  # the same prices, three post times (race 13 has none)
+        rows += [price(race, "WIN", "7", odds, at) for at, odds in seven]
+    rows += [
+        price(r12, "WIN", "7", 4.4, jst(14, 24)),  # race 12: between its T-10 and T-5
+        price(r11, "WIN", "3", 6.0, jst(14, 45)),
+        price(r11, "WIN", "3", 6.5, jst(14, 51, 1)),  # one second after post - 10
+        price(r11, "WIN", "3", 7.0, jst(14, 55)),
+        price(r11, "WIN", "3", 7.7, jst(14, 58)),
+        price(r11, "WIN", "5", 10.0, jst(13, 0)),
+        price(r11, "WIN", "5", None, jst(14, 50)),  # scratched by T-10: an unpriced reference
+        price(r11, "WIN", "9", 11.0, jst(14, 52)),  # first seen after post - 10
+        price(r11, "WIN", "9", 12.5, jst(14, 59)),
+        price(r11, "PLACE", "7", 1.5, jst(14, 40), odds_hi=2.0),
+        price(r11, "PLACE", "7", 1.3, jst(14, 51), odds_hi=2.4),  # the low figure
+        price(r11, "PLACE", "7", 1.2, jst(14, 55, 59), odds_hi=2.6),
+        price(r11, "QUINELLA", "3,7", 12.0, jst(14, 30)),
+        price(r11, "QUINELLA", "3,7", 10.5, jst(14, 54)),
+        price(r11, "QUINELLA_PLACE", "3,7", 4.1, jst(14, 49), odds_hi=5.0),
+        price(r11, "QUINELLA_PLACE", "3,7", 3.8, jst(14, 57), odds_hi=4.6),
+    ]
+    write_log("TOK", rows)
+
+    board = build(jst(15, 10))
+    race11, race12, race13 = (race_of(board, "TOK", no) for no in (11, 12, 13))
+    # (pool, combination): (t20_odds, t10_odds, t5_odds)
+    expected = {
+        ("WIN", "7"): (3.6, 3.3, 2.9),
+        ("WIN", "3"): (None, 6.0, 7.0),
+        ("WIN", "5"): (10.0, None, None),
+        ("WIN", "9"): (None, None, 11.0),
+        ("PLACE", "7"): (1.5, 1.3, 1.2),
+        ("QUINELLA", "3,7"): (12.0, 12.0, 10.5),
+        ("QUINELLA_PLACE", "3,7"): (None, 4.1, 4.1),
+    }
+    for (pool, combination), want in expected.items():
+        got = line(race11, pool, combination)
+        assert (got["t20_odds"], got["t10_odds"], got["t5_odds"]) == want, (pool, combination)
+    # race 12's earlier post: T-10 is the 07:05 row, T-5 the 14:24 row
+    got = line(race12, "WIN", "7")
+    assert (got["t10_odds"], got["t5_odds"]) == (4.1, 4.4)
+    # no post time: no references
+    got = line(race13, "WIN", "7")
+    assert (got["t10_odds"], got["t5_odds"]) == (None, None)
+    # the T-2 reference and the current odds are as before
+    assert (line(race11, "WIN", "7")["t2_odds"], line(race11, "WIN", "7")["odds"]) == (2.8, 2.7)
+    json.dumps(board)
+
+    # now before post - 10: neither; at post - 10 exactly: T-10 only; at post - 5: both
+    # (prices captured after now are not on the board)
+    for now, want in (
+        (jst(14, 50, 30), {"7": (None, None), "3": (None, None)}),
+        (jst(14, 51), {"7": (3.3, None), "3": (6.0, None)}),
+        (jst(14, 55, 59), {"7": (3.3, None), "3": (6.0, None)}),
+        (jst(14, 56), {"7": (3.3, 2.9), "3": (6.0, 7.0)}),
+    ):
+        race_now = race_of(build(now), "TOK", 11)
+        for combination, refs in want.items():
+            got = line(race_now, "WIN", combination)
+            assert (got["t10_odds"], got["t5_odds"]) == refs, (now, combination)
+            assert got["t20_odds"] is not None or combination == "3", (now, combination)
+
+
 # ---------------------------------------------------------------- pools
 
 
