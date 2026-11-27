@@ -243,10 +243,15 @@ class SegmentROI:
             raise ValueError(f"no bets in segment {segment}")
         return rows
 
-    def omega_draws(self, segment: dict[str, str], *, band: str | None = None) -> np.ndarray:
+    def omega_draws(
+        self, segment: dict[str, str], *, band: str | None = None, rate_weighted: bool = False
+    ) -> np.ndarray:
         """Posterior draws of the segment's omega, its band effects included: per draw, the mean
         over the segment's bets (a grouped row counts its bets) of each bet's omega. An empty
-        `segment` is every bet; `band` keeps only the bets of that odds band."""
+        `segment` is every bet; `band` keeps only the bets of that odds band. With
+        `rate_weighted` each bet weighs by its payout rate 1 - takeout, so that a draw times the
+        bets' mean payout rate is their mean expected return per unit stake, mean(omega_i *
+        (1 - t_i)), even when the takeouts differ (a boosted race beside ordinary ones)."""
         rows = np.ones(len(self._cell), dtype=bool)
         if segment:
             rows &= self._rows(segment)
@@ -257,7 +262,8 @@ class SegmentROI:
         if not rows.any():
             raise ValueError(f"no bets in segment {segment} and band {band!r}")
         cells, local = np.unique(self._cell[rows], return_inverse=True)
-        weight = np.bincount(local.ravel(), weights=self._count[rows])
+        bets = self._count[rows] * ((1 - self._takeout[rows]) if rate_weighted else 1.0)
+        weight = np.bincount(local.ravel(), weights=bets)
         weight /= weight.sum()
         design = self._design[cells]
         block = max(1, _BLOCK // len(cells))
