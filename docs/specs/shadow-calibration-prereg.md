@@ -68,8 +68,8 @@ with its point slope when one exists; a variant with no input is recorded with i
 ## Options shadowed
 
 - **The leaderboard's top options: K = 0.** At the freeze no row of the Japan leaderboard
-  (`rows_from_registry` on the japan registry) has a measured return, so no option has a
-  development rank to shadow by. A ranked option enters through a new family version that names
+  (`rows_from_registry` on the japan registry, read 2026-11-28: 0 of 5,183 rows) has a measured
+  return, so no option has a development rank to shadow by. A ranked option enters through a new family version that names
   it; every other option keeps its row.
 - **The pick rule** (owner, 2026-11-24), option `japan-shadow-calibration-v1/pick-rule-q05-t2`:
   a WIN record at T-2 whose `value_q05` is above 1 and whose own `flags` are empty (the avoid
