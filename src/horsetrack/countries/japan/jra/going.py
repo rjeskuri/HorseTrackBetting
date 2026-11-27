@@ -175,8 +175,13 @@ def _rail_setting(doc: BeautifulSoup) -> str | None:
 def parse_going_page(body: bytes, *, fetched_utc: datetime) -> pd.DataFrame:
     """One row per surface the page prints (columns COLUMNS). Raises ValueError for a naive
     `fetched_utc` and for a page without a date line, a known venue or a 発表 time."""
+    return parse_going_html(body.decode("cp932", errors="replace"), fetched_utc=fetched_utc)
+
+
+def parse_going_html(html: str, *, fetched_utc: datetime) -> pd.DataFrame:
+    """`parse_going_page` on the page's text, already decoded (ticket #90's `parse_baba_page`)."""
     fetched = _require_aware(fetched_utc, "fetched_utc")
-    doc = soup(body)
+    doc = BeautifulSoup(html, "lxml")
     race_date, venue = _meeting(doc)
     published = _published(doc, race_date)
     goings = _goings(doc)

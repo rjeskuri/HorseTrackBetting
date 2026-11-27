@@ -56,6 +56,14 @@ cross it. Every bet of a cell shares its omega, so in every draw that omega is b
 ``min O_j / (1 - t_j)`` over the cell's bets: a bet returns at most ``(1 - t_i)`` times its cell's
 bound, which is at most its odds, and bets at odds 1.0 and 1.2 at one takeout in one cell never
 beat their stake.
+
+Grouped input (#429). With ``count_col`` a row stands for ``count`` identical bets (same cell,
+odds and takeout) of which ``won`` won, ``0 <= won <= count``. The likelihood is a sum over bets
+and already aggregates them by cell and implied probability, so a grouped row fits exactly as its
+bets one row each. Every query weighs each row by its count: the means over the segment's bets
+behind ``expected_return``, ``p_beats_takeout`` and ``omega_mean``, and ``predictive_roi``'s mix
+of future bets. A cell's bound is a maximum over its bets' implied probabilities, the same
+whichever way they are grouped.
 """
 
 from __future__ import annotations
@@ -99,14 +107,27 @@ class _BoundaryMode(RuntimeError):
 
 
 class _Likelihood:
-    """The Bernoulli log-likelihood aggregated by cell and implied probability."""
+    """The Bernoulli log-likelihood aggregated by cell and implied probability; a row is
+    `count` bets of which `won` won."""
 
-    def __init__(self, cell: np.ndarray, q: np.ndarray, won: np.ndarray, design: np.ndarray):
+    def __init__(
+        self,
+        cell: np.ndarray,
+        q: np.ndarray,
+        won: np.ndarray,
+        count: np.ndarray,
+        design: np.ndarray,
+    ):
         self.design = design
         n_cells = design.shape[0]
         self.wins = np.bincount(cell, weights=won, minlength=n_cells).astype(float)
-        lose = won == 0
-        losers = pd.DataFrame({"cell": cell[lose], "q": q[lose]}).groupby(["cell", "q"]).size()
+        lost = count - won
+        lose = lost > 0
+        losers = (
+            pd.DataFrame({"cell": cell[lose], "q": q[lose], "n": lost[lose]})
+            .groupby(["cell", "q"])["n"]
+            .sum()
+        )
         self.lose_cell = losers.index.get_level_values("cell").to_numpy()
         self.lose_q = losers.index.get_level_values("q").to_numpy()
         self.lose_n = losers.to_numpy(dtype=float)
@@ -193,6 +214,7 @@ class SegmentROI:
         codes: np.ndarray,
         odds: np.ndarray,
         takeout: np.ndarray,
+        count: np.ndarray,
         tau: np.ndarray,
         tau_ess: float,
         tau_rejected: int,
@@ -209,6 +231,7 @@ class SegmentROI:
         self._codes = codes
         self._odds = odds
         self._takeout = takeout
+        self._count = count  # the bets each row stands for (all 1 without count_col)
         self._eta_max = eta_max
         self._seed = seed
         # Posterior means of the band effects (ln omega) and of each column's tau, the effective
@@ -251,9 +274,14 @@ class SegmentROI:
         group's index into them, its odds, its takeout and its share of the bets."""
         rows = self._rows(segment)
         mix = pd.DataFrame(
-            {"cell": self._cell[rows], "odds": self._odds[rows], "takeout": self._takeout[rows]}
+            {
+                "cell": self._cell[rows],
+                "odds": self._odds[rows],
+                "takeout": self._takeout[rows],
+                "n": self._count[rows],
+            }
         )
-        mix = mix.groupby(["cell", "odds", "takeout"]).size().reset_index(name="n")
+        mix = mix.groupby(["cell", "odds", "takeout"])["n"].sum().reset_index()
         cells, local = np.unique(mix["cell"].to_numpy(), return_inverse=True)
         freq = mix["n"].to_numpy() / mix["n"].sum()
         return cells, local.ravel(), mix["odds"].to_numpy(), mix["takeout"].to_numpy(), freq
@@ -316,17 +344,22 @@ class SegmentROI:
         return Interval(float(low), float(high), INTERVAL_LEVEL)
 
 
-def _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws) -> None:
+def _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws, count_col) -> None:
     if not isinstance(bets, pd.DataFrame) or bets.empty:
         raise ValueError("bets must be a non-empty DataFrame")
     if not segment_cols or len(set(segment_cols)) != len(segment_cols):
         raise ValueError("segment_cols must name one or more distinct columns")
     if {odds_band_col, takeout_col} & set(segment_cols):
         raise ValueError("the band and takeout columns cannot also be segment columns")
+    reserved = {"odds", "won", odds_band_col, takeout_col, *segment_cols}
+    if count_col is not None and count_col in reserved:
+        raise ValueError(f"the count column {count_col!r} is already used as {sorted(reserved)}")
     for name, value, low in (("seed", seed, 0), ("draws", draws, 1)):
         if not isinstance(value, int) or isinstance(value, bool) or value < low:
             raise ValueError(f"{name} must be an integer of at least {low}, not {value!r}")
     needed = ["odds", "won", odds_band_col, takeout_col, *segment_cols]
+    if count_col is not None:
+        needed.append(count_col)
     missing = [c for c in needed if c not in bets.columns]
     if missing:
         raise ValueError(f"bets lacks column(s): {', '.join(missing)}")
@@ -340,8 +373,16 @@ def _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws) -> No
         raise ValueError(f"{takeout_col} must be in [0, 1)")
     if not ((1 - takeout) / odds < P_MAX).all():
         raise ValueError(f"(1 - {takeout_col}) / odds must be below 1 (odds 1 needs a takeout)")
-    if not bets["won"].isin([0, 1]).all():
-        raise ValueError("won must be 0 or 1")
+    if count_col is None:
+        if not bets["won"].isin([0, 1]).all():
+            raise ValueError("won must be 0 or 1")
+        return
+    count = pd.to_numeric(bets[count_col], errors="coerce").to_numpy(dtype=float)
+    won = pd.to_numeric(bets["won"], errors="coerce").to_numpy(dtype=float)
+    if not (np.isfinite(count) & (count == np.round(count)) & (count >= 1)).all():
+        raise ValueError(f"{count_col} must be a positive integer")
+    if not (np.isfinite(won) & (won == np.round(won)) & (won >= 0) & (won <= count)).all():
+        raise ValueError(f"won must be an integer from 0 to {count_col}")
 
 
 def fit_segment_roi(
@@ -352,13 +393,16 @@ def fit_segment_roi(
     takeout_col: str,
     seed: int,
     draws: int,
+    count_col: str | None = None,
 ) -> SegmentROI:
-    """Fit the hierarchical omega model (module docstring) to one row per bet."""
+    """Fit the hierarchical omega model (module docstring) to one row per bet, or with
+    `count_col` to rows of `count` identical bets of which `won` won."""
     segment_cols = list(segment_cols)
-    _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws)
+    _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws, count_col)
     odds = bets["odds"].to_numpy(dtype=float)
     takeout = bets[takeout_col].to_numpy(dtype=float)
     won = bets["won"].to_numpy(dtype=int)
+    row_bets = np.ones(len(bets), dtype=int) if count_col is None else bets[count_col].to_numpy(int)
     band, band_levels = pd.factorize(bets[odds_band_col].astype(str), sort=True)
     codes, levels = [], []
     for col in segment_cols:
@@ -373,7 +417,7 @@ def fit_segment_roi(
     design = np.zeros((len(keys), offsets[-1]))
     for k in range(keys.shape[1]):
         design[np.arange(len(keys)), offsets[k] + keys[:, k]] = 1.0
-    lik = _Likelihood(cell, (1 - takeout) / odds, won, design)
+    lik = _Likelihood(cell, (1 - takeout) / odds, won, row_bets, design)
 
     group = np.repeat(np.arange(len(sizes)), sizes)  # 0 for mu, c + 1 for column c
 
@@ -458,6 +502,7 @@ def fit_segment_roi(
         codes=codes,
         odds=odds,
         takeout=takeout,
+        count=row_bets,
         tau=weights @ np.exp(samples),
         tau_ess=float(1 / (weights**2).sum()),
         tau_rejected=int((~np.isfinite(log_w)).sum()),

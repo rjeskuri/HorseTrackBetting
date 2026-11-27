@@ -21,7 +21,8 @@ log is exactly the board over its tier-1 rows, and a day's trifecta boards are n
                     pools: {POOL: {investment,
                                    rows: [{combination, odds, odds_hi, status,
                                            morning_odds, move_morning_pct,
-                                           t20_odds, move_t20_pct}]}}}]}]}
+                                           t20_odds, move_t20_pct,
+                                           t2_odds, move_t20_t2_pct}]}}}]}]}
 ```
 
 - The feed is JSON-ready: `race_date` is ISO date text, every timestamp is ISO-8601 UTC text,
@@ -34,7 +35,8 @@ log is exactly the board over its tier-1 rows, and a day's trifecta boards are n
 - `pools`: every pool the race's rows name, sorted by name. `investment` is the `investment` of
   the latest `__pool__` row of that pool that carries one, else null; `__pool__` is never a row.
 - `rows`: one per logged `combination` text, in numeric order (`'2'` before `'10'`, `'1,7'` before
-  `'3,7'`). `odds` and `odds_hi` are the current row's (`odds_hi` null for single-figure pools),
+  `'3,7'`); the board and shadow pages redraw them favourite first (#498), the feed's order
+  stays. `odds` and `odds_hi` are the current row's (`odds_hi` null for single-figure pools),
   `status` its `status_raw` as logged.
 - No key names a probability, an expected value, a fair price, a bet or a stake: the feed shows
   prices and their moves only.
@@ -57,8 +59,14 @@ that moment. `generated_utc` is `now()`.
 - T-20 reference (`t20_odds`): the latest row of the combination captured at or before
   post - 20 min, when that row is priced. Null while `now` is before post - 20 min, without a post
   time, and when the combination has no row by then.
+- T-2 reference (`t2_odds`, ticket #498): picked exactly as `t20_odds` is, at post - 2 min: the
+  latest row captured at or before post - 2 min, when that row is priced; null while `now` is
+  before post - 2 min, without a post time, and when the combination has no row by then.
 - Move: `current / reference - 1`, in percent rounded to one decimal, on `odds` (the low figure
   of a ranged pool such as PLACE or QUINELLA_PLACE). Null when either figure is missing.
+- T-20 -> T-2 move (`move_t20_t2_pct`): `t2_odds / t20_odds - 1`, rounded the same way; null
+  without both references. The shadow page shows it in its T-20→T-2 column; before the T-2
+  capture exists it is null and the page shows '-'.
 
 ## Scratches
 
@@ -95,7 +103,8 @@ cache=None) -> dict`
  races: [{race_id, venue, race_no, post_utc, minutes_to_post, tau_bucket_min, board_capture_utc,
           pools: {WIN:            {"7":   {value_mean, value_q05, value_q95, flags}},
                   PLACE:          {"7":   {value_at_low, value_at_high, flags}},
-                  QUINELLA_PLACE: {"3,7": {value_at_low, value_at_high, flags}}}}]}
+                  QUINELLA_PLACE: {"3,7": {value_at_low, value_at_high, flags}}}}],
+ win5: {race_date, capture_utc, investment, carryover, pool_ev} | null}
 ```
 
 - Input: the same logs as the plain feed, read on with `odds_log.LogTail`, and the post times of
@@ -116,6 +125,14 @@ cache=None) -> dict`
   none. Every WIN runner, PLACE runner and Wide pair on the board has an entry.
 - `models`: the ids of the fits in use, or null when `load_shadow_models` found none; then every
   value is null and the flags still show.
+- `win5` (ticket #135): on a WIN5 day, `research.win5.live_pool_ev` over the log's WIN5 `__pool__`
+  rows (race_id `jra:<date>:WIN5`, docs/specs/odds-log.md) available as of `now()`: `capture_utc`
+  is the latest such row's `snapshot_utc`, `investment` and `carryover` the latest figures any such
+  row carries (yen), and `pool_ev` = `(investment * (1 - 0.30) + carryover) / investment`, the
+  whole pool's gross return per 1 yen with the carryover (a carryover not printed counts as 0 and
+  `carryover` stays null; null without an `investment`). Null on a day without WIN5 rows. WIN5 rows
+  never become a race in `races`. The shadow page draws it as one line (`data-win5`) above the
+  board; the plain feed and board page stay free of it.
 - No key names a stake, a bet, Kelly, an amount or a wager.
 
 Recompute: `cache` is a mapping the caller keeps between builds (the server keeps one). A race's

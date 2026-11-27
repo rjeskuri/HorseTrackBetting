@@ -494,7 +494,12 @@ def assert_summary_matches(summary, site: FakeSite, store: FakeStore) -> None:
 
 def test_logger_yaml_ships_the_outline_values():
     shipped = load_country_yaml("japan", "logger")
-    for key, value in CONFIG.items():
+    # #358: bracket quinella is captured every round with tier 1, on a page of its own
+    want = config(
+        pools=["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE", "BRACKET_QUINELLA"],
+        requests={"navigation": 2, "per_race": 4},
+    )
+    for key, value in want.items():
         assert shipped.get(key) == value, f"logger.yaml {key}: {shipped.get(key)!r}, not {value!r}"
 
 
@@ -768,8 +773,11 @@ def test_no_venue_is_captured_faster_than_the_20_s_floor(tmp_path):
 def test_three_venues_are_logged_until_after_their_last_races(tmp_path):
     meetings = staggered()
     clock = Clock(jst(6, 30))
-    site = FakeSite(clock, meetings, rps=1.0)
     shipped = copy.deepcopy(load_country_yaml("japan", "logger"))
+    # The race date's schedule: the day-before window (#358) has its own tests
+    # (test_day_before_schedule.py), and this fake site has no sales_open().
+    shipped.pop("day_before", None)
+    site = FakeSite(clock, meetings, rps=1.0, per_race=shipped["requests"]["per_race"])
     summary, store = run(site, clock, tmp_path / "blocked", cfg=shipped)
 
     ends = {v: max(p.values()) + timedelta(minutes=10) for v, p in meetings.items()}
@@ -781,7 +789,7 @@ def test_three_venues_are_logged_until_after_their_last_races(tmp_path):
         vs = summary.venues[venue]
         assert (vs.failures, vs.wrong_meeting) == (0, 0), venue
         assert vs.stopped not in ("circuit_open", "wrong_meeting"), (venue, vs.stopped)
-        assert vs.longest_cycle_s >= 20 - EPS, f"{venue}: a 38-request cycle takes 2 rounds"
+        assert vs.longest_cycle_s >= 20 - EPS, f"{venue}: a 50-request cycle takes 3 rounds"
         reads = [c for c in site.calls if c.kind == "post_times" and c.venue == venue]
         assert 1 <= len(reads) <= secs(end - jst(7, 0)) / 300 + 2, f"{venue}: {len(reads)} reads"
         assert (venue, meetings[venue]) in store.post_times, f"{venue}: post times not stored"
@@ -789,7 +797,7 @@ def test_three_venues_are_logged_until_after_their_last_races(tmp_path):
     last_post = max(meetings["FKS"].values())
     after_hot = [c for c in caps(site, "FKS", ok=True) if last_post + timedelta(minutes=5) < c.t]
     assert after_hot, "FKS not captured between its last post + 5 and + 10 minutes"
-    # three venues with one hot race each cost 15 of a round's 20 requests: every round has them
+    # three venues with one hot race each cost 18 of a round's 20 requests: every round has them
     assert_hot_races_followed(site, shipped, meetings, every=20)
     assert_summary_matches(summary, site, store)
     assert clock.t <= max(ends.values()) + timedelta(seconds=300), f"returned at {hhmm(clock.t)}"

@@ -30,6 +30,9 @@ Contract pinned here (the coder implements what these tests call):
   that omega is at most ``min O_j / (1 - t_j)`` over the cell's bets, and a bet returns at most
   ``(1 - t_i)`` times its cell's bound. Bets at odds 1.0 and 1.2, both at takeout 0.2, in one
   cell return at most 1 each: a draw cannot pay the 1.0 bet its stake and the 1.2 bet more.
+- Grouped input (#429): ``fit_segment_roi(..., count_col='count')`` reads a row as ``count``
+  identical bets of which ``won`` won (``0 <= won <= count``, else ValueError). It fits, queries
+  and predicts exactly as the same bets one row each; without ``count_col`` nothing changes.
 
 Every dataset is synthetic and generated here with a seeded numpy RNG. Each test first asserts the
 premise it relies on (computed from the data, independently of the code under test), so the
@@ -592,3 +595,139 @@ def test_a_cells_shared_omega_is_bounded_by_its_likeliest_bet(case):
     )
     er = fit.expected_return(query)
     assert bound < er.high <= cell_bound(split) * (1 + 1e-12), (er, bound, cell_bound(split))
+
+
+# --- grouped bets: one row stands for `count` identical bets with `won` wins (#429) --------------
+
+GROUP_KEYS = ["segment", "band", "odds", "takeout"]
+
+
+def group_bets(bets: pd.DataFrame) -> pd.DataFrame:
+    """One row per (segment, band, odds, takeout) with its bets' count and wins, rows shuffled."""
+    grouped = bets.groupby(GROUP_KEYS, as_index=False).agg(
+        count=("won", "size"), won=("won", "sum")
+    )
+    return grouped.sample(frac=1.0, random_state=429).reset_index(drop=True)
+
+
+def fit_grouped(grouped: pd.DataFrame, seed: int) -> SegmentROI:
+    return fit_segment_roi(
+        grouped,
+        segment_cols=["segment"],
+        odds_band_col="band",
+        takeout_col="takeout",
+        seed=seed,
+        draws=DRAWS,
+        count_col="count",
+    )
+
+
+def test_grouped_bets_fit_like_the_same_bets_one_row_each(planted):
+    """DoD: the planted-segment bets grouped by (segment, band, odds, takeout) with counts give,
+    at the same seed, the per-bet fit's posterior means (within 1e-6) and P(omega beats takeout)
+    (within 0.01) for every segment, and the same band effects.
+
+    The likelihood is a sum over bets, so a binomial row is exactly its Bernoullis: the
+    conditional modes, the tau posterior and the importance weights do not change, which is why
+    the posterior mean (a weighted mean of modes) is pinned this tightly; P(beats takeout) comes
+    from the posterior draws and is pinned to 0.01.
+    """
+    bets, per_bet = planted
+    grouped = group_bets(bets)
+
+    # Premise: the grouping is real (far fewer rows, rows with several wins) and exact.
+    assert len(grouped) < len(bets) / 4
+    assert grouped["won"].max() > 1
+    assert grouped["count"].sum() == len(bets)
+    assert grouped["won"].sum() == bets["won"].sum()
+
+    fit = fit_grouped(grouped, seed=1)
+    for s in SEGMENTS:
+        assert fit.posterior_mean(seg(s)) == pytest.approx(
+            per_bet.posterior_mean(seg(s)), abs=1e-6
+        ), s
+        assert abs(fit.p_beats_takeout(seg(s)) - per_bet.p_beats_takeout(seg(s))) <= 0.01, s
+    for band, effect in per_bet.band_effects.items():
+        assert fit.band_effects[band] == pytest.approx(effect, abs=1e-6), band
+    # The verdict of the per-bet fit survives grouping.
+    assert max(SEGMENTS, key=lambda s: fit.posterior_mean(seg(s))) == PLANTED
+
+
+def test_grouped_bets_weigh_each_row_by_its_count():
+    """A row stands for `count` bets everywhere, not only in the likelihood: P(beats takeout) and
+    the predictive ROI average over bets, not over grouped rows.
+
+    Built so that the two weightings disagree: favourites (omega 1.5, expected return 1.2) are 90%
+    of the bets on a few odds values, longshots (omega 0.5, return 0.4) 10% of the bets spread over
+    many odds values. Per bet the mean expected return is above 1; per grouped row it is far
+    below. The grouped fit must match the per-bet fit.
+    """
+    rng = np.random.default_rng(4291)
+    omega = {"fav": 1.5, "mid": 1.0, "long": 0.5}
+    frames = [
+        make_bets(rng, 2000, omega_by_band=omega, band_probs=(0.9, 0.0, 0.1), labels=seg(s))
+        for s in ("g0", "g1", "g2", "g3", "g4", "g5")
+    ]
+    bets = pd.concat(frames, ignore_index=True)
+    grouped = group_bets(bets)
+
+    # Premise: weighting by bets and weighting by rows put the true mean return on either side of 1.
+    def mean_return(frame: pd.DataFrame, weight: np.ndarray) -> float:
+        ret = frame["band"].map(omega).to_numpy() * (1 - frame["takeout"].to_numpy())
+        return float((ret * weight).sum() / weight.sum())
+
+    g0 = grouped[grouped["segment"] == "g0"]
+    assert mean_return(g0, g0["count"].to_numpy(dtype=float)) > 1.05
+    assert mean_return(g0, np.ones(len(g0))) < 0.8
+    assert grouped["won"].max() > 1
+
+    per_bet = fit_segment_roi(
+        bets,
+        segment_cols=["segment"],
+        odds_band_col="band",
+        takeout_col="takeout",
+        seed=7,
+        draws=DRAWS,
+    )
+    fit = fit_grouped(grouped, seed=7)
+    for s in ("g0", "g1", "g2", "g3", "g4", "g5"):
+        assert fit.posterior_mean(seg(s)) == pytest.approx(
+            per_bet.posterior_mean(seg(s)), abs=1e-6
+        ), s
+        assert abs(fit.p_beats_takeout(seg(s)) - per_bet.p_beats_takeout(seg(s))) <= 0.01, s
+    # Per bet the segments beat the takeout; a row-weighted query would say they do not.
+    assert per_bet.p_beats_takeout(seg("g0")) > 0.9
+    for s in ("g0", "g3"):
+        grouped_roi, per_bet_roi = (
+            fit.predictive_roi(seg(s), 100),
+            per_bet.predictive_roi(seg(s), 100),
+        )
+        assert grouped_roi.low == pytest.approx(per_bet_roi.low, abs=0.02), s
+        assert grouped_roi.high == pytest.approx(per_bet_roi.high, abs=0.02), s
+
+
+def test_count_col_rejects_wins_above_the_count():
+    """A grouped row with more wins than bets (or negative wins) is not a set of bets: ValueError.
+    So is a `count_col` the frame does not have. A row whose bets all won is valid."""
+    rng = np.random.default_rng(4292)
+    frames = [make_bets(rng, 400, omega_by_band=flat(1.0), labels=seg(s)) for s in ("a", "b", "c")]
+    good = group_bets(pd.concat(frames, ignore_index=True))
+    kwargs = dict(
+        segment_cols=["segment"], odds_band_col="band", takeout_col="takeout", seed=0, draws=50
+    )
+
+    for count, won in ((1, 2), (4, 5), (3, 30), (2, -1)):
+        bad = good.copy()
+        bad.loc[0, "count"] = count
+        bad.loc[0, "won"] = won
+        with pytest.raises(ValueError):
+            fit_segment_roi(bad, count_col="count", **kwargs)
+
+    with pytest.raises(ValueError):
+        fit_segment_roi(good.drop(columns="count"), count_col="count", **kwargs)
+
+    # Premise of the cases above: the frame itself is valid grouped input.
+    all_won = good.copy()
+    row = all_won.index[all_won["band"] == "long"][0]
+    all_won.loc[row, "won"] = all_won.loc[row, "count"]
+    assert isinstance(fit_segment_roi(all_won, count_col="count", **kwargs), SegmentROI)

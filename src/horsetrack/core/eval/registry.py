@@ -9,11 +9,11 @@ opened to read or to append, under an exclusive lock, so concurrent writers cann
 
 A run's id is the sha256 hex of its record's canonical JSON: the same run twice is refused. A
 family's pre-registered spec is frozen with ``freeze_family``; the freeze is a line of its own,
-not a run. ``write_summary`` writes the committed, aggregate-only view: family, E id, variant,
-status and per-fold metric, value, CI and n, with the values of licensed-source runs withheld.
-A record's ``notes`` (run metadata, such as why a measurement could not be made) are outside its
-variant identity and the summary; a record without notes is written without the key, so its line
-and id are those it had before ``notes`` existed.
+not a run. ``write_summary`` writes the committed, aggregate-only view, one file per family: E id,
+variant, status and per-fold metric, value, CI and n, with the values of licensed-source runs
+withheld. A record's ``notes`` (run metadata, such as why a measurement could not be made) are
+outside its variant identity and the summary; a record without notes is written without the key,
+so its line and id are those it had before ``notes`` existed.
 """
 
 from __future__ import annotations
@@ -53,7 +53,8 @@ __all__ = [
     "RegistryTampered",
     "RunRecord",
     "default_registry",
-    "summary_path",
+    "summary_dir",
+    "summary_stem",
     "write_summary",
 ]
 
@@ -62,6 +63,15 @@ WITHHELD_LABEL = "withheld (licensed source)"
 GENESIS = "0" * 64
 
 _HYPOTHESIS_ID = re.compile(r"[ELP][0-9]+")
+_FAMILY_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a safe file stem
+_INDEX_STEM = "README"
+_PREAMBLE = (
+    "# Experiment registry summary",
+    "",
+    "Written by `horsetrack.core.eval.registry.write_summary` from the run registry under",
+    "the data directory; do not edit by hand. Every run is listed, failures included. A run",
+    "built on a licensed source shows no values here.",
+)
 _COUNTRY = re.compile(r"[a-z][a-z0-9_]*")
 
 
@@ -230,6 +240,25 @@ def _problem(r: RunRecord) -> str | None:
     return None
 
 
+def summary_stem(family_id: str) -> str | None:
+    """The stem of the family's summary file (each ``/`` of a legacy id mapped to ``--``), or
+    None when that is not a safe file stem or is the index's in any case (macOS ignores case)."""
+    stem = family_id.replace("/", "--")
+    if not _FAMILY_FILE.fullmatch(stem) or stem.casefold() == _INDEX_STEM.casefold():
+        return None
+    return stem
+
+
+def _unnameable(family_id: str) -> str | None:
+    """Why a new family id cannot be its own summary file name, or None."""
+    if summary_stem(family_id) != family_id:
+        return (
+            f"family_id {family_id!r} cannot be a summary file name: start with an ASCII letter "
+            f"or digit, then letters, digits, '.', '_' or '-', and not {_INDEX_STEM!r}"
+        )
+    return None
+
+
 # --------------------------------------------------------------------------- the chain
 
 
@@ -305,10 +334,12 @@ class Registry:
 
     def append(self, record: RunRecord) -> str:
         """Add one run and return its id; ``RecordRefused`` (nothing written) when it breaks a
-        rule or is already in the registry."""
+        rule, is already in the registry, or its family id cannot name its summary file: not a
+        safe file stem as it is, ``README`` in any case, or the file (ignoring case) of another
+        family already in the registry."""
         if not isinstance(record, RunRecord):
             raise TypeError(f"append takes a RunRecord, got {type(record).__name__}")
-        problem = _problem(record)
+        problem = _problem(record) or _unnameable(record.family_id)
         if problem is None and record.holdout_open is not None:
             if record.holdout_open not in self._holdout_line_hashes():
                 problem = (
@@ -326,6 +357,12 @@ class Registry:
         def entry(chain: _Chain) -> dict:
             if run_id in chain.run_ids:
                 raise RecordRefused(f"run {run_id} is already in the registry")
+            name = record.family_id.casefold()
+            for other in {r.family_id for r in chain.runs} - {record.family_id}:
+                if (summary_stem(other) or "").casefold() == name:
+                    raise RecordRefused(
+                        f"family {record.family_id!r} would share its summary file with {other!r}"
+                    )
             return {"kind": "run", "run_id": run_id, "record": data}
 
         self._append(entry)
@@ -367,9 +404,12 @@ class Registry:
     def freeze_family(self, family_id: str, spec: dict) -> str:
         """Freeze the family's pre-registered spec and return its hash (sha256 hex of the spec's
         sorted, compact JSON). Freezing again with an equal spec is a no-op; another spec raises
-        ``FamilyAlreadyFrozen``."""
+        ``FamilyAlreadyFrozen``. ``RecordRefused`` when the family id cannot name a summary
+        file, as ``append`` refuses it."""
         if not _text(family_id):
             raise RecordRefused(f"family_id must be a non-blank string, got {family_id!r}")
+        if (problem := _unnameable(family_id)) is not None:
+            raise RecordRefused(problem)
         if not isinstance(spec, dict):
             raise TypeError(f"spec must be a dict, got {type(spec).__name__}")
         try:
@@ -450,9 +490,10 @@ def default_registry(country: str) -> Registry:
     return Registry(path, holdout_log=DEFAULT_COUNTRIES_DIR / country / LOG_NAME)
 
 
-def summary_path(country: str) -> Path:
-    """Where the committed summary of ``country``'s registry lives."""
-    return env.repo_root() / "docs" / "experiments" / f"registry-{country}.md"
+def summary_dir(country: str) -> Path:
+    """The folder of the committed summary of ``country``'s registry: one file per family and an
+    index, so parallel study PRs add files instead of editing one shared file."""
+    return env.repo_root() / "docs" / "experiments" / "registry" / country
 
 
 # --------------------------------------------------------------------------- summary
@@ -466,24 +507,32 @@ def _number(value: float | None) -> str:
     return "-" if value is None else f"{value:.6g}"
 
 
-def write_summary(registry: Registry, path: Path | str) -> None:
-    """Write the aggregate-only summary of ``registry`` to ``path`` (normally
-    ``summary_path(country)``): per run its family, E id, variant, status and per-fold metric,
-    value, CI and n, and nothing else. A licensed-source run shows only its identity and
-    ``withheld (licensed source)``."""
+def write_summary(registry: Registry, directory: Path | str) -> None:
+    """Write the aggregate-only summary of ``registry`` into ``directory`` (normally
+    ``summary_dir(country)``): one ``<family_id>.md`` per family, holding per run its E id,
+    variant, status and per-fold metric, value, CI and n, and nothing else, and ``README.md``,
+    the index of the families. A legacy family id written before #525 has each ``/`` mapped to
+    ``--`` in its file name; its heading and index entry show the original id. ``ValueError``,
+    before any file is written, when a mapped name is still unsafe or ``README``, or two families
+    would share a file (ignoring case). A licensed-source run shows only its identity and
+    ``withheld (licensed source)``. A family's file depends on that family's records alone."""
     families: dict[str, list[RunRecord]] = {}
     for record in registry.records():
         families.setdefault(record.family_id, []).append(record)
+    stems: dict[str, str] = {}
+    taken: dict[str, str] = {}
+    for family in families:
+        stem = summary_stem(family)
+        if stem is None:
+            raise ValueError(f"family {family!r} cannot be a summary file name")
+        if (other := taken.setdefault(stem.casefold(), family)) != family:
+            raise ValueError(f"families {other!r} and {family!r} would share {stem}.md")
+        stems[family] = stem
 
-    lines = [
-        "# Experiment registry summary",
-        "",
-        "Written by `horsetrack.core.eval.registry.write_summary` from the run registry under",
-        "the data directory; do not edit by hand. Every run is listed, failures included. A run",
-        "built on a licensed source shows no values here.",
-    ]
+    directory = Path(directory)
     for family, records in families.items():
-        lines += [
+        lines = [
+            *_PREAMBLE,
             "",
             f"## {_cell(family)}",
             "",
@@ -501,4 +550,14 @@ def write_summary(registry: Registry, path: Path | str) -> None:
                 ci = "-" if m.lo is None and m.hi is None else f"[{_number(m.lo)}, {_number(m.hi)}]"
                 values = f"{_number(m.value)} | {ci} | {m.n}"
                 lines.append(f"{who} {_cell(m.fold)} | {_cell(m.metric)} | {values} |")
-    write_report(Path(path), "\n".join(lines) + "\n", sources=())
+        write_report(directory / f"{stems[family]}.md", "\n".join(lines) + "\n", sources=())
+
+    index = [
+        "# Experiment registry index",
+        "",
+        "Written by `horsetrack.core.eval.registry.write_summary`; do not edit by hand. One file",
+        "per family, each holding that family's runs.",
+        "",
+    ]
+    index += [f"- [{family}]({stems[family]}.md)" for family in sorted(families)]
+    write_report(directory / f"{_INDEX_STEM}.md", "\n".join(index) + "\n", sources=())

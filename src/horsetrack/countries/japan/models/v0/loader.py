@@ -2,7 +2,9 @@
 
 `data_dir()/models/japan/v0/current.json` names the fit files, {"win": file, "ordering": file,
 "nowcast": file}; a relative name resolves against the pointer's own directory. Each file is loaded
-through its class's `from_json` (WinCalibration #114, OrderingFit #115, NowcastV0 #116). A missing
+through its class's `from_json` (WinCalibration #114, OrderingFit #115, NowcastV0 #116); a nowcast
+file whose "model" is "nowcast_c1" is #85's structural nowcast, loaded behind the same draws
+interface (`models.nowcast.ShadowNowcast`), so the pointer switches nowcasts. A missing
 pointer, win file or nowcast file gives None and one warning, so the runner logs boards and flags
 without values; a pointer without an ordering fit gives `ordering=None`. A file that exists but
 does not parse raises: a broken deploy is not hidden as a day of null values.
@@ -20,6 +22,7 @@ import logging
 from pathlib import Path
 
 from horsetrack.core import paths
+from horsetrack.countries.japan.models import nowcast as nowcast_c1
 from horsetrack.countries.japan.models.v0.calibration import WinCalibration
 from horsetrack.countries.japan.models.v0.nowcast import NowcastV0
 from horsetrack.countries.japan.models.v0.ordering import OrderingFit
@@ -33,6 +36,17 @@ OPTIONAL = ("ordering", "residual")
 def current_pointer() -> Path:
     """`data_dir()/models/japan/v0/current.json`, the data dir read on every call."""
     return paths.data_dir() / "models" / "japan" / "v0" / "current.json"
+
+
+def _load_nowcast(text: str):
+    """#85's structural nowcast when the file names it, else #116's drift (NowcastV0)."""
+    try:
+        model = json.loads(text).get("model")
+    except (ValueError, AttributeError):
+        model = None
+    if model == nowcast_c1.MODEL_NAME:
+        return nowcast_c1.load_shadow_nowcast(text)
+    return NowcastV0.from_json(text)
 
 
 def load_shadow_models(pointer: Path | None = None) -> ShadowModels | None:
@@ -64,7 +78,7 @@ def load_shadow_models(pointer: Path | None = None) -> ShadowModels | None:
             return None
 
     win = WinCalibration.from_json(texts["win"])
-    nowcast = NowcastV0.from_json(texts["nowcast"])
+    nowcast = _load_nowcast(texts["nowcast"])
     ordering = None if texts["ordering"] is None else OrderingFit.from_json(texts["ordering"])
     ids = {"win": win.fit_id}
     if ordering is not None:

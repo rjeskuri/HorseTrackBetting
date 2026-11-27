@@ -1,0 +1,32 @@
+# The exotic pool-choice study's pre-registered inputs (ticket #81, Family L rules L1, L4 and L5;
+# read by countries/japan/studies/avoidance.py, owner_inputs). Every value is the owner's, answered
+# on #81 on 2026-11-25, and is frozen in the run registry (family
+# japan-family-l-exotic-pool-choice) before any race is read. Changing a value is an owner decision
+# and needs a new family, not a code change.
+
+# L1 (E11): the threshold X, in decimal odds, registered as a grid of variants. A set priced under X
+# on the board is bet in the direct pool; at X or above, as its ordered synthetic (six TIERCE or two
+# FORECAST orders, the stake split evenly). Each grid member is its own variant and counts in the
+# D17 family size. A one-member grid is written [x]; a bare number is refused.
+l1_threshold_trio: [20, 50, 100]
+l1_threshold_quinella: [5, 10, 20]
+
+# The sets bet: every combination of the race's starters, flat (04 §3.4); for L4, every same-bracket
+# pair of a bracket holding two or more starters.
+sets: every_set
+
+# L4 (E13): the market-order trifecta ranks equal Win prices by the lower horse number first.
+l4_market_order_ties: lower_horse_no
+
+# L4: the market-order trifecta's comparators (08 §5.1, "the trio or a box"): both. Sign confirmed
+# by the owner: rule = the do-not-bet ticket, comparator = the equivalent ticket, so a do-not-bet
+# ticket that loses more shows negative. The same-bracket variant is labelled 'card only (no price
+# read)'.
+l4_trifecta_comparators: [trio, box]
+
+# L5 (E16's arithmetic): report only, the payout rates and takeout-neutral ratios on the boosted
+# races; no same-race comparison against the base-rate dividend.
+l5_mode: report
+
+# Where the owner signed these answers.
+owner_signoff: 81

@@ -21,6 +21,12 @@ returned and nothing is written. Measurement only: nothing here is adopted (D16)
 `day_sd=versus` on the same `train_end`, the update variant built from it is scored through its
 own form (fitted on the same training rows) on the same races, and the per-race difference
 against `day_sd`'s update gets the same meeting bootstrap.
+
+Per fold, `day_sd` is each level's prior sd and `day_sd_estimate` the unfloored estimate behind
+an estimated one (#258), both estimands named apart: `per_level` / `pooled`, the day sd (a), what
+a day's races share beyond their cells' true means; `predictive_per_level` / `predictive_pooled`,
+the predictive sd (b), a day's deviation from the prior fitted without it, which the estimated
+modes put in `day_sd` (track_bias's module doc).
 """
 
 from __future__ import annotations
@@ -252,7 +258,8 @@ def track_bias_report(
     """Aggregates only: per-variant log loss and pseudo-R² against equal chances, the update's
     gain over the prior with meeting-bootstrap bounds overall and by races entered, and per fold
     the priors' day sd per level ("factor:level"), the unfloored estimate behind it (when
-    estimated) and the observation variance. `day_sd` (None or "pooled": the pooled estimate;
+    estimated: the day sd and the predictive sd, see the module doc) and the observation
+    variance. `day_sd` (None or "pooled": the pooled predictive estimate;
     "per_level"; a float or a per-level mapping, #224) goes to every fold's prior. `versus` (any
     `day_sd` value; the default NO_VERSUS adds nothing) adds the paired comparison of #256:
     `ll_update_versus`, `gain_update_vs_versus` (the bootstrap of ll_update_versus - ll_update per
@@ -320,7 +327,12 @@ def track_bias_report(
         "day_sd_estimate": [
             None
             if p.estimate is None
-            else {"per_level": _by_level(p.estimate.per_level), "pooled": p.estimate.pooled}
+            else {
+                "per_level": _by_level(p.estimate.per_level),
+                "pooled": p.estimate.pooled,
+                "predictive_per_level": _by_level(p.estimate.predictive_per_level),
+                "predictive_pooled": p.estimate.predictive_pooled,
+            }
             for p in priors
         ],
         "noise_var": [p.noise_var for p in priors],

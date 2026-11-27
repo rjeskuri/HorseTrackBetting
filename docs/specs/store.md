@@ -11,7 +11,8 @@ tables; anything one source alone needs is an optional column, null for the othe
 One Parquet file per table and source:
 `$HORSETRACK_DATA_DIR/processed/<source>/<table>.parquet`
 (`core.paths.processed_dir(source) / f"{table}.parquet"`), where `<source>` is the data-source key
-(`jra`, `nar`, `hkjc`). The data directory is resolved on every call. A file of any other name in
+(`jra`, `nar`, `hkjc`, `jravan`; the last is the JRA-VAN DataLab export, see "The jravan source"
+below). The data directory is resolved on every call. A file of any other name in
 that folder is not a store table.
 
 ## Column kinds
@@ -30,7 +31,8 @@ that folder is not a store table.
 Missing values are null, never sentinel numbers. Where parsing can lose information the page's
 text is kept next to the parsed value (`*_raw`). Timestamps are UTC and only appear in `*_utc`
 columns that come from the pages' fetch times (or, for `races.result_published_utc` and
-`races.result_unpublished_utc`, the odds logger's poll times).
+`races.result_unpublished_utc`, the odds logger's poll times; for `track_condition.published_utc`
+and `available_utc`, the publication time the page prints).
 
 ## Tables
 
@@ -51,6 +53,8 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
 | `horse_pedigree` | one horse's pedigree | `horse_id` |
 | `jrdb_pre_race` | one JRDB pre-race row matched to a runner | `race_id, horse_no` |
 | `jrdb_post_race` | one JRDB post-race row matched to a runner | `race_id, horse_no` |
+| `track_condition` | one JRA publication of a venue's going for a race date and surface | `race_date, venue, surface, published_utc` |
+| `win_sales` | one publication of a race's Win pool sales | `race_id, published_utc` |
 
 - **meetings**: `meeting_id, race_date, venue, season, day_night, surface_mix, status` (`run` or
   `abandoned`).
@@ -103,20 +107,77 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   `<data dir>/jrdb/specs`) are written by `horsetrack japan jrdb build`
   (`countries/japan/jrdb/tables.py`), which also writes `jurisdiction`; a family not delivered
   still has its columns, all null.
+- **track_condition** (#90): JRA's going measurements as published, `venue, race_date, surface`
+  (`turf`, `dirt`), `going` (the code, as on races), `rail` (the turf course in use, `A` to `D`;
+  null on dirt and when not printed), `cushion` (turf only), `moisture_goal, moisture_4c` (%),
+  `published_utc` (the 発表 time printed on the page or the yearly record, not a fetch time),
+  `available_utc` (= `published_utc`), `ingested_utc` (the fetch). A meeting republishes its page,
+  so a key has one row per publication; `jra.track_condition.as_of` (or the as-of views) takes the
+  latest at t. A value not printed is null, never 0. Parsed by `countries/japan/jra/
+  track_condition.py`; the store build does not write it (the backfill is #228).
+- **win_sales** (ticket #278): written only for sources with `win_sales` pages (JRA's: JRADB
+  単勝・複勝 pages fetched by `horsetrack japan fetch-win-sales`, `jra.win_sales_fetch`, forward
+  only). `race_id, race_date, venue, race_no` from the page's own date line and race number,
+  `win_tickets` (the 単勝 row of the page's 発売票数 block), `win_sales_yen` (tickets x the unit
+  stake, 100 yen), `is_final` (the page says 最終オッズ), `published_utc` (a live page's clock,
+  dated like `official_pages.source_update_utc`; a page without a clock: its printed post time +
+  30 min, or `fetched_utc` when it prints none; the owner's answer on #278), `fetched_utc` (the
+  manifest's). A page without a whole-number Win figure adds no row. As-of rule: `column` on
+  `published_utc` (`docs/specs/as-of.md`).
 
 Withdrawals and placing codes differ by site: each source adapter maps its own codes before rows
 reach the store, and documents the mapping.
 
 ## Read access
 
-- `tables.read_table(source, name, columns=None) -> pandas.DataFrame`: the declared columns (or the
-  requested subset), in declared or requested order whatever the file's order, cast to their
-  declared types. A name that is not in `schemas.TABLES` (case-sensitive) raises `ValueError`, as
-  does a column the table does not declare. A missing file raises `FileNotFoundError` naming the
-  table and the source.
+- `tables.read_table(source, name, columns=None, *, filters=None, development=None) ->
+  pandas.DataFrame`: the declared columns (or the requested subset), in declared or requested
+  order whatever the file's order, cast to their declared types. A name that is not in
+  `schemas.TABLES` (case-sensitive) raises `ValueError`, as does a column the table does not
+  declare. A missing file raises `FileNotFoundError` naming the table and the source. `filters=`,
+  a `pyarrow.dataset` expression (it may name columns not read), is applied by the Parquet scan
+  (`pyarrow.parquet.read_table(..., filters=...)`), so an excluded row never reaches the frame.
+  `development=<country>` reads only that country's development rows, through
+  `core.eval.holdout.read_development` (below), so a holdout row never reaches the frame; with
+  both, `filters` is passed as that read's `where`, narrowing the development scan.
 - `tables.connect(source) -> duckdb.DuckDBPyConnection`: an in-memory DuckDB with one view per
   declared table whose file exists for that source, named after the table. File paths are quoted
-  as SQL strings, so a data directory with a `'` in it works.
+  as SQL strings, so a data directory with a `'` in it works. The views apply no holdout
+  predicate: development readers do not use them.
+
+### Development reads and the holdout (#415)
+
+The development readers take two routes over one open handle (`pyarrow.memory_map`) of the
+table's file. The speed study's `studies/speed_run.read_inputs`, through
+`tables.read_table(..., development=...)`, reads through
+`core.eval.holdout.read_development(handle, country, ...)`, which scans the handle with
+`pyarrow.parquet.read_table`. `countries/japan/models/v0/store.read_store_table` builds the same
+predicate with `core.eval.holdout.file_development_filter` on the handle and scans a `ds.dataset`
+of the file's path on a one-file read-only filesystem served from that handle, so its read is a
+dataset scan with the predicate as its filter. Either way the predicate first narrows the
+requested range to the file's own first and last race_date: from each row group's footer
+statistics, or, for a row group written without them, by one Acero plan over those row groups
+together (a scan of race_date, a projection and a min/max aggregate of the in-range days with a
+null count), so the file is scanned once for its bounds and only the two bounds and the count,
+never a race_date column, reach Python. An open-ended read (`end=date.max`, as several callers
+pass) so asks the holdout rule only about the days the file can hold, and a range outside the
+file returns no row. The price-era guard of `read_store_table` checks the requested start,
+before this narrowing. The predicate is then `development_filter(country, start, end)`: the
+narrowed inclusive range minus the holdout days, built from the calendar and the committed
+`holdout.yaml`, never from the rows. A null race_date is not a development row; `read_table`
+(`dated=True` on `read_development`) refuses a table with one, `ValueError` before any row is
+read (the null count comes from the footers or the same bounds scan), rather than dropping it,
+so the speed study never runs on an incomplete field. Bounds and scan read one snapshot: a file
+atomically replaced at its path (`os.replace`, as a rebuild does) during the read is read as it
+was. No table or record batch the scan returns holds a holdout row. What is skipped on disk is
+narrower: Parquet prunes a row group only from its min/max statistics, so a row group holding
+both rows the scan needs and rows it excludes (a development and a holdout day, say 2026-12-02
+and 2026-12-03) is still read and decoded, and its excluded rows are dropped by the scan's
+filter before a table is built. A multi-day group after the holdout start is not necessarily
+such a group: 2026-12-03 and 12-04 are both holdout days. Every store table
+is Parquet; the other files under `$HORSETRACK_DATA_DIR` (the ingest manifest, JSONL logs, the
+raw page cache) have no row-group statistics and are not development reads. `LockedHoldout.open`
+remains the only way to holdout rows.
 
 ## Build
 
@@ -137,7 +198,8 @@ backfill can keep writing).
   a partial run never drops rows an earlier run parsed.
 - **Page types feed tables** as `schemas.FED_BY` says (`fixture` and `results` feed `meetings`;
   `results` races, runners, dividends, incidents; `sectional` sectionals; `corunning`
-  running_comments; `horse` horses and horse_runs; `pedigree_card` horse_pedigree). Any other
+  running_comments; `horse` horses and horse_runs; `pedigree_card` horse_pedigree; `win_sales`
+  win_sales). Any other
   page type, or one whose adapter has no parser version, is skipped and counted.
 - **Assembly**: pages whose parser flags a key mismatch are dropped, with every page sharing that
   key. Two pages claiming one race: the smaller page key wins; one horse: the latest
@@ -154,15 +216,74 @@ backfill can keep writing).
   the results: `run`, `abandoned`, or `scheduled` without results. Runners take `rating` and
   `gear_raw` from `horse_runs` on `(horse_id, race_date)`, withdrawals excluded and one run per
   key. `horse_pedigree` keeps one row per horse, each column's first non-null value, newest
-  card first. A bad cell becomes null, never a broken build.
-- **Output**: the nine tables fed by `fixture` .. `horse` on every build, `horse_pedigree` only
-  when the manifest holds pedigree pages (`schemas.SOURCE_TABLES`), never the JRDB tables; each
+  card first. `win_sales` keeps one row per `(race_id, published_utc)`, the latest `fetched_utc`
+  (`schemas.LATEST_FETCH`): a publication fetched twice is one row. A bad cell becomes null, never a broken build.
+- **Output**: the nine tables fed by `fixture` .. `horse` on every build, `horse_pedigree` and
+  `win_sales` only when the manifest holds their pages (`schemas.SOURCE_TABLES`), never the JRDB
+  tables; each
   written to a tmp file and moved into place. `processed_dir(source)/_build.json` holds the
   summary's fields (page counts, failures, rows per table, enrichment stats, `snapshot_id`: sha1
   over the included pages' `(page_type, key, sha256)`) plus `built_utc`; a report goes to
   `reports_dir()/store-build-<source>.md`.
 - **Byte-stable**: two builds of the same inputs write identical Parquet bytes; `_build.json`
   differs only in `built_utc` and `seconds`.
+
+## The WIN5 history (ticket #135)
+
+`processed_dir("jra")/win5.parquet`, one row per WIN5 day (sort key `race_date`), written by
+`horsetrack japan win5-history` (`countries/japan/research/win5_backfill.py`) from netkeiba's
+per-day WIN5 pages through `core.ingest` (raw pages under `raw/jra/win5_year` and
+`raw/jra/win5_day`), outside the store build. Columns: `race_date, pool_yen` (sales),
+`carryover_in_yen` (from the previous WIN5; 0 when none), `carryover_out_yen` (to the next; 0 when
+none), `winning_tickets` (over every winning combination), `dividend_yen` (per 100 yen, the
+largest over the combinations; null when nobody hit), `payout_yen` (the yen paid: dividend x
+tickets summed over the combinations; 0 when nobody hit), `winning_combinations` (more than 1 on a
+dead-heat day; 0 when nobody hit), `hit`, `pool_ev` (`(pool * 0.70 + carryover_in) / pool`). Read
+with `research.win5.read_history()`. `research.win5.payout_mismatches(table)` names the days whose
+`payout_yen + carryover_out_yen` is not `pool * (1 - takeout) + carryover_in_yen` at the day's own
+WIN5 takeout (boosts applied) within 10 yen per winning ticket; days before 2014-06-07 are skipped.
+Holdout days are in the table; no analysis reads them (`score_study` drops them).
+
+A year list (`raw/jra/win5_year`) counts as final only when its cached copy was fetched after the
+year ended (1 January JST of the next year); an earlier copy, and the current year's, is fetched
+again. `research.win5.carryover_chain_breaks(table)` names the days that break the carryover chain
+(a no-winner day with no carryover out, or a carryover in that is not the previous row's carryover
+out; a capped winner's carryover out is not a break); the command prints their count as
+`carryover_breaks=<n>` and lists them, and does not change its exit code for them.
+
+## The jravan source
+
+`processed/jravan/` holds the store's tables for the JRA-VAN DataLab export (the JV-Data files under
+`raw/jravan/`, #196), written by the commands `horsetrack japan jravan ...`
+(`countries/japan/jravan/`, epic #359). It is not written by `build.build_tables`: there is no
+manifest and no page cache, the parsers read the export's records directly, and `build_tables`
+does not accept the key. The tables, their columns, the mapping from JV-Data and the builds'
+rules are in [docs/specs/jravan.md](jravan.md); this section says only how they sit beside the
+store's.
+
+- **Shared tables** are in `schemas.TABLES` with the declared columns, so `read_table`,
+  `connect` and `models/v0/store.read_store_table(..., source="jravan")` serve them like another
+  source's: `meetings`, `races`, `runners`, `dividends`, `horses`, `horse_pedigree`. JRA venues
+  only (JV-Data venue codes 01-10). Where JV-Data has no value the column is null, never a guess
+  (e.g. `rating`, `gear_raw` and `brand_raw` on runners).
+- **Jravan-only tables** are outside `schemas.TABLES`: `final_odds`, `pool_votes` (final odds and
+  pool votes per combination), `jockeys`, `trainers` (the masters), `breeding_horses`, `produce`
+  and `lineages` (bloodlines), and `workouts` (the HC and WC workouts, #229). Each is a Parquet file in `processed/jravan/` whose schema is
+  its builder module's, so `read_table` and `connect` refuse or ignore them; a reader opens the
+  file itself.
+- **`processed/jravan/odds_timeseries/<YYYY-MM-DD>.parquet`**: the time-series odds, one file per
+  race day in the odds log's own schema (`logger.compact.SCHEMA`, `docs/specs/odds-log.md`), so
+  the readers of the logger's days read these too.
+- **Availability**: every table above has a rule in `availability.yaml` (`countries/japan/config/
+  availability.yaml`, docs/specs/as-of.md), the shared ones by their own entries and the
+  jravan-only ones by the owner's request on #376: `final_odds` and `pool_votes` are `label_only`,
+  `jockeys` and `trainers` are `current_value` with `in_view`, `breeding_horses`, `produce` and
+  `lineages` are `static`. `workouts` has no entry: its readers (`handicap/workouts_jravan.py`)
+  apply their own publication rule (#229). A table without an entry is refused by the as-of views, so no
+  jravan-only table is readable at t by accident. The dump of unmapped families
+  (`interim/jravan/records/`) is not a store table and has no rule.
+- **Guards**: the holdout (D14) and D10 apply to a jravan read as to any other: `read_store_table`
+  drops holdout days and refuses a price read before 2014-06-07 (D10) whatever the source.
 
 ## Not here yet
 

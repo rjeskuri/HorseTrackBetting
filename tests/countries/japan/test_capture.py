@@ -15,7 +15,8 @@ Contract pinned here (the coder follows it):
   per distinct odds page its asked pools are on. `now()` is called before the first request and
   its value is the snapshot of every row. A page dated for another meeting raises WrongMeeting;
   a meeting the menu does not list raises NotListed (after the menu, 1 request); a pool outside
-  WIN, PLACE, QUINELLA, QUINELLA_PLACE is a ValueError before any request.
+  WIN, PLACE, QUINELLA, QUINELLA_PLACE (and BRACKET_QUINELLA since #358: test_day_before_cli.py)
+  is a ValueError before any request.
 - Every JRADB request is a FetchTask of source "jra" to https://www.jra.go.jp<path>: POST, form
   body cname=<code>, mutable, page type official_menu, official_racelist, official_odds or
   official_card_racelist. Only the two entry codes are known in advance; every other code is
