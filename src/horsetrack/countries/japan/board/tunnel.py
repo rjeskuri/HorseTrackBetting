@@ -117,14 +117,15 @@ def quick_tunnel(port: int, *, timeout_s: float = 30.0) -> Iterator[str]:
             "--tunnel"
         )
     argv = [exe, "tunnel", "--url", f"http://127.0.0.1:{port}", "--no-autoupdate"]
+    child: subprocess.Popen[bytes] | None = None
     output: _Output | None = None
-    try:
-        child = subprocess.Popen(
-            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-        )
-    except OSError as exc:
-        raise TunnelError(f"cloudflared did not start: {exc}") from exc
-    try:  # from here on the child is reaped, even if its reader never starts
+    try:  # a child, once spawned, is reaped even if its reader never starts
+        try:
+            child = subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            )
+        except OSError as exc:
+            raise TunnelError(f"cloudflared did not start: {exc}") from exc
         output = _Output(child.stdout)
         output.start()
         ended = output.ready.wait(timeout_s)  # one wait: the URL and a registration both fit
@@ -145,4 +146,5 @@ def quick_tunnel(port: int, *, timeout_s: float = 30.0) -> Iterator[str]:
             raise TunnelError(f"{reason}: {last}" if last else reason)
         yield output.url
     finally:
-        _stop(child, output)
+        if child is not None:
+            _stop(child, output)

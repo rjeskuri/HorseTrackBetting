@@ -101,9 +101,11 @@ a test can make it print more later, pause, leave a marker file, wait for one, o
 
 from __future__ import annotations
 
+import errno
 import gzip
 import hmac
 import http.client
+import importlib
 import inspect
 import json
 import logging
@@ -1241,6 +1243,57 @@ def test_cloudflared_missing_from_path_is_a_clear_error(tmp_path, monkeypatch):
             pytest.fail("no cloudflared on PATH, yet the tunnel was entered")
 
     assert "cloudflared" in str(caught.value).lower()
+
+
+# what spawning a cloudflared found on PATH can raise: not executable, gone since the lookup, a
+# binary for another platform
+SPAWN_ERRORS = [
+    pytest.param(PermissionError, errno.EACCES, id="PermissionError"),
+    pytest.param(FileNotFoundError, errno.ENOENT, id="FileNotFoundError"),
+    pytest.param(OSError, errno.ENOEXEC, id="OSError"),
+]
+
+
+@pytest.mark.parametrize(("kind", "code"), SPAWN_ERRORS)
+def test_cloudflared_failing_to_spawn_leaves_no_child_and_a_clean_error(
+    fake, monkeypatch, kind, code
+):
+    board_server = server_module()
+    tunnel = importlib.import_module(board_server.quick_tunnel.__module__)
+    fake.install(banner(random_name(), 18423))
+    exe = str(fake.bin_dir / "cloudflared")
+    raised = kind(code, os.strerror(code), exe)
+    real_popen, real_stop = subprocess.Popen, tunnel._stop
+    spawns: list[list[str]] = []
+    stops: list[tuple[Any, Any]] = []
+
+    def popen(args, *rest, **kwargs):
+        argv = [str(a) for a in args] if isinstance(args, (list, tuple)) else [str(args)]
+        if Path(argv[0]).name == "cloudflared":
+            spawns.append(argv)
+            raise raised
+        return real_popen(args, *rest, **kwargs)
+
+    def stop(child, output):
+        stops.append((child, output))
+        return real_stop(child, output)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "Popen", popen)
+        patch.setattr(tunnel, "_stop", stop)
+        with pytest.raises(board_server.TunnelError) as caught:
+            with board_server.quick_tunnel(18423, timeout_s=5):
+                pytest.fail("cloudflared did not spawn, yet the tunnel was entered")
+
+    assert spawns, "the seam did not fire: cloudflared was never spawned through subprocess.Popen"
+    assert spawns[0][0] == exe, f"spawned {spawns[0][0]!r}, not the cloudflared on PATH"
+    message = str(caught.value)
+    assert "cloudflared did not start" in message.lower(), message
+    assert str(raised) in message, f"the {kind.__name__} text is missing from {message!r}"
+    assert caught.value.__cause__ is raised, "the spawn error is not chained as the cause"
+    assert fake.runs() == [], "a cloudflared child ran although spawning it failed"
+    assert all(child is not None for child, _ in stops), "the cleanup ran on a missing child"
+    assert stops == [], f"the cleanup ran although no child exists: {stops!r}"
 
 
 # ---------------------------------------------------------------- the command, as a process
