@@ -17,7 +17,12 @@ signature):
   latest row per combination). A runner priced there and scratched later counts: 8 drawn and one
   out, Place pays three places over the seven left; 5 drawn and one out, Place is still sold, with
   two. A runner already SCR there was withdrawn before sales opened and does not: 8 drawn and one
-  out before, two places over the seven; 5 drawn and one out before, Place is not sold.
+  out before, two places over the seven; 5 drawn and one out before, Place is not sold. That holds
+  only when the log covers the opening: the race's earliest WIN capture is before logger.yaml's
+  `day_before.probe_until` (Tokyo) on the day before the race date. A first capture at or after it
+  (a logger that first ran in the race date's 07:00 window, or late on the eve) does not: every
+  runner on the board counts, the SCR ones included (the scratch is taken as after the opening),
+  so 8 drawn and one SCR on a 07:00 first capture, Place still pays three.
 - Brackets follow JRA's draw of N horses, N the largest horse number on the board, scratched
   runners included (the draw was made before the scratch): N <= 8, no bracket quinella; 9-16,
   brackets 1..16-N take one horse each and the rest two, in number order; 17, brackets 1-7 two
@@ -38,13 +43,14 @@ from __future__ import annotations
 import json
 import math
 import random
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from horsetrack.core import paths
+from horsetrack.core.config import load_country_yaml
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board.flags import FlagRules
 from horsetrack.countries.japan.board.shadow_feed import build_shadow
@@ -465,6 +471,188 @@ def test_the_places_are_those_of_the_field_at_the_opening():
     brackets = set(fresh[cases[5][0].race_id]["p_model"][BRACKET])
     assert "7,7" in brackets and "8,8" not in brackets and "1,8" in brackets, sorted(brackets)
     assert not [c for c in brackets if "4" in c.split(",")], sorted(brackets)
+
+
+# ---------------------------------------------------------------- a log that missed the opening
+
+
+JST = timezone(timedelta(hours=9))  # Japan keeps no summer time
+EVE = DAY - timedelta(days=1)  # the day-before sales open in its evening (#358)
+
+
+def tokyo(day: date, hhmm: str) -> datetime:
+    return datetime.combine(day, time.fromisoformat(hhmm), tzinfo=JST).astimezone(UTC)
+
+
+PROBE_UNTIL = tokyo(EVE, load_country_yaml("japan", "logger")["day_before"]["probe_until"])
+EVE_1835, EVE_2055, EVE_2200 = tokyo(EVE, "18:35"), tokyo(EVE, "20:55"), tokyo(EVE, "22:00")
+DAY_0700 = tokyo(DAY, "07:00")  # the race date's first window: a logger that missed the eve
+TIME_FIELDS = ("snapshot_utc", "fetched_utc", "source_update_utc")
+COVERAGE_CASES = {  # (venue, race), drawn, odds seed, first capture, SCR on it, SCR later, places
+    "TOK 11: 8 drawn, first logged 07:00 on the race date with 5 SCR: 8 started, three": (
+        ("TOK", 11),
+        8,
+        71,
+        DAY_0700,
+        {5},
+        set(),
+        3,
+    ),
+    "TOK 12: the same race logged from 18:35 on the eve: 7 started, two": (
+        ("TOK", 12),
+        8,
+        71,
+        EVE_1835,
+        {5},
+        set(),
+        2,
+    ),
+    "KYO 1: 5 drawn, first logged 07:00 on the race date with 2 SCR: 5 started, two": (
+        ("KYO", 1),
+        5,
+        72,
+        DAY_0700,
+        {2},
+        set(),
+        2,
+    ),
+    "KYO 2: the same race logged from 20:55 on the eve: 4 started, Place not sold": (
+        ("KYO", 2),
+        5,
+        72,
+        EVE_2055,
+        {2},
+        set(),
+        0,
+    ),
+    "KYO 3: 8 drawn, first logged 22:00 on the eve (past probe_until) with 4 SCR: three": (
+        ("KYO", 3),
+        8,
+        73,
+        EVE_2200,
+        {4},
+        set(),
+        3,
+    ),
+    "KYO 4: 8 drawn, first logged at probe_until itself with 8 SCR: not covered, three": (
+        ("KYO", 4),
+        8,
+        74,
+        PROBE_UNTIL,
+        {8},
+        set(),
+        3,
+    ),
+    "NAK 1: 8 drawn, first logged 20:55 on the eve with 3 SCR: 7 started, two": (
+        ("NAK", 1),
+        8,
+        75,
+        EVE_2055,
+        {3},
+        set(),
+        2,
+    ),
+    "NAK 2: 9 drawn, first logged 07:00 on the race date, 3 and 9 SCR, 6 later: 9 started": (
+        ("NAK", 2),
+        9,
+        76,
+        DAY_0700,
+        {3, 9},
+        {6},
+        3,
+    ),
+}
+
+
+def coverage_day() -> tuple[SyntheticDay, dict[str, tuple], dict[str, tuple[dict, float]]]:
+    """Every COVERAGE_CASES race on one day: its earliest capture at its own time with its SCR,
+    a capture at T-6 min, then (after a first build through a cache) the later scratches at LATE.
+    Returns the day, label -> (race, first capture, SCR on it, SCR later, places) and step ->
+    (feed by race id, factor of the board's capture)."""
+    cases = {}
+    for label, ((venue, no), n, seed, first_at, before, after, places) in COVERAGE_CASES.items():
+        cases[label] = (race(venue, no, 14.0, field(n, seed)), first_at, before, after, places)
+    day = SyntheticDay(DAY, [case[0] for case in cases.values()])
+    for r, first_at, before, _, _ in cases.values():
+        capture_with_scratches(day, r, first_at, 1.0, before)  # the race's earliest capture
+        capture_with_scratches(day, r, T0 - timedelta(minutes=6), 1.01, before)
+    shadow_models = models()
+    cache: dict = {}
+
+    # before the later scratch, through a cache that then reads only the capture appended next
+    first = by_id(build(T0 - timedelta(minutes=3), shadow_models, cache=cache))
+    for r, _, before, after, _ in cases.values():
+        capture_with_scratches(day, r, LATE, 1.02, before | after)
+    cached = by_id(build(T0, shadow_models, cache=cache))
+    fresh = by_id(build(T0, models()))
+    steps = {
+        "before the later scratch": (first, 1.01),
+        "cached, after it": (cached, 1.02),
+        "fresh, after it": (fresh, 1.02),
+    }
+    return day, cases, steps
+
+
+@pytest.mark.parametrize(
+    "label",
+    list(COVERAGE_CASES),
+    ids=[label.split(":")[0].replace(" ", "") for label in COVERAGE_CASES],
+)
+def test_a_log_that_missed_the_opening_counts_every_runner_on_the_board(label):
+    # the fixture's times sit where their labels say, against logger.yaml's probe_until
+    assert EVE_1835 < EVE_2055 < PROBE_UNTIL < EVE_2200 < DAY_0700 < T0 - timedelta(minutes=6)
+    day, cases, steps = coverage_day()
+    fresh = steps["fresh, after it"][0]
+    labels = list(cases)
+
+    # the fixture: each late start and its covered twin differ only in the first capture's time,
+    # so their boards at t are the same and only the race's earliest capture tells them apart
+    for late, covered in ((labels[0], labels[1]), (labels[2], labels[3])):
+        a, b = by_capture(day, cases[late][0]), by_capture(day, cases[covered][0])
+        a_first, b_first = (cases[x][1].astimezone(UTC).isoformat() for x in (late, covered))
+        assert len(a) == len(b) == 3 and a_first in a and b_first in b
+        assert a_first != b_first and set(a) - {a_first} == set(b) - {b_first}
+        for snap in set(a) - {a_first}:
+            assert a[snap] == b[snap], snap
+        strip = [
+            {k: {f: v for f, v in row.items() if f not in TIME_FIELDS} for k, row in rows.items()}
+            for rows in (a[a_first], b[b_first])
+        ]
+        assert strip[0] == strip[1]
+        for h in cases[late][2]:
+            assert {a[a_first][(pool, str(h))]["status_raw"] for pool in (WIN, PLACE)} == {"SCR"}
+        ids = (cases[late][0].race_id, cases[covered][0].race_id)
+        for pool in (WIN, PLACE, WIDE):
+            assert set(fresh[ids[0]]["pools"][pool]) == set(fresh[ids[1]]["pools"][pool]), pool
+
+    r, first_at, before, after, places = cases[label]
+    drawn = len(r.base)
+    # covered: a runner SCR on the first capture was out before sales opened and does not count;
+    # not covered: its scratch is taken as after the opening, so every runner drawn started
+    counted_out = before if first_at < PROBE_UNTIL else set()
+    starters = drawn - len(counted_out)
+    assert places == places_paid(starters), label  # the table agrees with JRA's rule
+    for step, (got, factor) in steps.items():
+        where = (label, step)
+        out = before if step == "before the later scratch" else before | after
+        p_model = got[r.race_id]["p_model"]
+        assert isinstance(p_model, dict), where
+        if places:  # the places paid first, then every pool's probabilities
+            running = {str(h) for h in range(1, drawn + 1) if h not in out}
+            assert set(p_model.get(PLACE) or {}) == running, (where, "Place sold over the runners")
+            total = math.fsum(p_model[PLACE].values())
+            assert math.isclose(total, float(places), rel_tol=1e-9), (where, total)
+        else:
+            assert not p_model.get(PLACE), (where, "Place is not sold with 4 starters")
+        assert math.isclose(math.fsum(p_model[WIDE].values()), 3.0, rel_tol=1e-9), where
+        want = expected(r, factor, LAMBDAS, out, counted_out)
+        assert len(want["WIN"]) == drawn - len(out), where
+        check_p_model(got[r.race_id], want, where, starters=starters)
+        for pool, entries in p_model.items():
+            if pool == BRACKET:
+                continue
+            for combination in entries:
+                assert not {int(h) for h in combination.split(",")} & out, (where, pool)
 
 
 # ---------------------------------------------------------------- partial models
