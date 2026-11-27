@@ -39,6 +39,13 @@ The JG items each column comes from (names as `spec.record_spec` returns them):
   For both, an unset code (blank or 0) is null and not counted; a code outside the translation is
   null and counted in the report's `unmapped`.
 - `published_date`: データ作成年月日 (YYYYMMDD) as a date; `00000000` or blank is null.
+- Holdout (D14): a record whose race day is a holdout day (`is_holdout_day('japan', race_date)`)
+  gives no row and is counted only in `counts['holdout_skipped']` (not in `records` nor any other
+  count; its codes are never translated nor counted as unmapped).
+- Same-date tie (orchestrator's ruling, PR #471): when an entry's provision and its deletion carry
+  the same データ作成年月日, the deletion wins whatever the file order.
+- Coverage (orchestrator's ruling, PR #471): the `exclusions` input's jravan supply is the column
+  `exclusion_kind` (null for an entry not excluded), so the audit counts excluded entries only.
 
 Every layout here is made up in the workbook's shape (`jravan_workbook.write_workbook`): the item
 names are the workbook's, the widths of the horse name and the entry order, a reserve item and so
@@ -54,7 +61,7 @@ import re
 import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -66,6 +73,7 @@ from typer.testing import CliRunner
 
 from horsetrack.cli import app
 from horsetrack.core import paths
+from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.reports import is_withheld
 from horsetrack.countries.japan.research import coverage as cv
 
@@ -370,6 +378,9 @@ def test_unset_and_unknown_codes_are_null_and_only_unknown_ones_counted(data: Pa
                venue="06", created="00000000"),
             Jg(horse="2019100005", name="", entry="9", exclusion="1", year="2022", mmdd="1009",
                venue="06", created="20221008"),
+            # A blank データ作成年月日 beside the real dates and the zeros.
+            Jg(horse="2019100006", entry="1", exclusion="", year="2022", mmdd="1009",
+               venue="06", created=""),
         ],
     )  # fmt: skip
     report = exclusions.build_exclusions()
@@ -380,6 +391,7 @@ def test_unset_and_unknown_codes_are_null_and_only_unknown_ones_counted(data: Pa
         row(rid, "2019100003", "アカイホシ", 1, None, None, date(2022, 10, 7)),
         row(rid, "2019100004", "アカイホシ", 1, None, None, None),
         row(rid, "2019100005", None, 1, "scratched", "no_ballot", date(2022, 10, 8)),
+        row(rid, "2019100006", "アカイホシ", 1, "declared", None, None),
     ]
     # Unset codes (blank, 0) are not unmapped; codes outside the translation are.
     assert flat_unmapped(report) == {"3": 2, "7": 1}
@@ -496,6 +508,84 @@ def test_a_deletion_record_leaves_no_row(data: Path) -> None:
     assert report.counts["rows"] == 0
 
 
+# An entry provided and deleted on the same データ作成年月日 (in 2024's TOK race 11)
+TIE_PAIR = (
+    Jg(horse="2021108080", name="オナジヒ", entry="2", exclusion="2", kubun="1",
+       created="20240606"),
+    Jg(horse="2021108080", name="オナジヒ", entry="2", exclusion="2", kubun="0",
+       created="20240606"),
+)  # fmt: skip
+
+
+def test_a_deletion_dated_as_its_provision_wins_whatever_the_order(data: Path) -> None:
+    kept = Jg(horse="2021108181", name="ノコルウマ", entry="2", exclusion="1", created="20240606")
+    outputs = []
+    for pair in (TIE_PAIR, TIE_PAIR[::-1]):
+        for recs in ([*pair, kept], [kept, *pair], [pair[0], kept, pair[1]]):
+            write_year(data, 2024, recs)
+            exclusions.build_exclusions()
+            assert store_rows(data) == [
+                row(T11, "2021108181", "ノコルウマ", 1, "excluded_at_close", "no_ballot", D0606),
+            ], recs
+            outputs.append(store_path(data).read_bytes())
+    assert len(set(outputs)) == 1
+
+
+# ------------------------------------------------------------------------------------------------
+# Holdout (D14): a holdout day's records are never read into the table
+
+
+def first_day(holdout: bool) -> date:
+    """The first day from 2026-11-28 (the holdout's start) that is, or is not, a holdout day."""
+    day = date(2026, 11, 28)
+    while is_holdout_day("japan", day) is not holdout:
+        day += timedelta(days=1)
+    return day
+
+
+def test_a_holdout_day_record_gives_no_row_and_is_only_counted_as_skipped(data: Path) -> None:
+    dev, held, early = first_day(False), first_day(True), date(2026, 11, 22)
+    assert not is_holdout_day("japan", dev) and not is_holdout_day("japan", early)
+    assert is_holdout_day("japan", held)
+
+    def on(day: date, horse: str, race: str, **kw) -> Jg:
+        made = (day - timedelta(days=2)).strftime("%Y%m%d")
+        where = {"year": str(day.year), "mmdd": day.strftime("%m%d"), "venue": "05",
+                 "race": race, "created": made, **kw}  # fmt: skip
+        return Jg(horse=horse, **where)
+
+    write_year(
+        data, 2026,
+        [
+            on(held, "2023100003", "11", entry="2", exclusion="1"),
+            on(dev, "2023100001", "11", entry="2", exclusion="2"),
+            # Held out: an unknown code (never translated, never unmapped), two versions, a
+            # deletion.
+            on(held, "2023100004", "12", entry="3", exclusion="7"),
+            on(held, "2023100005", "12", entry="2", exclusion="1"),
+            on(held, "2023100005", "12", entry="2", exclusion="2",
+               created=(held - timedelta(days=1)).strftime("%Y%m%d")),
+            on(held, "2023100006", "12", kubun="0"),
+            on(early, "2023100002", "10", venue="08", entry="1", exclusion="0"),
+        ],
+    )  # fmt: skip
+    report = exclusions.build_exclusions()
+    assert store_rows(data) == [
+        row(f"jra:{early.isoformat()}:KYO:10", "2023100002", "アカイホシ", 1, "declared", None,
+            early - timedelta(days=2)),
+        row(f"jra:{dev.isoformat()}:TOK:11", "2023100001", "アカイホシ", 1, "excluded_at_close",
+            "lost_ballot", dev - timedelta(days=2)),
+    ]  # fmt: skip
+    counts = report.counts
+    assert counts["holdout_skipped"] == 5
+    assert counts["records"] == 2
+    assert counts["rows"] == 2
+    others = {k: counts.get(k, 0) for k in ("versions_dropped", "deletions", "non_jra",
+                                            "no_race_id")}  # fmt: skip
+    assert others == dict.fromkeys(others, 0)
+    assert flat_unmapped(report) == {}
+
+
 # ------------------------------------------------------------------------------------------------
 # Build: years, folders, bytes
 
@@ -543,7 +633,7 @@ def test_build_reads_every_year_or_the_years_named(data: Path, tmp_path: Path) -
 def test_two_builds_write_identical_bytes_whatever_the_record_order(
     data: Path, tmp_path: Path
 ) -> None:
-    recs_2024 = build_2024()
+    recs_2024 = [*build_2024(), *TIE_PAIR]  # the tie: the deletion wins in every order
     write_year(data, 2019, build_2019())
     write_year(data, 2024, recs_2024)
     first_report = exclusions.build_exclusions()
@@ -558,7 +648,8 @@ def test_two_builds_write_identical_bytes_whatever_the_record_order(
     assert second_report.to_json() == first_report.to_json()
     assert sorted(q.name for q in path.parent.iterdir()) == [FILENAME]
 
-    # The records shuffled within their files (no two versions of an entry): the same bytes.
+    # The records shuffled within their files (the only two versions of an entry are the tie):
+    # the same bytes.
     for seed in (1, 2, 3):
         shuffled = list(recs_2024)
         random.Random(seed).shuffle(shuffled)
@@ -606,7 +697,8 @@ def test_the_exclusions_input_names_the_jravan_exclusions_table() -> None:
     pairs = [(s.source, s.table, s.column) for s in supplies]
     jravan = [s for s in supplies if (s.source, s.table) == (SOURCE, TABLE)]
     assert jravan, pairs
-    assert all(s.column in COLUMNS for s in jravan), pairs
+    # Only excluded entries count: exclusion_kind is null for an entry not excluded.
+    assert [s.column for s in jravan] == ["exclusion_kind"], pairs
     assert not any(s.table.startswith("records/") for s in supplies), pairs
     assert all(is_withheld((s.source, s.table)) for s in jravan)
 
@@ -619,6 +711,7 @@ def test_the_committed_coverage_doc_lists_the_table_withheld() -> None:
     assert "records/RACE/JG" not in body
     lines = [line for line in body.splitlines() if "jravan" in line and f"{TABLE}." in line]
     assert lines, "docs/data-coverage.md does not list the jravan exclusions supply"
+    assert all(f"{TABLE}.exclusion_kind" in line for line in lines), lines
     assert all(WITHHELD in line and not re.search(r"\d{4}-\d{2}-\d{2}|\d+ rows", line)
                for line in lines), lines  # fmt: skip
 

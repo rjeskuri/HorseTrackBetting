@@ -2,9 +2,13 @@
 (`horsetrack japan jravan exclusions`, #405).
 
 `build_exclusions` reads `<raw>/stored/RACE/JG/<YYYY>.jvd` one year file at a time through
-`records.iter_file`, keeps one version per entry (`records.latest_versions` on the race key,
-血統登録番号 and 出馬投票受付順番; an entry whose latest record is a deletion has no row) and the
-records of JRA venues, and writes `<out>/exclusions.parquet` through `records.write_parquet`,
+`records.iter_lines`. A record's race day is read first, from its 開催年 and 開催月日 bytes alone:
+a record on a holdout day (`is_holdout_day('japan', race_date)`, D14) is read no further and
+counted only in `holdout_skipped`. The others are decoded; the builder keeps one version per entry
+(`records.latest_versions` on the race key, 血統登録番号 and 出馬投票受付順番; an entry whose
+latest record is a deletion has no row, and a deletion dated as its provision wins whatever the
+file order), drops a record `keys.race_id` rejects (counted in `no_race_id`), keeps the records of
+JRA venues, and writes `<out>/exclusions.parquet` through `records.write_parquet`,
 sorted by `race_id`, `horse_id` (plain string order), then `entry_order`, so the same inputs give
 the same bytes whatever the order of the records in the files.
 
@@ -30,6 +34,7 @@ import pyarrow as pa
 import typer
 
 from horsetrack.core import paths
+from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.countries.japan.jravan import keys, records, spec
 
 SOURCE = records.SOURCE
@@ -56,7 +61,10 @@ ENTRY_KINDS = {  # 出走区分
 }
 EXCLUSION_KINDS = {"1": "no_ballot", "2": "lost_ballot"}  # 除外状態区分
 TRANSLATED = (("entry_kind", ENTRY, ENTRY_KINDS), ("exclusion_kind", EXCLUSION, EXCLUSION_KINDS))
-REPORT_KEYS = ("records", "versions_dropped", "deletions", "non_jra", "no_race_id", "rows")
+COUNTRY = "japan"
+REPORT_KEYS = (
+    "holdout_skipped", "records", "versions_dropped", "deletions", "non_jra", "no_race_id", "rows",
+)  # fmt: skip
 
 EXCLUSIONS_SCHEMA = pa.schema(
     [
@@ -114,15 +122,58 @@ def _translate(values: Iterable[str | None], meanings: dict[str, str], unmapped:
 # Records -> rows
 
 
-def _read_year(path: Path, layout: spec.RecordSpec) -> pd.DataFrame:
-    """The text of the items `READ` names, one row per record of the file, in file order."""
+def _race_day(raw: bytes) -> date | None:
+    """開催年 + 開催月日 bytes (YYYYMMDD) as a date; None when they are not one."""
+    if len(raw) != 8 or not raw.isdigit():
+        return None
+    try:
+        return date(int(raw[:4]), int(raw[4:6]), int(raw[6:]))
+    except ValueError:
+        return None
+
+
+def _read_year(path: Path, layout: spec.RecordSpec) -> tuple[pd.DataFrame, int]:
+    """The text of the items `READ` names, one row per record of the file outside the holdout, in
+    file order; and the records skipped as on a holdout day. A record's race day is read from its
+    開催年 and 開催月日 bytes alone, and a holdout day's record (D14) is read no further."""
+    year, mmdd = records.leaf_bytes(layout, YEAR), records.leaf_bytes(layout, MMDD)
+    held: dict[bytes, bool] = {}
+
+    def on_holdout(line: bytes) -> bool:
+        raw = line[year] + line[mmdd]
+        if raw not in held:
+            day = _race_day(raw)
+            held[raw] = day is not None and is_holdout_day(COUNTRY, day)
+        return held[raw]
+
     parts: dict[str, list[np.ndarray]] = {k: [] for k in READ}
-    for chunk in records.iter_file(path, layout):
+    skipped = 0
+    for first, lines in records.iter_lines(path, layout):
+        records.check_types(lines, layout, first)  # before any date is trusted
+        rest = [i for i, line in enumerate(lines) if not on_holdout(line)]
+        skipped += len(lines) - len(rest)
+        if not rest:
+            continue
+        kept = lines if len(rest) == len(lines) else [lines[i] for i in rest]
+        cols = records.decode_lines(kept, layout, [first + i for i in rest])
         for k in READ:
-            parts[k].append(records.text(chunk[k]))
-    return pd.DataFrame(
-        {k: np.concatenate(v) if v else np.array([], dtype=object) for k, v in parts.items()}
+            parts[k].append(records.text(cols[k]))
+        del cols, kept
+    frame = pd.DataFrame(
+        {k: np.concatenate(v) if v else np.array([], dtype=object) for k, v in parts.items()},
+        dtype=object,
     )
+    return frame, skipped
+
+
+def _deletions_last(frame: pd.DataFrame) -> pd.DataFrame:
+    """`frame` stably reordered so that, among versions of an entry with the same データ作成年月日,
+    a deletion comes last (and so wins in `records.latest_versions`) and the others follow their
+    content, not the file order."""
+    content = [KUBUN, HORSE_NAME, ENTRY, EXCLUSION]
+    order = pd.DataFrame({k: [v or "" for v in frame[k]] for k in content})
+    order["_deleted"] = frame[KUBUN].to_numpy() == "0"
+    return frame.iloc[order.sort_values(["_deleted", *content], kind="stable").index.to_numpy()]
 
 
 def _rows(
@@ -131,7 +182,7 @@ def _rows(
     """One version per entry of `frame`, JRA venues only, as the table's columns plus the version
     key's tie-breakers (`_kai`, `_nichi`, `_order`); and the counts of those choices."""
     entries = len(frame.drop_duplicates(VERSION_KEY))
-    latest = records.latest_versions(frame, VERSION_KEY)
+    latest = records.latest_versions(_deletions_last(frame), VERSION_KEY)
     jra = np.array([keys.jurisdiction(v) == JURISDICTION for v in latest[VENUE]], dtype=bool)
     kept = latest[jra]
     race_ids = [
@@ -165,7 +216,12 @@ def _rows(
     rows["published_date"] = [_date(v) for v in kept[CREATED]]
     for column, item in (("_kai", KAI), ("_nichi", NICHI), ("_order", ORDER)):
         rows[column] = list(kept[item])
-    return pd.DataFrame(rows), counts
+    return pd.DataFrame(rows, dtype=object), counts  # object: a None stays None, never NaN
+
+
+def _values(column: pd.Series) -> list:
+    """A column's values for Arrow, any pandas missing value (None, NaN, NA) as None."""
+    return [None if pd.isna(v) else v for v in column]
 
 
 def _table(frame: pd.DataFrame) -> pa.Table:
@@ -174,7 +230,7 @@ def _table(frame: pd.DataFrame) -> pa.Table:
     by = ["race_id", "horse_id", "entry_order", "_kai", "_nichi", "_order"]
     frame = frame.sort_values(by, kind="stable", na_position="last") if len(frame) else frame
     columns = [
-        pa.array(list(frame[name]) if name in frame else [], type=field.type)
+        pa.array(_values(frame[name]) if name in frame else [], type=field.type)
         for name, field in zip(EXCLUSIONS_SCHEMA.names, EXCLUSIONS_SCHEMA, strict=True)
     ]
     return pa.Table.from_arrays(columns, schema=EXCLUSIONS_SCHEMA)
@@ -217,8 +273,9 @@ def build_exclusions(
     by_year: dict[int, dict[str, int]] = {}
     parts: list[pd.DataFrame] = []
     for year, path in files.items():
-        frame = _read_year(path, layout)
+        frame, skipped = _read_year(path, layout)
         rows, by_year[year] = _rows(frame, unmapped)
+        by_year[year]["holdout_skipped"] = skipped
         del frame
         parts.append(rows)
     table = _table(pd.concat(parts, ignore_index=True) if parts else pd.DataFrame())

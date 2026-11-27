@@ -60,9 +60,9 @@ Both stores take the flag from the final result, so a race-day scratch is in the
 
 Layers C0; role `feature_at_t`; tickets #405.
 
-JV-Data JG (horses excluded from a race's entries, e.g. by ballot), mapped into the jravan exclusions table with its publication date (published_date); its availability rule is the owner's question (#405), so until then the as-of views refuse it.
+JV-Data JG (horses excluded from a race's entries, e.g. by ballot), mapped into the jravan exclusions table with its publication date (published_date). The table lists every entry; exclusion_kind is null for an entry not excluded, so its non-null share is the excluded entries. Its availability rule is the owner's question (#405), so until then the as-of views refuse it.
 
-- jravan `exclusions.entry_kind`: withheld (D21)
+- jravan `exclusions.exclusion_kind`: withheld (D21)
 
 ## result_published
 
