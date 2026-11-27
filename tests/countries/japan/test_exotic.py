@@ -74,6 +74,17 @@ Review round 1 on PR #461:
   `min_dividend` (jra.yaml, 110 yen), False otherwise; the same required columns as
   `dividend_shares`, a missing one a ValueError.
 
+Review round 2 on PR #461:
+- `pool_blend`: p_model and q_pool cover the same combinations. A combination of q_pool missing
+  from p_model (a runner the board prices and the model lacks) is a ValueError too, whatever a
+  and b, never dropped from the board before it is renormalised.
+- `pool_blend(..., pool: str | None = None)`: the blend is the log-linear pool of a pool that pays
+  one combination per result (WIN, QUINELLA, FORECAST, TRIO, TIERCE) and keeps the contract above
+  (scale-invariant, sums to 1). A single-winner `pool` gives exactly the values of the call without
+  it, and None is today's call. PLACE and QUINELLA_PLACE, which pay several combinations on every
+  result, are a ValueError whatever a and b (how to blend them is #459's registered variant), as
+  is a code that is not one of the pools above.
+
 Expected values are derived independently: closed-form Harville, the stage weights written out
 here, JRA's published payout rates with the boost calendar's rules, a quadrature value of Henery's
 model, and hand-listed JRA dead-heat payouts. All data is synthetic and every RNG is seeded.
@@ -947,6 +958,114 @@ def test_pool_blend_needs_the_full_board():
     p_model, q_pool = _blend_inputs()
     with pytest.raises(ValueError):
         exotic().pool_blend(p_model, q_pool.drop(q_pool.index[3]), a=0.5, b=0.5)
+
+
+# The board prices horses 1-7 (P7); the model has six of them, horse 4 missing (P6_FAV4 renumbered),
+# so the board has every combination with horse 4 that the model lacks.
+MODEL_MISSING_4 = (1, 2, 3, 5, 6, 7)
+BLEND_WEIGHTS = ((0.0, 1.0), (1.0, 0.0), (0.6, 0.5))
+
+
+def _model_missing_a_runner(pool: str) -> tuple[pd.Series, pd.Series]:
+    ordering = exotic().Ordering("harville")
+    q_pool = pd.Series(ordering.joint_probs(P7, pool), dtype=float)
+    p_model = ordering.joint_probs(P6_FAV4, pool, horses=MODEL_MISSING_4, field_at_sale=len(P7))
+    return pd.Series(p_model, dtype=float), q_pool
+
+
+def _stray_board_label() -> tuple[pd.Series, pd.Series]:
+    p_model, q_pool = _blend_inputs()  # P5's Trios, horses 1-5
+    return p_model, pd.concat([q_pool, pd.Series({key(2, 4, 9): 0.01})])
+
+
+@pytest.mark.parametrize(
+    "case", [WIN, PLACE, QUINELLA, WIDE, EXACTA, TRIO, TRIFECTA, "stray_board_label"]
+)
+def test_pool_blend_needs_the_model_to_cover_the_board(case):
+    """Review round 2 on PR #461: both inputs cover the same combinations. A combination on the
+    board that the model lacks is a ValueError, not dropped, even at a=0, b=1."""
+    p_model, q_pool = (
+        _stray_board_label() if case == "stray_board_label" else _model_missing_a_runner(case)
+    )
+    extra = q_pool.index.difference(p_model.index)
+    assert len(extra) and not len(p_model.index.difference(q_pool.index))  # the case's premise
+    for a, b in BLEND_WEIGHTS:
+        with pytest.raises(ValueError):
+            exotic().pool_blend(p_model, q_pool, a=a, b=b)
+    # The same board without the combinations the model lacks blends.
+    got = exotic().pool_blend(p_model, q_pool.drop(extra), a=0.0, b=1.0)
+    assert list(got.index) == list(p_model.index)
+
+
+# The blend is the log-linear pool of a pool that pays one combination per result; PLACE and
+# QUINELLA_PLACE pay several, and how to blend them is #459's registered variant.
+SINGLE_WINNER_POOLS = (WIN, QUINELLA, EXACTA, TRIO, TRIFECTA)
+# (pool, runners: model P8 or P7, the board BOARD_P8's first n renormalised, places paid).
+SEVERAL_WINNER_CASES = {
+    "place_8_pays_3": (PLACE, 8, 3),
+    "place_7_pays_2": (PLACE, 7, 2),
+    "wide_8": (WIDE, 8, 3),
+    "wide_7": (WIDE, 7, 3),
+}
+BLEND_GRID = ((1.0, 0.0), (0.0, 1.0), (0.5, 0.5), (0.8, 0.3), (1.4, -0.2))
+BOARD_P8 = np.array([0.25, 0.22, 0.16, 0.12, 0.1, 0.08, 0.05, 0.02])
+
+
+def _joint_blend_inputs(pool: str, n: int) -> tuple[pd.Series, pd.Series]:
+    """One race's p_model and board from Harville `joint_probs`, horses 1..n, the board listed in
+    reverse so it is aligned by label."""
+    ordering = exotic().Ordering("harville")
+    board = BOARD_P8[:n] / BOARD_P8[:n].sum()
+    p_model = pd.Series(ordering.joint_probs(P8 if n == 8 else P7, pool), dtype=float)
+    q_pool = pd.Series(ordering.joint_probs(board, pool), dtype=float).iloc[::-1]
+    return p_model, q_pool
+
+
+@pytest.mark.parametrize("pool", SINGLE_WINNER_POOLS)
+def test_pool_blend_of_a_named_single_winner_pool_is_the_log_linear_pool(pool):
+    p_model, q_pool = _joint_blend_inputs(pool, 8)
+    assert p_model.sum() == pytest.approx(1.0, abs=1e-12)  # the premise: one combination pays
+    p, q = p_model.to_numpy(), q_pool.reindex(p_model.index).to_numpy()
+    for a, b in BLEND_GRID:
+        got = exotic().pool_blend(p_model, q_pool, a=a, b=b, pool=pool)
+        assert list(got.index) == list(p_model.index)
+        same = exotic().pool_blend(p_model, q_pool, a=a, b=b)
+        np.testing.assert_allclose(
+            got.to_numpy(dtype=float), same.to_numpy(dtype=float), rtol=1e-12
+        )
+        u = a * np.log(p) + b * np.log(q)
+        expected = np.exp(u) / np.exp(u).sum()
+        np.testing.assert_allclose(got.to_numpy(dtype=float), expected, rtol=1e-10, atol=1e-15)
+    as_model = exotic().pool_blend(p_model, q_pool, a=1.0, b=0.0, pool=pool)
+    np.testing.assert_allclose(as_model.to_numpy(dtype=float), p, rtol=1e-10)
+
+
+@pytest.mark.parametrize("case", list(SEVERAL_WINNER_CASES))
+def test_pool_blend_refuses_a_pool_that_pays_several_combinations(case):
+    pool, n, places = SEVERAL_WINNER_CASES[case]
+    p_model, q_pool = _joint_blend_inputs(pool, n)
+    assert p_model.sum() == pytest.approx(places, abs=1e-9)  # the premise: several pay
+    for a, b in BLEND_GRID:
+        with pytest.raises(ValueError):
+            exotic().pool_blend(p_model, q_pool, a=a, b=b, pool=pool)
+    # Without a pool, or with pool=None, the call is today's.
+    omitted = exotic().pool_blend(p_model, q_pool, a=0.5, b=0.5)
+    explicit = exotic().pool_blend(p_model, q_pool, a=0.5, b=0.5, pool=None)
+    assert list(explicit.index) == list(p_model.index)
+    np.testing.assert_allclose(explicit.to_numpy(dtype=float), omitted.to_numpy(dtype=float))
+
+
+# Not jra.yaml pool codes: its labels, a lower-case code, an empty string, a made-up code.
+NOT_POOL_CODES = ("WIDE", "EXACTA", "TRIFECTA", "trio", "", "BOGUS")
+
+
+@pytest.mark.parametrize("code", NOT_POOL_CODES)
+def test_pool_blend_refuses_an_unknown_pool(code):
+    p_model, q_pool = _blend_inputs()  # P5's Trios
+    with pytest.raises(ValueError):
+        exotic().pool_blend(p_model, q_pool, a=0.5, b=0.5, pool=code)
+    got = exotic().pool_blend(p_model, q_pool, a=0.5, b=0.5, pool=TRIO)
+    assert list(got.index) == list(p_model.index)
 
 
 # ---------------------------------------------------------------------------------------------

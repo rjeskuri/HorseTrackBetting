@@ -21,7 +21,8 @@ own dividends (ticket #99, epic #73; research 08 §3.2 C5, §4 E43, E44).
   fitted by `models.v0.ordering.fit_ordering`). `.fit(frame, folds)` refits on each fold's
   training rows only.
 - `pool_blend`: the log-linear pool of the model and the pool's own board, u_c = a ln p_model(c) +
-  b ln q_pool(c), for races whose full final board is logged (08 R21).
+  b ln q_pool(c), for races whose full final board is logged (08 R21), in a pool that pays one
+  combination per result.
 
 Pool codes are jra.yaml's. A combination is the store's `dividends.combination` string: horse
 numbers joined by ",", in finishing order for FORECAST and TIERCE, ascending for QUINELLA,
@@ -685,14 +686,32 @@ def _fit_stage(
 # ---------------------------------------------------------------------------------------------
 
 
-def pool_blend(p_model: pd.Series, q_pool: pd.Series, *, a: float, b: float) -> pd.Series:
+def pool_blend(
+    p_model: pd.Series, q_pool: pd.Series, *, a: float, b: float, pool: str | None = None
+) -> pd.Series:
     """exp(a ln p_model(c) + b ln q_pool(c)), normalised over one race's combinations.
 
-    Both Series are indexed by combination string; q_pool is aligned to p_model by label and the
-    result is on p_model's index, in its order. A combination of p_model missing from q_pool (no
-    full board) is a ValueError, as is a probability that is not finite and positive.
+    The log-linear pool of a pool that pays one combination per result (WIN, QUINELLA, FORECAST,
+    TRIO, TIERCE): scale-invariant in both inputs, and it sums to 1. `pool` names that pool; a
+    single-winner code or None gives the same values. PLACE and QUINELLA_PLACE pay several
+    combinations on every result, so their ticket chances sum to the places paid and this blend
+    would rescale them to 1: either is a ValueError (how to blend them is #459's registered
+    variant), as is a code not in POOLS. The keys are not checked against `pool`.
+
+    Both Series are indexed by combination string and cover the same combinations; q_pool is
+    aligned to p_model by label and the result is on p_model's index, in its order. A combination
+    of p_model missing from q_pool (no full board), or of q_pool missing from p_model (a runner
+    the model lacks), is a ValueError, as is a probability that is not finite and positive.
     """
     a, b = _real(a, "a"), _real(b, "b")
+    if pool is not None:
+        _check_pool(pool)
+        if pool in (PLACE, WIDE):
+            raise ValueError(
+                f"{pool} pays several combinations per result, so the log-linear pool would "
+                "rescale its ticket chances to 1: how to blend Wide and Place is #459's "
+                "registered variant"
+            )
     for name, s in (("p_model", p_model), ("q_pool", q_pool)):
         if not s.index.is_unique:
             raise ValueError(f"{name} has a combination twice")
@@ -700,6 +719,12 @@ def pool_blend(p_model: pd.Series, q_pool: pd.Series, *, a: float, b: float) -> 
     if len(missing):
         raise ValueError(
             f"{len(missing)} combination(s) have no pool price (no full board), e.g. {missing[0]!r}"
+        )
+    unpriced = q_pool.index.difference(p_model.index)
+    if len(unpriced):
+        raise ValueError(
+            f"{len(unpriced)} combination(s) on the board are not in p_model (a runner the model "
+            f"lacks), e.g. {unpriced[0]!r}"
         )
     p = p_model.to_numpy(dtype=float)
     q = q_pool.reindex(p_model.index).to_numpy(dtype=float)
