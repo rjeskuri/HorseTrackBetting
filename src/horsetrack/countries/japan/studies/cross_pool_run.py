@@ -13,8 +13,9 @@ is_fav . x_cross) times offset `normalised` (ln of normalised 1/final Win odds) 
 fold's training rows). One pair variant, `pair:quinella`: per starter pair of a race with a
 complete T-2 Quinella board, log_ratio = ln(q_pair_t / h_pair_t) (#434 `pair_features`) over the
 offset ln of normalised 1/final Quinella odds, the winners the pairs the final QUINELLA dividends
-pay. Each is fitted per D9 fold on that fold's training rows only (`fit_fold`, the unpenalised
-conditional logit of `models.condlogit`, clustered on the meeting) and scored on its test races:
+pay (a race is kept only when every paid pair is a T-2 starter pair). Each is fitted per D9 fold
+on that fold's training rows only (`fit_fold`, the unpenalised conditional logit of
+`models.condlogit`, clustered on the meeting) and scored on its test races:
 ΔLL = ll_offset - ll_model per race (a dead heat's winners averaged), D7's one-sided meeting
 bootstrap, overall and by class group; coefficients per fold and pooled over the scored rows with
 the meeting-clustered sandwich se.
@@ -28,14 +29,17 @@ race's largest claim, claims within a relative 1e-9 tied, a tie to the lowest fi
 lowest combination text); N5 (`core.eval.tail.tail_curve`) over every priced combination. Every
 settled selection and N5 band is a candidate cell (#430's schema, `study` STUDY), ranked by mean
 return. A (scorer, pool) with nothing to settle, or whose settlement raises, is unavailable: named
-in the result, the private report and the record's params; the fits and other pools are kept.
+in the result, the private report and a metric of the record (never its params, so a rerun with
+the pool restored is the same variant); the fits and other pools are kept.
 
 Order (`run_cross_pool`): refuse a span before 2014-06-07 (D10) and an unfrozen family (the
 registry's frozen hash must equal `build_spec`'s) before any store file is opened; list the
 `odds_timeseries` day files and drop every holdout day by its name (D14: never opened, never
 stat'd); read the rest one at a time; join the jravan `races`, `runners`, `final_odds` and
 `dividends`; fold, fit, score, settle; append one registry record per variant (failures included:
-a variant whose fit or scoring raises is a failed record and the others still run); write the
+a variant whose fit or scoring raises is a failed record and the others still run; a crash from
+the store's discovery and fingerprinting on is a failed record for every variant, every build
+named, `@missing` or `@unavailable` for a table not fingerprinted, and is raised); write the
 private report and the cell file through `write_report`. A trial (`trial=True`, `--trial`) runs
 the same code on the `TRIAL_SCHEME` folds without a freeze: its records go to `TRIAL_FAMILY_ID`
 (params `trial`), its files carry "trial", and `FAMILY_ID` is never frozen or written. The CLI
@@ -151,6 +155,7 @@ DAY_COLUMNS = ["race_id", "pool", "combination", "snapshot_utc", "fetched_utc"]
 DAY_COLUMNS += ["minutes_to_post", "odds", "status_raw"]
 ROW_COLUMNS = ["race_id", "horse_no", "p_win_t", "x_cross", "is_fav", "fav_x_cross"]
 _DAY_FILE = re.compile(r"(\d{4}-\d{2}-\d{2})\.parquet")
+BUILD_TABLES = ("races", "runners", "final_odds", "dividends")  # each a data build of a record
 
 
 class FamilyNotFrozen(RuntimeError):
@@ -1014,7 +1019,8 @@ def _spec(*, date_from: date, date_to: date, seed: int, family_id: str, scheme: 
             "choice_set": "the T-2 starter pairs (pairs of the Win starters at t) of a race whose "
             "Quinella board at t prices every one (#434 pair_features, every log_ratio finite)",
             "outcome": "the pair(s) the final QUINELLA dividends pay; a dead heat's paid pairs "
-            "are co-winners at 1/k",
+            "are co-winners at 1/k; a race is kept only when every paid pair is in its choice "
+            "set",
             "offset": "quinella",
             "feature": list(PAIR_FEATURES),
             "folds": "walk_forward over the pair rows' race dates with the same scheme",
@@ -1050,7 +1056,10 @@ def _spec(*, date_from: date, date_to: date, seed: int, family_id: str, scheme: 
             "pair variant: a race with fewer than 2 T-2 starter pairs; a race whose Quinella "
             "board at t misses a starter pair (a NaN log_ratio); a race with no row in races; a "
             "race with no QUINELLA dividend row; a race in which a starter pair has no final "
-            "Quinella price; a race none of whose starter pairs is paid",
+            "Quinella price; a race none of whose starter pairs is paid "
+            "(pair_excluded_no_paid_starter_pair); a race with a paid pair outside its choice set "
+            "while another is in it, as a dead heat with a paid horse off the T-2 Win board "
+            "(pair_excluded_incomplete_outcome), never fitted on its other paid pairs alone",
             "every exclusion is counted in the private report",
         ],
         "metric": {
@@ -1095,8 +1104,11 @@ def _spec(*, date_from: date, date_to: date, seed: int, family_id: str, scheme: 
             "segments": ["all", *GROUPS],
             "unavailable": "a (scorer, pool) with no priced combination to settle, or whose "
             "settlement raises, is unavailable: counted and named in the result, the private "
-            "report and the records' params (settlement_unavailable); the fits, gains and the "
-            "other pools are kept and the record stays scored",
+            "report and the records' metrics (settlement_unavailable[<scorer>/<pool>], value 1, "
+            "n 0, on the variant's record, and for an offset alone on the records of the "
+            "variants with that offset), never their params, so availability is no part of a "
+            "variant's identity and a rerun with the pool restored is the same variant; the "
+            "fits, gains and the other pools are kept and the record stays scored",
         },
         "n5": {
             "function": "core.eval.tail.tail_curve",
@@ -1137,6 +1149,12 @@ def _spec(*, date_from: date, date_to: date, seed: int, family_id: str, scheme: 
             "scheme, and appends one record per variant (params trial) to the trial family; it "
             "never freezes or writes this family, and its files are named as a trial's",
         },
+        "records": "one per variant, failures included; a crash from the store's discovery and "
+        "build fingerprinting on appends a failed record per variant to the family being run "
+        "(the trial family for a trial), every data build named as a full run names it, "
+        "'@missing' or '@unavailable' after the path of a table not fingerprinted, and is "
+        "raised; a refusal (an unfrozen family, a span before 2014-06-07, an out dir inside the "
+        "repository) appends nothing and opens no store file",
         "adoption": "none: a measurement",
         "sources": [SOURCE],
         "seed": int(seed),
@@ -1219,18 +1237,32 @@ def _read_day(path: Path) -> pd.DataFrame:
     return frame
 
 
-def _builds(files: list[tuple[date, Path]]) -> dict[str, str]:
+def _build_names() -> dict[str, str]:
+    """Every data build a record names, each `<path>@unavailable` until `_builds` fingerprints
+    it: a crash before then keeps the build identities (the paths) of a full run."""
+    builds = {"jravan_odds_timeseries": f"processed/{SOURCE}/odds_timeseries@unavailable"}
+    for name in BUILD_TABLES:
+        builds[f"jravan_{name}"] = f"processed/{SOURCE}/{name}.parquet@unavailable"
+    return builds
+
+
+def _builds(files: list[tuple[date, Path]], builds: dict[str, str]) -> None:
+    """Fingerprint the day files and the tables into `builds` (from `_build_names`), in place, so
+    a crash keeps what was collected; a missing table is `<path>@missing` and raises."""
     digest = hashlib.sha256()
     for day, path in files:
         digest.update(f"{day.isoformat()}:{path.stat().st_size}\n".encode())
-    folder = paths.processed_dir(SOURCE)
-    builds = {"jravan_odds_timeseries": f"processed/{SOURCE}/odds_timeseries@"}
+    builds["jravan_odds_timeseries"] = f"processed/{SOURCE}/odds_timeseries@"
     builds["jravan_odds_timeseries"] += digest.hexdigest()[:16]
-    for name in ("races", "runners", "final_odds", "dividends"):
-        stat = (folder / f"{name}.parquet").stat()
+    folder = paths.processed_dir(SOURCE)
+    for name in BUILD_TABLES:
+        try:
+            stat = (folder / f"{name}.parquet").stat()
+        except FileNotFoundError:
+            builds[f"jravan_{name}"] = f"processed/{SOURCE}/{name}.parquet@missing"
+            raise
         stamp = hashlib.sha256(f"{stat.st_size}:{stat.st_mtime_ns}".encode()).hexdigest()[:16]
         builds[f"jravan_{name}"] = f"processed/{SOURCE}/{name}.parquet@{stamp}"
-    return builds
 
 
 def _features(files, log) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int], float]:
@@ -1382,7 +1414,11 @@ def _pair_rows(feats, races, date_from, date_to, counts) -> pd.DataFrame:
     pb_ = pd.to_numeric(legs[1], errors="coerce").to_numpy(dtype=float)
     ok = (paid_code >= 0) & np.isfinite(pa_) & np.isfinite(pb_)
     lo, hi = np.minimum(pa_[ok], pb_[ok]).astype(np.int64), np.maximum(pa_[ok], pb_[ok])
-    won = np.isin(key, paid_code[ok].astype(np.int64) * 65536 + lo * 256 + hi.astype(np.int64))
+    paid_key = paid_code[ok].astype(np.int64) * 65536 + lo * 256 + hi.astype(np.int64)
+    won = np.isin(key, paid_key)
+    # each race's distinct paid pairs; a combination that does not parse is paid off the pairs
+    n_paid = np.bincount(np.unique(paid_key) // 65536, minlength=len(ids))
+    n_paid += np.bincount(paid_code[(paid_code >= 0) & ~ok], minlength=len(ids))
 
     years = np.array([d.year if keep[i] else 0 for i, d in enumerate(meta["race_date"])])
     final_key, final_odds, final_ret = [np.zeros(0, dtype=np.int64)], [np.zeros(0)], [np.zeros(0)]
@@ -1404,9 +1440,12 @@ def _pair_rows(feats, races, date_from, date_to, counts) -> pd.DataFrame:
     unpriced = np.bincount(code, weights=at < 0, minlength=len(ids)) > 0
     counts["pair_excluded_unpriced_final_pair"] = int((keep & unpriced).sum())
     keep &= ~unpriced
-    paid_starter = np.bincount(code, weights=won, minlength=len(ids)) > 0
-    counts["pair_excluded_no_paid_starter_pair"] = int((keep & ~paid_starter).sum())
-    keep &= paid_starter
+    n_won = np.bincount(code, weights=won, minlength=len(ids))
+    counts["pair_excluded_no_paid_starter_pair"] = int((keep & (n_won == 0)).sum())
+    keep &= n_won > 0
+    # a dead heat paying a pair off the choice set is never fitted on its other paid pairs alone
+    counts["pair_excluded_incomplete_outcome"] = int((keep & (n_won < n_paid)).sum())
+    keep &= n_won >= n_paid
 
     order = pd.DataFrame({"day": meta["race_date"].to_numpy(dtype=object), "race": ids})
     rank = np.empty(len(ids), dtype=np.int64)
@@ -1579,7 +1618,12 @@ def _metric(fold: str, name: str, value, n: int, lo=None, hi=None) -> FoldMetric
     return FoldMetric(str(fold), name, value, lo, hi, int(n))
 
 
-def _variant_metrics(variant, coefficients, gains, scores, settlement) -> tuple[FoldMetric, ...]:
+def _variant_metrics(
+    variant, coefficients, gains, scores, settlement, unavailable
+) -> tuple[FoldMetric, ...]:
+    """The record's metrics; `unavailable` (pool -> {scorer: why}) adds a flag (value 1, n 0)
+    per pool its own or its offset's settlement could not settle: a metric of the run, never a
+    param, so a rerun with the pool restored is the same variant."""
     out = []
     for row in coefficients[coefficients["variant"] == variant].itertuples(index=False):
         out.append(
@@ -1614,12 +1658,14 @@ def _variant_metrics(variant, coefficients, gains, scores, settlement) -> tuple[
                     row.upper,
                 )
             )
+    for pool, scorers in sorted(unavailable.items()):
+        for scorer in sorted(s for s in scorers if s in (variant, baseline)):
+            out.append(_metric("all_folds", f"settlement_unavailable[{scorer}/{pool}]", 1.0, 0))
     return tuple(m for m in out if m is not None)
 
 
-def _record(variant, spec, spec_hash, git_sha, builds, metrics, failed, unavailable=None):
-    """The variant's registry record; `unavailable` (pool -> {scorer: why}) names in params the
-    pools its own or its offset's settlement could not settle."""
+def _record(variant, spec, spec_hash, git_sha, builds, metrics, failed):
+    """The variant's registry record (its params are the same whatever settled)."""
     offset = variant.split(":")[1]
     origin = "pair_features" if variant == PAIR_VARIANT else "cross_features"
     params = {
@@ -1633,15 +1679,6 @@ def _record(variant, spec, spec_hash, git_sha, builds, metrics, failed, unavaila
     }
     if spec["family_id"] == TRIAL_FAMILY_ID:
         params["trial"] = True
-    mine = (variant, _baseline_of(variant))
-    missing = [
-        f"{scorer}/{pool}"
-        for pool, scorers in sorted((unavailable or {}).items())
-        for scorer in sorted(scorers)
-        if scorer in mine
-    ]
-    if missing:
-        params["settlement_unavailable"] = missing
     return RunRecord(
         hypothesis_id=HYPOTHESIS,
         family_id=spec["family_id"],
@@ -1724,10 +1761,11 @@ def run_cross_pool(
     started = time.monotonic()
     git_sha = _git_sha()
     boot = spec["bootstrap"]
-    files, held = _day_files(date_from, date_to)
-    builds = _builds(files)
+    builds = _build_names()
     settled = _Settled()
-    try:
+    try:  # from the store's discovery on, a crash is a failed record of every variant
+        files, held = _day_files(date_from, date_to)
+        _builds(files, builds)
         log(f"reading {len(files)} development day files")
         feats, pair_feats, pair_counts, per_day = _features(files, log)
         rows, counts, races = _study_rows(feats, date_from, date_to)
@@ -1792,9 +1830,10 @@ def run_cross_pool(
             spec_hash,
             git_sha,
             builds,
-            () if v in failed else _variant_metrics(v, coefficients, gains, scores, settlement),
+            ()
+            if v in failed
+            else _variant_metrics(v, coefficients, gains, scores, settlement, unavailable),
             v in failed,
-            unavailable,
         )
         for v in VARIANTS
     ]
@@ -2008,9 +2047,10 @@ def render_public_report(result: CrossPoolResult) -> str:
         "",
         "## Settlement at the final dividend",
         "",
-        "Each Win variant and its offset alone (beta = 0: `offset:normalised`, "
-        "`offset:calibrated`) is settled in WIN, QUINELLA and FORECAST (Exacta); the pair "
-        f"variant and its offset alone (`{PAIR_BASELINE}`) in QUINELLA. `value` bets every "
+        "The planned settlement pools: WIN, QUINELLA and FORECAST (Exacta) for each Win variant "
+        "and its offset alone (beta = 0: `offset:normalised`, `offset:calibrated`); QUINELLA "
+        f"for the pair variant and its offset alone (`{PAIR_BASELINE}`). Each planned pool's "
+        f"availability in this run is in the private report, {withheld}. `value` bets every "
         "priced combination with claim p x O > 1, `top1` the race's largest claim (equal claims "
         "to the lowest final odds, then the lowest combination text). The offsets alone have no "
         "registry record: their returns ride as `offset_return[...]` metrics on the records of "
@@ -2023,8 +2063,8 @@ def render_public_report(result: CrossPoolResult) -> str:
         *settled,
         "",
         f"N5 tail-return curves per scorer and pool, by class group: {withheld}. The ranked "
-        f"candidate cells (`study` `{STUDY}`): {withheld}. Counts, exclusions and any "
-        f"settlement pool left unavailable: {withheld}.",
+        f"candidate cells (`study` `{STUDY}`): {withheld}. Counts, exclusions and which "
+        f"planned pools were available: {withheld}, in the private report.",
         "",
         "## What the result rules out",
         "",

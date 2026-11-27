@@ -58,6 +58,24 @@ Fix round 1 (review of PR #493; the orchestrator's fix brief) adds:
   the offset baselines and how they are recorded (`offset_return[...]` metrics).
 - `FamilyNotFrozen`'s message names the frozen spec's date_from, date_to and seed.
 
+Fix round 2 (the re-check of PR #493 at f1a6575; the orchestrator's decisions) adds:
+
+- Pool availability is a run metric, never a param: a (scorer, pool) left unavailable is a
+  `FoldMetric` on the record whose name holds "unavailable" and the pool, and the record's params
+  are the same whether or not a pool settled, so a rerun of the frozen spec with the pool restored
+  keeps `Registry.family_size(FAMILY_ID)` at 5.
+- The pair model keeps a race only when every pair the final QUINELLA dividends pay is in its T-2
+  choice set (its T-2 Win starters' pairs); a race with a paid pair outside it (a dead heat paying
+  "1,2" and "1,3", horse 3 off the T-2 Win board) is dropped and counted under
+  `pair_excluded_incomplete_outcome`. A dead heat whose paid pairs are all in keeps both.
+- Store discovery and build fingerprinting are inside the failure-recording block: a run or a
+  trial on a store missing a table appends one "failed" record per variant to its family (with the
+  builds collected before the crash, the day files' `jravan_odds_timeseries` among them) and
+  re-raises. An unfrozen family or a span before 2014-06-07 is a refusal and appends nothing.
+- The public report names WIN, QUINELLA and FORECAST as the planned settlement pools, points to the
+  private report for availability, never says a pool was settled, and reads the same whatever was
+  unavailable.
+
 Expected values are derived here from first principles or from the dependencies the brief names
 (`models.condlogit`, `models.v0.calibration`, `core.eval.folds`), never from the module under test.
 Every store, board, result and dividend is synthetic and built in the test; HORSETRACK_DATA_DIR
@@ -69,6 +87,7 @@ points under tmp; no real data and no holdout data are read.
 from __future__ import annotations  # noqa: I001
 
 import builtins
+import dataclasses
 import glob
 import hashlib
 import io
@@ -155,6 +174,7 @@ PAIR_COUNTS = {  # a planted defect -> the count of the races the pair model dro
     "partial_board": "pair_excluded_incomplete_t2_quinella_board",
     "no_quinella_dividend": "pair_excluded_no_quinella_dividend",
     "unpriced_final_pair": "pair_excluded_unpriced_final_pair",
+    "incomplete_outcome": "pair_excluded_incomplete_outcome",  # a paid pair off the T-2 pairs
 }
 TIE = 1e-9  # claims equal within this relative gap tie
 FEATURES_OF = {"x_cross": ["x_cross"], "x_cross+fav": ["x_cross", "fav_x_cross"]}
@@ -1100,11 +1120,17 @@ def synth_race(
     *,
     defect: str | None = None,
     tie_fav: bool = False,
+    dead_heat: bool = False,
 ) -> dict:
     """One race in every table. `defect`: "partial_board" (a starter pair off the Quinella
-    board at t, priced only after t), "no_quinella_dividend" or "unpriced_final_pair" (a starter
-    pair with no final Quinella price); `tie_fav`: the two shortest final Win prices tie. The
-    final Quinella and Forecast odds carry noise, so some claims exceed 1."""
+    board at t, priced only after t), "no_quinella_dividend", "unpriced_final_pair" (a starter
+    pair with no final Quinella price) or "incomplete_outcome" (a dead heat, see below, with
+    horse 3 quoted on no Win board at or before t, only after it); `tie_fav`: the two shortest
+    final Win prices tie; `dead_heat`: horse 1 wins and horses 2 and 3 dead-heat for second, so
+    QUINELLA pays "1,2" and "1,3" (and FORECAST "1,2" and "1,3"). The final Quinella and Forecast
+    odds carry noise, so some claims exceed 1. Every option leaves the generator's draws as they
+    are, so the other races do not change."""
+    dead_heat = dead_heat or defect == "incomplete_outcome"
     rid = f"jra:{day.isoformat()}:{venue}:{race_no:02d}"
     meeting = f"jra:{day.isoformat()}:{venue}"
     n = int(rng.integers(6, 10))
@@ -1132,15 +1158,20 @@ def synth_race(
     final_fc = {(i + 1, j + 1): max(round(0.75 * f_noise[i, j] / ordered[i, j], 1), 1.1)
                 for i in range(n) for j in range(n) if i != j}  # fmt: skip
     order = np.argsort(-(np.log(p) + rng.gumbel(size=n)))
+    if dead_heat:  # horses 1, 2 and 3 (positions 0, 1, 2) fill the first three places
+        order = np.r_[[0, 1, 2], [i for i in order if i > 2]].astype(int)
     finish = np.empty(n, dtype=int)
     finish[order] = np.arange(1, n + 1)
-    first, second = horses[order[0]], horses[order[1]]
-    lo, hi = sorted((first, second))
+    if dead_heat:
+        finish[2] = 2  # horse 3 dead-heats horse 2 for second
+    first = horses[order[0]]
+    seconds = [horses[order[1]], horses[order[2]]] if dead_heat else [horses[order[1]]]
+    paid_pairs = [tuple(sorted((first, s))) for s in seconds]
     quin_board = dict(quin_t)  # the Quinella board at t
     if defect == "partial_board":
         del quin_board[(horses[0], horses[1])]
     if defect == "unpriced_final_pair":
-        del final_quin[next(pr for pr in itertools.combinations(horses, 2) if pr != (lo, hi))]
+        del final_quin[next(pr for pr in itertools.combinations(horses, 2) if pr not in paid_pairs)]
 
     post = datetime(day.year, day.month, day.day, 1, 0, tzinfo=UTC) + timedelta(
         minutes=40 * race_no + (0 if venue == VENUES[0] else 15)
@@ -1150,12 +1181,16 @@ def synth_race(
         return {k: max(round(v * rng.uniform(low, high), 1), 1.1) for k, v in odds.items()}
 
     win_board = dict(zip(horses, win_t.tolist(), strict=True))
-    ts = capture(rid, post, 6.0, win=jitter(win_board, 0.9, 1.1))
-    ts += capture(rid, post, 5.0, quinella=jitter(quin_board, 0.9, 1.1))
+    early_win, early_quin = jitter(win_board, 0.9, 1.1), jitter(quin_board, 0.9, 1.1)
+    late_win, late_quin = jitter(win_board, 0.5, 1.5), jitter(quin_t, 0.5, 1.5)
+    if defect == "incomplete_outcome":  # horse 3 has no Win quote at or before t
+        del win_board[3], early_win[3]
+    ts = capture(rid, post, 6.0, win=early_win)
+    ts += capture(rid, post, 5.0, quinella=early_quin)
     ts += capture(rid, post, 2.0, win=win_board)
     ts += capture(rid, post, 2.5, quinella=quin_board)
-    ts += capture(rid, post, 1.0, win=jitter(win_board, 0.5, 1.5))  # after t
-    ts += capture(rid, post, 0.5, quinella=jitter(quin_t, 0.5, 1.5))  # after t
+    ts += capture(rid, post, 1.0, win=late_win)  # after t
+    ts += capture(rid, post, 0.5, quinella=late_quin)  # after t
 
     base = {"jurisdiction": "jra", "race_id": rid, "race_date": day, "venue": venue,
             "race_no": race_no}  # fmt: skip
@@ -1171,12 +1206,13 @@ def synth_race(
     final += [odds_row("FORECAST", f"{a},{b}", o) for (a, b), o in final_fc.items()]
     final += [odds_row(pool, POOL_ROW, None, 1.0e8) for pool in ("WIN", "PLACE", *POOLS[1:])]
 
-    dividends = [
-        ("WIN", str(first), final_win[first - 1] * 100 + 30),
-        ("QUINELLA", f"{lo},{hi}", final_quin[(lo, hi)] * 100 + 40),
-        ("FORECAST", f"{first},{second}", final_fc[(first, second)] * 100 + 50),
-        *[("PLACE", str(horses[order[i]]), 150.0 + 10 * i) for i in range(3)],
-    ]
+    dividends = [("WIN", str(first), final_win[first - 1] * 100 + 30)]
+    for second, (lo, hi) in zip(seconds, paid_pairs, strict=True):
+        dividends += [
+            ("QUINELLA", f"{lo},{hi}", final_quin[(lo, hi)] * 100 + 40),
+            ("FORECAST", f"{first},{second}", final_fc[(first, second)] * 100 + 50),
+        ]
+    dividends += [("PLACE", str(horses[order[i]]), 150.0 + 10 * i) for i in range(3)]
     if defect == "no_quinella_dividend":
         dividends = [d for d in dividends if d[0] != "QUINELLA"]
     paid = [{"jurisdiction": "jra", "race_id": rid, "pool": pool, "combination": c,
@@ -1189,7 +1225,8 @@ def synth_race(
             "post_time_local": f"{jst:%H:%M}", "field_size": n, "status": "run"}  # fmt: skip
     runners = [{**base, "meeting_id": meeting, "season": str(day.year), "horse_id": f"{rid}:{h}",
                 "horse_no": h, "horse_name": f"horse {h}", "placing_raw": str(int(pos)),
-                "finish_pos": int(pos), "dead_heat": False, "win_odds": float(o),
+                "finish_pos": int(pos), "dead_heat": dead_heat and h in (2, 3),
+                "win_odds": float(o),
                 "is_scratched": False}
                for h, pos, o in zip(horses, finish, final_win, strict=True)]  # fmt: skip
     info = SimpleNamespace(
@@ -1229,8 +1266,8 @@ def build_store(data: Path) -> SimpleNamespace:
     folder.mkdir(parents=True)
     (folder / "_build.json").write_text("{}\n")
     dev, late = development_days(), after_day()
-    # Three defect races and a tied favourite on development days of the test months (from
-    # 2026-11-01), each in a meeting that keeps its other race.
+    # Four defect races, a tied favourite and a dead heat the pair model keeps on development
+    # days of the test months (from 2026-11-01), each in a meeting that keeps its other race.
     tested = [d for d in dev if d >= date(2026, 11, 1)]
     defects = {
         kind: f"jra:{tested[i].isoformat()}:{VENUES[0]}:01"
@@ -1238,10 +1275,12 @@ def build_store(data: Path) -> SimpleNamespace:
             ("partial_board", 1),
             ("no_quinella_dividend", 3),
             ("unpriced_final_pair", 5),
+            ("incomplete_outcome", 6),
         )
     }
     defect_of = {rid: kind for kind, rid in defects.items()}
     tie_race = f"jra:{tested[2].isoformat()}:{VENUES[1]}:01"
+    dead_heat_race = f"jra:{tested[4].isoformat()}:{VENUES[1]}:02"
     tables: dict[str, list[dict]] = {"races": [], "runners": [], "final": [], "paid": []}
     races_of: dict[date, list[str]] = {}
     info: dict[str, SimpleNamespace] = {}
@@ -1259,6 +1298,7 @@ def build_store(data: Path) -> SimpleNamespace:
                     RACE_CLASSES[n % len(RACE_CLASSES)],
                     defect=defect_of.get(rid),
                     tie_fav=rid == tie_race,
+                    dead_heat=rid == dead_heat_race,
                 )
                 n += 1
                 ts += race["ts"]
@@ -1288,7 +1328,7 @@ def build_store(data: Path) -> SimpleNamespace:
     test_days = sorted({race_dates[i] for f in folds for i in f.test_idx})
     assert test_days and test_days[0] == date(2026, 11, 1)
     assert HOLDOUT_DAY > test_days[0] and any(f.train_end > HOLDOUT_DAY for f in folds)
-    assert {info[r].day for r in (*defects.values(), tie_race)} <= set(test_days)
+    assert {info[r].day for r in (*defects.values(), tie_race, dead_heat_race)} <= set(test_days)
     forbidden_days = (HOLDOUT_DAY, EARLY_DAY, late)
     return SimpleNamespace(
         data=data,
@@ -1303,6 +1343,7 @@ def build_store(data: Path) -> SimpleNamespace:
         info=info,
         defects=defects,
         tie_race=tie_race,
+        dead_heat_race=dead_heat_race,
     )
 
 
@@ -1311,15 +1352,18 @@ def build_store(data: Path) -> SimpleNamespace:
 
 def win_scored_races(store: SimpleNamespace) -> list[str]:
     """The Win study's test-fold races: every race of a test day but the one whose T-2 Quinella
-    board misses a starter pair (its x_cross is NaN)."""
-    skip = store.defects["partial_board"]
-    return [r for d in store.test_days for r in store.races_of[d] if r != skip]
+    board misses a starter pair and the one whose horse 3 is off the T-2 Win board (each leaves a
+    final starter's x_cross NaN)."""
+    skip = {store.defects["partial_board"], store.defects["incomplete_outcome"]}
+    return [r for d in store.test_days for r in store.races_of[d] if r not in skip]
 
 
 def store_pairs(store: SimpleNamespace) -> tuple[pd.DataFrame, dict[str, set[str]]]:
     """The pair model's rows from first principles: one per starter pair of every development race
-    with a complete T-2 Quinella board, a QUINELLA dividend and a final price for every starter
-    pair; log_ratio = ln(q_pair_t / h_pair_t) from the boards at t; and the races dropped."""
+    with a complete T-2 Quinella board, a QUINELLA dividend, a final price for every starter pair
+    and every pair the QUINELLA dividends pay among its T-2 starter pairs (its choice set; a dead
+    heat's paid pairs are co-winners); log_ratio = ln(q_pair_t / h_pair_t) from the boards at t;
+    and the races dropped."""
     rows, dropped = [], {kind: set() for kind in PAIR_COUNTS}
     for day in store.dev_days:
         for rid in store.races_of[day]:
@@ -1334,6 +1378,9 @@ def store_pairs(store: SimpleNamespace) -> tuple[pd.DataFrame, dict[str, set[str
                 continue
             if any(pr not in info.final_quin for pr in pairs):
                 dropped["unpriced_final_pair"].add(rid)
+                continue
+            if not paid <= {f"{a},{b}" for a, b in pairs}:  # a paid pair off the choice set
+                dropped["incomplete_outcome"].add(rid)
                 continue
             q_t = ref_shares({pr: info.quin_board[pr] for pr in pairs})
             h_t = ref_harville(ref_shares(info.win_t))
@@ -1654,6 +1701,15 @@ def test_the_run_fits_scores_and_settles_the_pair_model(store, main_run):
     assert dropped == {kind: {rid} for kind, rid in store.defects.items()}  # the fixture's plants
     for key in PAIR_COUNTS.values():  # each dropped race is counted
         assert result.counts.get(key) == 1, (key, result.counts.get(key))
+    # Two dead heats pay "1,2" and "1,3". Where horse 3 is off the T-2 Win board, "1,3" is outside
+    # the choice set, so the race is dropped (above), never fitted with "1,2" as its sole winner;
+    # where every horse is on it, the race is in with both pairs co-winners at equal weight.
+    incomplete = store.info[store.defects["incomplete_outcome"]]
+    assert 3 not in incomplete.win_t
+    for info in (incomplete, store.info[store.dead_heat_race]):
+        assert {c for pool, c in info.paid if pool == "QUINELLA"} == {"1,2", "1,3"}
+    heat = pairs[pairs["race_id"] == store.dead_heat_race]
+    assert set(heat.loc[heat["won"], "combination"]) == {"1,2", "1,3"}
 
     record = [r for r in registry.records(FAMILY_ID) if r.variant == PAIR_VARIANT]
     assert len(record) == 1 and record[0].status == "scored"
@@ -1666,6 +1722,7 @@ def test_the_run_fits_scores_and_settles_the_pair_model(store, main_run):
     folds = [f for f in walk_forward(pairs["race_date"], scheme=SHORT) if len(f.test_idx)]
     per_fold = [ref_pair_fit(pairs.iloc[f.train_idx]).coef[0] for f in folds]
     tested = pd.concat([pairs.iloc[f.test_idx] for f in folds], ignore_index=True)
+    assert store.dead_heat_race in set(tested["race_id"])
     pooled = ref_pair_fit(tested)
     mine = result.coefficients[result.coefficients["variant"] == PAIR_VARIANT]
     assert set(mine["feature"]) == {"log_ratio"}
@@ -1803,9 +1860,10 @@ def no_forecast_store(store: SimpleNamespace, root: Path) -> Path:
 def test_an_unavailable_settlement_pool_keeps_the_fits_and_the_other_pools(
     store, main_run, tmp_path, monkeypatch
 ):
-    """M3: no FORECAST price or dividend at all. FORECAST is unavailable, named as such; every
-    variant is still scored, and its fits, gains and WIN and QUINELLA settlement are the run's
-    with FORECAST present."""
+    """M3: no FORECAST price or dividend at all. FORECAST is unavailable, named as such (in the
+    records' metrics, never their params); every variant is still scored, and its fits, gains and
+    WIN and QUINELLA settlement are the run's with FORECAST present. A rerun with FORECAST
+    restored leaves the family at five variants."""
     data = no_forecast_store(store, tmp_path)
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(data))
     monkeypatch.setattr(cross_pool_run, "load_country_scheme", lambda country: SHORT)
@@ -1822,10 +1880,14 @@ def test_an_unavailable_settlement_pool_keeps_the_fits_and_the_other_pools(
     assert "FORECAST" in result.unavailable_pools
     report = Path(result.report_path).read_text(encoding="utf-8")
     assert any("FORECAST" in line and "unavailable" in line.lower() for line in report.splitlines())
-    for r in records:
+    for r in records:  # availability is a metric of the run, never a param of the variant
+        assert "FORECAST" not in json.dumps(r.params), (r.variant, r.params)
+        assert not any("settlement" in key or "pool" in key for key in r.params), r.params
+        flagged = [m.metric for m in unavailable_metrics(r) if "FORECAST" in m.metric]
         if r.variant in WIN_VARIANTS:  # the pool its record would have settled
-            blob = json.dumps(r.params) + " ".join(m.metric for m in r.metrics)
-            assert "FORECAST" in blob, r.variant
+            assert flagged, (r.variant, [m.metric for m in r.metrics])
+        else:  # the pair model never settles in FORECAST
+            assert not any("FORECAST" in m.metric for m in r.metrics), r.variant
 
     full = main_run.result
     key = ["variant", "feature", "fold"]
@@ -1854,6 +1916,32 @@ def test_an_unavailable_settlement_pool_keeps_the_fits_and_the_other_pools(
     )
     cells = _strict(Path(result.cells_path).read_text(encoding="utf-8"))
     assert {c["pool"] for c in cells} == {"WIN", "QUINELLA"}
+
+    # A rerun of the same frozen spec with FORECAST restored is another run of the same five
+    # variants, not five more: the family size stays 5 (#493 re-check, cross_pool_run.py:1644).
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(store.data))
+    restored = run_cross_pool(**args, out_dir=tmp_path / "restored", registry=registry)
+
+    assert "FORECAST" not in restored.unavailable_pools
+    assert registry.family_size(FAMILY_ID) == restored.family_size == len(EXPECTED_VARIANTS) == 5
+    records = registry.records(FAMILY_ID)
+    assert len(records) == 2 * len(EXPECTED_VARIANTS)
+    first = {r.variant: r for r in records[: len(EXPECTED_VARIANTS)]}  # append order
+    again = {r.variant: r for r in records[len(EXPECTED_VARIANTS) :]}
+    assert set(first) == set(again) == EXPECTED_VARIANTS
+    for v in EXPECTED_VARIANTS:
+        assert again[v].params == first[v].params, v
+        assert again[v].status == first[v].status == "scored", v
+        names = [m.metric for m in again[v].metrics]
+        assert unavailable_metrics(again[v]) == [], (v, names)
+        if v in WIN_VARIANTS:  # settled in FORECAST this time; the first run still says it was not
+            assert any(n.startswith("return[FORECAST:") for n in names), (v, names)
+            assert any("FORECAST" in m.metric for m in unavailable_metrics(first[v])), v
+
+
+def unavailable_metrics(record) -> list:
+    """The record's metrics that say a settlement pool was unavailable."""
+    return [m for m in record.metrics if "unavailable" in m.metric.lower()]
 
 
 def test_a_trial_run_is_recorded_in_the_trial_family(store, main_run, tmp_path, monkeypatch):
@@ -1923,6 +2011,43 @@ def test_a_report_target_inside_the_repo_is_refused(store, tmp_path, monkeypatch
         shutil.rmtree(inside, ignore_errors=True)
 
 
+@pytest.mark.parametrize("missing", ["final_odds", "dividends"])
+def test_a_run_on_a_partly_built_store_is_recorded_as_failed(store, tmp_path, monkeypatch, missing):
+    """A store missing a table crashes the run while it finds and fingerprints the store; the
+    attempt is still audited: one failed record per variant in its family (a trial's in the trial
+    family, the run proper's in FAMILY_ID), with the builds collected before the crash, and the
+    error is raised (#493 re-check, cross_pool_run.py:1716)."""
+    data = tmp_path / "data"
+    shutil.copytree(store.processed, data / "processed" / "jravan")
+    (data / "processed" / "jravan" / f"{missing}.parquet").unlink()
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(data))
+    monkeypatch.setattr(cross_pool_run, "load_country_scheme", lambda country: SHORT)
+    monkeypatch.setattr(cross_pool_run, "TRIAL_SCHEME", SHORT)
+    registry = temp_registry(tmp_path / "reg")
+    span = {"date_from": SPAN_START, "date_to": STORE_TO, "seed": SEED}
+
+    for trial, family in ((True, TRIAL_FAMILY), (False, FAMILY_ID)):
+        if not trial:  # the run proper needs its freeze; the trial before it froze nothing
+            assert registry.frozen_spec_hash(FAMILY_ID) is None
+            freeze_spec(**span, registry=registry)
+        out = data / "reports" / family
+        with pytest.raises(OSError):
+            run_cross_pool(**span, out_dir=out, registry=registry, trial=trial)
+        records = registry.records(family)
+        assert sorted(r.variant for r in records) == sorted(EXPECTED_VARIANTS), (family, records)
+        assert registry.family_size(family) == len(EXPECTED_VARIANTS), family
+        for r in records:
+            assert r.status == "failed", (family, r.variant)
+            assert r.sources == ("jravan",) and r.hypothesis_id == "E25" and r.ticket == 435
+            assert r.params["date_from"] == SPAN_START.isoformat(), r.params
+            assert r.params["date_to"] == STORE_TO.isoformat(), r.params
+            assert bool(r.params.get("trial", False)) is trial, (family, r.params)
+            assert "jravan_odds_timeseries" in r.data_builds, r.data_builds  # read before the crash
+    assert len(registry.records(TRIAL_FAMILY)) == len(EXPECTED_VARIANTS)  # the run added none
+    kinds = [json.loads(line)["kind"] for line in registry.path.read_text().splitlines()]
+    assert kinds == ["run"] * 5 + ["freeze"] + ["run"] * 5
+
+
 # ---------------------------------------------------------------- refusals before any store read
 
 
@@ -1942,7 +2067,7 @@ def test_run_refuses_an_unfrozen_family(store, tmp_path, monkeypatch):
         attempt(bare, "bare")
     assert opened == []
     assert bare.frozen_spec_hash(FAMILY_ID) is None
-    assert bare.records(FAMILY_ID) == []
+    assert bare.records() == []  # a refusal, not a run: no record, failed or not, in any family
 
     # A freeze of another spec (another seed, another span end) is refused too.
     for name, change in (("seed", {"seed": SEED + 1}), ("to", {"date_to": date(2027, 1, 30)})):
@@ -1953,7 +2078,7 @@ def test_run_refuses_an_unfrozen_family(store, tmp_path, monkeypatch):
             attempt(other, name)
         assert opened == [], name
         assert other.frozen_spec_hash(FAMILY_ID) == frozen
-        assert other.records(FAMILY_ID) == []
+        assert other.records() == [], name
 
     # The same arguments frozen: the check passes and the run goes on to read the store (the spy
     # stops it at its first store file).
@@ -2042,8 +2167,11 @@ def test_a_span_before_2014_06_07_is_refused_before_any_store_file_is_opened(
         install_file_spy(mp, under(store.processed), opened)
         with pytest.raises(refused):
             run_cross_pool(**run_args(store, "early", registry, date_from=early))
+        # A trial needs no freeze, so the span alone refuses it, before any store file too.
+        with pytest.raises(ValueError):
+            run_cross_pool(**run_args(store, "early-trial", registry, date_from=early), trial=True)
     assert opened == []
-    assert registry.records(FAMILY_ID) == []
+    assert registry.records() == []  # a refusal, not a run: no failed record in either family
 
 
 # ---------------------------------------------------------------- the public report
@@ -2054,10 +2182,8 @@ LEAKS = ("1.2345", "1.23", "98765", "98,765", "0.0731", "0.073", "0.00456", "432
          "0.6789", "0.679", "56789", "56,789")  # fmt: skip
 
 
-def test_public_report_carries_no_figures(tmp_path, monkeypatch):
-    data = tmp_path / "data"
-    data.mkdir()
-    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(data))
+def figures_result(data: Path) -> CrossPoolResult:
+    """A result whose every figure is one of FIGURES, its files under the data dir `data`."""
     a, b, c, d, e, f, g = FIGURES
     digest = "abcdef" * 10 + "abcd"  # hex without digits: no figure can hide in it
     run_ids = [s * 10 + s[:4] for s in ("fedcba", "bcadef", "cabfed", "dabcef", "efabcd")]
@@ -2087,7 +2213,7 @@ def test_public_report_carries_no_figures(tmp_path, monkeypatch):
          "shrunk_edge": None, "mean_odds": f}
         for v in variants
     ]  # fmt: skip
-    result = CrossPoolResult(
+    return CrossPoolResult(
         family_id=FAMILY_ID,
         spec_hash=digest,
         family_size=len(variants),
@@ -2103,6 +2229,14 @@ def test_public_report_carries_no_figures(tmp_path, monkeypatch):
         failed_variants=[],
     )
 
+
+def test_public_report_carries_no_figures(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(data))
+    result = figures_result(data)
+    digest, run_ids, variants = result.spec_hash, result.run_ids, sorted(EXPECTED_VARIANTS)
+
     text = render_public_report(result)
 
     assert isinstance(text, str)
@@ -2116,3 +2250,29 @@ def test_public_report_carries_no_figures(tmp_path, monkeypatch):
     assert all(run_id[:12] in text for run_id in run_ids)
     assert f"reports/cross-pool-japan-{digest[:12]}.md" in text  # relative to the data dir
     assert str(data) not in text and str(data.resolve()) not in text  # no home path
+
+
+def test_public_report_names_the_planned_pools_and_never_claims_one_settled(tmp_path, monkeypatch):
+    """Which pools settled is withheld with the figures: the page names WIN, QUINELLA and FORECAST
+    as the planned settlement pools, points to the private report for their availability, says of
+    no pool that it was settled, and reads the same whatever was unavailable (#493 re-check,
+    cross_pool_run.py:2011)."""
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(data))
+    result = figures_result(data)
+    why = "unavailable: no priced FORECAST combination in the scored races"
+    gone = dataclasses.replace(
+        result, unavailable_pools={"FORECAST": dict.fromkeys((*WIN_VARIANTS, *WIN_BASELINES), why)}
+    )
+
+    text = render_public_report(gone)
+
+    assert text == render_public_report(result)
+    prose = [line for line in text.splitlines() if not line.lstrip().startswith("|")]
+    claims = [ln for ln in prose if re.search(r"\b(?:is|are|was|were|been)\s+settled\b", ln, re.I)]
+    assert claims == []
+    named = [line for line in prose if "FORECAST" in line]
+    assert named and all("planned" in line.lower() for line in named), named
+    assert all(pool in " ".join(named) for pool in POOLS), named
+    assert any("availab" in ln.lower() and "private report" in ln.lower() for ln in prose)

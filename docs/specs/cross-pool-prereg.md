@@ -38,7 +38,9 @@ CLI writes no public page for it.
 Real-store smoke and trial runs before the freeze checked only that the pipeline completes and
 its memory; their records are in the trial family. No output figure of theirs was read to shape
 this spec: the changes after them (the pair variant, per-pool settlement, the retrospective
-label, the `top1` tie rule, the required `--to`) came from the review findings on PR #493.
+label, the `top1` tie rule, the required `--to`, pool availability as a metric, the pair model's
+complete-outcome rule, failed records from the store's discovery on) came from the review
+findings on PR #493.
 
 ## Hypothesis and null
 
@@ -105,7 +107,11 @@ family size is **5**, one registry record each (failures included):
 - Choice set: the T-2 starter pairs of each race whose Quinella board at t prices every one
   (every `log_ratio` finite).
 - Outcome: the pair(s) the final QUINELLA dividends (`dividends`) pay; a dead heat's paid pairs
-  are co-winners at 1/k, averaged in the log loss as the Win variants' dead heats are.
+  are co-winners at 1/k, averaged in the log loss as the Win variants' dead heats are. A race is
+  kept only when every paid pair is in its choice set: a dead heat paying `1,2` and `1,3` whose
+  horse 3 has no Win quote at t is dropped (`pair_excluded_incomplete_outcome`), never fitted with
+  `1,2` as its sole winner; a race none of whose paid pairs is in the choice set is dropped under
+  `pair_excluded_no_paid_starter_pair`.
 - Offset `quinella`, feature `log_ratio` (λ2 = 1, zero votes unavailable), fitted per D9 fold on
   the earlier folds' rows only (`walk_forward` over the pair rows' race dates, the same scheme),
   scored by the pair log-loss gain per race (`cross_pool_run.score_pair_folds`), D7 bounds overall
@@ -143,7 +149,8 @@ family size is **5**, one registry record each (failures included):
   at t misses a starter pair (`pair_excluded_incomplete_t2_quinella_board`); a race with no row
   in `races`; a race with no QUINELLA dividend row (`pair_excluded_no_quinella_dividend`); a race
   in which a starter pair has no final Quinella price (`pair_excluded_unpriced_final_pair`); a
-  race none of whose starter pairs is paid.
+  race none of whose starter pairs is paid (`pair_excluded_no_paid_starter_pair`); a race with a
+  paid pair outside its choice set while another is in it (`pair_excluded_incomplete_outcome`).
 
 ## Metric and bounds
 
@@ -189,9 +196,12 @@ final-price offset; the cells say so in their `study` value.
   se_mean_return = (upper - lower) / (2 z_level).
 - A pool with nothing to settle (no priced combination in the scored races, as when a store
   lacks FORECAST final odds), or whose settlement raises, is unavailable for that scorer: counted,
-  named in the result (`unavailable_pools`), the private report and the records' params
-  (`settlement_unavailable`). The fits, gains, coefficients and the other pools are kept, and the
-  variant's record stays `scored`.
+  named in the result (`unavailable_pools`), the private report and the records' metrics
+  (`settlement_unavailable[<scorer>/<pool>]`, value 1, n 0, on the variant's record, and for an
+  offset alone on the records of the variants with that offset). It is never a param: params are
+  part of the variant's identity (`Registry.family_size`), so a rerun of the frozen spec with the
+  pool restored is another run of the same five variants. The fits, gains, coefficients and the
+  other pools are kept, and the variant's record stays `scored`.
 
 ## N5
 
@@ -223,7 +233,14 @@ mean_odds`.
   ranked cells), written through `core.eval.reports.write_report` with `sources=("jravan",)`; a
   trial's is `cross-pool-japan-<hash[:12]>-trial.md` and its cells `cross-pool-trial.json`.
 - One `RunRecord` per variant in the japan registry, `sources=("jravan",)`, status `scored` or
-  `failed`; then `write_summary` regenerates `docs/experiments/registry/japan/`.
+  `failed`; then `write_summary` regenerates `docs/experiments/registry/japan/`. A crash from the
+  store's discovery and build fingerprinting on (a store missing a table, say) appends a failed
+  record per variant to the family being run (the trial family for a trial) and is raised; the
+  record names every data build a full run names, `@missing` or `@unavailable` after the path of
+  a table it could not fingerprint, so its variant is a full run's. A refusal (an unfrozen
+  family, a span before 2014-06-07, an out dir inside the repository) appends nothing and opens
+  no store file.
 - After `--run`, the public `docs/experiments/cross-pool-japan.md` from `render_public_report`:
-  what ran, the family, the spec hash, the family size, the run ids and the private report's
-  path; every figure withheld (D21).
+  what ran, the family, the spec hash, the family size, the run ids, the private report's path
+  and the planned settlement pools (which of them were available is only in the private report);
+  every figure withheld (D21).
