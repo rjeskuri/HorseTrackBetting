@@ -1,11 +1,14 @@
 """The C5 exotic layer: Win probabilities to exotic-pool probabilities, priced against the pools'
 own dividends (ticket #99, epic #73; research 08 §3.2 C5, §4 E43, E44).
 
-- `dividend_share` / `dividend_shares`: the dividend-implied share of a pool's money on a winning
-  combination, R * 100 / (D + 5): R the race's own payout rate (`takeout.race_takeout`, boosts
-  included, #76), D the dividend per 100 yen, 5 yen the mean breakage (dividends are floored to
-  10 yen) added back (04 §1.2-1.3). This is the exotic market baseline of 08 R15 for a race with
-  one winning combination.
+- `dividend_share` / `statute_shares` / `dividend_shares`: the dividend-implied share of a pool's
+  money on each winning combination, the exotic market baseline of 08 R15. JRA pays each of a
+  race-pool's P winning combinations (W + L / P) x R (04 §1.2, 競馬法 第8条: W the money on it,
+  L the money on everything that lost, R the race's own payout rate, `takeout.race_takeout`,
+  boosts included, #76); D, the dividend per 100 yen, is floored to 10 yen, so the 5-yen mean
+  breakage is added back (04 §1.3). One winner (P = 1) holds R * 100 / (D + 5) of the pool,
+  `dividend_share`; `statute_shares` solves P winners together; `dividend_shares` applies it to
+  every (race_id, pool) of a dividends frame.
 - `winning_combinations`: the combinations a result pays, dead heats per 04 §1.4 (every
   combination some tie-break of the dead heats would make the result).
 - `Ordering`: the ordered first three from one race's Win probabilities, a softmax over the
@@ -73,46 +76,90 @@ HENERY_MAX_ITER = 100
 
 
 def dividend_share(dividend: float, payout_rate: float) -> float:
-    """payout_rate * 100 / (dividend + 5): the pool's share on a winning combination paying
-    `dividend` per 100 yen, mean breakage added back. ValueError for a dividend that is not a
-    positive number or a payout rate outside (0, 1]."""
-    d = _real(dividend, "dividend")
-    r = _real(payout_rate, "payout_rate")
-    if not d > 0:
-        raise ValueError(f"a dividend must be positive, got {dividend!r}")
-    if not 0 < r <= 1:
-        raise ValueError(f"a payout rate must be in (0, 1], got {payout_rate!r}")
+    """payout_rate * 100 / (dividend + 5): the pool's share on the one winning combination of a
+    race-pool, paying `dividend` per 100 yen, mean breakage added back. ValueError for a dividend
+    that is not a positive number or a payout rate outside (0, 1]."""
+    d = _dividend(dividend)
+    r = _payout_rate(payout_rate)
     return r * UNIT_STAKE / (d + MEAN_BREAKAGE)
+
+
+def statute_shares(dividends: Sequence[float], payout_rate: float) -> np.ndarray:
+    """The money shares W_c / S of one race-pool's P winning combinations, in input order, from
+    their dividends per 100 yen.
+
+    A winning ticket on c gets (W_c + L / P) x R / W_c per yen (04 §1.2, 競馬法 第8条; S the
+    pool, L = S - sum W the money that lost). With r_c = (D_c + 5) / (100 R), that is
+    W_c / L = 1 / (P (r_c - 1)), and S / L = 1 + K, K the sum of those: x_c = 1 / ((1 + K) P
+    (r_c - 1)). P = 1 is `dividend_share`. ValueError for an empty sequence, a dividend that is
+    not a positive number, a payout rate outside (0, 1], or any r_c <= 1 (nobody lost).
+    """
+    r = _payout_rate(payout_rate)
+    d = np.array([_dividend(x) for x in dividends], dtype=float)
+    if not len(d):
+        raise ValueError("a race-pool pays at least one winning combination, got none")
+    excess = (d + MEAN_BREAKAGE) / (UNIT_STAKE * r) - 1.0
+    if np.any(excess <= 0):
+        raise ValueError(
+            f"(D + 5) / 100 must exceed the payout rate {r} on every winning combination, "
+            f"or nobody lost: got dividends {d.tolist()!r}"
+        )
+    if len(d) == 1:
+        return np.array([r * UNIT_STAKE / (d[0] + MEAN_BREAKAGE)])  # `dividend_share`, exactly
+    on_vs_lost = 1.0 / (len(d) * excess)  # W_c / L
+    return on_vs_lost / (1.0 + on_vs_lost.sum())
 
 
 def dividend_shares(
     dividends: pd.DataFrame, *, calendar: takeout.BoostCalendar | None = None
 ) -> pd.Series:
-    """`dividend_share` for every row of a frame with the store's dividends columns (race_id, pool,
-    combination, dividend), each at its own race's payout rate, `takeout.race_takeout(race_id,
-    pool)` with `calendar` (None: the shipped boost calendar). An optional `race_class_raw`
-    column is passed on for the age-restricted boosts. The Series is on the frame's index."""
+    """The money share of every row of a frame with the store's dividends columns (race_id, pool,
+    combination, dividend): `statute_shares` over each (race_id, pool) group, P its row count,
+    at that race's own payout rate, `takeout.race_takeout(race_id, pool)` with `calendar` (None:
+    the shipped boost calendar). The frame must hold every winning combination of a race-pool,
+    as the store's dividends table does: a missing one leaves P short and the others' shares
+    too large. An optional `race_class_raw` column is passed on for the age-restricted boosts.
+    A combination twice in one race-pool, or a race-pool with two conditions labels, is a
+    ValueError. The Series is on the frame's index, in its order."""
     missing = [c for c in ("race_id", "pool", "combination", "dividend") if c not in dividends]
     if missing:
         raise ValueError(f"the dividends frame is missing columns: {missing}")
-    classes = (
-        dividends["race_class_raw"]
+    labels = (
+        [None if pd.isna(x) else str(x) for x in dividends["race_class_raw"]]
         if "race_class_raw" in dividends
-        else pd.Series(None, index=dividends.index, dtype=object)
+        else [None] * len(dividends)
     )
-    rates: dict[tuple, float] = {}
-    shares = []
-    for race_id, pool, label, dividend in zip(
-        dividends["race_id"], dividends["pool"], classes, dividends["dividend"], strict=True
-    ):
-        label = None if pd.isna(label) else str(label)
-        key = (race_id, pool, label)
-        if key not in rates:
-            rates[key] = takeout.race_takeout(
-                race_id, pool, calendar=calendar, race_class_raw=label
-            ).payout_rate
-        shares.append(dividend_share(dividend, rates[key]))
+    groups: dict[tuple, list[int]] = {}
+    for i, key in enumerate(zip(dividends["race_id"], dividends["pool"], strict=True)):
+        groups.setdefault(key, []).append(i)
+    combos = dividends["combination"].tolist()
+    values = dividends["dividend"].tolist()
+    shares = np.empty(len(dividends), dtype=float)
+    for (race_id, pool), rows in groups.items():
+        if len({combos[i] for i in rows}) < len(rows):
+            raise ValueError(f"{race_id} {pool}: a combination is given twice")
+        label = {labels[i] for i in rows}
+        if len(label) > 1:
+            raise ValueError(f"{race_id} {pool}: more than one race_class_raw, {label!r}")
+        rate = takeout.race_takeout(
+            race_id, pool, calendar=calendar, race_class_raw=label.pop()
+        ).payout_rate
+        shares[rows] = statute_shares([values[i] for i in rows], rate)
     return pd.Series(shares, index=dividends.index, dtype=float, name="share")
+
+
+def _dividend(value: object) -> float:
+    d = _real(value, "dividend")
+    if not d > 0:
+        raise ValueError(f"a dividend must be positive, got {value!r}")
+    return d
+
+
+def _payout_rate(value: object) -> float:
+    r = _real(value, "payout_rate")
+    if not 0 < r <= 1:
+        raise ValueError(f"a payout rate must be in (0, 1], got {value!r}")
+    return r
 
 
 def _real(value: object, name: str) -> float:

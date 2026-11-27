@@ -9,10 +9,20 @@ Contract pinned here (`horsetrack.countries.japan.models.exotic`):
   of the pool's money on the winning combination, implied by its dividend per 100 yen, with the
   5-yen mean breakage (dividends are floored to 10 yen) added back. A dividend that is not a
   positive number, or a payout rate outside (0, 1], is a ValueError.
-- `dividend_shares(dividends) -> pd.Series`: the same share for every row of a frame with the
-  store's dividends columns race_id ("jra:<YYYY-MM-DD>:<VENUE>:<NN>"), pool, combination and
-  dividend, each row at its own race's payout rate, `takeout.race_takeout(race_id, pool)` with the
-  shipped boost calendar (#76). The Series is on the frame's index.
+- `statute_shares(dividends, payout_rate) -> np.ndarray` (owner answer 3(a), 2026-11-26): the
+  money shares W_c / S of one race-pool's P winning combinations, in input order, from their
+  dividends per 100 yen. JRA pays every winning combination (W + L / P) x R (04 §1.2, 競馬法 第8条;
+  W the money on it, L the money on everything that lost, R the payout rate), so with
+  r_c = (D_c + 5) / (100 R), K = sum_c 1 / (P (r_c - 1)): x_c = 1 / ((1 + K) P (r_c - 1)). With
+  P = 1 it is `dividend_share`. An empty sequence, a dividend that is not a positive number, a
+  payout rate outside (0, 1], or any r_c <= 1 is a ValueError.
+- `dividend_shares(dividends) -> pd.Series`: the share of every row of a frame with the store's
+  dividends columns race_id ("jra:<YYYY-MM-DD>:<VENUE>:<NN>"), pool, combination and dividend:
+  `statute_shares` over each (race_id, pool) group, P = its row count (the frame holds every
+  winning combination of a race-pool, as the store's dividends table does), at that race's own
+  payout rate, `takeout.race_takeout(race_id, pool)` with the shipped boost calendar (#76) and
+  the optional `race_class_raw` column passed on. A one-row group is `dividend_share`. The Series
+  is on the frame's index, in its order.
 - `winning_combinations(finish, pool) -> list[str]`: `finish` maps every starter's horse number to
   its finishing position, ties sharing a position and the next runner skipping (1, 2, 3, 3, 5).
   The winners are every combination a tie-break of the dead heats could make the result (04 §1.4):
@@ -238,6 +248,222 @@ def test_boosted_days_use_their_own_takeout():
     # 72.5 / 1,005 a week earlier.
     assert shares.iloc[0] == pytest.approx(80 / 1005, rel=1e-12)
     assert shares.iloc[1] == pytest.approx(72.5 / 1005, rel=1e-12)
+
+
+# ---------------------------------------------------------------------------------------------
+# Several winning combinations: the statute's split (04 §1.2, owner answer 3(a))
+# ---------------------------------------------------------------------------------------------
+
+UNIT = 100.0  # yen: dividends are quoted per 100 yen
+BREAKAGE = 5.0  # yen: the mean breakage a dividend floored to 10 yen loses
+
+
+def statute_dividends(money: dict[str, float], pool_total: float, rate: float) -> dict[str, float]:
+    """The unrounded dividend per 100 yen of each winning combination, built from the pool's money
+    under 競馬法 第8条 (04 §1.2): a winning ticket on combination c gets (W_c + L / P) x R / W_c per
+    yen, W_c the money on c, L the money on everything that lost, P the number of winning
+    combinations; less the 5-yen mean breakage that the shares add back."""
+    lost = pool_total - sum(money.values())
+    assert lost > 0
+    n_winners = len(money)
+    paid = {c: UNIT * rate * (w + lost / n_winners) / w for c, w in money.items()}
+    # The fixture's own check: the winning tickets take exactly R of the whole pool.
+    total_paid = sum(money[c] * paid[c] / UNIT for c in money)
+    assert total_paid == pytest.approx(rate * pool_total, rel=1e-12)
+    return {c: p - BREAKAGE for c, p in paid.items()}
+
+
+WIDE_MONEY = {
+    "1,2": 9_000_000,
+    "2,4": 1_200_000,
+    "1,3": 6_000_000,
+    "2,3": 2_000_000,
+    "1,4": 3_500_000,
+}
+TRIO_MONEY = {"1,2,4": 800_000, "1,2,3": 3_000_000}
+
+# (pool, payout rate, yen on each winning combination in input order, the whole pool in yen). The
+# rates are JRA's published ones; 0.80 on TRIO is a Super Premium day, 0.85 on Wide a Super
+# Premium day with the Wide premium on top.
+DEAD_HEATS = {
+    "trio_dead_heat_for_third": (TRIO, 0.75, TRIO_MONEY, 100_000_000),
+    "trio_dead_heat_for_third_super_premium": (TRIO, 0.80, TRIO_MONEY, 100_000_000),
+    "wide_dead_heat_for_third": (WIDE, 0.775, WIDE_MONEY, 60_000_000),
+    "wide_dead_heat_for_third_ultra_premium": (WIDE, 0.85, WIDE_MONEY, 60_000_000),
+    "place_dead_heat_for_third": (
+        PLACE,
+        0.80,
+        {"7": 5_000_000, "3": 9_000_000, "11": 1_500_000, "5": 3_000_000},
+        40_000_000,
+    ),
+    "place_no_dead_heat": (
+        PLACE,
+        0.80,
+        {"3": 9_000_000, "7": 5_000_000, "5": 3_000_000},
+        40_000_000,
+    ),
+    "win_dead_heat": (WIN, 0.80, {"12": 25_000_000, "4": 10_000_000}, 100_000_000),
+    "exacta_dead_heat_for_first": (EXACTA, 0.75, {"4,12": 1_100_000, "12,4": 400_000}, 50_000_000),
+    "trifecta_three_way_dead_heat_for_first": (
+        TRIFECTA,
+        0.725,
+        {
+            "2,1,3": 300_000,
+            "1,2,3": 120_000,
+            "1,3,2": 90_000,
+            "3,1,2": 60_000,
+            "2,3,1": 45_000,
+            "3,2,1": 30_000,
+        },
+        200_000_000,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(DEAD_HEATS))
+def test_statute_shares_recover_the_money_on_every_winning_combination(case):
+    pool, rate, money, total = DEAD_HEATS[case]
+    dividends = statute_dividends(money, total, rate)
+    got = exotic().statute_shares([dividends[c] for c in money], rate)
+    assert isinstance(got, np.ndarray)
+    assert got.shape == (len(money),)
+    expected = np.array([w / total for w in money.values()])
+    np.testing.assert_allclose(got, expected, rtol=1e-10)
+    # The one-winner share R * 100 / (D + 5) overstates every one of them by 40% or more: a dead
+    # heat's (or Place's, or Wide's) winners split the losers' money P ways.
+    single = np.array([exotic().dividend_share(dividends[c], rate) for c in money])
+    assert np.all(single > 1.4 * expected), (pool, single / expected)
+
+
+def test_statute_shares_of_one_winner_are_the_single_winner_share():
+    # P = 1: the pool's money on the winner is R * 100 / (D + 5) of it, `dividend_share` exactly.
+    table = [
+        (1000, 0.75, 75 / 1005),
+        (1000, 0.80, 80 / 1005),
+        (110, 0.725, 72.5 / 115),
+        (25670, 0.775, 77.5 / 25675),
+        (4530, 0.85, 85 / 4535),
+        (99990, 0.75, 75 / 99995),
+        (160, 0.80, 80 / 165),
+        (1000, 1.0, 100 / 1005),  # a payout rate of 1 is allowed
+    ]
+    for dividend, rate, expected in table:
+        got = exotic().statute_shares((dividend,), rate)
+        assert isinstance(got, np.ndarray)
+        assert got.shape == (1,)
+        assert got[0] == pytest.approx(expected, rel=1e-12)
+        assert got[0] == pytest.approx(exotic().dividend_share(dividend, rate), rel=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("dividends", "rate"),
+    [
+        ([], 0.75),  # no winning combination
+        ([0], 0.75),
+        ([1270, -100], 0.75),
+        ([1270, math.nan], 0.75),
+        ([None, 4580], 0.75),
+        ([1270, 4580], 0.0),
+        ([1270, 4580], -0.2),
+        ([1270, 4580], 1.2),
+        ([1270, 4580], math.nan),
+        ([70], 0.75),  # (70 + 5) / 75 = 1: R per yen back means nobody lost
+        ([60], 0.75),  # under R per yen back
+        ([1270, 70], 0.75),  # one of two winners at r = 1
+        ([4580, 1270, 50], 0.80),  # one of three under
+        ([95], 1.0),  # r = 1 at a payout rate of 1
+    ],
+    ids=lambda v: repr(v).replace(" ", ""),
+)
+def test_statute_shares_rejects_impossible_inputs(dividends, rate):
+    with pytest.raises(ValueError):
+        exotic().statute_shares(dividends, rate)
+
+
+# (race id, pool, payout rate, race_class_raw, yen on each winning combination, the whole pool).
+# The rates follow JRA's published ones with the shipped calendar: 80% on a Super Premium day, 85%
+# with a premium on top (Wide on 2023-12-28; Win in a 2-year-old race in the 2016 summer, which
+# the race's conditions label alone tells apart from the 3-year-old-and-up race that day).
+DEAD_HEAT_GROUPS = [
+    ("jra:2026-09-21:HSN:5", TRIO, 0.80, None, TRIO_MONEY, 100_000_000),
+    ("jra:2026-09-21:NAK:5", TRIO, 0.75, None, TRIO_MONEY, 100_000_000),
+    ("jra:2023-12-28:NAK:11", WIDE, 0.85, None, WIDE_MONEY, 60_000_000),
+    (
+        "jra:2023-12-28:NAK:11",
+        TRIO,
+        0.80,
+        None,
+        {"1,2,3": 2_400_000, "1,2,4": 1_600_000},
+        90_000_000,
+    ),
+    ("jra:2026-10-10:TOK:3", EXACTA, 0.80, None, {"4,12": 1_100_000, "12,4": 400_000}, 50_000_000),
+    (
+        "jra:2016-07-02:FKS:5",
+        WIN,
+        0.85,
+        "2歳新馬",
+        {"12": 25_000_000, "4": 10_000_000},
+        100_000_000,
+    ),
+    (
+        "jra:2016-07-02:FKS:7",
+        WIN,
+        0.80,
+        "3歳以上500万下",
+        {"12": 25_000_000, "4": 10_000_000},
+        100_000_000,
+    ),
+    (
+        "jra:2026-10-11:TOK:3",
+        PLACE,
+        0.80,
+        "3歳以上1勝クラス",
+        {"3": 9_000_000, "7": 5_000_000, "5": 3_000_000},
+        40_000_000,
+    ),
+]
+# (race id, pool, payout rate, race_class_raw, combination, dividend): one winning combination.
+SINGLE_WINNER_GROUPS = [
+    ("jra:2025-10-26:TOK:11", TRIFECTA, 0.80, None, "3,1,7", 25670),
+    ("jra:2025-10-19:TOK:11", TRIFECTA, 0.725, None, "3,1,7", 25670),
+    ("jra:2016-04-10:HSN:11", QUINELLA, 0.825, None, "1,3", 880),
+]
+DIVIDEND_COLUMNS = ["race_id", "pool", "combination", "dividend", "race_class_raw"]
+
+
+def test_dividend_shares_split_each_race_pool_among_its_winning_combinations():
+    rows = []
+    for race_id, pool, rate, label, money, total in DEAD_HEAT_GROUPS:
+        dividends = statute_dividends(money, total, rate)
+        for c, w in money.items():
+            rows.append((race_id, pool, c, dividends[c], label, w / total, rate, False))
+    for race_id, pool, rate, label, c, dividend in SINGLE_WINNER_GROUPS:
+        rows.append((race_id, pool, c, dividend, label, rate * 100 / (dividend + 5), rate, True))
+    frame = pd.DataFrame(rows, columns=[*DIVIDEND_COLUMNS, "expected", "rate", "single"])
+    frame.index = pd.Index([f"div{n:02d}" for n in range(len(frame))])
+    frame = frame.iloc[np.random.default_rng(99).permutation(len(frame))]
+    # The fixture's own check: the shuffle splits race-pools, so no group is a run of rows.
+    group_key = frame["race_id"] + "|" + frame["pool"]
+    n_groups = len(DEAD_HEAT_GROUPS) + len(SINGLE_WINNER_GROUPS)
+    assert (group_key != group_key.shift()).sum() > n_groups + 5
+
+    shares = exotic().dividend_shares(frame[DIVIDEND_COLUMNS])
+    assert isinstance(shares, pd.Series)
+    assert list(shares.index) == list(frame.index)
+    # Each race-pool's rows recover the money on them, at that race's own rate: the same money
+    # pays other dividends on a boosted day and gives the same shares back; one race's Wide and
+    # Trio, or one day's two Trios, are separate splits.
+    np.testing.assert_allclose(shares.to_numpy(dtype=float), frame["expected"], rtol=1e-10)
+    # One-row groups keep today's value exactly.
+    single = frame[frame["single"]]
+    np.testing.assert_allclose(
+        shares[single.index].to_numpy(dtype=float),
+        [
+            exotic().dividend_share(d, r)
+            for d, r in zip(single["dividend"], single["rate"], strict=True)
+        ],
+        rtol=1e-12,
+    )
 
 
 # ---------------------------------------------------------------------------------------------
