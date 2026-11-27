@@ -225,9 +225,21 @@ re-runs nothing.
 
 - Registry family: `japan-family-l-exotic-pool-choice`.
 - As task 4 (#451, planned) specifies, each L1 and L4 rule and its comparator will be a measured row (comparators
-  deduplicated), each labelled by its selection: look-ahead for the final-price variants, decision time for the
-  board-at-t variants, card only for the variant that reads no price. The board-at-t variants, data pending above,
-  will be listed with their failed status and no return. L5, the takeout calendar, will be listed with no return.
+  deduplicated). The board-at-t variants, data pending above, will be listed with their failed status and no return.
+  L5, the takeout calendar, will be listed with no return.
+- Each row's selection label comes from that row's own selection inputs, not from the variant it was scored in:
+  - L1: the threshold rule reads the winning set's final TRIO or QUINELLA price, so its rows are look-ahead
+    (decision time for the board-at-t variants). Its comparator, always the TRIO or always the QUINELLA on every
+    combination of the starters, reads no price and is selectable from the card, so it carries no look-ahead label:
+    one card-only row per pool, the same for every X.
+  - L4, same-bracket: the rule and its comparator, the QUINELLAs within the bracket, read only the card's brackets
+    and scratches, so both rows are card only.
+  - L4, market-order TIERCE: the rule takes its three horses from the final Win order, and both comparators, the
+    TRIO and the box, bet those same three horses, so all three rows are look-ahead (decision time at t).
+  - Each paired difference keeps its rule's label: look-ahead for the L1 final-price rows and both market-order
+    comparisons, card only for the same-bracket comparison.
+  - #451 as written labels every row from its variant's suffix, comparators included; the L1 comparator rows need
+    the card-only label instead.
 - "No rule is adopted" above now reads as a measured position: under D18 as amended, a loss-avoidance rule and its
   stated comparator will each be a row, with the paired difference beside them, and no Family L standard is needed
   before either ranks. The re-runs filed as #352 and #353 stay follow-ups.
