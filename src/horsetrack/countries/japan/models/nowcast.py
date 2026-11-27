@@ -74,7 +74,7 @@ import hashlib
 import json
 import math
 import zlib
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from functools import cache
@@ -293,19 +293,43 @@ def pool_shares(
     low figures). `rule_sum` is the money's total in units of the pool (1 when the rule holds),
     NaN when no rule was used; shares are None when the pool is not sold for this many runners
     (Wide counts its pairs, which gives its three places from 4 runners, as `places_for` does)."""
+    shares, rule_sum, _ = _read_shares(pool, odds, investment, odds_hi)
+    return shares, rule_sum
+
+
+def place_shares(
+    odds: np.ndarray, odds_hi: np.ndarray | None = None
+) -> tuple[np.ndarray | None, float, str | None]:
+    """One PLACE board's (shares, rule_sum) exactly as `pool_shares` reads it, and the read it
+    used: `joint` (`place_money_fit` over both figures) or `low_only` (`stake_back_money`); None
+    when the pool is not sold for this many runners."""
+    odds = np.asarray(odds, dtype=float)
+    if odds.ndim != 1:
+        raise ValueError("place_shares reads one board: odds must be 1-D")
+    shares, rule_sum, joint = _read_shares(PLACE, odds, None, odds_hi)
+    if shares is None:
+        return None, rule_sum, None
+    return shares, rule_sum, "joint" if bool(joint[0]) else "low_only"
+
+
+def _read_shares(
+    pool: str, odds, investment, odds_hi
+) -> tuple[np.ndarray | None, float, np.ndarray | None]:
+    """`pool_shares`, and per row whether the joint Place fit was used (None off the rule)."""
     odds = np.asarray(odds, dtype=float)
     if investment is not None:
         money = np.asarray(investment, dtype=float)
         if money.size and np.all(np.isfinite(money) & (money > 0)):
-            return money / money.sum(axis=-1, keepdims=True), math.nan
+            return money / money.sum(axis=-1, keepdims=True), math.nan, None
     if not _stake_back(pool):
         inverse = 1.0 / odds
-        return inverse / inverse.sum(axis=-1, keepdims=True), math.nan
+        return inverse / inverse.sum(axis=-1, keepdims=True), math.nan, None
     places = _pool_config(pool).places_for(odds.shape[-1])
     if places == 0 or odds.shape[-1] < places:
-        return None, math.nan
+        return None, math.nan, None
     rate = 1.0 - float(_pool_config(pool).takeout)
     money = stake_back_money(np.maximum(odds, _floor(pool)), places, rate)
+    joint = np.zeros(len(np.atleast_2d(odds)), dtype=bool)
     if pool == PLACE and odds_hi is not None:
         hi = np.broadcast_to(np.asarray(odds_hi, dtype=float), odds.shape)
         rows = np.atleast_1d(np.isfinite(hi).all(axis=-1))
@@ -320,8 +344,9 @@ def pool_shares(
             flat = np.atleast_2d(money).copy()
             flat[np.flatnonzero(rows)[sound]] = fit[sound]
             money = flat.reshape(money.shape)
+            joint[np.flatnonzero(rows)[sound]] = True
     total = money.sum(axis=-1, keepdims=True)
-    return money / total, float(total[0]) if odds.ndim == 1 else math.nan
+    return money / total, float(total[0]) if odds.ndim == 1 else math.nan, joint
 
 
 # ---------------------------------------------------------------- the board at t
@@ -498,6 +523,24 @@ def _final_board(series: _Series) -> tuple[tuple[str, ...], np.ndarray, np.ndarr
     if shares is None:
         return None
     return tuple(series.combinations[i] for i in state.index), shares, state.lo
+
+
+def closing_boards(
+    frame: pd.DataFrame, pool: str
+) -> Iterator[tuple[str, tuple[str, ...], np.ndarray, np.ndarray]]:
+    """(race_id, combinations, low figures, high figures) of the final board of `pool` of each
+    race of `frame` with a post time: the board `extract` scores as the final (each combination's
+    latest row, the priced ones kept), before it is read into shares."""
+    for race in _races(frame[frame["pool"] == pool], None):
+        series = race.series.get(pool)
+        state = None if series is None else _state_at(series, _FAR_FUTURE)
+        if state is not None:
+            yield (
+                race.race_id,
+                tuple(series.combinations[i] for i in state.index),
+                state.lo,
+                state.hi,
+            )
 
 
 def _prepare(frame: pd.DataFrame) -> pd.DataFrame:
