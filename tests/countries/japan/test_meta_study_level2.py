@@ -324,3 +324,50 @@ def test_member_frame_normalises_the_files_probabilities_as_main_did(
         got = out[name].to_numpy()
         want = expected[name].reindex(out.index).to_numpy()
         assert np.array_equal(got, want), f"{name}: {int((got != want).sum())} values differ"
+
+
+# Round 3, finding 2: a mixed-precision member file (one member column float32, the others
+# float64) normalises each member in its own declared dtype, as main's per-column arithmetic did:
+# the float32 member's race sums, division and log stay float32, so a replay of the same export
+# reproduces main's values bit for bit. The expected frame reads the parquet directly with pyarrow,
+# as main's `read_members` did, and applies main's normalisation to it.
+
+
+def file_members(path: Path) -> pd.DataFrame:
+    """Main's read of the member file: its key and member columns, in the file's own dtypes."""
+    import pyarrow.parquet as pq
+
+    columns = meta.MEMBER_KEYS + [col for col, _ in meta.MEMBERS.values()]
+    return pq.read_table(path, columns=columns).to_pandas()
+
+
+@pytest.mark.parametrize("narrow", [col for col, _ in meta.MEMBERS.values()])
+def test_a_mixed_precision_member_file_normalises_each_member_in_its_own_dtype(
+    env: dict, narrow: str
+) -> None:
+    store = build_store()
+    write_store(store)
+    rows = member_rows(store, date(2023, 1, 10), seed=31)
+    rows[narrow] = rows[narrow].astype(np.float32)
+    path = write_members(env["dir"] / "members" / "mixed.parquet", rows)
+    raw = file_members(path)
+    dtypes = {col: raw[col].dtype for col, _ in meta.MEMBERS.values()}
+    assert dtypes[narrow] == np.float32
+    assert sum(d == np.float64 for d in dtypes.values()) == len(dtypes) - 1
+
+    runners, races = meta.read_development()
+    frame, _ = meta.store_frame(runners, races)
+    _, scored = meta.study_folds(frame, load_country_scheme("japan"))
+    members = meta.read_members(path)
+    level2 = meta.check_level2(frame, scored, members, meta.race_calendar(), min_seasons=0)
+
+    out, _ = meta.member_frame(level2, frame, members)
+    expected = main_normalisation(frame, raw)
+    assert len(out) > 0
+    assert set(out.index) == set(expected.index)
+    for name, (col, _) in meta.MEMBERS.items():
+        want = expected[name].reindex(out.index).to_numpy()
+        got = out[name].to_numpy()
+        assert want.dtype == dtypes[col], (name, want.dtype)  # main kept the declared dtype
+        assert got.dtype == want.dtype, f"{name}: {got.dtype}, main {want.dtype}"
+        assert np.array_equal(got, want), f"{name}: {int((got != want).sum())} values differ"

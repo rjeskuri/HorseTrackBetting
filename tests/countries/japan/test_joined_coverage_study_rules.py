@@ -181,8 +181,55 @@ def test_a_race_the_store_frame_drops_is_not_in_store_frame_whatever_its_member_
     assert cov.races(s, "scheduled") == len(store.races)
     assert cov.drops(s, "not_in_store_frame") == len(unpriced)
     assert cov.drops(s, "unmatched") == len(before) - 1
+    # round 3 finding 1: `not_in_store_frame` is a pre-match drop, so none of the four races is
+    # matched, whatever its member rows; the matched races are those from the export's first day
+    # on, less the three unpriced ones in that span
+    matched = len(store.races) - len(before) - 3
+    assert cov.races(s, "matched") == matched
+    assert cov.races(s, "forecastable") == matched
     assert cov.races(s, "scored") == len(scored) - 2
     assert cov.drops(s, "train_only") == len(seed) - 1
+    every_race_once(cov, s)
+
+
+# ------------------------------------------------------------------------------------------------
+# Round 3, finding 1: a race the study's store frame drops is a pre-match drop. A scheduled race
+# whose winner has no Win price and that has no member row at all (before the export's first day,
+# or every runner missing from the file) counts in `scheduled`, drops as `not_in_store_frame`, and
+# counts in no later stage: it is in neither `matched` nor `forecastable`.
+
+
+@pytest.mark.parametrize("span", ["before_export", "seed_season", "scored_season"])
+def test_an_unpriced_race_with_no_member_row_is_scheduled_but_not_matched(
+    env: dict, span: str
+) -> None:
+    store = build_store()
+    before, seed, scored = races_by_span(store)
+    race = {"before_export": before[-4], "seed_season": seed[3], "scored_season": scored[5]}[span]
+    store = with_odds(store, lambda r: r["race_id"].eq(race) & r["finish_pos"].eq(1))
+    rows = store.runners.loc[store.runners["race_id"].eq(race)]
+    absent = frozenset(zip(rows["race_id"], rows["horse_id"], strict=True))
+    members = member_rows(store, MEMBER_START, drop=absent)
+    assert not members["race_id"].eq(race).any(), "the race still has member rows"
+
+    cov = run(env, store, members)
+    s = jc.MEMBER_SOURCE
+    assert reasons(cov, s)[race] == "not_in_store_frame"
+    assert cov.races(s, "scheduled") == len(store.races)
+    in_span = len(store.races) - len(before)  # every runner has a member row from the first day
+    matched = in_span - (span != "before_export")
+    assert cov.races(s, "matched") == matched
+    assert cov.races(s, "forecastable") == matched
+    assert cov.drops(s, "unmatched") == len(before) - (span == "before_export")
+    assert cov.drops(s, "not_in_store_frame") == 1
+    assert cov.races(s, "scored") == len(scored) - (span == "scored_season")
+    # the race's own card class: it is scheduled there and matched in none of them
+    cls = store.races.set_index("race_id").at[race, "race_class"]
+    of_class = store.races.loc[store.races["race_class"].eq(cls)]
+    days = pd.to_datetime(of_class["race_date"])
+    class_matched = int((days >= pd.Timestamp(MEMBER_START)).sum()) - (span != "before_export")
+    assert cov.races(s, "scheduled", race_class=cls) == len(of_class)
+    assert cov.races(s, "matched", race_class=cls) == class_matched
     every_race_once(cov, s)
 
 

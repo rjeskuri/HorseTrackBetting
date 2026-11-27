@@ -423,8 +423,7 @@ def member_predictions(members: pd.DataFrame, race_days: pd.Series) -> pd.DataFr
     given; else, level 1 being a season walk-forward trained on the seasons before `fold_season`,
     the last of `race_days` before that season starts (not 31 December), NaT when none is. The
     file's own cutoff must be dates, datetimes or ISO strings: a numeric one (20231230, epoch
-    seconds) raises `ValueError`, as it would read as nanoseconds after the epoch. Each row also
-    carries `p`, the file's probability itself, which `member_frame` normalises."""
+    seconds) raises `ValueError`, as it would read as nanoseconds after the epoch."""
     if "member_train_end" in members.columns:
         train_end = _own_cutoffs(members["member_train_end"])
     else:
@@ -438,9 +437,7 @@ def member_predictions(members: pd.DataFrame, race_days: pd.Series) -> pd.DataFr
     )
     return pd.concat(
         [
-            keys.assign(
-                member=name, p=members[col].to_numpy(), logp=np.log(members[col].to_numpy())
-            )
+            keys.assign(member=name, logp=np.log(members[col].to_numpy()))
             for name, (col, _) in MEMBERS.items()
         ],
         ignore_index=True,
@@ -479,18 +476,20 @@ def check_level2(
 
 def member_frame(level2, frame: pd.DataFrame, members: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """The checked level-2 rows (`level2.frame`, store positions as index) with each member's
-    log-probability normalised over the race's starters, and the join's counts. The file's own
-    probability (`p`, carried through the join) is normalised, as before #418, not exp(logp)."""
-    from horsetrack.countries.japan.models.stacking import ROW  # see level2_population
-
+    log-probability normalised over the race's starters, and the join's counts. Each member's
+    own column of the file, selected on the checked rows' (race_id, horse_id), is normalised in
+    its declared dtype, as before #418, not exp(logp)."""
     meta = level2.frame.copy()
-    p = level2.provenance.pivot(index=ROW, columns="member", values="p").reindex(meta.index)
-    for name in MEMBERS:
-        col = p[name]
-        meta[name] = np.log((col / col.groupby(meta["race_id"]).transform("sum")).to_numpy())
+    keys = ["race_id", "horse_id"]
+    wide = [col for col, _ in MEMBERS.values()]
+    # the file's own columns, in their declared dtypes, on the checked rows in their order
+    own = meta[keys].merge(members[keys + wide], on=keys, how="left", validate="one_to_one")
+    own.index = meta.index
+    for name, (col, _) in MEMBERS.items():
+        p = own[col] / own[col].groupby(meta["race_id"]).transform("sum")
+        meta[name] = np.log(p.to_numpy())
     first, last = members["race_date"].min(), members["race_date"].max()
     span = frame.loc[(frame["race_date"] >= first) & (frame["race_date"] <= last)]
-    keys = ["race_id", "horse_id"]
     in_store = members[keys].merge(span[keys].drop_duplicates(), on=keys)
     found = pd.MultiIndex.from_frame(span[keys]).isin(pd.MultiIndex.from_frame(members[keys]))
     whole = pd.Series(found, index=span.index).groupby(span["race_id"]).transform("all")

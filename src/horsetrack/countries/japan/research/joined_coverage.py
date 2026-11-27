@@ -15,20 +15,21 @@ source, through the joins a model needs. `joined_coverage(schedule, sources)` is
   them, and only a race the study scores is scored here.
 
 Every scheduled race passes, per source, `STAGES` in order and drops at the first it fails, with
-one reason (`REASONS`): matched fails on `duplicate_key` (a key of the race occurs more than once
-in the source), else on `unmatched` (a scheduled runner has no source row); forecastable fails,
-for a source with a `StudyRaces`, on `not_in_store_frame` (the study's store frame drops the race,
-so the study forecasts none of it), else on `no_forecast` (a scheduled runner's forecast is
-missing); scored fails on `no_result` (a scheduled runner's `won` is missing, or no runner won; a
-dead heat is scored), else, with a `StudyRaces`, on `train_only` (the study only trains on the
-race: its scored folds test none of it) or `outside_folds` (its scored folds neither train on nor
-test the race), and a race the scored folds test is scored. With a `StudyRaces`, `unmatched` and
-`no_forecast` look only at the runners the study's store frame keeps, on the source's own
-(`race_id`, `horse_id`): a runner the store frame drops (an unpriced loser) drops no race, and a
-race the store frame drops is `not_in_store_frame` whatever the source holds. Counts split by era
-(`PRICE_ERA` from D10's `PRICE_ERA_START` on, `PRE_PRICE_ERA` before) and by card class. Key
-counts: source rows whose key repeats (every copy), scheduled keys with no source row, and source
-rows whose key is not scheduled.
+one reason (`REASONS`): matched fails, for a source with a `StudyRaces`, on `not_in_store_frame`
+(the study's store frame drops the race, so the study matches and forecasts none of it, whatever
+the source holds), else on `duplicate_key` (a key of the race occurs more than once in the
+source), else on `unmatched` (a scheduled runner has no source row); forecastable fails on
+`no_forecast` (a scheduled runner's forecast is missing); scored fails on `no_result` (a
+scheduled runner's `won` is missing, or no runner won; a dead heat is scored), else, with a
+`StudyRaces`, on `train_only` (the study only trains on the race: its scored folds test none of
+it) or `outside_folds` (its scored folds neither train on nor test the race), and a race the
+scored folds test is scored. With a `StudyRaces`, `unmatched` and `no_forecast` look only at the
+runners the study's store frame keeps, on the source's own (`race_id`, `horse_id`): a runner the
+store frame drops (an unpriced loser) drops no race, and a race the store frame drops is
+`not_in_store_frame` whatever the source holds. Counts split by era (`PRICE_ERA` from D10's
+`PRICE_ERA_START` on, `PRE_PRICE_ERA` before) and by card class. Key counts: source rows whose key
+repeats (every copy), scheduled keys with no source row, and source rows whose key is not
+scheduled.
 
 `render_summary` is the committed view: a licensed source (`reports.is_withheld((s,))`: JRA-VAN,
 JRDB) shows `coverage.WITHHELD` and no figure (D21). `render_report` is the private view with every
@@ -72,9 +73,9 @@ COUNTRY = "japan"
 REPORT_NAME = "joined-coverage.md"
 STAGES = ("scheduled", "matched", "forecastable", "scored")
 REASONS = (  # in the order a race is tested: the first that fails is its reason
+    "not_in_store_frame",
     "duplicate_key",
     "unmatched",
-    "not_in_store_frame",
     "no_forecast",
     "no_result",
     "train_only",
@@ -93,9 +94,9 @@ MEMBER_SOURCE = "hktrack_members_jrdb"  # the #87 member file: JRDB-derived, so 
 
 # the last stage a race reaches when it drops for a reason; a race that drops for none is scored
 _REACHED = {
+    "not_in_store_frame": 0,
     "duplicate_key": 0,
     "unmatched": 0,
-    "not_in_store_frame": 1,
     "no_forecast": 1,
     "no_result": 2,
     "train_only": 2,
@@ -293,13 +294,13 @@ def _source(
 _INTRO = (
     "Each scheduled development race (holdout days, D14, are in no count) passes, per source, the "
     "stages scheduled, matched, forecastable and scored, and drops at the first it fails: "
-    "`duplicate_key` (a runner key repeats in the source) or `unmatched` (a scheduled runner has "
-    "no source row) at matched, `not_in_store_frame` (for a source a study reads: the study's "
-    "store frame drops the race) or `no_forecast` (a runner has no forecast after the joins) at "
-    "forecastable, `no_result` (a runner has no result, or no runner won), `train_only` (the study "
-    "only trains on the race) or `outside_folds` (the study's scored folds neither train on nor "
-    "test the race) at scored; for a source a study reads, only the runners its store frame keeps "
-    "count at matched and forecastable. Eras split "
+    "`not_in_store_frame` (for a source a study reads: the study's store frame drops the race, "
+    "whatever the source holds), `duplicate_key` (a runner key repeats in the source) or "
+    "`unmatched` (a scheduled runner has no source row) at matched, `no_forecast` (a runner has "
+    "no forecast after the joins) at forecastable, `no_result` (a runner has no result, or no "
+    "runner won), `train_only` (the study only trains on the race) or `outside_folds` (the "
+    "study's scored folds neither train on nor test the race) at scored; for a source a study "
+    "reads, only the runners its store frame keeps count at matched and forecastable. Eras split "
     f"at D10's price era start, {PRICE_ERA_START.isoformat()}. Built by "
     "`research.joined_coverage` (#418)."
 )
