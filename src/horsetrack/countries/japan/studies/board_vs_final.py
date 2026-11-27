@@ -552,7 +552,12 @@ def pool_loglik(t: np.ndarray, finish: np.ndarray, *, places: int, wide: bool) -
 
 
 def _horses(combination: object) -> frozenset[int]:
-    return frozenset(int(h) for h in str(combination).split(","))
+    """The horse numbers of a paid combination ("4", "4,7"); empty for one that does not parse,
+    which then matches no result."""
+    parts = str(combination).split(",")
+    return (
+        frozenset(int(h) for h in parts) if all(h.strip().isdigit() for h in parts) else frozenset()
+    )
 
 
 def payout_rules(rows: pd.DataFrame, paid: pd.DataFrame) -> pd.DataFrame:
