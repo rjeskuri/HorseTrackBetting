@@ -1,10 +1,13 @@
 """Floor, tail and favourite avoidance rules L2, L3 and L7 (#82; 08 §8 A4, §5.1, §4 E3, E7, E12,
 E14, R3; 04 §1.3).
 
-Family L (D18), #81's paired design (`studies.avoidance`): each rule against its stated comparator
-on the same races, by the per-race difference in realised return at final dividends, one-sided over
-meeting clusters (D7). A rule only has to lose less; nothing here claims profit, and no rule is
-adopted here (that is the owner's, 08 §9.11).
+Family L, #81's paired design (`studies.avoidance`): each rule against its stated comparator on the
+same races. Every option is a ranked row (owner reframe 2026-11-27): each scored variant records
+the rule's and the comparator's own mean return per unit staked at final dividends, each with its
+meeting-clustered bounds (D7), the paired difference between them with its bounds, n and the
+variants searched (the family size). An avoid rule drops nothing from the data: the option with
+the flagged tickets (the comparator) and the option without them (the rule) are both rows. There
+is no pass/fail here and nothing is adopted here.
 
 - L2 'never bet at the floor' (E14): the base strategy's tickets minus those whose own board price
   is at or below 1.1 (WIN odds, the PLACE or Wide low figure), against the same tickets.
@@ -15,43 +18,57 @@ adopted here (that is the owner's, 08 §9.11).
   quintile; no favourite Win, Place or exotic box in handicaps; against the same tickets in all
   races. A race the rule skips returns its stake.
 - The 100-vs-110 check (R3, 04 §1.3): the realised Place dividends of floor-bound placed
-  favourites, against the Plus-10 prediction where its inputs exist.
+  favourites, against the Plus-10 prediction from the race's settled PLACE pool in the jravan
+  `pool_votes` table (JRA-VAN H1 votes, #368; `plus10_inputs: jravan_pool_votes`). The votes are a
+  label of the settled race, never a selection input, and are read lazily: the row groups whose
+  race_id statistics can hold a wanted race, the PLACE rows of those races, five columns.
 
 Selection: on history the final price (runners.win_odds), labelled LOOK_AHEAD; on logged days the
 board at t (odds_timeseries through `read_asof` at post_utc - 2 min, D2). Cut points (tail odds,
 ranks, entropy quintiles) come from the frozen spec, never from the data scored.
 
+D21: the votes are JRA-VAN's. The 100-vs-110 records declare the `jravan` source, and their table
+goes only to a private report and CSV written through `write_report` with that source (never
+inside the repository). The main report and every L3 and L7 record read the jra store alone.
+
 The study (`run_study`; `python -m horsetrack.countries.japan.studies.avoidance_price --run [--out
 DIR]`) reads config/avoidance_price.yaml (no defaults: a missing file or key raises
-`MissingOwnerDecision` before anything is read), freezes the family in the run registry, reads
-development rows only, scores every variant, appends one registry record per variant (failures and
-'data pending' included) and writes the report through `write_report`.
+`MissingOwnerDecision` and an unknown key a ValueError, before anything is read), freezes the
+family in the run registry (the freeze line is the record of the inputs), reads development rows
+only, scores every variant, appends one registry record per variant (failures and 'data pending'
+included) and writes the reports through `write_report`.
 """
 
 from __future__ import annotations
 
 import argparse
+import bisect
 import functools
 import itertools
 import json
 import math
 import sys
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from horsetrack.core import paths
 from horsetrack.core.config import load_country_yaml
-from horsetrack.core.eval.holdout import _git_sha
-from horsetrack.core.eval.registry import default_registry
+from horsetrack.core.eval.bootstrap import paired_bootstrap
+from horsetrack.core.eval.holdout import _git_sha, is_holdout_day
+from horsetrack.core.eval.registry import RunRecord, default_registry
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.pricing import _EPS as FLOOR_TOLERANCE
 from horsetrack.core.pricing import clean_odds
+from horsetrack.countries.japan.jravan import votes as jravan_votes
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START
 from horsetrack.countries.japan.odds_log import POOL_TOTAL
 from horsetrack.countries.japan.studies import avoidance, calibration
@@ -63,10 +80,12 @@ from horsetrack.countries.japan.studies.avoidance import (
     RUNNER_COLUMNS,
     SCHEME,
     RaceView,
+    RuleComparison,
     StudyData,
     Ticket,
     _choice,
     _Context,
+    _digest,
     _grid,
     _horses,
     _joined,
@@ -87,6 +106,7 @@ from horsetrack.countries.japan.studies.calibration import (
     _real,
     normalised_entropy,
 )
+from horsetrack.countries.japan.takeout import race_takeout
 
 __all__ = [
     "MissingOwnerDecision",
@@ -94,8 +114,10 @@ __all__ = [
     "at_floor",
     "drop_tail",
     "entropy_quintile",
+    "place_payout",
     "plus10_withheld",
     "predicted_floor_dividend",
+    "read_place_votes",
     "run_study",
     "win_ranks",
     "worst_member_rank",
@@ -103,6 +125,7 @@ __all__ = [
 
 COUNTRY = "japan"
 SOURCE = "jra"
+VOTES_SOURCE = jravan_votes.SOURCE  # JRA-VAN: withheld under D21 (core.eval.reports)
 FLOOR_ODDS = 1.1  # owner, 2026-11-24: a board price at or below 1.1 is at the floor
 PLUS10_DIVIDEND = 110  # yen per 100: the floor with Plus-10 (04 §1.3)
 WITHHELD_DIVIDEND = 100  # yen per 100: the floor when Plus-10 is withheld
@@ -137,6 +160,111 @@ def predicted_floor_dividend(total_payout: float, top_ups: float, sales: float) 
     """The floor dividend per 100 yen: 100 when Plus-10 is withheld, else 110."""
     withheld = plus10_withheld(total_payout, top_ups, sales)
     return WITHHELD_DIVIDEND if withheld else PLUS10_DIVIDEND
+
+
+PLACE_RULE = (
+    "JRA's Place rule (04 §1.3): the net pool (sales x the race's Place payout rate) first returns "
+    "the placed horses' stakes; the profit left is split equally over the placed horses and paid "
+    "per 100-yen ticket rounded down to 10 yen; a horse whose share is under 10 yen a ticket, or "
+    "with no profit left, is paid 100. The top-ups are 10 yen a ticket on each placed horse paid "
+    "100; predicted_floor_dividend then gives 100 or 110 for those horses"
+)
+
+
+def place_payout(
+    votes: Mapping[int, int], placed: Sequence[int], sales: float, payout_rate: float
+) -> tuple[dict[int, int], float, float]:
+    """JRA's Place payout before Plus-10 (PLACE_RULE): (each placed horse's dividend per 100 yen,
+    100 for a horse at the floor; total payout; top-ups), all in yen. `votes` maps each placed
+    horse to its 100-yen tickets, `sales` is the pool's sales in yen net of refunds. A placed horse
+    without tickets, no placed horse, or a figure that is not a finite amount is a ValueError."""
+    _pool_figures(0.0, 0.0, sales)
+    if not (_real(payout_rate) and 0.0 < payout_rate <= 1.0):
+        raise ValueError(f"payout_rate must be in (0, 1], got {payout_rate!r}")
+    placed = list(dict.fromkeys(int(h) for h in placed))
+    if not placed:
+        raise ValueError("no placed horse")
+    tickets = {h: votes.get(h) for h in placed}
+    if not all(isinstance(n, (int, np.integer)) and n > 0 for n in tickets.values()):
+        raise ValueError(f"a placed horse has no Place tickets: {tickets}")
+    unit, step = _unit(), PLUS10_DIVIDEND - WITHHELD_DIVIDEND
+    profit = sales * payout_rate - sum(unit * int(n) for n in tickets.values())
+    paid = {}
+    for h, n in tickets.items():
+        per_ticket = profit / len(placed) / int(n) if profit > 0 else 0.0
+        paid[h] = WITHHELD_DIVIDEND + int(math.floor(per_ticket / step + 1e-9)) * step
+    total = float(sum(paid[h] * int(n) for h, n in tickets.items()))
+    top_ups = float(sum(step * int(n) for h, n in tickets.items() if paid[h] == WITHHELD_DIVIDEND))
+    return paid, total, top_ups
+
+
+@dataclass(frozen=True)
+class PlacePool:
+    """One race's settled PLACE pool in the jravan pool_votes table: its tickets net of refunds
+    (None without a pool row) and each runner's tickets."""
+
+    tickets: int | None
+    votes: dict[int, int]
+
+
+def _row_groups(file: pq.ParquetFile, wanted: Sequence[str]) -> list[int]:
+    """The row groups whose race_id statistics can hold one of the sorted `wanted` races."""
+    meta, column = file.metadata, file.schema_arrow.get_field_index("race_id")
+    groups = []
+    for i in range(meta.num_row_groups):
+        stats = meta.row_group(i).column(column).statistics
+        if stats is None or not stats.has_min_max:
+            groups.append(i)
+            continue
+        at = bisect.bisect_left(wanted, stats.min)
+        if at < len(wanted) and wanted[at] <= stats.max:
+            groups.append(i)
+    return groups
+
+
+def read_place_votes(race_ids: Iterable[str], path: Path | None = None) -> dict[str, PlacePool]:
+    """The settled PLACE pools of `race_ids` from the jravan pool_votes table (JRA-VAN, withheld
+    under D21), read lazily: the row groups whose race_id statistics can hold a wanted race, five
+    columns, decoded `VOTES_BATCH` rows at a time and filtered to PLACE rows of those races. A race
+    on a holdout day is a ValueError (D14): no holdout row is read."""
+    wanted = sorted(set(race_ids))
+    holdout = [r for r in wanted if is_holdout_day(COUNTRY, date.fromisoformat(r.split(":")[1]))]
+    if holdout:
+        raise ValueError(f"{len(holdout)} holdout race(s) asked of pool_votes (D14)")
+    if not wanted:
+        return {}
+    path = votes_path() if path is None else path
+    file = pq.ParquetFile(path, pre_buffer=False)
+    value_set = pa.array(wanted, pa.string())
+    parts = []
+    for batch in file.iter_batches(
+        batch_size=VOTES_BATCH, row_groups=_row_groups(file, wanted), columns=VOTES_COLUMNS
+    ):
+        keep = pc.and_(
+            pc.equal(batch.column("pool"), "PLACE"),
+            pc.is_in(batch.column("race_id"), value_set=value_set),
+        )
+        rows = batch.filter(keep)
+        if rows.num_rows:
+            parts.append(rows)
+    pools: dict[str, PlacePool] = {}
+    if not parts:
+        return pools
+    frame = pa.Table.from_batches(parts).to_pandas()
+    for race, rows in frame.groupby("race_id", sort=True):
+        total = rows.loc[rows["combination"].eq(jravan_votes.POOL_ROW)]
+        tickets = None
+        if len(total) == 1 and pd.notna(total["votes"].iloc[0]):
+            refund = total["refund_votes"].iloc[0]
+            tickets = int(total["votes"].iloc[0]) - (0 if pd.isna(refund) else int(refund))
+        runners = rows.loc[rows["combination"].ne(jravan_votes.POOL_ROW) & rows["votes"].notna()]
+        pairs = zip(runners["combination"], runners["votes"], strict=True)
+        pools[str(race)] = PlacePool(tickets, {int(c): int(v) for c, v in pairs})
+    return pools
+
+
+def votes_path() -> Path:
+    return paths.processed_dir(VOTES_SOURCE) / jravan_votes.FILENAME
 
 
 def _win_prices(view: RaceView) -> dict[int, float]:
@@ -219,14 +347,20 @@ PRICE_POOLS = ("WIN", "PLACE", *EXOTIC_POOLS)
 BOARD_POOLS = ("WIN", "PLACE", "QUINELLA_PLACE")
 FINAL, AT_T = "final_look_ahead", "board_at_t"
 TAGS = (FINAL, AT_T)
-RACE_COLUMNS = ["race_id", "race_date", "meeting_id", "status", "weight_type"]
-PLUS10_COLUMNS = ["variant", "race_id", "horse_no", "place low at t", "realised", "predicted"]
+RACE_COLUMNS = ["race_id", "race_date", "meeting_id", "status", "weight_type", "race_class_raw"]
+PLUS10_COLUMNS = [
+    "variant", "race_id", "horse_no", "place low at t", "realised", "predicted", "why",
+]  # fmt: skip
+JRAVAN_VOTES, DATA_PENDING = "jravan_pool_votes", "data_pending"
+CELLS = ("100", "110", "above_110")  # the 100-vs-110 table's predicted and realised dividends
+VOTES_COLUMNS = ["race_id", "pool", "combination", "votes", "refund_votes"]
+VOTES_BATCH = 1 << 20  # rows decoded at a time from pool_votes
 OWNER_CHOICES: dict[str, tuple[str, ...]] = {
     "sets": ("every_set",),
     "favourite_ties": ("lower_horse_no", "drop_race"),
     "l7_favourite_boxes": ("top3_box", "none"),
     "l7_skipped_race": ("stake_back",),
-    "plus10_inputs": ("data_pending",),
+    "plus10_inputs": (JRAVAN_VOTES, DATA_PENDING),
 }
 OWNER_KEYS = {
     "l3_tail_odds": "L3's Win/Place tail cut-offs, a non-empty list of distinct decimal odds above "
@@ -248,20 +382,22 @@ OWNER_KEYS = {
     "races; a race the rule skips returns its stake (1.0), so the difference there is 1 minus the "
     "favourite ticket's return, and 0 elsewhere",
     "plus10_inputs": f"one of {list(OWNER_CHOICES['plus10_inputs'])}: the 100-vs-110 prediction's "
-    "inputs. No source holds them: the store has no Place pool sales on history, and the log's "
-    "__pool__ rows give a pool's sales but not the per-runner Place stakes that total payout and "
-    "top-ups need (a floor price hides the favourite's share). The table reports the realised "
-    "dividends and marks the prediction pending",
-    "owner_signoff": "the issue where the owner signed these answers",
+    f"inputs. {JRAVAN_VOTES}: the per-runner Place votes and the Place pool's sales of the settled "
+    "race, from the jravan pool_votes table (JRA-VAN H1, #368; withheld under D21). "
+    f"{DATA_PENDING}: no prediction, the realised dividends only",
 }
 DECISIONS = {
     "D2": "the board at t is read at post - primary_min of config/decision.yaml (T-2)",
     "D3": "every JRA pool is in research scope (amended 2026-11-24, #127); exotics are tier 2",
-    "D7": "meeting (venue x day) clusters, 95% one-sided (config/scoring.yaml)",
+    "D7": "meeting (venue x day) clusters, 95% one-sided bounds (config/scoring.yaml)",
     "D10": "races from 2014-06-07 only",
     "D14": "holdout days fully locked, outcomes and prices: no holdout row is read",
-    "D18": "Family L: a paired difference against a stated comparator on the same races, "
-    "one-sided; a rule only has to lose less and never claims profit",
+    "D21": "JRA-VAN-derived figures never enter the repository: the 100-vs-110 table built on "
+    "the jravan pool_votes table is in a private report only",
+    "ranking": "owner reframe 2026-11-27: every option (each rule and its comparator) is a "
+    "ranked row with its mean return, clustered bounds, n and the variants searched; the paired "
+    "difference against the stated comparator is reported with its bounds; there is no pass/fail "
+    "and nothing is adopted here",
     "floor": "a board price at or below 1.1 is at the floor (owner, 2026-11-24)",
     "handicap": "races.weight_type 'handicap' (calibration's handicap segment, #77)",
     "entropy": "calibration.normalised_entropy, the E3 measure",
@@ -272,7 +408,9 @@ DECISIONS = {
 
 
 def owner_inputs() -> dict:
-    """The owner's pre-registered inputs from config/avoidance_price.yaml, validated."""
+    """The owner's pre-registered inputs from config/avoidance_price.yaml, validated. The schema
+    is closed: an unknown key (`owner_signoff` among them, removed by the owner's reframe of
+    2026-11-27: the freeze line in the registry is the record) is a ValueError naming it."""
     where = f"countries/{COUNTRY}/config/{CONFIG_NAME}.yaml"
     try:
         raw, problem = load_country_yaml(COUNTRY, CONFIG_NAME), "lacks"
@@ -290,14 +428,10 @@ def owner_inputs() -> dict:
     cuts = raw["l7_entropy_cut_points"]
     if not (isinstance(cuts, list) and all(_real(c) and 0.0 < c < 1.0 for c in cuts)):
         raise ValueError(f"l7_entropy_cut_points must be four numbers in (0, 1), got {cuts!r}")
-    signoff = raw["owner_signoff"]
-    if not (isinstance(signoff, int) and not isinstance(signoff, bool) and signoff > 0):
-        raise ValueError(f"owner_signoff must be a positive issue number, got {signoff!r}")
     return {
         "l3_tail_odds": _grid(raw, "l3_tail_odds"),
         "l7_entropy_cut_points": [float(c) for c in _cut_points(cuts)],
         **{key: _choice(raw, key, options) for key, options in OWNER_CHOICES.items()},
-        "owner_signoff": signoff,
     }
 
 
@@ -377,6 +511,7 @@ def _rules(owner: dict) -> dict:
                 AT_T: "the favourite on the Win board at t whose PLACE low figure at t is at or "
                 "below the floor, and that placed",
                 "inputs": owner["plus10_inputs"],
+                "prediction": PLACE_RULE if owner["plus10_inputs"] == JRAVAN_VOTES else "none",
             },
         },
         "L3": {
@@ -417,21 +552,28 @@ def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
     """The family's pre-registered spec, frozen in the registry before any race is read."""
     rules = _rules(owner)
     variants = [run.name for run in _plan(rules)]
+    votes = owner["plus10_inputs"] == JRAVAN_VOTES
     return {
         "family_id": FAMILY_ID,
         "ticket": TICKET,
         "hypotheses": {
-            "L2": "E14: the base strategy less its tickets at the floor loses less than the same "
-            "tickets; R3: the 100-vs-110 check of floor-bound placed favourites",
-            "L3": "E12: the strategy less its tail tickets loses less than with the tail",
-            "L7": "E3, E7: no favourite Place in the flattest-entropy quintile, and no favourite "
-            "Win, Place or box in handicaps, loses less than the same tickets in all races",
+            "L2": "E14: the return of the base strategy less its tickets at the floor against "
+            "the same tickets; R3: the 100-vs-110 check of floor-bound placed favourites",
+            "L3": "E12: the return of the strategy less its tail tickets against the strategy "
+            "with the tail",
+            "L7": "E3, E7: the return with no favourite Place in the flattest-entropy quintile, "
+            "and no favourite Win, Place or box in handicaps, against the same tickets in all "
+            "races",
         },
         "rules": rules,
+        "ranked_rows": "each scored comparison is two ranked options, the rule and its "
+        "comparator, each with its mean return per unit staked over the paired races and its "
+        "meeting-clustered bounds, and their paired difference with its bounds; every record "
+        "carries the family size as variants_searched",
         "difference": "per paired race, the rule's payout / stake minus the comparator's at final "
         "dividends; for L7 a race the rule skips returns its stake (1.0). Its mean over paired "
-        "races, with D7's meeting-clustered paired bootstrap (D18, one-sided): positive is the "
-        "rule losing less",
+        "races, with D7's meeting-clustered paired bootstrap (one-sided bounds at the level): "
+        "positive is the rule returning more than its comparator",
         "selections": {
             LOOK_AHEAD: "history: the final Win odds (runners.win_odds), so the choice sees the "
             "closing price",
@@ -451,10 +593,23 @@ def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
         "family_size": len(variants),  # D17: every cut point counts
         "bootstrap": bootstrap,
         "price_era_start": PRICE_ERA_START.isoformat(),
-        "adoption": "none: no rule is adopted here (the owner's, 08 §9.11)",
+        "adoption": "none here: options are ranked (owner reframe 2026-11-27)",
         "decisions": DECISIONS,
-        "owner_signoff": owner["owner_signoff"],
-        "sources": [SOURCE],
+        "place_votes": (
+            {
+                "table": f"processed/{VOTES_SOURCE}/{jravan_votes.FILENAME}",
+                "columns": VOTES_COLUMNS,
+                "rows": "pool PLACE of the development races the check needs, never at t",
+                "sales": f"the {jravan_votes.POOL_ROW} row's votes less its refund_votes, x the "
+                "unit stake",
+                "payout_rate": "takeout.race_takeout(race, 'PLACE') (the boost calendar)",
+                "placed": "the race's paying PLACE rows in the jra dividends table",
+                "withheld": "D21: records built on it declare the jravan source",
+            }
+            if votes
+            else None
+        ),
+        "sources": [SOURCE, VOTES_SOURCE] if votes else [SOURCE],
     }
 
 
@@ -464,17 +619,25 @@ Sides = avoidance.Sides
 Paired = avoidance.Paired
 
 
-class _Ctx(_Context):
-    """#81's context over this study's pools, with the handicaps and a cached board at t."""
+VotesReader = Callable[[Iterable[str]], dict[str, PlacePool]]
 
-    def __init__(self, data: StudyData, spec: dict) -> None:
+
+class _Ctx(_Context):
+    """#81's context over this study's pools, with the handicaps, the races' conditions labels,
+    the Place votes reader and cached boards (final and at t)."""
+
+    def __init__(self, data: StudyData, spec: dict, place_votes: VotesReader | None) -> None:
         super().__init__(data, spec, pools=PRICE_POOLS)
-        weight = self.races.set_index("race_id")["weight_type"]
-        handicap = weight.eq("handicap").to_numpy(dtype=bool, na_value=False)
-        self.handicaps = frozenset(weight.index[handicap])
+        races = self.races.set_index("race_id")
+        handicap = races["weight_type"].eq("handicap").to_numpy(dtype=bool, na_value=False)
+        self.handicaps = frozenset(races.index[handicap])
+        classes = races["race_class_raw"] if "race_class_raw" in races else pd.Series(dtype=object)
+        self.class_of = {r: c for r, c in classes.items() if isinstance(c, str)}
         self.unit = _unit()
         self.l7 = spec["rules"]["L7"]
+        self.place_votes = place_votes
         self.view_at_t = functools.cache(self._board_at_t)
+        self.final_win_view = functools.cache(super().final_win_view)
 
     def _board_at_t(self, race_id: str) -> RaceView:
         if self.data.view_at_t is None:
@@ -651,16 +814,44 @@ def _skips(ctx: _Ctx, run: _Run) -> Callable[[RaceView], bool | None]:
     return flattest
 
 
-def _realised(dividend: float) -> str:
+def _cell(dividend: float) -> str:
+    """A dividend's cell of the 100-vs-110 table: '100', '110' or 'above_110'."""
     if dividend <= WITHHELD_DIVIDEND:
-        return "100"
-    return "110" if dividend <= PLUS10_DIVIDEND else "above 110"
+        return CELLS[0]
+    return CELLS[1] if dividend <= PLUS10_DIVIDEND else CELLS[2]
+
+
+def _placed_horses(paying: Mapping) -> list[int]:
+    return sorted(int(c) for (p, c), (_, refund) in paying.items() if p == "PLACE" and not refund)
+
+
+def _predict(ctx: _Ctx, race: str, horse: int, pool: PlacePool | None) -> tuple[int | None, str]:
+    """(the favourite's predicted Place dividend, '') from the race's settled PLACE pool, or
+    (None, why there is none)."""
+    placed = _placed_horses(ctx.paying.get(race, {}))
+    if pool is None:
+        return None, "no PLACE votes for the race"
+    if pool.tickets is None or pool.tickets <= 0:
+        return None, "no PLACE pool total"
+    if any(pool.votes.get(h, 0) <= 0 for h in placed):
+        return None, "a placed horse has no PLACE votes"
+    try:
+        rate = race_takeout(race, "PLACE", race_class_raw=ctx.class_of.get(race)).payout_rate
+    except (LookupError, ValueError) as exc:
+        return None, f"no Place payout rate ({type(exc).__name__})"
+    sales = float(pool.tickets * ctx.unit)
+    paid, total, top_ups = place_payout(pool.votes, placed, sales, rate)
+    if paid[horse] > WITHHELD_DIVIDEND:
+        return paid[horse], ""
+    return predicted_floor_dividend(total, top_ups, sales), ""
 
 
 def _plus10(ctx: _Ctx, run: _Run, races: Sequence[str], view) -> tuple[list, dict]:
-    """The 100-vs-110 check: each floor-bound placed favourite's realised Place dividend, and the
-    Plus-10 prediction where its inputs exist (none do yet: 'data pending')."""
-    ties, pending = ctx.l7["favourite_ties"], "data pending"
+    """The 100-vs-110 check: each floor-bound placed favourite's realised Place dividend and, under
+    jravan_pool_votes, its predicted dividend from the race's settled PLACE pool (PLACE_RULE),
+    cross-tabulated predicted x realised."""
+    ties = ctx.l7["favourite_ties"]
+    inputs = ctx.spec["rules"]["L2"]["plus10"]["inputs"]
     floor_bound, rows = 0, []
     for race in races:
         seen = view(race)
@@ -679,30 +870,63 @@ def _plus10(ctx: _Ctx, run: _Run, races: Sequence[str], view) -> tuple[list, dic
         if placed:
             rows.append(
                 {"variant": run.name, "race_id": race, "horse_no": int(horse)}
-                | {"place low at t": price, "realised": dividend, "predicted": pending}
+                | {"place low at t": price, "realised": dividend}
             )
-    realised = Counter(_realised(r["realised"]) for r in rows)
+    realised = Counter(_cell(r["realised"]) for r in rows)
     metrics = [_metric(FOLD, "floor_bound_favourites", floor_bound, floor_bound)]
     metrics.append(_metric(FOLD, "placed", len(rows), floor_bound))
-    table = []
-    for key in ("100", "110", "above 110"):
-        metrics.append(_metric(FOLD, f"realised_{key.replace(' ', '_')}", realised[key], len(rows)))
-        table.append(
+    public = []
+    for key in CELLS:
+        metrics.append(_metric(FOLD, f"realised_{key}", realised[key], len(rows)))
+        public.append(
             {"variant": run.name, "floor-bound favourites": floor_bound, "placed": len(rows)}
-            | {"realised": key, "predicted": pending, "favourites": realised[key]}
+            | {"realised": key, "favourites": realised[key]}
         )
-    return metrics, {"plus10": table, "plus10_races": rows}
+    if inputs != JRAVAN_VOTES:
+        for row in rows:
+            row |= {"predicted": "data pending", "why": inputs}
+        return metrics, {"plus10": public, "plus10_races": rows}
+
+    if ctx.place_votes is None:
+        raise ValueError("plus10_inputs is jravan_pool_votes and no pool_votes reader is given")
+    pools = ctx.place_votes([r["race_id"] for r in rows])
+    for row in rows:
+        predicted, why = _predict(ctx, row["race_id"], row["horse_no"], pools.get(row["race_id"]))
+        row |= {"predicted": predicted, "why": why}
+    done = [r for r in rows if r["predicted"] is not None]
+    cells = Counter((_cell(r["predicted"]), _cell(r["realised"])) for r in done)
+    metrics.append(_metric(FOLD, "favourites_predicted", len(done), len(rows)))
+    cross = []
+    for p, r in itertools.product(CELLS, CELLS):
+        metrics.append(_metric(FOLD, f"predicted_{p}_realised_{r}", cells[(p, r)], len(done)))
+        cross.append({"variant": run.name, "predicted": p, "realised": r} | {"n": cells[(p, r)]})
+    reasons = Counter(r["why"] for r in rows if r["predicted"] is None)
+    unpredicted = [{"variant": run.name, "why": w, "favourites": n} for w, n in reasons.items()]
+    return metrics, {
+        "plus10": public,
+        "plus10_races": rows,
+        "plus10_cells": cross,
+        "plus10_unpredicted": unpredicted,
+        "plus10_counts": [
+            {"variant": run.name, "floor-bound favourites": floor_bound, "placed": len(rows)}
+            | {"predicted": len(done), "not predicted": len(rows) - len(done)}
+        ],
+    }
 
 
-def _scored(study: Study, run: _Run, variant: Variant, compute, pending: str) -> None:
-    """#81's `_score`, with the races where the rule drops a ticket or skips the race."""
+SIDES = {"rule_mean_return": "rule", "comparator_mean_return": "comparator"}
+
+
+def _scored(study: Study, ctx: _Ctx, run: _Run, variant: Variant, compute, pending: str) -> None:
+    """#81's `_score`, with each side's own return bounded (the same meeting-clustered bootstrap
+    as the difference: two ranked rows) and the races where the rule drops a ticket or skips the
+    race."""
     changed: set[str] = set()
-    paired: list[set] = []
+    found: list[RuleComparison] = []
 
     def counted():
-        found = compute(changed)
-        paired.append(set(found.diff.index))
-        return found
+        found.append(compute(changed))
+        return found[-1]
 
     comparator = {
         "floor": "the same tickets, those at the floor included",
@@ -710,18 +934,36 @@ def _scored(study: Study, run: _Run, variant: Variant, compute, pending: str) ->
         "tail_rank": "every combination, the tail included",
     }.get(run.kind, "the same favourite tickets in all races")
     _score(study, variant, comparator, counted, pending)
-    if paired and not study.variants[-1].error:
-        n, k = len(paired[0]), len(changed & paired[0])
-        done = study.variants[-1]
-        study.variants[-1] = replace(
-            done, metrics=(*done.metrics, _metric(FOLD, "races_changed", k, n))
-        )
-        study.tables["comparisons"][-1]["races changed"] = k
+    done = study.variants[-1]
+    if not found or done.error:
+        return
+    comparison = found[0]
+    returns = {"rule_mean_return": comparison.rule_return}
+    returns["comparator_mean_return"] = comparison.comparator_return
+    bounds = {
+        name: paired_bootstrap(series, ctx.clusters, **ctx.boot())
+        for name, series in returns.items()
+    }
+    metrics = [
+        _metric(m.fold, m.metric, m.value, m.n, bounds[m.metric].lo, bounds[m.metric].hi)
+        if m.metric in bounds
+        else m
+        for m in done.metrics
+    ]
+    n = comparison.n_races
+    k = len(changed & set(comparison.diff.index))
+    metrics.append(_metric(FOLD, "races_changed", k, n))
+    study.variants[-1] = replace(done, metrics=tuple(metrics))
+    row = study.tables["comparisons"][-1]
+    for name, side in SIDES.items():
+        row |= {f"{side} lower": bounds[name].lo, f"{side} upper": bounds[name].hi}
+    row |= {"races changed": k, "variants searched": ctx.spec["family_size"]}
 
 
 def _score_run(study: Study, ctx: _Ctx, run: _Run) -> None:
     label, races, view, pending = ctx.selection(run)
     params: dict = {"pool": run.pool, "stake_yen": ctx.unit}
+    params["variants_searched"] = ctx.spec["family_size"]  # the family size (D17)
     if run.cut is not None:
         params["cut"] = run.cut
     if run.kind in ("flat", "handicap", "box", "plus10"):
@@ -757,13 +999,14 @@ def _score_run(study: Study, ctx: _Ctx, run: _Run) -> None:
             tickets, skips = _favourite_tickets(ctx, run), _skips(ctx, run)
             return ctx.paired(_skip_paired(ctx, races, view, tickets, skips, changed), label)
 
-    _scored(study, run, variant, compute, pending)
+    _scored(study, ctx, run, variant, compute, pending)
 
 
-def compute_study(data: StudyData, spec: dict) -> Study:
+def compute_study(data: StudyData, spec: dict, place_votes: VotesReader | None = None) -> Study:
     """Every variant of the frozen `spec` on `data`, in `_plan` order. No I/O beyond the
-    board-at-t reads of `data.view_at_t`."""
-    ctx = _Ctx(data, spec)
+    board-at-t reads of `data.view_at_t` and, for the 100-vs-110 check under jravan_pool_votes,
+    the settled PLACE pools of `place_votes`."""
+    ctx = _Ctx(data, spec, place_votes)
     study = Study(
         counts={
             "races_read": len(data.races),
@@ -783,30 +1026,67 @@ def compute_study(data: StudyData, spec: dict) -> Study:
 # --------------------------------------------------------------------------- report and runner
 
 NOTE = (
-    "Per paired race: the rule's payout / stake minus the comparator's, at final dividends (L7: a"
-    " race the rule skips returns its stake). 'paired difference' is its mean over the paired"
-    " races; lower and upper are the (1 - level) and level quantiles of the paired bootstrap over"
-    " meetings (D7, one-sided; D18): positive is the rule losing less. 'races changed' counts the"
+    "Per paired race: each side's payout / stake at final dividends (L7: a race the rule skips"
+    " returns its stake). 'rule return' and 'comparator return' are each side's mean over the"
+    " paired races and 'paired difference' the mean of rule minus comparator; each lower and"
+    " upper is the (1 - level) and level quantile of the bootstrap over meetings (D7, one-sided"
+    " bounds). Positive is the rule returning more than its comparator. 'races changed' counts the"
     " paired races where the rule drops a ticket or skips the race. 'final (look-ahead)' rows"
     " choose by the final price and are look-ahead; 'board at t' rows choose by odds_timeseries at"
-    " t. No rule is adopted here."
+    " t. Every row is ranked below; nothing here is adopted."
 )
 SECTIONS = (
     ("L2", "L2: never bet at the floor (E14)"),
     ("L3", "L3: avoid the tail (E12)"),
     ("L7", "L7: flat-market and handicap favourites (E3, E7)"),
 )
+PER = 100  # the ranked table's returns are per 100 yen staked
 
 
-def render_report(study: Study, spec: dict, about: dict) -> str:
-    """The full report: aggregate tables only (race rows go to the companion CSVs)."""
+def _ranked(comparisons: list[dict]) -> list[dict]:
+    """Each scored comparison as two options (the rule and its comparator), ranked within each
+    selection by mean return per 100 yen staked, highest first."""
+    options = []
+    for row in comparisons:
+        if row.get("status") != "scored":
+            continue
+        for side, what in (("rule", "the rule's tickets"), ("comparator", row["comparator"])):
+            options.append(
+                {"selection": row["selection"], "rule": row["rule"], "variant": row["variant"]}
+                | {"option": side, "bets": what, "races": row["races"]}
+                | {f"return per {PER} yen": PER * row[f"{side} return"]}
+                | {"lower": PER * row[f"{side} lower"], "upper": PER * row[f"{side} upper"]}
+                | {"variants searched": row["variants searched"]}
+            )
+    options.sort(key=lambda o: (o["selection"], -o[f"return per {PER} yen"], o["variant"]))
+    ranked, seen = [], Counter()
+    for option in options:
+        seen[option["selection"]] += 1
+        ranked.append({"rank": seen[option["selection"]]} | option)
+    return ranked
+
+
+def _withheld_runs(spec: dict) -> set[str]:
+    """The variants built on the jravan votes (D21): the 100-vs-110 check under
+    jravan_pool_votes."""
+    if spec["rules"]["L2"]["plus10"]["inputs"] != JRAVAN_VOTES:
+        return set()
+    return {run.name for run in _plan(spec["rules"]) if run.kind == "plus10"}
+
+
+def render_report(study: Study, spec: dict, about: dict, private: str | None = None) -> str:
+    """The main report, on the jra store alone: aggregate tables only (race rows go to the
+    companion CSVs). Under jravan_pool_votes the 100-vs-110 prediction is withheld (D21) and the
+    report names `private`, the report that holds it, instead."""
+    withheld = _withheld_runs(spec)
     lines = [
         f"# Floor, tail and favourite avoidance: Family L rules L2, L3, L7 ({COUNTRY}, #{TICKET})",
         "",
         *(f"- {key}: {value}" for key, value in about.items()),
-        f"- owner sign-off of the pre-registered inputs: #{spec['owner_signoff']}",
+        f"- variants searched (the family size): {spec['family_size']}",
         "- development rows only: holdout days are never read and the holdout is not opened",
-        "- no rule is adopted here: adoption is the owner's (08 §9.11)",
+        "- every option is a ranked row (owner reframe 2026-11-27): there is no pass/fail and"
+        " nothing here is adopted",
         "",
         "## Frozen rules",
         "",
@@ -827,26 +1107,97 @@ def render_report(study: Study, spec: dict, about: dict) -> str:
         rows = [row for row in comparisons if row["rule"] == rule]
         lines += ["", f"## {title}", "", NOTE, ""]
         lines.append(_markdown_table(rows) if rows else "_None: see the variants below._")
+    ranked = _ranked(comparisons)
     lines += [
+        "",
+        f"## Ranked options (mean return per {PER} yen staked, within each selection)",
+        "",
+        "Each scored comparison is two rows: the rule's tickets and its comparator's, over the"
+        " same paired races. Rows of one selection overlap (one comparator serves several cut"
+        " points), so the rank orders the options and is not a test.",
+        "",
+        _markdown_table(ranked) if ranked else "_None: no comparison was scored._",
         "",
         "## L2: the 100-vs-110 check (Plus-10, 04 §1.3)",
         "",
-        "Floor-bound favourites that placed, by realised Place dividend (yen per 100), against the"
-        f" Plus-10 prediction ({spec['rules']['L2']['plus10']['inputs']}: no source holds the"
-        " per-runner Place stakes it needs). Each race is in the companion plus10 CSV.",
+        "Floor-bound favourites that placed, by realised Place dividend (yen per 100), from the jra"
+        " dividends.",
         "",
     ]
     plus10 = study.tables.get("plus10")
     lines.append(_markdown_table(plus10) if plus10 else "_None: no floor-bound favourite placed._")
+    if withheld:
+        lines += [
+            "",
+            "The predicted dividend of each (100 or 110 under Plus-10), against the realised one,"
+            " is built on the JRA-VAN H1 Place votes (jravan pool_votes, #368) and is withheld"
+            f" (D21): it is in the private report `{private}` under the data directory, never in"
+            " the repository.",
+        ]
+    else:
+        lines += ["", "The prediction is pending: plus10_inputs is data_pending."]
     reasons = study.tables.get("dropped_reasons")
     lines += ["", "## Dropped races by reason", ""]
     lines.append(_markdown_table(reasons) if reasons else "_None._")
-    variants = [
-        {"rule": v.hypothesis_id, "variant": v.name, "status": "failed" if v.error else "scored"}
+    variants = []
+    for v in study.variants:
+        row = {"rule": v.hypothesis_id, "variant": v.name}
+        row["status"] = "failed" if v.error else "scored"
+        if v.error:
+            row["why"] = f"withheld (D21): see `{private}`" if v.name in withheld else v.error
+        variants.append(row)
+    lines += ["", "## Variants (one registry record each)", "", _markdown_table(variants), ""]
+    return "\n".join(lines)
+
+
+def render_private(study: Study, spec: dict, about: dict) -> str:
+    """The 100-vs-110 table built on the JRA-VAN votes: withheld (D21), written outside the
+    repository only."""
+    withheld = _withheld_runs(spec)
+    status = [
+        {"variant": v.name, "status": "failed" if v.error else "scored"}
         | ({"why": v.error} if v.error else {})
         for v in study.variants
+        if v.name in withheld
     ]
-    lines += ["", "## Variants (one registry record each)", "", _markdown_table(variants), ""]
+    lines = [
+        f"# The 100-vs-110 check ({COUNTRY}, #{TICKET}): JRA-VAN-derived, withheld (D21)",
+        "",
+        *(f"- {key}: {value}" for key, value in about.items()),
+        "- built on the JRA-VAN H1 Place votes (jravan pool_votes, #368): never in the repository",
+        "- development races only, read for the settled race (a label), never at t",
+        "",
+        "## The prediction",
+        "",
+        PLACE_RULE + ".",
+        "",
+        "```json",
+        json.dumps(spec["place_votes"], indent=2, ensure_ascii=False),
+        "```",
+        "",
+        "## Floor-bound placed favourites",
+        "",
+        _markdown_table(study.tables["plus10_counts"])
+        if study.tables.get("plus10_counts")
+        else "_None._",
+        "",
+        "## Predicted against realised Place dividend (yen per 100)",
+        "",
+        _markdown_table(study.tables["plus10_cells"])
+        if study.tables.get("plus10_cells")
+        else "_None._",
+        "",
+        "## Not predicted, by reason",
+        "",
+        _markdown_table(study.tables["plus10_unpredicted"])
+        if study.tables.get("plus10_unpredicted")
+        else "_None._",
+        "",
+        "## Variants",
+        "",
+        _markdown_table(status) if status else "_None._",
+        "",
+    ]
     return "\n".join(lines)
 
 
@@ -854,12 +1205,18 @@ def _csv(study: Study, key: str, columns: list[str]) -> str:
     return pd.DataFrame(study.tables.get(key, []), columns=columns).to_csv(index=False)
 
 
+def _votes_build(path: Path) -> dict[str, str]:
+    where = f"processed/{VOTES_SOURCE}/{jravan_votes.FILENAME}"
+    value = f"{where}@{_digest([path])}" if path.is_file() else f"{where} (missing)"
+    return {f"{VOTES_SOURCE}_pool_votes": value}
+
+
 def run_study(out_dir: Path | None = None) -> dict:
-    """Run the pre-registered study on Japan's development data and write its report.
+    """Run the pre-registered study on Japan's development data and write its reports.
 
     Raises `MissingOwnerDecision` before anything is read when config/avoidance_price.yaml lacks
-    an input, `paths.DataDirInsideRepo` for an `out_dir` inside the repository, and
-    `FamilyAlreadyFrozen` when the family is frozen with another spec."""
+    an input (a ValueError for an unknown key), `paths.DataDirInsideRepo` for an `out_dir` inside
+    the repository, and `FamilyAlreadyFrozen` when the family is frozen with another spec."""
     owner = owner_inputs()
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     minutes = int(load_country_yaml(COUNTRY, "decision")["primary_min"])
@@ -870,14 +1227,22 @@ def run_study(out_dir: Path | None = None) -> dict:
 
     data = avoidance.read_development(minutes, pools=PRICE_POOLS, race_columns=RACE_COLUMNS)
     builds = avoidance.store_builds(data.board_files)
-    study = compute_study(data, spec)
+    withheld = _withheld_runs(spec)
+    reader, votes_build = None, {}
+    if withheld:
+        path = votes_path()
+        reader, votes_build = functools.partial(read_place_votes, path=path), _votes_build(path)
+    study = compute_study(data, spec, reader)
     del data
 
+    def record(variant: Variant) -> RunRecord:
+        made = avoidance._record(variant, git_sha, builds, family_id=FAMILY_ID, ticket=TICKET)
+        if variant.name not in withheld:
+            return made
+        return replace(made, sources=(SOURCE, VOTES_SOURCE), data_builds={**builds, **votes_build})
+
     existing = registry.records(FAMILY_ID)
-    records = [
-        avoidance._record(v, git_sha, builds, family_id=FAMILY_ID, ticket=TICKET)
-        for v in study.variants
-    ]
+    records = [record(v) for v in study.variants]
     appended = [registry.append(r) for r in records if r not in existing]
     about = {
         "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
@@ -886,17 +1251,22 @@ def run_study(out_dir: Path | None = None) -> dict:
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     stem = out_dir / f"floor-tail-favourite-{COUNTRY}-{spec_hash[:12]}"
-    report = write_report(
-        stem.with_suffix(".md"), render_report(study, spec, about), sources=(SOURCE,)
-    )
-    written = {"report_path": str(report)}
-    for key, suffix, columns in (
-        ("dropped_races", "dropped", ["variant", "race_id", "reason"]),
-        ("plus10_races", "plus10", PLUS10_COLUMNS),
-    ):
+    private = stem.with_name(f"{stem.name}-plus10-{VOTES_SOURCE}.md")
+    text = render_report(study, spec, about, private.name if withheld else None)
+    written = {"report_path": str(write_report(stem.with_suffix(".md"), text, sources=(SOURCE,)))}
+    outputs = [("dropped_races", "dropped", ["variant", "race_id", "reason"], (SOURCE,))]
+    if withheld:  # D21: the votes' figures go to private files only, never inside the repository
+        both = (SOURCE, VOTES_SOURCE)
+        about_private = about | {"store": ", ".join({**builds, **votes_build}.values())}
+        text = render_private(study, spec, about_private)
+        written["private_report_path"] = str(write_report(private, text, sources=both))
+        outputs.append(("plus10_races", f"plus10-{VOTES_SOURCE}", PLUS10_COLUMNS, both))
+    else:
+        outputs.append(("plus10_races", "plus10", PLUS10_COLUMNS, (SOURCE,)))
+    for key, suffix, columns, sources in outputs:
         path = stem.with_name(f"{stem.name}-{suffix}.csv")
         text = _csv(study, key, columns)
-        written[f"{suffix}_path"] = str(write_report(path, text, sources=(SOURCE,)))
+        written[f"{suffix.replace('-', '_')}_path"] = str(write_report(path, text, sources=sources))
     return {
         "family_id": FAMILY_ID,
         "spec_hash": spec_hash,
