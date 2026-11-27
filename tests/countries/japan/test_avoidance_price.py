@@ -114,8 +114,8 @@ Review round 1 of b9a6b6d (each pinned by its own test below):
   record (named with `validation`, n the placed horses checked), withheld with it. The tolerance
   is in the frozen spec (a key holding `tolerance`): 10 yen per 100 staked, one rounding step (JRA
   rounds Place dividends down to 10 yen, and a floor horse's 100 or 110 is the check's own
-  question). A miss above it makes the record 'failed' with its reason reported, never a scored
-  prediction. A check with no race to check has no miss.
+  question). A miss above it is a diagnostic on its race's row (fix round 4, B below), never a
+  rejection of the record. A check with no race to check has no miss.
 - Missing or unreadable votes: the realised counts from the jra store (metrics `realised_<r>`)
   survive in a 'scored' 100-vs-110 record and only the prediction is unavailable (no predicted
   cell counts a favourite). The public report still gives the realised counts and never says
@@ -124,9 +124,8 @@ Review round 1 of b9a6b6d (each pinned by its own test below):
 Review round 2 of 360216f (each pinned by its own test below):
 
 - The Place rule above, JRA's stake-back share, replaces the equal split of the profit: hand-worked
-  cases of `place_payout` (P = 2, 3 and 4, Plus-10 paid and withheld), the fixture's realised
-  dividends from the same rule, and a premium race whose realised dividends carry the premium
-  (the boost calendar patched in memory).
+  cases of `place_payout` (P = 2, 3 and 4, Plus-10 paid and withheld) and the fixture's realised
+  dividends from the same rule. (A premium race is no longer rebuilt: fix round 4, A below.)
 - Eligible favourites whose prediction cannot be made (the votes missing or unreadable): the
   prediction is unavailable, shown by absent cells: the record holds no `predicted_*` cell and no
   `validation` metric, and no written row gives the check a verdict (`within`). A covered
@@ -134,12 +133,56 @@ Review round 2 of 360216f (each pinned by its own test below):
 - A scratch at t: a runner whose latest WIN or PLACE row at t is SCR has no price in any pool at
   t, Wide pairs included, even when an older row of the other pool still prices it (the
   board-at-t rule of docs/specs/board-at-t.md and `board.snapshot`).
-- A failed reconstruction check: each row of that variant in the private plus10 CSV has its
-  prediction cleared or a `why` naming the failure; its realised dividend stays.
 - The post-time input of the at-t records is one data build `<identity>@<digest>` (a hex digest
   of the race -> post-time mapping): the identity the same whatever the coverage, the digest
   moving when one race's post time changes or is backfilled, so the registry counts one family
   size over such runs. The coverage counts stay in the report.
+
+Fix round 4 of 1774fb3 (the owner-requested restart plan, GPT-6 Astra on #82, 2026-11-27: keep
+every observation and every attempted prediction, each with its availability and diagnostic
+status; each pinned by its own test below):
+
+- A. A race whose Place premium settlement is unresolved (the boost calendar gives its PLACE pool
+  a premium, which JRA may withhold: `takeout`'s `boost_may_be_withheld`) has its prediction
+  unavailable, its CSV row's `why` naming the premium. The premium is never inferred from the
+  realised dividends, so a race where it was paid (Q) and one where it was withheld (Q0) give the
+  same prediction rows. Its realised dividend and every other race stay.
+- B. No whole-table rejection: the reconstruction check is a diagnostic. The 100-vs-110 row of a
+  race any of whose placed horses misses its rebuilt dividend by more than the tolerance is
+  labelled discrepant (a cell matching 'discrepan') and keeps its prediction; the cross-tab is
+  scored over every available prediction and the record keeps its metrics (status 'scored', no
+  error). Counts come from the final row statuses: each 100-vs-110 record carries one metric each
+  named with `attempted` (the floor-bound placed favourites), `available` (those with a
+  prediction), `unavailable` (those without) and `discrepant` (the available ones labelled
+  discrepant); the private report has a table with those four columns and one row per check; the
+  private CSV's rows give the same counts (available: a `predicted` value; discrepant: a cell
+  matching 'discrepan'); the public report gives the attempted count (its realised table's
+  `placed`) and, the others being built on the votes (D21), none of the other three.
+- C. The read boundary (D14): `read_store_table` materialises no non-date column of a holdout day
+  (it may read the date column first), and `read_place_votes` decodes no votes column of a
+  holdout row, even in a row group mixing development and holdout races: no Python frame of the
+  package or of pyarrow's Python layer holds such a value while the reader runs (a trace of the
+  call), and a row group holding only a holdout day, whose other columns cannot be decoded, is
+  never decoded. The store reader's own test is in tests/countries/japan/models/test_v0_store.py.
+- D. A votes file that exists but cannot be opened (PermissionError) does not abort the run: every
+  record is written, the comparisons are scored as in A, the realised counts stand, the
+  prediction is unavailable and the votes' data build of the check's records names the failure.
+- E. Walk-forward rows. Each whole-development record keeps #81's scheme
+  'paired_same_races:development' and its name, as the descriptive output. Beside it, each paired
+  comparison has one walk-forward record (`fold_scheme` starting 'walk_forward', another variant
+  name, the same hypothesis and at least the same components and params) scoring only the races
+  in the test windows of `core.eval.folds.walk_forward` over the development race days under
+  Japan's scheme (`load_country_scheme`, config/folds.yaml; here a day scheme the tests control,
+  as the synthetic days span a week and Japan's quarters need 22 of them to train). Its pooled
+  metrics (fold labels naming no single window day) hold the paired difference with its bounds
+  and each side's mean return over those races; each fold's races are labelled with their fold:
+  one metric named with 'difference' whose fold label names the window's first day, n the fold's
+  paired races. The scheme is frozen in the spec; it moves no descriptive record.
+- F. run_study's returned summary and main's stdout tell no withheld check's status or result:
+  they are the same, masked of paths, hashes and times, whatever the votes give (A, V, M, Q0,
+  and R, a votes reader that raises).
+- G. The family is `japan-family-l-floor-tail-favourite-v5`, superseding v4, frozen before any race
+  is read.
 
 How the run-level tests prove it without fixing the owner's betting rules: the same synthetic
 store is run under one change at a time and the registry records are compared. Rows not available
@@ -161,12 +204,16 @@ declared in memory by patching the holdout definition.
 # block is written in its final order and I001 is waived so lint passes before and after.
 from __future__ import annotations  # noqa: I001
 
+import contextlib
 import copy
+import dataclasses
 import io
 import itertools
 import json
 import math
+import os
 import re
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -174,14 +221,17 @@ from fractions import Fraction
 from pathlib import Path
 
 import duckdb
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
 from horsetrack.core import config as core_config
+from horsetrack.core.eval import folds as folds_module
 from horsetrack.core.eval import holdout as holdout_module
 from horsetrack.core.eval import reports as reports_module
+from horsetrack.core.eval.folds import FoldScheme, walk_forward
 from horsetrack.core.eval.registry import Registry
 from horsetrack.core.eval.reports import is_withheld
 from horsetrack.core.store import schemas
@@ -785,11 +835,31 @@ def owner_config(**changes) -> dict:
     return raw | changes
 
 
-def use_owner_config(mp: pytest.MonkeyPatch, raw: dict | None) -> None:
-    """config/avoidance_price.yaml reads as `raw` (None: the file does not exist); every other
-    config as shipped."""
+# Fix round 4, E: the walk-forward scheme the tests control (config/folds.yaml's `folds:` section,
+# in memory only). Japan's own (quarters, min_train 22) has no fold on a week of synthetic days.
+# Over the development days D1..D4 below, windows of one day from D1 + 1: D1 trains only, and
+# D2, D3 and D4 are each a fold (worked by hand, checked against core.eval.folds.walk_forward).
+TEST_FOLDS = {
+    "unit": "day",
+    "test_length": 1,
+    "step": 1,
+    "min_train": 1,
+    "window": "expanding",
+    "embargo_days": 0,
+    "anchor_month": 1,
+}
+LATE_FOLDS = TEST_FOLDS | {"min_train": 8}  # K: the first window is D1 + 8 days, D4 alone
+
+
+def use_owner_config(mp: pytest.MonkeyPatch, raw: dict | None, folds: dict | None = None) -> None:
+    """config/avoidance_price.yaml reads as `raw` (None: the file does not exist) and
+    config/folds.yaml's scheme as `folds` (TEST_FOLDS by default); every other config as
+    shipped."""
+    scheme = dict(TEST_FOLDS if folds is None else folds)
 
     def load(country, name, *args, **kwargs):
+        if name == "folds":
+            return {"folds": dict(scheme)}
         if name != CONFIG_NAME:
             return SHIPPED_LOAD(country, name, *args, **kwargs)
         if raw is None:
@@ -797,7 +867,8 @@ def use_owner_config(mp: pytest.MonkeyPatch, raw: dict | None) -> None:
         return copy.deepcopy(raw)
 
     mp.setattr(core_config, "load_country_yaml", load)
-    mp.setattr(avoidance_price, "load_country_yaml", load, raising=False)
+    for module in (avoidance_price, avoidance, folds_module):
+        mp.setattr(module, "load_country_yaml", load, raising=False)
 
 
 HORSES = tuple(range(1, 11))
@@ -898,6 +969,10 @@ HOLDOUT = [  # poison: if a holdout row is read, every result moves
 H1, H2, H3, H4, H5, H6, H7, H8 = (race.race_id for race in HISTORY)
 G1, G2, G3, G4, G5, G6, G7, G8 = (race.race_id for race in LOGGED)
 RACES = {race.race_id: race for race in (*HISTORY, *LOGGED, *HOLDOUT)}
+# E: each test window's first day -> its races, by hand from the schemes (D1 trains only)
+FOLD_RACES = {D2: (H5, H6, H7, H8), D3: (G1, G2, G3, G4), D4: (G5, G6, G7, G8)}  # TEST_FOLDS
+LATE_FOLD_RACES = {D4: (G5, G6, G7, G8)}  # LATE_FOLDS (K)
+FOLD_DAYS = (D2, D3, D4)
 
 # E: other final odds on history, the winners' prices and every dividend unchanged
 E_FINAL = {
@@ -1213,9 +1288,14 @@ class Scenario:
     place: dict = field(default_factory=dict)  # race -> {horse: realised Place dividend} (M)
     no_place_at_t: frozenset = frozenset()  # races with no PLACE row at t (W, W1, P)
     place_at_t: dict = field(default_factory=dict)  # race -> the only horses priced at t (P)
-    votes_file: str = "parquet"  # "garbage" (U) or "missing" (U0)
+    # "garbage" (U), "missing" (U0), or "unopenable": written, then mode 000 (PU, fix round 4 D)
+    votes_file: str = "parquet"
     # review round 2 of 360216f
     premium: frozenset = frozenset()  # races whose PLACE pool pays JRA's 5% premium (Q)
+    # fix round 4: on the boost calendar with a premium, which the race did not pay (Q0, A)
+    premium_withheld: frozenset = frozenset()
+    reader_fault: bool = False  # the pool_votes reader raises a RuntimeError (R, F)
+    folds: dict | None = None  # config/folds.yaml's scheme (None: TEST_FOLDS; K: LATE_FOLDS)
     # race -> a horse scratched by t: SCR on its WIN row at T-3, whose PLACE and Wide rows are not
     # refreshed after T-20; the results mark it scratched (X)
     stale_scratch: dict = field(default_factory=dict)
@@ -1242,11 +1322,13 @@ def write_store(data_dir: Path, scenario: Scenario) -> None:
     )
     jravan = data_dir / "processed" / "jravan"
     jravan.mkdir(parents=True)
-    if scenario.votes_file == "parquet":
+    if scenario.votes_file in ("parquet", "unopenable"):
         pq.write_table(
             pa.Table.from_pylist(votes, schema=jravan_votes.POOL_VOTES_SCHEMA),
             jravan / jravan_votes.FILENAME,
         )
+        if scenario.votes_file == "unopenable":  # it exists, and opening it is refused
+            (jravan / jravan_votes.FILENAME).chmod(0)
     elif scenario.votes_file == "garbage":
         (jravan / jravan_votes.FILENAME).write_bytes(b"PAR1 a truncated download, not parquet")
     else:
@@ -1397,6 +1479,8 @@ class Outcome:
     base: Path = Path()
     out_dir: Path = Path()
     writes: list[tuple[Path, str, tuple]] = field(default_factory=list)  # each write_report call
+    summary: dict = field(default_factory=dict)  # what run_study returned
+    stdout: str = ""  # what main printed
 
     def masked(self, text: str) -> str:
         """`text` without what differs between two runs of one family: this run's directory,
@@ -1438,12 +1522,14 @@ class Outcome:
 
 
 def run_scenario(base: Path, scenario: Scenario, owner: dict) -> Outcome:
-    """run_study on a fresh data directory whose store appears only once a family is frozen."""
+    """The study's command line (main --run --out) on a fresh data directory whose store appears
+    only once a family is frozen; run_study's returned summary and main's stdout are kept."""
     data_dir, out_dir = base / "data", base / "out"
     data_dir.mkdir(parents=True)
     out_dir.mkdir()
     original, written = Registry.freeze_family, []
     real_write, writes = reports_module.write_report, []
+    real_run, summaries = avoidance_price.run_study, []
 
     def freeze(self, family_id, spec):
         spec_hash = original(self, family_id, spec)
@@ -1456,17 +1542,31 @@ def run_scenario(base: Path, scenario: Scenario, owner: dict) -> Outcome:
         writes.append((Path(path), text, tuple(sources)))
         return real_write(path, text, sources=sources, **kwargs)
 
+    def run_study(*args, **kwargs):
+        summaries.append(real_run(*args, **kwargs))
+        return summaries[-1]
+
+    def broken_reader(*args, **kwargs):
+        raise RuntimeError("synthetic fault: the pool_votes reader broke")
+
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("HORSETRACK_DATA_DIR", str(data_dir))
-        use_owner_config(mp, owner)
+        use_owner_config(mp, owner, scenario.folds)
         use_synthetic_holdout(mp)
-        if scenario.premium:
-            use_premium(mp, scenario.premium)
+        if scenario.premium or scenario.premium_withheld:
+            use_premium(mp, scenario.premium | scenario.premium_withheld)
+        if scenario.reader_fault:
+            mp.setattr(avoidance_price, "read_place_votes", broken_reader)
         mp.setattr(Registry, "freeze_family", freeze)
         for module in (reports_module, avoidance_price, avoidance):
             mp.setattr(module, "write_report", write_report, raising=False)
-        avoidance_price.run_study(out_dir)
+        mp.setattr(avoidance_price, "run_study", run_study)
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            code = avoidance_price.main(["--run", "--out", str(out_dir)])
+    assert code == 0
     assert written, "run_study never froze its family"
+    assert len(summaries) == 1, "main runs the study once"
     registry_path = data_dir / "registry" / "japan.jsonl"
     entries = [json.loads(line) for line in registry_path.read_text().splitlines()]
     texts = {
@@ -1474,7 +1574,9 @@ def run_scenario(base: Path, scenario: Scenario, owner: dict) -> Outcome:
         for p in sorted(out_dir.rglob("*"))
         if p.is_file() and p.suffix in (".md", ".csv", ".txt", ".json")
     }
-    return Outcome(entries, texts, registry_path, base, out_dir, writes)
+    return Outcome(
+        entries, texts, registry_path, base, out_dir, writes, summaries[0], printed.getvalue()
+    )
 
 
 SCENARIOS = {
@@ -1506,6 +1608,11 @@ SCENARIOS = {
         Scenario(untimed=UNTIMED, schedule=SCHEDULE, post_shift={SHIFTED_RACE: None}),
         owner_config(),
     ),
+    # fix round 4 of 1774fb3
+    "Q0": lambda: (Scenario(premium_withheld=frozenset({PREMIUM_RACE})), owner_config()),
+    "PU": lambda: (Scenario(votes_file="unopenable"), owner_config()),
+    "R": lambda: (Scenario(reader_fault=True), owner_config()),
+    "K": lambda: (Scenario(folds=dict(LATE_FOLDS)), owner_config()),
 }
 LOGGED_IDS = tuple(race.race_id for race in LOGGED)
 # N: D3 TOK's captures keep their post_utc beside a stale sidecar (one minute late) that must not
@@ -1666,6 +1773,29 @@ def variants_searched(record: dict) -> list:
     found = [m["value"] for m in record["metrics"] if any(k in m["metric"].lower() for k in names)]
     found += [v for k, v in record["params"].items() if any(n in k.lower() for n in names)]
     return found
+
+
+DESCRIPTIVE = "paired_same_races:development"  # #81's scheme: every development race once
+
+
+def is_descriptive(record: dict) -> bool:
+    """A whole-development record (the historical descriptive output)."""
+    return record["fold_scheme"] == DESCRIPTIVE
+
+
+def is_walk_forward(record: dict) -> bool:
+    return str(record["fold_scheme"]).startswith("walk_forward")
+
+
+def fold_day(label) -> str | None:
+    """The one test window's first day a metric's fold label names, or None (a pooled label)."""
+    days = {day for day in FOLD_DAYS if day in str(label)}
+    return days.pop() if len(days) == 1 else None
+
+
+def pooled(record: dict) -> list[dict]:
+    """The record's metrics over all its races (a walk-forward record's per-fold ones aside)."""
+    return [m for m in record["metrics"] if fold_day(m["fold"]) is None]
 
 
 NEGATIONS = ("no ", "not ", "none", "never", "nothing", "owner")
@@ -1893,7 +2023,10 @@ def test_the_100_vs_110_table_reports_predicted_against_realised_dividends(study
         checks = [
             record
             for record in study(name).records
-            if record["hypothesis_id"] == "L2" and is_look_ahead(record) and cross_tab(record)
+            if record["hypothesis_id"] == "L2"
+            and is_descriptive(record)
+            and is_look_ahead(record)
+            and cross_tab(record)
         ]
         assert len(checks) == 1, name  # the check at the final price
         record = checks[0]
@@ -1941,7 +2074,7 @@ def test_each_scored_variant_is_a_ranked_row_against_its_comparator(study):
             continue
         found = variants_searched(record)
         assert found and all(value == size for value in found), (name, found, size)
-        metrics = record["metrics"]
+        metrics = pooled(record)  # a walk-forward record's per-fold metrics aside
         if any("realised" in m["metric"] for m in metrics):
             continue  # the 100-vs-110 check, not a paired comparison
         differences = [
@@ -2031,10 +2164,13 @@ def public_report(outcome: Outcome) -> str:
 
 
 def plus10_names(outcome: Outcome) -> dict[str, str]:
-    """The 100-vs-110 checks' variants: 'final' (the look-ahead one) and 'at t': the L2 records
-    holding its cells, or built on the JRA-VAN votes (D21: a failed one holds no cell)."""
+    """The 100-vs-110 checks' variants: 'final' (the look-ahead one) and 'at t': the
+    whole-development L2 records holding its cells, or built on the JRA-VAN votes (D21: a failed
+    one holds no cell)."""
     found: dict[str, str] = {}
     for record in outcome.records:
+        if not is_descriptive(record):
+            continue
         if record["hypothesis_id"] == "L2" and (
             cross_tab(record) or realised_counts(record) or is_withheld(record["sources"])
         ):
@@ -2058,11 +2194,13 @@ def realised_counts(record: dict) -> dict[str, tuple[float, int]]:
 
 
 def paired_means(record: dict) -> tuple[float, float, int]:
-    """(the rule's mean return, the comparator's, n) of a scored paired comparison."""
-    (diff,) = [m for m in record["metrics"] if "difference" in m["metric"] and m["lo"] is not None]
+    """(the rule's mean return, the comparator's, n) of a scored paired comparison, over all its
+    races (a walk-forward record's per-fold metrics aside)."""
+    metrics = pooled(record)
+    (diff,) = [m for m in metrics if "difference" in m["metric"] and m["lo"] is not None]
     n = diff["n"]
-    (rule,) = side_returns(record["metrics"], "rule", n)
-    (comparator,) = side_returns(record["metrics"], "comparator", n)
+    (rule,) = side_returns(metrics, "rule", n)
+    (comparator,) = side_returns(metrics, "comparator", n)
     return rule["value"], comparator["value"], n
 
 
@@ -2198,10 +2336,23 @@ def test_a_runner_scratched_after_t_is_selected_and_refunded(study):
     assert all(checked[rule] for rule in RULES), checked
 
 
+def within_tolerance(record: dict) -> tuple[float, int]:
+    """(placed horses within the tolerance, placed horses checked): the validation metric."""
+    (metric,) = [
+        m
+        for m in pooled(record)
+        if "validat" in m["metric"].lower() and "within" in m["metric"].lower()
+    ]
+    return metric["value"], metric["n"]
+
+
 def test_the_place_payout_reconstruction_is_checked_before_the_cross_tab(study):
     """Review 1 (high): the 100-vs-110 check validates its reconstructed Place dividends against
     the realised ones of every placed horse of its races; the check is in the (withheld) record,
-    its tolerance in the frozen spec; a miss above the tolerance fails the record."""
+    its tolerance in the frozen spec. Fix round 4 (B), changed from 'a miss fails the record': a
+    miss above the tolerance is a diagnostic, never a rejection: the record stays scored with its
+    metrics, its cross-tab and realised counts those of A, the miss shown in its validation
+    figures and labelled discrepant on its race's row."""
     a, m, v = study("A"), study("M"), study("V")
     # the fixture: every placed horse of the check's races is within one 10-yen step of the
     # reference payout of its votes (A's and V's), the non-floor ones exactly; M misprices one
@@ -2239,12 +2390,20 @@ def test_the_place_payout_reconstruction_is_checked_before_the_cross_tab(study):
             # every placed horse of its races, the non-floor ones included
             assert max(x["n"] for x in checks) >= 3 * races[tag], (tag, checks)
             assert is_withheld(record["sources"]), (tag, record["sources"])
+            within, checked = within_tolerance(record)
+            assert within == checked >= 3 * races[tag], (tag, within, checked)
 
-    record = m.by_variant()[names["final"]]  # a miss above the tolerance: not a prediction
-    assert record["status"] == "failed", record["metrics"]
-    rows = rows_naming(m, names["final"])
-    assert any("failed" in cells for cells in rows), rows
-    assert not reported_pending(m, names["final"]), rows
+    # a miss above the tolerance (one placed horse of H6): a diagnostic, the evidence kept
+    record, kept = m.by_variant()[names["final"]], a.by_variant()[names["final"]]
+    assert record["status"] == "scored", record["metrics"]
+    assert cross_tab(record) == cross_tab(kept), cross_tab(record)
+    assert realised_counts(record) == realised_counts(kept)
+    within, checked = within_tolerance(record)
+    assert (within, checked) == (within_tolerance(kept)[0] - 1, within_tolerance(kept)[1])
+    assert not reported_pending(m, names["final"]), rows_naming(m, names["final"])
+    # the check at t holds no race of H6's day: nothing moves there
+    record, kept = m.by_variant()[names["at t"]], a.by_variant()[names["at t"]]
+    assert same(record, kept), record["metrics"]
 
 
 def test_plus10_at_t_counts_a_race_only_with_a_place_price_at_t(study):
@@ -2293,6 +2452,7 @@ def test_l2_keeps_a_no_bet_race_in_the_pairing(study):
         n
         for n, record in ra.items()
         if record["hypothesis_id"] == "L2"
+        and is_descriptive(record)
         and is_at_t(record)
         and is_comparison(record)
         and record["params"]["pool"] == "PLACE"
@@ -2366,11 +2526,22 @@ VERDICT_CELL = re.compile(r"(?i)^within( tolerance)?$")
 HEX_DIGEST = re.compile(r"[0-9a-f]{8,64}")
 
 
-def test_a_premium_race_is_rebuilt_with_its_premium(study):
-    """Review 2 (high): on a premium race the Place dividends carry 5% of sales split over the
-    placed horses, per ticket, rounded down to 10 yen by itself, after Plus-10 on the base payout
-    (the base rate stays 0.80). The check rebuilds them and still scores."""
-    a, q = study("A"), study("Q")
+def expected_cells(floor: dict[str, tuple[int, float]], races) -> Counter:
+    """(predicted, realised) -> favourites over `races` of a check's floor favourites, from the
+    votes profiles (PREDICTED) and the realised dividends written."""
+    return Counter(
+        (PREDICTED[VOTES[race]], realised_cell(floor[race][1])) for race in floor if race in races
+    )
+
+
+def test_an_unresolved_premium_leaves_the_prediction_unavailable(study):
+    """Fix round 4 (A), changed from review 2's 'a premium race is rebuilt with its premium': JRA
+    may withhold a premium (takeout's boost_may_be_withheld) and the store holds no settlement
+    signal, so a race the boost calendar gives a Place premium has its prediction unavailable,
+    with a reason naming the premium, and the premium is never inferred from the realised
+    dividends: the race where it was withheld (Q0) and the race where it was paid (Q) give the
+    same prediction rows. The realised dividend and every other race stay."""
+    a, q, q0 = study("A"), study("Q"), study("Q0")
     race = RACES[PREMIUM_RACE]
     favourite, realised = FLOOR_FAVOURITES[PREMIUM_RACE]
     votes = place_votes(race, VOTES[PREMIUM_RACE])
@@ -2378,28 +2549,66 @@ def test_a_premium_race_is_rebuilt_with_its_premium(study):
     paid = reference_place_dividends(votes, race.finish, premium=True)
     # the fixture, by hand: the favourite (700,000 tickets) gains nothing and stays at 110; the
     # others (30,000 and 20,000) gain 10 x floor(1,000,000 / 180,000) = 50 and 10 x floor(
-    # 1,000,000 / 120,000) = 80, more than the tolerance; at a 0.85 rate the last would be 430
+    # 1,000,000 / 120,000) = 80 when the premium is paid (Q). Q0's store is A's: the premium
+    # withheld, the dividends the base ones, 50 and 80 below what a premium rebuild would give.
     others = [h for h in race.finish if h != favourite]
     assert paid[favourite] == base[favourite] == realised == 110
     assert [paid[h] - base[h] for h in others] == [50, 80]
     assert [base[h] for h in others] == [300, 410]
-    assert {h: d for h, d in place_paid(race).items()} == base  # A's store: no premium
-    # the boost calendar of Q marks the race's PLACE pool, and only that pool
+    assert {h: d for h, d in place_paid(race).items()} == base  # A's and Q0's store
+    assert PREMIUM_RACE in FLOOR_FAVOURITES and PREMIUM_RACE in AT_T_FLOOR_FAVOURITES
+    # the boost calendar of Q and Q0 marks the race's PLACE pool, and only that pool
     with pytest.MonkeyPatch.context() as mp:
         use_premium(mp, {PREMIUM_RACE})
-        assert takeout.race_takeout(PREMIUM_RACE, "PLACE").boost == "premium"
+        place = takeout.race_takeout(PREMIUM_RACE, "PLACE")
+        assert place.boost == "premium" and place.boost_may_be_withheld
         assert takeout.race_takeout(PREMIUM_RACE, "WIN").boost is None
         assert takeout.race_takeout(G1, "PLACE").boost is None
 
     names = plus10_names(a)
-    races = {"final": len(FLOOR_FAVOURITES), "at t": len(AT_T_FLOOR_FAVOURITES)}
+    floors = {"final": FLOOR_FAVOURITES, "at t": AT_T_FLOOR_FAVOURITES}
     for tag, name in names.items():
-        record = q.by_variant()[name]
-        assert record["status"] == "scored", (tag, record["metrics"])
-        checks = [x for x in record["metrics"] if re.search("validat", x["metric"].lower())]
-        assert checks and max(x["n"] for x in checks) >= 3 * races[tag], (tag, checks)
-        assert cross_tab(record) == cross_tab(a.by_variant()[name]), tag
-        assert realised_counts(record) == realised_counts(a.by_variant()[name]), tag
+        floor = floors[tag]
+        others_races = [r for r in floor if r != PREMIUM_RACE]
+        want = expected_cells(floor, others_races)
+        assert sum(want.values()) == len(floor) - 1
+        rows = {}
+        for outcome in (q0, q):
+            record = outcome.by_variant()[name]
+            assert record["status"] == "scored", (tag, record["metrics"])
+            assert realised_counts(record) == realised_counts(a.by_variant()[name]), tag
+            # the other races' predictions, the premium race's left out
+            cells = cross_tab(record)
+            assert {c: v for c, (v, _) in cells.items() if v} == dict(want), (tag, cells)
+            assert {n for _, n in cells.values()} == {len(floor) - 1}, (tag, cells)
+            within, checked = within_tolerance(record)  # nothing rebuilt misses
+            assert within == checked, (tag, within, checked)
+
+            frame = plus10_csv(outcome)
+            frame = frame.loc[frame["variant"].eq(name)]
+            got = {
+                r["race_id"]: r
+                for r in frame.to_dict("records")
+                if r["race_id"] in floor  # every floor favourite keeps its row
+            }
+            assert set(got) == set(floor), (tag, sorted(got))
+            for race_id, row in got.items():
+                assert float(row["realised"]) == floor[race_id][1], (tag, row)
+                if race_id == PREMIUM_RACE:  # unavailable, with its reason
+                    assert pd.isna(row["predicted"]), (tag, row)
+                    assert re.search(r"(?i)premium", str(row["why"])), (tag, row)
+                else:
+                    assert row["predicted"] == PREDICTED[VOTES[race_id]], (tag, row)
+            rows[outcome is q] = sorted(
+                (r["race_id"], str(r["predicted"]), str(r["why"])) for r in got.values()
+            )
+        assert rows[True] == rows[False], tag  # paid or withheld: the same prediction rows
+
+    # nothing else moves with an unresolved premium (Q0's store is A's): only the checks built on
+    # the votes
+    votes_built = {n for n, r in a.by_variant().items() if is_withheld(r["sources"])}
+    assert set(names.values()) <= votes_built
+    assert set(moved(a, q0)) <= votes_built, sorted(set(moved(a, q0)) - votes_built)
 
 
 def test_unreadable_votes_leave_the_prediction_unavailable(study):
@@ -2539,27 +2748,31 @@ def plus10_csv(outcome: Outcome) -> pd.DataFrame:
     return pd.read_csv(io.StringIO(found[0]))
 
 
-def test_a_failed_check_leaves_no_prediction_in_its_csv(study):
-    """Review 2 (medium): when the reconstruction check fails, the private CSV keeps each
-    floor-bound placed favourite's realised dividend, and its rejected prediction is cleared or
-    labelled with the failure, never exported as a plain prediction."""
+DISCREPANT = re.compile(r"(?i)discrepan")
+
+
+def test_a_discrepancy_is_labelled_on_its_row_and_keeps_the_prediction(study):
+    """Fix round 4 (B), changed from review 2's 'a failed check leaves no prediction in its CSV':
+    a reconstruction miss above the tolerance (M: a placed horse of H6 that is not the favourite)
+    labels the row of its race discrepant in the private CSV, and that row keeps its realised
+    dividend and its prediction; no other row is labelled, nor any row when nothing misses (A)."""
     a, m = study("A"), study("M")
     names = plus10_names(a)
-    assert m.by_variant()[names["final"]]["status"] == "failed"
+    assert MISPRICED_RACE in FLOOR_FAVOURITES and MISPRICED_RACE not in AT_T_FLOOR_FAVOURITES
 
-    for outcome in (m, a):
-        frame = plus10_csv(outcome)
-        rows = frame.loc[frame["variant"].eq(names["final"])]
-        got = {(r, int(h)): float(d) for r, h, d in zip(rows["race_id"], rows["horse_no"],
-                                                       rows["realised"], strict=True)}  # fmt: skip
-        assert got == {(r, h): float(d) for r, (h, d) in FLOOR_FAVOURITES.items()}, got
-        for row in rows.to_dict("records"):
-            why = "" if pd.isna(row["why"]) else str(row["why"])
-            if outcome is m:  # rejected by the check: cleared, or labelled as failed
-                assert pd.isna(row["predicted"]) or "fail" in why.lower(), row
-            else:  # validated: the prediction, not labelled
-                assert row["predicted"] == PREDICTED[VOTES[row["race_id"]]], row
-                assert "fail" not in why.lower(), row
+    for outcome in (a, m):
+        for tag, floor in (("final", FLOOR_FAVOURITES), ("at t", AT_T_FLOOR_FAVOURITES)):
+            frame = plus10_csv(outcome)
+            rows = frame.loc[frame["variant"].eq(names[tag])]
+            triples = zip(rows["race_id"], rows["horse_no"], rows["realised"], strict=True)
+            got = {(r, int(h)): float(d) for r, h, d in triples}
+            assert got == {(r, h): float(d) for r, (h, d) in floor.items()}, (tag, got)
+            for row in rows.to_dict("records"):
+                # every attempted prediction stays, whatever its diagnostic
+                assert row["predicted"] == PREDICTED[VOTES[row["race_id"]]], (tag, row)
+                labelled = any(DISCREPANT.search(str(v)) for v in row.values() if pd.notna(v))
+                want = outcome is m and row["race_id"] == MISPRICED_RACE
+                assert labelled == want, (tag, row)
 
 
 def post_builds(outcome: Outcome) -> dict[str, tuple[str, str, str]]:
@@ -2612,3 +2825,554 @@ def test_the_post_time_build_keeps_one_identity(study, tmp_path):
         return [cells for cells in table_rows(public_report(outcome)) if "post" in cells[0]]
 
     assert coverage(outcomes["N"]) and coverage(outcomes["N"]) != coverage(outcomes["N2"])
+
+
+# ---------------------------------------------------------------------------------------------
+# Fix round 4 of 1774fb3 (the owner-requested restart plan): counts from the row statuses, the
+# read boundary, an unopenable votes file, walk-forward rows, the CLI summary, the v5 family
+# ---------------------------------------------------------------------------------------------
+
+COUNT_WORDS = {  # B: the counts, in this order, from the final row statuses
+    "attempted": re.compile(r"attempted"),
+    "available": re.compile(r"(?<!un)available"),
+    "unavailable": re.compile(r"unavailable"),
+    "discrepant": re.compile(r"discrepan"),
+}
+# (attempted, available, unavailable, discrepant) of each check, by hand from the fixture: A every
+# floor-bound placed favourite predicted, nothing off; M one race's reconstruction off (H6, in the
+# check at the final price only); U the votes unreadable; Q0 the premium race (G6, in both checks)
+# unresolved
+EXPECTED_COUNTS = {
+    "A": {"final": (6, 6, 0, 0), "at t": (3, 3, 0, 0)},
+    "M": {"final": (6, 6, 0, 1), "at t": (3, 3, 0, 0)},
+    "U": {"final": (6, 0, 6, 0), "at t": (3, 0, 3, 0)},
+    "Q0": {"final": (6, 5, 1, 0), "at t": (3, 2, 1, 0)},
+}
+
+
+def markdown_tables(text: str) -> list[tuple[list[str], list[list[str]]]]:
+    """Each markdown table in `text`: (its header cells, its rows' cells)."""
+    tables: list[tuple[list[str], list[list[str]]]] = []
+    header: list[str] | None = None
+    rows: list[list[str]] = []
+    for line in [*text.splitlines(), ""]:
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            if header is not None:
+                tables.append((header, rows))
+            header, rows = None, []
+            continue
+        if set(stripped) <= set("|-: "):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if header is None:
+            header = cells
+        else:
+            rows.append(cells)
+    return tables
+
+
+def private_report(outcome: Outcome) -> str:
+    """The private report: the one markdown file written with the JRA-VAN source."""
+    found = [
+        text
+        for path, text, sources in outcome.writes
+        if path.suffix == ".md" and is_withheld(sources)
+    ]
+    assert len(found) == 1, [str(path) for path, _, _ in outcome.writes]
+    return found[0]
+
+
+def registry_counts(record: dict) -> tuple[int, ...]:
+    got = []
+    for word, pattern in COUNT_WORDS.items():
+        found = [m for m in pooled(record) if pattern.search(m["metric"].lower())]
+        names = [m["metric"] for m in record["metrics"]]
+        assert len(found) == 1, (record["variant"], word, names)
+        got.append(int(found[0]["value"]))
+    return tuple(got)
+
+
+def private_counts(outcome: Outcome, variant: str) -> tuple[int, ...]:
+    """The counts row of `variant` in the private report's table holding the four counts."""
+    hits = []
+    for header, rows in markdown_tables(private_report(outcome)):
+        where = {
+            word: [i for i, cell in enumerate(header) if pattern.search(cell.lower())]
+            for word, pattern in COUNT_WORDS.items()
+        }
+        if not all(len(found) == 1 for found in where.values()):
+            continue
+        for cells in rows:
+            if variant in cells:
+                hits.append(tuple(int(float(cells[where[w][0]])) for w in COUNT_WORDS))
+    assert len(hits) == 1, (variant, hits)
+    return hits[0]
+
+
+def flagged(row: dict) -> bool:
+    return any(DISCREPANT.search(str(value)) for value in row.values() if pd.notna(value))
+
+
+def csv_counts(outcome: Outcome, variant: str) -> tuple[int, ...]:
+    """The counts the private CSV's rows of `variant` give: a row with a prediction is available,
+    one with a cell matching 'discrepan' discrepant."""
+    frame = plus10_csv(outcome)
+    rows = frame.loc[frame["variant"].eq(variant)]
+    available = int(rows["predicted"].notna().sum())
+    discrepant = sum(flagged(row) for row in rows.to_dict("records"))
+    return len(rows), available, len(rows) - available, discrepant
+
+
+def test_prediction_counts_agree_across_every_output(study):
+    """Fix round 4 (B): the counts come from the final row statuses, attempted, available,
+    unavailable and discrepant (separately), and agree across the registry metrics, the private
+    report, the private CSV and, for the attempted count alone, the public report; the public
+    report gives none of the counts built on the votes (D21)."""
+    names = plus10_names(study("A"))
+    for scenario, expected in EXPECTED_COUNTS.items():
+        outcome = study(scenario)
+        public = markdown_tables(public_report(outcome))
+        for tag, name in names.items():
+            want = expected[tag]
+            attempted, available, unavailable, discrepant = want
+            assert attempted == available + unavailable and discrepant <= available
+            record = outcome.by_variant()[name]
+            assert record["status"] == "scored", (scenario, tag, record["metrics"])
+            assert sum(v for v, _ in realised_counts(record).values()) == attempted
+            assert registry_counts(record) == want, (scenario, tag)
+            assert private_counts(outcome, name) == want, (scenario, tag)
+            assert csv_counts(outcome, name) == want, (scenario, tag)
+
+            placed = set()
+            for header, rows in public:
+                naming = [cells for cells in rows if name in cells]
+                if not naming:
+                    continue
+                for word in ("available", "unavailable", "discrepant"):  # built on the votes
+                    assert not any(COUNT_WORDS[word].search(c.lower()) for c in header), header
+                assert not any(DISCREPANT.search(c) for cells in naming for c in cells), naming
+                where = [i for i, c in enumerate(header) if c.lower() in ("placed", "attempted")]
+                placed |= {int(float(cells[where[0]])) for cells in naming if where}
+            assert placed == {attempted}, (scenario, tag, placed)
+
+
+# C: the read boundary, traced. A frame of the package or of pyarrow's Python layer that holds a
+# holdout row's value while a reader runs has materialised it.
+PACKAGE_DIR = os.path.realpath(Path(avoidance_price.__file__).resolve().parents[3])
+PYARROW_DIR = os.path.realpath(Path(pa.__file__).resolve().parent)
+
+
+def holds(value, hit, depth: int = 0) -> bool:
+    """Whether `value` (Arrow, pandas or numpy data, a container or dataclass of them, or a
+    scalar) holds a scalar that `hit` flags."""
+    if depth > 4:
+        return False
+    if isinstance(value, (pa.Table, pa.RecordBatch)):
+        return any(holds(column, hit, depth + 1) for column in value.columns)
+    if isinstance(value, (pa.Array, pa.ChunkedArray)):
+        return any(hit(x) for x in value.to_pylist())
+    if isinstance(value, pa.Scalar):
+        return hit(value.as_py())
+    if isinstance(value, pd.DataFrame):
+        return any(holds(value.iloc[:, i], hit, depth + 1) for i in range(value.shape[1]))
+    if isinstance(value, (pd.Series, pd.Index, np.ndarray)):
+        return any(hit(x) for x in np.asarray(value, dtype=object).ravel().tolist())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(holds(v, hit, depth + 1) for v in value)
+    if isinstance(value, dict):
+        return any(holds(v, hit, depth + 1) for v in value.values())
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        fields = dataclasses.fields(value)
+        return any(holds(getattr(value, f.name), hit, depth + 1) for f in fields)
+    return bool(hit(value))
+
+
+class ReadTrace:
+    """While the block runs, every local of every Python frame of the package or of pyarrow's
+    Python layer, and every value such a frame returns or yields, searched for a scalar `hit`
+    flags; `found` names the frames and lines where one was held."""
+
+    def __init__(self, hit) -> None:
+        self.hit, self.found = hit, []
+        self._watched: dict[str, bool] = {}
+
+    def __enter__(self) -> ReadTrace:
+        self._previous = sys.gettrace()
+        sys.settrace(self._call)
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        sys.settrace(self._previous)
+        return False
+
+    def _call(self, frame, event, arg):
+        name = frame.f_code.co_filename
+        if name not in self._watched:
+            path = os.path.realpath(name)
+            self._watched[name] = path.startswith((PACKAGE_DIR, PYARROW_DIR))
+        return self._line if self._watched[name] else None
+
+    def _line(self, frame, event, arg):
+        if event in ("line", "return") and len(self.found) < 20:
+            values = [*frame.f_locals.values(), *([arg] if event == "return" else [])]
+            try:
+                held = any(holds(value, self.hit) for value in values)
+            except Exception:  # a value the search cannot read holds nothing it can flag
+                held = False
+            if held:
+                where = f"{Path(frame.f_code.co_filename).name}:{frame.f_lineno}"
+                self.found.append(f"{where} {frame.f_code.co_name}")
+        return self._line
+
+
+def unreadable_row_group(path: Path, group: int, keep) -> None:
+    """Overwrite the data of row group `group`'s column chunks, those named in `keep` aside, so
+    that decoding one fails; the footer (schema, row-group statistics) stays."""
+    meta = pq.read_metadata(path).row_group(group)
+    data = bytearray(path.read_bytes())
+    for j in range(meta.num_columns):
+        column = meta.column(j)
+        if column.path_in_schema in keep:
+            continue
+        start = (
+            column.dictionary_page_offset if column.has_dictionary_page else column.data_page_offset
+        )
+        data[start : start + column.total_compressed_size] = b"\xff" * column.total_compressed_size
+    path.write_bytes(bytes(data))
+
+
+VOTES_POISON = 9_090_000  # a holdout row's votes figures start here; no development figure does
+
+
+def votes_rows_of(race_id: str, k: int, holdout: bool) -> list[dict]:
+    """One race's PLACE and WIN rows of pool_votes (six runners and the `__pool__` row, its votes
+    holding the refunds too), in votes.py's order. A holdout race's figures are all poison."""
+    keys = race_keys(race_id)
+    base = {c: keys[c] for c in ("jurisdiction", "race_id", "race_date", "venue", "race_no")}
+    rows = []
+    for pool in ("PLACE", "WIN"):
+        bump = 5 if pool == "WIN" else 0
+        votes = {
+            h: VOTES_POISON + 100 * k + 10 * h + bump if holdout else 1000 * h + 10 * k + bump
+            for h in range(1, 7)
+        }
+        refund = VOTES_POISON + 99 if holdout else (30 * (k + 1) if pool == "PLACE" else 0)
+        rows += [
+            base
+            | {"pool": pool, "combination": str(h), "votes": n, "refund_votes": None}
+            | {"fav_rank": None, "data_kubun": "4"}
+            for h, n in votes.items()
+        ]
+        rows.append(
+            base
+            | {"pool": pool, "combination": jravan_votes.POOL_ROW}
+            | {"votes": sum(votes.values()) + refund, "refund_votes": refund}
+            | {"fav_rank": None, "data_kubun": "4"}
+        )
+    return sorted(rows, key=lambda r: (r["race_id"], r["pool"], r["combination"]))
+
+
+def test_read_place_votes_decodes_no_holdout_votes(tmp_path, monkeypatch):
+    """Fix round 4 (C): read_place_votes decodes no votes column of a holdout row, even when a row
+    group mixes development and holdout races, and never decodes a row group holding a holdout
+    race alone; what it returns for the development races is their settled PLACE pools."""
+    dev = [rid("2026-06-13", "TOK", 1), rid("2026-06-13", "TOK", 2), rid("2026-06-27", "TOK", 1)]
+    mixed = [rid("2026-06-20", "TOK", 1), rid("2026-06-20", "TOK", 2)]
+    alone = rid("2026-06-21", "TOK", 1)
+    holdout_days = {"2026-06-20", "2026-06-21"}
+    monkeypatch.setattr(
+        holdout_module,
+        "_load_definition",
+        lambda countries_dir, country: (date(2026, 6, 20), "s", None),
+    )
+    monkeypatch.setattr(holdout_module, "_is_holdout_day", lambda seed, day: day in holdout_days)
+
+    rows = {race: votes_rows_of(race, k, race in (*mixed, alone)) for k, race in enumerate(
+        [*dev, *mixed, alone])}  # fmt: skip
+    groups = [  # one mixed row group, one holding the holdout race alone, one development
+        [row for race in (dev[0], dev[1], *mixed) for row in rows[race]],
+        rows[alone],
+        rows[dev[2]],
+    ]
+    path = tmp_path / jravan_votes.FILENAME
+    schema = jravan_votes.POOL_VOTES_SCHEMA
+    with pq.ParquetWriter(path, schema) as writer:
+        for group in groups:
+            writer.write_table(pa.Table.from_pylist(group, schema=schema))
+    keys = ("race_id", "race_date", "pool")
+    unreadable_row_group(path, 1, keep=keys)
+    # the fixture: three row groups, the first mixing the races; the second's keys read, the rest
+    # of it cannot be decoded
+    assert pq.read_metadata(path).num_row_groups == 3
+    assert pq.ParquetFile(path).read_row_group(1, columns=list(keys)).num_rows == len(rows[alone])
+    with pytest.raises((OSError, pa.ArrowException)):
+        pq.ParquetFile(path).read_row_group(1, columns=["votes"])
+    poison = {
+        n
+        for race in (*mixed, alone)
+        for row in rows[race]
+        for n in (row["votes"], row["refund_votes"])
+        if n is not None
+    }
+    assert min(poison) >= VOTES_POISON > max(row["votes"] for race in dev for row in rows[race])
+
+    def expected(races) -> dict:
+        want = {}
+        for race in races:
+            place = [r for r in rows[race] if r["pool"] == "PLACE"]
+            runners = {
+                int(r["combination"]): r["votes"] for r in place if r["combination"].isdigit()
+            }
+            want[race] = avoidance_price.PlacePool(sum(runners.values()), runners)
+        return want
+
+    def hit(x) -> bool:
+        return isinstance(x, (int, np.integer)) and not isinstance(x, bool) and int(x) in poison
+
+    got = {}
+    with ReadTrace(hit) as trace:
+        try:
+            for races in (dev, dev[:2], [dev[2]]):
+                got[tuple(races)] = avoidance_price.read_place_votes(races, path=path)
+        except (OSError, pa.ArrowException) as exc:
+            pytest.fail(f"a row group holding a holdout race alone was decoded: {exc!r}")
+    assert not trace.found, f"a holdout row's votes were decoded: {trace.found}"
+    for races, pools in got.items():
+        assert pools == expected(races), races
+    with pytest.raises(ValueError):  # a holdout race is never asked of the table
+        avoidance_price.read_place_votes([dev[0], mixed[0]], path=path)
+
+
+def test_a_votes_file_that_cannot_be_opened_leaves_the_prediction_unavailable(study):
+    """Fix round 4 (D): the votes file exists and opening it is refused (PermissionError). The run
+    is not aborted: every record is written, the comparisons are scored as in A, the realised
+    counts stand, the prediction is unavailable and the votes' data build names the failure."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root opens a file whatever its mode")
+    a = study("A")
+    try:
+        pu = study("PU")
+    except OSError as exc:
+        pytest.fail(f"run_study aborted on a votes file it cannot open: {exc!r}")
+    names = plus10_names(a)
+    ra, rp = a.by_variant(), pu.by_variant()
+    assert ra.keys() == rp.keys()
+    assert len(pu.records) == pu.spec["family_size"]
+    votes_built = {n for n, r in ra.items() if is_withheld(r["sources"])}
+    assert set(names.values()) <= votes_built
+    for name, record in ra.items():  # scoring goes on: nothing the votes do not build moves
+        if name not in votes_built:
+            assert same(record, rp[name]), name
+
+    def votes_builds(record: dict) -> list[str]:
+        return [v for k, v in record["data_builds"].items() if "votes" in k.lower()]
+
+    for tag, name in names.items():
+        record = rp[name]
+        assert record["status"] == "scored", (tag, record["metrics"])
+        assert realised_counts(record) == realised_counts(ra[name]), tag
+        assert any(value for value, _ in realised_counts(record).values()), tag
+        assert cross_tab(record) == {}, (tag, cross_tab(record))  # unavailable: no cell
+        (build,) = votes_builds(record)
+        assert build not in votes_builds(ra[name]), (tag, build)
+        assert re.search(r"(?i)unreadable|unopen|permission|cannot", build), (tag, build)
+    assert private_report(pu)
+
+
+def dropped_races(outcome: Outcome) -> set[tuple[str, str]]:
+    """(variant, race) of every dropped race in the public dropped-races CSV."""
+    found = [text for path, text, _ in outcome.writes if path.name.endswith("-dropped.csv")]
+    assert len(found) == 1, [str(path) for path, _, _ in outcome.writes]
+    frame = pd.read_csv(io.StringIO(found[0]))
+    return set(zip(frame["variant"], frame["race_id"], strict=True))
+
+
+def counterpart(forward: dict, record: dict) -> bool:
+    """Whether a walk-forward record is `record`'s: the same hypothesis and at least its
+    components and params."""
+    return (
+        forward["hypothesis_id"] == record["hypothesis_id"]
+        and all(forward["components"].get(k) == v for k, v in record["components"].items())
+        and all(forward["params"].get(k) == v for k, v in record["params"].items())
+    )
+
+
+def fold_differences(record: dict) -> dict[str, list[dict]]:
+    """Each window's first day -> the record's metrics labelled with that fold and named with
+    'difference', those of no race aside."""
+    found: dict[str, list[dict]] = {}
+    for m in record["metrics"]:
+        day = fold_day(m["fold"])
+        if day is not None and "difference" in m["metric"] and m["n"]:
+            found.setdefault(day, []).append(m)
+    return found
+
+
+ALL_IDS = (*(race.race_id for race in HISTORY), *LOGGED_IDS)
+
+
+def test_walk_forward_rows_score_only_the_fold_test_races(study):
+    """Fix round 4 (E): beside each whole-development record (#81's scheme, its name), a
+    walk-forward record scores only the paired races in the test windows of
+    `core.eval.folds.walk_forward` under Japan's scheme (config/folds.yaml), each fold's labelled
+    with its fold; the first training span (D1 here) is scored by none. The scheme moves no
+    descriptive record."""
+    # the fixture: walk_forward over the development race days gives the folds worked by hand
+    days = sorted({date.fromisoformat(race.split(":")[1]) for race in ALL_IDS})
+    for scheme, want in ((TEST_FOLDS, FOLD_RACES), (LATE_FOLDS, LATE_FOLD_RACES)):
+        folds = walk_forward(days, scheme=FoldScheme.from_mapping(scheme))
+        assert [fold.test_start.isoformat() for fold in folds] == sorted(want)
+        assert all(race.split(":")[1] == day for day, races in want.items() for race in races)
+        assert {race for races in want.values() for race in races} == {
+            race for race in ALL_IDS if race.split(":")[1] in want
+        }
+    assert avoidance.SCHEME == DESCRIPTIVE  # #81's records keep their scheme
+
+    a, k = study("A"), study("K")
+    for outcome, fold_races in ((a, FOLD_RACES), (k, LATE_FOLD_RACES)):
+        records = outcome.records
+        schemes = {r["fold_scheme"] for r in records}
+        assert all(is_descriptive(r) or is_walk_forward(r) for r in records), schemes
+        descriptive = [r for r in records if is_descriptive(r)]
+        forward = [r for r in records if is_walk_forward(r)]
+        assert forward, schemes
+        assert not {r["variant"] for r in descriptive} & {r["variant"] for r in forward}
+        plus10 = set(plus10_names(outcome).values())
+        dropped = dropped_races(outcome)
+        checked = Counter()
+        for record in descriptive:
+            if record["hypothesis_id"] not in RULES or record["variant"] in plus10:
+                continue
+            twins = [w for w in forward if counterpart(w, record)]
+            assert len(twins) == 1, (record["variant"], [w["variant"] for w in twins])
+            if not is_comparison(record):
+                continue
+            (twin,) = twins
+            considered = LOGGED_IDS if is_at_t(record) else ALL_IDS
+            paired = {race for race in considered if (record["variant"], race) not in dropped}
+            assert paired_means(record)[2] == len(paired), record["variant"]  # every race once
+            per_fold = {day: len(paired & set(races)) for day, races in fold_races.items()}
+            if not sum(per_fold.values()):
+                assert twin["status"] == "failed", twin["variant"]
+                continue
+            assert twin["status"] == "scored", twin["variant"]
+            assert paired_means(twin)[2] == sum(per_fold.values()), twin["variant"]
+            differences = fold_differences(twin)
+            assert set(differences) <= set(fold_races), (twin["variant"], sorted(differences))
+            for day, count in per_fold.items():
+                found = [m["n"] for m in differences.get(day, [])]
+                assert found == ([count] if count else []), (twin["variant"], day, found)
+            checked[(record["hypothesis_id"], "at t" if is_at_t(record) else "final")] += 1
+        assert {rule for rule, _ in checked} == set(RULES), checked
+        assert {tag for _, tag in checked} == {"final", "at t"}, checked
+
+    rk = k.by_variant()  # another fold scheme: the descriptive records do not move
+    for name, record in a.by_variant().items():
+        if is_descriptive(record):
+            assert same(record, rk[name]), name
+
+
+def favourite_win_returns(race: Race, board: dict[int, float]) -> tuple[float, float]:
+    """L7's handicap rule on one race, from first principles: one unit on the favourite of
+    `board` to win, the race skipped (its stake back) when a handicap. (rule, comparator) return
+    per unit staked at the race's WIN dividend."""
+    favourite = min(board, key=board.get)
+    paid = {(r["pool"], r["combination"]): r["dividend"] for r in dividend_rows(race)}
+    back = paid.get(("WIN", str(favourite)), 0.0) / 100
+    return (1.0 if race.weight_type == "handicap" else back), back
+
+
+def test_walk_forward_rows_return_their_fold_races_own_returns(study):
+    """Fix round 4 (E): a walk-forward record's figures are those of its fold races alone: L7's
+    handicap Win rule, worked from the fixture, over the races of the test windows (pooled: each
+    side's mean and the paired difference; per fold: the fold's difference), at the final price
+    and at t, under two schemes."""
+    for scenario, fold_races in (("A", FOLD_RACES), ("K", LATE_FOLD_RACES)):
+        seen = Counter()
+        for record in study(scenario).records:
+            if not (
+                is_walk_forward(record)
+                and record["hypothesis_id"] == "L7"
+                and record["params"].get("pool") == "WIN"
+            ):
+                continue
+            at_t = is_at_t(record)
+            folds = {
+                day: [
+                    favourite_win_returns(RACES[r], RACES[r].at_t if at_t else RACES[r].final)
+                    for r in races
+                    if not at_t or RACES[r].at_t is not None
+                ]
+                for day, races in fold_races.items()
+            }
+            every = [x for returns in folds.values() for x in returns]
+            rule, comparator, n = paired_means(record)
+            assert n == len(every), (scenario, record["variant"], n)
+            want_rule = sum(r for r, _ in every) / n
+            want_comparator = sum(c for _, c in every) / n
+            assert math.isclose(rule, want_rule, rel_tol=1e-9), (scenario, rule, want_rule)
+            assert math.isclose(comparator, want_comparator, rel_tol=1e-9), (scenario, comparator)
+            (diff,) = [
+                m for m in pooled(record) if "difference" in m["metric"] and m["lo"] is not None
+            ]
+            assert math.isclose(diff["value"], want_rule - want_comparator, abs_tol=1e-12)
+            differences = fold_differences(record)
+            for day, returns in folds.items():
+                if not returns:
+                    continue
+                (m,) = differences[day]
+                want = sum(r - c for r, c in returns) / len(returns)
+                assert m["n"] == len(returns), (scenario, day, m)
+                assert math.isclose(m["value"], want, abs_tol=1e-12), (scenario, day, m, want)
+            seen["at t" if at_t else "final"] += 1
+        assert seen == {"final": 1, "at t": 1}, (scenario, seen)
+
+
+def summary_text(outcome: Outcome) -> str:
+    return outcome.masked(json.dumps(outcome.summary, indent=2, sort_keys=True))
+
+
+def test_the_cli_summary_tells_no_withheld_result(study):
+    """Fix round 4 (F, D21): run_study's returned summary and main's stdout (which prints it) are
+    the same, masked of paths, hashes and times, whatever the JRA-VAN votes give: other votes (V),
+    a reconstruction miss (M), an unresolved premium (Q0), a votes reader that raises (R)."""
+    a = study("A")
+    votes_built = {n for n, r in a.by_variant().items() if is_withheld(r["sources"])}
+    assert votes_built
+    want = summary_text(a)
+    for name in ("A", "V", "M", "Q0", "R"):
+        outcome = study(name)
+        assert json.loads(outcome.stdout) == json.loads(json.dumps(outcome.summary)), name
+        if name == "A":
+            continue
+        # the fixture: the checks built on the votes give other results in each of these runs
+        assert set(moved(a, outcome)) & votes_built, name
+        got = summary_text(outcome)
+        assert got == want, (name, sorted(set(got.splitlines()) ^ set(want.splitlines())))
+
+
+FAMILY_V5 = "japan-family-l-floor-tail-favourite-v5"
+
+
+def holds_mapping(value, wanted: dict) -> bool:
+    """Whether a mapping holding every item of `wanted` is anywhere in the JSON value."""
+    if isinstance(value, dict):
+        if all(key in value and value[key] == item for key, item in wanted.items()):
+            return True
+        value = list(value.values())
+    return isinstance(value, list) and any(holds_mapping(v, wanted) for v in value)
+
+
+def test_the_changed_family_is_frozen_as_v5_before_any_race_is_read(study):
+    """Fix round 4 (G): the changed semantics are a new family, v5, superseding v4 (whose records
+    stay), frozen before any race is read, its walk-forward scheme frozen with it."""
+    a, k = study("A"), study("K")
+    assert avoidance_price.FAMILY_ID == FAMILY_V5
+    assert a.entries[0]["kind"] == "freeze"  # the store appeared only once it was frozen
+    assert a.freezes[0]["family_id"] == FAMILY_V5
+    assert {r["family_id"] for r in a.records} == {FAMILY_V5}
+    assert "japan-family-l-floor-tail-favourite-v4" in a.spec["supersedes"]
+    assert holds_mapping(a.spec, TEST_FOLDS) and not holds_mapping(a.spec, LATE_FOLDS)
+    assert holds_mapping(k.spec, LATE_FOLDS)
+    assert k.spec_hash != a.spec_hash  # another scheme, another spec

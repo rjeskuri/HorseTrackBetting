@@ -22,11 +22,14 @@ is no pass/fail here and nothing is adopted here.
   favourites, against the Plus-10 prediction from the race's settled PLACE pool in the jravan
   `pool_votes` table (JRA-VAN H1 votes, #368; `plus10_inputs: jravan_pool_votes`). The votes are a
   label of the settled race, never a selection input, and are read lazily: the row groups whose
-  race_id statistics can hold a wanted race, the PLACE rows of those races, five columns. Before
-  the predicted x realised table, every placed horse of the check's races has its dividend
-  reconstructed and compared with the realised one; a miss above the frozen tolerance fails the
-  record. Votes that cannot be read leave the realised counts scored and the prediction
-  unavailable (no check, no cell).
+  race_id statistics can hold a wanted race, and only the PLACE rows of those races, five
+  columns, decoded into Python. Every attempted row (a floor-bound placed favourite) stays, with
+  its prediction or why it has none: votes missing or unreadable (a file that cannot be opened is
+  recorded in the data build, never fatal), no votes for the race, or a premium PLACE pool whose
+  settlement is unresolved (JRA may withhold the premium; #481). Every placed horse of the
+  rebuilt races has its dividend reconstructed and compared with the realised one, a diagnostic:
+  a miss above the frozen tolerance labels the race's row discrepant and rejects nothing. The
+  counts (attempted, available, unavailable, discrepant) come from the rows' final statuses.
 
 Selection: on history the final price (runners.win_odds), labelled LOOK_AHEAD; on logged days the
 board at t (odds_timeseries through `read_asof` at the post - 2 min, D2: the post_utc of the
@@ -35,6 +38,12 @@ on the board is a runner, whatever the results say later, and one whose latest W
 SCR has no price in any pool; a ticket holding a runner the results mark scratched is refunded
 (stake back). Cut points (tail odds, ranks, entropy quintiles) come from
 the frozen spec, never from the data scored.
+
+Evaluation: each paired comparison has two records. The descriptive one (#81's scheme
+`paired_same_races:development`) scores every development race once, the first training span
+included; its walk-forward twin (`<variant>:walk_forward`) scores the same per-race returns over
+the test windows of `core.eval.folds.walk_forward` under config/folds.yaml's scheme alone,
+pooled and per window. The 100-vs-110 check has the descriptive record only.
 
 D21: the votes are JRA-VAN's. The 100-vs-110 records declare the `jravan` source, and their table
 goes only to a private report and CSV written through `write_report` with that source (never
@@ -52,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import dataclasses
 import functools
 import hashlib
 import itertools
@@ -67,12 +77,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.compute as pc
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 from horsetrack.core import paths
 from horsetrack.core.config import load_country_yaml
 from horsetrack.core.eval.bootstrap import paired_bootstrap
+from horsetrack.core.eval.folds import FoldScheme, load_country_scheme, walk_forward
 from horsetrack.core.eval.holdout import _git_sha, is_holdout_day
 from horsetrack.core.eval.registry import RunRecord, default_registry
 from horsetrack.core.eval.reports import write_report
@@ -117,7 +128,7 @@ from horsetrack.countries.japan.studies.calibration import (
     _real,
     normalised_entropy,
 )
-from horsetrack.countries.japan.takeout import PREMIUM_TOP_UP, race_takeout
+from horsetrack.countries.japan.takeout import race_takeout
 
 __all__ = [
     "MissingOwnerDecision",
@@ -180,11 +191,11 @@ PLACE_RULE = (
     "payout pool is (W_h + D/P) x R shared over its own tickets, R the Place rate without any "
     "premium (0.80), so its base dividend per 100 yen is R x (W_h + D/P) / W_h x 100 rounded down "
     "to 10 yen, never under 100. The top-ups are 10 yen a ticket on each placed horse at base "
-    "100, and predicted_floor_dividend on the base total payout gives those horses 100 or 110. On "
-    "a premium or ultra_premium PLACE pool (takeout.race_takeout's boost) each placed horse then "
-    "gains 5% of sales split equally over the P horses, per ticket, rounded down to 10 yen: "
-    "10 x floor(S / (2 P W_h)) yen. The premium is taken as paid (JRA may withhold it, "
-    "takeout.boost_may_be_withheld); a race where it was not fails the reconstruction check"
+    "100, and predicted_floor_dividend on the base total payout gives those horses 100 or 110. A "
+    "premium or ultra_premium PLACE pool (takeout.race_takeout's boost) has no prediction: JRA may "
+    "withhold its premium (takeout.boost_may_be_withheld) and the store holds no settlement "
+    "signal, so the race's prediction is unavailable with that reason, never a premium inferred "
+    "from the realised dividends (verified premium settlement: #481)"
 )
 DIVIDEND_STEP = 10  # yen per 100: JRA rounds a dividend down to 10 yen
 
@@ -234,19 +245,6 @@ def place_payout(
     return paid, total, top_ups
 
 
-def _place_premium(votes: Mapping[int, int], placed: Sequence[int], sales: float) -> dict[int, int]:
-    """JRA's premium on a Place pool (takeout.PREMIUM_TOP_UP, 5% of sales), paid after Plus-10:
-    split equally over the placed horses and paid per 100-yen ticket, rounded down to 10 yen, so
-    10 x floor(S / (2 P W_h)) yen for S = sales / 100 tickets. Each placed horse -> its gain."""
-    placed = list(dict.fromkeys(int(h) for h in placed))
-    per_horse = PREMIUM_TOP_UP * sales / len(placed)  # yen
-    return {
-        h: DIVIDEND_STEP
-        * int(math.floor(per_horse / int(votes[h]) / DIVIDEND_STEP + FLOOR_TOLERANCE))
-        for h in placed
-    }
-
-
 @dataclass(frozen=True)
 class PlacePool:
     """One race's settled PLACE pool in the jravan pool_votes table: its tickets net of refunds
@@ -274,8 +272,9 @@ def _row_groups(file: pq.ParquetFile, wanted: Sequence[str]) -> list[int]:
 def read_place_votes(race_ids: Iterable[str], path: Path | None = None) -> dict[str, PlacePool]:
     """The settled PLACE pools of `race_ids` from the jravan pool_votes table (JRA-VAN, withheld
     under D21), read lazily: the row groups whose race_id statistics can hold a wanted race, five
-    columns, decoded `VOTES_BATCH` rows at a time and filtered to PLACE rows of those races. A race
-    on a holdout day is a ValueError (D14): no holdout row is read."""
+    columns, scanned `VOTES_BATCH` rows at a time with the PLACE rows of those races as the scan's
+    filter, so only they are ever decoded into Python. A race on a holdout day is a ValueError
+    (D14): no holdout row is asked, and none of a row group mixing them reaches Python."""
     wanted = sorted(set(race_ids))
     holdout = [r for r in wanted if is_holdout_day(COUNTRY, date.fromisoformat(r.split(":")[1]))]
     if holdout:
@@ -283,23 +282,19 @@ def read_place_votes(race_ids: Iterable[str], path: Path | None = None) -> dict[
     if not wanted:
         return {}
     path = votes_path() if path is None else path
-    file = pq.ParquetFile(path, pre_buffer=False)
-    value_set = pa.array(wanted, pa.string())
-    parts = []
-    for batch in file.iter_batches(
-        batch_size=VOTES_BATCH, row_groups=_row_groups(file, wanted), columns=VOTES_COLUMNS
-    ):
-        keep = pc.and_(
-            pc.equal(batch.column("pool"), "PLACE"),
-            pc.is_in(batch.column("race_id"), value_set=value_set),
-        )
-        rows = batch.filter(keep)
-        if rows.num_rows:
-            parts.append(rows)
+    with pq.ParquetFile(path, pre_buffer=False) as file:
+        groups = _row_groups(file, wanted)
+    scope = (ds.field("pool") == "PLACE") & ds.field("race_id").isin(pa.array(wanted, pa.string()))
+    options = ds.ParquetFragmentScanOptions(pre_buffer=False)
+    dataset = ds.dataset(path, format=ds.ParquetFileFormat(default_fragment_scan_options=options))
+    (fragment,) = dataset.get_fragments()
+    table = fragment.subset(row_group_ids=groups).to_table(
+        schema=dataset.schema, columns=VOTES_COLUMNS, filter=scope, batch_size=VOTES_BATCH
+    )
     pools: dict[str, PlacePool] = {}
-    if not parts:
+    if not table.num_rows:
         return pools
-    frame = pa.Table.from_batches(parts).to_pandas()
+    frame = table.to_pandas()
     for race, rows in frame.groupby("race_id", sort=True):
         total = rows.loc[rows["combination"].eq(jravan_votes.POOL_ROW)]
         tickets = None
@@ -385,7 +380,7 @@ def entropy_quintile(entropy: float, cut_points: tuple[float, float, float, floa
 
 TICKET = 82
 # A changed pre-registration is a new family; the earlier ones keep their records (SUPERSEDES)
-FAMILY_ID = "japan-family-l-floor-tail-favourite-v4"
+FAMILY_ID = "japan-family-l-floor-tail-favourite-v5"
 SUPERSEDES = {
     "japan-family-l-floor-tail-favourite": "the review of #82 (2026-11-27): t from the scheduled "
     "post time when the captures carry none; selection at t from the board at t alone, a runner "
@@ -402,8 +397,17 @@ SUPERSEDES = {
     "favourites without readable votes leave the prediction unavailable (no check, no cell); a "
     "runner whose latest WIN or PLACE row at t is SCR has no price in any pool at t; a failed "
     "check clears its rows' predictions",
+    "japan-family-l-floor-tail-favourite-v4": "fix round 4 of #82 (2026-11-27, the owner's "
+    "restart plan): a premium PLACE pool's prediction is unavailable (its settlement unresolved) "
+    "in place of a premium taken as paid; the reconstruction check is a diagnostic labelling a "
+    "race's row discrepant, never a rejection of the record; the counts come from the rows' "
+    "final statuses (attempted, available, unavailable, discrepant); a votes file that cannot be "
+    "read is recorded and the run goes on; each paired comparison gains a walk-forward record "
+    "over the test windows of config/folds.yaml's scheme",
 }
 CONFIG_NAME = "avoidance_price"
+WALK_FORWARD = "walk_forward"  # E: a walk-forward record's name suffix and fold_scheme prefix
+WALK_FORWARD_FOLD = "walk_forward:test_windows"  # its pooled metrics' fold label
 STAKE_BACK, NO_BET_RETURN = "stake_back", 1.0  # L2's no-bet race returns its stake, as L7's skip
 VALIDATION_TOLERANCE = 10  # yen per 100 staked: one 10-yen rounding step of a Place dividend
 POST_TIME = (
@@ -425,10 +429,10 @@ TAGS = (FINAL, AT_T)
 RACE_COLUMNS = ["race_id", "race_date", "meeting_id", "status", "weight_type", "race_class_raw"]
 PLUS10_COLUMNS = [
     "variant", "race_id", "horse_no", "place low at t", "realised", "predicted", "why",
+    "diagnostic",
 ]  # fmt: skip
 JRAVAN_VOTES, DATA_PENDING = "jravan_pool_votes", "data_pending"
 CELLS = ("100", "110", "above_110")  # the 100-vs-110 table's predicted and realised dividends
-REJECTED = "rejected: the Place payout reconstruction check failed"
 VOTES_COLUMNS = ["race_id", "pool", "combination", "votes", "refund_votes"]
 VOTES_BATCH = 1 << 20  # rows decoded at a time from pool_votes
 OWNER_CHOICES: dict[str, tuple[str, ...]] = {
@@ -596,13 +600,13 @@ def _rules(owner: dict) -> dict:
                 "prediction": PLACE_RULE if owner["plus10_inputs"] == JRAVAN_VOTES else "none",
                 "validation": (
                     {
-                        "rule": "before the predicted x realised table, every placed horse of "
-                        "the check's rebuilt races (the floor favourite and the others) has its "
-                        "Place dividend reconstructed from the votes (the prediction's rule: the "
-                        "base, Plus-10 on the base total, then any premium) and compared with the "
-                        "realised one; one off by more than the tolerance fails the record with "
-                        "its reason, no table is scored and each rebuilt row's prediction is "
-                        "cleared (its realised dividend stays)",
+                        "rule": "a diagnostic, never a rejection: every placed horse of the "
+                        "check's rebuilt races (the floor favourite and the others) has its Place "
+                        "dividend reconstructed from the votes (the prediction's rule: the base, "
+                        "then Plus-10 on the base total) and compared with the realised one; a "
+                        "race with one off by more than the tolerance has its row labelled "
+                        "discrepant, and that row keeps its realised dividend and its prediction, "
+                        "which the predicted x realised table counts",
                         "tolerance_yen_per_100": VALIDATION_TOLERANCE,
                         "why": "JRA rounds Place dividends down to 10 yen, and a floor horse's "
                         "100 or 110 is the check's own question",
@@ -610,11 +614,15 @@ def _rules(owner: dict) -> dict:
                     if owner["plus10_inputs"] == JRAVAN_VOTES
                     else "none"
                 ),
-                "unreadable_votes": "eligible favourites none of whose races can be rebuilt (the "
-                "pool_votes file missing or unreadable, or no votes for them) leave the realised "
-                "counts (jra store) scored and the prediction unavailable: no check, no "
-                "predicted cell; a covered selection with no eligible favourite is a scored zero, "
-                "every cell 0",
+                "counts": "from the rows' final statuses: attempted (the floor-bound placed "
+                "favourites), available (with a prediction), unavailable (without one, each with "
+                "its reason) and discrepant (available, the race labelled discrepant)",
+                "unavailable": "a row has no prediction when its race cannot be rebuilt: the "
+                "pool_votes file missing or unreadable (recorded in its data build, never fatal), "
+                "no votes for the race, or a premium PLACE pool whose settlement is unresolved; "
+                "eligible favourites none of which has a prediction leave the realised counts "
+                "(jra store) scored and no diagnostic or predicted cell; a covered selection with "
+                "no eligible favourite is a scored zero, every cell 0",
             },
         },
         "L3": {
@@ -649,14 +657,37 @@ def _rules(owner: dict) -> dict:
     }
 
 
+def _names(rules: dict) -> list[str]:
+    """Every record's variant in scoring order: each run's whole-development record and, for a
+    paired comparison, its walk-forward record next to it."""
+    names = []
+    for run in _plan(rules):
+        names += [run.name, *([_forward_name(run.name)] if run.kind != "plus10" else [])]
+    return names
+
+
 def variant_names(owner: dict) -> list[str]:
-    return [run.name for run in _plan(_rules(owner))]
+    return _names(_rules(owner))
 
 
-def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
-    """The family's pre-registered spec, frozen in the registry before any race is read."""
+def _forward_name(name: str) -> str:
+    return f"{name}:{WALK_FORWARD}"
+
+
+def walk_forward_scheme(scheme: FoldScheme) -> str:
+    """The walk-forward records' fold_scheme, naming the scheme it scores under."""
+    s = scheme
+    return (
+        f"{WALK_FORWARD}:{s.unit} x{s.test_length} step {s.step}, {s.window}, min_train "
+        f"{s.min_train}, embargo {s.embargo_days}d, anchor month {s.anchor_month}"
+    )
+
+
+def build_spec(owner: dict, bootstrap: dict, minutes: int, scheme: FoldScheme) -> dict:
+    """The family's pre-registered spec, frozen in the registry before any race is read; `scheme`
+    is Japan's walk-forward scheme (config/folds.yaml, core.eval.folds.load_country_scheme)."""
     rules = _rules(owner)
-    variants = [run.name for run in _plan(rules)]
+    variants = _names(rules)
     votes = owner["plus10_inputs"] == JRAVAN_VOTES
     return {
         "family_id": FAMILY_ID,
@@ -704,6 +735,29 @@ def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
             "stake back, as JRA settles it (the store holds no refund row for a scratch)",
         },
         "races": "development races with status 'run' from 2014-06-07 (D10); holdout days unread",
+        "evaluation": {
+            "descriptive": f"fold_scheme {SCHEME}: every development race once, the first "
+            "training span included; the historical descriptive output (#81's scheme)",
+            WALK_FORWARD: {
+                "scheme": dataclasses.asdict(scheme),
+                "scheme_source": f"countries/{COUNTRY}/config/folds.yaml "
+                "(core.eval.folds.load_country_scheme)",
+                "fold_scheme": walk_forward_scheme(scheme),
+                "calendar": "core.eval.folds.walk_forward over the race days of the development "
+                "races read (status 'run')",
+                "records": "beside each paired comparison's descriptive record, one named "
+                f"'<variant>:{WALK_FORWARD}': the same per-race returns over the races of the "
+                f"test windows alone; pooled over them (fold '{WALK_FORWARD_FOLD}') the paired "
+                "difference and each side's mean with D7's bounds, n and the variants "
+                "searched; per window (fold '<first day>..<last day>') its paired difference "
+                "and n. Nothing is fitted, so the scheme only decides which races are scored; "
+                "a comparison with no paired race in a window is failed with its reason. The "
+                "100-vs-110 check has no walk-forward record",
+                "cut_points": "#77's entropy cut points come from 2014-06-07..2019-12-31, the "
+                "first window's training span under Japan's scheme, so its test windows are out "
+                "of their sample",
+            },
+        },
         "variants": variants,
         "family_size": len(variants),  # D17: every cut point counts
         "bootstrap": bootstrap,
@@ -717,9 +771,9 @@ def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
                 "rows": "pool PLACE of the development races the check needs, never at t",
                 "sales": f"the {jravan_votes.POOL_ROW} row's votes less its refund_votes, x the "
                 "unit stake",
-                "payout_rate": "the base rate: takeout.race_takeout(race, 'PLACE')'s payout rate "
-                "less the premium (0.80 for Place since 2014-06-07); its boost premium or "
-                "ultra_premium adds the premium per horse after Plus-10 (PLACE_RULE)",
+                "payout_rate": "takeout.race_takeout(race, 'PLACE')'s payout rate (0.80 for "
+                "Place since 2014-06-07); a pool whose boost may be withheld (premium, "
+                "ultra_premium) has no prediction (PLACE_RULE)",
                 "placed": "the race's paying PLACE rows in the jra dividends table",
                 "withheld": "D21: records built on it declare the jravan source",
             }
@@ -770,6 +824,19 @@ def _board_runners(view: RaceView) -> frozenset[int]:
     return frozenset(int(c) for c in rows["combination"].to_numpy()[priced] if str(c).isdigit())
 
 
+def _fold_labels(races: pd.DataFrame, scheme: FoldScheme) -> dict[str, str]:
+    """E: each development race in a test window of `core.eval.folds.walk_forward` over the
+    races' days -> its window's label, '<first day>..<last day>'."""
+    if races.empty:
+        return {}
+    ids = races["race_id"].to_numpy()
+    return {
+        ids[i]: f"{fold.test_start.isoformat()}..{fold.test_end.isoformat()}"
+        for fold in walk_forward(races["race_date"], scheme=scheme)
+        for i in fold.test_idx
+    }
+
+
 class _Ctx(_Context):
     """#81's context over this study's pools, with the handicaps, the races' conditions labels,
     the runners the results mark scratched, the Place votes reader and cached boards (final and
@@ -793,6 +860,9 @@ class _Ctx(_Context):
         self.place_votes = place_votes
         self.view_at_t = functools.cache(self._board_at_t)
         self.final_win_view = functools.cache(super().final_win_view)
+        forward = spec["evaluation"][WALK_FORWARD]
+        self.fold_scheme = forward["fold_scheme"]
+        self.fold_of = _fold_labels(self.races, FoldScheme.from_mapping(forward["scheme"]))
 
     def _board_at_t(self, race_id: str) -> RaceView:
         if self.data.view_at_t is None:
@@ -1044,13 +1114,17 @@ def _placed_horses(paying: Mapping) -> list[int]:
     return sorted(int(c) for (p, c), (_, refund) in paying.items() if p == "PLACE" and not refund)
 
 
-PREMIUMS = ("premium", "ultra_premium")  # takeout's boosts that add the 5% premium
+UNRESOLVED_PREMIUM = (
+    "a premium PLACE pool whose premium settlement is unresolved (JRA may withhold it, "
+    "takeout.boost_may_be_withheld, and the store holds no settlement signal; #481)"
+)
 
 
 def _reconstruct(ctx: _Ctx, race: str, pool: PlacePool | None) -> tuple[dict | None, str]:
     """({each placed horse: its Place dividend per 100 yen as rebuilt from the race's settled
-    PLACE pool (PLACE_RULE: the base, Plus-10 on the base total, then any premium)}, ''), or
-    (None, why there is none)."""
+    PLACE pool (PLACE_RULE: the base, then Plus-10 on the base total)}, ''), or (None, why there
+    is none). A race whose PLACE pool the boost calendar gives a premium has none: whether the
+    premium was paid is unresolved, and it is never inferred from the realised dividends."""
     placed = _placed_horses(ctx.paying.get(race, {}))
     if pool is None:
         return None, "no PLACE votes for the race"
@@ -1064,30 +1138,40 @@ def _reconstruct(ctx: _Ctx, race: str, pool: PlacePool | None) -> tuple[dict | N
         rate = race_takeout(race, "PLACE", race_class_raw=ctx.class_of.get(race))
     except (LookupError, ValueError) as exc:
         return None, f"no Place payout rate ({type(exc).__name__})"
-    premium = rate.boost in PREMIUMS
-    base_rate = round(rate.payout_rate - (PREMIUM_TOP_UP if premium else 0.0), 6)
+    if rate.boost_may_be_withheld:  # A: no premium engine here (#481), no inference
+        return None, UNRESOLVED_PREMIUM
     sales = float(pool.tickets * ctx.unit)
-    paid, total, top_ups = place_payout(pool.votes, placed, sales, base_rate)
-    floor = predicted_floor_dividend(total, top_ups, sales)  # on the base payout alone
-    paid = {h: d if d > WITHHELD_DIVIDEND else floor for h, d in paid.items()}
-    if premium:
-        gains = _place_premium(pool.votes, placed, sales)
-        paid = {h: d + gains[h] for h, d in paid.items()}
-    return paid, ""
+    paid, total, top_ups = place_payout(pool.votes, placed, sales, rate.payout_rate)
+    floor = predicted_floor_dividend(total, top_ups, sales)  # on the base payout
+    return {h: d if d > WITHHELD_DIVIDEND else floor for h, d in paid.items()}, ""
 
 
-def _validation(
+WITHIN = "within tolerance"
+
+
+def _diagnostics(
     ctx: _Ctx, run: _Run, rebuilt: Mapping[str, tuple[dict | None, str]]
-) -> tuple[list, dict, str | None]:
-    """The reconstruction check: every placed horse of the rebuilt races, its rebuilt Place
-    dividend against the realised one. (metrics, its table row, the failure or None)."""
+) -> tuple[list, dict, dict[str, str]]:
+    """The reconstruction diagnostic: every placed horse of the rebuilt races, its rebuilt Place
+    dividend against the realised one. (metrics, its table row, each rebuilt race -> its label:
+    'discrepant: ...' when a placed horse misses by more than the tolerance, else WITHIN). A
+    discrepancy labels its race's row; it rejects nothing."""
     tolerance = ctx.spec["rules"]["L2"]["plus10"]["validation"]["tolerance_yen_per_100"]
-    errors = [
-        abs(dividend - ctx.paying[race][("PLACE", str(h))][0])
+    misses = {
+        race: [abs(d - ctx.paying[race][("PLACE", str(h))][0]) for h, d in paid.items()]
         for race, (paid, _) in rebuilt.items()
         if paid is not None
-        for h, dividend in paid.items()
-    ]
+    }
+    labels = {}
+    for race, errors in misses.items():
+        off = sum(1 for e in errors if e > tolerance + 1e-9)
+        labels[race] = WITHIN
+        if off:
+            labels[race] = (
+                f"discrepant: {off} of {len(errors)} placed horses' rebuilt Place dividends miss "
+                f"the realised by more than {tolerance} yen per 100 (largest {max(errors):g})"
+            )
+    errors = [e for found in misses.values() for e in found]
     n, worst = len(errors), max(errors, default=0.0)
     within = sum(1 for e in errors if e <= tolerance + 1e-9)
     metrics = [
@@ -1095,28 +1179,42 @@ def _validation(
         _metric(FOLD, "validation_within_tolerance", within, n),
         _metric(FOLD, "validation_max_abs_error_yen", worst, n),
     ]
-    row = {"variant": run.name, "placed horses checked": n, "within tolerance": within}
+    row = {"variant": run.name, "races checked": len(misses), "placed horses checked": n}
+    discrepant = sum(1 for label in labels.values() if label != WITHIN)
+    row |= {"within tolerance": within, "races discrepant": discrepant}
     row |= {"largest miss (yen per 100)": worst, "tolerance (yen per 100)": tolerance}
-    failure = None
-    if within < n:
-        failure = (
-            f"the Place payout reconstruction check failed: {n - within} of {n} placed horses "
-            f"are off their realised dividend by more than {tolerance} yen per 100"
-        )
-    return metrics, {"plus10_validation": [row | {"result": failure or "within"}]}, failure
+    return metrics, {"plus10_validation": [row]}, labels
 
 
-def _plus10(
-    ctx: _Ctx, run: _Run, races: Sequence[str], view
-) -> tuple[list, dict, str | None] | None:
+def _counts(run: _Run, floor_bound: int, rows: list[dict], prediction: str) -> tuple[list, dict]:
+    """B: the check's counts from its rows' final statuses: attempted (the floor-bound placed
+    favourites), available (a prediction), unavailable (none) and discrepant (available, its race
+    labelled discrepant). (metrics, the private counts row)."""
+    attempted = len(rows)
+    available = sum(1 for r in rows if r["predicted"] is not None)
+    discrepant = sum(1 for r in rows if r["predicted"] is not None and r["diagnostic"] != WITHIN)
+    metrics = [
+        _metric(FOLD, "predictions_attempted", attempted, attempted),
+        _metric(FOLD, "predictions_available", available, attempted),
+        _metric(FOLD, "predictions_unavailable", attempted - available, attempted),
+        _metric(FOLD, "predictions_discrepant", discrepant, available),
+    ]
+    row = {"variant": run.name, "floor-bound favourites": floor_bound, "attempted": attempted}
+    row |= {"available": available, "unavailable": attempted - available}
+    return metrics, row | {"discrepant": discrepant, "prediction": prediction}
+
+
+def _plus10(ctx: _Ctx, run: _Run, races: Sequence[str], view) -> tuple[list, dict] | None:
     """The 100-vs-110 check: each floor-bound placed favourite's realised Place dividend and, under
     jravan_pool_votes, its predicted dividend from the race's settled PLACE pool (PLACE_RULE),
-    cross-tabulated predicted x realised once the reconstruction check passes. (metrics, tables,
-    the failure or None); None when no race counts (a favourite priced on its board and, at t,
-    with a PLACE price at t): data pending, not zero favourites. Eligible favourites none of whose
-    races can be rebuilt (the votes missing or unreadable) leave the prediction unavailable: the
-    realised counts, no check and no cell. A covered selection with no eligible favourite is a
-    scored zero, every cell 0. A failed check clears each rebuilt row's prediction (REJECTED)."""
+    cross-tabulated predicted x realised over every available prediction. (metrics, tables); None
+    when no race counts (a favourite priced on its board and, at t, with a PLACE price at t): data
+    pending, not zero favourites. Every attempted row stays with its status: a prediction, or why
+    there is none (the votes missing or unreadable, an unresolved premium, ...); the
+    reconstruction diagnostic labels a race's row discrepant and rejects nothing. Eligible
+    favourites none of which has a prediction leave it unavailable: the realised counts, no
+    diagnostic and no cell. A covered selection with no eligible favourite is a scored zero, every
+    cell 0."""
     ties = ctx.l7["favourite_ties"]
     inputs = ctx.spec["rules"]["L2"]["plus10"]["inputs"]
     floor_bound, rows, covered = 0, [], 0
@@ -1155,63 +1253,130 @@ def _plus10(
             {"variant": run.name, "floor-bound favourites": floor_bound, "placed": len(rows)}
             | {"realised": key, "favourites": realised[key]}
         )
+    tables: dict = {"plus10": public, "plus10_races": rows}
     if inputs != JRAVAN_VOTES:
         for row in rows:
-            row |= {"predicted": "data pending", "why": inputs}
-        return metrics, {"plus10": public, "plus10_races": rows}, None
+            row |= {"predicted": None, "why": f"data pending ({inputs})", "diagnostic": ""}
+        found, counts = _counts(run, floor_bound, rows, "data pending")
+        return metrics + found, tables | {"plus10_counts": [counts]}
 
     if ctx.place_votes is None:
         raise ValueError("plus10_inputs is jravan_pool_votes and no pool_votes reader is given")
     wanted = sorted({r["race_id"] for r in rows})
     try:
         pools, unread = ctx.place_votes(wanted) if wanted else {}, ""
-    except (OSError, pa.ArrowException) as exc:  # the realised counts stand without the votes
+    except Exception as exc:  # an optional label: the realised counts stand without the votes
         pools, unread = {}, f"pool_votes unreadable ({type(exc).__name__})"
     rebuilt = {
         race: (None, unread) if unread else _reconstruct(ctx, race, pools.get(race))
         for race in wanted
     }
+    checked, validation, labels = _diagnostics(ctx, run, rebuilt)
     for row in rows:
         paid, why = rebuilt[row["race_id"]]
         row |= {"predicted": None if paid is None else paid[row["horse_no"]], "why": why}
+        row["diagnostic"] = labels.get(row["race_id"], "")
     done = [r for r in rows if r["predicted"] is not None]
     reasons = Counter(r["why"] for r in rows if r["predicted"] is None)
-    tables: dict = {"plus10": public, "plus10_races": rows}
     tables["plus10_unpredicted"] = [
         {"variant": run.name, "why": w, "favourites": n} for w, n in reasons.items()
     ]
-    counts = {"variant": run.name, "floor-bound favourites": floor_bound, "placed": len(rows)}
-    counts |= {"predicted": len(done), "not predicted": len(rows) - len(done)}
     if rows and not done:  # eligible favourites, none rebuilt: the prediction is unavailable
-        tables["plus10_counts"] = [counts | {"prediction": "unavailable"}]
-        return metrics, tables, None
-    failure = None
+        found, counts = _counts(run, floor_bound, rows, "unavailable")
+        return metrics + found, tables | {"plus10_counts": [counts]}
+    found, counts = _counts(run, floor_bound, rows, "made" if done else "no eligible favourite")
+    metrics += found
+    tables["plus10_counts"] = [counts]
     if done:
-        checked, validation, failure = _validation(ctx, run, rebuilt)
         metrics += checked
         tables |= validation
-    metrics.append(_metric(FOLD, "favourites_predicted", len(done), len(rows)))
-    if failure:  # the payout rule does not reproduce the realised dividends: no table scored
-        for row in done:  # the realised dividend stays; the rejected prediction does not
-            row |= {"predicted": None, "why": REJECTED}
-        tables["plus10_counts"] = [counts | {"prediction": REJECTED}]
-        return metrics, tables, failure
-    tables["plus10_counts"] = [counts | {"prediction": "made" if done else "no eligible favourite"}]
     cells = Counter((_cell(r["predicted"]), _cell(r["realised"])) for r in done)
     cross = []
     for p, r in itertools.product(CELLS, CELLS):
         metrics.append(_metric(FOLD, f"predicted_{p}_realised_{r}", cells[(p, r)], len(done)))
         cross.append({"variant": run.name, "predicted": p, "realised": r} | {"n": cells[(p, r)]})
-    return metrics, tables | {"plus10_cells": cross}, None
+    return metrics, tables | {"plus10_cells": cross}
 
 
 SIDES = {"rule_mean_return": "rule", "comparator_mean_return": "comparator"}
+DESCRIPTIVE_ROWS = "descriptive: every development race"
+FORWARD_ROWS = "walk-forward: the test windows"
+
+
+def _evaluated(row: dict, evaluation: str) -> dict:
+    """The comparisons row with its evaluation named next to its variant."""
+    head = {k: row[k] for k in ("rule", "variant") if k in row}
+    return head | {"evaluation": evaluation} | row
+
+
+def _forward(
+    study: Study,
+    ctx: _Ctx,
+    variant: Variant,
+    comparator: str,
+    comparison: RuleComparison | None,
+    changed: set[str],
+    error: str | None = None,
+    status: str | None = None,
+) -> None:
+    """E: a paired comparison's walk-forward record, beside its descriptive one: the same per-race
+    returns over the paired races of the walk-forward test windows alone (`ctx.fold_of`). Pooled
+    (WALK_FORWARD_FOLD): the paired difference and each side's mean, each with D7's bounds, n,
+    the races dropped and changed; per window (its label): the paired difference and n. Without a
+    paired race in a window it fails with that reason; when the descriptive record has none
+    (`error`), with the descriptive record's error and table `status`."""
+    twin = replace(
+        variant,
+        name=_forward_name(variant.name),
+        fold_scheme=ctx.fold_scheme,
+        components=variant.components | {"evaluation": WALK_FORWARD},
+    )
+    row = {"rule": variant.hypothesis_id, "variant": twin.name, "evaluation": FORWARD_ROWS}
+    row |= {"selection": variant.components["selection"], "comparator": comparator}
+    races = [] if comparison is None else [r for r in comparison.diff.index if r in ctx.fold_of]
+    if error is None and not races:
+        error = "no paired race in a walk-forward test window"
+    if error:
+        study.variants.append(replace(twin, error=error))
+        study.tables["comparisons"].append(row | {"status": status or error})
+        return
+    pick = pd.Index(races, name="race_id", dtype=object)
+    series = {
+        "paired_return_difference": comparison.diff.loc[pick],
+        "rule_mean_return": comparison.rule_return.loc[pick],
+        "comparator_mean_return": comparison.comparator_return.loc[pick],
+    }
+    bounds = {name: paired_bootstrap(s, ctx.clusters, **ctx.boot()) for name, s in series.items()}
+    n, iv = len(races), bounds["paired_return_difference"]
+    dropped = sum(1 for race in comparison.dropped if race in ctx.fold_of)
+    k = len(changed & set(races))
+    metrics = [
+        _metric(WALK_FORWARD_FOLD, name, b.mean, n, b.lo, b.hi) for name, b in bounds.items()
+    ]
+    metrics += [
+        _metric(WALK_FORWARD_FOLD, "dropped_races", dropped, n + dropped),
+        _metric(WALK_FORWARD_FOLD, "meetings", iv.n_clusters, n),
+        _metric(WALK_FORWARD_FOLD, "races_changed", k, n),
+    ]
+    diff = series["paired_return_difference"]
+    windows = diff.groupby(diff.index.map(ctx.fold_of), sort=True)
+    for label, values in windows:
+        metrics.append(_metric(label, "paired_return_difference", values.mean(), len(values)))
+    study.variants.append(replace(twin, metrics=tuple(metrics)))
+    row |= {"races": n, "dropped": dropped, "meetings": iv.n_clusters}
+    row |= {"rule return": bounds["rule_mean_return"].mean}
+    row |= {"comparator return": bounds["comparator_mean_return"].mean}
+    row |= {"paired difference": iv.mean, "lower": iv.lo, "upper": iv.hi, "status": "scored"}
+    for name, side in SIDES.items():
+        row |= {f"{side} lower": bounds[name].lo, f"{side} upper": bounds[name].hi}
+    row |= {"races changed": k, "variants searched": ctx.spec["family_size"]}
+    study.tables["comparisons"].append(row | {"windows": windows.ngroups})
 
 
 def _scored(study: Study, ctx: _Ctx, run: _Run, variant: Variant, compute, pending: str) -> None:
     """#81's `_score`, with each side's own return bounded (the same meeting-clustered bootstrap
     as the difference: two ranked rows) and the races where the rule drops a ticket or skips the
-    race."""
+    race; then its walk-forward record (`_forward`)."""
     changed: set[str] = set()
     found: list[RuleComparison] = []
 
@@ -1225,8 +1390,10 @@ def _scored(study: Study, ctx: _Ctx, run: _Run, variant: Variant, compute, pendi
         "tail_rank": "every combination, the tail included",
     }.get(run.kind, "the same favourite tickets in all races")
     _score(study, variant, comparator, counted, pending)
-    done = study.variants[-1]
+    done, rows = study.variants[-1], study.tables["comparisons"]
+    rows[-1] = _evaluated(rows[-1], DESCRIPTIVE_ROWS)
     if not found or done.error:
+        _forward(study, ctx, variant, comparator, None, changed, done.error, rows[-1]["status"])
         return
     comparison = found[0]
     returns = {"rule_mean_return": comparison.rule_return}
@@ -1249,6 +1416,7 @@ def _scored(study: Study, ctx: _Ctx, run: _Run, variant: Variant, compute, pendi
     for name, side in SIDES.items():
         row |= {f"{side} lower": bounds[name].lo, f"{side} upper": bounds[name].hi}
     row |= {"races changed": k, "variants searched": ctx.spec["family_size"]}
+    _forward(study, ctx, variant, comparator, comparison, changed)
 
 
 def _score_run(study: Study, ctx: _Ctx, run: _Run) -> None:
@@ -1273,13 +1441,10 @@ def _score_run(study: Study, ctx: _Ctx, run: _Run) -> None:
         if found is None:
             study.variants.append(replace(variant, error=pending))
             return
-        metrics, tables, failure = found
-        for key, rows in tables.items():  # the realised counts stand when the check fails
+        metrics, tables = found
+        for key, rows in tables.items():
             study.tables.setdefault(key, []).extend(rows)
-        done = (
-            replace(variant, error=failure) if failure else replace(variant, metrics=tuple(metrics))
-        )
-        study.variants.append(done)
+        study.variants.append(replace(variant, metrics=tuple(metrics)))
         return
     if run.kind in ("floor", "tail_odds"):
 
@@ -1319,6 +1484,10 @@ def compute_study(data: StudyData, spec: dict, place_votes: VotesReader | None =
             "dividend_rows": len(ctx.dividends),
         }
         | {f"races_with_a_logged_{p}_board": len(ctx.logged(p)) for p in BOARD_POOLS}
+        | {
+            "walk_forward_test_windows": len(set(ctx.fold_of.values())),
+            "races_in_walk_forward_test_windows": len(ctx.fold_of),
+        }
     )
     for run in _plan(spec["rules"]):
         _score_run(study, ctx, run)
@@ -1337,7 +1506,11 @@ NOTE = (
     " comparator. 'races changed' counts the paired races where the rule drops a ticket or skips"
     " the race. 'final (look-ahead)' rows"
     " choose by the final price and are look-ahead; 'board at t' rows choose by odds_timeseries at"
-    " t. Every row is ranked below; nothing here is adopted."
+    " t. 'evaluation': a descriptive row scores every development race once (the first training"
+    " span included: a historical description); its walk-forward row scores the same races'"
+    " returns in the test windows of config/folds.yaml's scheme alone ('windows' the test windows"
+    " with a paired race; per window in the registry record). Every row is ranked below; nothing"
+    " here is adopted."
 )
 SECTIONS = (
     ("L2", "L2: never bet at the floor (E14)"),
@@ -1349,24 +1522,31 @@ PER = 100  # the ranked table's returns are per 100 yen staked
 
 def _ranked(comparisons: list[dict]) -> list[dict]:
     """Each scored comparison as two options (the rule and its comparator), ranked within each
-    selection by mean return per 100 yen staked, highest first."""
+    evaluation (walk-forward, descriptive) and selection by mean return per 100 yen staked,
+    highest first."""
     options = []
     for row in comparisons:
         if row.get("status") != "scored":
             continue
         for side, what in (("rule", "the rule's tickets"), ("comparator", row["comparator"])):
             options.append(
-                {"selection": row["selection"], "rule": row["rule"], "variant": row["variant"]}
+                {"evaluation": row["evaluation"], "selection": row["selection"]}
+                | {"rule": row["rule"], "variant": row["variant"]}
                 | {"option": side, "bets": what, "races": row["races"]}
                 | {f"return per {PER} yen": PER * row[f"{side} return"]}
                 | {"lower": PER * row[f"{side} lower"], "upper": PER * row[f"{side} upper"]}
                 | {"variants searched": row["variants searched"]}
             )
-    options.sort(key=lambda o: (o["selection"], -o[f"return per {PER} yen"], o["variant"]))
+    first = {FORWARD_ROWS: 0, DESCRIPTIVE_ROWS: 1}  # the walk-forward rows lead
+
+    def group(option: dict) -> tuple:
+        return first.get(option["evaluation"], 2), option["evaluation"], option["selection"]
+
+    options.sort(key=lambda o: (*group(o), -o[f"return per {PER} yen"], o["variant"]))
     ranked, seen = [], Counter()
     for option in options:
-        seen[option["selection"]] += 1
-        ranked.append({"rank": seen[option["selection"]]} | option)
+        seen[group(option)] += 1
+        ranked.append({"rank": seen[group(option)]} | option)
     return ranked
 
 
@@ -1414,11 +1594,13 @@ def render_report(study: Study, spec: dict, about: dict, private: str | None = N
     ranked = _ranked(comparisons)
     lines += [
         "",
-        f"## Ranked options (mean return per {PER} yen staked, within each selection)",
+        f"## Ranked options (mean return per {PER} yen staked, within each evaluation and"
+        " selection)",
         "",
         "Each scored comparison is two rows: the rule's tickets and its comparator's, over the"
         " same paired races. Rows of one selection overlap (one comparator serves several cut"
-        " points), so the rank orders the options and is not a test.",
+        " points), so the rank orders the options and is not a test. The walk-forward rows come"
+        " first; the descriptive rows (every development race) are the historical description.",
         "",
         _markdown_table(ranked) if ranked else "_None: no comparison was scored._",
         "",
@@ -1434,11 +1616,12 @@ def render_report(study: Study, spec: dict, about: dict, private: str | None = N
         lines += [
             "",
             "The predicted dividend of each (100 or 110 under Plus-10), against the realised one,"
-            " is built on the JRA-VAN H1 Place votes (jravan pool_votes, #368), and so is the"
-            " reconstruction check run before it (every placed horse of the check's races, its"
-            " rebuilt Place dividend against the realised one, within the frozen tolerance). The"
-            f" check, the table and their status are withheld (D21): they are in the private report"
-            f" `{private}` under the data directory, never in the repository.",
+            " is built on the JRA-VAN H1 Place votes (jravan pool_votes, #368), and so are the"
+            " reconstruction diagnostic (every placed horse of the check's races, its rebuilt"
+            " Place dividend against the realised one, within the frozen tolerance) and the counts"
+            " of predictions available, unavailable and labelled by the diagnostic. They and the"
+            f" records' status are withheld (D21): they are in the private report `{private}`"
+            " under the data directory, never in the repository.",
         ]
     else:
         lines += ["", "The prediction is pending: plus10_inputs is data_pending."]
@@ -1486,15 +1669,21 @@ def render_private(study: Study, spec: dict, about: dict) -> str:
         "",
         "## Floor-bound placed favourites",
         "",
+        "From the rows' final statuses (the private CSV): attempted, the floor-bound placed"
+        " favourites; available, those with a prediction; unavailable, those without one (each"
+        " with its reason, below); discrepant, the available ones whose race the reconstruction"
+        " diagnostic labels discrepant.",
+        "",
         _markdown_table(study.tables["plus10_counts"])
         if study.tables.get("plus10_counts")
         else "_None._",
         "",
-        "## The reconstruction check",
+        "## The reconstruction diagnostic",
         "",
-        "Every placed horse of the check's races: its Place dividend rebuilt from the votes (the"
-        " prediction's rule) against the realised one. A miss above the frozen tolerance fails the"
-        " record and no predicted x realised table is scored.",
+        "Every placed horse of the check's rebuilt races: its Place dividend rebuilt from the votes"
+        " (the prediction's rule) against the realised one. A race with a miss above the frozen"
+        " tolerance has its row labelled discrepant in the CSV; its prediction stays and is counted"
+        " in the table below (a diagnostic, never a rejection).",
         "",
         _markdown_table(study.tables["plus10_validation"])
         if study.tables.get("plus10_validation")
@@ -1570,8 +1759,15 @@ class _ScheduledPosts:
 
 
 def _votes_build(path: Path) -> dict[str, str]:
+    """The votes' data build, '<path>@<digest>'; a file that is missing or cannot be read for its
+    digest is named so, and the run goes on (the prediction is then unavailable)."""
     where = f"processed/{VOTES_SOURCE}/{jravan_votes.FILENAME}"
-    value = f"{where}@{_digest([path])}" if path.is_file() else f"{where} (missing)"
+    if not path.is_file():
+        return {f"{VOTES_SOURCE}_pool_votes": f"{where} (missing)"}
+    try:
+        value = f"{where}@{_digest([path])}"
+    except OSError as exc:  # optional input: unreadable is recorded, never fatal
+        value = f"{where} (unreadable: {type(exc).__name__})"
     return {f"{VOTES_SOURCE}_pool_votes": value}
 
 
@@ -1584,7 +1780,7 @@ def run_study(out_dir: Path | None = None) -> dict:
     owner = owner_inputs()
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     minutes = int(load_country_yaml(COUNTRY, "decision")["primary_min"])
-    spec = build_spec(owner, bootstrap_settings(), minutes)
+    spec = build_spec(owner, bootstrap_settings(), minutes, load_country_scheme(COUNTRY))
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
     spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any race is read or settled
@@ -1644,7 +1840,7 @@ def run_study(out_dir: Path | None = None) -> dict:
         path = stem.with_name(f"{stem.name}-{suffix}.csv")
         text = _csv(study, key, columns)
         written[f"{suffix.replace('-', '_')}_path"] = str(write_report(path, text, sources=sources))
-    return {
+    return {  # public (printed by main): a withheld variant's status is the private report's (D21)
         "family_id": FAMILY_ID,
         "spec_hash": spec_hash,
         **written,
@@ -1652,7 +1848,10 @@ def run_study(out_dir: Path | None = None) -> dict:
         "counts": study.counts,
         "records_appended": len(appended),
         "records_already_present": len(records) - len(appended),
-        "failed_or_pending_variants": [v.name for v in study.variants if v.error],
+        "failed_or_pending_variants": [
+            v.name for v in study.variants if v.error and v.name not in withheld
+        ],
+        "withheld_variants": sorted(withheld),
     }
 
 
