@@ -22,8 +22,17 @@ row. It is built from the calendar alone (every day from ``start`` to ``end`` is
 holdout row, outcomes included, reaches a table. Pruning is limited by what the file records:
 Parquet skips a row group only from its min/max statistics, so a row group whose days mix
 development and holdout days is still read from disk and decoded, and the scan's filter drops
-its holdout rows before any table is returned. ``split_off`` and ``LockedHoldout.open`` below are
-unchanged and remain the only way to the holdout rows.
+its holdout rows before any table is returned.
+
+``read_development(handle, country, *, columns, start, end, where, column)`` is the development
+scan of one Parquet file through one open handle (#415, PR #427 review): it first narrows
+``start..end`` to the file's own first and last ``column`` day (from the row groups' footer
+statistics; a row group without them is searched by ``count_rows`` under a range filter, so no
+value is materialized), so an open-ended read (``end=date.max``) asks ``is_holdout_day`` only
+about the days the file can hold, then scans the same handle with ``development_filter`` over
+that narrowed range. The bounds and the scan read one snapshot of the file even when it is
+atomically replaced meanwhile. ``split_off`` and ``LockedHoldout.open`` below are unchanged and
+remain the only way to the holdout rows.
 
 The holdout rows are reached only through ``LockedHoldout.open(ticket=..., purpose=...,
 family=...)``, which appends one JSON line to ``<countries_dir>/<country>/holdout_log.jsonl``
@@ -64,6 +73,7 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -72,6 +82,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import pandas as pd
 import pyarrow as pa
 import pyarrow.dataset as ds
+import pyarrow.parquet as pq
 import yaml
 
 from horsetrack.core.config import load_country_yaml
@@ -283,6 +294,104 @@ def development_filter(
     if held:
         keep = keep & ~day.isin(pa.array(held, pa.date32()))
     return keep
+
+
+def _day_count(fragment: ds.Fragment, column: str, low: date, high: date) -> int:
+    day = ds.field(column)
+    span = (day >= pa.scalar(low, pa.date32())) & (day <= pa.scalar(high, pa.date32()))
+    return fragment.count_rows(filter=span)
+
+
+def _searched_bounds(
+    fragment: ds.Fragment, column: str, start: date, end: date
+) -> tuple[date, date] | None:
+    """The first and last ``column`` day in ``start..end`` of ``fragment``, by binary search on
+    row counts under a range filter (no value reaches Python), or None when it has none."""
+    if _day_count(fragment, column, start, end) == 0:
+        return None
+    low, high = start.toordinal(), end.toordinal()
+    while low < high:  # the first day d with a row in start..d
+        mid = (low + high) // 2
+        if _day_count(fragment, column, start, date.fromordinal(mid)) > 0:
+            high = mid
+        else:
+            low = mid + 1
+    first = date.fromordinal(low)
+    high = end.toordinal()
+    while low < high:  # the last day d with a row in d..end
+        mid = (low + high + 1) // 2
+        if _day_count(fragment, column, date.fromordinal(mid), end) > 0:
+            low = mid
+        else:
+            high = mid - 1
+    return first, date.fromordinal(low)
+
+
+def _file_day_bounds(
+    fragment: ds.ParquetFileFragment, column: str, start: date, end: date
+) -> tuple[date, date] | None:
+    """A range holding every ``column`` day in ``start..end`` of the Parquet file ``fragment``,
+    or None when it holds none. From each row group's footer statistics where it records them;
+    the row groups that do not are searched by row counts."""
+    meta = fragment.metadata
+    lows, highs, unrecorded = [], [], []
+    for g in range(meta.num_row_groups):
+        group = meta.row_group(g)
+        chunk = next(
+            (
+                group.column(c)
+                for c in range(group.num_columns)
+                if group.column(c).path_in_schema == column
+            ),
+            None,
+        )
+        if chunk is None:
+            raise ValueError(f"the Parquet file has no {column!r} column")
+        stats = chunk.statistics
+        if group.num_rows == 0:
+            continue
+        if stats is not None and stats.has_min_max:
+            if stats.max >= start and stats.min <= end:
+                lows.append(max(stats.min, start))
+                highs.append(min(stats.max, end))
+        elif stats is None or not stats.has_null_count or stats.null_count < group.num_rows:
+            unrecorded.append(g)
+    if unrecorded:
+        searched = _searched_bounds(fragment.subset(row_group_ids=unrecorded), column, start, end)
+        if searched is not None:
+            lows.append(searched[0])
+            highs.append(searched[1])
+    return (min(lows), max(highs)) if lows else None
+
+
+def read_development(
+    handle: pa.NativeFile,
+    country: str,
+    *,
+    columns: Sequence[str],
+    start: date = date.min,
+    end: date = date.max,
+    where: ds.Expression | None = None,
+    column: str = "race_date",
+) -> pa.Table:
+    """The development rows of the Parquet file open on ``handle`` with ``start <= column <=
+    end``: exactly ``columns``, in that order, with ``where`` (a dataset expression, which may
+    name columns not read) narrowing them further inside the scan. The range is first narrowed to
+    the file's own first and last day (footer statistics, or row counts for a row group without
+    them), so ``development_filter`` asks ``is_holdout_day`` only about days the file can hold;
+    a range outside the file returns no row. Bounds and scan read the one open handle, so a file
+    atomically replaced at its path meanwhile is read as it was. Raises ``HoldoutConfigError``
+    when the country has no valid holdout definition."""
+    columns = list(columns)
+    bounds = _file_day_bounds(ds.ParquetFileFormat().make_fragment(handle), column, start, end)
+    if bounds is None:
+        _load_definition(DEFAULT_COUNTRIES_DIR, country)  # no definition: refuse, even for no days
+        keep = ds.scalar(False)
+    else:
+        keep = development_filter(country, *bounds, column=column)
+    if where is not None:
+        keep = keep & where
+    return pq.read_table(handle, columns=columns, filters=keep).select(columns)
 
 
 def _race_days(frame: pd.DataFrame, date_col: str) -> pd.Series:

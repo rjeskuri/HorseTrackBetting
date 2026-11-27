@@ -13,8 +13,19 @@ Contract pinned here, for the two development readers:
   points a reader scans through, ``pyarrow.dataset.dataset`` (with what it returns: its
   ``to_table``, ``to_batches``, ``head``, ``take``, ``scanner``, ``filter``, ``get_fragments``,
   ``Scanner.from_dataset``) and ``pyarrow.parquet.read_table`` (which ``pandas.read_parquet``
-  uses), and checks every table and batch they hand back. A read that scans by another route is
-  not seen and fails the "a scan was seen" check.
+  uses), and checks every table and batch they hand back. It also wraps the row reads of
+  ``pyarrow.parquet.ParquetFile`` (``read``, ``read_row_group(s)``, ``iter_batches``),
+  ``pyarrow.parquet.ParquetDataset.read(_pandas)`` and ``pyarrow.parquet.read_pandas``, so finding
+  a table's date span may not materialize holdout dates either (footer statistics or a row count
+  are not rows). A read that scans by another route is not seen and fails the "a scan was seen"
+  check.
+- An open-ended read (``end=date.max``, the pattern ten callers use, or ``start=date.min``) asks
+  the holdout rule about the days the table can hold, not about every day of the requested range
+  (PR #427 review): its development rows come back within a small budget of ``is_holdout_day``
+  calls, and fast. A Parquet file written without race_date statistics is still read in full and
+  without a leak.
+- ``read_inputs`` reads one snapshot of each table: a table atomically rebuilt while the read is
+  under way comes back either as it was or as it is, never a mixture of the two.
 
 The store is synthetic: every calendar day from 2026-11-20 to 2026-12-21, so development and
 holdout days interleave from the holdout start (2026-11-28, a development day) on, and the rows
@@ -25,6 +36,8 @@ holdout.yaml with hashlib; it never calls the code under test. The holdout is ne
 from __future__ import annotations
 
 import hashlib
+import os
+import time
 from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
@@ -36,8 +49,9 @@ import pyarrow.parquet as pq
 import pytest
 import yaml
 
+import horsetrack.core.eval.holdout as holdout_module
 from horsetrack.core.store import schemas, tables
-from horsetrack.countries.japan.models.v0.store import read_store_table
+from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
 from horsetrack.countries.japan.studies.speed_run import RACE_COLUMNS, RUNNER_COLUMNS, read_inputs
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -178,10 +192,68 @@ def spy(monkeypatch) -> ScanSpy:
         def from_batches(*a, **kw):
             return Spied(real_scanner.from_batches(*a, **kw), watcher)
 
+    real_file, real_pq_dataset, real_read_pandas = pq.ParquetFile, pq.ParquetDataset, pq.read_pandas
+
+    class ParquetFile(real_file):
+        def read(self, *a, **kw):
+            return watcher.record(super().read(*a, **kw))
+
+        def read_row_group(self, *a, **kw):
+            return watcher.record(super().read_row_group(*a, **kw))
+
+        def read_row_groups(self, *a, **kw):
+            return watcher.record(super().read_row_groups(*a, **kw))
+
+        def iter_batches(self, *a, **kw):
+            return (watcher.record(b) for b in super().iter_batches(*a, **kw))
+
+    class ParquetDataset(real_pq_dataset):
+        def read(self, *a, **kw):
+            return watcher.record(super().read(*a, **kw))
+
+        def read_pandas(self, *a, **kw):
+            return watcher.record(super().read_pandas(*a, **kw))
+
+    def read_pandas(*a, **kw):
+        return watcher.record(real_read_pandas(*a, **kw))
+
     monkeypatch.setattr(ds, "dataset", dataset)
     monkeypatch.setattr(ds, "Scanner", Scanner)
     monkeypatch.setattr(pq, "read_table", read_table)
+    monkeypatch.setattr(pq, "ParquetFile", ParquetFile)
+    monkeypatch.setattr(pq, "ParquetDataset", ParquetDataset)
+    monkeypatch.setattr(pq, "read_pandas", read_pandas)
     return watcher
+
+
+# A read asks the holdout rule about at most this many days: the synthetic tables span 32 days,
+# an open-ended request up to ~2.9M (date.min or 1900 to date.max).
+DAY_BUDGET = 5_000
+
+
+@pytest.fixture
+def day_budget(monkeypatch) -> Counter:
+    """Counts the days ``is_holdout_day`` is asked about (development_filter looks it up at call
+    time) and fails the read once they pass ``DAY_BUDGET``."""
+    asked: Counter = Counter()
+    real = holdout_module.is_holdout_day
+
+    def counted(country, day):
+        asked["days"] += 1
+        if asked["days"] > DAY_BUDGET:
+            raise AssertionError(
+                f"the read asked is_holdout_day about more than {DAY_BUDGET} days: it enumerates "
+                "the requested range instead of the days the table can hold"
+            )
+        return real(country, day)
+
+    monkeypatch.setattr(holdout_module, "is_holdout_day", counted)
+    return asked
+
+
+def statistics_for(mode: str, names: list[str]):
+    """write_statistics for pq.write_table: 'all', 'none', or every column but race_date."""
+    return {"all": True, "none": False}.get(mode, [n for n in names if n != "race_date"])
 
 
 def assert_scan_excluded_holdout(spy: ScanSpy, n_development: int) -> None:
@@ -228,7 +300,7 @@ def v0_rows(source: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def write_v0_store(tmp_path, monkeypatch) -> dict[str, pd.DataFrame]:
+def write_v0_store(tmp_path, monkeypatch, statistics: str = "all") -> dict[str, pd.DataFrame]:
     data = (tmp_path / "data").resolve()
     monkeypatch.setenv(DATA_VAR, str(data))
     frames = {}
@@ -241,6 +313,7 @@ def write_v0_store(tmp_path, monkeypatch) -> dict[str, pd.DataFrame]:
             pa.Table.from_pandas(shuffled, schema=V0_SCHEMA, preserve_index=False),
             folder / "runners.parquet",
             row_group_size=16,  # small, mixed row groups: each holds development and holdout days
+            write_statistics=statistics_for(statistics, V0_SCHEMA.names),
         )
         frames[source] = frame
     return frames
@@ -294,6 +367,71 @@ def test_read_store_table_scans_no_holdout_row(
     for column in columns:  # every development row in range, both endpoints included
         assert Counter(got[column].tolist()) == Counter(want[column].tolist()), column
     assert_scan_excluded_holdout(spy, len(want))
+
+
+_OPEN_ENDED = [  # (id, start, end, touches_price): the callers' open-ended reads
+    ("1900-to-date-max", date(1900, 1, 1), date.max, False),
+    ("price-era-to-date-max", PRICE_ERA_START, date.max, True),
+    ("holdout-day-to-date-max", date(2026, 11, 29), date.max, True),
+    ("dev-day-to-date-max", date(2026, 12, 5), date.max, False),
+    ("date-min-to-holdout-day", date.min, date(2026, 12, 3), False),
+    ("date-min-to-date-max", date.min, date.max, False),
+    ("after-the-store-to-date-max", date(2027, 1, 1), date.max, True),
+]
+OPEN_ENDED = [
+    pytest.param(start, end, price, COLUMN_SETS[k % len(COLUMN_SETS)], id=name)
+    for k, (name, start, end, price) in enumerate(_OPEN_ENDED)
+]
+
+
+@pytest.mark.parametrize("statistics", ["all", "none", "no-race-date"])
+@pytest.mark.parametrize(("start", "end", "touches_price", "columns"), OPEN_ENDED)
+def test_read_store_table_open_ended_read_asks_only_the_tables_days(
+    tmp_path, monkeypatch, spy, day_budget, start, end, touches_price, columns, statistics
+):
+    """PR #427 review: ``end=date.max`` (or ``start=date.min``) asks the holdout rule about the
+    days the table can hold, not the ~2.9M days of the request; with or without race_date
+    statistics, every development row in range comes back and no holdout row is scanned."""
+    frames = write_v0_store(tmp_path, monkeypatch, statistics)
+    source = "jravan" if statistics == "none" else "jra"
+
+    table = read_store_table(
+        "runners",
+        columns=columns,
+        start=start,
+        end=end,
+        touches_price=touches_price,
+        source=source,
+    )
+
+    want = expected_v0(frames[source], start, end)
+    assert table.column_names == columns
+    assert table.num_rows == len(want)
+    got = table.to_pandas()
+    for column in columns:
+        assert Counter(got[column].tolist()) == Counter(want[column].tolist()), column
+    assert day_budget["days"] <= DAY_BUDGET
+    if len(want):
+        assert_scan_excluded_holdout(spy, len(want))
+    else:
+        assert not spy.leaks(0), f"the scan materialized holdout rows: {spy.leaks(0)}"
+
+
+def test_read_store_table_to_date_max_is_fast(tmp_path, monkeypatch):
+    """The callers' ``start=HISTORY_START (1900), end=date.max`` read of a 32-day table finishes
+    well inside 2 s (it took ~15 s when every requested day was asked about)."""
+    frames = write_v0_store(tmp_path, monkeypatch)
+    start = date(1900, 1, 1)
+
+    began = time.perf_counter()
+    table = read_store_table(
+        "runners", columns=["race_id", "race_date"], start=start, end=date.max, touches_price=False
+    )
+    elapsed = time.perf_counter() - began
+
+    want = expected_v0(frames["jra"], start, date.max)
+    assert Counter(table.column("race_id").to_pylist()) == Counter(want["race_id"].tolist())
+    assert elapsed < 2.0, f"read_store_table(..., end=date.max) took {elapsed:.1f} s"
 
 
 @pytest.mark.parametrize("source", ["jra", "jravan"])
@@ -361,7 +499,9 @@ def speed_store(days: list[date], tag: str) -> tuple[list[dict], list[dict]]:
     return races, runners
 
 
-def write_speed_store(tmp_path, monkeypatch, days) -> tuple[list[dict], list[dict]]:
+def write_speed_store(
+    tmp_path, monkeypatch, days, statistics: str = "all"
+) -> tuple[list[dict], list[dict]]:
     data = (tmp_path / "data").resolve()
     monkeypatch.setenv(DATA_VAR, str(data))
     for source, tag in (("jra", "jra"), ("jravan", "jvn")):
@@ -371,7 +511,13 @@ def write_speed_store(tmp_path, monkeypatch, days) -> tuple[list[dict], list[dic
         for name, rows in (("races", races), ("runners", runners)):
             rows = pd.DataFrame(rows).sample(frac=1.0, random_state=7).to_dict("records")
             rows = [{c: (None if pd.isna(v) else v) for c, v in row.items()} for row in rows]
-            pq.write_table(_store_frame(name, rows), folder / f"{name}.parquet", row_group_size=8)
+            frame = _store_frame(name, rows)
+            pq.write_table(
+                frame,
+                folder / f"{name}.parquet",
+                row_group_size=8,
+                write_statistics=statistics_for(statistics, frame.column_names),
+            )
         if source == "jra":
             jra = (races, runners)
     return jra
@@ -402,9 +548,12 @@ CALENDARS = [
 ]
 
 
+@pytest.mark.parametrize("statistics", ["all", "none", "no-race-date"])
 @pytest.mark.parametrize("days", CALENDARS)
-def test_read_inputs_scans_no_holdout_row(tmp_path, monkeypatch, spy, days):
-    races, runners = write_speed_store(tmp_path, monkeypatch, days)
+def test_read_inputs_scans_no_holdout_row(tmp_path, monkeypatch, spy, days, statistics):
+    """Also without race_date statistics in the footer (PR #427 review): the span may not be
+    found by reading the race_date column, which holds the holdout days."""
+    races, runners = write_speed_store(tmp_path, monkeypatch, days, statistics)
     dev_races = [r for r in races if not held(r["race_date"])]
     dev_runners = [r for r in runners if not held(r["race_date"])]
     assert dev_races and len(dev_races) < len(races)
@@ -419,3 +568,101 @@ def test_read_inputs_scans_no_holdout_row(tmp_path, monkeypatch, spy, days):
     kept_days = {pd.Timestamp(d).date() for d in got_races["race_date"]}
     assert kept_days == {r["race_date"] for r in dev_races}  # the first and last dev days too
     assert_scan_excluded_holdout(spy, max(len(dev_races), len(dev_runners)))
+
+
+# ---------------------------------------------------------------------------------------------
+# read_inputs reads one snapshot (PR #427 review: the span and the scan opened the file apart)
+# ---------------------------------------------------------------------------------------------
+
+
+class RebuildOnFirstOpen:
+    """Atomically replaces ``target`` with ``rebuilt`` (os.replace, as a store rebuild does) right
+    after the first pyarrow call that opens ``target`` by its path returns; once only."""
+
+    def __init__(self, monkeypatch, target: Path, rebuilt: Path) -> None:
+        self.target, self.rebuilt, self.replaced = target.resolve(), rebuilt, False
+        names = {
+            pq: ("read_table", "read_metadata", "read_schema", "read_pandas"),
+            ds: ("dataset",),
+            pa: ("memory_map", "input_stream"),
+        }
+        for module, funcs in names.items():
+            for name in funcs:
+                monkeypatch.setattr(module, name, self._wrap(getattr(module, name)))
+        hook = self
+
+        class ParquetFile(pq.ParquetFile):
+            def __init__(self, source, *a, **kw):
+                super().__init__(source, *a, **kw)
+                hook._after(source)
+
+        class ParquetDataset(pq.ParquetDataset):
+            def __init__(self, path_or_paths, *a, **kw):
+                super().__init__(path_or_paths, *a, **kw)
+                hook._after(path_or_paths)
+
+        monkeypatch.setattr(pq, "ParquetFile", ParquetFile)
+        monkeypatch.setattr(pq, "ParquetDataset", ParquetDataset)
+
+    def _opens_target(self, source) -> bool:
+        items = source if isinstance(source, (list, tuple)) else [source]
+        return any(
+            isinstance(x, (str, os.PathLike)) and Path(x).resolve() == self.target for x in items
+        )
+
+    def _after(self, source) -> None:
+        if not self.replaced and self._opens_target(source):
+            os.replace(self.rebuilt, self.target)
+            self.replaced = True
+
+    def _wrap(self, real):
+        def opened(*a, **kw):
+            out = real(*a, **kw)
+            source = (
+                a[0]
+                if a
+                else next(
+                    (kw[k] for k in ("source", "path", "where", "path_or_paths") if k in kw), None
+                )
+            )
+            self._after(source)
+            return out
+
+        return opened
+
+
+def test_read_inputs_reads_one_snapshot_of_a_table_rebuilt_mid_read(tmp_path, monkeypatch):
+    """The runners table is rebuilt (every finish time changed, one development day added after
+    its last day) between the read's first open of it and the rest of the read. The runners come
+    back as the table was or as it is, all of one: never the new times with the added day cut."""
+    _, runners = write_speed_store(tmp_path, monkeypatch, DAYS)
+    folder = tmp_path / "data" / "processed" / "jra"
+    added = next(d for d in (DAYS[-1] + timedelta(days=k) for k in range(1, 30)) if not held(d))
+    new_rows = [{**r, "finish_time_s": r["finish_time_s"] + 100.0} for r in runners] + [
+        {
+            "race_id": f"jra:{added.isoformat()}:TOK:01",
+            "race_date": added,
+            "horse_no": h,
+            "finish_pos": h,
+            "finish_time_s": 90.0 + h,
+        }
+        for h in range(1, 5)
+    ]
+    rebuilt = folder / "runners.rebuilt"
+    pq.write_table(_store_frame("runners", new_rows), rebuilt, row_group_size=8)
+
+    def dev(rows):
+        return Counter((r["race_id"], r["finish_time_s"]) for r in rows if not held(r["race_date"]))
+
+    before, after = dev(runners), dev(new_rows)
+    assert before != after and (f"jra:{added.isoformat()}:TOK:01", 91.0) in after
+
+    RebuildOnFirstOpen(monkeypatch, folder / "runners.parquet", rebuilt)
+    _, got = read_inputs()
+
+    pairs = Counter(zip(got["race_id"], got["finish_time_s"].astype(float), strict=True))
+    assert pairs in (before, after), (
+        "the runners mix two versions of the table: "
+        f"{sum((pairs & after).values())} rows of the rebuilt one, "
+        f"{sum((pairs & before).values())} of the old, of {sum(pairs.values())}"
+    )

@@ -1,13 +1,15 @@
 """A scoped reader over the copied store for the v0 models (#114).
 
-`read_store_table` reads `processed_dir(source)/<name>.parquet` through pyarrow.dataset (`source`
+`read_store_table` reads `processed_dir(source)/<name>.parquet` through one open handle (`source`
 defaults to `SOURCE`, 'jra'; `source='jravan'` reads the JRA-VAN copy): only the named columns,
-with the inclusive date range and the holdout exclusion pushed into the scan as one dataset
-expression (`core.eval.holdout.development_filter`, #415: #71's `is_holdout_day`, looked up at
-call time). No holdout row is materialized; Parquet prunes row groups only by their min/max
-statistics, so a row group mixing development and holdout days is still read from disk and its
-holdout rows are dropped by the scan's filter. A read that touches prices may not start before
-D10's price era (2014-06-07), whichever the source.
+with the inclusive date range, clamped to the file's own first and last race_date, and the
+holdout exclusion pushed into the scan as one dataset expression
+(`core.eval.holdout.read_development`, #415: #71's `is_holdout_day`, looked up at call time, so
+an open-ended `end=date.max` asks it only about the file's days). No holdout row is materialized;
+Parquet prunes row groups only by their min/max statistics, so a row group mixing development and
+holdout days is still read from disk and its holdout rows are dropped by the scan's filter. A
+read that touches prices may not start before D10's price era (2014-06-07), whichever the source:
+the requested start is checked, before any clamping.
 
 When #46 lands, this may delegate to its `read_table`.
 """
@@ -21,7 +23,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.dataset as ds
 
-from horsetrack.core.eval.holdout import development_filter
+from horsetrack.core.eval.holdout import read_development
 from horsetrack.core.paths import processed_dir
 
 PRICE_ERA_START = date(2014, 6, 7)
@@ -62,7 +64,8 @@ def read_store_table(
             f"got start {start.isoformat()}"
         )
 
-    dataset = ds.dataset(processed_dir(source) / f"{name}.parquet", format="parquet")
+    path = processed_dir(source) / f"{name}.parquet"
+    dataset = ds.dataset(path, format="parquet")
     available = set(dataset.schema.names)
     missing = [c for c in columns if c not in available]
     if missing:
@@ -70,7 +73,7 @@ def read_store_table(
     if DATE_COLUMN not in available:
         raise ValueError(f"{name} has no {DATE_COLUMN} column to scope the read by")
 
-    keep = development_filter(COUNTRY, start, end, column=DATE_COLUMN)
-    if where is not None:
-        keep = keep & where
-    return dataset.to_table(columns=columns, filter=keep)
+    with pa.memory_map(str(path)) as handle:  # the file's bounds and its scan: one snapshot
+        return read_development(
+            handle, COUNTRY, columns=columns, start=start, end=end, where=where, column=DATE_COLUMN
+        )

@@ -134,9 +134,8 @@ reach the store, and documents the mapping.
   requested subset), in declared or requested order whatever the file's order, cast to their
   declared types. A name that is not in `schemas.TABLES` (case-sensitive) raises `ValueError`, as
   does a column the table does not declare. A missing file raises `FileNotFoundError` naming the
-  table and the source. `filters=`, a `pyarrow.dataset` expression, is applied by the Parquet
-  scan (`pyarrow.parquet.read_table(..., filters=...)`), so an excluded row never reaches the
-  frame.
+  table and the source. `development=<country>` reads only that country's development rows,
+  through `core.eval.holdout.read_development` (below), so a holdout row never reaches the frame.
 - `tables.connect(source) -> duckdb.DuckDBPyConnection`: an in-memory DuckDB with one view per
   declared table whose file exists for that source, named after the table. File paths are quoted
   as SQL strings, so a data directory with a `'` in it works. The views apply no holdout
@@ -145,10 +144,20 @@ reach the store, and documents the mapping.
 ### Development reads and the holdout (#415)
 
 The development readers (`countries/japan/models/v0/store.read_store_table`, and the speed
-study's `studies/speed_run.read_inputs`) pass `core.eval.holdout.development_filter(country,
-start, end)` to the scan: the inclusive date range minus the holdout days, built from the
-calendar and the committed `holdout.yaml`, never from the rows. No table or record batch the
-scan returns holds a holdout row. What is skipped on disk is narrower: Parquet prunes a row group
+study's `studies/speed_run.read_inputs`, through `tables.read_table(..., development=...)`) read
+through `core.eval.holdout.read_development(handle, country, ...)`, on one open handle
+(`pyarrow.memory_map`) of the table's file. It first narrows the requested range to the file's
+own first and last race_date: from each row group's footer statistics, or, for a row group
+written without them, by a binary search on `count_rows` under a range filter, so no race_date
+value is materialized to find the bounds. An open-ended read (`end=date.max`, as several callers
+pass) so asks the holdout rule only about the days the file can hold, and a range outside the
+file returns no row. The price-era guard of `read_store_table` checks the requested start,
+before this narrowing. It then scans the same handle with `development_filter(country, start,
+end)`: the narrowed inclusive range minus the holdout days, built from the calendar and the
+committed `holdout.yaml`, never from the rows. Bounds and scan read one snapshot: a file
+atomically replaced at its path (`os.replace`, as a rebuild does) during the read is read as it
+was. No table or record batch the scan returns holds a holdout row. What is skipped on disk is
+narrower: Parquet prunes a row group
 only from its min/max statistics, so a row group whose race days mix development and holdout
 days (any group spanning more than one day after the holdout start) is still read and decoded,
 and its holdout rows are dropped by the scan's filter before a table is built. Every store table
