@@ -618,8 +618,11 @@ is withheld (D21).
 
 - `build_mining_predictions(*, years=None, raw=None, out=None, chunk_records=500) -> BuildReport`
   reads `<raw>/stored/MING/DM/<YYYY>.jvd` and `TM/<YYYY>.jvd` (`years` None reads every year file
-  of either folder; a year without a TM file reads DM alone; a named year with neither file is a
-  `FileNotFoundError`). Each record's type is checked and its race date read from its 開催年 and
+  of either folder; a year with only one of the two files reads that one alone; a named year with
+  neither file is a `FileNotFoundError`). Before anything is written, and so leaving a table
+  already there as it was: `years` None with no `<YYYY>.jvd` in either folder (or no folder) is a
+  `FileNotFoundError`, and the command exits non-zero; an `out` that resolves inside the repository
+  is a `paths.DataDirInsideRepo` (`paths.outside_repo`). Each record's type is checked and its race date read from its 開催年 and
   開催月日 bytes alone: a record on a holdout day is read no further and counted only in
   `holdout_skipped` (D14). Each file is then streamed twice, as for `votes`: the first pass keeps
   one version per race and record type (`latest_versions` on 開催年, 開催月日, 競馬場コード,
@@ -632,7 +635,8 @@ is withheld (D21).
   positive integer. `jurisdiction` `jra`, `race_id` (`keys.race_id`), `race_date`, `venue`,
   `race_no`, `horse_no`, `kind` (`DM` or `TM`), `value` (DM 予想走破タイム in seconds, MMSSff; TM
   予測スコア, tenths), `error_plus_s` and `error_minus_s` (DM 予想誤差(信頼度)＋ and －, hundredths
-  of a second; null on TM), each null when blank or not a number; `rank` per race and kind over
+  of a second; null on TM), each null when blank or not a number; an all-zero DM time is unset too
+  (null value and rank, its errors as printed), a zero TM score is a value; `rank` per race and kind over
   the rows with a value (DM ascending, TM descending, ties sharing the lowest rank, null without a
   value); `data_kubun`; `created_utc` (データ作成年月日 + データ作成時分, JST, as UTC; null when
   either is invalid).

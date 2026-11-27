@@ -14,11 +14,12 @@ group of `<out>/mining_predictions.parquet`, through a tmp file and `os.replace`
 give the same bytes.
 
 One row per slot of マイニング予想 whose 馬番 is a positive integer: `kind` the record type,
-`value` the DM 予想走破タイム in seconds (MMSSff) or the TM 予測スコア (tenths), `error_plus_s`
-and `error_minus_s` the DM 予想誤差(信頼度)＋ and － (hundredths of a second; null on TM), each null
-when blank or not a number; `rank` per race and kind over the rows with a value (DM ascending, TM
-descending, ties sharing the lowest rank); `data_kubun` and `created_utc` (データ作成年月日 +
-データ作成時分 JST, as UTC; null when either is invalid) of the record kept. The table is not a
+`value` the DM 予想走破タイム in seconds (MMSSff; an all-zero time is unset) or the TM 予測スコア
+(tenths; zero is a score), `error_plus_s` and `error_minus_s` the DM 予想誤差(信頼度)＋ and －
+(hundredths of a second; null on TM), each null when blank or not a number; `rank` per race and
+kind over the rows with a value (DM ascending, TM descending, ties sharing the lowest rank);
+`data_kubun` and `created_utc` (データ作成年月日 + データ作成時分 JST, as UTC; null when either is
+invalid) of the record kept. The table is not a
 store table and has no availability rule until the owner sets one, so the as-of views refuse it.
 See docs/specs/jravan.md.
 """
@@ -92,9 +93,9 @@ _SORT = [("race_id", "ascending"), ("kind", "ascending"), ("horse_no", "ascendin
 
 def _seconds(raw: np.ndarray) -> np.ndarray:
     """予想走破タイム (MMSSff: the last four digits SSff, the digits before them the minutes) as
-    seconds; NaN when blank, not a number or negative."""
+    seconds; NaN when blank, not a number, negative or all zeros (an unset time)."""
     v = records.integer(raw)
-    v[v < 0] = np.nan
+    v[v <= 0] = np.nan
     minutes = np.floor(v / 10_000)
     return (minutes * 6_000 + (v - minutes * 10_000)) / 100
 
@@ -286,6 +287,8 @@ def _year_files(root: Path, years: Iterable[int] | None) -> dict[int, dict[str, 
             if p.stem.isdigit() and len(p.stem) == 4:
                 found.setdefault(int(p.stem), {})[rt] = p
     if years is None:
+        if not found:
+            raise FileNotFoundError(f"no DM or TM year file under {root / 'stored' / DATASPEC}")
         return dict(sorted(found.items()))
     wanted = sorted({int(y) for y in years})
     missing = [y for y in wanted if y not in found]
@@ -304,10 +307,15 @@ def build_mining_predictions(
     """Read the export's DM and TM year files (`raw` the export root, default
     `paths.raw_dir('jravan')`; `years` None for every year file of either folder), `chunk_records`
     records at a time, and write `<out>/mining_predictions.parquet` (default
-    `paths.processed_dir('jravan')`), one row group per year. Returns the counts, no record
-    content."""
+    `paths.processed_dir('jravan')`), one row group per year. Before anything is written, an `out`
+    inside the repository raises `paths.DataDirInsideRepo` and an export with no year file (no
+    `years` given) raises FileNotFoundError, so a table already there stays. Returns the counts,
+    no record content."""
     root = Path(raw) if raw is not None else paths.raw_dir(SOURCE)
-    target = (Path(out) if out is not None else paths.processed_dir(SOURCE)) / FILENAME
+    folder = (
+        paths.processed_dir(SOURCE) if out is None else paths.outside_repo(Path(out), what="out")
+    )
+    target = folder / FILENAME
     files = _year_files(root, years)
     layouts = {rt: spec.record_spec(rt) for rt in RECORD_TYPES}
     cache: dict[date, bool] = {}
