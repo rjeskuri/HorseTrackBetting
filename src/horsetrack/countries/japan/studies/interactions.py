@@ -1165,25 +1165,46 @@ class _Families:
 _INDEX_ENTRY = re.compile(r"- \[([^\]]+)\]\(\1\.md\)")
 
 
-def write_committed_summary(registry) -> None:
+PUBLIC_FILE_LIMIT = 256 * 1024  # scripts/check_public_tree.py's `size` rule (#16)
+
+
+def write_committed_summary(registry, log=print) -> list[str]:
     """This study's family files by `write_summary`, and the committed index with their lines
-    added (`studies.ability.write_committed_summary`'s rule)."""
+    added (`studies.ability.write_committed_summary`'s rule). A family file over the public
+    tree's size cap is written under the data dir's reports instead, unchanged, and gets no
+    index line (the index lists exactly the committed files) until `write_summary` can split
+    it (#330). Returns the families kept out of the tree."""
     directory = summary_dir(COUNTRY)
     mine = _Families(registry, {FAMILY_ID, TRIAL_FAMILY_ID})
     if not mine.records():
-        return
+        return []
+    held = []
     with tempfile.TemporaryDirectory() as scratch:
         write_summary(mine, scratch)
         for path in sorted(Path(scratch).glob("*.md")):
-            if path.stem != "README":
-                write_report(directory / path.name, path.read_text("utf-8"), sources=())
-        fresh = Path(scratch, "README.md").read_text("utf-8").splitlines()
+            if path.stem == "README":
+                continue
+            text = path.read_text("utf-8")
+            if len(text.encode("utf-8")) > PUBLIC_FILE_LIMIT:
+                held.append(path.stem)
+                out = paths.reports_dir() / f"registry-summary-{path.name}"
+                write_report(out, text, sources=SOURCES)
+                log(f"{path.stem}: summary over the public tree's size cap, written to {out}")
+                (directory / path.name).unlink(missing_ok=True)
+                continue
+            write_report(directory / path.name, text, sources=())
+        fresh = [
+            line
+            for line in Path(scratch, "README.md").read_text("utf-8").splitlines()
+            if not ((m := _INDEX_ENTRY.fullmatch(line)) and m[1] in held)
+        ]
     index = directory / "README.md"
     committed = index.read_text("utf-8").splitlines() if index.exists() else []
     entries = {m[1]: line for line in committed + fresh if (m := _INDEX_ENTRY.fullmatch(line))}
     head = [line for line in fresh if not _INDEX_ENTRY.fullmatch(line)]
-    lines = [*head, *(entries[family] for family in sorted(entries))]
+    lines = [*head, *(entries[family] for family in sorted(entries) if family not in held)]
     write_report(index, "\n".join(lines) + "\n", sources=())
+    return held
 
 
 def planned() -> list[tuple[str, str]]:
