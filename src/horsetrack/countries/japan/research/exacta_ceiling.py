@@ -1101,28 +1101,9 @@ class _Mine:
         self._registry = registry
 
     def records(self, family_id: str | None = None) -> list[RunRecord]:
-        """In spec order (family, then member or descriptive), each variant's runs in append
-        order: a committed file never shows the order a run ranked its members in (D21)."""
-        specs = list(family_specs())
-        variants = [f"{c}|k={k}|{s}" for c, k, s in MEMBERS] + [
-            f"{kind}|lambda2={label}"
-            for kind in ("d", "quinella_order_split")
-            for label in ("full_development", "1.0")
-        ]
-        mine = [r for r in self._registry.records(family_id) if r.family_id in specs]
-        return [
-            r
-            for _, r in sorted(
-                enumerate(mine),
-                key=lambda item: (
-                    specs.index(item[1].family_id),
-                    variants.index(item[1].variant)
-                    if item[1].variant in variants
-                    else len(variants),
-                    item[0],
-                ),
-            )
-        ]
+        """In append order: ``write_summary`` lists licensed runs by identity, so a committed
+        file never shows the order a run ranked its members in (D21)."""
+        return [r for r in self._registry.records(family_id) if r.family_id in family_specs()]
 
 
 def _spec_order(row: CeilingRow) -> tuple[int, int]:

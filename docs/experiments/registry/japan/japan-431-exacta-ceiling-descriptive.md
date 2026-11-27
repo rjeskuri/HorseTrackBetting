@@ -8,7 +8,7 @@ built on a licensed source shows no values here.
 
 | E id | Variant | Status | Fold | Metric | Value | CI | n |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| E43 | d\|lambda2=full_development | scored | withheld (licensed source) | | | | |
 | E43 | d\|lambda2=1.0 | scored | withheld (licensed source) | | | | |
-| E43 | quinella_order_split\|lambda2=full_development | scored | withheld (licensed source) | | | | |
+| E43 | d\|lambda2=full_development | scored | withheld (licensed source) | | | | |
 | E43 | quinella_order_split\|lambda2=1.0 | scored | withheld (licensed source) | | | | |
+| E43 | quinella_order_split\|lambda2=full_development | scored | withheld (licensed source) | | | | |
