@@ -11,10 +11,13 @@ signature):
   (models/v0/shadow_values.py): exact sums over the discounted Harville model's ordered triples.
 - Scratched runners (a current SCR WIN or PLACE row) are off the board: they have no key and the
   others' probabilities are renormalised, as the shadow values do. The places Place and Wide pay
-  (and whether they are sold) are those of the runners at the start of sales, which the board
-  knows as its priced runners plus its scratched ones (the logs do not say when sales opened, so a
-  scratch is taken as after): 8 drawn and one out, Place pays three places over the seven left;
-  5 drawn and one out, Place is still sold, with two places.
+  (and whether they are sold) are those of the field at the start of sales. The logger opens with
+  the day-before sales (#358), so `starters` is the runners on the race's earliest logged WIN
+  capture that are not SCR there, read from the logs the feed reads (a board at t holds only the
+  latest row per combination). A runner priced there and scratched later counts: 8 drawn and one
+  out, Place pays three places over the seven left; 5 drawn and one out, Place is still sold, with
+  two. A runner already SCR there was withdrawn before sales opened and does not: 8 drawn and one
+  out before, two places over the seven; 5 drawn and one out before, Place is not sold.
 - Brackets follow JRA's draw of N horses, N the largest horse number on the board, scratched
   runners included (the draw was made before the scratch): N <= 8, no bracket quinella; 9-16,
   brackets 1..16-N take one horse each and the rest two, in number order; 17, brackets 1-7 two
@@ -49,7 +52,7 @@ from horsetrack.countries.japan.models.v0.ordering import OrderingFit
 from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels
 
 # isort: split
-from finish_orders import jra_brackets, pool_probabilities, pool_totals
+from finish_orders import jra_brackets, places_paid, pool_probabilities, pool_totals
 from shadow_fakes import (
     BANNED_KEY_WORDS,
     IDS,
@@ -150,10 +153,11 @@ def capture_with_scratches(day: SyntheticDay, r: Race, at: datetime, factor: flo
     day.rows.extend(rows)
 
 
-def expected(r: Race, factor: float, lambdas, out=()) -> dict[str, dict[str, float]]:
-    """p_model of the capture of `r` at `factor`, the runners `out` scratched: FakeWin on the
-    board's q, then every pool enumerated over the runners left, the places paid for every horse
-    drawn (the start of sales); brackets from the draw of max(horse number)."""
+def expected(r: Race, factor: float, lambdas, out=(), before=()) -> dict[str, dict[str, float]]:
+    """p_model of the capture of `r` at `factor`, the runners `out` scratched, of which `before`
+    were already SCR on the race's first capture (out before sales opened): FakeWin on the board's
+    q, then every pool enumerated over the runners left, the places paid for the field at the
+    start of sales (every horse drawn but `before`); brackets from the draw of max(horse number)."""
     win, _, _ = figures(r, factor)
     running = {h: o for h, o in win.items() if h not in out}
     horses = sorted(running)
@@ -161,7 +165,7 @@ def expected(r: Race, factor: float, lambdas, out=()) -> dict[str, dict[str, flo
     p = dict(zip(horses, (float(x) for x in win_p(inv / inv.sum())), strict=True))
     drawn = max(win)
     brackets = jra_brackets(drawn) if drawn >= 9 else None
-    return pool_probabilities(p, lambdas, brackets, starters=len(win))
+    return pool_probabilities(p, lambdas, brackets, starters=len(win) - len(set(before)))
 
 
 def check_p_model(got: dict, want: dict[str, dict[str, float]], where, starters=None) -> None:
@@ -294,7 +298,7 @@ def test_scratched_runners_have_no_probability_and_the_rest_renormalise():
         cases.append((race(venue, no, 14.0, field(n, 50 + n)), out, places))
     day = SyntheticDay(DAY, [r for r, _, _ in cases])
     for r, out, _ in cases:
-        day.capture(r, T0 - timedelta(minutes=6), 1.0)  # before the scratch: all priced
+        day.capture(r, T0 - timedelta(minutes=6), 1.0)  # the first capture: all priced (late)
         capture_with_scratches(day, r, T0 - timedelta(seconds=10), 1.02, out)
 
     got = by_id(build(T0, models()))
@@ -322,6 +326,145 @@ def test_scratched_runners_have_no_probability_and_the_rest_renormalise():
     brackets = set(got[cases[1][0].race_id]["p_model"][BRACKET])
     assert "7,7" in brackets and "8,8" not in brackets, sorted(brackets)
     assert not [c for c in brackets if "6" in c.split(",")], sorted(brackets)
+
+
+# ---------------------------------------------------------------- the field at the opening
+
+
+OPENING = T0 - timedelta(hours=20)  # the day-before sales: each race's earliest logged capture
+LATE = T0 - timedelta(seconds=10)  # the latest capture, appended between the two builds
+OPENING_CASES = {  # (venue, race), drawn, odds seed, SCR at the opening, SCR later, places paid
+    "TOK 9: 8 drawn, 5 out before the opening: 7 started, Place pays two": (
+        ("TOK", 9),
+        8,
+        61,
+        {5},
+        set(),
+        2,
+    ),
+    "TOK 10: the same race with 5 out after the opening: 8 started, Place pays three": (
+        ("TOK", 10),
+        8,
+        61,
+        set(),
+        {5},
+        3,
+    ),
+    "KYO 11: 9 drawn, 2 out before and 7 after: 8 started, Place pays three": (
+        ("KYO", 11),
+        9,
+        62,
+        {2},
+        {7},
+        3,
+    ),
+    "KYO 12: 8 drawn, 1 out before and 6 after: 7 started, Place pays two": (
+        ("KYO", 12),
+        8,
+        63,
+        {1},
+        {6},
+        2,
+    ),
+    "NAK 9: 5 drawn, 3 out before the opening: 4 started, Place not sold, Wide sold": (
+        ("NAK", 9),
+        5,
+        64,
+        {3},
+        set(),
+        0,
+    ),
+    "NAK 10: 10 drawn, 10 out before and 4 after: 9 started, brackets of the 10 drawn": (
+        ("NAK", 10),
+        10,
+        65,
+        {10},
+        {4},
+        3,
+    ),
+}
+
+
+def by_capture(day: SyntheticDay, r: Race) -> dict[str, dict[tuple, dict]]:
+    """snapshot_utc -> (pool, combination) -> the row as written, without its race_id."""
+    out: dict[str, dict[tuple, dict]] = {}
+    for row in day.rows:
+        if row["race_id"] == r.race_id:
+            slot = out.setdefault(row["snapshot_utc"], {})
+            slot[(row["pool"], row["combination"])] = {
+                k: v for k, v in row.items() if k != "race_id"
+            }
+    return out
+
+
+def test_the_places_are_those_of_the_field_at_the_opening():
+    cases = []
+    for (venue, no), n, seed, before, after, places in OPENING_CASES.values():
+        cases.append((race(venue, no, 14.0, field(n, seed)), before, after, places))
+    day = SyntheticDay(DAY, [r for r, *_ in cases])
+    for r, before, _, _ in cases:
+        capture_with_scratches(day, r, OPENING, 1.0, before)  # the field at the opening
+        capture_with_scratches(day, r, T0 - timedelta(minutes=6), 1.01, before)
+    shadow_models = models()
+    cache: dict = {}
+
+    # before the late scratches, through a cache that then reads only the capture appended next
+    first = by_id(build(T0 - timedelta(minutes=3), shadow_models, cache=cache))
+    for r, before, after, _ in cases:
+        capture_with_scratches(day, r, LATE, 1.02, before | after)
+    cached = by_id(build(T0, shadow_models, cache=cache))
+    fresh = by_id(build(T0, models()))
+
+    # the fixture: TOK 9 and TOK 10 differ only in when horse 5's SCR first appears; their
+    # latest captures are the same rows, so a board at t cannot tell the two apart
+    tok9, tok10 = by_capture(day, cases[0][0]), by_capture(day, cases[1][0])
+    late = LATE.astimezone(UTC).isoformat()
+    assert sorted(tok9) == sorted(tok10) and len(tok9) == 3
+    assert tok9[late] == tok10[late]
+    for snap in set(tok9) - {late}:
+        differ = {k for k in tok10[snap] if tok9[snap].get(k) != tok10[snap][k]}
+        with_5 = {k for k in tok10[snap] if "5" in k[1].split(",")}  # WIN, PLACE, 7 Wide pairs
+        assert differ == with_5 and len(with_5) == 2 + 7, (snap, sorted(differ))
+        assert {tok9[snap][(pool, "5")]["status_raw"] for pool in (WIN, PLACE)} == {"SCR"}
+        assert all(tok10[snap][(pool, "5")]["odds"] for pool in (WIN, PLACE)), snap
+        assert set(tok9[snap]) < set(tok10[snap]), snap  # TOK 9 lists no Wide pair with 5
+    for pool in (WIN, PLACE, WIDE):
+        assert set(fresh[cases[0][0].race_id]["pools"][pool]) == set(
+            fresh[cases[1][0].race_id]["pools"][pool]
+        ), pool
+
+    for (r, before, after, places), label in zip(cases, OPENING_CASES, strict=True):
+        drawn = len(r.base)
+        starters = drawn - len(before)
+        assert places == places_paid(starters), label  # the table agrees with JRA's rule
+        steps = (
+            ("before the late scratches", first, 1.01, before),
+            ("cached, after them", cached, 1.02, before | after),
+            ("fresh, after them", fresh, 1.02, before | after),
+        )
+        for step, got, factor, out in steps:
+            where = (label, step)
+            want = expected(r, factor, LAMBDAS, out, before)
+            assert len(want["WIN"]) == drawn - len(out), where
+            check_p_model(got[r.race_id], want, where, starters=starters)
+            p_model = got[r.race_id]["p_model"]
+            for pool, entries in p_model.items():
+                if pool == BRACKET:
+                    continue
+                for combination in entries:
+                    assert not {int(h) for h in combination.split(",")} & out, (where, pool)
+            if places:
+                running = {str(h) for h in range(1, drawn + 1) if h not in out}
+                assert set(p_model[PLACE]) == running, where
+                total = math.fsum(p_model[PLACE].values())
+                assert math.isclose(total, float(places), rel_tol=1e-9), (where, total)
+            else:
+                assert not p_model.get(PLACE), (where, "Place is not sold with 4 starters")
+            assert math.isclose(math.fsum(p_model[WIDE].values()), 3.0, rel_tol=1e-9), where
+    # NAK 10: the draw of 10 (bracket 8 is 9 and 10), horse 10 out before the opening
+    brackets = set(fresh[cases[5][0].race_id]["p_model"][BRACKET])
+    assert "7,7" in brackets and "8,8" not in brackets and "1,8" in brackets, sorted(brackets)
+    assert not [c for c in brackets if "4" in c.split(",")], sorted(brackets)
 
 
 # ---------------------------------------------------------------- partial models
