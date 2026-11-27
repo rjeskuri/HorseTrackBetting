@@ -21,7 +21,8 @@ log is exactly the board over its tier-1 rows, and a day's trifecta boards are n
                     pools: {POOL: {investment,
                                    rows: [{combination, odds, odds_hi, status,
                                            morning_odds, move_morning_pct,
-                                           t20_odds, move_t20_pct}]}}}]}]}
+                                           t20_odds, move_t20_pct,
+                                           t2_odds, move_t20_t2_pct}]}}}]}]}
 ```
 
 - The feed is JSON-ready: `race_date` is ISO date text, every timestamp is ISO-8601 UTC text,
@@ -34,7 +35,8 @@ log is exactly the board over its tier-1 rows, and a day's trifecta boards are n
 - `pools`: every pool the race's rows name, sorted by name. `investment` is the `investment` of
   the latest `__pool__` row of that pool that carries one, else null; `__pool__` is never a row.
 - `rows`: one per logged `combination` text, in numeric order (`'2'` before `'10'`, `'1,7'` before
-  `'3,7'`). `odds` and `odds_hi` are the current row's (`odds_hi` null for single-figure pools),
+  `'3,7'`); the board and shadow pages redraw them favourite first (#498), the feed's order
+  stays. `odds` and `odds_hi` are the current row's (`odds_hi` null for single-figure pools),
   `status` its `status_raw` as logged.
 - No key names a probability, an expected value, a fair price, a bet or a stake: the feed shows
   prices and their moves only.
@@ -57,8 +59,14 @@ that moment. `generated_utc` is `now()`.
 - T-20 reference (`t20_odds`): the latest row of the combination captured at or before
   post - 20 min, when that row is priced. Null while `now` is before post - 20 min, without a post
   time, and when the combination has no row by then.
+- T-2 reference (`t2_odds`, ticket #498): picked exactly as `t20_odds` is, at post - 2 min: the
+  latest row captured at or before post - 2 min, when that row is priced; null while `now` is
+  before post - 2 min, without a post time, and when the combination has no row by then.
 - Move: `current / reference - 1`, in percent rounded to one decimal, on `odds` (the low figure
   of a ranged pool such as PLACE or QUINELLA_PLACE). Null when either figure is missing.
+- T-20 -> T-2 move (`move_t20_t2_pct`): `t2_odds / t20_odds - 1`, rounded the same way; null
+  without both references. The shadow page shows it in its T-20→T-2 column; before the T-2
+  capture exists it is null and the page shows '-'.
 
 ## Scratches
 

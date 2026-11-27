@@ -6,13 +6,18 @@ Contract pinned here (`horsetrack.countries.japan.board.feed.build_board`):
   day, or only `venues`); nothing is requested over the network.
 - Shape: {race_date, generated_utc, venues: [{venue, races: [{race_no, race_id, post_utc,
   last_capture_utc, pools: {POOL: {investment, rows: [{combination, odds, odds_hi, status,
-  morning_odds, move_morning_pct, t20_odds, move_t20_pct}]}}}]}]}. The feed is JSON-ready:
+  morning_odds, move_morning_pct, t20_odds, move_t20_pct, t2_odds, move_t20_t2_pct}]}}}]}]}. The
+  feed is JSON-ready:
   `race_date` is ISO date text, timestamps are ISO UTC text (compared here as instants).
 - Current odds: the latest row of the combination by snapshot_utc (log order does not matter).
 - Morning reference: the earliest price row of the combination captured on race day at or after
   `morning_from` Japan time. T-20 reference: the latest row at or before post - 20 min; null while
   now is before post - 20 min, and without a post time. move = current / reference - 1 in percent,
   one decimal, on `odds` (the low figure of a ranged pool); null without a reference.
+- T-2 reference (ticket #498): `t2_odds` is picked exactly as `t20_odds` is, at post - 2 min (the
+  latest row at or before it, null when that row is unpriced, while now is before post - 2 min and
+  without a post time); `move_t20_t2_pct` = t2_odds / t20_odds - 1 in percent, one decimal, null
+  without both.
 - 'SCR' rows carry status 'SCR', no odds and no move. Pool `investment` is the latest `__pool__`
   figure; `__pool__` is never a row. Post times: the sidecar, else HKTrack's stored card, else null.
 - No key anywhere names a probability, EV or bet.
@@ -48,6 +53,8 @@ ROW_KEYS = {
     "move_morning_pct",
     "t20_odds",
     "move_t20_pct",
+    "t2_odds",
+    "move_t20_t2_pct",
 }
 RACE_KEYS = {"race_no", "race_id", "post_utc", "last_capture_utc", "pools"}
 
@@ -395,6 +402,84 @@ def test_t20_move_is_null_before_t20_and_without_a_post_time():
         no_post = line(race12, "WIN", "7")
         assert (no_post["t20_odds"], no_post["move_t20_pct"]) == (None, None)
         assert no_post["move_morning_pct"] == -17.1
+
+
+def test_t2_reference_and_the_t20_to_t2_move():
+    """t2_odds: the latest row at or before post - 2 min (null when unpriced), as t20_odds at
+    post - 20 min; move_t20_t2_pct = t2_odds / t20_odds - 1, null without both (#498)."""
+    r11, r12, r13 = rid("TOK", 11), rid("TOK", 12), rid("TOK", 13)
+    # race 11: post 15:01, T-20 14:41, T-2 14:59; race 12: post 14:31, T-20 14:11, T-2 14:29
+    write_sidecar("TOK", {11: jst(15, 1).astimezone(UTC), 12: jst(14, 31).astimezone(UTC)})
+    seven = [
+        (jst(7, 5), 4.1),
+        (jst(14, 40), 3.6),
+        (jst(14, 58), 3.2),
+        (jst(14, 59), 3.0),  # exactly post - 2 in race 11: used
+        (jst(14, 59, 30), 2.8),  # after post - 2: not used
+        (jst(15, 5), 2.7),  # after the post
+    ]
+    rows = []
+    for race in (r11, r12, r13):  # the same prices, three post times (race 13 has none)
+        rows += [price(race, "WIN", "7", odds, at) for at, odds in seven]
+    rows += [
+        price(r12, "WIN", "7", 4.4, jst(14, 20)),  # race 12: between its T-20 and T-2
+        price(r11, "WIN", "3", 6.0, jst(14, 41)),  # exactly post - 20
+        price(r11, "WIN", "3", 7.5, jst(14, 50)),
+        price(r11, "WIN", "3", 6.6, jst(14, 59, 1)),  # one second after post - 2
+        price(r11, "WIN", "2", 4.0, jst(14, 30)),  # its last row by both references
+        price(r11, "WIN", "2", 5.0, jst(14, 59, 40)),
+        price(r11, "WIN", "4", 20.0, jst(14, 0)),
+        price(r11, "WIN", "4", 23.0, jst(14, 58)),
+        price(r11, "WIN", "5", 10.0, jst(13, 0)),
+        price(r11, "WIN", "5", None, jst(14, 58)),  # scratched by T-2: an unpriced reference
+        price(r11, "WIN", "9", 11.0, jst(14, 45)),  # first seen after post - 20
+        price(r11, "WIN", "9", 9.9, jst(14, 55)),
+        price(r11, "PLACE", "7", 1.5, jst(14, 40), odds_hi=2.0),
+        price(r11, "PLACE", "7", 1.2, jst(14, 59), odds_hi=2.6),  # moves on the low figure
+        price(r11, "PLACE", "7", 1.1, jst(15, 5), odds_hi=1.4),
+    ]
+    write_log("TOK", rows)
+
+    board = build(jst(15, 10))
+    race11, race12, race13 = (race_of(board, "TOK", no) for no in (11, 12, 13))
+    # (pool, combination): (t20_odds, t2_odds, move_t20_t2_pct)
+    expected = {
+        ("WIN", "7"): (3.6, 3.0, -16.7),
+        ("WIN", "3"): (6.0, 7.5, 25.0),
+        ("WIN", "2"): (4.0, 4.0, 0.0),
+        ("WIN", "4"): (20.0, 23.0, 15.0),
+        ("WIN", "5"): (10.0, None, None),
+        ("WIN", "9"): (None, 9.9, None),
+        ("PLACE", "7"): (1.5, 1.2, -20.0),
+    }
+    for (pool, combination), want in expected.items():
+        got = line(race11, pool, combination)
+        assert (got["t20_odds"], got["t2_odds"], got["move_t20_t2_pct"]) == want, (
+            pool,
+            combination,
+        )
+    # the current odds and the T-20 move are as before
+    seven_now = line(race11, "WIN", "7")
+    assert (seven_now["odds"], seven_now["move_t20_pct"]) == (2.7, -25.0)
+    # race 12's earlier post: T-20 is the 07:05 row, T-2 the 14:20 row
+    got = line(race12, "WIN", "7")
+    assert (got["t20_odds"], got["t2_odds"], got["move_t20_t2_pct"]) == (4.1, 4.4, 7.3)
+    # no post time: no T-2 reference
+    assert race13["post_utc"] is None
+    got = line(race13, "WIN", "7")
+    assert (got["t2_odds"], got["move_t20_t2_pct"]) == (None, None)
+    json.dumps(board)
+
+    # before post - 2 the reference is null though T-20 has one; at post - 2 it is there
+    early = race_of(build(jst(14, 58, 30)), "TOK", 11)
+    for combination in ("7", "3", "2", "4"):
+        got = line(early, "WIN", combination)
+        assert got["t20_odds"] is not None, combination
+        assert (got["t2_odds"], got["move_t20_t2_pct"]) == (None, None), combination
+    at_t2 = race_of(build(jst(14, 59)), "TOK", 11)
+    for combination, want in {"7": (3.0, -16.7), "4": (23.0, 15.0), "3": (7.5, 25.0)}.items():
+        got = line(at_t2, "WIN", combination)
+        assert (got["t2_odds"], got["move_t20_t2_pct"]) == want, combination
 
 
 # ---------------------------------------------------------------- pools
