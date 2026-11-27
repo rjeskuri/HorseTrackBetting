@@ -1256,6 +1256,80 @@ def test_a_measurement_failure_is_persisted_in_the_registry(
             assert identity_of(last) == identity_of(first), (family_id, each[0])
 
 
+def test_a_retry_that_succeeds_again_is_each_rules_latest_record(
+    tmp_path, monkeypatch, main_runners
+):
+    """Round 4 of PR #345: a transient failure is not the last word. The same frozen family runs
+    three times on the same data, registry and seed: StepM runs, then raises, then runs again and
+    reproduces the first run exactly. After the third run each rule's latest registry record is a
+    success again: it carries `stepm_superior` (StepM's verdict, as the third report gives it)
+    and every metric of the first run's last record, and no 'max_stat' failure note; its other
+    notes are the first success's. The failure stays in the append-only history, and the retry is
+    another run, never another variant: the family size and each rule's variant identity are
+    those of the first run."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(data_dir))
+    registry = new_registry(tmp_path)
+    spec = make_family("test-88-retry", MAX_STAT_RULES)
+    freeze(registry, spec)
+    ids = [rule[0] for rule in MAX_STAT_RULES]
+
+    def records_of(rid: str) -> list[RunRecord]:
+        return [r for r in registry.records(spec.family_id) if r.variant == rid]
+
+    def attempt(stepm_fails: bool):
+        holdout = TrippedHoldout()
+        with pytest.MonkeyPatch.context() as patch:
+            if stepm_fails:
+                _replace_everywhere(patch, stepm, _stepm_raising)
+            report = run_study(
+                spec, main_runners.copy(), registry=registry, holdout=holdout, seed=STUDY_SEED
+            )
+        assert holdout.calls == []
+        return report, registry.family_size(spec.family_id), {r: records_of(r)[-1] for r in ids}
+
+    def metric_names(record: RunRecord) -> set[str]:
+        return {m.metric for m in record.metrics}
+
+    first, first_size, succeeded = attempt(stepm_fails=False)
+    # Premise: StepM ran and tested both rules, and their last records carry its verdict.
+    assert not explained(first.stages["max_stat"]), first.stages["max_stat"]
+    assert set(first.stages["max_stat"]["tested"]) == set(ids)
+    for rid in ids:
+        assert set(RECORD_METRICS) <= metric_names(succeeded[rid]), (rid, succeeded[rid])
+        assert "max_stat" not in notes_of(succeeded[rid]), (rid, succeeded[rid].notes)
+
+    failed, failed_size, after_failure = attempt(stepm_fails=True)
+    # Premise: the failure is recorded, and is each rule's latest record for now.
+    assert explained(failed.stages["max_stat"]), failed.stages["max_stat"]
+    for rid in ids:
+        assert "stepm_superior" not in metric_names(after_failure[rid]), rid
+        assert notes_of(after_failure[rid]).get("max_stat") == failed.stages["max_stat"]["error"]
+
+    third, third_size, latest = attempt(stepm_fails=False)
+    # Premise: the third run reproduces the first.
+    assert not explained(third.stages["max_stat"]), third.stages["max_stat"]
+    assert third.stages["max_stat"]["superior"] == first.stages["max_stat"]["superior"]
+
+    for rid in ids:
+        last = latest[rid]
+        superior = [m.value for m in last.metrics if m.metric == "stepm_superior"]
+        assert superior == [float(rid in third.stages["max_stat"]["superior"])], (rid, last)
+        assert set(succeeded[rid].metrics) <= set(last.metrics), (rid, last.metrics)
+        notes = notes_of(last)
+        assert "max_stat" not in notes, (rid, notes)
+        for stage in ("log_loss", "omega", "roi"):
+            assert notes.get(stage) == notes_of(succeeded[rid]).get(stage), (rid, stage, notes)
+        assert last.status == succeeded[rid].status, rid
+        assert identity_of(last) == identity_of(succeeded[rid]), rid
+        history = records_of(rid)
+        assert any("max_stat" in notes_of(r) for r in history), rid  # the failure is kept
+    assert first.family_size == failed.family_size == third.family_size == len(ids)
+    assert first_size == failed_size == third_size == len(ids)
+    registry.verify()
+
+
 PREDICTIVE_LEVEL = f"{PREDICTIVE}_level"
 
 

@@ -23,9 +23,13 @@ Contract pinned here (the coder implements what these tests call):
   50% to a 99% central interval passes).
 - The same ``seed`` gives identical outputs.
 - The model's bound (#88): a bet's win probability ``omega * (1 - t) / O`` stays below 1 in every
-  posterior draw that ``expected_return``, ``p_beats_takeout`` and ``omega_mean`` read, so a bet
-  returns at most its odds and a segment's mean expected return per unit stake is at most the
-  mean decimal odds of its bets.
+  posterior draw that ``expected_return``, ``p_beats_takeout``, ``omega_mean`` and
+  ``predictive_roi`` read, so a bet returns at most its odds and a segment's mean expected return
+  per unit stake is at most the mean decimal odds of its bets. The bound is the cell's (round 4
+  of PR #345): every bet of a cell (odds band x segment levels) shares one omega, so in every draw
+  that omega is at most ``min O_j / (1 - t_j)`` over the cell's bets, and a bet returns at most
+  ``(1 - t_i)`` times its cell's bound. Bets at odds 1.0 and 1.2, both at takeout 0.2, in one
+  cell return at most 1 each: a draw cannot pay the 1.0 bet its stake and the 1.2 bet more.
 
 Every dataset is synthetic and generated here with a seeded numpy RNG. Each test first asserts the
 premise it relies on (computed from the data, independently of the code under test), so the
@@ -485,3 +489,106 @@ def test_return_draws_respect_the_models_probability_bound(case):
         assert p == 0.0, (p, er)
     else:
         assert er.high > 1.0 and p > 0.5, (p, er)
+
+
+# --- the bound is the cell's: one omega for every bet of a cell (#88) ----------------------------
+
+LONG_RUN = 1_000_000  # bets in a predictive ROI whose outcome noise is far below the bound's gap
+# (odds, takeout, n_won, n) groups of segment 's' in one cell, and the cell's bound on the mean
+# expected return per unit stake, worked by hand: mean over bets of (1 - t_i) * min O_j/(1 - t_j).
+CELL_CASES = {
+    # 1.0 binds: omega <= 1 / 0.8 = 1.25, so both prices return at most 0.8 * 1.25 = 1.
+    "1.0-and-1.2-at-takeout-0.2": ([(1.0, 0.2, 4, 5), (1.2, 0.2, 9, 10)], 1.0),
+    # 1.0 at 0.1 binds: omega <= 1 / 0.9; (5 * 0.9 + 10 * 0.8) / 15 / 0.9 = 12.5 / 13.5.
+    "1.0-at-0.1-and-1.5-at-0.2": ([(1.0, 0.1, 4, 5), (1.5, 0.2, 9, 10)], 12.5 / 13.5),
+    # The longer price binds (the lower takeout): omega <= 1.1 / 0.95, not 1.05 / 0.7;
+    # (5 * 0.95 + 10 * 0.7) / 15 * 1.1 / 0.95.
+    "1.1-at-0.05-binds-before-1.05-at-0.3": (
+        [(1.1, 0.05, 4, 5), (1.05, 0.3, 9, 10)],
+        (5 * 0.95 + 10 * 0.7) / 15 * 1.1 / 0.95,
+    ),
+}
+
+
+def cell_bets(groups: list[tuple], *, split: bool = False) -> pd.DataFrame:
+    """Segment 's''s unit-stake bets, one block per (odds, takeout, n_won, n) group, all in band
+    'fav' (one cell), or with `split` each group in a band of its own (a cell of its own)."""
+    frames = []
+    for k, (odds, takeout, n_won, n) in enumerate(groups):
+        frame = near_certain(odds, takeout, n_won, n)
+        if split:
+            frame["band"] = f"b{k}"
+        frames.append(frame)
+    return pd.concat(frames, ignore_index=True)
+
+
+def cell_bound(bets: pd.DataFrame) -> float:
+    """The most the bets' mean expected return per unit stake can be when each cell's bets share
+    one omega below every one of their O / (1 - t): the mean of (1 - t_i) times its cell's
+    min O_j / (1 - t_j). Segment 's' only, so the cells are the bands."""
+    cap = (bets["odds"] / (1 - bets["takeout"])).groupby(bets["band"]).transform("min")
+    return float(((1 - bets["takeout"]) * cap).mean())
+
+
+@pytest.mark.parametrize("case", list(CELL_CASES), ids=list(CELL_CASES))
+def test_a_cells_shared_omega_is_bounded_by_its_likeliest_bet(case):
+    """Round 4 of PR #345: bets at two prices in one cell (one band, one segment level) share one
+    omega, so the bet with the highest implied probability (1 - t) / O bounds it for both: in
+    every posterior draw omega <= min O_j / (1 - t_j), and no draw pays the likelier bet at most
+    its odds while paying the other more than (1 - t) times that bound. Clipping each bet's
+    probability apart lets a draw of omega = 1.30 return 1.00 on the 1.0 bet and 1.04 on the 1.2
+    bet, beating takeout although the 1.0 bet keeps omega below 1.25. So the expected return's
+    upper bound, omega_mean times the payout rate and the long-run predictive ROI stay within the
+    cell's bound (below break-even in every case here), and P(beats takeout) is 0. The same bets
+    with each price in a band of its own are two cells, each with its own bound, and the
+    segment's expected return may then pass the one-cell bound: the bound is the cell's, not the
+    segment's."""
+    groups, worked = CELL_CASES[case]
+    bets = cell_bets(groups)
+    query = seg("s")
+    bound = cell_bound(bets)
+    assert bound == pytest.approx(worked, rel=1e-12)
+    # Premise: one cell, two prices, each won and lost at least once; the bets returned close to
+    # the bound or above it, so a posterior that ignores the shared omega crosses it.
+    assert bets["band"].nunique() == 1 and bets["odds"].nunique() == 2
+    assert all(0 < n_won < n for _, _, n_won, n in groups)
+    assert bound <= 1.0
+    realised = float((bets["won"] * bets["odds"]).mean())
+    assert realised >= bound - 0.07, (realised, bound)
+
+    fit = fit_segment_roi(
+        bets,
+        segment_cols=["segment"],
+        odds_band_col="band",
+        takeout_col="takeout",
+        seed=7803,
+        draws=DRAWS,
+    )
+    ceiling = bound * (1 + 1e-12)  # the bound, give or take the rounding of a mean
+    er = fit.expected_return(query)
+    assert all(math.isfinite(v) for v in (er.mean, er.low, er.high)), er
+    assert er.low <= er.mean <= er.high <= ceiling, (er, bound)
+    payout = float((1 - bets["takeout"]).mean())
+    assert fit.omega_mean(query) * payout <= ceiling, (fit.omega_mean(query), bound)
+    assert fit.p_beats_takeout(query) == 0.0, (fit.p_beats_takeout(query), er)
+    # Each predictive draw is LONG_RUN bets, each returning between 0 and the top odds, with a mean
+    # of at most the bound: its ROI has mean <= bound - 1 and variance <= top^2 / (4 LONG_RUN)
+    # (Popoviciu). By Cantelli at a quarter of the interval's upper tail, too few draws pass the
+    # slack below to move the interval's upper end above it.
+    interval = fit.predictive_roi(query, LONG_RUN)
+    tail = (1 - interval.level) / 2
+    sd = float(bets["odds"].max()) / (2 * math.sqrt(LONG_RUN))
+    slack = sd * math.sqrt(4 / tail - 1)
+    assert interval.high <= bound - 1 + slack, (interval, bound - 1, slack)
+
+    split = cell_bets(groups, split=True)
+    fit = fit_segment_roi(
+        split,
+        segment_cols=["segment"],
+        odds_band_col="band",
+        takeout_col="takeout",
+        seed=7803,
+        draws=DRAWS,
+    )
+    er = fit.expected_return(query)
+    assert bound < er.high <= cell_bound(split) * (1 + 1e-12), (er, bound, cell_bound(split))

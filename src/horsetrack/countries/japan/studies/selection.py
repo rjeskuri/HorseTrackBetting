@@ -66,8 +66,10 @@ per rule (status 'failed' when its claim could not be scored); at the end a seco
 every measurement made as metrics (the predictive interval apart, as `predictive_roi_100` and its
 level `predictive_roi_100_level`) and, in `notes`, each failed stage's reason ('log_loss',
 'max_stat', 'omega', 'roi'), outside the variant identity. A record already in the registry is
-not appended again, and a rerun whose frame cannot score a variant the family holds scored is
-refused before any record.
+not appended again, unless it is a rule's end record and no longer the rule's latest (a retry
+that reproduces a run after a later failure, say): then it is appended again as the latest, with
+a 'rerun' note numbering it, outside the variant identity. A rerun whose frame cannot score a
+variant the family holds scored is refused before any record.
 `sources` defaults to licensed sources (fails closed, D21): pass the sources `data` was built from.
 """
 
@@ -124,6 +126,7 @@ PREDICTIVE = f"predictive_roi_{PREDICTIVE_BETS}"
 PREDICTIVE_LEVEL = f"{PREDICTIVE}_level"  # its level, a metric apart so no level reads as an ROI
 AVOID = "S0"  # D19's default rung: the study makes no rung decision
 EVALUATED = "all_folds"  # the fold label of a measurement on the walk-forward test rows
+RERUN = "rerun"  # the note on a record appended again as its variant's latest (run_study)
 UNSTATED_SOURCES = ("jra", "jrdb")  # fails closed: unnamed sources are treated as licensed
 FAMILY_CONFIG = "selection_family"
 _HYPOTHESIS = re.compile(r"([ELP][0-9]+)(?:-|$)")
@@ -647,11 +650,21 @@ def run_study(
             **identity,
         )
 
-    def append(records: list[RunRecord]) -> None:
+    def append(records: list[RunRecord], *, latest: bool = False) -> None:
+        """Append each record the family does not hold. With `latest`, a record it holds that is
+        not its variant's latest, RERUN note aside (a retry reproducing a run after a later
+        failure, say), is appended again as the latest with a RERUN note numbering it: outside
+        the variant identity, and a new run id, so the registry takes it."""
         existing = registry.records(spec.family_id)
         for r in records:
             if r not in existing:
                 registry.append(r)
+            elif latest:
+                held = [e for e in existing if e.variant == r.variant]
+                notes = {k: v for k, v in (held[-1].notes or {}).items() if k != RERUN}
+                if dataclasses.replace(held[-1], notes=notes or None) != r:
+                    note = f"record {len(held) + 1}, reproducing record {held.index(r) + 1}"
+                    registry.append(dataclasses.replace(r, notes={**(r.notes or {}), RERUN: note}))
 
     # Stage 1: each rule's departure from the calibrated market, fitted in fold, out of fold.
     race_ids, won = frame["race_id"].to_numpy(), frame["won"].to_numpy()
@@ -884,7 +897,7 @@ def run_study(
         if "error" in max_stat and rid in tested:
             notes["max_stat"] = max_stat["error"]
         outcome.append(record(rule, metrics[rid] + extra, rid not in losses, notes))
-    append(outcome)
+    append(outcome, latest=True)
 
     return StudyReport(
         family_size=registry.family_size(spec.family_id),

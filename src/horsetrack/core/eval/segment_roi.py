@@ -49,9 +49,13 @@ its band's and its levels' effects combined. ``expected_return``, ``p_beats_take
 that it exceeds 1, and its mean over the bets' mean payout rate (the payout-weighted omega, which
 clears ``1 / (1 - mean t_i)`` exactly when the expected return clears 1; with one takeout,
 ``P(omega_s > 1 / (1 - t))``). Every bet counts once (flat stakes): the stake column is not used.
-In those draws and in ``predictive_roi``'s, each bet's win probability ``omega_i * (1 - t_i) / O_i``
-is held below ``P_MAX``, the bound the fit keeps, since the Gaussian draws can cross it: a bet
-returns at most its odds, so bets at odds 1 never beat their stake.
+In those draws and in ``predictive_roi``'s, each cell's ln omega is held to the bound the fit
+keeps, ``ln P_MAX - ln max q`` over the fit's bets in that cell (a segment is whole cells, so these
+are its own bets there), before any bet's win probability is derived, since the Gaussian draws can
+cross it. Every bet of a cell shares its omega, so in every draw that omega is below
+``min O_j / (1 - t_j)`` over the cell's bets: a bet returns at most ``(1 - t_i)`` times its cell's
+bound, which is at most its odds, and bets at odds 1.0 and 1.2 at one takeout in one cell never
+beat their stake.
 """
 
 from __future__ import annotations
@@ -192,6 +196,7 @@ class SegmentROI:
         tau: np.ndarray,
         tau_ess: float,
         tau_rejected: int,
+        eta_max: np.ndarray,
         seed: int,
     ):
         self._columns = columns
@@ -204,6 +209,7 @@ class SegmentROI:
         self._codes = codes
         self._odds = odds
         self._takeout = takeout
+        self._eta_max = eta_max
         self._seed = seed
         # Posterior means of the band effects (ln omega) and of each column's tau, the effective
         # sample size of the tau importance weights (out of TAU_SAMPLES), and how many tau samples
@@ -253,18 +259,20 @@ class SegmentROI:
         return cells, local.ravel(), mix["odds"].to_numpy(), mix["takeout"].to_numpy(), freq
 
     def _win_probabilities(self, cells, local, odds, takeout):
-        """Per block of posterior draws, each group's win probability ``omega (1 - t) / O``, held
-        below P_MAX as the fit holds it (module docstring)."""
+        """Per block of posterior draws, each group's win probability ``omega (1 - t) / O``, its
+        cell's ln omega first held to the fit's bound for that cell (module docstring); the clip
+        at P_MAX only absorbs rounding at that bound."""
         q = (1 - takeout) / odds
         block = max(1, _BLOCK // len(odds))
         for start in range(0, len(self._draws), block):
             eta = self._draws[start : start + block] @ self._design[cells].T
+            eta = np.minimum(eta, self._eta_max[cells])
             yield np.minimum(q * np.exp(eta[:, local]), P_MAX)
 
     def _return_draws(self, segment: dict[str, str]) -> tuple[np.ndarray, float]:
         """Posterior draws of the segment's mean expected return per unit stake,
-        ``mean(O_i * p_i)`` over its own bets (``omega_i * (1 - t_i)`` wherever p_i is below
-        P_MAX), and the bets' mean payout rate."""
+        ``mean(O_i * p_i)`` over its own bets (``omega_i * (1 - t_i)``, each cell's omega held to
+        its bound), and the bets' mean payout rate."""
         cells, local, odds, takeout, freq = self._mix(segment)
         groups = (cells, local, odds, takeout)
         draws = np.concatenate([p @ (freq * odds) for p in self._win_probabilities(*groups)])
@@ -272,7 +280,7 @@ class SegmentROI:
 
     def omega_mean(self, segment: dict[str, str]) -> float:
         """Posterior mean of the segment's payout-weighted omega, ``sum((1 - t_i) * omega_i) /
-        sum(1 - t_i)`` (each bet's win probability held below P_MAX): the multiplier that clears
+        sum(1 - t_i)`` (each cell's omega held to its bound): the multiplier that clears
         1 / (1 - mean t_i) exactly when `expected_return` clears 1 (the same draws)."""
         draws, payout = self._return_draws(segment)
         return float(draws.mean() / payout)
@@ -453,5 +461,6 @@ def fit_segment_roi(
         tau=weights @ np.exp(samples),
         tau_ess=float(1 / (weights**2).sum()),
         tau_rejected=int((~np.isfinite(log_w)).sum()),
+        eta_max=lik.eta_max,
         seed=seed,
     )
