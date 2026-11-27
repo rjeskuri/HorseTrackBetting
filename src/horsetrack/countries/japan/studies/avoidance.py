@@ -649,18 +649,29 @@ def logged_boards(race_ids: set[str]) -> tuple[dict[str, list[str]], dict[str, P
     return {pool: sorted(races) for pool, races in logged.items()}, files
 
 
-def board_view(files: Mapping[str, Path], rules, minutes: int) -> Callable[[str], RaceView]:
-    """race -> its board at t = post_utc (of its latest capture) - `minutes`, through `view_at`."""
+def board_view(
+    files: Mapping[str, Path],
+    rules,
+    minutes: int,
+    *,
+    post_time: Callable[[str], datetime | None] | None = None,
+) -> Callable[[str], RaceView]:
+    """race -> its board at t = post_utc (of its latest capture carrying one) - `minutes`, through
+    `view_at`. When no capture carries a post_utc, `post_time(race_id)` gives the post when given
+    (a scheduled post time); with neither the board is empty."""
     selection = f"{BOARD_AT_T} (T-{minutes})"
 
     def view(race_id: str) -> RaceView:
         rows = pq.read_table(files[race_id], filters=[("race_id", "==", race_id)])
         posts = rows.select(["snapshot_utc", "post_utc"]).to_pandas().dropna()
-        if posts.empty:
+        if not posts.empty:
+            post = posts.sort_values("snapshot_utc")["post_utc"].iloc[-1].to_pydatetime()
+        else:
+            post = post_time(race_id) if post_time is not None else None
+        if post is None:
             return RaceView(
                 race_id, pd.DataFrame(columns=["pool", "combination", "odds"]), selection
             )
-        post = posts.sort_values("snapshot_utc")["post_utc"].iloc[-1].to_pydatetime()
         con = duckdb.connect(":memory:")
         try:
             con.register(BOARD_TABLE, rows)
@@ -678,9 +689,11 @@ def read_development(
     *,
     pools: Sequence[str] = STUDY_POOLS,
     race_columns: Sequence[str] = RACE_COLUMNS,
+    post_time: Callable[[str], datetime | None] | None = None,
 ) -> StudyData:
     """Column- and date-scoped store reads from 2014-06-07, holdout days dropped, then
-    `split_off`'s development rows; dividends of `pools` for those races only."""
+    `split_off`'s development rows; dividends of `pools` for those races only. `post_time` is
+    `board_view`'s fallback for a race whose captures carry no post_utc."""
     frames = {}
     for name, columns in (("races", race_columns), ("runners", RUNNER_COLUMNS)):
         table = read_store_table(
@@ -693,7 +706,7 @@ def read_development(
     dataset = ds.dataset(_store_file("dividends"), format="parquet")
     dividends = dataset.to_table(columns=DIVIDEND_COLUMNS, filter=scope).to_pandas()
     logged, files = logged_boards(set(run))
-    view = board_view(files, load_availability(COUNTRY), minutes)
+    view = board_view(files, load_availability(COUNTRY), minutes, post_time=post_time)
     return StudyData(races, frames["runners"], dividends, logged, view, sorted(set(files.values())))
 
 

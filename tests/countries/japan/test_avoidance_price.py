@@ -69,7 +69,7 @@ Contract pinned here (`horsetrack.countries.japan.studies.avoidance_price`, buil
   rule. The record's metrics hold one count per cell of predicted (100, 110) x realised (100, 110,
   above 110), named `predicted_<p>_realised_<r>` (r `100`, `110` or `above_110`, either order),
   with n the favourites predicted; a cell left out counts 0. The fixture's pools sit far from every
-  boundary (payout plus top-ups at 85% or 107% of sales), so any faithful reading of the rule gives
+  boundary (payout plus top-ups at 85%, 93.5% or 107% of sales), so any faithful reading gives
   the same predictions, and each race's WIN pool tells the opposite story, so a prediction read
   from the WIN rows flips.
 - D21: the votes are JRA-VAN's (`core.eval.reports.WITHHELD_SOURCES`). The 100-vs-110 record, and
@@ -78,6 +78,39 @@ Contract pinned here (`horsetrack.countries.japan.studies.avoidance_price`, buil
   `core.eval.reports.write_report`, and every written text that moves with the votes is written
   with a withheld source, so no public (jra-only) output carries a JRA-VAN figure. The holdout
   day's votes rows move nothing and no written text names a holdout day.
+
+Review round 1 of b9a6b6d (each pinned by its own test below):
+
+- The board at t's post time: a race's capture's own `post_utc`; when its capture carries none,
+  the scheduled post time of `board.snapshot.post_times_for(day, venue)` (the `<VENUE>.races.json`
+  sidecar beside the odds log, else HKTrack's stored card), so t is that time - 2 min (D2). The
+  capture's post_utc wins over a schedule that disagrees. With neither, the race is data pending.
+  The frozen spec or the board-at-t records name that scheduled source (post_times_for, the
+  sidecar or the card).
+- Selection at t reads the board at t alone: a runner priced on it is a runner, whatever the final
+  results say later. A runner scratched after t is still selected (the favourite, the top-3 box,
+  every set), and every ticket holding it is settled as JRA settles it: refunded, stake back. The
+  store carries no refund row for a scratch (its `is_refund` is always false), so the refund comes
+  from `runners.is_scratched`. Look-ahead variants may read the final starters. Each record's
+  `params` carry its `pool` and, for a cut variant, its `cut`.
+- L2's no-bet race: when every ticket the comparator bets in a race is at the floor, the race stays
+  paired and the rule's side returns its stake (`stake_back`, named in the spec's L2 rules); only
+  a race without board data (the comparator bets nothing) drops.
+- The 100-vs-110 check at t counts a race only once its favourite at t has a PLACE price at t.
+  With no such race the at-t check is data pending (a 'failed' record, reported as data pending),
+  never scored with n = 0; a covered race whose favourite is off the floor is a scored zero.
+- The reconstruction check: before its cross-tab, the 100-vs-110 check reconstructs the Place
+  dividend of every placed horse of its races (the floor favourite and the non-floor ones) from
+  the votes and compares it with the realised one. Its figures are metrics of the 100-vs-110
+  record (named with `validation`, n the placed horses checked), withheld with it. The tolerance
+  is in the frozen spec (a key holding `tolerance`): 10 yen per 100 staked, one rounding step (JRA
+  rounds Place dividends down to 10 yen, and a floor horse's 100 or 110 is the check's own
+  question). A miss above it makes the record 'failed' with its reason reported, never a scored
+  prediction. A check with no race to check has no miss.
+- Missing or unreadable votes: the realised counts from the jra store (metrics `realised_<r>`)
+  survive in a 'scored' 100-vs-110 record and only the prediction is unavailable (no predicted
+  cell counts a favourite). The public report still gives the realised counts and never says
+  that no floor-bound favourite placed.
 
 How the run-level tests prove it without fixing the owner's betting rules: the same synthetic
 store is run under one change at a time and the registry records are compared. Rows not available
@@ -88,7 +121,9 @@ and files. The store appears only when the family is frozen, so a read before th
 
 Expected values come from first principles: the ranks, floors and tails from the fixture prices
 written below, the quintiles from the convention above, entropies from a reference formula, the
-Plus-10 predictions from a reference Place payout. Every frame is synthetic; no date is a Japan
+Plus-10 predictions from a reference Place payout. Every race's realised Place dividends follow
+that reference payout of its own votes, save the floor favourites' 100 or 110 set by hand, so a
+faithful reconstruction passes its check. Every frame is synthetic; no date is a Japan
 holdout day (on or after 2026-11-28). The holdout day of the run-level tests is a synthetic one,
 declared in memory by patching the holdout definition.
 """
@@ -121,6 +156,8 @@ from horsetrack.core.eval.reports import is_withheld
 from horsetrack.core.store import schemas
 from horsetrack.core.store.asof import load_availability
 from horsetrack.core.store.tables import ARROW_TYPES
+from horsetrack.countries.japan import odds_log
+from horsetrack.countries.japan.board.snapshot import SCRATCHED
 from horsetrack.countries.japan.jravan import votes as jravan_votes
 from horsetrack.countries.japan.logger.compact import SCHEMA as ODDS_SCHEMA
 from horsetrack.countries.japan.odds_log import POOL_TOTAL
@@ -698,7 +735,8 @@ HISTORY = [  # no board logged: only the final price exists
     # a flat market (0.914): the favourite (6) runs second
     Race(rid(D1, "KYO", 1), "set", (1, 6, 8), priced("semi", 6, 1)),
     Race(rid(D1, "KYO", 2), "allowance", (9, 2, 7), priced("flat", 4)),
-    Race(rid(D2, "TOK", 1), "handicap", (1, 6, 10), priced("conc2", 1)),
+    # a floor favourite wins, and its Place pays 110 though its votes predict 100
+    Race(rid(D2, "TOK", 1), "handicap", (1, 6, 10), priced("conc2", 1), place={1: 110}),
     # a floor favourite wins, and its Place pays 100 though its votes predict 110
     Race(rid(D2, "TOK", 2), "age", (8, 2, 5), priced("conc", 8), place={8: 100}),
     Race(rid(D2, "KYO", 1), "handicap", (10, 4, 2), priced("semi", 2, 4)),
@@ -772,14 +810,15 @@ def r10(x: float) -> int:
     return int(round(x / 10.0)) * 10
 
 
-def dividend_rows(race: Race) -> list[dict]:
-    """The race's paying rows in every pool, from its own (base) final odds."""
+def dividend_rows(race: Race, place: dict[int, int] | None = None) -> list[dict]:
+    """The race's paying rows in every pool, from its own (base) final odds; the PLACE rows from
+    the reference Place payout of its (base) votes, then `race.place`, then `place` (M)."""
     o, (first, second, third) = race.final, race.finish
     top3 = race.finish
+    votes = place_votes(race, VOTES.get(race.race_id, "mid"))
+    paid = reference_place_dividends(votes, top3) | race.place | (place or {})
     rows = [("WIN", str(first), max(100, r10(100 * o[first])))]
-    rows += [
-        ("PLACE", str(h), race.place.get(h, max(110, r10(100 + 25 * (o[h] - 1))))) for h in top3
-    ]
+    rows += [("PLACE", str(h), paid[h]) for h in top3]
     for a, b in itertools.combinations(sorted(top3), 2):
         rows.append(("QUINELLA_PLACE", f"{a},{b}", max(110, r10(50 * math.sqrt(o[a] * o[b])))))
     quinella = max(110, r10(100 * o[first] * o[second] / 3))
@@ -815,23 +854,28 @@ def race_keys(race_id: str) -> dict:
     }
 
 
-def runner_rows(race: Race, final: dict[int, float]) -> list[dict]:
-    order = [*race.finish, *(h for h in HORSES if h not in race.finish)]
+def runner_rows(race: Race, final: dict[int, float], scratched: int | None = None) -> list[dict]:
+    """The race's runners; `scratched` (S) is out of the race: no placing, no final price."""
+    assert scratched not in race.finish
+    order = [*race.finish, *(h for h in HORSES if h not in race.finish and h != scratched)]
     position = {h: i + 1 for i, h in enumerate(order)}
-    favourite = {h: i + 1 for i, h in enumerate(sorted(final, key=final.get))}
+    running = sorted((h for h in final if h != scratched), key=final.get)
+    favourite = {h: i + 1 for i, h in enumerate(running)}
     return [
         race_keys(race.race_id)
         | {
             "horse_id": f"{race.race_id.replace(':', '-')}-{h:02d}",
             "horse_no": h,
-            "placing_raw": str(position[h]),
-            "finish_pos": position[h],
             "dead_heat": False,
-            "win_odds": final[h],
-            "is_scratched": False,
             "bracket": BRACKETS[h],
-            "win_fav_rank": favourite[h],
         }
+        | (
+            {"placing_raw": "除外", "finish_pos": None, "win_odds": None, "is_scratched": True}
+            | {"win_fav_rank": None}
+            if h == scratched
+            else {"placing_raw": str(position[h]), "finish_pos": position[h]}
+            | {"win_odds": final[h], "is_scratched": False, "win_fav_rank": favourite[h]}
+        )
         for h in HORSES
     ]
 
@@ -842,12 +886,29 @@ def post_of(race_id: str) -> datetime:
     return datetime.fromisoformat(day).replace(hour=hh, minute=mm, tzinfo=JST).astimezone(UTC)
 
 
-def board_capture(race_id, snap, fetched, win, *, final=False, totals=1.0, paying=None) -> list:
+def board_capture(
+    race_id,
+    snap,
+    fetched,
+    win,
+    *,
+    final=False,
+    totals=1.0,
+    paying=None,
+    timed=True,
+    place=True,
+    scratched=frozenset(),
+) -> list:
+    """One capture of the race's WIN, PLACE and Wide boards. `timed` False: the rows carry no
+    post_utc (N, N0). `place` False: no PLACE row (W, P); a set of horses: only those priced on
+    the PLACE board, the others' rows unpriced (P). A `scratched` horse's rows are unpriced."""
     post, paying = post_of(race_id), paying or {}
+    priced_place = set(HORSES) if place is True else set(place or ())
     rows = []
     for h in HORSES:
         rows.append(odds_row(race_id, post, snap, fetched, "WIN", str(h), win[h]))
-        rows.append(odds_row(race_id, post, snap, fetched, "PLACE", str(h), *place_of(win[h])))
+        low, high = place_of(win[h]) if h in priced_place else (None, None)
+        rows.append(odds_row(race_id, post, snap, fetched, "PLACE", str(h), low, high))
     for a, b in itertools.combinations(HORSES, 2):
         low, high = wide_of(win[a], win[b])
         rows.append(odds_row(race_id, post, snap, fetched, "QUINELLA_PLACE", f"{a},{b}", low, high))
@@ -857,6 +918,16 @@ def board_capture(race_id, snap, fetched, win, *, final=False, totals=1.0, payin
                 race_id, post, snap, fetched, pool, POOL_TOTAL, None, investment=total * totals
             )
         )
+    if place is False:
+        rows = [r for r in rows if r["pool"] != "PLACE"]
+    for r in rows:
+        horses = (
+            set() if r["combination"] == POOL_TOTAL else set(map(int, r["combination"].split(",")))
+        )
+        if horses & set(scratched):
+            r |= {"odds": None, "odds_hi": None, "status_raw": SCRATCHED}
+        if not timed:
+            r |= {"post_utc": None, "minutes_to_post": None}
     return [
         r | {"is_final_capture": final, "dividend": paying.get((r["pool"], r["combination"]))}
         for r in rows
@@ -884,9 +955,12 @@ FLOOR_FAVOURITES = {
     G6: (10, 110),
 }
 # race -> its votes profile; every other race (the holdout day's too) is "mid"
-VOTES = {H1: "plus10", H5: "withheld", H6: "plus10", G1: "plus10", G4: "withheld", G6: "plus10"}
-V_VOTES = {H1: "withheld", G4: "plus10"}  # V: other Place votes, every price and dividend unchanged
-PREDICTED = {"plus10": 110, "withheld": 100}
+VOTES = {H1: "floor110", H5: "withheld", H6: "plus10", G1: "plus10", G4: "withheld", G6: "plus10"}
+# V: other Place votes, every price and dividend unchanged. Each flip is between the two all-floor
+# profiles, so every placed horse of the race stays within one 10-yen step of its realised
+# dividend and the reconstruction check still passes.
+V_VOTES = {H1: "withheld", G4: "floor110"}
+PREDICTED = {"plus10": 110, "floor110": 110, "withheld": 100}
 REFUNDED = {H6: 12_000}  # tickets refunded in the Place pool (in the pool row, on no runner)
 MID_VOTES = (260_000, 180_000, 140_000, 110_000, 90_000, 70_000, 60_000, 40_000, 30_000, 20_000)
 
@@ -907,7 +981,9 @@ def place_votes(race: Race, profile: str) -> dict[int, int]:
 
     plus10: the favourite holds 70% and the other two placed runners 3% and 2%. The profit left
     after the placed stakes (5% of sales) leaves the favourite 2.4 yen a ticket, so it is paid 100,
-    and payout plus its top-ups are 85.1% of sales: 110.
+    and payout plus its top-ups are 85.1% of sales: 110 (the other two 150 and 180).
+    floor110: 80%, 3% and 2%. The net pool (80%) does not cover the placed stakes (85%), every
+    placed runner is paid 100, and the top-ups take the total to 93.5% of sales: 110 for all three.
     withheld: 88%, 5% and 4%. The net pool (80%) does not cover the placed stakes (97%), every
     placed runner is paid 100, and the top-ups take the total to 106.7% of sales: 100.
     mid: by final Win price, 26% down to 2%: every placed runner is paid at least 120."""
@@ -917,6 +993,9 @@ def place_votes(race: Race, profile: str) -> dict[int, int]:
     if profile == "plus10":
         unplaced = (50_000, 40_000, 40_000, 35_000, 30_000, 30_000, 25_000)
         return _shares(race, favourite, (700_000, 30_000, 20_000), unplaced)
+    if profile == "floor110":
+        unplaced = (30_000, 25_000, 25_000, 20_000, 20_000, 15_000, 15_000)
+        return _shares(race, favourite, (800_000, 30_000, 20_000), unplaced)
     assert profile == "withheld"
     unplaced = (6_000, 5_000, 5_000, 4_000, 4_000, 3_000, 3_000)
     return _shares(race, favourite, (880_000, 50_000, 40_000), unplaced)
@@ -925,31 +1004,37 @@ def place_votes(race: Race, profile: str) -> dict[int, int]:
 def win_votes(race: Race, profile: str) -> dict[int, int]:
     """The WIN pool's votes, the opposite story: read as Place stakes they flip the prediction."""
     order = sorted(race.final, key=race.final.get)
+    one_sided = (950_000, 10_000, 8_000, 7_000, 6_000, 5_000, 5_000, 4_000, 3_000, 2_000)
     shares = {
-        "plus10": (950_000, 10_000, 8_000, 7_000, 6_000, 5_000, 5_000, 4_000, 3_000, 2_000),
+        "plus10": one_sided,
+        "floor110": one_sided,
         "withheld": (300_000, 160_000, 120_000, 100_000, 90_000, 70_000, 60_000, 50_000, 30_000,
                      20_000),
     }.get(profile, MID_VOTES)  # fmt: skip
     return dict(zip(order, shares, strict=True))
 
 
-def reference_floor_dividend(votes: dict[int, int], placed, horse: int) -> int:
-    """The Place dividend per 100 yen JRA pays `horse`, from first principles (04 §1.3): sales are
-    the pool's tickets (refunds excluded) x 100; the net pool, 80% of sales, first returns the
-    placed stakes; the profit left is split equally over the placed horses and paid per ticket,
-    rounded down to 10 yen (100 when nothing is left). A horse paid 100 is topped up to 110, 10
-    yen a ticket on every placed horse paid 100, unless payout plus top-ups exceed sales."""
+def reference_place_dividends(votes: dict[int, int], placed) -> dict[int, int]:
+    """The Place dividend per 100 yen JRA pays each placed horse, from first principles (04 §1.3):
+    sales are the pool's tickets (refunds excluded) x 100; the net pool, 80% of sales, first
+    returns the placed stakes; the profit left is split equally over the placed horses and paid
+    per ticket, rounded down to 10 yen (100 when nothing is left). A horse paid 100 is topped up to
+    110, 10 yen a ticket on every placed horse paid 100, unless payout plus top-ups exceed sales."""
     sales = 100 * sum(votes.values())
     profit = sales * (1 - PLACE_TAKEOUT) - sum(100 * votes[h] for h in placed)
     paid = {}
     for h in placed:
         per_ticket = profit / len(placed) / votes[h] if profit > 0 else 0.0
         paid[h] = 100 + int(per_ticket // 10) * 10
-    if paid[horse] > 100:
-        return paid[horse]
     payout = sum(paid[h] * votes[h] for h in placed)
     top_ups = sum(10 * votes[h] for h in placed if paid[h] == 100)
-    return 100 if payout + top_ups > sales else 110
+    floor = 100 if payout + top_ups > sales else 110
+    return {h: d if d > 100 else floor for h, d in paid.items()}
+
+
+def reference_floor_dividend(votes: dict[int, int], placed, horse: int) -> int:
+    """The Place dividend per 100 yen JRA pays `horse` (`reference_place_dividends`)."""
+    return reference_place_dividends(votes, placed)[horse]
 
 
 def realised_cell(dividend: float) -> str:
@@ -995,6 +1080,15 @@ class Scenario:
     late: bool = False  # B: every row not available at t (and the final capture) changes
     holdout: bool = True  # the synthetic holdout day's rows are in the store (all but D)
     votes: dict = field(default_factory=dict)  # race -> another Place votes profile (V)
+    # review round 1 of b9a6b6d
+    untimed: frozenset = frozenset()  # races whose captures carry no post_utc (N, N0)
+    # (day, venue) -> ("sidecar" or "card", minutes added to the true post): post_times_for (N)
+    schedule: dict = field(default_factory=dict)
+    scratched: dict = field(default_factory=dict)  # race -> horse scratched after t (S)
+    place: dict = field(default_factory=dict)  # race -> {horse: realised Place dividend} (M)
+    no_place_at_t: frozenset = frozenset()  # races with no PLACE row at t (W, W1, P)
+    place_at_t: dict = field(default_factory=dict)  # race -> the only horses priced at t (P)
+    votes_file: str = "parquet"  # "garbage" (U) or "missing" (U0)
 
 
 def store_schema(table: str) -> pa.Schema:
@@ -1016,10 +1110,15 @@ def write_store(data_dir: Path, scenario: Scenario) -> None:
     )
     jravan = data_dir / "processed" / "jravan"
     jravan.mkdir(parents=True)
-    pq.write_table(
-        pa.Table.from_pylist(votes, schema=jravan_votes.POOL_VOTES_SCHEMA),
-        jravan / jravan_votes.FILENAME,
-    )
+    if scenario.votes_file == "parquet":
+        pq.write_table(
+            pa.Table.from_pylist(votes, schema=jravan_votes.POOL_VOTES_SCHEMA),
+            jravan / jravan_votes.FILENAME,
+        )
+    elif scenario.votes_file == "garbage":
+        (jravan / jravan_votes.FILENAME).write_bytes(b"PAR1 a truncated download, not parquet")
+    else:
+        assert scenario.votes_file == "missing"
 
     finals = {r.race_id: {**r.final, **scenario.final.get(r.race_id, {})} for r in races}
     meetings = {race_keys(r.race_id)["meeting_id"]: race_keys(r.race_id) for r in races}
@@ -1042,8 +1141,14 @@ def write_store(data_dir: Path, scenario: Scenario) -> None:
             }
             for r in races
         ],
-        "runners": [row for r in races for row in runner_rows(r, finals[r.race_id])],
-        "dividends": [row for r in races for row in dividend_rows(r)],
+        "runners": [
+            row
+            for r in races
+            for row in runner_rows(r, finals[r.race_id], scenario.scratched.get(r.race_id))
+        ],
+        "dividends": [
+            row for r in races for row in dividend_rows(r, scenario.place.get(r.race_id))
+        ],
     }
     for name, rows in tables.items():
         pq.write_table(
@@ -1052,34 +1157,58 @@ def write_store(data_dir: Path, scenario: Scenario) -> None:
 
     by_day: dict[str, list[dict]] = {}
     for race in LOGGED:
-        post, s = post_of(race.race_id), timedelta(seconds=1)
-        at_t = scenario.at_t.get(race.race_id, race.at_t)
+        post, s, race_id = post_of(race.race_id), timedelta(seconds=1), race.race_id
+        at_t = scenario.at_t.get(race_id, race.at_t)
         late = mirrored(race.final) if scenario.late else race.final
         paying = {
             (row["pool"], row["combination"]): row["dividend"]
-            for row in dividend_rows(race)
+            for row in dividend_rows(race, scenario.place.get(race_id))
             if row["pool"] in ("WIN", "PLACE", "QUINELLA_PLACE")
         }
         shift = 1.7 if scenario.late else 1.0
+        timed = race_id not in scenario.untimed
+        place = race_id not in scenario.no_place_at_t and scenario.place_at_t.get(race_id, True)
+        before = {"timed": timed, "place": place}  # the captures on the board at t
+        after = {"timed": timed, "scratched": {scenario.scratched.get(race_id)} - {None}}
         rows = [
             # T-20 (the A board at t in every scenario), T-3 (the board at t)
-            *board_capture(race.race_id, post - timedelta(minutes=20),
-                           post - timedelta(minutes=20) + 3 * s, race.at_t, totals=0.35),
-            *board_capture(race.race_id, post - timedelta(minutes=3),
-                           post - timedelta(minutes=3) + 2 * s, at_t, totals=0.75),
+            *board_capture(race_id, post - timedelta(minutes=20),
+                           post - timedelta(minutes=20) + 3 * s, race.at_t, totals=0.35, **before),
+            *board_capture(race_id, post - timedelta(minutes=3),
+                           post - timedelta(minutes=3) + 2 * s, at_t, totals=0.75, **before),
             # taken before t but fetched after it, then the final capture: not on the board at t
-            *board_capture(race.race_id, post - timedelta(minutes=2, seconds=20),
-                           post - timedelta(seconds=100), late, totals=0.9 * shift),
-            *board_capture(race.race_id, post + timedelta(minutes=1),
+            *board_capture(race_id, post - timedelta(minutes=2, seconds=20),
+                           post - timedelta(seconds=100), late, totals=0.9 * shift, **after),
+            *board_capture(race_id, post + timedelta(minutes=1),
                            post + timedelta(minutes=1) + 5 * s, late, final=True,
-                           totals=shift, paying=paying),
+                           totals=shift, paying=paying, **after),
         ]  # fmt: skip
-        by_day.setdefault(race.race_id.split(":")[1], []).extend(rows)
+        by_day.setdefault(race_id.split(":")[1], []).extend(rows)
     for day, rows in by_day.items():
         table = pa.Table.from_pylist(rows, schema=ODDS_SCHEMA)
         pq.write_table(table, folder / "odds_timeseries" / f"{day}.parquet")
+    write_schedules(data_dir, scenario.schedule)
     if scenario.holdout:  # never opened: reading it would fail
         (folder / "odds_timeseries" / f"{HOLDOUT_DAY}.parquet").write_bytes(b"holdout: unread")
+
+
+def write_schedules(data_dir: Path, schedule: dict) -> None:
+    """The scheduled post times `board.snapshot.post_times_for` reads (N): a `<VENUE>.races.json`
+    sidecar beside the day's odds logs (the logger's own writer), or HKTrack's stored card
+    `processed/jra/upcoming/jra_<day>_<VENUE>/races.parquet` (post_time_local in JST)."""
+    for (day, venue), (kind, minutes) in schedule.items():
+        posts = {no: post_of(rid(day, venue, no)) + timedelta(minutes=minutes) for no in POST_LOCAL}
+        if kind == "sidecar":
+            sidecar = data_dir / "odds_snapshots" / "jra" / day / f"{venue}.races.json"
+            odds_log.write_post_times(
+                sidecar, posts, datetime.fromisoformat(day).replace(tzinfo=UTC)
+            )
+            continue
+        assert kind == "card"
+        card = data_dir / "processed" / "jra" / "upcoming" / f"jra_{day}_{venue}" / "races.parquet"
+        card.parent.mkdir(parents=True)
+        local = [posts[no].astimezone(JST).isoformat() for no in sorted(posts)]
+        pq.write_table(pa.table({"race_no": sorted(posts), "post_time_local": local}), card)
 
 
 def use_synthetic_holdout(mp: pytest.MonkeyPatch) -> None:
@@ -1189,7 +1318,40 @@ SCENARIOS = {
     "E": lambda: (Scenario(final=E_FINAL), owner_config()),
     "F": lambda: (Scenario(), owner_config(l7_entropy_cut_points=list(F_CUTS))),
     "V": lambda: (Scenario(votes=V_VOTES), owner_config()),
+    # review round 1 of b9a6b6d
+    "N": lambda: (Scenario(untimed=UNTIMED, schedule=SCHEDULE), owner_config()),
+    "N0": lambda: (Scenario(untimed=frozenset(LOGGED_IDS)), owner_config()),
+    "S": lambda: (Scenario(scratched={SCRATCH_RACE: SCRATCH_HORSE}), owner_config()),
+    "M": lambda: (Scenario(place=mispriced()), owner_config()),
+    "W": lambda: (Scenario(no_place_at_t=frozenset(LOGGED_IDS)), owner_config()),
+    "W1": lambda: (Scenario(no_place_at_t=frozenset(LOGGED_IDS) - {G2}), owner_config()),
+    "P": lambda: (Scenario(no_place_at_t=frozenset({G5}), place_at_t={G1: {2}}), owner_config()),
+    "U": lambda: (Scenario(votes_file="garbage"), owner_config()),
+    "U0": lambda: (Scenario(votes_file="missing"), owner_config()),
 }
+LOGGED_IDS = tuple(race.race_id for race in LOGGED)
+# N: D3 TOK's captures keep their post_utc beside a stale sidecar (one minute late) that must not
+# override it; D3 KYO's carry none and HKTrack's card gives the post; D4's carry none and the
+# sidecar gives it.
+UNTIMED = frozenset({G3, G4, G5, G6, G7, G8})
+SCHEDULE = {
+    (D3, "TOK"): ("sidecar", 1),
+    (D3, "KYO"): ("card", 0),
+    (D4, "TOK"): ("sidecar", 0),
+    (D4, "KYO"): ("sidecar", 0),
+}
+# S: G7's favourite at t is excluded at the gate after t (the final results mark it scratched)
+SCRATCH_RACE, SCRATCH_HORSE = G7, 6
+# M: a non-floor placed horse's realised Place dividend, 30 yen above its reconstruction
+MISPRICED_RACE, MISPRICED_HORSE, MISPRICE = H6, 2, 30
+VALIDATION_TOLERANCE = 10  # yen per 100 staked, in the frozen spec
+
+
+def mispriced() -> dict:
+    race = RACES[MISPRICED_RACE]
+    paid = reference_place_dividends(place_votes(race, VOTES[MISPRICED_RACE]), race.finish)
+    assert paid[MISPRICED_HORSE] > 110  # not at the floor
+    return {MISPRICED_RACE: {MISPRICED_HORSE: paid[MISPRICED_HORSE] + MISPRICE}}
 
 
 @pytest.fixture(scope="module")
@@ -1614,3 +1776,389 @@ def test_each_scored_variant_is_a_ranked_row_against_its_comparator(study):
         for line in text.splitlines():
             if VERDICT.search(line.lower()):
                 assert any(word in line.lower() for word in VERDICT_NEGATIONS), (name, line)
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 1 of b9a6b6d: the post-time fallback, scratches after t, the reconstruction check,
+# Plus-10 coverage at t, L2's no-bet race, the realised counts without the votes
+# ---------------------------------------------------------------------------------------------
+
+# The floor-bound placed favourites at t: race -> (favourite on the Win board at t, realised Place
+# dividend), by hand from the fixture (the favourite's PLACE low figure at t at most 1.1, placed).
+AT_T_FLOOR_FAVOURITES = {G1: (2, 110), G4: (1, 100), G6: (10, 110)}
+EXOTIC_LEGS = {"QUINELLA_PLACE": 2, "QUINELLA": 2, "FORECAST": 2, "TRIO": 3, "TIERCE": 3}
+ORDERED_POOLS = ("FORECAST", "TIERCE")
+SCORED_CONTENT = re.compile(r"return|difference|realised|predicted|favourites|placed")
+STATUS_WORDS = re.compile(r"(?i)\b(scored|failed|pending|withheld)\b")
+SCHEDULED_SOURCE = re.compile(r"post_times_for|races\.json|sidecar|\bcard\b")
+
+
+def place_paid(race: Race) -> dict[int, float]:
+    return {
+        int(r["combination"]): r["dividend"] for r in dividend_rows(race) if r["pool"] == "PLACE"
+    }
+
+
+def same_content(a: dict, b: dict) -> bool:
+    """The same status and scored figures (returns, differences, the 100-vs-110 counts), other
+    metrics (provenance counts among them) aside."""
+
+    def scored_part(record):
+        metrics = [m for m in record["metrics"] if SCORED_CONTENT.search(m["metric"])]
+        return {"status": record["status"], "metrics": metrics}
+
+    return same(scored_part(a), scored_part(b))
+
+
+def table_rows(text: str) -> list[list[str]]:
+    """The cells of each markdown table row in `text` (separator rows left out)."""
+    rows = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("|") and not set(line.strip()) <= set("|-: "):
+            rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
+    return rows
+
+
+def rows_naming(outcome: Outcome, variant: str) -> list[list[str]]:
+    """Every table row of every written file with a cell that is `variant`."""
+    return [
+        cells for _, text, _ in outcome.writes for cells in table_rows(text) if variant in cells
+    ]
+
+
+def reported_pending(outcome: Outcome, variant: str) -> bool:
+    return any("data pending" in cell for cells in rows_naming(outcome, variant) for cell in cells)
+
+
+def public_report(outcome: Outcome) -> str:
+    """The main report: the one markdown file written on the jra store alone."""
+    found = [
+        text
+        for path, text, sources in outcome.writes
+        if path.suffix == ".md" and not is_withheld(sources)
+    ]
+    assert len(found) == 1, [str(path) for path, _, _ in outcome.writes]
+    return found[0]
+
+
+def plus10_names(outcome: Outcome) -> dict[str, str]:
+    """The 100-vs-110 checks' variants: 'final' (the look-ahead one) and 'at t'."""
+    found: dict[str, str] = {}
+    for record in outcome.records:
+        if record["hypothesis_id"] == "L2" and cross_tab(record):
+            tag = "final" if is_look_ahead(record) else "at t" if is_at_t(record) else None
+            assert tag and tag not in found, record["variant"]
+            found[tag] = record["variant"]
+    assert set(found) == {"final", "at t"}, found
+    return found
+
+
+def realised_counts(record: dict) -> dict[str, tuple[float, int]]:
+    """The record's realised-only cells (`realised_<r>`, no prediction in the name)."""
+    cells: dict[str, tuple[float, int]] = {}
+    for m in record["metrics"]:
+        name = m["metric"].lower()
+        found = re.search(r"realised_(above_110|100|110)(?!\d)", name)
+        if found and "predicted" not in name:
+            assert found.group(1) not in cells, (record["variant"], name)
+            cells[found.group(1)] = (m["value"], m["n"])
+    return cells
+
+
+def paired_means(record: dict) -> tuple[float, float, int]:
+    """(the rule's mean return, the comparator's, n) of a scored paired comparison."""
+    (diff,) = [m for m in record["metrics"] if "difference" in m["metric"] and m["lo"] is not None]
+    n = diff["n"]
+    (rule,) = side_returns(record["metrics"], "rule", n)
+    (comparator,) = side_returns(record["metrics"], "comparator", n)
+    return rule["value"], comparator["value"], n
+
+
+def is_comparison(record: dict) -> bool:
+    """A scored L2, L3 or L7 paired comparison (the 100-vs-110 check is not one)."""
+    if record["hypothesis_id"] not in RULES or record["status"] != "scored":
+        return False
+    return not any(
+        "realised" in m["metric"] or "predicted" in m["metric"] for m in record["metrics"]
+    )
+
+
+def numbers_in(value) -> list[float]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return [float(value)]
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, list):
+        return [x for v in value for x in numbers_in(v)]
+    return []
+
+
+def numbers_under(value, part: str) -> list[float]:
+    """The numbers held under every key whose name holds `part`."""
+    if isinstance(value, dict):
+        return [
+            x
+            for k, v in value.items()
+            for x in (numbers_in(v) if part in str(k).lower() else numbers_under(v, part))
+        ]
+    if isinstance(value, list):
+        return [x for v in value for x in numbers_under(v, part)]
+    return []
+
+
+def holds_text(value, text: str) -> bool:
+    if isinstance(value, str):
+        return value == text
+    if isinstance(value, dict):
+        value = list(value.values())
+    return isinstance(value, list) and any(holds_text(v, text) for v in value)
+
+
+def test_the_board_at_t_falls_back_to_the_scheduled_post_time(study):
+    """Review 1 (high): a capture without post_utc takes post_times_for's scheduled post, t is that
+    post - 2 min; the capture's own post_utc wins; with neither the race is data pending."""
+    a, n, n0 = study("A"), study("N"), study("N0")
+    # the fixture: N's stale sidecar (D3 TOK, one minute late) would put the capture fetched at
+    # T-1:40 on the board at t, and G1's floor runner (2) is not at the floor there
+    assert RACES[G1].at_t[2] <= 1.1 < RACES[G1].final[2]
+    assert {(r.split(":")[1], r.split(":")[2]) for r in UNTIMED} | {(D3, "TOK")} == set(SCHEDULE)
+
+    ra, rn, rn0 = a.by_variant(), n.by_variant(), n0.by_variant()
+    at_t = [name for name, record in ra.items() if is_at_t(record)]
+    assert [name for name in at_t if ra[name]["status"] == "scored"]
+    assert n.spec_hash == a.spec_hash  # the schedule is data, not the spec
+    for name in at_t:  # the scheduled post gives the same t as the capture's own
+        assert same_content(ra[name], rn[name]), (name, rn[name]["status"], rn[name]["metrics"])
+    # the run says where the post time came from
+    assert SCHEDULED_SOURCE.search(json.dumps([n.spec, *(rn[name] for name in at_t)]))
+    for name in at_t:  # neither the capture nor a schedule: data pending, not a board
+        assert rn0[name]["status"] == "failed", name
+        assert reported_pending(n0, name), name
+
+
+def scratch_shares(record: dict) -> tuple[float, float]:
+    """(rule, comparator): the share of the record's tickets in SCRATCH_RACE holding the scratched
+    horse, from the frozen rules on the race's board at t."""
+    horse, win = SCRATCH_HORSE, RACES[SCRATCH_RACE].at_t
+    pool, cut, rule = record["params"]["pool"], record["params"].get("cut"), record["hypothesis_id"]
+    legs = EXOTIC_LEGS.get(pool, 1)
+    ranks = {h: 1 + sum(o < win[h] for o in win.values()) for h in win}
+
+    def sets(horses) -> list[tuple[int, ...]]:
+        if pool in ORDERED_POOLS:
+            return list(itertools.permutations(horses, legs))
+        return list(itertools.combinations(sorted(horses), legs))
+
+    comparator = sets(HORSES)
+    if rule == "L2":  # every set priced on the pool's board at t, less those at the floor
+        low = {
+            "WIN": lambda s: win[s[0]],
+            "PLACE": lambda s: place_of(win[s[0]])[0],
+            "QUINELLA_PLACE": lambda s: wide_of(win[s[0]], win[s[1]])[0],
+        }[pool]
+        kept = [s for s in comparator if low(s) > 1.1]
+    elif rule == "L3" and legs == 1:  # the runners priced at most the cut at t
+        kept = [s for s in comparator if win[s[0]] <= cut]
+    elif rule == "L3":  # the combinations whose worst rank at t is better than the cut
+        kept = [s for s in comparator if max(ranks[h] for h in s) < cut]
+    else:  # L7: the favourite's ticket or the top-3 box at t, in a race the rule does not skip
+        kept = comparator = sets(sorted(win, key=win.get)[: 3 if legs > 1 else 1])
+
+    def share(tickets) -> float:
+        return sum(horse in s for s in tickets) / len(tickets)
+
+    return share(kept), share(comparator)
+
+
+def test_a_runner_scratched_after_t_is_selected_and_refunded(study):
+    """Review 1 (high): selection at t reads the board at t, not the final results. The favourite
+    at t, excluded after t, is still the favourite, still in the box and every set, and each
+    ticket holding it is refunded (stake back) though the store has no refund row for it."""
+    a, s = study("A"), study("S")
+    race, horse = RACES[SCRATCH_RACE], SCRATCH_HORSE
+    # the fixture: the horse is the favourite at t and unplaced (a ticket holding it loses in A),
+    # in a race L7 does not skip at t (no handicap, not the flattest quintile)
+    assert min(race.at_t, key=race.at_t.get) == horse and horse not in race.finish
+    assert race.weight_type != "handicap"
+    assert entropy_quintile(reference_entropy(race.at_t), CUTS) < 5
+    # the jra store says scratched, and holds no refund row
+    assert not any(r["is_refund"] for r in dividend_rows(race))
+
+    ra, rs = a.by_variant(), s.by_variant()
+    checked = Counter()
+    for name, record in ra.items():
+        if not (is_at_t(record) and is_comparison(record)):
+            continue
+        rule_a, comparator_a, n = paired_means(record)
+        assert rs[name]["status"] == "scored", name
+        rule_s, comparator_s, n_s = paired_means(rs[name])
+        assert n_s == n, name  # the race stays paired, on the same tickets
+        rule_share, comparator_share = scratch_shares(record)
+        assert rule_share > 0 and comparator_share > 0, name
+        # each ticket holding the horse returns its stake instead of losing: the race's return
+        # rises by the share of such tickets, the mean by that over n
+        got = (rule_s - rule_a, comparator_s - comparator_a)
+        want = (rule_share / n, comparator_share / n)
+        assert all(
+            math.isclose(x, y, rel_tol=1e-9, abs_tol=1e-12) for x, y in zip(got, want, strict=True)
+        ), (name, got, want)
+        checked[record["hypothesis_id"]] += 1
+    assert all(checked[rule] for rule in RULES), checked
+
+
+def test_the_place_payout_reconstruction_is_checked_before_the_cross_tab(study):
+    """Review 1 (high): the 100-vs-110 check validates its reconstructed Place dividends against
+    the realised ones of every placed horse of its races; the check is in the (withheld) record,
+    its tolerance in the frozen spec; a miss above the tolerance fails the record."""
+    a, m, v = study("A"), study("M"), study("V")
+    # the fixture: every placed horse of the check's races is within one 10-yen step of the
+    # reference payout of its votes (A's and V's), the non-floor ones exactly; M misprices one
+    # non-floor horse by more than the tolerance
+    non_floor = 0
+    for profiles in (VOTES, VOTES | V_VOTES):
+        for race_id in (*FLOOR_FAVOURITES, *AT_T_FLOOR_FAVOURITES):
+            race = RACES[race_id]
+            want = reference_place_dividends(place_votes(race, profiles[race_id]), race.finish)
+            paid = place_paid(race)
+            for h in race.finish:
+                assert abs(paid[h] - want[h]) <= VALIDATION_TOLERANCE, (race_id, h)
+                if want[h] > 110:
+                    assert paid[h] == want[h], (race_id, h)
+                    non_floor += 1
+    assert non_floor
+    assert MISPRICED_RACE in FLOOR_FAVOURITES and MISPRICE > VALIDATION_TOLERANCE
+    assert {
+        race: {h: d + MISPRICE for h, d in place_paid(RACES[race]).items() if h == MISPRICED_HORSE}
+        for race in (MISPRICED_RACE,)
+    } == mispriced()
+
+    for outcome in (a, m):  # the tolerance is frozen with the family
+        tolerances = numbers_under(outcome.spec, "tolerance")
+        assert tolerances and set(tolerances) == {VALIDATION_TOLERANCE}, tolerances
+
+    names = plus10_names(a)
+    races = {"final": len(FLOOR_FAVOURITES), "at t": len(AT_T_FLOOR_FAVOURITES)}
+    for outcome in (a, v):  # within the tolerance: scored, with the check in the record
+        for tag, name in names.items():
+            record = outcome.by_variant()[name]
+            assert record["status"] == "scored", (tag, name)
+            checks = [x for x in record["metrics"] if re.search("validat", x["metric"].lower())]
+            assert checks, (tag, [x["metric"] for x in record["metrics"]])
+            # every placed horse of its races, the non-floor ones included
+            assert max(x["n"] for x in checks) >= 3 * races[tag], (tag, checks)
+            assert is_withheld(record["sources"]), (tag, record["sources"])
+
+    record = m.by_variant()[names["final"]]  # a miss above the tolerance: not a prediction
+    assert record["status"] == "failed", record["metrics"]
+    rows = rows_naming(m, names["final"])
+    assert any("failed" in cells for cells in rows), rows
+    assert not reported_pending(m, names["final"]), rows
+
+
+def test_plus10_at_t_counts_a_race_only_with_a_place_price_at_t(study):
+    """Review 1 (medium): a race with Win prices at t but no PLACE price for its favourite at t is
+    not covered; with no covered race the at-t check is data pending, never scored with n = 0."""
+    a, w, w1 = study("A"), study("W"), study("W1")
+    name = plus10_names(a)["at t"]
+    # the fixture: G2's favourite at t has a PLACE price at t, off the floor
+    favourite = min(RACES[G2].at_t, key=RACES[G2].at_t.get)
+    assert place_of(RACES[G2].at_t[favourite])[0] > 1.1
+
+    record = w.by_variant()[name]  # the Place board arrives after t in every race
+    assert record["status"] == "failed", record["metrics"]
+    assert reported_pending(w, name)
+    record = w1.by_variant()[name]  # one covered race, its favourite off the floor: a zero
+    assert record["status"] == "scored", name
+    assert not any(value for value, _ in cross_tab(record).values())
+    assert not any(value for value, _ in realised_counts(record).values())
+    assert not reported_pending(w1, name)
+
+
+def place_floor_returns(race: Race, lows: dict[int, float]) -> tuple[float, float]:
+    """L2 on one race's PLACE board at t (horse -> low figure): the (rule, comparator) return per
+    unit staked at the realised dividends; the rule's side returns its stake when it bets none."""
+    paid = place_paid(race)
+
+    def back(horses) -> float:
+        return sum(paid.get(h, 0.0) for h in horses) / (100 * len(horses))
+
+    kept = [h for h, low in lows.items() if low > 1.1]
+    return (back(kept) if kept else 1.0), back(list(lows))
+
+
+def test_l2_keeps_a_no_bet_race_in_the_pairing(study):
+    """Review 1 (medium): a race whose every priced ticket is at the floor stays paired, the
+    rule's side returning its stake (stake_back, in the spec); only missing board data drops."""
+    a, p = study("A"), study("P")
+    # the fixture: on G1's PLACE board at t only its floor runner (2) is priced in P; G5 has no
+    # PLACE board at t in P
+    lows_g1 = {h: place_of(RACES[G1].at_t[h])[0] for h in HORSES}
+    lows_g5 = {h: place_of(RACES[G5].at_t[h])[0] for h in HORSES}
+    assert [h for h, low in lows_g1.items() if low <= 1.1] == [2]
+
+    ra, rp = a.by_variant(), p.by_variant()
+    (name,) = [
+        n
+        for n, record in ra.items()
+        if record["hypothesis_id"] == "L2"
+        and is_at_t(record)
+        and is_comparison(record)
+        and record["params"]["pool"] == "PLACE"
+    ]
+    rule_a, comparator_a, n_a = paired_means(ra[name])
+    assert n_a == len(LOGGED)
+    assert rp[name]["status"] == "scored", name
+    rule_p, comparator_p, n_p = paired_means(rp[name])
+    assert n_p == n_a - 1  # G1 stays (no bet is a decision), G5 drops (no board)
+
+    rule_g1, comparator_g1 = place_floor_returns(RACES[G1], lows_g1)
+    rule_g5, comparator_g5 = place_floor_returns(RACES[G5], lows_g5)
+    no_bet, floor_ticket = place_floor_returns(RACES[G1], {2: lows_g1[2]})
+    assert 2 in RACES[G1].finish and no_bet == 1.0
+    assert floor_ticket == place_paid(RACES[G1])[2] / 100
+    assert math.isclose(rule_p * n_p, rule_a * n_a - rule_g1 - rule_g5 + no_bet, rel_tol=1e-9)
+    assert math.isclose(
+        comparator_p * n_p,
+        comparator_a * n_a - comparator_g1 - comparator_g5 + floor_ticket,
+        rel_tol=1e-9,
+    )
+    assert holds_text(p.spec["rules"]["L2"], "stake_back")
+
+
+def test_realised_floor_dividends_survive_without_the_votes(study):
+    """Review 1 (medium): a missing or unreadable pool_votes.parquet leaves the realised counts of
+    the jra store in a scored record and in the public report; only the prediction is gone."""
+    a = study("A")
+    names = plus10_names(a)
+    # the fixture: the realised cells by hand, at the final price and at t
+    derived = {}
+    for race in LOGGED:
+        favourite = min(race.at_t, key=race.at_t.get)
+        if place_of(race.at_t[favourite])[0] <= 1.1 and favourite in race.finish:
+            derived[race.race_id] = (favourite, place_paid(race)[favourite])
+    assert derived == AT_T_FLOOR_FAVOURITES
+    want = {
+        "final": Counter(realised_cell(paid) for _, paid in FLOOR_FAVOURITES.values()),
+        "at t": Counter(realised_cell(paid) for _, paid in AT_T_FLOOR_FAVOURITES.values()),
+    }
+    assert want["final"] == {"110": 4, "100": 2} and want["at t"] == {"110": 2, "100": 1}
+
+    shown = [  # the public report's realised rows in A (no status row)
+        cells
+        for cells in table_rows(public_report(a))
+        if set(names.values()) & set(cells) and not STATUS_WORDS.search(" ".join(cells))
+    ]
+    assert shown
+    for outcome in (a, study("U"), study("U0")):
+        for tag, name in names.items():
+            record = outcome.by_variant()[name]
+            assert record["status"] == "scored", (tag, name)
+            got = {cell: value for cell, (value, _) in realised_counts(record).items() if value}
+            assert got == dict(want[tag]), (tag, got)
+            if outcome is not a:  # no prediction without the votes
+                assert not any(value for value, _ in cross_tab(record).values()), tag
+        text = public_report(outcome)
+        assert not re.search(r"(?i)no floor-bound favourites? placed", text)
+        rows = table_rows(text)
+        for cells in shown:
+            assert any(set(cells) <= set(other) for other in rows), cells

@@ -1,9 +1,9 @@
 # The floor, tail and favourite avoidance study's pre-registered inputs (ticket #82, Family L rules
 # L2, L3 and L7; read by countries/japan/studies/avoidance_price.py, owner_inputs). Every value is
 # the owner's, answered on #82 on 2026-11-26, and is frozen in the run registry (family
-# japan-family-l-floor-tail-favourite) before any race is read: the freeze line is the record (owner
-# reframe 2026-11-27), so this file carries no sign-off key. Changing a value needs a new family,
-# not a code change.
+# japan-family-l-floor-tail-favourite-v2, after japan-family-l-floor-tail-favourite) before any race
+# is read: the freeze line is the record (owner reframe 2026-11-27), so this file carries no sign-off
+# key. Changing a value needs a new family, not a code change.
 
 # L3 (E12): the Win/Place tail cut-offs in decimal odds, #77's convention (fractional 50/1 and
 # 100/1). A runner whose WIN odds on the board are strictly above x is in the tail; a Place ticket is

@@ -10,7 +10,8 @@ the flagged tickets (the comparator) and the option without them (the rule) are 
 is no pass/fail here and nothing is adopted here.
 
 - L2 'never bet at the floor' (E14): the base strategy's tickets minus those whose own board price
-  is at or below 1.1 (WIN odds, the PLACE or Wide low figure), against the same tickets.
+  is at or below 1.1 (WIN odds, the PLACE or Wide low figure), against the same tickets. A race
+  whose every priced ticket is at the floor stays paired, the rule's side returning its stake.
 - L3 'avoid the tail' (E12): no WIN or PLACE ticket on a runner whose WIN odds are above a cut-off,
   and no exotic combination holding a runner ranked 9th or worse (13th or worse as a variant) by
   WIN odds, against the same strategy with the tail included.
@@ -21,11 +22,17 @@ is no pass/fail here and nothing is adopted here.
   favourites, against the Plus-10 prediction from the race's settled PLACE pool in the jravan
   `pool_votes` table (JRA-VAN H1 votes, #368; `plus10_inputs: jravan_pool_votes`). The votes are a
   label of the settled race, never a selection input, and are read lazily: the row groups whose
-  race_id statistics can hold a wanted race, the PLACE rows of those races, five columns.
+  race_id statistics can hold a wanted race, the PLACE rows of those races, five columns. Before
+  the predicted x realised table, every placed horse of the check's races has its dividend
+  reconstructed and compared with the realised one; a miss above the frozen tolerance fails the
+  record. Votes that cannot be read leave the realised counts scored and the prediction empty.
 
 Selection: on history the final price (runners.win_odds), labelled LOOK_AHEAD; on logged days the
-board at t (odds_timeseries through `read_asof` at post_utc - 2 min, D2). Cut points (tail odds,
-ranks, entropy quintiles) come from the frozen spec, never from the data scored.
+board at t (odds_timeseries through `read_asof` at the post - 2 min, D2: the post_utc of the
+race's captures, else the scheduled post of `board.snapshot.post_times_for`). At t a runner priced
+on the board is a runner, whatever the results say later; a ticket holding a runner the results
+mark scratched is refunded (stake back). Cut points (tail odds, ranks, entropy quintiles) come from
+the frozen spec, never from the data scored.
 
 D21: the votes are JRA-VAN's. The 100-vs-110 records declare the `jravan` source, and their table
 goes only to a private report and CSV written through `write_report` with that source (never
@@ -68,6 +75,7 @@ from horsetrack.core.eval.registry import RunRecord, default_registry
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.pricing import _EPS as FLOOR_TOLERANCE
 from horsetrack.core.pricing import clean_odds
+from horsetrack.countries.japan.board import snapshot
 from horsetrack.countries.japan.jravan import votes as jravan_votes
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START
 from horsetrack.countries.japan.odds_log import POOL_TOTAL
@@ -335,8 +343,19 @@ def entropy_quintile(entropy: float, cut_points: tuple[float, float, float, floa
 # =========================================================================== the study
 
 TICKET = 82
-FAMILY_ID = "japan-family-l-floor-tail-favourite"
+# v2: the review of 2026-11-27 changed the pre-registration (the post-time fallback, selection at
+# t with refunds, the reconstruction check, L2's no-bet race); the first family keeps its records
+FAMILY_ID = "japan-family-l-floor-tail-favourite-v2"
+SUPERSEDES = "japan-family-l-floor-tail-favourite"
 CONFIG_NAME = "avoidance_price"
+STAKE_BACK, NO_BET_RETURN = "stake_back", 1.0  # L2's no-bet race returns its stake, as L7's skip
+VALIDATION_TOLERANCE = 10  # yen per 100 staked: one 10-yen rounding step of a Place dividend
+POST_TIME = (
+    "the post_utc of the race's latest capture carrying one; when no capture carries it, the "
+    "scheduled post of board.snapshot.post_times_for(day, venue) (the <VENUE>.races.json sidecar "
+    "beside the odds log, else HKTrack's stored card); with neither, the race has no t and is data "
+    "pending"
+)
 BOOTSTRAP_SEED = 82  # reproducibility only; scoring.yaml signs no seed
 TAIL_RANKS = (9, 13)  # the request (E12): a runner ranked 9th or worse; 13th or worse a variant
 FLATTEST = 5
@@ -501,6 +520,10 @@ def _rules(owner: dict) -> dict:
             "rule": "the base strategy's tickets less those whose own price on the board is at or "
             "below the floor: WIN odds, the PLACE low figure, the Wide low figure",
             "comparator": "the same tickets, those at the floor included (08 §5.1)",
+            "no_bet_race": STAKE_BACK,
+            "no_bet_rule": "a race whose every ticket the comparator bets is at the floor stays "
+            "paired: the rule bets nothing there and its side returns its stake (1.0), as L7's "
+            "stake_back; only a race without board data (the comparator bets nothing) drops",
             "pools": {FINAL: ["WIN"], AT_T: list(BOARD_POOLS)},
             "pools_why": "the store holds no final PLACE or Wide board on history",
             "plus10": {
@@ -510,8 +533,27 @@ def _rules(owner: dict) -> dict:
                 "the floor (100 or 110)",
                 AT_T: "the favourite on the Win board at t whose PLACE low figure at t is at or "
                 "below the floor, and that placed",
+                "coverage": "a race counts once its favourite is priced: at t, once the favourite "
+                "at t has a PLACE price at t; with no race counted the check is data pending",
                 "inputs": owner["plus10_inputs"],
                 "prediction": PLACE_RULE if owner["plus10_inputs"] == JRAVAN_VOTES else "none",
+                "validation": (
+                    {
+                        "rule": "before the predicted x realised table, every placed horse of "
+                        "the check's races (the floor favourite and the others) has its Place "
+                        "dividend reconstructed from the votes (the prediction's rule: the Place "
+                        "rule, then predicted_floor_dividend for a horse paid 100) and compared "
+                        "with the realised one; one off by more than the tolerance fails the "
+                        "record with its reason, and no table is scored",
+                        "tolerance_yen_per_100": VALIDATION_TOLERANCE,
+                        "why": "JRA rounds Place dividends down to 10 yen, and a floor horse's "
+                        "100 or 110 is the check's own question",
+                    }
+                    if owner["plus10_inputs"] == JRAVAN_VOTES
+                    else "none"
+                ),
+                "unreadable_votes": "a missing or unreadable pool_votes file leaves the realised "
+                "counts (jra store) scored and the prediction empty",
             },
         },
         "L3": {
@@ -523,6 +565,8 @@ def _rules(owner: dict) -> dict:
             "the Win board (1 + the runners priced strictly shorter); each rank its own variant",
             "rank_pools": list(EXOTIC_POOLS),
             "comparator": "the same strategy with the tail included (08 §5.1)",
+            "no_bet_race": "dropped: the rule bets nothing only when every priced runner is in "
+            "the tail, which a full board cannot give (its favourite is inside every cut)",
         },
         "L7": {
             "entropy_cut_points": list(owner["l7_entropy_cut_points"]),
@@ -556,6 +600,14 @@ def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
     return {
         "family_id": FAMILY_ID,
         "ticket": TICKET,
+        "supersedes": {
+            "family_id": SUPERSEDES,
+            "why": "the review of #82 (2026-11-27): t from the scheduled post time when the "
+            "captures carry none; selection at t from the board at t alone, a runner scratched "
+            "after t refunded; the 100-vs-110 check's coverage at t and its reconstruction check "
+            "with a frozen tolerance; L2's no-bet race kept under stake_back; the realised counts "
+            "kept when the votes cannot be read",
+        },
         "hypotheses": {
             "L2": "E14: the return of the base strategy less its tickets at the floor against "
             "the same tickets; R3: the 100-vs-110 check of floor-bound placed favourites",
@@ -577,9 +629,10 @@ def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
         "selections": {
             LOOK_AHEAD: "history: the final Win odds (runners.win_odds), so the choice sees the "
             "closing price",
-            avoidance.BOARD_AT_T: "odds_timeseries through read_asof at the race's post_utc - "
+            avoidance.BOARD_AT_T: "odds_timeseries through read_asof at the race's post time - "
             f"{minutes} min, the latest snapshot per (pool, combination)",
         },
+        "post_time": POST_TIME,
         "decision_time_min": minutes,
         "board_fields": {
             "odds_timeseries": BOARD_COLUMNS,
@@ -587,7 +640,13 @@ def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
             "races": RACE_COLUMNS,
             "dividends": DIVIDEND_COLUMNS,
         },
-        "starters": "runners not is_scratched; a scratched horse is never bet",
+        "starters": {
+            LOOK_AHEAD: "runners not is_scratched (the results know the scratches)",
+            avoidance.BOARD_AT_T: "every runner priced on the board at t, whatever the results "
+            "say later (a runner scratched by t is unpriced on the board)",
+            "settlement": "a ticket holding a runner that runners.is_scratched marks is refunded, "
+            "stake back, as JRA settles it (the store holds no refund row for a scratch)",
+        },
         "races": "development races with status 'run' from 2014-06-07 (D10); holdout days unread",
         "variants": variants,
         "family_size": len(variants),  # D17: every cut point counts
@@ -622,12 +681,27 @@ Paired = avoidance.Paired
 VotesReader = Callable[[Iterable[str]], dict[str, PlacePool]]
 
 
+def _board_runners(view: RaceView) -> frozenset[int]:
+    """Every horse of a priced row on the view's board (a scratched runner's rows are unpriced)."""
+    board = view.board
+    rows = board.loc[board["combination"].ne(POOL_TOTAL)]
+    priced = ~np.isnan(clean_odds(rows["odds"].to_numpy()))
+    return frozenset(h for c in rows["combination"].to_numpy()[priced] for h in _horses(c))
+
+
 class _Ctx(_Context):
     """#81's context over this study's pools, with the handicaps, the races' conditions labels,
-    the Place votes reader and cached boards (final and at t)."""
+    the runners the results mark scratched, the Place votes reader and cached boards (final and
+    at t)."""
 
     def __init__(self, data: StudyData, spec: dict, place_votes: VotesReader | None) -> None:
         super().__init__(data, spec, pools=PRICE_POOLS)
+        runners = data.runners.loc[data.runners["race_id"].isin(set(self.race_ids))]
+        out = runners.loc[runners["is_scratched"].eq(True).to_numpy(dtype=bool, na_value=False)]
+        self.scratched = {
+            race: frozenset(int(h) for h in horses)
+            for race, horses in out.groupby("race_id")["horse_no"]
+        }
         races = self.races.set_index("race_id")
         handicap = races["weight_type"].eq("handicap").to_numpy(dtype=bool, na_value=False)
         self.handicaps = frozenset(races.index[handicap])
@@ -651,11 +725,32 @@ class _Ctx(_Context):
     def paying(self) -> dict:
         return _paying(self.dividends)
 
+    def runners(self, view: RaceView) -> frozenset[int]:
+        """Who may be bet: at the final price the race's starters (look-ahead: the results know
+        the scratches); at t every runner priced on the board at t, whatever the results say
+        later (a runner scratched after t is refunded when settled)."""
+        if view.selection == LOOK_AHEAD:
+            return self.starters_of(view.race_id)
+        return _board_runners(view)
+
+    def settle(self, race: str, tickets: Iterable[Ticket]) -> tuple[int, float, str | None]:
+        """#81's `_settle` (stake, payout, why the race cannot be settled), with every ticket
+        holding a runner the results mark scratched refunded, stake back: JRA refunds it, and the
+        store holds no refund row for a scratch."""
+        out, kept, back = self.scratched.get(race, frozenset()), [], 0
+        for ticket in tickets:
+            if out and out & set(_horses(ticket.combination)):
+                back += int(ticket.stake)
+            else:
+                kept.append(ticket)
+        stake, payout, why = _settle(kept, self.paying.get(race, {}))
+        return stake + back, payout + back, why
+
     def selection(self, run: _Run) -> tuple[str, list[str], Callable[[str], RaceView], str]:
         """(label, races, view, why a variant without a paired race has none)."""
         if run.tag == FINAL:
             return LOOK_AHEAD, self.race_ids, self.final_win_view, "no paired race"
-        pending = f"data pending: no {run.board_pool} board logged at t"
+        pending = f"data pending: no {run.board_pool} board at t (none logged, or no post time)"
         return self.at_t, self.logged(run.board_pool), self.view_at_t, pending
 
 
@@ -679,28 +774,59 @@ def _entropy(view: RaceView) -> float:
 
 
 def _floor_sides(ctx: _Ctx, pool: str, changed: set) -> Sides:
-    """L2: every set of the starters priced in `pool` on the board, less those at the floor."""
+    """L2: every set of the runners priced in `pool` on the board, less those at the floor; the
+    rule's empty list is a no-bet race (every priced set at the floor), not missing data."""
 
     def comparator(view: RaceView) -> list[Ticket] | None:
-        sets = _priced_sets(view, pool, ctx.starters_of(view.race_id))
+        sets = _priced_sets(view, pool, ctx.runners(view))
         return [Ticket(pool, c, ctx.unit) for c, _ in sets] or None
 
     def rule(view: RaceView) -> list[Ticket] | None:
-        sets = _priced_sets(view, pool, ctx.starters_of(view.race_id))
+        sets = _priced_sets(view, pool, ctx.runners(view))
         floor = at_floor(pd.Series([o for _, o in sets], dtype=float)).tolist()
         kept = [Ticket(pool, c, ctx.unit) for (c, _), f in zip(sets, floor, strict=True) if not f]
         if len(kept) < len(sets):
             changed.add(view.race_id)
-        return kept or None
+        return kept
 
     return rule, comparator
 
 
+def _tickets_paired(
+    ctx: _Ctx, races: Sequence[str], view, sides: Sides, no_bet: float | None = None
+) -> Paired:
+    """#81's `compare`, settled by `ctx.settle` (a ticket holding a runner scratched after the
+    choice is refunded). A race the comparator bets nothing in (no board data) drops; a race the
+    rule bets nothing in drops too or, with `no_bet`, stays paired with the rule's side returning
+    `no_bet` per unit staked (L2's stake_back: 1.0)."""
+    rule, comparator = sides
+    returns, reasons = {}, {}
+    for race in races:
+        seen = view(race)
+        ours, theirs = rule(seen), comparator(seen)
+        if not theirs:
+            reasons[race] = "no priced ticket on the board (the comparator bets nothing)"
+            continue
+        if not ours and no_bet is None:
+            reasons[race] = "the rule does not cover it"
+            continue
+        settled = [ctx.settle(race, tickets) for tickets in (theirs, *([ours] if ours else []))]
+        why = next((w for _, _, w in settled if w), None)
+        if why is None and min(s for s, _, _ in settled) <= 0:
+            why = "a side stakes nothing"
+        if why:
+            reasons[race] = why
+            continue
+        back = [payout / stake for stake, payout, _ in settled]
+        returns[race] = (back[1] if ours else float(no_bet), back[0])
+    return list(races), returns, reasons
+
+
 def _tail_sides(ctx: _Ctx, pool: str, max_odds: float, changed: set) -> Sides:
-    """L3's odds rule: a `pool` ticket on every starter priced on the Win board, less the tail."""
+    """L3's odds rule: a `pool` ticket on every runner priced on the Win board, less the tail."""
 
     def comparator(view: RaceView) -> list[Ticket] | None:
-        starters = ctx.starters_of(view.race_id)
+        starters = ctx.runners(view)
         runners = sorted(h for h in _win_prices(view) if h in starters)
         return [Ticket(pool, str(h), ctx.unit) for h in runners] or None
 
@@ -722,18 +848,22 @@ def _sets_of(pool: str, n: int) -> int:
 def _rank_paired(
     ctx: _Ctx, pool: str, cut: int, races: Sequence[str], view, changed: set
 ) -> Paired:
-    """L3's rank rule on every combination of the starters, flat: a losing set stakes the same
+    """L3's rank rule on every combination of the runners, flat: a losing set stakes the same
     and pays nothing on both sides, so per race the returns come from the paying rows and the
-    number of sets each side bets (C(n, k), or n!/(n-k)! in an ordered pool)."""
+    number of sets each side bets (C(n, k), or n!/(n-k)! in an ordered pool). A set holding a
+    runner the results mark scratched is refunded on each side that bets it."""
     returns, reasons = {}, {}
     for race in races:
-        ranks, starters = win_ranks(view(race)), ctx.starters_of(race)
+        seen = view(race)
+        ranks, starters = win_ranks(seen), ctx.runners(seen)
+        out = ctx.scratched.get(race, frozenset()) & starters
         rows = [(c, d, r) for (p, c), (d, r) in ctx.paying.get(race, {}).items() if p == pool]
-        n = len(starters)
-        m = sum(1 for h in starters if ranks.get(h, cut) < cut)
+        kept = {h for h in starters if ranks.get(h, cut) < cut}
+        n, m = len(starters), len(kept)
         no_dividend = any(not r and not math.isfinite(d) for _, d, r in rows)
         why = avoidance._first(
             (not rows, f"no {pool} dividend row"),
+            (not ranks, "no Win price on the board"),
             (any(h not in ranks for h in starters), "a starter has no Win price on the board"),
             (_sets_of(pool, n) == 0, f"fewer than {LEGS[pool]} starters"),
             (_sets_of(pool, m) == 0, "the rule bets no set"),
@@ -745,6 +875,8 @@ def _rank_paired(
         paid = [(c, d / ctx.unit) for c, d, r in rows if not r and set(_horses(c)) <= starters]
         rule = sum(p for c, p in paid if worst_member_rank(c, ranks) < cut)
         comparator = sum(p for _, p in paid)
+        rule += _sets_of(pool, m) - _sets_of(pool, len(kept - out))  # refunded sets: stake back
+        comparator += _sets_of(pool, n) - _sets_of(pool, n - len(out))
         if m < n:
             changed.add(race)
         returns[race] = (rule / _sets_of(pool, m), comparator / _sets_of(pool, n))
@@ -760,7 +892,8 @@ def _skip_paired(
     changed: set,
 ) -> Paired:
     """L7: the comparator's tickets in every race; the rule's are the same except in a race it
-    skips, which returns its stake (1.0)."""
+    skips, which returns its stake (1.0). A ticket holding a runner scratched after the choice is
+    refunded."""
     returns, reasons = {}, {}
     for race in races:
         seen = view(race)
@@ -771,7 +904,7 @@ def _skip_paired(
         if skip is None:
             reasons[race] = "no normalised entropy (under two priced runners)"
             continue
-        stake, payout, why = _settle(tickets, ctx.paying.get(race, {}))
+        stake, payout, why = ctx.settle(race, tickets)
         if why:
             reasons[race] = why
             continue
@@ -787,7 +920,7 @@ def _favourite_tickets(ctx: _Ctx, run: _Run) -> Callable[[RaceView], list[Ticket
 
     def tickets(view: RaceView) -> list[Ticket] | None:
         k = 3 if run.kind == "box" else 1
-        top = _favourites(view, ctx.starters_of(view.race_id), k, ties)
+        top = _favourites(view, ctx.runners(view), k, ties)
         if top is None:
             return None
         if run.kind != "box":
@@ -825,9 +958,10 @@ def _placed_horses(paying: Mapping) -> list[int]:
     return sorted(int(c) for (p, c), (_, refund) in paying.items() if p == "PLACE" and not refund)
 
 
-def _predict(ctx: _Ctx, race: str, horse: int, pool: PlacePool | None) -> tuple[int | None, str]:
-    """(the favourite's predicted Place dividend, '') from the race's settled PLACE pool, or
-    (None, why there is none)."""
+def _reconstruct(ctx: _Ctx, race: str, pool: PlacePool | None) -> tuple[dict | None, str]:
+    """({each placed horse: its Place dividend per 100 yen as rebuilt from the race's settled
+    PLACE pool (PLACE_RULE, then predicted_floor_dividend for a horse paid 100)}, ''), or (None,
+    why there is none)."""
     placed = _placed_horses(ctx.paying.get(race, {}))
     if pool is None:
         return None, "no PLACE votes for the race"
@@ -841,27 +975,61 @@ def _predict(ctx: _Ctx, race: str, horse: int, pool: PlacePool | None) -> tuple[
         return None, f"no Place payout rate ({type(exc).__name__})"
     sales = float(pool.tickets * ctx.unit)
     paid, total, top_ups = place_payout(pool.votes, placed, sales, rate)
-    if paid[horse] > WITHHELD_DIVIDEND:
-        return paid[horse], ""
-    return predicted_floor_dividend(total, top_ups, sales), ""
+    floor = predicted_floor_dividend(total, top_ups, sales)
+    return {h: d if d > WITHHELD_DIVIDEND else floor for h, d in paid.items()}, ""
 
 
-def _plus10(ctx: _Ctx, run: _Run, races: Sequence[str], view) -> tuple[list, dict] | None:
+def _validation(
+    ctx: _Ctx, run: _Run, rebuilt: Mapping[str, tuple[dict | None, str]]
+) -> tuple[list, dict, str | None]:
+    """The reconstruction check: every placed horse of the rebuilt races, its rebuilt Place
+    dividend against the realised one. (metrics, its table row, the failure or None)."""
+    tolerance = ctx.spec["rules"]["L2"]["plus10"]["validation"]["tolerance_yen_per_100"]
+    errors = [
+        abs(dividend - ctx.paying[race][("PLACE", str(h))][0])
+        for race, (paid, _) in rebuilt.items()
+        if paid is not None
+        for h, dividend in paid.items()
+    ]
+    n, worst = len(errors), max(errors, default=0.0)
+    within = sum(1 for e in errors if e <= tolerance + 1e-9)
+    metrics = [
+        _metric(FOLD, "validation_placed_horses_checked", n, n),
+        _metric(FOLD, "validation_within_tolerance", within, n),
+        _metric(FOLD, "validation_max_abs_error_yen", worst, n),
+    ]
+    row = {"variant": run.name, "placed horses checked": n, "within tolerance": within}
+    row |= {"largest miss (yen per 100)": worst, "tolerance (yen per 100)": tolerance}
+    failure = None
+    if within < n:
+        failure = (
+            f"the Place payout reconstruction check failed: {n - within} of {n} placed horses "
+            f"are off their realised dividend by more than {tolerance} yen per 100"
+        )
+    return metrics, {"plus10_validation": [row | {"result": failure or "within"}]}, failure
+
+
+def _plus10(
+    ctx: _Ctx, run: _Run, races: Sequence[str], view
+) -> tuple[list, dict, str | None] | None:
     """The 100-vs-110 check: each floor-bound placed favourite's realised Place dividend and, under
     jravan_pool_votes, its predicted dividend from the race's settled PLACE pool (PLACE_RULE),
-    cross-tabulated predicted x realised. None when no race has a favourite priced on its board
-    (a board at t without prices is data pending, not zero favourites)."""
+    cross-tabulated predicted x realised once the reconstruction check passes. (metrics, tables,
+    the failure or None); None when no race counts (a favourite priced on its board and, at t,
+    with a PLACE price at t): data pending, not zero favourites."""
     ties = ctx.l7["favourite_ties"]
     inputs = ctx.spec["rules"]["L2"]["plus10"]["inputs"]
-    floor_bound, rows, priced = 0, [], 0
+    floor_bound, rows, covered = 0, [], 0
     for race in races:
         seen = view(race)
-        top = _favourites(seen, ctx.starters_of(race), 1, ties)
+        top = _favourites(seen, ctx.runners(seen), 1, ties)
         if top is None:
             continue
-        priced += 1
         horse = str(top[0])
         price = _price(seen.board, "PLACE", horse) if run.tag == AT_T else math.nan
+        if run.tag == AT_T and math.isnan(price):
+            continue  # no PLACE price for the favourite at t: the race does not count
+        covered += 1
         if run.tag == AT_T and not bool(at_floor(pd.Series([price])).iloc[0]):
             continue
         dividend, refund = ctx.paying.get(race, {}).get(("PLACE", horse), (math.nan, False))
@@ -874,10 +1042,11 @@ def _plus10(ctx: _Ctx, run: _Run, races: Sequence[str], view) -> tuple[list, dic
                 {"variant": run.name, "race_id": race, "horse_no": int(horse)}
                 | {"place low at t": price, "realised": dividend}
             )
-    if not priced:
+    if not covered:
         return None
     realised = Counter(_cell(r["realised"]) for r in rows)
-    metrics = [_metric(FOLD, "floor_bound_favourites", floor_bound, floor_bound)]
+    metrics = [_metric(FOLD, "races_counted", covered, len(races))]
+    metrics.append(_metric(FOLD, "floor_bound_favourites", floor_bound, floor_bound))
     metrics.append(_metric(FOLD, "placed", len(rows), floor_bound))
     public = []
     for key in CELLS:
@@ -889,33 +1058,46 @@ def _plus10(ctx: _Ctx, run: _Run, races: Sequence[str], view) -> tuple[list, dic
     if inputs != JRAVAN_VOTES:
         for row in rows:
             row |= {"predicted": "data pending", "why": inputs}
-        return metrics, {"plus10": public, "plus10_races": rows}
+        return metrics, {"plus10": public, "plus10_races": rows}, None
 
     if ctx.place_votes is None:
         raise ValueError("plus10_inputs is jravan_pool_votes and no pool_votes reader is given")
-    pools = ctx.place_votes([r["race_id"] for r in rows])
+    wanted = sorted({r["race_id"] for r in rows})
+    try:
+        pools, unread = ctx.place_votes(wanted) if wanted else {}, ""
+    except (OSError, pa.ArrowException) as exc:  # the realised counts stand without the votes
+        pools, unread = {}, f"pool_votes unreadable ({type(exc).__name__})"
+    rebuilt = {
+        race: (None, unread) if unread else _reconstruct(ctx, race, pools.get(race))
+        for race in wanted
+    }
     for row in rows:
-        predicted, why = _predict(ctx, row["race_id"], row["horse_no"], pools.get(row["race_id"]))
-        row |= {"predicted": predicted, "why": why}
+        paid, why = rebuilt[row["race_id"]]
+        row |= {"predicted": None if paid is None else paid[row["horse_no"]], "why": why}
     done = [r for r in rows if r["predicted"] is not None]
-    cells = Counter((_cell(r["predicted"]), _cell(r["realised"])) for r in done)
+    checked, tables, failure = _validation(ctx, run, rebuilt)
+    metrics += checked
     metrics.append(_metric(FOLD, "favourites_predicted", len(done), len(rows)))
-    cross = []
-    for p, r in itertools.product(CELLS, CELLS):
-        metrics.append(_metric(FOLD, f"predicted_{p}_realised_{r}", cells[(p, r)], len(done)))
-        cross.append({"variant": run.name, "predicted": p, "realised": r} | {"n": cells[(p, r)]})
     reasons = Counter(r["why"] for r in rows if r["predicted"] is None)
-    unpredicted = [{"variant": run.name, "why": w, "favourites": n} for w, n in reasons.items()]
-    return metrics, {
+    tables |= {
         "plus10": public,
         "plus10_races": rows,
-        "plus10_cells": cross,
-        "plus10_unpredicted": unpredicted,
+        "plus10_unpredicted": [
+            {"variant": run.name, "why": w, "favourites": n} for w, n in reasons.items()
+        ],
         "plus10_counts": [
             {"variant": run.name, "floor-bound favourites": floor_bound, "placed": len(rows)}
             | {"predicted": len(done), "not predicted": len(rows) - len(done)}
         ],
     }
+    if failure:  # the payout rule does not reproduce the realised dividends: no table scored
+        return metrics, tables, failure
+    cells = Counter((_cell(r["predicted"]), _cell(r["realised"])) for r in done)
+    cross = []
+    for p, r in itertools.product(CELLS, CELLS):
+        metrics.append(_metric(FOLD, f"predicted_{p}_realised_{r}", cells[(p, r)], len(done)))
+        cross.append({"variant": run.name, "predicted": p, "realised": r} | {"n": cells[(p, r)]})
+    return metrics, tables | {"plus10_cells": cross}, None
 
 
 SIDES = {"rule_mean_return": "rule", "comparator_mean_return": "comparator"}
@@ -985,17 +1167,23 @@ def _score_run(study: Study, ctx: _Ctx, run: _Run) -> None:
             return
         if found is None:
             study.variants.append(replace(variant, error=pending))
-        else:
-            study.attempt(variant, lambda: found)
+            return
+        metrics, tables, failure = found
+        for key, rows in tables.items():  # the realised counts stand when the check fails
+            study.tables.setdefault(key, []).extend(rows)
+        done = (
+            replace(variant, error=failure) if failure else replace(variant, metrics=tuple(metrics))
+        )
+        study.variants.append(done)
         return
     if run.kind in ("floor", "tail_odds"):
 
         def compute(changed):
-            if run.kind == "floor":
-                sides = _floor_sides(ctx, run.pool, changed)
+            if run.kind == "floor":  # a no-bet race returns its stake (L2's stake_back)
+                sides, no_bet = _floor_sides(ctx, run.pool, changed), NO_BET_RETURN
             else:
-                sides = _tail_sides(ctx, run.pool, run.cut, changed)
-            return ctx.compare(races, sides, view)
+                sides, no_bet = _tail_sides(ctx, run.pool, run.cut, changed), None
+            return ctx.paired(_tickets_paired(ctx, races, view, sides, no_bet), label)
 
     elif run.kind == "tail_rank":
 
@@ -1036,11 +1224,13 @@ def compute_study(data: StudyData, spec: dict, place_votes: VotesReader | None =
 
 NOTE = (
     "Per paired race: each side's payout / stake at final dividends (L7: a race the rule skips"
-    " returns its stake). 'rule return' and 'comparator return' are each side's mean over the"
-    " paired races and 'paired difference' the mean of rule minus comparator; each lower and"
-    " upper is the (1 - level) and level quantile of the bootstrap over meetings (D7, one-sided"
-    " bounds). Positive is the rule returning more than its comparator. 'races changed' counts the"
-    " paired races where the rule drops a ticket or skips the race. 'final (look-ahead)' rows"
+    " returns its stake; L2: so does a race whose every ticket is at the floor; a ticket holding a"
+    " runner scratched after the choice is refunded). 'rule return' and 'comparator return' are"
+    " each side's mean over the paired races and 'paired difference' the mean of rule minus"
+    " comparator; each lower and upper is the (1 - level) and level quantile of the bootstrap"
+    " over meetings (D7, one-sided bounds). Positive is the rule returning more than its"
+    " comparator. 'races changed' counts the paired races where the rule drops a ticket or skips"
+    " the race. 'final (look-ahead)' rows"
     " choose by the final price and are look-ahead; 'board at t' rows choose by odds_timeseries at"
     " t. Every row is ranked below; nothing here is adopted."
 )
@@ -1134,14 +1324,16 @@ def render_report(study: Study, spec: dict, about: dict, private: str | None = N
         "",
     ]
     plus10 = study.tables.get("plus10")
-    lines.append(_markdown_table(plus10) if plus10 else "_None: no floor-bound favourite placed._")
+    lines.append(_markdown_table(plus10) if plus10 else "_None: no race counted for the check._")
     if withheld:
         lines += [
             "",
             "The predicted dividend of each (100 or 110 under Plus-10), against the realised one,"
-            " is built on the JRA-VAN H1 Place votes (jravan pool_votes, #368) and is withheld"
-            f" (D21): it is in the private report `{private}` under the data directory, never in"
-            " the repository.",
+            " is built on the JRA-VAN H1 Place votes (jravan pool_votes, #368), and so is the"
+            " reconstruction check run before it (every placed horse of the check's races, its"
+            " rebuilt Place dividend against the realised one, within the frozen tolerance). The"
+            f" check, the table and their status are withheld (D21): they are in the private report"
+            f" `{private}` under the data directory, never in the repository.",
         ]
     else:
         lines += ["", "The prediction is pending: plus10_inputs is data_pending."]
@@ -1152,9 +1344,11 @@ def render_report(study: Study, spec: dict, about: dict, private: str | None = N
     for v in study.variants:
         row = {"rule": v.hypothesis_id, "variant": v.name}
         row["status"] = "failed" if v.error else "scored"
-        if v.error:  # a withheld variant's error text could carry a figure: only pending shows
-            shown = v.name not in withheld or v.error.startswith("data pending")
-            row["why"] = v.error if shown else f"withheld (D21): see `{private}`"
+        pending = bool(v.error) and v.error.startswith("data pending")
+        if v.name in withheld and not pending:  # its status could tell the check's result (D21)
+            row |= {"status": "withheld (D21)", "why": f"see `{private}`"}
+        elif v.error:
+            row["why"] = v.error
         variants.append(row)
     lines += ["", "## Variants (one registry record each)", "", _markdown_table(variants), ""]
     return "\n".join(lines)
@@ -1191,6 +1385,16 @@ def render_private(study: Study, spec: dict, about: dict) -> str:
         if study.tables.get("plus10_counts")
         else "_None._",
         "",
+        "## The reconstruction check",
+        "",
+        "Every placed horse of the check's races: its Place dividend rebuilt from the votes (the"
+        " prediction's rule) against the realised one. A miss above the frozen tolerance fails the"
+        " record and no predicted x realised table is scored.",
+        "",
+        _markdown_table(study.tables["plus10_validation"])
+        if study.tables.get("plus10_validation")
+        else "_None._",
+        "",
         "## Predicted against realised Place dividend (yen per 100)",
         "",
         _markdown_table(study.tables["plus10_cells"])
@@ -1215,6 +1419,34 @@ def _csv(study: Study, key: str, columns: list[str]) -> str:
     return pd.DataFrame(study.tables.get(key, []), columns=columns).to_csv(index=False)
 
 
+class _ScheduledPosts:
+    """The scheduled post (aware UTC) of a race whose captures carry no post_utc, from
+    `board.snapshot.post_times_for` (read once per meeting), or None. A race on a holdout day is
+    a ValueError (D14): its card is not read. `timed` and `untimed` are the races asked."""
+
+    def __init__(self) -> None:
+        self.meetings: dict[tuple[date, str], dict[int, datetime]] = {}
+        self.timed: set[str] = set()
+        self.untimed: set[str] = set()
+
+    def __call__(self, race_id: str) -> datetime | None:
+        _, day, venue, race_no = race_id.split(":")
+        when = date.fromisoformat(day)
+        if is_holdout_day(COUNTRY, when):
+            raise ValueError(f"{race_id} is on a holdout day (D14): its post time is not read")
+        if (when, venue) not in self.meetings:
+            self.meetings[(when, venue)] = snapshot.post_times_for(when, venue)
+        post = self.meetings[(when, venue)].get(int(race_no))
+        (self.untimed if post is None else self.timed).add(race_id)
+        return post
+
+    def build(self) -> dict[str, str]:
+        """The at-t records' post-time provenance."""
+        where = "board.snapshot.post_times_for (the <VENUE>.races.json sidecar, else the card)"
+        n, m = len(self.timed), len(self.timed | self.untimed)
+        return {f"{SOURCE}_post_times": f"{where}: {n} of the {m} races without a post_utc"}
+
+
 def _votes_build(path: Path) -> dict[str, str]:
     where = f"processed/{VOTES_SOURCE}/{jravan_votes.FILENAME}"
     value = f"{where}@{_digest([path])}" if path.is_file() else f"{where} (missing)"
@@ -1235,7 +1467,10 @@ def run_study(out_dir: Path | None = None) -> dict:
     registry = default_registry(COUNTRY)
     spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any race is read or settled
 
-    data = avoidance.read_development(minutes, pools=PRICE_POOLS, race_columns=RACE_COLUMNS)
+    posts = _ScheduledPosts()
+    data = avoidance.read_development(
+        minutes, pools=PRICE_POOLS, race_columns=RACE_COLUMNS, post_time=posts
+    )
     builds = avoidance.store_builds(data.board_files)
     withheld = _withheld_runs(spec)
     reader, votes_build = None, {}
@@ -1244,12 +1479,22 @@ def run_study(out_dir: Path | None = None) -> dict:
         reader, votes_build = functools.partial(read_place_votes, path=path), _votes_build(path)
     study = compute_study(data, spec, reader)
     del data
+    study.counts |= {
+        "races_timed_by_the_scheduled_post": len(posts.timed),
+        "races_without_any_post_time": len(posts.untimed),
+    }
+    at_t_builds = {**builds, **posts.build()}
 
     def record(variant: Variant) -> RunRecord:
-        made = avoidance._record(variant, git_sha, builds, family_id=FAMILY_ID, ticket=TICKET)
+        at_t = variant.components["selection"] != LOOK_AHEAD
+        made = avoidance._record(
+            variant, git_sha, at_t_builds if at_t else builds, family_id=FAMILY_ID, ticket=TICKET
+        )
         if variant.name not in withheld:
             return made
-        return replace(made, sources=(SOURCE, VOTES_SOURCE), data_builds={**builds, **votes_build})
+        return replace(
+            made, sources=(SOURCE, VOTES_SOURCE), data_builds={**made.data_builds, **votes_build}
+        )
 
     existing = registry.records(FAMILY_ID)
     records = [record(v) for v in study.variants]
