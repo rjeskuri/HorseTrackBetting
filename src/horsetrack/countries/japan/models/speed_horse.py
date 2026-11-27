@@ -11,18 +11,24 @@ relative speed and SD, and p_speed via Henery (normal) or PL strengths exp(-mu_i
 - Baseline. A run's baseline is #96's expected top-3 time of its race as of the run's off
   (`race_utc`, or its publication when that is earlier): the par plus the day variant from the
   day's results published strictly before then, so never the run's own race. V, the variant's
-  posterior variance then, joins the run's error. Each baseline is fixed: it reads no result
+  posterior variance then, joins the run's error. This baseline is fixed: it reads no result
   published after its own run, so a run whose result is published before t brings nothing
-  published at or after t, and a result published after every run of the frame reaches no fitted
-  term. The par is the speed model's own, fitted on its frame: runs belong on days the speed model
-  observed, since a run on a day of its fit frame has a par that saw its race and the prior variant.
+  published at or after t, and an observed result published after every run of the frame reaches
+  no fitted term. The par is the speed model's own, fitted on its frame.
+- A run on a (day, group) of the speed model's fit frame (a training-window day: #96 refuses to
+  observe it, so its as-of variant is the prior) has a second baseline, the par plus the fit's
+  in-sample variant of that (day, group) (`SpeedModel.in_sample_variant`), whose variance is V
+  there (the owner on #97, 2026-11-26, Q3 (b)). It is used at t only when every fit race of that
+  (day, group) had its result published strictly before t (a null publication: never); until then
+  the as-of baseline stands, so nothing published at or after t reaches theta at t through it.
 - theta_i is a random walk: its variance grows by `drift_var_per_day` (s^2) per day elapsed
   between offs, from N(m0, s0^2), the population prior, at the horse's first run.
-- pace_r is the share of front runners among the race's rows (the styles given: the caller's,
-  read from earlier races), less its mean over the fit runs; each style has its slope b[style]
-  and a runner without a style none. What pace_r is, is the owner's choice (feature inclusion):
-  this front-runner share (#129's `field_front_share`) stands until the owner settles it. Draw is
-  no term (08's formula has none; `same_day_bias` carries the draw). w_ref is the fit runs' mean
+- pace_r is the field's mean early position from earlier races (the owner on #97, 2026-11-26,
+  Q2 (c)): the mean of the race's rows' non-null `early_pos_mean3` (#129's mean over the horse's
+  newest 3 earlier starts of (first-corner position - 1) / (field size - 1), the caller's, as of
+  t), less its mean over the fit runs (a race with no value left out). A race with no value has
+  no pace term. Each style has its slope b[style] and a runner without a style none. Draw is no
+  term (08's formula has none; `same_day_bias` carries the draw). w_ref is the fit runs' mean
   weight carried.
 - eps is Student-t with `t_df` degrees of freedom and scale sqrt(sigma^2 + V) (normal with that SD
   when t_df is None).
@@ -37,12 +43,15 @@ t, by maximum likelihood over the filter's one-step prediction errors (exact und
 error): given (sigma, s0) and the runs' weights the filter is linear in the data, so (w, b, m0) are
 the generalised least squares of each column's innovations, and (sigma, s0) maximise that profile
 (Nelder-Mead on their logs, each at least SCALE_FLOOR). Under the t error the weights are then
-recomputed by the forward filter at the new terms, until the terms settle. A run without a finish
-time is no observation, and one whose cell has no par is skipped and counted in `n_unseen`.
+recomputed by the forward filter at the new terms, until the terms settle. The fit reads each run
+as `predict` does at a t after every publication: a fit-day run against its in-sample baseline
+when its (day, group) is ever fully resulted. A run without a finish time is no observation, and
+one whose cell has no par is skipped and counted in `n_unseen`.
 
 `predict(race_runners, at_utc)`: theta_i is the filter over that horse's runs whose result was
-published strictly before at_utc (null: never), in off order, then drifted to the card's off (no
-drift before a first run, none backwards); a horse with no such run has the population prior.
+published strictly before at_utc (null: never), in off order, each against the baseline it has at
+at_utc, then drifted to the card's off (no drift before a first run, none backwards); a horse with
+no such run has the population prior.
 gamma, the fit runs' style-weighted mean of b, is the race-level pace term: the card's expected
 top-3 time is #96's at at_utc with pace_s = gamma * pace_r, and
 
@@ -85,7 +94,7 @@ from horsetrack.countries.japan.handicap.factors import STYLES, _draw_group
 from horsetrack.countries.japan.handicap.track_bias import DRAW_LEVELS, LEVELS
 from horsetrack.countries.japan.models.speed import JST, SpeedModel, _instant_ns, _jst_date, _utc_ns
 
-CARD_COLUMNS = ("race_id", "race_utc", "horse_id", "style", "weight_kg", "draw")
+CARD_COLUMNS = ("race_id", "race_utc", "horse_id", "style", "early_pos_mean3", "weight_kg", "draw")
 RUN_COLUMNS = (*CARD_COLUMNS, "finish_time_s", "result_available_utc")
 BIAS_COLUMNS = (*CARD_COLUMNS[:3], "venue", "draw", "style", "finish_pos", "result_available_utc")
 NS_PER_DAY = 86_400 * 10**9
@@ -120,10 +129,18 @@ def _check_styles(style: pd.Series, name: str) -> np.ndarray:
     return style.astype(object).where(style.notna(), None).to_numpy(object)
 
 
-def _front_share(race_id: pd.Series, style: np.ndarray) -> np.ndarray:
-    """Each row's race's share of front runners among its rows."""
-    front = pd.Series((style == "front").astype(float), index=race_id.index)
-    return front.groupby(race_id.to_numpy()).transform("mean").to_numpy()
+def _field_pace(frame: pd.DataFrame, name: str) -> np.ndarray:
+    """Each row's race's mean non-null early_pos_mean3 over its rows; NaN when it has none."""
+    early = frame["early_pos_mean3"].to_numpy(dtype=float, na_value=np.nan)
+    if np.isinf(early).any():
+        raise ValueError(f"{name} has an infinite early_pos_mean3")
+    by_race = pd.Series(early, index=frame.index).groupby(frame["race_id"].to_numpy())
+    return by_race.transform("mean").to_numpy()
+
+
+def _centred(pace: np.ndarray, ref: float) -> np.ndarray:
+    """pace_r: the pace less the fit runs' mean, 0 (no pace term) for a race without one."""
+    return np.where(np.isnan(pace), 0.0, pace - ref)
 
 
 @dataclass(frozen=True)
@@ -203,12 +220,24 @@ def _forward(steps: _Steps, u, s, q: float, p0: float, df: float | None):
 @dataclass(frozen=True)
 class _History:
     """One horse's usable runs in off order: off and publication (ns), residual u from the fitted
-    global terms, error scale^2 sigma^2 + V."""
+    global terms and error scale^2 sigma^2 + V against the as-of baseline, the same against the
+    in-sample baseline, and the instant (ns) after which that one is used (NEVER: not at all)."""
 
     tau: np.ndarray
     pub: np.ndarray
     u: np.ndarray
     s: np.ndarray
+    u_in: np.ndarray
+    s_in: np.ndarray
+    switch: np.ndarray
+
+    def at(self, at_ns: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(off, u, s) of the runs published strictly before at_ns, each on its baseline then."""
+        avail = self.pub < at_ns
+        later = self.switch[avail] < at_ns
+        u = np.where(later, self.u_in[avail], self.u[avail])
+        s = np.where(later, self.s_in[avail], self.s[avail])
+        return self.tau[avail], u, s
 
 
 class HorseSpeed:
@@ -232,7 +261,7 @@ class HorseSpeed:
         self.weight_ref: float | None = None  # w_ref, kg
         self.pace_slopes: dict[str, float] = {}  # b per style, s per unit of pace_r
         self.pace_race: float | None = None  # gamma
-        self.pace_ref: float | None = None  # the fit runs' mean front-runner share
+        self.pace_ref: float | None = None  # the fit runs' mean field early position
         self.n_runs = 0
         self.n_unseen = 0
         self.n_iter = 0
@@ -252,7 +281,7 @@ class HorseSpeed:
         tau_all, _ = _utc_ns(runs["race_utc"], "race_utc")
         pub_all, known_all = _utc_ns(runs["result_available_utc"], "result_available_utc")
         style_all = _check_styles(runs["style"], "runs")
-        pace_all = _front_share(runs["race_id"], style_all)  # over all the race's rows
+        pace_all = _field_pace(runs, "runs")  # over all the race's rows
 
         time = runs["finish_time_s"].to_numpy(dtype=float)
         if np.isinf(time).any():
@@ -263,7 +292,7 @@ class HorseSpeed:
             raise ValueError("weight_kg has a missing or non-finite value on a run with a time")
 
         as_of = np.where(known_all, np.minimum(tau_all, pub_all), tau_all)
-        base, vvar = self._baselines(runs, speed, keys, as_of, timed)
+        base, vvar, base_in, vvar_in, switch = self._baselines(runs, speed, keys, as_of, timed)
         seen = ~np.isnan(base)
         use = np.flatnonzero(timed & seen)
         if use.size == 0:
@@ -274,14 +303,18 @@ class HorseSpeed:
         tau = tau_all[use]
         order = np.lexsort((tau, code))
         use, code, tau = use[order], code[order], tau[order]
-        e = time[use] - base[use]
-        vv = vvar[use]
+        e, e_in = time[use] - base[use], time[use] - base_in[use]
+        vv, vv_in = vvar[use], vvar_in[use]
         style, weight = style_all[use], weight_all[use]
-        weight_ref, pace_ref = float(weight.mean()), float(pace_all[use].mean())
-        x = self._design(weight - weight_ref, style, pace_all[use] - pace_ref)
+        pace = pace_all[use]
+        known_pace = ~np.isnan(pace)
+        pace_ref = float(pace[known_pace].mean()) if known_pace.any() else 0.0
+        weight_ref = float(weight.mean())
+        x = self._design(weight - weight_ref, style, _centred(pace, pace_ref))
         steps = _steps(code, tau, len(horses))
 
-        sigma, s0, coef, n_iter = self._fit_terms(steps, code, e, x, vv)
+        # the fit reads every run as predict does after every publication (the module docstring)
+        sigma, s0, coef, n_iter = self._fit_terms(steps, code, e_in, x, vv_in)
         # everything is fitted: keep it
         self._speed = speed
         self.sigma, self.prior_sd, self.n_iter = sigma, s0, n_iter
@@ -294,32 +327,45 @@ class HorseSpeed:
         self.prior_mean = float(coef[-1])
         self.n_runs, self.n_unseen = int(use.size), int(np.sum(timed & ~seen))
 
-        u = e - x @ coef[:-1] - self.prior_mean
-        s = sigma**2 + vv
+        fitted = x @ coef[:-1] + self.prior_mean
+        u, u_in = e - fitted, e_in - fitted
+        s, s_in = sigma**2 + vv, sigma**2 + vv_in
         pub = np.where(known_all[use], pub_all[use], NEVER)
+        sw = switch[use]
         bounds = np.r_[0, np.flatnonzero(np.diff(code)) + 1, len(code)]
         self._history = {
-            horses[code[lo]]: _History(tau[lo:hi], pub[lo:hi], u[lo:hi], s[lo:hi])
+            horses[code[lo]]: _History(*(a[lo:hi] for a in (tau, pub, u, s, u_in, s_in, sw)))
             for lo, hi in zip(bounds[:-1], bounds[1:], strict=True)
         }
         return self
 
     @staticmethod
     def _baselines(runs, speed, keys, as_of, timed):
-        """Each timed run's expected top-3 time as of `as_of` and the variant's variance then;
-        NaN where its cell has no par."""
+        """Each timed run's expected top-3 time as of `as_of` and the variant's variance then; the
+        same against the in-sample variant of its (day, group) and the instant (ns) that becomes
+        usable after (NEVER, and the as-of values, off the fit frame's days or when one of its
+        races was never published). NaN where the run's cell has no par."""
         n = len(runs)
         base, vvar = np.full(n, np.nan), np.full(n, np.nan)
+        base_in, vvar_in = np.full(n, np.nan), np.full(n, np.nan)
+        switch = np.full(n, NEVER, dtype=np.int64)
         values = {k: runs[k].tolist() for k in (*keys, "race_utc")}
         race_ids = runs["race_id"].tolist()
         cache: dict[tuple, tuple[float, float]] = {}
+        in_cache: dict = {}
         for i in np.flatnonzero(timed):
             key = (race_ids[i], int(as_of[i]))
+            race = None
             if key not in cache:
                 race = {k: values[k][i] for k in values}
                 cache[key] = _baseline(speed, race, int(as_of[i]))
             base[i], vvar[i] = cache[key]
-        return base, vvar
+            if race_ids[i] not in in_cache:
+                race = race or {k: values[k][i] for k in values}
+                in_cache[race_ids[i]] = _in_sample(speed, race)
+            got = in_cache[race_ids[i]]
+            base_in[i], vvar_in[i], switch[i] = (base[i], vvar[i], NEVER) if got is None else got
+        return base, vvar, base_in, vvar_in, switch
 
     @staticmethod
     def _design(weight: np.ndarray, style: np.ndarray, pace: np.ndarray) -> np.ndarray:
@@ -384,7 +430,7 @@ class HorseSpeed:
         weight = card["weight_kg"].to_numpy(dtype=float)
         if not np.isfinite(weight).all():
             raise ValueError("race_runners has a missing or non-finite weight_kg")
-        pace = _front_share(card["race_id"], style) - self.pace_ref
+        pace = _centred(_field_pace(card, "race_runners"), self.pace_ref)
 
         n = len(card)
         top3, vcard = np.empty(n), np.empty(n)
@@ -426,9 +472,9 @@ class HorseSpeed:
             hist = self._history.get(h)
             if hist is None:
                 continue
-            avail = hist.pub < at_ns
-            if avail.any():
-                parts.append((k, hist.tau[avail], hist.u[avail], hist.s[avail]))
+            tau, u, s = hist.at(at_ns)
+            if tau.size:
+                parts.append((k, tau, u, s))
         mean = np.zeros(len(horses))
         var = np.full(len(horses), self.prior_sd**2)
         last = np.full(len(horses), -1, dtype=np.int64)
@@ -456,6 +502,21 @@ def _baseline(speed: SpeedModel, race: dict, at_ns: int) -> tuple[float, float]:
     group = tuple(race[k] for k in speed.spec.variant_keys)
     _, sd = speed.variant(_jst_date(race["race_utc"]), *group, at_utc=at)
     return mean, sd * sd
+
+
+def _in_sample(speed: SpeedModel, race: dict) -> tuple[float, float, int] | None:
+    """(par + the fit's in-sample variant, its variance, the instant in ns after which it is
+    usable) of a race on a fit (day, group) that is ever fully resulted; None otherwise."""
+    group = tuple(race[k] for k in speed.spec.variant_keys)
+    got = speed.in_sample_variant(_jst_date(race["race_utc"]), *group)
+    if got is None or got[2] is None:
+        return None
+    try:
+        par = speed.par(**{k: race[k] for k in speed.spec.par_keys})
+    except KeyError:
+        return None
+    mean, sd, resulted = got
+    return par + mean, sd * sd, int(resulted.as_unit("ns").value)
 
 
 def _start_scales(code: np.ndarray, e: np.ndarray, vvar: np.ndarray) -> np.ndarray:
