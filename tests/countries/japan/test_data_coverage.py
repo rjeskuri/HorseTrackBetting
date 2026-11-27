@@ -117,9 +117,9 @@ JRAVAN_ONLY = {
     "lineages": bloodlines.LINEAGES_SCHEMA.names,
 }
 # the schemas.TABLES tables the jravan builders write (races.py, runners.py, dividends.py,
-# masters.py)
+# masters.py, horse_runs.py)
 JRAVAN_STORE_TABLES = frozenset(
-    {"races", "meetings", "runners", "dividends", "horses", "horse_pedigree"}
+    {"races", "meetings", "runners", "dividends", "horses", "horse_pedigree", "horse_runs"}
 )
 DUMP_TABLE = re.compile(r"records/([A-Z]{4})/([0-9A-Z]{2})")
 VENUE = "QQV"  # a made-up venue code, so a race id never matches a real one
