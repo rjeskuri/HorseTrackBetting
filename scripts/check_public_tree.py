@@ -14,6 +14,8 @@ Rules, by id:
             there that does not start with the synthetic marker (see that folder's README)
   size      a file over 256 KB, except uv.lock (whose content is still scanned)
   jrdb      a JRDB-style data file name: three capital letters, six digits, .txt
+  jravan    a JV-Data file name, in any letter case: a record file ending .jvd, or the JV-Data
+            specification (a name starting JV-Data and ending .xlsx or .pdf)
   secret    a private-key header, or a GitHub, AWS or Slack token
   personal  a home path, an email address other than the two noreply ones, a claude.ai
             artifact link
@@ -31,11 +33,12 @@ import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
-DATA, FIXTURE, SIZE, JRDB, SECRET, PERSONAL = (
+DATA, FIXTURE, SIZE, JRDB, JRAVAN, SECRET, PERSONAL = (
     "data",
     "fixture",
     "size",
     "jrdb",
+    "jravan",
     "secret",
     "personal",
 )
@@ -46,6 +49,12 @@ FIXTURES = "tests/fixtures/"
 SYNTHETIC = FIXTURES + "synthetic/"
 MARKER = b"<!-- synthetic:"
 JRDB_NAME = re.compile(r"[A-Z]{3}[0-9]{6}\.txt")
+# JV-Data names, compared with the file name (the part after the last "/") lowercased.
+JVD_SUFFIX = ".jvd"
+JV_DATA_PREFIX = "jv-data"
+JV_DATA_SPEC_SUFFIXES = (".xlsx", ".pdf")
+JRAVAN_RECORD = "JV-Data record file; licensed data stays under $HORSETRACK_DATA_DIR/raw/jravan"
+JRAVAN_SPEC = "JV-Data specification; it stays under $HORSETRACK_DATA_DIR/specs/jravan"
 
 # Every repetition is bounded or anchored on a literal prefix, so each scan stays linear.
 SECRETS = (
@@ -97,8 +106,14 @@ def _path_violations(path: str, data: bytes) -> Iterator[Violation]:
             yield Violation(path, FIXTURE, "html fixture does not start with the synthetic marker")
     if path != SIZE_EXEMPT and len(data) > LIMIT:
         yield Violation(path, SIZE, f"{len(data)} bytes, over the {LIMIT}-byte limit")
-    if JRDB_NAME.fullmatch(path.rsplit("/", 1)[-1]):
+    name = path.rsplit("/", 1)[-1]
+    if JRDB_NAME.fullmatch(name):
         yield Violation(path, JRDB, "JRDB-style data file name")
+    lowered = name.lower()
+    if lowered.endswith(JVD_SUFFIX):
+        yield Violation(path, JRAVAN, JRAVAN_RECORD)
+    elif lowered.startswith(JV_DATA_PREFIX) and lowered.endswith(JV_DATA_SPEC_SUFFIXES):
+        yield Violation(path, JRAVAN, JRAVAN_SPEC)
 
 
 def _content_violations(path: str, data: bytes) -> Iterator[Violation]:

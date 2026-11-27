@@ -30,11 +30,20 @@ owner accepted the proposed defaults, each conservative relative to JRA's public
     and use them as features', 2026-11-24), #228's outline step 4 from his option-A split
     ('available_utc = published_utc as in #136') and his answer on #87 (usable 'once JRA has
     officially published it (with its publication timestamp)', 2026-11-24).
+11. win_sales (#278): column on published_utc, each publication of a race's Win sales from its
+    own time: a live page's clock, a final page's post + 30 min (the owner's answer on #278).
+12. The JRA-VAN-only tables (#376, the owner's request of 2026-11-26), not store tables (not in
+    `schemas.TABLES`; their schemas are the jravan modules'): `final_odds` and `pool_votes`
+    label_only (labels or conditioners only, never features at t); `jockeys` and `trainers`
+    current_value with `in_view` ("the master row as exported is used, with no history": in
+    every view at any t, the look-ahead documented in docs/specs/as-of.md); `breeding_horses`,
+    `produce` and `lineages` static (known at any t). None has label columns. `horses` stays
+    current_value without `in_view`, refused (#80).
 
 The expected rules below are written from that answer, never read back from the config. The
 leakage tests run the shipped rules over small synthetic tables built from the store's column
-contracts (`core.store.schemas`, `core.store.tables.ARROW_TYPES`) and the odds log's
-(`countries/japan/logger/compact.py` SCHEMA).
+contracts (`core.store.schemas`, `core.store.tables.ARROW_TYPES`), the odds log's
+(`countries/japan/logger/compact.py` SCHEMA) and the jravan modules' schemas.
 """
 
 from __future__ import annotations
@@ -60,6 +69,7 @@ from horsetrack.core.store.asof import (
     read_label,
 )
 from horsetrack.core.store.tables import ARROW_TYPES
+from horsetrack.countries.japan.jravan import bloodlines, masters, odds, votes
 from horsetrack.countries.japan.logger.compact import SCHEMA as ODDS_SCHEMA
 
 UTC = timezone.utc
@@ -97,6 +107,16 @@ VIEW_EXTRA = {"races": frozenset({"post_utc"})}
 POST_RESULTS = ("dividends", "sectionals", "incidents", "running_comments")
 ODDS_LABELS = frozenset({"dividend", "is_refund", "is_final_capture"})
 PEDIGREE_LABELS = frozenset({"source_race_id", "scraped_utc"})
+# the JRA-VAN-only tables (#376): parquet under processed/jravan, not store tables
+JRAVAN_SCHEMAS = {
+    "final_odds": odds.FINAL_ODDS_SCHEMA,
+    "pool_votes": votes.POOL_VOTES_SCHEMA,
+    "jockeys": masters.JOCKEYS_SCHEMA,
+    "trainers": masters.TRAINERS_SCHEMA,
+    "breeding_horses": bloodlines.BREEDING_HORSES_SCHEMA,
+    "produce": bloodlines.PRODUCE_SCHEMA,
+    "lineages": bloodlines.LINEAGES_SCHEMA,
+}
 
 
 def _offset(minutes: int, labels=frozenset(), prefixes: tuple[str, ...] = ()) -> dict:
@@ -123,6 +143,21 @@ OWNER: dict[str, dict] = {
     "jrdb_post_race": {"kind": "label_only"},
     # a published value counts from its 発表 time (#90)
     "track_condition": {"kind": "column", "column": "available_utc"},
+    # per-race Win sales (#278): each publication from its own time; a final figure's time is its
+    # post + 30 min (tests/countries/japan/test_win_sales_store.py pins the view)
+    "win_sales": {"kind": "column", "column": "published_utc"},
+    # The JRA-VAN-only tables (#376, the owner's request, 2026-11-26). The final odds and the votes
+    # are labels or conditioners only, never features at t.
+    "final_odds": {"kind": "label_only"},
+    "pool_votes": {"kind": "label_only"},
+    # The jockey and trainer masters: "the master row as exported is used, with no history", so in
+    # every view at any t (tests/countries/japan/test_jravan_masters.py pins the views).
+    "jockeys": {"kind": "current_value", "in_view": True},
+    "trainers": {"kind": "current_value", "in_view": True},
+    # Pedigree: static, known at any t (tests/countries/japan/test_jravan_bloodlines.py).
+    "breeding_horses": {"kind": "static"},
+    "produce": {"kind": "static"},
+    "lineages": {"kind": "static"},
 }
 VIEW_TABLES = [t for t, o in OWNER.items() if o["kind"] == "offset"]
 LABEL_ONLY = [t for t, o in OWNER.items() if o["kind"] == "label_only"]
@@ -131,6 +166,8 @@ LABEL_ONLY = [t for t, o in OWNER.items() if o["kind"] == "label_only"]
 def _schema(table: str) -> pa.Schema:
     if table == "odds_timeseries":
         return ODDS_SCHEMA
+    if table in JRAVAN_SCHEMAS:
+        return JRAVAN_SCHEMAS[table]
     spec = schemas.TABLES[table]
     return pa.schema([(c, ARROW_TYPES[k]) for c, k in spec.columns.items()])
 
@@ -144,11 +181,19 @@ def rules():
 
 
 def test_the_shipped_config_has_one_rule_per_table_and_nothing_else(rules):
-    assert len(schemas.TABLES) == 13
-    assert set(OWNER) == set(schemas.TABLES) | {"odds_timeseries"}
+    assert len(schemas.TABLES) == 14  # 12, + track_condition (#90), + win_sales (#278)
+    assert len(JRAVAN_SCHEMAS) == 7
+    assert not set(JRAVAN_SCHEMAS) & set(schemas.TABLES)  # #376 leaves them out of the store
+    assert set(OWNER) == set(schemas.TABLES) | {"odds_timeseries"} | set(JRAVAN_SCHEMAS)
     assert set(rules) == set(OWNER)
     for table, rule in rules.items():
         assert rule.table == table
+
+
+@pytest.mark.parametrize("table", list(OWNER))
+def test_only_the_jockey_and_trainer_masters_are_current_values_in_the_views(rules, table):
+    # #376: jockeys and trainers in_view; horses (#80) and every other table without it
+    assert rules[table].in_view is OWNER[table].get("in_view", False)
 
 
 @pytest.mark.parametrize("table", list(OWNER))
@@ -211,6 +256,8 @@ def _value(dtype: pa.DataType, column: str, i: int):
         return RACE_DATES[i]
     if pa.types.is_timestamp(dtype):
         return SCRAPED
+    if pa.types.is_list(dtype) and pa.types.is_string(dtype.value_type):
+        return [f"{column}-{i}-{k}" for k in range(2)]  # produce's pedigree ids (#376)
     if pa.types.is_list(dtype):
         return [i + 1, i + 2] if pa.types.is_integer(dtype.value_type) else [11.5, 12.25]
     raise AssertionError(f"{column}: no synthetic value for {dtype}")
@@ -815,4 +862,6 @@ def test_the_spec_documents_each_shipped_rule(rules, table):
     for name in (rule.column, rule.anchor, rule.fallback):
         if name is not None:
             needles.append(f"`{name}`")
+    if OWNER[table].get("in_view"):  # jockeys and trainers (#376)
+        needles.append("`in_view`")
     assert _documented(doc, table, needles), f"{SPEC.name} does not document {table}: {needles}"

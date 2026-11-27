@@ -3,7 +3,7 @@
 Pure data, no pandas or pyarrow imports, so every store module and test can share it cheaply. The
 tables and columns are HKTrack's (its SPEC section 5), plus `jurisdiction` and the key columns on
 the two JRDB tables, whose per-family columns are declared by the ticket that builds them, and
-JRA's `track_condition` (#90).
+JRA's `track_condition` (#90) and `win_sales` (#278).
 """
 
 from __future__ import annotations
@@ -149,6 +149,17 @@ _SPECS = (
         },
         ("race_date", "venue", "surface", "published_utc"),
     ),
+    # one publication of a race's Win pool sales (ticket #278): tickets sold, the money they are,
+    # and when the figure was published
+    TableSpec(
+        "win_sales",
+        {
+            "jurisdiction": STR, "race_id": STR, "race_date": DATE, "venue": STR, "race_no": INT,
+            "win_tickets": INT, "win_sales_yen": INT, "is_final": BOOL, "published_utc": UTC,
+            "fetched_utc": UTC,
+        },
+        ("race_id", "published_utc"),
+    ),
 )  # fmt: skip
 
 TABLES: dict[str, TableSpec] = {spec.name: spec for spec in _SPECS}
@@ -181,10 +192,15 @@ FED_BY: dict[str, tuple[str, ...]] = {
     "horses": ("horse",),
     "horse_runs": ("horse",),
     "horse_pedigree": ("pedigree_card",),
+    "win_sales": ("win_sales",),
 }
 # Written only for a source whose manifest holds pages of their page types, so a source without
-# them gets no empty file. One row per id: the first sort column.
-SOURCE_TABLES: tuple[str, ...] = ("horse_pedigree",)
+# them gets no empty file. One row per id: the first sort column, unless LATEST_FETCH names the
+# table.
+SOURCE_TABLES: tuple[str, ...] = ("horse_pedigree", "win_sales")
+# Source tables with one row per these columns (a publication, not an id): of rows equal on them,
+# the latest `fetched_utc` stays (the same publication fetched twice).
+LATEST_FETCH: dict[str, tuple[str, ...]] = {"win_sales": ("race_id", "published_utc")}
 # Page types the build places. Upcoming-meeting pages (race cards, entries) are deliberately not
 # here: they would leak future races into `races`.
 PAGE_TYPES: tuple[str, ...] = tuple(sorted({t for types in FED_BY.values() for t in types}))

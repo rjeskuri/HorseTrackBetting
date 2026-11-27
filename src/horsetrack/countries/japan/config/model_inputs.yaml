@@ -1,0 +1,629 @@
+# The model inputs of the Japan stack (docs/modeling.md, C0 to C6, and the evaluation's own inputs)
+# and the store tables that supply them, read by `horsetrack japan coverage` (#374,
+# research/coverage.py), which writes docs/data-coverage.md and a private report.
+#
+# This is an inventory of what exists, not a feature-inclusion decision: whether a model may read
+# an input, from which date and at which time is the owner's (the availability rules in
+# availability.yaml, D10, D14, the frozen specs). `d10: true` restates D10 for an input that is a
+# price, a pool or a dividend: its rows before 2014-06-07 enter no component.
+#
+# Per input:
+#   layers   the layers that use it, C0 to C6
+#   role     at the decision time t: feature_at_t (known at t), label (an outcome, read after the
+#            race) or conditioner (fixed alongside the label: the final price, a pool, a split)
+#   supplies {source, table, column, filter}: source `jra` (the netkeiba store, the odds logger's
+#            days, the public JRA ingests and the JRDB tables) or `jravan` (the JRA-VAN DataLab
+#            export); a table of core.store.schemas, `odds_timeseries` (logger.compact.SCHEMA), a
+#            jravan-only table, or a dumped JV-Data family `records/<DATASPEC>/<RT>` (counted
+#            only). `filter` keeps the rows whose columns equal every value it names.
+#   tickets  the tickets that cover the input's gaps (an input without a table and without a
+#            ticket is configuration, not a gap)
+#   note     why an input has no supply, or what the supplies leave out
+#
+# #404 covers the jravan gap years of the race and runner columns: the export's sparse early years
+# and the first year each table is complete (the private report holds them, D21).
+inputs:
+  # ---------------------------------------------------------------------------------------------
+  # C0: what is known at t
+  card_races:
+    layers: [C0, C2, C3, C4]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: race_id}
+      - {source: jravan, table: races, column: race_id}
+    tickets: [404]
+    note: The race card, known from 00:00 JST of the race date (availability.yaml).
+  card_runners:
+    layers: [C0, C2, C3, C4]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: horse_no}
+      - {source: jravan, table: runners, column: horse_no}
+    tickets: [404]
+    note: The runners of the card, known from 00:00 JST of the race date.
+  post_time:
+    layers: [C0, C1, C6]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: post_time_local}
+      - {source: jravan, table: races, column: post_time_local}
+    tickets: [404]
+    note: The scheduled post, the anchor of races.post_utc (#227) and of the decision grid.
+  scratches_at_t:
+    layers: [C0, C4, C6]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: is_scratched}
+      - {source: jravan, table: runners, column: is_scratched}
+    tickets: [401, 309, 404]
+    note: >-
+      Both stores take the flag from the final result, so a race-day scratch is in the views from
+      00:00 JST (the accepted leak, docs/specs/as-of.md, #309); the pre-race card versions would
+      give the value as of each version (#401).
+  exclusions:
+    layers: [C0]
+    role: feature_at_t
+    supplies:
+      - {source: jravan, table: records/RACE/JG, column: _record}
+    tickets: [405]
+    note: >-
+      JV-Data JG (horses excluded from a race's entries, e.g. by ballot), dumped but not mapped
+      into a table, so it has no availability rule.
+  result_published:
+    layers: [C0, C2, C3]
+    role: conditioner
+    supplies:
+      - {source: jra, table: races, column: result_published_utc}
+      - {source: jravan, table: races, column: result_published_utc}
+    tickets: [225, 227]
+    note: >-
+      When JRA published a race's result, which lets later races of the day use it. Logged
+      forward only (#225); no source holds it for earlier races, where the as-of rule
+      post_utc + 30 min stands in (#227, availability.yaml).
+  going_published:
+    layers: [C0, C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: track_condition, column: going}
+    tickets: [228]
+    note: >-
+      The going as published through the day (#90, #136), usable from its publication time; the
+      table is filled by the backfill and the daily fetch (#228).
+
+  # ---------------------------------------------------------------------------------------------
+  # C1: the final-price nowcast (and the board at t of C0 and C6)
+  board_at_t:
+    layers: [C0, C1, C6]
+    role: feature_at_t
+    d10: true
+    supplies:
+      - {source: jra, table: odds_timeseries, column: odds, filter: {pool: WIN}}
+      - {source: jravan, table: odds_timeseries, column: odds, filter: {pool: WIN}}
+      - {source: jra, table: odds_timeseries, column: odds, filter: {pool: PLACE}}
+      - {source: jravan, table: odds_timeseries, column: odds, filter: {pool: PLACE}}
+      - {source: jra, table: odds_timeseries, column: odds, filter: {pool: BRACKET_QUINELLA}}
+      - {source: jravan, table: odds_timeseries, column: odds, filter: {pool: BRACKET_QUINELLA}}
+      - {source: jra, table: odds_timeseries, column: odds, filter: {pool: QUINELLA}}
+      - {source: jravan, table: odds_timeseries, column: odds, filter: {pool: QUINELLA}}
+    tickets: [358]
+    note: >-
+      The board at t and the odds paths by pool: the odds logger's days (`jra`, forward only; the
+      bracket quinella from #358 on) and the JV-Data 0B41 (Win, Place, bracket quinella) and 0B42
+      (quinella) history (`jravan`, #369).
+  board_wide_and_exotics:
+    layers: [C1, C5, C6]
+    role: feature_at_t
+    d10: true
+    supplies:
+      - {source: jra, table: odds_timeseries, column: odds, filter: {pool: QUINELLA_PLACE}}
+      - {source: jravan, table: odds_timeseries, column: odds, filter: {pool: QUINELLA_PLACE}}
+      - {source: jra, table: odds_timeseries, column: odds, filter: {pool: FORECAST}}
+      - {source: jravan, table: odds_timeseries, column: odds, filter: {pool: FORECAST}}
+      - {source: jra, table: odds_timeseries, column: odds, filter: {pool: TRIO}}
+      - {source: jravan, table: odds_timeseries, column: odds, filter: {pool: TRIO}}
+      - {source: jra, table: odds_timeseries, column: odds, filter: {pool: TIERCE}}
+      - {source: jravan, table: odds_timeseries, column: odds, filter: {pool: TIERCE}}
+    tickets: [400, 130]
+    note: >-
+      The Wide (QUINELLA_PLACE), exacta (FORECAST), trio and trifecta (TIERCE) paths. The export's
+      time series holds 0B41 and 0B42 only, so no history holds a Wide or exotic path (#400); the
+      logger captures them forward (tier 2, #130).
+  board_horizon:
+    layers: [C1, C6]
+    role: feature_at_t
+    d10: true
+    supplies:
+      - {source: jra, table: odds_timeseries, column: minutes_to_post}
+      - {source: jravan, table: odds_timeseries, column: minutes_to_post}
+    tickets: [352]
+    note: >-
+      The horizon of each capture, minutes to the scheduled post; null without a post time (the
+      logged days' missing post-time sidecar, #352).
+  pool_totals_at_t:
+    layers: [C1, C6]
+    role: feature_at_t
+    d10: true
+    supplies:
+      - {source: jra, table: odds_timeseries, column: investment, filter: {combination: __pool__}}
+      - {source: jravan, table: odds_timeseries, column: investment, filter: {combination: __pool__}}
+    tickets: []
+    note: The pool totals on the board at t, per pool and capture; the own-stake impact of C6 reads them.
+  bracket_high_end_at_t:
+    layers: [C1, C5, C6]
+    role: feature_at_t
+    d10: true
+    supplies:
+      - {source: jra, table: odds_timeseries, column: odds_hi, filter: {pool: PLACE}}
+      - {source: jravan, table: odds_timeseries, column: odds_hi, filter: {pool: PLACE}}
+      - {source: jra, table: odds_timeseries, column: odds_hi, filter: {pool: QUINELLA_PLACE}}
+      - {source: jravan, table: odds_timeseries, column: odds_hi, filter: {pool: QUINELLA_PLACE}}
+    tickets: [400]
+    note: >-
+      The high end of the lo-hi range the Place and Wide (QUINELLA_PLACE) boards show (the low end
+      is `odds` in board_at_t and board_wide_and_exotics). The nowcast moves it by the low figure's
+      factor (#116) and the shadow values value Place and Wide at both ends (#118, docs/modeling.md
+      diagram 4). JV-Data's 0B41 (O1) records carry the Place range; no history holds the Wide one
+      (#400).
+
+  # ---------------------------------------------------------------------------------------------
+  # C2: per-horse ability and interactions
+  past_placings:
+    layers: [C2]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: finish_pos}
+      - {source: jravan, table: runners, column: finish_pos}
+      - {source: jra, table: horse_runs, column: placing_raw}
+    tickets: [403, 377, 404]
+    note: >-
+      A horse's earlier runs, read from runners (#128). Both stores hold JRA races only;
+      `horse_runs` (every run of a horse) is built for neither source (#403), and the NAR and
+      overseas runs are left out (#377).
+  margins:
+    layers: [C2]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: lbw_lengths}
+      - {source: jravan, table: runners, column: lbw_lengths}
+    tickets: [404]
+  running_style:
+    layers: [C2, C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: running_positions}
+      - {source: jravan, table: runners, column: running_positions}
+    tickets: [404]
+    note: The positions at the corners, which give the run style (#129) and the pace.
+  horse:
+    layers: [C2]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: horse_id}
+      - {source: jravan, table: runners, column: horse_id}
+      - {source: jra, table: horses, column: horse_id}
+      - {source: jravan, table: horses, column: horse_id}
+    tickets: [370, 404]
+    note: >-
+      netkeiba's horse profiles are not scraped, so the jra `horses` master is empty; the jravan
+      horse master (#370) holds the export's.
+  jockey:
+    layers: [C2]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: jockey_code}
+      - {source: jravan, table: runners, column: jockey_code}
+      - {source: jravan, table: jockeys, column: jockey_code}
+    tickets: [376, 404]
+  trainer:
+    layers: [C2]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: trainer_code}
+      - {source: jravan, table: runners, column: trainer_code}
+      - {source: jravan, table: trainers, column: trainer_code}
+    tickets: [376, 404]
+  age:
+    layers: [C2]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: age}
+      - {source: jravan, table: runners, column: age}
+    tickets: [404]
+  sex:
+    layers: [C2]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: sex}
+      - {source: jravan, table: runners, column: sex}
+    tickets: [404]
+  weight_carried:
+    layers: [C2, C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: actual_wt_kg}
+      - {source: jravan, table: runners, column: actual_wt_kg}
+    tickets: [404]
+  body_weight:
+    layers: [C2, C4]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: horse_wt_kg}
+      - {source: jravan, table: runners, column: horse_wt_kg}
+      - {source: jra, table: runners, column: horse_wt_change_kg}
+      - {source: jravan, table: runners, column: horse_wt_change_kg}
+    tickets: [404]
+    note: Published about an hour before the post; in the views from post_utc - 60 min (#227).
+  draw:
+    layers: [C2, C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: draw}
+      - {source: jravan, table: runners, column: draw}
+    tickets: [404]
+  field_size:
+    layers: [C2, C4]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: field_size}
+      - {source: jravan, table: races, column: field_size}
+    tickets: [401, 309, 404]
+    note: >-
+      The field: the competition terms (#94) read the other runners of the race, and the field
+      size is a C4 segment flag. Both stores take it from the result (the accepted leak, #309).
+  sire:
+    layers: [C2]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: horse_pedigree, column: sire_id}
+      - {source: jravan, table: horse_pedigree, column: sire_id}
+      - {source: jravan, table: breeding_horses, column: sire_breeding_id}
+    tickets: [376]
+  dam:
+    layers: [C2]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: horse_pedigree, column: dam_id}
+      - {source: jravan, table: horse_pedigree, column: dam_id}
+      - {source: jravan, table: breeding_horses, column: dam_breeding_id}
+    tickets: [376]
+  dam_sire:
+    layers: [C2]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: horse_pedigree, column: dam_sire_id}
+      - {source: jravan, table: horse_pedigree, column: dam_sire_id}
+    tickets: []
+  sire_line:
+    layers: [C2]
+    role: feature_at_t
+    supplies:
+      - {source: jravan, table: lineages, column: lineage_id}
+      - {source: jravan, table: produce, column: pedigree_breeding_ids}
+    tickets: [376]
+    note: The lineage (#95); netkeiba's pedigree card names no sire line.
+  career_counts:
+    layers: [C2]
+    role: feature_at_t
+    supplies:
+      - {source: jravan, table: records/SNPN/CK, column: _record}
+    tickets: [407]
+    note: >-
+      JV-Data CK (each runner's placings so far, by surface, distance, going and venue, and its
+      jockey's and trainer's), dumped but not mapped into a table.
+
+  # ---------------------------------------------------------------------------------------------
+  # C3: speed and par
+  finish_time:
+    layers: [C3]
+    role: label
+    supplies:
+      - {source: jra, table: runners, column: finish_time_s}
+      - {source: jravan, table: runners, column: finish_time_s}
+      - {source: jra, table: races, column: finish_time_s}
+      - {source: jravan, table: races, column: finish_time_s}
+    tickets: [404]
+    note: >-
+      The speed model's target (#96, #97); a feature of the horse's later races once published.
+  last_3f:
+    layers: [C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: last_3f_s}
+      - {source: jravan, table: runners, column: last_3f_s}
+    tickets: [404]
+  lap_times:
+    layers: [C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: split_times_s}
+      - {source: jravan, table: races, column: split_times_s}
+    tickets: [404]
+  track:
+    layers: [C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: venue}
+      - {source: jravan, table: races, column: venue}
+    tickets: [404]
+  surface:
+    layers: [C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: surface}
+      - {source: jravan, table: races, column: surface}
+    tickets: [404]
+  distance:
+    layers: [C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: distance_m}
+      - {source: jravan, table: races, column: distance_m}
+    tickets: [404]
+  layout:
+    layers: [C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: course_config}
+      - {source: jravan, table: races, column: course_config}
+    tickets: [305, 404]
+    note: >-
+      The inner or outer course, printed only where a venue has both, so most races are null and
+      every year's share stays low by design, not for want of data; #305's par keys read a null
+      layout as its own cell.
+  rail_setting:
+    layers: [C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: rail_setting, filter: {surface: turf}}
+      - {source: jravan, table: races, column: rail_setting, filter: {surface: turf}}
+      - {source: jra, table: track_condition, column: rail, filter: {surface: turf}}
+    tickets: [228, 404]
+    note: >-
+      The A/B/C/D rail of the turf course (#222, #253), and its moves (track bias, #138); turf
+      races only. The jra store fills it from the going pages, which the backfill brings (#228).
+  race_class:
+    layers: [C3, C4]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: race_class}
+      - {source: jravan, table: races, column: race_class}
+    tickets: [384, 404]
+  going:
+    layers: [C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: going}
+      - {source: jravan, table: races, column: going}
+      - {source: jra, table: track_condition, column: going}
+    tickets: [228, 404]
+    note: The race's going, in the views from post_utc - 60 min (#227); the published going is going_published.
+  cushion:
+    layers: [C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: track_condition, column: cushion, filter: {surface: turf}}
+    tickets: [228]
+    note: >-
+      The turf cushion value (クッション値), from JRA's going pages (#90, #136) as far back as JRA
+      published it; the backfill fills the table (#228).
+  moisture:
+    layers: [C3]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: track_condition, column: moisture_goal}
+      - {source: jra, table: track_condition, column: moisture_4c}
+    tickets: [228]
+    note: >-
+      The soil moisture (含水率) at the goal and at the fourth corner, per surface (#90, #136), as
+      far back as JRA published it (#228).
+  weather:
+    layers: [C3]
+    role: feature_at_t
+    supplies: []
+    tickets: [89, 402]
+    note: >-
+      No store table yet. JMA AMeDAS weather per venue (#89) is written as
+      `processed/jra/weather.parquet`, keyed by station and observation time, outside the store
+      schemas until #89's table spec lands; the RA records' weather code (天候コード), which would
+      cover the years before JMA's, is not mapped into the jravan races (#402).
+
+  # ---------------------------------------------------------------------------------------------
+  # C4: the meta-model at the final price
+  final_win_price:
+    layers: [C4, C5, C6]
+    role: conditioner
+    d10: true
+    supplies:
+      - {source: jra, table: runners, column: win_odds}
+      - {source: jravan, table: runners, column: win_odds}
+      - {source: jravan, table: final_odds, column: odds, filter: {pool: WIN}}
+    tickets: [376, 404]
+    note: >-
+      The price that pays, posted after the off: the offset of the meta-model and a conditioner
+      or a label, never a feature at t (docs/specs/as-of.md).
+  segment_handicap:
+    layers: [C4]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: weight_type}
+      - {source: jravan, table: races, column: weight_type}
+    tickets: [404]
+  segment_final_race:
+    layers: [C4]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: races, column: race_no}
+      - {source: jravan, table: races, column: race_no}
+    tickets: [404]
+    note: The meeting's last race, from the race numbers of its card.
+  segment_debut:
+    layers: [C4]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: horse_id}
+      - {source: jravan, table: runners, column: horse_id}
+    tickets: [403, 377, 404]
+    note: >-
+      A debut is a horse's first run, so a store tells it only for horses that started after the
+      store's first year; a run outside JRA (NAR, overseas) is in neither store (#377, #403).
+  workouts:
+    layers: [C4]
+    role: feature_at_t
+    supplies:
+      - {source: jravan, table: records/SLOP/HC, column: _record}
+      - {source: jravan, table: records/WOOD/WC, column: _record}
+    tickets: [229]
+    note: >-
+      JRA-VAN's slope (坂路, HC) and woodchip (ウッド, WC) workout times, dumped but not mapped
+      (#229). The JRDB workouts (#137, private) are `processed/jra/jrdb_workouts.parquet`, outside
+      the store schemas.
+  jrdb_card:
+    layers: [C4]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: jrdb_pre_race, column: horse_id}
+      - {source: jra, table: jrdb_post_race, column: horse_id}
+    tickets: []
+    note: >-
+      The JRDB pre-race and post-race tables (#57), matched to the store's runners; private
+      members only (D21).
+  mining_predictions:
+    layers: [C4]
+    role: feature_at_t
+    supplies:
+      - {source: jravan, table: records/MING/DM, column: _record}
+      - {source: jravan, table: records/MING/TM, column: _record}
+    tickets: [406]
+    note: >-
+      JV-Data DM (time-type) and TM (match-type) data-mining predictions, published before the
+      race; dumped but not mapped, so no publication time is known.
+  win_sales:
+    layers: [C4]
+    role: conditioner
+    d10: true
+    supplies:
+      - {source: jra, table: win_sales, column: win_sales_yen}
+    tickets: [349]
+    note: >-
+      The per-race Win sales of the low-turnover segment (#278); the table is not built on this
+      machine yet, and the JRA-VAN history would fill the earlier years (#349).
+  member_outputs:
+    layers: [C4]
+    role: feature_at_t
+    supplies: []
+    tickets: [92, 93, 94, 95, 97, 98]
+    note: >-
+      Computed, not stored: the handicap score (#129), the ratings (#91), Plackett-Luce ability
+      (#92), the interaction terms (#93, #94, #95) and p_speed (#97), each built from the inputs
+      above as of t and melded by #98.
+
+  # ---------------------------------------------------------------------------------------------
+  # C5: Place, Wide and exotics
+  final_prices:
+    layers: [C5]
+    role: label
+    d10: true
+    supplies:
+      - {source: jravan, table: final_odds, column: odds, filter: {pool: PLACE}}
+      - {source: jravan, table: final_odds, column: odds, filter: {pool: BRACKET_QUINELLA}}
+      - {source: jravan, table: final_odds, column: odds, filter: {pool: QUINELLA}}
+      - {source: jravan, table: final_odds, column: odds, filter: {pool: QUINELLA_PLACE}}
+      - {source: jravan, table: final_odds, column: odds, filter: {pool: FORECAST}}
+      - {source: jravan, table: final_odds, column: odds, filter: {pool: TRIO}}
+      - {source: jravan, table: final_odds, column: odds, filter: {pool: TIERCE}}
+      - {source: jra, table: odds_timeseries, column: odds, filter: {is_final_capture: true}}
+    tickets: [376]
+    note: >-
+      Each pool's final prices, the pools' own baseline (D5). netkeiba holds no final odds beyond
+      Win; the logger's final captures hold them forward.
+  dividends:
+    layers: [C5]
+    role: label
+    d10: true
+    supplies:
+      - {source: jra, table: dividends, column: dividend}
+      - {source: jravan, table: dividends, column: dividend}
+    tickets: []
+    note: Every pool's dividends; a per-race table without race_date, so rows only (its span is races').
+  final_bracket_high_end:
+    layers: [C5, C6]
+    role: label
+    d10: true
+    supplies:
+      - {source: jravan, table: final_odds, column: odds_hi, filter: {pool: PLACE}}
+      - {source: jravan, table: final_odds, column: odds_hi, filter: {pool: QUINELLA_PLACE}}
+    tickets: [376]
+    note: >-
+      The high end of the final Place and Wide ranges, beside the low end in final_prices: what the
+      shadow values at the high end (#118) are scored against. netkeiba holds no final range; the
+      logger's final captures hold it forward (bracket_high_end_at_t).
+  bracket_number:
+    layers: [C5]
+    role: feature_at_t
+    supplies:
+      - {source: jra, table: runners, column: bracket}
+      - {source: jravan, table: runners, column: bracket}
+    tickets: [404]
+    note: >-
+      Each runner's frame (枠番, 1 to 8), on which the bracket quinella (BRACKET_QUINELLA) is bet
+      and paid; not the price range of Place and Wide (bracket_high_end_at_t,
+      final_bracket_high_end).
+  pool_votes:
+    layers: [C5, C6]
+    role: conditioner
+    d10: true
+    supplies:
+      - {source: jravan, table: pool_votes, column: votes}
+      - {source: jravan, table: pool_votes, column: votes, filter: {combination: __pool__}}
+      - {source: jravan, table: final_odds, column: investment, filter: {combination: __pool__}}
+    tickets: [376]
+    note: >-
+      The final votes per combination and the final pool totals (JV-Data H1, H6 and the O1-O6
+      pool rows).
+  takeout_and_boosts:
+    layers: [C5, C6]
+    role: conditioner
+    supplies: []
+    tickets: []
+    note: >-
+      Configuration, not a table: each pool's takeout and its history in config/jra.yaml and the
+      payout boosts in config/takeout_boosts.yaml.
+
+  # ---------------------------------------------------------------------------------------------
+  # C6: the decision layer, shadow only (the board at t and the pool totals are above)
+  shadow_log:
+    layers: [C6]
+    role: label
+    supplies: []
+    tickets: []
+    note: >-
+      Not a store table: the sealed, append-only shadow log per race day under
+      `$HORSETRACK_DATA_DIR/shadow/` (#119, #120), forward only, read after the races to score the
+      decisions (#101).
+
+  # ---------------------------------------------------------------------------------------------
+  # Evaluation: the folds, the D7 meeting bootstrap and the holdout split
+  race_days:
+    layers: [C1, C2, C3, C4, C5, C6]
+    role: conditioner
+    supplies:
+      - {source: jra, table: meetings, column: race_date}
+      - {source: jravan, table: meetings, column: race_date}
+    tickets: [404]
+    note: The walk-forward folds split by race day (#70).
+  meetings:
+    layers: [C1, C2, C3, C4, C5, C6]
+    role: conditioner
+    supplies:
+      - {source: jra, table: meetings, column: meeting_id}
+      - {source: jravan, table: meetings, column: meeting_id}
+    tickets: [404]
+    note: The D7 bootstrap resamples whole meetings (#69).
+  holdout_split:
+    layers: [C1, C2, C3, C4, C5, C6]
+    role: conditioner
+    supplies: []
+    tickets: []
+    note: >-
+      Configuration, not a table: config/holdout.yaml's start and seed (#71); every holdout race
+      day is locked (D14) and never read here.
