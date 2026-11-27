@@ -547,8 +547,17 @@ def test_the_earliest_fold_present_only_trains(folded):
     assert_fit_equal(run.fits[2], ref_fit(ref_train(later, folds, 2), "P0"))
 
 
-def test_rows_inside_the_embargo_never_train(folded):
-    rows, folds = folded
+@pytest.fixture(scope="module")
+def embargoed():
+    """`folded`'s weekly Wednesdays plus a Friday meeting day, 2025-02-28: fold 1's races that
+    day fall inside fold 2's embargo (train_end = 2025-03-05 - 7 d = 2025-02-26)."""
+    weekly = synthetic_races(21, b_band={1: -0.4})
+    friday = synthetic_races(22, weeks=1, b_band={1: -0.4}, start=date(2025, 2, 28))
+    return with_folds(pd.concat([weekly, friday], ignore_index=True))
+
+
+def test_rows_inside_the_embargo_never_train(embargoed):
+    rows, folds = embargoed
     dates = pd.to_datetime(rows["race_date"])
     inside = (rows["fold"] == 1) & (dates > pd.Timestamp(folds[2].train_end))
     assert inside.any()  # the fixture has fold-1 races in fold 2's embargo week
@@ -559,6 +568,7 @@ def test_rows_inside_the_embargo_never_train(folded):
     )
     got = fb.walk_forward_meld(moved, folds, "P0").fits
     assert_fit_equal(got[2], {"a": base[2].a, **base[2].b}, tol=1e-9)
+    assert fits_differ(got[3], base[3])  # the same rows do train fold 3: the change is real
 
 
 # ---------------------------------------------------------------- 5. scoring
