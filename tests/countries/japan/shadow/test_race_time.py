@@ -14,7 +14,8 @@ Contract pinned here (`horsetrack.countries.japan.shadow.race_time`; the coder f
     a result seen after the cutoff into same_day_s without being in results_used.
   - `results`: a DataFrame of the day's results seen so far: race_id, venue, post_utc, the par
     keys, top3_time_s and first_seen_utc (the first observed publication, #225; NaT when never
-    seen).
+    seen). Its index labels carry no meaning (round-2 finding G: duplicate labels, as from a
+    concat of venue frames, give the same records as a reindexed frame).
   - The input cutoff is post_utc - the primary decision minutes (`load_decision_grid().primary`,
     config/decision.yaml, D2: T-2).
   - `now()` is read twice: before the computation (input_snapshot_utc, when the inputs were taken)
@@ -50,6 +51,13 @@ Contract pinned here (`horsetrack.countries.japan.shadow.race_time`; the coder f
   input snapshot, results_used against `results` by id, sighting and top3_time_s value, versions):
   an empty list when inputs and predictions match; a problem about a race names its race_id. A
   changed input value is a problem even when the forecast it gives is unchanged.
+- Round-2 finding D: each record also carries results_pending, a list of {"race_id",
+  "first_seen_utc"}: the results of the same eligible set (same JST day and variant group, a cell
+  with a fitted par, first seen by min(cutoff, snapshot), not the target) whose top3_time_s was
+  NaN at the snapshot; they do not feed the forecast. verify_replay treats a result in a record's
+  results_pending as unavailable to that record even when the source now has its time; a result
+  eligible in the source and in neither list is still reported, and the forecast is recomputed
+  with the pending results left out, so moving a used result into results_pending is caught.
 
 Every race, fit and result is synthetic (a planted par per cell and variant per day); expected
 forecasts come from a separate copy of the #305 model fed only the eligible results, never from
@@ -933,3 +941,81 @@ def test_replay_verification_refuses_another_model_or_card(model, results, which
     kwargs[which] = kwargs[which] + "-other"
     problems = verify_replay(records, card=card_frame(), results=results, model=model, **kwargs)
     assert problems
+
+
+def test_results_with_duplicate_index_labels_give_the_same_records(model, results):
+    """Round-2 finding G: the two venues' results concatenated with their own default indices
+    (labels 0-5 twice) give every race the record the reindexed frame gives, and verify."""
+    parts = [results[results["venue"] == v].reset_index(drop=True) for v in ("KYO", "TOK")]
+    stacked = pd.concat(parts)
+    assert not stacked.index.is_unique
+    for race_id in FORECASTABLE:
+        when = cutoff_of(race_id) - timedelta(seconds=30)
+        want = record(model, results, race_id, when)
+        got = record(model, stacked, race_id, when)
+        assert got["results_used"] == want["results_used"], race_id
+        assert got["par_s"] == pytest.approx(want["par_s"], abs=1e-12), race_id
+        assert got["same_day_s"] == pytest.approx(want["same_day_s"], abs=1e-12), race_id
+    records = [record(model, stacked, r, REPLAY_AT, replay=True) for r in CARD]
+    problems = verify_replay(
+        records, card=card_frame(), results=stacked, model=model, model_version=MV, card_version=CV
+    )
+    assert problems == []
+
+
+def _pending(record: dict) -> set:
+    return {(u["race_id"], utc(u["first_seen_utc"])) for u in record["results_pending"]}
+
+
+@pytest.mark.parametrize(
+    ("target", "pending", "elsewhere"),
+    [
+        (rid("TOK", 5), rid("TOK", 3), rid("TOK", 2)),  # TOK turf; TOK R2 is TOK dirt
+        (rid("KYO", 4), rid("KYO", 2), rid("KYO", 1)),  # KYO turf; KYO R1 is KYO dirt
+    ],
+)
+def test_a_result_seen_without_its_finish_time_is_pending_and_a_rebuilt_source_still_verifies(
+    model, results, target, pending, elsewhere
+):
+    """Round-2 finding D: a result first seen by the cutoff whose finish time was not yet there
+    (NaN) at the snapshot is listed in results_pending, not used, and leaves the forecast as it
+    is without it; verifying that live record against the source rebuilt afterwards (the time
+    now filled in) finds nothing. With results_pending emptied the same record is reported, and
+    moving a used result into results_pending cannot make a forecast that used it pass."""
+    cutoff = cutoff_of(target)
+    when = cutoff - timedelta(seconds=30)
+    at_snapshot = results.copy()
+    gap = at_snapshot["race_id"].isin([pending, elsewhere])
+    at_snapshot.loc[gap, "top3_time_s"] = np.nan  # the store had not got their times yet
+    seen = dict(zip(results["race_id"], results["first_seen_utc"], strict=True))
+    assert seen[pending] <= pd.Timestamp(cutoff) and seen[elsewhere] <= pd.Timestamp(cutoff)
+
+    rec = record(model, at_snapshot, target, when)
+    json.dumps(rec)
+    assert rec["mode"] == "live"
+    assert _pending(rec) == {(pending, seen[pending])}  # another group's gap is not listed
+    assert pending not in used_ids(rec)
+    without = results[results["race_id"] != pending]
+    _, same_day = expected(model, CARD[target], without, cutoff)
+    assert rec["same_day_s"] == pytest.approx(same_day, abs=1e-9)
+
+    rebuilt = results.copy()  # every time filled in after the forecast
+    kwargs = dict(
+        card=card_frame(), results=rebuilt, model=model, model_version=MV, card_version=CV
+    )
+    assert verify_replay([rec], **kwargs) == []
+
+    hidden = copy.deepcopy(rec)
+    hidden["results_pending"] = []
+    assert any(target in p for p in verify_replay([hidden], **kwargs))
+
+    on_time = record(model, rebuilt, target, when)  # the time was there: the result is used
+    assert pending in used_ids(on_time) and on_time["results_pending"] == []
+    assert verify_replay([on_time], **kwargs) == []
+    moved = copy.deepcopy(on_time)
+    entry = next(u for u in moved["results_used"] if u["race_id"] == pending)
+    moved["results_used"].remove(entry)
+    moved["results_pending"].append(
+        {"race_id": entry["race_id"], "first_seen_utc": entry["first_seen_utc"]}
+    )
+    assert any(target in p for p in verify_replay([moved], **kwargs))

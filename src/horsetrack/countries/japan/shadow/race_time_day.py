@@ -3,21 +3,29 @@
 - `run_race_time_day(race_date, *, model, model_version, races, now, sleep, replay=False,
   day_dir=None) -> RaceTimeRun`: each race of the card `races()` (re-read on every pass) is
   recorded once through `race_time.record_race` and appended to the day's log as it is made. Post
-  times come from each venue's `<VENUE>.races.json` sidecar and first sightings (#225) from its
-  `<VENUE>.results.json` sidecar in `jra_day_dir(race_date, day_dir)`, re-read on every pass;
-  `latest_post` re-reads the races sidecar after each computation. Prospective (replay=False): a
+  times come from each venue's `<VENUE>.races.json` sidecar, else the card's own post_utc, and
+  first sightings (#225) from its `<VENUE>.results.json` sidecar in `jra_day_dir(race_date,
+  day_dir)`, re-read on every pass; `latest_post` re-reads the races sidecar after each
+  computation, with the same fallback. Prospective (replay=False): a
   race with a post is recorded once the clock is LEAD before its input cutoff (post - primary),
   waiting with `sleep` (at most POLL_S at a time, so a moved post is seen); a race whose cutoff
   has passed is recorded at once; races without a post are recorded last, once no race with a
   post is left, so a post that appears meanwhile still gives a forecast. replay=True records every
   race at once with replay=True and never sleeps. card_version hashes the card inputs (the race
-  rows without their results, and the posts).
+  rows without their results, and the posts); each version's card is appended, before the first
+  record made under it, to `card_snapshots_path(race_date)` and read back by
+  `load_card_snapshots(race_date) -> {card_version: card}`, to verify each record against.
 - `race_time_log_path(race_date)`: `data_dir()/race_time/japan/<YYYY-MM-DD>.jsonl`, append-only.
 - `load_speed_model(race_date)`: #305's model (`studies.speed_run`: its race table, its keys and
   its primary t5 error) fitted on the store's races strictly before race_date, holdout days
-  dropped as speed_run drops them; the holdout is never opened. `load_day_races(race_date)`: the
-  store's races of the day with the model's keys and their top-3 time (NaN until resulted).
-- D14: on a Japan holdout day `run_race_time_day`, `load_day_races` and the command raise
+  dropped as speed_run drops them; the holdout is never opened. Its version hashes the spec, the
+  estimand, the keys and the training rows, so later store rows leave it unchanged.
+- `load_day_races(race_date)`: every race of the upcoming cards
+  (`processed/jra/upcoming/jra_<date>_<VENUE>/races.parquet`; venue from meeting_id, post_utc
+  from post_time_local), then the store's races of the day no card lists; the model's keys
+  ("unknown" when missing), post_utc and the store's top-3 time (NaN until resulted).
+- D14: on a Japan holdout day `run_race_time_day`, `load_day_races`, `load_card_snapshots` and
+  the command raise
   `HoldoutDayError` before any read (card, sidecar or store) and write no log.
 
 Seams for the command, looked up at call time: `utc_now`, `sleep`, `load_speed_model`,
@@ -37,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pyarrow.parquet as pq
 import typer
 
 from horsetrack.core import paths
@@ -57,6 +66,8 @@ EXIT_ERROR = 1
 
 __all__ = [
     "RaceTimeRun",
+    "card_snapshots_path",
+    "load_card_snapshots",
     "load_day_races",
     "load_speed_model",
     "race_time_log_path",
@@ -99,22 +110,49 @@ def _race_no(race_id: str) -> int:
 
 
 def _card(frame: pd.DataFrame, folder: Path) -> pd.DataFrame:
-    """The day's races with post_utc and first_seen_utc from the venues' sidecars."""
+    """The day's races with first_seen_utc from the venues' sidecars and post_utc from their
+    sidecar where it has the race, else the card's own post_utc (NaT when the card has none)."""
     card = frame.drop_duplicates("race_id").reset_index(drop=True)
     venues = set(card["venue"])
     posts = {v: odds_log.read_post_times(folder / f"{v}.races.json") for v in venues}
     seen = {v: odds_log.read_published(folder / f"{v}.results.json") for v in venues}
     keys = list(zip(card["venue"], card["race_id"].map(_race_no), strict=True))
-    card["post_utc"] = pd.to_datetime([posts[v].get(n) for v, n in keys], utc=True)
+    own = pd.to_datetime(card["post_utc"], utc=True) if "post_utc" in card else pd.NaT
+    side = pd.Series(pd.to_datetime([posts[v].get(n) for v, n in keys], utc=True))
+    card["post_utc"] = side.where(side.notna(), own)
     card["first_seen_utc"] = pd.to_datetime([seen[v].get(n) for v, n in keys], utc=True)
     return card
 
 
+def _card_inputs(card: pd.DataFrame) -> pd.DataFrame:
+    """The card without its results: what the card version hashes and its snapshot keeps."""
+    return card.drop(columns=["top3_time_s", "first_seen_utc"], errors="ignore")
+
+
 def _card_version(race_date: date, card: pd.DataFrame) -> str:
-    inputs = card.drop(columns=["top3_time_s", "first_seen_utc"], errors="ignore")
+    inputs = _card_inputs(card)
     rows = sorted(inputs.astype(object).where(inputs.notna(), None).to_dict("records"), key=repr)
     text = json.dumps(rows, sort_keys=True, default=str)
     return f"card:{race_date.isoformat()}:{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+
+
+def card_snapshots_path(race_date: date) -> Path:
+    """``data_dir()/race_time/japan/<YYYY-MM-DD>.cards.jsonl``, beside the log, append-only."""
+    return race_time_log_path(race_date).with_suffix(".cards.jsonl")
+
+
+def load_card_snapshots(race_date: date) -> dict[str, pd.DataFrame]:
+    """Each saved card version of the day -> its card (race_id, venue, post_utc, the par keys)."""
+    _refuse_holdout(race_date)
+    path = card_snapshots_path(race_date)
+    out: dict[str, pd.DataFrame] = {}
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    for line in filter(None, lines):
+        saved = json.loads(line)
+        card = pd.DataFrame(saved["races"])
+        card["post_utc"] = pd.to_datetime(card["post_utc"], utc=True)
+        out[saved["card_version"]] = card
+    return out
 
 
 def _refuse_holdout(race_date: date) -> None:
@@ -141,6 +179,7 @@ def run_race_time_day(
     primary = timedelta(minutes=load_decision_grid().primary)
     records: list[dict[str, Any]] = []
     done: set[str] = set()
+    saved: set[str] = set()
     while True:
         card = _card(races(), folder)
         version = _card_version(race_date, card)
@@ -159,6 +198,10 @@ def run_race_time_day(
             if not due:
                 sleep(min((min(wake.values()) - clock).total_seconds(), POLL_S))
                 continue
+        if version not in saved:  # the card each record's card_version names, for verify_replay
+            inputs = json.loads(_card_inputs(card).to_json(orient="records", date_format="iso"))
+            _append(card_snapshots_path(race_date), {"card_version": version, "races": inputs})
+            saved.add(version)
         for race in due:
             sidecar, no = folder / f"{race['venue']}.races.json", _race_no(race["race_id"])
             rec = record_race(
@@ -169,6 +212,7 @@ def run_race_time_day(
                 card_version=version,
                 now=now,
                 replay=replay,
+                # a race the sidecar lacks keeps the post it had here: the card's (finding C)
                 latest_post=lambda s=sidecar, n=no: odds_log.read_post_times(s).get(n),
             )
             _append(path, rec)
@@ -193,33 +237,70 @@ def load_speed_model(race_date: date) -> tuple[SpeedModel, str]:
         t_df=speed_run.ERROR_MODELS["t5"],
     )
     model = SpeedModel(spec).fit(table)
+    rows = table.sort_values("race_id", kind="stable").to_csv(index=False)  # the training rows
     about = {
         "spec": asdict(spec),
         "estimand": speed_run.ESTIMANDS[0],
         "keys": speed_run.KEYS,
-        "builds": speed_run.store_builds(),
+        "table": hashlib.sha256(rows.encode()).hexdigest(),
     }
     digest = hashlib.sha256(json.dumps(about, sort_keys=True).encode()).hexdigest()[:12]
     last = max(table["race_date"]).isoformat()
     return model, f"{speed_run.FAMILY_ID}:t5:fit-to-{last}:n{len(table)}:{digest}"
 
 
+def _card_post_utc(value: Any) -> pd.Timestamp:
+    """An upcoming card's post_time_local (ISO, +09:00; a naive one is read as JST) as UTC."""
+    if value is None or pd.isna(value):
+        return pd.NaT
+    local = pd.Timestamp(value)
+    return (local.tz_localize(speed_run.JST) if local.tzinfo is None else local).tz_convert("UTC")
+
+
+def _upcoming(race_date: date) -> pd.DataFrame:
+    """Every venue's upcoming card of the day, with venue from meeting_id and post_utc."""
+    root = paths.processed_dir(SOURCE) / "upcoming"
+    files = sorted(root.glob(f"jra_{race_date.isoformat()}_*/races.parquet"))
+    if not files:
+        return pd.DataFrame()
+    card = pd.concat([pq.read_table(f).to_pandas() for f in files], ignore_index=True)
+    card["venue"] = card["meeting_id"].astype(str).str.rsplit(":", n=1).str[-1]
+    card["post_utc"] = pd.to_datetime(card["post_time_local"].map(_card_post_utc), utc=True)
+    return card
+
+
+def _keyed(races: pd.DataFrame) -> pd.DataFrame:
+    """race_id, venue, the model's keys ("unknown" for a missing value or column) and post_utc."""
+    out = races.loc[:, ["race_id", "venue", "post_utc"]].reset_index(drop=True)
+    for key, column in speed_run.KEYS.items():
+        values = races[column].astype(object) if column in races else pd.Series([None] * len(out))
+        out[key] = values.where(values.notna(), speed_run.UNKNOWN).to_numpy()
+    return out
+
+
 def load_day_races(race_date: date) -> pd.DataFrame:
-    """The store's races of the day: race_id, venue, the model's keys and top3_time_s."""
+    """The day's races: every upcoming card race, then the store's races of the day no card lists;
+    race_id, venue, the model's keys, post_utc and top3_time_s (NaN until resulted)."""
     _refuse_holdout(race_date)
+    card = _upcoming(race_date)
     races = read_table(SOURCE, "races", columns=list(speed_run.RACE_COLUMNS))
     races = races.loc[(speed_run._race_days(races["race_date"]) == race_date).to_numpy()]
-    if races.empty:
-        raise LookupError(f"the {SOURCE} store has no race on {race_date.isoformat()}")
+    days = pd.Series([race_date] * len(races), index=races.index, dtype=object)
+    races = races.assign(post_utc=speed_run._post_utc(days, races["post_time_local"]))
+    listed = set() if card.empty else set(card["race_id"])
+    parts = [
+        _keyed(frame)
+        for frame in (card, races.loc[~races["race_id"].isin(listed).to_numpy()])
+        if not frame.empty
+    ]
+    if not parts:
+        raise LookupError(f"no {SOURCE} card or store race on {race_date.isoformat()}")
+    out = pd.concat(parts, ignore_index=True).drop_duplicates("race_id", ignore_index=True)
     top3 = pd.Series(dtype=float)
     runners = read_table(SOURCE, "runners", columns=list(speed_run.RUNNER_COLUMNS))
-    runners = runners.loc[runners["race_id"].isin(races["race_id"])]
+    runners = runners.loc[runners["race_id"].isin(out["race_id"])]
     if not runners.empty:
         top3, _ = speed_run._mean_placed_1_3(runners)
-    out = pd.DataFrame({"race_id": races["race_id"].to_numpy(), "venue": races["venue"].to_numpy()})
-    for key, column in speed_run.KEYS.items():
-        values = races[column].astype(object)
-        out[key] = values.where(values.notna(), speed_run.UNKNOWN).to_numpy()
     out["top3_time_s"] = out["race_id"].map(top3).astype(float)
     return out
 

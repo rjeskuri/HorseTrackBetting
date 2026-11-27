@@ -11,7 +11,9 @@ loader. Nothing here is adopted (D16) and nothing reads an outcome of the race f
   of the model observes only the day's results first seen (#225's first observed publication) at
   or before min(cutoff, snapshot) in a cell with a fitted par, so the caller's model never changes
   and a result seen later, or never, cannot move the forecast whatever the clock reads; each is
-  listed in results_used with its sighting and top-3 time. par_s is the cell's par, same_day_s the
+  listed in results_used with its sighting and top-3 time. A result of that set without a top-3
+  time at the snapshot is listed in results_pending (id and sighting; [] when none) and feeds
+  nothing. Index labels of `results` carry no meaning. par_s is the cell's par, same_day_s the
   par plus the same-day variant's mean at the cutoff. `latest_post()` (default: the post at the
   cutoff) is read after the computation: latest_post_utc. mode is "live" when completion_utc is at
   or before both cutoffs (each post less the primary minutes), "replay" at or after either post or
@@ -24,7 +26,8 @@ loader. Nothing here is adopted (D16) and nothing reads an outcome of the race f
   time.
 - `verify_replay(records, *, card, results, model, model_version, card_version)`: recomputes each
   ok record from the card row, its recorded input snapshot, the source results (id, sighting and
-  top-3 time of each result used) and the versions; [] when everything matches, else one problem
+  top-3 time of each result used, the record's results_pending left out of the source) and the
+  versions; [] when everything matches, else one problem
   per mismatch, each naming its race id. A changed input value is a problem even when the forecast
   it gives is unchanged.
 """
@@ -92,21 +95,25 @@ def _has_par(model: SpeedModel, row: Mapping) -> bool:
 
 def _eligible(results: pd.DataFrame, race: Mapping, model: SpeedModel, as_of: pd.Timestamp):
     """The results the same-day variant may use: another race of the target's JST day and variant
-    group, timed, in a cell with a fitted par, first seen at or before `as_of`; renamed for
-    `SpeedModel.observe`."""
-    seen = pd.to_datetime(results["first_seen_utc"], utc=True)
-    posts = pd.to_datetime(results["post_utc"], utc=True)
-    keep = seen.notna() & (seen <= as_of) & posts.notna() & results["top3_time_s"].notna()
-    keep &= results["race_id"] != race["race_id"]
+    group, in a cell with a fitted par, first seen at or before `as_of`; renamed for
+    `SpeedModel.observe`. Returns (timed, pending): pending have no top-3 time yet. One positional
+    mask selects the rows, posts and sightings, whatever the index labels are."""
+    seen = pd.to_datetime(results["first_seen_utc"], utc=True).reset_index(drop=True)
+    posts = pd.to_datetime(results["post_utc"], utc=True).reset_index(drop=True)
+    keep = (seen.notna() & (seen <= as_of) & posts.notna()).to_numpy()
+    keep &= (results["race_id"] != race["race_id"]).to_numpy()
     day = _stamp(race["post_utc"]).tz_convert(JST).date()
-    keep &= posts.dt.tz_convert(JST).dt.date == day
+    keep &= (posts.dt.tz_convert(JST).dt.date == day).to_numpy()
     for key in model.spec.variant_keys:
-        keep &= results[key] == race[key]
-    frame = results[keep].copy()
-    accepted = [_has_par(model, row) for row in frame.to_dict("records")]
-    frame = frame.loc[np.array(accepted, dtype=bool)]
-    frame["race_utc"], frame["result_available_utc"] = posts[frame.index], seen[frame.index]
-    return frame.sort_values(["result_available_utc", "race_id"], kind="stable")
+        keep &= (results[key] == race[key]).to_numpy()
+    rows = results.to_dict("records")
+    for i in np.flatnonzero(keep):
+        keep[i] = _has_par(model, rows[i])
+    frame = results.iloc[keep].copy()
+    frame["race_utc"], frame["result_available_utc"] = posts[keep].array, seen[keep].array
+    frame = frame.sort_values(["result_available_utc", "race_id"], kind="stable")
+    timed = frame["top3_time_s"].notna().to_numpy()
+    return frame.iloc[timed], frame.iloc[~timed]
 
 
 def _mode(completion: pd.Timestamp, posts: tuple, replay: bool) -> str | None:
@@ -149,6 +156,7 @@ def record_race(
     cutoff = None if post is None else post - _primary()
     par_s = same_day_s = reason = None
     used: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
     if post is None:
         reason = NO_POST
     else:
@@ -159,7 +167,7 @@ def record_race(
         except KeyError:
             reason = UNSEEN_CELL
         if reason is None:
-            frame = _eligible(results, race, model, min(cutoff, snapshot))
+            frame, waiting = _eligible(results, race, model, min(cutoff, snapshot))
             try:
                 local.observe(frame)
             except ValueError as exc:
@@ -175,6 +183,12 @@ def record_race(
                         frame["result_available_utc"],
                         frame["top3_time_s"],
                         strict=True,
+                    )
+                ]
+                pending = [
+                    {"race_id": rid, "first_seen_utc": _iso(_stamp(seen))}
+                    for rid, seen in zip(
+                        waiting["race_id"], waiting["result_available_utc"], strict=True
                     )
                 ]
     latest = None if latest_post is None else _stamp(latest_post())  # read after the work
@@ -197,6 +211,7 @@ def record_race(
         "par_s": par_s,
         "same_day_s": same_day_s,
         "results_used": used,
+        "results_pending": pending,
         "mode": _mode(completion, (post, latest), replay),
     }
 
@@ -275,10 +290,11 @@ def verify_replay(
         if snapshot is None:
             problems.append(f"{race_id}: no input snapshot recorded")
             continue
+        pending = {u["race_id"] for u in rec.get("results_pending") or ()}
         again = record_race(
             rows[race_id],
             model=model,
-            results=results,
+            results=results[~results["race_id"].isin(pending)],  # no time at the snapshot
             model_version=model_version,
             card_version=card_version,
             now=lambda at=snapshot: at,  # the inputs as the recorded snapshot saw them
