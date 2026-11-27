@@ -933,8 +933,19 @@ def test_one_real_year_maps_into_the_vocabulary(tmp_path):
     assert ids.len() > 0.99 * frame.height
     assert ids.str.contains(r"^[0-9]{10}$").all()
     ff = frame["final_furlong_s"].drop_nulls()
-    assert ff.len() > 0 and 10.0 <= ff.median() <= 15.0
+    assert ff.len() > 0
     assert ff.is_between(9.0, 20.0).mean() > 0.95
+    # A 200 m lap, per course, between race pace and a slow canter: HC logs every run up the
+    # slope (mostly canters), so no tighter bound holds for both courses and both centres.
+    medians = dict(frame.group_by("course").agg(pl.col("final_furlong_s").median()).rows())
+    assert all(m is not None and 11.0 <= m <= 18.0 for m in medians.values()), medians
+    # The splits nest: the 3-furlong total holds the final lap and two more of its scale, and the
+    # longest total is at least the 3-furlong one. A lap read as a total, or a total as a lap,
+    # breaks one of these.
+    both = frame.drop_nulls(["final_furlong_s", "split_mid_s", "split_first_s"])
+    assert both.height > 0.99 * frame.height
+    assert (both["split_mid_s"] > 2 * both["final_furlong_s"]).mean() > 0.99
+    assert (both["split_first_s"] >= both["split_mid_s"]).mean() > 0.99
     furlongs = frame.group_by("course").agg(pl.col("furlongs").max()).rows()
     assert dict(furlongs)["hill"] <= 4 and dict(furlongs)["wood"] <= 10
     assert frame["effort"].null_count() == frame["partner"].null_count() == frame.height
