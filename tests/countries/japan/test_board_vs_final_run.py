@@ -40,6 +40,17 @@ Review round 2:
 - An attempt report never replaces another: two failed runs at the same instant, or
   `write_attempt` called again with the same `attempt`, leave each report in its own file.
 
+Review round 3:
+
+- The default out dir gets an explicit `--out`'s check: `output_dir(None)` is
+  `$HORSETRACK_DATA_DIR/reports` resolved, and a `reports` symlinked out of the data directory
+  raises `OutsideDataDir` (symlinked into the repository: `DataDirInsideRepo`, or another of the
+  refusals above) with nothing written in the link's target. `main(["--run"])` without `--out`
+  is then refused before the freeze: it returns 2, appends no registry entry, writes no summary,
+  prints no result and leaves the target empty. A `reports` that is a real directory, or a
+  symlink resolving under the data directory, is accepted and returned resolved, and a run
+  writes there.
+
 All data is synthetic: no JRDB file or value. Expected values come from the hand-written fixtures
 and from sums over the trifecta array written out here, never from the code under test.
 """
@@ -845,3 +856,98 @@ def test_write_attempt_never_overwrites_an_attempt_of_the_same_name(data_dir):
         assert f"synthetic failure number {k}" in data.decode("utf-8"), path.name
         assert "-attempt-" in path.name and attempt in path.name and path.suffix == ".md"
         assert path.parent == out.resolve()
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 3: the default out dir is checked before the freeze too
+# ---------------------------------------------------------------------------------------------
+
+REDIRECTED = {  # where `<data dir>/reports` points, and what refuses it
+    "symlink-out-of-the-data-dir": (OutsideDataDir,),
+    "symlink-into-the-repository": (paths.DataDirInsideRepo, LicensedOutputInRepo, OutsideDataDir),
+}
+
+
+def redirect_reports(data: Path, tmp_path: Path, where: str) -> Path:
+    """`data`/reports made a symlink to an empty directory outside the data dir; that target."""
+    if where == "symlink-out-of-the-data-dir":
+        target = tmp_path / "reports-elsewhere"
+    elif where == "symlink-into-the-repository":
+        target = env.repo_root() / f".tmp-board-vs-final-{uuid.uuid4().hex[:8]}"
+    else:
+        raise AssertionError(where)
+    target.mkdir()
+    (data / "reports").symlink_to(target, target_is_directory=True)
+    return target
+
+
+@pytest.mark.parametrize("where", REDIRECTED)
+def test_the_default_out_dir_symlinked_out_of_the_data_dir_is_refused(data_dir, tmp_path, where):
+    target = redirect_reports(data_dir, tmp_path, where)
+    try:
+        with pytest.raises(REDIRECTED[where]):
+            output_dir(None)
+        assert files_under(target) == [], "a refused default out dir is never written"
+    finally:
+        if where == "symlink-into-the-repository":
+            shutil.rmtree(target, ignore_errors=True)
+
+
+@pytest.mark.parametrize("where", REDIRECTED)
+def test_the_run_refuses_a_default_out_dir_symlinked_out_of_the_data_dir_before_the_freeze(
+    data_dir, tmp_path, capsys, where
+):
+    """A store the run could read is in place, so only the refusal keeps it from the freeze."""
+    write_store(data_dir, tyb="null")
+    target = redirect_reports(data_dir, tmp_path, where)
+    existing = files_under(data_dir)
+    try:
+        code = main(["--run"])
+        assert code == 2, "a default out dir outside the data dir is refused like an --out"
+        assert files_under(target) == [], "the link's target is never written"
+    finally:
+        if where == "symlink-into-the-repository":
+            shutil.rmtree(target, ignore_errors=True)
+    assert files_under(data_dir) == existing, "refused before the freeze: no registry entry"
+    assert not (data_dir / "registry").exists() or files_under(data_dir / "registry") == []
+    assert (data_dir / "reports").is_symlink(), "the data dir's reports link is left as it was"
+    assert files_under(tmp_path / "summary") == []
+    assert capsys.readouterr().out.strip() == "", "a refused run prints no result"
+
+
+def reports_under_the_data_dir(data: Path, how: str) -> Path:
+    """`data`/reports as a real directory or a symlink resolving under `data`; where it resolves."""
+    if how == "real-directory":
+        (data / "reports").mkdir()
+        return (data / "reports").resolve()
+    if how == "symlink-within-the-data-dir":
+        target = data / "store" / "reports-here"
+        target.mkdir(parents=True)
+        (data / "reports").symlink_to(target, target_is_directory=True)
+        return target.resolve()
+    raise AssertionError(how)
+
+
+@pytest.mark.parametrize("how", ["real-directory", "symlink-within-the-data-dir"])
+def test_the_default_out_dir_resolving_under_the_data_dir_is_accepted_resolved(data_dir, how):
+    want = reports_under_the_data_dir(data_dir, how)
+    assert output_dir(None) == want, "the default out dir is returned resolved"
+
+
+def test_a_run_with_reports_symlinked_within_the_data_dir_writes_into_its_target(
+    data_dir, tmp_path, capsys
+):
+    """Regression row for the default's check: a link that stays in the data dir is not refused."""
+    write_store(data_dir, tyb="null")
+    want = reports_under_the_data_dir(data_dir, "symlink-within-the-data-dir")
+
+    code, result = run_cli(["--run"], capsys)
+
+    assert code == 1, "the run goes ahead (its tables fail on the missing board)"
+    attempt = attempt_path(result)
+    assert attempt.parent == want and attempt.is_file() and attempt.stat().st_size > 0
+    registry = Registry(
+        data_dir / "registry" / "japan.jsonl", holdout_log=tmp_path / "no-holdout-log.jsonl"
+    )
+    assert registry.frozen_spec_hash(bvf.FAMILY_ID) == result["spec_hash"]
+    assert registry.records(bvf.FAMILY_ID), "the run's records are appended"

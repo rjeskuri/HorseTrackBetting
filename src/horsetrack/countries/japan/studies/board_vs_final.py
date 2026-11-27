@@ -945,11 +945,12 @@ def freeze() -> tuple[Registry, dict, str]:
 
 
 def output_dir(out_dir: Path | str | None) -> Path:
-    """The run's output directory, resolved: the data directory's reports directory by default;
-    one given must lie under $HORSETRACK_DATA_DIR (OutsideDataDir otherwise) and so outside the
-    repository (DataDirInsideRepo). Checked before anything is written."""
+    """The run's output directory, resolved: the data directory's reports directory by default.
+    Either one, the default included (it may be a symlink), must lie under $HORSETRACK_DATA_DIR
+    (OutsideDataDir otherwise) and so outside the repository (DataDirInsideRepo). Checked before
+    anything is written."""
     if out_dir is None:
-        return paths.reports_dir()
+        out_dir = paths.reports_dir()
     resolved = paths.outside_repo(Path(out_dir), what="out")
     data = paths.data_dir()
     # A data dir not created yet holds no symlink: both resolved paths compare as written.
