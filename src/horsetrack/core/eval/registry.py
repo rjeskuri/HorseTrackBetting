@@ -53,6 +53,7 @@ __all__ = [
     "default_registry",
     "run_id",
     "summary_dir",
+    "summary_stem",
     "write_summary",
 ]
 
@@ -61,7 +62,7 @@ WITHHELD_LABEL = "withheld (licensed source)"
 GENESIS = "0" * 64
 
 _HYPOTHESIS_ID = re.compile(r"[ELP][0-9]+")
-_FAMILY_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a family id that is a safe file stem
+_FAMILY_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a safe file stem
 _INDEX_STEM = "README"
 _PREAMBLE = (
     "# Experiment registry summary",
@@ -225,6 +226,41 @@ def _problem(r: RunRecord) -> str | None:
     return None
 
 
+def summary_stem(family_id: str) -> str | None:
+    """The stem of the family's summary file (each ``/`` of a legacy id mapped to ``--``), or
+    None when that is not a safe file stem or is the index's in any case (macOS ignores case)."""
+    stem = family_id.replace("/", "--")
+    if not _FAMILY_FILE.fullmatch(stem) or stem.casefold() == _INDEX_STEM.casefold():
+        return None
+    return stem
+
+
+def _unnameable(family_id: str) -> str | None:
+    """Why a new family id cannot be its own summary file name, or None."""
+    if summary_stem(family_id) != family_id:
+        return (
+            f"family_id {family_id!r} cannot be a summary file name: start with an ASCII letter "
+            f"or digit, then letters, digits, '.', '_' or '-', and not {_INDEX_STEM!r}"
+        )
+    return None
+
+
+def _shared_summary_file(chain: _Chain, families: list[str]) -> str | None:
+    """Why one of `families` (new runs' family ids, each its own safe stem) would share its
+    summary file, ignoring case, with another family already in `chain` or with another of
+    `families`; None when none would."""
+    held = {r.family_id for r in chain.runs}
+    seen: dict[str, str] = {}
+    for family in dict.fromkeys(families):
+        name = family.casefold()
+        for other in held - {family}:
+            if (summary_stem(other) or "").casefold() == name:
+                return f"family {family!r} would share its summary file with {other!r}"
+        if (other := seen.setdefault(name, family)) != family:
+            return f"family {family!r} would share its summary file with {other!r}"
+    return None
+
+
 # --------------------------------------------------------------------------- the chain
 
 
@@ -300,12 +336,17 @@ class Registry:
 
     def append(self, record: RunRecord) -> str:
         """Add one run and return its id; ``RecordRefused`` (nothing written) when it breaks a
-        rule or is already in the registry."""
+        rule, is already in the registry, or its family id cannot name its summary file: not a
+        safe file stem as it is, ``README`` in any case, or the file (ignoring case) of another
+        family already in the registry."""
         run_id, data = self._checked(record)
 
         def entry(chain: _Chain) -> dict:
             if run_id in chain.run_ids:
                 raise RecordRefused(f"run {run_id} is already in the registry")
+            shared = _shared_summary_file(chain, [record.family_id])
+            if shared is not None:
+                raise RecordRefused(shared)
             return {"kind": "run", "run_id": run_id, "record": data}
 
         self._append(entry)
@@ -314,8 +355,9 @@ class Registry:
     def append_all(self, records: list[RunRecord]) -> list[str]:
         """Add the runs in order under one lock and one read of the chain, and return their ids:
         for a study with many variants, since ``append`` reads the whole chain each time. Each
-        record is checked as ``append`` checks one; when any breaks a rule, is already in the
-        registry or repeats an earlier one, ``RecordRefused`` is raised and none is written."""
+        record is checked as ``append`` checks one, and the batch's families also against each
+        other; when any breaks a rule, is already in the registry, repeats an earlier one or would
+        share a summary file, ``RecordRefused`` is raised and none is written."""
         checked = [self._checked(record) for record in records]
 
         def entries(chain: _Chain) -> list[dict]:
@@ -324,6 +366,9 @@ class Registry:
                 if run_id in seen:
                     raise RecordRefused(f"run {run_id} is already in the registry or repeated")
                 seen.add(run_id)
+            shared = _shared_summary_file(chain, [record.family_id for record in records])
+            if shared is not None:
+                raise RecordRefused(shared)
             return [{"kind": "run", "run_id": run_id, "record": data} for run_id, data in checked]
 
         if checked:
@@ -334,7 +379,7 @@ class Registry:
         """The record's id and data when it passes every rule that needs no chain."""
         if not isinstance(record, RunRecord):
             raise TypeError(f"append takes a RunRecord, got {type(record).__name__}")
-        problem = _problem(record)
+        problem = _problem(record) or _unnameable(record.family_id)
         if problem is None and record.holdout_open is not None:
             if record.holdout_open not in self._holdout_line_hashes():
                 problem = (
@@ -384,9 +429,12 @@ class Registry:
     def freeze_family(self, family_id: str, spec: dict) -> str:
         """Freeze the family's pre-registered spec and return its hash (sha256 hex of the spec's
         sorted, compact JSON). Freezing again with an equal spec is a no-op; another spec raises
-        ``FamilyAlreadyFrozen``."""
+        ``FamilyAlreadyFrozen``. ``RecordRefused`` when the family id cannot name a summary
+        file, as ``append`` refuses it."""
         if not _text(family_id):
             raise RecordRefused(f"family_id must be a non-blank string, got {family_id!r}")
+        if (problem := _unnameable(family_id)) is not None:
+            raise RecordRefused(problem)
         if not isinstance(spec, dict):
             raise TypeError(f"spec must be a dict, got {type(spec).__name__}")
         try:
@@ -499,16 +547,25 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
     """Write the aggregate-only summary of ``registry`` into ``directory`` (normally
     ``summary_dir(country)``): one ``<family_id>.md`` per family, holding per run its E id,
     variant, status and per-fold metric, value, CI and n, and nothing else, and ``README.md``,
-    the index of the families. A licensed-source run shows only its E id and variant, with
-    ``withheld (licensed source)`` in place of its status and values: a status may be data-derived
-    (D21; #430, a cell rule failed for want of bets). A family's file depends on that family's
-    records alone."""
+    the index of the families. A legacy family id written before #525 has each ``/`` mapped to
+    ``--`` in its file name; its heading and index entry show the original id. ``ValueError``,
+    before any file is written, when a mapped name is still unsafe or ``README``, or two families
+    would share a file (ignoring case). A licensed-source run shows only its E id and variant,
+    with ``withheld (licensed source)`` in place of its status and values: a status may be
+    data-derived (D21; #430, a cell rule failed for want of bets). A family's file depends on
+    that family's records alone."""
     families: dict[str, list[RunRecord]] = {}
     for record in registry.records():
         families.setdefault(record.family_id, []).append(record)
+    stems: dict[str, str] = {}
+    taken: dict[str, str] = {}
     for family in families:
-        if not _FAMILY_FILE.fullmatch(family) or family == _INDEX_STEM:
+        stem = summary_stem(family)
+        if stem is None:
             raise ValueError(f"family {family!r} cannot be a summary file name")
+        if (other := taken.setdefault(stem.casefold(), family)) != family:
+            raise ValueError(f"families {other!r} and {family!r} would share {stem}.md")
+        stems[family] = stem
 
     directory = Path(directory)
     for family, records in families.items():
@@ -532,7 +589,7 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
                 ci = "-" if m.lo is None and m.hi is None else f"[{_number(m.lo)}, {_number(m.hi)}]"
                 values = f"{_number(m.value)} | {ci} | {m.n}"
                 lines.append(f"{who} {_cell(m.fold)} | {_cell(m.metric)} | {values} |")
-        write_report(directory / f"{family}.md", "\n".join(lines) + "\n", sources=())
+        write_report(directory / f"{stems[family]}.md", "\n".join(lines) + "\n", sources=())
 
     index = [
         "# Experiment registry index",
@@ -541,5 +598,5 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
         "per family, each holding that family's runs.",
         "",
     ]
-    index += [f"- [{family}]({family}.md)" for family in sorted(families)]
+    index += [f"- [{family}]({stems[family]}.md)" for family in sorted(families)]
     write_report(directory / f"{_INDEX_STEM}.md", "\n".join(index) + "\n", sources=())
