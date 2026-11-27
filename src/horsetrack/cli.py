@@ -45,6 +45,7 @@ from horsetrack.countries.japan.logger.pull_vm import pull_vm_command
 from horsetrack.countries.japan.logger.systemd import systemd_command
 from horsetrack.countries.japan.research.coverage import coverage_command
 from horsetrack.countries.japan.research.exacta_impact import exacta_impact_command
+from horsetrack.countries.japan.research.pool_depth import pool_depth_app
 from horsetrack.countries.japan.research.win5_backfill import win5_history_command
 from horsetrack.countries.japan.research.win5_study import win5_study_app
 from horsetrack.countries.japan.shadow.day import shadow_day_command
@@ -68,6 +69,7 @@ japan.add_typer(win5_study_app, name="win5-study")
 japan.command("fetch-going")(fetch_going_command)
 japan.command("fetch-win-sales")(fetch_win_sales_command)
 japan.command("exacta-impact")(exacta_impact_command)
+japan.add_typer(pool_depth_app, name="pool-depth")
 japan.command("nowcast-study")(nowcast_study_command)
 japan.command("ability-study")(ability_study_command)
 japan.command("coverage")(coverage_command)
