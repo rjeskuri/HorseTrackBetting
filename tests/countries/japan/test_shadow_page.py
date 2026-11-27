@@ -1332,6 +1332,131 @@ def test_an_observed_plain_reference_wins_over_a_cached_projection(tmp_path):
     assert replaced >= 7, replaced  # the fixture has stale points on both sides of the cutoff
 
 
+def merged(plain_row: dict, ladder) -> list[dict | None]:
+    """The same-schedule merge: an observed ladder point stays, else the plain reference when it is
+    not null, else the ladder's point (projected or null)."""
+    out = []
+    for point, ref in zip(ladder, PLAIN_REFS, strict=True):
+        value = None if ref is None else plain_row.get(ref)
+        keep = point is not None and point["observed"]
+        out.append(point if keep or value is None else seen(value))
+    return out
+
+
+@needs_node
+def test_a_delayed_post_merges_only_references_of_the_same_schedule(tmp_path):
+    """TOK 10 was due at 10:02:30 (OLD) and is delayed to 10:12:30 (NEW); NOW is 10:01. The feeds
+    refresh apart, so one carries the new post time while the other still has the old one.
+    - the shadow feed has NEW, the cached plain feed OLD: the plain rows' t10/t5/t2 were taken for
+      OLD (before the delay); the ladder projects T-10 on for NEW. The page shows the ladder as is:
+      no plain reference replaces a projected or null point.
+    - the plain feed has NEW, the cached shadow feed OLD: the plain rows' t20 is NEW's; the stale
+      ladder (observed to T-2 for OLD, null T-20 where OLD had no capture) shows as is.
+    - both feeds on the same post (OLD or NEW): the plain references replace projected and null
+      points, as before.
+    The race header shows the newer (later) post time of the two."""
+    old, new = jst(10, 2, 30), jst(10, 12, 30)
+    # plain rows taken for OLD (every checkpoint passed) and, at a delay, the ladder for NEW
+    after_shadow = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.8, 2.5, 2.3, 2.26),
+                  (seen(2.6), ahead(2.41), ahead(2.33), ahead(2.27), ahead(2.19))),
+            "2": (ref_line("2", 5.8, 4.6, 4.9, 5.6, 5.9),
+                  (seen(5.0), None, ahead(5.62), ahead(5.77), ahead(6.02))),
+            "3": (ref_line("3", 8.6, 9.3, None, 8.8, 8.7),
+                  (seen(9.1), ahead(9.04), ahead(8.93), None, None)),
+            "4": (ref_line("4", 31.0, None, 28.7, 33.1, 35.2),
+                  (None, ahead(30.2), ahead(32.0), ahead(33.4), ahead(36.0))),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.4, 1.3, 1.24, 1.22, hi=1.6),
+                  (seen(1.3), ahead(1.27), ahead(1.23), ahead(1.21), ahead(1.18))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.7, 3.4, 3.2, 3.27, hi=4.1),
+                    (seen(3.5), ahead(3.38), ahead(3.31), ahead(3.27), ahead(3.2))),
+        },
+    }  # fmt: skip
+    # plain rows taken for NEW (only T-20 passed) and the ladder still for OLD
+    after_plain = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.6, None, None, None),
+                  (seen(2.8), seen(2.5), seen(2.3), seen(2.26), ahead(2.19))),
+            "2": (ref_line("2", 5.8, 5.0, None, None, None),
+                  (None, seen(4.9), seen(5.6), seen(5.9), ahead(6.02))),
+            "3": (ref_line("3", 8.6, 9.1, None, None, None),
+                  (seen(9.3), None, seen(8.8), seen(8.7), None)),
+            "4": (ref_line("4", 31.0, 30.4, None, None, None),
+                  (None, seen(28.7), seen(33.1), seen(35.2), ahead(36.0))),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.3, None, None, None, hi=1.6),
+                  (None, seen(1.3), seen(1.24), seen(1.22), ahead(1.18))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.5, None, None, None, hi=4.1),
+                    (None, seen(3.4), seen(3.2), seen(3.27), ahead(3.2))),
+        },
+    }  # fmt: skip
+
+    def feeds(table, plain_post, plain_at, shadow_post, shadow_at) -> tuple[dict, dict]:
+        plain = {
+            "race_date": DAY,
+            "generated_utc": utc_text(plain_at),
+            "venues": [{"venue": "TOK", "races": [
+                race("TOK", 10, plain_post, plain_at, {
+                    code: pool(*(r for r, _ in rows.values())) for code, rows in table.items()
+                })
+            ]}],
+        }  # fmt: skip
+        shadow = {
+            "race_date": DAY,
+            "generated_utc": utc_text(shadow_at),
+            "models": {"nowcast": "now-c3"},
+            "races": [shadow_race("TOK", 10, shadow_post, 16, {
+                code: {
+                    combo: {**(win(0.9, 0.8, 1.0) if code == "WIN" else rng(0.6, 0.8)),
+                            "ladder": dict(zip(LADDER_KEYS, ladder, strict=True))}
+                    for combo, (_, ladder) in rows.items()
+                }
+                for code, rows in table.items()
+            })],
+        }  # fmt: skip
+        return plain, shadow
+
+    earlier = NOW - timedelta(seconds=4)
+    # (name, table, plain post, plain generated, shadow post, shadow generated, merge?, header)
+    cases = [
+        ("shadow saw the delay first", after_shadow, old, earlier, new, NOW, False, new),
+        ("plain saw the delay first", after_plain, new, NOW, old, earlier, False, new),
+        ("no delay, the old ladder", after_shadow, old, earlier, old, NOW, True, old),
+        ("both on the delay", after_plain, new, NOW, new, earlier, True, new),
+    ]
+    steps = []
+    for _, table, plain_post, plain_at, shadow_post, shadow_at, _, _ in cases:
+        plain, shadow = feeds(table, plain_post, plain_at, shadow_post, shadow_at)
+        steps.append(call("renderShadow", plain, shadow,
+                          {"now": ms(NOW), "venue": "TOK", "race": rid("TOK", 10)}))  # fmt: skip
+    pages = [soup(h) for h in results(steps, tmp_path)]
+
+    for (name, table, *_, merge, header_post), page in zip(cases, pages, strict=True):
+        block = race_block(page, rid("TOK", 10))
+        differ = 0
+        for code, rows in table.items():
+            for combo, (plain_row, ladder) in rows.items():
+                want = merged(plain_row, ladder) if merge else list(ladder)
+                check_ladder_row(row_of(pool_block(block, code), combo), want, (name, code, combo))
+                differ += sum(m != lad for m, lad in zip(merged(plain_row, ladder), ladder,
+                                                         strict=True))  # fmt: skip
+        assert differ >= 4, (name, differ)  # the merge would change cells of this fixture
+        head = text(block.find("header"))
+        minutes = math.ceil((header_post - NOW).total_seconds() / 60)
+        assert f"Post {header_post:%H:%M} JST" in head, (name, head)
+        assert f"{minutes} min to post" in head, (name, head)
+        other = old if header_post == new else new
+        assert f"Post {other:%H:%M} JST" not in head, (name, head)
+
+
 def _write_logged_day(captures: dict[datetime, dict[str, float]], post: datetime) -> None:
     """One TOK race (5R) of synthetic WIN captures, and its post time, under the data dir."""
     from horsetrack.core import paths

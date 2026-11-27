@@ -19,10 +19,14 @@ signature):
   cell's mean on the nowcast's grid (60, 30, 16, 5, 2, 1), linear in tau between neighbouring
   grid taus (T-20, T-10, a tau_now off the grid), the T-60 cell beyond T-60, and mu(0) = 0. The
   projected odds are exp of that (the median), floored at 1.0.
-- tau_now is anchored to the capture of the row O_now comes from (its `snapshot_utc`): minutes from
-  that capture to the post, not from now and not from the race's newest capture of another pool.
-  With staggered captures (WIN at post - 12, a later Wide-only capture at post - 9) WIN projects
-  from tau 12 and Wide from tau 9, whatever now is.
+- tau_now is anchored to the time the price O_now comes from was fetched: minutes from that row's
+  `fetched_utc` (its `snapshot_utc` when it has none; `snapshot._available`) to the post, not
+  from now and not from the race's newest capture of another pool. The native logger stamps a
+  capture before it fetches the odds pages, so a row snapped at post - 12 and fetched at post - 11
+  projects from tau 11. With staggered captures (WIN at post - 12, a later Wide-only capture at
+  post - 9) WIN projects from tau 12 and Wide from tau 9, whatever now is. The board at now and
+  the observed checkpoints read only rows available (fetched) by now; an observed checkpoint is
+  still chosen by `snapshot_utc` (the latest captured at or before post - k).
 - mu(tau) reads only the cells it needs: the exact grid cell, or the two grid cells bracketing tau
   (only the upper one below the smallest grid tau). A fitted nowcast missing an unrelated (pool,
   tau) (`NowcastV0.cell` raises KeyError for it) still projects; a checkpoint whose projection
@@ -32,8 +36,9 @@ signature):
 - The ladder is display only: the values, flags and shadow log are unchanged (their own tests).
 
 The nowcasts are built here from known cells (no fit file), and every expected odds figure is
-derived here from the logged rows and those cells, tau_now from each row's own capture. Most races
-here capture every pool at now; the staggered-capture test does not. All rows are
+derived here from the logged rows and those cells, tau_now from each row's own fetch time. Most
+races here capture every pool at now, fetched at their capture; the staggered-capture and
+fetch-lag tests do not. All rows are
 synthetic and written under tmp_path; nothing waits on a real clock.
 """
 
@@ -180,6 +185,11 @@ def _key(row: dict) -> tuple[str, str]:
     return row["pool"], row["combination"]
 
 
+def ref_available(row: dict) -> datetime:
+    """When a row could first be known: its fetch time, else its capture time."""
+    return instant(row.get("fetched_utc") or row["snapshot_utc"])
+
+
 def _priced(row: dict) -> bool:
     return row.get("odds") is not None and row.get("status_raw") != "SCR"
 
@@ -187,8 +197,9 @@ def _priced(row: dict) -> bool:
 def ref_ladders(
     rows: list[dict], race: Race, now: datetime, mu: MuFn | None, *, no_cells=(), missing=()
 ) -> dict[tuple[str, str], dict[str, dict | None]]:
-    """{(pool, combination): {"20": entry or None, ...}} from the logged rows of `race`; each
-    projection from the current row's own capture (tau_now = post - its snapshot_utc)."""
+    """{(pool, combination): {"20": entry or None, ...}} from the logged rows of `race` available
+    (fetched) by now; each projection from the current row's own fetch time (tau_now = post - its
+    fetched_utc, else its snapshot_utc); observed checkpoints chosen by snapshot_utc."""
     mine = [r for r in rows if r["race_id"] == race.race_id and r["pool"] in POOLS]
     mine = sorted(mine, key=lambda r: instant(r["snapshot_utc"]))  # stable: log order
     final_snaps = {
@@ -197,11 +208,11 @@ def ref_ladders(
         if r.get("source_update_utc") is None and FINAL_TEXT in (r.get("status_raw") or "")
     }
     out: dict[tuple[str, str], dict[str, dict | None]] = {}
-    for key in sorted({_key(r) for r in mine if instant(r["snapshot_utc"]) <= now}):
-        history = [r for r in mine if _key(r) == key and instant(r["snapshot_utc"]) <= now]
+    for key in sorted({_key(r) for r in mine if ref_available(r) <= now}):
+        history = [r for r in mine if _key(r) == key and ref_available(r) <= now]
         pool = key[0]
-        current = history[-1]
-        tau_now = max(0.0, (race.post - instant(current["snapshot_utc"])) / timedelta(minutes=1))
+        current = max(enumerate(history), key=lambda ir: (ref_available(ir[1]), ir[0]))[1]
+        tau_now = max(0.0, (race.post - ref_available(current)) / timedelta(minutes=1))
         ladder: dict[str, dict | None] = {}
         for k in CHECKPOINTS:
             cutoff = race.post - timedelta(minutes=k)
@@ -498,6 +509,98 @@ def test_the_projection_starts_from_the_capture_of_the_row_it_uses():
             wrong = {ref_projected(mu_a, pool, current["odds"], tau, int(k)) for tau in (9.0, 7.0)}
             told[pool] += all(abs(w - right) > 3 * TOL for w in wrong if w is not None)
     assert told[WIN] >= 10 and told[PLACE] >= 5, told  # the fixture tells the anchors apart
+
+
+def capture_late(day: SyntheticDay, r: Race, snap: datetime, fetched: datetime, factor: float,
+                 pools=POOLS) -> None:  # fmt: skip
+    """A capture stamped at `snap` whose odds pages were fetched at `fetched` (the native logger
+    stamps the snapshot first), only the rows of `pools`."""
+    rows = [row for row in capture_rows(r, snap, factor) if row["pool"] in pools]
+    for row in rows:
+        row["fetched_utc"] = fetched.astimezone(UTC).isoformat()
+    odds_log.append_capture(log_path(DAY, r.venue), rows)
+    day.rows.extend(rows)
+
+
+def test_the_projection_starts_from_the_fetch_of_the_price_it_uses():
+    """Captures stamped before their pages were fetched; now is T0 for every race.
+    - CHU 7 (post - 7 at now): every pool snapped at post - 12, fetched at post - 11; a Wide-only
+      capture snapped at post - 9, fetched at post - 8. WIN and PLACE project from tau 11, Wide
+      from tau 8 (not 12 or 9 from the stamps, not 7 from now).
+    - CHU 8 (post - 7): snapped at post - 17, fetched at post - 15.5: tau 15.5 (below the T-16
+      grid cell, where the stamp's 17 is above it).
+    - CHU 9 (post - 4): snapped at post - 6, fetched at post - 5.5: tau 5.5; its T-5 is observed
+      from that row (chosen by its stamp, at or before post - 5).
+    - CHU 10 (post - 7): snapped at post - 9 but fetched at post - 6.5, after now: not on the board
+      yet, so O_now and tau 25 come from the post - 25 capture and T-10 is observed from it."""
+    lagged = race("CHU", 7, 7.0, EIGHT)
+    crossing = race("CHU", 8, 7.0, SIX)
+    near = race("CHU", 9, 4.0, EIGHT2)
+    unseen = race("CHU", 10, 7.0, EIGHT)
+    day = SyntheticDay(DAY, [lagged, crossing, near, unseen])
+
+    def at(r: Race, minutes: float) -> datetime:
+        return r.post - timedelta(minutes=minutes)
+
+    for r, first in ((lagged, 25), (crossing, 30), (near, 25), (unseen, 25)):
+        day.capture(r, at(r, first), 1.0)
+    capture_late(day, lagged, at(lagged, 12), at(lagged, 11), 1.06)
+    capture_late(day, lagged, at(lagged, 9), at(lagged, 8), 0.97, pools=(WIDE,))
+    capture_late(day, crossing, at(crossing, 17), at(crossing, 15.5), 1.11)
+    capture_late(day, near, at(near, 6), at(near, 5.5), 0.92)
+    capture_late(day, unseen, at(unseen, 9), at(unseen, 6.5), 1.08)
+
+    # (race, pool) -> (the anchor wanted, the anchors a wrong reading would use)
+    anchors = {
+        (lagged, WIN): (11.0, (12.0, 9.0, 8.0, 7.0)),
+        (lagged, PLACE): (11.0, (12.0, 9.0, 8.0, 7.0)),
+        (lagged, WIDE): (8.0, (9.0, 11.0, 12.0, 7.0)),
+        (crossing, WIN): (15.5, (17.0, 7.0)),
+        (crossing, PLACE): (15.5, (17.0, 7.0)),
+        (crossing, WIDE): (15.5, (17.0, 7.0)),
+        (near, WIN): (5.5, (6.0, 4.0)),
+        (near, PLACE): (5.5, (6.0, 4.0)),
+        (near, WIDE): (5.5, (6.0, 4.0)),
+        (unseen, WIN): (25.0, (9.0, 6.5, 7.0)),
+        (unseen, PLACE): (25.0, (9.0, 6.5, 7.0)),
+        (unseen, WIDE): (25.0, (9.0, 6.5, 7.0)),
+    }
+    ahead = {lagged: ("5", "2", "0"), crossing: ("5", "2", "0"), near: ("2", "0"),
+             unseen: ("5", "2", "0")}  # fmt: skip
+    nowcast = models_of(nowcast_of(mu_a))
+    got = by_id(build(T0, nowcast))
+    told: dict[tuple[str, str], int] = {}
+    wants = {r: ref_ladders(day.rows, r, T0, mu_a) for r in (lagged, crossing, near, unseen)}
+    for r, want in wants.items():
+        for (pool, combination), ladder in want.items():
+            right_tau, wrong_taus = anchors[(r, pool)]
+            history = [
+                row
+                for row in day.rows
+                if row["race_id"] == r.race_id
+                and (row["pool"], row["combination"]) == (pool, combination)
+                and ref_available(row) <= T0
+            ]
+            current = history[-1]
+            assert (r.post - ref_available(current)) / timedelta(minutes=1) == right_tau
+            for k in ahead[r]:
+                right = ref_projected(mu_a, pool, current["odds"], right_tau, int(k))
+                assert ladder[k] == {"odds": right, "observed": False}, (r.race_id, pool, k)
+                wrong = [ref_projected(mu_a, pool, current["odds"], t, int(k)) for t in wrong_taus]
+                apart = all(abs(w - right) > 3 * TOL for w in wrong if w is not None)
+                told[(r.race_id, pool)] = told.get((r.race_id, pool), 0) + apart
+        # the fixture tells the anchors apart in every pool of every race
+        for pool in POOLS:
+            assert told.get((r.race_id, pool), 0) >= 3, (r.race_id, pool, told)
+    for r, want in wants.items():
+        counts = assert_ladders(got[r.race_id], want, r.race_id)
+        assert counts["projected"] >= 2 * len(want), (r.race_id, counts)
+
+    # the observed checkpoints keep the stamp rule among the rows fetched by now
+    win1 = {r: got[r.race_id]["pools"][WIN]["1"]["ladder"] for r in (near, unseen, lagged)}
+    assert win1[near]["5"] == {"odds": round(EIGHT2[0] * 0.92, 2), "observed": True}
+    assert win1[unseen]["10"] == {"odds": EIGHT[0], "observed": True}
+    assert win1[lagged]["10"] == {"odds": round(EIGHT[0] * 1.06, 2), "observed": True}
 
 
 # ---------------------------------------------------------------- a nowcast with a missing cell

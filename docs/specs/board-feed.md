@@ -67,7 +67,10 @@ that moment. `generated_utc` is `now()`.
   at post - 10 min and post - 5 min. The shadow page's odds ladder falls back to these four
   references when a row has no shadow ladder, and, as the two feeds refresh apart, shows a
   non-null reference as observed in place of a projected or null ladder point (an observed
-  ladder point stays). `board-serve` rebuilds `/feed` when any of post - 20,
+  ladder point stays), but only when the plain race's `post_utc` equals the shadow race's: on a
+  delayed post one feed may still carry the old post time, its checkpoints are for another
+  schedule, and the ladder shows as it is. The race header (post time and minutes to post)
+  shows the later of the two feeds' post times. `board-serve` rebuilds `/feed` when any of post - 20,
   10, 5 or 2 min passes, so each reference fills at its cutoff without a log write.
 - Move: `current / reference - 1`, in percent rounded to one decimal, on `odds` (the low figure
   of a ranged pool such as PLACE or QUINELLA_PLACE). Null when either figure is missing.
@@ -162,9 +165,14 @@ no value, flag, row order, shadow log record or `verify()`.
   tau, below the smallest grid tau linear toward `mu(0) = 0`, and beyond the largest (T-60) it is
   that cell's. mu reads only the cells it needs (the exact grid cell, or the two bracketing tau);
   a checkpoint whose projection needs a cell the fit lacks (for tau_now or for k) is null, the
-  others still project. `tau_now` is the minutes from the capture (`snapshot_utc`) of the row
-  O_now comes from to the post, 0 after the post: with staggered captures each pool projects
-  from its own row's capture, not from the race's newest capture of another pool. The figure shown is `exp(ln O_k)`, the median odds under the nowcast's
+  others still project. `tau_now` is the minutes from the fetch of the row O_now comes from to
+  the post, 0 after the post: the row's availability (`fetched_utc`, else `snapshot_utc`;
+  `snapshot._available`), the row being the latest by availability (then log order) among those
+  available by `now`. The native logger stamps a capture before it fetches the odds pages, so a
+  row snapped at post - 12 and fetched at post - 11 projects from tau 11. With staggered captures
+  each pool projects from its own row's fetch, not from the race's newest capture of another
+  pool. The observed checkpoints keep the capture rule above (`snapshot_utc` at or before
+  post - k, among the rows available by `now`). The figure shown is `exp(ln O_k)`, the median odds under the nowcast's
   log-normal drift (the mean would add `sigma^2 / 2`; the median is the forecast a reader can hold
   half above and half below), floored at 1.0 and rounded to two decimals. It is a forecast of the
   crowd's drift, not a value and not a signal.

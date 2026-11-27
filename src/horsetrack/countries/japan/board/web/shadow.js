@@ -105,9 +105,11 @@
 
   /* The five checkpoints of a row, each {odds, observed} or null: the shadow entry's ladder, else
    * the plain row's references as observed and null ahead (the final always). The two feeds
-   * refresh apart, so an observed point wins: the plain row's reference replaces a projected or
-   * null ladder point, and an observed ladder point stays. */
-  function ladderOf(entry, line) {
+   * refresh apart, so an observed point wins: when both feeds have the race on the same post
+   * (`sameSchedule`), the plain row's reference replaces a projected or null ladder point, and an
+   * observed ladder point stays. On a delayed post one feed may still carry the old post time,
+   * and its checkpoints are for another schedule: the ladder then shows as it is. */
+  function ladderOf(entry, line, sameSchedule) {
     var ladder = own(entry, "ladder");
     var hasLadder = ladder && typeof ladder === "object";
     return LADDER.map(function (c) {
@@ -115,6 +117,7 @@
       if (!point || typeof point !== "object" || num(own(point, "odds")) === null) point = null;
       else point = { odds: num(point.odds), observed: point.observed === true };
       if (point !== null && point.observed) return point;
+      if (hasLadder && !sameSchedule) return point;
       var ref = c[2] === null ? null : num(own(line, c[2]));
       return ref !== null ? { odds: ref, observed: true } : point;
     });
@@ -122,8 +125,8 @@
 
   /* Observed odds with one decimal, coloured up / down against an observed T-20; projected ones
    * as '≈' and the odds, muted; '-' for none. */
-  function ladderCells(entry, line) {
-    var points = ladderOf(entry, line);
+  function ladderCells(entry, line, sameSchedule) {
+    var points = ladderOf(entry, line, sameSchedule);
     var t20 = points[0] && points[0].observed ? points[0].odds : null;
     return points.map(function (p, i) {
       var cls = "num lad", shown = DASH;
@@ -145,24 +148,47 @@
     '<th scope="col" class="num">Value</th><th scope="col">Read at</th>' +
     '<th scope="col">Flags</th>';
 
+  /* The plain feed with each race's post_utc replaced by the shadow feed's when that is later (a
+   * delay one feed saw first), and race_id -> whether both feeds have the race on the same post. */
+  function withLaterPosts(feed, races) {
+    var same = {};
+    if (!feed || !Array.isArray(feed.venues)) return { feed: feed, same: same };
+    var venues = feed.venues.map(function (v) {
+      if (!v || !Array.isArray(v.races)) return v;
+      var copy = Object.assign({}, v);
+      copy.races = v.races.map(function (r) {
+        var id = r ? String(r.race_id) : null;
+        var shadow = id !== null && has.call(races, id) ? races[id] : null;
+        if (!shadow) return r;
+        var plainMs = board.instantMs(r.post_utc), shadowMs = board.instantMs(shadow.post_utc);
+        same[id] = plainMs === shadowMs;
+        if (shadowMs === null || (plainMs !== null && shadowMs <= plainMs)) return r;
+        return Object.assign({}, r, { post_utc: shadow.post_utc });
+      });
+      return copy;
+    });
+    return { feed: Object.assign({}, feed, { venues: venues }), same: same };
+  }
+
   /* The HTML of the shadow page for one race of one venue: the board plus ladder, value, bucket
-   * and flag cells. */
+   * and flag cells. The race header shows the later of the two feeds' post times. */
   function renderShadow(feed, shadowFeed, opts) {
     opts = opts || {};
     var races = shadowRaces(shadowFeed);
+    var joined = withLaterPosts(feed, races);
     var columns = {
       head: HEAD,
       cells: function (raceId, code, line) {
         var race = has.call(races, String(raceId)) ? races[String(raceId)] : null;
         var entry = own(own(own(race, "pools"), code), String(line.combination));
-        return ladderCells(entry, line) +
+        return ladderCells(entry, line, joined.same[String(raceId)] === true) +
           '<td data-col="value" class="num val">' + esc(valueText(code, entry)) + "</td>" +
           '<td data-col="bucket" class="mono small">' + esc(race ? bucketText(race) : DASH) +
           "</td>" + '<td data-col="flags" class="flags">' + flagChips(entry) + "</td>";
       },
     };
     return win5Line(shadowFeed) +
-      board.renderBoard(feed,
+      board.renderBoard(joined.feed,
         { now: opts.now, venue: opts.venue, race: opts.race, columns: columns });
   }
 

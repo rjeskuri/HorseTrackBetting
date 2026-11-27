@@ -313,12 +313,13 @@ def _ladders(
         for runners, figure in shown.items():
             combination = f"{runners[0]},{runners[1]}" if pool == WIDE else str(runners)
             odds_now, key = _low(figure), (pool, runners)  # key: the board key of snapshot._key
-            # tau_now: minutes to the post from the capture of the row O_now comes from
+            # tau_now: minutes to the post from the fetch of the row O_now comes from (its
+            # availability: fetched_utc, else snapshot_utc; snapshot._available)
             entry = current.get(key)
-            snap = None if entry is None else odds_log._instant(entry[2].get("snapshot_utc"))
+            fetched = None if entry is None else entry[0]
             tau_now = None
-            if post is not None and snap is not None:
-                tau_now = max(0.0, (post - snap) / timedelta(minutes=1))
+            if post is not None and fetched is not None:
+                tau_now = max(0.0, (post - fetched) / timedelta(minutes=1))
             ladder: dict[int, dict | None] = {}
             for k in (*LADDER_MINUTES, 0):
                 if k == 0:
