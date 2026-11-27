@@ -27,8 +27,10 @@ D14; never ``LockedHoldout``), none before 2014-06-07 (D10), one year per ``load
 A run that scores no race records its members as failed and publishes nothing
 (``NoEligibleRace``). Every figure goes through ``write_report`` (jravan is withheld, D21) and
 the private registry. Each run writes its own report and export, named by its commit, data build,
-seed and asked days and carrying the days it scored; only the run of record (seed 431 over
-``RECORD_DAYS``) writes the ledger-linked ``CELLS_FILE``.
+seed and asked days and carrying the days it scored, and never the ledger-linked ``CELLS_FILE``.
+The run of record is the one run whose commit, data build, seed and asked days are
+``RECORD_COMMIT``, ``RECORD_BUILD``, ``DEFAULT_SEED`` and ``RECORD_DAYS`` (the ledger's N2 row);
+``record_cells`` (`exacta-ceiling record`) writes ``CELLS_FILE`` from its export alone.
 """
 
 from __future__ import annotations
@@ -117,8 +119,11 @@ UNIT = 100.0  # yen per vote
 WITHHELD = "withheld (D21)"
 LOOK_AHEAD = "look-ahead: the selection reads the final boards"
 CELLS_FILE = Path("candidate-cells") / "exacta-ceiling.json"
-# The run of record (the ledger row): seed DEFAULT_SEED over these asked days. Only it writes
-# CELLS_FILE; every other run writes its own report and export and leaves that file alone.
+# The run of record (the ledger's N2 row): its commit, the sha256 of its merged data builds
+# (``_build_digest``), seed DEFAULT_SEED and these asked days. Every run, this one too, writes
+# only its own report and export; ``record_cells`` writes CELLS_FILE from this run's export alone.
+RECORD_COMMIT = "fd4df5c079608285c07955c0efa66ef71b2da94d"
+RECORD_BUILD = "3fbc963a25ea052e29fb268eaec69381a6846241eea9ec5535a48bb0d846028f"
 RECORD_DAYS = (FIRST_DAY, date(2026, 11, 27))
 NO_RECORD = "no scored record of this superseded member in the registry"
 NO_BET = "no combination selected"
@@ -688,7 +693,7 @@ class CeilingResult:
     excluded: dict
     meta: dict
     report_path: Path
-    cells_path: Path | None  # None: only the run of record (RECORD_DAYS, seed 431) writes it
+    cells_path: Path | None  # always None: a run never writes CELLS_FILE, ``record_cells`` does
     run_ids: tuple[str, ...]
     variants_searched: int  # the variants actually scored, of VARIANTS_SEARCHED frozen
     export_path: Path | None = None  # this run's own ranked export, beside its report
@@ -996,14 +1001,17 @@ def run_ceiling(
     """Score every frozen member on the development days of [max(date_from, 2014-06-07),
     date_to]; one registry record per member and per descriptive (a failure too), and the
     private report and this run's own export under ``out_dir`` (named by its commit, data build,
-    seed and asked days, carrying the days it scored). Only the run of record (seed 431 over
-    ``RECORD_DAYS``) also writes the ledger-linked ``CELLS_FILE``. With the default registry, the
-    committed summary of this study's families is regenerated."""
+    seed and asked days, carrying the days it scored, flagged ``run_of_record`` by
+    ``_is_run_of_record``). No run writes the ledger-linked ``CELLS_FILE``: ``record_cells`` does,
+    from the run of record's export. With the default registry, the committed summary of this
+    study's families is regenerated."""
     default = registry is None
     registry = default_registry(COUNTRY) if default else registry
     _check_frozen(registry)
     out_dir = Path(out_dir)
     sha = _git_sha()
+    if not sha:  # the registry takes no record without a commit: refuse before any read
+        raise RunRefused("no git commit to record the run under")
     specs = family_specs()
     lambdas: dict[str, tuple[str, float]] = {}
     labels = {FAMILY_ID: "full_development", PLAIN_ID: "1.0"}
@@ -1051,7 +1059,7 @@ def run_ceiling(
         ranked = _ranked([*groups[FAMILY_ID], *groups[PLAIN_ID], *_superseded_rows(registry)])
         span = (min(scored_days), max(scored_days))
         window = (max(date_from, FIRST_DAY), date_to)  # the asked days, as `_days` clamps them
-        report_path, export_path, cells_path = _write_private(
+        report_path, export_path = _write_private(
             out_dir, sha, meta, ranked, descriptives, dict(excluded), span, window, seed
         )
     except RunRefused:
@@ -1098,7 +1106,7 @@ def run_ceiling(
         dict(excluded),
         meta,
         report_path,
-        cells_path,
+        None,  # cells_path: a run never writes CELLS_FILE
         tuple(run_ids),
         sum(not row.unavailable for row in ranked),
         export_path,
@@ -1206,17 +1214,36 @@ def _status(row: CeilingRow) -> str:
     return "scored" if _available(row.rho) else f"scored, {NO_BET}"
 
 
+def _build_digest(builds: Mapping) -> str:
+    """A run's data-build identity: the sha256 of its merged builds as sorted JSON."""
+    return hashlib.sha256(json.dumps(builds, sort_keys=True).encode()).hexdigest()
+
+
+def _stem(commit: str, digest: str, seed: int, window) -> str:
+    """A run's report and export name: its commit, data build, seed and asked days, so no other
+    run (another revision, seed or span) ever overwrites them."""
+    days = f"{window[0]:%Y%m%d}-{window[1]:%Y%m%d}"
+    return f"exacta-ceiling-japan-{commit[:12]}-{digest[:8]}-seed{seed}-{days}"
+
+
+def _is_run_of_record(commit: str, builds: Mapping, seed: int, window) -> bool:
+    """The recorded commit, data build, seed and asked days, read now; never when the record or
+    the run lacks a commit or a data build (two blanks or two empty build maps are no record)."""
+    if not (RECORD_COMMIT and RECORD_BUILD and commit and builds):
+        return False
+    found = (commit, _build_digest(builds), seed, tuple(window))
+    return found == (RECORD_COMMIT, RECORD_BUILD, DEFAULT_SEED, tuple(RECORD_DAYS))
+
+
 def _write_private(out_dir, sha, meta, ranked, descriptives, excluded, span, window, seed):
-    """The report and this run's export (``<stem>.md``, ``<stem>.json``), and ``CELLS_FILE``
-    for the run of record alone; (report, export, cells or None)."""
+    """The report and this run's export (``<stem>.md``, ``<stem>.json``); (report, export).
+    Never ``CELLS_FILE``: ``record_cells`` writes it from the run of record's export."""
     specs = family_specs()
     hashes = {f: _spec_hash(s) for f, s in specs.items()}
-    tag = hashlib.sha256(json.dumps(meta["data_builds"], sort_keys=True).encode()).hexdigest()[:8]
-    # The run's identity: its commit, the rows it read, its seed and its asked days, so no other
-    # run (another seed, a shorter span) ever overwrites this run's report or export.
-    asked = f"{window[0]:%Y%m%d}-{window[1]:%Y%m%d}"
-    stem = f"exacta-ceiling-japan-{sha[:12]}-{tag}-seed{seed}-{asked}"
-    of_record = seed == DEFAULT_SEED and tuple(window) == RECORD_DAYS
+    digest = _build_digest(meta["data_builds"])
+    tag = digest[:8]
+    stem = _stem(sha, digest, seed, window)
+    of_record = _is_run_of_record(sha, meta["data_builds"], seed, window)
     searched = sum(not r.unavailable for r in ranked)  # only the variants actually scored
     scored = f"{span[0]} to {span[1]}"
 
@@ -1256,11 +1283,13 @@ def _write_private(out_dir, sha, meta, ranked, descriptives, excluded, span, win
         "",
         f"- Run `{stem}`: asked {window[0]} to {window[1]}, seed {seed}; "
         + (
-            f"the run of record (it writes `{CELLS_FILE.as_posix()}`)"
+            f"the run of record (`exacta-ceiling record` writes `{CELLS_FILE.as_posix()}` from "
+            f"its export `{stem}.json`)"
             if of_record
-            else f"not the run of record (seed {DEFAULT_SEED}, asked {RECORD_DAYS[0]} to "
-            f"{RECORD_DAYS[1]}): `{CELLS_FILE.as_posix()}` is left alone, this run's export is "
-            f"`{stem}.json`"
+            else f"not the run of record (commit `{RECORD_COMMIT[:12]}`, data build "
+            f"`{RECORD_BUILD[:8]}`, seed {DEFAULT_SEED}, asked {RECORD_DAYS[0]} to "
+            f"{RECORD_DAYS[1]}): `{CELLS_FILE.as_posix()}` is the run of record's alone, this "
+            f"run's export is `{stem}.json`"
         ),
         f"- Span scored by this run (p source `board`): {scored}",
         *[f"- p source `{k}`: {v}; eligible: {SPANS[k]}" for k, v in P_SOURCES.items()],
@@ -1321,6 +1350,7 @@ def _write_private(out_dir, sha, meta, ranked, descriptives, excluded, span, win
             "export": stem,
             "commit": sha,
             "data_build": tag,
+            "data_build_digest": digest,
             "seed": seed,
             "asked": window,
             "scored": span,
@@ -1342,12 +1372,47 @@ def _write_private(out_dir, sha, meta, ranked, descriptives, excluded, span, win
     export = write_report(
         out_dir / f"{stem}.json", json.dumps(_json_safe(payload), indent=1) + "\n", sources=SOURCES
     )
-    if not of_record:  # the ledger-linked file is the run of record's alone
-        return report, export, None
-    cells = write_report(
-        out_dir / CELLS_FILE, json.dumps(_json_safe(leaderboard), indent=1) + "\n", sources=SOURCES
+    return report, export
+
+
+def record_cells(out_dir: Path) -> Path:
+    """Write ``out_dir / CELLS_FILE``, the ledger-linked ranked member file, as the leaderboard of
+    the run of record's export (``RECORD_COMMIT``, ``RECORD_BUILD``, ``DEFAULT_SEED``,
+    ``RECORD_DAYS``, read now) and return its path. Everything is checked before anything is
+    written: no record, no export, or an export whose commit, data build (recomputed from its
+    builds, never its digest field), seeds or asked days differ raises ``RunRefused`` and writes
+    nothing. It appends no registry record."""
+    out_dir = Path(out_dir)
+    if not (RECORD_COMMIT and RECORD_BUILD):
+        raise RunRefused("the run of record names no commit or no data build")
+    path = out_dir / f"{_stem(RECORD_COMMIT, RECORD_BUILD, DEFAULT_SEED, RECORD_DAYS)}.json"
+    if not path.is_file():
+        raise RunRefused(f"no export of the run of record at {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise RunRefused(f"{path.name} is not JSON: {exc}") from exc
+    run = payload.get("run") if isinstance(payload, dict) else None
+    meta = payload.get("meta") if isinstance(payload, dict) else None
+    if not isinstance(run, dict) or not isinstance(meta, dict):
+        raise RunRefused(f"{path.name} has no run or meta block")
+    builds, leaderboard = meta.get("data_builds"), payload.get("leaderboard")
+    if not run.get("commit") or not isinstance(builds, dict) or not builds:
+        raise RunRefused(f"{path.name} names no commit or no data build")
+    if not isinstance(leaderboard, list) or not leaderboard:
+        raise RunRefused(f"{path.name} has no ranked members")
+    checks = (
+        ("commit", run["commit"], RECORD_COMMIT),
+        ("data build", _build_digest(builds), RECORD_BUILD),
+        ("seed", run.get("seed"), DEFAULT_SEED),
+        ("export seed", payload.get("seed"), DEFAULT_SEED),
+        ("asked days", run.get("asked"), [d.isoformat() for d in RECORD_DAYS]),
     )
-    return report, export, cells
+    for name, found, want in checks:
+        if found != want:
+            raise RunRefused(f"{path.name}: its {name} is {found!r}, the run of record's {want!r}")
+    text = json.dumps(leaderboard, indent=1) + "\n"
+    return write_report(out_dir / CELLS_FILE, text, sources=SOURCES)
 
 
 class _Mine:
@@ -1435,9 +1500,10 @@ a betting-edge claim, nothing is adopted, and the holdout is not opened.
   and `.json`, named by the run's commit, data build, seed and asked days so that no run
   overwrites another's (every ranked member with its p source, status, the days its run scored,
   family size and the variants searched; the descriptives and the exclusions); and the
-  ledger-linked ranked member file `$HORSETRACK_DATA_DIR/reports/{CELLS_FILE.as_posix()}`, written
-  only by the run of record (seed {DEFAULT_SEED}, asked days {RECORD_DAYS[0]} to
-  {RECORD_DAYS[1]}); any other run leaves it alone.
+  ledger-linked ranked member file `$HORSETRACK_DATA_DIR/reports/{CELLS_FILE.as_posix()}`, which
+  no run writes: `uv run horsetrack japan exacta-ceiling record` writes it from the run of
+  record's export (commit `{RECORD_COMMIT[:12]}`, data build `{RECORD_BUILD[:8]}`, seed
+  {DEFAULT_SEED}, asked days {RECORD_DAYS[0]} to {RECORD_DAYS[1]}) and refuses every other.
 - Variants frozen: {VARIANTS_SEARCHED}, every member family of the study: {len(MEMBERS)}
   members at #115's full-development lambda2 and the same {len(MEMBERS)} at plain Harville, for
   each p source (v2 and v1); family size {len(MEMBERS)} each. Each run's report and export state
@@ -1539,7 +1605,20 @@ def run_command(
         raise typer.Exit(1) from exc
     public = write_report(env.repo_root() / PUBLIC_REPORT, render_public_report(result), sources=())
     typer.echo(
-        f"report={result.report_path}\nexport={result.export_path}\ncells={result.cells_path}\n"
-        f"public={public}"
+        f"report={result.report_path}\nexport={result.export_path}\n"
+        f"cells=not written by a run; `exacta-ceiling record` writes {CELLS_FILE.as_posix()} from "
+        f"the run of record's export\npublic={public}"
     )
     typer.echo(f"rows={len(result.rows)} ranked={len(result.ranked)} records={len(result.run_ids)}")
+
+
+@exacta_ceiling_app.command("record")
+def record_command() -> None:
+    """Write the ledger-linked ranked member file from the run of record's export (the commit
+    and data build of the ledger's N2 row); any other export, or none, writes nothing (exit 1)."""
+    try:
+        cells = record_cells(paths.reports_dir())
+    except RunRefused as exc:
+        typer.echo(f"refused: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"cells={cells}")

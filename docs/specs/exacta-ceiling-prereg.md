@@ -182,11 +182,14 @@ Each with a two-sided 95% meeting-bootstrap interval (10,000 replicates).
   seed, a shorter span) overwrites another's. The export carries the run's identity (commit,
   build, seed, asked days, whether it is the run of record) and the first and last development
   day it scored; each row of a run's own families carries those scored days as its span, and a
-  v1 row names the run it comes from. The ledger-linked ranked member file
-  `$HORSETRACK_DATA_DIR/reports/candidate-cells/exacta-ceiling.json` is written only by the run
-  of record: seed 431 over the asked days 2014-06-07 to 2026-11-27 (`RECORD_DAYS`); any other
-  run leaves it alone. Each ranks all 64 members, each row with its p source, status, span,
-  run, family size, the variants searched and the variants frozen.
+  v1 row names the run it comes from. The run of record is the one run whose commit, data build
+  (the sha256 of its merged builds), seed and asked days are the ledger's: `RECORD_COMMIT`,
+  `RECORD_BUILD`, seed 431 and 2014-06-07 to 2026-11-27 (`RECORD_DAYS`); a run lacking a commit
+  or a data build is never it. No run writes the ledger-linked ranked member file
+  `$HORSETRACK_DATA_DIR/reports/candidate-cells/exacta-ceiling.json`:
+  `uv run horsetrack japan exacta-ceiling record` writes it from the run of record's export and
+  refuses every other export, writing nothing. Each ranks all 64 members, each row with its p
+  source, status, span, run, family size, the variants searched and the variants frozen.
 - Public: `docs/experiments/exacta-ceiling-japan.md` (every figure withheld, D21), the registry
   summary under `docs/experiments/registry/japan/` (`write_summary`, never hand-edited) and the
   ledger rows.

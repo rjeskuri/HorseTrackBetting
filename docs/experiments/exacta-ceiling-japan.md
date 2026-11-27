@@ -37,9 +37,10 @@ a betting-edge claim, nothing is adopted, and the holdout is not opened.
   and `.json`, named by the run's commit, data build, seed and asked days so that no run
   overwrites another's (every ranked member with its p source, status, the days its run scored,
   family size and the variants searched; the descriptives and the exclusions); and the
-  ledger-linked ranked member file `$HORSETRACK_DATA_DIR/reports/candidate-cells/exacta-ceiling.json`, written
-  only by the run of record (seed 431, asked days 2014-06-07 to
-  2026-11-27); any other run leaves it alone.
+  ledger-linked ranked member file `$HORSETRACK_DATA_DIR/reports/candidate-cells/exacta-ceiling.json`, which
+  no run writes: `uv run horsetrack japan exacta-ceiling record` writes it from the run of
+  record's export (commit `fd4df5c07960`, data build `3fbc963a`, seed
+  431, asked days 2014-06-07 to 2026-11-27) and refuses every other.
 - Variants frozen: 64, every member family of the study: 16
   members at #115's full-development lambda2 and the same 16 at plain Harville, for
   each p source (v2 and v1); family size 16 each. Each run's report and export state

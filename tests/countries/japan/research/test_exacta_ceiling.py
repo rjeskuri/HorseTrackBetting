@@ -76,6 +76,7 @@ import hashlib
 import json
 import math
 import random
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -84,8 +85,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 import yaml
+from typer.testing import CliRunner
 
-from horsetrack.core import env
+from horsetrack.core import env, paths
 from horsetrack.core.eval import registry as registry_module
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.registry import Registry
@@ -1011,3 +1013,350 @@ def test_public_report_carries_no_figures(isolated, tmp_path, monkeypatch):
     assert text_a == text_b, "the public report changes with the result's figures"
     for day in (*a_days, *b_days):  # no span: no race day of either store
         assert day.isoformat() not in text_a
+
+
+# ---------------------------------------------------------------------------------------------
+# 10. Only the recorded run is the run of record; `record_cells` alone writes the ledger file
+# ---------------------------------------------------------------------------------------------
+#
+# GPT review round 3 of PR #608 (medium): the ledger's full-window command repeated at another
+# revision flagged its export `run_of_record` and replaced `candidate-cells/exacta-ceiling.json`,
+# so the ledger's report and ranked file could name different runs. The contract:
+#
+# - ``RECORD_COMMIT`` (40 hex) and ``RECORD_BUILD`` (64 hex: sha256 of
+#   ``json.dumps(meta["data_builds"], sort_keys=True)``) name the run of record with
+#   ``DEFAULT_SEED`` and ``RECORD_DAYS``; all four are read at call time, the run's own commit
+#   from ``_git_sha()``.
+# - ``run_ceiling`` writes its own ``<stem>.md`` and ``<stem>.json`` and never the ledger file
+#   (``cells_path`` None). The export's ``run`` block carries ``data_build_digest`` and
+#   ``run_of_record``: True only when the commit, the digest, the seed and the asked days
+#   ``(max(date_from, 2014-06-07), date_to)`` are the record's, never when the record or the run
+#   lacks a commit or a data build. Every leaderboard row carries the same flag; another run's
+#   report says "not the run of record" and names the recorded commit and build tag.
+# - ``record_cells(out_dir) -> Path`` writes ``out_dir / CELLS_FILE`` as the recorded export's
+#   leaderboard, or raises ``RunRefused`` and writes nothing; it appends no registry record.
+#   ``horsetrack japan exacta-ceiling record`` runs it on the reports folder (exit 1 on refusal).
+
+RECORD_SHA = hashlib.sha1(b"431: the run of record").hexdigest()  # synthetic 40-hex commits
+LATER_SHA = hashlib.sha1(b"431: a later revision").hexdigest()
+PROBE_SHA = hashlib.sha1(b"431: a probe").hexdigest()
+LEDGER_CELLS = Path("candidate-cells") / "exacta-ceiling.json"  # the ledger's ranked-member file
+SENTINEL = b'[{"sentinel": "the ledger-linked file before this run"}]\n'
+
+
+def _digest(builds) -> str:
+    """A run's full data-build identity: sha256 of its merged builds as sorted JSON."""
+    return hashlib.sha256(json.dumps(builds, sort_keys=True).encode()).hexdigest()
+
+
+def _stem(sha: str, digest: str, seed: int, asked) -> str:
+    days = f"{asked[0]:%Y%m%d}-{asked[1]:%Y%m%d}"
+    return f"exacta-ceiling-japan-{sha[:12]}-{digest[:8]}-seed{seed}-{days}"
+
+
+def _iso(asked) -> list[str]:
+    return [asked[0].isoformat(), asked[1].isoformat()]
+
+
+def _record_store():
+    """A small store from 2014-06-07 (one year, one read) and the asked days of its record."""
+    races, meta, days = _ranked_store(43110, boards=2, good="no_fav", lam=1.0, first=FIRST_DAY,
+                                      m0=40)  # fmt: skip
+    return races, meta, (FIRST_DAY, days[-1] + timedelta(days=3))
+
+
+def _ceiling_run(monkeypatch, out, registry, races, meta, *, sha, asked, seed=431):
+    monkeypatch.setattr(ceiling, "load_races", FakeStore(races, meta))
+    monkeypatch.setattr(ceiling, "_git_sha", lambda: sha)
+    return ceiling.run_ceiling(date_from=asked[0], date_to=asked[1], out_dir=out, seed=seed,
+                               registry=registry)  # fmt: skip
+
+
+def _build_digest(monkeypatch, root: Path, races, meta, asked) -> str:
+    """The data-build digest a run of this store records, read from a throwaway run's export
+    (seed 7, never the run of record, in its own folder and registry)."""
+    out = root / "probe"
+    registry = _registry(root / "probe-registry")
+    _ceiling_run(monkeypatch, out, registry, races, meta, sha=PROBE_SHA, asked=asked, seed=7)
+    (export,) = out.glob("exacta-ceiling-japan-*.json")
+    return _digest(json.loads(export.read_text(encoding="utf-8"))["meta"]["data_builds"])
+
+
+def _set_record(monkeypatch, *, commit: str, build: str, days) -> None:
+    monkeypatch.setattr(ceiling, "RECORD_COMMIT", commit, raising=False)
+    monkeypatch.setattr(ceiling, "RECORD_BUILD", build, raising=False)
+    monkeypatch.setattr(ceiling, "RECORD_DAYS", tuple(days))
+
+
+def _plant(out: Path) -> Path:
+    """The ledger-linked file already in place, as an earlier ``record_cells`` left it."""
+    path = out / LEDGER_CELLS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(SENTINEL)
+    return path
+
+
+def _lines(path: Path) -> list[str]:
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def _assert_own_outputs(result, out: Path, *, sha, seed, asked, of_record, case) -> str:
+    """The run's own report and export, named by its identity, flag ``of_record`` on the run and
+    on every ranked row, and the ledger file is untouched; returns the run's data-build digest."""
+    tail = f"-seed{seed}-{asked[0]:%Y%m%d}-{asked[1]:%Y%m%d}.json"
+    named = out.glob(f"exacta-ceiling-japan-{sha[:12]}-*.json")
+    found = [p for p in named if p.name.endswith(tail)]
+    assert len(found) == 1, (case, sorted(p.name for p in out.iterdir()))
+    export = found[0]
+    payload = json.loads(export.read_text(encoding="utf-8"))
+    digest = _digest(payload["meta"]["data_builds"])
+    assert export.name == f"{_stem(sha, digest, seed, asked)}.json", case
+    assert export.with_suffix(".md").is_file(), case
+    assert (out / LEDGER_CELLS).read_bytes() == SENTINEL, (case, "the run replaced the ledger file")
+    assert result.cells_path is None, case
+    assert Path(result.export_path) == export, case
+    run = payload["run"]
+    assert run["run_of_record"] is of_record, case
+    flags = {row["run_of_record"] for row in payload["leaderboard"]}
+    assert flags == {of_record}, (case, flags)
+    assert (run["commit"], run["seed"], run["asked"]) == (sha, seed, _iso(asked)), case
+    assert run.get("data_build_digest") == digest and run["data_build"] == digest[:8], case
+    text = export.with_suffix(".md").read_text(encoding="utf-8")
+    if of_record:
+        assert "the run of record" in text and "not the run of record" not in text, case
+    else:
+        assert "not the run of record" in text, case
+        for part in (ceiling.RECORD_COMMIT[:12], ceiling.RECORD_BUILD[:8]):
+            assert part in text, (case, f"the report does not name the recorded {part!r}")
+    return digest
+
+
+def test_the_recorded_identity_is_the_ledgers_run_of_record():
+    """The module's record names the export the ledger's N2 row names as its run of record."""
+    commit, build = ceiling.RECORD_COMMIT, ceiling.RECORD_BUILD
+    assert re.fullmatch(r"[0-9a-f]{40}", commit), commit
+    assert re.fullmatch(r"[0-9a-f]{64}", build), build
+    ledger = (REPO / "docs" / "ledger.md").read_text(encoding="utf-8").splitlines()
+    (row,) = [line for line in ledger if line.startswith("| N2 (#431")]
+    assert _stem(commit, build, ceiling.DEFAULT_SEED, ceiling.RECORD_DAYS) in row
+
+
+RECORD_CASES = [
+    pytest.param({"of_record": True}, id="all-four-match"),
+    pytest.param(
+        {"date_from": date(2014, 5, 24), "of_record": True},
+        id="all-four-match-asked-from-before-2014-06-07",
+    ),
+    pytest.param({"sha": LATER_SHA}, id="the-ledger-command-at-a-later-revision"),
+    pytest.param({"rebuilt": True}, id="another-data-build"),
+    pytest.param({"seed": 432}, id="another-seed"),
+    pytest.param({"date_from": FIRST_DAY + timedelta(days=1)}, id="asked-from-a-day-later"),
+    pytest.param({"to_shift": -1}, id="asked-to-a-day-earlier"),
+    pytest.param({"no_builds": True}, id="no-data-build-on-either-side"),
+]
+
+
+@pytest.mark.parametrize("case", RECORD_CASES)
+def test_only_the_recorded_commit_build_seed_and_days_make_the_run_of_record(
+    isolated, tmp_path, monkeypatch, case
+):
+    """One part of the identity off (commit, data build, seed, first or last asked day), or no
+    data build on either side, and the run is not the run of record; all four on and it is. No
+    run writes the ledger-linked file: it stays byte-identical, the run makes its own export."""
+    races, meta, record = _record_store()
+    if case.get("no_builds"):  # two empty build maps compare equal: still no record
+        meta, digest = {**meta, "data_builds": {}}, _digest({})
+    else:
+        digest = _build_digest(monkeypatch, tmp_path, races, meta, record)
+    _set_record(monkeypatch, commit=RECORD_SHA, build=digest, days=record)
+    if case.get("rebuilt"):  # the same commit, seed and days on rebuilt rows
+        meta = _meta(1.0, "rebuilt-43110")
+    sha, seed = case.get("sha", RECORD_SHA), case.get("seed", 431)
+    date_from = case.get("date_from", FIRST_DAY)
+    date_to = record[1] + timedelta(days=case.get("to_shift", 0))
+    out = tmp_path / "reports"
+    _plant(out)
+
+    result = _ceiling_run(monkeypatch, out, _registry(tmp_path), races, meta, sha=sha, seed=seed,
+                          asked=(date_from, date_to))  # fmt: skip
+    asked = (max(date_from, FIRST_DAY), date_to)
+    built = _assert_own_outputs(result, out, sha=sha, seed=seed, asked=asked,
+                                of_record=case.get("of_record", False), case=case)  # fmt: skip
+    assert (built != digest) == bool(case.get("rebuilt")), "only the rebuilt store reads another"
+
+
+def test_a_run_without_a_commit_never_claims_the_record(isolated, tmp_path, monkeypatch):
+    """No commit on either side (``RECORD_COMMIT`` empty, ``_git_sha`` empty) is no record, even
+    with the recorded build, seed and days: the run may fail (the registry takes no record
+    without a commit), but no export it leaves is flagged and the ledger file stays."""
+    races, meta, record = _record_store()
+    digest = _build_digest(monkeypatch, tmp_path, races, meta, record)
+    _set_record(monkeypatch, commit="", build=digest, days=record)
+    out = tmp_path / "reports"
+    _plant(out)
+    try:
+        result = _ceiling_run(monkeypatch, out, _registry(tmp_path), races, meta, sha="",
+                              asked=record)  # fmt: skip
+    except AssertionError:
+        raise
+    except Exception:  # a refusal is fine; a claim of the record is not
+        result = None
+    if result is not None:
+        assert result.cells_path is None
+    assert (out / LEDGER_CELLS).read_bytes() == SENTINEL, "the run replaced the ledger file"
+    for export in out.glob("exacta-ceiling-japan-*.json"):
+        payload = json.loads(export.read_text(encoding="utf-8"))
+        assert payload["run"]["run_of_record"] is False, export.name
+        assert {row["run_of_record"] for row in payload["leaderboard"]} == {False}, export.name
+
+
+def test_record_cells_writes_the_recorded_runs_ranked_members(isolated, tmp_path, monkeypatch):
+    """``record_cells`` writes the ledger file as the recorded export's leaderboard and returns
+    its path; the ledger command repeated at a later revision and another seed's run, in the same
+    folder, leave it and the recorded export byte-identical; a second ``record_cells`` replaces
+    whatever is there by the record again, and neither call appends a registry record."""
+    races, meta, record = _record_store()
+    digest = _build_digest(monkeypatch, tmp_path, races, meta, record)
+    _set_record(monkeypatch, commit=RECORD_SHA, build=digest, days=record)
+    out, registry = tmp_path / "reports", _registry(tmp_path)
+    _ceiling_run(monkeypatch, out, registry, races, meta, sha=RECORD_SHA, asked=record)
+    export = out / f"{_stem(RECORD_SHA, digest, 431, record)}.json"
+    raw = export.read_bytes()
+    recorded = json.loads(raw)
+    assert recorded["run"]["run_of_record"] is True
+    assert not (out / LEDGER_CELLS).exists(), "the run of record wrote the ledger file itself"
+    before = _lines(registry.path)
+
+    cells = ceiling.record_cells(out)
+    assert Path(cells) == out / LEDGER_CELLS
+    written = (out / LEDGER_CELLS).read_bytes()
+    assert json.loads(written) == recorded["leaderboard"]
+    assert _lines(registry.path) == before, "record_cells appended a registry record"
+
+    for sha, seed in ((LATER_SHA, 431), (RECORD_SHA, 432)):
+        _ceiling_run(monkeypatch, out, registry, races, meta, sha=sha, seed=seed, asked=record)
+        other = out / f"{_stem(sha, digest, seed, record)}.json"
+        ranked = json.loads(other.read_text(encoding="utf-8"))["leaderboard"]
+        assert ranked != recorded["leaderboard"], (sha, seed)
+    assert (out / LEDGER_CELLS).read_bytes() == written, "a later run replaced the ledger file"
+    assert export.read_bytes() == raw, "a later run rewrote the recorded export"
+
+    _plant(out)
+    before = _lines(registry.path)
+    again = ceiling.record_cells(out)
+    assert json.loads(Path(again).read_text(encoding="utf-8")) == recorded["leaderboard"]
+    assert _lines(registry.path) == before, "record_cells appended a registry record"
+    assert _lines(isolated["data"] / "registry" / "japan.jsonl") == [], "the default registry grew"
+
+
+def test_record_cells_refuses_any_export_but_the_recorded_runs(isolated, tmp_path, monkeypatch):
+    """Copies of the recorded export, each edited in one way, in folders of their own: only the
+    unedited copy is the record. A missing record (commit or build), a missing export, an export
+    without a commit or data builds, or one whose commit, recomputed build digest, seed or asked
+    days differ raises ``RunRefused``: no ledger file is created and a planted one stays."""
+    races, meta, record = _record_store()
+    digest = _build_digest(monkeypatch, tmp_path, races, meta, record)
+    _set_record(monkeypatch, commit=RECORD_SHA, build=digest, days=record)
+    out, registry = tmp_path / "reports", _registry(tmp_path)
+    _ceiling_run(monkeypatch, out, registry, races, meta, sha=RECORD_SHA, asked=record)
+    export = out / f"{_stem(RECORD_SHA, digest, 431, record)}.json"
+    recorded = json.loads(export.read_text(encoding="utf-8"))
+    before = _lines(registry.path)
+    empty = _digest({})
+    later = (record[0] + timedelta(days=1), record[1])
+    earlier = (record[0], record[1] - timedelta(days=1))
+
+    def rebuilt(p):  # the rows changed; the export's own digest field still says the record's
+        name = sorted(p["meta"]["data_builds"])[0]
+        p["meta"]["data_builds"][name] += "0"
+
+    def no_builds(p):  # an empty build map, the record's build the digest of an empty map
+        p["meta"]["data_builds"] = {}
+        p["run"].update(data_build_digest=empty, data_build=empty[:8])
+
+    def other_seed(p):
+        p["run"]["seed"] = 432
+        p["seed"] = 432
+
+    cases = [
+        # (case, record constants changed, edit of the recorded export's copy; None: no copy
+        # under the record's name, only another run's export)
+        ("the recorded export itself", {}, lambda p: None),
+        ("the record names no commit", {"RECORD_COMMIT": ""}, lambda p: p["run"].update(commit="")),
+        ("the record names no data build", {"RECORD_BUILD": ""}, lambda p: None),
+        ("no export of the recorded run", {}, None),
+        ("the export names no commit", {}, lambda p: p["run"].pop("commit")),
+        ("the export's commit is empty", {}, lambda p: p["run"].update(commit="")),
+        ("another commit's export", {}, lambda p: p["run"].update(commit=LATER_SHA)),
+        ("the export names no data build", {}, lambda p: p["meta"].pop("data_builds")),
+        ("no data build on either side", {"RECORD_BUILD": empty}, no_builds),
+        ("rebuilt rows under the recorded digest", {}, rebuilt),
+        ("another seed", {}, other_seed),
+        ("asked from a day later", {}, lambda p: p["run"].update(asked=_iso(later))),
+        ("asked to a day earlier", {}, lambda p: p["run"].update(asked=_iso(earlier))),
+    ]
+    for k, (case, constants, edit) in enumerate(cases):
+        folder = tmp_path / "cases" / f"{k:02d}"
+        folder.mkdir(parents=True)
+        with pytest.MonkeyPatch.context() as mp:
+            for name, value in constants.items():
+                mp.setattr(ceiling, name, value)
+            stem = _stem(ceiling.RECORD_COMMIT, ceiling.RECORD_BUILD, ceiling.DEFAULT_SEED,
+                         ceiling.RECORD_DAYS)  # fmt: skip
+            payload = copy.deepcopy(recorded)
+            if edit is None:
+                stem = _stem(LATER_SHA, digest, 431, record)
+            else:
+                edit(payload)
+            (folder / f"{stem}.json").write_text(json.dumps(payload), encoding="utf-8")
+            files = sorted(folder.rglob("*"))
+            if k == 0:  # the control: the unedited copy is the record
+                path = ceiling.record_cells(folder)
+                assert json.loads(Path(path).read_text(encoding="utf-8")) == recorded["leaderboard"]
+                continue
+            for planted in (False, True):
+                if planted:
+                    _plant(folder)
+                try:
+                    ceiling.record_cells(folder)
+                except ceiling.RunRefused:
+                    pass
+                else:
+                    pytest.fail(f"{case}: record_cells wrote the ledger file from it")
+                if planted:
+                    assert (folder / LEDGER_CELLS).read_bytes() == SENTINEL, case
+                else:
+                    assert not (folder / LEDGER_CELLS).exists(), case
+                    assert sorted(folder.rglob("*")) == files, f"{case}: it wrote a file"
+    assert _lines(registry.path) == before, "record_cells appended a registry record"
+    assert _lines(isolated["data"] / "registry" / "japan.jsonl") == [], "the default registry grew"
+
+
+def test_the_record_command_writes_the_ledger_file_or_exits_1(isolated, tmp_path, monkeypatch):
+    """``horsetrack japan exacta-ceiling record`` writes the reports folder's ledger file from
+    the recorded export and prints its path; with no recorded export it exits 1 with the reason
+    on stderr and leaves the file alone."""
+    from horsetrack.cli import app
+
+    races, meta, record = _record_store()
+    digest = _build_digest(monkeypatch, tmp_path, races, meta, record)
+    _set_record(monkeypatch, commit=RECORD_SHA, build=digest, days=record)
+    out = paths.reports_dir()
+    _ceiling_run(monkeypatch, out, _registry(tmp_path), races, meta, sha=RECORD_SHA, asked=record)
+    export = out / f"{_stem(RECORD_SHA, digest, 431, record)}.json"
+    recorded = json.loads(export.read_text(encoding="utf-8"))
+    cells = out / LEDGER_CELLS
+    runner = CliRunner()
+
+    done = runner.invoke(app, ["japan", "exacta-ceiling", "record"])
+    assert done.exit_code == 0, done.output
+    assert str(cells) in done.stdout
+    assert json.loads(cells.read_text(encoding="utf-8")) == recorded["leaderboard"]
+
+    cells.write_bytes(SENTINEL)
+    monkeypatch.setattr(ceiling, "RECORD_COMMIT", LATER_SHA)  # a record with no export here
+    refused = runner.invoke(app, ["japan", "exacta-ceiling", "record"])
+    assert refused.exit_code == 1, refused.output
+    assert refused.stderr.strip()
+    assert cells.read_bytes() == SENTINEL
+    assert _lines(isolated["data"] / "registry" / "japan.jsonl") == [], "the default registry grew"
