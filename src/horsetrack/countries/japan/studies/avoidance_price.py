@@ -343,10 +343,18 @@ def entropy_quintile(entropy: float, cut_points: tuple[float, float, float, floa
 # =========================================================================== the study
 
 TICKET = 82
-# v2: the review of 2026-11-27 changed the pre-registration (the post-time fallback, selection at
-# t with refunds, the reconstruction check, L2's no-bet race); the first family keeps its records
-FAMILY_ID = "japan-family-l-floor-tail-favourite-v2"
-SUPERSEDES = "japan-family-l-floor-tail-favourite"
+# A changed pre-registration is a new family; the earlier ones keep their records (SUPERSEDES)
+FAMILY_ID = "japan-family-l-floor-tail-favourite-v3"
+SUPERSEDES = {
+    "japan-family-l-floor-tail-favourite": "the review of #82 (2026-11-27): t from the scheduled "
+    "post time when the captures carry none; selection at t from the board at t alone, a runner "
+    "scratched after t refunded; the 100-vs-110 check's coverage at t and its reconstruction "
+    "check with a frozen tolerance; L2's no-bet race kept under stake_back; the realised counts "
+    "kept when the votes cannot be read",
+    "japan-family-l-floor-tail-favourite-v2": "at t it counted as a runner every horse of a "
+    "priced row on the board, and the logged Wide board still prices the pairs of a horse "
+    "scratched before t: the runners at t are now those priced in the WIN or PLACE pool",
+}
 CONFIG_NAME = "avoidance_price"
 STAKE_BACK, NO_BET_RETURN = "stake_back", 1.0  # L2's no-bet race returns its stake, as L7's skip
 VALIDATION_TOLERANCE = 10  # yen per 100 staked: one 10-yen rounding step of a Place dividend
@@ -600,14 +608,7 @@ def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
     return {
         "family_id": FAMILY_ID,
         "ticket": TICKET,
-        "supersedes": {
-            "family_id": SUPERSEDES,
-            "why": "the review of #82 (2026-11-27): t from the scheduled post time when the "
-            "captures carry none; selection at t from the board at t alone, a runner scratched "
-            "after t refunded; the 100-vs-110 check's coverage at t and its reconstruction check "
-            "with a frozen tolerance; L2's no-bet race kept under stake_back; the realised counts "
-            "kept when the votes cannot be read",
-        },
+        "supersedes": dict(SUPERSEDES),
         "hypotheses": {
             "L2": "E14: the return of the base strategy less its tickets at the floor against "
             "the same tickets; R3: the 100-vs-110 check of floor-bound placed favourites",
@@ -642,8 +643,9 @@ def build_spec(owner: dict, bootstrap: dict, minutes: int) -> dict:
         },
         "starters": {
             LOOK_AHEAD: "runners not is_scratched (the results know the scratches)",
-            avoidance.BOARD_AT_T: "every runner priced on the board at t, whatever the results "
-            "say later (a runner scratched by t is unpriced on the board)",
+            avoidance.BOARD_AT_T: "every runner priced in the WIN or PLACE pool of the board at "
+            "t, whatever the results say later (those boards mark a runner scratched by t "
+            "unpriced; the logged Wide board can still price its pairs, so it names no runner)",
             "settlement": "a ticket holding a runner that runners.is_scratched marks is refunded, "
             "stake back, as JRA settles it (the store holds no refund row for a scratch)",
         },
@@ -682,11 +684,12 @@ VotesReader = Callable[[Iterable[str]], dict[str, PlacePool]]
 
 
 def _board_runners(view: RaceView) -> frozenset[int]:
-    """Every horse of a priced row on the view's board (a scratched runner's rows are unpriced)."""
+    """Every horse priced in the WIN or PLACE pool of the view's board: those boards mark a
+    scratched runner unpriced, while the logged Wide board can still price its pairs."""
     board = view.board
-    rows = board.loc[board["combination"].ne(POOL_TOTAL)]
+    rows = board.loc[board["pool"].isin(TAILED) & board["combination"].ne(POOL_TOTAL)]
     priced = ~np.isnan(clean_odds(rows["odds"].to_numpy()))
-    return frozenset(h for c in rows["combination"].to_numpy()[priced] for h in _horses(c))
+    return frozenset(int(c) for c in rows["combination"].to_numpy()[priced] if str(c).isdigit())
 
 
 class _Ctx(_Context):
@@ -727,8 +730,8 @@ class _Ctx(_Context):
 
     def runners(self, view: RaceView) -> frozenset[int]:
         """Who may be bet: at the final price the race's starters (look-ahead: the results know
-        the scratches); at t every runner priced on the board at t, whatever the results say
-        later (a runner scratched after t is refunded when settled)."""
+        the scratches); at t every runner priced in the WIN or PLACE pool of the board at t,
+        whatever the results say later (a runner scratched after t is refunded when settled)."""
         if view.selection == LOOK_AHEAD:
             return self.starters_of(view.race_id)
         return _board_runners(view)
