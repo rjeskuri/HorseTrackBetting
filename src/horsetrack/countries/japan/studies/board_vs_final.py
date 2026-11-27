@@ -1012,17 +1012,16 @@ def run_study(out_dir: Path | str | None = None) -> dict:
 
 def _build(name: str) -> str:
     """'processed/jra/<name>.parquet@<sha256 prefix>' of the store file; '@missing' (or
-    '@unreadable') and no digest when it cannot be opened, so the read then fails inside the
-    run's failure handling, each table a failed record."""
+    '@unreadable') and no digest when it cannot be opened or read through, so the read then
+    fails inside the run's failure handling, each table a failed record."""
     digest = hashlib.sha256()
     try:
-        fh = open(paths.processed_dir("jra") / f"{name}.parquet", "rb")
+        with open(paths.processed_dir("jra") / f"{name}.parquet", "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
     except OSError as exc:
         state = "missing" if isinstance(exc, FileNotFoundError) else "unreadable"
         return f"processed/jra/{name}.parquet@{state}"
-    with fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            digest.update(chunk)
     return f"processed/jra/{name}.parquet@{digest.hexdigest()[:16]}"
 
 
