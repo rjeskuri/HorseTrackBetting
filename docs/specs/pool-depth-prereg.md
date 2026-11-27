@@ -135,8 +135,19 @@ the failures are kept.
   scored, `co-placer` **failed** again by its rule check, on the rule itself rather than on
   missing votes or prices: the frozen rule is not JRA's (see "Co-placer v2" below).
 - `japan-pool-depth-coplacer-v2`, frozen before its run, at `42b46cc`: `co-placer` **scored** by
-  its rule check in both pools (the shares: withheld (D21)). The Place and Wide capacity of this
-  study is that run's.
+  its rule check in both pools (the shares: withheld (D21)).
+- Review round 2 again corrected how both frozen specs are applied, not the specs: the open span
+  ends on the store's last development day (never a holdout day) and the run records it; a run's
+  identity digests the rows it read, day files included, never a file's bytes; the co-placer
+  check takes sum W from the confirmed votes of the race's paying combinations, so a paid
+  combination without its final price is one not reproduced rather than its whole race; the
+  totals at t keep a race whose final record is missing; a `depth` run with no cell is recorded
+  **failed**; the public report keeps every run it already lists.
+- Third invocation, at `3de5687`, under both frozen specs: v1's `depth` and `exacta-own-impact`
+  scored and its `co-placer` **failed** by its rule check (the frozen rule, as before); v2's
+  `co-placer` **scored** in both pools (the shares: withheld (D21)). The Place and Wide capacity
+  of this study is that v2 run's (registry run
+  `aaeaaccd5dc4f9cfed503d5ba7d0167ddef5d9f87e3f401400941e5ac2f1d371`).
 
 ## Co-placer v2: the co-placer variant re-registered (2026-11-27)
 

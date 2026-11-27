@@ -1,6 +1,6 @@
 # Pool depth and stake capacity, Japan (N3, #432)
 
-Family `japan-pool-depth-v1`, spec sha256 `1545d788a9ac6997365900f48e1abc48177a24b9451d985f4d8b754b1857f34c` (frozen before the run; docs/specs/pool-depth-prereg.md). Race days from 2014-06-07 to the run's last day (a span of the store: withheld (D21)), development days only, confirmed vote and odds records only. The JRA-VAN store is licensed: every figure computed from it is withheld (D21), in the private report `pool-depth-japan-caa088dd3cacaf0f.md` under `$HORSETRACK_DATA_DIR/reports/`. A run's private report is named in its line below where it carries the run's id (its first 16 hex digits); the first invocation's runs named theirs by the spec hash.
+Family `japan-pool-depth-v1`, spec sha256 `1545d788a9ac6997365900f48e1abc48177a24b9451d985f4d8b754b1857f34c` (frozen before the run; docs/specs/pool-depth-prereg.md). Race days from 2014-06-07 to the run's last day (a span of the store: withheld (D21)), development days only, confirmed vote and odds records only. The JRA-VAN store is licensed: every figure computed from it is withheld (D21), in the private report `pool-depth-japan-f103a3b667bed45d.md` under `$HORSETRACK_DATA_DIR/reports/`. A run's private report is named in its line below where the report folder holds it: `<stem>-<first 16 hex digits of the run id>.md`, or for the first invocation's runs `<stem>-<first 12 hex digits of the spec hash>.md`.
 
 ## Hypothesis
 
@@ -23,13 +23,17 @@ A single-winner pool pays rate x V / W per yen. Our stake s goes into both, so a
 
 ## Variants tried
 
-- `depth` at `f21e0aa`: scored, registry run `6573127e490b925a6a73d3e61fb306029643773691312459e705c53555980669`; every figure withheld (D21).
-- `co-placer` at `f21e0aa`: failed, registry run `fc33a936a7a8684355e2335f0698490dab964f39aea6711ce372c8bad8e72ba2`; every figure withheld (D21).
-- `exacta-own-impact` at `f21e0aa`: scored, registry run `e2dccdba5ce4d77ef771a6771b5341bdac2d3704afb27aa8e76c0279e7b9a6f2`; every figure withheld (D21).
+- `depth` at `f21e0aa`: scored, registry run `6573127e490b925a6a73d3e61fb306029643773691312459e705c53555980669`, private report `pool-depth-japan-1545d788a9ac.md`; every figure withheld (D21).
+- `co-placer` at `f21e0aa`: failed, registry run `fc33a936a7a8684355e2335f0698490dab964f39aea6711ce372c8bad8e72ba2`, private report `pool-depth-coplacer-japan-1545d788a9ac.md`; every figure withheld (D21).
+- `exacta-own-impact` at `f21e0aa`: scored, registry run `e2dccdba5ce4d77ef771a6771b5341bdac2d3704afb27aa8e76c0279e7b9a6f2`, private report `exacta-impact-history-japan-1545d788a9ac.md`; every figure withheld (D21).
 - `depth` at `3ff70c5`: scored, registry run `caa088dd3cacaf0fb30ab1ae2375ffda1009dd17dd6b1c438ab916b249b695ff`, private report `pool-depth-japan-caa088dd3cacaf0f.md`; every figure withheld (D21).
 - `co-placer` at `3ff70c5`: failed, registry run `c0bea021fdd0cca4f3c70e756907ff406002527b186159f347591239a67e1761`, private report `pool-depth-coplacer-japan-c0bea021fdd0cca4.md`; every figure withheld (D21).
 - `exacta-own-impact` at `3ff70c5`: scored, registry run `9d968b30dd66c843122b752f0ca8aa463fd5f8dd8b4f277a4b4050dcee62cea7`, private report `exacta-impact-history-japan-9d968b30dd66c843.md`; every figure withheld (D21).
 - `co-placer` (family `japan-pool-depth-coplacer-v2`, spec sha256 `82a471b219bfee2e65f53c5c12e2f66514757169d82184b6be45b35b2454e89a`) at `42b46cc`: scored, registry run `19e524668afd7572f5b7cb455b12f5a170f0865e148bfc59e0c25d2faa617fc5`, private report `pool-depth-coplacer-japan-19e524668afd7572.md`; every figure withheld (D21).
+- `depth` at `3de5687`: scored, registry run `f103a3b667bed45d0c0f3aff18b31dce16e853cf5da4b09e8bc240fc46c0c546`, private report `pool-depth-japan-f103a3b667bed45d.md`; every figure withheld (D21).
+- `co-placer` at `3de5687`: failed, registry run `420c46b4106171f09368a82ac8dd0e24c0bfef3992c0763512f0a26389bd92f8`, private report `pool-depth-coplacer-japan-420c46b4106171f0.md`; every figure withheld (D21).
+- `exacta-own-impact` at `3de5687`: scored, registry run `77f70ef00b49e5c3c6a7c9e5b71c4410121d421265246ad3198f7867a6ea9050`, private report `exacta-impact-history-japan-77f70ef00b49e5c3.md`; every figure withheld (D21).
+- `co-placer` (family `japan-pool-depth-coplacer-v2`, spec sha256 `82a471b219bfee2e65f53c5c12e2f66514757169d82184b6be45b35b2454e89a`) at `3de5687`: scored, registry run `aaeaaccd5dc4f9cfed503d5ba7d0167ddef5d9f87e3f401400941e5ac2f1d371`, private report `pool-depth-coplacer-japan-aaeaaccd5dc4f9cf.md`; every figure withheld (D21).
 
 ## Alternatives rejected and why
 
