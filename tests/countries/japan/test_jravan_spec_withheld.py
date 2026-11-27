@@ -43,6 +43,19 @@ end (`.`, `:` before whitespace) and the block's ends.
     bodies joined). Text above the first `## ` pairs with the archive's text above its first.
   - Except a number the same section of the doc now writes as a code constant (`1,234` in the
     pre-fix doc, `1_234` in a code span now).
+  - Spans and dates, outside code spans: every year or ISO date span (`1961-1972`, `2001-02-03
+    to 2002-03-04`, `1961 to 2001-02-03`) and every lone ISO date of a pre-fix section that the
+    same section of the doc no longer states stands whole in the archive's section, both ends
+    (not run on into another date, year or range).
+  - Table cells: every cell of a pre-fix table that has a figure row stands in a table row of
+    the archive's section with the same row label (first cell) under the same column header.
+  - Outcomes: every sentence or list item of a pre-fix section that the same section of the doc
+    no longer holds (a number now a code constant read as one), and whose block holds a figure
+    or which names the export, stands verbatim in the archive's section (whitespace and
+    backticks aside); so does every row of a table without a figure row that names the export.
+    A reworded sentence that neither sits by a figure nor names the export is not archived.
+  - The rules are checked on made-up text without the data dir; the real archive check alone is
+    `local`.
 
 D21: this file holds no figure from the export. Figures are found by pattern, never by value;
 every example below is made up. Every check on the doc or the private file fails through
@@ -547,10 +560,7 @@ def section_bodies(text: str) -> dict[str, str]:
 
 def figures_by_section(text: str) -> dict[tuple[str, str], set[int]]:
     """(`## ` heading the figure is under, figure) -> its lines, for every flagged figure."""
-    owner, heading = [], ""
-    for line in text.split("\n"):
-        heading = line.rstrip() if line.startswith("## ") else heading
-        owner.append(heading)
+    owner = line_headings(text)
     out: dict[tuple[str, str], set[int]] = {}
     for figure, lines in flagged_figures(text).items():
         for line in lines:
@@ -558,7 +568,7 @@ def figures_by_section(text: str) -> dict[tuple[str, str], set[int]]:
     return out
 
 
-def unarchived(old: str, archive: str, new: str) -> dict[tuple[str, str], set[int]]:
+def unarchived_figures(old: str, archive: str, new: str) -> dict[tuple[str, str], set[int]]:
     """The figures of `old` that the archive's section of the same heading does not hold as a
     whole value, and that the same section of `new` does not write as a code constant."""
     held = {heading: normalized(body) for heading, body in section_bodies(archive).items()}
@@ -571,8 +581,291 @@ def unarchived(old: str, archive: str, new: str) -> dict[tuple[str, str], set[in
     }
 
 
-@pytest.mark.local
-def test_private_reports_hold_the_withheld_figures(doc):
+def line_headings(text: str) -> list[str]:
+    """The `## ` heading each line of `text` is under ("" above the first), by line index."""
+    owner, heading = [], ""
+    for line in text.split("\n"):
+        heading = line.rstrip() if line.startswith("## ") else heading
+        owner.append(heading)
+    return owner
+
+
+# Spans and dates: a year or ISO date (`2001-02-03`, `2001-02-03/04`) to another, by `-`, `–` or
+# `to`, or a lone ISO date; outside code spans. Both ends are one value.
+YEAR_OR_DATE = r"(?:\d{4}-\d{2}-\d{2}(?:/\d{2})?|(?:19|20)\d{2})"
+SPAN_OR_DATE = re.compile(
+    rf"(?<![\w.,:/#])(?:{YEAR_OR_DATE}(?:\s*[-–]\s*|\s+to\s+){YEAR_OR_DATE}"
+    r"|\d{4}-\d{2}-\d{2}(?:/\d{2})?)(?![\w]|[-/.,]\d)"
+)
+
+
+def holds_span(text: str, span: str) -> bool:
+    """`span` stands in `text` whole: neither end runs on into another date, year or range."""
+    whole = r"(?<![\w.,:/#])(?<!\d[-–])" + re.escape(span) + r"(?![\w]|[-/.,]\d)"
+    return re.search(whole, text) is not None
+
+
+def spans_and_dates(text: str) -> list[tuple[int, str]]:
+    """(line, normalized span or date) of every span and ISO date outside code spans."""
+    out = []
+    for first_line, block in blocks(text):
+        for m in SPAN_OR_DATE.finditer(mask_code(block)):
+            line = first_line + block.count("\n", 0, m.start())
+            out.append((line, WHITESPACE.sub(" ", m.group())))
+    return out
+
+
+def unarchived_spans(old: str, archive: str, new: str) -> list[tuple[int, str, str]]:
+    """(line, heading, span) of every span or ISO date of `old` that the same section of `new`
+    no longer states and the archive's section of that heading does not hold whole."""
+    owner = line_headings(old)
+    archived = {heading: normalized(body) for heading, body in section_bodies(archive).items()}
+    kept = {heading: normalized(body) for heading, body in section_bodies(new).items()}
+    out = []
+    for line, span in spans_and_dates(old):
+        heading = owner[line - 1]
+        if not holds_span(kept.get(heading, ""), span) and not holds_span(
+            archived.get(heading, ""), span
+        ):
+            out.append((line, heading, span))
+    return out
+
+
+def row_cells(raw: str) -> tuple[str, ...]:
+    """The normalized cells of a `|` row; a `|` inside a code span does not split."""
+    masked = mask_code(raw)
+    edges = [-1, *(i for i, ch in enumerate(masked) if ch == "|"), len(raw)]
+    parts = [raw[a + 1 : b] for a, b in zip(edges, edges[1:], strict=False)]
+    if masked.lstrip().startswith("|"):
+        parts = parts[1:]
+    if masked.rstrip().endswith("|"):
+        parts = parts[:-1]
+    return tuple(normalized(part).strip() for part in parts)
+
+
+def tables(text: str) -> list[dict]:
+    """Every table of `text`: its `header` cells, its data `rows` as (line, cells), and whether
+    a row holds a figure cell (`figures`)."""
+    lines = text.split("\n")
+    out: list[dict] = []
+    current = None
+    for number, line in enumerate(lines, start=1):
+        if not line.lstrip().startswith("|"):
+            current = None
+        elif SEPARATOR_ROW.match(line):
+            above = lines[number - 2] if number >= 2 else ""
+            header = row_cells(above) if above.lstrip().startswith("|") else ()
+            current = {"header": header, "rows": [], "figures": False}
+            out.append(current)
+        elif current is not None:
+            current["rows"].append((number, row_cells(line)))
+            if any(FIGURE_CELL.match(cell) for cell in cells(mask_code(line))):
+                current["figures"] = True
+    return out
+
+
+def table_cells(text: str, figures_only: bool) -> Iterator[tuple[int, str, str, str, str]]:
+    """(line, heading, column header, row label, value) of every cell right of the label."""
+    owner = line_headings(text)
+    for table in tables(text):
+        if figures_only and not table["figures"]:
+            continue
+        for line, row in table["rows"]:
+            for header, value in zip(table["header"][1:], row[1:], strict=False):
+                yield line, owner[line - 1], header, row[0], value
+
+
+def unarchived_cells(old: str, archive: str) -> list[tuple[int, str, str]]:
+    """(line, heading, `header | label`) of every cell of a figure row of `old` that no table
+    row of the archive's section of that heading holds under the same row label and column
+    header."""
+    held = {(h, header, label, value) for _, h, header, label, value in table_cells(archive, False)}
+    return [
+        (line, heading, f"{header} | {label}")
+        for line, heading, header, label, value in table_cells(old, True)
+        if (heading, header, label, value) not in held
+    ]
+
+
+SENTENCE_BREAK = re.compile(r"(?<=[.。])\s+|\n(?=\s*[-*] )")
+
+
+def sentences(block: str) -> Iterator[tuple[int, str]]:
+    """(offset, text) of each sentence or list item of a prose block."""
+    start = 0
+    for m in SENTENCE_BREAK.finditer(block):
+        yield start, block[start : m.start()]
+        start = m.end()
+    yield start, block[start:]
+
+
+def as_constants(text: str, constants: set[str]) -> str:
+    """`text` with each `,`-grouped number the doc now writes as a code constant in `_` form."""
+
+    def swap(m: re.Match) -> str:
+        return m.group().replace(",", "_") if m.group().replace(",", "") in constants else m.group()
+
+    return GROUPED.sub(swap, text)
+
+
+def table_rows(body: str) -> set[tuple[str, ...]]:
+    return {row for table in tables(body) for _line, row in table["rows"]}
+
+
+def unarchived_outcomes(old: str, archive: str, new: str) -> list[tuple[int, str, str]]:
+    """(line, heading, unit) of every sentence, list item or column-table row of `old` that the
+    same section of `new` no longer holds, that states what a run found (its block holds a
+    figure, or it names the export), and that the archive's section of that heading does not
+    hold verbatim (whitespace and backticks aside)."""
+    owner = line_headings(old)
+    new_bodies, archive_bodies = section_bodies(new), section_bodies(archive)
+    out = []
+    for first_line, block in blocks(old):
+        heading = owner[first_line - 1]
+        new_body, archived = new_bodies.get(heading, ""), archive_bodies.get(heading, "")
+        if block.lstrip().startswith("|"):
+            block_tables = tables(block)
+            if any(table["figures"] for table in block_tables):
+                continue  # figure tables: cell by cell, `unarchived_cells`
+            kept, held = table_rows(new_body), table_rows(archived)
+            for table in block_tables:
+                for line, row in table["rows"]:
+                    if "export" in " ".join(row).lower() and row not in kept | held:
+                        out.append((first_line + line - 1, heading, " | ".join(row)))
+            continue
+        figured = any(finder(block) for finder in PROSE_RULES.values())
+        constants = code_constants(new_body)
+        kept, held = normalized(new_body), normalized(archived)
+        for offset, text in sentences(block):
+            unit = as_constants(normalized(text).strip(), constants)
+            if not unit or not (figured or "export" in unit.lower()):
+                continue
+            if unit not in kept and unit not in held:
+                out.append((first_line + block.count("\n", 0, offset), heading, unit))
+    return out
+
+
+def unarchived(old: str, archive: str, new: str) -> dict[tuple[str, str, str], set[int]]:
+    """(heading, rule, item) -> pre-fix lines, for everything the archive fails to hold: the
+    flagged figures (`figure`), the removed spans and dates (`span`), the figure-table cells by
+    row and column (`cell`) and the removed sentences that state an outcome (`outcome`)."""
+    out: dict[tuple[str, str, str], set[int]] = {}
+    for (heading, figure), lines in unarchived_figures(old, archive, new).items():
+        out.setdefault((heading, "figure", figure), set()).update(lines)
+    found = [
+        ("span", unarchived_spans(old, archive, new)),
+        ("cell", unarchived_cells(old, archive)),
+        ("outcome", unarchived_outcomes(old, archive, new)),
+    ]
+    for rule, items in found:
+        for line, heading, item in items:
+            out.setdefault((heading, rule, item), set()).add(line)
+    return out
+
+
+def flagged_lines(missing: dict) -> set[int]:
+    return {line for lines in missing.values() for line in lines}
+
+
+# A made-up pre-fix doc, its withheld version and a faithful archive. Every value is invented.
+SYN_OLD = (
+    "intro\n"  # 1
+    "\n"
+    "## A (#1)\n"  # 3
+    "\n"
+    "The toy run on the export (2001-02-03 to 2002-03-04, 1961-1972): 11,111 rows.\n"  # 5
+    "The second pass changed no file (48 s).\n"  # 6
+    "Every gadget has a lid.\n"  # 7
+    "\n"
+    "| pool | rows | first year |\n"  # 9
+    "|---|---|---|\n"
+    "| WIN | 22,222 | 1961 |\n"  # 11
+    "| PLACE | 33,333 | 1963 |\n"  # 12
+    "\n"
+    "A gadget without a lid writes no row and is counted; the export holds none.\n"  # 14
+    "\n"
+    "Reads in chunks of at most 4,321 records.\n"  # 16
+    "\n"
+    "Days run 2003-04-05 to 2004-05-06 in the toy set.\n"  # 18
+    "\n"
+    "| column | from |\n"  # 20
+    "|---|---|\n"
+    "| `stamp` | null: the export has no stamp |\n"  # 22
+    "| `kept` | as printed |\n"  # 23
+    "\n"
+    "## B (#2)\n"  # 25
+    "\n"
+    "A plain rule sentence.\n"  # 27
+)
+SYN_NEW = (
+    "intro\n\n## A (#1)\n\nThe toy run on the export: withheld (D21), in `toy-figures.md`.\n\n"
+    "A gadget without a lid writes no row and is counted.\n\n"
+    "Reads in chunks of at most `4_321` records.\n\n"
+    "The toy days: withheld (D21).\n\n"
+    "| column | from |\n|---|---|\n| `stamp` | null: the layout has no stamp |\n"
+    "| `kept` | as printed |\n\n"
+    "## B (#2)\n\nA plain rule sentence, reworded.\n"
+)
+# Verbatim, wrapped differently and with a code span; the sentences the new doc still holds
+# (the code constant, the kept row) and a reworded plain rule sentence need not be archived.
+SYN_ARCHIVE = (
+    "## A (#1)\n\n"
+    "The toy run on the export (2001-02-03 to 2002-03-04,\n1961-1972): `11,111` rows. The second"
+    " pass changed\nno file (48 s). Every gadget has a lid.\n\n"
+    "| pool | rows | first year |\n|---|---:|---|\n| WIN | 22,222 | 1961 |\n"
+    "| PLACE | 33,333 | 1963 |\n\n"
+    "A gadget without a lid writes no row and is counted; the export holds\nnone.\n\n"
+    "Days run 2003-04-05 to 2004-05-06 in the toy set.\n\n"
+    "| column | from |\n|---|---|\n| `stamp` | null: the export has no stamp |\n"
+)
+ALL_SYN_LINES = {5, 6, 7, 11, 12, 14, 18, 22}
+
+# Each case edits the faithful archive; the pre-fix lines the check must then report.
+ARCHIVE_CASES = {
+    "faithful": ([], set()),
+    # Spans: both endpoints, year spans and ISO date spans (finding 1).
+    "year_span_end_changed": ([("1961-1972", "1961-1979")], {5}),
+    "year_span_start_changed": ([("1961-1972", "1962-1972")], {5}),
+    "date_span_end_changed": ([("2002-03-04", "2002-03-14")], {5}),
+    "date_span_start_changed": ([("2001-02-03", "2001-02-13")], {5}),
+    "plain_date_span_end_changed": ([("2004-05-06", "2004-05-07")], {18}),
+    "plain_date_span_start_dropped": ([("Days run 2003-04-05 to", "Days run to")], {18}),
+    # Table cells: by row label and column header (finding 2).
+    "counts_swapped": (
+        [("| WIN | 22,222 |", "| WIN | 33,333 |"), ("| PLACE | 33,333 |", "| PLACE | 22,222 |")],
+        {11, 12},
+    ),
+    "first_years_swapped": (
+        [("22,222 | 1961", "22,222 | 1963"), ("33,333 | 1963", "33,333 | 1961")],
+        {11, 12},
+    ),
+    "column_renamed": ([("| pool | rows |", "| pool | races |")], {11, 12}),
+    "row_relabelled": ([("| PLACE |", "| SHOW |")], {12}),
+    # Outcomes in words (finding 3).
+    "outcome_words_dropped_figure_kept": (
+        [("The second pass changed\nno file (48 s).", "No file (48 s).")],
+        {6},
+    ),
+    "word_only_sentence_dropped": ([(" Every gadget has a lid.", "")], {7}),
+    "export_clause_dropped": ([("is counted; the export holds\nnone.", "is counted.")], {14}),
+    "export_table_row_dropped": ([("| `stamp` | null: the export has no stamp |\n", "")], {22}),
+    # Everything under a heading that is not the same text.
+    "wrong_heading": ([("## A (#1)", "## A")], ALL_SYN_LINES),
+}
+
+
+@pytest.mark.parametrize("case", list(ARCHIVE_CASES))
+def test_archive_check_catches_a_misplaced_or_dropped_figure(case):
+    edits, expected = ARCHIVE_CASES[case]
+    archive = SYN_ARCHIVE
+    for before, after in edits:
+        assert before in archive, (case, before)
+        archive = archive.replace(before, after)
+    found = flagged_lines(unarchived(SYN_OLD, archive, SYN_NEW))
+    assert found == expected, (case, sorted(found))
+
+
+def test_archive_check_holds_whole_figures_by_section():
     made_up = (
         "| pool | rows |\n|---|---|\n| WIN | 12,345 |\n\nin chunks of 4,321 records, 6,789 races"
         " on 2.5 GB (1977-1999)\n\nan ok, 17 files check, 3.5% of `81,234`, a 1,234.5 kg mean,"
@@ -639,12 +932,15 @@ def test_private_reports_hold_the_withheld_figures(doc):
         ),
     ]
     wrong = [
-        (archive, new, set(unarchived(old, archive, new)))
+        (archive, new, set(unarchived_figures(old, archive, new)))
         for archive, new, missing in archives
-        if set(unarchived(old, archive, new)) != missing
+        if set(unarchived_figures(old, archive, new)) != missing
     ]
     assert not wrong, wrong
 
+
+@pytest.mark.local
+def test_private_reports_hold_the_withheld_figures(doc):
     try:
         reports = paths.reports_dir()
     except paths.DataDirNotSet:
@@ -671,13 +967,25 @@ def test_private_reports_hold_the_withheld_figures(doc):
 
     published = figures_by_section(old)
     fail_unless(bool(published), "no figure found in the pre-fix doc: the rules have broken")
+    fail_unless(
+        any(table["figures"] for table in tables(old)) and bool(spans_and_dates(old)),
+        "no figure table or span found in the pre-fix doc: the rules have broken",
+    )
     missing = unarchived(old, archive, doc)
-    # Counts, pre-fix line numbers and headings only: the values are the licensed figures.
+    # Rule names, counts, pre-fix line numbers and headings only: the values are the licensed
+    # figures, and the outcome sentences state what the run found.
+    by_rule = {}
+    for heading, rule, _item in missing:
+        by_rule.setdefault(rule, set()).add(heading)
+    counts = {rule: sum(1 for key in missing if key[1] == rule) for rule in sorted(by_rule)}
     lines = sorted({line for found in missing.values() for line in found})
-    absent = sorted({heading for heading, _figure in missing} - set(section_bodies(archive)))
+    headings_missing = {rule: sorted(found) for rule, found in sorted(by_rule.items())}
+    absent = sorted({key[0] for key in missing} - set(section_bodies(archive)))
     fail_unless(
         not missing,
-        f"{len(missing)} of {len(published)} figures the pre-fix doc published are not, as whole "
-        f"values, in their section of {FIGURES_FILE} (pre-fix {DOC_REL} lines {lines}; headings "
-        f"the archive lacks: {absent})",
+        f"{len(missing)} items the pre-fix doc published are not in their section of "
+        f"{FIGURES_FILE} (per rule {counts}: figure = a figure as a whole value, span = a span "
+        f"or date with both ends, cell = a table cell under its row label and column header, "
+        f"outcome = a removed sentence or row verbatim; pre-fix {DOC_REL} lines {lines}; "
+        f"headings per rule {headings_missing}; headings the archive lacks: {absent})",
     )
