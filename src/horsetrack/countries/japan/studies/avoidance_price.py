@@ -846,18 +846,20 @@ def _predict(ctx: _Ctx, race: str, horse: int, pool: PlacePool | None) -> tuple[
     return predicted_floor_dividend(total, top_ups, sales), ""
 
 
-def _plus10(ctx: _Ctx, run: _Run, races: Sequence[str], view) -> tuple[list, dict]:
+def _plus10(ctx: _Ctx, run: _Run, races: Sequence[str], view) -> tuple[list, dict] | None:
     """The 100-vs-110 check: each floor-bound placed favourite's realised Place dividend and, under
     jravan_pool_votes, its predicted dividend from the race's settled PLACE pool (PLACE_RULE),
-    cross-tabulated predicted x realised."""
+    cross-tabulated predicted x realised. None when no race has a favourite priced on its board
+    (a board at t without prices is data pending, not zero favourites)."""
     ties = ctx.l7["favourite_ties"]
     inputs = ctx.spec["rules"]["L2"]["plus10"]["inputs"]
-    floor_bound, rows = 0, []
+    floor_bound, rows, priced = 0, [], 0
     for race in races:
         seen = view(race)
         top = _favourites(seen, ctx.starters_of(race), 1, ties)
         if top is None:
             continue
+        priced += 1
         horse = str(top[0])
         price = _price(seen.board, "PLACE", horse) if run.tag == AT_T else math.nan
         if run.tag == AT_T and not bool(at_floor(pd.Series([price])).iloc[0]):
@@ -872,6 +874,8 @@ def _plus10(ctx: _Ctx, run: _Run, races: Sequence[str], view) -> tuple[list, dic
                 {"variant": run.name, "race_id": race, "horse_no": int(horse)}
                 | {"place low at t": price, "realised": dividend}
             )
+    if not priced:
+        return None
     realised = Counter(_cell(r["realised"]) for r in rows)
     metrics = [_metric(FOLD, "floor_bound_favourites", floor_bound, floor_bound)]
     metrics.append(_metric(FOLD, "placed", len(rows), floor_bound))
@@ -974,10 +978,15 @@ def _score_run(study: Study, ctx: _Ctx, run: _Run) -> None:
     variant = Variant(run.rule, run.name, SCHEME, components, params)
 
     if run.kind == "plus10":
-        if not races:
+        try:
+            found = _plus10(ctx, run, races, view) if races else None
+        except Exception as exc:  # every failure is a registry record, never dropped
+            study.variants.append(replace(variant, error=f"{type(exc).__name__}: {exc}"))
+            return
+        if found is None:
             study.variants.append(replace(variant, error=pending))
         else:
-            study.attempt(variant, lambda: _plus10(ctx, run, races, view))
+            study.attempt(variant, lambda: found)
         return
     if run.kind in ("floor", "tail_odds"):
 
@@ -1143,8 +1152,9 @@ def render_report(study: Study, spec: dict, about: dict, private: str | None = N
     for v in study.variants:
         row = {"rule": v.hypothesis_id, "variant": v.name}
         row["status"] = "failed" if v.error else "scored"
-        if v.error:
-            row["why"] = f"withheld (D21): see `{private}`" if v.name in withheld else v.error
+        if v.error:  # a withheld variant's error text could carry a figure: only pending shows
+            shown = v.name not in withheld or v.error.startswith("data pending")
+            row["why"] = v.error if shown else f"withheld (D21): see `{private}`"
         variants.append(row)
     lines += ["", "## Variants (one registry record each)", "", _markdown_table(variants), ""]
     return "\n".join(lines)
