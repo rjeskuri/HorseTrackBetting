@@ -68,9 +68,13 @@ are in the module docstring.
 descending, ties by raw return descending then option id, ranked 1..k; the measured descriptive
 rows follow, unranked, by family id then option id; unmeasured rows come last, unranked, by
 family id then option id (an unmeasured descriptive row has no value to show and sorts with
-them). Option ids must be unique. Both Markdown texts show a descriptive row's value and bounds
-with no rank and say in their header that descriptive rows are shown unranked; `to_json` and
-`from_json` carry the flag.
+them). Option ids must be unique. Both Markdown texts keep descriptive rows out of the ranked
+table (value column "Return per ¥100 staked"), which holds the ranked rows and then the
+unmeasured ones that are not descriptive. Every shown descriptive row follows in its own section,
+`## Descriptive, not ranked`, in a table whose value column is "Pool value per ¥100
+(descriptive)": in `rank`'s order, with its value, CI and n, no shrunk value and "—" for rank.
+The public text's `## Withheld (D21)` list stays last. Both headers say descriptive rows are not
+ranked; `to_json` and `from_json` carry the flag.
 
 ## From the registry (`rows_from_registry`)
 
