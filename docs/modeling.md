@@ -21,8 +21,10 @@ How to read the diagrams:
   is one a ticket plans. Diagrams 5 and 6 show the order of steps, in a process and in a race day:
   there a solid arrow is a step in that order, and a dotted arrow leads into a step that is planned,
   not yet available, or still waiting on an owner decision.
-- Nothing here is adopted. Every model and rule stays in shadow until the owner adopts it through
-  diagram 5, and no code places a bet.
+- Nothing here is adopted or rejected (D16 as amended 2026-11-27, epic #447). Every option, model
+  and member is a row on the country's leaderboard, ranked by its return at the final price
+  (diagram 5); the top-ranked options are shadowed and played by hand with small flat stakes, and no
+  code places a bet.
 
 Status as of 2026-11-27. When a ticket in a diagram lands, move its box from planned to built and
 name its module.
@@ -38,8 +40,8 @@ flowchart LR
     PRICE["Price half: draws of the final pools from the board at t<br/>C1; v0 nowcast<br/>#116 japan/models/v0/nowcast.py"]
     MIX["Average of p · O_final over the draws (D1)<br/>#118 japan/models/v0/shadow_values.py"]
     TEST{"E[p · O_final | info_t] #gt; 1 ?"}
-    YES["Worth a bet in principle.<br/>Today: logged in shadow, never staked<br/>#119 japan/shadow/log.py"]
-    NO["No value: avoid, the default rung (D19)"]
+    YES["Worth a bet in principle: logged in shadow<br/>#119 japan/shadow/log.py;<br/>played by hand only if the option ranks<br/>at the top of the leaderboard (D19)"]
+    NO["No claimed value: not played, the avoid rung (D19);<br/>the option stays a row on the leaderboard"]
     HIST --> PROB
     LOGS --> PRICE
     INFO --> PROB
@@ -210,50 +212,48 @@ which other horses also place, so v0 gives a value at both ends of that range. E
 pools is judged first against the pool's own final prices and only second against the Win-derived
 ordering (D5, D6).
 
-## 5. How a claim earns adoption
+## 5. How an option is ranked
 
 ```mermaid
 flowchart TD
-    PRE["Pre-register the family of claims,<br/>frozen by hash before any scoring<br/>#74 core/eval/registry.py"]
+    PRE["Pre-register the study: Claude freezes its spec<br/>by hash before any scored read, no sign-off wait<br/>#74 core/eval/registry.py"]
     REG["Registry: every run is a record,<br/>failures too, hash-chained<br/>#74 core/eval/registry.py"]
     OOF["Walk-forward out-of-fold fits<br/>on development days (D9, D14)<br/>#70 core/eval/folds.py"]
-    BOOT["Log-loss gain over the final price,<br/>meeting bootstrap (D7)<br/>#69 core/eval/scoring.py, core/eval/bootstrap.py"]
-    SNOOP["SPA and StepM over the whole family (D17)<br/>#75 core/eval/snooping.py<br/>segment shrinkage #78 core/eval/segment_roi.py<br/>tail-return curve by claim #433 core/eval/tail.py"]
-    HOLD["Holdout opening: by the owner, once per<br/>family, at its power target (D15)<br/>#71, #126 core/eval/holdout.py"]
-    D16["D16 on the holdout: gain interval above 0,<br/>encompassing weight above 0, and the<br/>full-stack gain for a stack member<br/>encompassing test #87 planned"]
-    subgraph TRACKS["Betting rules: two tracks (D18)"]
-        LA["Loss-avoidance, Family L: loses less than<br/>a stated alternative on the same races,<br/>never claims a profit<br/>#81, #82, #83 planned<br/>evidence standard, holdout use included:<br/>owner decision open"]
-        PE["Positive-edge, Family P: realised return<br/>above 0 at final dividends on the holdout<br/>#88 planned"]
-    end
-    OWN["Owner adoption decision,<br/>with an experiment report and the model card"]
-    RUNG["Staking rung (D19): avoid, shadow, flat minimum,<br/>flat small, shrunk fractional Kelly<br/>avoid flags #117 japan/board/flags.py<br/>shadow calibration slope #101 planned"]
+    RET["Return per ¥100 at the final dividend,<br/>takeout and breakage included,<br/>with its meeting-bootstrap CI (D7)<br/>#69 core/eval/bootstrap.py;<br/>read from every record: #450 planned"]
+    SHRINK["Shrinkage of the ranking (D17):<br/>hierarchical within a study #78 core/eval/segment_roi.py,<br/>per pool across studies #449 planned"]
+    LB["Leaderboard: every option, model and member a row,<br/>failed variants too, with its CI and the<br/>number of variants searched (D16)<br/>#449 core/eval/leaderboard.py planned;<br/>horsetrack japan leaderboard and<br/>docs/leaderboard/japan.md #452 planned"]
+    PLAY["Top-ranked options: shadowed, and played by hand<br/>with flat stakes, at most ¥30,000 per race day (D19)<br/>shadow log #119 japan/shadow/log.py;<br/>the day's shortlist #455 planned"]
+    BETS["Bet log, every hand-placed bet,<br/>settled against the final dividends<br/>#453 japan/bets/ planned, settlement #454 planned"]
+    HOLD["Holdout opening by the owner (D15), once per family<br/>at its power target: checks whether the ranking<br/>holds up, adopts or rejects nothing<br/>#71, #126 core/eval/holdout.py"]
+    DIAG["Reported diagnostics, gating nothing:<br/>log-loss gain over the final price #69 core/eval/scoring.py,<br/>encompassing weight #87 planned,<br/>SPA and StepM #75 core/eval/snooping.py,<br/>tail-return curve #433 core/eval/tail.py"]
     PRE --> REG
     REG --> OOF
-    OOF --> BOOT
-    BOOT --> SNOOP
-    SNOOP --> HOLD
-    SNOOP -.->|"paired, one-sided on the same races;<br/>evidence standard open, #81, #82, #83"| LA
-    HOLD --> D16
-    D16 -.->|"plus holdout return"| PE
-    D16 --> OWN
-    LA -.->|"evidence standard open"| OWN
-    PE -.-> OWN
-    OWN --> RUNG
+    OOF --> RET
+    OOF --> DIAG
+    RET --> SHRINK
+    SHRINK -.-> LB
+    DIAG -.->|"beside the row"| LB
+    LB -.-> PLAY
+    PLAY -.-> BETS
+    BETS -.->|"settled bets feed back as rows"| LB
+    LB -.->|"ranking checked"| HOLD
 ```
 
-A model or a betting rule is adopted only by the owner, and only after it survives a fixed
-sequence of tests written down before the data is looked at. Every attempt is recorded, failures
-included, so the number of things tried is always known and the tests can allow for it. Models are
-fitted and scored on development days; the locked holdout days are opened by the owner once per
-pre-registered family, and a model must beat the final price there with an interval above zero.
-Betting rules are pre-registered families too, so they face the same family-wide tests (D17).
-Rules that only avoid losses are compared with a stated alternative on the same races, by a
-one-sided paired difference, and never claim a profit (D18). How much evidence that takes before the
-owner can adopt one, including whether it is measured on the holdout, is still an open owner
-decision (the Family L evidence standard, #81, #82, #83), so the diagram draws no holdout step for
-them. Rules that claim a profit must also make money at the final dividends on the holdout, on top
-of the log-loss evidence (D18). Whatever the owner adopts starts at the avoid rung and
-climbs one rung at a time, each on its own entry evidence (D19).
+Nothing is adopted or rejected (D16 as amended 2026-11-27, epic #447): every option the project
+measures, a race type, pool, combination or rule, and every model and member, becomes a row on one
+leaderboard per country, failures included. Claude writes each study's plan down and freezes it
+before the data is scored, and every run is recorded, so the number of variants searched is always
+known and printed beside each row. Each option is fitted and scored on development days and
+measured by its return per ¥100 at the dividend that actually paid, with a bootstrap interval over
+meetings. Because many options are searched, each return is shrunk toward its pool's own average
+before ranking, so a lucky small sample does not top the list (D17). The top-ranked options are
+shadowed and played by hand with small flat stakes, at most ¥30,000 per race day, and every bet is
+logged and settled against the final dividends, so real bets feed back as data (D19). A
+loss-avoidance rule and its stated alternative are each a row, with their paired difference beside
+them (D18). The owner opens the locked holdout once per family at its power target, to check
+whether the ranking holds up, not to pass or fail anything (D15). The log-loss gain over the final
+price, the encompassing weight and the family-wide SPA and StepM tests are still reported beside
+the rows, as diagnostics that gate nothing.
 
 ## 6. Timeline of a race day
 

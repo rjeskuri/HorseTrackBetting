@@ -424,10 +424,18 @@ OWNER DECISION (D15): Who may open a holdout, how often, and what does a use mea
 Answer: Once per pre-registered family, opened by the owner, scored together with the D17 correction; every opening
 is logged and a failed claim counts as a use.
 
+Amended 2026-11-27 (epic #447, owner sign-off): opening stays the owner's, through `LockedHoldout.open`, once per
+pre-registered family at its power target (D12 unchanged). A use checks whether the leaderboard's ranking, built on
+development days, holds up on the block; it is not a pass/fail bar and adopts or rejects nothing. Every opening is
+logged and counts as a use whatever it shows.
+
 ## 6. Adoption rule
 
 What the brief fixes:
 - **Model adoption is an owner decision**, taken per adoption on the evidence the statement prescribes.
+  - Amended 2026-11-27: nothing is adopted or rejected (D16 as amended). Every option, model and member is a row on
+    the country's leaderboard, ranked by its return at the final price; the owner reviews the leaderboard, and the
+    top-ranked options are shadowed and played (D19 as amended).
 - **Every modeling PR carries an experiment report**: the hypothesis; every variant tried, including failures, with
   confidence intervals; the alternatives rejected and why; what the result rules out; and the follow-ups, filed as
   tickets.
@@ -454,6 +462,15 @@ Answer: On the holdout: the lower bound of the log-loss gain over the final pric
 a model + final-price combination the model's weight is positive with its interval above 0; a stack component must
 also show the full-stack gain over the stack without it.
 
+Amended 2026-11-27 (epic #447, owner sign-off): nothing is adopted or rejected. Every option (race type × pool ×
+combination × rule) and every model and member is a row on the country's leaderboard, ranked by its expected return
+per ¥100 staked at the final price (walk-forward, takeout and breakage included), shrunk within its pool, with its CI
+and the number of variants searched beside it. A model or member ranks by the return of the bets it selects and is
+listed unranked until one is measured. An option whose selection is read from the final price (look-ahead) ranks in
+the same list, labelled by its selection (decision-time or look-ahead). The log-loss gain over the final price, the
+encompassing weight and the full-stack gain stay reported diagnostics, not thresholds. The top-ranked options are
+shadowed and played (D19).
+
 OWNER DECISION (D17): How are many candidate rules and variants tested without mining noise?
 
 - **One pre-registered primary per experiment.** The simplest valid inference; everything else is exploratory and
@@ -471,6 +488,11 @@ Answer: Pre-registered families tested with Hansen SPA and Romano-Wolf StepM, bo
 returns shrunk hierarchically with odds-band fixed effects; FDR only as a screen; the number of rules tried reported
 with every result.
 
+Amended 2026-11-27 (epic #447, owner sign-off): multiple testing is handled by shrinkage of the ranking (#78's
+hierarchical model within a study, the leaderboard's per-pool shrinkage across studies) and by the count of variants
+searched beside every row. SPA, StepM and FDR stay reported diagnostics and gate nothing. Every variant is still
+registered before scoring, failures included.
+
 OWNER DECISION (D18): Are betting rules split into two families with different evidence standards?
 
 - **Yes: loss-avoidance rules and positive-edge rules.** A loss-avoidance rule ("never bet at the minimum payout",
@@ -485,6 +507,10 @@ OWNER DECISION (D18): Are betting rules split into two families with different e
 Answer: Yes. Loss-avoidance rules are adopted on a one-sided paired difference vs a stated alternative on the same
 races and never claim profit; positive-edge rules need a realised return above 0 at final dividends on the holdout,
 on top of the log-loss evidence.
+
+Amended 2026-11-27 (epic #447, owner sign-off): one leaderboard, not two evidence standards. A loss-avoidance rule and
+its stated alternative are each a row, with the paired difference reported beside them; no rule needs a holdout
+return before it is played.
 
 OWNER DECISION (D19): What are the staking rungs, and what evidence moves a rule up a rung?
 
@@ -505,6 +531,14 @@ cap. Flat minimum needs the D16 evidence and a shadow calibration slope whose in
 positive realised holdout return; Kelly adds a further prospective period. Caps per ticket, race and day are set
 later on a ticket.
 
+Amended 2026-11-27 (epic #447, owner sign-off): three rungs. Avoid (every option not played); shadow (any option, on
+paper); played: the top-ranked options get small flat stakes placed by hand by the owner, at most ¥30,000 per race day
+over all venues, every bet logged in the manual bet log and joined to the final dividends. No Kelly or bankroll-scaled
+stake; no code places a bet. The flat stake is the owner's, in `countries/japan/config/betting.yaml`: ¥1,000 per bet
+(owner, 2026-11-27, ticket #448). A placed bet is a fact: a bet past the cap or off the flat stake is recorded and
+flagged. A bet on a holdout day is logged and counts toward the cap, but is settled only when the owner opens the
+holdout (D14 unchanged). A look-ahead option may be played through its board-at-t proxy, labelled as such.
+
 ## 7. Out of scope
 
 What the brief fixes:
@@ -514,6 +548,9 @@ What the brief fixes:
   ticket that justifies it, and no HKTrack assumption is carried over without a ticket that tests it.
 - **Not in this statement:** the choice of any model, feature or betting rule; real-money staking before a rule is
   adopted; private information, which reaches the pool only as money and is read, if at all, from price moves.
+  - Amended 2026-11-27: no rule is adopted any more (D16 as amended), and real-money staking is in scope only as D19
+    as amended sets it: small flat stakes on the top-ranked options, placed by hand by the owner, at most ¥30,000 per
+    race day, every bet logged. No code places a bet.
 
 OWNER DECISION (D20): Are NAR (local government) tracks in scope for Japan?
 
@@ -531,11 +568,22 @@ What the brief fixes:
 - **Owner decisions, never Rulings:** target and estimand, loss and metric, baseline, splits, holdout use, feature
   inclusion, model adoption, staking and betting rules. They are taken through `needs-input` on the ticket or a
   pre-registered spec the owner approves.
+  - Amended 2026-11-27: the decisions that stay the owner's, taken through `needs-input` and never a Ruling, are this
+    statement's decisions and their amendments, every holdout opening, staking and caps, and any publication of a
+    licensed-source figure (D21). There is no adoption to decide (D16 as amended). Claude pre-registers each study,
+    its spec frozen before any scored read, logs every variant in the registry and runs the study without waiting
+    for sign-off; the study's modeling choices live in that frozen spec, never in a `Ruling:` line.
 - **Sign-off level:** this statement as a whole, plus each adoption decision.
+  - Amended 2026-11-27: sign-off is on this statement and its amendments. There are no adoption decisions (D16 as
+    amended) and studies do not stop for sign-off; the owner reviews the leaderboard.
 - **A `Ruling:` is only for a reversible implementation choice** (code layout, formats, tooling). A Ruling never
   settles any item in the list above.
 - **A known-vs-assumed ledger** (#12) labels every claim as measured (with its source), single-run or assumption.
   The claims of section 1.1 enter it.
+
+Added 2026-11-27 (epic #447, owner sign-off): **keep everything.** No dataset, feature, member or result, nulls and
+failed variants included, is deleted or excluded from the record. A kill rule becomes "ranks low": the option stays a
+row on the leaderboard. Parking a ticket sets the order of work only.
 
 The owner-decision list in this statement: D1 to D21, in the table below, all answered at sign-off on 2026-11-24.
 The evaluation-harness tickets that depend on them (scoring #69, folds #70, holdout #71) now have the decisions
@@ -576,11 +624,11 @@ any change to a decision needs owner sign-off on a ticket.
 | D12 | Japan holdout dates and size | Start 2026-11-28; opened at a power target; rolls forward after an opening | 5. Holdout |
 | D13 | Hong Kong holdout | Prospective from now; ingest keeps running while model work is paused | 5. Holdout |
 | D14 | Whether holdout-period price paths may train the price half | No: fully locked, outcomes and prices | 5. Holdout |
-| D15 | Who opens a holdout, how often, and what counts as a use | Once per pre-registered family, by the owner, with the D17 correction; every opening logged | 5. Holdout |
-| D16 | Evidence that adopts a model (the adoption threshold) | Holdout gain lower bound above 0 AND positive encompassing weight; stack components also need the full-stack gain | 6. Adoption rule |
-| D17 | Multiple-testing policy | Pre-registered families with SPA and StepM over meetings; hierarchical shrinkage; FDR as screen; rules tried reported | 6. Adoption rule |
-| D18 | Two families of betting rules with separate evidence standards, or one | Yes: loss-avoidance (paired, one-sided) and positive-edge (holdout return above 0) | 6. Adoption rule |
-| D19 | Staking rungs, their entry evidence, method and caps | Five rungs, avoid to shrunk fractional Kelly; entry evidence per rung; caps set later on a ticket | 6. Adoption rule |
+| D15 | Who opens a holdout, how often, and what counts as a use | Once per pre-registered family, by the owner, through `LockedHoldout.open` at its power target; a use checks whether the leaderboard's ranking holds up and adopts or rejects nothing; every opening logged and counted (amended 2026-11-27, epic #447) | 5. Holdout |
+| D16 | Evidence that adopts a model (the adoption threshold) | Nothing adopted or rejected: every option, model and member is a leaderboard row ranked by its shrunk return per ¥100 at the final price, with its CI and the variants searched; log-loss gain, encompassing weight and full-stack gain are reported diagnostics (amended 2026-11-27, epic #447) | 6. Adoption rule |
+| D17 | Multiple-testing policy | Shrinkage of the ranking (#78 within a study, per pool across studies) and the variants searched beside every row; SPA, StepM and FDR reported diagnostics only; every variant registered before scoring (amended 2026-11-27, epic #447) | 6. Adoption rule |
+| D18 | Two families of betting rules with separate evidence standards, or one | One leaderboard: a loss-avoidance rule and its stated alternative are each a row, the paired difference beside them; no holdout return needed before play (amended 2026-11-27, epic #447) | 6. Adoption rule |
+| D19 | Staking rungs, their entry evidence, method and caps | Three rungs: avoid, shadow, played (top-ranked options, flat stakes by hand, at most ¥30,000 per race day, every bet logged and joined to the final dividends); no Kelly; no code places a bet (amended 2026-11-27, epic #447) | 6. Adoption rule |
 | D20 | NAR tracks in or out of scope | Later, as an extension with its own ticket; this statement is JRA-only | 7. Out of scope |
 | D21 | Licensed-source figures in the public repo; amending this statement | Never; factual corrections logged without sign-off, decision changes need owner sign-off | 8. Governance |
 
@@ -599,3 +647,10 @@ any change to a decision needs owner sign-off on a ticket.
   7. D11 option B: the historical block's tradeoff notes the licensed pre-race tote snapshot HKTrack fitted and
      scored on (HKTrack DECISIONS #27).
 - 2026-11-24: D3 amended by the owner (ticket #127): all pools in scope, Win/Place/Wide first.
+- 2026-11-27: D15, D16, D17, D18 and D19 amended by the owner (epic #447, owner sign-off; ticket #448): every option
+  is ranked on a leaderboard by its return at the final price instead of adopted or rejected, every result is kept,
+  and the top-ranked options are played with small flat stakes by hand under a ¥30,000 race-day cap. Sections 6, 7
+  and 8 carry dated notes to match, and section 8 gains the keep-everything rule. The owner's words: "I don't want
+  to throw away any data even if it doesn't cross some threshold. All of it is useful. I fully expect most if not
+  all findings to not show consistent profitability... We are trying to find the BEST options among the worst. This
+  is a fun data experiment not a full time job."
