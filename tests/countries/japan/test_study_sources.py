@@ -38,6 +38,17 @@ Round 1 of the review adds (all keyword-only, defaults unchanged):
   (`WinCalibration.sources`), and a residual on that base names `jravan` in its record, manifest
   and report sources, so the report is withheld.
 The jravan copy now starts in 2009 (before RATING_FROM) and both copies run weekly to 2024.
+
+Round 2 of the review adds:
+- `studies.speed_run.run_study(out_dir, *, source, start=date.min)`: a jravan run reads, freezes,
+  records and reports the jravan copy (spec `sources`, `races` and D21 text; every record's
+  `sources` and `data_builds`; `write_report`'s sources); a `start` is frozen in the spec as
+  `first_race_day_read`, absent by default. `studies.speed_run.read_inputs(*, source, start)`
+  reads from `start` on.
+- `models.v0.calibration.run_fit(source='jravan')` names its fit, OOF and manifest files after
+  the copy, so it never overwrites a jra fit with the same fit id.
+- `studies.rating.run_study(start=...)` refuses a start after the price era's first day before
+  any store read or freeze.
 """
 
 # Ruff reads the module under test as third-party until it exists, then as first-party; the
@@ -60,7 +71,7 @@ import pytest
 
 from horsetrack.core import paths
 from horsetrack.core.eval import holdout, reports
-from horsetrack.core.eval.registry import default_registry
+from horsetrack.core.eval.registry import Registry, default_registry
 from horsetrack.core.store import schemas, tables
 from horsetrack.countries.japan.handicap import pp
 from horsetrack.countries.japan.models import speed_runs
@@ -189,9 +200,10 @@ def build(source: str) -> tuple[pd.DataFrame, pd.DataFrame]:
 WORLD = {source: build(source) for source in PLAN}
 
 
-def write_stores(data: Path) -> Path:
-    """Both copies under `data/processed/<source>/`, as the store writes them."""
-    for source, (races, runners) in WORLD.items():
+def write_stores(data: Path, world: dict | None = None) -> Path:
+    """Both copies (`WORLD`'s unless `world` is given) under `data/processed/<source>/`, as the
+    store writes them."""
+    for source, (races, runners) in (WORLD if world is None else world).items():
         folder = data / "processed" / source
         folder.mkdir(parents=True, exist_ok=True)
         for name, frame in (("races", races), ("runners", runners)):
@@ -694,3 +706,225 @@ def test_a_residual_on_a_jravan_base_is_labelled_and_withheld_as_jravan(tmp_path
     assert "jravan" in report.get("sources", [])
     assert written and all(reports.is_withheld(s) for s in written), written
     assert all("jravan" in s for s in written), written
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 2: the speed study's source and start, the calibration fit's file names, the
+# rating's start bound
+# ---------------------------------------------------------------------------------------------
+
+
+def _frozen_spec(family_id: str) -> dict | None:
+    """The spec the run registry froze for `family_id` (read from its sealed lines), or None."""
+    path = default_registry("japan").path
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = [json.loads(raw) for raw in text.splitlines() if raw]
+    specs = [
+        line["spec"]
+        for line in lines
+        if line.get("kind") == "freeze" and line.get("family_id") == family_id
+    ]
+    assert len(specs) <= 1, specs
+    return specs[0] if specs else None
+
+
+def _spy_write_report(monkeypatch, module, written: list) -> None:
+    real = module.write_report
+
+    def spy(path, text, *, sources, **kwargs):
+        written.append(tuple(sources))
+        return real(path, text, sources=sources, **kwargs)
+
+    monkeypatch.setattr(module, "write_report", spy)
+
+
+def test_a_jravan_speed_study_reads_freezes_records_and_reports_the_jravan_store(
+    tmp_path, monkeypatch
+):
+    data = fresh_data(tmp_path, monkeypatch, "speed-jravan")
+    # The committed summary is the repository's; this run's goes under tmp_path.
+    monkeypatch.setattr(speed_run, "summary_dir", lambda country: tmp_path / "summary" / country)
+    reads: list[dict] = []
+    written: list[tuple] = []
+    _spy(monkeypatch, speed_run, "read_inputs", reads)
+    _spy_write_report(monkeypatch, speed_run, written)
+    assert _frozen_spec(speed_run.FAMILY_ID) is None  # a fresh registry
+
+    speed_run.run_study(data.parent / "out", source="jravan")
+
+    assert [c.get("source") for c in reads] == ["jravan"]
+    spec = _frozen_spec(speed_run.FAMILY_ID)
+    assert spec is not None
+    assert spec["sources"] == ["jravan"]
+    assert "jravan" in spec["races"] and "(jra)" not in spec["races"], spec["races"]
+    d21 = spec["decisions"]["D21"]
+    assert "JRA-VAN" in d21 and "no licensed source" not in d21, d21
+    assert "first_race_day_read" not in spec  # no start given
+    records = default_registry("japan").records(speed_run.FAMILY_ID)
+    assert records
+    for record in records:
+        assert tuple(record.sources) == ("jravan",), (record.variant, record.sources)
+        builds = list(record.data_builds.values())
+        assert builds and all("processed/jravan/" in b for b in builds), builds
+    assert written == [("jravan",)]
+    assert reports.is_withheld(written[0])
+
+
+def test_the_default_speed_spec_names_the_jra_store_and_no_first_day():
+    spec = speed_run.build_spec(
+        speed_run.bootstrap_settings(),
+        speed_run.load_country_scheme("japan"),
+        speed_run.decision_min(),
+    )
+    assert spec["sources"] == ["jra"]
+    assert "first_race_day_read" not in spec
+    assert "no licensed source" in spec["decisions"]["D21"]
+
+
+def test_the_speed_study_takes_a_start_defaulting_to_every_day():
+    for fn in (speed_run.read_inputs, speed_run.run_study):
+        param = inspect.signature(fn).parameters.get("start")
+        assert param is not None, f"{fn.__qualname__} has no start parameter"
+        assert param.kind == param.KEYWORD_ONLY
+        assert param.default == date.min
+
+
+def _on_or_after(frame: pd.DataFrame, start: date) -> pd.Series:
+    return pd.to_datetime(frame["race_date"]) >= pd.Timestamp(start)
+
+
+def _sorted(frame: pd.DataFrame) -> pd.DataFrame:
+    keys = [c for c in ("race_id", "finish_pos", "finish_time_s") if c in frame.columns]
+    return frame.sort_values(keys, kind="stable").reset_index(drop=True)
+
+
+SPEED_STARTS = (
+    date(2009, 1, 3),  # jravan's first day; before jra's
+    SPEED_START,
+    PRICE_ERA_START,  # jra's first day
+    date(2020, 1, 2),  # not a race day
+    LATE_OPEN[0],
+)
+
+
+@pytest.mark.parametrize("source", list(PLAN))
+def test_the_speed_study_reads_the_store_from_its_start(source, tmp_path, monkeypatch):
+    fresh_data(tmp_path, monkeypatch, f"speed-start-{source}")
+    races_w, runners_w = WORLD[source]
+    every = speed_run.read_inputs(source=source)
+    # The default reads from date.min: the whole open store.
+    assert set(every[0]["race_id"].astype(str)) == set(open_rows(races_w)["race_id"])
+    sizes = []
+    for start in SPEED_STARTS:
+        races, runners = speed_run.read_inputs(source=source, start=start)
+        for got, full in zip((races, runners), every, strict=True):
+            assert len(got) and _on_or_after(got, start).all(), (source, start)
+            want = full.loc[_on_or_after(full, start)]
+            pd.testing.assert_frame_equal(_sorted(got), _sorted(want))
+        # Derived from the frames, not from the default read.
+        assert set(races["race_id"].astype(str)) == set(open_rows(races_w, start)["race_id"])
+        assert Counter(runners["race_id"].astype(str)) == Counter(
+            open_rows(runners_w, start)["race_id"]
+        )
+        sizes.append(len(races))
+    # A later start reads fewer races, so the start is not ignored.
+    assert sizes == sorted(sizes, reverse=True) and sizes[-1] < sizes[3] < len(every[0])
+
+
+@pytest.mark.parametrize("start", [None, date(2009, 1, 3), SPEED_START, date(2020, 1, 2)], ids=str)
+def test_a_speed_study_freezes_its_start_as_the_first_race_day_read(start, tmp_path, monkeypatch):
+    fresh_data(tmp_path, monkeypatch, "speed-first-day")
+    reads: list[dict] = []
+    _spy(monkeypatch, speed_run, "read_inputs", reads, stop=True)  # the spec is frozen first
+    kw = {} if start is None else {"start": start}
+    with pytest.raises(_Stop):
+        speed_run.run_study(tmp_path / "out", **kw)
+    assert [c.get("start", date.min) for c in reads] == [start or date.min]
+    spec = _frozen_spec(speed_run.FAMILY_ID)
+    assert spec is not None
+    if start is None:
+        assert "first_race_day_read" not in spec
+    else:
+        assert spec["first_race_day_read"] == start.isoformat()
+    assert spec["sources"] == ["jra"]
+
+
+CAL_FILES = ("win_calibration-{}.json", "win_calibration_oof-{}.parquet")
+CAL_MANIFEST = "manifest-win_calibration-{}.json"
+
+
+def test_calibration_fits_of_two_copies_with_one_fit_id_keep_their_own_files(tmp_path, monkeypatch):
+    # jravan = jra's rows plus pre-price-era years, so the fits' usable rows are the same.
+    def early(frame):
+        return frame.loc[frame["race_date"] < PRICE_ERA_START]
+
+    (jra_races, jra_runners), (van_races, van_runners) = WORLD["jra"], WORLD["jravan"]
+    world = {
+        "jra": WORLD["jra"],
+        "jravan": (
+            pd.concat([early(van_races), jra_races], ignore_index=True),
+            pd.concat([early(van_runners), jra_runners], ignore_index=True),
+        ),
+    }
+    data = write_stores((tmp_path / "same-fit" / "data").resolve(), world)
+    monkeypatch.setenv(DATA_VAR, str(data))
+    out = data.parent / "out"
+
+    jra = calibration.run_fit(out, source="jra")
+    before = {key: Path(jra[key]).read_bytes() for key in ("fit_path", "oof_path", "manifest_path")}
+    van = calibration.run_fit(out, source="jravan")
+
+    fit_id = jra["fit_id"]
+    assert van["fit_id"] == fit_id, "the fixture's copies should share one fit id"
+    for manifest, name in ((jra, fit_id), (van, f"jravan-{fit_id}")):
+        assert Path(manifest["fit_path"]) == out / CAL_FILES[0].format(name)
+        assert Path(manifest["oof_path"]) == out / CAL_FILES[1].format(name)
+        assert Path(manifest["manifest_path"]) == out / CAL_MANIFEST.format(name)
+    assert {p.name for p in out.iterdir()} == {
+        pattern.format(name)
+        for pattern in (*CAL_FILES, CAL_MANIFEST)
+        for name in (fit_id, f"jravan-{fit_id}")
+    }
+
+    # The jra fit, OOF and manifest are as the jra run wrote them.
+    for key, content in before.items():
+        assert Path(jra[key]).read_bytes() == content, f"{key}: the jravan run overwrote it"
+    assert "sources" not in json.loads(before["fit_path"])
+    assert "sources" not in json.loads(before["manifest_path"])
+    assert json.loads(Path(van["fit_path"]).read_text(encoding="utf-8"))["sources"] == ["jravan"]
+    on_disk = json.loads(Path(van["manifest_path"]).read_text(encoding="utf-8"))
+    assert on_disk["sources"] == ["jravan"]
+
+
+@pytest.mark.parametrize("source", list(PLAN))
+@pytest.mark.parametrize(
+    "start", [PRICE_ERA_START + timedelta(days=1), date(2016, 1, 1), date(2024, 1, 1)], ids=str
+)
+def test_a_rating_run_from_after_the_price_era_start_is_refused_before_any_read(
+    start, source, tmp_path, monkeypatch
+):
+    fresh_data(tmp_path, monkeypatch, "rating-late")
+    calls: list[dict] = []
+    for module, name in (
+        (rating, "read_development"),
+        (rating, "read_results"),
+        (rating, "read_store_table"),
+        (Registry, "freeze_family"),
+    ):
+        _spy(monkeypatch, module, name, calls, stop=True)
+    with pytest.raises(ValueError):
+        rating.run_study(tmp_path / "out", source=source, start=start)
+    assert calls == [], "a store read or the freeze ran before the refusal"
+    assert _frozen_spec(rating.FAMILY_ID) is None
+
+
+@pytest.mark.parametrize("start", [PRICE_ERA_START, RATING_FROM, EARLY_START], ids=str)
+def test_a_rating_run_from_the_price_era_start_or_earlier_still_runs(start, tmp_path, monkeypatch):
+    fresh_data(tmp_path, monkeypatch, "rating-early")
+    calls: list[dict] = []
+    _spy(monkeypatch, rating, "read_development", calls, stop=True)
+    with pytest.raises(_Stop):
+        rating.run_study(tmp_path / "out", source="jravan", start=start)
+    assert [c.get("source") for c in calls] == ["jravan"]
+    spec = _frozen_spec(rating.FAMILY_ID)
+    assert spec is not None and spec["sources"] == ["jravan"]
