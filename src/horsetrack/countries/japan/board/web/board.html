@@ -63,6 +63,8 @@ p{margin:0} button{font:inherit;color:inherit}
 .rbtn i{font-style:normal;font-size:.62rem;font-family:var(--mono);letter-spacing:.05em;color:var(--strip-dim)}
 .rbtn.next{outline:2px solid var(--strip-ink);outline-offset:1px}
 .rbtn.off{opacity:.45}
+.rbtn.sel{background:var(--accent);border-color:var(--accent);opacity:1}
+.rbtn.sel b,.rbtn.sel span,.rbtn.sel i{color:var(--bg)}
 
 /* races and pools */
 .races{display:flex;flex-direction:column;gap:12px}
@@ -70,6 +72,9 @@ p{margin:0} button{font:inherit;color:inherit}
 .race.next{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
 .race.off{opacity:.8}
 .race-head{display:flex;flex-direction:column;gap:4px}
+.race-title{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.step{flex:0 0 4rem;font-size:.8rem;color:var(--accent);text-decoration:none;text-align:center;padding:6px 4px;border:1px solid var(--rule);border-radius:5px}
+span.step{border-color:transparent}
 .meta{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;font-size:.82rem;color:var(--muted)}
 .pool{display:flex;flex-direction:column;gap:4px}
 .pool-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--rule);padding-bottom:3px}
@@ -102,7 +107,7 @@ tr.scratched .combo{text-decoration:line-through}
   </div>
 </div>
 <main class="wrap">
-  <p class="legend">Odds now, and how they moved since the first morning capture and since 20 minutes before post. <span class="up">+ odds lengthened</span>, <span class="down">- odds shortened</span>, "-" when there is nothing to compare. Times are Japan time.</p>
+  <p class="legend">Odds now, and how they moved since the first morning capture and since 20 minutes before post. <span class="up">+ odds lengthened</span>, <span class="down">- odds shortened</span>, "-" when there is nothing to compare. One race at a time, rows favourite first by the current odds. Times are Japan time.</p>
   <div id="board" aria-live="off"><p class="empty muted">Loading the board.</p></div>
   <p class="foot">Refreshes every 5 seconds. A race is marked stale when its last capture is more than 2 minutes old.</p>
 </main>
