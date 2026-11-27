@@ -278,7 +278,7 @@ flowchart TD
 | store tables | `core/store/schemas.py`, `core/store/tables.py`; one set per source key (`jra`, `nar`, `hkjc`, `jravan`; `docs/specs/store.md`) |
 | store checks, rebuild check | `core/store/checks.py`, `scripts/check_store_rebuild.py` |
 | as-of views | `core/store/asof.py`, `countries/japan/config/availability.yaml` (owner decisions); spec `docs/specs/as-of.md` |
-| handicap features | `countries/japan/handicap/pp.py`, `countries/japan/handicap/factors.py`, `countries/japan/handicap/workouts.py`, `countries/japan/handicap/track_bias.py` |
+| handicap features | `countries/japan/handicap/pp.py`, `countries/japan/handicap/factors.py`, `countries/japan/handicap/workouts.py`, `countries/japan/handicap/workouts_jravan.py`, `countries/japan/handicap/track_bias.py` |
 | model fits | `countries/japan/models/v0/` (scoped reader `countries/japan/models/v0/store.py`), `countries/japan/studies/calibration.py` |
 
 The as-of views exist, but the features and fits do not read through them yet; the dashed arrows are

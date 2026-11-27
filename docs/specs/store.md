@@ -228,7 +228,7 @@ store's.
   (e.g. `rating`, `gear_raw` and `brand_raw` on runners).
 - **Jravan-only tables** are outside `schemas.TABLES`: `final_odds`, `pool_votes` (final odds and
   pool votes per combination), `jockeys`, `trainers` (the masters), `breeding_horses`, `produce`
-  and `lineages` (bloodlines). Each is a Parquet file in `processed/jravan/` whose schema is
+  and `lineages` (bloodlines), and `workouts` (the HC and WC workouts, #229). Each is a Parquet file in `processed/jravan/` whose schema is
   its builder module's, so `read_table` and `connect` refuse or ignore them; a reader opens the
   file itself.
 - **`processed/jravan/odds_timeseries/<YYYY-MM-DD>.parquet`**: the time-series odds, one file per
@@ -238,7 +238,8 @@ store's.
   availability.yaml`, docs/specs/as-of.md), the shared ones by their own entries and the
   jravan-only ones by the owner's request on #376: `final_odds` and `pool_votes` are `label_only`,
   `jockeys` and `trainers` are `current_value` with `in_view`, `breeding_horses`, `produce` and
-  `lineages` are `static`. A table without an entry is refused by the as-of views, so no
+  `lineages` are `static`. `workouts` has no entry: its readers (`handicap/workouts_jravan.py`)
+  apply their own publication rule (#229). A table without an entry is refused by the as-of views, so no
   jravan-only table is readable at t by accident. The dump of unmapped families
   (`interim/jravan/records/`) is not a store table and has no rule.
 - **Guards**: the holdout (D14) and D10 apply to a jravan read as to any other: `read_store_table`
