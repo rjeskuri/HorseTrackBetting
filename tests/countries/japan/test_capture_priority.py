@@ -361,12 +361,15 @@ def skipped_in_health(summary: DaySummary, venue: str) -> int:
 
 def test_logger_yaml_ships_tier2_at_the_d2_grid_after_tier1():
     shipped = load_country_yaml("japan", "logger")
-    assert shipped["pools"] == list(ODDS_POOLS), "tier 1's pools are unchanged"
+    # #358: bracket quinella moved from tier 2 to every round with tier 1
+    tier1 = ["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE", "BRACKET_QUINELLA"]
+    assert sorted(shipped["pools"]) == sorted(tier1), shipped["pools"]
+    shipped_tier2 = [p for p in TIER2_POOLS if p != "BRACKET_QUINELLA"]
     tier2 = shipped["tier2"]
-    assert sorted(tier2["pools"]) == sorted(TIER2_POOLS)
+    assert sorted(tier2["pools"]) == sorted(shipped_tier2)
     assert tier2["grid_min"] == load_country_yaml("japan", "decision")["grid_min"] == D2_GRID
     # one capture: the odds menu and race list, then one page per pool of each race
-    assert tier2["requests"] == {"navigation": 2, "per_race": len(TIER2_POOLS)}
+    assert tier2["requests"] == {"navigation": 2, "per_race": len(shipped_tier2)}
 
 
 # ---------------------------------------------------------------- an ample budget

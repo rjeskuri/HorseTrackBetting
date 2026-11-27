@@ -571,7 +571,11 @@ def _assemble(
     names = [name for name in schemas.FED_BY if name not in schemas.SOURCE_TABLES]
     for name in schemas.SOURCE_TABLES:
         if present_types & set(schemas.FED_BY[name]):
-            frames[name] = _first_non_null(frames[name], schemas.TABLES[name].sort_by[0])
+            keys = schemas.LATEST_FETCH.get(name)
+            if keys is not None:
+                frames[name] = _latest_fetch(frames[name], keys)
+            else:
+                frames[name] = _first_non_null(frames[name], schemas.TABLES[name].sort_by[0])
             names.append(name)
     out = {}
     for name in names:
@@ -593,6 +597,16 @@ def _first_non_null(frame: pd.DataFrame, id_column: str) -> pd.DataFrame:
     )
     first = frame.groupby(id_column, sort=False, as_index=False).first()
     return first.astype(object).where(first.notna(), None)
+
+
+def _latest_fetch(frame: pd.DataFrame, keys: tuple[str, ...]) -> pd.DataFrame:
+    """One row per `keys` (e.g. one publication of a race's Win sales): the row with the latest
+    `fetched_utc`, the smaller page key on a tie; rows missing a key are dropped."""
+    frame = frame.loc[frame[list(keys)].notna().all(axis=1)]
+    frame = frame.sort_values(
+        ["fetched_utc", PAGE_KEY], ascending=[False, True], kind="stable", na_position="last"
+    )
+    return frame.drop_duplicates(list(keys), keep="first")
 
 
 # ---------------------------------------------------------------- output
