@@ -99,7 +99,7 @@ flowchart TB
         SV["Shadow value over nowcast draws<br/>#118 japan/models/v0/shadow_values.py<br/>v0"]
         SLOG["Shadow log at each grid point<br/>#119 japan/shadow/log.py<br/>#120 japan/shadow/day.py<br/>built"]
         STAKE["Shadow EV with our own stake #100<br/>japan/models/decision.py<br/>built"]
-        SDEC["Shadow decisions logged and scored #101<br/>planned"]
+        SDEC["Shadow decisions logged and scored #101<br/>japan/models/shadow.py<br/>built"]
     end
     BOARD --> NC0
     NC0 -.->|"replaced by"| NC1

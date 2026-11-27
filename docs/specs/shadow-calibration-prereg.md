@@ -1,6 +1,9 @@
 # C6 in shadow: calibration, the pick rule, E20 and the hand-played bets, pre-registration (ticket #101)
 
-Status: **PROPOSED**, to be frozen with `Registry.freeze_family` before any scored read.
+Status: **FROZEN** on 2026-11-28 at commit `66574dd`, before any scored read (it was PROPOSED
+until then). Spec sha256 `8b2239a4f6cc5ed0d1a36a7abd08f344d6e7dbc264f359bd9ca0ef46a7dee32a`.
+First run: 2026-11-28 at the same commit; results in
+[docs/experiments/shadow-calibration-japan.md](../experiments/shadow-calibration-japan.md).
 
 Family: `japan-shadow-calibration-v1`. The spec is
 `horsetrack.countries.japan.studies.shadow_run.build_spec()`, plain JSON;
@@ -59,11 +62,18 @@ result was joined to a claim before the freeze.
 | `calibration-win-t2-race` | P5 | sensitivity: T-2 with race clusters, which understate the dependence within a meeting; reported beside the primary, never in its place |
 | `pick-rule-q05-t2` | P5 | the 2026-11-24 pick rule as one leaderboard option (below) |
 | `drift-win-lag3` | E20 | primary: the fall from T-2, scored from T-5 |
-| `drift-win-lag11`, `drift-win-lag14` | E20 | the fall from T-5 scored from T-16; from T-16 scored from T-30 |
+| `drift-win-lag11`, `drift-win-lag14` | E20 | the fall from T-5 scored from T-16; from T-16 scored from T-30 (see the note below) |
 | `hand-played-bets` | P5 | the owner's bets by day and option, beside each option's development rank |
 
 A variant whose interval cannot be estimated (fewer than two meetings) is recorded as failed,
 with its point slope when one exists; a variant with no input is recorded with its counts.
+
+Note added after the first run (the frozen spec is unchanged): the frozen spec names only the
+lags (`lags_min: [3, 11, 14]`), and `selection_drift` uses every record that has a record at
+tau + lag. On the grid (1, 2, 5, 16, 30, 60) lag 3 and lag 11 each pair one decision time, as the
+table says, but lag 14 pairs two: T-16 from T-30 and also T-2 from T-16 (2 + 14 = 16). The table's
+gloss of lag 14 was incomplete when frozen; the run follows the frozen spec, and the report says
+which pairs each lag pooled.
 
 ## Options shadowed
 

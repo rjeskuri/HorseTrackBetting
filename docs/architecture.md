@@ -118,7 +118,7 @@ flowchart LR
 | `vm/{alias}/` | `countries/japan/logger/pull_vm.py` | `board-serve` and `shadow-day` with `--from-vm` |
 | `logs/japan/` | log-day's health lines and block markers (`countries/japan/logger/health.py`, `countries/japan/logger/log_day.py`) | the owner |
 | `models/japan/v0/` | `countries/japan/models/v0/calibration.py`, `countries/japan/models/v0/nowcast.py`, `countries/japan/models/v0/ordering.py`, `countries/japan/models/v0/residual.py` | `countries/japan/models/v0/loader.py` |
-| `shadow/japan/{date}.jsonl` | `countries/japan/shadow/log.py` | settling against final dividends, planned (#101); the shadow page never reads it |
+| `shadow/japan/{date}.jsonl` | `countries/japan/shadow/log.py` (also through `log_decisions` in `countries/japan/models/shadow.py`) | `countries/japan/models/shadow.py` (`read_shadow`, development days only, then `settle_shadow` against the final dividends, #101); the shadow page never reads it |
 | `registry/{country}.jsonl` | `core/eval/registry.py`, from the studies and fits | its committed summary `docs/experiments/registry/japan/` |
 | `reports/` | `core/eval/reports.py` (`write_report`), `core/store/checks.py` | the owner |
 | `features/`, `jrdb/`, `fixtures/` | `countries/japan/handicap/` feature sets; JRDB specs; real pages for `local` tests | the fits; `countries/japan/jrdb/parse.py`; the `local` tests |
@@ -212,7 +212,7 @@ flowchart TD
 | nowcast | `countries/japan/models/v0/nowcast.py`; config `countries/japan/config/nowcast_v0.yaml` |
 | shadow values | `countries/japan/models/v0/shadow_values.py` (with `countries/japan/models/v0/calibration.py`, `countries/japan/models/v0/ordering.py`, `countries/japan/models/v0/residual.py`) |
 | avoid flags | `countries/japan/board/flags.py`; config `countries/japan/config/avoid_flags.yaml` |
-| pick rule | planned, #100 (the shadow decider) and #101 (settling and staking on paper) |
+| pick rule | shadow EV in `countries/japan/models/decision.py` (#100); settled, staked flat under the cap and scored on paper in `countries/japan/models/shadow.py`, run by `countries/japan/studies/shadow_run.py` (#101) |
 | sealed shadow log | `countries/japan/shadow/log.py`, written by `shadow-day` in `countries/japan/shadow/day.py`; spec `docs/specs/shadow-log.md` |
 | shadow feed, shadow page | `countries/japan/board/shadow_feed.py`, `countries/japan/board/server.py`, `countries/japan/board/web/shadow.html`, `countries/japan/board/web/shadow.js` |
 | tunnel to the phone | `countries/japan/board/tunnel.py`, started by `board-serve --tunnel` (`countries/japan/board/server.py` gates every path with the run's access token); spec `docs/specs/board-feed.md` |

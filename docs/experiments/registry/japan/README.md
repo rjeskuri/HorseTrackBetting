@@ -36,6 +36,7 @@ per family, each holding that family's runs.
 - [japan-pool-depth-coplacer-v2](japan-pool-depth-coplacer-v2.md)
 - [japan-pool-depth-v1](japan-pool-depth-v1.md)
 - [japan-same-day-bias-final-win](japan-same-day-bias-final-win.md)
+- [japan-shadow-calibration-v1](japan-shadow-calibration-v1.md)
 - [japan-speed-top3-c3](japan-speed-top3-c3.md)
 - [japan-speed-top3-c3-timing](japan-speed-top3-c3-timing.md)
 - [japan-tail-beta-final-win](japan-tail-beta-final-win.md)

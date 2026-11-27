@@ -61,7 +61,8 @@ FOLD_SCHEME = "development-days"
 DAYS = ("2026-11-21", "2026-11-22")  # every logged shadow day before the holdout start
 POOL = "WIN"  # the only pool v0 logs a point claim (value_mean) for
 TAUS = (2, 1, 5, 16, 30, 60)  # the shadow grid; T-2 is D2's decision time and the primary
-DRIFT_LAGS = (3, 11, 14)  # E20: T-2 scored from T-5, T-5 from T-16, T-16 from T-30
+# E20 lags: 3 pairs T-2 with T-5, 11 pairs T-5 with T-16, 14 pairs T-16 with T-30 and T-2 with T-16
+DRIFT_LAGS = (3, 11, 14)
 PICK_OPTION = "pick-rule-q05-t2"
 BOOTSTRAP_SEED = TICKET
 
