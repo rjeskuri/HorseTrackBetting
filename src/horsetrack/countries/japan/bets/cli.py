@@ -2,15 +2,17 @@
 
 `check` and `record` go through the day's `BetLog` (#453), which holds the cap arithmetic and the
 append; `settle` joins the day's bets to `settle.day_dividends` and writes
-`$HORSETRACK_DATA_DIR/bets/japan/<day>.settled.json` beside the log (#454). Exit codes: 0 fits or
-recorded within the cap; 1 the stake does not fit (`check`) or the recorded bet is over the cap
-(`record`, the bet is kept); 2 refused or failed, nothing written. Everything printed stays in
-the terminal and every file under the data dir: the bet log is the owner's financial record.
+`$HORSETRACK_DATA_DIR/bets/japan/<day>.settled.json` beside the log (#454); a holdout day's bets
+are written 'holdout', without a read of the store. Exit codes: 0 fits or recorded within the cap;
+1 the stake does not fit (`check`) or the recorded bet is over the cap (`record`, the bet is kept);
+2 refused or failed, nothing written. Everything printed stays in the terminal and every file
+under the data dir: the bet log is the owner's financial record.
 """
 
 from __future__ import annotations
 
 import os
+import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
@@ -119,7 +121,7 @@ def record_command(
         "pool": pool,
         "combination": combination,
         "stake_yen": stake,
-        "placed_utc": placed_utc or datetime.now(timezone.utc).isoformat(),
+        "placed_utc": datetime.now(timezone.utc).isoformat() if placed_utc is None else placed_utc,
     }
     if option_id is not None:
         bet["option_id"] = option_id
@@ -162,11 +164,16 @@ def _write_settled(day: date, settled: pd.DataFrame) -> Path:
     if is_inside(path, env.repo_root()):
         raise BetLogInRepo(f"{path} is inside the repository: settled bets stay outside it")
     path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(f".{path.name}.partial")
-    partial.write_text(
-        settled.to_json(orient="records", force_ascii=False, indent=1) + "\n", encoding="utf-8"
-    )
-    os.replace(partial, path)
+    text = settled.to_json(orient="records", force_ascii=False, indent=1) + "\n"
+    # a temp file of this run's own, so two runs never write one partial file
+    fd, partial = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".partial")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(partial, path)
+    except BaseException:
+        Path(partial).unlink(missing_ok=True)
+        raise
     return path
 
 

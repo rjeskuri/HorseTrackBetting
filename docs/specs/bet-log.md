@@ -216,7 +216,7 @@ order, its columns kept, plus `outcome`, `paid_yen` and `return_per_100`:
 | --- | --- | --- | --- |
 | `holdout` | its `day_status` is `holdout`, or `is_holdout_day("japan", <race day>)` holds, whatever dividends are passed | null | null |
 | `unsettled` | its race has no dividend row of its pool yet (rows of other pools only are not a loss) | null | null |
-| `refunded` | its combination has an `is_refund` row | its stake | null |
+| `refunded` | its combination has an `is_refund` row (`day_dividends` adds one for a runner scratched before the start, see Scratched runners) | its stake | null |
 | `won` | its combination is a paying row of its race and pool | stake / 100 × that row's dividend | paid / stake × 100 |
 | `lost` | its race and pool have rows, none of them its combination | 0 | 0 |
 
@@ -226,6 +226,8 @@ order, its columns kept, plus `outcome`, `paid_yen` and `return_per_100`:
   combination its own dividend; each bet is paid by the one row of its combination.
 - WIN5 is keyed by its day, `jra:<day>:WIN5`, a format-1 record on a venue race included. The
   store's `dividends` holds no WIN5 rows, so a real WIN5 bet stays `unsettled`.
+- A race abandoned, or a pool not established (不成立), writes no dividend rows, so its bets stay
+  `unsettled`.
 - A combination with two different rows in one race and pool, a dividend row whose combination is
   not horse numbers, or a paying row without a dividend raises `ValueError`, for the races and
   pools of the bets only: settlement never guesses which row paid.
@@ -238,12 +240,36 @@ staked × 100, null when nothing was staked) over the won and lost bets, and `n_
 `n_pending` (`unsettled` and `holdout` bets) beside them. `totals(settled)` gives the same figures
 over all the rows, the day's line of `bets settle`.
 
-`day_dividends(day)`: the jra store's dividend rows of the day's races. `races` (`race_id,
-race_date, venue, race_no`) is read through `models/v0/store.read_store_table`, which drops
-holdout days, then the `dividends` rows of those race ids; each race is keyed
+`day_dividends(day)`: the jra store's dividend rows of the day's races, and the refund rows of its
+scratched runners (below). A holdout day (`is_holdout_day("japan", day)`) gives an empty frame of
+the five columns without opening the store, so it needs no store on disk. Otherwise `races`
+(`race_id, race_date, venue, race_no`) is read through `models/v0/store.read_store_table`, which
+drops holdout days, then the `dividends` rows of those race ids; each race is keyed
 `jra:<date>:<VENUE>:<NN>` from its race_date, venue (the jra config's venue code; a venue number
-or name maps to it) and race_no. A holdout day, or a day without races, gives an empty frame of
-the five columns.
+or name maps to it) and race_no. A day without races gives the empty frame too.
+
+### Scratched runners
+
+JRA returns the stake of a ticket on a runner scratched before the start, but the store's
+`dividends` holds no refund row for it (the results parser and jravan write `is_refund` false).
+`day_dividends` adds them from `runners` (`race_id, horse_no, bracket, is_scratched`, read through
+`read_store_table`): a refund row (`is_refund` true, no dividend) for each combination below, in
+each race with a scratched runner and each pool the race has dividend rows of.
+
+- Refunded: a runner with `is_scratched` true, which is exactly 出走取消 (`placing_code` WV) and
+  発走除外/競走除外 (WX). Every combination of the race's entered horse numbers that holds one is
+  refunded, in every pool from WIN to TIERCE.
+- Not refunded: a runner pulled up (競走中止, PU) or disqualified (失格, DISQ) started; a bet on it
+  is a loss like any other.
+- BRACKET_QUINELLA: a pair of two brackets is refunded only when one of them has no runner left; a
+  pair of one bracket (`"7,7"`, ゾロ目) when that bracket, entered with two or more, has fewer than
+  two left.
+- WIN5: never refunded for a scratched leg horse (JRA counts the ticket on the leg's win favourite
+  instead); a WIN5 bet stays `unsettled` as above.
+- A combination the store already has a row of keeps that row, and a pool without rows (not sold,
+  不成立, or no results yet) gets no refund rows, so its bets stay `unsettled`. A store without a
+  `runners` table, which the store build never writes beside `races` (both come from the results
+  pages), adds none.
 
 ## Commands
 
@@ -252,14 +278,17 @@ the five columns.
 - `check --date YYYY-MM-DD --stake N`: prints the day's staked total, the cap and what is left
   before this stake (`BetLog.check`), writes nothing; exit 0 when it fits, 1 when it does not.
 - `record --date ... --race-id ... --pool ... --combination ... --stake N [--option-id ...]
-  [--placed-utc ...] [--note ...]`: appends the bet (`placed_utc` defaults to now, UTC). A bet over
+  [--placed-utc ...] [--note ...]`: appends the bet (`placed_utc` defaults to now, UTC, only when
+  the option is left out: an empty one is refused like any other bad timestamp). A bet over
   the cap is kept: `over_cap` is printed and it exits 1; `off_flat` is printed too.
 - `settle --date ...`: settles the day's bets against `day_dividends(day)`, writes
   `$HORSETRACK_DATA_DIR/bets/japan/<day>.settled.json` beside the log (a JSON array, one object per
   bet: its record and `outcome`, `paid_yen`, `return_per_100`), replaced whole on every run, and
   prints each bet and the day's staked, paid and return per ¥100 over won and lost bets. The bet log
   is not changed. A day with no bets prints so, writes nothing and exits 0. A holdout day settles
-  like any other: its file holds every bet as `holdout`, with no paid figure.
+  without reading the store (`day_dividends` does not open it, so a fresh data dir with no store
+  settles too, and no `processed/` is made): its file holds every bet as `holdout`, with no paid
+  figure, and it exits 0.
 - A refused stake or bet, a tampered log, an unset data dir or a missing store prints the reason
   and exits 2, writing nothing.
 

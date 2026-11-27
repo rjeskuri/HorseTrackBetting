@@ -6,13 +6,16 @@ refund row gets its stake back, one whose race and pool have rows but not its co
 A bet whose race has no row of its pool yet waits ('unsettled'), and a holdout day's bet is never
 settled here ('holdout'): the outcomes of holdout days stay behind ``LockedHoldout.open``, which
 this module never opens. ``played_by_option`` sums the settled bets per leaderboard option, and
-``day_dividends`` reads a development day's dividends from the jra store. The format is in
-docs/specs/bet-log.md (Settlement). Nothing here writes a file.
+``day_dividends`` reads a development day's dividends from the jra store, with a refund row for
+each combination a runner scratched before the start returns (the store holds none). The format
+is in docs/specs/bet-log.md (Settlement). Nothing here writes a file.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import itertools
+from collections import Counter
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import date
 from typing import Any
 
@@ -27,11 +30,14 @@ from horsetrack.countries.japan.bets.log import (
     _RACE_ID,
     COUNTRY,
     HOLDOUT,
+    POOLS,
     SOURCE,
     WIN5,
     _check_day,
     _in_store_order,
     _jra,
+    _kind,
+    _legs_in_order,
 )
 from horsetrack.countries.japan.models.v0.store import read_store_table
 
@@ -51,6 +57,7 @@ OPTION_COLUMNS = [
     "n_pending",
 ]
 RACE_COLUMNS = ["race_id", "race_date", "venue", "race_no"]
+RUNNER_COLUMNS = ["race_id", "horse_no", "bracket", "is_scratched"]
 
 
 def _day_of(race_id: Any) -> date:
@@ -209,27 +216,116 @@ def _log_race_ids(races: Iterable[dict], day: date) -> dict[str, str]:
     }
 
 
+def _no_dividends() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            **{c: pd.Series(dtype=object) for c in ("race_id", "pool", "combination")},
+            "dividend": pd.Series(dtype="float64"),
+            "is_refund": pd.Series(dtype=bool),
+        }
+    )
+
+
+def _refunded(pool: str, field: list[tuple[int, int | None, bool]]) -> Iterator[str]:
+    """The combinations of ``pool``, in the store's order, that a race's scratches return;
+    ``field`` is its entered runners as (horse_no, bracket, is_scratched). A combination is
+    returned when it uses one of its numbers more often than that number has runners left running,
+    though it had that many entered: a scratched horse; for BRACKET_QUINELLA a bracket with no
+    runner left, or for a pair of one bracket (7,7, JRA's ゾロ目) fewer than two."""
+    legs = int(_jra()["pools"][pool]["legs"])
+    if _kind(pool).endswith("_bracket"):
+        runners = [(bracket, gone) for _, bracket, gone in field if bracket is not None]
+        draw = itertools.combinations_with_replacement
+    else:
+        runners = [(horse_no, gone) for horse_no, _, gone in field]
+        draw = itertools.permutations if _legs_in_order(pool) else itertools.combinations
+    entered = Counter(number for number, _ in runners)
+    left = Counter(number for number, gone in runners if not gone)
+    for numbers in draw(sorted(entered), legs):
+        if any(left[n] < k <= entered[n] for n, k in Counter(numbers).items()):
+            yield ",".join(map(str, numbers))
+
+
+def _scratch_refunds(paid: pd.DataFrame, runners: pd.DataFrame) -> pd.DataFrame:
+    """Refund rows (``is_refund`` true, no dividend) of the combinations JRA returns for runners
+    scratched before the start (取消 WV, 除外 WX: ``runners.is_scratched``; a runner pulled up,
+    競走中止, or disqualified, 失格, ran), which the store's ``dividends`` never holds. In each
+    race with such a runner, for each pool of its ``paid`` rows but WIN5 (JRA puts the leg's
+    favourite in for a scratched WIN5 horse): every combination ``_refunded`` gives that the store
+    has no row of. A pool without rows (not sold, 不成立, or no results yet) gets none."""
+    scratched = runners["is_scratched"].astype("boolean").fillna(False).to_numpy(dtype=bool)
+    fields: dict[str, list[tuple[int, int | None, bool]]] = {}
+    for race_id, horse_no, bracket, gone in zip(
+        runners["race_id"], runners["horse_no"], runners["bracket"], scratched, strict=True
+    ):
+        if not pd.isna(horse_no):
+            entry = (int(horse_no), None if pd.isna(bracket) else int(bracket), bool(gone))
+            fields.setdefault(race_id, []).append(entry)
+    hit = {race_id for race_id, field in fields.items() if any(gone for *_, gone in field)}
+    stored: dict[tuple[str, str], set[str]] = {}
+    for race_id, pool, combination in paid[["race_id", "pool", "combination"]].itertuples(
+        index=False
+    ):
+        if race_id in hit and pool in POOLS and pool != WIN5:
+            valid = isinstance(combination, str) and _COMBINATION.fullmatch(combination)
+            stored.setdefault((race_id, pool), set()).add(
+                _in_store_order(pool, combination) if valid else combination
+            )
+    rows = [
+        (race_id, pool, combination)
+        for (race_id, pool), present in sorted(stored.items())
+        for combination in _refunded(pool, fields[race_id])
+        if combination not in present
+    ]
+    return pd.DataFrame(
+        {
+            "race_id": pd.Series([row[0] for row in rows], dtype=object),
+            "pool": pd.Series([row[1] for row in rows], dtype=object),
+            "combination": pd.Series([row[2] for row in rows], dtype=object),
+            "dividend": pd.Series([float("nan")] * len(rows), dtype="float64"),
+            "is_refund": pd.Series([True] * len(rows), dtype=bool),
+        }
+    )
+
+
+def _day_runners(day: date, race_ids: list[str]) -> pd.DataFrame | None:
+    """The jra store's ``runners`` rows of ``race_ids`` (``RUNNER_COLUMNS``), read through
+    ``read_store_table``; None when the store has no runners table."""
+    if not (processed_dir(SOURCE) / "runners.parquet").is_file():
+        return None
+    return read_store_table(
+        "runners",
+        columns=RUNNER_COLUMNS,
+        start=day,
+        end=day,
+        touches_price=False,
+        where=ds.field("race_id").isin(race_ids),
+    ).to_pandas()
+
+
 def day_dividends(day: date) -> pd.DataFrame:
-    """The jra store's dividend rows of ``day``'s races, keyed by the log's race_id. ``races``
-    is read through ``read_store_table``, which drops holdout days, so a holdout day, like a day
-    without races, gives an empty frame of ``DIVIDEND_COLUMNS``."""
+    """The jra store's dividend rows of ``day``'s races, keyed by the log's race_id, and a refund
+    row (``_scratch_refunds``) for each combination a runner scratched before the start returns.
+    A holdout day gives an empty frame of ``DIVIDEND_COLUMNS`` without opening the store. ``races``
+    and ``runners`` are read through ``read_store_table``, which drops holdout days; a day without
+    races gives the empty frame too, and a store without a runners table no refund rows."""
     _check_day(day)
+    if is_holdout_day(COUNTRY, day):
+        return _no_dividends()
     races = read_store_table(
         "races", columns=RACE_COLUMNS, start=day, end=day, touches_price=False
     ).to_pylist()
     keyed = _log_race_ids(races, day)
     if not keyed:
-        return pd.DataFrame(
-            {
-                **{c: pd.Series(dtype=object) for c in ("race_id", "pool", "combination")},
-                "dividend": pd.Series(dtype="float64"),
-                "is_refund": pd.Series(dtype=bool),
-            }
-        )
+        return _no_dividends()
     paid = pq.read_table(
         processed_dir(SOURCE) / "dividends.parquet",
         columns=DIVIDEND_COLUMNS,
         filters=ds.field("race_id").isin(list(keyed)),
     ).to_pandas()
+    runners = _day_runners(day, list(keyed))
+    refunds = None if runners is None else _scratch_refunds(paid, runners)
+    if refunds is not None and len(refunds):
+        paid = pd.concat([paid, refunds.astype(paid.dtypes.to_dict())], ignore_index=True)
     paid["race_id"] = paid["race_id"].map(keyed)
     return paid[DIVIDEND_COLUMNS].reset_index(drop=True)
