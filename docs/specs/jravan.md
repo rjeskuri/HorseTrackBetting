@@ -218,7 +218,8 @@ post time a null `post_time_local`.
   race, by horse id. A reader keyed on `(race_id, horse_no)` drops or counts those rows apart
   (`reconcile` counts them as `runners.<source>_unnumbered`); `horse_runs` keeps them as runs
   with a null `draw`. A `runners.parquet` built before #394 still holds 99 there: rebuild it
-  (`horsetrack japan jravan runners`, full range) before relying on the null.
+  (`horsetrack japan jravan runners`, full range, with every year's SE file present; see the
+  `reconcile` section) before relying on the null.
 
 The run on the export: `horsetrack japan jravan runners`, run 2026-11-26. Every count, span,
 share, rate, wall time and peak memory of it is withheld (D21), in two files under
@@ -673,7 +674,10 @@ at a time, and changes neither store:
 - An existing `runners.parquet` keeps the abandoned races' undrawn runners at horse number 99, so
   `reconcile` run straight after this change still reports those duplicates. Run a full
   `horsetrack japan jravan runners` rebuild first; only then does `reconcile` reflect the null
-  `horse_no`.
+  `horse_no`. Before it, check that the raw SE export has a year file for every year in the
+  existing store: the command reads the year files present (or only the `--year` ones) and
+  replaces `runners.parquet` in full, so a missing year loses its runners and its races' winner
+  times in `races.parquet` (`finish_time_s` is reset from the rebuilt runners), with no error.
 - The command prints the overall counts and rates; the detail by year, with up to 20 failing race
   ids per check, goes to `reports/jravan-reconcile.md` through `write_report`
   (`sources=('jravan', 'jra')`), which refuses the repository. Its figures come from a licensed
