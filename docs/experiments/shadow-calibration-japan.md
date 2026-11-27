@@ -24,7 +24,17 @@ appears here.
   (10,810): its log key (`race_id`, `pool`, `combination`, `tau_min`), its `decision_utc`, and
   its `outcome`, `return_per_100`, `claimed_ev` and `realised`, so each logged claim joins back to
   its line in the append-only log. Per-race rows stay out of the tree. The first run's report,
-  `shadow-calibration-japan-8b2239a4f6cc.json`, stays beside them.
+  `shadow-calibration-japan-8b2239a4f6cc.json`, stays beside them. Those names carry the spec
+  hash and the commit (the first run's the spec hash alone) and keep them. Since review round 2
+  the runner names a run's files `shadow-calibration-japan-<spec hash 12>-<commit 7>-<artifact
+  id>.json` and `...-settlement.jsonl`: the artifact id is 16 hex digits of the sha256 of the
+  run's registry record ids (each hashes the whole record: its commit, its input builds, which
+  are each shadow and odds log's bytes and the jra store build, and its results) and of its
+  settlement text (each record's outcome at the dividend it used). A new commit, a rebuilt input
+  or a changed result writes new files beside the old ones, and no existing file is replaced: a
+  rerun that reproduces a run's records keeps that run's report and settlement file as written.
+  A report lists its run's `run_ids` and the `records_appended` by the invocation that wrote it.
+  A rerun at another commit is a new run, with twelve new records.
 - Data: the shadow logs of 2026-11-21 and 2026-11-22 (Kyoto), both development days, sealed:
   10,810 records. Only 2026-11-21 carries claims: 560 WIN records over the grid, 116 settled at
   T-2 over 9 races, one meeting. 2026-11-22's records name no fits and carry no value. Every race
@@ -80,9 +90,10 @@ recorded value, not an absence.
 - Mean realised -0.778 at T-2 is a ¥100 ticket on every runner of the 9 races returning about
   ¥22 per ¥100: the day's 9 winners, against the claimed -0.289. The fitted line passes through
   the means, so its intercept is -0.778 - 0.975 x (-0.289) = -0.496: the line puts a runner
-  claimed at break-even (EV 0) at about -0.50 per yen on this meeting. The slope is the scale of
-  the claim; the level is the intercept, and here the claims sit about 0.49 per yen above the
-  realised return on average, a level that 9 races' winners decide.
+  claimed at break-even (EV 0) at about -0.50 per yen on this meeting. The slope says how the
+  fitted average realised return moves as the claimed EV rises (0.975 per yen of claim); the
+  intercept sets its level, and here the mean claim sits about 0.49 per yen above the mean
+  realised return, a gap that 9 races' winners decide.
 - The race-clustered interval treats the 9 races of one meeting as independent, which D7 does not
   allow; it understates the uncertainty and is reported beside the primary, never in its place.
 - Lag 14 pools two pairs of decision times (T-2 from T-16, 116; T-16 from T-30, 38): the frozen
@@ -132,9 +143,11 @@ with their limits:
   price half of each claim is in-sample: the nowcast fit the values used (`ec0a8794fe55`) was
   fitted on these two meetings' boards. A slope near 1 is not a calibrated claim: at T-2 the mean
   claim is -0.289 per yen and the mean realised -0.778 (intercept -0.496), so on this day the
-  claims ordered and spaced the runners' returns about in proportion while overstating their
-  level by about 0.49 per yen. With 9 races the level is mostly which runners won, and the slope
-  is in-sample on the price half, so neither confirms nor rules out calibration out of sample.
+  fitted average realised return rose about 0.975 per yen of claimed EV while the mean claim
+  overstated the mean realised return by about 0.49 per yen. The slope is a fit of averages: it
+  does not say whether the claims ordered the individual runners' returns. With 9 races the
+  level is mostly which runners won, and the slope is in-sample on the price half, so neither
+  confirms nor rules out calibration out of sample.
 - E20, point slopes 0.59, 0.93 and 0.85: positive, as E20 expects, with no interval. Read
   descriptively (not pre-registered), the score at T-5 is strongly tied to the odds level at T-2
   (correlation -0.81 with ln O_t), so these slopes cannot separate an overlay effect from the
