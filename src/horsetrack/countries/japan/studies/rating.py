@@ -439,7 +439,15 @@ def run_study(
     """Run the pre-registered family on Japan's development data; write its report and export.
     `source` names the store copy read (#404: 'jravan' the JRA-VAN copy), for the development rows
     and the rating's results alike, and is recorded in the spec, the records and the report;
-    `start` is the rating results' first day (default RATING_FROM)."""
+    `start` is the rating results' first day (default RATING_FROM); one after the price era's
+    first day (the development rows' first day) raises ValueError before the spec is frozen,
+    since the earlier priced starters would have no rating."""
+    if start > PRICE_ERA_START:
+        raise ValueError(
+            f"start {start.isoformat()} is after the development rows' first day "
+            f"{PRICE_ERA_START.isoformat()} (the price era): the rating's results must cover "
+            "every priced starter"
+        )
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     sources = (source,)
     scheme = load_country_scheme(COUNTRY)

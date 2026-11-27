@@ -24,8 +24,10 @@ cell alone? The null is that it does not.
   replicate here draws whole meetings the same way and recomputes both RMSEs over the pooled races
   of the draw, model and baseline on the same draw (paired).
 - `rmse_table`: the overall row and one row per distinct `by` value, each with its own bounds.
-- `read_inputs(*, source='jra')`: the store copy's races and runners, column-scoped, holdout
-  days never scanned beyond their race_date (`read_store_table`).
+- `read_inputs(*, source='jra', start=date.min)`: the store copy's races and runners from
+  `start` on, column-scoped, holdout days never scanned beyond their race_date
+  (`read_store_table`); `run_study(source=..., start=...)` passes both and records them in the
+  spec (a `start` only when given), the source also in the records and the report.
 
 The study (`run_study`; CLI `python -m horsetrack.countries.japan.studies.speed_run --run [--out
 DIR]`, an `--out` inside the repository refused) freezes its spec in the run registry before any
@@ -422,18 +424,20 @@ def rmse_table(
 # --------------------------------------------------------------------------- reading
 
 
-def read_inputs(*, source: str = SOURCE) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """The store copy `source`'s races (RACE_COLUMNS) and runners (RUNNER_COLUMNS and race_date),
-    column-scoped through `read_store_table`, which never scans a holdout day's other columns, in
-    `read_table`'s dtypes. `source` defaults to the JRA store (#404: 'jravan' reads the JRA-VAN
-    copy). No JRDB table is read (D21)."""
+def read_inputs(
+    *, source: str = SOURCE, start: date = date.min
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The store copy `source`'s races (RACE_COLUMNS) and runners (RUNNER_COLUMNS and race_date)
+    from `start` on (default every day), column-scoped through `read_store_table`, which never
+    scans a holdout day's other columns, in `read_table`'s dtypes. `source` defaults to the JRA
+    store (#404: 'jravan' reads the JRA-VAN copy). No JRDB table is read (D21)."""
     return tuple(
         to_frame(
             name,
             read_store_table(
                 name,
                 columns=columns,
-                start=date.min,
+                start=start,
                 end=date.max,
                 touches_price=False,
                 source=source,
@@ -469,9 +473,23 @@ def scheme_label(scheme: FoldScheme) -> str:
     return "walk_forward:" + json.dumps(dataclasses.asdict(scheme), sort_keys=True)
 
 
-def build_spec(boot: dict, scheme: FoldScheme, minutes: int) -> dict:
-    """The family's pre-registered spec, frozen before any outcome is read."""
-    return {
+def build_spec(
+    boot: dict,
+    scheme: FoldScheme,
+    minutes: int,
+    *,
+    source: str = SOURCE,
+    start: date = date.min,
+) -> dict:
+    """The family's pre-registered spec, frozen before any outcome is read. `source` is the store
+    copy read and `start` the first race day read (#404); the default spec is unchanged, and a
+    `start` is recorded only when one is given."""
+    licensed = {
+        SOURCE: "no licensed source (JRDB, JRA-VAN) is read",
+        "jravan": "JRA-VAN, a licensed source, is read (the jravan store copy), so the report is "
+        "withheld; no JRDB table is read",
+    }.get(source, f"the store copy {source} is read; no JRDB table is read")
+    spec = {
         "family_id": FAMILY_ID,
         "ticket": TICKET,
         "hypotheses": {
@@ -485,8 +503,8 @@ def build_spec(boot: dict, scheme: FoldScheme, minutes: int) -> dict:
         "estimand": ESTIMANDS[0] + ": the mean finish time of the first three past the post, "
         "per runner; each runner placed 1 or 2 once, the runners placed 3rd as one slot at their "
         "mean; without a 3rd-placed runner, the runners placed 1-2 present (partly placed)",
-        "races": "store races and runners (jra), every development race day; excluded in order "
-        "and counted: jump races, no post time, no placed and timed runner",
+        "races": f"store races and runners ({source}), every development race day; excluded in "
+        "order and counted: jump races, no post time, no placed and timed runner",
         "post_utc": "post_time_local (H:MM or HH:MM) on the Asia/Tokyo wall clock of race_date",
         "result_available_utc": "post_utc + 30 min (availability.yaml's same-day results rule)",
         "model": {
@@ -524,10 +542,13 @@ def build_spec(boot: dict, scheme: FoldScheme, minutes: int) -> dict:
             "D10": "no price is read, so rows before 2014-06-07 may train",
             "D11-D15": "Japan holdout A2 from 2026-11-28, fully locked: no holdout day is read",
             "D16": "nothing is adopted",
-            "D21": "no licensed source (JRDB, JRA-VAN) is read",
+            "D21": licensed,
         },
-        "sources": [SOURCE],
+        "sources": [source],
     }
+    if start != date.min:
+        spec["first_race_day_read"] = start.isoformat()
+    return spec
 
 
 @dataclass(frozen=True)
@@ -651,15 +672,21 @@ def _sha_prefix(path: Path) -> str:
     return digest.hexdigest()[:16]
 
 
-def store_builds() -> dict[str, str]:
+def store_builds(source: str = SOURCE) -> dict[str, str]:
     return {
-        f"{SOURCE}_{name}": f"processed/{SOURCE}/{name}.parquet@"
-        + _sha_prefix(table_path(SOURCE, name))
+        f"{source}_{name}": f"processed/{source}/{name}.parquet@"
+        + _sha_prefix(table_path(source, name))
         for name in ("races", "runners")
     }
 
 
-def _record(variant: Variant, git_sha: str, builds: dict[str, str], fold_scheme: str) -> RunRecord:
+def _record(
+    variant: Variant,
+    git_sha: str,
+    builds: dict[str, str],
+    fold_scheme: str,
+    source: str = SOURCE,
+) -> RunRecord:
     params = variant.params | ({"error": variant.error} if variant.error else {})
     return RunRecord(
         hypothesis_id=HYPOTHESIS_ID,
@@ -668,7 +695,7 @@ def _record(variant: Variant, git_sha: str, builds: dict[str, str], fold_scheme:
         ticket=TICKET,
         git_sha=git_sha,
         data_builds=builds,
-        sources=(SOURCE,),
+        sources=(source,),
         fold_scheme=fold_scheme,
         components=variant.components,
         params=params,
@@ -724,19 +751,21 @@ def render_report(variants: list[Variant], tables: dict, counts: dict, about: di
     return "\n".join(lines) + "\n"
 
 
-def run_study(out_dir: Path | None = None) -> dict:
+def run_study(out_dir: Path | None = None, *, source: str = SOURCE, start: date = date.min) -> dict:
     """Freeze the spec, build the race table from the development store, run the fold loop per
     error model, append the registry records, rewrite the committed summary and write the
-    report outside the tree."""
+    report outside the tree. `source` names the store copy read (#404: 'jravan' the JRA-VAN
+    copy) and `start` the first race day read (default every day); both are recorded in the spec,
+    and the source in the records, the data builds and the report's `write_report` sources."""
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     scheme, minutes = load_country_scheme(COUNTRY), decision_min()
-    spec = build_spec(bootstrap_settings(), scheme, minutes)
+    spec = build_spec(bootstrap_settings(), scheme, minutes, source=source, start=start)
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
     spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any outcome is read
 
-    builds = store_builds()
-    races, runners = read_inputs()
+    builds = store_builds(source)
+    races, runners = read_inputs(source=source, start=start)
     table, builder = build_race_table(races, runners, estimand=ESTIMANDS[0])
     del races, runners
     builder |= {
@@ -748,7 +777,7 @@ def run_study(out_dir: Path | None = None) -> dict:
 
     existing = registry.records(FAMILY_ID)
     fold_scheme = scheme_label(scheme)
-    records = [_record(v, git_sha, builds, fold_scheme) for v in variants]
+    records = [_record(v, git_sha, builds, fold_scheme, source) for v in variants]
     run_ids = {}
     for variant, record in zip(variants, records, strict=True):
         if record not in existing:
@@ -764,7 +793,7 @@ def run_study(out_dir: Path | None = None) -> dict:
     report = write_report(
         out_dir / f"speed-{COUNTRY}-{spec_hash[:12]}.md",
         render_report(variants, tables, counts, about),
-        sources=(SOURCE,),
+        sources=(source,),
     )
     return {
         "family_id": FAMILY_ID,

@@ -354,7 +354,8 @@ def run_fit(
     predictions over Japan's fold scheme, and write the fit, the predictions and a manifest.
 
     `source` names the store copy read (#404): 'jra' by default, 'jravan' the JRA-VAN copy; a
-    run on another copy than 'jra' names it in the manifest's and the fit file's `sources`.
+    run on another copy than 'jra' names it in the manifest's and the fit file's `sources` and in
+    its output file names (`win_calibration-<source>-<fit_id>.json` and the like).
 
     An `out_dir` that resolves inside the repository raises `paths.DataDirInsideRepo` before
     anything is read or written."""
@@ -379,9 +380,12 @@ def run_fit(
     oof = oof_predict(frame, folds=folds, n_knots=n_knots, chunk_races=chunk_races)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    fit_path = out_dir / f"win_calibration-{model.fit_id}.json"
-    oof_path = out_dir / f"win_calibration_oof-{model.fit_id}.parquet"
-    manifest_path = out_dir / f"manifest-win_calibration-{model.fit_id}.json"
+    # Another store copy's outputs name it, so a run on each copy keeps its own files (the fit id
+    # leaves the source out: two copies with the same usable rows share it).
+    name = model.fit_id if source == "jra" else f"{source}-{model.fit_id}"
+    fit_path = out_dir / f"win_calibration-{name}.json"
+    oof_path = out_dir / f"win_calibration_oof-{name}.parquet"
+    manifest_path = out_dir / f"manifest-win_calibration-{name}.json"
 
     race_codes = frame["race_id"].cat.codes.to_numpy()
     fold_entries = []
