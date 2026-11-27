@@ -21,6 +21,15 @@ Module under test: `horsetrack.countries.japan.studies.cross_pool`. Contract pin
   runner with the largest Win share; `fav_support` the favourite's x_cross on every row of the
   race; `kl_race` = sum over pairs of q ln(q / h); `gap_s` = (quinella_utc - win_utc) in seconds,
   signed (positive when the Quinella capture is the later one).
+- `RaceBoards.quinella_zero`: frozenset of the starter pairs whose latest Quinella row at t is a
+  JRA-VAN zero-vote quote (null odds, `status_raw` "0000" after strip); blank, `----`, `****` and
+  absent rows are not in it, and a zero-vote row at t supersedes an older price. Default empty.
+- `cross_features` / `pair_features(..., zero_vote="unavailable" | "zero")`: "unavailable" (the
+  default) counts a zero-vote pair as missing (the race's Quinella columns are NaN); "zero" counts
+  it as a known zero share when every other starter pair is priced: shares are normalised over
+  the priced pairs, the zero pairs get q_pair 0, kl_race sums over the priced pairs, and x_cross
+  and log_ratio are NaN (never -inf) where the Quinella support is zero. Any other mode raises
+  ValueError. No column is ever infinite.
 
 Expected values are derived here from the stated formulas, never from the module. All data are
 synthetic and in memory.
@@ -44,6 +53,7 @@ import pytest
 from horsetrack.countries.japan.logger.compact import SCHEMA
 from horsetrack.countries.japan.studies import cross_pool
 from horsetrack.countries.japan.studies.cross_pool import (
+    RaceBoards,
     boards_at,
     cross_features,
     harville_pairs,
@@ -482,7 +492,8 @@ FORBIDDEN_IMPORTS = (
 
 
 def test_nothing_reads_the_store_the_registry_or_the_holdout(tmp_path, monkeypatch):
-    tree = ast.parse(open(cross_pool.__file__, encoding="utf-8").read())
+    with open(cross_pool.__file__, encoding="utf-8") as source:
+        tree = ast.parse(source.read())
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -698,6 +709,233 @@ def test_a_zero_vote_quinella_pair_never_gives_an_infinite_feature():
     boards = boards_at(day_frame(rows))[rid]
     assert_no_inf(cross_features(boards))
     assert_no_inf(pair_features(boards))
+
+
+# ---------------------------------------------------------------- zero-vote quotes kept apart
+
+ZERO = "0000"
+BLANK = "    "
+
+
+def quinella_quotes(rid, minutes, quotes: dict[tuple[int, int], float | str]) -> list[dict]:
+    """QUINELLA rows at `minutes`: a float is a price, a str a null price with that raw text."""
+    rows = []
+    for (a, b), quote in quotes.items():
+        if isinstance(quote, str):
+            rows.append(row(rid, "QUINELLA", f"{a},{b}", minutes, None, status=quote))
+        else:
+            rows.append(row(rid, "QUINELLA", f"{a},{b}", minutes, quote))
+    rows.append(row(rid, "QUINELLA", POOL_ROW, minutes, None, status=None, investment=2.0e7))
+    return rows
+
+
+ZERO_READERS = {"plain": lambda table: table.to_pandas(), **READERS}
+
+
+def test_race_boards_default_to_no_zero_vote_pairs():
+    assert RaceBoards().quinella_zero == frozenset()
+    assert isinstance(RaceBoards().quinella_zero, frozenset)
+
+
+@pytest.mark.parametrize("reader", sorted(ZERO_READERS))
+def test_boards_at_marks_the_zero_vote_quinella_pairs(reader):
+    rid, other = race_id(9), race_id(10, "HAN")
+    # Starters 1-5; 6 is scratched at t and 9 has no Win row.
+    rows = win_capture(rid, 10.0, {1: 2.4, 2: 3.3, 3: 5.2, 4: 8.8, 5: 13.0, 6: 22.0})
+    rows += win_capture(
+        rid, 3.0, {1: 2.2, 2: 3.5, 3: 5.0, 4: 9.0, 5: 14.0, 6: None}, status={6: "SCR"}
+    )
+    pairs = list(itertools.combinations((1, 2, 3, 4, 5), 2))
+    old = {pr: round(6.0 + 1.7 * pr[0] * pr[1], 1) for pr in pairs}
+    rows += quinella_quotes(rid, 10.0, {**old, (1, 2): ZERO})  # an old zero, priced again at t
+    at_t = {
+        (1, 2): 4.1,
+        (1, 3): 7.3,
+        (2, 3): 9.9,
+        (4, 5): 61.0,
+        (1, 4): ZERO,
+        (2, 4): ZERO + "  ",  # JRA-VAN keeps the raw text untrimmed
+        (3, 4): "  " + ZERO,  # priced at 10 minutes, zero votes at t
+        (3, 5): BLANK,
+        (1, 5): "----",
+        (2, 5): "****",
+        (4, 6): ZERO,  # names the scratched runner
+        (4, 9): ZERO,  # names a runner with no Win row
+    }
+    rows += quinella_quotes(rid, 2.5, at_t)
+    rows += quinella_quotes(rid, 1.0, {(1, 3): ZERO, (4, 5): ZERO})  # after t
+    win2, q2 = consistent_odds(normalise([0.5, 0.3, 0.2]))
+    rows += win_capture(other, 4.0, win2) + quinella_capture(other, 3.0, q2)
+    table = pa.Table.from_pylist(jravan_rows(rows), schema=SCHEMA)
+    boards = boards_at(ZERO_READERS[reader](table))
+
+    rb = boards[rid]
+    assert isinstance(rb.quinella_zero, frozenset)
+    assert rb.quinella_zero == {(1, 4), (2, 4), (3, 4)}, reader
+    assert rb.quinella == pytest.approx({(1, 2): 4.1, (1, 3): 7.3, (2, 3): 9.9, (4, 5): 61.0})
+    assert set(rb.win) == {1, 2, 3, 4, 5}
+    assert boards[other].quinella_zero == frozenset()
+    assert boards[other].quinella == pytest.approx(q2)
+
+
+ZERO_CASES = {  # (WIN odds at t, the starter pairs with zero votes at t)
+    "one-pair": ({1: 2.0, 2: 3.2, 3: 5.5, 4: 12.0}, {(3, 4)}),
+    "outsider": ({2: 1.8, 3: 4.0, 5: 7.5, 7: 15.0, 9: 80.0}, {(2, 9), (3, 9), (5, 9), (7, 9)}),
+    "two-pairs": ({1: 3.1, 2: 3.4, 3: 6.0, 4: 9.5, 5: 20.0, 6: 45.0}, {(4, 6), (5, 6)}),
+}
+
+
+def zero_vote_race(rid, win, zero, *, also=None):
+    """WIN at 3 and QUINELLA at 2.5: every starter pair priced except the `zero` ones (and `also`,
+    pair -> raw text or None for no row)."""
+    also = also or {}
+    quotes: dict = {}
+    for i, (a, b) in enumerate(itertools.combinations(sorted(win), 2)):
+        if (a, b) in also:
+            if also[(a, b)] is not None:
+                quotes[(a, b)] = also[(a, b)]
+        elif (a, b) in zero:
+            quotes[(a, b)] = ZERO if i % 2 else "  " + ZERO
+        else:
+            quotes[(a, b)] = round(4.0 + 1.1 * a * b + 0.3 * b, 2)
+    rows = win_capture(rid, 3.0, win) + quinella_quotes(rid, 2.5, quotes)
+    priced = {pr: v for pr, v in quotes.items() if not isinstance(v, str)}
+    return rows, priced
+
+
+@pytest.mark.parametrize("lam", [1.0, 0.85])
+@pytest.mark.parametrize("case", sorted(ZERO_CASES))
+def test_zero_vote_pairs_in_either_mode(case, lam):
+    win, zero = ZERO_CASES[case]
+    rid = race_id(5)
+    rows, priced = zero_vote_race(rid, win, zero)
+    boards = boards_at(day_frame(rows))[rid]
+    assert boards.quinella_zero == zero
+
+    # "unavailable", the default: the race has no Quinella features.
+    default = cross_features(boards, lambda2=lam)
+    unavailable = cross_features(boards, lambda2=lam, zero_vote="unavailable")
+    pd.testing.assert_frame_equal(default, unavailable)
+    for column in (*QUINELLA_COLUMNS, "gap_s"):
+        assert unavailable[column].astype(float).isna().all(), (case, column)
+    assert np.isfinite(unavailable["h_top2_t"].astype(float)).all()
+    assert_no_inf(unavailable)
+    pf_un = pair_features(boards, lambda2=lam, zero_vote="unavailable")
+    pd.testing.assert_frame_equal(pair_features(boards, lambda2=lam), pf_un)
+    assert pf_un["q_pair"].astype(float).isna().all()
+    assert pf_un["log_ratio"].astype(float).isna().all()
+    assert_no_inf(pf_un)
+
+    # "zero": a zero-vote pair is a known zero share.
+    p = ref_shares(win)
+    h = ref_harville(p, lam)
+    qs = ref_shares(priced)
+    q = {pr: qs.get(pr, 0.0) for pr in h}
+    q_top2, h_top2 = ref_top2(q), ref_top2(h)
+    x = {k: math.log(q_top2[k] / h_top2[k]) if q_top2[k] > 0 else math.nan for k in p}
+    fav = min(win, key=win.get)
+
+    feats = cross_features(boards, lambda2=lam, zero_vote="zero")
+    assert_no_inf(feats)
+    assert sorted(feats["horse_no"].astype(int)) == sorted(win)
+    assert_close_maps(by_horse(feats, "p_win_t"), p)
+    assert_close_maps(by_horse(feats, "q_top2_t"), q_top2)
+    assert_close_maps(by_horse(feats, "h_top2_t"), h_top2)
+    got_x = by_horse(feats, "x_cross")
+    for k, v in x.items():
+        if math.isnan(v):
+            assert math.isnan(got_x[k]), (case, k)
+        else:
+            assert got_x[k] == pytest.approx(v, abs=TOL), (case, k)
+    assert all(v == pytest.approx(x[fav], abs=TOL) for v in feats["fav_support"])
+    kl = ref_kl(qs, h)  # 0 ln 0 = 0: the zero pairs add nothing
+    assert all(v == pytest.approx(kl, abs=1e-10) for v in feats["kl_race"])
+    assert all(g == pytest.approx(30.0, abs=1e-6) for g in feats["gap_s"])
+
+    pf = pair_features(boards, lambda2=lam, zero_vote="zero")
+    assert_no_inf(pf)
+    pairs = [tuple(pr) for pr in pf["pair"]]
+    assert set(pairs) == set(h)
+    assert_close_maps(dict(zip(pairs, pf["h_pair"].astype(float), strict=True)), h)
+    assert_close_maps(dict(zip(pairs, pf["q_pair"].astype(float), strict=True)), q)
+    assert float(pf["q_pair"].sum()) == pytest.approx(1.0, abs=TOL)
+    for pr, v in zip(pairs, pf["log_ratio"].astype(float), strict=True):
+        if pr in zero:
+            assert math.isnan(v), (case, pr)
+        else:
+            assert v == pytest.approx(math.log(q[pr] / h[pr]), abs=TOL), (case, pr)
+
+
+@pytest.mark.parametrize("missing", ["absent", BLANK, "----", "****"])
+def test_zero_mode_still_needs_every_other_starter_pair_priced(missing):
+    rid = race_id(6)
+    win = {1: 2.0, 2: 3.2, 3: 5.5, 4: 12.0}
+    rows, _ = zero_vote_race(
+        rid, win, {(3, 4)}, also={(2, 4): None if missing == "absent" else missing}
+    )
+    boards = boards_at(day_frame(rows))[rid]
+    assert boards.quinella_zero == {(3, 4)}
+    for mode in ("unavailable", "zero"):
+        feats = cross_features(boards, zero_vote=mode)
+        assert_no_inf(feats)
+        for column in (*QUINELLA_COLUMNS, "gap_s"):
+            assert feats[column].astype(float).isna().all(), (missing, mode, column)
+        assert np.isfinite(feats["p_win_t"].astype(float)).all()
+        pf = pair_features(boards, zero_vote=mode)
+        assert_no_inf(pf)
+        assert pf["q_pair"].astype(float).isna().all(), (missing, mode)
+        assert pf["log_ratio"].astype(float).isna().all(), (missing, mode)
+
+
+def _boards_without_zero_votes() -> dict[str, RaceBoards]:
+    rows = []
+    a, b, c, d = race_id(1), race_id(2), race_id(3), race_id(4)
+    win, quinella = consistent_odds(normalise([0.4, 0.25, 0.2, 0.1, 0.05]))
+    rows += win_capture(a, 3.0, win) + quinella_capture(a, 2.5, quinella)
+    p = normalise([0.3, 0.2, 0.15, 0.12, 0.09, 0.07])
+    win_b, _ = consistent_odds(p)
+    tilt = {1: 0.8, 2: 1.3, 3: 1.0, 4: 0.7, 5: 1.5, 6: 1.1}
+    raw = {(i, j): v * tilt[i] * tilt[j] for (i, j), v in ref_harville(p).items()}
+    rows += win_capture(b, 3.0, win_b) + quinella_capture(
+        b, 2.0, {k: 0.775 / v for k, v in raw.items()}
+    )
+    rows += _missing_rows(
+        c, (1, 2, 3, 4), {(1, 2): 3.2, (1, 3): 5.0, (2, 3): 7.0}, [(1, 4), (2, 4), (3, 4)], "blank"
+    )
+    win_d = {1: 2.4, 2: 3.8, 3: None, 4: 9.0, 5: 14.5}
+    q_d = {
+        pr: round(3.0 + 1.4 * pr[0] * pr[1], 1) for pr in itertools.combinations((1, 2, 3, 4, 5), 2)
+    }
+    rows += win_capture(d, 3.0, win_d, status={3: "SCR"}) + quinella_capture(d, 2.5, q_d)
+    return boards_at(day_frame(rows))
+
+
+@pytest.mark.parametrize("lam", [1.0, 0.9])
+def test_zero_mode_changes_nothing_without_zero_vote_pairs(lam):
+    boards = _boards_without_zero_votes()
+    assert len(boards) == 4
+    for rid, rb in boards.items():
+        assert rb.quinella_zero == frozenset(), rid
+        pd.testing.assert_frame_equal(
+            cross_features(rb, lambda2=lam, zero_vote="zero"),
+            cross_features(rb, lambda2=lam, zero_vote="unavailable"),
+        )
+        pd.testing.assert_frame_equal(
+            pair_features(rb, lambda2=lam, zero_vote="zero"),
+            pair_features(rb, lambda2=lam, zero_vote="unavailable"),
+        )
+
+
+@pytest.mark.parametrize("mode", ["Zero", "missing", "", None, 0])
+def test_an_unknown_zero_vote_mode_is_refused(mode):
+    rid = race_id(5)
+    rows, _ = zero_vote_race(rid, {1: 2.0, 2: 3.2, 3: 5.5, 4: 12.0}, {(3, 4)})
+    boards = boards_at(day_frame(rows))
+    for rb in (boards[rid], _boards_without_zero_votes()[race_id(1)]):
+        with pytest.raises(ValueError):
+            cross_features(rb, zero_vote=mode)
+        with pytest.raises(ValueError):
+            pair_features(rb, zero_vote=mode)
 
 
 # ---------------------------------------------------------------- pair features

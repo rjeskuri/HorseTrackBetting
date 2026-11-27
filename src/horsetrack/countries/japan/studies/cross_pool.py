@@ -21,6 +21,13 @@ in memory; nothing here reads a file, the store, the registry or the holdout.
   row priced it. A race whose Quinella board at t misses any starter pair, or has none, gets NaN
   in every Quinella-dependent column (q_top2_t, x_cross, fav_support, kl_race, gap_s; q_pair and
   log_ratio in `pair_features`): its shares cannot be normalised over the field.
+- Zero votes: `RaceBoards.quinella_zero` holds the starter pairs whose latest Quinella row at t is
+  a JRA-VAN zero-vote quote (null odds, `status_raw` all '0' after strip), kept apart from the
+  blank / `----` / `****` / absent quotes. `zero_vote="unavailable"` (the default) reads such a
+  pair as missing, as above; `zero_vote="zero"` reads it as a known zero share: when every other
+  starter pair is priced, shares are normalised over the priced pairs and the zero pairs get 0,
+  kl_race sums over the priced pairs, and x_cross / log_ratio are NaN where the Quinella support
+  is zero. No column is ever infinite. How a zero-vote pair should count is the owner's call.
 - Nullable and PyArrow-backed columns read as plain ones: a missing value never matches a mask.
 """
 
@@ -40,6 +47,7 @@ QUINELLA = "QUINELLA"
 POOL_TOTAL = "__pool__"
 SCRATCHED = "SCR"
 _KEY = ["race_id", "pool", "combination"]
+ZERO_VOTE_MODES = ("unavailable", "zero")
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,7 @@ class RaceBoards:
     quinella: dict[tuple[int, int], float] = field(default_factory=dict)
     win_utc: datetime | None = None
     quinella_utc: datetime | None = None
+    quinella_zero: frozenset[tuple[int, int]] = frozenset()
 
 
 def _mask(cond: pd.Series) -> np.ndarray:
@@ -84,6 +93,12 @@ def _priced(rows: pd.DataFrame) -> pd.Series:
     return pd.Series(np.isfinite(odds) & (odds > 0), index=rows.index)
 
 
+def _zero_vote(rows: pd.DataFrame) -> pd.Series:
+    """Rows quoting zero votes: no price, and raw text of '0' characters only (any width)."""
+    raw = rows["status_raw"].astype("string").str.strip().str.fullmatch("0+")
+    return pd.Series(~_priced(rows).to_numpy() & _mask(raw), index=rows.index)
+
+
 def _first_utc(rows: pd.DataFrame) -> dict[str, datetime]:
     return rows.groupby("race_id")["available"].min().to_dict()
 
@@ -100,7 +115,9 @@ def boards_at(day: pd.DataFrame, *, minutes_before: float = 2.0) -> dict[str, Ra
     win_board = win[starting]
     win_shown = win[starting | scratched]
 
-    quinella = latest[(latest["pool"] == QUINELLA) & _priced(latest)].copy()
+    quinella = latest[latest["pool"] == QUINELLA]
+    quinella = quinella[_priced(quinella) | _zero_vote(quinella)].copy()
+    priced, zero = _priced(quinella).to_numpy(), _zero_vote(quinella).to_numpy()
     runners = quinella["combination"].str.split(",", expand=True)
     if quinella.empty:
         quinella["a"] = quinella["b"] = pd.Series(dtype=int)
@@ -117,10 +134,12 @@ def boards_at(day: pd.DataFrame, *, minutes_before: float = 2.0) -> dict[str, Ra
     both_start = pd.MultiIndex.from_arrays([quinella["race_id"], quinella["a"]]).isin(
         starters
     ) & pd.MultiIndex.from_arrays([quinella["race_id"], quinella["b"]]).isin(starters)
-    quinella_board = quinella[~named_off & (~has_starters | both_start)]
+    on_board = priced & ~named_off & (~has_starters | both_start)
+    zero_on_board = zero & both_start  # zero-vote quotes count only for starter pairs
+    quinella_board, zero_board = quinella[on_board], quinella[zero_on_board]
 
     win_utc = _first_utc(win_shown)
-    quinella_utc = _first_utc(quinella_board)
+    quinella_utc = _first_utc(quinella[on_board | zero_on_board])
     win_by_race = {
         rid: dict(zip(g["horse_no"].astype(int), g["odds"].astype(float), strict=True))
         for rid, g in win_board.groupby("race_id")
@@ -129,6 +148,10 @@ def boards_at(day: pd.DataFrame, *, minutes_before: float = 2.0) -> dict[str, Ra
         rid: {(int(a), int(b)): float(o) for a, b, o in zip(g["a"], g["b"], g["odds"], strict=True)}
         for rid, g in quinella_board.groupby("race_id")
     }
+    zero_by_race = {
+        rid: frozenset(zip(g["a"].astype(int), g["b"].astype(int), strict=True))
+        for rid, g in zero_board.groupby("race_id")
+    }
     races = sorted(set(latest["race_id"]))
     return {
         rid: RaceBoards(
@@ -136,6 +159,7 @@ def boards_at(day: pd.DataFrame, *, minutes_before: float = 2.0) -> dict[str, Ra
             quinella=quinella_by_race.get(rid, {}),
             win_utc=win_utc.get(rid),
             quinella_utc=quinella_utc.get(rid),
+            quinella_zero=zero_by_race.get(rid, frozenset()),
         )
         for rid in races
     }
@@ -171,18 +195,34 @@ def harville_pairs(p: dict[int, float], *, lambda2: float = 1.0) -> dict[tuple[i
     }
 
 
-def _starter_quinella(boards: RaceBoards) -> dict[tuple[int, int], float]:
-    """Quinella shares over the Win starters' pairs; {} unless every starter pair is priced."""
+def _check_mode(zero_vote: str) -> None:
+    if zero_vote not in ZERO_VOTE_MODES:
+        raise ValueError(f"zero_vote must be one of {ZERO_VOTE_MODES}, got {zero_vote!r}")
+
+
+def _finite_or_nan(values: np.ndarray) -> np.ndarray:
+    return np.where(np.isfinite(values), values, np.nan)
+
+
+def _starter_quinella(boards: RaceBoards, zero_vote: str) -> dict[tuple[int, int], float]:
+    """Quinella shares over the Win starters' pairs, the zero-vote pairs at 0 in "zero" mode;
+    {} unless every starter pair is priced (or, in "zero" mode, zero-vote) and one is priced."""
     pairs = list(itertools.combinations(sorted(boards.win), 2))
-    if not pairs or any(pr not in boards.quinella for pr in pairs):
+    zero = boards.quinella_zero if zero_vote == "zero" else frozenset()
+    priced = [pr for pr in pairs if pr in boards.quinella]
+    if not priced or any(pr not in boards.quinella and pr not in zero for pr in pairs):
         return {}
-    return quinella_shares({pr: boards.quinella[pr] for pr in pairs})
+    shares = quinella_shares({pr: boards.quinella[pr] for pr in priced})
+    return {pr: shares.get(pr, 0.0) for pr in pairs}
 
 
-def pair_features(boards: RaceBoards, *, lambda2: float = 1.0) -> pd.DataFrame:
+def pair_features(
+    boards: RaceBoards, *, lambda2: float = 1.0, zero_vote: str = "unavailable"
+) -> pd.DataFrame:
     """One row per starter pair: q_pair, h_pair and log_ratio = ln(q_pair / h_pair)."""
+    _check_mode(zero_vote)
     h = harville_pairs(win_shares(boards.win), lambda2=lambda2) if boards.win else {}
-    q = _starter_quinella(boards)
+    q = _starter_quinella(boards, zero_vote)
     frame = pd.DataFrame(
         {
             "pair": list(h),
@@ -190,7 +230,11 @@ def pair_features(boards: RaceBoards, *, lambda2: float = 1.0) -> pd.DataFrame:
             "h_pair": list(h.values()),
         }
     )
-    frame["log_ratio"] = np.log(frame["q_pair"].astype(float) / frame["h_pair"].astype(float))
+    with np.errstate(divide="ignore"):
+        ratio = np.log(
+            frame["q_pair"].to_numpy(dtype=float) / frame["h_pair"].to_numpy(dtype=float)
+        )
+    frame["log_ratio"] = _finite_or_nan(ratio)
     return frame
 
 
@@ -202,20 +246,24 @@ def _top2(pairs: dict[tuple[int, int], float], horses: list[int]) -> np.ndarray:
     return np.array([out[h] for h in horses])
 
 
-def cross_features(boards: RaceBoards, *, lambda2: float = 1.0) -> pd.DataFrame:
+def cross_features(
+    boards: RaceBoards, *, lambda2: float = 1.0, zero_vote: str = "unavailable"
+) -> pd.DataFrame:
     """One row per Win starter: the Win share and its Quinella-vs-Harville top-2 disagreement."""
+    _check_mode(zero_vote)
     horses = sorted(boards.win)
     p = win_shares(boards.win) if horses else {}
     h = harville_pairs(p, lambda2=lambda2)
-    q = _starter_quinella(boards)
+    q = _starter_quinella(boards, zero_vote)
     p_win = np.array([p[k] for k in horses], dtype=float)
     h_top2 = _top2(h, horses)
     nan = np.full(len(horses), np.nan)
     if q:
         q_top2 = _top2(q, horses)
-        with np.errstate(divide="ignore"):
-            x_cross = np.log(q_top2 / h_top2)
-        kl = float(sum(v * np.log(v / h[pr]) for pr, v in q.items()))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            x_cross = _finite_or_nan(np.log(q_top2 / h_top2))
+        kl = float(sum(v * np.log(v / h[pr]) for pr, v in q.items() if v > 0))  # 0 ln 0 = 0
+        kl = kl if np.isfinite(kl) else np.nan
     else:
         q_top2, x_cross, kl = nan, nan.copy(), np.nan
     fav = int(np.argmax(p_win)) if horses else -1  # ties: the lowest horse_no
