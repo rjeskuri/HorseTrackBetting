@@ -82,9 +82,11 @@ class _Output(threading.Thread):
             self.ready.set()
 
 
-def _stop(child: subprocess.Popen[bytes], output: _Output) -> None:
-    """Terminate the child, kill it if it still runs after STOP_GRACE_S, and reap it."""
-    output.stopping = True
+def _stop(child: subprocess.Popen[bytes], output: _Output | None) -> None:
+    """Terminate the child, kill it if it still runs after STOP_GRACE_S, and reap it; `output` is
+    None or unstarted when its reader never got going."""
+    if output is not None:
+        output.stopping = True
     try:
         if child.poll() is None:
             child.terminate()
@@ -96,9 +98,10 @@ def _stop(child: subprocess.Popen[bytes], output: _Output) -> None:
         if child.poll() is None:
             child.kill()
             child.wait()
-        output.join(timeout=1)
-        if not output.is_alive() and child.stdout is not None:
-            child.stdout.close()
+        if output is not None and output.is_alive():  # never join a reader that did not start
+            output.join(timeout=1)
+        if (output is None or not output.is_alive()) and child.stdout is not None:
+            child.stdout.close()  # no reader owns it any more, or none ever did
 
 
 @contextmanager
@@ -114,15 +117,16 @@ def quick_tunnel(port: int, *, timeout_s: float = 30.0) -> Iterator[str]:
             "--tunnel"
         )
     argv = [exe, "tunnel", "--url", f"http://127.0.0.1:{port}", "--no-autoupdate"]
+    output: _Output | None = None
     try:
         child = subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
     except OSError as exc:
         raise TunnelError(f"cloudflared did not start: {exc}") from exc
-    output = _Output(child.stdout)
-    output.start()
-    try:
+    try:  # from here on the child is reaped, even if its reader never starts
+        output = _Output(child.stdout)
+        output.start()
         ended = output.ready.wait(timeout_s)  # one wait: the URL and a registration both fit
         reason = None
         if not output.registered or output.url is None:

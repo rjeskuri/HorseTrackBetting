@@ -67,6 +67,15 @@ The tunnel
   it does today), and `held_wait`, patched over `threading.Event.wait`, returns from such a wait
   only once the fake child has exited (a zombie counts: `Popen.poll` sees it) and the threads
   started since have ended (its output read to EOF). The tests check that the seam fired.
+- The startup window: the reader of the child's output is a `threading.Thread`, built and started
+  in the thread that entered `quick_tunnel` once the child has started. An exception raised there,
+  while that thread is built, while it is started or just after it started (KeyboardInterrupt,
+  which board-serve's SIGTERM handler raises, or any other), propagates unchanged (the same object)
+  out of `quick_tunnel`, and the child is terminated, killed if it ignores SIGTERM, and reaped (no
+  process left, not even a zombie), all within the bound above. The tests interrupt that window
+  through `threading.Thread.__init__` and `threading.Thread.start`, patched to raise once, in that
+  thread, at the first Thread built or started after the fake child wrote its run record, and check
+  that the seam fired.
 
 The command
 - `horsetrack japan board-serve --date D --tunnel [--port N] [--page P]` makes a token in memory,
@@ -801,6 +810,58 @@ def gone_within(pid: int, seconds: float) -> bool:
     return not alive(pid)
 
 
+def reaped_within(pid: int, seconds: float) -> bool:
+    """No process `pid` at all within `seconds`, not even a zombie: its parent waited for it."""
+    deadline = time.monotonic() + seconds
+    while True:
+        state = subprocess.run([PS, "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+        if not state.stdout.strip():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def interrupted_thread(records: Path, window: str, raised: BaseException):
+    """Stand-ins for `threading.Thread.__init__` and `threading.Thread.start` that raise `raised`
+    once, in the thread that called this, at the first Thread built or started after a fake
+    cloudflared started after this call wrote its run record under `records`: before that Thread is
+    built ("construct"), before it starts ("start") or once it started ("started"). Returns them
+    and a list that holds `window` once the seam fired."""
+    real_init, real_start = threading.Thread.__init__, threading.Thread.start
+    owner = threading.current_thread()
+    known = set(records.glob("*.json"))
+    fired: list[str] = []
+
+    def armed() -> bool:
+        if fired or threading.current_thread() is not owner:
+            return False
+        deadline = time.monotonic() + 5  # Popen has returned: the record follows within moments
+        while not set(records.glob("*.json")) - known:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
+
+    def fire() -> None:
+        fired.append(window)
+        raise raised
+
+    def init(self, *args, **kwargs):
+        if window == "construct" and armed():
+            fire()
+        real_init(self, *args, **kwargs)
+
+    def start(self):
+        if window == "start" and armed():
+            fire()
+        real_start(self)
+        if window == "started" and armed():
+            fire()
+
+    return init, start, fired
+
+
 def held_wait(records: str, hold_s: float = 5.0):
     """A `threading.Event.wait` that makes cloudflared's exit between its registered connection and
     the handoff certain instead of a race. Once a fake cloudflared started after this call has
@@ -977,6 +1038,43 @@ def test_a_child_that_ignores_sigterm_is_killed(fake):
 
     assert time.monotonic() - started < 10, "stopping the tunnel waited on a stubborn child"
     assert gone_within(pid, 2)
+
+
+# (window, error, the child ignores SIGTERM): each window with both errors, each error both ways
+READER_STARTUP = [
+    pytest.param("construct", KeyboardInterrupt, False, id="building-KeyboardInterrupt"),
+    pytest.param("construct", RuntimeError, True, id="building-RuntimeError-stubborn"),
+    pytest.param("start", KeyboardInterrupt, True, id="starting-KeyboardInterrupt-stubborn"),
+    pytest.param("start", RuntimeError, False, id="starting-RuntimeError"),
+    pytest.param("started", KeyboardInterrupt, False, id="started-KeyboardInterrupt"),
+    pytest.param("started", RuntimeError, True, id="started-RuntimeError-stubborn"),
+]
+
+
+@pytest.mark.parametrize(("window", "error", "stubborn"), READER_STARTUP)
+def test_an_exception_while_the_output_reader_starts_stops_the_child(
+    fake, monkeypatch, window, error, stubborn
+):
+    board_server = server_module()
+    fake.install(banner(random_name(), 18423), ignore_term=stubborn, life_s=25)
+    raised = error(f"a signal while the output reader starts ({window})")
+    init, start, fired = interrupted_thread(fake.records, window, raised)
+    started = time.monotonic()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "__init__", init)
+        patch.setattr(threading.Thread, "start", start)
+        with pytest.raises(error) as caught:
+            with board_server.quick_tunnel(18423, timeout_s=10):
+                pytest.fail("the reader's startup was interrupted, yet the tunnel was entered")
+    elapsed = time.monotonic() - started
+
+    assert fired == [window], "the seam did not fire: no Thread built or started once the child ran"
+    assert caught.value is raised, f"the {error.__name__} was replaced by {caught.value!r}"
+    pid = fake.the_run()["pid"]
+    assert gone_within(pid, 5), f"cloudflared outlived a {error.__name__} while the reader started"
+    assert reaped_within(pid, 2), "cloudflared was stopped but never waited for: a zombie is left"
+    assert elapsed < 10, f"stopping the child took {elapsed:.1f} s"
 
 
 def test_the_child_output_is_drained_after_the_url(fake):
