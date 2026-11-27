@@ -535,13 +535,20 @@ def test_the_study_scores_its_board_at_t_variants_on_the_registered_board(rules,
 
 def _board_rules(rules, case: str):
     """The shipped rules with odds_timeseries replaced: no fallback, an offset of two minutes
-    from snapshot_utc, or a `logged_utc` fallback."""
+    from snapshot_utc, a `logged_utc` fallback, odds gated until snapshot_utc + 1 min (a
+    publication proxy), or a primary timestamp the board view drops (`<column>-primary`, with
+    the shipped `snapshot_utc` fallback)."""
     import dataclasses
 
-    from horsetrack.core.store.asof import Availability
+    from horsetrack.core.store.asof import Availability, Gate
 
     board = rules["odds_timeseries"]
-    if case == "no-fallback":
+    if case.endswith("-primary"):
+        board = dataclasses.replace(board, column=case.removesuffix("-primary"))
+    elif case == "gated-odds":
+        gate = Gate(("odds",), anchor="snapshot_utc", offset=timedelta(minutes=1))
+        board = dataclasses.replace(board, gates=(gate,))
+    elif case == "no-fallback":
         board = dataclasses.replace(board, fallback=None)
     elif case == "offset-2min":
         board = Availability(
@@ -607,3 +614,59 @@ def test_the_fallback_disclosure_follows_the_board_readers_rules(rules, tmp_path
         assert any(str(expected) in re.findall(r"\d+", line) for line in lines), (
             f"{expected} races on the logged_utc fallback: {lines}"
         )
+
+
+def _proxy_lines(report: str) -> list[str]:
+    from horsetrack.countries.japan.feature_boundary import PUBLICATION_PROXY
+
+    return [
+        line
+        for line in report.splitlines()
+        if PUBLICATION_PROXY in line and "`odds_timeseries.odds`" in line
+    ]
+
+
+@pytest.mark.parametrize("case", ["gated-odds", "shipped"])
+def test_the_board_features_approximation_tags_follow_the_board_readers_rules(
+    rules, tmp_path, case
+):
+    """The odds line's tags come from the rules the board was read under: a reader whose rule
+    gates odds behind an anchor + offset reports odds as a publication proxy; the shipped rule
+    (no gate) does not."""
+    minutes = int(load_country_yaml("japan", "decision")["primary_min"])
+    spec = _study_setup(minutes)
+    captures = _study_captures(minutes, FALLBACK_RACES)
+    files = _write_days(tmp_path / "odds_timeseries", captures)
+    board_rules = rules if case == "shipped" else _board_rules(rules, case)
+    assert ("odds" in board_rules["odds_timeseries"].gated) is (case == "gated-odds")
+
+    study = avoidance.compute_study(
+        _real_path_data(files, board_rules, minutes, board_rules=board_rules), spec
+    )
+    report = avoidance.render_report(study, spec, {"git": "0000000"})
+    lines = _proxy_lines(report)
+    if case == "gated-odds":
+        assert lines, "the reader's gate on odds is not reported as a publication proxy"
+    else:
+        assert not lines, f"the shipped rule does not gate odds: {lines}"
+    # the shipped snapshot_utc fallback is still disclosed under both
+    assert _fallback_lines(report), case
+
+
+@pytest.mark.parametrize("primary", ["captured_utc", "logged_utc"])
+def test_a_board_rule_whose_primary_timestamp_the_view_drops_is_refused(rules, tmp_path, primary):
+    """Fail closed: the board view keeps only BOARD_KEYS and the features, so a fallback on a
+    primary column outside them could never be counted; compute_study refuses the rules."""
+    assert primary not in IDENTIFIERS
+    minutes = int(load_country_yaml("japan", "decision")["primary_min"])
+    spec = _study_setup(minutes)
+    captures = _study_captures(minutes, FALLBACK_RACES)
+    files = _write_days(tmp_path / "odds_timeseries", captures, logged=True)
+    board_rules = _board_rules(rules, f"{primary}-primary")
+    rule = board_rules["odds_timeseries"]
+    assert (rule.column, rule.fallback) == (primary, "snapshot_utc")
+    # the reader reads its boards under the shipped rules where its own cannot be read
+    reader = board_rules if primary == "logged_utc" else rules
+    data = _real_path_data(files, reader, minutes, board_rules=board_rules)
+    with pytest.raises(ValueError, match=primary):
+        avoidance.compute_study(data, spec)

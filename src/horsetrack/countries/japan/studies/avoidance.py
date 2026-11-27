@@ -659,10 +659,13 @@ class StudyData:
 
 @dataclass
 class BoardStudy(Study):
-    """A study with the timestamp fallback of the rule its board at t was read under: `(column,
-    stand-in)` of feature_boundary.availability_fallback, None for a rule without one."""
+    """A study with what the rule its board at t was read under says of the board: its timestamp
+    fallback, `(column, stand-in)` of feature_boundary.availability_fallback (None for a rule
+    without one), and per BOARD_FEATURES column its documented approximations
+    (feature_boundary.approximations under that rule; empty: none recorded)."""
 
     board_fallback: tuple[str, str] | None = None
+    board_tags: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 def _store_file(name: str) -> Path:
@@ -1166,14 +1169,24 @@ def _score(
 
 def compute_study(data: StudyData, spec: dict) -> Study:
     """Every variant of the frozen `spec` on `data`, in `variant_names` order. No I/O beyond the
-    board-at-t reads of `data.view_at_t`."""
+    board-at-t reads of `data.view_at_t`. The board's fallback and its features' approximation
+    tags come from the rules the board was read under (`data.board_rules`, else the shipped
+    ones); a ValueError, before any variant is scored, when that fallback's primary column is
+    not one of BOARD_KEYS: the board view drops it, so its races could never be counted."""
     ctx = _Context(data, spec)
     on_fallback: set[str] = set()
     rules = load_availability(COUNTRY) if data.board_rules is None else data.board_rules
     fallback = availability_fallback(BOARD_TABLE, rules=rules)
+    if fallback is not None and fallback[0] not in BOARD_KEYS:
+        raise ValueError(
+            f"{BOARD_TABLE}: the rule falls back from {fallback[0]!r} to {fallback[1]!r}, but the "
+            f"board view keeps only {BOARD_KEYS} and {BOARD_FEATURES}, so a capture without "
+            f"{fallback[0]!r} could not be counted"
+        )
     data = replace(data, view_at_t=_noting_fallback(data.view_at_t, fallback, on_fallback))
     study = BoardStudy(
         board_fallback=fallback,
+        board_tags=approximations(BOARD_TABLE, BOARD_FEATURES, rules=rules),
         counts={
             "races_read": len(data.races),
             "run_races": len(ctx.race_ids),
@@ -1362,13 +1375,19 @@ _APPROXIMATION_NOTES = {
 
 def _approximation_lines(study: Study) -> list[str]:
     """One line per column the study reads that carries a documented approximation
-    (feature_boundary.approximations), with its table and its tags; the board's features too,
-    when the rule the study read its board at t under has a timestamp fallback
-    (`BoardStudy.board_fallback`), with the races whose board at t used it."""
-    used = [*CARD_FILTERS, *((BOARD_TABLE, c, "the board at t") for c in BOARD_FEATURES)]
+    (feature_boundary.approximations), with its table and its tags: the card filters' under the
+    shipped rules, the board's features' under the rule the study read its board at t under
+    (`BoardStudy.board_tags`; the shipped rules for a study without them). The board's features
+    again when that rule has a timestamp fallback (`BoardStudy.board_fallback`), with the races
+    whose board at t used it."""
+    board_tags = getattr(study, "board_tags", None) or approximations(BOARD_TABLE, BOARD_FEATURES)
+    used = [
+        *((t, c, use, approximations(t, [c])[c]) for t, c, use in CARD_FILTERS),
+        *((BOARD_TABLE, c, "the board at t", board_tags[c]) for c in BOARD_FEATURES),
+    ]
     lines = []
-    for table, column, use in used:
-        tags = sorted(approximations(table, [column])[column])
+    for table, column, use, tagged in used:
+        tags = sorted(tagged)
         if tags:
             notes = "; ".join(_APPROXIMATION_NOTES[tag] for tag in tags)
             lines.append(f"- `{table}.{column}` ({use}): {', '.join(tags)}: {notes}")
