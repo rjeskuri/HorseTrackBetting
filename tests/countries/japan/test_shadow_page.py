@@ -13,7 +13,8 @@ sets `module.exports` (when `module` exists) to at least:
   venue (the plain feed's first venue by default; `now` in ms since the epoch; the race chosen as
   board.js's `renderBoard` chooses it: `race` when it is of the venue, else the next race to post,
   else the venue's last race). `feed` is the plain feed (docs/specs/board-feed.md, each row with
-  `t2_odds` and `move_t20_t2_pct`, which may be absent); `shadowFeed` is #121's shadow feed or
+  `t10_odds`, `t5_odds`, `t2_odds` and `move_t20_t2_pct`, which may be absent); `shadowFeed` is
+  #121's shadow feed (each entry with #499's `ladder`, which may be absent) or
   null. Rows join on (race_id, pool, combination). The HTML carries every hook of board.js's
   `renderBoard` (venue tabs `data-venue`, the race strip's `#<hash>` links, the race block
   `data-race` containing `data-pool` blocks, rows `data-combination`, cells `data-col="odds"`,
@@ -21,9 +22,17 @@ sets `module.exports` (when `module` exists) to at least:
   plain feed: favourite first by the crowd's current odds (#498, the owner's display choice), never
   sorted, highlighted or coloured by shadow value (D19). Rows come from the plain feed only:
   a shadow entry without a plain row draws nothing. Each row adds these cells:
-  - `data-col="move-t20-t2"` (#498, the T-20→T-2 column, replacing the 'Since T-2' cell
-    `data-col="move-t2"`, which is gone): board.js's `formatMove(move_t20_t2_pct)` with class
-    `up` / `down` as the other move cells; '-' when the figure is null or absent.
+  - The odds ladder (#499, replacing #498's single T-20→T-2 cell `data-col="move-t20-t2"`, which
+    is gone, as is the 'Since T-2' cell `data-col="move-t2"`): five cells `data-col="ladder-t20"`,
+    `"ladder-t10"`, `"ladder-t5"`, `"ladder-t2"`, `"ladder-final"`, in that order, under header
+    cells reading `T-20`, `T-10`, `T-5`, `T-2`, `Final` in the same columns. Each shows the shadow
+    entry's `ladder` checkpoint ("20", "10", "5", "2", "0"): an observed one as its odds with one
+    decimal (e.g. `4.8`), class `up` / `down` when it is above / below the T-20 odds (none for
+    the T-20 cell itself, or without a T-20 figure); a projected one as `≈` and its odds with one
+    decimal (e.g. `≈4.8`), with class `projected`; a null one as `-`. A row with no ladder (no
+    shadow entry, a pool the shadow feed lacks such as Quinella, no shadow feed) shows the plain
+    row's `t20_odds`, `t10_odds`, `t5_odds`, `t2_odds` as observed and `-` for the rest (the final
+    always). A legend line in shadow.html explains the `≈` mark.
   - `data-col="value"`: for WIN, `value_mean` then the band `value_q05` and `value_q95`, each with
     two decimals, in that order (e.g. `0.81 (0.74–0.88)`; no other decimal number in the cell).
     For every other pool, `value_at_low` and `value_at_high` with two decimals as `low–high`
@@ -66,6 +75,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -85,6 +95,7 @@ from page_fakes import (
     moved_to_race,
     strip_links,
 )
+from shadow_fakes import FakeOrdering, FakeWin
 
 REPO = Path(__file__).resolve().parents[3]
 WEB = REPO / "src" / "horsetrack" / "countries" / "japan" / "board" / "web"
@@ -632,15 +643,6 @@ def check_value(shown: str, pool_code: str, entry: dict | None, where: str) -> N
         assert "-" in shown, f"{where}: a null figure shows no '-': {shown!r}"
 
 
-def move_text_ok(shown: str, pct) -> bool:
-    shown = shown.strip()
-    if pct is None:
-        return shown == "-"
-    if pct == 0:
-        return shown in {"0.0%", "+0.0%", "±0.0%"}
-    return shown == f"{'+' if pct > 0 else ''}{pct:.1f}%"
-
-
 def chips(row_el) -> list:
     return cell(row_el, "flags").select("[data-flag]")
 
@@ -884,21 +886,226 @@ def test_the_bucket_label_is_shown(tmp_path):
     assert labels == {"@T-5", "@T-10", "@T-20"}
 
 
+# ---------------------------------------------------------------- the odds ladder (#499)
+
+LADDER_COLS = ("ladder-t20", "ladder-t10", "ladder-t5", "ladder-t2", "ladder-final")
+LADDER_KEYS = ("20", "10", "5", "2", "0")
+LADDER_HEADS = ("T-20", "T-10", "T-5", "T-2", "Final")
+PLAIN_REFS = ("t20_odds", "t10_odds", "t5_odds", "t2_odds", None)  # the final has none
+
+
+def seen(odds):
+    return {"odds": odds, "observed": True}
+
+
+def ahead(odds):
+    return {"odds": odds, "observed": False}
+
+
+def ladder_line(combo, odds, t20, t10, *, hi=None) -> dict:
+    """A plain row 9 minutes before the post: T-20 and T-10 passed, T-5 and T-2 not yet."""
+    out = line(combo, odds, hi=hi, mm=0.0, t20=None, t2=None)
+    out.update(t20_odds=t20, t10_odds=t10, t5_odds=None, t2_odds=None)
+    out["move_t20_pct"] = None if t20 is None else round((odds / t20 - 1) * 100, 1)
+    return out
+
+
+LADDER_POST = jst(10, 10)  # NOW is 10:01: nine minutes to post
+
+
+def ladder_feeds() -> tuple[dict, dict]:
+    """TOK 8 at NOW, with a ladder per shadow entry: observed at T-20 and T-10, projected ahead.
+    Shadow entries agree with the plain rows' t20_odds / t10_odds."""
+    plain_race = race(
+        "TOK",
+        8,
+        LADDER_POST,
+        NOW,
+        {
+            "WIN": pool(
+                ladder_line("1", 2.4, 2.8, 2.5),
+                ladder_line("2", 5.1, 4.6, 4.9),
+                ladder_line("3", 9.3, 9.3, 9.3),
+                ladder_line("4", 31.0, None, 28.7),  # first priced after T-20
+            ),
+            "PLACE": pool(
+                ladder_line("1", 1.3, 1.4, 1.3, hi=1.6),
+                ladder_line("2", 1.9, 1.7, 1.8, hi=2.7),
+                ladder_line("4", 6.2, 6.6, 6.4, hi=9.9),  # its shadow entry has no ladder
+            ),
+            "QUINELLA_PLACE": pool(
+                ladder_line("1,2", 3.3, 3.7, 3.4, hi=4.1),
+                ladder_line("1,3", 5.6, 5.2, 5.9, hi=7.2),  # no shadow entry
+            ),
+            "QUINELLA": pool(  # no shadow pool, and no projection for it
+                ladder_line("1,2", 7.7, 8.4, 7.9),
+                ladder_line("1,3", 14.6, 13.2, 14.1),
+                ladder_line("2,4", 120.5, None, 133.3),
+            ),
+        },
+    )
+    plain = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW),
+        "venues": [{"venue": "TOK", "races": [plain_race]}],
+    }
+
+    def entry(values: dict, ladder: dict | None) -> dict:
+        out = dict(values)
+        if ladder is not None:
+            out["ladder"] = dict(zip(LADDER_KEYS, ladder, strict=True))
+        return out
+
+    shadow = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW),
+        "models": {"nowcast": "now-c3"},
+        "races": [
+            shadow_race(
+                "TOK",
+                8,
+                LADDER_POST,
+                16,
+                {
+                    "WIN": {
+                        "1": entry(
+                            win(0.9, 0.8, 1.0), (seen(2.8), seen(2.5), ahead(2.31), ahead(2.24),
+                                                 ahead(2.07))
+                        ),
+                        "2": entry(
+                            win(1.1, 1.0, 1.2), (seen(4.6), seen(4.9), ahead(5.43), ahead(5.71),
+                                                 ahead(6.02))
+                        ),
+                        "3": entry(
+                            win(0.7, 0.6, 0.8), (seen(9.3), seen(9.3), ahead(9.66), ahead(10.04),
+                                                 None)
+                        ),
+                        "4": entry(
+                            win(0.3, 0.2, 0.4), (None, seen(28.7), ahead(33.8), ahead(36.1),
+                                                 ahead(41.27))
+                        ),
+                    },
+                    "PLACE": {
+                        "1": entry(
+                            rng(0.8, 0.9), (seen(1.4), seen(1.3), ahead(1.21), ahead(1.08),
+                                            ahead(1.0))
+                        ),
+                        "2": entry(
+                            rng(0.7, 1.0), (seen(1.7), seen(1.8), ahead(1.93), ahead(2.04),
+                                            ahead(2.18))
+                        ),
+                        "4": entry(rng(0.5, 0.8), None),
+                    },
+                    "QUINELLA_PLACE": {
+                        "1,2": entry(
+                            rng(0.6, 0.75), (seen(3.7), seen(3.4), ahead(3.17), ahead(3.02),
+                                             ahead(2.88))
+                        ),
+                    },
+                },
+            )
+        ],
+    }  # fmt: skip
+    return plain, shadow
+
+
+def expected_ladder(row_: dict, entry: dict | None) -> list[dict | None]:
+    """The five cells of a row: the shadow ladder, else the plain row's references, observed."""
+    ladder = (entry or {}).get("ladder")
+    if ladder is not None:
+        return [ladder[k] for k in LADDER_KEYS]
+    return [None if ref is None or row_.get(ref) is None else seen(row_[ref]) for ref in PLAIN_REFS]
+
+
+def check_ladder_row(row_el, want: list[dict | None], where) -> None:
+    cells = [cell(row_el, col) for col in LADDER_COLS]
+    positions = [c for c in row_el.find_all(["th", "td"], recursive=False)]
+    assert [positions.index(c) for c in cells] == sorted(positions.index(c) for c in cells), where
+    t20 = want[0]["odds"] if want[0] is not None else None
+    for i, (el, expected) in enumerate(zip(cells, want, strict=True)):
+        shown, cls = text(el), classes(el)
+        at = (where, LADDER_COLS[i], shown, cls, expected)
+        if expected is None:
+            assert shown == "-", at
+            assert "projected" not in cls, at
+            continue
+        figure_ = f"{expected['odds']:.1f}"
+        if expected["observed"]:
+            assert shown == figure_, at
+            assert "projected" not in cls, at
+            if i == 0 or t20 is None:
+                assert "up" not in cls and "down" not in cls, at
+            else:
+                assert ("up" in cls) == (expected["odds"] > t20), at
+                assert ("down" in cls) == (expected["odds"] < t20), at
+        else:
+            assert re.fullmatch(rf"≈\s*{re.escape(figure_)}", shown), at
+            assert "projected" in cls, at
+
+
 @needs_node
-def test_the_t20_to_t2_move_is_shown(tmp_path):
-    pages = render_all(tmp_path)
-    count = 0
-    for venue, race_, pool_code, row_ in all_rows(FEED):
-        key = (race_["race_id"], pool_code, row_["combination"])
-        row_el = row_in(pages, venue, *key)
-        el = cell(row_el, "move-t20-t2")
-        pct = row_.get("move_t20_t2_pct")  # absent on a feed without the T-2 fields
-        assert move_text_ok(text(el), pct), (key, text(el), pct)
-        assert ("up" in classes(el)) == (pct is not None and pct > 0), (key, pct)
-        assert ("down" in classes(el)) == (pct is not None and pct < 0), (key, pct)
+def test_the_ladder_shows_observed_and_projected_odds(tmp_path):
+    plain, shadow = ladder_feeds()
+    opts = {"now": ms(NOW), "venue": "TOK"}
+    with_shadow, without, board = (
+        soup(html)
+        for html in results(
+            [
+                call("renderShadow", plain, shadow, opts),
+                call("renderShadow", plain, None, opts),
+                call("renderBoard", plain, opts, mod="board"),
+            ],
+            tmp_path,
+        )
+    )
+    # display only: the rows stay in the board's order, favourite first
+    assert order_of(with_shadow) == order_of(board) == order_of(without)
+    idx = shadow_index(shadow)
+    race_id = rid("TOK", 8)
+    kinds = {"observed": 0, "projected": 0, "null": 0, "coloured": 0}
+    for _, _race, pool_code, row_ in all_rows(plain):
+        key = (race_id, pool_code, row_["combination"])
+        row_el = row_of(pool_block(race_block(with_shadow, race_id), pool_code), key[2])
+        want = expected_ladder(row_, idx.get(key))
+        check_ladder_row(row_el, want, key)
+        assert not row_el.select('[data-col="move-t20-t2"]'), "the T-20→T-2 cell is back"
         assert not row_el.select('[data-col="move-t2"]'), "the blank 'Since T-2' cell is back"
-        count += pct is not None
-    assert count >= 20
+        for i, w in enumerate(want):
+            if w is None:
+                kinds["null"] += 1
+            elif w["observed"]:
+                kinds["observed"] += 1
+                kinds["coloured"] += i > 0 and want[0] is not None and w["odds"] != want[0]["odds"]
+            else:
+                kinds["projected"] += 1
+        # without a shadow feed: the plain row's references, '-' ahead
+        bare = row_of(pool_block(race_block(without, race_id), pool_code), key[2])
+        check_ladder_row(bare, expected_ladder(row_, None), ("no shadow feed", key))
+    assert kinds["projected"] >= 15 and kinds["null"] >= 10 and kinds["coloured"] >= 6, kinds
+
+    # Quinella (no projection) and a combination without a shadow entry: observed, then '-'
+    block = race_block(with_shadow, race_id)
+    for pool_code, combo, t20, t10 in (
+        ("QUINELLA", "1,3", "13.2", "14.1"),
+        ("QUINELLA_PLACE", "1,3", "5.2", "5.9"),
+        ("PLACE", "4", "6.6", "6.4"),
+    ):
+        row_el = row_of(pool_block(block, pool_code), combo)
+        shown = [text(cell(row_el, col)) for col in LADDER_COLS]
+        assert shown == [t20, t10, "-", "-", "-"], (pool_code, combo, shown)
+
+    # the header names the five columns, each above its cells
+    for pool_el in block.select("[data-pool]"):
+        heads = [text(th) for th in pool_el.select("thead th")]
+        row_el = pool_el.select("[data-combination]")[0]
+        positions = row_el.find_all(["th", "td"], recursive=False)
+        for col, head in zip(LADDER_COLS, LADDER_HEADS, strict=True):
+            assert head in heads, (pool_el["data-pool"], heads)
+            assert heads.index(head) == positions.index(cell(row_el, col)), (col, heads)
+
+    # shadow.html explains the projected mark
+    legends = soup(PAGE.read_text(encoding="utf-8")).select(".legend")
+    assert any("≈" in text(e) for e in legends), "no legend line explains the ≈ mark"
 
 
 def _write_logged_day(captures: dict[datetime, dict[str, float]], post: datetime) -> None:
@@ -927,46 +1134,88 @@ def _write_logged_day(captures: dict[datetime, dict[str, float]], post: datetime
     )
 
 
+def _drift_nowcast():
+    """A fitted v0 nowcast with mu = 0.02 * tau in every cell (so mu(7) - mu(5) = 0.04)."""
+    from horsetrack.countries.japan.board.snapshot import load_decision_grid
+    from horsetrack.countries.japan.models.v0.nowcast import DriftCell, NowcastV0
+
+    grid, bands = load_decision_grid(), (2.0, 5.0, 10.0, 20.0, 50.0, 100.0)
+    pools = ("WIN", "PLACE", "QUINELLA_PLACE")
+    sigma0 = {(p, t): 0.1 for p in pools for t in grid.minutes}
+    cells = {
+        (p, t, b): DriftCell(p, t, b, 30, 0.02 * t, 0.1)
+        for p in pools
+        for t in grid.minutes
+        for b in range(len(bands) + 1)
+    }
+    return NowcastV0(bands, grid, 50.0, ("2026-11-14",), sigma0, cells, "drift-e2e")
+
+
 @needs_node
-def test_a_logged_day_shows_the_t20_to_t2_move(tmp_path, monkeypatch):
-    """Captures at T-20 and T-2 of a synthetic day, through build_board and the page: the
-    T-20→T-2 cell shows t2 / t20 - 1; before the T-2 capture it shows '-'."""
+def test_a_logged_day_shows_the_ladder(tmp_path, monkeypatch):
+    """Synthetic WIN captures through build_board, build_shadow (a known nowcast) and the page:
+    read at 10:45 (T-15) only T-20 is observed; read at 10:53 (T-7) T-20 and T-10 are, and T-5,
+    T-2 and the final are projected: O_now * exp(0.02 * (7 - k)), shown as '≈' with one decimal."""
     from horsetrack.core import paths
     from horsetrack.countries.japan.board import feed as feed_mod
+    from horsetrack.countries.japan.board.flags import FlagRules
+    from horsetrack.countries.japan.board.shadow_feed import build_shadow
+    from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels
 
     monkeypatch.setenv(paths.DATA_DIR_VAR, str(tmp_path / "data"))
-    post = jst(11, 0)  # T-20 10:40, T-2 10:58
-    _write_logged_day(
-        {
-            jst(8, 0): {"1": 4.0, "2": 2.5, "3": 9.0},
-            jst(10, 40): {"1": 5.0, "2": 2.0, "3": 9.0},
-            jst(10, 58): {"1": 4.0, "2": 2.6, "3": 12.6},
-            jst(10, 59): {"1": 3.5, "2": 2.6, "3": 12.0},
-        },
-        post,
+    post = jst(11, 0)  # T-20 10:40, T-10 10:50, T-5 10:55
+    captures = {
+        jst(10, 30): {"1": 4.0, "2": 2.5, "3": 9.0},
+        jst(10, 40): {"1": 5.0, "2": 2.2, "3": 9.0},  # exactly T-20
+        jst(10, 45): {"1": 4.8, "2": 2.3, "3": 10.4},
+        jst(10, 50): {"1": 4.6, "2": 2.4, "3": 11.0},  # exactly T-10
+        jst(10, 53): {"1": 4.2, "2": 2.6, "3": 12.0},
+    }
+    _write_logged_day(captures, post)
+    models = ShadowModels(
+        win=FakeWin(), ordering=FakeOrdering(), nowcast=_drift_nowcast(), ids={"nowcast": "e2e"}
     )
+    rules = FlagRules(floor_max_odds=1.3, tail_min_odds=50.0, tail_rank=6, stale_s=40.0)
     day = datetime.fromisoformat(DAY).date()
-    late, early = (
-        json.loads(json.dumps(feed_mod.build_board(day, now=lambda at=at: at)))
-        for at in (jst(10, 59, 30), jst(10, 57))
-    )
-    pages = results(
-        [
-            call("renderShadow", late, None, {"now": ms(jst(10, 59, 30)), "venue": "TOK"}),
-            call("renderShadow", early, None, {"now": ms(jst(10, 57)), "venue": "TOK"}),
-        ],
-        tmp_path,
-    )
-    late_page, early_page = ({"TOK": soup(p)} for p in pages)
-    # combination: (the T-20→T-2 cell, its class): 4.0/5.0, 2.6/2.0, 12.6/9.0
-    want = {"1": ("-20.0%", "down"), "2": ("+30.0%", "up"), "3": ("+40.0%", "up")}
-    for combo, (shown, cls) in want.items():
-        el = cell(row_in(late_page, "TOK", rid("TOK", 5), "WIN", combo), "move-t20-t2")
-        assert text(el) == shown, (combo, text(el))
-        assert cls in classes(el), (combo, classes(el))
-        before = cell(row_in(early_page, "TOK", rid("TOK", 5), "WIN", combo), "move-t20-t2")
-        assert text(before) == "-", (combo, text(before))
-        assert "up" not in classes(before) and "down" not in classes(before)
+    steps, reads = [], (jst(10, 45), jst(10, 53))
+    for at in reads:
+        plain = json.loads(json.dumps(feed_mod.build_board(day, now=lambda at=at: at)))
+        shadow = json.loads(
+            json.dumps(
+                build_shadow(
+                    day, now=lambda at=at: at, models=models, flag_rules=rules, n_draws=8, seed=1
+                )
+            )
+        )
+        steps.append(call("renderShadow", plain, shadow, {"now": ms(at), "venue": "TOK"}))
+    early, late = ({"TOK": soup(p)} for p in results(steps, tmp_path))
+
+    def shown(page, combo):
+        row_el = row_in(page, "TOK", rid("TOK", 5), "WIN", combo)
+        return [(text(cell(row_el, c)), classes(cell(row_el, c))) for c in LADDER_COLS]
+
+    def near(got: str, want: float) -> bool:
+        m = re.fullmatch(r"≈\s*(\d+\.\d)", got)
+        return m is not None and abs(float(m.group(1)) - want) <= 0.051
+
+    for combo in ("1", "2", "3"):
+        t20, t10 = captures[jst(10, 40)][combo], captures[jst(10, 50)][combo]
+        # 10:53, tau 7: T-20 and T-10 observed, the T-10 cell coloured by its move since T-20
+        cells = shown(late, combo)
+        assert cells[0][0] == f"{t20:.1f}" and "projected" not in cells[0][1], (combo, cells)
+        assert cells[1][0] == f"{t10:.1f}" and "projected" not in cells[1][1], (combo, cells)
+        assert ("up" if t10 > t20 else "down") in cells[1][1], (combo, cells)
+        now_odds = captures[jst(10, 53)][combo]
+        for (got, cls), k in zip(cells[2:], (5, 2, 0), strict=True):
+            want = now_odds * math.exp(0.02 * (7 - k))
+            assert near(got, want) and "projected" in cls, (combo, k, got, want)
+        # 10:45, tau 15: T-20 observed, the rest projected from the 10:45 odds
+        cells = shown(early, combo)
+        assert cells[0][0] == f"{t20:.1f}" and "projected" not in cells[0][1], (combo, cells)
+        now_odds = captures[jst(10, 45)][combo]
+        for (got, cls), k in zip(cells[1:], (10, 5, 2, 0), strict=True):
+            want = now_odds * math.exp(0.02 * (15 - k))
+            assert near(got, want) and "projected" in cls, (combo, k, got, want)
 
 
 # A Win pool whose crowd order, feed order and shadow-value order all differ, with a tie.
