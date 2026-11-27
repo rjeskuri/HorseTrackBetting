@@ -17,7 +17,7 @@
 
 ``load_races`` refuses (``RunRefused``) a development race whose Win board in the store differs
 from the one #114's out-of-fold artifact was built on (its ``q``), so ``p_cal`` is never paired
-with a corrected board.
+with a corrected board; a corrected race the exacta scorer always excludes is skipped and counted.
 
 Before writing anything, score and max-test refuse (``RunRefused``) a family frozen with a spec
 other than the one in use, and a Win or ordering fit other than the one the family's scored
@@ -314,7 +314,10 @@ def load_races() -> tuple[list[dict], dict]:
 
     ``RunRefused`` when a race's Win board in the store is not the board the out-of-fold artifact
     was built on (its normalised implied shares differ from the artifact's ``q`` by more than
-    ``BOARD_TOLERANCE``, same horses or not): ``p_cal`` would be from the old board."""
+    ``BOARD_TOLERANCE``, same horses or not) and the exacta scorer would score the race: ``p_cal``
+    would be from the old board. A mismatched race the scorer always excludes
+    (``exacta_study.exclusion_reason``) is left out and counted in ``dropped_before_scoring`` as
+    ``board_corrected_<reason>``, so a correction no score reads never aborts the run."""
     races = development_races()
     win_id, oof_path, ordering_id, lambda2 = _fits()
     oof = _read(oof_path, ["race_id", "horse_no", "q", "p_cal"], races["race_id"].tolist())
@@ -348,15 +351,23 @@ def load_races() -> tuple[list[dict], dict]:
         if set(field) != set(probs) or not all(math.isfinite(v) and v > 0 for v in field.values()):
             dropped["p_or_odds_mismatch"] = dropped.get("p_or_odds_mismatch", 0) + 1
             continue
+        t = takeout.race_takeout(race.race_id, "FORECAST", race_class_raw=race.race_class_raw)
+        exacta = rows.get(race.race_id, [])
         shares, q = _board_shares(field), built_on[race.race_id]
         gap = max(abs(shares[h] - q[h]) for h in shares)
         if not gap <= BOARD_TOLERANCE:
-            raise RunRefused(
-                f"{race.race_id}: the Win board in the store is not the one "
-                f"{oof_path.name} was built on (implied shares differ by {gap:.3g}): "
-                "refit the Win model on the corrected board"
+            reason = study.exclusion_reason(
+                n_starters=len(field), boost_may_be_withheld=t.boost_may_be_withheld, exacta=exacta
             )
-        t = takeout.race_takeout(race.race_id, "FORECAST", race_class_raw=race.race_class_raw)
+            if reason is None:
+                raise RunRefused(
+                    f"{race.race_id}: the Win board in the store is not the one "
+                    f"{oof_path.name} was built on (implied shares differ by {gap:.3g}): "
+                    "refit the Win model on the corrected board"
+                )
+            key = f"board_corrected_{reason}"
+            dropped[key] = dropped.get(key, 0) + 1
+            continue
         out.append(
             {
                 "race_id": race.race_id,
@@ -368,7 +379,7 @@ def load_races() -> tuple[list[dict], dict]:
                 "p": {int(h): float(v) for h, v in probs.items()},
                 "rate": t.payout_rate,
                 "boost_may_be_withheld": t.boost_may_be_withheld,
-                "exacta": rows.get(race.race_id, []),
+                "exacta": exacta,
             }
         )
     # "<identity>@<digest>": the identity is the table, the digest its development rows read

@@ -1510,6 +1510,110 @@ def test_an_unchanged_board_passes_and_a_holdout_board_is_never_compared(isolate
     assert again == races
 
 
+# 13b. A corrected board on a race the scorer always excludes is skipped (Sol 6, exacta_run.py:353).
+# Ruling (orchestrator): the race is absent from load_races()'s races and counted in
+# meta["dropped_before_scoring"][f"board_corrected_{reason}"], reason exclusion_reason's value.
+
+INELIGIBLE = ("dead_heat", "refund", "no_exacta_row")
+
+
+def _make_ineligible(data: Path, races: list[dict], race_id: str, reason: str) -> None:
+    """Rewrite the store's FORECAST rows of ``race_id`` so the exacta scorer excludes it."""
+    path = data / "processed" / "jra" / "dividends.parquet"
+    frame = pq.read_table(path).to_pandas()
+    mine = (frame["race_id"] == race_id) & (frame["pool"] == "FORECAST")
+    assert mine.sum() == 1
+    if reason == "dead_heat":  # two horses dead-heat for second: two paying FORECAST rows
+        race = next(r for r in races if r["race_id"] == race_id)
+        first, second = race["winner"]
+        third = min(h for h in race["odds"] if h not in (first, second))
+        extra = frame[mine].copy()
+        extra["combination"] = f"{first},{third}"
+        extra["dividend"] = float(race["dividend"]) + 70.0
+        frame = pd.concat([frame, extra], ignore_index=True)
+    elif reason == "refund":
+        frame.loc[mine, "is_refund"] = True
+    else:  # no_exacta_row
+        frame = frame[~mine]
+    pq.write_table(pa.Table.from_pandas(frame, preserve_index=False), path)
+
+
+def _check_ineligible(entry: dict, reason: str) -> None:
+    """The fixture race is excluded for ``reason`` (structural check, independent of the run)."""
+    assert entry["boost_may_be_withheld"] is False and len(entry["win_odds"]) >= 5
+    rows = entry["exacta"]
+    if reason == "dead_heat":
+        assert len(rows) == 2 and not any(refund for _, _, refund in rows)
+    elif reason == "refund":
+        assert len(rows) == 1 and rows[0][2] is True
+    else:
+        assert rows == []
+
+
+@pytest.mark.parametrize("change", CORRECTIONS)
+@pytest.mark.parametrize("reason", INELIGIBLE)
+def test_a_corrected_board_on_an_excluded_race_is_skipped_and_counted(isolated, reason, change):
+    data = isolated["data"]
+    base = _base_races()
+    corrected, race_id = _corrected_board(base, change)
+
+    # Reference: the same excluded race with the board the artifact was built on is kept.
+    _write_store(data, base)
+    _make_ineligible(data, base, race_id, reason)
+    _write_fits(data, base, **FIT_A)
+    kept, kept_meta = exacta_run.load_races()
+    assert len(kept) == 216
+    (entry,) = [r for r in kept if r["race_id"] == race_id]
+    _check_ineligible(entry, reason)
+    assert not any(k.startswith("board_corrected_") for k in kept_meta["dropped_before_scoring"])
+
+    # Corrected board on that excluded race: no refusal, the race is dropped and counted.
+    _write_store(data, corrected)
+    _make_ineligible(data, corrected, race_id, reason)
+    races, meta = exacta_run.load_races()
+    assert race_id not in {r["race_id"] for r in races}
+    assert races == [r for r in kept if r["race_id"] != race_id]
+    assert meta["dropped_before_scoring"] == {f"board_corrected_{reason}": 1}
+
+
+def test_an_eligible_corrected_board_is_still_refused_beside_a_skipped_one(isolated):
+    data = isolated["data"]
+    base = _base_races()
+    corrected, skipped = _corrected_board(base, "longest_price_up_5")
+    dev = [r for r in corrected if r["race_date"] not in HOLDOUT_DAYS]
+    eligible = dev[-1]  # a second development race, eligible, its board corrected too
+    assert eligible["race_id"] != skipped
+    by_price = sorted(eligible["odds"], key=lambda h: (eligible["odds"][h], h))
+    eligible["odds"][by_price[-1]] = round(eligible["odds"][by_price[-1]] + 5.0, 1)
+    _write_store(data, corrected)
+    _make_ineligible(data, corrected, skipped, "dead_heat")
+    _write_fits(data, base, **FIT_A)
+
+    with pytest.raises(exacta_run.RunRefused, match=re.escape(eligible["race_id"])):
+        exacta_run.load_races()
+
+
+def test_score_and_breakage_complete_with_a_corrected_board_on_a_dead_heat(isolated, monkeypatch):
+    data = isolated["data"]
+    base = _base_races()
+    corrected, race_id = _corrected_board(base, "favourite_swapped")
+    _write_store(data, corrected)
+    _make_ineligible(data, corrected, race_id, "dead_heat")
+    _write_fits(data, base, **FIT_A)
+    _cli_n_boot(monkeypatch)
+
+    assert exacta_run.main(["freeze"]) == 0
+    assert exacta_run.main(["score"]) == 0
+    assert exacta_run.main(["breakage"]) == 0
+    reg = _cli_registry(data)
+    assert [r for r in reg.records() if r.status == "failed"] == []
+    assert {k: v for k, v in _counts(reg).items() if k is not None} == EXPECTED_COUNTS
+    assert len(reg.records(BREAKAGE_FAMILY)) == len(LAMBDA_KEYS)
+    (js,) = _reports(data).glob(f"e1-{SHA[:12]}*.json")
+    report = json.loads(js.read_text(encoding="utf-8"))
+    assert report["spa"]["family_size"] == 84
+
+
 # ---------------------------------------------------------------------------------------------
 # 14. C with no race above 110 yen, and C of one meeting (Sol 5, exacta_run.py:493)
 # ---------------------------------------------------------------------------------------------
