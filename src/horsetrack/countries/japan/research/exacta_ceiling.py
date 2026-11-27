@@ -4,9 +4,12 @@ final boards (`horsetrack japan exacta-ceiling freeze|run`).
 LOOK-AHEAD everywhere: a combination c of category X (fav_second or no_fav against the favourite
 of the final Win board) is bought for 100 yen when r = q_c / p_c < k, q_c the final exacta board's
 implied share (``implied_share``, breakage added back, NaN at or below 110 yen) and p_c the
-discounted Harville probability on #114's out-of-fold Win probabilities. The final board holds
-money placed after T-2, so the result is not a betting rule and not a proven bound on the T-2 rule
-(informed late money); docs/specs/exacta-ceiling-prereg.md.
+discounted Harville probability on the normalised implied Win shares of the final Win board
+(#131's rule-v5 p_c(t), read on the final board: the v2 families). The final board holds money
+placed after T-2, so the result is not a betting rule and not a proven bound on the T-2 rule
+(informed late money); docs/specs/exacta-ceiling-prereg.md. The v1 families (p from #114's
+out-of-fold ``p_cal``, races with a #114 row) are superseded: frozen, recorded and ranked as
+variant rows from the registry, never executed again.
 
 - Return at the final dividend with own impact: stake / 100 x D x (P + n s) / P x W / (W + s), n
   combinations bought, P the pool's final money net of refunds, W the winner's final money.
@@ -20,7 +23,9 @@ money placed after T-2, so the result is not a betting rule and not a proven bou
 ``run_ceiling`` refuses (``RunRefused``) before any store read unless every family of
 ``family_specs`` is frozen with that spec. It reads development days only (``is_holdout_day``,
 D14; never ``LockedHoldout``), none before 2014-06-07 (D10), one year per ``load_races`` call.
-Every figure goes through ``write_report`` (jravan is withheld, D21) and the private registry.
+A run that scores no race records its members as failed and publishes nothing
+(``NoEligibleRace``). Every figure goes through ``write_report`` (jravan is withheld, D21) and
+the private registry.
 """
 
 from __future__ import annotations
@@ -73,14 +78,33 @@ TICKET = 431
 HYPOTHESIS_ID = "E43"  # as #131
 FIRST_DAY = date(2014, 6, 7)  # D10
 FOLD_SCHEME = "development-days"
-FAMILY_ID = "japan-431-exacta-ceiling"  # the 16 members at #115's full-development lambda2
-PLAIN_ID = "japan-431-exacta-ceiling-plain-harville"  # the same 16 at lambda2 = 1
-DESCRIPTIVE_ID = "japan-431-exacta-ceiling-descriptive"  # D and the Quinella x order split
+# v2 (Sol review round 1 of 24d080f): p from the final Win board's normalised implied shares,
+# every development day with final Win and exacta boards, as #131's rule-v5. The run's families.
+FAMILY_ID = "japan-431-exacta-ceiling-v2"  # the 16 members at #115's full-development lambda2
+PLAIN_ID = "japan-431-exacta-ceiling-plain-harville-v2"  # the same 16 at lambda2 = 1
+DESCRIPTIVE_ID = "japan-431-exacta-ceiling-descriptive-v2"  # D and the Quinella x order split
 MEMBER_FAMILIES = (FAMILY_ID, PLAIN_ID)
+# v1, superseded: p from #114's out-of-fold p_cal on the races with a #114 row (rule-v4's
+# inputs). Frozen and recorded, ranked as variant rows from the registry, never executed again.
+V1_ID = "japan-431-exacta-ceiling"
+V1_PLAIN_ID = "japan-431-exacta-ceiling-plain-harville"
+V1_DESCRIPTIVE_ID = "japan-431-exacta-ceiling-descriptive"
+V1_MEMBER_FAMILIES = (V1_ID, V1_PLAIN_ID)
 RULE_CATEGORIES = ("fav_second", "no_fav")
 CUTS = (0.6, 0.7, 0.8, 0.9)
 CELLS = ("all", "headline")
 MEMBERS = tuple((c, k, s) for c in RULE_CATEGORIES for k in CUTS for s in CELLS)
+VARIANTS_SEARCHED = len(MEMBERS) * (len(MEMBER_FAMILIES) + len(V1_MEMBER_FAMILIES))  # 64
+WIN_SOURCE = "final-win-board-implied-shares"  # v2's p: no fitted Win model enters
+P_SOURCE = {FAMILY_ID: "board", PLAIN_ID: "board", V1_ID: "p_cal", V1_PLAIN_ID: "p_cal"}
+P_SOURCES = {
+    "board": "normalised implied Win shares of the final Win board (v2, as #131's rule-v5)",
+    "p_cal": "#114's out-of-fold calibrated p_cal (v1, superseded, as #131's rule-v4)",
+}
+SPANS = {
+    "board": "every development day from 2014-06-07 with final Win and exacta boards",
+    "p_cal": "the development races with #114 out-of-fold Win probabilities (its test quarters)",
+}
 STAKE = 100.0
 N_BOOT = 10_000
 LEVEL = 0.95
@@ -93,10 +117,15 @@ CELLS_FILE = Path("candidate-cells") / "exacta-ceiling.json"
 NO_BET = "no combination selected"
 FEW_MEETINGS = "fewer than two meetings: no bootstrap bound"
 EMPTY = "no scored race with a share in the cell"
+NO_RACE = "no eligible race in the asked development days"
 
 
 class RunRefused(RuntimeError):
     """The run refused before it read, recorded or wrote anything."""
+
+
+class NoEligibleRace(RuntimeError):
+    """The run scored no race: its members are recorded as failed and nothing is published."""
 
 
 # --------------------------------------------------------------------------- pre-registration
@@ -142,7 +171,7 @@ def _member_spec(family_id: str, lambda2: str | float, role: str) -> dict:
         "n_boot": N_BOOT,
         "level": LEVEL,
         "ranking": "rho descending; a member without a bet ranks after every member with one",
-        "variants_searched": len(MEMBERS) * len(MEMBER_FAMILIES),
+        "variants_searched": len(MEMBERS) * len(V1_MEMBER_FAMILIES),
         "family_size": len(MEMBERS),
         "exclusions": [
             "boost_may_be_withheld",
@@ -171,13 +200,12 @@ def _member_spec(family_id: str, lambda2: str | float, role: str) -> dict:
     }
 
 
-def family_specs() -> dict[str, dict]:
-    """Every family the run writes, as plain-JSON specs (a fresh copy on every call)."""
-    descriptive = {
+def _descriptive_spec(family_id: str) -> dict:
+    return {
         "ticket": TICKET,
         "hypothesis_id": HYPOTHESIS_ID,
         "spec": "docs/specs/exacta-ceiling-prereg.md",
-        "family_id": DESCRIPTIVE_ID,
+        "family_id": family_id,
         "role": "descriptive, not a member: no rank",
         "label": "look-ahead",
         "descriptives": {
@@ -193,9 +221,96 @@ def family_specs() -> dict[str, dict]:
         "interval": "meeting bootstrap of the ratio, two-sided 95%, 10000 replicates",
         "n_boot": N_BOOT,
     }
+
+
+def superseded_specs() -> dict[str, dict]:
+    """The v1 families (p from #114's p_cal), frozen and recorded on 2026-11-28 and superseded by
+    v2: kept so their hashes and committed summary stay checkable; never executed again."""
     return {
-        FAMILY_ID: _member_spec(FAMILY_ID, "full_development", "the 16 frozen members"),
-        PLAIN_ID: _member_spec(PLAIN_ID, 1.0, "variant: plain Harville (lambda2 = 1)"),
+        V1_ID: _member_spec(V1_ID, "full_development", "the 16 frozen members"),
+        V1_PLAIN_ID: _member_spec(V1_PLAIN_ID, 1.0, "variant: plain Harville (lambda2 = 1)"),
+        V1_DESCRIPTIVE_ID: _descriptive_spec(V1_DESCRIPTIVE_ID),
+    }
+
+
+_V2_REVISION = (
+    "v2 (Sol review round 1 of 24d080f, 2026-11-28): v1 took p from #114's out-of-fold "
+    "calibrated p_cal and scored only the races with a #114 row, the inputs of #131's "
+    "superseded rule-v4. #131's frozen E2 is rule-v5: p_c(t) is discounted Harville at the "
+    "registered lambda2 on the normalised implied Win shares of the Win board, on every day with "
+    "Win and exacta boards. v2 is rule-v5's look-ahead analogue: the same shares read on the "
+    "final Win board, every development day from 2014-06-07 with final Win and exacta boards. "
+    "It also excludes a race whose exacta pool has refund votes (a scratch after sales: the "
+    "JRA-VAN dividends carry no refund row) and records the bootstrap seed with every result. "
+    "Members, cuts, cells, lambda2, favourite, stake, return, estimand, interval and ranking "
+    "are v1's. v1's families and records stay in the registry as ranked variant rows."
+)
+_V2_P = (
+    "discounted Harville (harville_exacta) at lambda2 on the normalised implied Win shares of "
+    "the final Win board (final_odds WIN: 1 / odds over the race's sum of 1 / odds, over the "
+    "horses with a positive final Win odds): #131's rule-v5 p_c(t) read on the final board; no "
+    "fitted Win model enters"
+)
+_V2_EXCLUSIONS = [
+    "boost_may_be_withheld",
+    "fewer than 5 starters",
+    "no exacta row",
+    "a refunded exacta: a paying row with is_refund, or refund votes on the exacta pool's "
+    "__pool__ row (a scratch after sales), so no combination on a scratched horse is scored",
+    "more than one paying exacta (dead heat)",
+    "segments undefined (field outside 5-18, race class unknown)",
+    "no priced exacta board",
+    "no exacta pool total",
+    "no final money on the paying combination",
+]
+_V2_DROPPED = [
+    "race status other than run",
+    "race class outside exacta_study.CLASS_GROUPS",
+    "no priced final Win board",
+    "takeout unknown",
+]
+_V2_DATA = (
+    "jravan final_odds (WIN, QUINELLA, FORECAST), pool_votes (FORECAST), dividends (FORECAST), "
+    "races; confirmed records (data_kubun 4, 5); development days only, from 2014-06-07; every "
+    "race with a final Win board and a final exacta board (no #114 row required)"
+)
+_V2_SEED = "the run's seed (default 431) in every record's params and in the private report's name"
+
+
+def _member_spec_v2(family_id: str, lambda2: str | float, role: str, supersedes: str) -> dict:
+    return {
+        **_member_spec(family_id, lambda2, role),
+        "rule": "buy exacta c of category X for 100 yen when q_c / p_c < k, read on the final "
+        "boards (look-ahead): #131's E2 rule-v5 with its selection on the final exacta and Win "
+        "boards instead of T-2",
+        "p": _V2_P,
+        "exclusions": list(_V2_EXCLUSIONS),
+        "dropped_before_scoring": list(_V2_DROPPED),
+        "data": _V2_DATA,
+        "seed": _V2_SEED,
+        "variants_searched": VARIANTS_SEARCHED,
+        "variants_searched_counts": "every member family of the study: v2's two (this run) and "
+        "v1's two (superseded, recorded), 16 members each",
+        "supersedes": supersedes,
+        "revision": _V2_REVISION,
+    }
+
+
+def family_specs() -> dict[str, dict]:
+    """Every family the run writes (v2), as plain-JSON specs (a fresh copy on every call)."""
+    descriptive = {
+        **_descriptive_spec(DESCRIPTIVE_ID),
+        "p": _V2_P,
+        "data": _V2_DATA,
+        "seed": _V2_SEED,
+        "supersedes": V1_DESCRIPTIVE_ID,
+        "revision": _V2_REVISION,
+    }
+    return {
+        FAMILY_ID: _member_spec_v2(FAMILY_ID, "full_development", "the 16 frozen members", V1_ID),
+        PLAIN_ID: _member_spec_v2(
+            PLAIN_ID, 1.0, "variant: plain Harville (lambda2 = 1)", V1_PLAIN_ID
+        ),
         DESCRIPTIVE_ID: descriptive,
     }
 
@@ -379,13 +494,13 @@ def _boards(frame: pd.DataFrame, value: str) -> dict[str, dict]:
 
 
 def load_races(days: Sequence[date]) -> tuple[list[dict], dict]:
-    """The scoring inputs of the development races on ``days`` with #114 out-of-fold Win
-    probabilities, from the jravan store (confirmed records), and the run's meta."""
+    """The scoring inputs of the development races on ``days`` from the jravan store (confirmed
+    records), p the normalised implied Win shares of the final Win board, and the run's meta."""
     days = sorted({d for d in days if d >= FIRST_DAY and not is_holdout_day(COUNTRY, d)})
-    win_id, oof_path, ordering_id, lambda2 = exacta_run._fits()
+    _, _, ordering_id, lambda2 = exacta_run._fits()  # #115's lambda2; #114's p is not read
     meta = {
         "lambda2_full_development": lambda2,
-        "win_fit": win_id,
+        "win_fit": WIN_SOURCE,
         "ordering_fit": ordering_id,
         "dropped_before_scoring": {},
         "diagnostics": {},
@@ -396,17 +511,9 @@ def load_races(days: Sequence[date]) -> tuple[list[dict], dict]:
         in_days = ds.field("race_date").isin(pa.array(days, pa.date32()))
         lo, hi = days[0], days[-1]
         races = pool_depth._scan("races", RACE_COLUMNS, lo, hi, where=in_days).to_pandas()
-        ids = races["race_id"].tolist()
-        oof = pq.read_table(
-            oof_path, columns=["race_id", "horse_no", "q", "p_cal"], filters=_ids_filter(ids)
-        ).to_pandas()
-        read.update(races=races, oof=oof)
-        if not oof.empty:
-            out = _assemble(
-                races, oof, in_days & _ids_filter(set(oof["race_id"])), lo, hi, read, meta
-            )
-        else:
-            meta["dropped_before_scoring"]["no_win_probabilities"] = len(races)
+        read["races"] = races
+        if not races.empty:
+            out = _assemble(races, in_days, lo, hi, read, meta)
     names = {
         "races": "jravan_races",
         "final_odds": "jravan_final_odds",
@@ -417,14 +524,11 @@ def load_races(days: Sequence[date]) -> tuple[list[dict], dict]:
     for table, name in names.items():
         frame = read.get(table, pd.DataFrame())
         builds[name] = f"processed/jravan/{table}.parquet@{exacta_run._fingerprint(frame)}"
-    builds["win_oof"] = (
-        f"{oof_path.name}@{exacta_run._fingerprint(read.get('oof', pd.DataFrame()))}"
-    )
     meta["data_builds"] = builds
     return out, meta
 
 
-def _assemble(races, oof, where, lo, hi, read, meta) -> list[dict]:
+def _assemble(races, where, lo, hi, read, meta) -> list[dict]:
     confirmed = pool_depth._confirmed
     odds = pool_depth._scan(
         "final_odds",
@@ -445,7 +549,7 @@ def _assemble(races, oof, where, lo, hi, read, meta) -> list[dict]:
         hi,
         where=confirmed(where & (ds.field("pool") == "FORECAST")),
     ).to_pandas()
-    ids = sorted(set(oof["race_id"]))
+    ids = sorted(set(races["race_id"]))
     dividends = pq.read_table(
         paths.processed_dir(SOURCE) / "dividends.parquet",
         columns=["race_id", "combination", "dividend", "is_refund"],
@@ -463,32 +567,28 @@ def _assemble(races, oof, where, lo, hi, read, meta) -> list[dict]:
         - np.nan_to_num(pools["refund_votes"].to_numpy(dtype=float))
     )
     pool_yen = dict(zip(pools["race_id"], net, strict=True))
+    # A scratch after sales refunds the exacta tickets on the horse: the pool row carries the
+    # refund votes while the dividends (JRA-VAN writes no refund row) still pay as usual.
+    refund_votes = np.nan_to_num(pools["refund_votes"].to_numpy(dtype=float), nan=0.0)
+    refunded = set(pools["race_id"].to_numpy()[refund_votes > 0])
     slots = votes.loc[~is_pool].assign(yen=lambda f: UNIT * f["votes"].astype(float))
     money = _boards(slots.loc[slots["yen"].notna()], "yen")
     paid: dict[str, list] = {}
     for r in dividends.itertuples(index=False):
         combo = tuple(int(h) for h in str(r.combination).split(","))
-        paid.setdefault(r.race_id, []).append((combo, float(r.dividend), bool(r.is_refund)))
-    probs = {
-        k: dict(zip(g["horse_no"].astype(int), g["p_cal"], strict=True))
-        for k, g in oof.groupby("race_id")
-    }
-    built_on = {
-        k: dict(zip(g["horse_no"].astype(int), g["q"], strict=True))
-        for k, g in oof.groupby("race_id")
-    }
+        refund = bool(r.is_refund) or r.race_id in refunded
+        paid.setdefault(r.race_id, []).append((combo, float(r.dividend), refund))
     dropped, diagnostics = Counter(), Counter()
-    dropped["no_win_probabilities"] = int((~races["race_id"].isin(set(probs))).sum())
     out = []
-    for race in races.loc[races["race_id"].isin(set(probs))].itertuples(index=False):
-        rid, p = race.race_id, probs[race.race_id]
-        field = boards["WIN"].get(rid, {})
+    for race in races.itertuples(index=False):
+        rid = race.race_id
+        field = {h: v for h, v in boards["WIN"].get(rid, {}).items() if math.isfinite(v) and v > 0}
         if race.status != "run":
             dropped["status_not_run"] += 1
         elif race.race_class not in study.CLASS_GROUPS:
             dropped["unknown_race_class"] += 1
-        elif set(field) != set(p) or not all(v > 0 and math.isfinite(v) for v in p.values()):
-            dropped["p_or_odds_mismatch"] += 1
+        elif not field:
+            dropped["no_final_win_board"] += 1
         else:
             try:
                 t = takeout.race_takeout(rid, "FORECAST", race_class_raw=race.race_class_raw)
@@ -496,9 +596,8 @@ def _assemble(races, oof, where, lo, hi, read, meta) -> list[dict]:
             except (takeout.TakeoutUnknown, ValueError):
                 dropped["takeout_unknown"] += 1
                 continue
-            inv = {h: 1 / v for h, v in field.items()}
-            gap = max(abs(inv[h] / sum(inv.values()) - built_on[rid][h]) for h in inv)
-            diagnostics["win_board_differs_from_oof_q"] += int(not gap <= 1e-9)
+            diagnostics["exacta_pool_refund_votes"] += int(rid in refunded)
+            p = exacta_run._board_shares(field)
             out.append(
                 {
                     "race_id": rid,
@@ -562,18 +661,25 @@ class CeilingRow:
     n_selected: int
     n_races: int
     n_meetings: int
+    run: str = ""  # the commit of the run the row comes from (a v1 row: its recorded run)
+
+    @property
+    def p_source(self) -> str:
+        return P_SOURCE[self.family_id]
 
 
 @dataclass(frozen=True)
 class CeilingResult:
     rows: tuple[CeilingRow, ...]  # FAMILY_ID's 16 members in rank order
     variant_rows: tuple[CeilingRow, ...]  # PLAIN_ID's 16, in rank order
-    ranked: tuple[CeilingRow, ...]  # every member of every member family, ranked together
+    # every member of every member family ranked together: this run's 32 and the v1 families'
+    # latest scored rows in the registry (labelled by p source and span)
+    ranked: tuple[CeilingRow, ...]
     descriptives: tuple[dict, ...]
     excluded: dict
     meta: dict
     report_path: Path
-    cells_path: Path
+    cells_path: Path | None  # None: a seed other than the pre-registered one writes no cells
     run_ids: tuple[str, ...]
     variants_searched: int
 
@@ -711,11 +817,11 @@ def _interval(num, den, meetings, seed: int, level: float) -> tuple[float, float
     return up.rho, lo.bound, up.bound, up.n_meetings
 
 
-def _row(family: str, label: str, member: tuple, b: _Bets, seed: int) -> CeilingRow:
+def _row(family: str, label: str, member: tuple, b: _Bets, seed: int, run: str) -> CeilingRow:
     category, cut, cell = member
     nan = math.nan
     if not b.staked:
-        return CeilingRow(family, label, category, cut, cell, nan, nan, nan, nan, nan, 0, 0, 0)
+        return CeilingRow(family, label, category, cut, cell, nan, nan, nan, nan, nan, 0, 0, 0, run)
     staked = np.asarray(b.staked)
     rho, lower, upper, meetings = _interval(
         b.returned, staked * np.asarray(b.rate), b.meeting, seed, LEVEL
@@ -735,7 +841,46 @@ def _row(family: str, label: str, member: tuple, b: _Bets, seed: int) -> Ceiling
         b.n_selected,
         len(b.staked),
         meetings,
+        run,
     )
+
+
+def _value(metric: FoldMetric | None, attr: str = "value") -> float:
+    found = None if metric is None else getattr(metric, attr)
+    return math.nan if found is None else float(found)
+
+
+def _superseded_rows(registry: Registry) -> list[CeilingRow]:
+    """The v1 families' members as rows: each member's latest scored record in the registry
+    (rho, its bounds, the return per 100 yen and the counts, as ``_member_metrics`` wrote them)."""
+    latest: dict[tuple[str, str], RunRecord] = {}
+    for record in registry.records():
+        if record.family_id in V1_MEMBER_FAMILIES and record.status == "scored":
+            latest[(record.family_id, record.variant)] = record
+    rows = []
+    for (family, _), record in sorted(latest.items()):
+        m = {x.metric: x for x in record.metrics}
+        rho, r100 = m.get("rho"), m.get("return_per_100")
+        p = record.params
+        rows.append(
+            CeilingRow(
+                family,
+                str(p["lambda2"]),  # "full_development" or "1.0", as the run labels them
+                str(p["category"]),
+                float(p["cut"]),
+                str(p["cell"]),
+                _value(rho),
+                _value(rho, "hi"),
+                _value(rho, "lo"),
+                _value(r100),
+                _value(r100, "hi"),
+                int(_value(m.get("n_selected"))) if "n_selected" in m else 0,
+                int(rho.n) if rho is not None else 0,
+                int(_value(m.get("n_meetings"))) if "n_meetings" in m else 0,
+                record.git_sha[:12],
+            )
+        )
+    return rows
 
 
 def _ranked(rows) -> tuple[CeilingRow, ...]:
@@ -866,25 +1011,31 @@ def run_ceiling(
             del races
         meta = dict(first["meta"] or {"win_fit": "none", "ordering_fit": "none"})
         meta["data_builds"] = _merge_builds(builds)
+        if not scored_days:  # nothing to rank: no scored record, no report, no cells file
+            raise NoEligibleRace(f"{NO_RACE} ({date_from} to {date_to})")
+        run = sha[:12]
         groups = {
-            f: [_row(f, labels[f], m, bets[(f, m)], seed) for m in MEMBERS] for f in MEMBER_FAMILIES
+            f: [_row(f, labels[f], m, bets[(f, m)], seed, run) for m in MEMBERS]
+            for f in MEMBER_FAMILIES
         }
         descriptives = _descriptives(ratios, list(labels.values()), seed)
         rows, variant_rows = _ranked(groups[FAMILY_ID]), _ranked(groups[PLAIN_ID])
-        ranked = _ranked([*groups[FAMILY_ID], *groups[PLAIN_ID]])
-        span = (min(scored_days), max(scored_days)) if scored_days else None
+        ranked = _ranked([*groups[FAMILY_ID], *groups[PLAIN_ID], *_superseded_rows(registry)])
+        span = (min(scored_days), max(scored_days))
         report_path, cells_path = _write_private(
             out_dir, sha, meta, ranked, descriptives, dict(excluded), span, seed
         )
     except RunRefused:
         raise
-    except Exception:
+    except Exception as exc:
         meta = dict(first["meta"] or {"win_fit": "none", "ordering_fit": "none"})
         meta["data_builds"] = _merge_builds(builds) if builds else {}
+        reason = NO_RACE if isinstance(exc, NoEligibleRace) else type(exc).__name__
+        marker = (FoldMetric("development", f"run:unavailable:{reason}", 0.0, None, None, 0),)
         _append(
             registry,
             [
-                _record(f, m, (), meta, sha, specs, "failed")
+                _record(f, m, marker, meta, sha, specs, "failed", seed)
                 for f in MEMBER_FAMILIES
                 for m in MEMBERS
             ],
@@ -899,13 +1050,14 @@ def run_ceiling(
             sha,
             specs,
             "scored",
+            seed,
         )
         for row in sorted((*rows, *variant_rows), key=_spec_order)  # never in rank order
     ]
     for kind in ("d", "quinella_order_split"):
         for label in labels.values():
             part = [r for r in descriptives if r["descriptive"] == kind and r["lambda2"] == label]
-            records.append(_descriptive_record(kind, label, part, meta, sha, specs))
+            records.append(_descriptive_record(kind, label, part, meta, sha, specs, seed))
     run_ids = _append(registry, records)
     if default:
         write_committed_summary(registry)
@@ -919,7 +1071,7 @@ def run_ceiling(
         report_path,
         cells_path,
         tuple(run_ids),
-        len(MEMBERS) * len(MEMBER_FAMILIES),
+        VARIANTS_SEARCHED,
     )
 
 
@@ -928,7 +1080,7 @@ def _components(family: str, meta: dict) -> dict[str, str]:
     return {"win": str(meta["win_fit"]), "ordering": str(ordering)}
 
 
-def _record(family, member, metrics, meta, sha, specs, status) -> RunRecord:
+def _record(family, member, metrics, meta, sha, specs, status, seed: int) -> RunRecord:
     category, cut, cell = member
     params = {
         "category": category,
@@ -937,6 +1089,8 @@ def _record(family, member, metrics, meta, sha, specs, status) -> RunRecord:
         "selection": "look-ahead",
         "lambda2": specs[family]["lambda2"],
         "stake_yen": 100,
+        "seed": seed,
+        "n_boot": N_BOOT,
         "family_spec_hash": _spec_hash(specs[family]),
     }
     return RunRecord(
@@ -955,11 +1109,13 @@ def _record(family, member, metrics, meta, sha, specs, status) -> RunRecord:
     )
 
 
-def _descriptive_record(kind, label, rows, meta, sha, specs) -> RunRecord:
+def _descriptive_record(kind, label, rows, meta, sha, specs, seed: int) -> RunRecord:
     params = {
         "descriptive": kind,
         "lambda2": label,
         "selection": "look-ahead",
+        "seed": seed,
+        "n_boot": N_BOOT,
         "family_spec_hash": _spec_hash(specs[DESCRIPTIVE_ID]),
     }
     family = FAMILY_ID if label == "full_development" else PLAIN_ID
@@ -1018,46 +1174,56 @@ def _write_private(out_dir, sha, meta, ranked, descriptives, excluded, span, see
     specs = family_specs()
     hashes = {f: _spec_hash(s) for f, s in specs.items()}
     tag = hashlib.sha256(json.dumps(meta["data_builds"], sort_keys=True).encode()).hexdigest()[:8]
-    stem = f"exacta-ceiling-japan-{sha[:12]}-{tag}"
-    n = len(ranked)
+    # The seed is part of the identity: a re-run at another seed never overwrites this report.
+    stem = f"exacta-ceiling-japan-{sha[:12]}-{tag}-seed{seed}"
     leaderboard = [
         {
             "rank": k + 1,
             "option": f"{r.family_id}:{r.category}|k={r.cut}|{r.cell}",
             **asdict(r),
+            "p_source": r.p_source,
+            "p": P_SOURCES[r.p_source],
+            "span": SPANS[r.p_source],
             "label": "look-ahead",
-            "variants_searched": n,
+            "family_size": len(MEMBERS),  # the members of the row's own family
+            "variants_searched": VARIANTS_SEARCHED,  # every member family of the study
+            "seed": seed if r.family_id in MEMBER_FAMILIES else "its run's recorded seed",
             "break_even_rho": "1 / rate (rho = 1 is the payout rate)",
         }
         for k, r in enumerate(ranked)
     ]
     lines = [
-        f"# N2 (#431): exacta look-ahead ceiling on final boards ({sha[:12]})",
+        f"# N2 (#431): exacta look-ahead ceiling on final boards ({sha[:12]}, seed {seed})",
         "",
         f"**{LOOK_AHEAD}.** Not a betting rule and not a proven bound on the T-2 rule.",
         "",
-        f"- Span scored: {span[0]} to {span[1]}" if span else "- Span scored: no scored race",
+        f"- Span scored by this run (p source `board`): {span[0]} to {span[1]}",
+        *[f"- p source `{k}`: {v}; span: {SPANS[k]}" for k, v in P_SOURCES.items()],
         f"- Seed {seed}, {N_BOOT} meeting-bootstrap replicates, one-sided {LEVEL:.0%} bounds",
-        f"- Variants searched: {n} ({len(MEMBERS)} per member family)",
-        f"- Win fit `{meta['win_fit']}`, ordering fit `{meta['ordering_fit']}`, lambda2 "
-        f"full_development = {meta.get('lambda2_full_development')}",
+        f"- Variants searched: {VARIANTS_SEARCHED} (every member family of the study, "
+        f"{len(MEMBERS)} members each: this run's {', '.join(MEMBER_FAMILIES)} and the "
+        f"superseded {', '.join(V1_MEMBER_FAMILIES)}, whose rows come from their recorded runs)",
+        f"- Win probabilities `{meta['win_fit']}`, ordering fit `{meta['ordering_fit']}`, "
+        f"lambda2 full_development = {meta.get('lambda2_full_development')}",
         *[f"- Family `{f}`, spec sha256 `{h}`" for f, h in hashes.items()],
         *[f"- Build `{k}`: `{v}`" for k, v in meta["data_builds"].items()],
         "",
         "## Ranked members (rho = return over staked x rate; the CI column is the one-sided 95% "
-        "upper bound)",
+        "upper bound; family size = the row's family, variants searched = the study)",
         "",
-        "| rank | family | lambda2 | category | cut | cell | rho | upper (CI) | lower | return per "
-        "100 yen | its upper | n selected | n races | n meetings |",
-        "|" + " --- |" * 14,
+        "| rank | family | p source | run | lambda2 | category | cut | cell | rho | upper (CI) | "
+        "lower | return per 100 yen | its upper | n selected | n races | n meetings | family "
+        "size | variants searched |",
+        "|" + " --- |" * 18,
     ]
     for row in leaderboard:
         lines.append(
-            f"| {row['rank']} | {row['family_id']} | {row['lambda2']} | {row['category']} | "
-            f"{row['cut']} | {row['cell']} | {_num(row['rho'])} | {_num(row['upper'])} | "
-            f"{_num(row['lower'])} | {_num(row['return_per_100'], 1)} | "
-            f"{_num(row['return_per_100_upper'], 1)} | {row['n_selected']} | {row['n_races']} | "
-            f"{row['n_meetings']} |"
+            f"| {row['rank']} | {row['family_id']} | {row['p_source']} | {row['run']} | "
+            f"{row['lambda2']} | {row['category']} | {row['cut']} | {row['cell']} | "
+            f"{_num(row['rho'])} | {_num(row['upper'])} | {_num(row['lower'])} | "
+            f"{_num(row['return_per_100'], 1)} | {_num(row['return_per_100_upper'], 1)} | "
+            f"{row['n_selected']} | {row['n_races']} | {row['n_meetings']} | "
+            f"{row['family_size']} | {row['variants_searched']} |"
         )
     lines += [
         "",
@@ -1080,14 +1246,19 @@ def _write_private(out_dir, sha, meta, ranked, descriptives, excluded, span, see
         "meta": meta,
         "span": span,
         "seed": seed,
+        "family_size": len(MEMBERS),
+        "variants_searched": VARIANTS_SEARCHED,
         "leaderboard": leaderboard,
         "descriptives": descriptives,
         "excluded": excluded,
         "spec_hashes": hashes,
+        "superseded_spec_hashes": {f: _spec_hash(s) for f, s in superseded_specs().items()},
     }
     write_report(
         out_dir / f"{stem}.json", json.dumps(_json_safe(payload), indent=1) + "\n", sources=SOURCES
     )
+    if seed != DEFAULT_SEED:  # the ranked member file is the pre-registered seed's alone
+        return report, None
     cells = write_report(
         out_dir / CELLS_FILE, json.dumps(_json_safe(leaderboard), indent=1) + "\n", sources=SOURCES
     )
@@ -1103,7 +1274,8 @@ class _Mine:
     def records(self, family_id: str | None = None) -> list[RunRecord]:
         """In append order: ``write_summary`` lists licensed runs by identity, so a committed
         file never shows the order a run ranked its members in (D21)."""
-        return [r for r in self._registry.records(family_id) if r.family_id in family_specs()]
+        mine = {**superseded_specs(), **family_specs()}
+        return [r for r in self._registry.records(family_id) if r.family_id in mine]
 
 
 def _spec_order(row: CeilingRow) -> tuple[int, int]:
@@ -1141,6 +1313,7 @@ def render_public_report(result: CeilingResult) -> str:
     rho, bound, count, rank or span): every figure is withheld (D21)."""
     del result  # nothing of the result is public
     hashes = "\n".join(f"  | `{f}` | `{_spec_hash(s)}` |" for f, s in family_specs().items())
+    old = "\n".join(f"  | `{f}` | `{_spec_hash(s)}` |" for f, s in superseded_specs().items())
     members = ", ".join(f"`{c}|k={k}|{s}`" for c, k, s in MEMBERS)
     return f"""# Experiment report: N2, the exacta look-ahead ceiling on final boards (Japan, #431)
 
@@ -1150,23 +1323,37 @@ span, sign, bound or rank derived from that data. The selection is **look-ahead*
 final exacta and Win boards, which hold money placed after T-2. Nothing here is a betting rule or
 a betting-edge claim, nothing is adopted, and the holdout is not opened.
 
-- Registry families, each frozen with `Registry.freeze_family` before the run read any row
-  (`uv run horsetrack japan exacta-ceiling freeze`; spec `docs/specs/exacta-ceiling-prereg.md`,
-  code `exacta_ceiling.family_specs()`):
+- Registry families of the run (v2), each frozen with `Registry.freeze_family` before the run
+  read any row (`uv run horsetrack japan exacta-ceiling freeze`; spec
+  `docs/specs/exacta-ceiling-prereg.md`, code `exacta_ceiling.family_specs()`). Win
+  probabilities: the normalised implied Win shares of the final Win board, as #131's E2
+  rule-v5 on the T-2 board:
 
   | family | spec sha256 |
   | --- | --- |
 {hashes}
+- Superseded families (v1, `exacta_ceiling.superseded_specs()`): Win probabilities from #114's
+  out-of-fold calibrated `p_cal` on the races with a #114 row, as #131's superseded rule-v4.
+  Frozen and recorded; their members stay ranked variant rows, labelled with that p source and
+  span; never executed again:
+
+  | family | spec sha256 |
+  | --- | --- |
+{old}
 - Command: `uv run horsetrack japan exacta-ceiling run --from 2014-06-07 --to <last day>`;
-  development days only (`is_holdout_day`), none before 2014-06-07 (D10), races with #114's
-  out-of-fold Win probabilities; `LockedHoldout` is never opened.
+  development days only (`is_holdout_day`), none before 2014-06-07 (D10), every race with final
+  Win and exacta boards; `LockedHoldout` is never opened. A race whose exacta pool has refund
+  votes (a scratch after sales) is excluded and counted. A run that scores no race records its
+  members as failed and writes no report.
 - Private outputs, through `write_report` with the source `jravan`:
-  `$HORSETRACK_DATA_DIR/reports/exacta-ceiling-japan-<commit>-<build>.md` and `.json` (the
-  ranked members, the descriptives, the exclusions and the span), and the ranked member file
-  `$HORSETRACK_DATA_DIR/reports/{CELLS_FILE.as_posix()}`.
-- Variants searched: {len(MEMBERS) * len(MEMBER_FAMILIES)} ({len(MEMBERS)} members at #115's
-  full-development lambda2 and the same {len(MEMBERS)} at plain Harville); family size
-  {len(MEMBERS)} each.
+  `$HORSETRACK_DATA_DIR/reports/exacta-ceiling-japan-<commit>-<build>-seed<seed>.md` and `.json`
+  (every ranked member with its p source, family size and the variants searched, the
+  descriptives, the exclusions and the span), and the ranked member file
+  `$HORSETRACK_DATA_DIR/reports/{CELLS_FILE.as_posix()}` (written by the pre-registered seed
+  {DEFAULT_SEED} only).
+- Variants searched: {VARIANTS_SEARCHED}, every member family of the study: {len(MEMBERS)}
+  members at #115's full-development lambda2 and the same {len(MEMBERS)} at plain Harville, for
+  each p source (v2 and v1); family size {len(MEMBERS)} each.
 
 ## Hypothesis
 
@@ -1181,13 +1368,15 @@ upper bound on the T-2 rule (informed late money), a ledger assumption.
 ## Variants tried
 
 The 16 members of #131's E2 unchanged: {members}; each at #115's full-development lambda2
-(`{FAMILY_ID}`) and at plain Harville, lambda2 = 1 (`{PLAIN_ID}`). Each member's look-ahead rho,
-its one-sided 95% meeting-bootstrap upper bound (the CI column), lower bound, return per 100 yen
-and its upper bound, n selected, n races and n meetings: {WITHHELD}. Descriptives
-(`{DESCRIPTIVE_ID}`): D = sum q / sum p per category and cell, and the Quinella x order split,
-each with a two-sided 95% meeting-bootstrap interval: {WITHHELD}. A member with no bet keeps its
-row, ranked last, with an unavailable marker in the registry; a failed run is recorded too (the
-registry summary lists every run's status).
+(`{FAMILY_ID}`) and at plain Harville, lambda2 = 1 (`{PLAIN_ID}`), with p from the final Win
+board's normalised implied shares; and the same 32 with p from #114's `p_cal` on the races with a
+#114 row (`{V1_ID}`, `{V1_PLAIN_ID}`: superseded, recorded, ranked as variant rows). Each
+member's look-ahead rho, its one-sided 95% meeting-bootstrap upper bound (the CI column), lower
+bound, return per 100 yen and its upper bound, n selected, n races and n meetings: {WITHHELD}.
+Descriptives (`{DESCRIPTIVE_ID}`, and v1's `{V1_DESCRIPTIVE_ID}`): D = sum q / sum p per category
+and cell, and the Quinella x order split, each with a two-sided 95% meeting-bootstrap interval:
+{WITHHELD}. A member with no bet keeps its row, ranked last, with an unavailable marker in the
+registry; a failed run is recorded too (the registry summary lists every run's status).
 
 ## Alternatives rejected and why
 
@@ -1195,8 +1384,10 @@ registry summary lists every run's status).
   member is a ranked row and nothing closes or is parked on this result.
 - The real lower tertile of the final exacta pool totals as the headline's "less popular": not
   added; #131's race-card proxy keeps the members comparable with E2 and the family small.
-- Win probabilities from the final Win price over a longer span: not added; #114's out-of-fold
-  calibrated probabilities are #131's source, so the ceiling is comparable with E2.
+- #114's out-of-fold `p_cal` as the run's Win probabilities (v1): superseded by v2 because
+  #131's frozen E2 is rule-v5, whose p_c(t) is the normalised implied Win shares of the Win
+  board on every day with Win and exacta boards; v1's rows stay ranked (Sol review round 1 of
+  24d080f).
 - Own impact from the logged odds: the JRA-VAN final votes give each combination's money and the
   pool's net total directly, so the payout identity needs no odds inversion.
 
@@ -1208,8 +1399,9 @@ member's row is a look-ahead ceiling for the leaderboard, never a betting rule.
 
 ## Leaderboard rows
 
-Option ids `{FAMILY_ID}:<category>|k=<cut>|<cell>` and `{PLAIN_ID}:<category>|k=<cut>|<cell>`
-for the 16 members above, each a look-ahead row ranked by rho; rank and figures {WITHHELD}.
+Option ids `<family>:<category>|k=<cut>|<cell>` for the 16 members above in each member family
+(`{FAMILY_ID}`, `{PLAIN_ID}`, `{V1_ID}`, `{V1_PLAIN_ID}`), each a look-ahead row ranked by rho
+and labelled with its p source and span; rank and figures {WITHHELD}.
 
 ## Follow-ups filed
 
@@ -1228,9 +1420,10 @@ exacta_ceiling_app = typer.Typer(
 
 @exacta_ceiling_app.command("freeze")
 def freeze_command() -> None:
-    """Freeze every family's spec in the japan registry (irreversible; again is a no-op)."""
+    """Freeze every family's spec in the japan registry, the superseded v1 specs too
+    (irreversible; again is a no-op)."""
     registry = default_registry(COUNTRY)
-    for family_id, spec in family_specs().items():
+    for family_id, spec in {**superseded_specs(), **family_specs()}.items():
         typer.echo(f"frozen {family_id} {registry.freeze_family(family_id, spec)}")
 
 
@@ -1240,13 +1433,18 @@ def run_command(
     date_from: str = typer.Option("2014-06-07", "--from", help="First day (clamped to D10)."),
     seed: int = typer.Option(DEFAULT_SEED, help="Bootstrap seed."),
 ) -> None:
-    """Score the frozen members on development days and record the run; prints no figure."""
-    result = run_ceiling(
-        date_from=date.fromisoformat(date_from),
-        date_to=date.fromisoformat(date_to),
-        out_dir=paths.reports_dir(),
-        seed=seed,
-    )
+    """Score the frozen members on development days and record the run; prints no figure. A
+    span with no eligible race records the members as failed and publishes nothing (exit 1)."""
+    try:
+        result = run_ceiling(
+            date_from=date.fromisoformat(date_from),
+            date_to=date.fromisoformat(date_to),
+            out_dir=paths.reports_dir(),
+            seed=seed,
+        )
+    except NoEligibleRace as exc:
+        typer.echo(f"failed: {exc}; recorded, nothing published", err=True)
+        raise typer.Exit(1) from exc
     public = write_report(env.repo_root() / PUBLIC_REPORT, render_public_report(result), sources=())
     typer.echo(f"report={result.report_path}\ncells={result.cells_path}\npublic={public}")
     typer.echo(f"rows={len(result.rows)} ranked={len(result.ranked)} records={len(result.run_ids)}")
