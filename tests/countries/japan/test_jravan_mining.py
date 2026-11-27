@@ -13,13 +13,17 @@ Contract pinned here (the coder follows it), module `horsetrack.countries.japan.
 - `build_mining_predictions(*, years=None, raw=None, out=None, chunk_records: int = 500)
   -> records.BuildReport`: reads `<raw>/stored/MING/DM/<YYYY>.jvd` and
   `<raw>/stored/MING/TM/<YYYY>.jvd` (`raw` the export root, default `paths.raw_dir('jravan')`;
-  `years` None reads every year file of either folder; a year with no TM file, every year before
-  TM began, reads DM alone) with `spec.record_spec('DM')` and `spec.record_spec('TM')`; keeps one
-  version per race and record type, JRA venues only, no holdout day; writes
-  `<out>/mining_predictions.parquet` (`out` a folder, default `paths.processed_dir('jravan')`):
-  schema `MINING_PREDICTIONS_SCHEMA`, rows sorted by `race_id`, `kind`, `horse_no` (numeric),
-  byte-stable. The report's name is `mining`; `counts['rows']` is the rows written and
+  `years` None reads every year file of either folder; a year with only one of the two files reads
+  that one alone) with `spec.record_spec('DM')` and `spec.record_spec('TM')`; keeps one version per
+  race and record type, JRA venues only, no holdout day; writes `<out>/mining_predictions.parquet`
+  (`out` a folder, default `paths.processed_dir('jravan')`): schema `MINING_PREDICTIONS_SCHEMA`,
+  rows sorted by `race_id`, `kind`, `horse_no` (numeric), byte-stable, the same bytes whatever
+  `chunk_records`. The report's name is `mining`; `counts['rows']` is the rows written and
   `counts['holdout_skipped']` the records on a holdout day; counts only, every one an int.
+- Refusals, each before anything is written (a table already there is left as it was): `years`
+  None and no `<YYYY>.jvd` in either folder (or no folder) raises FileNotFoundError, and the
+  command exits non-zero; an `out` that resolves inside the repository (a relative `out` from the
+  cwd) raises `paths.DataDirInsideRepo`, as `paths.outside_repo` does.
 - `horsetrack japan jravan mining`: the same build, then `records.write_build_report`
   (`<reports dir>/jravan-mining.json`).
 - `dump.MAPPED` gains `("MING", "DM")` and `("MING", "TM")` (test_jravan_dump.py), and
@@ -40,7 +44,8 @@ returns them):
   four digits are SSff, the digits before them the minutes); `error_plus_s` and `error_minus_s`
   are `予想誤差(信頼度)＋` and `予想誤差(信頼度)－` in seconds (hundredths). TM: `value` is
   `予測スコア` (tenths); both errors null. A value or an error that is blank or not a number is
-  null (the runner's row stays: null where unset).
+  null (the runner's row stays: null where unset). An all-zero DM time is unset too (null value,
+  null rank, its errors as printed); a zero TM score is a value (0.0, ranked as any other score).
 - `rank`, per race and kind over the rows with a value: DM ascending time (the fastest is 1), TM
   descending score (the highest is 1); ties share the lowest rank (1, 1, 3); a null value has a
   null rank.
@@ -63,6 +68,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -77,7 +83,7 @@ import pytest
 from typer.testing import CliRunner
 
 from horsetrack.cli import app
-from horsetrack.core import paths
+from horsetrack.core import env, paths
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.store import schemas, tables
 from horsetrack.core.store.asof import (
@@ -400,6 +406,39 @@ def test_tm_records_give_one_row_per_runner_with_score_and_rank(
     assert stamps_of(table)[(hsn12, "TM")] == {("2", datetime(2023, 12, 26, 15, 0, tzinfo=UTC))}
 
 
+def test_an_all_zero_dm_time_is_unset_and_a_zero_tm_score_is_a_value(
+    layouts: Mapping[str, spec.RecordSpec],
+) -> None:
+    tok11, tok12 = "jra:2024-06-01:TOK:11", "jra:2024-06-01:TOK:12"
+    dm = from_records(layouts, "DM", [
+        Rec(slots=[
+            ("01", "000000", "00010", "00020"),  # unset time: the row stays, errors as printed
+            ("02", "011000", "00030", "00040"),  # 70.0
+            ("03", "010500", "00000", "00000"),  # 65.0, the fastest; zero errors are values
+            ("04", "000000", "", ""),  # unset time, no errors
+        ]),
+        Rec(race="12", slots=[("05", "000000", "00010", "00010"), ("06", "000000", "", "")]),
+    ])  # fmt: skip
+    assert by_key(rows_of(dm)) == [
+        (tok11, "DM", 1, None, 0.1, 0.2, None),
+        (tok11, "DM", 2, 70.0, 0.3, 0.4, 2),
+        (tok11, "DM", 3, 65.0, 0.0, 0.0, 1),
+        (tok11, "DM", 4, None, None, None, None),
+        (tok12, "DM", 5, None, 0.1, 0.1, None),
+        (tok12, "DM", 6, None, None, None, None),
+    ]
+    # A TM score of zero is the lowest score, not an unset one.
+    scores = from_records(layouts, "TM", [
+        tm(slots=[("01", "00000"), ("02", "00250"), ("03", "00000"), ("04", "")]),
+    ])  # fmt: skip
+    assert by_key(rows_of(scores)) == [
+        (tok11, "TM", 1, 0.0, None, None, 2),
+        (tok11, "TM", 2, 25.0, None, None, 1),
+        (tok11, "TM", 3, 0.0, None, None, 2),
+        (tok11, "TM", 4, None, None, None, None),
+    ]
+
+
 @pytest.mark.parametrize("rt", ["DM", "TM"])
 def test_every_jra_venue_maps_and_other_venues_write_nothing(
     layouts: Mapping[str, spec.RecordSpec], rt: str
@@ -656,6 +695,115 @@ def test_two_builds_write_identical_bytes(data: Path) -> None:
     assert sorted(q.name for q in path.parent.iterdir()) == [FILENAME]
 
 
+def test_the_chunk_size_does_not_change_the_output(data: Path, tmp_path: Path) -> None:
+    held, dev = first_day(True), first_day(False)
+
+    def on(rt: str, day: date, race: str, created: str, slots: list[Slot]) -> Rec:
+        return Rec(rt=rt, year="2026", mmdd=day.strftime("%m%d"), race=race, created=created,
+                   slots=slots)  # fmt: skip
+
+    write_build_races(data)
+    # Holdout records between the versions of one race, so a chunk of 1 or 2 splits them.
+    write_year(data, "DM", 2026, [
+        on("DM", dev, "01", "20261120", [("01", "010000", "", ""), ("02", "010100", "", "")]),
+        on("DM", held, "01", "20261120", [("01", "010000", "", "")]),
+        on("DM", dev, "01", "20261122", [("01", "010300", "", ""), ("02", "010200", "", "")]),
+        on("DM", held, "02", "20261120", [("03", "010000", "", "")]),
+        on("DM", dev, "02", "20261120", [("04", "010000", "", "")]),
+    ])  # fmt: skip
+    write_year(data, "TM", 2026, [
+        on("TM", held, "01", "20261120", [("01", "00500")]),
+        on("TM", dev, "01", "20261121", [("01", "00500"), ("02", "00400")]),
+        on("TM", held, "03", "20261120", [("01", "00500")]),
+    ])  # fmt: skip
+    first = mining.build_mining_predictions(out=tmp_path / "default")
+    want = (tmp_path / "default" / FILENAME).read_bytes()
+    d1, d2 = (f"jra:{dev.isoformat()}:TOK:{n}" for n in ("01", "02"))
+    assert rows_of(pq.read_table(tmp_path / "default" / FILENAME)) == ROWS_2009 + ROWS_2024 + [
+        (d1, "DM", 1, 63.0, None, None, 2),
+        (d1, "DM", 2, 62.0, None, None, 1),
+        (d1, "TM", 1, 50.0, None, None, 1),
+        (d1, "TM", 2, 40.0, None, None, 2),
+        (d2, "DM", 4, 60.0, None, None, 1),
+    ]
+    assert first.counts["holdout_skipped"] == 4
+    for chunk in (1, 2, 3):
+        out = tmp_path / f"chunk{chunk}"
+        report = mining.build_mining_predictions(out=out, chunk_records=chunk)
+        assert (out / FILENAME).read_bytes() == want, chunk
+        assert report.to_json() == first.to_json(), chunk
+
+
+def ming_without_year_files(data: Path, case: str) -> None:
+    """Take every year file out of the export's MING folders, as `case` says."""
+    ming = data / "raw" / SOURCE / "stored" / "MING"
+    if case == "no MING folder":
+        shutil.rmtree(ming)
+        return
+    for p in ming.glob("*/*.jvd"):
+        p.unlink()
+    if case == "files that are not year files":
+        rec = Rec(slots=[("01", "010000", "00010", "00010")])
+        wb.write_jvd(ming / "DM" / "notes.jvd", [rec.record()])
+        wb.write_jvd(ming / "TM" / "24.jvd", [tm(slots=[("01", "00500")]).record()])
+        (ming / "DM" / "2024.txt").write_bytes(rec.record())
+
+
+NO_YEAR_FILES = ["empty folders", "no MING folder", "files that are not year files"]
+
+
+@pytest.mark.parametrize("case", NO_YEAR_FILES)
+def test_no_year_file_at_all_is_refused_and_the_table_is_kept(
+    data: Path, tmp_path: Path, case: str
+) -> None:
+    write_build_races(data)
+    mining.build_mining_predictions()
+    path = store_path(data)
+    before = path.read_bytes()
+    ming_without_year_files(data, case)
+
+    with pytest.raises(FileNotFoundError):
+        mining.build_mining_predictions()
+    assert path.read_bytes() == before
+    assert sorted(q.name for q in path.parent.iterdir()) == [FILENAME]
+
+    # Another empty export into a fresh folder writes nothing there either.
+    fresh = tmp_path / "fresh"
+    with pytest.raises(FileNotFoundError):
+        mining.build_mining_predictions(raw=tmp_path / "no-export", out=fresh)
+    assert not (fresh / FILENAME).exists()
+    assert not fresh.exists() or not any(fresh.iterdir())
+
+    # The command fails and leaves the table as it was.
+    result = CliRunner().invoke(app, ["japan", "jravan", "mining"])
+    assert result.exit_code != 0, result.output
+    assert path.read_bytes() == before
+    assert sorted(q.name for q in path.parent.iterdir()) == [FILENAME]
+
+
+def test_an_out_folder_inside_the_repository_is_refused(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_build_races(data)
+    repo = env.repo_root().resolve()
+    inside = repo / f".tmp-jravan-mining-{uuid.uuid4().hex[:8]}"
+    before = {p.name for p in repo.iterdir()}
+    monkeypatch.chdir(repo)
+    try:
+        # A folder in the checkout, the checkout itself as a relative path, and one through "..".
+        for out in (inside, Path("."), Path("docs") / ".."):
+            with pytest.raises(paths.DataDirInsideRepo):
+                mining.build_mining_predictions(out=out)
+            assert not inside.exists(), out
+            assert {p.name for p in repo.iterdir()} == before, out
+        assert not store_path(data).exists()
+    finally:
+        shutil.rmtree(inside, ignore_errors=True)
+        for p in repo.iterdir():
+            if p.name not in before and FILENAME in p.name:
+                p.unlink()
+
+
 # ------------------------------------------------------------------------------------------------
 # Availability, the model inputs and the coverage doc
 
@@ -716,7 +864,7 @@ def test_the_committed_coverage_doc_lists_the_table() -> None:
 # ------------------------------------------------------------------------------------------------
 # The real export (local: needs $HORSETRACK_DATA_DIR with the export and the workbook)
 
-REAL_YEAR = 2024  # a whole recent year with DM and TM, before the holdout
+REAL_YEAR = 2024  # a year before the holdout; the test skips unless both files are there
 
 
 @pytest.mark.local
@@ -763,5 +911,5 @@ def test_a_real_year_maps(tmp_path: Path) -> None:
         keep = jra & (cols["データ区分"] != b"0")
         expected += int(((horse > 0) & keep[:, None]).sum())
         del cols
-    # the stored files hold one version per race (a duplicate would only lower the rows)
+    # only kept versions write rows, so n is at most the slots counted over every version
     assert n <= expected
