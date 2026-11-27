@@ -32,4 +32,5 @@ per family, each holding that family's runs.
 - [japan/131-exacta-logscore-v1](japan--131-exacta-logscore-v1.md)
 - [japan/131-exacta-logscore-v2](japan--131-exacta-logscore-v2.md)
 - [japan/131-exacta-rule-v2](japan--131-exacta-rule-v2.md)
+- [japan/131-exacta-rule-v3](japan--131-exacta-rule-v3.md)
 - [win5-carryover-v1](win5-carryover-v1.md)
