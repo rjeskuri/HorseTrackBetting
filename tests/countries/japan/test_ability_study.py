@@ -499,6 +499,76 @@ def test_committed_summary_keeps_every_committed_family_in_the_index(tmp_path, m
     assert "fresh:variant" in summary.joinpath(f"{ability.FAMILY_ID}.md").read_text("utf-8")
 
 
+def seal_legacy_runs(path: Path, records: list[RunRecord]) -> None:
+    """Append ``records`` as run lines the way the registry chains and seals them, bypassing
+    ``append``'s checks: how #131's '/' family ids, written before #525, sit in the real log.
+    The chaining is copied from tests/core/eval/test_registry.py ``seal_lines``."""
+
+    def canonical(value) -> str:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        )
+
+    data = path.read_bytes() if path.exists() else b""
+    head = hashlib.sha256(data[:-1].split(b"\n")[-1]).hexdigest() if data else "0" * 64
+    with open(path, "ab") as handle:
+        for i, record in enumerate(records):
+            fields = dataclasses.asdict(record)
+            text = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            run_id = hashlib.sha256(text.encode("ascii")).hexdigest()
+            body = {"kind": "run", "run_id": run_id, "record": fields, "prev": head}
+            body["utc"] = f"2026-11-2{i % 7}T08:00:00+00:00"
+            body["seal"] = hashlib.sha256(canonical(body).encode("ascii")).hexdigest()
+            line = canonical(body).encode("ascii")
+            handle.write(line + b"\n")
+            head = hashlib.sha256(line).hexdigest()
+
+
+def test_committed_summary_keeps_a_legacy_slash_family_line_in_the_index(tmp_path, monkeypatch):
+    """#131's '/' ids are filed as '--' with the original id as the index label; the study's own
+    summary keeps their lines, ordered by label like every other line, and their files."""
+    summary = tmp_path / "docs" / "experiments" / "registry" / "japan"
+    monkeypatch.setattr(ability, "summary_dir", lambda country: summary)
+    monkeypatch.setattr(registry_mod, "summary_dir", lambda country: summary)
+    legacy = {
+        "japan/131-exacta-category-v1": "japan--131-exacta-category-v1",
+        "japan/131-exacta-category-v1/max-test": "japan--131-exacta-category-v1--max-test",
+    }
+    path = tmp_path / "data" / "committed.jsonl"
+    committed = Registry(path, holdout_log=tmp_path / "no.jsonl")
+    committed.append(make_record("japan-alpha-final-win", "alpha:variant", value=0.25))
+    seal_legacy_runs(path, [make_record(f, f"legacy:{i}") for i, f in enumerate(legacy)])
+    committed.append(make_record("win5-gamma-v1", "gamma:variant", value=0.5))
+    committed.append(make_record(ability.FAMILY_ID, "old:variant", sources=ability.SOURCES))
+    committed.verify()
+    write_summary(committed, summary)
+    listed = summary.joinpath("README.md").read_text(encoding="utf-8")
+    for family, stem in legacy.items():
+        assert f"- [{family}]({stem}.md)" in listed  # the committed index holds the legacy line
+    before = {stem: summary.joinpath(f"{stem}.md").read_bytes() for stem in legacy.values()}
+
+    local = Registry(tmp_path / "data" / "registry" / "japan.jsonl", holdout_log=tmp_path / "no")
+    local.append(make_record(ability.FAMILY_ID, "fresh:variant", sources=ability.SOURCES))
+
+    ability.write_committed_summary(local)
+
+    lines = summary.joinpath("README.md").read_text(encoding="utf-8").splitlines()
+    entries = [line for line in lines if line.startswith("- [")]
+    # By label (the family id), as write_summary orders it: '-' sorts before '/', so the
+    # ordinary japan- ids come before japan/131 (a sort by file stem would put japan--131 first).
+    assert entries == [
+        "- [japan-alpha-final-win](japan-alpha-final-win.md)",
+        f"- [{ability.FAMILY_ID}]({ability.FAMILY_ID}.md)",
+        "- [japan/131-exacta-category-v1](japan--131-exacta-category-v1.md)",
+        "- [japan/131-exacta-category-v1/max-test](japan--131-exacta-category-v1--max-test.md)",
+        "- [win5-gamma-v1](win5-gamma-v1.md)",
+    ]
+    assert lines[0] == "# Experiment registry index"
+    for stem, data in before.items():
+        assert summary.joinpath(f"{stem}.md").read_bytes() == data, f"{stem}.md changed"
+    assert "fresh:variant" in summary.joinpath(f"{ability.FAMILY_ID}.md").read_text("utf-8")
+
+
 # --------------------------------------------------------------------------- artifacts
 
 
