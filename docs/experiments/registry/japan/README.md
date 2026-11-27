@@ -3,6 +3,12 @@
 Written by `horsetrack.core.eval.registry.write_summary`; do not edit by hand. One file
 per family, each holding that family's runs.
 
+- [japan-131-exacta-breakage](japan-131-exacta-breakage.md)
+- [japan-131-exacta-category-b1-v2](japan-131-exacta-category-b1-v2.md)
+- [japan-131-exacta-category-b3-v2](japan-131-exacta-category-b3-v2.md)
+- [japan-131-exacta-category-v2](japan-131-exacta-category-v2.md)
+- [japan-131-exacta-category-v2-max-test](japan-131-exacta-category-v2-max-test.md)
+- [japan-131-exacta-logscore-v2](japan-131-exacta-logscore-v2.md)
 - [japan-beta-clustered-final-win](japan-beta-clustered-final-win.md)
 - [japan-c1-nowcast-final-shares](japan-c1-nowcast-final-shares.md)
 - [japan-c1-nowcast-final-shares-trial](japan-c1-nowcast-final-shares-trial.md)

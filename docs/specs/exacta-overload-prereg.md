@@ -23,8 +23,28 @@
 | `japan-131-exacta-category-b1-v2` | E1′: B1 flat box, reported | 3 × 14 (42) | `fb6844a9a189ee689f6390b6f2fde58a318370b9e73834ab5b28fbad735ec49b` |
 | `japan-131-exacta-category-b3-v2` | E1″: B3 Harville calibration, reported | λ2 {`full_development`, 1} × 3 × 14 (84) | `493253276d7a803446716325353bb6c18e01409868dc6dbec53eec09a9b4912f` |
 | `japan-131-exacta-logscore-v2` | C: log-score total | λ2 {`full_development`, 1} (2) | `084244a2f3cb69154da1dc97615044b58e0cf534f8077ed1cbd459a98e3650bd` |
-| `japan-131-exacta-rule-v4` | E2: ratio-cut rules | 2 categories × 4 cuts × 2 scopes (16) | `28929cd783cd9e25ae8c7f39f30f2b0891720b60864a38fdbb13d7dcd2a8d3bc` |
+| `japan-131-exacta-rule-v5` | E2: ratio-cut rules | 2 categories × 4 cuts × 2 scopes (16) | `37d8abb85db2bf8480f619b46440e0ea80a5ed68af992ef344b64e0b36dc2817` |
+| `japan-131-exacta-rule-v4` | E2, superseded by v5: history, not executed | 2 categories × 4 cuts × 2 scopes (16) | `28929cd783cd9e25ae8c7f39f30f2b0891720b60864a38fdbb13d7dcd2a8d3bc` |
 | `japan/131-exacta-rule-v3` | E2, superseded by v4: history, not executed | 2 categories × 4 cuts × 2 scopes (16) | `9104e173371668a34b4594b6e4970546649b886cdccc4e726ec9749188701f0d` |
+
+`japan-131-exacta-rule-v5` (frozen 2026-11-28, GPT-6.2 Sol review round 5 of 2c73ca0)
+supersedes `japan-131-exacta-rule-v4`. v4 inherited the E1 families' Win probabilities (#114's
+out-of-fold calibrated `p_cal`, built from final Win odds) and their eligibility (races with a
+#114 out-of-fold row): look-ahead for a rule decided at T−2, and it left out logged days #114
+does not cover. v5 changes two inputs and nothing else:
+
+- **`win_probabilities`:** the normalised implied Win shares on the Win board at T−2
+  (1 / odds over the race's sum of 1 / odds, over the starters on that board), fed to the
+  discounted Harville at the registered λ2 (`full_development`) to give `p_c(t)`. No model fit
+  of final Win odds enters a selection.
+- **`data`:** every #130-logged development day whose log holds the Win board and the exacta
+  board at T−2, each race with both boards at T−2 scored; no #114 row is required.
+
+`rule` restates the same decision rule with the v5 `p_c(t)`, and `revision` explains v5. The
+members, cuts, scopes, selection time, favourite, category, stake, λ2, judging, metric,
+bootstrap settings and exclusions are v4's. v4's spec is frozen under both
+`japan/131-exacta-rule-v4` and `japan-131-exacta-rule-v4` (same hash, so v5's `supersedes`
+names a freeze); it is history and is not executed. v4's text below is kept as written.
 
 **Ids renamed 2026-11-27 (#525).** The registry refuses a `/` in a family id (it cannot name a
 summary file), so the live families take the `japan-131-…` form above: the same specs, so the
@@ -69,6 +89,9 @@ changes, `min_meetings` included.
 > are not available when it is selected. v4 resolves it: the cutoff is the race card, the same
 > as E1's headline cell; the tertile is reported as an agreement diagnostic only; and there is
 > no meeting gate (v3's `min_meetings` 100 is gone). Scoring E2 under v4 is #281.
+>
+> **rule-v4 is superseded by rule-v5 and not executed** (Sol review round 5 of 2c73ca0,
+> 2026-11-28): its `p_c(t)` came from #114's final-odds calibration. #281 scores E2 under v5.
 
 The superseded v1 families, frozen 2026-11-25 with the label `in_fold` for the same fit, and
 scored that day (their records stay in the registry):
@@ -175,6 +198,14 @@ Why B2:
 
 - It is an actual bet (stakes known from the Win board), so it is judged at the final dividends
   that pay, with breakage and the minimum payout included, as D18 requires.
+
+> **Historical box results are final-Win-odds look-ahead** (Sol review round 5 of 2c73ca0,
+> 2026-11-28). On history the B2 weights (#114's `p_cal`, built from final Win odds), the
+> favourite and the favourite-odds bands all come from the final Win board, which is not known
+> when an exacta is bought. So E1's B1, B2 and B3 results describe that historical selection
+> (categories and cells defined on the final Win board), not a bet placeable before the off;
+> their conclusions are limited to it. A decision-time version is E2 (rule-v5), whose inputs
+> are all from the boards at T−2.
 - It needs only the winner's dividend. Every combination in S is staked, so selecting on the
   winner adds no bias.
 - Harville weights keep its variance far below the flat box.
@@ -229,17 +260,20 @@ a segment.
   `japan-131-exacta-category-v2-max-test` (before #525: `japan/131-exacta-category-v2/max-test`;
   v1: `…-v1/max-test`), so they do not add a variant to E1.
 
-**Family E2, ratio-cut rules** (D18 positive-edge; `japan-131-exacta-rule-v4`, superseding
-`-rule-v3` for the race-card popularity cutoff, which superseded `-rule-v2` for the
-decision-time favourite).
+**Family E2, ratio-cut rules** (D18 positive-edge; `japan-131-exacta-rule-v5`, superseding
+`-rule-v4` for decision-time Win probabilities and eligibility, which superseded `-rule-v3` for
+the race-card popularity cutoff, which superseded `-rule-v2` for the decision-time favourite).
 
 - The owner's 2026-11-27 reframe on #131 ranks every member by expected return at the final
-  price with its CI and drops the meeting gate; scoring E2 that way is #281.
+  price with its CI and drops the meeting gate; scoring E2 that way, under rule-v5, is #281.
 
 - Rule form: "at T−2, buy exacta c in category X ∈ {fav_second, no_fav} when
   `r_c(t) = q_c(t)/p_c(t) < k`".
   - `q_c(t)` comes from the exacta board at t: `implied_share(odds × 100, rate=...)`.
-  - `p_c(t)` is Harville on the Win board at t.
+  - `p_c(t)` is Harville on the Win board at t. rule-v5: discounted Harville at the registered
+    λ2 on the normalised implied Win shares of the Win board at T−2 (v4: #114's `p_cal`).
+  - Eligibility (rule-v5): every #130-logged development day with the Win and exacta boards
+    at T−2; no #114 row is needed.
   - Selection uses only the board at t. A selection variable taken from final odds is look-ahead.
 - Stake: ¥100 per selected combination. The rule is judged at the final dividend,
   with own impact from the payout identity using that race's logged pool totals.
@@ -248,10 +282,10 @@ decision-time favourite).
   4 cuts × 2 scopes = 16 members.
 - Benchmark: no bet (loss 0).
 - **History cannot score E2:** only the winner's `q_c` is known, so the selection set is
-  unobservable. E2 is scored only on #130-logged development days: rule-v4 scores the eligible
-  logged development days available at each run, reported with n and the CI, and is re-scored
-  as more days are logged (the owner's 2026-11-27 reframe). rule-v3 is history and not
-  executed: the note under the family table.
+  unobservable. E2 is scored only on #130-logged development days: rule-v5 (as rule-v4 before
+  it) scores the eligible logged development days available at each run, reported with n and
+  the CI, and is re-scored as more days are logged (the owner's 2026-11-27 reframe). rule-v3
+  and rule-v4 are history and not executed: the notes under the family table.
 - Buying fav_first is not in E2. A loss-avoidance rule (D18: "do not buy fav_first when
   r_c(t) is above a cut") becomes a follow-up ticket.
 
@@ -286,7 +320,23 @@ tertile is only its reported agreement diagnostic.)
 - Unavailable statistics (an empty cell, a 0 / 0 breakage share, a shrinkage without a positive
   SE, a one-meeting cell's bounds) are listed in the record's metrics as
   `<name>:unavailable:<reason>`, never in its params: the params are the variant's identity, so
-  a change in data coverage reruns a variant and never adds one to the family.
+  a change in data coverage reruns a variant and never adds one to the family. C with no
+  scored race above ¥110 keeps both λ2 records with `log_score_gain` unavailable (n 0); a C
+  sample of one meeting keeps its mean without bounds.
+- Return per ¥100 (Sol review round 5 of 2c73ca0, 2026-11-28): each B2 and B1 member also
+  reports `return_per_100` = 100 · Σ_r R_r / n, the gross yen returned per ¥100 staked on the
+  box in each of the cell's n races at the final dividend, with one-sided 95% meeting-bootstrap
+  bounds by the same rules. It is the governance metric (return per ¥100 at the price that
+  pays) shown beside ρ; it is a metric, never a param, so family sizes are unchanged. ρ stays
+  the pre-registered estimand. B3 is paid at Harville-fair odds, not the dividend, so it has
+  none.
+- Breakage (descriptive, review of 0c39a8d): a dividend at or below ¥110 may have been raised
+  by JRA's minimum payout, so its unrounded value is unknown. Such races are counted
+  (`n_floor`) and left out of `rho_unrounded` and `breakage_share`, which are unavailable when
+  every race of the cell pays at the floor; the paid ρ is over every race.
+- Board check: the run refuses (before recording anything) a development race whose Win board
+  in the store differs from the one #114's out-of-fold artifact was built on (its normalised
+  implied shares `q`), so `p_cal` is never paired with a corrected board.
 - Multiple testing:
   - Hansen SPA ("does any member depart in its stated direction") and Romano-Wolf StepM ("which"),
     both over meetings (`core/eval/snooping.py`, D17).
