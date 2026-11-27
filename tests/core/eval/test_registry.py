@@ -1209,6 +1209,157 @@ def test_summary_withholds_the_status_of_licensed_source_runs(tmp_path, sources)
             assert numbers == PUBLIC_NUMBERS, record.variant
 
 
+# ------------------------------------------------------------------------- #431 licensed row order
+#
+# Contract (#431, D21): the registry is append-only and a study may append its licensed runs in the
+# rank order of their results, so ``write_summary`` writes a family's licensed-source runs in an
+# order that depends only on their identity, never on when they were appended or on their figures:
+# the same runs in any append order, or carrying other figures, give a byte-identical family file.
+# Every run of a repeated variant stays; among themselves they may keep their append order. The
+# sort key is the implementation's. The index and the public family's file are unaffected.
+
+ORDER_FAMILY = "FAM-lic-order"
+ORDER_PUBLIC_FAMILY = "FAM-pub-order"
+# Licensed variant -> its sources. The names' order is neither a figure order nor its reverse.
+ORDER_VARIANTS = {
+    "var-cedar": ("jrdb",),
+    "var-alder": ("netkeiba", "jravan"),
+    "var-fir": ("jrdb",),
+    "var-birch": ("jravan",),
+    "var-elm": ("jrdb", "jravan"),
+    "var-dogwood": ("jrdb",),
+}
+ORDER_REPEATED = "var-birch"  # a failed run, then a scored run, of the same variant
+ORDER_PUBLIC = {
+    "pub-one": fold("foldqd-2025", "roi", 0.71, 0.63, 0.82, 977),
+    "pub-two": fold("foldqd-2025", "roi", 0.58, 0.47, 0.66, 640),
+}
+# The licensed figures, lowest first; a run's rank picks its value, CI and n.
+ORDER_VALUES = (-0.7341, -0.4127, -0.1883, 0.0936, 0.2571, 0.6184)
+ORDER_NS = (1503, 2277, 3061, 3845, 4629, 5413)
+ORDER_RANKS = {
+    "first": {
+        "var-cedar": 5,
+        "var-alder": 1,
+        "var-fir": 3,
+        "var-birch": 0,
+        "var-elm": 4,
+        "var-dogwood": 2,
+    },
+    "second": {
+        "var-cedar": 0,
+        "var-alder": 4,
+        "var-fir": 1,
+        "var-birch": 5,
+        "var-elm": 2,
+        "var-dogwood": 3,
+    },
+}
+
+
+def order_run(variant: str, status: str, ranks: dict[str, int]) -> RunRecord:
+    if variant in ORDER_PUBLIC:
+        return make_record(
+            hypothesis_id="E432",
+            family_id=ORDER_PUBLIC_FAMILY,
+            variant=variant,
+            metrics=(ORDER_PUBLIC[variant],),
+        )
+    rank = ranks[variant]
+    value = ORDER_VALUES[rank]
+    metrics = (fold("foldqd-2025", "roi", value, value - 0.0412, value + 0.0388, ORDER_NS[rank]),)
+    return make_record(
+        hypothesis_id="E431",
+        family_id=ORDER_FAMILY,
+        variant=variant,
+        sources=ORDER_VARIANTS[variant],
+        metrics=() if status == "failed" else metrics,
+        status=status,
+    )
+
+
+def by_return(ranks: dict[str, int], *, best_first: bool) -> list[tuple[str, str]]:
+    """The scored licensed runs in the order of their returns, as a study ranks them."""
+    ranked = sorted(ORDER_VARIANTS, key=lambda v: ranks[v], reverse=best_first)
+    return [(variant, "scored") for variant in ranked]
+
+
+def test_summary_orders_licensed_runs_independently_of_append_order_and_figures(tmp_path):
+    failed, scored = (ORDER_REPEATED, "failed"), (ORDER_REPEATED, "scored")
+    pub_one, pub_two = ("pub-one", "scored"), ("pub-two", "scored")
+    # The failed run right before its scored run, as a retry leaves them.
+    worst_first = by_return(ORDER_RANKS["first"], best_first=False)
+    worst_first.insert(worst_first.index(scored), failed)
+    # name -> (figures, append order); the public runs keep their relative order throughout.
+    arrangements = {
+        "best-first": (
+            ORDER_RANKS["first"],
+            [pub_one, failed, *by_return(ORDER_RANKS["first"], best_first=True), pub_two],
+        ),
+        "worst-first": (ORDER_RANKS["first"], [*worst_first, pub_one, pub_two]),
+        "shuffled": (
+            ORDER_RANKS["first"],
+            [
+                ("var-fir", "scored"),
+                pub_one,
+                failed,
+                ("var-dogwood", "scored"),
+                ("var-cedar", "scored"),
+                scored,
+                pub_two,
+                ("var-alder", "scored"),
+                ("var-elm", "scored"),
+            ],
+        ),
+        "other-figures-best-first": (
+            ORDER_RANKS["second"],
+            [failed, pub_one, pub_two, *by_return(ORDER_RANKS["second"], best_first=True)],
+        ),
+    }
+
+    every_run = sorted(
+        [failed, pub_one, pub_two, *by_return(ORDER_RANKS["first"], best_first=True)]
+    )
+    pages = {}
+    for name, (ranks, order) in arrangements.items():
+        assert sorted(order) == every_run, f"{name} does not append every run once"
+        assert order.index(failed) < order.index(scored), name
+        assert order.index(pub_one) < order.index(pub_two), name
+        reg, _, _ = open_registry(tmp_path / name)
+        for variant, status in order:
+            reg.append(order_run(variant, status, ranks))
+        out = summary_dir_in(tmp_path / name)
+        write_summary(reg, out)
+        pages[name] = written(out)
+
+    family_file, public_file = f"{ORDER_FAMILY}.md", f"{ORDER_PUBLIC_FAMILY}.md"
+    reference = pages["best-first"]
+    assert set(reference) == {"README.md", family_file, public_file}
+    assert all(set(files) == set(reference) for files in pages.values())
+    index = reference["README.md"].decode("utf-8")
+    assert f"({family_file})" in index and f"({public_file})" in index
+    unchanged = ("README.md", public_file)
+    changed = [(n, f) for n, files in pages.items() for f in unchanged if files[f] != reference[f]]
+    assert changed == [], f"the index or the public family's file changed: {changed}"
+
+    follows = [
+        name for name, files in pages.items() if files[family_file] != reference[family_file]
+    ]
+    assert follows == [], (
+        f"{family_file} differs from best-first's in {follows}: the order of its licensed rows "
+        "follows the append order or the figures, so it publishes their rank (D21)"
+    )
+
+    text = reference[family_file].decode("utf-8")
+    counts = {variant: text.count(variant) for variant in ORDER_VARIANTS}
+    assert counts == {v: 2 if v == ORDER_REPEATED else 1 for v in ORDER_VARIANTS}, (
+        "every run of every licensed variant must be listed, a repeated variant's too"
+    )
+    assert WITHHELD_LABEL in text
+    figures = [f"{v:.4f}" for v in ORDER_VALUES] + [str(n) for n in ORDER_NS]
+    assert [num for num in figures if shows_number(text, num)] == []
+
+
 # --------------------------------------------------------------------------- default registry
 
 

@@ -51,6 +51,7 @@ __all__ = [
     "RegistryTampered",
     "RunRecord",
     "default_registry",
+    "is_licensed_record",
     "run_id",
     "summary_dir",
     "summary_stem",
@@ -157,6 +158,12 @@ def _licensed(record: RunRecord) -> bool:
     components = record.components if isinstance(record.components, dict) else {}
     named = [*builds, *components, *components.values()]
     return is_withheld(record.sources) or is_withheld(tuple(str(name) for name in named))
+
+
+def is_licensed_record(record: RunRecord) -> bool:
+    """Whether ``write_summary`` withholds the run's values: what ``_licensed`` returns, so other
+    readers (the leaderboard, #450) withhold exactly the runs the summary withholds."""
+    return _licensed(record)
 
 
 # --------------------------------------------------------------------------- validation
@@ -543,6 +550,16 @@ def _number(value: float | None) -> str:
     return "-" if value is None else f"{value:.6g}"
 
 
+def _summary_order(records: list[RunRecord]) -> list[RunRecord]:
+    """A family's runs as its summary lists them: the public runs in append order, then the
+    licensed-source runs sorted by their identity (variant, E id, status; append order only
+    between runs alike in all three), so neither when a licensed run was appended nor where it
+    fell among the public runs shows in the file (D21)."""
+    public = [r for r in records if not _licensed(r)]
+    licensed = [r for r in records if _licensed(r)]
+    return public + sorted(licensed, key=lambda r: (r.variant, r.hypothesis_id, r.status))
+
+
 def write_summary(registry: Registry, directory: Path | str) -> None:
     """Write the aggregate-only summary of ``registry`` into ``directory`` (normally
     ``summary_dir(country)``): one ``<family_id>.md`` per family, holding per run its E id,
@@ -553,7 +570,9 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
     would share a file (ignoring case). A licensed-source run shows only its E id and variant,
     with ``withheld (licensed source)`` in place of its status and values: a status may be
     data-derived (D21; #430, a cell rule failed for want of bets). A family's file depends on
-    that family's records alone."""
+    that family's records alone: its public runs in append order, then its licensed-source runs
+    in identity order, so the file is the same whatever order those were appended in (a study
+    may append them ranked)."""
     families: dict[str, list[RunRecord]] = {}
     for record in registry.records():
         families.setdefault(record.family_id, []).append(record)
@@ -577,7 +596,7 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
             "| E id | Variant | Status | Fold | Metric | Value | CI | n |",
             "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
-        for r in records:
+        for r in _summary_order(records):
             if _licensed(r):
                 ids = f"| {_cell(r.hypothesis_id)} | {_cell(r.variant)} |"
                 lines.append(f"{ids} {WITHHELD_LABEL} | | | | | |")
