@@ -13,9 +13,13 @@ pushed into the scan. Per year it counts:
   after rounding to the tenth;
 - dividends per pool by (race_id, pool, combination), and of the matched rows the equal ones;
 - matched races whose runners match one to one with every Win odds equal (`win_odds_agree`), and
-  whose dividend rows match one to one with every dividend equal (`payouts_agree`);
+  whose dividend rows match one to one with every dividend equal (`payouts_agree`); a race with a
+  repeated runner key in either store agrees on neither, one with an unnumbered runner in either
+  store does not agree on Win odds;
 - rows whose key occurs more than once in one store (`<table>.<source>_duplicate`); they are still
-  matched row by row.
+  matched row by row;
+- runners with a null `horse_no` (`runners.<source>_unnumbered`, #394): they have no key, so they
+  stay out of the merge and the `_duplicate` count.
 
 Each one-store and repeated-key count is also broken down by the race's `status` in that store's
 `races` (`<check>.<status>`; `no_race` when that store's races lack the race), so the report shows
@@ -115,6 +119,8 @@ class Reconciliation:
             for table in ("races", "runners", "dividends")
         )
         lines.append(f"rows whose key repeats in one store: {repeats}")
+        unnumbered = ", ".join(_with_status(o, f"runners.{s}_unnumbered", s) for s in SOURCES)
+        lines.append(f"runners with no horse number, not matched: {unnumbered}")
         return "\n".join(lines)
 
     def to_markdown(self) -> str:
@@ -133,7 +139,8 @@ class Reconciliation:
             "agree rates: over the matched count of the table (races, runners, or the pool's "
             "dividends). Equal means both values equal or both null; `post_time_local` compares "
             "as minutes of the day, `finish_time_s` and `win_odds` at the tenth. "
-            "`<table>.<source>_duplicate` counts the rows whose key repeats in that store. "
+            "`<table>.<source>_duplicate` counts the rows whose key repeats in that store; "
+            "`runners.<source>_unnumbered` the runners with no horse number there (not matched). "
             "`<check>.<status>` breaks a one-store or repeated-key count down by the race's "
             "`status` in that store's races (`no_race`: not in that store's races).",
             "",
@@ -211,14 +218,26 @@ def _compare_year(lo: date, hi: date) -> tuple[Counter[str], dict[str, set[str]]
     matched_ids = set(matched["race_id"])
 
     frames = _read("runners", RUNNER_KEY + list(RUNNER_FIELDS), lo, hi)
+    unnumbered_ids: set[str] = set()
+    for s in SOURCES:  # a runner with no horse number has no key: counted apart, never merged
+        blank = frames[s]["horse_no"].isna()
+        rows = frames[s].loc[blank, "race_id"]
+        counts[f"runners.{s}_unnumbered"] += len(rows)
+        _by_status(f"runners.{s}_unnumbered", rows, status[s], counts)
+        fail(f"runners.{s}_unnumbered", rows)
+        unnumbered_ids |= set(rows)
+        frames[s] = frames[s][~blank]
     runners = _merge("runners", frames, RUNNER_KEY, counts, fail, status)
     _presence("runners.", runners, counts, fail, status)
     both = runners[runners["_merge"] == "both"]
     for f in RUNNER_FIELDS:
         _equal_count(f"runners.equal.{f}", both, f, counts, fail)
+    repeated_ids = {r for s in SOURCES for r in bad.get(f"runners.{s}_duplicate", ())}
     odds_bad = set(runners.loc[runners["_merge"] != "both", "race_id"])
     odds_bad |= set(both.loc[~_equal(both, "win_odds"), "race_id"])
-    _agree("races.win_odds_agree", matched_ids, odds_bad, counts, fail)
+    _agree(
+        "races.win_odds_agree", matched_ids, odds_bad | unnumbered_ids | repeated_ids, counts, fail
+    )
 
     ids = sorted(set(races["race_id"]))
     frames = {s: _read_dividends(s, ids) for s in SOURCES}
@@ -232,7 +251,7 @@ def _compare_year(lo: date, hi: date) -> tuple[Counter[str], dict[str, set[str]]
     pay_bad = set(dividends.loc[dividends["_merge"] != "both", "race_id"])
     paired = dividends[dividends["_merge"] == "both"]
     pay_bad |= set(paired.loc[~_equal(paired, "dividend"), "race_id"])
-    _agree("races.payouts_agree", matched_ids, pay_bad, counts, fail)
+    _agree("races.payouts_agree", matched_ids, pay_bad | repeated_ids, counts, fail)
     return counts, bad
 
 
@@ -353,6 +372,8 @@ def _ordered_keys(counts: Mapping[str, int]) -> list[str]:
         if table == "races":
             keys += ["races.win_odds_agree", "races.payouts_agree"]
         keys += [f"{table}.{s}_duplicate" for s in SOURCES]
+        if table == "runners":
+            keys += [f"runners.{s}_unnumbered" for s in SOURCES]
     for pool in _pools(counts):
         keys += [f"dividends.{pool}.{c}" for c in (*PRESENCE.values(), "equal")]
     keys += [f"dividends.{s}_duplicate" for s in SOURCES]
@@ -362,8 +383,8 @@ def _ordered_keys(counts: Mapping[str, int]) -> list[str]:
 
 
 def _breakdown(counts: Mapping[str, int], key: str) -> list[str]:
-    """The `<key>.<status>` keys of a one-store or repeated-key count."""
-    if not key.endswith(("_only", "_duplicate")):
+    """The `<key>.<status>` keys of a one-store, repeated-key or unnumbered count."""
+    if not key.endswith(("_only", "_duplicate", "_unnumbered")):
         return []
     return sorted(
         k for k in counts if k.startswith(key + ".") and k.count(".") == key.count(".") + 1

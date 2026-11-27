@@ -10,7 +10,8 @@ margin names, beaten-lengths sum and pound conversion). `build_runners` reads
 `finish_time_s` on `races.parquet` (from `races.build_races`) to each race's winner's time. The
 code values each mapping uses are the constants below (the code-table text stays in the licensed
 workbook); a code a mapping lacks becomes null and is counted per code in the report. A blank or
-all-zero margin code is JV-Data's "unset": null and never counted. See docs/specs/jravan.md.
+all-zero margin code is JV-Data's "unset": null and never counted. An undrawn runner (馬番 99, in
+abandoned races) is kept with a null `horse_no` and `draw` (#394). See docs/specs/jravan.md.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ YEAR, MMDD, VENUE, KAI, NICHI, RACE_NO = (
     races.YEAR, races.MMDD, races.VENUE, races.KAI, races.NICHI, races.RACE_NO,
 )  # fmt: skip
 HORSE_NO = "馬番"
+UNDRAWN = 99  # 馬番 of a runner of an abandoned race that was never drawn: no number, no draw
 HORSE_ID = "血統登録番号"  # the top-level item, not the one inside 1着馬(相手馬)情報
 BRACKET = "枠番"
 HORSE_NAME = "馬名"
@@ -177,7 +179,7 @@ def _map(cols: Mapping[str, np.ndarray]) -> tuple[pd.DataFrame, dict[str, collec
     race = [by_key[k] for k in race_keys]
     race_ids = [r[0] for r in race]
 
-    horse_no = _values(records.integer(cols[HORSE_NO]))
+    horse_no = _values(records.integer(cols[HORSE_NO]), null=(UNDRAWN,))
     places = _values(records.integer(cols[PLACE]), null=(0,))
     body = _values(records.integer(cols[BODY_WT]), null=(0, NOT_WEIGHED))
     change = _values(records.integer(cols[CHANGE]), null=(NOT_WEIGHED,))

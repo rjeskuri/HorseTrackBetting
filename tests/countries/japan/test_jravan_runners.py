@@ -1203,6 +1203,152 @@ def test_two_builds_write_identical_bytes(data: Path) -> None:
 
 
 # ------------------------------------------------------------------------------------------------
+# Abandoned races: the undrawn runner's 馬番 99 becomes a null horse_no and draw (#394)
+
+UNDRAWN = 99  # 馬番 as printed for a runner of an abandoned race that was never drawn
+UNDRAWN_RECORDS = [  # (horse_no, horse_id, bracket): an abandoned race's field
+    (UNDRAWN, "2022100031", 5), (UNDRAWN, "2020100007", 2), (UNDRAWN, "2021100020", 8),
+    (4, "2021100044", 3), (7, "2019100077", 6), (1, "2022100001", 1), (18, "2018100018", 8),
+    (10, "2020100010", 5),
+]  # fmt: skip
+
+
+def unplaced(**over: Any) -> bytes:
+    """An SE record of a runner that never ran: no place, time, odds or margin."""
+    return se(
+        **{"place": 0, "time": "0000", "odds": 0, "fav": 0, "margin": "   ", "last3": 0,
+           "corners": (0, 0, 0, 0)} | over
+    )  # fmt: skip
+
+
+def test_an_undrawn_runner_has_no_horse_number_or_draw(se_spec: spec.RecordSpec) -> None:
+    recs = [unplaced(race="03", horse_no=n, horse_id=h, bracket=b) for n, h, b in UNDRAWN_RECORDS]
+    frame = mapped(se_spec, *recs)
+    assert len(frame) == len(UNDRAWN_RECORDS)
+    rows = {
+        row["horse_id"]: {k: plain(v) for k, v in row.items()} for row in frame.to_dict("records")
+    }
+    assert set(rows) == {h for _, h, _ in UNDRAWN_RECORDS}  # every runner is kept
+    for number, horse, bracket in UNDRAWN_RECORDS:
+        row = rows[horse]
+        want = None if number == UNDRAWN else number
+        # a drawn runner keeps its number and draws by it; an undrawn one has neither
+        assert (row["horse_no"], row["draw"]) == (want, want), horse
+        # everything else is as printed
+        assert_subset(
+            row,
+            {"race_id": TOK + "03", "bracket": bracket, "horse_name": "カクウノウマ",
+             "finish_pos": None, "is_scratched": False, "jockey_code": "01126"},
+            horse,
+        )  # fmt: skip
+    assert sum(r["horse_no"] is None for r in rows.values()) == 3
+
+    # the number alone decides it: 99 is undrawn, 98 and the real numbers are not
+    for number, want in ((99, None), (98, 98), (18, 18), (1, 1)):
+        (row,) = mapped(se_spec, unplaced(race="05", horse_no=number)).to_dict("records")
+        assert (plain(row["horse_no"]), plain(row["draw"])) == (want, want), number
+
+
+ABANDONED_DAY_2025 = [
+    ra(race="03", kubun="9"),  # TOK 03: abandoned
+    ra(race="04", post="1015"),  # TOK 04: ran
+]
+ABANDONED_DAY_2024 = [
+    ra(**KYO, kubun="9"),  # KYO 11: abandoned, all its runners undrawn
+]
+SE_ABANDONED_2025 = [  # written out of horse-id order on purpose
+    *[unplaced(race="03", horse_no=n, horse_id=h, bracket=b) for n, h, b in UNDRAWN_RECORDS],
+    se(race="04", horse_no=2, horse_id="2021100102", place=2, time="1100", margin="1  "),
+    se(race="04", horse_no=1, horse_id="2021100101", place=1, time="1092"),
+]  # fmt: skip
+SE_ABANDONED_2024 = [
+    unplaced(**KYO, horse_no=UNDRAWN, horse_id="2020100900"),
+    unplaced(**KYO, horse_no=UNDRAWN, horse_id="2020100700"),
+]
+
+
+def abandoned_inputs(data: Path, *, reverse: bool = False) -> None:
+    write_ra(data, 2024, ABANDONED_DAY_2024)
+    write_ra(data, 2025, ABANDONED_DAY_2025)
+    for year, recs in ((2024, SE_ABANDONED_2024), (2025, SE_ABANDONED_2025)):
+        write_se(data, year, recs[::-1] if reverse else recs)
+
+
+def test_the_build_keeps_an_abandoned_races_runners_with_a_unique_horse_number(
+    data: Path,
+) -> None:
+    abandoned_inputs(data)
+    races.build_races()
+    report = runners.build_runners()
+    path = tables.table_path(SOURCE, "runners")
+    assert_store_types(path, "runners")
+    got = tables.read_table(SOURCE, "runners")
+
+    # no runner is dropped
+    assert report.by_year[2024]["runners_written"] == len(SE_ABANDONED_2024)
+    assert report.by_year[2025]["runners_written"] == len(SE_ABANDONED_2025)
+    assert len(got) == len(SE_ABANDONED_2024) + len(SE_ABANDONED_2025)
+    assert flat_unmapped(report) == {}
+
+    # (race_id, horse_no) is unique where horse_no is set, and no row carries 99
+    keyed = [
+        (r, int(n)) for r, n in zip(got["race_id"], got["horse_no"], strict=True) if pd.notna(n)
+    ]
+    assert len(keyed) == len(set(keyed)) == 5 + 2
+    assert UNDRAWN not in {n for _, n in keyed}
+    assert got["horse_no"].isna().sum() == got["draw"].isna().sum() == 3 + 2
+
+    # the abandoned races keep status `abandoned`; the other race is unchanged
+    after = by_race(tables.read_table(SOURCE, "races"))
+    assert {rid: row["status"] for rid, row in after.items()} == {
+        "jra:2024-11-30:KYO:11": "abandoned", TOK + "03": "abandoned", TOK + "04": "run",
+    }  # fmt: skip
+    assert after[TOK + "03"]["finish_time_s"] is None
+    assert after["jra:2024-11-30:KYO:11"]["finish_time_s"] is None
+    assert after[TOK + "04"]["finish_time_s"] == pytest.approx(69.2)
+
+    # sorted by (race_id, horse_no, horse_id): the numbered runners by number, then the
+    # unnumbered ones (null horse_no) by horse id
+    order = [
+        (r, None if pd.isna(n) else int(n), h)
+        for r, n, h in zip(got["race_id"], got["horse_no"], got["horse_id"], strict=True)
+    ]
+    assert order == [
+        ("jra:2024-11-30:KYO:11", None, "2020100700"),
+        ("jra:2024-11-30:KYO:11", None, "2020100900"),
+        (TOK + "03", 1, "2022100001"),
+        (TOK + "03", 4, "2021100044"),
+        (TOK + "03", 7, "2019100077"),
+        (TOK + "03", 10, "2020100010"),
+        (TOK + "03", 18, "2018100018"),
+        (TOK + "03", None, "2020100007"),
+        (TOK + "03", None, "2021100020"),
+        (TOK + "03", None, "2022100031"),
+        (TOK + "04", 1, "2021100101"),
+        (TOK + "04", 2, "2021100102"),
+    ]
+
+    # the unnumbered runners keep their other fields; a drawn runner draws by its number
+    rows = {r["horse_id"]: r for r in got.to_dict("records")}
+    assert plain(rows["2022100031"]["bracket"]) == 5 and plain(rows["2020100007"]["bracket"]) == 2
+    assert plain(rows["2022100001"]["draw"]) == 1 and plain(rows["2018100018"]["draw"]) == 18
+    assert pd.isna(rows["2022100031"]["draw"])
+
+
+def test_the_abandoned_race_build_is_byte_stable_whatever_the_record_order(data: Path) -> None:
+    abandoned_inputs(data)
+    races.build_races()
+    runners.build_runners()
+    first = {t: tables.table_path(SOURCE, t).read_bytes() for t in ("runners", "races")}
+
+    abandoned_inputs(data, reverse=True)  # the same records, the other way round
+    races.build_races()
+    runners.build_runners()
+    for table, blob in first.items():
+        assert tables.table_path(SOURCE, table).read_bytes() == blob, table
+
+
+# ------------------------------------------------------------------------------------------------
 # The real export (local: needs $HORSETRACK_DATA_DIR with the export and the workbook)
 
 REAL_YEAR = 2024  # a whole recent year, before the holdout

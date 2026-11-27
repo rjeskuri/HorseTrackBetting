@@ -210,8 +210,14 @@ post time a null `post_time_local`.
   and `win_fav_rank` (zero null) in store units; `sex` H, M, G; `age` as printed. `brand_raw`,
   `rating` and `gear_raw` are null. Each mapping's code values are constants in `runners.py`; a
   code a mapping lacks is null and counted.
-- Runners of abandoned races (RA data kubun 9) are written, without a place; their undrawn
-  runners carry 馬番 99 as printed.
+- Abandoned races (RA data kubun 9, `races.status` `abandoned`) are kept, and so are their
+  runners, written without a place. A runner that was never drawn is printed with 馬番 99; its
+  `horse_no` and `draw` are null (#394), only for 99, so no number is shared and `(race_id,
+  horse_no)` is unique where `horse_no` is set (`check_unique_horse_no` already skips nulls). The
+  table's sort key (`race_id`, `horse_no`, `horse_id`) puts the unnumbered runners last in their
+  race, by horse id. A reader keyed on `(race_id, horse_no)` drops or counts those rows apart
+  (`reconcile` counts them as `runners.<source>_unnumbered`); `horse_runs` keeps them as runs
+  with a null `draw`.
 
 The run on the export: `horsetrack japan jravan runners`, run 2026-11-26. Every count, span,
 share, rate, wall time and peak memory of it is withheld (D21), in two files under
@@ -655,8 +661,13 @@ at a time, and changes neither store:
   `combination`). Over the matched rows it counts the equal fields (`RACE_FIELDS`,
   `RUNNER_FIELDS`; post times as minutes of the day, `finish_time_s` and `win_odds` at the
   tenth), the races whose Win odds all agree and those whose payouts all agree, and the rows whose
-  key repeats within a store. One-store and repeated-key counts are broken down by the race's
-  `status` in that store.
+  key repeats within a store. One-store, repeated-key and unnumbered counts are broken down by the
+  race's `status` in that store.
+- A runner with a null `horse_no` (jravan's undrawn runners of abandoned races) has no key: it
+  stays out of the runner merge and of `runners.<source>_duplicate`, and is counted as
+  `runners.<source>_unnumbered`. A matched race with a repeated runner key in either store
+  agrees on neither Win odds nor payouts; one with an unnumbered runner in either store does not
+  agree on Win odds.
 - The command prints the overall counts and rates; the detail by year, with up to 20 failing race
   ids per check, goes to `reports/jravan-reconcile.md` through `write_report`
   (`sources=('jravan', 'jra')`), which refuses the repository. Its figures come from a licensed

@@ -921,3 +921,171 @@ def test_the_report_holds_counts_and_rates_and_is_refused_inside_the_repo(
         assert not inside.parent.exists()
     finally:
         shutil.rmtree(inside.parent, ignore_errors=True)
+
+
+# ------------------------------------------------------------------------------------------------
+# Abandoned races and repeated or missing runner keys (#394)
+#
+# The jravan store keeps the races JV-Data marks abandoned (`status` `abandoned`), the jra store
+# does not. A runner of an abandoned race that was never drawn has a null `horse_no`: such a row is
+# counted as `runners.<source>_unnumbered` (by the race's status, like the other counts) and does
+# not enter the (race_id, horse_no) merge, nor the `_duplicate` count. A matched race whose runners
+# have a repeated key, or an unnumbered runner, in either store does not agree on Win odds; one
+# with a repeated key does not agree on payouts either. Every expected count is derived from the
+# plan each test writes.
+
+ABANDONED = {"jravan": {"status": "abandoned"}}
+
+
+def unnumbered(stores: Stores, source: str, day: date, venue: str, race_no: int, horse_id: str):
+    """A runner with no horse number or draw (nor a place, time, price or weight) in `source`."""
+    stores.rows[source, "runners"].append(
+        base_runner(day, venue, race_no, 1)
+        | {"horse_no": None, "draw": None, "horse_id": horse_id, "finish_pos": None,
+           "finish_time_s": None, "win_odds": None, "win_fav_rank": None, "horse_wt_kg": None}
+    )  # fmt: skip
+
+
+def repeat_number(stores: Stores, source: str, day, venue, race_no, horse_no, horse_id) -> None:
+    """A second runner with `horse_no` in `source`; everything else a normal runner's."""
+    stores.rows[source, "runners"].append(
+        base_runner(day, venue, race_no, horse_no) | {"horse_id": horse_id}
+    )
+
+
+def test_unnumbered_runners_are_counted_apart_and_fail_the_win_odds_agreement(data: Path) -> None:
+    stores = Stores()
+    d16, d19 = date(2016, 4, 2), date(2019, 10, 5)
+    stores.add(d16, "TOK", 1, n=6)  # clean
+    stores.add(d16, "TOK", 2, n=6, race=ABANDONED)  # matched, abandoned in jravan, 2 unnumbered
+    unnumbered(stores, "jravan", d16, "TOK", 2, "2016100201")
+    unnumbered(stores, "jravan", d16, "TOK", 2, "2016100202")
+    stores.add(d16, "TOK", 3, n=6)  # matched, 1 unnumbered in jravan
+    unnumbered(stores, "jravan", d16, "TOK", 3, "2016100301")
+    stores.add(d16, "TOK", 4, n=6)  # matched, 1 unnumbered in jra
+    unnumbered(stores, "jra", d16, "TOK", 4, "2016100401")
+    stores.add(d16, "TOK", 5, n=6)  # clean
+    # 2019: a jravan-only abandoned race (3 drawn, 2 unnumbered, no payouts), a matched race with 3
+    # unnumbered runners in jravan, two clean ones
+    stores.add(d19, "KYO", 1, n=3, sources=("jravan",), race=ABANDONED, dividends=())
+    unnumbered(stores, "jravan", d19, "KYO", 1, "2019100101")
+    unnumbered(stores, "jravan", d19, "KYO", 1, "2019100102")
+    stores.add(d19, "KYO", 2, n=6)
+    stores.add(d19, "KYO", 3, n=6)
+    stores.add(d19, "KYO", 4, n=6)
+    for k in range(3):
+        unnumbered(stores, "jravan", d19, "KYO", 4, f"201910040{k}")
+    stores.write(data)
+
+    rec = reconcile(start=date(2016, 1, 1), end=date(2019, 12, 31))
+
+    want = {
+        2016: {
+            "races.both": 5, "runners.both": 30, "runners.jravan_only": 0, "runners.jra_only": 0,
+            "runners.jravan_unnumbered": 3, "runners.jravan_unnumbered.abandoned": 2,
+            "runners.jravan_unnumbered.run": 1, "runners.jra_unnumbered": 1,
+            "runners.jra_unnumbered.run": 1, "races.win_odds_agree": 2,
+        },
+        2019: {
+            "races.both": 3, "races.jravan_only": 1, "races.jravan_only.abandoned": 1,
+            "runners.both": 18, "runners.jravan_only": 3, "runners.jravan_only.abandoned": 3,
+            "runners.jravan_unnumbered": 5, "runners.jravan_unnumbered.abandoned": 2,
+            "runners.jravan_unnumbered.run": 3, "runners.jra_unnumbered": 0,
+            "races.win_odds_agree": 2,
+        },
+    }  # fmt: skip
+    for year, counts in want.items():
+        for key, n in counts.items():
+            assert count(rec, year, key) == n, (year, key)
+        # an unnumbered row is never matched, never a repeated key, never in one store only
+        for source in SOURCES:
+            assert count(rec, year, f"runners.{source}_duplicate") == 0, (year, source)
+    assert total(rec, "runners.jravan_unnumbered") == 8
+    assert total(rec, "runners.jravan_unnumbered.abandoned") == 4
+    assert total(rec, "runners.jravan_unnumbered.run") == 4
+    assert total(rec, "races.win_odds_agree") == 4
+    assert_overall_is_the_sum(rec)
+    # the counts are in the private report too
+    assert "runners.jravan_unnumbered" in rec.to_markdown()
+
+
+def test_a_repeated_runner_key_is_counted_and_fails_both_agreements(data: Path) -> None:
+    stores = Stores()
+    d17, d21 = date(2017, 4, 1), date(2021, 5, 1)
+    # 2017: a repeated key in jravan (R1) and in an abandoned race there (R3), one in jra (R4)
+    stores.add(d17, "TOK", 1, n=6)
+    repeat_number(stores, "jravan", d17, "TOK", 1, 5, "2017100150")
+    stores.add(d17, "TOK", 2, n=6)  # clean
+    stores.add(d17, "TOK", 3, n=6, race=ABANDONED)
+    repeat_number(stores, "jravan", d17, "TOK", 3, 1, "2017100310")
+    stores.add(d17, "TOK", 4, n=6)
+    repeat_number(stores, "jra", d17, "TOK", 4, 2, "2017100420")
+    # 2021: two clean races, one horse number three times in jravan
+    stores.add(d21, "TOK", 1, n=6)
+    stores.add(d21, "TOK", 2, n=6)
+    stores.add(d21, "TOK", 3, n=6)
+    repeat_number(stores, "jravan", d21, "TOK", 3, 3, "2021100330")
+    repeat_number(stores, "jravan", d21, "TOK", 3, 3, "2021100331")
+    stores.write(data)
+
+    rec = reconcile(start=date(2017, 1, 1), end=date(2021, 12, 31))
+
+    want = {
+        2017: {
+            "races.both": 4, "runners.both": 27, "runners.jravan_only": 0, "runners.jra_only": 0,
+            "runners.jravan_duplicate": 4, "runners.jravan_duplicate.run": 2,
+            "runners.jravan_duplicate.abandoned": 2, "runners.jra_duplicate": 2,
+            "runners.jra_duplicate.run": 2, "races.win_odds_agree": 1,
+            "races.payouts_agree": 1,
+        },
+        2021: {
+            "races.both": 3, "runners.both": 20, "runners.jravan_duplicate": 3,
+            "runners.jravan_duplicate.run": 3, "runners.jra_duplicate": 0,
+            "races.win_odds_agree": 2, "races.payouts_agree": 2,
+        },
+    }  # fmt: skip
+    for year, counts in want.items():
+        for key, n in counts.items():
+            assert count(rec, year, key) == n, (year, key)
+        for source in SOURCES:
+            assert count(rec, year, f"runners.{source}_unnumbered") == 0, (year, source)
+    assert total(rec, "runners.jravan_duplicate") == 7
+    assert (total(rec, "races.win_odds_agree"), total(rec, "races.payouts_agree")) == (3, 3)
+    assert_overall_is_the_sum(rec)
+
+
+def test_abandoned_and_unmatched_races_are_counted_by_status(data: Path) -> None:
+    stores = Stores()
+    day = date(2018, 10, 6)
+    # two abandoned and one run race in jravan only; one race in jra only
+    stores.add(day, "KYO", 1, n=4, sources=("jravan",), race=ABANDONED, dividends=())
+    stores.add(day, "KYO", 2, n=5, sources=("jravan",), race=ABANDONED, dividends=())
+    stores.add(day, "KYO", 3, n=6, sources=("jravan",))
+    stores.add(day, "KYO", 4, n=7, sources=("jra",))
+    # a race in jra's races only, whose runners (and one extra) and payouts (and one extra) jravan
+    # holds without a races row: its extras are jravan's, from a race jravan's races lack
+    rid = stores.add(day, "KYO", 5, n=8, sources=("jra",))
+    for horse_no in range(1, 10):
+        stores.rows["jravan", "runners"].append(base_runner(day, "KYO", 5, horse_no))
+    stores.payouts("jravan", rid, BASE_DIVIDENDS + (("WIN", "3", 400.0),))
+    stores.write(data)
+
+    rec = reconcile(start=date(2018, 1, 1), end=date(2018, 12, 31))
+
+    want = {
+        "races.both": 0, "races.jravan_only": 3, "races.jravan_only.abandoned": 2,
+        "races.jravan_only.run": 1, "races.jra_only": 2, "races.jra_only.run": 2,
+        "runners.both": 8, "runners.jravan_only": 16, "runners.jravan_only.abandoned": 9,
+        "runners.jravan_only.run": 6, "runners.jravan_only.no_race": 1, "runners.jra_only": 7,
+        "runners.jra_only.run": 7,
+        "dividends.WIN.both": 1, "dividends.WIN.jravan_only": 2,
+        "dividends.WIN.jravan_only.run": 1, "dividends.WIN.jravan_only.no_race": 1,
+        "dividends.WIN.jra_only": 1, "dividends.WIN.jra_only.run": 1,
+        "dividends.PLACE.both": 3, "dividends.PLACE.jravan_only": 3,
+        "dividends.PLACE.jravan_only.run": 3, "dividends.PLACE.jra_only": 3,
+        "races.win_odds_agree": 0, "races.payouts_agree": 0,
+        "runners.jravan_duplicate": 0, "runners.jravan_unnumbered": 0,
+    }  # fmt: skip
+    for key, n in want.items():
+        assert count(rec, 2018, key) == n, key
+    assert_overall_is_the_sum(rec)
