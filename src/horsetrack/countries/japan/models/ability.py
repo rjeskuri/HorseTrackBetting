@@ -429,9 +429,11 @@ def _newton(theta, pb: _Problem, precision, *, tol=STEP_TOL, at=None, steps=None
     return theta, loglik, info, (loglik, score, info)
 
 
-def _empirical_bayes(pb: _Problem, blocks: list[np.ndarray]):
+def _empirical_bayes(pb: _Problem, blocks: list[np.ndarray], base_precision=None):
     """The MAP at the prior variances that solve MacKay's fixed point, one per entity block:
-    (theta, loglik, Sigma, tau2). The fixed point runs on z = ln tau2 with a per-block secant
+    (theta, loglik, Sigma, tau2). `base_precision` (per coefficient, default 0: unpenalised) is
+    the fixed prior precision of the coefficients outside the blocks (#95's cell deviations at
+    tau_cell). The fixed point runs on z = ln tau2 with a per-block secant
     step on the residual ln(update) - z (the plain update when the secant has no valid slope), so
     it converges where the plain update crawls (a variance the data barely support); a block
     whose update goes below TAU2_FLOOR stays at the floor, and a step is capped at EB_JUMP.
@@ -444,7 +446,7 @@ def _empirical_bayes(pb: _Problem, blocks: list[np.ndarray]):
     floor = math.log(TAU2_FLOOR)
     last, at, tight = None, None, not len(blocks)
     for _ in range(EB_MAX):
-        precision = np.zeros(size)
+        precision = np.zeros(size) if base_precision is None else np.array(base_precision)
         for cols, zz in zip(blocks, z, strict=True):
             precision[cols] = math.exp(-zz)
         tol, steps = (STEP_TOL, None) if tight else (LOOSE_TOL, INNER_STEPS)
