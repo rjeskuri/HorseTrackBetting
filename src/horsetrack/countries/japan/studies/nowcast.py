@@ -32,8 +32,9 @@ its final H1 votes in `pool_votes`, read through the store's scoped reader so ho
 reach the study; after the folds); Wide coverage (development days only: a holdout day's file is
 never read, D14); counts. A read's Place rows stand as a result only when it validated boards and
 its shares were within the tolerance on at least `PLACE_MIN_WITHIN_TOLERANCE` of them
-(`place_result_readers`); the gains hold the Place cases of those reads only, and the others
-(`undetermined` always) are reported apart (`gains_undetermined`, `gains_unvalidated`). One
+(`place_result_readers`); the gains and the PIT hold the Place cases of those reads only, and the
+others (`undetermined` always) are reported apart (`gains_undetermined`, `gains_unvalidated`,
+`pit_diagnostic`). One
 registry record per comparison (E19) and one for the Place rule (#410), failures included (a
 measurement that stands no read is a failed, unvalidated one, and the report then calls the Place
 rows a diagnostic), then `write_summary` regenerates the committed summary. Family
@@ -238,16 +239,23 @@ def final_place_votes(days: list[str]) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
 
 
-def _file_build(name: str) -> str:
-    digest = hashlib.sha256()
-    with open(paths.processed_dir(SOURCE) / name, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 23), b""):
-            digest.update(chunk)
-    return f"processed/{SOURCE}/{name}@{digest.hexdigest()[:16]}"
-
-
-def place_rule_builds() -> dict[str, str]:
-    return {"jravan_pool_votes": _file_build(f"{POOL_VOTES}.parquet")}
+def place_rule_builds(votes: pd.DataFrame) -> dict[str, str]:
+    """The final votes' build: a digest of the scoped rows the measurement reads
+    (`final_place_votes` of the development days, as the odds build covers them), not of the
+    whole file, so votes outside them (holdout days among them) never enter it. The rows are
+    serialised as sorted tab-separated lines (votes as integers), so the digest does not depend
+    on the scan's row order."""
+    text = (
+        votes["race_id"].astype(str)
+        + "\t"
+        + votes["combination"].astype(str)
+        + "\t"
+        + votes["votes"].astype("Int64").astype(str)
+        + "\t"
+        + votes["data_kubun"].astype(str)
+    )
+    digest = hashlib.sha256("".join(f"{line}\n" for line in sorted(text)).encode())
+    return {"jravan_pool_votes": f"processed/{SOURCE}/{POOL_VOTES}@{digest.hexdigest()[:16]}"}
 
 
 def jra_place_figures(share: np.ndarray, places: int) -> tuple[np.ndarray, np.ndarray]:
@@ -599,19 +607,22 @@ def drift_forecaster(model: NowcastV0):
 
 
 def _pit_summary(pit: pd.DataFrame, cases: nc.Cases, offset: int, acc: dict) -> None:
-    """Add PIT decile counts and 50% / 90% coverage counts per (forecaster, pool, tau)."""
+    """Add PIT decile counts and 50% / 90% coverage counts per (forecaster, pool, tau, closing
+    board's read; `none` off the Place rule), split by read once the reads that stand are known
+    (`_split_pit`)."""
     local = pit["case"].to_numpy() - offset
     keys = pd.DataFrame(
         {
             "forecaster": pit["forecaster"].to_numpy(),
             "pool": cases.pool[local],
             "tau": cases.tau[local],
+            "reader": pd.Series(cases.reader[local], dtype=object).fillna("none").astype(str),
             "u": pit["pit"].to_numpy(),
         }
     )
-    for (name, pool, tau), g in keys.groupby(["forecaster", "pool", "tau"]):
+    for (name, pool, tau, reader), g in keys.groupby(["forecaster", "pool", "tau", "reader"]):
         u = g["u"].to_numpy()
-        slot = acc.setdefault((name, pool, float(tau)), np.zeros(PIT_BINS + 3))
+        slot = acc.setdefault((name, pool, float(tau), reader), np.zeros(PIT_BINS + 3))
         slot[:PIT_BINS] += np.histogram(u, bins=PIT_BINS, range=(0.0, 1.0))[0]
         slot[PIT_BINS] += ((u >= 0.25) & (u <= 0.75)).sum()
         slot[PIT_BINS + 1] += ((u >= 0.05) & (u <= 0.95)).sum()
@@ -842,13 +853,23 @@ def run_study(
 
     # From here `builds` names the final votes too: they choose the Place cases in the gains.
     place_measured, place_appended, builds = _measure_place_rule(
-        closing, scored_place, registry, family, git_sha, builds, spec_hash, trial=trial, log=log
+        closing,
+        scored_place,
+        dev_days,
+        registry,
+        family,
+        git_sha,
+        builds,
+        spec_hash,
+        trial=trial,
+        log=log,
     )
     del closing
     log(f"  Place rule measured on the scored boards ({_progress(started)})")
     readers = place_result_readers(place_measured)
     scores = pd.concat(scores, ignore_index=True)
     in_result, diagnostic = _split_place(scores, readers)
+    pit_result, pit_diagnostic = _split_pit(pit_acc, readers)
     gains, gains_undetermined, gains_unvalidated, records = {}, {}, {}, []
     for a, b in COMPARISONS:
         pair = in_result[in_result["forecaster"].isin([a, b])]
@@ -919,7 +940,8 @@ def run_study(
         "place_measurement": place_measured,
         "phi": _phi_diagnostics(phi),
         "cells": cells,
-        "pit": _pit_rows(pit_acc),
+        "pit": _pit_rows(pit_result),
+        "pit_diagnostic": _pit_rows(pit_diagnostic),
         "wide": wide_coverage(),
     }
     about = {
@@ -988,11 +1010,31 @@ def _split_place(
     then calls a diagnostic as a whole."""
     on_place = (scores["pool"] == nc.PLACE).to_numpy()
     reader = scores["reader"].fillna("none").astype(str).to_numpy()
-    out = on_place & (reader == UNDETERMINED)
-    if readers:
-        out |= on_place & ~np.isin(reader, sorted(readers))
+    out = on_place & np.isin(reader, sorted(_diagnostic_reads(set(reader[on_place]), readers)))
     diagnostic = {str(r): scores[out & (reader == r)] for r in sorted(set(reader[out].tolist()))}
     return scores[~out], diagnostic
+
+
+def _diagnostic_reads(seen: set[str], readers: set[str]) -> set[str]:
+    """The Place reads among `seen` kept out of the result (`_split_place`, `_split_pit`):
+    `undetermined` always; when some read stands (`readers`), every other read too."""
+    return {UNDETERMINED} | ({r for r in seen if r not in readers} if readers else set())
+
+
+def _split_pit(acc: dict, readers: set[str]) -> tuple[dict, dict]:
+    """The PIT counts by (forecaster, pool, tau, read) split as `_split_place` splits the gains:
+    the result's, summed over the reads kept in it, by (forecaster, pool, tau); and the Place
+    reads kept out, by (forecaster, pool, tau, read)."""
+    seen = {key[3] for key in acc if key[1] == nc.PLACE}
+    out = _diagnostic_reads(seen, readers)
+    result, diagnostic = {}, {}
+    for (name, pool, tau, reader), slot in acc.items():
+        if pool == nc.PLACE and reader in out:
+            diagnostic[(name, pool, tau, reader)] = slot.copy()
+        else:
+            result.setdefault((name, pool, tau), np.zeros(PIT_BINS + 3))
+            result[(name, pool, tau)] += slot
+    return result, diagnostic
 
 
 def _diagnostic_gains(pair: pd.DataFrame, a: str, b: str, bootstrap: dict) -> dict:
@@ -1032,13 +1074,15 @@ def _phi_diagnostics(phi: pd.DataFrame) -> list[dict]:
 
 
 def _pit_rows(acc: dict) -> list[dict]:
+    """PIT rows of counts keyed (forecaster, pool, tau) or (forecaster, pool, tau, read); the
+    latter's rows lead with `reader`."""
     rows = []
-    for (name, pool, tau), slot in sorted(
-        acc.items(), key=lambda kv: (kv[0][0], kv[0][1], -kv[0][2])
-    ):
+    for key, slot in sorted(acc.items(), key=lambda kv: (kv[0][3:], kv[0][0], kv[0][1], -kv[0][2])):
+        name, pool, tau = key[:3]
         n = slot[PIT_BINS + 2]
         rows.append(
-            {
+            ({"reader": key[3]} if len(key) == 4 else {})
+            | {
                 "forecaster": name,
                 "pool": pool,
                 "tau_min": tau,
@@ -1135,21 +1179,33 @@ def _record(
 
 
 def _measure_place_rule(
-    closing, scored_place, registry, family, git_sha, builds, spec_hash, *, trial: bool, log
+    closing,
+    scored_place,
+    dev_days,
+    registry,
+    family,
+    git_sha,
+    builds,
+    spec_hash,
+    *,
+    trial: bool,
+    log,
 ) -> tuple[dict, int, dict[str, str]]:
     """#410's measurement on the closing boards of the scored Place cases (`scored_place`: the
-    (race_id, day) of each, the folds' test cases after test-day sampling), and its registry
-    record: scored when a read stands as a result (`place_result_readers`), failed (unvalidated)
-    when none does or it could not run. Returns the measurement, the records appended (0 or 1)
-    and the builds it read: `builds` plus the final votes' build when that could be taken, which
-    the comparison records and the report then carry."""
+    (race_id, day) of each, the folds' test cases after test-day sampling), against the final
+    votes of the development days (`dev_days`, whose build `place_rule_builds` takes), and its
+    registry record: scored when a read stands as a result (`place_result_readers`), failed
+    (unvalidated) when none does or it could not run. Returns the measurement, the records
+    appended (0 or 1) and the builds it read: `builds` plus the final votes' build when that could
+    be taken, which the comparison records and the report then carry."""
     log("measuring the Place rule on the scored closing boards (#410)")
     scored = {race_id for race_id, _ in scored_place}
     boards = [b for b in closing if b[0] in scored]
     try:
-        place_builds = builds | place_rule_builds()
-        days = sorted({str(day)[:10] for _, day in scored_place})
-        measured = place_rule_measurement(boards, final_place_votes(days))
+        votes = final_place_votes(sorted({str(day)[:10] for day in dev_days}))
+        place_builds = builds | place_rule_builds(votes)
+        measured = place_rule_measurement(boards, votes)
+        del votes
         if place_validated(measured):
             record = _place_record(
                 _place_metrics(measured),
@@ -1330,10 +1386,14 @@ def render_report(
         "## PIT deciles and 50% / 90% coverage (runner level)",
         "",
         "PIT of each combination's final ln-share under its draws, pooled over the scored folds. "
-        "Combinations of one race are dependent, so no test statistic is given.",
+        "Combinations of one race are dependent, so no test statistic is given. The Place rows "
+        "are split as the gains are: they hold the Place cases of the reads that stand as a "
+        "result (with none standing, of every determined read, then a diagnostic as the Place "
+        "status says); the others are in the PIT diagnostic below.",
         "",
         _table(data["pit"]),
         "",
+        *_pit_diagnostic_section(data.get("pit_diagnostic", [])),
         "## sigma_t and beta by pool and tau (structural fit, every fold)",
         "",
         _table(_cell_summary(data["cells"])),
@@ -1411,6 +1471,21 @@ def _diagnostic_sections(diagnostics: dict) -> list[str]:
             lines += [_table(tables["day"].to_dict("records")), "", "Meeting clusters:", ""]
             lines += [_table(tables["meeting"].to_dict("records")), ""]
     return lines
+
+
+def _pit_diagnostic_section(rows: list[dict]) -> list[str]:
+    """The PIT of the Place cases kept out of the result PIT (#410 review), by read."""
+    if not rows:
+        return []
+    return [
+        "## PIT diagnostic: the Place boards whose read is not a result",
+        "",
+        "The PIT and coverage of the Place cases whose closing board's read does not stand as a "
+        "result (`undetermined` always), by read, kept out of the PIT above. Not evidence.",
+        "",
+        _table(rows),
+        "",
+    ]
 
 
 def _cell_summary(cells: list[dict]) -> list[dict]:

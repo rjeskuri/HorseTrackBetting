@@ -139,6 +139,9 @@ PLACE_FIT_ITER = 20  # the Place fit's re-weightings at most; it stops once the 
 # is at most this times the largest (ruling, #410: figures that hold some runners' money only as
 # a sum, e.g. two favourites at the floor at both ends)
 PLACE_RANK_RTOL = 1e-9
+# the Place fit's least squares takes the pseudo-inverse for a design whose QR has a diagonal entry
+# at most this times its largest (exactly dependent columns: rounding level, ~1e-16), else QR
+PLACE_QR_SCREEN = 1e-6
 _US_PER_MIN = 60_000_000
 _FAR_FUTURE = np.iinfo(np.int64).max
 
@@ -315,13 +318,25 @@ def _place_design(m: np.ndarray, c: np.ndarray, places: int) -> np.ndarray:
 
 
 def _least_squares(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Each row's least-squares x of a x = b ((n, r, k) and (n, r)): by the normal equations, or
-    by the pseudo-inverse when a row's are singular."""
-    at = np.swapaxes(a, 1, 2)
-    try:
-        return np.linalg.solve(at @ a, at @ b[:, :, None])[:, :, 0]
-    except np.linalg.LinAlgError:
-        return (np.linalg.pinv(a) @ b[:, :, None])[:, :, 0]
+    """Each row's least-squares x of a x = b ((n, r, k) and (n, r)), the minimum-norm one where
+    `a` is rank deficient: singular values at most `PLACE_RANK_RTOL` times the largest are
+    dropped, the rank test's own cut. A row is solved by QR; one whose R has a diagonal entry
+    at most `PLACE_QR_SCREEN` times its largest (where exactly dependent columns put one at
+    rounding level) by the pseudo-inverse at that cut instead. Neither depends on whether
+    rounding leaves a singular system exactly singular, as the normal equations did (#410: on
+    one BLAS they raised and took the pseudo-inverse, on another they solved to a spurious
+    money)."""
+    q, r = np.linalg.qr(a)
+    qb = np.swapaxes(q, 1, 2) @ b[:, :, None]
+    diag = np.abs(np.diagonal(r, axis1=1, axis2=2))
+    screened = diag.min(axis=1) <= PLACE_QR_SCREEN * diag.max(axis=1)
+    out = np.empty((a.shape[0], a.shape[2]))
+    if (~screened).any():
+        out[~screened] = np.linalg.solve(r[~screened], qb[~screened])[:, :, 0]
+    if screened.any():
+        pinv = np.linalg.pinv(a[screened], rtol=PLACE_RANK_RTOL)
+        out[screened] = (pinv @ b[screened][:, :, None])[:, :, 0]
+    return out
 
 
 def pool_shares(

@@ -2003,3 +2003,222 @@ def test_the_place_rank_is_computed_only_when_the_read_is_asked_for(monkeypatch)
     _, _, reader = place_shares(*boards[3])
     assert reader == "undetermined"
     assert calls, "place_shares named the read without a rank routine of np.linalg"
+
+
+# ---------------------------------------------------------------- round 5 (#410 review)
+
+
+def holdout_days(n: int) -> list[date]:
+    """The first `n` holdout days from the holdout start, by the committed rule."""
+    start = date(2026, 11, 28)
+    days = [start + timedelta(days=i) for i in range(120)]
+    held = [d for d in days if is_holdout_day(COUNTRY, d)][:n]
+    assert len(held) == n
+    return held
+
+
+def registry_run_ids() -> dict[str, str]:
+    """{variant: run_id} of the registry's run entries, read from its file."""
+    path = default_registry(COUNTRY).path
+    out = {}
+    for raw in path.read_text().splitlines():
+        entry = json.loads(raw)
+        if entry.get("kind") == "run":
+            out[entry["record"]["variant"]] = entry["run_id"]
+    return out
+
+
+def votes_build_run(data_dir, tmp_path, monkeypatch, name: str, rows: list[dict]) -> dict:
+    """A trial run on `rows` as pool_votes, on a fresh registry: its JSON dump, Markdown, records
+    and run ids by variant."""
+    write_pool_votes(data_dir, rows)
+    result, dump = run_trial(data_dir, tmp_path, monkeypatch, f"out-{name}")
+    registry = default_registry(COUNTRY)
+    records = {r.variant: r for r in registry.records()}
+    ids = registry_run_ids()
+    registry.path.unlink()
+    return {
+        "dump": dump,
+        "markdown": Path(result["report_path"]).read_text(),
+        "records": records,
+        "run_ids": ids,
+    }
+
+
+def test_holdout_votes_never_enter_the_votes_build(data_dir, tmp_path, monkeypatch):
+    """Round 5: the final votes' build the study records (`jravan_pool_votes` in every
+    comparison record's data builds, and in the report's data line) is taken from the vote rows
+    the measurement reads, not the whole pool_votes file. Adding holdout-day votes, or changing
+    only them, leaves the build, the records and their registry run ids as they were; changing
+    a development vote that the measurement reads changes the build."""
+    write_jravan_store(data_dir, TRAIN_DAYS + TEST_DAYS[:1])
+    dev_days = TRAIN_DAYS + TEST_DAYS[:1]
+    base = final_votes_of(dev_days)
+    held = holdout_days(2)
+    held_v1 = store_votes(held[0], 1, PLACE, {"1": 4100, "2": 900, "3": 350}) + store_votes(
+        held[0], 2, PLACE, {"1": 700, "2": 650, "3": 120}
+    )
+    held_v2 = (
+        store_votes(held[0], 1, PLACE, {"1": 3999, "2": 1001, "3": 351})
+        + store_votes(held[0], 2, PLACE, {"1": 701, "2": 649, "3": 121})
+        + store_votes(held[1], 1, PLACE, {"1": 55, "2": 66, "3": 77})
+    )
+    changed = [
+        r | {"votes": r["votes"] + 7} if r["combination"] == "1" and r["race_no"] == 1 else r
+        for r in base
+    ]
+    assert changed != base
+    runs = {
+        name: votes_build_run(data_dir, tmp_path, monkeypatch, name, rows)
+        for name, rows in (
+            ("base", base),
+            ("held_added", base + held_v1),
+            ("held_changed", base + held_v2),
+            ("dev_changed", changed),
+        )
+    }
+
+    comparisons = {f"{a}_vs_{b}" for a, b in study.COMPARISONS}
+    builds = {}
+    for name, run in runs.items():
+        assert comparisons <= set(run["records"]), (name, sorted(run["records"]))
+        votes = {run["records"][c].data_builds.get("jravan_pool_votes") for c in comparisons}
+        assert len(votes) == 1 and None not in votes, (name, votes)
+        builds[name] = votes.pop()
+        assert builds[name] in run["dump"]["about"]["data"], (name, run["dump"]["about"])
+        assert builds[name] in run["markdown"], name
+
+    for name in ("held_added", "held_changed"):
+        assert builds[name] == builds["base"], (name, builds)
+        assert runs[name]["dump"]["about"]["data"] == runs["base"]["dump"]["about"]["data"]
+        for variant in comparisons | {study.PLACE_VARIANT}:
+            assert runs[name]["records"][variant] == runs["base"]["records"][variant], variant
+            assert runs[name]["run_ids"][variant] == runs["base"]["run_ids"][variant], variant
+    assert builds["dev_changed"] != builds["base"], builds
+
+
+def pit_rows_of(dump: dict, key: str, pool: str) -> dict[tuple, dict]:
+    """{(forecaster, tau_min[, reader]): row} of a dump's PIT rows for `pool`."""
+    out = {}
+    for row in dump.get(key, []):
+        if row["pool"] != pool:
+            continue
+        ident = (row["forecaster"], float(row["tau_min"]))
+        if "reader" in row:
+            ident += (row["reader"],)
+        out[ident] = row
+    return out
+
+
+def assert_same_pit(got: dict, want: dict) -> None:
+    assert set(got) == set(want), (sorted(got), sorted(want))
+    for key, row in want.items():
+        other = got[key]
+        assert other["n"] == row["n"], (key, other["n"], row["n"])
+        for c in ("coverage_50", "coverage_90"):
+            assert other[c] == pytest.approx(row[c], abs=1e-12), (key, c)
+        np.testing.assert_allclose(other["deciles"], row["deciles"], atol=1e-9, err_msg=str(key))
+
+
+def markdown_tables(markdown: str) -> list[tuple[str, list[dict]]]:
+    """(the heading above, rows) of every table in a report."""
+    out, heading, block = [], "", []
+
+    def close():
+        if len(block) >= 2:
+            head = [c.strip() for c in block[0].strip("|").split("|")]
+            rows = [
+                dict(zip(head, [c.strip() for c in line.strip("|").split("|")], strict=False))
+                for line in block[2:]
+            ]
+            out.append((heading, rows))
+        block.clear()
+
+    for line in markdown.splitlines():
+        if line.startswith("|"):
+            block.append(line.strip())
+            continue
+        close()
+        if line.startswith("#"):
+            heading = line
+    close()
+    return out
+
+
+def test_place_pit_is_split_by_closing_board_read(data_dir, tmp_path, monkeypatch):
+    """Round 5: the report's PIT deciles and 50% / 90% coverage follow the same split as the
+    gains. The scored day holds a `joint` race (its final votes validate it, so `joint` stands)
+    and an `undetermined` one. The result PIT (`pit` in the JSON) holds the Place cases of the
+    reads that stand only: it equals the Place PIT of the same run with the undetermined race
+    removed from the scored day (every case is drawn with its own seed). The undetermined
+    board's PIT is reported apart, as `pit_diagnostic` rows carrying `reader`, equal to the run
+    whose scored day holds that race alone. The Markdown shows both: the result PIT table's
+    Place rows have the result counts, and a PIT table under a heading marked diagnostic has
+    the undetermined rows."""
+    day = TEST_DAYS[0]
+    total, shares = final_place_money(day, races=1)[race_id_of(day, 1)]
+    joint = np.maximum(np.round(shares * total / 100.0), 1).astype(int)
+    votes = final_votes_of(TRAIN_DAYS)
+    votes += store_votes(day, 1, PLACE, {str(j + 1): int(x) for j, x in enumerate(joint)})
+    votes += store_votes(
+        day, 2, PLACE, {str(j + 1): int(m // 100) for j, m in enumerate(UNIDENTIFIED)}
+    )
+    layouts = {
+        "both": day_with_an_undetermined_race(day),
+        "joint_only": day_rows(day, races=1),
+        "undetermined_only": undetermined_race_rows(day, 2),
+    }
+    dumps, markdowns = {}, {}
+    for name, rows in layouts.items():
+        write_jravan_store(data_dir, TRAIN_DAYS + (day,), custom={day: rows})
+        write_pool_votes(data_dir, votes)
+        result, dumps[name] = run_trial(data_dir, tmp_path, monkeypatch, f"out-{name}")
+        markdowns[name] = Path(result["report_path"]).read_text()
+        default_registry(COUNTRY).path.unlink()
+
+    both = dumps["both"]
+    assert both["place_result_readers"] == ["joint"], both["place_measurement"]
+    result = pit_rows_of(both, "pit", PLACE)
+    assert result, both.get("pit")
+    assert not any(len(k) == 3 and k[2] == "undetermined" for k in result), sorted(result)
+    assert_same_pit(
+        {k[:2]: v for k, v in result.items()},
+        {k[:2]: v for k, v in pit_rows_of(dumps["joint_only"], "pit", PLACE).items()},
+    )
+    # every grid tau of the scored day's joint race counts its runners
+    k_joint = RUNNERS[0]
+    for (forecaster, tau), row in {k[:2]: v for k, v in result.items()}.items():
+        assert row["n"] % k_joint == 0, (forecaster, tau, row["n"])
+
+    assert "pit_diagnostic" in both, sorted(both)
+    diagnostic = pit_rows_of(both, "pit_diagnostic", PLACE)
+    assert diagnostic, both["pit_diagnostic"]
+    assert {k[2] for k in diagnostic if len(k) == 3} == {"undetermined"}, sorted(diagnostic)
+    assert all(len(k) == 3 for k in diagnostic), sorted(diagnostic)
+    alone = pit_rows_of(dumps["undetermined_only"], "pit_diagnostic", PLACE)
+    assert_same_pit(diagnostic, alone)
+    grid = {float(t) for t in GRID}
+    for (forecaster, tau, _), row in diagnostic.items():
+        assert row["n"] == len(UNIDENTIFIED), (forecaster, tau, row["n"])
+    assert {k[1] for k in diagnostic} == grid
+    assert not pit_rows_of(both, "pit_diagnostic", WIN), "WIN cases have no Place read"
+
+    tables = markdown_tables(markdowns["both"])
+    pit_tables = [(h, rows) for h, rows in tables if "PIT" in h]
+    shown = [
+        rows for h, rows in pit_tables if "diagnostic" not in h.lower() and rows and "n" in rows[0]
+    ]
+    assert len(shown) == 1, [h for h, _ in pit_tables]
+    place_n = {
+        (r["forecaster"], float(r["tau_min"])): int(r["n"])
+        for r in shown[0]
+        if r.get("pool") == PLACE
+    }
+    assert place_n == {k[:2]: int(v["n"]) for k, v in result.items()}, place_n
+    marked = [rows for h, rows in pit_tables if "diagnostic" in h.lower()]
+    assert marked, [h for h, _ in tables]
+    diag_rows = [r for rows in marked for r in rows if r.get("pool") == PLACE]
+    assert diag_rows and {r.get("reader") for r in diag_rows} == {"undetermined"}, diag_rows
+    assert {(r["forecaster"], float(r["tau_min"])): int(r["n"]) for r in diag_rows} == {
+        k[:2]: int(v["n"]) for k, v in diagnostic.items()
+    }
