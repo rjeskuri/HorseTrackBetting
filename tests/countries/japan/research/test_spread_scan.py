@@ -1961,6 +1961,50 @@ def test_each_run_keeps_its_own_report_and_its_records_name_it(tmp_path, monkeyp
             )
 
 
+class WriteFailed(OSError):
+    """A write the test makes fail: an `Exception`, so the scan's failure path handles it."""
+
+
+@pytest.mark.parametrize("failing", ["candidate-cells", "report"])
+def test_a_failed_run_names_its_report_only_once_the_report_is_written(
+    tmp_path, monkeypatch, failing
+):
+    data = tiny_store(tmp_path)
+    guard(monkeypatch)
+    passthrough = ss.write_report
+
+    def failing_write(path, text, *, sources, repo_root=None):
+        target = "candidate-cells" if Path(path).parent.name == "candidate-cells" else "report"
+        if target == failing:
+            raise WriteFailed(f"the {target} write failed: {path}")
+        return passthrough(path, text, sources=sources, repo_root=repo_root)
+
+    monkeypatch.setattr(reports, "write_report", failing_write)
+    monkeypatch.setattr(ss, "write_report", failing_write)
+    registry = frozen_registry(tmp_path)
+    out_dir = tmp_path / "out"
+    seen = len(registry_lines(registry))
+    with pytest.raises(WriteFailed):
+        run(monkeypatch, data, out_dir, registry, date_from=date(2019, 1, 1))
+    new = [e["record"] for e in registry_lines(registry)[seen:] if e["kind"] == "run"]
+    assert Counter((r["family_id"], r["variant"]) for r in new) == Counter(
+        itertools.product(ss.FAMILIES, VARIANTS)
+    ), "one record per family and variant"
+    assert {r["status"] for r in new} == {"failed"}, "a run whose write failed is never scored"
+    written = sorted(p for p in out_dir.rglob("*") if p.is_file()) if out_dir.exists() else []
+    if failing == "candidate-cells":  # the report was written, then the export failed
+        assert len(written) == 1 and written[0].parent == out_dir, written
+        expected = f"reports/spread-scan@{written[0].name}"
+    else:  # the report write itself failed: there is no report to name
+        assert written == [], written
+        expected = "reports/spread-scan@not-written"
+    for record in new:
+        assert record["data_builds"]["report"] == expected, (
+            f"{record['family_id']}/{record['variant']}: {record['data_builds']['report']!r}"
+        )
+    registry.verify()
+
+
 def _tree(folder: Path) -> dict[str, bytes]:
     return {str(p.relative_to(folder)): p.read_bytes() for p in folder.rglob("*") if p.is_file()}
 

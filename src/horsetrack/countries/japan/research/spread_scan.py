@@ -982,6 +982,7 @@ def run_scan(
         ]
 
     skipped: Counter = Counter()
+    written = NO_REPORT  # what a failed run's records name: the report once it is on disk
     try:
         bets = _Bets([], [], [], [], [], [], [], [], [], [])
         for year in range(start.year, end.year + 1):
@@ -1000,13 +1001,14 @@ def run_scan(
         report_path = write_report(
             out_dir / report_name, _report(rows, summary, skipped), sources=(SOURCE,)
         )
+        written = report_name
         cells_path = write_report(
             out_dir / "candidate-cells" / "spread-scan.json",
             json.dumps(rows, allow_nan=False, indent=1) + "\n",
             sources=(SOURCE,),
         )
     except Exception:
-        _append(registry, records(lambda f, v: (), "failed", NO_REPORT))
+        _append(registry, records(lambda f, v: (), "failed", written))
         raise
     scored = records(lambda f, v: _metrics(rows, f, v), "scored", report_name)
     run_ids = _append(registry, scored)
