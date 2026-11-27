@@ -2,19 +2,25 @@
 
 Contract pinned here (`horsetrack.countries.japan.models.v0.shadow_values.model_probabilities`):
 
-`model_probabilities(p, ordering, *, brackets=None) -> dict[str, dict[str, float]]`
+`model_probabilities(p, ordering, *, brackets=None, starters=None) -> dict[str, dict[str, float]]`
 - `p`: horse number -> Win probability of the runners in the race (scratched runners left out).
   It is renormalised to sum to 1 first, as the shadow values renormalise q over the board's
   runners.
+- `starters`: the runners at the start of sales (default len(p)). JRA fixes the places Place and
+  Wide pay, and whether they are sold, at the start of sales (jra.yaml `places_paid`), so a runner
+  scratched after sales opened leaves the places unchanged: 8 drawn and one out, Place still pays
+  three places over the seven left. Only the places come from `starters`; the ordered finishes are
+  over the runners in `p` alone.
 - `ordering`: the v0 ordering fit (`OrderingFit`, family discounted_harville, lambdas (l2, l3)),
   or None. P(i, j, k first three in that order) = p_i * p_j^l2 / sum_{l != i} p_l^l2
   * p_k^l3 / sum_{l not in {i, j}} p_l^l3; every pool is an exact sum over these ordered triples.
 - The result maps pool code -> combination text (the odds-log format) -> probability:
   - WIN "7": p_7;
-  - PLACE "7": P(7 finishes in the first `places`), places from the jra config for len(p)
-    runners (3 at 8+, 2 at 5-7; none at 4 or fewer);
+  - PLACE "7": P(7 finishes in the first `places`), places from the jra config for `starters`
+    (3 at 8+, 2 at 5-7; not sold at 4 or fewer);
   - QUINELLA "a,b" (a < b): P({first two} = {a, b});
-  - QUINELLA_PLACE (Wide) "a,b" (a < b): P(a and b both in the first three);
+  - QUINELLA_PLACE (Wide) "a,b" (a < b): P(a and b both in the first three); sold from 4
+    `starters`;
   - FORECAST (exacta) "a,b": P(a first, b second);
   - TRIO "a,b,c" (a < b < c): P({first three} = {a, b, c});
   - TIERCE (trifecta) "a,b,c": P(a first, b second, c third);
@@ -102,15 +108,22 @@ def text(*horses: int, ordered: bool) -> str:
     return ",".join(str(h) for h in (horses if ordered else sorted(horses)))
 
 
-def places_paid(runners: int) -> int:
-    """JRA Place: 3 places at 8+ runners, 2 at 5-7, not sold at 4 or fewer."""
-    return 3 if runners >= 8 else 2 if runners >= 5 else 0
+def places_paid(starters: int) -> int:
+    """JRA Place: 3 places at 8+ starters, 2 at 5-7, not sold at 4 or fewer."""
+    return 3 if starters >= 8 else 2 if starters >= 5 else 0
 
 
-def brute_force(p, lambdas, brackets=None) -> dict[str, dict[str, float]]:
-    """Every pool's probabilities by summing the enumerated ordered triples."""
+def wide_sold(starters: int) -> bool:
+    """JRA Wide: any two of the first three, sold from 4 starters."""
+    return starters >= 4
+
+
+def brute_force(p, lambdas, brackets=None, starters=None) -> dict[str, dict[str, float]]:
+    """Every pool's probabilities by summing the enumerated ordered triples of the runners in `p`;
+    the places paid (and whether Place and Wide are sold) from `starters`, len(p) by default."""
     total = sum(p.values())
-    places = places_paid(len(p))
+    starters = len(p) if starters is None else starters
+    places = places_paid(starters)
     out: dict[str, dict[str, float]] = {pool: defaultdict(float) for pool in ORDERED_POOLS}
     if brackets is not None:
         out[BRACKET] = defaultdict(float)
@@ -127,15 +140,19 @@ def brute_force(p, lambdas, brackets=None) -> dict[str, dict[str, float]]:
             out[BRACKET][text(brackets[i], brackets[j], ordered=False)] += prob
     if not places:
         del out[PLACE]
+    if not wide_sold(starters):
+        del out[WIDE]
     out = {pool: dict(entries) for pool, entries in out.items()}
     out[WIN] = {str(h): v / total for h, v in p.items()}
     return out
 
 
-def totals(runners: int, with_brackets: bool) -> dict[str, float]:
-    out = {WIN: 1.0, QUINELLA: 1.0, WIDE: 3.0, FORECAST: 1.0, TRIO: 1.0, TIERCE: 1.0}
-    if places_paid(runners):
-        out[PLACE] = float(places_paid(runners))
+def totals(starters: int, with_brackets: bool) -> dict[str, float]:
+    out = {WIN: 1.0, QUINELLA: 1.0, FORECAST: 1.0, TRIO: 1.0, TIERCE: 1.0}
+    if wide_sold(starters):
+        out[WIDE] = 3.0
+    if places_paid(starters):
+        out[PLACE] = float(places_paid(starters))
     if with_brackets:
         out[BRACKET] = 1.0
     return out
@@ -251,33 +268,93 @@ def test_plain_harville_by_hand():
 
 
 # ---------------------------------------------------------------------------------------------
-# Scratches: no key for the runner, the others renormalised
+# Scratches: no key for the runner, the others renormalised, the places of the start of sales
 # ---------------------------------------------------------------------------------------------
 
 
+SCRATCHES = {  # id: (horses drawn, runners scratched after sales opened, (l2, l3))
+    "8 drawn, 7 run: Place still pays three": (range(1, 9), {3}, (0.85, 0.7)),
+    "8 drawn, 5 run: three places over five": (range(1, 9), {2, 5, 7}, (0.9, 0.75)),
+    "10 drawn, the favourite's number and the last out": (range(1, 11), {1, 10}, (0.9, 0.6)),
+    "12 drawn, 9 run": (range(1, 13), {4, 5, 11}, (1.1, 0.8)),
+    "5 drawn, 4 run: Place still sold, two places": (range(1, 6), {2}, (0.8, 0.65)),
+    "4 drawn, 3 run: Wide still sold, no Place": (range(1, 5), {4}, (1.0, 1.0)),
+}
+CHANGED = [  # the scratches that change what the runners left alone would pay
+    name
+    for name, (h, o, _) in SCRATCHES.items()
+    if (places_paid(len(h)), wide_sold(len(h)))
+    != (places_paid(len(h) - len(o)), wide_sold(len(h) - len(o)))
+]
+assert len(CHANGED) == 4, CHANGED
+
+
 @pytest.mark.parametrize(
-    ("horses", "out", "lambdas"),
-    [
-        (range(1, 9), {3}, (0.85, 0.7)),  # 8 drawn, 7 run: Place pays two places
-        (range(1, 11), {1, 10}, (0.9, 0.6)),  # the favourite's number and the last one out
-        (range(1, 13), {4, 5, 11}, (1.1, 0.8)),
-    ],
+    ("horses", "out", "lambdas"), list(SCRATCHES.values()), ids=list(SCRATCHES)
 )
-def test_scratched_runners_have_no_key_and_the_rest_are_renormalised(horses, out, lambdas):
+def test_scratched_runners_have_no_key_and_the_places_follow_the_start_of_sales(
+    horses, out, lambdas
+):
+    drawn = len(horses)
     full = dirichlet(horses, 33)
     running = {h: v for h, v in full.items() if h not in out}  # sums to less than 1
 
-    got = model_probabilities(running, fit(lambdas))
+    got = model_probabilities(running, fit(lambdas), starters=drawn)
 
-    want = brute_force(running, lambdas)
+    want = brute_force(running, lambdas, starters=drawn)
     assert_matches(got, want, out)
-    assert_totals(got, len(running), False, out)
+    assert_totals(got, drawn, False, out)
     for pool, entries in got.items():
         for combination in entries:
             assert not {int(h) for h in combination.split(",")} & out, (pool, combination)
     # only the ratios count: the same runners on another scale give the same probabilities
-    scaled = model_probabilities({h: 7.5 * v for h, v in running.items()}, fit(lambdas))
-    assert_matches(scaled, want, ("scaled", out))
+    scaled = {h: 7.5 * v for h, v in running.items()}
+    assert_matches(model_probabilities(scaled, fit(lambdas), starters=drawn), want, ("x7.5", out))
+
+
+def test_eight_drawn_and_one_scratched_place_sums_to_three_by_hand():
+    """Plain Harville over the seven left: P(i in the first three) = 1 - P(i not in the first
+    three), the latter summed over the ordered triples without i, and the seven sum to 3."""
+    p = {1: 0.30, 2: 0.22, 4: 0.16, 5: 0.12, 6: 0.09, 7: 0.07, 8: 0.04}  # horse 3 scratched
+
+    got = model_probabilities(p, fit((1.0, 1.0)), starters=8)
+
+    for h in p:
+        others = [x for x in p if x != h]
+        miss = 0.0
+        for i in others:
+            for j in others:
+                for k in others:
+                    if len({i, j, k}) == 3:
+                        miss += p[i] * p[j] / (1 - p[i]) * p[k] / (1 - p[i] - p[j])
+        assert math.isclose(got[PLACE][str(h)], 1.0 - miss, rel_tol=1e-9), h
+    assert math.isclose(math.fsum(got[PLACE].values()), 3.0, rel_tol=1e-9)
+    assert math.isclose(math.fsum(got[WIDE].values()), 3.0, rel_tol=1e-9)
+    assert set(got[PLACE]) == {str(h) for h in p}
+
+
+@pytest.mark.parametrize(
+    ("horses", "out"),
+    [(range(1, 9), {3}), (range(1, 6), {2})],
+    ids=["8 drawn, 7 left: two places", "5 drawn, 4 left: Place not sold"],
+)
+def test_without_starters_the_places_follow_the_runners_in_p(horses, out):
+    running = {h: v for h, v in dirichlet(horses, 44).items() if h not in out}
+    lambdas = (0.85, 0.7)
+
+    got = model_probabilities(running, fit(lambdas))
+
+    want = brute_force(running, lambdas)  # places for len(running)
+    assert_matches(got, want, ("default", out))
+    assert_totals(got, len(running), False, ("default", out))
+    explicit = model_probabilities(running, fit(lambdas), starters=len(running))
+    assert_matches(explicit, want, ("starters=len(p)", out))
+    # the start-of-sales count is another answer: Place sums to its places, not these
+    drawn = model_probabilities(running, fit(lambdas), starters=len(horses))
+    assert math.isclose(
+        math.fsum(drawn[PLACE].values()), float(places_paid(len(horses))), rel_tol=1e-9
+    )
+    assert math.fsum((got.get(PLACE) or {}).values()) < places_paid(len(horses)) - 0.5
 
 
 # ---------------------------------------------------------------------------------------------

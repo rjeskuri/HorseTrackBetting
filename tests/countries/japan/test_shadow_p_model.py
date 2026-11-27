@@ -7,11 +7,14 @@ signature):
   more, BRACKET_QUINELLA, keyed by the odds log's combination texts (so they join the plain
   feed's rows). WIN is the calibrated Win model on the board as of now: q = (1/O_WIN) /
   sum(1/O_WIN) over the board's runners, p = models.win.predict(q, board.context()). The other
-  pools are `model_probabilities(p, models.ordering, brackets=...)` (models/v0/shadow_values.py):
-  exact sums over the discounted Harville model's ordered triples, Place's places from the jra
-  config for the board's starters.
+  pools are `model_probabilities(p, models.ordering, brackets=..., starters=...)`
+  (models/v0/shadow_values.py): exact sums over the discounted Harville model's ordered triples.
 - Scratched runners (a current SCR WIN or PLACE row) are off the board: they have no key and the
-  others' probabilities are renormalised, as the shadow values do.
+  others' probabilities are renormalised, as the shadow values do. The places Place and Wide pay
+  (and whether they are sold) are those of the runners at the start of sales, which the board
+  knows as its priced runners plus its scratched ones (the logs do not say when sales opened, so a
+  scratch is taken as after): 8 drawn and one out, Place pays three places over the seven left;
+  5 drawn and one out, Place is still sold, with two places.
 - Brackets follow JRA's draw of N horses, N the largest horse number on the board, scratched
   runners included (the draw was made before the scratch): N <= 8, no bracket quinella; 9-16,
   brackets 1..16-N take one horse each and the rest two, in number order; 17, brackets 1-7 two
@@ -149,17 +152,19 @@ def capture_with_scratches(day: SyntheticDay, r: Race, at: datetime, factor: flo
 
 def expected(r: Race, factor: float, lambdas, out=()) -> dict[str, dict[str, float]]:
     """p_model of the capture of `r` at `factor`, the runners `out` scratched: FakeWin on the
-    board's q, then every pool enumerated; brackets from the draw of max(horse number)."""
+    board's q, then every pool enumerated over the runners left, the places paid for every horse
+    drawn (the start of sales); brackets from the draw of max(horse number)."""
     win, _, _ = figures(r, factor)
     running = {h: o for h, o in win.items() if h not in out}
     horses = sorted(running)
     inv = np.array([1.0 / running[h] for h in horses])
     p = dict(zip(horses, (float(x) for x in win_p(inv / inv.sum())), strict=True))
     drawn = max(win)
-    return pool_probabilities(p, lambdas, jra_brackets(drawn) if drawn >= 9 else None)
+    brackets = jra_brackets(drawn) if drawn >= 9 else None
+    return pool_probabilities(p, lambdas, brackets, starters=len(win))
 
 
-def check_p_model(got: dict, want: dict[str, dict[str, float]], where) -> None:
+def check_p_model(got: dict, want: dict[str, dict[str, float]], where, starters=None) -> None:
     p_model = got.get("p_model")
     assert isinstance(p_model, dict), (where, "the race has no p_model mapping", sorted(got))
     shown = {pool for pool, entries in p_model.items() if entries}
@@ -179,7 +184,7 @@ def check_p_model(got: dict, want: dict[str, dict[str, float]], where) -> None:
                 value,
                 prob,
             )
-    starters = len(want["WIN"])
+    starters = len(want["WIN"]) if starters is None else starters
     for pool, total in pool_totals(starters, BRACKET in want).items():
         assert math.isclose(math.fsum(p_model[pool].values()), total, rel_tol=1e-9), (where, pool)
 
@@ -275,30 +280,32 @@ def test_bracket_quinella_follows_the_jra_draw():
 # ---------------------------------------------------------------- scratches
 
 
-SCRATCH_CASES = {  # (horses drawn, runners scratched)
-    "TOK 5: 8 drawn, 7 run, Place pays two": (8, {3}),
-    "KYO 6: 10 drawn, a single-horse bracket and the last number out": (10, {6, 10}),
-    "NAK 7: 18 drawn, the first number and one of bracket 8 out": (18, {1, 17}),
+SCRATCH_CASES = {  # (venue, race), horses drawn, runners scratched, places Place pays
+    "TOK 5: 8 drawn, 7 run, Place still pays three": (("TOK", 5), 8, {3}, 3),
+    "KYO 6: 10 drawn, a single-horse bracket and the last number out": (("KYO", 6), 10, {6, 10}, 3),
+    "NAK 7: 18 drawn, the first number and one of bracket 8 out": (("NAK", 7), 18, {1, 17}, 3),
+    "TOK 8: 5 drawn, 4 run, Place still sold with two places": (("TOK", 8), 5, {4}, 2),
 }
 
 
 def test_scratched_runners_have_no_probability_and_the_rest_renormalise():
     cases = []
-    for (venue, no), (n, out) in zip(
-        (("TOK", 5), ("KYO", 6), ("NAK", 7)), SCRATCH_CASES.values(), strict=True
-    ):
-        cases.append((race(venue, no, 14.0, field(n, 50 + n)), out))
-    day = SyntheticDay(DAY, [r for r, _ in cases])
-    for r, out in cases:
+    for (venue, no), n, out, places in SCRATCH_CASES.values():
+        cases.append((race(venue, no, 14.0, field(n, 50 + n)), out, places))
+    day = SyntheticDay(DAY, [r for r, _, _ in cases])
+    for r, out, _ in cases:
         day.capture(r, T0 - timedelta(minutes=6), 1.0)  # before the scratch: all priced
         capture_with_scratches(day, r, T0 - timedelta(seconds=10), 1.02, out)
 
     got = by_id(build(T0, models()))
 
-    for (r, out), label in zip(cases, SCRATCH_CASES, strict=True):
-        want = expected(r, 1.02, LAMBDAS, out)
-        check_p_model(got[r.race_id], want, label)
-        check_unchanged(got[r.race_id], r, 1.02, bucket(14.0), out)
+    for (r, out, places), label in zip(cases, SCRATCH_CASES, strict=True):
+        drawn = len(r.base)
+        want = expected(r, 1.02, LAMBDAS, out)  # every pool over the runners left
+        assert len(want["WIN"]) == drawn - len(out), label
+        check_p_model(got[r.race_id], want, label, starters=drawn)
+        if drawn - len(out) >= 5:  # the shadow values keep their own places (not #506's)
+            check_unchanged(got[r.race_id], r, 1.02, bucket(14.0), out)
         p_model = got[r.race_id]["p_model"]
         for pool, entries in p_model.items():
             if pool == BRACKET:
@@ -306,10 +313,11 @@ def test_scratched_runners_have_no_probability_and_the_rest_renormalise():
             for combination in entries:
                 runners = {int(h) for h in combination.split(",")}
                 assert not runners & out, (label, pool, combination)
-    # 7 starters after the scratch: Place pays two places
-    assert math.isclose(
-        math.fsum(got[cases[0][0].race_id]["p_model"][PLACE].values()), 2.0, rel_tol=1e-9
-    )
+        # the places of the start of sales, over the runners left
+        assert set(p_model[PLACE]) == {str(h) for h in range(1, drawn + 1) if h not in out}
+        total = math.fsum(p_model[PLACE].values())
+        assert math.isclose(total, float(places), rel_tol=1e-9), (label, total)
+        assert math.isclose(math.fsum(p_model[WIDE].values()), 3.0, rel_tol=1e-9), label
     # bracket 6 (horse 6 alone) is gone; bracket 8 (9, 10) keeps 9 only, so no 8-8
     brackets = set(got[cases[1][0].race_id]["p_model"][BRACKET])
     assert "7,7" in brackets and "8,8" not in brackets, sorted(brackets)

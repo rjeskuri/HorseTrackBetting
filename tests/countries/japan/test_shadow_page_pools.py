@@ -13,6 +13,12 @@ here (the coder implements against it), on top of test_shadow_page.py's:
   `p_model` descending, whatever the plain feed's order or odds; each row `data-combination` is
   the combination text, its `data-col="odds"` the plain row's odds with one decimal, or `-` when
   the plain feed has no row for it (no capture).
+- Scratches first: the two feeds are polled apart, so /feed can show a scratch the shadow feed's
+  `p_model` has not caught up with. Before the top 15 are taken, FORECAST, TRIO and TIERCE leave
+  out every combination with a runner whose current plain WIN or PLACE row has status `SCR` (with
+  or without a tier-2 row for it), and every combination whose own tier-2 row has status `SCR`;
+  the next most probable eligible combinations move up, still by `p_model` descending, and an
+  eligible combination without a plain row still shows odds `-`.
 - Model p: every row of every section has one `data-col="p-model"` cell under a header reading
   `Model p`: the shadow race's `p_model[pool][combination]` as a percent with one decimal (e.g.
   `12.3%`), `-` without one.
@@ -452,6 +458,152 @@ def test_tier2_sections_show_their_capture_age(tmp_path):
         assert re.findall(r"(\d+)\s*min", sp.text(stamp[0])) == [
             str(AGES_A[pool_code].seconds // 60 + 10)
         ], pool_code
+
+
+# ---------------------------------------------------------------- scratches the shadow feed lags
+
+
+def runners_of(combination: str) -> set[int]:
+    return {int(h) for h in combination.split(",")}
+
+
+def stale_p_model(field: list[int], strong: tuple[int, ...], seed: int) -> dict:
+    """The exotic p_model of the whole field as the shadow feed last computed it, before the
+    scratches: each combination weighted by its runners' strengths (by finishing position for
+    Exacta and Trifecta), the `strong` runners far ahead so their combinations fill the top 15.
+    Distinct probabilities."""
+    rnd = random.Random(seed)
+    s = {h: 1.0 + 2.0 * rnd.random() for h in field}
+    for rank, h in enumerate(strong):
+        s[h] = 9.0 - 0.5 * rank
+    out = {"WIN": {str(h): v / sum(s.values()) for h, v in s.items()}}
+    for pool_code, powers in (("FORECAST", (2, 1)), ("TRIO", (1, 1, 1)), ("TIERCE", (3, 2, 1))):
+        keys = combos(pool_code, field)
+        weights = []
+        for i, key in enumerate(keys):
+            w = 1.0 + 1e-7 * i
+            for h, power in zip(map(int, key.split(",")), powers, strict=True):
+                w *= s[h] ** power
+            weights.append(w)
+        total = sum(weights)
+        out[pool_code] = {k: w / total for k, w in zip(keys, weights, strict=True)}
+    return out
+
+
+def mixed_feeds() -> tuple[dict, dict, dict]:
+    """(plain, shadow, {race_id: (runners out, {pool: combination SCR on its own row})}).
+
+    TOK 12, 12 runners, tier-2 captured; each exclusion has one source only. Horse 3 is SCR on
+    WIN and PLACE and on its tier-2 rows (the feed's carry); horse 8 is SCR on WIN (no PLACE row)
+    and the capture no longer lists its combinations; horse 11 is SCR on PLACE (no WIN row) while
+    its tier-2 rows still carry odds; in each exotic pool the most probable combination of the
+    runners left is SCR on its own row, and two of the others are not in the capture. TOK 13, 8
+    runners, nothing captured past WIN and PLACE: horse 2 is SCR on both. The shadow feed's
+    p_model is from before every scratch."""
+    rnd = random.Random(1212)
+    post12, post13 = sp.jst(11, 20), sp.jst(11, 40)
+    field12, field13 = list(range(1, 13)), list(range(1, 9))
+    out12, out13 = {3, 8, 11}, {2}
+    p12, p13 = stale_p_model(field12, (3, 8, 11), 12), stale_p_model(field13, (2,), 13)
+
+    def place_line(h: int, win_odds: float, scr: bool) -> dict:
+        return sp.line(str(h), round(1 + win_odds / 6, 1), hi=round(1.4 + win_odds / 4, 1), scr=scr)
+
+    win12 = dict(zip(field12, distinct(rnd, 12, 2.0, 60.0), strict=True))
+    win_rows = [sp.line(str(h), o, scr=h in (3, 8)) for h, o in win12.items() if h != 11]
+    place_rows = [place_line(h, o, h in (3, 11)) for h, o in win12.items() if h != 8]
+    pools12 = {"WIN": sp.pool(*win_rows), "PLACE": sp.pool(*place_rows)}
+    own_scr = {}
+    for pool_code in EXOTICS:
+        keys = combos(pool_code, field12)
+        left = [c for c in top(p12[pool_code], 10**6) if not runners_of(c) & out12]
+        own_scr[pool_code] = left[0]
+        missing = {left[3], left[10]}  # after the SCR row: the 3rd and 10th shown, odds '-'
+        rows = []
+        for key, o in zip(keys, distinct(rnd, len(keys), 3.0, 900.0), strict=True):
+            if 8 in runners_of(key) or key in missing:  # the source stopped listing them
+                continue
+            scr = 3 in runners_of(key) or key == own_scr[pool_code]
+            rows.append(sp.line(key, o, scr=scr, mm=0.0, t20=0.0, t2=0.0))
+        rnd.shuffle(rows)
+        body = sp.pool(*rows, investment=2_000_000)
+        body["capture_utc"] = sp.utc_text(NOW - minutes(4, 10))
+        pools12[pool_code] = body
+    plain12 = sp.race("TOK", 12, post12, NOW - timedelta(seconds=20), pools12)
+
+    win13 = dict(zip(field13, distinct(rnd, 8, 2.0, 40.0), strict=True))
+    pools13 = {
+        "WIN": sp.pool(*(sp.line(str(h), o, scr=h == 2) for h, o in win13.items())),
+        "PLACE": sp.pool(*(place_line(h, o, h == 2) for h, o in win13.items())),
+    }
+    plain13 = sp.race("TOK", 13, post13, NOW - timedelta(seconds=20), pools13)
+
+    shadows = []
+    for no, post, field, p_model in ((12, post12, field12, p12), (13, post13, field13, p13)):
+        values = {
+            "WIN": {str(h): sp.win(0.7 + 0.01 * h, 0.6, 0.9) for h in field},
+            "PLACE": {str(h): sp.rng(0.8, 0.9 + 0.01 * h) for h in field},
+        }
+        shadow = sp.shadow_race("TOK", no, post, 16, values)
+        shadow["p_model"] = p_model
+        shadows.append(shadow)
+    plain = {
+        "race_date": sp.DAY,
+        "generated_utc": sp.utc_text(NOW),
+        "venues": [{"venue": "TOK", "races": [plain12, plain13]}],
+    }
+    shadow = {
+        "race_date": sp.DAY,
+        "generated_utc": sp.utc_text(NOW),
+        "models": {"win": "w", "ordering": "o", "nowcast": "n"},
+        "races": shadows,
+        "win5": None,
+    }
+    cases = {plain12["race_id"]: (out12, own_scr), plain13["race_id"]: (out13, {})}
+    return plain, shadow, cases
+
+
+@needs_node
+def test_exotics_leave_out_scratched_runners_before_taking_the_top_fifteen(tmp_path):
+    plain, shadow, cases = mixed_feeds()
+    # the fixture: without the exclusion, combinations of every scratched runner would show
+    for race_id, (out, _) in cases.items():
+        for pool_code in EXOTICS:
+            stale = top(shadow_race(race_id, shadow)["p_model"][pool_code])
+            for k in out:
+                assert [c for c in stale if k in runners_of(c)], (race_id, pool_code, k)
+            assert sum(bool(runners_of(c) & out) for c in stale) >= 8, (race_id, pool_code)
+
+    pages = render(list(cases), plain, shadow, tmp_path=tmp_path)
+
+    dashes = {race_id: 0 for race_id in cases}
+    for race_id, (out, own_scr) in cases.items():
+        p_model = shadow_race(race_id, shadow)["p_model"]
+        for pool_code in EXOTICS:
+            el = section(pages[race_id], race_id, pool_code)
+            eligible = {
+                c: p
+                for c, p in p_model[pool_code].items()
+                if not runners_of(c) & out and c != own_scr.get(pool_code)
+            }
+            want = top(eligible)
+            assert len(want) == TOP, (race_id, pool_code)
+            shown = rows_in(el)
+            assert shown == want, (race_id, pool_code, shown[:6], want[:6])
+            odds = odds_of(race_id, pool_code, plain)
+            for combination in want:
+                row_el = sp.row_of(el, combination)
+                p, o = p_model[pool_code][combination], odds.get(combination)
+                where = (race_id, pool_code, combination)
+                shown_odds = sp.text(sp.cell(row_el, "odds"))
+                assert shown_odds == ("-" if o is None else f"{o:.1f}"), (where, shown_odds)
+                assert percent_ok(sp.text(sp.cell(row_el, "p-model")), p), where
+                shown_value = sp.text(sp.cell(row_el, "value"))
+                assert figure_ok(shown_value, None if o is None else p * o), (where, shown_value)
+                dashes[race_id] += o is None
+    tok12, tok13 = cases
+    assert dashes[tok12] == 2 * 3, dashes  # the two eligible combinations the capture lacks
+    assert dashes[tok13] == TOP * 3, dashes  # no capture: every eligible row without odds
 
 
 # ---------------------------------------------------------------- from the logs to the page
