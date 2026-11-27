@@ -12,11 +12,17 @@ only if the export holds a pre-race version. `census` counts what it holds; noth
   SE adds `horse_no` and `horse_id` (the top-level 血統登録番号).
 - `census(*, raw=None, as_of)` reads `<raw>/stored/<DATASPEC>/RA|SE/*.jvd` of every DATASPEC
   folder (the files directly in the folder; folders, then files, in sorted order), never
-  `stored_shift/`, `_incoming/` or `probe/`, streamed by `records.iter_file`. Per record it keeps
+  `stored_shift/`, `_incoming/` or `probe/`, streamed by `records.iter_lines`. Per record it keeps
   only the layout's key items (as bytes), データ区分, データ作成年月日, the race date and 開催年.
-  A record on a holdout day (`is_holdout_day('japan', race_date)`, D14) is read no further than
-  its date and counted only in `holdout_skipped`; a record without a valid race date cannot be
-  cleared of being one, so it is counted only in `undated`.
+  Each record's race date is read first, from the bytes of 開催年 and 開催月日 alone: a record on
+  a holdout day (`is_holdout_day('japan', race_date)`, D14) is read no further, whatever its
+  width, and counted only in `holdout_skipped`. The others are then checked and decoded
+  (`records.decode_lines`, a bad width raising `RecordLengthError` with the file's record number;
+  a record too short to hold its date is one). A record without a valid race date cannot be
+  cleared of being on a holdout day, so it is counted only in `undated`.
+- `final_only` is true when no version before the final result (データ区分 1-6) is held, and null
+  (inconclusive) when the record type has no record to count: no file, only empty files, or every
+  record skipped. The command fails on a record type with no file under any DATASPEC folder.
 - A version is a key's (データ区分, データ作成年月日). A record repeating a version already read
   (the same record in `stored/RACE` and `stored/DIFN`, or twice in one file) is counted once, and
   the repeats in `duplicates` only. A key's versions are pooled over every folder and file of its
@@ -130,6 +136,15 @@ def _race_dates(cols: Mapping[str, np.ndarray]) -> np.ndarray:
     return _dates(_join(cols[YEAR], cols[MMDD]))
 
 
+def _line_dates(lines: list[bytes], year: slice, mmdd: slice) -> np.ndarray:
+    """Each undecoded record's race date from its 開催年 and 開催月日 bytes alone (`_dates`); NaT
+    for a record too short to hold them."""
+    end = max(year.stop, mmdd.stop)
+    width = (year.stop - year.start) + (mmdd.stop - mmdd.start)
+    raw = [line[year] + line[mmdd] if len(line) >= end else b"" for line in lines]
+    return _dates(np.array(raw, dtype=f"S{width}"))
+
+
 def record_versions(cols: Mapping[str, np.ndarray], record_type: str) -> pd.DataFrame:
     """One row per RA or SE record of `cols` (as `records.decode` returns them), never
     deduplicated, with `race_id`, `data_kubun`, `created` and `race_date`, and for SE
@@ -184,6 +199,7 @@ def _read(files: list[Path], layout: spec.RecordSpec) -> tuple[dict[str, np.ndar
     """Per record outside the holdout: its key bytes, データ区分, データ作成年月日, race date and
     開催年, in read order; and the records skipped as on a holdout day and as undated."""
     key_items = [item.name for item in layout.items if item.is_key]
+    year, mmdd = records.leaf_bytes(layout, YEAR), records.leaf_bytes(layout, MMDD)
     cache: dict[date, bool] = {}
 
     def holdout(day: date) -> bool:
@@ -194,20 +210,25 @@ def _read(files: list[Path], layout: spec.RecordSpec) -> tuple[dict[str, np.ndar
     parts: dict[str, list[np.ndarray]] = collections.defaultdict(list)
     skipped = undated = 0
     for path in files:
-        for cols in records.iter_file(path, layout):
-            days = _race_dates(cols)  # the only item read before the holdout check
+        for first, lines in records.iter_lines(path, layout):
+            days = _line_dates(lines, year, mmdd)  # the only bytes read before the holdout check
             dated = ~np.isnat(days)
             held = np.zeros(len(days), dtype=bool)
             held[dated] = _holdout_flags(days[dated], holdout)
-            undated += int((~dated).sum())
             skipped += int(held.sum())
-            use = dated & ~held
+            rest = np.flatnonzero(~held)
+            if not rest.size:
+                continue
+            kept_lines = lines if rest.size == len(lines) else [lines[i] for i in rest]
+            cols = records.decode_lines(kept_lines, layout, first + rest)
+            days, use = days[rest], dated[rest]
+            undated += int((~use).sum())
             parts["key"].append(_join(*(cols[name][use] for name in key_items)))
             parts["kubun"].append(cols[KUBUN][use])
             parts["created"].append(cols[CREATED][use])
             parts["day"].append(days[use])
             parts["year"].append(cols[YEAR][use])
-            del cols
+            del cols, kept_lines
     kept = {name: np.concatenate(chunks) for name, chunks in parts.items()}
     return kept, skipped, undated
 
@@ -219,12 +240,13 @@ def _codes(raw: np.ndarray) -> tuple[list[str], np.ndarray]:
 
 
 def _section(kept: dict[str, np.ndarray], as_of: date) -> dict[str, Any]:
-    """The counts of one record type over its records outside the holdout (see the docstring)."""
+    """The counts of one record type over its records outside the holdout (see the docstring);
+    with no record to count, `final_only` is None (inconclusive)."""
     if not kept or len(kept["key"]) == 0:
         return {
             "records": 0, "duplicates": 0, "by_kubun": {}, "by_year": {},
             "multi_version_keys": 0, "combos": {}, "pre_race_on_run_races": 0, "held": {},
-            "final_only": True,
+            "final_only": None,
         }  # fmt: skip
     # one row per version, in read order
     _, first = np.unique(_join(kept["key"], kept["kubun"], kept["created"]), return_index=True)
@@ -301,17 +323,30 @@ def card_versions_command(
     """Count the JV-Data RA and SE records of the export per データ区分 (which versions it
     holds); the report (counts and codes only) goes to <reports dir>/jravan-card-versions.json."""
     day = _parse_day(as_of) if as_of else datetime.now(keys.JST).date()
+    errors = (paths.DataDirNotSet, LicensedOutputInRepo, ValueError, LookupError, OSError)
     try:
-        report = census(as_of=day)
+        raw = paths.raw_dir(records.SOURCE)
+        missing = [t for t in RECORD_TYPES if not _files(raw, t)]
+    except errors as exc:
+        _die(f"jravan card-versions failed: {type(exc).__name__}: {exc}")
+    if missing:  # an incomplete copy of the export, not evidence of anything
+        where = "; ".join(f"no {t} file under {raw / 'stored'}/<DATASPEC>/{t}/" for t in missing)
+        _die(f"jravan card-versions failed: {where}")
+    try:
+        report = census(raw=raw, as_of=day)
         target = records.write_build_report(report)
-    except (paths.DataDirNotSet, LicensedOutputInRepo, ValueError, LookupError, OSError) as exc:
+    except errors as exc:
         _die(f"jravan card-versions failed: {type(exc).__name__}: {exc}")
     for record_type, section in report.record_types.items():
         held = ", ".join(section["held"]) or "none"
+        if section["final_only"] is None:  # nothing to count: no verdict either way
+            final_only = pre_race = "inconclusive"
+        else:
+            final_only = "yes" if section["final_only"] else "no"
+            pre_race = "yes" if section["pre_race_on_run_races"] else "none"
         typer.echo(
-            f"{record_type}: データ区分 held {held}; final version only: "
-            f"{'yes' if section['final_only'] else 'no'}; pre-race versions of races run before "
-            f"{day.isoformat()}: {'yes' if section['pre_race_on_run_races'] else 'none'}"
+            f"{record_type}: データ区分 held {held}; final version only: {final_only}; "
+            f"pre-race versions of races run before {day.isoformat()}: {pre_race}"
         )
     typer.echo(f"report: {target}")
 

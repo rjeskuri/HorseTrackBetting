@@ -756,8 +756,14 @@ abandoned race (レース中止), `A` a NAR race (地方競馬), `B` an overseas
   order (a tie in read order), and the pre-race versions (`1`, `2`) of races run before
   `as_of`. A version is a key's (データ区分, データ作成年月日): a record repeating one already read
   (the same record in `stored/RACE` and `stored/DIFN`) counts once, the repeats as `duplicates`.
-  A record on a holdout day is read no further than its date and counted only as
-  `holdout_skipped` (D14); one without a valid race date only as `undated`.
+  Each record's race date is read first, from its 開催年 and 開催月日 bytes alone: a record on a
+  holdout day is read no further, whatever its width, and counted only as `holdout_skipped`
+  (D14); one without a valid race date only as `undated`. The others are then checked: one of
+  the wrong width, or too short to hold its date, stops the census (`RecordLengthError`).
+- `final_only`: true when no version `1`-`6` is held; null (inconclusive) when the record type
+  has no record to count (no file, only empty files, every record skipped), never true. The
+  command fails, writing no report, when RA or SE has no file under any `stored/<DATASPEC>/`
+  (an incomplete copy of the export), and prints `inconclusive` for a null verdict.
 - The report, `<reports dir>/jravan-card-versions.json` through `records.write_build_report`,
   holds counts, codes and years only; its figures are withheld (D21).
 

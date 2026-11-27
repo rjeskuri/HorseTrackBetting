@@ -30,9 +30,17 @@ Contract pinned here (the coder follows it), module
     データ作成年月日 order joined with " > " (`2 > 7`) -> keys.
   - `pre_race_on_run_races`: records of a `PRE_RACE` データ区分 whose race date is before `as_of`.
   - `held`: each データ区分 present -> its `KUBUN_NAMES` name; `final_only`: true when no record of
-    データ区分 1-6 is present.
+    データ区分 1-6 is present, and null (inconclusive, never true) when the record type has no
+    record to count: no file under any `stored/<DATASPEC>/`, only empty files, or every record
+    skipped as on a holdout day or undated.
+  - A holdout-day record is read no further than its race date: one cut short (or overlong) after
+    its date is only counted in `holdout_skipped`; the same record on a development day still
+    raises `records.RecordLengthError` (its record number counting the file), as before.
 - `horsetrack japan jravan card-versions [--as-of YYYY-MM-DD]` (default: today) runs `census` and
-  writes the report; a reports folder inside the repository is refused (non-zero exit).
+  writes the report; a reports folder inside the repository is refused (non-zero exit). An export
+  with no RA or no SE file under any `stored/<DATASPEC>/` fails the command (non-zero exit, a
+  message naming the record type, no report calling it final-only); a cut-off development-day
+  record exits 1.
 
 The builders keep the final version: `races.build_races` and `runners.build_runners` write the same
 `races`, `meetings` and `runners` from an export holding card and final versions as from the
@@ -512,6 +520,209 @@ def test_a_record_on_a_holdout_day_only_adds_to_the_skipped_total(data: Path) ->
 
 
 # ------------------------------------------------------------------------------------------------
+# A record type with nothing to count is inconclusive, never final-only
+
+TYPES = ("RA", "SE")
+NOT_FINAL = set("123456")
+UNDATED = (("2026", "0230"), ("0000", "0000"), ("2026", "1301"))  # (開催年, 開催月日), no valid day
+SKIPPED_KUBUN = ("2", "7", "3")  # card, final and flash versions: each would change the verdict
+
+
+def other_type(record_type: str) -> str:
+    return "SE" if record_type == "RA" else "RA"
+
+
+def row(
+    record_type: str, kubun: str, *, year: str, mmdd: str, race_no: int, created: date
+) -> bytes:
+    """One RA or SE record (for SE: 馬番 1) of race `race_no` at TOK, its race date exactly
+    `year` + `mmdd` (which need not be a valid day)."""
+    common = dict(
+        kubun=kubun, created=ymd(created), year=year, mmdd=mmdd, venue=TOK, race=f"{race_no:02d}"
+    )
+    if record_type == "RA":
+        return rn.ra(**common)
+    return rn.se(**common, horse_no=1, horse_id=f"20231000{race_no:02d}")
+
+
+def dated(record_type: str, kubun: str, day: date, race_no: int) -> bytes:
+    """`row` on `day`, published two days before it (a pre-race version) or the day after."""
+    created = day - timedelta(days=2) if kubun in {"1", "2"} else day + timedelta(days=1)
+    return row(
+        record_type, kubun, year=f"{day.year:04d}", mmdd=day.strftime("%m%d"), race_no=race_no,
+        created=created,
+    )  # fmt: skip
+
+
+def assert_inconclusive(
+    got: dict[str, Any], record_type: str, *, skipped: int = 0, undated: int = 0
+) -> None:
+    assert "final_only" in got, f"{record_type}: no final_only"
+    assert got["final_only"] is None, (record_type, got["final_only"])  # JSON null
+    want = {
+        "records": 0, "by_kubun": {}, "held": {}, "multi_version_keys": 0, "combos": {},
+        "pre_race_on_run_races": 0, "holdout_skipped": skipped, "undated": undated,
+    }  # fmt: skip
+    assert {k: got.get(k, "<missing>") for k in want} == want, record_type
+
+
+# How a record type can be absent from the export: no file under any stored/<DATASPEC>/ (or only
+# empty ones), whatever lies outside stored/
+ABSENT = ("no-folder", "empty-folder", "empty-file", "only-outside-stored")
+
+
+def leave_out(raw: Path, record_type: str, how: str, day: date) -> None:
+    if how == "empty-folder":
+        (raw / "stored" / "RACE" / record_type).mkdir(parents=True, exist_ok=True)
+    elif how == "empty-file":
+        put(raw, "stored/RACE", record_type, "2025.jvd", [])
+    elif how == "only-outside-stored":
+        for folder in ("stored_shift/RACE", "_incoming/RACE", "probe/RACE"):
+            put(raw, folder, record_type, "2025.jvd", holding_records(record_type, {"2", "7"}, day))
+
+
+# (RA データ区分 held, SE データ区分 held); None: the record type is absent
+ABSENT_CASES = [
+    ({"7"}, None),
+    ({"2", "7"}, None),
+    (None, {"7"}),
+    (None, {"6", "7"}),
+    (None, None),
+]
+
+
+@pytest.mark.parametrize("how", ABSENT)
+@pytest.mark.parametrize(("ra_held", "se_held"), ABSENT_CASES)
+def test_a_record_type_absent_from_the_export_is_inconclusive(
+    data: Path, ra_held: set[str] | None, se_held: set[str] | None, how: str
+) -> None:
+    day = date(2025, 3, 16)
+    raw = raw_of(data)
+    put(raw, "stored/RACE", "UM", "all.jvd", [wb.jvd_record("UM", 40, "架空")])  # not RA or SE
+    plan = {"RA": ra_held, "SE": se_held}
+    for record_type, held in plan.items():
+        if held is None:
+            leave_out(raw, record_type, how, day)
+        else:
+            put(
+                raw, "stored/RACE", record_type, "2025.jvd", holding_records(record_type, held, day)
+            )
+
+    report = card_versions.census(raw=raw, as_of=date(2025, 4, 1))
+    for record_type, held in plan.items():
+        got = section(report, record_type)
+        if held is None:
+            assert_inconclusive(got, record_type)
+            continue
+        # the record type that is there keeps its verdict
+        assert got["by_kubun"] == dict.fromkeys(held, 1), record_type
+        assert got["final_only"] is (not held & NOT_FINAL), (record_type, held)
+
+
+# (the record type whose every record is skipped, holdout-day records, undated records, the other
+# record type's データ区分 on a development day)
+SKIPPED_CASES = [
+    ("SE", 3, 0, {"7"}),
+    ("SE", 0, 2, {"2", "7"}),
+    ("SE", 2, 3, {"7"}),
+    ("RA", 3, 0, {"6", "7"}),
+    ("RA", 1, 2, {"7"}),
+]
+
+
+@pytest.mark.parametrize(("skipped_type", "n_held", "n_undated", "other_held"), SKIPPED_CASES)
+def test_a_record_type_whose_every_record_is_skipped_is_inconclusive(
+    data: Path, skipped_type: str, n_held: int, n_undated: int, other_held: set[str]
+) -> None:
+    held_out, dev = first_day(True), first_day(False)
+    raw = raw_of(data)
+    other = other_type(skipped_type)
+    put(raw, "stored/RACE", other, "2026.jvd", holding_records(other, other_held, dev))
+    recs = [
+        dated(skipped_type, SKIPPED_KUBUN[i % 3], held_out, 1 + i) for i in range(n_held)
+    ] + [
+        row(skipped_type, SKIPPED_KUBUN[i % 3], year=y, mmdd=m, race_no=11 + i, created=dev)
+        for i, (y, m) in enumerate(UNDATED[:n_undated])
+    ]  # fmt: skip
+    put(raw, "stored/RACE", skipped_type, "2026.jvd", recs)
+
+    report = card_versions.census(raw=raw, as_of=held_out + timedelta(days=30))
+    assert_inconclusive(
+        section(report, skipped_type), skipped_type, skipped=n_held, undated=n_undated
+    )
+    got = section(report, other)
+    assert got["by_kubun"] == dict.fromkeys(other_held, 1), other
+    assert got["final_only"] is (not other_held & NOT_FINAL), (other, other_held)
+
+
+# ------------------------------------------------------------------------------------------------
+# A holdout-day record is read no further than its race date, whatever its width
+
+CUTS = ("at-the-date", "mid-record", "one-byte-short", "one-byte-long")
+
+
+def date_end(layout: spec.RecordSpec) -> int:
+    """The bytes from the record's start through its race date (開催年 and 開催月日)."""
+    by_name = {item.name: item for item in layout.items}
+    return max(by_name[n].start - 1 + by_name[n].length for n in (races.YEAR, races.MMDD))
+
+
+def cut(rec: bytes, layout: spec.RecordSpec, how: str) -> bytes:
+    """`rec` cut off after its race date, midway, one byte short, or with a byte too many."""
+    body = rec.removesuffix(b"\r\n")
+    width = layout.length - spec.SEPARATOR_BYTES
+    end = date_end(layout)
+    assert len(body) == width and end < width - 1, (len(body), width, end)
+    if how == "one-byte-long":
+        return body + b"0\r\n"
+    keep = {"at-the-date": end, "mid-record": (end + width) // 2, "one-byte-short": width - 1}
+    return body[: keep[how]] + b"\r\n"
+
+
+@pytest.mark.parametrize("how", CUTS)
+@pytest.mark.parametrize("record_type", TYPES)
+def test_a_cut_off_record_on_a_holdout_day_is_skipped_on_its_date_alone(
+    data: Path, layouts: dict[str, spec.RecordSpec], record_type: str, how: str
+) -> None:
+    held_out, dev = first_day(True), first_day(False)
+    layout, other = layouts[record_type], other_type(record_type)
+    raw = raw_of(data)
+    as_of = held_out + timedelta(days=30)
+    put(raw, "stored/RACE", other, "2026.jvd", holding_records(other, {"7"}, dev))
+    put(raw, "stored/RACE", record_type, "2026.jvd", [
+        dated(record_type, "2", dev, 11),
+        cut(dated(record_type, "7", held_out, 11), layout, how),
+        dated(record_type, "7", dev, 11),
+        dated(record_type, "2", held_out, 12),
+    ])  # fmt: skip
+
+    report = card_versions.census(raw=raw, as_of=as_of)
+    want = {
+        "records": 2,
+        "holdout_skipped": 2,
+        "undated": 0,
+        "by_kubun": {"2": 1, "7": 1},
+        "by_year": {str(dev.year): {"2": 1, "7": 1}},
+        "multi_version_keys": 1,
+        "combos": {"2 > 7": 1},
+        "pre_race_on_run_races": 1,
+        "final_only": False,
+    }
+    got = section(report, record_type)
+    assert {k: got.get(k, "<missing>") for k in want} == want, (record_type, how)
+    assert section(report, other)["final_only"] is True, other
+
+    # the same cut on a development day still stops the census, at its record in its file
+    bad = cut(dated(record_type, "7", dev, 10), layout, how)
+    put(raw, "stored/RACE", record_type, "cut.jvd", [dated(record_type, "2", held_out, 9), bad])
+    with pytest.raises(records.RecordLengthError) as caught:
+        card_versions.census(raw=raw, as_of=as_of)
+    assert caught.value.record_type == record_type
+    assert caught.value.record == 2  # the holdout-day record before it still counts in the file
+    assert caught.value.length == len(bad) - spec.SEPARATOR_BYTES
+
+
+# ------------------------------------------------------------------------------------------------
 # The final-result version still feeds races and runners
 
 
@@ -630,3 +841,72 @@ def test_the_report_goes_through_write_report_and_the_command_writes_it(
         assert not inside.parent.exists()
     finally:
         shutil.rmtree(inside.parent, ignore_errors=True)
+
+
+def names(record_type: str, text: str) -> bool:
+    """Whether `text` names `record_type` as a word of its own (`RA` in `RACE` does not count)."""
+    return re.search(rf"(?<![A-Za-z]){record_type}(?![A-Za-z])", text) is not None
+
+
+@pytest.mark.parametrize("how", ("no-folder", "empty-folder"))
+@pytest.mark.parametrize("missing", (("SE",), ("RA",), ("RA", "SE")))
+def test_the_command_fails_on_an_export_without_ra_or_se_files(
+    data: Path, missing: tuple[str, ...], how: str
+) -> None:
+    raw, day, as_of = raw_of(data), date(2025, 3, 16), "2025-04-01"
+    target = data / "reports" / REPORT
+    for record_type in TYPES:
+        put(raw, "stored/RACE", record_type, "2025.jvd", holding_records(record_type, {"7"}, day))
+    put(raw, "stored/RACE", "UM", "all.jvd", [wb.jvd_record("UM", 40, "架空")])
+
+    # the whole export: final versions only, and the command says so
+    ok = invoke("--as-of", as_of)
+    assert ok.exit_code == 0, ok.output
+    written = json.loads(target.read_text(encoding="utf-8"))["record_types"]
+    assert {t: written[t]["final_only"] for t in TYPES} == {"RA": True, "SE": True}
+    target.unlink()
+
+    # a copy missing a record type (a copy outside stored/ is not the export)
+    for record_type in missing:
+        shutil.rmtree(raw / "stored" / "RACE" / record_type)
+        if how == "empty-folder":
+            (raw / "stored" / "RACE" / record_type).mkdir()
+        put(raw, "stored_shift/RACE", record_type, "2025.jvd",
+            holding_records(record_type, {"7"}, day))  # fmt: skip
+    result = invoke("--as-of", as_of)
+    assert result.exit_code != 0, result.output
+    assert isinstance(result.exception, SystemExit), repr(result.exception)  # reported, no crash
+    for record_type in missing:
+        assert names(record_type, result.output), (record_type, result.output)
+    if target.exists():  # a report may be written, never one calling a missing type final-only
+        written = json.loads(target.read_text(encoding="utf-8"))["record_types"]
+        for record_type in missing:
+            assert written.get(record_type, {}).get("final_only") is not True, record_type
+
+
+@pytest.mark.parametrize("record_type", TYPES)
+def test_the_command_skips_a_cut_off_holdout_record_and_stops_at_a_development_one(
+    data: Path, layouts: dict[str, spec.RecordSpec], record_type: str
+) -> None:
+    held_out, dev = first_day(True), first_day(False)
+    layout, other = layouts[record_type], other_type(record_type)
+    raw, as_of = raw_of(data), (held_out + timedelta(days=30)).isoformat()
+    target = data / "reports" / REPORT
+    put(raw, "stored/RACE", other, "2026.jvd", holding_records(other, {"7"}, dev))
+    put(raw, "stored/RACE", record_type, "2026.jvd", [
+        dated(record_type, "7", dev, 11),
+        cut(dated(record_type, "2", held_out, 11), layout, "mid-record"),
+    ])  # fmt: skip
+
+    ok = invoke("--as-of", as_of)
+    assert ok.exit_code == 0, ok.output
+    got = json.loads(target.read_text(encoding="utf-8"))["record_types"][record_type]
+    assert (got["records"], got["holdout_skipped"], got["final_only"]) == (1, 1, True)
+    target.unlink()
+
+    put(raw, "stored/RACE", record_type, "cut.jvd", [
+        cut(dated(record_type, "7", dev, 10), layout, "mid-record"),
+    ])  # fmt: skip
+    failed = invoke("--as-of", as_of)
+    assert failed.exit_code == 1, failed.output
+    assert isinstance(failed.exception, SystemExit), repr(failed.exception)
