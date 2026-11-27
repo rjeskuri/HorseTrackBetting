@@ -27,13 +27,19 @@ the log-score, CRPS and KL gains with one-sided 95% bounds resampling race days 
 meetings (D7); PIT deciles and 50% / 90% coverage per forecaster; sigma_t and beta per pool and
 tau across folds; the phi_t profile against the observed V_t / V_final; the board's age at t; the
 Place rule's check at t; the Place rule against the final votes (#410: the closing PLACE board
-of every race with a Place case, read as scored, against its final H1 votes in `pool_votes`, read
-through the store's scoped reader so holdout rows never reach the study; after the days are read,
-before the folds); Wide coverage (development days only: a holdout day's file is never read, D14);
-counts. One registry record per comparison (E19) and one for the Place rule (#410), failures
-included (an empty measurement is a failed, unvalidated one, and the report then calls the Place
+of every scored Place case, the folds' test cases after test-day sampling, read as scored, against
+its final H1 votes in `pool_votes`, read through the store's scoped reader so holdout rows never
+reach the study; after the folds); Wide coverage (development days only: a holdout day's file is
+never read, D14); counts. A read's Place rows stand as a result only when it validated boards and
+its shares were within the tolerance on at least `PLACE_MIN_WITHIN_TOLERANCE` of them
+(`place_result_readers`); the gains hold the Place cases of those reads only, and the others
+(`undetermined` always) are reported apart (`gains_undetermined`, `gains_unvalidated`). One
+registry record per comparison (E19) and one for the Place rule (#410), failures included (a
+measurement that stands no read is a failed, unvalidated one, and the report then calls the Place
 rows a diagnostic), then `write_summary` regenerates the committed summary. Family
-`japan-c1-nowcast-final-shares-v4` supersedes v3, whose Place measurement validated the
+`japan-c1-nowcast-final-shares-v5` supersedes v4, whose Place verdict took coverage for agreement,
+measured every extracted Place race rather than the scored ones and pooled the undetermined
+boards' cases into the Place gains; v4 superseded v3, whose Place measurement validated the
 `final_odds` boards rather than the scored closing boards, took non-final votes as final and
 registered an empty measurement as scored; v3 superseded v2, whose Place shares inverted the low
 figures by a rule that applied the takeout to the pool rather than the dividend; v2 superseded
@@ -84,9 +90,9 @@ COUNTRY = "japan"
 TICKET = 85
 SOURCE = "jravan"
 HYPOTHESIS = "E19"
-FAMILY_ID = "japan-c1-nowcast-final-shares-v4"
+FAMILY_ID = "japan-c1-nowcast-final-shares-v5"
 TRIAL_FAMILY_ID = f"{FAMILY_ID}-trial"  # trial runs' records; a trial never freezes FAMILY_ID
-SUPERSEDES = "japan-c1-nowcast-final-shares-v3"
+SUPERSEDES = "japan-c1-nowcast-final-shares-v4"
 PLACE_TICKET = 410
 PLACE_VARIANT = "place_rule_vs_votes"  # the Place rule measured against the final votes (#410)
 POOL_VOTES = "pool_votes"
@@ -98,8 +104,17 @@ PLACE_FINAL_KUBUN = ("4", "5")
 # (tests/countries/japan/test_nowcast.py states the derivation).
 PLACE_REL_TOL = 0.075
 PLACE_ABS_TOL = 0.01
+# #410 re-check: the share of a read's validated boards whose shares are within that tolerance
+# for the read's Place rows to stand as a result. By the derivation above a read that recovers
+# the money is within the tolerance on every board whose figures the rule prints from the votes,
+# so the bound is near 1; the slack leaves room for the few boards whose votes and figures
+# disagree for reasons outside the read (which `share_reproduced` counts), while a read that
+# fails structurally (the low figures on a floored favourite) misses on most of its boards. A
+# data-validity check on the share read, not an adoption gate.
+PLACE_MIN_WITHIN_TOLERANCE = 0.95
 # `models.nowcast.place_shares`'s read whose figures do not determine the money: a diagnostic
 UNDETERMINED = "undetermined"
+PLACE_READS = ("joint", "low_only", UNDETERMINED)
 COLUMNS = [
     "race_id",
     "venue",
@@ -386,16 +401,24 @@ def _validated_stats(v: pd.DataFrame) -> dict:
     }
 
 
-def place_validated(measured: dict) -> bool:
-    """Whether the measurement validated any board read by a determined read (`joint` or
-    `low_only`; an empty or failed one validates none, and an `undetermined` board is a
-    diagnostic, ruling #410)."""
-    if "error" in measured or measured.get("counts", {}).get("boards_validated", 0) <= 0:
-        return False
-    return any(
-        row["boards"] == "all" and row["reader"] != UNDETERMINED and row["n"] > 0
+def place_result_readers(measured: dict) -> set[str]:
+    """The determined reads (`joint`, `low_only`) whose Place rows stand as a result: the read
+    validated boards (coverage) and its shares are within the tolerance on at least
+    `PLACE_MIN_WITHIN_TOLERANCE` of them (agreement). An empty or failed measurement gives none,
+    and `undetermined` is never one (ruling #410)."""
+    return {
+        str(row["reader"])
         for row in measured.get("summary", [])
-    )
+        if row["boards"] == "all"
+        and row["reader"] != UNDETERMINED
+        and row["n"] > 0
+        and row.get("share_within_tolerance", 0.0) >= PLACE_MIN_WITHIN_TOLERANCE
+    }
+
+
+def place_validated(measured: dict) -> bool:
+    """Whether any read's Place rows stand as a result (`place_result_readers`)."""
+    return bool(place_result_readers(measured))
 
 
 def _place_metrics(measured: dict) -> tuple[FoldMetric, ...]:
@@ -414,10 +437,14 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
     """The family's design, frozen before any development row is read."""
     return {
         "family_id": FAMILY_ID,
-        "supersedes": f"{SUPERSEDES}: its Place rule measurement validated the final_odds "
-        "boards rather than the closing boards the cases score (runners without a high figure "
-        "dropped, P and the read changed), took non-final H1 votes as final and registered an "
-        "empty measurement as scored (#410's review); v3 superseded v2, whose Place shares "
+        "supersedes": f"{SUPERSEDES}: its Place verdict counted a read as validated when its "
+        "boards had final votes (coverage) whatever its agreement with them, measured every "
+        "extracted Place race rather than the cases the folds scored, and pooled the "
+        "undetermined boards' Place cases into the Place gains (#410's re-check); v4 superseded "
+        "v3, whose Place rule measurement validated the final_odds boards rather than the "
+        "closing boards the cases score (runners without a high figure dropped, P and the read "
+        "changed), took non-final H1 votes as final and registered an empty measurement as "
+        "scored (#410's review); v3 superseded v2, whose Place shares "
         "inverted the low figures alone by a rule that applied the takeout to the pool, not to "
         "the dividend; v2 superseded japan-c1-nowcast-final-shares, whose spec dropped "
         "late-scratch cases against the owner's #69 rule",
@@ -453,12 +480,14 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
             "used figures do not determine the money, by an SVD rank test of their design with "
             "relative tolerance models.nowcast.PLACE_RANK_RTOL, keeps its minimum-norm shares, "
             "is still scored and is flagged undetermined by models.nowcast.place_shares, and its "
-            "Place rows are a diagnostic), else the "
+            "Place rows are a diagnostic; the rank is computed only where the read is named: "
+            "place_shares and the closing board of each case, never in the draws), else the "
             "low figures alone in closed form (owner, #410); the rule's money total at t is "
             "reported; #116's drift draws are printed as JRA prints (truncated, floored) and "
             "read by the same rule",
-            "place_rule_measurement": "after the development days are read and before the "
-            "folds, on the closing PLACE board of every race with a Place case "
+            "place_rule_measurement": "after the folds, on the closing PLACE board of every "
+            "scored Place case (the folds' test cases after test-day sampling; no broader "
+            "development measurement) "
             "(models.nowcast.closing_boards: the final board the cases score, every priced "
             "runner kept), read as scored (models.nowcast.place_shares: P from the priced "
             "runners, the joint, undetermined or low-only read), against the PLACE votes (H1) of "
@@ -471,9 +500,22 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
             "votes (P as scored, and again from the registered slots), the share read within "
             f"{PLACE_REL_TOL} relative and {PLACE_ABS_TOL} absolute of the vote shares on every "
             "runner (as scored, and the low figures alone on the same boards), the worst errors "
-            "and the rule's money total; one registry record: scored when a board is validated, "
-            "failed (params.unvalidated) when none is or the measurement cannot run, and then "
-            "the Place rows are a diagnostic",
+            "and the rule's money total; one registry record: scored when a read stands as a "
+            "result, failed (params.unvalidated) when none does or the measurement cannot run, "
+            "and then the Place rows are a diagnostic",
+            "place_result": "coverage and agreement are separate: a determined read (joint, "
+            "low_only; never undetermined) stands as a result when it validated a board and its "
+            "shares as scored are within the tolerance on at least "
+            f"{PLACE_MIN_WITHIN_TOLERANCE} of its validated boards (a data-validity check on the "
+            "share read, not an adoption gate: by the tolerance's derivation a read that "
+            "recovers the money is within it on every board whose figures the rule prints from "
+            "the votes, the slack leaving room for boards whose votes and figures disagree for "
+            "reasons outside the read); each score row carries its closing board's read; the "
+            "result gain tables (day, meeting, fold) hold the Place cases of the reads that "
+            "stand only, the undetermined boards' Place cases go to gains_undetermined and, when "
+            "some read stands, every other read's to gains_unvalidated (by read); when no read "
+            "stands, the determined reads stay in the gain tables and the report calls their "
+            "Place rows a diagnostic",
         },
         "grid": {"minutes": list(grid.minutes), "primary": grid.primary},
         "fold_scheme": dataclasses.asdict(scheme),
@@ -702,17 +744,17 @@ def run_study(
     cases = nc.Cases.concat(case_chunks)
     growth = nc.Growth.concat(growth_chunks)
     del case_chunks, growth_chunks
-    place_measured, place_appended = _measure_place_rule(
-        closing, cases, registry, family, git_sha, builds, spec_hash, trial=trial, log=log
-    )
-    del closing
-    log(f"  Place rule measured ({_progress(started)})")
+    on_place = cases.pool == nc.PLACE
+    place_races = set(cases.race_id[on_place].tolist())
+    closing = [b for b in closing if b[0] in place_races]  # kept for the scored races' check
+    del on_place, place_races
     dev_days = sorted(set(cases.day.tolist()))
     folds = nc.fold_days(dev_days, scheme)
     log(f"{len(cases)} cases on {len(dev_days)} days, {len(folds)} folds ({_progress(started)})")
 
     rng = np.random.default_rng(SEED)
     scores, pit_acc, cells, phi_rows, fold_rows = [], {}, [], [], []
+    scored_place = []  # (race_id, day) of every scored Place case, for the Place rule (#410)
     offset = 0
     try:
         for train, test, fold in folds:
@@ -729,6 +771,14 @@ def run_study(
                 prior_n=float(v0_config["prior_n"]),
             )
             test_cases = cases.select_days(scored_days)
+            on_place = test_cases.pool == nc.PLACE
+            scored_place.extend(
+                zip(
+                    test_cases.race_id[on_place].tolist(),
+                    test_cases.day[on_place].tolist(),
+                    strict=True,
+                )
+            )
             forecasters = {
                 "structural": structural.draws,
                 "no_features": plain.draws,
@@ -783,13 +833,31 @@ def run_study(
                 error=f"{type(exc).__name__}: {exc}",
             )
             registry.append(record)
+        error = f"the folds failed before the scored boards were known: {type(exc).__name__}"
+        registry.append(
+            _place_record((), git_sha, builds, spec_hash, trial=trial, status="failed", error=error)
+        )
         write_summary(registry, summary_dir(COUNTRY))
         raise
 
+    place_measured, place_appended = _measure_place_rule(
+        closing, scored_place, registry, family, git_sha, builds, spec_hash, trial=trial, log=log
+    )
+    del closing
+    log(f"  Place rule measured on the scored boards ({_progress(started)})")
+    readers = place_result_readers(place_measured)
     scores = pd.concat(scores, ignore_index=True)
-    gains, records = {}, []
+    in_result, diagnostic = _split_place(scores, readers)
+    gains, gains_undetermined, gains_unvalidated, records = {}, {}, {}, []
     for a, b in COMPARISONS:
-        pair = scores[scores["forecaster"].isin([a, b])]
+        pair = in_result[in_result["forecaster"].isin([a, b])]
+        name = f"{a}_vs_{b}"
+        for reader, rows in diagnostic.items():
+            tables = _diagnostic_gains(rows[rows["forecaster"].isin([a, b])], a, b, bootstrap)
+            if reader == UNDETERMINED:
+                gains_undetermined[name] = tables
+            else:
+                gains_unvalidated.setdefault(name, {})[reader] = tables
         by_day = nc.gain_table(
             pair,
             a,
@@ -831,6 +899,7 @@ def run_study(
                 test_days_per_fold,
                 n_draws,
                 trial=trial,
+                place_readers=sorted(readers),
             )
         )
 
@@ -864,20 +933,28 @@ def run_study(
         "trial (records marked params.trial, spec not frozen)": trial,
     }
     stem = f"nowcast-{COUNTRY}-{spec_hash[:12]}" + ("-trial" if trial else "")
+    diagnostics = {"undetermined": gains_undetermined, "unvalidated": gains_unvalidated}
     report = write_report(
-        out_dir / f"{stem}.md", render_report(gains, report_data, about, grid), sources=(SOURCE,)
+        out_dir / f"{stem}.md",
+        render_report(gains, report_data, about, grid, diagnostics=diagnostics),
+        sources=(SOURCE,),
     )
+
+    def records_of(tables: dict) -> dict:
+        return {
+            u: (
+                t.to_dict("records") if u != "fold" else [(f, ft.to_dict("records")) for f, ft in t]
+            )
+            for u, t in tables.items()
+        }
+
     dump = {k: v for k, v in report_data.items()} | {
-        "gains": {
-            k: {
-                u: (
-                    v[u].to_dict("records")
-                    if u != "fold"
-                    else [(f, t.to_dict("records")) for f, t in v[u]]
-                )
-                for u in v
-            }
-            for k, v in gains.items()
+        "place_result_readers": sorted(readers),
+        "gains": {k: records_of(v) for k, v in gains.items()},
+        "gains_undetermined": {k: records_of(v) for k, v in gains_undetermined.items()},
+        "gains_unvalidated": {
+            k: {reader: records_of(t) for reader, t in v.items()}
+            for k, v in gains_unvalidated.items()
         },
         "about": about,
     }
@@ -897,6 +974,39 @@ def run_study(
         "spec_hash": spec_hash,
         "records_appended": appended,
         "registry_path": str(registry.path),
+    }
+
+
+def _split_place(
+    scores: pd.DataFrame, readers: set[str]
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+    """The score rows of the result gains, and the Place rows kept out of them by closing-board
+    read (#410 re-check): `undetermined` always; when some read stands as a result
+    (`readers`), every other read too, so the result tables hold only validated reads. With no
+    read standing, the determined reads stay in the result tables, whose Place rows the report
+    then calls a diagnostic as a whole."""
+    on_place = (scores["pool"] == nc.PLACE).to_numpy()
+    reader = scores["reader"].fillna("none").astype(str).to_numpy()
+    out = on_place & (reader == UNDETERMINED)
+    if readers:
+        out |= on_place & ~np.isin(reader, sorted(readers))
+    diagnostic = {str(r): scores[out & (reader == r)] for r in sorted(set(reader[out].tolist()))}
+    return scores[~out], diagnostic
+
+
+def _diagnostic_gains(pair: pd.DataFrame, a: str, b: str, bootstrap: dict) -> dict:
+    """The day- and meeting-clustered gain tables of diagnostic Place rows."""
+    return {
+        unit: nc.gain_table(
+            pair,
+            a,
+            b,
+            n_boot=bootstrap["n_boot"],
+            level=bootstrap["level"],
+            seed=SEED,
+            cluster=unit,
+        )
+        for unit in ("day", "meeting")
     }
 
 
@@ -987,6 +1097,7 @@ def _record(
     trial: bool = False,
     status: str = "scored",
     error: str | None = None,
+    place_readers: list[str] | None = None,
 ) -> RunRecord:
     params = {
         "candidate": candidate,
@@ -996,6 +1107,8 @@ def _record(
         "seed": SEED,
         "test_days_per_fold": days_per_fold,
     }
+    if place_readers is not None:  # the Place reads whose cases are in the gains as a result
+        params["place_result_readers"] = place_readers
     if trial:
         params["trial"] = True
     if error is not None:
@@ -1021,27 +1134,34 @@ def _record(
 
 
 def _measure_place_rule(
-    closing, cases, registry, family, git_sha, builds, spec_hash, *, trial: bool, log
+    closing, scored_place, registry, family, git_sha, builds, spec_hash, *, trial: bool, log
 ) -> tuple[dict, int]:
-    """#410's measurement on the closing boards of the races with a Place case, and its registry
-    record: scored when a board was validated, failed (unvalidated) when none was or it could not
-    run. Returns the measurement and the records appended (0 or 1)."""
-    log("measuring the Place rule on the closing boards (#410)")
-    on_place = cases.pool == nc.PLACE
-    scored = set(cases.race_id[on_place].tolist())
+    """#410's measurement on the closing boards of the scored Place cases (`scored_place`: the
+    (race_id, day) of each, the folds' test cases after test-day sampling), and its registry
+    record: scored when a read stands as a result (`place_result_readers`), failed (unvalidated)
+    when none does or it could not run. Returns the measurement and the records appended (0 or
+    1)."""
+    log("measuring the Place rule on the scored closing boards (#410)")
+    scored = {race_id for race_id, _ in scored_place}
     boards = [b for b in closing if b[0] in scored]
     try:
         place_builds = builds | place_rule_builds()
-        days = sorted({str(d)[:10] for d in cases.day[on_place].tolist()})
+        days = sorted({str(day)[:10] for _, day in scored_place})
         measured = place_rule_measurement(boards, final_place_votes(days))
         if place_validated(measured):
             record = _place_record(
-                _place_metrics(measured), git_sha, place_builds, spec_hash, trial=trial
+                _place_metrics(measured),
+                git_sha,
+                place_builds,
+                spec_hash,
+                trial=trial,
+                readers=sorted(place_result_readers(measured)),
             )
         else:
             measured["error"] = (
-                "unvalidated: no scored Place board with a determined read has final votes on "
-                "every runner"
+                "unvalidated: no determined read of the scored Place boards has final votes on "
+                f"a board and shares within the tolerance on at least {PLACE_MIN_WITHIN_TOLERANCE} "
+                "of its validated boards"
             )
             record = _place_record(
                 _place_metrics(measured),
@@ -1052,7 +1172,7 @@ def _measure_place_rule(
                 status="failed",
                 error=measured["error"],
             )
-    except Exception as exc:  # recorded as a failed run; the folds still run
+    except Exception as exc:  # recorded as a failed run; the gains are still reported
         measured = {"error": f"{type(exc).__name__}: {exc}"}
         record = _place_record(
             (), git_sha, builds, spec_hash, trial=trial, status="failed", error=measured["error"]
@@ -1064,9 +1184,23 @@ def _measure_place_rule(
 
 
 def _place_record(
-    metrics, git_sha, builds, spec_hash, *, trial: bool, status: str = "scored", error=None
+    metrics,
+    git_sha,
+    builds,
+    spec_hash,
+    *,
+    trial: bool,
+    status: str = "scored",
+    error=None,
+    readers: list[str] | None = None,
 ) -> RunRecord:
-    params = {"spec_sha256": spec_hash, "rel_tol": PLACE_REL_TOL, "abs_tol": PLACE_ABS_TOL}
+    params = {
+        "spec_sha256": spec_hash,
+        "rel_tol": PLACE_REL_TOL,
+        "abs_tol": PLACE_ABS_TOL,
+        "min_within_tolerance": PLACE_MIN_WITHIN_TOLERANCE,
+        "result_readers": readers or [],
+    }
     if trial:
         params["trial"] = True
     if status != "scored":
@@ -1081,7 +1215,7 @@ def _place_record(
         git_sha=git_sha,
         data_builds=builds,
         sources=(SOURCE,),
-        fold_scheme="none: the closing boards of the races with a Place case",
+        fold_scheme="none: the closing boards of the scored Place cases",
         components={
             "rule": "core/pricing.py stake_back_share_dividend",
             "boards": "countries/japan/models/nowcast.py closing_boards",
@@ -1098,37 +1232,42 @@ def _place_record(
 
 def _place_status(measured: dict) -> str:
     """How the Place rows are to be read, from #410's measurement."""
-    if not place_validated(measured):
+    readers = place_result_readers(measured)
+    if not readers:
         return (
             "**Place rows: a diagnostic.** The Place rule's measurement against the final votes "
-            f"did not validate any scored board ({measured.get('error', 'empty')}), so the Place "
-            "shares are not shown to be money shares and the Place gains are not evidence; the Win "
-            "rows are unaffected."
+            "on the scored boards stands no read as a result "
+            f"({measured.get('error', 'empty')}), so the Place shares are not shown to be money "
+            "shares and the Place gains are not evidence; the `undetermined` boards' Place rows "
+            "are in the diagnostic tables; the Win rows are unaffected."
         )
     alls = [row for row in measured.get("summary", []) if row["boards"] == "all"]
-    unvalidated = sorted(
-        row["reader"] for row in alls if row["n"] == 0 and row["reader"] != UNDETERMINED
+    others = sorted(
+        row["reader"] for row in alls if row["reader"] not in readers and row["n_scored"] > 0
     )
     tail = (
-        f" The {' and '.join(unvalidated)} read validated no board, so the Place rows of the "
-        "boards it read are a diagnostic."
-        if unvalidated
+        f" The {', '.join(f'`{r}`' for r in others)} read's Place rows are a diagnostic (the "
+        f"`{UNDETERMINED}` read always: figures that hold some runners' money only as a sum; a "
+        "determined read when it validated no board or its shares were within the tolerance on "
+        f"fewer than {PLACE_MIN_WITHIN_TOLERANCE} of its validated boards): they are left out "
+        "of the gains below and reported in the diagnostic tables."
+        if others
         else ""
     )
-    if any(row["reader"] == UNDETERMINED for row in alls):
-        tail += (
-            f" The `{UNDETERMINED}` read (figures that hold some runners' money only as a sum; "
-            "minimum-norm shares) is a diagnostic whatever its measurement, so the Place rows "
-            "of the boards it read are a diagnostic."
-        )
     return (
-        "**Place rows: read with the rule's measurement.** The Place shares were checked against "
-        "the final votes on the scored closing boards (coverage, reproduction and tolerance per "
-        f"read used, in the section on the rule below).{tail}"
+        "**Place rows: a result for the "
+        f"{' and '.join(f'`{r}`' for r in sorted(readers))} read.** Its shares were checked "
+        "against the final votes on the scored closing boards and were within the tolerance on "
+        f"at least {PLACE_MIN_WITHIN_TOLERANCE} of its validated boards (coverage, reproduction "
+        f"and tolerance per read, in the section on the rule below); the Place rows of the gains "
+        f"hold only its boards.{tail}"
     )
 
 
-def render_report(gains: dict, data: dict, about: dict, grid) -> str:
+def render_report(
+    gains: dict, data: dict, about: dict, grid, *, diagnostics: dict | None = None
+) -> str:
+    diagnostics = diagnostics or {}
     lines = [
         f"# The C1 final-price nowcast against the random walk and #116's drift "
         f"({COUNTRY}, #{TICKET})",
@@ -1183,6 +1322,7 @@ def render_report(gains: dict, data: dict, about: dict, grid) -> str:
                     }
                 )
         lines += [_table(rows), ""]
+    lines += _diagnostic_sections(diagnostics)
     lines += [
         "## PIT deciles and 50% / 90% coverage (runner level)",
         "",
@@ -1205,7 +1345,7 @@ def render_report(gains: dict, data: dict, about: dict, grid) -> str:
         "",
         "## Place shares: the rule against the final votes (#410)",
         "",
-        "The closing PLACE board of every race with a Place case, read as the cases read it, "
+        "The closing PLACE board of every scored Place case, read as the cases read it, "
         "against its final PLACE votes (H1, data_kubun "
         f"{'/'.join(PLACE_FINAL_KUBUN)}). `reader`: the read used in scoring (`joint`: both "
         "figures; `low_only`: the low figures, on a board without a high figure on every "
@@ -1243,6 +1383,31 @@ def render_report(gains: dict, data: dict, about: dict, grid) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def _diagnostic_sections(diagnostics: dict) -> list[str]:
+    """The Place gains kept out of the result tables (#410 re-check), by read."""
+    by_read: dict[str, dict] = defaultdict(dict)
+    for name, tables in diagnostics.get("undetermined", {}).items():
+        by_read[UNDETERMINED][name] = tables
+    for name, per_reader in diagnostics.get("unvalidated", {}).items():
+        for reader, tables in per_reader.items():
+            by_read[reader][name] = tables
+    if not by_read:
+        return []
+    lines = [
+        "## Place diagnostics: the gains of the boards whose read is not a result",
+        "",
+        "The Place cases whose closing board is read by a read that does not stand as a result "
+        "(see the Place status above), kept out of the gains above. Not evidence.",
+        "",
+    ]
+    for reader in sorted(by_read):
+        for name, tables in by_read[reader].items():
+            lines += [f"### `{reader}`: {name}", "", "Race-day clusters:", ""]
+            lines += [_table(tables["day"].to_dict("records")), "", "Meeting clusters:", ""]
+            lines += [_table(tables["meeting"].to_dict("records")), ""]
+    return lines
 
 
 def _cell_summary(cells: list[dict]) -> list[dict]:

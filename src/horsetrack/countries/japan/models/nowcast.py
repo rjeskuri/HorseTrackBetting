@@ -258,13 +258,21 @@ def place_fit_determined(
     """Per board, whether `place_money_fit`'s used equations determine the money: their design at
     the fitted money's order has full column rank (its smallest singular value above
     `PLACE_RANK_RTOL` times its largest)."""
-    return _place_fit(lo, hi, places, rate, floor, step)[1]
+    return _place_fit(lo, hi, places, rate, floor, step, rank=True)[1]
 
 
 def _place_fit(
-    lo: np.ndarray, hi: np.ndarray, places: int, rate: float, floor: float, step: float
-) -> tuple[np.ndarray, np.ndarray]:
-    """`place_money_fit`'s money and `place_fit_determined`'s flags."""
+    lo: np.ndarray,
+    hi: np.ndarray,
+    places: int,
+    rate: float,
+    floor: float,
+    step: float,
+    *,
+    rank: bool = False,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """`place_money_fit`'s money and, only when `rank` is asked for, `place_fit_determined`'s
+    flags (one SVD per board); None without it."""
     lo, hi = np.atleast_2d(lo).astype(float), np.atleast_2d(hi).astype(float)
     k = lo.shape[1]
     use = np.concatenate([lo > floor + 1e-9, hi > floor + 1e-9], axis=1)  # (n, 2k)
@@ -284,6 +292,8 @@ def _place_fit(
         settled = np.isclose(new, now, rtol=1e-10, atol=1e-12).all(axis=1)
         m[active] = new
         active = active[~settled]
+    if not rank:
+        return m, None
     weight = np.where(use, 1.0 / (places * np.tile(np.maximum(m, PLACE_FIT_MIN_MONEY), 2)), 0.0)
     sv = np.linalg.svd(_place_design(m, c, places) * weight[:, :, None], compute_uv=False)
     return m, sv[:, -1] > PLACE_RANK_RTOL * sv[:, 0]
@@ -327,7 +337,7 @@ def pool_shares(
     low figures). `rule_sum` is the money's total in units of the pool (1 when the rule holds),
     NaN when no rule was used; shares are None when the pool is not sold for this many runners
     (Wide counts its pairs, which gives its three places from 4 runners, as `places_for` does)."""
-    shares, rule_sum, _ = _read_shares(pool, odds, investment, odds_hi)
+    shares, rule_sum, _ = _read_shares(pool, odds, investment, odds_hi, rank=False)
     return shares, rule_sum
 
 
@@ -342,16 +352,18 @@ def place_shares(
     odds = np.asarray(odds, dtype=float)
     if odds.ndim != 1:
         raise ValueError("place_shares reads one board: odds must be 1-D")
-    shares, rule_sum, reader = _read_shares(PLACE, odds, None, odds_hi)
+    shares, rule_sum, reader = _read_shares(PLACE, odds, None, odds_hi, rank=True)
     if shares is None:
         return None, rule_sum, None
     return shares, rule_sum, str(reader[0])
 
 
 def _read_shares(
-    pool: str, odds, investment, odds_hi
+    pool: str, odds, investment, odds_hi, *, rank: bool
 ) -> tuple[np.ndarray | None, float, np.ndarray | None]:
-    """`pool_shares`, and per row the Place read used (`place_shares`; None off the rule)."""
+    """`pool_shares`, and per row the Place read used (`place_shares`; None off the rule). The
+    fit's rank, which tells `joint` from `undetermined`, is computed only with `rank`; without it
+    a joint fit's rows are labelled `joint`, and the shares are the same either way."""
     odds = np.asarray(odds, dtype=float)
     if investment is not None:
         money = np.asarray(investment, dtype=float)
@@ -373,15 +385,17 @@ def _read_shares(
             step = float(_pool_config(pool).dividend_step) / 100.0
             fit, determined = _place_fit(
                 np.atleast_2d(odds)[rows], np.atleast_2d(hi)[rows], places, rate,
-                _floor(pool), step,
+                _floor(pool), step, rank=rank,
             )  # fmt: skip
             # a fit that leaves a combination without positive money keeps the low figures' read
             sound = np.isfinite(fit).all(axis=1) & (fit > 0).all(axis=1)
             flat = np.atleast_2d(money).copy()
             flat[np.flatnonzero(rows)[sound]] = fit[sound]
             money = flat.reshape(money.shape)
-            reader[np.flatnonzero(rows)[sound]] = np.where(
-                determined[sound], "joint", "undetermined"
+            reader[np.flatnonzero(rows)[sound]] = (
+                "joint"
+                if determined is None
+                else np.where(determined[sound], "joint", "undetermined")
             )
     total = money.sum(axis=-1, keepdims=True)
     return money / total, float(total[0]) if odds.ndim == 1 else math.nan, reader
@@ -553,14 +567,20 @@ def _pool_board(series: _Series, post: int, tau_min: float) -> tuple[PoolBoard, 
     return board, rule_sum
 
 
-def _final_board(series: _Series) -> tuple[tuple[str, ...], np.ndarray, np.ndarray] | None:
+def _final_board(
+    series: _Series,
+) -> tuple[tuple[str, ...], np.ndarray, np.ndarray, str | None] | None:
+    """(combinations, shares, low figures, Place read) of the final board; the read is
+    `place_shares`' (`joint`, `low_only` or `undetermined`) for a Place board read by the rule,
+    None otherwise."""
     state = _state_at(series, _FAR_FUTURE)
     if state is None:
         return None
-    shares, _ = _shares_of(series.pool, state)
+    shares, _, reader = _read_shares(series.pool, state.lo, state.inv, state.hi, rank=True)
     if shares is None:
         return None
-    return tuple(series.combinations[i] for i in state.index), shares, state.lo
+    read = str(reader[0]) if series.pool == PLACE and reader is not None else None
+    return tuple(series.combinations[i] for i in state.index), shares, state.lo, read
 
 
 def closing_boards(
@@ -676,6 +696,7 @@ class Cases:
     board_min: np.ndarray
     rule_sum: np.ndarray  # the stake-back money's total at t (NaN when the rule was not used)
     scratched: np.ndarray  # board combinations off the final board (> 0: renormalised, #69)
+    reader: np.ndarray  # the final board's Place read (`place_shares`), None off the Place rule
     combination: np.ndarray  # runner rows from here
     s_t: np.ndarray
     lag5: np.ndarray
@@ -687,7 +708,7 @@ class Cases:
 
     CASE = (
         "race_id", "day", "venue", "race_no", "grade", "pool", "tau", "k", "total_t", "total_f",
-        "board_min", "rule_sum", "scratched",
+        "board_min", "rule_sum", "scratched", "reader",
     )  # fmt: skip
     ROW = ("combination", "s_t", "lag5", "lag15", "s_f", "odds_t", "odds_hi_t", "odds_f")
 
@@ -701,7 +722,7 @@ class Cases:
     @classmethod
     def build(cls, case_rows: list[dict], runner_rows: list[dict]) -> Cases:
         """From one dict per case (CASE fields) and one dict of row arrays per case (ROW fields)."""
-        obj = {"race_id", "day", "venue", "grade", "pool", "combination"}
+        obj = {"race_id", "day", "venue", "grade", "pool", "reader", "combination"}
 
         def column(name, values):
             if name in obj:
@@ -858,7 +879,7 @@ def extract(
             if final is None:
                 counts["no_final"] += len(taus)
                 continue
-            f_combos, f_shares, f_odds = final
+            f_combos, f_shares, f_odds, f_reader = final
             f_index = {c: j for j, c in enumerate(f_combos)}
             for tau in taus:
                 built = _pool_board(series, race.post, float(tau))
@@ -889,6 +910,7 @@ def extract(
                         "board_min": board.board_min,
                         "rule_sum": rule_sum,
                         "scratched": scratched,
+                        "reader": f_reader,
                     }
                 )
                 k = len(board.combinations)
@@ -1474,6 +1496,7 @@ def score_cases(
             "venue": cases.venue,
             "pool": cases.pool,
             "tau_min": cases.tau,
+            "reader": cases.reader,
         }
     )
     table = table.merge(meta, on="case", how="left")
