@@ -435,6 +435,14 @@ class _Model:
         self.z = np.full(len(self.groups), math.log(TAU2_START))
         self.counts = {"rows": self.n, "races": int(codes.max()) + 1}
 
+    def label(self, g: int) -> str:
+        """A prior group's name: its term's, with the coefficient of a structured block."""
+        group = self.groups[g]
+        term = self.terms[group.term]
+        if term.kind == STRUCTURED:
+            return f"{term.label}:{('a', 'b', 'c', 'e')[group.k]}"
+        return term.label
+
     def _add(self, term: _Term, block: str | None = None) -> None:
         if not term.m:
             raise ValueError(f"{term.label}: no level in the training rows")
@@ -660,7 +668,8 @@ class _Model:
         term.W = trial / scale
         self._set_u(term, U * scale)
         self._refresh(term)
-        return float(np.abs(term.W - W0).max())
+        # the step on u: a W that U barely uses (tau near 0) has converged whatever it does
+        return float(np.abs(term.W - W0).max() * np.abs(U).max() * scale)
 
     def sweep(self, z: np.ndarray, tol: float, *, fix_w: bool = False) -> float:
         """One step on every part: the joint Newton step, each local term and, unless `fix_w`,
@@ -802,6 +811,41 @@ class _Model:
         self._D = self._design(self.X, [(t, t.codes, t.X) for t in self.terms])
         self._at = None
 
+    def warm(self, start: dict) -> None:
+        """Start from another fit's `warm_start()`: its prior sds by group name, its feature
+        coefficients, each term's values on the levels both fits share (0 elsewhere) and each
+        low-rank W on the shared columns (re-centred and rescaled)."""
+        for g in range(len(self.groups)):
+            sd = start.get("prior_sd", {}).get(self.label(g))
+            if sd is not None and math.isfinite(sd) and sd > 0:
+                self.z[g] = max(2.0 * math.log(sd), math.log(TAU2_FLOOR))
+        for j, feat in enumerate(self.features):
+            value = start.get("coef", {}).get(feat)
+            if value is not None and math.isfinite(value):
+                self.theta[j] = value
+        for term in self.terms:
+            prev = start.get("terms", {}).get(term.label)
+            if prev is None or prev[1].shape[1] != term.K:
+                continue
+            at = prev[0].get_indexer(term.index)
+            values = np.where(at[:, None] >= 0, prev[1][np.maximum(at, 0)], 0.0)
+            if term.local:
+                term.theta = values
+            else:
+                for k in range(term.K):
+                    self.theta[term.offset + k * term.m : term.offset + (k + 1) * term.m] = values[
+                        :, k
+                    ]
+            w = start.get("W", {}).get(term.label)
+            if term.kind == LOW_RANK and w is not None:
+                at = w[0].get_indexer(term.col_index)
+                mapped = np.where(at >= 0, w[1][np.maximum(at, 0)], 0.0)
+                if np.abs(mapped - mapped.mean()).max() > 0:
+                    term.W, term.started = _unit(mapped), True
+                    term.X = self._lr_cov(term)
+        self._D = self._design(self.X, [(t, t.codes, t.X) for t in self.terms])
+        self._at = None
+
 
 class InteractionFit:
     """A fitted AbilityModel with interaction blocks: `tau(name)` and `predict(frame)`."""
@@ -813,15 +857,8 @@ class InteractionFit:
         self._tau: dict[str, Interval] = {}
         self.blocks = list(model.blocks)
         self.coef_ = pd.Series(model.theta[: len(model.features)], index=model.features)
-        self.prior_sd_ = {self._label(g): math.exp(0.5 * z) for g, z in enumerate(self._z)}
+        self.prior_sd_ = {model.label(g): math.exp(0.5 * z) for g, z in enumerate(self._z)}
         self.counts = dict(model.counts)
-
-    def _label(self, g: int) -> str:
-        group = self._model.groups[g]
-        term = self._model.terms[group.term]
-        if term.kind == STRUCTURED:
-            return f"{term.label}:{('a', 'b', 'c', 'e')[group.k]}"
-        return term.label
 
     def _block_groups(self, name: str) -> list[int]:
         groups = [g for g, group in enumerate(self._model.groups) if group.block == name]
@@ -837,6 +874,31 @@ class InteractionFit:
             return math.exp(0.5 * z[groups[0]])
         tau2 = np.exp(z[groups])
         return float(np.sqrt(np.mean((term.X * term.X) @ tau2)))
+
+    def warm_start(self) -> dict:
+        """What `fit_with_blocks(..., start=)` reads to start another fit from this one."""
+        model = self._model
+        theta, local, ws, _ = self._state
+        terms, w = {}, {}
+        for term, th, wt in zip(model.terms, local, ws, strict=True):
+            if term.local:
+                values = th
+            else:
+                values = np.column_stack(
+                    [
+                        theta[term.offset + k * term.m : term.offset + (k + 1) * term.m]
+                        for k in range(term.K)
+                    ]
+                )
+            terms[term.label] = (term.index, values.copy())
+            if term.kind == LOW_RANK:
+                w[term.label] = (term.col_index, wt.copy())
+        return {
+            "prior_sd": dict(self.prior_sd_),
+            "coef": {f: float(v) for f, v in self.coef_.items()},
+            "terms": terms,
+            "W": w,
+        }
 
     def tau_point(self, name: str) -> float:
         """The block's tau at the empirical-Bayes prior variances (no interval)."""
@@ -921,15 +983,25 @@ class InteractionFit:
 
 
 def fit_with_blocks(
-    frame: pd.DataFrame, base: AbilityModel, blocks: list[InteractionBlock]
+    frame: pd.DataFrame,
+    base: AbilityModel,
+    blocks: list[InteractionBlock],
+    *,
+    start: dict | None = None,
 ) -> InteractionFit:
     """`base` (an unfitted AbilityModel: its k, discounts, features and entity columns) with the
-    blocks added, fitted on frame's rows only (its training window); see the module docstring."""
+    blocks added, fitted on frame's rows only (its training window); see the module docstring.
+    `start` (another fit's `warm_start()`, or a dict with only its "prior_sd") starts the solver
+    there instead of at 0 and TAU2_START: a walk-forward fit starts from the previous fold's,
+    which changes the steps it takes, not the MAP and fixed point it stops at (within MAP_TOL and
+    EB_TOL; a low-rank block's W from the previous fold's, so not from the score's direction)."""
     if not isinstance(base, AbilityModel):
         raise TypeError(f"base must be an AbilityModel, got {type(base).__name__}")
     for block in blocks:
         if not isinstance(block, InteractionBlock):
             raise TypeError(f"blocks must be InteractionBlocks, got {type(block).__name__}")
     model = _Model(frame, base, list(blocks))
+    if start:
+        model.warm(start)
     model.empirical_bayes()
     return InteractionFit(model)
