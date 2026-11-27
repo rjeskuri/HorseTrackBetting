@@ -12,31 +12,46 @@ refuses stake keys by design.
 ## The log
 
 Path: `$HORSETRACK_DATA_DIR/bets/japan/<YYYY-MM-DD>.jsonl` (`bet_log_path(day)`, the data dir read on
-every call), one file per race day, named by its local (JST) date. `BetLog(path, day=..., limits=...)`
-refuses a file whose name is not `<day>.jsonl` (`ValueError`) and a path inside the repository
-(`BetLogInRepo`, a `RuntimeError`; `core.eval.reports.is_inside` against `core.env.repo_root()`, so
-`..`, symlinks and relative paths count).
+every call), one file per race day, named by its local (JST) date. A day has one log, at one place,
+so `check` and `record` always count the same stakes. `BetLog(path, day=..., limits=...)` takes only
+`bet_log_path(day)`, compared after resolving (`..`, symlinks and a path relative to the working
+directory that name the same file are the same log):
+
+- a path inside the repository raises `BetLogInRepo` (a `RuntimeError`;
+  `core.eval.reports.is_inside` against `core.env.repo_root()`, so `..`, symlinks and relative
+  paths count); this check runs first;
+- any other path raises `ValueError`, even one outside the repository named `<day>.jsonl`, and once
+  `HORSETRACK_DATA_DIR` moves, a file under the old data dir is no longer the day's log;
+- a refused path creates nothing.
 
 - One JSON object per line, compact separators, ASCII-escaped (so UTF-8), each line ending in `\n`.
 - The file is opened only for append, never truncated or rewritten. Each `record` is one line,
   written, flushed and `os.fsync`ed before it returns (and the directory fsynced when the file is
   new). The writer holds an exclusive `flock` from reading the file to the end of its write, so two
   writers cannot chain onto the same line; readers take a shared lock.
-- Every call (`record`, `check`, `read`, `staked_yen`) reads the whole file and checks the chain
-  first. A broken chain raises `BetLogTampered` (a `ValueError`), and nothing is appended onto it.
+- Every call (`record`, `check`, `read`, `staked_yen`) reads the whole file and checks the chain,
+  each line's checksum and each record first. A broken chain or checksum, or a record that is not a
+  bet of the log's day, raises `BetLogTampered` (a `ValueError`), and nothing is appended onto it.
 
 ### Lines
 
 ```json
-{"seq":1,"prev_sha256":"0000…0000","record":{…,"seq":1,…}}
-{"seq":2,"prev_sha256":"<sha256 of line 1>","record":{…,"seq":2,…}}
+{"seq":1,"prev_sha256":"0000…0000","record":{…,"seq":1,…},"sha256":"<sha256 of this line without sha256>"}
+{"seq":2,"prev_sha256":"<sha256 of line 1>","record":{…,"seq":2,…},"sha256":"<…>"}
 ```
 
+- The keys are `seq`, `prev_sha256`, `record` and `sha256`, in that order.
 - `seq`: 1 on the first line, one more on each line after it; the record carries the same `seq`.
-- `prev_sha256`: the hex sha256 of the previous line's bytes without its newline; 64 zeros on the
-  first line.
+- `prev_sha256`: the hex sha256 of the previous whole line's bytes (its `sha256` included) without
+  its newline; 64 zeros on the first line.
+- `sha256`: the hex sha256 of the line's own encoding without the `sha256` member, the other keys
+  in the line's order (`{"seq":…,"prev_sha256":…,"record":…}`). A wrong or missing `sha256` is a
+  changed line, so an edit to the last line is caught too.
 - A line is exactly the bytes the log writes for its JSON: the same JSON with other whitespace or
   escapes is a changed line.
+- Every stored record must be a bet the log would take on its day: a record whose `race_id` is
+  dated another day (a log copied under another day's name, or one record edited) is tampering, as
+  is a combination not in the store's order.
 
 ### Record fields
 
@@ -44,9 +59,9 @@ Given by the caller:
 
 | key | type | notes |
 | --- | --- | --- |
-| `race_id` | text | `jra:<YYYY-MM-DD>:<VENUE>:<NN>`, the log's own day, a venue code of `config/jra.yaml`, `NN` from `01` |
+| `race_id` | text | `jra:<YYYY-MM-DD>:<VENUE>:<NN>`, the log's own day, a venue code of `config/jra.yaml`, `NN` from `01`; a WIN5 bet, and only a WIN5 bet, takes the day-level key `jra:<YYYY-MM-DD>:WIN5` (as `research/win5.py` keys the pool), dated the log's own day |
 | `pool` | text | one of `POOLS`, the jra config's pool codes: `WIN`, `PLACE`, `BRACKET_QUINELLA`, `QUINELLA`, `QUINELLA_PLACE`, `FORECAST`, `TRIO`, `TIERCE`, `WIN5` |
-| `combination` | text | horse numbers joined by `,` (`"4"`, `"4,7"`), as the store's dividends hold them; as many numbers as the pool's `legs` |
+| `combination` | text | horse numbers joined by `,` (`"4"`, `"4,7"`), no leading zeros, as many numbers as the pool's `legs`; stored in the store's order (see Combinations) |
 | `stake_yen` | integer | at least 100 and a multiple of 100 (the jra config's `unit_stake`) |
 | `placed_utc` | ISO text with a UTC offset | when the bet was placed; `Z`, `+00:00` or another offset |
 | `option_id` | text or null | optional: the leaderboard option bet on; null for the owner's own pick |
@@ -62,8 +77,22 @@ Set by the log, never by the caller:
 | `over_cap` | boolean | the day's staked total including this bet exceeds the day cap |
 | `off_flat` | boolean | a flat stake is set and this stake differs from it |
 
-Records are stored as given: no keys dropped, no values coerced, no timestamps normalised. `record`
-returns the stored record and does not change the caller's dict.
+Records are stored as given, but for the combination's order: no keys dropped, no values coerced,
+no timestamps normalised. `record` returns the stored record and does not change the caller's dict.
+
+### Combinations
+
+A combination is stored as the store's dividends hold it (`jravan/dividends.py`), so a bet joins
+its dividend on `race_id`, `pool` and `combination`:
+
+- the legs of a pool whose jra config `kind` is `ordered_*` (FORECAST, TIERCE: finishing order) or
+  `multi_race_*` (WIN5: race order) are stored as given;
+- the others (BRACKET_QUINELLA, QUINELLA, QUINELLA_PLACE, TRIO) ascending by number, not as text:
+  `"7,4"` is stored `"4,7"`, `"12,3"` is stored `"3,12"`.
+
+A number given twice is refused, except where the legs are not horses of one race: BRACKET_QUINELLA
+(`kind` `*_bracket`; `"3,3"` is two horses of one bracket) and WIN5 (one race per leg;
+`"1,1,1,1,1"`).
 
 Example, synthetic:
 
@@ -99,10 +128,12 @@ refused first bet, and a refusal uses up no `seq`) when the bet:
 - has any other key, including the five the log sets (a stake under another name, a caller-set
   `seq`, `over_cap`, ...);
 - has a field of the wrong type or form: a `race_id` of another source, form, day or venue; a pool
-  outside `POOLS`; a blank or non-numeric combination, or one of the wrong number of horses; a
-  stake that is not an integer number of hundreds of yen (`100.0`, `"100"`, `150`, `0`); a
-  `placed_utc` that is not ISO text with a UTC offset (a date, a naive time, a datetime object);
-  an `option_id` that is blank or not text; a `note` that is not text.
+  outside `POOLS`; a WIN5 bet keyed by one race, or another pool on the WIN5 key; a blank or
+  non-numeric combination, one with a leading zero, one of the wrong number of horses, or one with
+  a number twice where the pool takes no repeat; a stake that is not an integer number of hundreds
+  of yen (`100.0`, `"100"`, `150`, `0`); a `placed_utc` that is not ISO text with a UTC offset (a
+  date, a naive time, a datetime object); an `option_id` that is blank or not text; a `note` that
+  is not text.
 
 ## Holdout days
 
@@ -123,10 +154,15 @@ refused first bet, and a refusal uses up no `seq`) when the bet:
 Detected, as `BetLogTampered`:
 
 - an edited, inserted, reordered, replayed or deleted line that has a later line after it;
+- an edit to any line, the last one included, that leaves its `sha256` as it was, and a wrong or
+  missing `sha256`;
+- a record dated another day than the log's, whether one record was edited (hashes recomputed) or
+  another day's whole log was copied under this day's name;
 - a cut-off last line (no newline), a line not in the log's own encoding, a line or record not of
-  the shape this log writes (keys, `seq`, a stake, the flags, `day_status`).
+  the shape this log writes (keys, `seq`, a bet the log would refuse, a combination not in the
+  store's order, the flags, `day_status`).
 
 Not detected without an outside anchor:
 
-- a change to the last line that keeps it well formed, or the removal of the last whole lines;
-- a rewrite of the whole file with recomputed hashes (the chain has no secret).
+- the removal of the last whole lines (what remains is a valid shorter chain);
+- a rewrite of the file with every `sha256` and `prev_sha256` recomputed (the chain has no secret).

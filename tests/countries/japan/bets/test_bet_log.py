@@ -7,20 +7,26 @@ Contract pinned here, module ``horsetrack.countries.japan.bets.log``:
   answer, 2026-11-27: a ¥30,000 cap per race day, ¥1,000 flat stake).
 - ``bet_log_path(day)`` is ``$HORSETRACK_DATA_DIR/bets/japan/<YYYY-MM-DD>.jsonl``, the data dir
   read on every call.
-- ``BetLog(path, *, day, limits)`` refuses a file name other than ``<day>.jsonl`` (ValueError) and
-  a path inside the repository.
-- A bet is a dict of ``race_id`` (``jra:<day>:<VENUE>:<NN>``, the log's own day, a jra venue code),
-  ``pool`` (one of POOLS), ``combination`` (non-blank text), ``stake_yen`` (an int, at least 100, a
-  multiple of 100), ``placed_utc`` (ISO text with a UTC offset) and the optional ``option_id`` and
-  ``note``. Anything else raises ``BetRefused`` (a ValueError) and writes nothing.
+- ``BetLog(path, *, day, limits)`` accepts only ``bet_log_path(day)``, compared after resolving: a
+  path inside the repository raises ``BetLogInRepo`` (a RuntimeError), any other path a
+  ValueError, and nothing is created (review fix, ruling 1: one log per race day, at one place).
+- A bet is a dict of ``race_id`` (``jra:<day>:<VENUE>:<NN>``, the log's own day, a jra venue code;
+  a WIN5 bet, and only a WIN5 bet, takes the day-level ``jra:<day>:WIN5``), ``pool`` (one of
+  POOLS), ``combination`` (horse numbers joined by ``,``, as many as the pool's legs, no leading
+  zeros, no repeats except in BRACKET_QUINELLA and WIN5; stored in the store's order: FORECAST,
+  TIERCE and WIN5 as given, the others ascending), ``stake_yen`` (an int, at least 100, a multiple
+  of 100), ``placed_utc`` (ISO text with a UTC offset) and the optional ``option_id`` and ``note``.
+  Anything else raises ``BetRefused`` (a ValueError) and writes nothing.
 - ``record(bet)`` appends one line and returns the stored record: the bet plus ``seq``,
   ``written_utc``, ``day_status`` (holdout or development, from the committed holdout rule),
   ``over_cap`` (the day's total including this bet exceeds the cap) and ``off_flat`` (a flat stake
   is set and this stake differs from it). A bet past the cap or off the flat stake is recorded.
 - ``check(stake) -> CapCheck(fits, staked_yen, remaining_yen, off_flat)``: the day's total so far,
   the cap left before this stake, whether the stake fits (total + stake <= cap). It writes nothing.
-- Lines are ``{"seq", "prev_sha256", "record"}``, compact ASCII JSON, chained as
-  docs/specs/shadow-log.md describes; a broken chain raises ``BetLogTampered`` on every call.
+- Lines are ``{"seq", "prev_sha256", "record", "sha256"}``, compact ASCII JSON, chained as
+  docs/specs/shadow-log.md describes; ``sha256`` is the sha256 of the line's own encoding without
+  ``sha256``, so an edit to the last line is caught too. A broken chain or checksum, or a record
+  dated another day than the log's, raises ``BetLogTampered`` on every call.
 - Holdout days: bets are written, read back and counted toward the cap like any other day.
 
 Every bet is synthetic. HORSETRACK_DATA_DIR points at tmp_path in every test.
@@ -45,6 +51,7 @@ from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.countries.japan.bets.log import (
     POOLS,
     BetLog,
+    BetLogInRepo,
     BetLogTampered,
     BetRefused,
     CapCheck,
@@ -63,6 +70,7 @@ CAP = 30_000
 NO_FLAT = Limits(day_cap_yen=CAP, flat_stake_yen=None)
 ADDED = {"seq", "written_utc", "day_status", "over_cap", "off_flat"}
 OPTIONAL = {"option_id", "note"}
+LINE_KEYS = {"seq", "prev_sha256", "record", "sha256"}
 FORBIDDEN_IMPORTS = (
     "requests",
     "httpx",
@@ -127,6 +135,12 @@ def bet(
     return out
 
 
+def win5(stake: int = 100, *, day: date = DEV_DAY, combination: str = "1,2,3,4,5") -> dict:
+    """A synthetic WIN5 bet, keyed by its day (``jra:<day>:WIN5``) as the odds log keys the pool."""
+    race_id = f"jra:{day.isoformat()}:WIN5"
+    return bet(stake, day=day, pool="WIN5", combination=combination, race_id=race_id)
+
+
 def open_log(day: date = DEV_DAY, limits: Limits = NO_FLAT) -> tuple[BetLog, Path]:
     path = bet_log_path(day)
     return BetLog(path, day=day, limits=limits), path
@@ -134,6 +148,16 @@ def open_log(day: date = DEV_DAY, limits: Limits = NO_FLAT) -> tuple[BetLog, Pat
 
 def sha(line: bytes) -> str:
     return hashlib.sha256(line).hexdigest()
+
+
+def encode(obj) -> bytes:
+    """The log's own encoding: compact, ASCII-escaped JSON."""
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=True).encode()
+
+
+def line_sha(obj: dict) -> str:
+    """The checksum a line carries: the sha256 of the line's own encoding without ``sha256``."""
+    return sha(encode({key: value for key, value in obj.items() if key != "sha256"}))
 
 
 def split_lines(raw: bytes) -> list[bytes]:
@@ -145,21 +169,60 @@ def join_lines(lines: list[bytes]) -> bytes:
     return b"".join(line + b"\n" for line in lines)
 
 
+def lines_of(raw: bytes) -> list[dict]:
+    return [json.loads(line) for line in split_lines(raw)]
+
+
 def chain(raw: bytes) -> list[dict]:
     """The parsed lines of a bet log, checked against the ticket's format from first principles."""
     objs, prev = [], ZERO
     for n, line in enumerate(split_lines(raw), 1):
         assert line.isascii(), f"line {n} is not ASCII"
         obj = json.loads(line)
-        compact = json.dumps(obj, separators=(",", ":"), ensure_ascii=True).encode()
-        assert line == compact, f"line {n} is not compact JSON"
-        assert set(obj) == {"seq", "prev_sha256", "record"}, f"line {n} has keys {sorted(obj)}"
+        assert line == encode(obj), f"line {n} is not compact JSON"
+        assert set(obj) == LINE_KEYS, f"line {n} has keys {sorted(obj)}, not {sorted(LINE_KEYS)}"
         assert obj["prev_sha256"] == prev, f"line {n} does not chain onto line {n - 1}"
+        assert obj["sha256"] == line_sha(obj), f"line {n}'s sha256 is not of the line without it"
         assert obj["seq"] == n and type(obj["seq"]) is int
         assert obj["record"]["seq"] == n
         prev = sha(line)
         objs.append(obj)
     return objs
+
+
+def rechain(objs: list[dict], *, keep: frozenset[int] = frozenset()) -> bytes:
+    """The lines re-encoded as an editor who knows the format would write them: every
+    ``prev_sha256`` and ``sha256`` recomputed, except the ``sha256`` of the lines (from 0) in
+    ``keep``. A line without ``sha256`` stays without one."""
+    out, prev = [], ZERO
+    for i, obj in enumerate(objs):
+        obj = {**obj, "prev_sha256": prev}
+        if "sha256" in obj and i not in keep:
+            obj["sha256"] = line_sha(obj)
+        line = encode(obj)
+        out.append(line)
+        prev = sha(line)
+    return join_lines(out)
+
+
+def assert_tampered(path: Path, day: date = DEV_DAY) -> None:
+    """Every call, each through a fresh BetLog of ``day``, raises BetLogTampered and leaves the
+    file byte-identical."""
+    raw = path.read_bytes()
+    calls = {
+        "read": lambda log: log.read(),
+        "record": lambda log: log.record(bet(100, day=day, race=9)),
+        "staked_yen": lambda log: log.staked_yen(),
+        "check": lambda log: log.check(100),
+    }
+    for name, call in calls.items():
+        try:
+            call(BetLog(path, day=day, limits=NO_FLAT))
+        except BetLogTampered:
+            pass
+        else:
+            pytest.fail(f"{name} accepted the tampered log of {day}")
+        assert path.read_bytes() == raw, f"{name} wrote onto a tampered log"
 
 
 def instant(text: str) -> datetime:
@@ -265,11 +328,88 @@ def test_every_pool_code_is_accepted():
     for i, pool in enumerate(POOLS):
         legs = pools[pool]["legs"]
         combination = ",".join(str(n + 1) for n in range(legs))
-        stored = log.record(bet(200, race=1 + i, pool=pool, combination=combination))
+        # WIN5 spans five races: it is keyed by its day, as the odds log keys its pool
+        key = {"race_id": f"jra:{DEV_DAY.isoformat()}:WIN5"} if pool == "WIN5" else {}
+        stored = log.record(bet(200, race=1 + i, pool=pool, combination=combination, **key))
         assert stored["pool"] == pool and stored["combination"] == combination
+        assert stored["race_id"] == key.get("race_id", f"jra:{DEV_DAY.isoformat()}:TOK:{1 + i:02d}")
         assert stored["seq"] == i + 1
     assert [r["pool"] for r in BetLog(path, day=DEV_DAY, limits=NO_FLAT).read()] == list(POOLS)
     assert log.staked_yen() == 200 * len(POOLS)
+
+
+# (pool, combination as given, combination as stored): the store's order (jravan/dividends.py),
+# FORECAST and TIERCE in finishing order, the others ascending by number
+STORE_ORDER = [
+    ("QUINELLA", "7,4", "4,7"),
+    ("QUINELLA", "4,7", "4,7"),
+    ("QUINELLA", "12,3", "3,12"),  # by number, not as text
+    ("QUINELLA_PLACE", "18,9", "9,18"),
+    ("QUINELLA_PLACE", "2,1", "1,2"),
+    ("BRACKET_QUINELLA", "8,1", "1,8"),
+    ("BRACKET_QUINELLA", "3,3", "3,3"),  # two horses of one bracket
+    ("TRIO", "9,2,5", "2,5,9"),
+    ("TRIO", "15,2,10", "2,10,15"),
+    ("TRIO", "3,1,2", "1,2,3"),
+    ("FORECAST", "7,4", "7,4"),
+    ("FORECAST", "4,7", "4,7"),
+    ("FORECAST", "12,3", "12,3"),
+    ("TIERCE", "9,2,5", "9,2,5"),
+    ("TIERCE", "15,2,10", "15,2,10"),
+    ("WIN", "7", "7"),
+    ("PLACE", "12", "12"),
+]
+
+
+def test_a_combination_is_stored_in_the_stores_order():
+    ordered = {p for p, c in jra_config()["pools"].items() if c["kind"].startswith("ordered_")}
+    assert ordered == {"FORECAST", "TIERCE"}  # the pools whose legs are a finishing order
+    log, path = open_log()
+    stored_all = []
+    for i, (pool, given, expected) in enumerate(STORE_ORDER):
+        placed = bet(100, race=1 + i % 12, pool=pool, combination=given)
+        caller_copy = dict(placed)
+        stored = log.record(placed)
+        assert placed == caller_copy, "record changed the caller's bet"
+        assert stored["combination"] == expected, (
+            f"{pool} {given!r} stored as {stored['combination']!r}"
+        )
+        as_stored = {**placed, "combination": expected}
+        assert_stored(stored, as_stored, seq=i + 1, status="development", over=False, off=False)
+        stored_all.append(stored)
+    assert BetLog(path, day=DEV_DAY, limits=NO_FLAT).read() == stored_all
+    in_file = [json.loads(line)["record"]["combination"] for line in split_lines(path.read_bytes())]
+    assert in_file == [expected for _, _, expected in STORE_ORDER]
+
+
+def test_a_win5_bet_is_keyed_by_its_day():
+    for day in (DEV_DAY, DEV_DAY - timedelta(days=1)):
+        log, path = open_log(day)
+        given = [
+            win5(1_000, day=day, combination="1,1,1,1,1"),  # horse 1 in each of five races
+            win5(200, day=day, combination="12,3,1,7,2"),  # in race order, as given
+            bet(300, day=day, race=11, combination="4"),
+        ]
+        stored = [log.record(dict(placed)) for placed in given]
+        assert [s["race_id"] for s in stored] == [
+            f"jra:{day.isoformat()}:WIN5",
+            f"jra:{day.isoformat()}:WIN5",
+            f"jra:{day.isoformat()}:TOK:11",
+        ]
+        assert [s["combination"] for s in stored] == ["1,1,1,1,1", "12,3,1,7,2", "4"]
+        assert [s["pool"] for s in stored] == ["WIN5", "WIN5", "WIN"]
+        assert [s["seq"] for s in stored] == [1, 2, 3]
+        assert BetLog(path, day=day, limits=NO_FLAT).read() == stored
+        assert log.staked_yen() == 1_500
+
+    # the day-level key is dated too: a WIN5-only log copied to another day is not that day's log
+    day, other = DEV_DAY - timedelta(days=2), DEV_DAY + timedelta(days=3)
+    log, path = open_log(day)
+    log.record(win5(100, day=day, combination="3,3,8,1,14"))
+    target = bet_log_path(other)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(path.read_bytes())
+    assert_tampered(target, other)
 
 
 # ---------------------------------------------------------------- the cap
@@ -416,6 +556,42 @@ MALFORMED = {
     "a placed_utc that is not ISO": bet(placed="Sunday afternoon"),
     "a placed_utc that is not text": bet(placed=datetime(2026, 11, 22, 5, 40, tzinfo=UTC)),
     "not a dict": [bet()],
+    # combinations: the wrong number of legs for the pool
+    "two horses in WIN": bet(pool="WIN", combination="4,7"),
+    "one horse in QUINELLA": bet(pool="QUINELLA", combination="4"),
+    "two horses in TRIO": bet(pool="TRIO", combination="1,2"),
+    "four races in WIN5": win5(combination="1,2,3,4"),
+    # combinations: not horse numbers
+    "a dash between horses": bet(pool="QUINELLA", combination="4-7"),
+    "a letter": bet(combination="a"),
+    "horse 0": bet(combination="0"),
+    "a leg of 0": bet(pool="QUINELLA", combination="4,0"),
+    "a leading zero": bet(combination="04"),
+    "a leading zero in a leg": bet(pool="QUINELLA", combination="4,07"),
+    # combinations: one horse twice (BRACKET_QUINELLA and WIN5 take repeats)
+    "a repeat in WIN": bet(pool="WIN", combination="4,4"),
+    "a repeat in PLACE": bet(pool="PLACE", combination="4,4"),
+    "a repeat in QUINELLA": bet(pool="QUINELLA", combination="4,4"),
+    "a repeat in QUINELLA_PLACE": bet(pool="QUINELLA_PLACE", combination="4,4"),
+    "a repeat in FORECAST": bet(pool="FORECAST", combination="4,4"),
+    "a repeat in TRIO": bet(pool="TRIO", combination="4,7,4"),
+    "one horse three times in TRIO": bet(pool="TRIO", combination="7,7,7"),
+    "a repeat in TIERCE": bet(pool="TIERCE", combination="4,7,4"),
+    "a repeat first in TIERCE": bet(pool="TIERCE", combination="4,4,7"),
+    # race ids: race 00, and the WIN5 key for WIN5 alone
+    "race number 00": bet(race_id="jra:2026-11-22:TOK:00"),
+    "a WIN5 bet keyed by one race": bet(pool="WIN5", combination="1,2,3,4,5"),
+    "a WIN5 key of another day": {**win5(), "race_id": "jra:2026-11-23:WIN5"},
+    "a WIN bet on the WIN5 key": bet(race_id="jra:2026-11-22:WIN5"),
+    "a TRIO bet on the WIN5 key": bet(
+        pool="TRIO", combination="1,2,3", race_id="jra:2026-11-22:WIN5"
+    ),
+    # option_id and note
+    "a blank option_id": bet(option_id=""),
+    "a whitespace option_id": bet(option_id="   "),
+    "an option_id that is not text": bet(option_id=7),
+    "a note that is a number": bet(note=5),
+    "a note that is a list": bet(note=["own pick"]),
 }
 REQUIRED = ("race_id", "pool", "combination", "stake_yen", "placed_utc")
 
@@ -468,9 +644,16 @@ def three_bets() -> tuple[Path, bytes]:
     assert second["seq"] == 2
     again.record(bet(300, race=3, pool="QUINELLA", combination="4,7", note="中山"))
     raw = path.read_bytes()
-    objs = chain(raw)
-    assert objs[1]["prev_sha256"] == sha(split_lines(raw)[0])
+    lines = split_lines(raw)  # the line format itself is pinned by chain(), where a test needs it
+    assert len(lines) == 3 and json.loads(lines[1])["prev_sha256"] == sha(lines[0])
     return path, raw
+
+
+def only_bet() -> tuple[Path, bytes]:
+    """A log of one bet of 1000 yen."""
+    log, path = open_log()
+    log.record(bet(1_000, race=1))
+    return path, path.read_bytes()
 
 
 def flip_byte(pattern: bytes) -> Callable[[bytes], bytes]:
@@ -528,6 +711,153 @@ def test_the_log_is_append_only_and_chained(edit):
         assert path.read_bytes() == tampered, f"{name} wrote onto a broken chain"
 
 
+def swap(old: bytes, new: bytes) -> Callable[[bytes], bytes]:
+    """Replace ``old`` by ``new`` of the same length, once: a one-byte edit that keeps the line
+    well formed."""
+
+    def edit(line: bytes) -> bytes:
+        assert line.count(old) == 1 and len(old) == len(new), f"{old!r} in {line!r}"
+        return line.replace(old, new)
+
+    return edit
+
+
+LAST_LINE_EDITS = {
+    "the only bet's stake, 1000 to 2000": (
+        only_bet,
+        swap(b'"stake_yen":1000', b'"stake_yen":2000'),
+    ),
+    "the last bet's stake, 300 to 800": (three_bets, swap(b'"stake_yen":300', b'"stake_yen":800')),
+    "the last bet's race, 03 to 04": (three_bets, swap(b":TOK:03", b":TOK:04")),
+    "the last bet's combination, 4,7 to 4,8": (three_bets, swap(b'"4,7"', b'"4,8"')),
+}
+
+
+@pytest.mark.parametrize(
+    ("build", "edit"), list(LAST_LINE_EDITS.values()), ids=list(LAST_LINE_EDITS)
+)
+def test_an_edit_to_the_last_line_is_detected(build, edit):
+    path, raw = build()
+    lines = split_lines(raw)
+    tampered = join_lines([*lines[:-1], edit(lines[-1])])
+    assert tampered != raw and len(tampered) == len(raw)
+    path.write_bytes(tampered)
+    assert_tampered(path)
+
+
+SHA = rb'"sha256"\s*:\s*"[0-9a-f]'  # the first hex digit of a line's own sha256
+
+
+def other_hex(digest: str) -> str:
+    return ("8" if digest[0] != "8" else "9") + digest[1:]
+
+
+def on_last(edit: Callable[[bytes], bytes]) -> Callable[[bytes], bytes]:
+    def apply(raw: bytes) -> bytes:
+        lines = split_lines(raw)
+        return join_lines([*lines[:-1], edit(lines[-1])])
+
+    return apply
+
+
+def with_sha(value: str | None) -> Callable[[bytes], bytes]:
+    """The line with its sha256 set to ``value``, or without one (None), re-encoded."""
+
+    def edit(line: bytes) -> bytes:
+        obj = json.loads(line)
+        assert "sha256" in obj
+        if value is None:
+            del obj["sha256"]
+        else:
+            obj["sha256"] = value
+        return encode(obj)
+
+    return edit
+
+
+def rechained(n: int, change: Callable[[dict], object]) -> Callable[[bytes], bytes]:
+    """Change line ``n`` (from 0), then recompute every hash after it, as an editor who knows the
+    format would, but leave line ``n``'s own sha256 as the change left it."""
+
+    def apply(raw: bytes) -> bytes:
+        objs = lines_of(raw)
+        assert rechain(objs) == raw, "the test's model of the format is not the log's"
+        change(objs[n])
+        return rechain(objs, keep=frozenset({n}))
+
+    return apply
+
+
+CHECKSUM_EDITS = {
+    "the only line's sha256, one hex digit": (only_bet, on_last(flip_byte(SHA))),
+    "the only line's sha256 missing": (only_bet, on_last(with_sha(None))),
+    "the last line's sha256, one hex digit": (three_bets, on_last(flip_byte(SHA))),
+    "the last line's sha256 missing": (three_bets, on_last(with_sha(None))),
+    "the last line's sha256 all zeros": (three_bets, on_last(with_sha(ZERO))),
+    "the last line's sha256 copied from line 2": (
+        three_bets,
+        lambda raw: on_last(with_sha(lines_of(raw)[1]["sha256"]))(raw),
+    ),
+    "line 1's stake edited, the hashes after it recomputed": (
+        three_bets,
+        rechained(0, lambda obj: obj["record"].update(stake_yen=20_000)),
+    ),
+    "line 1's sha256 missing, the hashes after it recomputed": (
+        three_bets,
+        rechained(0, lambda obj: obj.pop("sha256")),
+    ),
+    "line 2's sha256 wrong, the hashes after it recomputed": (
+        three_bets,
+        rechained(1, lambda obj: obj.update(sha256=other_hex(obj["sha256"]))),
+    ),
+}
+
+
+@pytest.mark.parametrize(("build", "edit"), list(CHECKSUM_EDITS.values()), ids=list(CHECKSUM_EDITS))
+def test_each_line_carries_its_own_sha256(build, edit):
+    path, raw = build()
+    chain(raw)  # every line carries a sha256 of itself
+    tampered = edit(raw)
+    assert tampered != raw
+    path.write_bytes(tampered)
+    assert_tampered(path)
+
+
+COPIES = {  # name -> (bets in the log, days from the log's day to the day it is copied to)
+    "one bet, to the next day": (1, 1),
+    "three bets, to a week before": (3, -7),
+    "three bets, to a year later": (3, 365),
+}
+
+
+@pytest.mark.parametrize(("n", "offset"), list(COPIES.values()), ids=list(COPIES))
+def test_a_log_copied_to_another_day_is_tampered(n, offset):
+    log, path = open_log()
+    bets = [
+        bet(1_000, race=1),
+        bet(2_000, race=2, pool="PLACE", combination="7"),
+        bet(300, race=3, pool="QUINELLA", combination="4,7"),
+    ][:n]
+    for placed in bets:
+        log.record(placed)
+    stakes = [placed["stake_yen"] for placed in bets]
+    other = DEV_DAY + timedelta(days=offset)
+    target = bet_log_path(other)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(path.read_bytes())  # the right file name, the chain intact, another day
+    assert_tampered(target, other)
+    assert BetLog(path, day=DEV_DAY, limits=NO_FLAT).staked_yen() == sum(stakes)  # its own day
+
+
+def test_one_record_dated_another_day_is_tampered():
+    path, raw = three_bets()
+    objs = lines_of(raw)
+    assert rechain(objs) == raw, "the test's model of the format is not the log's"
+    objs[1]["record"]["race_id"] = "jra:2026-11-23:TOK:02"  # the day after, hashes recomputed
+    path.write_bytes(rechain(objs))
+    assert_tampered(path)
+
+
 def test_a_cut_off_last_line_is_detected():
     path, raw = three_bets()
     path.write_bytes(raw[:-1])  # no newline after the last line
@@ -582,6 +912,64 @@ def test_the_log_path_is_under_the_data_dir(D, tmp_path, monkeypatch):
     assert not (D / "bets").exists()
 
 
+def test_a_day_has_one_log_at_its_bet_log_path(D, tmp_path, monkeypatch):
+    name = f"{DEV_DAY.isoformat()}.jsonl"
+    own = bet_log_path(DEV_DAY)
+    BetLog(own, day=DEV_DAY, limits=NO_FLAT).record(bet(1_000, race=1))
+
+    # other spellings of the same file are the same log: compared after resolving
+    alias = tmp_path / "alias"
+    alias.symlink_to(own.parent, target_is_directory=True)
+    same = {
+        "through ..": D / "bets" / "japan" / ".." / "japan" / name,
+        "through a symlink": alias / name,
+        "relative to the working directory": Path(os.path.relpath(own)),
+    }
+    for i, path in enumerate(same.values()):
+        BetLog(path, day=DEV_DAY, limits=NO_FLAT).record(bet(100 * (i + 1), race=2 + i))
+    assert BetLog(own, day=DEV_DAY, limits=NO_FLAT).staked_yen() == 1_600
+    assert len(split_lines(own.read_bytes())) == 4
+
+    # the day's file name anywhere else is refused, and nothing is created
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "elsewhere-link").symlink_to(elsewhere, target_is_directory=True)
+    refused = {
+        "outside the data dir": tmp_path / "ok" / name,
+        "the data dir's root": D / name,
+        "the bets folder": D / "bets" / name,
+        "a folder under the day's": D / "bets" / "japan" / "old" / name,
+        "another country's folder": D / "bets" / "hongkong" / name,
+        "the shadow log's folder": D / "shadow" / "japan" / name,
+        "another data dir's layout": tmp_path / "data-2" / "bets" / "japan" / name,
+        "a symlink to another folder": tmp_path / "elsewhere-link" / name,
+    }
+    before = own.read_bytes()
+    for where, path in refused.items():
+        with pytest.raises(ValueError) as err:
+            BetLog(path, day=DEV_DAY, limits=NO_FLAT)
+        assert not isinstance(err.value, BetLogInRepo), where
+        assert not path.exists(), where
+    for folder in (
+        tmp_path / "ok",
+        tmp_path / "data-2",
+        D / "bets" / "japan" / "old",
+        D / "bets" / "hongkong",
+        D / "shadow",
+    ):
+        assert not folder.exists(), f"a refused path created {folder}"
+    assert not (D / name).exists() and not (D / "bets" / name).exists()
+    assert list(elsewhere.iterdir()) == []
+    assert own.read_bytes() == before
+
+    # the data dir is read on every call: once it moves, the old file is no longer the day's log
+    moved = (tmp_path / "moved").resolve()
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(moved))
+    with pytest.raises(ValueError):
+        BetLog(own, day=DEV_DAY, limits=NO_FLAT)
+    assert BetLog(bet_log_path(DEV_DAY), day=DEV_DAY, limits=NO_FLAT).staked_yen() == 0
+
+
 @pytest.mark.parametrize(
     "name", ["2026-11-23.jsonl", "2026-11-22.json", "2026-11-22.jsonl.bak", "bets.jsonl"]
 )
@@ -603,18 +991,23 @@ def test_the_log_refuses_a_path_inside_the_repository(tmp_path, monkeypatch):
         "through ..": tmp_path / os.path.relpath(REPO / "docs", tmp_path) / name,
         "relative to the working directory": Path(os.path.relpath(REPO / "tests" / name)),
     }
+    assert issubclass(BetLogInRepo, RuntimeError)
     for where, path in inside.items():
-        with pytest.raises((ValueError, PermissionError, RuntimeError)):
+        with pytest.raises(BetLogInRepo):
             BetLog(path, day=DEV_DAY, limits=NO_FLAT)
         assert not (REPO / name).exists(), where
         assert not (REPO / "docs" / name).exists(), where
         assert not (REPO / "tests" / name).exists(), where
         assert not (REPO / "docs" / "bets-453").exists(), where
 
-    # outside the repository the same name is accepted
+    # outside the repository the same name elsewhere is not the day's log either (ruling 1)
     outside = (tmp_path / "ok" / name).resolve()
-    BetLog(outside, day=DEV_DAY, limits=NO_FLAT).record(bet(100))
-    assert outside.is_file()
+    with pytest.raises(ValueError) as refused:
+        BetLog(outside, day=DEV_DAY, limits=NO_FLAT)
+    assert not isinstance(refused.value, BetLogInRepo)
+    assert not (tmp_path / "ok").exists()
+    BetLog(bet_log_path(DEV_DAY), day=DEV_DAY, limits=NO_FLAT).record(bet(100))
+    assert bet_log_path(DEV_DAY).is_file()
 
     # and the default path cannot be pointed at the repository
     monkeypatch.setenv(paths.DATA_DIR_VAR, str(REPO / "data"))

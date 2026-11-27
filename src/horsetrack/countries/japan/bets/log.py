@@ -1,11 +1,12 @@
 """The owner's manual bet log per Japan race day, hash-chained, with the race-day cap (#453).
 
-``data_dir()/bets/japan/<YYYY-MM-DD>.jsonl`` holds one JSON line per bet the owner placed by hand,
-each line chained to the one before it by sha256, as the shadow log chains its lines
-(docs/specs/shadow-log.md). A placed bet is a fact: a bet past the day cap or off the flat stake is
-recorded and flagged, never refused; ``check`` is the gate before betting. Stakes are not
-outcomes, so a holdout day's bets are read back and counted like any other day's. The format is in
-docs/specs/bet-log.md. The log is the owner's financial record and stays outside the repository.
+``data_dir()/bets/japan/<YYYY-MM-DD>.jsonl``, the one log of the day, holds one JSON line per bet
+the owner placed by hand, each line carrying a sha256 of itself and chained to the one before it by
+sha256, as the shadow log chains its lines (docs/specs/shadow-log.md). A placed bet is a fact: a
+bet past the day cap or off the flat stake is recorded and flagged, never refused; ``check`` is the
+gate before betting. Stakes are not outcomes, so a holdout day's bets are read back and counted
+like any other day's. The format is in docs/specs/bet-log.md. The log is the owner's financial
+record and stays outside the repository.
 """
 
 from __future__ import annotations
@@ -45,10 +46,13 @@ ZERO_SHA = "0" * 64
 REQUIRED = ("race_id", "pool", "combination", "stake_yen", "placed_utc")
 OPTIONAL = ("option_id", "note")
 ADDED = ("seq", "written_utc", "day_status", "over_cap", "off_flat")
-LINE_KEYS = frozenset({"seq", "prev_sha256", "record"})
+LINE_KEYS = frozenset({"seq", "prev_sha256", "record", "sha256"})
+WIN5 = "WIN5"  # the pool, keyed by its day (jra:<day>:WIN5) as research/win5.py keys it
 
 # [0-9] and [A-Z], not \d and \w: those match full-width digits and letters too.
-_RACE_ID = re.compile(r"jra:([0-9]{4}-[0-9]{2}-[0-9]{2}):([A-Z]+):(0[1-9]|[1-9][0-9])")
+_RACE_ID = re.compile(
+    r"jra:(?P<day>[0-9]{4}-[0-9]{2}-[0-9]{2}):(?:(?P<venue>[A-Z]+):(?:0[1-9]|[1-9][0-9])|WIN5)"
+)
 _COMBINATION = re.compile(r"[1-9][0-9]?(?:,[1-9][0-9]?)*")
 
 
@@ -147,6 +151,31 @@ def _jra() -> dict[str, Any]:
     return load_country_yaml(COUNTRY, SOURCE)
 
 
+def _kind(pool: str) -> str:
+    return _jra()["pools"][pool]["kind"]
+
+
+def _legs_in_order(pool: str) -> bool:
+    """Whether the legs are in an order the dividend depends on: finishing order (the
+    ``ordered_*`` kinds) or race order (WIN5's ``multi_race_*``)."""
+    return _kind(pool).startswith(("ordered_", "multi_race_"))
+
+
+def _repeats_allowed(pool: str) -> bool:
+    """Whether a number may repeat: the legs are brackets (two horses of one bracket) or races
+    (WIN5), not horses of one race."""
+    kind = _kind(pool)
+    return kind.endswith("_bracket") or kind.startswith("multi_race_")
+
+
+def _in_store_order(pool: str, combination: str) -> str:
+    """``combination`` as the store holds it (jravan/dividends.py): as given when its legs are in
+    order, else ascending by number."""
+    if _legs_in_order(pool):
+        return combination
+    return ",".join(sorted(combination.split(","), key=int))
+
+
 def _stake_refusal(stake: Any) -> str | None:
     """Why ``stake`` is not a stake JRA sells (whole units of its unit stake), or None."""
     unit = int(_jra()["unit_stake"])
@@ -168,20 +197,25 @@ def _refusal(bet: Any, day: date) -> str | None:
     race_id = bet["race_id"]
     match = _RACE_ID.fullmatch(race_id) if isinstance(race_id, str) else None
     if match is None:
-        return f"has a race_id not of the form jra:<YYYY-MM-DD>:<VENUE>:<NN>: {race_id!r}"
-    if match[1] != day.isoformat():
+        return f"has a race_id not of the form jra:<YYYY-MM-DD>:<VENUE>:<NN> or :WIN5: {race_id!r}"
+    if match["day"] != day.isoformat():
         return f"has a race_id of another day than {day.isoformat()}: {race_id!r}"
-    if match[2] not in _jra()["venues"]:
+    if match["venue"] is not None and match["venue"] not in _jra()["venues"]:
         return f"has a race_id at an unknown venue: {race_id!r}"
     pool = bet["pool"]
     if not isinstance(pool, str) or pool not in POOLS:
         return f"has a pool other than {', '.join(POOLS)}: {pool!r}"
+    if (pool == WIN5) != (match["venue"] is None):
+        return f"has the race_id {race_id!r} for {pool}: WIN5, and only WIN5, takes jra:<day>:WIN5"
     combination = bet["combination"]
     if not isinstance(combination, str) or not _COMBINATION.fullmatch(combination):
         return f"has a combination that is not horse numbers joined by ',': {combination!r}"
+    numbers = combination.split(",")
     legs = _jra()["pools"][pool]["legs"]
-    if len(combination.split(",")) != legs:
+    if len(numbers) != legs:
         return f"has a combination of other than {legs} numbers for {pool}: {combination!r}"
+    if len(set(numbers)) != len(numbers) and not _repeats_allowed(pool):
+        return f"has a combination with a number twice, which {pool} does not sell: {combination!r}"
     reason = _stake_refusal(bet["stake_yen"])
     if reason is not None:
         return f"has a stake_yen that {reason}"
@@ -196,24 +230,30 @@ def _refusal(bet: Any, day: date) -> str | None:
     return None
 
 
-def _stored_ok(record: Any, seq: int) -> bool:
-    """Whether a record read back has the shape this log writes, numbered ``seq``."""
+def _stored_refusal(record: Any, seq: int, day: date) -> str | None:
+    """Why a record read back is not one this log writes as bet ``seq`` of ``day``, or None."""
     if not isinstance(record, dict):
-        return False
+        return "is not a dict"
     keys = set(record)
     if not set(REQUIRED + ADDED) <= keys <= set(REQUIRED + OPTIONAL + ADDED):
-        return False
-    return (
+        return f"has the keys {sorted(keys)}"
+    if not (
         type(record["seq"]) is int
         and record["seq"] == seq
-        and _stake_refusal(record["stake_yen"]) is None
         and record["day_status"] in (HOLDOUT, DEVELOPMENT)
         and type(record["over_cap"]) is bool
         and type(record["off_flat"]) is bool
-    )
+    ):
+        return "has a seq, day_status or flag this log does not write"
+    reason = _refusal({key: record[key] for key in keys - set(ADDED)}, day)  # a bet of the day
+    if reason is not None:
+        return reason
+    if record["combination"] != _in_store_order(record["pool"], record["combination"]):
+        return f"has a combination not in the store's order: {record['combination']!r}"
+    return None
 
 
-def _parse(raw: bytes, path: Path) -> _State:
+def _parse(raw: bytes, path: Path, day: date) -> _State:
     """The verified content of a log file; BetLogTampered on any break in the chain."""
     if raw and not raw.endswith(b"\n"):
         raise BetLogTampered(f"{path}: the last line is cut off")
@@ -228,13 +268,16 @@ def _parse(raw: bytes, path: Path) -> _State:
             obj = None
         if not isinstance(obj, dict) or set(obj) != LINE_KEYS:
             raise BetLogTampered(f"{where}: not a line this log wrote")
+        if obj["sha256"] != _sha(_encode({k: v for k, v in obj.items() if k != "sha256"})):
+            raise BetLogTampered(f"{where}: its sha256 is not that of the line")
         if obj["prev_sha256"] != prev:
             raise BetLogTampered(f"{where}: does not chain onto the line before it")
         seq = FIRST_SEQ + n - 1
         if type(obj["seq"]) is not int or obj["seq"] != seq:
             raise BetLogTampered(f"{where}: seq out of order")
-        if not _stored_ok(obj["record"], seq):
-            raise BetLogTampered(f"{where}: not a bet record this log wrote")
+        reason = _stored_refusal(obj["record"], seq, day)
+        if reason is not None:
+            raise BetLogTampered(f"{where}: not a bet record this log wrote: it {reason}")
         records.append(obj["record"])
         prev = _sha(line)
     return _State(
@@ -266,12 +309,13 @@ class BetLog:
         if not isinstance(limits, Limits):
             raise TypeError(f"limits must be Limits, got {limits!r}")
         path = Path(path)
-        if path.name != f"{day.isoformat()}.jsonl":
-            raise ValueError(f"{path.name} is not the bet log of {day.isoformat()}")
         root = env.repo_root()
         if is_inside(path, root):
             raise BetLogInRepo(f"{path} is inside the repository at {root}: bets stay outside it")
-        self._path = Path(os.path.abspath(path))
+        own = bet_log_path(day)  # one log per day, so check and record count the same stakes
+        if path.resolve() != own.resolve():
+            raise ValueError(f"{path} is not the bet log of {day.isoformat()}, which is {own}")
+        self._path = own
         self._day = day
         self._limits = limits
 
@@ -282,7 +326,7 @@ class BetLog:
                 raw = fh.read()
         except FileNotFoundError:
             raw = b""
-        return _parse(raw, self._path)
+        return _parse(raw, self._path, self._day)
 
     def _status(self, state: _State) -> str:
         """Fails closed: holdout when the rule says so now or any bet was logged as holdout."""
@@ -308,8 +352,9 @@ class BetLog:
         )
 
     def record(self, bet: dict) -> dict:
-        """Append one placed bet and return the stored record, or raise BetRefused and write
-        nothing. A bet past the cap or off the flat stake is recorded and flagged."""
+        """Append one placed bet and return the stored record, its combination in the store's
+        order, or raise BetRefused and write nothing. A bet past the cap or off the flat stake is
+        recorded and flagged."""
         reason = _refusal(bet, self._day)
         if reason is not None:
             raise BetRefused(f"the bet {reason}; nothing was written")
@@ -319,16 +364,18 @@ class BetLog:
         with open(self._path, "a+b") as fh:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)  # read, verify and append as one step
             fh.seek(0)
-            state = _parse(fh.read(), self._path)
+            state = _parse(fh.read(), self._path, self._day)
             record = {
                 **bet,
+                "combination": _in_store_order(bet["pool"], bet["combination"]),
                 "seq": state.next_seq,
                 "written_utc": datetime.now(timezone.utc).isoformat(),
                 "day_status": self._status(state),
                 "over_cap": state.staked_yen + stake > self._limits.day_cap_yen,
                 "off_flat": self._off_flat(stake),
             }
-            line = _encode({"seq": state.next_seq, "prev_sha256": state.last_sha, "record": record})
+            body = {"seq": state.next_seq, "prev_sha256": state.last_sha, "record": record}
+            line = _encode({**body, "sha256": _sha(_encode(body))})
             stored = _decode(line)["record"]  # it must read back as written
             fh.seek(0, os.SEEK_END)
             fh.write(line + b"\n")
