@@ -24,7 +24,9 @@ cell alone? The null is that it does not.
   replicate here draws whole meetings the same way and recomputes both RMSEs over the pooled races
   of the draw, model and baseline on the same draw (paired).
 - `rmse_table`: the overall row and one row per distinct `by` value, each with its own bounds.
-- `read_inputs()`: the JRA store's races and runners, column-scoped, holdout days dropped.
+- `read_inputs()`: the JRA store's races and runners, column-scoped, holdout days excluded by
+  the Parquet scan (#415), so none is materialized; a row group mixing development and holdout
+  days is still read from disk (pruning is by min/max statistics only).
 
 The study (`run_study`; CLI `python -m horsetrack.countries.japan.studies.speed_run --run [--out
 DIR]`, an `--out` inside the repository refused) freezes its spec in the run registry before any
@@ -422,10 +424,14 @@ def rmse_table(
 
 def read_inputs() -> tuple[pd.DataFrame, pd.DataFrame]:
     """The JRA store's races (RACE_COLUMNS) and runners (RUNNER_COLUMNS and race_date),
-    column-scoped, holdout days dropped. No JRDB table is read (D21)."""
-    races = read_table(SOURCE, "races", columns=list(RACE_COLUMNS))
-    runners = read_table(SOURCE, "runners", columns=[*RUNNER_COLUMNS, "race_date"])
-    return _development(races), _development(runners)
+    column-scoped. Holdout days are excluded by the scan (`read_table(..., development=COUNTRY)`,
+    #415: each table's own race_date bounds and its scan from one open handle), so no holdout row
+    is materialized. No JRDB table is read (D21)."""
+    races = read_table(SOURCE, "races", columns=list(RACE_COLUMNS), development=COUNTRY)
+    runners = read_table(
+        SOURCE, "runners", columns=[*RUNNER_COLUMNS, "race_date"], development=COUNTRY
+    )
+    return races, runners
 
 
 # --------------------------------------------------------------------------- the study
