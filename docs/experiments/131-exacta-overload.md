@@ -6,8 +6,14 @@ combinations relative to the Win pool and an ordering model. Spec:
 on 2026-11-25 and frozen in the Japan run registry before any scored run. Registry hypothesis id
 `E43`. E1's members are ranked by their shrunk return below; every E1, E1′ and E1″ member's value
 is in [131-exacta-e1-members.md](131-exacta-e1-members.md) and every registry record in
-[registry/japan/](registry/japan/README.md), one file per family (the file names of the
-`japan/131-…` families are TBD). Nothing is adopted; no rule is staked.
+[registry/japan/](registry/japan/README.md), one file per family, its "/" written as "--":
+[japan--131-exacta-category-v2.md](registry/japan/japan--131-exacta-category-v2.md),
+[japan--131-exacta-category-b1-v2.md](registry/japan/japan--131-exacta-category-b1-v2.md),
+[japan--131-exacta-category-b3-v2.md](registry/japan/japan--131-exacta-category-b3-v2.md),
+[japan--131-exacta-category-v2--max-test.md](registry/japan/japan--131-exacta-category-v2--max-test.md)
+and [japan--131-exacta-logscore-v2.md](registry/japan/japan--131-exacta-logscore-v2.md), and the
+v1 files of the same names with `v1`. The rule families are frozen, not scored, so they have no
+file. Nothing is adopted; no rule is staked.
 
 The results name the v2 families (`japan/131-exacta-*-v2`, frozen 2026-11-27). v2 supersedes the
 v1 families of 2026-11-25 only for the λ2 label: the owner, 2026-11-26 on #131, "Relabel λ2
@@ -245,8 +251,8 @@ whose records stay in the registry:
   - **Failed (void):** the first run (git `4271171`) passed the spec's 95% confidence level as
     `snooping.stepm`'s `level`, which is the test size, so StepM ran at a family-wise error of
     0.95 and "rejected" 13 members. That record stays in the registry; its StepM list means
-    nothing. In [registry/japan/](registry/japan/README.md), family
-    `japan/131-exacta-category-v1/max-test`, it is the first `spa+stepm` record (the first three
+    nothing. In family `japan/131-exacta-category-v1/max-test`
+    ([japan--131-exacta-category-v1--max-test.md](registry/japan/japan--131-exacta-category-v1--max-test.md)), it is the first `spa+stepm` record (the first three
     rows, `stepm_superior` 13); the valid re-run is the next three rows (`stepm_superior` 0). SPA
     does not take a level and is identical in both records (p 0.175).
   - The re-run (git `9910a7c`, FWER 0.05): SPA p = 0.175, StepM no member; the v2 record equals it.
