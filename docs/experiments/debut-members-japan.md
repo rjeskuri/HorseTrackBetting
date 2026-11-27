@@ -2,10 +2,11 @@
 
 Ticket #438 (epic #73; N7, E34, E37). Each member that could carry signal for a debut or maiden runner is fitted beside the final Win price, one at a time and all together, per class (DEBUT, MAIDEN), as a conditional logit with ln q as its offset on D9's folds. **Nothing is adopted** (D16-D19): every variant is a ranked row with its encompassing weight beside it. The holdout is not opened. **Every figure is withheld (D21)**: the members read JRA-VAN and JRDB data, so this report gives no count, span, score, rate, sign or bound; each figure is in the private report and the registry records it names.
 
-- Registry family `japan-debut-maiden-members-v1`, spec sha256 `fee36f35aa6d81a1294ef67cecdb14c3bb71e1aa8cc81c79664684759e1e3174`, frozen before the run read any store row. The pre-registration is `docs/specs/debut-members-prereg.md`.
+- Registry family `japan-debut-maiden-members-v2`, spec sha256 `55bf539436caf585b84eccccc49be9b1c1f9b66aea1cbcc81e727a5bc85e44d3`, frozen before the run read any store row. The pre-registration is `docs/specs/debut-members-prereg.md`.
 - Code: `countries/japan/studies/debut_members.py`. To reproduce, run `uv run horsetrack japan debut-members`.
-- Private report: `$HORSETRACK_DATA_DIR/reports/debut-members-japan-fee36f35aa6d.md`, its tables as JSON beside it, and the ranked rows in `$HORSETRACK_DATA_DIR/reports/candidate-cells/debut-members.json`, all written through `write_report` with the sources `jra`, `jravan`, `jrdb`.
-- Records: `docs/experiments/registry/japan/japan-debut-maiden-members-v1.md`; every one is withheld.
+- Private report: `$HORSETRACK_DATA_DIR/reports/debut-members-japan-<spec hash>-<run digest>.md` (the spec hash, then a digest of the run's date range and input builds, so no run overwrites another), its tables as JSON beside it, and the ranked rows in `$HORSETRACK_DATA_DIR/reports/candidate-cells/` under the same stem, all written through `write_report` with the sources `jra`, `jravan`, `jrdb`.
+- Records: `docs/experiments/registry/japan/japan-debut-maiden-members-v2.md`; every one is withheld.
+- Supersedes `japan-debut-maiden-members-v1`, kept in the record with its records and summary: v1 cut the late Win boards by the day file's minutes_to_post, measured to the JRA-VAN post rather than the study's JRA post, and settled a race whose winner had no WIN dividend row at the final odds in the N5 curve; v1's records are kept.
 
 ## Hypothesis
 
@@ -23,11 +24,11 @@ Ticket #438 (epic #73; N7, E34, E37). Each member that could carry signal for a 
 | `workouts_jravan` | #229 | built | jra, jravan | #229's best final furlong against par and its trend from JRA-VAN's 坂路 and ウッド times |
 | `jvdata_mining` | #406 | missing: listed, left out | jravan | the JV-Data mining predictions (#406): not landed; listed and left out, added as a counted variant when it lands |
 | `body_weight` | #227 | built | jra | the race-day body weight and its change, in the views from post - 60 min |
-| `late_win` | #438 | built | jra, jravan | the Win share's move to T-2 from T-20 and from T-5 on the JRA-VAN 0B41 boards (#369) |
+| `late_win` | #438 | built | jra, jravan | the Win share's move to T-2 from T-20 and from T-5 on the JRA-VAN 0B41 boards (#369), each board cut at the JRA post |
 
 ## Variants tried
 
-One registry record each, failures included. Each is scored by its per-race winner ΔLL against the final price with D7's one-sided meeting bounds, its weights, its encompassing weight and N5's curve settled at Win (Place after #410).
+One registry record each, failures included. Each is scored by its per-race winner ΔLL against the final price with D7's one-sided meeting bounds, its weights, its encompassing weight and N5's curve settled at each winner's own Win dividend (a race with a winner that has no Win dividend row is left out of the curve and counted in the private report; Place after #410).
 
 | E | variant | status | ΔLL, bounds, weight, encompassing weight, N5 |
 | --- | --- | --- | --- |
@@ -51,6 +52,7 @@ One registry record each, failures included. Each is scored by its per-race winn
 - A fit pooled over both classes: the members' meaning differs for a debut runner (no run, no weight change), so each class has its own fit.
 - A member's raw values without a missing flag: a debut runner lacks some members by construction, and the flag keeps that apart from a value at the mean.
 - The JV-Data mining member (#406): not landed; it is listed and enters as a counted variant when it lands.
+- Settling a race without a Win dividend row at its final odds, and cutting the late Win boards by the JRA-VAN post's minutes to post: both were v1's, replaced in this family (the board cut at the study's JRA post; such a race left out of the curve).
 
 ## What this rules out
 
