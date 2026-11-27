@@ -36,8 +36,9 @@ withheld (D21) and are in a private report only. There is no race or runner row 
 - The full report is under the data directory, at `reports/floor-tail-favourite-japan-dd4d0926b6bc.md`, with
   `-dropped.csv` beside it. The 100-vs-110 check is in `reports/floor-tail-favourite-japan-dd4d0926b6bc-plus10-jravan.md`
   and its `.csv` (private, JRA-VAN-derived). Every record is in
-  `docs/experiments/registry/japan/japan-family-l-floor-tail-favourite-v5.md`, each walk-forward record with its 28
-  per-window differences; the two 100-vs-110 records show neither their status nor any value there (licensed
+  `docs/experiments/registry/japan/japan-family-l-floor-tail-favourite-v5.md`, each walk-forward record with its
+  per-window differences (28 windows for each of the 23 final-price comparisons, one window, 2026-10-01..2026-12-31,
+  for each of the 25 board-at-t comparisons); the two 100-vs-110 records show neither their status nor any value there (licensed
   source). The command's printed summary names them only as withheld.
 - One run, 2026-11-27: 191 s, 1.87 GB peak resident memory (v4: 156 s, 1.09 GB). Most of the rise is the votes read,
   which now filters inside pyarrow's dataset scan so that no holdout row reaches Python (C below); that scan decodes
@@ -489,7 +490,8 @@ data directory. The attempted count is the realised table above.
 - **Re-scoring each walk-forward window from the races up.** Nothing is fitted, so a race's paired returns are the
   same in either evaluation; the walk-forward record restricts the descriptive record's per-race returns to the test
   windows' races. The pooled figures are bootstrapped over those races' meetings; the per-window differences carry no
-  bounds of their own (a point and n per window, 28 windows by 48 comparisons).
+  bounds of their own (a point and n per window: 28 windows for each of the 23 final-price comparisons, one for each
+  of the 25 board-at-t comparisons).
 - **The equal split of the Place profit (v1 to v3).** It is not JRA's published Place rule. JRA pays each placed
   horse (its own stakes plus an equal share of the losing stakes) times the payout rate, shared over its own tickets
   (the stake-back share). `core.pricing.stake_back_share_dividend` already implements it, so the study reuses it

@@ -67,6 +67,7 @@ import hashlib
 import itertools
 import json
 import math
+import stat
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -1761,12 +1762,16 @@ class _ScheduledPosts:
 def _votes_build(path: Path) -> dict[str, str]:
     """The votes' data build, '<path>@<refresh>': the path is the build's identity whatever the
     file's availability, so the registry counts a run with the file restored as a refresh of the
-    same variant. The refresh is the file's digest, or 'missing', or 'unreadable-<error>' when even
-    probing the file is refused (an untraversable directory) or it cannot be read; the run goes on
-    (the prediction is then unavailable)."""
+    same variant. The refresh is the file's digest; 'missing' when its stat finds nothing there
+    (FileNotFoundError, NotADirectoryError) or no regular file; or 'unreadable-<error>' when the
+    stat is refused (an untraversable directory) or the file cannot be read; the run goes on (the
+    prediction is then unavailable). The probe is `stat`, not `is_file`, which from Python 3.14
+    reports a refused stat as no file."""
     where = f"processed/{VOTES_SOURCE}/{jravan_votes.FILENAME}"
     try:
-        refresh = _digest([path]) if path.is_file() else "missing"
+        refresh = _digest([path]) if stat.S_ISREG(path.stat().st_mode) else "missing"
+    except (FileNotFoundError, NotADirectoryError):
+        refresh = "missing"
     except OSError as exc:  # optional input: unreadable is recorded, never fatal
         refresh = f"unreadable-{type(exc).__name__}"
     return {f"{VOTES_SOURCE}_pool_votes": f"{where}@{refresh}"}
