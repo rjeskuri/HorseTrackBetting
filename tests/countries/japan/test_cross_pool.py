@@ -35,6 +35,7 @@ import itertools
 import math
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -46,6 +47,7 @@ from horsetrack.countries.japan.studies.cross_pool import (
     boards_at,
     cross_features,
     harville_pairs,
+    pair_features,
     quinella_shares,
     win_shares,
 )
@@ -184,6 +186,19 @@ def assert_close_maps(got: dict, want: dict, tol: float = TOL) -> None:
     assert set(got) == set(want)
     for k, v in want.items():
         assert got[k] == pytest.approx(v, abs=tol), k
+
+
+NUMERIC_FEATURES = sorted(FEATURE_COLUMNS - {"horse_no"})
+QUINELLA_COLUMNS = ("q_top2_t", "x_cross", "fav_support", "kl_race")
+
+
+def assert_no_inf(frame: pd.DataFrame) -> None:
+    """No feature column holds +inf or -inf (NaN is the only "unavailable")."""
+    for column in frame.columns:
+        if column == "pair":
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce").astype(float).to_numpy()
+        assert not np.isinf(values).any(), column
 
 
 # ---------------------------------------------------------------- the board at t
@@ -490,3 +505,245 @@ def test_nothing_reads_the_store_the_registry_or_the_holdout(tmp_path, monkeypat
     feats = cross_features(one_race_boards(win, quinella))
     assert len(feats) == 3
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------- nullable string columns
+
+
+def jravan_rows(rows: list[dict]) -> list[dict]:
+    """The rows as JRA-VAN's time series writes them: no fetch time, and `status_raw` null on
+    every priced row (only a non-positive price keeps its raw text)."""
+    out = []
+    for r in rows:
+        r = dict(r, fetched_utc=None)
+        if r["odds"] is not None:
+            r["status_raw"] = None
+        out.append(r)
+    return out
+
+
+def _arrow_backed(table: pa.Table) -> pd.DataFrame:
+    return table.to_pandas(types_mapper=pd.ArrowDtype)
+
+
+def _convert_pyarrow(table: pa.Table) -> pd.DataFrame:
+    return table.to_pandas().convert_dtypes(dtype_backend="pyarrow")
+
+
+def _string_dtype(dtype: str):
+    def read(table: pa.Table) -> pd.DataFrame:
+        frame = table.to_pandas()
+        for column in ("race_id", "pool", "combination", "status_raw"):
+            frame[column] = frame[column].astype(dtype)
+        return frame
+
+    return read
+
+
+READERS = {
+    "arrow-dtype": _arrow_backed,
+    "convert-dtypes-pyarrow": _convert_pyarrow,
+    "string": _string_dtype("string"),
+    "string[pyarrow]": _string_dtype("string[pyarrow]"),
+}
+
+
+@pytest.mark.parametrize("reader", sorted(READERS))
+def test_nullable_status_columns_give_the_same_boards_and_features(reader):
+    rid, other = race_id(7), race_id(8, "HAN")
+    horses = (1, 2, 3, 4, 5, 6)
+    win = {1: 2.6, 2: 3.9, 3: 5.8, 4: None, 5: 11.0, 6: 24.0}  # 4 cancelled before sale
+    pairs = list(itertools.combinations(horses, 2))
+    q = {pr: round(4.0 + 1.3 * pr[0] * pr[1] + 0.2 * pr[1], 1) for pr in pairs}
+    rows = win_capture(rid, 3.0, win, status={4: "----"}) + quinella_capture(rid, 2.5, q)
+    p2 = normalise([0.5, 0.3, 0.2])
+    win2, q2 = consistent_odds(p2)
+    rows += win_capture(other, 4.0, win2) + quinella_capture(other, 3.0, q2)
+    table = pa.Table.from_pylist(jravan_rows(rows), schema=SCHEMA)
+    plain = boards_at(table.to_pandas())
+    nullable_day = READERS[reader](table)
+    assert nullable_day["status_raw"].isna().any()
+    nullable = boards_at(nullable_day)
+
+    starters = (1, 2, 3, 5, 6)
+    want = {
+        rid: (
+            {h: win[h] for h in starters},
+            {pr: q[pr] for pr in itertools.combinations(starters, 2)},
+            3.0,
+            2.5,
+        ),
+        other: (win2, q2, 4.0, 3.0),
+    }
+    lag = timedelta(seconds=FETCH_LAG_S)  # no fetch time: the snapshot time is used
+    for boards in (plain, nullable):
+        assert set(boards) == {rid, other}
+        for r, (w, qq, w_min, q_min) in want.items():
+            assert boards[r].win == pytest.approx(w), (reader, r)
+            assert boards[r].quinella == pytest.approx(qq), (reader, r)
+            assert pd.Timestamp(boards[r].win_utc) == pd.Timestamp(
+                POST - timedelta(minutes=w_min) - lag
+            )
+            assert pd.Timestamp(boards[r].quinella_utc) == pd.Timestamp(
+                POST - timedelta(minutes=q_min) - lag
+            )
+
+    for r in want:
+        got, ref = cross_features(nullable[r]), cross_features(plain[r])
+        assert list(got["horse_no"].astype(int)) == list(ref["horse_no"].astype(int))
+        assert len(got) == len(want[r][0])
+        for column in NUMERIC_FEATURES:
+            a = got[column].astype(float).to_numpy()
+            b = ref[column].astype(float).to_numpy()
+            assert np.allclose(a, b, atol=TOL, equal_nan=True), (reader, r, column)
+            assert np.isfinite(a).all(), (reader, r, column)
+
+
+# ---------------------------------------------------------------- pairs off the Win board
+
+
+@pytest.mark.parametrize("absent", [5, 9])
+def test_quinella_pairs_naming_a_runner_off_the_win_board_are_dropped(absent):
+    rid = race_id(4)
+    p = normalise([0.4, 0.3, 0.2, 0.1])
+    win, quinella = consistent_odds(p)
+    # An older Quinella capture names a runner that has no Win row at all.
+    stale = {(h, absent): 40.0 + 3.0 * h for h in p}
+    rows = win_capture(rid, 3.0, win) + quinella_capture(rid, 2.5, quinella)
+    rows += quinella_capture(rid, 10.0, stale)
+    boards = boards_at(day_frame(rows))[rid]
+
+    assert set(boards.win) == set(p)
+    assert boards.quinella == pytest.approx(quinella)
+    assert pd.Timestamp(boards.quinella_utc) == pd.Timestamp(POST - timedelta(minutes=2.5))
+    feats = cross_features(boards)
+    assert all(g == pytest.approx(30.0, abs=1e-6) for g in feats["gap_s"])
+    assert all(abs(x) < 1e-9 for x in feats["x_cross"])
+    assert_no_inf(feats)
+
+
+# ---------------------------------------------------------------- missing Quinella quotes
+
+
+def _missing_rows(rid, horses, priced, missing, how):
+    """WIN at 3 and QUINELLA at 2.5 over `horses`; the `missing` starter pairs have no price at
+    t: `absent` (no row), `blank` (a null price, raw text blank), `stale` (priced at 10 minutes,
+    blank at 2.5)."""
+    win = {h: 2.0 + 1.5 * i for i, h in enumerate(horses)}
+    rows = win_capture(rid, 3.0, win)
+    if how == "absent":
+        rows += quinella_capture(rid, 2.5, priced)
+    else:
+        rows += quinella_capture(rid, 2.5, {**priced, **dict.fromkeys(missing)})
+        for r in rows:
+            if r["pool"] == "QUINELLA" and r["odds"] is None and r["combination"] != POOL_ROW:
+                r["status_raw"] = "    "
+    if how == "stale":
+        rows += quinella_capture(rid, 10.0, dict.fromkeys(missing, 50.0))
+    return rows
+
+
+@pytest.mark.parametrize("how", ["absent", "blank", "stale"])
+def test_a_starter_pair_without_a_quinella_price_makes_the_race_unavailable(how):
+    # The equal three-runner field of the review: only (1, 2) priced.
+    a = race_id(3)
+    rows = _missing_rows(a, (1, 2, 3), {(1, 2): 3.2}, [(1, 3), (2, 3)], how)
+    # A larger field with one pair missing.
+    b = race_id(6)
+    horses = (2, 4, 5, 7, 8, 11)
+    gone = (5, 8)
+    priced_b = {pr: 6.0 + pr[0] + pr[1] for pr in itertools.combinations(horses, 2) if pr != gone}
+    rows += _missing_rows(b, horses, priced_b, [gone], how)
+    # A fully priced race of the same day stays available.
+    c = race_id(10)
+    win_c, q_c = consistent_odds(normalise([0.35, 0.3, 0.2, 0.15]))
+    rows += win_capture(c, 3.0, win_c) + quinella_capture(c, 2.5, q_c)
+    boards = boards_at(day_frame(rows))
+
+    for rid, n, missing in ((a, 3, [(1, 3), (2, 3)]), (b, len(horses), [gone])):
+        feats = cross_features(boards[rid])
+        assert len(feats) == n
+        assert_no_inf(feats)
+        for column in QUINELLA_COLUMNS:
+            assert feats[column].astype(float).isna().all(), (how, rid, column)
+        # The Win-only columns are still there.
+        assert np.isfinite(feats["p_win_t"].astype(float)).all()
+        assert np.isfinite(feats["h_top2_t"].astype(float)).all()
+        assert float(feats["p_win_t"].sum()) == pytest.approx(1.0, abs=TOL)
+
+        pf = pair_features(boards[rid])
+        assert_no_inf(pf)
+        row_of = {tuple(pr): i for i, pr in enumerate(pf["pair"])}
+        for pr in missing:
+            assert math.isnan(float(pf["q_pair"].iloc[row_of[pr]])), (how, rid, pr)
+            assert math.isnan(float(pf["log_ratio"].iloc[row_of[pr]])), (how, rid, pr)
+
+    full = cross_features(boards[c])
+    for column in QUINELLA_COLUMNS:
+        assert np.isfinite(full[column].astype(float)).all(), column
+    assert all(abs(x) < 1e-9 for x in full["x_cross"])
+
+
+def test_a_zero_vote_quinella_pair_never_gives_an_infinite_feature():
+    # JRA-VAN writes a zero-vote price ("0000") as a null price with its raw text in status_raw
+    # (docs/specs/jravan.md); how cross_pool reads it is not pinned here, only that no feature is
+    # infinite. Every pair of the outsider 4 has zero votes.
+    rid = race_id(2)
+    win = {1: 2.0, 2: 3.0, 3: 30.0, 4: 60.0}
+    q = {(1, 2): 3.5, (1, 3): 20.0, (1, 4): None, (2, 3): 35.0, (2, 4): None, (3, 4): None}
+    rows = win_capture(rid, 3.0, win) + quinella_capture(rid, 2.5, q)
+    for r in rows:
+        if r["pool"] == "QUINELLA" and r["combination"] in ("1,4", "2,4", "3,4"):
+            r["status_raw"] = "0000"
+    boards = boards_at(day_frame(rows))[rid]
+    assert_no_inf(cross_features(boards))
+    assert_no_inf(pair_features(boards))
+
+
+# ---------------------------------------------------------------- pair features
+
+
+@pytest.mark.parametrize("lam", [1.0, 0.85])
+@pytest.mark.parametrize(
+    "p",
+    [
+        normalise([0.45, 0.25, 0.15, 0.1, 0.05]),
+        normalise([0.3, 0.2, 0.15, 0.12, 0.09, 0.07], horses=(2, 3, 5, 8, 9, 14)),
+    ],
+)
+def test_pair_features_on_consistent_pools(p, lam):
+    win, quinella = consistent_odds(p, lam)
+    pf = pair_features(one_race_boards(win, quinella), lambda2=lam)
+    h = ref_harville(p, lam)
+    pairs = [tuple(pr) for pr in pf["pair"]]
+    assert set(pairs) == set(h)
+    assert_close_maps(dict(zip(pairs, pf["h_pair"].astype(float), strict=True)), h)
+    assert_close_maps(dict(zip(pairs, pf["q_pair"].astype(float), strict=True)), h)
+    assert float(pf["q_pair"].sum()) == pytest.approx(1.0, abs=TOL)
+    assert all(abs(v) < 1e-9 for v in pf["log_ratio"])
+
+
+@pytest.mark.parametrize("factor", [1.2, 1.6])
+@pytest.mark.parametrize(
+    "p, planted",
+    [
+        (normalise([0.3, 0.2, 0.15, 0.12, 0.09, 0.07, 0.04, 0.03]), 1),
+        (normalise([0.3, 0.2, 0.15, 0.12, 0.09, 0.07, 0.04, 0.03]), 6),
+        (normalise([0.55, 0.25, 0.12, 0.08], horses=(3, 6, 9, 10)), 10),
+    ],
+)
+def test_pair_features_on_a_planted_overbet(p, planted, factor):
+    win, _ = consistent_odds(p)
+    h = ref_harville(p)
+    raw = {pr: v * (factor if planted in pr else 1.0) for pr, v in h.items()}
+    z = sum(raw.values())
+    q = {pr: v / z for pr, v in raw.items()}
+    pf = pair_features(one_race_boards(win, {pr: 0.775 / v for pr, v in q.items()}))
+    pairs = [tuple(pr) for pr in pf["pair"]]
+    assert set(pairs) == set(h)
+    assert float(pf["q_pair"].sum()) == pytest.approx(1.0, abs=TOL)
+    got = dict(zip(pairs, pf["log_ratio"].astype(float), strict=True))
+    assert_close_maps(got, {pr: math.log(q[pr] / h[pr]) for pr in h})
+    for pr, v in got.items():
+        assert (v > 0) == (planted in pr), pr
+    assert_no_inf(pf)

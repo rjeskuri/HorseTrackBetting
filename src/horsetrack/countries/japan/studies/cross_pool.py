@@ -15,9 +15,13 @@ in memory; nothing here reads a file, the store, the registry or the holdout.
   Quinella and Harville top-2 support (the sum of the pair shares holding it); x_cross =
   ln(q_top2_t / h_top2_t); fav_support, the favourite's x_cross; kl_race = sum q ln(q / h);
   gap_s = quinella_utc - win_utc in seconds. `pair_features` gives ln(q_pair / h_pair) per pair.
-  Quinella pairs naming a runner off the Win board are dropped and the Quinella shares
-  renormalised over the starters' pairs; a race with no Quinella board at t gets NaN in every
-  Quinella-dependent column.
+  Quinella pairs naming a runner off the Win board (scratched, unpriced or with no Win row) are
+  dropped before the Quinella capture time is taken. A pair whose latest row at t has no price
+  (blank, or a JRA-VAN `0000` / `----` / `****` quote) is off the board at t, even when an older
+  row priced it. A race whose Quinella board at t misses any starter pair, or has none, gets NaN
+  in every Quinella-dependent column (q_top2_t, x_cross, fav_support, kl_race, gap_s; q_pair and
+  log_ratio in `pair_features`): its shares cannot be normalised over the field.
+- Nullable and PyArrow-backed columns read as plain ones: a missing value never matches a mask.
 """
 
 from __future__ import annotations
@@ -48,22 +52,36 @@ class RaceBoards:
     quinella_utc: datetime | None = None
 
 
+def _mask(cond: pd.Series) -> np.ndarray:
+    """A boolean mask in which a missing comparison (nullable or PyArrow dtypes) is False."""
+    return cond.fillna(False).to_numpy(dtype=bool)
+
+
+def _utc(column: pd.Series) -> pd.Series:
+    """A datetime64[ns, UTC] column from a plain, nullable or PyArrow timestamp column."""
+    return pd.to_datetime(column, utc=True).astype("datetime64[ns, UTC]")
+
+
 def _latest_rows(day: pd.DataFrame, minutes_before: float) -> pd.DataFrame:
-    rows = day.loc[
-        day["pool"].isin((WIN, QUINELLA))
-        & (day["combination"] != POOL_TOTAL)
-        & (day["minutes_to_post"] >= minutes_before),
-        [*_KEY, "snapshot_utc", "fetched_utc", "odds", "status_raw"],
-    ].copy()
-    rows["available"] = rows["fetched_utc"].fillna(rows["snapshot_utc"])
+    minutes = day["minutes_to_post"].to_numpy(dtype=float, na_value=np.nan)
+    keep = (
+        _mask(day["pool"].isin((WIN, QUINELLA)))
+        & _mask(day["combination"] != POOL_TOTAL)
+        & (minutes >= minutes_before)
+    )
+    rows = day.loc[keep, [*_KEY, "snapshot_utc", "fetched_utc", "odds", "status_raw"]].copy()
+    for column in _KEY:
+        rows[column] = rows[column].astype(object)
+    rows["odds"] = rows["odds"].to_numpy(dtype=float, na_value=np.nan)
+    rows["available"] = _utc(rows["fetched_utc"]).fillna(_utc(rows["snapshot_utc"]))
     rows = rows.dropna(subset=["available"])
     rows = rows.sort_values("available", kind="mergesort")
     return rows.drop_duplicates(_KEY, keep="last")
 
 
 def _priced(rows: pd.DataFrame) -> pd.Series:
-    odds = rows["odds"]
-    return odds.notna() & np.isfinite(odds) & (odds > 0)
+    odds = rows["odds"].to_numpy(dtype=float)
+    return pd.Series(np.isfinite(odds) & (odds > 0), index=rows.index)
 
 
 def _first_utc(rows: pd.DataFrame) -> dict[str, datetime]:
@@ -76,7 +94,7 @@ def boards_at(day: pd.DataFrame, *, minutes_before: float = 2.0) -> dict[str, Ra
 
     win = latest[latest["pool"] == WIN].copy()
     win["horse_no"] = win["combination"].astype(int)
-    scratched = win["status_raw"] == SCRATCHED
+    scratched = pd.Series(_mask(win["status_raw"] == SCRATCHED), index=win.index)
     starting = _priced(win) & ~scratched
     off = pd.MultiIndex.from_frame(win.loc[~starting, ["race_id", "horse_no"]])
     win_board = win[starting]
@@ -93,7 +111,13 @@ def boards_at(day: pd.DataFrame, *, minutes_before: float = 2.0) -> dict[str, Ra
     named_off = pd.MultiIndex.from_arrays([quinella["race_id"], quinella["a"]]).isin(off) | (
         pd.MultiIndex.from_arrays([quinella["race_id"], quinella["b"]]).isin(off)
     )
-    quinella_board = quinella[~named_off]
+    # Where a race has Win starters, its Quinella board holds only their pairs.
+    starters = pd.MultiIndex.from_frame(win_board[["race_id", "horse_no"]])
+    has_starters = quinella["race_id"].isin(set(win_board["race_id"])).to_numpy()
+    both_start = pd.MultiIndex.from_arrays([quinella["race_id"], quinella["a"]]).isin(
+        starters
+    ) & pd.MultiIndex.from_arrays([quinella["race_id"], quinella["b"]]).isin(starters)
+    quinella_board = quinella[~named_off & (~has_starters | both_start)]
 
     win_utc = _first_utc(win_shown)
     quinella_utc = _first_utc(quinella_board)
@@ -148,10 +172,11 @@ def harville_pairs(p: dict[int, float], *, lambda2: float = 1.0) -> dict[tuple[i
 
 
 def _starter_quinella(boards: RaceBoards) -> dict[tuple[int, int], float]:
-    """Quinella shares over the pairs of Win starters, renormalised."""
-    starters = set(boards.win)
-    pairs = {pr: o for pr, o in boards.quinella.items() if set(pr) <= starters}
-    return quinella_shares(pairs) if pairs else {}
+    """Quinella shares over the Win starters' pairs; {} unless every starter pair is priced."""
+    pairs = list(itertools.combinations(sorted(boards.win), 2))
+    if not pairs or any(pr not in boards.quinella for pr in pairs):
+        return {}
+    return quinella_shares({pr: boards.quinella[pr] for pr in pairs})
 
 
 def pair_features(boards: RaceBoards, *, lambda2: float = 1.0) -> pd.DataFrame:
