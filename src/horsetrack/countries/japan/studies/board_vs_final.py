@@ -15,10 +15,17 @@ never filled from another price. Every output is JRDB-derived (D21): the report 
 leaderboard go through `write_report` outside the repository, the registry records carry the
 source `jrdb`, and the committed registry summary withholds their values.
 
+E45's Place and Wide outcomes, and whether a race is scored in them, come from the race's paid
+combinations in the dividends table (`payout_rules`; family v2): the store does not hold the field
+when sales opened, which sets the places paid. v1 took them from the field of starters and stays
+in the registry as recorded, superseded.
+
 Order: freeze the family's spec (before any outcome is read), read the development store, fit
 and score, append one registry record per fitted model (failures included), write the outputs and
-the family's summary file. CLI:
-`python -m horsetrack.countries.japan.studies.board_vs_final (--freeze | --run) [--out DIR]`.
+the family's summary file. A run in which a table could not be produced writes its report to an
+attempt-named file, leaves the last complete outputs as they are and exits non-zero. CLI:
+`python -m horsetrack.countries.japan.studies.board_vs_final (--freeze | --run) [--out DIR]`,
+DIR under $HORSETRACK_DATA_DIR (default its reports directory).
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import hashlib
+import itertools
 import json
 import math
 import sys
@@ -39,6 +47,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset as ds
 
 from horsetrack.core import env, paths
 from horsetrack.core.config import load_country_yaml, load_source
@@ -50,6 +59,8 @@ from horsetrack.core.eval.registry import (
     FoldMetric,
     Registry,
     RunRecord,
+    _canonical,
+    _sha256,
     default_registry,
     summary_dir,
 )
@@ -87,6 +98,14 @@ RUNNER_COLUMNS += ["is_scratched"]
 RACE_COLUMNS = ["race_id", "race_date", "meeting_id", "status", "post_time_local", "going"]
 RACE_COLUMNS += ["going_raw", "finish_time_s", "split_times_s", "result_published_utc"]
 RACE_COLUMNS += ["result_unpublished_utc"]
+DIVIDEND_COLUMNS = ["race_id", "pool", "combination", "is_refund"]
+PAID_POOLS = (WIN, PLACE, WIDE)  # a paid Win marks a race whose paid record is held
+SCORED, NO_RECORD, NOT_PAID = "scored", "no paid record", "not paid"
+MISMATCH = "paid combinations do not match the result"
+
+
+class OutsideDataDir(ValueError):
+    """An output directory that does not resolve under $HORSETRACK_DATA_DIR."""
 
 
 # --------------------------------------------------------------------------- the board
@@ -324,7 +343,11 @@ def render_report(
     coefficients: Mapping | None = None,
     about: Mapping | None = None,
     failures: Mapping | None = None,
+    payout: Mapping | None = None,
+    leads: Mapping | None = None,
 ) -> str:
+    """`payout`: E45's races per pool by the status of their paid record (`payout_rules`);
+    `leads`: per hypothesis, the board's lead to the off per fold (`board_leads`)."""
     lines = [f"# Board-fitted against final-fitted terms on the JRDB board ({COUNTRY}, #{TICKET})"]
     lines += ["", *(f"- {k}: {v}" for k, v in (about or {}).items())]
     lines += ["- built on JRDB (D21): private, never published", ""]
@@ -348,6 +371,17 @@ def render_report(
         ]
         lines += ["", f"## {h} coefficients fitted on {f} (R13: with their snapshot)", ""]
         lines.append(_markdown_table(rows) if rows else "_None._")
+    for h, rows in (leads or {}).items():
+        lines += ["", f"## {h}: the board's lead to the off per fold (R13: the snapshot)", ""]
+        lines += [
+            "Minutes from each matched race's latest board release to its off, the median over "
+            "the fold's training races (what the board fits are fitted at) and its test races.",
+            "",
+            _markdown_table(rows) if rows else "_None._",
+        ]
+    if payout:
+        lines += ["", "## E45's races by pool and paid record (the dividends table)", ""]
+        lines.append(_markdown_table([{"pool": p, **dict(n)} for p, n in payout.items()]))
     if failures:
         lines += ["", "## Failed (each a registry record)", ""]
         lines += [f"- {key}: {error}" for key, error in failures.items()]
@@ -362,7 +396,7 @@ def write_outputs(tables: Mapping, *, out_dir: Path | str, **report) -> dict[str
     out_dir = Path(out_dir)
     if is_inside(out_dir, env.repo_root()):
         raise LicensedOutputInRepo(f"{out_dir} is inside the repository (D21)")
-    stem = f"board-vs-final-{COUNTRY}-{FAMILY_ID}"
+    stem = _stem()
     rows = leaderboard_rows(tables)
     cells = [
         dict(
@@ -383,6 +417,20 @@ def write_outputs(tables: Mapping, *, out_dir: Path | str, **report) -> dict[str
             out_dir / f"{stem}-leaderboard.json", to_json(rows), sources=SOURCES
         ),
     }
+
+
+def _stem() -> str:
+    return f"board-vs-final-{COUNTRY}-{FAMILY_ID}"
+
+
+def write_attempt(tables: Mapping, *, out_dir: Path | str, attempt: str, **report) -> dict:
+    """A run with a failed table: its report alone, under `out_dir` in a file named by `attempt`,
+    through `write_report`. `write_outputs`' files, the last complete run's, are not touched."""
+    out_dir = Path(out_dir)
+    if is_inside(out_dir, env.repo_root()):
+        raise LicensedOutputInRepo(f"{out_dir} is inside the repository (D21)")
+    path = out_dir / f"{_stem()}-attempt-{attempt}.md"
+    return {"attempt": write_report(path, render_report(tables, **report), sources=SOURCES)}
 
 
 # --------------------------------------------------------------------------- the two fits
@@ -480,23 +528,22 @@ def _bernoulli(p: np.ndarray, y: np.ndarray) -> float:
     return float((y * np.log(p) + (1 - y) * np.log1p(-p)).sum())
 
 
-def pool_loglik(t: np.ndarray, finish: np.ndarray) -> dict[str, float]:
+def pool_loglik(t: np.ndarray, finish: np.ndarray, *, places: int, wide: bool) -> dict[str, float]:
     """One race's log-likelihood per pool from a trifecta array and the finishing positions (one
     runner each in first, second and third): PLACE, the Bernoulli sum over runners of placing in
-    the places the field pays (jra.yaml; NaN where Place is not sold); QUINELLA_PLACE, the
-    Bernoulli sum over pairs of both finishing in the first three (NaN where Wide is not sold);
-    TRIO, ln P of the first three as a set."""
+    the first `places`, the places the race paid (NaN for 0: not scored in Place);
+    QUINELLA_PLACE, the Bernoulli sum over pairs of both finishing in the first three (NaN unless
+    `wide`, the race paid Wide); TRIO, ln P of the first three as a set."""
     n = len(finish)
     top = [int(np.flatnonzero(finish == k)[0]) for k in (1, 2, 3)]
-    pools = load_source(COUNTRY, "jra").pools
     out = {PLACE: math.nan, WIDE: math.nan}
-    places = pools[PLACE].places_for(n)
     if places:
         y = np.zeros(n)
         y[top[:places]] = 1.0
-        out[PLACE] = _bernoulli(pool_array(t, PLACE, field_at_sale=n), y)
+        positions = (t.sum(axis=(1, 2)), t.sum(axis=(0, 2)), t.sum(axis=(0, 1)))
+        out[PLACE] = _bernoulli(sum(positions[:places]), y)
     trio = pool_array(t, TRIO)
-    if pools[WIDE].places_for(n):
+    if wide:
         i, j = np.triu_indices(n, 1)
         y = np.isin(i, top) & np.isin(j, top)
         out[WIDE] = _bernoulli(trio.sum(axis=2)[i, j], y.astype(float))
@@ -504,9 +551,52 @@ def pool_loglik(t: np.ndarray, finish: np.ndarray) -> dict[str, float]:
     return out
 
 
+def _horses(combination: object) -> frozenset[int]:
+    return frozenset(int(h) for h in str(combination).split(","))
+
+
+def payout_rules(rows: pd.DataFrame, paid: pd.DataFrame) -> pd.DataFrame:
+    """Per race of `rows` (one runner each in first, second and third), from its paid
+    combinations in `paid` (dividends rows: race_id, pool, combination, is_refund; refunds are
+    not paid): `places`, the Place places scored (0: not scored in Place), `wide`, whether Wide
+    is scored, and each pool's status. Place scores the first `places` finishers when the paid
+    PLACE horses are exactly those and `places` is a count jra.yaml pays; Wide scores when the
+    paid pairs are exactly the pairs of the first three. A race with no paid Win has no paid
+    record and scores in neither (NO_RECORD); one without a paid row of the pool was not sold it
+    or lost its record (NOT_PAID); one whose paid combinations differ from the result, MISMATCH."""
+    refund = paid["is_refund"].astype("boolean").fillna(False).to_numpy(dtype=bool)
+    combos: dict[tuple, set] = {}
+    for race, pool, combination in paid.loc[~refund, ["race_id", "pool", "combination"]].itertuples(
+        index=False
+    ):
+        combos.setdefault((str(race), str(pool)), set()).add(_horses(combination))
+    counts = {rule.places for rule in load_source(COUNTRY, "jra").pools[PLACE].places_paid}
+    top = rows.loc[rows["finish_pos"].isin([1.0, 2.0, 3.0])]
+    top = top.pivot(index="race_id", columns="finish_pos", values="horse_no")
+    top = top.reindex(columns=[1.0, 2.0, 3.0])
+    out = {}
+    for race_id, *first3 in top.astype("int64").itertuples():
+        place, wide = combos.get((race_id, PLACE), set()), combos.get((race_id, WIDE), set())
+        p, p_status, w_status = len(place), NOT_PAID, NOT_PAID
+        if (race_id, WIN) not in combos:
+            p, p_status, w_status = 0, NO_RECORD, NO_RECORD
+        elif place:
+            ok = p in counts and place == {frozenset([h]) for h in first3[:p]}
+            p, p_status = (p, SCORED) if ok else (0, MISMATCH)
+        if w_status != NO_RECORD and wide:
+            ok = wide == {frozenset(pair) for pair in itertools.combinations(first3, 2)}
+            w_status = SCORED if ok else MISMATCH
+        out[race_id] = {"places": p, "wide": w_status == SCORED}
+        out[race_id] |= {"place_status": p_status, "wide_status": w_status}
+    frame = pd.DataFrame.from_dict(out, orient="index")
+    columns = ["places", "wide", "place_status", "wide_status"]
+    return frame.reindex(columns=columns).rename_axis("race_id")
+
+
 def e45_deltas(model: Ordering, rows: pd.DataFrame, price: str) -> pd.DataFrame:
     """Per test race of each fold and per pool, the fold's fitted ordering's log-likelihood on
-    the price minus Harville's on it."""
+    the price minus Harville's on it; Place and Wide by the race's `places_paid` and
+    `wide_paid` (`payout_rules`)."""
     harville = Ordering("harville")
     out = {}
     for k, fold in enumerate(_folds(rows)):
@@ -514,13 +604,33 @@ def e45_deltas(model: Ordering, rows: pd.DataFrame, price: str) -> pd.DataFrame:
         test = rows.iloc[fold.test_idx]
         for race_id, race in test.groupby(test["race_id"].to_numpy(dtype=object), sort=False):
             p, finish = race[price].to_numpy(dtype=float), race["finish_pos"].to_numpy(dtype=float)
+            paid = {
+                "places": int(race["places_paid"].iloc[0]),
+                "wide": bool(race["wide_paid"].iloc[0]),
+            }
             m, h = (
-                pool_loglik(fitted.trifecta(p), finish),
-                pool_loglik(harville.trifecta(p), finish),
+                pool_loglik(fitted.trifecta(p), finish, **paid),
+                pool_loglik(harville.trifecta(p), finish, **paid),
             )
             out[race_id] = {pool: m[pool] - h[pool] for pool in E45_POOLS}
     frame = pd.DataFrame.from_dict(out, orient="index", columns=list(E45_POOLS), dtype=float)
     return frame.rename_axis("race_id")
+
+
+def board_leads(rows: pd.DataFrame) -> list[dict]:
+    """Per fold of `rows` (with `lead_min`, each runner's minutes from its board's release to
+    its race's off): the median over the fold's training and test races of each race's lead,
+    from its latest release (R13: the snapshot the board's terms are fitted and scored at)."""
+    race = rows["race_id"].to_numpy(dtype=object)
+    lead = rows["lead_min"].astype(float).groupby(race).min()
+    out = []
+    for fold in _folds(rows):
+        row = {"fold": fold.test_start.isoformat()}
+        for part, idx in (("train", fold.train_idx), ("test", fold.test_idx)):
+            races = lead.loc[pd.unique(race[idx])]
+            row |= {f"{part} median (min)": float(races.median()), f"{part} races": len(races)}
+        out.append(row)
+    return out
 
 
 class _Memo:
@@ -591,19 +701,34 @@ def build_spec(scheme, boot: dict) -> dict:
             "races": "matched races with one runner each in first, second and third, no dead heat",
             "score": "per test race and pool, the fitted ordering's log-likelihood minus "
             "Harville's, both on the scored price",
+            "paid": "Place's places and Wide's sale from the race's paid combinations "
+            "(dividends: race_id, pool, combination, non-refund rows), not from the field of "
+            "starters: the places paid follow the field when sales opened (jra.yaml), which the "
+            "store does not hold, so a late scratch from eight to seven still pays three",
             "pools": {
-                PLACE: "Bernoulli sum over starters of placing in the places paid to the field of "
-                "starters (jra.yaml); races where Place is not sold are not scored",
-                WIDE: "Bernoulli sum over pairs of both finishing in the first three; races where "
-                "Wide is not sold are not scored",
+                PLACE: "Bernoulli sum over starters of placing in the first p, p the count of "
+                "paid PLACE horses; scored only when p is a count jra.yaml pays and the paid "
+                "horses are exactly the first p finishers",
+                WIDE: "Bernoulli sum over pairs of both finishing in the first three; scored only "
+                "when the paid QUINELLA_PLACE pairs are exactly the pairs of the first three",
                 TRIO: "ln P(the first three as a set)",
             },
+            "not scored": "in Place and Wide, a race without a paid Win (no paid record); in a "
+            "pool, a race without a paid row of it (not sold, or its record missing) or whose "
+            "paid combinations differ from the result; each race counted by status per pool in "
+            "the private report",
         },
+        "supersedes": "japan-board-vs-final-e2-e45-v1, whose Place places and Wide sale came "
+        "from the field of starters (a late scratch from eight to seven scored as two places); "
+        "its records stay in the registry as recorded",
+        "lead": "R13: per fold, the median minutes from each matched race's latest board "
+        "release to its off, over the training and the test races, in the private report",
         "bootstrap": boot,
         "cluster_unit": CONFIG["cluster_unit"],
         "records": "one per (hypothesis, pool, price fitted on): its ΔLL on each price scored "
         "with D7's bounds; one per (hypothesis, price fitted on): its per-fold coefficients; a "
-        "failed table gives failed records, never none",
+        "failed table gives failed records, never none; a run with a failed table writes its "
+        "report to an attempt-named file, leaves the last complete outputs and exits non-zero",
         "leaderboard": "each fit x score cell a member row, withheld (D21): a ΔLL, not a return "
         "per ¥100, so it carries no return and ranks unranked",
         "sources": list(SOURCES),
@@ -614,7 +739,9 @@ def build_spec(scheme, boot: dict) -> dict:
 
 
 def read_development() -> dict[str, pd.DataFrame]:
-    """Development rows of the price era, column- and date-scoped (holdout days dropped)."""
+    """Development rows of the price era, column- and date-scoped (holdout days dropped). The
+    dividends table has no date column: its Win, Place and Wide rows are read column-scoped, of
+    the development races only (filtered in the scan)."""
     out = {}
     for name, columns in (
         ("runners", RUNNER_COLUMNS),
@@ -625,6 +752,12 @@ def read_development() -> dict[str, pd.DataFrame]:
             name, columns=columns, start=PRICE_ERA_START, end=date.max, touches_price=True
         )
         out[name], _ = split_off(table.to_pandas(date_as_object=False), "race_date", COUNTRY)
+    races = pa.array(out["races"]["race_id"].astype(str).unique())
+    dataset = ds.dataset(paths.processed_dir("jra") / "dividends.parquet", format="parquet")
+    out["dividends"] = dataset.to_table(
+        columns=DIVIDEND_COLUMNS,
+        filter=ds.field("pool").isin(pa.array(PAID_POOLS)) & ds.field("race_id").isin(races),
+    ).to_pandas()
     return out
 
 
@@ -649,7 +782,8 @@ def post_times(races: pd.DataFrame) -> pd.Series:
 
 def study_frame(data: Mapping[str, pd.DataFrame], board: pd.DataFrame) -> pd.DataFrame:
     """One row per priced starter of a run race with a winner: race_id, race_date, meeting_id,
-    horse_no, finish_pos, dead_heat, won, q_final and q_board (NaN without a released board)."""
+    horse_no, finish_pos, dead_heat, won, q_final, q_board (NaN without a released board) and
+    lead_min (the board's minutes before the off, `_board`)."""
     runners, races = data["runners"], data["races"].astype({"race_id": object})
     kept = runners.loc[runners["race_id"].isin(races.loc[races["status"].eq("run"), "race_id"])]
     scratched = kept["is_scratched"].eq(True).to_numpy(dtype=bool, na_value=False)
@@ -662,7 +796,7 @@ def study_frame(data: Mapping[str, pd.DataFrame], board: pd.DataFrame) -> pd.Dat
     frame["won"] = frame["finish_pos"].eq(1)
     frame = frame.loc[frame.groupby("race_id")["won"].transform("any").to_numpy(dtype=bool)]
     frame = frame.merge(races[["race_id", "meeting_id"]], on="race_id", validate="many_to_one")
-    tyb = board[["race_id", "horse_no", "tyb_win_odds"]].astype({"horse_no": "int64"})
+    tyb = board[["race_id", "horse_no", "tyb_win_odds", "lead_min"]].astype({"horse_no": "int64"})
     frame = frame.merge(tyb, on=["race_id", "horse_no"], how="left", validate="one_to_one")
     frame["board_odds"] = clean_odds(frame["tyb_win_odds"].to_numpy(dtype=float, na_value=np.nan))
     for odds_col, q in (("final_odds", FINAL), ("board_odds", BOARD)):
@@ -683,11 +817,13 @@ def clean_top3(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.loc[ok].reset_index(drop=True)
 
 
-def compute(frame: pd.DataFrame, boot: dict) -> tuple[dict, dict, dict]:
-    """The cross tables, the coefficients and the failures of both hypotheses."""
-    tables, coefficients, failures = {}, {}, {}
+def compute(frame: pd.DataFrame, paid: pd.DataFrame, boot: dict) -> tuple[dict, dict, dict, dict]:
+    """The cross tables, the coefficients, the failures and the report's notes (`render_report`'s
+    `payout` and `leads`) of both hypotheses; E45's Place and Wide by `paid` (`payout_rules`)."""
+    tables, coefficients, failures, notes = {}, {}, {}, {"payout": {}, "leads": {}}
     prices = (FINAL, BOARD)
     rows = frame.loc[matched(frame, prices)].reset_index(drop=True)  # cross_apply's own rows
+    notes["leads"]["E2"] = board_leads(rows) if len(rows) else []
     fits = _Memo(e2_fit)
     try:
         tables[("E2", WIN)] = cross_apply(
@@ -704,6 +840,12 @@ def compute(frame: pd.DataFrame, boot: dict) -> tuple[dict, dict, dict]:
         if price in fits.cache:
             coefficients[("E2", price)] = e2_coefficients(fits.cache[price], rows, boot["level"])
     rows = clean_top3(rows)
+    rules = payout_rules(rows, paid)
+    by_race = rows["race_id"].map
+    rows = rows.assign(places_paid=by_race(rules["places"]), wide_paid=by_race(rules["wide"]))
+    for pool, status in ((PLACE, "place_status"), (WIDE, "wide_status")):
+        notes["payout"][pool] = rules[status].value_counts().sort_index().to_dict()
+    notes["leads"]["E45"] = board_leads(rows) if len(rows) else []
     fits, deltas = _Memo(e45_fit), _Memo(e45_deltas)
     for pool in E45_POOLS:
         try:
@@ -720,7 +862,7 @@ def compute(frame: pd.DataFrame, boot: dict) -> tuple[dict, dict, dict]:
     for price in prices:
         if price in fits.cache:
             coefficients[("E45", price)] = e45_coefficients(fits.cache[price], rows)
-    return tables, coefficients, failures
+    return tables, coefficients, failures, notes
 
 
 def _failed_records(failures: Mapping, git_sha: str, builds: dict) -> list[RunRecord]:
@@ -749,17 +891,20 @@ def _failed_records(failures: Mapping, git_sha: str, builds: dict) -> list[RunRe
 
 def _append_new(registry: Registry, records: list[RunRecord]) -> tuple[dict, int]:
     """Append the records the family does not already hold (a record equal to one in the
-    registry but for its git commit is the same run reproduced); their ids by variant."""
+    registry but for its git commit is the same run reproduced); the run ids by variant, a held
+    record's own id for one not appended."""
 
     def same(r: RunRecord) -> str:
         return json.dumps(dataclasses.asdict(dataclasses.replace(r, git_sha="")), sort_keys=True)
 
-    held = {same(r) for r in registry.records(FAMILY_ID)}
+    held = {
+        same(r): _sha256(_canonical(dataclasses.asdict(r))) for r in registry.records(FAMILY_ID)
+    }
     ids, appended = {}, 0
     for record in records:
         key = f"{record.hypothesis_id}:{record.variant}"
         if same(record) in held:
-            ids[key] = "already in the registry"
+            ids[key] = held[same(record)]
             continue
         ids[key] = registry.append(record)
         appended += 1
@@ -773,16 +918,32 @@ def freeze() -> tuple[Registry, dict, str]:
     return registry, boot, registry.freeze_family(FAMILY_ID, spec)
 
 
-def run_study(out_dir: Path | None = None) -> dict:
-    """Freeze, then run the family on Japan's development data and write its private outputs."""
-    out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
+def output_dir(out_dir: Path | str | None) -> Path:
+    """The run's output directory, resolved: the data directory's reports directory by default;
+    one given must lie under $HORSETRACK_DATA_DIR (OutsideDataDir otherwise) and so outside the
+    repository (DataDirInsideRepo). Checked before anything is written."""
+    if out_dir is None:
+        return paths.reports_dir()
+    resolved = paths.outside_repo(Path(out_dir), what="out")
+    data = paths.data_dir()
+    if not is_inside(resolved, data):
+        raise OutsideDataDir(f"out={resolved} is not under {paths.DATA_DIR_VAR}={data}")
+    return resolved
+
+
+def run_study(out_dir: Path | str | None = None) -> dict:
+    """Freeze, then run the family on Japan's development data and write its private outputs.
+    When a table could not be produced, the failed records are appended and only the attempt's
+    report is written (`write_attempt`); the result's `failed` lists the tables."""
+    out_dir = output_dir(out_dir)
     registry, boot, spec_hash = freeze()  # before any outcome is read
-    builds = {**store_builds(), "jrdb_pre_race": _build("jrdb_pre_race")}
+    builds = {**store_builds(), **{name: _build(name) for name in ("dividends", "jrdb_pre_race")}}
+    notes: dict = {}
     try:
         data = read_development()
-        frame = study_frame(data, _board(data))
+        frame, paid = study_frame(data, _board(data)), data["dividends"]
         del data
-        tables, coefficients, failures = compute(frame, boot)
+        tables, coefficients, failures, notes = compute(frame, paid, boot)
     except Exception as exc:  # a failed read fails every table: each a registry record
         error = f"{type(exc).__name__}: {exc}"
         tables, coefficients = {}, {}
@@ -791,16 +952,21 @@ def run_study(out_dir: Path | None = None) -> dict:
     records = run_records(tables, git_sha=git_sha, data_builds=builds, coefficients=coefficients)
     records += _failed_records(failures, git_sha, builds)
     ids, appended = _append_new(registry, records)
+    now = datetime.now(timezone.utc)
     about = {
         "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
         "builds": ", ".join(builds.values()),
         "records": f"{appended} appended; ids by variant: {json.dumps(ids)}",
-        "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "written (UTC)": now.isoformat(timespec="seconds"),
     }
-    written = write_outputs(
-        tables, out_dir=out_dir, coefficients=coefficients, about=about, failures=failures
-    )
+    report = {"coefficients": coefficients, "about": about, "failures": failures, **notes}
+    if failures:  # the last complete run's outputs stay; this attempt gets its own file
+        written = write_attempt(
+            tables, out_dir=out_dir, attempt=now.strftime("%Y%m%dT%H%M%SZ"), **report
+        )
+    else:
+        written = write_outputs(tables, out_dir=out_dir, **report)
     update_summary(registry, [FAMILY_ID], summary_dir(COUNTRY))
     return {
         "family_id": FAMILY_ID,
@@ -822,18 +988,20 @@ def _build(name: str) -> str:
 
 
 def _board(data: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+    """`jrdb_board` at each race's off, with `lead_min`, the minutes from release to the off."""
     races = data["races"]
+    offs = post_times(races)
     con = duckdb.connect(":memory:")
     try:
         con.register("jrdb_pre_race", _arrow(data["jrdb_pre_race"]))
-        return jrdb_board(
-            con,
-            races["race_id"].astype(str).tolist(),
-            rules=CONFIG["board"],
-            decision_utc=post_times(races),
+        board = jrdb_board(
+            con, races["race_id"].astype(str).tolist(), rules=CONFIG["board"], decision_utc=offs
         )
     finally:
         con.close()
+    off = pd.to_datetime(board["race_id"].map(pd.to_datetime(offs, utc=True)), utc=True)
+    lead = off - pd.to_datetime(board["release_utc"], utc=True)
+    return board.assign(lead_min=lead.dt.total_seconds() / 60.0)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -843,13 +1011,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--freeze", action="store_true", help="freeze the family's spec only")
     mode.add_argument("--run", action="store_true", help="freeze, then run the family")
-    parser.add_argument("--out", type=Path, default=None, help="output directory, outside the repo")
+    parser.add_argument(
+        "--out", type=Path, default=None, help="output directory, under $HORSETRACK_DATA_DIR"
+    )
     args = parser.parse_args(argv)
     if args.freeze:
         _, _, spec_hash = freeze()
         print(json.dumps({"family_id": FAMILY_ID, "spec_hash": spec_hash}, indent=2))
-    else:
-        print(json.dumps(run_study(args.out), indent=2))
+        return 0
+    try:
+        result = run_study(args.out)
+    except (OutsideDataDir, paths.DataDirInsideRepo) as exc:  # refused, nothing written
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2))
+    if result["failed"]:
+        print(f"error: tables not produced: {result['failed']}", file=sys.stderr)
+        return 1
     return 0
 
 

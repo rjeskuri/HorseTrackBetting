@@ -18,6 +18,12 @@ a choice open, the test-author's choice is marked (*).
   value is never filled from another price: the store's final `runners.win_odds`, or KYI's
   day-before `kyi_base_odds`. The owner's `jrdb_pre_race` rule in availability.yaml (tyb_ columns
   are labels) is not edited; `test_availability.py` pins it.
+  `jrdb_board(..., decision_utc=offs)`: `offs` is a Series of timezone-aware instants indexed by
+  race_id, each race's own decision time (its off; the run passes `races.post_utc`). A runner's
+  board counts only if released at or before its own race's off (release_utc <= off, the
+  boundary included), never by another race's later off on the same day; a requested race with
+  no decision time (missing from `offs`, or NaT) has no board. Without `decision_utc` the board
+  is read as of now.
 - `cross_apply(frame, *, fit_price, score_price, fit, score) -> pd.DataFrame`: `fit_price` and
   `score_price` name the two price columns of `frame` (one row per runner, with `race_id`). Only
   the races where both prices are present on every row are used, by every fit and every score
@@ -320,13 +326,14 @@ def put(con, name: str, frame: pd.DataFrame, casts: dict[str, str]) -> None:
     con.unregister("_frame")
 
 
-def put_jrdb_store(con, seed: int = 5) -> pd.DataFrame:
+def put_jrdb_store(con, seed: int = 5, races=BOARD_RACES, no_odds=NO_ODDS) -> pd.DataFrame:
     """`jrdb_pre_race` as the store holds it (the store's key columns, then KYI's day-before board
-    and TYB's day-of columns) and `runners` with the final Win odds, every price different.
+    and TYB's day-of columns) and `runners` with the final Win odds, every price different, for
+    `races` (race_id, race_date, odds time, runners), the `no_odds` runner without board odds.
     Returns the rows, one per runner, with the final odds beside them."""
     rng = np.random.default_rng(seed)
     rows = []
-    for race_id, day, odds_time, n in BOARD_RACES:
+    for race_id, day, odds_time, n in races:
         venue, race_no = race_id.split(":")[2:]
         for horse in range(1, n + 1):
             board = round(float(rng.uniform(1.5, 60.0)), 1)
@@ -353,14 +360,14 @@ def put_jrdb_store(con, seed: int = 5) -> pd.DataFrame:
     pre_race = frame.drop(columns=["final_win_odds"])
     casts = {"race_date": "DATE", "horse_no": "BIGINT", "tyb_odds_time": "VARCHAR"}
     put(con, "jrdb_pre_race", pre_race, casts)
-    for race_id, _, odds_time, _ in BOARD_RACES:
+    for race_id, _, odds_time, _ in races:
         if odds_time is None:
             con.execute(
                 "UPDATE jrdb_pre_race SET tyb_odds_time = NULL WHERE race_id = ?", [race_id]
             )
     con.execute(
         "UPDATE jrdb_pre_race SET tyb_win_odds = NULL WHERE race_id = ? AND horse_no = ?",
-        list(NO_ODDS),
+        list(no_odds),
     )
     runners = frame[["race_id", "race_date", "horse_no", "final_win_odds"]].rename(
         columns={"final_win_odds": "win_odds"}
@@ -420,6 +427,97 @@ def test_the_board_is_read_as_of_the_jrdb_release_time(lag):
         value = got.iloc[at[key]]["tyb_win_odds"]
         assert pd.isna(value), (
             f"{key} has no released board, yet reads {value} (final odds {final[key]})"
+        )
+
+
+# Each race's own off. The last field is the off: minutes after the race's release (an int, so the
+# race keeps that relation to its board whatever the lag), a JST clock time that does not move
+# with the lag (a str), "missing" (not in decision_utc) or "nat" (a NaT decision time).
+OFF_RACES = [
+    ("jra:2025-06-01:TOK:01", date(2025, 6, 1), "0950", 4, -1),  # released a minute after its off
+    ("jra:2025-06-01:TOK:02", date(2025, 6, 1), "1025", 5, 0),  # released exactly at its off
+    ("jra:2025-06-01:TOK:03", date(2025, 6, 1), "1105", 4, "1140"),  # a lag of 45 misses the off
+    ("jra:2025-06-01:TOK:05", date(2025, 6, 1), "1200", 3, "missing"),
+    ("jra:2025-06-01:TOK:06", date(2025, 6, 1), "1230", 3, "nat"),
+    ("jra:2025-06-01:TOK:11", date(2025, 6, 1), "1532", 6, 13),  # the day's last off
+    ("jra:2025-06-08:KYO:01", date(2025, 6, 8), "0850", 4, -2),  # UTC day before; after its off
+    ("jra:2025-06-08:KYO:11", date(2025, 6, 8), "1545", 5, 5),
+    ("jra:2025-06-08:KYO:12", date(2025, 6, 8), "1610", 3, 20),  # in decision_utc, not requested
+]
+OFF_NOT_REQUESTED = "jra:2025-06-08:KYO:12"
+OFF_NO_ODDS = ("jra:2025-06-01:TOK:11", 2)
+
+
+def off_of(day: date, hhmm: str, lag_min: float, off) -> pd.Timestamp:
+    """The race's off as a UTC instant (NaT for "nat"), from OFF_RACES' last field."""
+    if off == "nat":
+        return pd.NaT
+    if isinstance(off, str):
+        return released_at(day, off, 0)
+    return released_at(day, hhmm, lag_min) + pd.Timedelta(minutes=off)
+
+
+@pytest.mark.parametrize(
+    ("lag", "zone"),
+    [(None, "UTC"), (0, "Asia/Tokyo"), (45, "UTC")],
+    ids=["as-configured", "0-offs-in-JST", "45"],
+)
+def test_each_race_reads_its_board_as_of_its_own_off(lag, zone):
+    configured = load_country_yaml("japan", "board_vs_final")["board"]
+    rules = dict(configured) if lag is None else {**configured, "release_lag_min": lag}
+    minutes = configured["release_lag_min"] if lag is None else lag
+
+    offs = {r[0]: off_of(r[1], r[2], minutes, r[4]) for r in OFF_RACES if r[4] != "missing"}
+    decision = pd.Series(
+        pd.DatetimeIndex(list(offs.values())).tz_convert(zone),
+        index=pd.Index(list(offs), dtype=object),
+    )
+    requested = [r[0] for r in OFF_RACES if r[0] != OFF_NOT_REQUESTED]
+    con = duckdb.connect(":memory:")
+    try:
+        races = [r[:4] for r in OFF_RACES]
+        store = put_jrdb_store(con, seed=11, races=races, no_odds=OFF_NO_ODDS)
+        got = jrdb_board(con, requested, rules=rules, decision_utc=decision)
+    finally:
+        con.close()
+
+    release = {r[0]: released_at(r[1], r[2], minutes) for r in OFF_RACES}
+    off = {rid: offs.get(rid, pd.NaT) for rid in requested}
+    last_off = max(t for t in off.values() if not pd.isna(t))
+    # The fixture holds what a cutoff at the day's last off, or at now, would get wrong.
+    late = [r for r in requested if not pd.isna(off[r]) and off[r] < release[r] <= last_off]
+    timeless = [r for r in requested if pd.isna(off[r])]
+    assert {"jra:2025-06-01:TOK:01", "jra:2025-06-08:KYO:01"} <= set(late)
+    assert any(off[r] == release[r] for r in requested), "a board released exactly at its off"
+    assert len(timeless) == 2 and all(release[r] <= last_off for r in timeless)
+
+    assert {"race_id", "horse_no", "tyb_win_odds", "release_utc"} <= set(got.columns)
+    keys = [(str(r), int(h)) for r, h in zip(got["race_id"], got["horse_no"], strict=True)]
+    assert len(keys) == len(set(keys)), "one row per runner at most"
+    assert {r for r, _ in keys} <= set(requested), "only the requested races"
+    at = dict(zip(keys, range(len(got)), strict=True))
+
+    expected = {}
+    for row in store.itertuples(index=False):
+        key, rid = (row.race_id, int(row.horse_no)), row.race_id
+        if rid in off and not pd.isna(off[rid]) and release[rid] <= off[rid] and key != OFF_NO_ODDS:
+            expected[key] = (row.tyb_win_odds, release[rid])
+    assert {r for r, _ in expected} >= {"jra:2025-06-01:TOK:11", "jra:2025-06-08:KYO:11"}
+
+    for key, (board, when) in expected.items():
+        assert key in at, f"{key}: released by its own off {off[key[0]]}, so it is read"
+        row = got.iloc[at[key]]
+        assert float(row["tyb_win_odds"]) == pytest.approx(board), f"{key}: the board's own odds"
+        stamp = pd.Timestamp(row["release_utc"])
+        assert stamp.tzinfo is not None, f"{key}: release_utc must be timezone-aware"
+        assert stamp.tz_convert("UTC") == when, f"{key}: released {stamp}, want {when}"
+
+    final = {(r.race_id, int(r.horse_no)): r.final_win_odds for r in store.itertuples(index=False)}
+    for key in set(at) - set(expected):
+        value = got.iloc[at[key]]["tyb_win_odds"]
+        assert pd.isna(value), (
+            f"{key}: released {release[key[0]]}, its off {off[key[0]]}: no board, yet reads "
+            f"{value} (final odds {final[key]})"
         )
 
 

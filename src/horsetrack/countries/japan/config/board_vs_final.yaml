@@ -16,7 +16,10 @@
 #   column).
 # bootstrap_seed: the bootstrap's seed (reproducibility only; scoring.yaml sets the level and the
 #   replicates).
-family_id: japan-board-vs-final-e2-e45-v1
+# family_id: v2 corrects E45's place rule (Place's places and Wide's sale from each race's paid
+#   combinations, not from the field of starters); v1 (places by the starters) stays in the
+#   registry as recorded, superseded.
+family_id: japan-board-vs-final-e2-e45-v2
 board:
   release_lag_min: 10
   tz: Asia/Tokyo
