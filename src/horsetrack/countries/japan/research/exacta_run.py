@@ -143,7 +143,7 @@ def count() -> dict:
         "oof_rows": oof_ids.num_rows,
         "oof_races": len(pc.unique(oof_ids["race_id"])),
         "ordering_fit": ordering_id,
-        "lambda2_in_fold": lambda2,
+        "lambda2_full_development": lambda2,
         "logged_exacta_meetings": len(logged),
         "logged_exacta_meeting_ids": logged,
     }
@@ -201,7 +201,7 @@ def load_races() -> tuple[list[dict], dict]:
     meta = {
         "win_fit": win_id,
         "ordering_fit": ordering_id,
-        "lambda2_in_fold": lambda2,
+        "lambda2_full_development": lambda2,
         "dropped_before_scoring": dropped,
         "data_builds": {
             **{
@@ -273,14 +273,14 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
     for family_id in study.family_specs():
         if registry.frozen_spec_hash(family_id) is None:
             raise RuntimeError(f"{family_id} is not frozen; run `freeze` first")
-    lambdas = {"in_fold": meta["lambda2_in_fold"], 1.0: 1.0}
+    lambdas = {study.FITTED: meta["lambda2_full_development"], 1.0: 1.0}
     frames = score_frames(races, meta)
-    meta["excluded"] = frames["in_fold"].attrs["excluded"]
-    meta["scored_races"] = int(frames["in_fold"]["race_id"].nunique())
-    meta["scored_meetings"] = int(frames["in_fold"]["meeting_id"].nunique())
+    meta["excluded"] = frames[study.FITTED].attrs["excluded"]
+    meta["scored_races"] = int(frames[study.FITTED]["race_id"].nunique())
+    meta["scored_meetings"] = int(frames[study.FITTED]["meeting_id"].nunique())
     results, seed = [], 131
     plan = [("B2", study.E1_ID, "b2", True, list(lambdas)),
-            ("B1", study.E1_B1_ID, "b1", True, ["in_fold"]),
+            ("B1", study.E1_B1_ID, "b1", True, [study.FITTED]),
             ("B3", study.E1_B3_ID, "b3", False, list(lambdas))]  # fmt: skip
     for estimator, family, column, ratio, keys in plan:
         for key in keys:
@@ -305,7 +305,7 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
     components = {"win": meta["win_fit"]}
     for row in table.itertuples(index=False):
         variant = f"{row.estimator.lower()}|lambda2={row.lambda2}|{row.category}|{row.cell}"
-        comps = {**components, "ordering": meta["ordering_fit"] if row.lambda2 == "in_fold"
+        comps = {**components, "ordering": meta["ordering_fit"] if row.lambda2 == study.FITTED
                  else "plain_harville"}  # fmt: skip
         if row.estimator == "B1":
             comps = dict(components)
@@ -329,7 +329,7 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
                               seed=seed)  # fmt: skip
         c_rows.append({"lambda2": key, "mean": ci.mean, "lo": ci.lo, "hi": ci.hi,
                        "n": len(gain), "meetings": ci.n_clusters})  # fmt: skip
-        comps = {**components, "ordering": meta["ordering_fit"] if key == "in_fold"
+        comps = {**components, "ordering": meta["ordering_fit"] if key == study.FITTED
                  else "plain_harville"}  # fmt: skip
         registry.append(_record(
             study.C_ID, f"c|lambda2={key}", {"estimator": "C", "lambda2": key}, comps,
@@ -346,7 +346,7 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
 
 
 def score_frames(races: list[dict], meta: dict) -> dict[object, pd.DataFrame]:
-    lambdas = {"in_fold": meta["lambda2_in_fold"], 1.0: 1.0}
+    lambdas = {study.FITTED: meta["lambda2_full_development"], 1.0: 1.0}
     return {
         key: study.score_races(races, holdout_day=is_holdout_day, lambda2=value)
         for key, value in lambdas.items()
@@ -358,7 +358,7 @@ def max_test(registry, frames, meta, sha, *, n_boot: int = 10000, note: str | No
 
     The spec's level 0.95 is the confidence level: StepM's family-wise error (snooping.stepm's
     ``level``, arch's ``size``) is 0.05."""
-    first = frames["in_fold"].drop_duplicates("race_id").set_index("race_id")
+    first = frames[study.FITTED].drop_duplicates("race_id").set_index("race_id")
     losses = {}
     for key, frame in frames.items():
         for category in CATEGORIES:

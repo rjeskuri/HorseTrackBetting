@@ -59,12 +59,23 @@ DIRECTIONS = {"fav_first": "less", "fav_second": "greater", "no_fav": "greater"}
 ESTIMATORS = ("b1", "b2", "b3")
 MIN_STARTERS = 5
 
-E1_ID = "japan/131-exacta-category-v1"
-E1_B1_ID = "japan/131-exacta-category-b1-v1"
-E1_B3_ID = "japan/131-exacta-category-b3-v1"
-C_ID = "japan/131-exacta-logscore-v1"
-E2_ID = "japan/131-exacta-rule-v1"
-LAMBDA2S = ["in_fold", 1.0]
+# v2 (owner, 2026-11-26): the v1 families, frozen 2026-11-25, labelled #115's single
+# full-development lambda2 fit "in_fold". The relabelled specs are frozen under new ids beside
+# them; the registry is append-only, so v1 stays as frozen. Only the label and its text change.
+E1_ID = "japan/131-exacta-category-v2"
+E1_B1_ID = "japan/131-exacta-category-b1-v2"
+E1_B3_ID = "japan/131-exacta-category-b3-v2"
+C_ID = "japan/131-exacta-logscore-v2"
+E2_ID = "japan/131-exacta-rule-v2"
+SUPERSEDES = {
+    E1_ID: "japan/131-exacta-category-v1",
+    E1_B1_ID: "japan/131-exacta-category-b1-v1",
+    E1_B3_ID: "japan/131-exacta-category-b3-v1",
+    C_ID: "japan/131-exacta-logscore-v1",
+    E2_ID: "japan/131-exacta-rule-v1",
+}
+FITTED = "full_development"  # #115's one lambda2 fit over the development out-of-fold races
+LAMBDA2S = [FITTED, 1.0]
 
 
 def _finite_positive(name: str, value: float) -> float:
@@ -354,9 +365,11 @@ _COMMON = {
         "no exacta row",
     ],
     "win_probabilities": "#114 out-of-fold calibrated p_cal, renormalised over the starters",
-    "ordering": "discounted Harville; in_fold = #115's lambda2, one fit on the development "
-    "out-of-fold races (ordering_v0.yaml; the fit id is recorded with each run); 1.0 = plain "
-    "Harville",
+    "ordering": "discounted Harville; full_development = #115's lambda2, one fit on the "
+    "development out-of-fold races, the scored races among them, so partly in-sample "
+    "(ordering_v0.yaml; the fit id is recorded with each run); 1.0 = plain Harville",
+    "relabel": "owner 2026-11-26 on #131: #115's single full-development lambda2 fit is "
+    "labelled full_development (the v1 label said in-fold); the design is v1's unchanged",
     "favourite": "lowest final Win odds, ties to the lowest number",
     "rate": "takeout.race_takeout(race_id, 'FORECAST', race_class_raw=...).payout_rate",
     "cluster": "meeting",
@@ -398,7 +411,7 @@ def _e1_like(estimator: str, lambda2, estimand: str, **extra) -> dict:
 def family_specs() -> dict[str, dict]:
     """The pre-registered families as plain-JSON dicts, a fresh copy on every call."""
     b2 = "rho_S = sum_r R^B2_{S,r} / sum_r rate_r (null 1)"
-    return {
+    specs = {
         E1_ID: _e1_like(
             "B2",
             list(LAMBDA2S),
@@ -412,7 +425,7 @@ def family_specs() -> dict[str, dict]:
         ),
         E1_B1_ID: _e1_like(
             "B1",
-            "in_fold",
+            FITTED,
             "rho_S = sum_r R^B1_{S,r} / sum_r rate_r (null 1); B1 does not use p",
             role="E1' reported variant, not in E1's max test",
         ),
@@ -446,7 +459,7 @@ def family_specs() -> dict[str, dict]:
             "cuts": [0.6, 0.7, 0.8, 0.9],
             "stake_yen": 100,
             "min_meetings": 100,
-            "lambda2": "in_fold",
+            "lambda2": FITTED,
             "family_size": 16,
             "judged_at": "final dividends, own impact from the payout identity with the race's "
             "logged pool totals",
@@ -454,3 +467,4 @@ def family_specs() -> dict[str, dict]:
             "scored_on": "#130-logged development meetings only, once there are min_meetings",
         },
     }
+    return {fid: {**spec, "supersedes": SUPERSEDES[fid]} for fid, spec in specs.items()}

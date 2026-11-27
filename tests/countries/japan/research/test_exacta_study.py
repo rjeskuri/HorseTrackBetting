@@ -45,12 +45,17 @@ API pinned here (module ``horsetrack.countries.japan.research.exacta_study``, no
   With between-variance tau2 and mu = the precision-weighted mean with weights 1 / (se^2 + tau2),
   each estimate becomes (x / se^2 + mu / tau2) / (1 / se^2 + 1 / tau2); tau2 = 0 gives mu for every
   estimate; tau2 None estimates it from the data (truncated at 0).
-- ``family_specs() -> dict[family_id, spec]``: the frozen families as plain-JSON dicts. Pinned keys:
-  E1 "japan/131-exacta-category-v1" and E2 "japan/131-exacta-rule-v1"; each spec has "estimator"
-  ("B1", "B2", "B3" or "rule"), "members" (E1-type: {"category", "cell"}; E2: {"category", "cut",
-  "scope"}), "lambda2" ("in_fold", 1.0 or a list of them), "block_size", "n_boot", "level",
+- ``family_specs() -> dict[family_id, spec]``: the frozen families as plain-JSON dicts, one per
+  estimator: "B2" (E1), "B1" (E1'), "B3" (E1''), "C" (log score) and "rule" (E2). Each spec has
+  "estimator", "members" (E1-type: {"category", "cell"}; E2: {"category", "cut", "scope"}),
+  "lambda2" ("full_development", 1.0 or a list of them), "block_size", "n_boot", "level",
   "cluster" ("meeting"); E1-type specs carry "directions" {category: "less" | "greater"}; E2 carries
   "cuts", "stake_yen" and "min_meetings".
+  Owner 2026-11-26: #115's single full-development lambda2 fit (partly in-sample) is labelled
+  "full_development", and no spec says "in_fold". The v1 families (tests/fixtures/synthetic/
+  exacta_131_v1_family_specs.json, frozen 2026-11-25 with the hashes in V1_HASHES) stay in the
+  append-only registry, which refuses another spec under a frozen id (FamilyAlreadyFrozen), so the
+  relabelled families are frozen under new ids beside them.
 """
 
 # Ruff reads the module under test as third-party until it exists, then as first-party; the
@@ -63,6 +68,7 @@ import json
 import math
 from datetime import date
 from itertools import permutations
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -90,8 +96,29 @@ CELLS = (
     "popularity:less", "popularity:rest",
     "headline",
 )  # fmt: skip
-E1_ID = "japan/131-exacta-category-v1"
-E2_ID = "japan/131-exacta-rule-v1"
+# The v1 families frozen in the Japan registry on 2026-11-25, with the hashes the spec documents
+# (docs/specs/exacta-overload-prereg.md); their specs label #115's fit "in_fold".
+V1_HASHES = {
+    "japan/131-exacta-category-v1":
+        "9ac3b740d1bbdde9645091d3fd14247442b1a210b2d109c5e58ade0983769a8f",
+    "japan/131-exacta-category-b1-v1":
+        "f0e915f51cc13c7b40ef478076f6c44b1b5d22b52722b321c46359e5c2bf5e8f",
+    "japan/131-exacta-category-b3-v1":
+        "07721b74cc11fd7181b812c42450ac523371e07435047c623cd9d159d0d3fbcb",
+    "japan/131-exacta-logscore-v1":
+        "0af318b97297b3085d82434921cf4c2f651864321a3e63ae03560b3e2b81c715",
+    "japan/131-exacta-rule-v1":
+        "b1577fd3765d5f72b0c0643235aca7cd69317d467470a0a31949da50c65a019f",
+}  # fmt: skip
+FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "synthetic"
+V1_SPECS_FIXTURE = FIXTURES / "exacta_131_v1_family_specs.json"
+ESTIMATORS = ("B2", "B1", "B3", "C", "rule")
+
+
+def _family_id(specs, estimator) -> str:
+    found = [fid for fid, spec in specs.items() if spec["estimator"] == estimator]
+    assert len(found) == 1, (estimator, found)
+    return found[0]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -708,7 +735,7 @@ def _e1_like(specs, estimator):
 
 def test_e1_spec_has_42_category_by_cell_members_and_the_signed_settings():
     specs = family_specs()
-    e1 = specs[E1_ID]
+    e1 = specs[_family_id(specs, "B2")]
     assert e1["estimator"] == "B2"
     members = {(m["category"], m["cell"]) for m in e1["members"]}
     assert len(e1["members"]) == 42
@@ -718,23 +745,60 @@ def test_e1_spec_has_42_category_by_cell_members_and_the_signed_settings():
     assert e1["n_boot"] == 10000
     assert e1["level"] == 0.95
     assert e1["cluster"] == "meeting"
-    assert "in_fold" in _lambda2s(e1)
+    assert "full_development" in _lambda2s(e1)
 
 
 def test_e1_variants_b1_b3_and_plain_harville_are_registered():
     specs = family_specs()
+    e1 = specs[_family_id(specs, "B2")]
     for estimator in ("B1", "B3"):
         found = _e1_like(specs, estimator)
         assert found, estimator
         for spec in found:
             members = {(m["category"], m["cell"]) for m in spec["members"]}
             assert members == {(c, cell) for c in CATEGORIES for cell in CELLS}
-            assert spec["directions"] == specs[E1_ID]["directions"]
+            assert spec["directions"] == e1["directions"]
     assert any(1.0 in _lambda2s(s) for s in _e1_like(specs, "B2"))
 
 
+@pytest.mark.parametrize(
+    "estimator, expected",
+    [
+        ("B2", {"full_development", 1.0}),
+        ("B3", {"full_development", 1.0}),
+        ("C", {"full_development", 1.0}),
+        ("rule", {"full_development"}),
+    ],
+)
+def test_the_fitted_lambda2_is_labelled_full_development(estimator, expected):
+    specs = family_specs()
+    assert set(_lambda2s(specs[_family_id(specs, estimator)])) == expected
+
+
+def _strings(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+    elif isinstance(value, str):
+        yield value
+
+
+@pytest.mark.parametrize("estimator", ESTIMATORS)
+def test_no_spec_says_in_fold_and_every_lambda2_label_is_full_development(estimator):
+    specs = family_specs()
+    spec = specs[_family_id(specs, estimator)]
+    assert [s for s in _strings(spec) if "in_fold" in s] == []
+    assert {v for v in _lambda2s(spec) if isinstance(v, str)} <= {"full_development"}
+    assert all(v == 1.0 for v in _lambda2s(spec) if not isinstance(v, str))
+
+
 def test_e2_spec_has_16_rule_members_and_the_signed_settings():
-    e2 = family_specs()[E2_ID]
+    specs = family_specs()
+    e2 = specs[_family_id(specs, "rule")]
     assert e2["estimator"] == "rule"
     members = {(m["category"], m["cut"], m["scope"]) for m in e2["members"]}
     assert len(e2["members"]) == 16
@@ -754,17 +818,73 @@ def test_e2_spec_has_16_rule_members_and_the_signed_settings():
 def test_family_specs_are_plain_json_deterministic_and_freeze(tmp_path):
     first, second = family_specs(), family_specs()
     assert first == second
+    assert sorted(s["estimator"] for s in first.values()) == sorted(ESTIMATORS)
     for family_id, spec in first.items():
         assert json.loads(json.dumps(spec, allow_nan=False)) == spec  # lists, not tuples; no NaN
         assert spec == second[family_id]
-    first[E1_ID]["members"].clear()  # a caller's change never reaches the next call
-    assert len(family_specs()[E1_ID]["members"]) == 42
+    e1_id = _family_id(first, "B2")
+    first[e1_id]["members"].clear()  # a caller's change never reaches the next call
+    assert len(family_specs()[e1_id]["members"]) == 42
 
     reg = Registry(tmp_path / "japan.jsonl", holdout_log=tmp_path / "holdout_log.jsonl")
     for family_id, spec in second.items():
-        expected = hashlib.sha256(
-            json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+        expected = _hash(spec)
         assert reg.freeze_family(family_id, copy.deepcopy(spec)) == expected
         assert reg.freeze_family(family_id, family_specs()[family_id]) == expected  # no-op
-    assert reg.frozen_spec_hash(E1_ID) is not None and reg.frozen_spec_hash(E2_ID) is not None
+    for family_id, spec in second.items():
+        assert reg.frozen_spec_hash(family_id) == _hash(spec)
+
+
+def _hash(spec) -> str:
+    return hashlib.sha256(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _v1_specs() -> dict:
+    v1 = json.loads(V1_SPECS_FIXTURE.read_text(encoding="utf-8"))
+    assert {fid: _hash(spec) for fid, spec in v1.items()} == V1_HASHES  # the frozen v1 record
+    return v1
+
+
+def _v1_id(v1, estimator) -> str:
+    (found,) = [fid for fid, spec in v1.items() if spec["estimator"] == estimator]
+    return found
+
+
+def test_relabelled_families_freeze_under_new_ids_beside_the_frozen_v1_families(tmp_path):
+    v1 = _v1_specs()
+    reg = Registry(tmp_path / "japan.jsonl", holdout_log=tmp_path / "holdout_log.jsonl")
+    for family_id, spec in v1.items():
+        assert reg.freeze_family(family_id, spec) == V1_HASHES[family_id]
+
+    specs = family_specs()
+    assert set(specs).isdisjoint(V1_HASHES)  # every v1 spec changes (its λ2 label): new ids
+    for family_id, spec in specs.items():
+        assert _hash(spec) not in V1_HASHES.values()
+        assert reg.freeze_family(family_id, spec) == _hash(spec)  # no FamilyAlreadyFrozen
+
+    for family_id, frozen in V1_HASHES.items():  # the v1 freezes stand, unchanged
+        assert reg.frozen_spec_hash(family_id) == frozen
+    for family_id, spec in specs.items():
+        assert reg.frozen_spec_hash(family_id) == _hash(spec)
+    reg.verify()
+
+
+_UNCHANGED_KEYS = (
+    "estimator", "members", "family_size", "directions", "segments", "block_size", "n_boot",
+    "level", "seed", "cluster", "exclusions", "cuts", "stake_yen", "pool", "sources",
+    "hypothesis_id", "ticket",
+)  # fmt: skip
+
+
+@pytest.mark.parametrize("estimator", ESTIMATORS)
+def test_the_relabel_changes_the_lambda2_label_and_not_the_design(estimator):
+    v1 = _v1_specs()
+    old = v1[_v1_id(v1, estimator)]
+    specs = family_specs()
+    new = specs[_family_id(specs, estimator)]
+    for key in _UNCHANGED_KEYS:
+        assert new.get(key) == old.get(key), key
+    relabelled = json.loads(json.dumps(old["lambda2"]).replace('"in_fold"', '"full_development"'))
+    assert new["lambda2"] == relabelled
