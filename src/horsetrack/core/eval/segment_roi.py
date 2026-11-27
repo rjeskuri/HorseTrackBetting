@@ -42,12 +42,13 @@ check: 20 wins at odds 1.0 beside three null levels gives a tau posterior mean o
 0.097 exact), and then about half the tau samples are rejected. A band whose bets all won cannot
 be fitted at any tau and raises.
 
-Queries name a segment as ``{column: level}`` for one or more segment columns. Its omega is the
-mean over the segment's own bets of each bet's fitted omega (its band, its levels of every column;
-``omega_mean`` gives its posterior mean), and ``p_beats_takeout`` is the probability that the
-segment's mean expected return per unit stake, ``mean(omega_i * (1 - t_i))``, exceeds 1; with one
-takeout that is ``P(omega_s > 1 / (1 - t))``.
-Every bet counts once (flat stakes): the stake column is not used.
+Queries name a segment as ``{column: level}`` for one or more segment columns. Each bet's omega is
+its band's and its levels' effects combined. ``expected_return``, ``p_beats_takeout`` and
+``omega_mean`` read the same posterior draws of the segment's mean expected return per unit stake,
+``mean(omega_i * (1 - t_i))`` over its own bets: its mean and credible interval, the probability
+that it exceeds 1, and its mean over the bets' mean payout rate (the payout-weighted omega, which
+clears ``1 / (1 - mean t_i)`` exactly when the expected return clears 1; with one takeout,
+``P(omega_s > 1 / (1 - t))``). Every bet counts once (flat stakes): the stake column is not used.
 """
 
 from __future__ import annotations
@@ -71,6 +72,16 @@ _BLOCK = 2_000_000  # array elements per block of the predictive simulation
 
 @dataclass(frozen=True)
 class Interval:
+    low: float
+    high: float
+    level: float
+
+
+@dataclass(frozen=True)
+class Estimate:
+    """A posterior mean and its central credible interval."""
+
+    mean: float
     low: float
     high: float
     level: float
@@ -226,22 +237,34 @@ class SegmentROI:
         codes = self._codes_of(segment)
         return float(sum(self._mean[self._offsets[c] + code] for c, code in codes.items()))
 
-    def omega_mean(self, segment: dict[str, str]) -> float:
-        """Posterior mean of the segment's omega: the mean over its own bets of each bet's omega
-        (its band and its level of every column combined), the multiplier `p_beats_takeout`
-        judges against 1 / (1 - t)."""
-        rows = self._rows(segment)
-        cells, local = np.unique(self._cell[rows], return_inverse=True)
-        weight = np.bincount(local.ravel()) / rows.sum()
-        return float(np.mean(np.exp(self._draws @ self._design[cells].T) @ weight))
-
-    def p_beats_takeout(self, segment: dict[str, str]) -> float:
-        """P(mean expected return per unit stake of the segment's bets > 1 | data)."""
+    def _return_draws(self, segment: dict[str, str]) -> tuple[np.ndarray, float]:
+        """Posterior draws of the segment's mean expected return per unit stake,
+        ``mean(omega_i * (1 - t_i))`` over its own bets, and the bets' mean payout rate."""
         rows = self._rows(segment)
         cells, local = np.unique(self._cell[rows], return_inverse=True)
         weight = np.bincount(local.ravel(), weights=1 - self._takeout[rows]) / rows.sum()
-        expected = np.exp(self._draws @ self._design[cells].T) @ weight
-        return float(np.mean(expected > 1))
+        return np.exp(self._draws @ self._design[cells].T) @ weight, float(weight.sum())
+
+    def omega_mean(self, segment: dict[str, str]) -> float:
+        """Posterior mean of the segment's payout-weighted omega, ``sum((1 - t_i) * omega_i) /
+        sum(1 - t_i)``: the multiplier that clears 1 / (1 - mean t_i) exactly when
+        `expected_return` clears 1 (the same draws)."""
+        draws, payout = self._return_draws(segment)
+        return float(draws.mean() / payout)
+
+    def expected_return(self, segment: dict[str, str]) -> Estimate:
+        """Posterior mean and central INTERVAL_LEVEL credible interval of the segment's mean
+        expected return per unit stake (break-even 1), the quantity `p_beats_takeout` judges.
+        Uncertainty about the mean only; `predictive_roi` adds the outcomes of future bets."""
+        draws, _ = self._return_draws(segment)
+        tail = (1 - INTERVAL_LEVEL) / 2
+        low, high = np.quantile(draws, [tail, 1 - tail])
+        return Estimate(float(draws.mean()), float(low), float(high), INTERVAL_LEVEL)
+
+    def p_beats_takeout(self, segment: dict[str, str]) -> float:
+        """P(mean expected return per unit stake of the segment's bets > 1 | data)."""
+        draws, _ = self._return_draws(segment)
+        return float(np.mean(draws > 1))
 
     def predictive_roi(self, segment: dict[str, str], n_bets: int) -> Interval:
         """Central INTERVAL_LEVEL interval for the ROI of the segment's next `n_bets` unit bets."""

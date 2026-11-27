@@ -7,10 +7,12 @@
 # deferred; the E4 variants dropped; decision time T-2; cluster unit meeting; SPA/StepM level
 # 0.05, block 6 meetings, n_boot 10000. The owner also answered: the benchmark is D4's calibrated
 # market fitted in fold (answer 3); omega is fitted on each rule's selected bets and reported only
-# (answer 4); a pre-registered non-survivor sits at S0 (answer 5); a stage-1 pass needs the claim
-# pointing the way the rule bets, one-sided (answer 6: `direction`); the odds-band cut points
-# were proposed under answer 7 and are frozen with the family. Once frozen, changing any value is
-# an owner decision and a new family id, not an edit.
+# (answer 4); a stage-1 pass needs the claim pointing the way the rule bets, one-sided (answer 6:
+# `direction`); the odds-band cut points were proposed under answer 7 and are frozen with the
+# family. Under the owner's reframe of 2026-11-27 every rule is measured whatever its verdicts and
+# sits at D19's default rung S0 (answer 5's rungs are superseded); the study reads no sign-off,
+# and the frozen hash guards the family. Once frozen, changing any value is an owner decision and
+# a new family id, not an edit.
 #
 # NOT FROZEN, NOT RUN HERE. The development-fold run is follow-up #462 (epic #72): every rule
 # selects on the Win board at t (odds_t, rank_t, entropy_t_bin), which the development store holds

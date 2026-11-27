@@ -1,112 +1,104 @@
 """The pre-registered Family P selection study (ticket #88; 08 §5.2 end to end, §5.3, §8 A6).
 
-Contract pinned here (`horsetrack.countries.japan.studies.selection`), with the owner's answers on
-#88 of 2026-11-26 (benchmark, omega, rungs, one-sided passes, odds bands, the family):
+Contract pinned here (`horsetrack.countries.japan.studies.selection`), as amended on 2026-11-27 (the
+owner's reframe: keep every result and rank instead of gate; the restart plan on #88), with the
+owner's answers of 2026-11-26 that still hold (benchmark, omega basis, one-sided passes, bands):
 
 - `RuleSpec(rule_id, claim, segment, selection_cols, thresholds, direction)` and
   `FamilySpec(family_id, rules, decision_time, cluster_unit, benchmark, max_stat,
   odds_band_cut_points, dropped_variants=[])` are dataclasses. `claim` is 'beta', 'alpha' or
-  'omega'. `dropped_variants` (default empty, so a spec without one still builds) lists the
-  variant ids screened and dropped before the freeze (08 §5.2 step 1: the family size counts
-  them); it is frozen with the spec, and `run_study` records each as a failed variant of the
-  family. Three more fields extend the ticket's signature; each is an owner decision with no
-  default, so it is frozen with the family rather than read from code (the values below are test
-  inputs, not the owner's):
-  - `max_stat`: the multiple-testing settings, `{"level": StepM's family-wise level,
-    "block_size": the stationary bootstrap's mean block length in clusters, "n_boot": SPA's and
-    StepM's replicates}`, passed to #75's `spa` and `stepm`.
-  - `direction` ("above" or "below"): the way the rule bets (owner answer 6). A stage-1 pass
-    needs the claim's coefficient on that side of its null: "above" means the segment's
-    favourites (a 'beta' claim) or the segment's runners (an 'omega' claim) win more often than
-    the benchmark says; "below" means its longshots do. A departure the other way never passes.
-  - `odds_band_cut_points`: ascending final decimal odds that cut the omega model's
-    favourite-longshot odds bands (its fixed effects; owner answer 7). The study derives the
-    bands from them; the data carry no band column.
+  'omega'; `direction` ("above" or "below") is the side of the claim's null the rule bets (a
+  stage-1 pass needs the coefficient on that side); `max_stat` is `{"level", "block_size",
+  "n_boot"}` for #75's `spa` and `stepm`; `odds_band_cut_points` cut the omega model's
+  final-odds bands; `dropped_variants` are variants screened and dropped before the freeze, which
+  `run_study` records as failed variants of the family (08 §5.2 step 1: the family size counts
+  them). `decision_time` is "T-n": n minutes before the race's post. The values below are test
+  inputs, not the owner's.
 - Frozen means `registry.freeze_family(spec.family_id, dataclasses.asdict(spec))`. `run_study`
-  raises `FamilyNotFrozen` before it scores or writes anything unless
-  `registry.frozen_spec_hash(spec.family_id)` is the hash `freeze_family` gives
-  `dataclasses.asdict(spec)`: an unfrozen family, or any edit after the freeze (a direction or a
-  cut point included), is refused, and the study never freezes the family itself.
-- `data` is one row per runner, development rows only, every row a starter, one winner per race:
-    race_id          the race
-    meeting_id       the race's meeting (venue x day); `cluster_unit` names this column
-    race_date        the race day (pd.Timestamp): orders the clusters for SPA and StepM. A row on
-                     a holdout day (`core.eval.holdout.is_holdout_day`) makes run_study raise a
-                     ValueError before anything is scored or written
-    horse_id         the runner within its race
-    odds_t           decimal Win odds on the board at the decision time t (selection may use it)
-    odds_final       final decimal Win odds: the price the log-loss stage conditions on
-    win_dividend     the Win dividend per unit stake the runner pays if it wins; it differs from
-                     odds_final by a little (a late pool move), so ROI provably reads the dividend.
-                     A loser's may be missing (NaN): it pays nothing
-    won              1 for the race's winner, else 0
-    takeout          the Win pool's takeout t (0.2)
-    final_odds_band  odds band of odds_final (1 to 4); present in some frames, never required
-    final_rank       rank of odds_final in the race (1 = favourite)
-    final_entropy    normalised entropy of the race's final-odds probabilities
+  raises `FamilyNotFrozen` before it scores or writes anything unless the registry holds exactly
+  this spec's hash: an unfrozen family, or any edit after the freeze, is refused, and the study
+  never freezes the family itself. No owner sign-off is required anywhere: `load_family("japan")`
+  reads the committed config/selection_family.yaml with or without an `owner_signoff` (absent or
+  null), its `dropped` variants carried as the spec's `dropped_variants`.
+- `data` is one row per runner, development rows only, one winner per race:
+    race_id, meeting_id  the race and its meeting (venue x day); `cluster_unit` names meeting_id
+    race_date        the race day (pd.Timestamp); a row on a holdout day
+                     (`core.eval.holdout.is_holdout_day`) is a ValueError before anything is
+                     scored or written
+    post_utc         the race's post time, timezone-aware UTC (the races view's derived post_utc).
+                     The race's decision instant t is post_utc minus the spec's decision_time
+    horse_id, odds_t the runner, and its decimal Win odds on the board at t (selection may use it)
+    odds_final       final decimal Win odds: the log-loss stage and the omega model condition on it
+    win_dividend     the Win dividend per unit stake if the runner wins (a little off odds_final,
+                     so a return provably reads the dividend); a loser's may be missing (NaN)
+    won, takeout     1 for the winner, else 0; the Win pool's takeout t (0.2, or mixed by band)
+    final_*          final-odds band, rank and entropy: look-ahead, never required
     seg, jockey      segment columns: `seg` is constant within a race, `jockey` varies within it
-- A rule's segment `{col: level}` holds the runners with `data[col] == level` for every pair (a
-  missing value is in no segment). A 'beta' claim's segment columns are race-level (#77's
-  `segment_beta`). `thresholds` maps each selection column to `[lo, hi]`, both ends inclusive,
-  `None` an open end; the rule bets one unit to Win on each runner of its segment whose selection
-  columns are all in range: its selected bets.
-- `benchmark="calibrated_market"` is D4's calibrated market (owner answer 3): the conditional-logit
-  natural cubic spline in ln q (`models.v0.calibration`), fitted in fold. A favourite-longshot bias
-  the whole market shares is in the benchmark, so no segment is credited with it.
-- Look-ahead: `odds_final`, every `final_*` column and the store's final-price columns `win_odds`
-  and `win_fav_rank` are final-price columns, and every column Japan's availability config
-  classifies as a label (`core.store.asof.load_availability("japan")`: any table's
-  `label_columns`, or a name one of its `label_prefixes` starts) is a result a view at t never
-  returns (`finish_pos`, `last_3f_s`, a payout...). They may condition a probability claim (the
-  log-loss stage at the final price, the omega model's odds bands) but never select a bet: a rule
-  naming one in `selection_cols` or in its `segment` is refused with `LookAheadSelection`.
-  Board-at-t columns (`odds_t`) are allowed.
-- `run_study(...) -> StudyReport(family_size, stages, survivors, p_beats_takeout, rungs)`:
-  - `stages` holds "log_loss", "max_stat", "omega" and "roi" in that order (other keys allowed):
-    `stages["log_loss"][rule_id]["passed"]` (bool) for every rule (its probability claim on all
-    runners of its segment against the benchmark, #69's paired bootstrap over `cluster_unit`,
-    one-sided in the rule's direction); `stages["max_stat"]["superior"]`, the rule ids StepM
-    finds superior; `stages["roi"]`, keyed by the survivors only, `{"roi": float, "n_bets": int}`
-    where roi = (sum of the selected winners' win_dividend) / n_bets - 1 over every row of `data`
-    the rule selects. A survivor's registry records carry it as the metric `roi_win_dividend`.
-  - `survivors`: the rules that passed the log-loss stage and that StepM finds superior. The
-    log-loss verdict comes from #69's `paired_bootstrap` and the max-statistic one from #75's
-    `stepm` (ticket outline); one test replaces each, in every loaded horsetrack module that
-    holds it, to force its verdict.
-  - `p_beats_takeout[rule_id]`: P(omega_s > 1/(1 - t) | data), in [0, 1], from #78's model
-    (`fit_segment_roi`, its `p_beats_takeout`) fitted on the rule's selected bets (owner answer
-    4), with the family's odds bands as fixed effects: one rule's gaps never blank another's.
-    Reported only: it never changes a survivor or a rung.
-  - `stages["omega"][rule_id]`, for every rule: its `p_beats_takeout` and `omega_selected`, the
-    posterior mean of the return multiplier of the rule's selected bets (the mean over those
-    bets of each bet's omega, band and segment effects combined: every bet of the fit is in the
-    rule's segment, so that mix is what the bets identify, not a segment effect apart from the
-    bands). Only a survivor's entry carries a return: its posterior predictive ROI,
-    `predictive_roi_100` ([low, high, level], 08 §5.2 step 4); a non-survivor's entry, and its
-    registry records, carry no ROI of any kind.
-  - `rungs[rule_id]`: "S1" (shadow) for a survivor, "S0" for every other rule (owner answer 5);
-    nothing is adopted.
-  - `family_size`: `registry.family_size(family_id)` after the run: the rules (one registry record
-    each, variant = rule_id), the spec's `dropped_variants` (failed records) and the variants
-    already in the family, failed (dropped) included.
-  - The holdout passed in is never opened: the study completes with one whose `open` raises.
-  - A rerun on a refreshed frame: a rule the registry already holds scored that the new frame
-    cannot score is a ValueError naming the rule, raised before the rerun appends any record
-    (the max-statistic stage would otherwise refuse the family after the first records).
-- `load_family("japan")` reads the committed config/selection_family.yaml, signed off by the
-  owner on #88, its `dropped` variants carried as the spec's `dropped_variants`; a copy without
-  the sign-off raises `FamilyNotApproved`.
+- Selection inputs (the narrow contract for this family's inputs). Every column a rule reads, in
+  its segment or its selection, is declared in the frame beside it: `<col>__source`, where the
+  value comes from, and `<col>__available_utc`, the timezone-aware UTC instant each row's value
+  became available. Admitted sources are the board at t (`board_at_t`, docs/specs/board-at-t.md)
+  and the pre-race card tables read through an as-of view at t (`races`, `runners`;
+  docs/specs/as-of.md). A rule is refused with `LookAheadSelection`, before anything is scored or
+  written, when a column it reads is undeclared (no source or no stamp), comes from any other
+  source (a post-race table such as the Win payout table `dividends`, `sectionals`, `incidents`,
+  `running_comments`; `jrdb_post_race`; `horses`; the final board), or holds a value whose stamp
+  is missing or later than its race's decision instant (a value stamped exactly at t is
+  available). The name rules stay, declared or not: `odds_final`, every `final_*` column, the
+  store's `win_odds` and `win_fav_rank`, and every label of Japan's availability config
+  (`core.store.asof.load_availability`) are refused as a segment or a selection column. Outcome
+  columns (won, win_dividend, odds_final, takeout) are read only to score, never declared.
+- Evaluation population: every return the study reports (bet counts, omega, the expected return,
+  P(omega_s > 1/(1 - t)), the realised ROI, the predictive interval) is read on the rule's
+  selected bets among the rows D9's walk-forward folds score out of fold (config/folds.yaml: from
+  2020-Q1 here), never on training-only rows.
+- `run_study(...) -> StudyReport(family_size, stages, survivors, p_beats_takeout, rungs)`. No
+  stage gates another: every configured rule has an entry in every stage with each measurement
+  its data allow, whatever its log-loss or max-statistic result, and a measurement that cannot be
+  made leaves its number non-finite (or absent) and carries its reason as a non-empty `"error"`
+  string in that entry.
+  - `stages` holds "log_loss", "max_stat", "omega" and "roi" in that order (others allowed).
+    `log_loss[rule_id]`: `passed` (bool), `delta_ll` with its bootstrap bounds `lo` and `hi`.
+    `max_stat`: `tested` (every rule whose claim was scored) and `superior` (StepM's verdict).
+    `omega[rule_id]`: `n_bets`; `omega_selected`, the posterior mean of the selected bets'
+    payout-weighted return multiplier, sum((1 - t_i) * omega_i) / sum(1 - t_i); `expected_return`,
+    `{"mean", "low", "high", "level"}`: the posterior mean and central credible interval of the
+    bets' mean expected return per unit stake at the final price, mean((1 - t_i) * omega_i)
+    (break-even 1), so omega_selected * (1 - mean t_i) is its mean; `p_beats_takeout`, the
+    posterior probability that the same quantity exceeds 1, from the same draws; a
+    `breakeven_omega`, when reported, is 1 / (1 - mean t_i); `predictive_roi_100`,
+    `[low, high, level]`, the posterior predictive interval of the ROI of the next 100 bets (08
+    §5.2 step 4), reported apart from the expected return's interval. `roi[rule_id]`:
+    `{"roi", "n_bets"}`, roi = (sum of the selected winners' win_dividend) / n_bets - 1.
+  - `survivors`: a diagnostic, the rules that passed the log-loss stage and that StepM finds
+    superior. It gates nothing.
+  - `p_beats_takeout[rule_id]`, for every rule: `stages["omega"][rule_id]["p_beats_takeout"]`.
+  - `rungs[rule_id]`: "S0" (D19's default, avoid) for every rule, survivor or not: the study makes
+    no rung decision (rules move through the leaderboard, #449, and the owner); nothing above S1,
+    nothing adopted.
+  - `family_size`: `registry.family_size(family_id)` after the run: the rules, the spec's
+    `dropped_variants` and the variants already in the family, failed ones included.
+  - Each rule's last registry record carries, as metrics, every measurement made:
+    `delta_ll_vs_calibrated_market` (lo, hi), `stepm_superior` (1.0 or 0.0), `omega_selected`,
+    `expected_return` (lo = low, hi = high), `p_beats_takeout` and `roi_win_dividend`.
+  - The holdout passed in is never opened. A rerun whose frame cannot score a rule the registry
+    holds scored is a ValueError naming it, before any record.
+- `sources` is validated before anything is scored or written: a bare str or bytes, a collection
+  holding anything but non-blank names, or an empty one is refused (TypeError or ValueError). A
+  collection naming a licensed source in any spelling keeps the registry's repository-write guard
+  and the summary's redaction.
+- `core.eval.segment_roi.SegmentROI.expected_return(segment)`: `.mean`, `.low`, `.high`,
+  `.level` of the posterior of the segment's mean expected return per unit stake,
+  mean((1 - t_i) * omega_i), the quantity `p_beats_takeout` judges against 1.
 
-Not pinned: the log-loss bootstrap's level and replicates (D7, config/scoring.yaml), the form of
-a claim against the spline (a power on p_cal or a slope on ln q), the omega model's draws and
-segment columns, and on which side of a cut point a price on it falls.
+Not pinned: the log-loss bootstrap's level and replicates, the form of a claim against the spline,
+the omega model's draws, a price on a cut point, registry fold labels, the status of a rule whose
+claim could not be scored, the order of the pre-scoring checks.
 
 All data is synthetic and seeded. Expected values come from the generator's own arrays (selected
 rows, realised wins, a conditional-logit Newton written here), never from the code under test.
-Where the benchmark matters, the generator's truth is a power law in q, so the market-wide power
-fit written here stands in for the calibrated market. Each test first asserts the premise it
-relies on. Rule ids start with the Family P candidate they belong to (P3, P4, P6), the
-registry's hypothesis-id form. The families are test-only and decide nothing.
+Each test first asserts the premise it relies on. Rule ids start with the Family P candidate they
+belong to (P3, P4, P6). The families are test-only and decide nothing.
 """
 
 # Ruff reads the module under test as third-party until it exists, then as first-party; the
@@ -126,19 +118,22 @@ import pandas as pd
 import pytest
 import yaml
 
+from horsetrack.core import env
 from horsetrack.core.eval.bootstrap import paired_bootstrap
+from horsetrack.core.eval.folds import load_country_scheme, walk_forward
 from horsetrack.core.eval.holdout import (
     DEFAULT_COUNTRIES_DIR,
     LOG_NAME,
     LockedHoldout,
     is_holdout_day,
 )
-from horsetrack.core.eval.registry import Registry, RunRecord
+from horsetrack.core.eval.registry import WITHHELD_LABEL, Registry, RunRecord, write_summary
+from horsetrack.core.eval.reports import LicensedOutputInRepo
 from horsetrack.core.eval.segment_roi import fit_segment_roi
 from horsetrack.core.eval.snooping import stepm
 from horsetrack.core.store.asof import load_availability
+from horsetrack.countries.japan.models.v0.calibration import fit_win_calibration
 from horsetrack.countries.japan.studies.selection import (
-    FamilyNotApproved,
     FamilyNotFrozen,
     FamilySpec,
     LookAheadSelection,
@@ -152,6 +147,7 @@ N_MEETINGS = 240
 RACES_PER_MEETING = 6
 FIRST_DAY = date(2014, 6, 7)  # D10: no price before this day
 LAST_DAY = date(2025, 12, 31)  # before the holdout (2026-11-28); 2020 on is in D9's scored folds
+FIRST_SCORED = pd.Timestamp(2020, 1, 1)  # config/folds.yaml: the first scored quarter, 2020-Q1
 SEGMENTS = ("A", "B", "C", "D")
 # J1 rides only in segment A's races (a quarter of the runners there) and J2 and J3 never do, so
 # J1's edge, paid for by the other runners of its races, leaves J2's and J3's prices exact.
@@ -177,6 +173,7 @@ OMEGA_SEED = 8803
 FLB_SEED = 8804
 DIRECTION_SEED = 8805
 FINISH_SEED = 8806  # the finishing order behind the synthetic result-label columns
+MIXED_SEED = 8807  # the bets of the segment-ROI mixed-takeout cases
 STUDY_SEED = 88
 BENCHMARK = "calibrated_market"
 MAX_STAT = {"level": 0.05, "block_size": 4, "n_boot": 500}  # test inputs, not the owner's
@@ -185,10 +182,40 @@ LOOK_AHEAD = ("odds_final", "final_odds_band", "final_rank", "final_entropy")
 HOLDOUT_LOG = DEFAULT_COUNTRIES_DIR / "japan" / LOG_NAME
 FAMILY_FILE = DEFAULT_COUNTRIES_DIR / "japan" / "config" / "selection_family.yaml"
 CLEAR_Z = 2.5  # a selection's realised return this many standard errors from breakeven
-# The reported return multiplier of a rule's bets, times (1 - t), within this many standard errors
-# of their realised return at the final odds (an unbiased estimate of the same mean).
+# A reported expected return within this many standard errors of the bets' realised return at the
+# final odds (an unbiased estimate of the same mean).
 MIX_Z = 3.5
 FOLLOW_UP_RUN = "#462"  # the development-fold run of the committed family
+PREDICTIVE = "predictive_roi_100"
+
+# The selection-input declaration (module docstring): a column's source and availability stamp.
+SOURCE, AVAILABLE = "__source", "__available_utc"
+BOARD, RACES, RUNNERS = "board_at_t", "races", "runners"
+DECISION_MINUTES = 5  # make_family's decision_time, "T-5"
+# Sources a selection input can never come from: the race's results (the Win payout table and the
+# other post-race tables of the availability config), a label-only or current-value table, and the
+# final board.
+REFUSED_SOURCES = (
+    "dividends",
+    "sectionals",
+    "incidents",
+    "running_comments",
+    "jrdb_post_race",
+    "horses",
+    "final_board",
+)
+
+# The metrics a rule's last registry record carries for its measurements (module docstring).
+LOG_LOSS_METRIC = "delta_ll_vs_calibrated_market"
+RECORD_METRICS = (
+    LOG_LOSS_METRIC,
+    "stepm_superior",
+    "omega_selected",
+    "expected_return",
+    "p_beats_takeout",
+    "roi_win_dividend",
+)
+RETURN_METRICS = ("omega_selected", "expected_return", "p_beats_takeout", "roi_win_dividend")
 
 # (rule_id, claim, segment, selection_cols, thresholds, direction); only segment A's claim is
 # real. Every rule backs favourites; against the calibrated market (pulled towards A's bias) B, C
@@ -219,9 +246,11 @@ FLB_RULES = [
     ("P3-c-longshot", "beta", {"seg": "C"}, ["odds_t"], LONGSHOTS, "below"),
     ("P6-d-favourite", "beta", {"seg": "D"}, ["odds_t"], FAVOURITES, "above"),
 ]
-# Each departing segment bet both ways, and a segment with the market-wide bias only.
+# Each departing segment bet both ways, and a segment with the market-wide bias only. A's
+# favourites start at 1.5: on the scored rows alone, a winner near 1.1 would put the omega fit of
+# its bets on the p = 1 boundary (#78), and this family needs every rule's omega measured.
 DIRECTION_RULES = [
-    ("P4-a-favourite", "beta", {"seg": "A"}, ["odds_t"], FAVOURITES, "above"),
+    ("P4-a-favourite", "beta", {"seg": "A"}, ["odds_t"], {"odds_t": [1.5, 3.0]}, "above"),
     ("P3-a-longshot", "beta", {"seg": "A"}, ["odds_t"], LONGSHOTS, "below"),
     ("P3-b-longshot", "beta", {"seg": "B"}, ["odds_t"], LONGSHOTS, "below"),
     ("P4-b-favourite", "beta", {"seg": "B"}, ["odds_t"], FAVOURITES, "above"),
@@ -237,10 +266,51 @@ OWNER_RULES = {
 }
 OWNER_MAX_STAT = {"level": 0.05, "block_size": 6, "n_boot": 10000}
 
+# Mixed takeout. In the study's mixed frame the Win takeout depends on the final-odds band of
+# CUT_POINTS (<3, 3-8, 8-30, 30+), so a rule's bets mix payout rates across bands of different
+# multipliers. In the segment-ROI cases each band's bets share a takeout and a true multiplier
+# (band, takeout, omega, odds cycled): the high multiplier sits on the low payout rate (the
+# unweighted mean multiplier clears 1/(1 - mean t) while the expected return is below 1), or on
+# the high one (the reverse). Takeouts far apart, so the two land clearly apart.
+TAKEOUT_BY_BAND = (0.40, 0.05, 0.40, 0.05)
+MIXED_BETS = 4000  # per band
+MIXED_CASES = {
+    "below": [("b1", 0.62, 2.52, (1.8, 2.0, 2.2)), ("b2", 0.02, 0.90, (3.5, 4.0, 4.5))],
+    "above": [("b1", 0.62, 0.90, (1.8, 2.0, 2.2)), ("b2", 0.02, 1.855, (3.5, 4.0, 4.5))],
+}
+TRAINING_DIVIDEND = 40.0  # the big winning bets planted in training-only races
+
 
 # ---------------------------------------------------------------------------------------------
-# Synthetic runners
+# Synthetic runners and their selection-input declarations
 # ---------------------------------------------------------------------------------------------
+
+
+def decision_utc(frame: pd.DataFrame, minutes: int = DECISION_MINUTES) -> pd.Series:
+    """Each row's decision instant t: its race's post minus the decision time."""
+    return frame["post_utc"] - pd.Timedelta(minutes=minutes)
+
+
+def board_stamp(frame: pd.DataFrame) -> pd.Series:
+    """When each race's board at t was read: at t itself in every fourth race, else 20, 40 or 60
+    seconds before it."""
+    k = pd.factorize(frame["race_id"])[0] % 4
+    return decision_utc(frame) - pd.Series(pd.to_timedelta(20 * k, unit="s"), index=frame.index)
+
+
+def card_stamp(frame: pd.DataFrame) -> pd.Series:
+    """00:00 JST of the race date, when the races and runners views open a day's card."""
+    return frame["race_date"].dt.tz_localize("Asia/Tokyo").dt.tz_convert("UTC")
+
+
+def declare(frame: pd.DataFrame, **sources: str) -> pd.DataFrame:
+    """`frame` with each named column declared: its source, and its availability stamp (the
+    board's read time for the board at t, the card's opening for a card table)."""
+    out = frame.copy()
+    for col, source in sources.items():
+        out[col + SOURCE] = source
+        out[col + AVAILABLE] = board_stamp(out) if source == BOARD else card_stamp(out)
+    return out
 
 
 def make_runners(seed: int, *, beta: dict[str, float], jockey_boost: float = 0.0) -> pd.DataFrame:
@@ -250,6 +320,7 @@ def make_runners(seed: int, *, beta: dict[str, float], jockey_boost: float = 0.0
     With q the normalised inverse final odds, the winner is drawn from softmax(beta[seg] * ln q +
     jockey_boost * [jockey == J1]), so beta 1 and no boost is a race the final price gets right.
     Segments cycle over the races; J1 rides only in segment A's races, J2 and J3 only elsewhere.
+    The post is 01:00 UTC plus 35 minutes per race; odds_t, seg and jockey are declared.
     """
     rng = np.random.default_rng(seed)
     span = (LAST_DAY - FIRST_DAY).days
@@ -283,6 +354,7 @@ def make_runners(seed: int, *, beta: dict[str, float], jockey_boost: float = 0.0
                         "race_id": f"m{m:03d}-r{r + 1:02d}",
                         "meeting_id": f"m{m:03d}",
                         "race_date": day,
+                        "post_utc": day.tz_localize("UTC") + pd.Timedelta(hours=1, minutes=35 * r),
                         "horse_id": np.arange(1, n + 1),
                         "seg": segment,
                         "jockey": jockey,
@@ -297,7 +369,18 @@ def make_runners(seed: int, *, beta: dict[str, float], jockey_boost: float = 0.0
                     }
                 )
             )
-    return pd.concat(frames, ignore_index=True)
+    runners = pd.concat(frames, ignore_index=True)
+    return declare(runners, odds_t=BOARD, seg=RACES, jockey=RUNNERS)
+
+
+def scored(data: pd.DataFrame) -> pd.DataFrame:
+    """The rows D9's walk-forward folds score out of fold (config/folds.yaml), in frame order:
+    the population every reported return is read on."""
+    folds = walk_forward(
+        data["race_date"].reset_index(drop=True), scheme=load_country_scheme("japan")
+    )
+    rows = np.concatenate([fold.test_idx for fold in folds if len(fold.test_idx)])
+    return data.iloc[np.sort(rows)]
 
 
 def implied(frame: pd.DataFrame) -> pd.Series:
@@ -367,18 +450,24 @@ def omega_premise(frame: pd.DataFrame, mask: pd.Series) -> tuple[float, float]:
 
 
 def selected(data: pd.DataFrame, rule: tuple) -> pd.DataFrame:
-    """The rows a rule bets on: its segment, every selection column in [lo, hi] inclusive."""
+    """The rows a rule bets on: its segment, every selection column present and in [lo, hi]."""
     _, _, segment, selection_cols, thresholds = rule[:5]
     keep = pd.Series(True, index=data.index)
     for col, level in segment.items():
         keep &= data[col] == level
     for col in selection_cols:
         lo, hi = thresholds[col]
+        keep &= data[col].notna()
         if lo is not None:
             keep &= data[col] >= lo
         if hi is not None:
             keep &= data[col] <= hi
     return data[keep]
+
+
+def bets_of(data: pd.DataFrame, rule: tuple) -> pd.DataFrame:
+    """The rule's selected bets in the evaluation population."""
+    return selected(scored(data), rule)
 
 
 def realised_roi(rows: pd.DataFrame) -> float:
@@ -389,6 +478,12 @@ def roi_z(rows: pd.DataFrame) -> float:
     """The selection's realised return per unit stake over its standard error (0 = breakeven)."""
     pay = rows["won"] * rows["win_dividend"].fillna(0.0) - 1.0
     return float(pay.mean() / (pay.std(ddof=1) / math.sqrt(len(pay))))
+
+
+def gross_return(rows: pd.DataFrame) -> tuple[float, float]:
+    """The bets' realised return per unit stake at the final odds, and its standard error."""
+    pay = rows["won"] * rows["odds_final"]
+    return float(pay.mean()), float(pay.std(ddof=1) / math.sqrt(len(pay)))
 
 
 def finish_positions(data: pd.DataFrame) -> np.ndarray:
@@ -412,9 +507,13 @@ def availability_labels() -> list[str]:
     return sorted(names)
 
 
-def roi_keys(mapping) -> list[str]:
-    """The keys of a stage entry, or the metric names of a record, that report a return."""
-    return [name for name in mapping if "roi" in str(name).lower()]
+def finite(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def explained(entry: dict) -> bool:
+    """Whether a stage entry carries the reason a measurement could not be made."""
+    return isinstance(entry.get("error"), str) and bool(entry["error"].strip())
 
 
 # ---------------------------------------------------------------------------------------------
@@ -437,7 +536,7 @@ def make_family(family_id: str, rules: list[tuple]) -> FamilySpec:
     return FamilySpec(
         family_id=family_id,
         rules=[make_rule(*rule) for rule in rules],
-        decision_time="T-5",  # five minutes before the off: a test value
+        decision_time=f"T-{DECISION_MINUTES}",  # five minutes before the off: a test value
         cluster_unit="meeting_id",
         benchmark=BENCHMARK,
         max_stat=dict(MAX_STAT),
@@ -494,6 +593,14 @@ class TrippedHoldout(LockedHoldout):
         return "TrippedHoldout()"
 
 
+class ScoringStarted(BaseException):
+    """Raised when the study fits its first benchmark: a refusal must come before it."""
+
+
+def _no_scoring(*args, **kwargs):
+    raise ScoringStarted("the study began scoring (it fitted the calibrated market)")
+
+
 def read_holdout_log() -> bytes | None:
     return HOLDOUT_LOG.read_bytes() if HOLDOUT_LOG.exists() else None
 
@@ -510,7 +617,7 @@ class Run:
     log_after: bytes | None
 
 
-def run_spec(root: Path, spec: FamilySpec, data, dropped=(), rules=()) -> Run:
+def run_spec(root: Path, spec: FamilySpec, data, dropped=(), rules=(), **kwargs) -> Run:
     registry = new_registry(root)
     add_dropped(registry, spec.family_id, list(dropped))
     freeze(registry, spec)
@@ -519,12 +626,71 @@ def run_spec(root: Path, spec: FamilySpec, data, dropped=(), rules=()) -> Run:
     with pytest.MonkeyPatch.context() as patch:
         (root / "data").mkdir(parents=True, exist_ok=True)
         patch.setenv("HORSETRACK_DATA_DIR", str(root / "data"))
-        report = run_study(spec, data.copy(), registry=registry, holdout=holdout, seed=STUDY_SEED)
+        report = run_study(
+            spec, data.copy(), registry=registry, holdout=holdout, seed=STUDY_SEED, **kwargs
+        )
     return Run(list(rules), spec, data, registry, holdout, report, before, read_holdout_log())
 
 
-def run_frozen(root: Path, family_id: str, rules: list[tuple], data, dropped=()) -> Run:
-    return run_spec(root, make_family(family_id, rules), data, dropped, rules)
+def run_frozen(root: Path, family_id: str, rules: list[tuple], data, dropped=(), **kwargs) -> Run:
+    return run_spec(root, make_family(family_id, rules), data, dropped, rules, **kwargs)
+
+
+def _replace_everywhere(patch: pytest.MonkeyPatch, original, fake) -> None:
+    """Point every loaded horsetrack module's name for `original` at `fake`."""
+    for name, module in list(sys.modules.items()):
+        if name.startswith("horsetrack") and getattr(module, original.__name__, None) is original:
+            patch.setattr(module, original.__name__, fake)
+
+
+def outcome_before_scoring(root: Path, name: str, rules: list[tuple], data, **kwargs) -> str:
+    """How run_study treats a frozen family on `data` when scoring would raise: 'look-ahead'
+    (LookAheadSelection), 'scored' (it began scoring), 'completed', or another exception's type.
+    Whatever the outcome, no record was written and the holdout was not opened."""
+    registry = new_registry(root / name)
+    spec = make_family(f"test-88-{name}", rules)
+    freeze(registry, spec)
+    holdout = TrippedHoldout()
+    with pytest.MonkeyPatch.context() as patch:
+        _replace_everywhere(patch, fit_win_calibration, _no_scoring)
+        try:
+            run_study(spec, data, registry=registry, holdout=holdout, seed=1, **kwargs)
+        except LookAheadSelection:
+            outcome = "look-ahead"
+        except ScoringStarted:
+            outcome = "scored"
+        except (TypeError, ValueError) as exc:
+            outcome = type(exc).__name__
+        else:
+            outcome = "completed"
+    assert registry.records(spec.family_id) == [], (name, outcome)
+    assert holdout.calls == [], name
+    return outcome
+
+
+def last_metrics(run: Run, rid: str) -> dict[str, list]:
+    """The metrics of the rule's last registry record, by name."""
+    records = [r for r in run.registry.records(run.spec.family_id) if r.variant == rid]
+    assert records, f"{rid}: no registry record"
+    metrics: dict[str, list] = {}
+    for metric in records[-1].metrics:
+        metrics.setdefault(metric.metric, []).append(metric)
+    return metrics
+
+
+def omega_numbers(entry: dict) -> dict[str, float]:
+    """The omega stage's measurements of one rule, flat."""
+    er, pred = entry["expected_return"], entry[PREDICTIVE]
+    return {
+        "n_bets": entry["n_bets"],
+        "omega_selected": entry["omega_selected"],
+        "p_beats_takeout": entry["p_beats_takeout"],
+        "expected_mean": er["mean"],
+        "expected_low": er["low"],
+        "expected_high": er["high"],
+        "predictive_low": pred[0],
+        "predictive_high": pred[1],
+    }
 
 
 @pytest.fixture(scope="module")
@@ -573,13 +739,13 @@ def direction_run(tmp_path_factory, direction_runners) -> Run:
 
 def with_gaps(data: pd.DataFrame) -> pd.DataFrame:
     """`data` with a second race-level segment column `seg2` ('X', 'Y' or missing, a third of
-    the races each) and no dividend on any loser."""
+    the races each, declared from the races card) and no dividend on any loser."""
     out = data.copy()
     k = pd.factorize(out["race_id"])[0] % 3
     out["seg2"] = pd.Series(np.where(k == 0, "X", "Y"), index=out.index, dtype=object)
     out.loc[k == 2, "seg2"] = None
     out.loc[out["won"] == 0, "win_dividend"] = np.nan
-    return out
+    return declare(out, seg2=RACES)
 
 
 GAP_RULES = [
@@ -593,6 +759,18 @@ GAP_RULES = [
 def gap_run(tmp_path_factory, main_runners) -> Run:
     root = tmp_path_factory.mktemp("gaps")
     return run_frozen(root, "test-88-gaps", GAP_RULES, with_gaps(main_runners))
+
+
+def with_mixed_takeout(data: pd.DataFrame) -> pd.DataFrame:
+    """`data` with the Win takeout of each runner's final-odds band (TAKEOUT_BY_BAND)."""
+    band = np.digitize(data["odds_final"].to_numpy(), CUT_POINTS)
+    return data.assign(takeout=np.asarray(TAKEOUT_BY_BAND)[band])
+
+
+@pytest.fixture(scope="module")
+def mixed_run(tmp_path_factory, omega_runners) -> Run:
+    root = tmp_path_factory.mktemp("mixed")
+    return run_frozen(root, "test-88-mixed-takeout", OMEGA_RULES, with_mixed_takeout(omega_runners))
 
 
 def check_main_premise(data: pd.DataFrame) -> None:
@@ -702,45 +880,79 @@ def test_family_is_frozen_before_scoring(tmp_path, monkeypatch, main_runners):
 
 
 # ---------------------------------------------------------------------------------------------
-# DoD: ROI only for the rules that survived the log-loss and max-statistic stages
+# DoD: every configured rule is reported with each measurement its data allow; nothing gates
 # ---------------------------------------------------------------------------------------------
 
 
-def test_roi_stage_runs_only_on_log_loss_survivors(main_run, omega_run):
-    """Observed through `report.stages`: in each family only the rule whose claim is real
-    reaches the ROI stage, and its ROI is the realised return of the rows it selects at t, paid
-    at the final dividend."""
+def test_every_rule_is_reported_whatever_its_log_loss_result(
+    main_run, omega_run, direction_run, flb_run, gap_run
+):
+    """Survivor or not, every rule has its log-loss gain and interval, the StepM verdict, omega,
+    the expected return with its interval, P(omega_s > 1/(1 - t)), the predictive interval and
+    the realised ROI at the final dividend (read on its scored selected bets), in the report and
+    in its last registry record. Survivors stay as a diagnostic: in each family where one rule's
+    claim is real, that rule alone survives."""
     check_main_premise(main_run.data)
     check_omega_premise(omega_run.data)
-
-    for run, real in ((main_run, MAIN_REAL), (omega_run, OMEGA_REAL)):
+    measured = {"survivor": [], "other": []}
+    for run in (main_run, omega_run, direction_run, flb_run, gap_run):
         report, ids = run.report, [rule[0] for rule in run.rules]
         names = list(report.stages)
-        assert {"log_loss", "max_stat", "omega", "roi"} <= set(names), names
         order = [name for name in names if name in ("log_loss", "max_stat", "omega", "roi")]
         assert order == ["log_loss", "max_stat", "omega", "roi"], names
-
-        log_loss, superior = report.stages["log_loss"], report.stages["max_stat"]["superior"]
-        assert set(log_loss) == set(ids)  # every rule's claim is tested, not only some
-        assert set(superior) <= set(ids)
-        passed_both = {r for r in ids if log_loss[r]["passed"] is True and r in superior}
+        log_loss, max_stat = report.stages["log_loss"], report.stages["max_stat"]
+        omega, roi = report.stages["omega"], report.stages["roi"]
+        for stage, entries in (("log_loss", log_loss), ("omega", omega), ("roi", roi)):
+            assert set(entries) == set(ids), (run.spec.family_id, stage, sorted(entries))
+        passed_both = {
+            r for r in ids if log_loss[r]["passed"] is True and r in max_stat["superior"]
+        }
         assert set(report.survivors) == passed_both
-        assert list(report.survivors) == [real]
-        assert set(report.stages["roi"]) == {real}
+        for rule in run.rules:
+            rid, rows = rule[0], bets_of(run.data, rule)
+            assert len(rows) > 30, rid  # premise: every rule has bets to measure
+            ll = log_loss[rid]
+            assert all(finite(ll[key]) for key in ("delta_ll", "lo", "hi")), (rid, ll)
+            assert ll["lo"] < ll["hi"], (rid, ll)
+            assert rid in max_stat["tested"], rid
+            entry = omega[rid]
+            assert entry["n_bets"] == len(rows), (rid, entry["n_bets"], len(rows))
+            assert finite(entry["omega_selected"]) and entry["omega_selected"] > 0, (rid, entry)
+            p = entry["p_beats_takeout"]
+            assert finite(p) and 0.0 <= p <= 1.0, (rid, entry)
+            assert report.p_beats_takeout[rid] == pytest.approx(p, abs=1e-12), rid
+            er = entry["expected_return"]
+            assert all(finite(er[key]) for key in ("mean", "low", "high", "level")), (rid, er)
+            assert er["low"] <= er["mean"] <= er["high"] and 0.0 < er["level"] < 1.0, (rid, er)
+            low, high, level = entry[PREDICTIVE]
+            assert finite(low) and finite(high) and low < high and 0.0 < level < 1.0, (rid, entry)
+            assert roi[rid]["n_bets"] == len(rows), rid
+            assert roi[rid]["roi"] == pytest.approx(realised_roi(rows), rel=1e-9, abs=1e-12), rid
 
-        rule = next(rule for rule in run.rules if rule[0] == real)
-        rows = selected(run.data, rule)
-        assert len(rows) > 50
-        assert realised_roi(rows) != pytest.approx(  # the dividend, not the final odds
-            float((rows["won"] * rows["odds_final"]).sum() / len(rows) - 1.0), abs=1e-6
-        )
-        roi = report.stages["roi"][real]
-        assert roi["n_bets"] == len(rows)
-        assert roi["roi"] == pytest.approx(realised_roi(rows), rel=1e-9, abs=1e-12)
-
-    # Both ends of a range are inclusive: rows on the bounds are among the main rule's bets.
-    rows = selected(main_run.data, MAIN_RULES[0])
-    assert (rows["odds_t"] == 1.5).any() and (rows["odds_t"] == 4.0).any()
+            metrics = last_metrics(run, rid)
+            assert all(len(metrics.get(name, [])) == 1 for name in RECORD_METRICS), (
+                rid,
+                sorted(metrics),
+            )
+            (gain,) = metrics[LOG_LOSS_METRIC]
+            assert (gain.value, gain.lo, gain.hi) == pytest.approx(
+                (ll["delta_ll"], ll["lo"], ll["hi"]), rel=1e-9
+            ), rid
+            superior = float(rid in max_stat["superior"])
+            assert metrics["stepm_superior"][0].value == superior, rid
+            assert metrics["omega_selected"][0].value == pytest.approx(entry["omega_selected"])
+            (expected,) = metrics["expected_return"]
+            assert (expected.value, expected.lo, expected.hi) == pytest.approx(
+                (er["mean"], er["low"], er["high"]), rel=1e-9
+            ), rid
+            assert metrics["p_beats_takeout"][0].value == pytest.approx(p, abs=1e-12), rid
+            assert metrics["roi_win_dividend"][0].value == pytest.approx(roi[rid]["roi"]), rid
+            measured["survivor" if rid in report.survivors else "other"].append(rid)
+    assert list(main_run.report.survivors) == [MAIN_REAL]
+    assert list(omega_run.report.survivors) == [OMEGA_REAL]
+    assert set(direction_run.report.survivors) == DIRECTION_SURVIVORS
+    assert list(flb_run.report.survivors) == []
+    assert len(measured["survivor"]) >= 4 and len(measured["other"]) >= 10, measured
 
 
 def _stepm_finding_nothing(*args, **kwargs):
@@ -754,19 +966,17 @@ def _bootstrap_of_the_reversed_difference(diff, clusters, **kwargs):
     return paired_bootstrap(-diff, clusters, **kwargs)
 
 
-def _replace_everywhere(patch: pytest.MonkeyPatch, original, fake) -> None:
-    """Point every loaded horsetrack module's name for `original` at `fake`."""
-    for name, module in list(sys.modules.items()):
-        if name.startswith("horsetrack") and getattr(module, original.__name__, None) is original:
-            patch.setattr(module, original.__name__, fake)
-
-
-def test_roi_needs_both_the_log_loss_and_the_max_statistic_stage(tmp_path, main_runners):
-    """Either gate alone stops a rule. With StepM finding nothing, segment A still passes the
-    log-loss stage and gets no ROI; with the log-loss bootstrap's verdict reversed, StepM's view
-    of A alone does not let it through. The stages' tools are #75's stepm and #69's
+def test_a_forced_verdict_changes_no_measurement(tmp_path, main_runners, main_run):
+    """No verdict gates a measurement. With StepM finding nothing, segment A still passes the
+    log-loss stage; with the log-loss bootstrap's verdict reversed, it fails it. Either way the
+    survivors diagnostic empties, yet each rule's omega, expected return, P(omega_s > 1/(1 - t)),
+    predictive interval and realised ROI are exactly those of the unforced run, its record
+    carries them, and its rung stays S0. The stages' tools are #75's stepm and #69's
     paired_bootstrap (ticket outline), replaced here to force their verdicts."""
     check_main_premise(main_runners)
+    baseline = main_run.report
+    assert list(baseline.survivors) == [MAIN_REAL]
+    ids = [rule[0] for rule in MAIN_RULES[:2]]
     gates = [
         ("max_stat", stepm, _stepm_finding_nothing),
         ("log_loss", paired_bootstrap, _bootstrap_of_the_reversed_difference),
@@ -774,48 +984,110 @@ def test_roi_needs_both_the_log_loss_and_the_max_statistic_stage(tmp_path, main_
     for gate, original, fake in gates:
         with pytest.MonkeyPatch.context() as patch:
             _replace_everywhere(patch, original, fake)
-            run = run_frozen(tmp_path / gate, f"test-88-{gate}-gate", MAIN_RULES[:2], main_runners)
+            run = run_frozen(
+                tmp_path / gate, f"test-88-{gate}-forced", MAIN_RULES[:2], main_runners
+            )
         report = run.report
         assert list(report.survivors) == [], gate
-        assert report.stages["roi"] == {}, gate
-        # No survivor, so no return anywhere: omega still reports P for each rule, and no ROI.
-        for rid in (rule[0] for rule in MAIN_RULES[:2]):
-            entry = report.stages["omega"][rid]
-            assert roi_keys(entry) == [], (gate, rid, sorted(entry))
-            assert 0.0 <= report.p_beats_takeout[rid] <= 1.0, (gate, rid)
         if gate == "max_stat":
             assert report.stages["max_stat"]["superior"] == []
             assert report.stages["log_loss"][MAIN_REAL]["passed"] is True
         else:
             assert report.stages["log_loss"][MAIN_REAL]["passed"] is False
+        for rid in ids:
+            for stage in ("omega", "roi"):
+                assert rid in baseline.stages[stage] and rid in report.stages[stage], (gate, rid)
+            assert omega_numbers(report.stages["omega"][rid]) == pytest.approx(
+                omega_numbers(baseline.stages["omega"][rid]), rel=1e-9
+            ), (gate, rid)
+            forced, unforced = report.stages["roi"][rid], baseline.stages["roi"][rid]
+            assert forced["n_bets"] == unforced["n_bets"], (gate, rid)
+            assert forced["roi"] == pytest.approx(unforced["roi"], rel=1e-12), (gate, rid)
+            assert report.rungs[rid] == "S0", (gate, rid)
+            metrics = last_metrics(run, rid)
+            assert all(name in metrics for name in RETURN_METRICS), (gate, rid, sorted(metrics))
+
+
+REASON_NO_BET = "P6-seg-c-none"
+REASON_NO_CLAIM = "P4-j2-beta"
+REASON_RULES = [
+    MAIN_RULES[0],
+    # odds_t is never below 1.1: the claim on segment C is scored, but no bet is selected.
+    (REASON_NO_BET, "beta", {"seg": "C"}, ["odds_t"], {"odds_t": [None, 1.0]}, "above"),
+    # A 'beta' claim needs a race-level segment and J2 varies within races: the claim cannot be
+    # scored, but its selected bets can be measured.
+    (REASON_NO_CLAIM, "beta", {"jockey": "J2"}, ["odds_t"], {"odds_t": [3.0, None]}, "above"),
+]
+
+
+@pytest.fixture(scope="module")
+def reason_run(tmp_path_factory, main_runners) -> Run:
+    root = tmp_path_factory.mktemp("reasons")
+    return run_frozen(root, "test-88-reasons", REASON_RULES, main_runners)
+
+
+def test_a_measurement_that_cannot_be_made_carries_its_reason(reason_run):
+    """A rule that selects no bet keeps its log-loss result, and its omega and ROI entries carry
+    the reason they could not be measured (no number, no metric). A rule whose claim cannot be
+    scored carries the log-loss reason and is not in StepM's family, yet its omega, expected
+    return, P(omega_s > 1/(1 - t)) and ROI are measured and recorded: nothing gates them."""
+    data, report = reason_run.data, reason_run.report
+    ids = [rule[0] for rule in REASON_RULES]
+    no_bet, no_claim = (next(r for r in REASON_RULES if r[0] == rid) for rid in ids[1:])
+    assert bets_of(data, no_bet).empty  # premise
+    races_mixed = data.groupby("race_id")["jockey"].apply(
+        lambda j: (j == "J2").any() > (j == "J2").all()
+    )
+    assert races_mixed.any()  # premise: J2 is a runner-level segment
+    rows = bets_of(data, no_claim)
+    assert len(rows) > 50  # premise
+    for stage in ("log_loss", "omega", "roi"):
+        assert set(report.stages[stage]) == set(ids), (stage, sorted(report.stages[stage]))
+
+    ll = report.stages["log_loss"][REASON_NO_BET]
+    assert finite(ll.get("delta_ll")), ll
+    entry, roi = report.stages["omega"][REASON_NO_BET], report.stages["roi"][REASON_NO_BET]
+    assert explained(entry) and explained(roi), (entry, roi)
+    assert entry["n_bets"] == 0 and roi["n_bets"] == 0, (entry, roi)
+    assert not finite(entry.get("omega_selected")) and not finite(roi.get("roi")), (entry, roi)
+    assert not finite(report.p_beats_takeout[REASON_NO_BET])
+    metrics = last_metrics(reason_run, REASON_NO_BET)
+    assert LOG_LOSS_METRIC in metrics, sorted(metrics)
+    assert not set(RETURN_METRICS) & set(metrics), sorted(metrics)
+
+    assert explained(report.stages["log_loss"][REASON_NO_CLAIM])
+    assert REASON_NO_CLAIM not in report.stages["max_stat"]["tested"]
+    entry, roi = report.stages["omega"][REASON_NO_CLAIM], report.stages["roi"][REASON_NO_CLAIM]
+    assert entry["n_bets"] == roi["n_bets"] == len(rows), (entry, roi)
+    assert finite(entry["omega_selected"]) and finite(entry["expected_return"]["mean"]), entry
+    assert 0.0 <= report.p_beats_takeout[REASON_NO_CLAIM] <= 1.0
+    assert roi["roi"] == pytest.approx(realised_roi(rows), rel=1e-9, abs=1e-12)
+    metrics = last_metrics(reason_run, REASON_NO_CLAIM)
+    assert set(RETURN_METRICS) <= set(metrics), sorted(metrics)
+    assert metrics["roi_win_dividend"][0].value == pytest.approx(realised_roi(rows), rel=1e-9)
+    assert report.rungs == dict.fromkeys(ids, "S0")
 
 
 def test_roi_reads_the_winners_dividends_when_losers_carry_none(gap_run):
-    """Losers' dividends are missing (NaN) in the store; a survivor's ROI is still the selected
-    winners' dividends over its bets, and its registry records carry it as `roi_win_dividend`."""
+    """Losers' dividends are missing (NaN) in the store; every rule's ROI is still the selected
+    winners' dividends over its bets, and its last registry record carries it as
+    `roi_win_dividend`."""
     data = gap_run.data
     assert data.loc[data["won"] == 0, "win_dividend"].isna().all()
     assert data.loc[data["won"] == 1, "win_dividend"].notna().all()
     report = gap_run.report
     assert MAIN_REAL in report.survivors  # premise: segment A survives here as in the main run
-    assert set(report.stages["roi"]) == set(report.survivors)
-    records = gap_run.registry.records(gap_run.spec.family_id)
-    for rid in report.survivors:
-        rows = selected(data, next(rule for rule in gap_run.rules if rule[0] == rid))
+    assert set(report.stages["roi"]) == {rule[0] for rule in GAP_RULES}
+    for rule in GAP_RULES:
+        rid, rows = rule[0], bets_of(data, rule)
         expected = float(rows.loc[rows["won"] == 1, "win_dividend"].sum() / len(rows) - 1.0)
         roi = report.stages["roi"][rid]
         assert roi["n_bets"] == len(rows), rid
         assert math.isfinite(roi["roi"]), rid
         assert roi["roi"] == pytest.approx(expected, rel=1e-9, abs=1e-12), rid
-        logged = [
-            metric.value
-            for record in records
-            if record.variant == rid
-            for metric in record.metrics
-            if metric.metric == "roi_win_dividend"
-        ]
-        assert logged, f"{rid}: no roi_win_dividend metric in its registry records"
-        assert logged[-1] == pytest.approx(expected, rel=1e-9, abs=1e-12), rid
+        logged = last_metrics(gap_run, rid).get("roi_win_dividend")
+        assert logged, f"{rid}: no roi_win_dividend metric in its last registry record"
+        assert logged[0].value == pytest.approx(expected, rel=1e-9, abs=1e-12), rid
 
 
 # ---------------------------------------------------------------------------------------------
@@ -826,7 +1098,7 @@ def test_roi_reads_the_winners_dividends_when_losers_carry_none(gap_run):
 def test_a_market_wide_favourite_longshot_bias_is_no_segment_claim(flb_run):
     """Every race is priced q^1.3: favourites win more often than the normalised price says in
     every segment alike. The calibrated market carries that bias, so no segment departs from it
-    and no rule passes the log-loss stage, whichever way it bets."""
+    and no rule passes the log-loss stage, whichever way it bets; every rule is still measured."""
     check_flb_premise(flb_run.data)
     report = flb_run.report
     ids = [rule[0] for rule in FLB_RULES]
@@ -835,16 +1107,16 @@ def test_a_market_wide_favourite_longshot_bias_is_no_segment_claim(flb_run):
         ids, False
     )
     assert list(report.survivors) == []
-    assert report.stages["roi"] == {}
+    assert set(report.stages["roi"]) == set(ids)
     assert report.rungs == dict.fromkeys(ids, "S0")
 
 
 def test_a_segment_claim_passes_only_in_the_direction_its_rule_bets(direction_run):
     """On top of the market-wide bias, segment A's favourites and segment B's longshots win far
     more often than priced. Each segment is bet both ways: only the rule betting the side that
-    departs passes and survives; the rule betting the other side of the same departure (a
-    favourite rule where favourites are overbet, a longshot rule where longshots are) sits at S0,
-    as does the favourite rule of segment C, which carries the market-wide bias only."""
+    departs passes and survives; the rule betting the other side of the same departure, and the
+    favourite rule of segment C (the market-wide bias only), do not. Every rule is measured and
+    sits at S0."""
     check_direction_premise(direction_run.data)
     report = direction_run.report
     ids = [rule[0] for rule in DIRECTION_RULES]
@@ -852,22 +1124,24 @@ def test_a_segment_claim_passes_only_in_the_direction_its_rule_bets(direction_ru
     passed = {rid: report.stages["log_loss"][rid]["passed"] for rid in ids}
     assert passed == {rid: rid in DIRECTION_SURVIVORS for rid in ids}
     assert set(report.survivors) == DIRECTION_SURVIVORS
-    assert set(report.stages["roi"]) == DIRECTION_SURVIVORS
-    assert report.rungs == {rid: "S1" if rid in DIRECTION_SURVIVORS else "S0" for rid in ids}
+    assert set(report.stages["roi"]) == set(ids)
+    assert report.rungs == dict.fromkeys(ids, "S0")
 
 
 # ---------------------------------------------------------------------------------------------
-# Selection hygiene: a final-odds selection variable is refused at the ROI stage
+# DoD: the selection-input contract (each input's source and its availability by t)
 # ---------------------------------------------------------------------------------------------
 
 
 def test_a_final_odds_selection_variable_is_refused_at_the_roi_stage(
     tmp_path, monkeypatch, main_runners
 ):
-    """The real rule (segment A, which survives whatever it selects on) is re-pointed at each
-    final-price column in turn, alone or beside a board-at-t column; every run is refused."""
+    """The real rule (segment A) is re-pointed at each final-price column in turn, alone or
+    beside a board-at-t column. Each is declared as if it came from the board at t, stamped
+    before t, so only the column itself refuses it; every run is refused before any record."""
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
     check_main_premise(main_runners)
+    data = declare(main_runners, **dict.fromkeys(LOOK_AHEAD, BOARD))
     cases = [[col] for col in LOOK_AHEAD] + [["odds_t", "final_rank"]]
     ranges = {
         "odds_t": [1.5, 4.0],
@@ -884,16 +1158,22 @@ def test_a_final_odds_selection_variable_is_refused_at_the_roi_stage(
         freeze(registry, spec)
         holdout = TrippedHoldout()
         with pytest.raises(LookAheadSelection):
-            run_study(spec, main_runners.copy(), registry=registry, holdout=holdout, seed=1)
+            run_study(spec, data.copy(), registry=registry, holdout=holdout, seed=1)
         assert holdout.calls == [], cols
+        assert registry.records(spec.family_id) == [], cols
 
 
 def test_the_stores_final_price_columns_are_look_ahead(tmp_path, monkeypatch, main_runners):
     """The JRA store names the final Win odds `win_odds` and the final favourite rank
-    `win_fav_rank`; a rule selecting on either is refused like any `final_*` column."""
+    `win_fav_rank`; a rule selecting on either is refused like any `final_*` column, even
+    declared from the runners card and stamped before t."""
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
-    data = main_runners.assign(
-        win_odds=main_runners["odds_final"], win_fav_rank=main_runners["final_rank"]
+    data = declare(
+        main_runners.assign(
+            win_odds=main_runners["odds_final"], win_fav_rank=main_runners["final_rank"]
+        ),
+        win_odds=RUNNERS,
+        win_fav_rank=RUNNERS,
     )
     for k, (col, bounds) in enumerate([("win_odds", [1.5, 4.0]), ("win_fav_rank", [1, 1])]):
         real = ("P4-seg-a", "beta", {"seg": "A"}, [col], {col: bounds}, "above")
@@ -907,21 +1187,13 @@ def test_the_stores_final_price_columns_are_look_ahead(tmp_path, monkeypatch, ma
 
 
 def _accepted(tmp_path: Path, name: str, cases: list[tuple], data: pd.DataFrame) -> list[str]:
-    """The cases (a label, a rule) whose one-rule family run_study accepts; each refused case
-    must be refused with LookAheadSelection, without opening the holdout."""
+    """The cases (a label, a rule) whose one-rule family run_study does not refuse with
+    LookAheadSelection before scoring; none writes a record or opens the holdout."""
     accepted = []
     for k, (label, rule) in enumerate(cases):
-        registry = new_registry(tmp_path / f"{name}{k}")
-        spec = make_family(f"test-88-{name}-{k}", [rule])
-        freeze(registry, spec)
-        holdout = TrippedHoldout()
-        try:
-            run_study(spec, data, registry=registry, holdout=holdout, seed=1)
-        except LookAheadSelection:
-            pass
-        else:
-            accepted.append(label)
-        assert holdout.calls == [], label
+        outcome = outcome_before_scoring(tmp_path, f"{name}-{k}", [rule], data)
+        if outcome != "look-ahead":
+            accepted.append(f"{label}: {outcome}")
     return accepted
 
 
@@ -930,9 +1202,9 @@ def test_every_label_of_the_availability_config_is_refused_as_a_selection_column
 ):
     """A view at t never returns a label column (Japan's availability config: each table's
     `label_columns`, and every name under a `label_prefixes` entry), so no bet is selected on
-    one. Each label column, holding the finishing position, is the only selection column of the
-    real rule (segment A, which survives): [1, 1] would bet the winners only and report their
-    return. Every run is refused."""
+    one. Each label column, holding the finishing position and declared from the runners card
+    with a stamp before t, is the only selection column of the real rule (segment A): [1, 1]
+    would bet the winners only and report their return. Every run is refused before scoring."""
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
     check_main_premise(main_runners)
     labels = availability_labels()
@@ -942,7 +1214,9 @@ def test_every_label_of_the_availability_config_is_refused_as_a_selection_column
     assert any(name.endswith("win_odds") and name != "win_odds" for name in labels)  # a prefix
     assert all(is_availability_label(name) for name in labels)
     finish = finish_positions(main_runners)
-    data = main_runners.assign(**dict.fromkeys(labels, finish))
+    data = declare(
+        main_runners.assign(**dict.fromkeys(labels, finish)), **dict.fromkeys(labels, RUNNERS)
+    )
     assert (data.loc[data["won"] == 1, "finish_pos"] == 1).all()
     assert (data.loc[data["won"] == 0, "finish_pos"] >= 2).all()
 
@@ -955,14 +1229,21 @@ def test_every_label_of_the_availability_config_is_refused_as_a_selection_column
 
 def test_a_segment_on_a_look_ahead_column_is_refused(tmp_path, monkeypatch, main_runners):
     """The segment half of selection hygiene: a rule whose segment is read from a result label
-    or a final-price column is refused like a selection column. Runner-level segments that are
-    the winners (`finish_pos` 1) or the final favourites (`final_rank` 1), and segment A's races
-    (the real claim) under the name of a race result, a board payout or a prefixed label."""
+    or a final-price column is refused like a selection column, declared or not. Runner-level
+    segments that are the winners (`finish_pos` 1) or the final favourites (`final_rank` 1), and
+    segment A's races (the real claim) under the name of a race result, a board payout or a
+    prefixed label."""
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
     renamed = ["result_published_utc", "dividend", "tyb_segment"]
     assert all(is_availability_label(name) for name in ["finish_pos", *renamed])
-    data = main_runners.assign(
-        finish_pos=finish_positions(main_runners), **{col: main_runners["seg"] for col in renamed}
+    data = declare(
+        main_runners.assign(
+            finish_pos=finish_positions(main_runners),
+            **{col: main_runners["seg"] for col in renamed},
+        ),
+        finish_pos=RUNNERS,
+        final_rank=BOARD,
+        **dict.fromkeys(renamed, RACES),
     )
     anywhere = {"odds_t": [None, None]}
     cases = [
@@ -975,6 +1256,129 @@ def test_a_segment_on_a_look_ahead_column_is_refused(tmp_path, monkeypatch, main
     ]
     accepted = _accepted(tmp_path, "label-segment", cases, data)
     assert accepted == [], f"look-ahead columns accepted as a segment: {accepted}"
+
+
+def payout_join(data: pd.DataFrame) -> pd.DataFrame:
+    """`data` with the Win payout table joined on by race and winning runner, keeping the paid
+    combination (the winner's number) and its pool: both are present on the winners only, and
+    the payout is published after the race (availability.yaml: post_utc + 30 min)."""
+    winners = data.loc[data["won"] == 1, ["race_id", "horse_id"]]
+    payouts = winners.assign(pool="WIN", combination=winners["horse_id"].astype(float))
+    return data.merge(payouts, on=["race_id", "horse_id"], how="left", validate="many_to_one")
+
+
+def test_a_post_race_table_joined_onto_runners_is_refused(tmp_path, monkeypatch, main_runners):
+    """The Win payout's `combination`, joined onto runners and selected with [null, null], bets
+    the winners only. However it is presented (undeclared, declared from the payout table at its
+    publication or stamped before t, passed off as the board at t but stamped at publication,
+    half declared) and from every source that is not the board at t or a pre-race card table, it
+    is refused with LookAheadSelection before anything is scored or written; so is a segment read
+    from the payout table. The source is checked whatever the column's name: the real rule's own
+    `odds_t` or `seg`, declared from one of those sources (one row of it, or all), with a stamp
+    before t, is refused the same way."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    joined = payout_join(main_runners)
+    select = ("P4-seg-a", "beta", {"seg": "A"}, ["combination"], {"combination": [None, None]})
+    select += ("above",)
+    winners = selected(joined, select)
+    # Premise: the rule bets exactly segment A's winners, so its return would be the winners'.
+    assert (
+        winners["won"].all()
+        and len(winners) == joined.loc[joined["seg"] == "A", "race_id"].nunique()
+    )
+    assert realised_roi(winners) > 1.0
+    published = joined["post_utc"] + pd.Timedelta(minutes=30)
+    before_t = card_stamp(joined)
+    assert (published > decision_utc(joined)).all() and (before_t < decision_utc(joined)).all()
+
+    def declared(col: str, source: str | None, available: pd.Series | None) -> pd.DataFrame:
+        out = joined.copy()
+        if source is not None:
+            out[col + SOURCE] = source
+        if available is not None:
+            out[col + AVAILABLE] = available
+        return out
+
+    segment = ("P4-winners", "omega", {"pool": "WIN"}, ["odds_t"], {"odds_t": [None, None]})
+    segment += ("above",)
+    cases = [
+        ("undeclared", select, joined),
+        ("from dividends, at publication", select, declared("combination", "dividends", published)),
+        (
+            "from dividends, stamped before t",
+            select,
+            declared("combination", "dividends", before_t),
+        ),
+        ("as the board at t, at publication", select, declared("combination", BOARD, published)),
+        ("a stamp before t, no source", select, declared("combination", None, before_t)),
+        ("the board at t, no stamp", select, declared("combination", BOARD, None)),
+        ("a segment from dividends", segment, declared("pool", "dividends", published)),
+    ]
+    cases += [
+        (f"from {source}, stamped before t", select, declared("combination", source, before_t))
+        for source in REFUSED_SOURCES[1:]
+    ]
+    real = MAIN_RULES[0]
+    cases += [
+        (f"odds_t from {source}", real, declared("odds_t", source, before_t))
+        for source in REFUSED_SOURCES
+    ]
+    one_row = joined.copy()
+    one_row.loc[bets_of(joined, real).index[0], "odds_t" + SOURCE] = "dividends"
+    cases += [
+        ("one selected odds_t from dividends", real, one_row),
+        ("seg from dividends", real, declared("seg", "dividends", before_t)),
+    ]
+    outcomes = {
+        label: outcome_before_scoring(tmp_path, f"payout-{k}", [rule], data)
+        for k, (label, rule, data) in enumerate(cases)
+    }
+    assert outcomes == dict.fromkeys(outcomes, "look-ahead"), outcomes
+
+
+def test_an_input_published_after_the_decision_time_is_refused(
+    tmp_path, monkeypatch, main_runners, main_run
+):
+    """A declared input holds what was known at the race's decision instant t (post_utc - 5 min
+    here) or earlier. One selected runner's board-at-t price stamped a second after t, a minute
+    before the off, or after the race, or with no stamp; one segment value stamped a second
+    after t; segment A's boards read at the off instead of at t: each is refused with
+    LookAheadSelection before anything is scored or written. The same frame stamped at or
+    before t, some values exactly at t, ran in the main study."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    rule = MAIN_RULES[0]
+    bets = bets_of(main_runners, rule)
+    t = decision_utc(main_runners)
+    stamp = main_runners["odds_t" + AVAILABLE]
+    # Premise: every stamp is at or before t, the bets include values stamped exactly at t, and
+    # the main study accepted this frame.
+    assert (stamp <= t).all() and (main_runners["seg" + AVAILABLE] <= t).all()
+    assert (stamp.loc[bets.index] == t.loc[bets.index]).any()
+    assert main_run.report.family_size > 0 and MAIN_REAL in main_run.report.stages["roi"]
+    row = bets.index[0]
+    post = main_runners.loc[row, "post_utc"]
+
+    def restamped(col: str, when) -> pd.DataFrame:
+        out = main_runners.copy()
+        out.loc[row, col + AVAILABLE] = when
+        return out
+
+    at_the_off = main_runners.copy()
+    in_a = at_the_off["seg"] == "A"
+    at_the_off.loc[in_a, "odds_t" + AVAILABLE] = at_the_off.loc[in_a, "post_utc"]
+    cases = [
+        ("odds_t a second after t", restamped("odds_t", t.loc[row] + pd.Timedelta(seconds=1))),
+        ("odds_t a minute before the off", restamped("odds_t", post - pd.Timedelta(minutes=1))),
+        ("odds_t after the race", restamped("odds_t", post + pd.Timedelta(minutes=30))),
+        ("odds_t with no stamp", restamped("odds_t", pd.NaT)),
+        ("seg a second after t", restamped("seg", t.loc[row] + pd.Timedelta(seconds=1))),
+        ("segment A's boards read at the off", at_the_off),
+    ]
+    outcomes = {
+        label: outcome_before_scoring(tmp_path, f"late-{k}", [rule], data)
+        for k, (label, data) in enumerate(cases)
+    }
+    assert outcomes == dict.fromkeys(outcomes, "look-ahead"), outcomes
 
 
 # ---------------------------------------------------------------------------------------------
@@ -994,16 +1398,21 @@ def test_the_holdout_is_never_opened(main_run, omega_run):
 
 
 def _with_races_on(data: pd.DataFrame, days: list[date]) -> pd.DataFrame:
-    """`data` plus a copy of its first race on each of `days`, in a meeting of its own."""
+    """`data` plus a copy of its first race on each of `days`, in a meeting of its own, its post
+    and availability stamps moved with it."""
     first = data[data["race_id"] == data["race_id"].iloc[0]]
-    extra = [
-        first.assign(
-            race_id=f"late-{day.isoformat()}-r01",
-            meeting_id=f"late-{day.isoformat()}",
-            race_date=pd.Timestamp(day),
+    stamps = [col for col in first.columns if isinstance(first[col].dtype, pd.DatetimeTZDtype)]
+    extra = []
+    for day in days:
+        shift = pd.Timestamp(day) - first["race_date"].iloc[0]
+        extra.append(
+            first.assign(
+                race_id=f"late-{day.isoformat()}-r01",
+                meeting_id=f"late-{day.isoformat()}",
+                race_date=pd.Timestamp(day),
+                **{col: first[col] + shift for col in stamps},
+            )
         )
-        for day in days
-    ]
     return pd.concat([data, *extra], ignore_index=True)
 
 
@@ -1032,6 +1441,137 @@ def test_rows_on_a_holdout_day_are_refused(tmp_path, monkeypatch, main_runners):
     run = run_frozen(tmp_path / "late", "test-88-late-development", MAIN_RULES[:2], late)
     assert set(run.report.rungs) == {rule[0] for rule in MAIN_RULES[:2]}
     assert run.holdout.calls == []
+
+
+# ---------------------------------------------------------------------------------------------
+# DoD: `sources` is validated before scoring; licensed sources stay withheld
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_licensed_source_cannot_slip_past_the_registry_or_its_summary(
+    tmp_path, monkeypatch, main_runners
+):
+    """A bare string ('jrdb' would become the names 'j', 'r', 'd', 'b'), bytes, a collection
+    holding a non-name or a blank name, or no source at all is refused before anything is scored
+    or written. A collection naming JRDB or JRA-VAN keeps both protections: a registry inside
+    the repository refuses the run's records, and the summary of a registry outside it shows
+    every record of the family withheld, no metric."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(data_dir))
+    rules = MAIN_RULES[:2]
+    malformed = {
+        "a bare str": "jrdb",
+        "a bare str, another spelling": "JRA-VAN",
+        "bytes": b"jrdb",
+        "a non-str name": ["jrdb", 3],
+        "a nested collection": [["jrdb"]],
+        "a blank name": ("jra", " "),
+        "no source": (),
+    }
+    outcomes = {
+        label: outcome_before_scoring(tmp_path, f"sources-{k}", rules, main_runners, sources=src)
+        for k, (label, src) in enumerate(malformed.items())
+    }
+    refused = {
+        label for label, outcome in outcomes.items() if outcome in ("TypeError", "ValueError")
+    }
+    assert refused == set(malformed), outcomes
+
+    for k, sources in enumerate([("jrdb",), ["JRA-VAN"]]):
+        spec = make_family(f"test-88-licensed-{k}", rules)
+        # A registry inside the repository: the run is refused and writes no record.
+        repo = tmp_path / f"repo{k}"
+        (repo / "pyproject.toml").parent.mkdir(parents=True)
+        (repo / "pyproject.toml").write_text("", encoding="utf-8")
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(env, "repo_root", lambda repo=repo: repo)
+            inside = new_registry(repo)
+            freeze(inside, spec)
+            with pytest.raises(LicensedOutputInRepo):
+                run_study(
+                    spec,
+                    main_runners.copy(),
+                    registry=inside,
+                    holdout=TrippedHoldout(),
+                    seed=1,
+                    sources=sources,
+                )
+            assert inside.records(spec.family_id) == [], sources
+        # A registry outside it: the run is recorded, and the summary withholds every value.
+        run = run_spec(tmp_path / f"public{k}", spec, main_runners, sources=sources)
+        records = run.registry.records(spec.family_id)
+        assert records, sources
+        summary = tmp_path / f"summary{k}.md"
+        write_summary(run.registry, summary)
+        text = summary.read_text(encoding="utf-8")
+        assert text.count(WITHHELD_LABEL) == len(records), text
+        names = {metric.metric for record in records for metric in record.metrics}
+        assert names and not [name for name in names if name in text], text
+
+
+# ---------------------------------------------------------------------------------------------
+# DoD: return reporting uses the walk-forward test rows that log loss scores
+# ---------------------------------------------------------------------------------------------
+
+
+def with_training_only_winners(data: pd.DataFrame, rule: tuple, n_races: int = 40) -> pd.DataFrame:
+    """`data` plus copies of `n_races` training-only races of the rule's segment (before the first
+    scored quarter, in new meetings), in each of which a runner the rule selects wins at
+    TRAINING_DIVIDEND."""
+    early = data[data["race_date"] < FIRST_SCORED]
+    bets = selected(early, rule)
+    copies = []
+    for k, race_id in enumerate(list(dict.fromkeys(bets["race_id"]))[:n_races]):
+        race = data[data["race_id"] == race_id]
+        won = (race.index == bets.index[bets["race_id"] == race_id][0]).astype(int)
+        dividend = np.where(won == 1, TRAINING_DIVIDEND, race["win_dividend"])
+        copies.append(
+            race.assign(
+                race_id=f"train-{k:02d}",
+                meeting_id=f"train-{k:02d}",
+                won=won,
+                win_dividend=dividend,
+            )
+        )
+    return pd.concat([data, *copies], ignore_index=True)
+
+
+def test_returns_are_reported_on_the_walk_forward_test_rows_only(
+    tmp_path, monkeypatch, main_runners, main_run
+):
+    """Every return is read on the rows the walk-forward folds score. Training-only races (before
+    2020-Q1) holding big winning bets of segment B's rule change no rule's bet count, omega,
+    expected return, P(omega_s > 1/(1 - t)), predictive interval or realised ROI, and each count
+    and ROI is the one of the rule's selected bets among the scored rows."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    rule = MAIN_RULES[1]
+    planted = with_training_only_winners(main_runners, rule)
+    key = ["race_id", "horse_id"]
+    # Premise: the scored rows are those from 2020-Q1 on, the planted races are none of them, and
+    # read over every row the rule's return would change by far.
+    training_only = int((main_runners["race_date"] < FIRST_SCORED).sum())
+    assert training_only > 0.3 * len(main_runners), training_only
+    assert (scored(main_runners)["race_date"] >= FIRST_SCORED).all()
+    assert len(scored(main_runners)) == len(main_runners) - training_only
+    assert scored(planted)[key].equals(scored(main_runners)[key])
+    assert len(planted) > len(main_runners)
+    everywhere = realised_roi(selected(planted, rule)) - realised_roi(selected(main_runners, rule))
+    assert everywhere > 0.5, everywhere
+
+    run = run_frozen(tmp_path / "planted", "test-88-training-winners", MAIN_RULES, planted)
+    for each in MAIN_RULES:
+        rid, rows = each[0], bets_of(main_runners, each)
+        entry, roi = run.report.stages["omega"][rid], run.report.stages["roi"][rid]
+        assert entry["n_bets"] == len(rows), (rid, entry["n_bets"], len(rows))
+        assert roi["n_bets"] == len(rows), rid
+        assert roi["roi"] == pytest.approx(realised_roi(rows), rel=1e-9, abs=1e-12), rid
+        assert omega_numbers(entry) == pytest.approx(
+            omega_numbers(main_run.report.stages["omega"][rid]), rel=1e-9
+        ), rid
+        assert run.report.p_beats_takeout[rid] == pytest.approx(
+            main_run.report.p_beats_takeout[rid]
+        )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1064,7 +1604,7 @@ def test_a_rerun_that_cannot_score_a_scored_rule_writes_nothing(
     rule, raised before the rerun appends a record (not part-way, after its first records)."""
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
     k = pd.factorize(main_runners["race_id"])[0] % 3
-    data = main_runners.assign(seg2=np.where(k == 0, "X", "Y"))
+    data = declare(main_runners.assign(seg2=np.where(k == 0, "X", "Y")), seg2=RACES)
     first = run_frozen(tmp_path / "rerun", "test-88-rerun", RERUN_RULES, data)
     assert_claims_scored(first)
     registry, spec = first.registry, first.spec
@@ -1087,9 +1627,11 @@ def test_a_rerun_that_cannot_score_a_scored_rule_writes_nothing(
 
 
 def test_report_states_p_beats_takeout_per_segment(main_run, omega_run):
-    """One probability per rule's segment; J1, whose runners return about 2 * (1 - t) per unit
-    at the final price, beats the takeout and J2 and J3 do not."""
+    """One probability per rule; J1, whose scored bets return about 2 * (1 - t) per unit at the
+    final price, beats the takeout, and J3, whose scored bets clearly lose, does not."""
     check_omega_premise(omega_run.data)
+    assert roi_z(bets_of(omega_run.data, OMEGA_RULES[0])) > 1.5
+    assert roi_z(bets_of(omega_run.data, OMEGA_RULES[2])) < -1.5
     for run in (main_run, omega_run):
         p = run.report.p_beats_takeout
         assert set(p) == {rule[0] for rule in run.rules}
@@ -1097,63 +1639,59 @@ def test_report_states_p_beats_takeout_per_segment(main_run, omega_run):
             assert isinstance(value, float) and 0.0 <= value <= 1.0
     p = omega_run.report.p_beats_takeout
     assert p["P4-j1"] > 0.5
-    assert p["P4-j2"] < 0.5 and p["P4-j3"] < 0.5
+    assert p["P4-j3"] < 0.5
 
 
-def test_p_beats_takeout_is_read_on_each_rules_selected_bets(main_run, direction_run):
-    """P(omega_s > 1/(1 - t)) follows the return of the bets the rule makes, not of every runner
-    of its segment: a selection that clearly beats breakeven at the final dividend gets a high
-    probability and one that clearly loses a low one, even for two rules on the same segment."""
-    same_segment = {rule[0]: selected(direction_run.data, rule) for rule in DIRECTION_RULES[:2]}
+def test_p_beats_takeout_is_read_on_each_rules_selected_bets(
+    main_run, direction_run, omega_run, flb_run
+):
+    """P(omega_s > 1/(1 - t)) follows the return of the bets the rule makes among the scored
+    rows, not of every runner of its segment: a selection that clearly beats breakeven at the
+    final dividend gets a high probability and one that clearly loses a low one, even for two
+    rules on the same segment."""
+    same_segment = {rule[0]: bets_of(direction_run.data, rule) for rule in DIRECTION_RULES[:2]}
     assert roi_z(same_segment["P4-a-favourite"]) > CLEAR_Z
     assert roi_z(same_segment["P3-a-longshot"]) < -CLEAR_Z
     checked = {"high": [], "low": []}
-    for run in (main_run, direction_run):
+    for run in (main_run, direction_run, omega_run, flb_run):
         p = run.report.p_beats_takeout
         for rule in run.rules:
-            z = roi_z(selected(run.data, rule))
+            z = roi_z(bets_of(run.data, rule))
             if z > CLEAR_Z:
                 assert p[rule[0]] > 0.8, (rule[0], z, p[rule[0]])
                 checked["high"].append(rule[0])
             elif z < -CLEAR_Z:
                 assert p[rule[0]] < 0.2, (rule[0], z, p[rule[0]])
                 checked["low"].append(rule[0])
-    assert len(checked["high"]) >= 3 and len(checked["low"]) >= 3, checked
+    assert len(checked["high"]) >= 2 and len(checked["low"]) >= 4, checked
 
 
-class _FlippedOmega:
-    """#78's fitted model with P(omega_s > 1/(1 - t)) reversed; everything else its own."""
-
-    def __init__(self, model) -> None:
-        self._model = model
-
-    def __getattr__(self, name):
-        return getattr(self._model, name)
-
-    def p_beats_takeout(self, segment):
-        return 1.0 - self._model.p_beats_takeout(segment)
-
-
-def _omega_flipped(*args, **kwargs):
-    return _FlippedOmega(fit_segment_roi(*args, **kwargs))
+def _omega_on_tripled_odds(bets, *args, **kwargs):
+    """#78's model fitted as if every selected bet were offered at three times its final odds:
+    each rule's expected return, and so P(omega_s > 1/(1 - t)), goes up."""
+    return fit_segment_roi(bets.assign(odds=bets["odds"] * 3.0), *args, **kwargs)
 
 
 def test_p_beats_takeout_gates_nothing(tmp_path, direction_runners, direction_run):
-    """Omega is reported only (owner answer 4). With #78's P(omega_s > 1/(1 - t)) reversed for
-    every rule, survivors near certain to beat the takeout become near certain not to, and
-    non-survivors the reverse, yet the survivors, the ROI stage and the rungs are unchanged."""
+    """Omega is reported only (owner answer 4). With #78's model fitted on tripled odds, a rule
+    near certain not to beat the takeout becomes near certain to, yet the log-loss verdicts, the
+    survivors, every realised ROI and the rungs are unchanged."""
     before = direction_run.report
     p_before = before.p_beats_takeout
-    assert any(p_before[rid] > 0.8 for rid in before.survivors), p_before
-    assert any(p_before[rid] < 0.2 for rid in p_before if rid not in before.survivors), p_before
+    low = [rid for rid in p_before if rid not in before.survivors and p_before[rid] < 0.2]
+    assert low, p_before
     with pytest.MonkeyPatch.context() as patch:
-        _replace_everywhere(patch, fit_segment_roi, _omega_flipped)
+        _replace_everywhere(patch, fit_segment_roi, _omega_on_tripled_odds)
         run = run_frozen(tmp_path, "test-88-direction", DIRECTION_RULES, direction_runners)
     after = run.report
-    for rid, value in p_before.items():
-        assert after.p_beats_takeout[rid] == pytest.approx(1.0 - value, abs=1e-9), rid
+    flipped = [rid for rid in low if after.p_beats_takeout[rid] > 0.8]
+    assert flipped, after.p_beats_takeout  # premise: the change reached the omega stage
+    passed = {rid: entry["passed"] for rid, entry in before.stages["log_loss"].items()}
+    assert {rid: entry["passed"] for rid, entry in after.stages["log_loss"].items()} == passed
     assert list(after.survivors) == list(before.survivors)
-    assert set(after.stages["roi"]) == set(before.stages["roi"])
+    assert set(after.stages["roi"]) == set(before.stages["roi"]) == set(p_before)
+    for rid, entry in before.stages["roi"].items():
+        assert after.stages["roi"][rid]["roi"] == pytest.approx(entry["roi"], rel=1e-12), rid
     assert after.rungs == before.rungs
 
 
@@ -1166,34 +1704,6 @@ def test_a_gap_in_one_rules_segment_column_leaves_every_p_finite(gap_run):
     for rid, value in p.items():
         assert isinstance(value, float) and math.isfinite(value), (rid, value)
         assert 0.0 <= value <= 1.0, (rid, value)
-
-
-def test_only_a_survivor_is_given_a_predictive_roi(main_run, omega_run, direction_run, flb_run):
-    """ROI is computed for survivors only (DoD), the omega stage's posterior predictive ROI
-    included: a non-survivor's omega entry and registry records carry no return of any kind,
-    while P(omega_s > 1/(1 - t)) is still reported for every rule. A survivor keeps its
-    predictive interval. In the market-bias family nothing survives."""
-    seen = {"survivor": [], "other": []}
-    for run in (main_run, omega_run, direction_run, flb_run):
-        report = run.report
-        records = run.registry.records(run.spec.family_id)
-        for rid in (rule[0] for rule in run.rules):
-            entry = report.stages["omega"][rid]
-            p = report.p_beats_takeout[rid]
-            assert isinstance(p, float) and 0.0 <= p <= 1.0, (rid, p)
-            assert entry["p_beats_takeout"] == pytest.approx(p, abs=1e-12), rid
-            if rid in report.survivors:
-                low, high, level = entry["predictive_roi_100"]
-                assert math.isfinite(low) and math.isfinite(high) and low < high, (rid, entry)
-                assert 0.0 < level < 1.0, (rid, entry)
-                seen["survivor"].append(rid)
-            else:
-                assert roi_keys(entry) == [], (rid, sorted(entry))
-                metrics = [m.metric for r in records if r.variant == rid for m in r.metrics]
-                assert roi_keys(metrics) == [], (rid, sorted(set(metrics)))
-                seen["other"].append(rid)
-    assert flb_run.report.survivors == []
-    assert len(seen["survivor"]) >= 3 and len(seen["other"]) >= 8, seen
 
 
 # The same bets as omega_run's J1 and J2 rules, under another segment: an extra column every
@@ -1209,7 +1719,8 @@ TWIN_OF = {"P4-j1-twin": "P4-j1", "P4-j2-twin": "P4-j2", "P4-r2": "P4-j2"}
 
 def with_twins(data: pd.DataFrame) -> pd.DataFrame:
     """`data` with `always` ('yes' for every runner) and `rider` (the jockey relabelled R1...)."""
-    return data.assign(always="yes", rider=data["jockey"].str.replace("J", "R", regex=False))
+    twins = data.assign(always="yes", rider=data["jockey"].str.replace("J", "R", regex=False))
+    return declare(twins, always=RACES, rider=RUNNERS)
 
 
 def test_omega_reports_the_return_multiplier_its_selected_bets_identify(
@@ -1219,9 +1730,9 @@ def test_omega_reports_the_return_multiplier_its_selected_bets_identify(
     effect from the odds bands' fixed effects; what they identify is the return multiplier of
     their own mix, `omega_selected`. (1) The same bets under another segment (an extra column all
     runners share, another column name and label) report the same multiplier and the same
-    P(omega_s > 1/(1 - t)). (2) The multiplier times (1 - t) is the bets' expected return at the
-    final odds, and agrees with their realised return there, sum(won * odds_final) / n_bets (an
-    unbiased estimate of it), within MIX_Z standard errors, for every rule of every family."""
+    P(omega_s > 1/(1 - t)). (2) At a single takeout the multiplier times (1 - t) is the bets'
+    expected return at the final odds, and agrees with their realised return there among the
+    scored rows, sum(won * odds_final) / n_bets, within MIX_Z standard errors, for every rule."""
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
     twins = run_frozen(tmp_path / "twins", "test-88-twins", TWIN_RULES, with_twins(omega_runners))
     for twin, plain in TWIN_OF.items():
@@ -1239,13 +1750,12 @@ def test_omega_reports_the_return_multiplier_its_selected_bets_identify(
     for run in (omega_run, twins, main_run, direction_run, flb_run):
         for rule in run.rules:
             entry = run.report.stages["omega"][rule[0]]
-            rows = selected(run.data, rule)
-            assert len(rows) > 50 and "omega_selected" in entry, (rule[0], sorted(entry))
-            pay = rows["won"] * rows["odds_final"]
-            se = float(pay.std(ddof=1) / math.sqrt(len(pay)))
+            rows = bets_of(run.data, rule)
+            assert len(rows) >= 40 and "omega_selected" in entry, (rule[0], sorted(entry))
+            mean, se = gross_return(rows)
             expected = entry["omega_selected"] * (1.0 - TAKEOUT)
-            assert abs(expected - pay.mean()) <= MIX_Z * se, (rule[0], expected, pay.mean(), se)
-            realised[(run.spec.family_id, rule[0])] = float(pay.mean())
+            assert abs(expected - mean) <= MIX_Z * se, (rule[0], expected, mean, se)
+            realised[(run.spec.family_id, rule[0])] = mean
     # Premise: the realised returns run from far below breakeven to far above it.
     assert min(realised.values()) < 0.5 and max(realised.values()) > 1.4, realised
 
@@ -1273,38 +1783,163 @@ def test_the_odds_bands_are_frozen_with_the_family(tmp_path, monkeypatch, main_r
 
 
 # ---------------------------------------------------------------------------------------------
-# DoD: nothing is promoted beyond stake rung S1
+# DoD: the expected return and P(ω_s > 1/(1 - t)) share the payout-weighted posterior draws
 # ---------------------------------------------------------------------------------------------
 
 
-def test_no_rule_is_placed_above_rung_s1(main_run, omega_run):
-    """Even J1, which passes every stage with a positive realised return at the final dividend,
-    stops at shadow; nothing in the registry is adopted."""
-    j1 = selected(omega_run.data, OMEGA_RULES[0])
+def mixed_bets(groups: list[tuple]) -> pd.DataFrame:
+    """MIXED_BETS bets per band, one segment level: odds cycled from the band's list, each bet
+    winning with probability omega * (1 - t) / odds (#78's model, so omega is the truth)."""
+    rng = np.random.default_rng(MIXED_SEED)
+    frames = []
+    for band, takeout, omega, odds in groups:
+        prices = np.resize(np.asarray(odds, dtype=float), MIXED_BETS)
+        won = (rng.random(MIXED_BETS) < omega * (1 - takeout) / prices).astype(int)
+        frames.append(
+            pd.DataFrame(
+                {"odds": prices, "won": won, "band": band, "takeout": takeout, "seg": "all"}
+            )
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
+def test_expected_return_and_p_beats_takeout_share_the_payout_weighted_draws():
+    """#78's model under mixed takeout. Where the high multiplier sits on the low payout rate, the
+    bets' expected return is below break-even while their unweighted mean multiplier clears
+    1/(1 - mean t); where it sits on the high one, the reverse. `expected_return` reads the
+    payout-weighted quantity (it matches the realised return at the final odds), its interval
+    lies on the realised side of 1, P(omega_s > 1/(1 - t)) agrees with it, and the predictive
+    interval of the next 100 bets is wider than it."""
+    query = {"seg": "all"}
+    for side, groups in MIXED_CASES.items():
+        bets = mixed_bets(groups)
+        pay = bets["won"] * bets["odds"]
+        realised, se = float(pay.mean()), float(pay.std(ddof=1) / math.sqrt(len(pay)))
+        q = (1 - bets["takeout"]) / bets["odds"]
+        per_band = bets.assign(q=q).groupby("band")
+        multiplier = per_band["won"].sum() / per_band["q"].sum()
+        unweighted = float(
+            (multiplier * per_band.size()).sum() / len(bets) * (1 - bets["takeout"].mean())
+        )
+        # Premise: the realised return is clearly on its side of 1, the unweighted reading on the
+        # other.
+        if side == "below":
+            assert (realised - 1) / se < -3 and unweighted > 1.05, (realised, se, unweighted)
+        else:
+            assert (realised - 1) / se > 3 and unweighted < 0.95, (realised, se, unweighted)
+        model = fit_segment_roi(
+            bets,
+            segment_cols=["seg"],
+            odds_band_col="band",
+            takeout_col="takeout",
+            seed=STUDY_SEED,
+            draws=4000,
+        )
+        er = model.expected_return(query)
+        assert all(finite(v) for v in (er.mean, er.low, er.high, er.level)), (side, er)
+        assert er.low <= er.mean <= er.high and 0.0 < er.level < 1.0, (side, er)
+        assert abs(er.mean - realised) <= MIX_Z * se, (side, er, realised, se)
+        tail = (1 - er.level) / 2
+        p = model.p_beats_takeout(query)
+        if side == "below":
+            assert er.high < 1.0 and p <= tail + 0.01, (side, er, p)
+        else:
+            assert er.low > 1.0 and p >= 1 - tail - 0.01, (side, er, p)
+        predictive = model.predictive_roi(query, 100)
+        assert predictive.high - predictive.low > er.high - er.low, (side, predictive, er)
+
+
+def test_the_reported_expected_return_agrees_with_p_beats_takeout_under_mixed_takeout(
+    mixed_run, main_run, omega_run, direction_run, flb_run, gap_run
+):
+    """Per rule of every family, the Win takeout mixed by odds band in one of them: the reported
+    expected return is omega_selected * (1 - mean t) of the rule's scored bets (the multiplier is
+    payout-weighted, so omega_s > 1/(1 - t) exactly when the expected return is above 1), a
+    reported break-even multiplier is 1/(1 - mean t) and sits on the same side, P(omega_s >
+    1/(1 - t)) agrees with the expected return's interval, the expected return matches the
+    realised return at the final odds, and the predictive interval is reported apart (wider)."""
+    # Premise: in the mixed family the unweighted and payout-weighted readings of the same band
+    # multipliers differ by far more than rounding.
+    apart = 0
+    for rule in mixed_run.rules:
+        rows = bets_of(mixed_run.data, rule)
+        band = np.digitize(rows["odds_final"].to_numpy(), CUT_POINTS)
+        q = (1 - rows["takeout"]) / rows["odds_final"]
+        grouped = rows.assign(q=q, band=band).groupby("band")
+        multiplier = grouped["won"].sum() / grouped["q"].sum()
+        n, t = grouped.size(), grouped["takeout"].first()
+        unweighted = float((n * multiplier).sum() / n.sum() * (1 - rows["takeout"].mean()))
+        weighted = float((n * multiplier * (1 - t)).sum() / n.sum())
+        apart += abs(unweighted - weighted) > 0.01
+    assert apart >= 2, apart
+
+    for run in (mixed_run, main_run, omega_run, direction_run, flb_run, gap_run):
+        for rule in run.rules:
+            rid, rows = rule[0], bets_of(run.data, rule)
+            entry = run.report.stages["omega"][rid]
+            er, mean_t = entry["expected_return"], float(rows["takeout"].mean())
+            assert er["mean"] == pytest.approx(entry["omega_selected"] * (1 - mean_t), rel=1e-6), (
+                run.spec.family_id,
+                rid,
+                er,
+                entry["omega_selected"],
+                mean_t,
+            )
+            if "breakeven_omega" in entry:
+                assert entry["breakeven_omega"] == pytest.approx(1 / (1 - mean_t), rel=1e-9), rid
+                assert (entry["omega_selected"] > entry["breakeven_omega"]) == (er["mean"] > 1), rid
+            tail, p = (1 - er["level"]) / 2, entry["p_beats_takeout"]
+            if er["high"] < 1:
+                assert p <= tail + 0.01, (rid, er, p)
+            elif er["low"] > 1:
+                assert p >= 1 - tail - 0.01, (rid, er, p)
+            else:
+                assert tail - 0.01 <= p <= 1 - tail + 0.01, (rid, er, p)
+            realised, se = gross_return(rows)
+            assert abs(er["mean"] - realised) <= MIX_Z * se, (rid, er, realised, se)
+            low, high, _ = entry[PREDICTIVE]
+            assert high - low > er["high"] - er["low"], (rid, entry)
+
+
+# ---------------------------------------------------------------------------------------------
+# DoD: nothing is promoted beyond stake rung S1; the study makes no rung decision
+# ---------------------------------------------------------------------------------------------
+
+
+def test_no_rule_is_placed_above_rung_s1(main_run, omega_run, direction_run, flb_run):
+    """Every rule sits at D19's default rung S0, survivor or not: even J1, which passes every
+    stage with a positive realised return at the final dividend. The study makes no rung
+    decision, nothing goes above S1, and nothing in the registry is adopted."""
+    j1 = bets_of(omega_run.data, OMEGA_RULES[0])
     assert realised_roi(j1) > 0.2  # premise: an edge a naive ladder would stake on
-    for run in (main_run, omega_run):
-        assert set(run.report.rungs) == {rule[0] for rule in run.rules}
-        assert set(run.report.rungs.values()) <= {"S0", "S1"}
+    survivors = []
+    for run in (main_run, omega_run, direction_run, flb_run):
+        ids = [rule[0] for rule in run.rules]
+        assert run.report.rungs == dict.fromkeys(ids, "S0"), run.report.rungs
+        survivors += list(run.report.survivors)
         records = run.registry.records(run.spec.family_id)
         assert all(record.status != "adopted" for record in records)
         assert all(record.owner_signoff is None for record in records)
+    assert OMEGA_REAL in survivors and len(survivors) >= 3, survivors  # premise
 
 
 # ---------------------------------------------------------------------------------------------
-# The committed family: the owner's approval on #88
+# The committed family
 # ---------------------------------------------------------------------------------------------
 
 
 def _owner_family_frame(data: pd.DataFrame) -> pd.DataFrame:
     """`data` with the committed family's columns: segment A's races are handicaps, B's are
-    R12, C's are the most concentrated bin, and rank_t is the min-rank of odds_t in the race."""
+    R12, C's are the most concentrated bin, and rank_t is the min-rank of odds_t in the race;
+    the first two declared from the races card, the last two from the board at t."""
     seg = data["seg"]
-    return data.assign(
+    frame = data.assign(
         weight_type=np.where(seg == "A", "handicap", "other"),
         R12=np.where(seg == "B", "in", "out"),
         entropy_t_bin=np.where(seg == "C", 1, 2),
         rank_t=data.groupby("race_id")["odds_t"].rank(method="min").astype(int),
     )
+    return declare(frame, weight_type=RACES, R12=RACES, entropy_t_bin=BOARD, rank_t=BOARD)
 
 
 def _prose(text: str) -> list[str]:
@@ -1341,14 +1976,14 @@ def test_the_committed_family_cites_its_run_and_awaits_no_confirmation():
 
 
 def test_the_committed_family_is_the_one_the_owner_approved(tmp_path, monkeypatch, main_runners):
-    """`load_family("japan")` reads the signed file: Family P's three runnable rules with their
+    """`load_family("japan")` reads the committed file: Family P's three runnable rules with their
     thresholds and directions, decision time T-2, meeting clusters, the max-statistic settings,
     the calibrated market, the odds-band cut points and the six E4 variants the owner dropped
-    (`dropped_variants`, frozen with the spec). Without the sign-off a copy is refused; the family
-    freezes as plain JSON and the study runs it, recording each dropped variant as failed, so the
-    family size is 3 + 6 = 9 (08 §5.2 step 1)."""
+    (`dropped_variants`, frozen with the spec). No sign-off is required: a copy without
+    `owner_signoff`, or with it null, loads to the same spec, so the frozen hash is the only
+    guard. The family freezes as plain JSON and the study runs it, recording each dropped variant
+    as failed, so the family size is 3 + 6 = 9 (08 §5.2 step 1)."""
     raw = yaml.safe_load(FAMILY_FILE.read_text(encoding="utf-8"))
-    assert raw["owner_signoff"] == 88
     dropped = [entry["variant"] for entry in raw["dropped"]]
     assert len(dropped) == len(set(dropped)) == 6 and not set(dropped) & set(OWNER_RULES)
 
@@ -1369,16 +2004,23 @@ def test_the_committed_family_is_the_one_the_owner_approved(tmp_path, monkeypatc
     cuts = list(spec.odds_band_cut_points)
     assert cuts and all(isinstance(c, (int, float)) and math.isfinite(c) and c > 1 for c in cuts)
     assert all(lo < hi for lo, hi in zip(cuts[:-1], cuts[1:], strict=True)), cuts
+    # The dropped variants are part of the frozen spec, so the freeze covers them too.
+    assert list(getattr(spec, "dropped_variants", None) or []) == dropped
 
-    unsigned = tmp_path / "selection_family.yaml"
-    unsigned.write_text(yaml.safe_dump({**raw, "owner_signoff": None}), encoding="utf-8")
-    with pytest.raises(FamilyNotApproved):
-        load_family(unsigned)
+    unsigned = {key: value for key, value in raw.items() if key != "owner_signoff"}
+    for k, copy in enumerate([unsigned, {**unsigned, "owner_signoff": None}]):
+        path = tmp_path / f"selection_family_{k}.yaml"
+        path.write_text(yaml.safe_dump(copy), encoding="utf-8")
+        assert load_family(path) == spec, k
+    hashes = {
+        freeze(new_registry(tmp_path / f"hash{k}"), loaded)
+        for k, loaded in enumerate([spec, load_family(path)])
+    }
+    assert len(hashes) == 1, hashes
 
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
     run = run_spec(tmp_path / "owner", spec, _owner_family_frame(main_runners))
-    assert set(run.report.rungs) == set(OWNER_RULES)
-    assert set(run.report.rungs.values()) <= {"S0", "S1"}
+    assert run.report.rungs == dict.fromkeys(OWNER_RULES, "S0")
     records = run.registry.records(spec.family_id)
     assert {record.variant for record in records} == set(OWNER_RULES) | set(dropped)
     status = {(record.variant, record.status) for record in records}
@@ -1387,5 +2029,4 @@ def test_the_committed_family_is_the_one_the_owner_approved(tmp_path, monkeypatc
     assert run.report.family_size == run.registry.family_size(spec.family_id)
     for rid, value in run.report.p_beats_takeout.items():
         assert math.isfinite(value) and 0.0 <= value <= 1.0, (rid, value)
-    # The dropped variants are part of the frozen spec, so the freeze covers them too.
-    assert list(getattr(spec, "dropped_variants", None) or []) == dropped
+    assert set(run.report.stages["roi"]) == set(OWNER_RULES)
