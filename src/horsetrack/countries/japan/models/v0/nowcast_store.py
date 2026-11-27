@@ -10,15 +10,24 @@ nowcast_v0.yaml's `max_board_age_s` is not applied (it was set for a ~30 s logge
 paths are 5-minute), and the manifest says so.
 
 Fit: `NowcastV0.fit` on the WIN and PLACE pairs with nowcast_v0.yaml's bands and prior_n and the
-shipped decision grid. The JRA-VAN series has no Wide pool, so the QUINELLA_PLACE cells and sigma0
-are copied unchanged from the nowcast fit `current.json` names (our logged days); without such a
-v0 fit the command refuses and writes nothing. The merged fit's id is the sha256 of its JSON, as
-`NowcastV0.fit` names a fit.
+shipped decision grid; a day with no WIN or PLACE pair (a quinella-only file) is not one of the
+fit's days, and a pool with no pair at some grid tau (a partial backfill) refuses the fit. The
+JRA-VAN series has no Wide pool, so the QUINELLA_PLACE cells and sigma0 are copied unchanged from
+our logged-days nowcast fit: the one `current.json` names or, when it names a fit of this command,
+the logged fit that fit's manifest names. Without such a v0 fit the command refuses and writes
+nothing. The merged fit's id is the sha256 of its JSON, as `NowcastV0.fit` names a fit.
+
+Provenance: the data build is a digest of the selected development day files (name, size,
+content), so it does not depend on where HORSETRACK_DATA_DIR is and never reads a holdout file or
+the races table.
 
 Outputs (JRA-VAN-derived, D21, through `write_report`, which refuses the repository):
 `$HORSETRACK_DATA_DIR/models/japan/v0/nowcast-<fit_id>.json` and `manifest-nowcast-<fit_id>.json`;
 then `current.json`'s "nowcast" entry names the new file (every other entry and the old fit file
-kept). One registry record per fit (family `japan-v0-nowcast-drift`), a failed fit too.
+kept). One registry record per fit (family `japan-v0-nowcast-drift`), a failed fit too, and one
+success record per fit_id: publication is idempotent, so an unchanged rerun, or a retry after a
+crash between the record and the pointer, completes the writes without a second record and keeps
+the first run's Wide source and rollback target (`previous_nowcast`).
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ import dataclasses
 import hashlib
 import json
 import os
+from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Annotated
@@ -38,7 +48,16 @@ from pandas.api.types import union_categoricals
 
 from horsetrack.core import config
 from horsetrack.core.eval.holdout import is_holdout_day
-from horsetrack.core.eval.registry import RunRecord, default_registry, summary_dir, write_summary
+from horsetrack.core.eval.registry import (
+    RecordRefused,
+    Registry,
+    RunRecord,
+    _canonical,
+    _sha256,
+    default_registry,
+    summary_dir,
+    write_summary,
+)
 from horsetrack.core.eval.reports import write_report
 from horsetrack.countries.japan.board.snapshot import load_decision_grid
 from horsetrack.countries.japan.models import nowcast as nc
@@ -61,6 +80,21 @@ class NoWideSource(RuntimeError):
     """The pointer names no v0 nowcast fit with Wide cells to carry over."""
 
 
+class MissingHorizons(ValueError):
+    """WIN or PLACE has no pairs at some tau of the decision grid."""
+
+
+@dataclasses.dataclass(frozen=True)
+class WideSource:
+    """The logged-days fit the Wide cells come from, and the pointer as it was before the run."""
+
+    names: dict  # current.json's entries
+    fit: NowcastV0  # the logged fit, which holds the Wide cells
+    fit_name: str  # its file, as current.json (or the pointed fit's manifest) names it
+    pointed_id: str  # the fit current.json names now: the logged fit or one of ours
+    pointed_manifest: dict | None  # that fit's manifest when it is one of ours
+
+
 def development_files() -> tuple[list[tuple[str, Path]], int]:
     """(day, path) of every JRA-VAN day from PRICE_ERA_START that is not a holdout day, and how
     many holdout days were skipped. Only file names are looked at here."""
@@ -69,8 +103,28 @@ def development_files() -> tuple[list[tuple[str, Path]], int]:
     return keep, len(files) - len(keep)
 
 
+def data_builds(files: list[tuple[str, Path]]) -> dict[str, str]:
+    """A digest of the selected development day files, each day's name, size and content: a
+    change to one of them changes it, and nothing else does (holdout or pre-era files, the races
+    table, where the data dir is)."""
+    digest = hashlib.sha256()
+    for day, path in files:
+        content = hashlib.sha256()
+        with path.open("rb") as f:
+            while chunk := f.read(1 << 20):
+                content.update(chunk)
+        digest.update(f"{day}:{path.stat().st_size}:{content.hexdigest()}\n".encode())
+    build = f"processed/{SOURCE}/odds_timeseries@{digest.hexdigest()[:16]}"
+    return {"jravan_odds_timeseries": f"{build} ({len(files)} development days)"}
+
+
 def _concat(parts: list[pd.DataFrame]) -> pd.DataFrame:
-    """The days' examples in one frame, `day` and `pool` kept categorical."""
+    """The days' examples in one frame, `day` and `pool` kept categorical. Days with no pairs are
+    left out: their empty categoricals have object categories, which pandas 3 will not union with
+    the others' `str` categories."""
+    parts = [p for p in parts if len(p)]
+    if not parts:
+        raise ValueError(f"no drift pairs on any {SOURCE} development day")
     return pd.DataFrame(
         {
             "day": union_categoricals([p["day"] for p in parts]),
@@ -97,8 +151,25 @@ def store_examples(files: list[tuple[str, Path]] | None = None) -> pd.DataFrame:
     return _concat(parts)
 
 
-def _wide_from_current(pointer: Path) -> tuple[dict, NowcastV0]:
-    """The pointer's names and the v0 nowcast fit it names, which must hold Wide cells."""
+def _manifest_path(folder: Path, fit_id: str) -> Path:
+    return folder / f"manifest-nowcast-{fit_id}.json"
+
+
+def _load_v0(folder: Path, name: str, what: str) -> NowcastV0:
+    path = Path(name) if Path(name).is_absolute() else folder / name
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise NoWideSource(f"the {what} {path} is missing") from exc
+    if json.loads(text).get("model") != "nowcast_v0":
+        raise NoWideSource(f"the {what} {path} is not a v0 drift fit; no Wide cells")
+    return NowcastV0.from_json(text)
+
+
+def _wide_from_current(pointer: Path) -> WideSource:
+    """The pointer's names and the logged v0 fit to take Wide from: the fit the pointer names or,
+    when that fit is one of ours (it has a manifest), the logged fit its manifest names. The
+    logged fit must hold Wide cells."""
     try:
         names = json.loads(pointer.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -107,17 +178,24 @@ def _wide_from_current(pointer: Path) -> tuple[dict, NowcastV0]:
     name = names.get("nowcast") if isinstance(names, dict) else None
     if name is None:
         raise NoWideSource(f"{pointer} names no nowcast fit to take Wide from")
-    path = Path(name) if Path(name).is_absolute() else pointer.parent / name
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise NoWideSource(f"the current nowcast fit {path} is missing") from exc
-    if json.loads(text).get("model") != "nowcast_v0":
-        raise NoWideSource(f"the current nowcast fit {path} is not a v0 drift fit; no Wide cells")
-    current = NowcastV0.from_json(text)
-    if not any(key[0] == WIDE for key in current.cells):
-        raise NoWideSource(f"the current nowcast fit {current.fit_id} has no {WIDE} cells")
-    return names, current
+    folder = pointer.parent
+    pointed = _load_v0(folder, name, "current nowcast fit")
+    manifest_path = _manifest_path(folder, pointed.fit_id)
+    manifest = None
+    if manifest_path.is_file():  # a fit of this command: its manifest names the logged fit
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        wide_name, wide_id = manifest.get("wide_fit_file"), manifest.get("wide_fit_id")
+        if not wide_name or not wide_id:
+            raise NoWideSource(f"{manifest_path} names no logged fit to take Wide from")
+        logged = _load_v0(folder, wide_name, "logged nowcast fit")
+        if logged.fit_id != wide_id:
+            msg = f"{wide_name} holds fit {logged.fit_id}, not {wide_id} as {manifest_path} says"
+            raise NoWideSource(msg)
+    else:
+        logged, wide_name = pointed, name
+    if not any(key[0] == WIDE for key in logged.cells):
+        raise NoWideSource(f"the current nowcast fit {logged.fit_id} has no {WIDE} cells")
+    return WideSource(names, logged, wide_name, pointed.fit_id, manifest)
 
 
 def _with_wide(history: NowcastV0, wide: NowcastV0) -> NowcastV0:
@@ -130,6 +208,17 @@ def _with_wide(history: NowcastV0, wide: NowcastV0) -> NowcastV0:
     merged = dataclasses.replace(history, days=days, sigma0=sigma0, cells=cells, fit_id="")
     digest = hashlib.sha256(merged.to_json().encode()).hexdigest()[:12]
     return dataclasses.replace(merged, fit_id=digest)
+
+
+def _missing_horizons(examples: pd.DataFrame, grid) -> dict[str, list[int]]:
+    """The grid taus at which WIN or PLACE has no pair, by pool."""
+    missing = {}
+    for pool in HISTORY_POOLS:
+        present = set(examples.loc[examples["pool"] == pool, "tau_min"].astype(int).tolist())
+        gaps = [int(t) for t in grid.minutes if int(t) not in present]
+        if gaps:
+            missing[pool] = gaps
+    return missing
 
 
 def _record(*, status: str, params: dict, builds: dict, git_sha: str, wide_fit_id: str):
@@ -149,6 +238,14 @@ def _record(*, status: str, params: dict, builds: dict, git_sha: str, wide_fit_i
     )
 
 
+def _success_run_id(registry: Registry, fit_id: str) -> str | None:
+    """The run id of `fit_id`'s success record when the registry holds one already."""
+    for record in registry.records(FAMILY_ID):
+        if record.status != "failed" and record.params.get("fit_id") == fit_id:
+            return _sha256(_canonical(asdict(record)))  # as Registry.append names a run
+    return None
+
+
 def _write_pointer(pointer: Path, names: dict) -> None:
     tmp = pointer.with_name(f".{pointer.name}.tmp")
     tmp.write_text(json.dumps(names, indent=2) + "\n", encoding="utf-8")
@@ -156,21 +253,26 @@ def _write_pointer(pointer: Path, names: dict) -> None:
 
 
 def fit_from_store() -> dict:
-    """Fit, write the fit and its manifest, point current.json at the fit, record the run;
-    returns the manifest. Raises NoWideSource, before any day is read, without a Wide source."""
+    """Fit, write the fit, record the run, write its manifest and point current.json at the fit;
+    returns the manifest. Raises NoWideSource, before any day is read, without a Wide source, and
+    MissingHorizons (after a failed record, nothing else written) when WIN or PLACE has no pair at
+    a grid tau. Rerunning on unchanged inputs, or after a crash part way, finishes the writes and
+    appends no second success record."""
     pointer = current_pointer()
-    names, wide = _wide_from_current(pointer)
+    source = _wide_from_current(pointer)
+    wide = source.fit
     cfg = config.load_country_yaml(COUNTRY, CONFIG_STEM)
     bands = tuple(float(b) for b in cfg["bands"])
     prior_n = float(cfg["prior_n"])
     grid = load_decision_grid()
     files, held = development_files()
-    days = [d for d, _ in files]
-    builds = study.data_builds(files)
+    builds = data_builds(files)
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
     params = {
-        "jravan_days": days,
+        "jravan_days": [
+            d for d, _ in files
+        ],  # the selected days, until the pairs say which gave any
         "pool_sources": POOL_SOURCES,
         "wide_fit_id": wide.fit_id,
         "bands": list(bands),
@@ -182,17 +284,24 @@ def fit_from_store() -> dict:
     try:
         examples = store_examples(files)
         examples = examples[examples["pool"].isin(HISTORY_POOLS)]
+        missing = _missing_horizons(examples, grid)
+        if missing:
+            gaps = "; ".join(f"{p} at tau {', '.join(map(str, t))} min" for p, t in missing.items())
+            raise MissingHorizons(f"no {SOURCE} pairs on the decision grid for {gaps}")
         history = NowcastV0.fit(examples, bands=bands, grid=grid, prior_n=prior_n)
     except Exception as exc:
         failed = {**params, "fit_id": "", "error": f"{type(exc).__name__}: {exc}"}
-        registry.append(
-            _record(
-                status="failed", params=failed, builds=builds, git_sha=git_sha,
-                wide_fit_id=wide.fit_id,
-            )
-        )  # fmt: skip
+        record = _record(
+            status="failed", params=failed, builds=builds, git_sha=git_sha, wide_fit_id=wide.fit_id
+        )
+        try:
+            registry.append(record)
+        except RecordRefused:
+            pass  # the same failed run, on the same inputs and code, is in the registry already
         write_summary(registry, summary_dir(COUNTRY))
         raise
+    days = list(history.days)  # the development days that gave a WIN or PLACE pair
+    params["jravan_days"] = days
     model = _with_wide(history, wide)
     cells_per_pool = {pool: sum(k[0] == pool for k in model.cells) for pool in (WIN, PLACE, WIDE)}
     examples_per_pool = {pool: int((examples["pool"] == pool).sum()) for pool in HISTORY_POOLS}
@@ -200,22 +309,29 @@ def fit_from_store() -> dict:
 
     folder = pointer.parent
     fit_path = folder / f"nowcast-{model.fit_id}.json"
-    manifest_path = folder / f"manifest-nowcast-{model.fit_id}.json"
+    manifest_path = _manifest_path(folder, model.fit_id)
+    if model.fit_id == source.pointed_id and source.pointed_manifest is not None:
+        first = source.pointed_manifest  # an unchanged rerun: keep the first run's provenance
+        previous, created = first.get("previous_nowcast"), first.get("created_utc")
+    else:
+        previous, created = source.names.get("nowcast"), None
     write_report(fit_path, model.to_json(), sources=(SOURCE,))
-    run_id = registry.append(
-        _record(
-            status="scored",
-            params={
-                **params,
-                "fit_id": model.fit_id,
-                "cells_per_pool": cells_per_pool,
-                "examples_per_pool": examples_per_pool,
-            },
-            builds=builds,
-            git_sha=git_sha,
-            wide_fit_id=wide.fit_id,
+    run_id = _success_run_id(registry, model.fit_id)
+    if run_id is None:
+        run_id = registry.append(
+            _record(
+                status="scored",
+                params={
+                    **params,
+                    "fit_id": model.fit_id,
+                    "cells_per_pool": cells_per_pool,
+                    "examples_per_pool": examples_per_pool,
+                },
+                builds=builds,
+                git_sha=git_sha,
+                wide_fit_id=wide.fit_id,
+            )
         )
-    )
     write_summary(registry, summary_dir(COUNTRY))
     manifest = {
         "fit_id": model.fit_id,
@@ -225,6 +341,7 @@ def fit_from_store() -> dict:
         "holdout_days_skipped": held,
         "pool_sources": POOL_SOURCES,
         "wide_fit_id": wide.fit_id,
+        "wide_fit_file": source.fit_name,
         "max_board_age_s_applied": False,
         "config": {"bands": list(bands), "prior_n": prior_n},
         "grid": list(grid.minutes),
@@ -236,14 +353,14 @@ def fit_from_store() -> dict:
             for c in model.cells.values()
         ],
         "data_builds": builds,
-        "previous_nowcast": names.get("nowcast"),
+        "previous_nowcast": previous,
         "pointer": str(pointer),
         "run_id": run_id,
         "git_sha": git_sha,
-        "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "created_utc": created or datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     write_report(manifest_path, json.dumps(manifest, indent=2) + "\n", sources=(SOURCE,))
-    _write_pointer(pointer, {**names, "nowcast": fit_path.name})
+    _write_pointer(pointer, {**source.names, "nowcast": fit_path.name})
     return manifest
 
 
@@ -267,8 +384,8 @@ def nowcast_fit_command(
         raise typer.Exit(2)
     try:
         manifest = fit_from_store()
-    except NoWideSource as exc:
-        typer.echo(f"refused: {exc}; nothing written", err=True)
+    except (NoWideSource, MissingHorizons) as exc:
+        typer.echo(f"refused: {exc}; nothing written to the models folder", err=True)
         raise typer.Exit(1) from exc
     typer.echo(
         f"nowcast fit {manifest['fit_id']} on {len(manifest['jravan_days'])} {SOURCE} days "

@@ -31,6 +31,7 @@ a tmp HORSETRACK_DATA_DIR.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import math
@@ -585,3 +586,386 @@ def test_without_a_current_nowcast_fit_the_command_refuses(data_dir, monkeypatch
     folder = models_dir(data_dir)
     written = sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []
     assert written == [], written
+
+
+# ---------------------------------------------------------------- review fixes (PR #507)
+
+
+QUINELLA_ONLY = date(2026, 11, 14)  # a development day whose file holds only 0B42 quinella rows
+EXTRA_DAY = (date(2026, 11, 23), "KYO")  # a development day added to change the store
+
+
+def fit_reference(data_dir: Path, days) -> NowcastV0:
+    """NowcastV0.fit on the study's drift_v0 pairs of `days`, with the yaml's bands and prior_n."""
+    cfg = v0_config()
+    parts = []
+    for day in sorted(days):
+        frame = study.read_day(jravan_dir(data_dir) / f"{day.isoformat()}.parquet")
+        parts.append(study.drift_examples(nc.extract(frame)[0], [day.isoformat()]))
+    return NowcastV0.fit(
+        pd.concat(parts, ignore_index=True),
+        bands=cfg["bands"],
+        grid=load_decision_grid(),
+        prior_n=cfg["prior_n"],
+    )
+
+
+def assert_history_cells(model: NowcastV0, want: NowcastV0) -> None:
+    history = {k: c for k, c in model.cells.items() if k[0] != WIDE}
+    assert set(history) == set(want.cells)
+    for key, cell in want.cells.items():
+        assert history[key].n == cell.n, key
+        assert history[key].mu == pytest.approx(cell.mu, abs=1e-12), key
+        assert history[key].sigma == pytest.approx(cell.sigma, rel=1e-9), key
+
+
+def assert_wide_is_the_logged_fit(model: NowcastV0) -> None:
+    old = old_nowcast()
+    assert {k: c for k, c in model.cells.items() if k[0] == WIDE} == {
+        k: c for k, c in old.cells.items() if k[0] == WIDE
+    }
+
+
+def snapshot_models(data_dir: Path) -> dict[str, bytes]:
+    folder = models_dir(data_dir)
+    return {p.name: p.read_bytes() for p in sorted(folder.iterdir()) if p.is_file()}
+
+
+def command_output(result) -> str:
+    out = result.output
+    try:
+        out += result.stderr or ""
+    except (ValueError, AttributeError):
+        pass
+    return out
+
+
+def pointed_fit(data_dir: Path) -> Path:
+    pointer = models_dir(data_dir) / "current.json"
+    return resolve(pointer, json.loads(pointer.read_text())["nowcast"]).resolve()
+
+
+def stored_manifest(data_dir: Path, fit_id: str) -> dict:
+    return json.loads((models_dir(data_dir) / f"manifest-nowcast-{fit_id}.json").read_text())
+
+
+def scored(records, fit_id: str) -> list:
+    return [r for r in records if r.status != "failed" and r.params.get("fit_id") == fit_id]
+
+
+def string_inference():
+    """pandas 3's default string inference (the `str` dtype), on pandas 2 too, so a day's string
+    categories are `str` as on the locked pandas 3 while an empty day's stay object."""
+    if int(pd.__version__.split(".")[0]) >= 3:
+        return contextlib.nullcontext()
+    return pd.option_context("future.infer_string", True)
+
+
+@pytest.mark.parametrize("name", list(VARIANTS))
+def test_a_quinella_only_day_contributes_no_pairs_and_the_fit_succeeds(
+    name, data_dir, monkeypatch, tmp_path
+):
+    """Finding 1: a development day whose file holds only QUINELLA rows yields no WIN/PLACE pair;
+    mixing it with normal days must not abort the refit. Ruling: such a day is not in
+    `jravan_days` or the fit's days (it gave no pairs)."""
+    assert not is_holdout_day(COUNTRY, QUINELLA_ONLY) and QUINELLA_ONLY >= PRICE_ERA_START
+    variant = VARIANTS[name]
+    write_store(data_dir, variant)
+    quinella = [
+        r for r in day_rows(QUINELLA_ONLY, "NIG", scale=1.0, scratch=False)
+        if r["pool"] == "QUINELLA"
+    ]  # fmt: skip
+    assert quinella
+    write_parquet(jravan_dir(data_dir) / f"{QUINELLA_ONLY.isoformat()}.parquet", quinella)
+    write_current_fits(data_dir)
+    module = store_module(monkeypatch, tmp_path)
+
+    with string_inference():  # the locked pandas 3 infers `str`; pandas 2 is told to
+        examples = module.store_examples()
+        assert_pairs_equal(as_pairs(examples), expected_pairs(variant))
+        manifest = module.fit_from_store()
+    days = sorted(d.isoformat() for d in variant["days"])
+    assert manifest["jravan_days"] == days
+    model = NowcastV0.from_json(Path(manifest["fit_path"]).read_text())
+    assert QUINELLA_ONLY.isoformat() not in model.days
+    assert_history_cells(model, fit_reference(data_dir, variant["days"]))
+    assert_wide_is_the_logged_fit(model)
+    assert pointed_fit(data_dir) == Path(manifest["fit_path"]).resolve()
+    record = default_registry(COUNTRY).records()[-1]
+    assert record.status != "failed"
+    assert record.params["jravan_days"] == days
+
+
+def _store_variant(
+    data_dir: Path, *, drop_dev_race: bool = False, holdout_bytes: bytes = b""
+) -> None:
+    """four-days with races.parquet removed; optionally race 3 of the first development day
+    dropped (a changed development file), the corrupt holdout file's bytes changed and the
+    pre-era day removed (changes outside development)."""
+    variant = VARIANTS["four-days"]
+    write_store(data_dir, variant)
+    (data_dir / "processed" / "jravan" / "races.parquet").unlink()
+    if holdout_bytes:
+        (jravan_dir(data_dir) / f"{HELD[1].isoformat()}.parquet").write_bytes(holdout_bytes)
+        (jravan_dir(data_dir) / f"{PRE_ERA.isoformat()}.parquet").unlink()
+    if drop_dev_race:
+        first = min(variant["days"])
+        rows = day_rows(first, variant["days"][first], scale=variant["scale"],
+                        scratch=first == variant["scratch_day"])  # fmt: skip
+        write_parquet(
+            jravan_dir(data_dir) / f"{first.isoformat()}.parquet",
+            [r for r in rows if r["race_no"] != 3],
+        )
+    write_current_fits(data_dir)
+
+
+def test_provenance_reads_no_races_table_and_no_holdout_path(data_dir, monkeypatch, tmp_path):
+    """Finding 2: with no races.parquet the fit succeeds, and no read during it (Path.read_bytes,
+    read_text, open, io.open, parquet readers) names races.parquet or a holdout day. Ruling: the
+    data builds are a function of the selected development day files only: changing a holdout
+    file or dropping the pre-era day leaves them unchanged, changing a development day changes
+    them, and none names the races table."""
+    import builtins
+    import io
+
+    assert_dates_hold()
+    _store_variant(data_dir)
+    module = store_module(monkeypatch, tmp_path)
+    opened: list[str] = []
+
+    def watch(owner, attr, *, method: bool) -> None:
+        real = getattr(owner, attr)
+        if method:
+
+            def spy(self, *args, _real=real, **kwargs):
+                opened.append(str(self))
+                return _real(self, *args, **kwargs)
+        else:
+
+            def spy(source, *args, _real=real, **kwargs):
+                opened.append(str(source))
+                return _real(source, *args, **kwargs)
+
+        monkeypatch.setattr(owner, attr, spy)
+
+    for attr in ("read_bytes", "read_text", "open"):
+        watch(Path, attr, method=True)
+    for owner, attr in ((builtins, "open"), (io, "open"), (pq, "read_table"), (pq, "ParquetFile"),
+                        (pq, "ParquetDataset"), (pq, "read_metadata"), (pq, "read_schema"),
+                        (ds, "dataset"), (pd, "read_parquet")):  # fmt: skip
+        watch(owner, attr, method=False)
+    try:
+        manifest = module.fit_from_store()
+    finally:
+        monkeypatch.undo()
+    touched = [p for p in opened if "races.parquet" in p or any(d.isoformat() in p for d in HELD)]
+    assert not touched, touched
+    assert any("odds_timeseries" in p for p in opened)
+    builds = manifest["data_builds"]
+    assert builds and not any("races" in f"{k} {v}" for k, v in builds.items())
+
+    monkeypatch.setattr(module, "summary_dir", lambda c: tmp_path / "summary", raising=False)
+    monkeypatch.setattr("horsetrack.core.eval.registry.summary_dir", lambda c: tmp_path / "summary")
+    outside = (tmp_path / "outside").resolve()
+    changed = (tmp_path / "changed").resolve()
+    built = {}
+    for folder, kwargs in ((outside, {"holdout_bytes": b"another locked day\n"}),
+                           (changed, {"drop_dev_race": True})):  # fmt: skip
+        folder.mkdir()
+        monkeypatch.setenv(paths.DATA_DIR_VAR, str(folder))
+        _store_variant(folder, **kwargs)
+        built[folder] = module.fit_from_store()["data_builds"]
+    assert built[outside] == builds
+    assert built[changed] != builds
+
+
+@pytest.mark.parametrize(
+    ("pool", "drop_from_min", "missing"),
+    [(WIN, 60.0, (60,)), (PLACE, 30.0, (60, 30))],
+    ids=["win-at-60", "place-at-60-and-30"],
+)
+def test_a_pool_with_no_pairs_at_a_grid_horizon_is_refused(
+    pool, drop_from_min, missing, data_dir, monkeypatch, tmp_path
+):
+    """Finding 3: when WIN or PLACE has no pairs at a horizon of the decision grid (a partial
+    backfill), the command exits non-zero naming the pool and each missing horizon; the pointer,
+    the old fit and every file in the models folder are unchanged. Ruling: the refusal is a run,
+    so the registry gets exactly one record, status "failed", and no other."""
+    from horsetrack.cli import app
+
+    variant = VARIANTS["four-days"]
+    write_store(data_dir, variant)
+    for day, venue in variant["days"].items():
+        rows = day_rows(day, venue, scale=variant["scale"], scratch=day == variant["scratch_day"])
+        kept = [r for r in rows if not (r["pool"] == pool and r["minutes_to_post"] > drop_from_min)]
+        write_parquet(jravan_dir(data_dir) / f"{day.isoformat()}.parquet", kept)
+    write_current_fits(data_dir)
+    assert set(missing) <= set(load_decision_grid().minutes)
+    before = snapshot_models(data_dir)
+    store_module(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(app, ["japan", "nowcast-fit", "--from-store"])
+
+    assert result.exit_code not in (0, None), command_output(result)
+    message = command_output(result)
+    assert pool in message, message
+    for tau in missing:
+        assert str(tau) in message, message
+    assert snapshot_models(data_dir) == before
+    records = default_registry(COUNTRY).records()
+    assert [r.status for r in records] == ["failed"], records
+
+
+class Died(BaseException):
+    """The process dying: not an Exception, so no handler in the code under test catches it."""
+
+
+def test_a_crash_after_the_registry_append_is_retried_cleanly(data_dir, monkeypatch, tmp_path):
+    """Finding 4: the process dies right after the success record is appended; a rerun with the
+    same inputs succeeds, the pointer names the new fit, its manifest exists, and the registry
+    holds exactly one success record for that fit."""
+    from horsetrack.core.eval import registry as registry_module
+
+    write_store(data_dir, VARIANTS["two-days"])
+    write_current_fits(data_dir)
+    module = store_module(monkeypatch, tmp_path)
+    real_append = registry_module.Registry.append
+    died = []
+
+    def append_then_die(self, record):
+        run_id = real_append(self, record)
+        if record.status != "failed" and not died:
+            died.append(run_id)
+            raise Died
+        return run_id
+
+    monkeypatch.setattr(registry_module.Registry, "append", append_then_die)
+    with pytest.raises(Died):
+        module.fit_from_store()
+    assert died
+    monkeypatch.setattr(registry_module.Registry, "append", real_append)
+
+    manifest = module.fit_from_store()
+
+    fit_id = manifest["fit_id"]
+    assert pointed_fit(data_dir) == (models_dir(data_dir) / f"nowcast-{fit_id}.json").resolve()
+    assert stored_manifest(data_dir, fit_id)["fit_id"] == fit_id
+    assert stored_manifest(data_dir, fit_id)["wide_fit_id"] == OLD_ID
+    records = default_registry(COUNTRY).records()
+    assert len(scored(records, fit_id)) == 1, records
+    assert not [r for r in records if r.status == "failed"], records
+    loaded = load_shadow_models()
+    assert loaded is not None and loaded.ids["nowcast"] == fit_id
+
+
+def test_a_rerun_keeps_the_logged_wide_source_and_the_rollback_target(
+    data_dir, monkeypatch, tmp_path
+):
+    """Finding 5: an unchanged rerun (the pointer already names the merged fit) keeps the manifest's
+    wide_fit_id = the logged fit and previous_nowcast = the logged fit's file; the pointer still
+    names the merged fit. A refit on a changed store, on top of the merged fit, still names the
+    logged fit as its Wide source (through the merged fit's manifest), keeps its Wide cells, and
+    takes the merged fit as its rollback target. Ruling: one success record per fit_id, so the
+    unchanged rerun appends no second one."""
+    variant = VARIANTS["four-days"]
+    write_store(data_dir, variant)
+    names = write_current_fits(data_dir)
+    pointer = models_dir(data_dir) / "current.json"
+    logged_file = resolve(pointer, names["nowcast"]).resolve()
+    module = store_module(monkeypatch, tmp_path)
+
+    first = module.fit_from_store()
+    merged = first["fit_id"]
+    second = module.fit_from_store()
+
+    assert second["fit_id"] == merged
+    for manifest in (second, stored_manifest(data_dir, merged)):
+        assert manifest["wide_fit_id"] == OLD_ID
+        assert resolve(pointer, manifest["previous_nowcast"]).resolve() == logged_file
+    assert pointed_fit(data_dir) == Path(first["fit_path"]).resolve()
+    assert len(scored(default_registry(COUNTRY).records(), merged)) == 1
+
+    day, venue = EXTRA_DAY
+    assert not is_holdout_day(COUNTRY, day)
+    write_parquet(
+        jravan_dir(data_dir) / f"{day.isoformat()}.parquet",
+        day_rows(day, venue, scale=variant["scale"], scratch=False),
+    )
+    third = module.fit_from_store()
+
+    refit = third["fit_id"]
+    assert refit != merged
+    assert third["jravan_days"] == sorted(
+        [*(d.isoformat() for d in variant["days"]), day.isoformat()]
+    )
+    for manifest in (third, stored_manifest(data_dir, refit)):
+        assert manifest["wide_fit_id"] == OLD_ID
+        prev = resolve(pointer, manifest["previous_nowcast"]).resolve()
+        assert prev == Path(first["fit_path"]).resolve()
+    assert pointed_fit(data_dir) == Path(third["fit_path"]).resolve()
+    model = NowcastV0.from_json(Path(third["fit_path"]).read_text())
+    assert_wide_is_the_logged_fit(model)
+    assert_history_cells(model, fit_reference(data_dir, [*variant["days"], day]))
+    records = scored(default_registry(COUNTRY).records(), refit)
+    assert len(records) == 1 and records[0].params["wide_fit_id"] == OLD_ID
+
+
+def test_a_read_failure_records_one_failed_run_and_reraises(data_dir, monkeypatch, tmp_path):
+    """Low finding: a development day that cannot be read fails the fit; the error propagates,
+    the registry gets exactly one "failed" record, and the models folder is unchanged."""
+    variant = VARIANTS["four-days"]
+    write_store(data_dir, variant)
+    bad = min(variant["days"])
+    (jravan_dir(data_dir) / f"{bad.isoformat()}.parquet").write_bytes(b"not parquet\n")
+    write_current_fits(data_dir)
+    before = snapshot_models(data_dir)
+    module = store_module(monkeypatch, tmp_path)
+
+    with pytest.raises(Exception):  # noqa: B017 - any read error, re-raised unchanged
+        module.fit_from_store()
+
+    assert [r.status for r in default_registry(COUNTRY).records()] == ["failed"]
+    assert snapshot_models(data_dir) == before
+
+
+def _c1_pointer(data_dir: Path) -> None:
+    folder = models_dir(data_dir)
+    (folder / "nowcast-c1fit500.json").write_text(
+        json.dumps({"model": "nowcast_c1", "fit_id": "c1fit500"}), encoding="utf-8"
+    )
+    names = json.loads((folder / "current.json").read_text())
+    (folder / "current.json").write_text(
+        json.dumps({**names, "nowcast": "nowcast-c1fit500.json"}), encoding="utf-8"
+    )
+
+
+def _no_wide_pointer(data_dir: Path) -> None:
+    old = old_nowcast()
+    cells = {k: c for k, c in old.cells.items() if k[0] != WIDE}
+    sigma0 = {k: s for k, s in old.sigma0.items() if k[0] != WIDE}
+    no_wide = NowcastV0(old.bands, old.grid, old.prior_n, old.days, sigma0, cells, "nowide500")
+    (models_dir(data_dir) / f"nowcast-{OLD_ID}.json").write_text(
+        no_wide.to_json(), encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize(
+    "make", [_c1_pointer, _no_wide_pointer], ids=["nowcast-c1", "no-wide-cells"]
+)
+def test_no_v0_wide_source_is_refused_and_writes_nothing(make, data_dir, monkeypatch, tmp_path):
+    """Low finding: when the pointer's nowcast is not a v0 drift fit, or the v0 fit has no
+    QUINELLA_PLACE cells, the command exits non-zero and writes nothing: the models folder is
+    unchanged and the registry is empty."""
+    from horsetrack.cli import app
+
+    write_store(data_dir, VARIANTS["four-days"])
+    write_current_fits(data_dir)
+    make(data_dir)
+    before = snapshot_models(data_dir)
+    store_module(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(app, ["japan", "nowcast-fit", "--from-store"])
+
+    assert result.exit_code not in (0, None), command_output(result)
+    assert snapshot_models(data_dir) == before
+    assert default_registry(COUNTRY).records() == []
