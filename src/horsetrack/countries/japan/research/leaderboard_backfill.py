@@ -1,7 +1,7 @@
 """The leaderboard backfilled from the Japan registry's legacy families (ticket #451).
 
 The leaderboard is a view: nothing here re-runs a study or appends a record (the owner's answer
-7 on #447). Three legacy families carry returns in shapes of their own, read by adapters for
+7 on #447). These legacy families carry returns in shapes of their own, read by adapters for
 ``core.eval.leaderboard.rows_from_registry``:
 
 - ``japan-family-l-exotic-pool-choice`` (#81): per variant a rule row (100 x
@@ -16,8 +16,17 @@ The leaderboard is a view: nothing here re-runs a study or appends a record (the
   and step3 variants are left to the core's unmeasured row.
 - ``win5-carryover-v1`` (#135): one WIN5 cell per ``mean_day_value`` carryover bin, a lower
   bound only, n in days; a bin of params['ratio_edges'] with no days is an unmeasured cell.
+  Every bin is descriptive (``LeaderboardRow.descriptive``): a share of the pool paid back to
+  all bettors, not a return per ¥100 on a ticket, so shown and never ranked
+  (``docs/experiments/win5-carryover-japan.md``, "On the leaderboard").
+- every #131 exacta family ('japan-131-exacta-*' and the legacy slash 'japan/131-exacta-*'):
+  per variant one FORECAST cell from its development ``return_per_100`` (already per ¥100, its
+  one-sided 95% bounds as recorded, n in races, segment the variant's last '|' part,
+  look-ahead); a variant without one (rho only, an empty cell's markers, B3's mean_return, the
+  breakage and log-score runs) is the core's unmeasured row, kind 'cell'.
 
-Every other legacy family is unmeasured and takes its kind from ``LEGACY_KINDS``. Withheld rows
+Every other legacy family is unmeasured and takes its kind from ``LEGACY_KINDS``; #438's debut and
+maiden 'combined:' variants are models, their 'member:' variants members. Withheld rows
 (JRDB, JRA-VAN) are marked by the core through ``is_licensed_record``.
 """
 
@@ -80,6 +89,9 @@ LEGACY_KINDS: dict[str, str] = {
     ),
     "exacta-own-impact": "other",
 }
+
+# #438's families: a 'combined:<class>' variant fits the six members together, so is a model.
+_COMBINED_FAMILIES = ("japan-debut-maiden-members-v1", "japan-debut-maiden-members-v2")
 
 # #131's exacta families, the slash ids of the legacy log and the hyphen ids of PR #280: cells.
 _CELL_PREFIXES = ("japan/131-exacta-", "japan-131-exacta-")
@@ -302,10 +314,48 @@ def _win5_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
                 variants_searched=size,
                 status=record.status,
                 payout_rate=payout_rate("WIN5"),
+                descriptive=True,
                 **figures,
             )
         )
     return rows
+
+
+# --------------------------------------------------------------------------- exacta (#131)
+
+_EXACTA_POOL = "FORECAST"  # the jra config's key for 馬単 (EXACTA)
+_EXACTA_METRIC = "return_per_100"
+_EXACTA_LEVEL = 0.95
+
+
+def _exacta_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
+    """The run's development 'return_per_100' as one FORECAST cell, already per ¥100; none (the
+    core's unmeasured row) without one: rho, bootstrap_se, rho_eb, mean_return and markers."""
+    metric = _development(record).get(_EXACTA_METRIC)
+    if metric is None:
+        return []
+    return [
+        LeaderboardRow(
+            option_id=f"{record.family_id}/{record.variant}",
+            family_id=record.family_id,
+            ticket=record.ticket,
+            kind="cell",
+            pool=_EXACTA_POOL,
+            segment=record.variant.rsplit("|", 1)[-1],
+            rule=record.variant,
+            selection="look_ahead",  # E1's favourite is the lowest final Win odds
+            sources=tuple(record.sources),
+            variants_searched=size,
+            status=record.status,
+            return_per_100=metric.value,
+            ci_lo=metric.lo,
+            ci_hi=metric.hi,
+            ci_level=_EXACTA_LEVEL,
+            n=metric.n,
+            n_unit="races",
+            payout_rate=payout_rate(_EXACTA_POOL),
+        )
+    ]
 
 
 LEGACY_ADAPTERS: Mapping[str, Adapter] = {
@@ -313,6 +363,23 @@ LEGACY_ADAPTERS: Mapping[str, Adapter] = {
     COPLACER: _coplacer_rows,
     WIN5: _win5_rows,
 }
+
+
+class _Adapters(Mapping):
+    """``LEGACY_ADAPTERS``, and ``_exacta_rows`` for every #131 exacta family by its prefix."""
+
+    def __getitem__(self, family_id: str) -> Adapter:
+        if family_id in LEGACY_ADAPTERS:
+            return LEGACY_ADAPTERS[family_id]
+        if isinstance(family_id, str) and family_id.startswith(_CELL_PREFIXES):
+            return _exacta_rows
+        raise KeyError(family_id)
+
+    def __iter__(self):
+        return iter(LEGACY_ADAPTERS)
+
+    def __len__(self) -> int:
+        return len(LEGACY_ADAPTERS)
 
 
 # --------------------------------------------------------------------------- the rows
@@ -335,12 +402,16 @@ def _dedupe_comparators(rows: list[LeaderboardRow]) -> list[LeaderboardRow]:
 
 def _with_kind(row: LeaderboardRow) -> LeaderboardRow:
     kind = None if row.measured else legacy_kind(row.family_id)
+    if kind == "member" and row.family_id in _COMBINED_FAMILIES:
+        if row.option_id.startswith(f"{row.family_id}/combined:"):
+            kind = "model"  # the six members fitted together
     return row if kind is None or kind == row.kind else dataclasses.replace(row, kind=kind)
 
 
 def legacy_rows(registry: Registry) -> list[LeaderboardRow]:
-    """``rows_from_registry(registry, adapters=LEGACY_ADAPTERS)``, Family L's comparators
-    deduplicated and each unmeasured row of a legacy family given its ``LEGACY_KINDS`` kind; a
-    measured row keeps its kind. Reads the registry, never writes it."""
-    rows = rows_from_registry(registry, adapters=LEGACY_ADAPTERS)
+    """``rows_from_registry`` with ``LEGACY_ADAPTERS`` and the exacta adapter for every #131
+    family, Family L's comparators deduplicated and each unmeasured row of a legacy family given
+    its ``LEGACY_KINDS`` kind ('model' for a debut and maiden 'combined:' variant); a measured
+    row keeps its kind. Reads the registry, never writes it."""
+    rows = rows_from_registry(registry, adapters=_Adapters())
     return [_with_kind(row) for row in _dedupe_comparators(rows)]

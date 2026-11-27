@@ -34,15 +34,29 @@ adopted or rejected by the leaderboard; it orders the options.
 | `shrunk_per_100` | set by `shrink`, never by a reader |
 | `licensed` | the run is built on a licensed source (D21) |
 | `note` | free text, e.g. why a registry block was refused |
+| `descriptive` | a bool, default False: the row is a measurement shown on the board but given no D16 rank (below) |
 
 A row is checked on construction (`RowRefused`). A row is *measured* when `return_per_100` is set
 and *withheld* when it is marked licensed or its sources name JRDB or JRA-VAN in any spelling
 (`core.eval.reports.is_withheld`).
 
+### Descriptive rows
+
+A *descriptive* row holds a measured value that is not a return per ¥100 staked on a defined
+ticket, so it cannot be compared with one under D16. The case today is #135's WIN5 carryover
+cells (`docs/experiments/win5-carryover-japan.md`, "On the leaderboard"): a cell's value is the
+mean share of the day's pool paid back to all its bettors, and the study measured no ticket
+strategy, so a cell above 1 must not outrank a ticket rule. A WIN5 row ranks under D16 only on a
+walk-forward return per ¥100 staked on a selection rule, a follow-up of epic #447. A descriptive
+row keeps its value, bounds and n; `shrink` leaves it out of its pool's estimate and gives it no
+shrunk value; `rank` gives it no rank. A row file written before the flag existed reads as not
+descriptive.
+
 ## Shrinkage and ranking
 
 `shrink` sets `shrunk_per_100` within each pool by DerSimonian-Laird over the measured rows with
-a positive standard error (`se_per_100`, else recovered from the one-sided bounds at `ci_level`):
+a positive standard error that are not descriptive (`se_per_100`, else recovered from the
+one-sided bounds at `ci_level`):
 each row is pulled toward its pool's own random-effects mean by `tau^2 / (tau^2 + se^2)`. A pool
 of one keeps its raw return; a row without a pool or a positive se gets no shrunk value. The
 target is the pool's mean, not its payout rate. Rows of one pool overlap (a segment's bets are
@@ -50,9 +64,13 @@ also its 'all' row's; variants share races), so the shrinkage is a ranking devic
 inference: no CI, test or claim is built on it. The formulas and their numerically stable form
 are in the module docstring.
 
-`rank` orders measured rows by shrunk value (else raw return) descending, ties by raw return
-descending then option id, ranked 1..k; unmeasured rows follow, unranked, by family id then
-option id. Option ids must be unique.
+`rank` orders the measured rows that are not descriptive by shrunk value (else raw return)
+descending, ties by raw return descending then option id, ranked 1..k; the measured descriptive
+rows follow, unranked, by family id then option id; unmeasured rows come last, unranked, by
+family id then option id (an unmeasured descriptive row has no value to show and sorts with
+them). Option ids must be unique. Both Markdown texts show a descriptive row's value and bounds
+with no rank and say in their header that descriptive rows are shown unranked; `to_json` and
+`from_json` carry the flag.
 
 ## From the registry (`rows_from_registry`)
 
