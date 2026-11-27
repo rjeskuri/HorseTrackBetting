@@ -83,7 +83,13 @@ import typer
 from horsetrack.core import paths
 from horsetrack.core.eval.folds import Fold, load_country_scheme, walk_forward
 from horsetrack.core.eval.holdout import _git_sha, split_off
-from horsetrack.core.eval.registry import RunRecord, default_registry, summary_dir, write_summary
+from horsetrack.core.eval.registry import (
+    RunRecord,
+    default_registry,
+    summary_dir,
+    summary_stem,
+    write_summary,
+)
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.eval.scoring import gain
 from horsetrack.countries.japan.handicap.factors import RATE_PRIOR_RUNS, RATE_WINDOW_DAYS
@@ -1200,14 +1206,22 @@ class _Families:
         return [r for r in self._registry.records(family_id) if r.family_id in self._families]
 
 
-_INDEX_ENTRY = re.compile(r"- \[([^\]]+)\]\(\1\.md\)")  # a family's line in write_summary's index
+_INDEX_LINE = re.compile(r"- \[([^\]]+)\]\(([^)]+)\.md\)")
+
+
+def _index_family(line: str) -> str | None:
+    """The family a line of write_summary's index lists (its label, whose summary file the line
+    links: a legacy '/' id links its '--' file), or None for any other line."""
+    match = _INDEX_LINE.fullmatch(line)
+    return match[1] if match and summary_stem(match[1]) == match[2] else None
 
 
 def write_committed_summary(registry) -> None:
     """This study's family files, by `write_summary` over this study's families of `registry`,
-    and the committed index with their lines added: every family the index lists stays, and no
-    other family's file is written, so a fresh local registry drops nothing and no other
-    ticket's uncommitted family enters (nor #131's '/' ids, which `write_summary` refuses)."""
+    and the committed index with their lines added, ordered by family id: every family the index
+    lists stays (#131's legacy '/' ids, filed as '--', included), and no other family's file is
+    written, so a fresh local registry drops nothing and no other ticket's uncommitted family
+    enters."""
     directory = summary_dir(COUNTRY)
     mine = _Families(registry, {FAMILY_ID, TRIAL_FAMILY_ID})
     if not mine.records():
@@ -1220,8 +1234,8 @@ def write_committed_summary(registry) -> None:
         fresh = Path(scratch, "README.md").read_text("utf-8").splitlines()
     index = directory / "README.md"
     committed = index.read_text("utf-8").splitlines() if index.exists() else []
-    entries = {m[1]: line for line in committed + fresh if (m := _INDEX_ENTRY.fullmatch(line))}
-    head = [line for line in fresh if not _INDEX_ENTRY.fullmatch(line)]
+    entries = {family: line for line in committed + fresh if (family := _index_family(line))}
+    head = [line for line in fresh if not _index_family(line)]
     lines = [*head, *(entries[family] for family in sorted(entries))]
     write_report(index, "\n".join(lines) + "\n", sources=())
 
