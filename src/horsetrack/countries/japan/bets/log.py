@@ -8,9 +8,11 @@ gate before betting. Stakes are not outcomes, so a holdout day's bets are read b
 like any other day's. The format is in docs/specs/bet-log.md. The log is the owner's financial
 record and stays outside the repository.
 
-Format: there is one line format, ``{seq, prev_sha256, record, sha256}``, the first to reach main.
-A line without ``sha256`` is not an older version; it is refused as tampered. A future format
-change adds an explicit, append-only upgrade rather than reading old lines loosely.
+Format: ``record`` writes format 2, ``{seq, prev_sha256, record, sha256}``. A day begun by a565ac0
+in format 1, ``{seq, prev_sha256, record}``, is read and continued, append-only, nothing rewritten:
+a file may start with a run of format-1 lines, and once a format-2 line appears every later line is
+format 2. Both chain alike. A format-1 record is checked as a565ac0 checked a bet (no store order,
+no repeated-number rule, no WIN5 day key) and must have been written before ``FORMAT_2_SINCE``.
 """
 
 from __future__ import annotations
@@ -51,6 +53,10 @@ REQUIRED = ("race_id", "pool", "combination", "stake_yen", "placed_utc")
 OPTIONAL = ("option_id", "note")
 ADDED = ("seq", "written_utc", "day_status", "over_cap", "off_flat")
 LINE_KEYS = frozenset({"seq", "prev_sha256", "record", "sha256"})
+FORMAT_1_LINE_KEYS = frozenset({"seq", "prev_sha256", "record"})  # a565ac0's line, read only
+# When format 2 replaced format 1: the commit time of f366f20. A format-1 record written at or after
+# it is a format-2 line with its sha256 stripped, so it is refused as tampered.
+FORMAT_2_SINCE = datetime(2026, 11, 27, 9, 31, 47, tzinfo=timezone.utc)
 WIN5 = "WIN5"  # the pool, keyed by its day (jra:<day>:WIN5) as research/win5.py keys it
 
 # [0-9] and [A-Z], not \d and \w: those match full-width digits and letters too.
@@ -188,8 +194,9 @@ def _stake_refusal(stake: Any) -> str | None:
     return None
 
 
-def _refusal(bet: Any, day: date) -> str | None:
-    """Why ``bet`` is refused as a bet of ``day``, or None."""
+def _refusal(bet: Any, day: date, *, format_1: bool = False) -> str | None:
+    """Why ``bet`` is refused as a bet of ``day``, or None. ``format_1``: as a565ac0 checked a bet,
+    every race_id at a venue (no WIN5 day key) and no rule on a repeated number."""
     if not isinstance(bet, dict):
         return "is not a dict"
     unknown = sorted(repr(key) for key in bet if key not in REQUIRED + OPTIONAL)
@@ -202,6 +209,8 @@ def _refusal(bet: Any, day: date) -> str | None:
     match = _RACE_ID.fullmatch(race_id) if isinstance(race_id, str) else None
     if match is None:
         return f"has a race_id not of the form jra:<YYYY-MM-DD>:<VENUE>:<NN> or :WIN5: {race_id!r}"
+    if format_1 and match["venue"] is None:
+        return f"has a race_id not of the form jra:<YYYY-MM-DD>:<VENUE>:<NN>: {race_id!r}"
     if match["day"] != day.isoformat():
         return f"has a race_id of another day than {day.isoformat()}: {race_id!r}"
     if match["venue"] is not None and match["venue"] not in _jra()["venues"]:
@@ -209,7 +218,7 @@ def _refusal(bet: Any, day: date) -> str | None:
     pool = bet["pool"]
     if not isinstance(pool, str) or pool not in POOLS:
         return f"has a pool other than {', '.join(POOLS)}: {pool!r}"
-    if (pool == WIN5) != (match["venue"] is None):
+    if not format_1 and (pool == WIN5) != (match["venue"] is None):
         return f"has the race_id {race_id!r} for {pool}: WIN5, and only WIN5, takes jra:<day>:WIN5"
     combination = bet["combination"]
     if not isinstance(combination, str) or not _COMBINATION.fullmatch(combination):
@@ -218,7 +227,7 @@ def _refusal(bet: Any, day: date) -> str | None:
     legs = _jra()["pools"][pool]["legs"]
     if len(numbers) != legs:
         return f"has a combination of other than {legs} numbers for {pool}: {combination!r}"
-    if len(set(numbers)) != len(numbers) and not _repeats_allowed(pool):
+    if not format_1 and len(set(numbers)) != len(numbers) and not _repeats_allowed(pool):
         return f"has a combination with a number twice, which {pool} does not sell: {combination!r}"
     reason = _stake_refusal(bet["stake_yen"])
     if reason is not None:
@@ -234,8 +243,9 @@ def _refusal(bet: Any, day: date) -> str | None:
     return None
 
 
-def _stored_refusal(record: Any, seq: int, day: date) -> str | None:
-    """Why a record read back is not one this log writes as bet ``seq`` of ``day``, or None."""
+def _stored_refusal(record: Any, seq: int, day: date, *, format_1: bool = False) -> str | None:
+    """Why a record read back is not one this log writes as bet ``seq`` of ``day``, or None.
+    ``format_1``: one a565ac0 wrote, before ``FORMAT_2_SINCE``, its combination as given."""
     if not isinstance(record, dict):
         return "is not a dict"
     keys = set(record)
@@ -249,9 +259,16 @@ def _stored_refusal(record: Any, seq: int, day: date) -> str | None:
         and type(record["off_flat"]) is bool
     ):
         return "has a seq, day_status or flag this log does not write"
-    reason = _refusal({key: record[key] for key in keys - set(ADDED)}, day)  # a bet of the day
+    if format_1:
+        written = _instant(record["written_utc"])
+        if written is None or written >= FORMAT_2_SINCE:
+            return f"has a written_utc not before {FORMAT_2_SINCE.isoformat()}, as format 1 has"
+    bet = {key: record[key] for key in keys - set(ADDED)}
+    reason = _refusal(bet, day, format_1=format_1)  # a bet of the day
     if reason is not None:
         return reason
+    if format_1:
+        return None
     if record["combination"] != _in_store_order(record["pool"], record["combination"]):
         return f"has a combination not in the store's order: {record['combination']!r}"
     return None
@@ -264,22 +281,27 @@ def _parse(raw: bytes, path: Path, day: date) -> _State:
     lines = raw[:-1].split(b"\n") if raw else []
     records: list[dict[str, Any]] = []
     prev = ZERO_SHA
+    upgraded = False  # a format-2 line was read: every later line is format 2
     for n, line in enumerate(lines, 1):
         where = f"{path}, line {n}"
         try:
             obj = _decode(line)
         except (TypeError, ValueError, RecursionError):
             obj = None
-        if not isinstance(obj, dict) or set(obj) != LINE_KEYS:
+        if not isinstance(obj, dict) or set(obj) not in (LINE_KEYS, FORMAT_1_LINE_KEYS):
             raise BetLogTampered(f"{where}: not a line this log wrote")
-        if obj["sha256"] != _sha(_encode({k: v for k, v in obj.items() if k != "sha256"})):
-            raise BetLogTampered(f"{where}: its sha256 is not that of the line")
+        if set(obj) == LINE_KEYS:
+            upgraded = True
+            if obj["sha256"] != _sha(_encode({k: v for k, v in obj.items() if k != "sha256"})):
+                raise BetLogTampered(f"{where}: its sha256 is not that of the line")
+        elif upgraded:
+            raise BetLogTampered(f"{where}: a format-1 line after a format-2 line")
         if obj["prev_sha256"] != prev:
             raise BetLogTampered(f"{where}: does not chain onto the line before it")
         seq = FIRST_SEQ + n - 1
         if type(obj["seq"]) is not int or obj["seq"] != seq:
             raise BetLogTampered(f"{where}: seq out of order")
-        reason = _stored_refusal(obj["record"], seq, day)
+        reason = _stored_refusal(obj["record"], seq, day, format_1=not upgraded)
         if reason is not None:
             raise BetLogTampered(f"{where}: not a bet record this log wrote: it {reason}")
         records.append(obj["record"])
@@ -291,6 +313,29 @@ def _parse(raw: bytes, path: Path, day: date) -> _State:
         next_seq=FIRST_SEQ + len(lines),
         last_sha=prev,
     )
+
+
+def _existing_part(path: Path) -> tuple[Path, tuple[str, ...]]:
+    """The nearest of ``path`` and its parents that exists, and the names below it."""
+    rest: list[str] = []
+    while not os.path.exists(path) and path != path.parent:
+        rest.append(path.name)
+        path = path.parent
+    return path, tuple(reversed(rest))
+
+
+def _same_log(a: Path, b: Path) -> bool:
+    """Whether ``a`` and ``b`` name one file, before it exists too: equal once resolved, or else
+    the nearest existing ancestor of each (the path itself included) is one file by device and
+    inode, with the same names below it (a filesystem that ignores letter case)."""
+    a, b = a.resolve(), b.resolve()
+    if a == b:
+        return True
+    (a_base, a_rest), (b_base, b_rest) = _existing_part(a), _existing_part(b)
+    try:
+        return a_rest == b_rest and os.path.samefile(a_base, b_base)
+    except OSError:
+        return False
 
 
 def _fsync_dir(path: Path) -> None:
@@ -318,7 +363,7 @@ class BetLog:
         if is_inside(path, root):
             raise BetLogInRepo(f"{path} is inside the repository at {root}: bets stay outside it")
         own = bet_log_path(day)  # one log per day, so check and record count the same stakes
-        if path.resolve() != own.resolve():
+        if not _same_log(path, own):
             raise ValueError(f"{path} is not the bet log of {day.isoformat()}, which is {own}")
         self._path = own
         self._day = day
@@ -326,12 +371,15 @@ class BetLog:
 
     def _still_own(self) -> None:
         """ValueError, before any file is touched, once ``bet_log_path(day)`` is no longer this
-        log's path (``HORSETRACK_DATA_DIR`` moved), so no process stakes into a stale file."""
-        own = bet_log_path(self._day)
-        if own.resolve() != self._path.resolve():
-            raise ValueError(
-                f"{self._path} is no longer the bet log of {self._day.isoformat()}, which is {own}"
-            )
+        log's path (``HORSETRACK_DATA_DIR`` moved or is blank), so no process stakes into a stale
+        file."""
+        gone = f"{self._path} is no longer the bet log of {self._day.isoformat()}"
+        try:
+            own = bet_log_path(self._day)
+        except paths.DataDirNotSet as err:
+            raise ValueError(f"{gone}: {paths.DATA_DIR_VAR} is not set") from err
+        if not _same_log(own, self._path):
+            raise ValueError(f"{gone}, which is {own}")
 
     def _load(self) -> _State:
         self._still_own()

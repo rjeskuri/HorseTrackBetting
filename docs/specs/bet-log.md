@@ -14,8 +14,12 @@ refuses stake keys by design.
 Path: `$HORSETRACK_DATA_DIR/bets/japan/<YYYY-MM-DD>.jsonl` (`bet_log_path(day)`, the data dir read on
 every call), one file per race day, named by its local (JST) date. A day has one log, at one place,
 so `check` and `record` always count the same stakes. `BetLog(path, day=..., limits=...)` takes only
-`bet_log_path(day)`, compared after resolving (`..`, symlinks and a path relative to the working
-directory that name the same file are the same log):
+`bet_log_path(day)`, compared by filesystem identity: two paths are the same log when they are
+equal once resolved (`..`, symlinks and a path relative to the working directory), or else when the
+nearest existing ancestor of each (the path itself included) is the same file by device and inode
+and the not-yet-existing names below it are identical. So on a filesystem that ignores letter case
+(macOS's default APFS), a data dir spelled in another case is the same log, before the day's first
+bet too; on a case-sensitive one it is another directory.
 
 - a path inside the repository raises `BetLogInRepo` (a `RuntimeError`;
   `core.eval.reports.is_inside` against `core.env.repo_root()`, so `..`, symlinks and relative
@@ -26,9 +30,10 @@ directory that name the same file are the same log):
 
 An open `BetLog` re-resolves `bet_log_path(day)` at the start of every call (`record`, `read`,
 `check`, `staked_yen`). Once that is no longer its path (`HORSETRACK_DATA_DIR` moved in the
-environment or `.env`), the call raises `ValueError` and touches neither the old file nor the new
-data dir, so a process holding a log cannot stake into the old file while a fresh `check` at the
-new place sees an empty day. Moved back, the same object works again.
+environment or `.env`, or became blank), the call raises `ValueError` (not `BetLogTampered`,
+`BetRefused` or `DataDirNotSet`) and touches neither the old file nor the new data dir, so a
+process holding a log cannot stake into the old file while a fresh `check` at the new place sees
+an empty day. Moved back, the same object works again.
 
 - One JSON object per line, compact separators, ASCII-escaped (so UTF-8), each line ending in `\n`.
 - The file is opened only for append, never truncated or rewritten. Each `record` is one line,
@@ -46,26 +51,53 @@ new place sees an empty day. Moved back, the same object works again.
 {"seq":2,"prev_sha256":"<sha256 of line 1>","record":{…,"seq":2,…},"sha256":"<…>"}
 ```
 
-- The keys are `seq`, `prev_sha256`, `record` and `sha256`, in that order.
+- The keys are `seq`, `prev_sha256`, `record` and `sha256`, in that order (format 2; for the
+  format-1 prefix without `sha256`, see Format version).
 - `seq`: 1 on the first line, one more on each line after it; the record carries the same `seq`.
 - `prev_sha256`: the hex sha256 of the previous whole line's bytes (its `sha256` included) without
   its newline; 64 zeros on the first line.
 - `sha256`: the hex sha256 of the line's own encoding without the `sha256` member, the other keys
-  in the line's order (`{"seq":…,"prev_sha256":…,"record":…}`). A wrong or missing `sha256` is a
-  changed line, so an edit to the last line is caught too.
+  in the line's order (`{"seq":…,"prev_sha256":…,"record":…}`). A wrong `sha256` is a changed
+  line, so an edit to the last line is caught too. A line without `sha256` is format 1, taken only
+  as the leading run the Format version section describes.
 - A line is exactly the bytes the log writes for its JSON: the same JSON with other whitespace or
   escapes is a changed line.
 - Every stored record must be a bet the log would take on its day: a record whose `race_id` is
   dated another day (a log copied under another day's name, or one record edited) is tampering, as
-  is a combination not in the store's order.
+  is a combination not in the store's order (a format-1 record is checked as a565ac0 checked it).
 
 ### Format version
 
-There is one line format, `{seq, prev_sha256, record, sha256}`, the first to reach main; no earlier
-format was released (an unmerged revision of #453 wrote lines without `sha256`, and no bet log
-existed under the owner's data dir). A line without `sha256` is not an older version: it is refused
-as tampered. A future change to the line or record format must add an explicit, append-only
-upgrade, in a ticket of its own, rather than read old lines loosely.
+`record` writes format 2, `{seq, prev_sha256, record, sha256}`. Format 1, `{seq, prev_sha256,
+record}` with no `sha256`, is what the first revision of #453 (a565ac0) wrote. A day begun in
+format 1 is read and continued, append-only; nothing is rewritten:
+
+- A file may start with a run of format-1 lines. Once a format-2 line appears, every later line is
+  format 2: a format-1 line after a format-2 line is `BetLogTampered`.
+- Both formats chain alike: line 1's `prev_sha256` is 64 zeros, each later line's is the sha256 of
+  the previous line's bytes, whatever its format; `seq` runs in order; every line is in the log's
+  own compact encoding.
+- A format-1 record is checked as a565ac0 checked it: the record shape (keys, `seq`, flags,
+  `day_status`) and the bet checks a565ac0 made when writing (day, venue, pool, the number of legs,
+  the stake, `placed_utc`, `option_id`, `note`). The three checks a565ac0 did not make are skipped:
+  the store's combination order, the no-repeated-number rule, and the WIN5 day key with its
+  pairing rule. a565ac0's `race_id` is always `jra:<day>:<VENUE>:<NN>` at a known venue, a WIN5 bet
+  included, so a format-1 record on `jra:<day>:WIN5` is tampered.
+- A format-1 record's `written_utc` must be ISO text with an offset, earlier than
+  `FORMAT_2_SINCE`, 2026-11-27T09:31:47Z (the commit time of f366f20, when format 2 replaced
+  format 1). A format-1 line stamped at or after it is a format-2 line with its `sha256` stripped,
+  and is tampered.
+- `read`, `staked_yen` and `check` count format-1 records exactly as stored. `record` appends a
+  format-2 line chained onto the last line, whatever its format. A `holdout` label on any record
+  carries forward (see Holdout days).
+
+Limits: the chain has no secret, so an editor who strips a format-2 line's `sha256` and also
+rewrites its `written_utc` to before `FORMAT_2_SINCE` is not detected, the same limit as a full
+recompute. An all-format-1 file's last line carries no checksum of itself, so an edit to it is
+caught only once a format-2 line follows it.
+
+A future change to the line or record format adds another explicit, append-only upgrade, in a
+ticket of its own, rather than read old lines loosely.
 
 ### Record fields
 
@@ -171,15 +203,20 @@ refused first bet, and a refusal uses up no `seq`) when the bet:
 Detected, as `BetLogTampered`:
 
 - an edited, inserted, reordered, replayed or deleted line that has a later line after it;
-- an edit to any line, the last one included, that leaves its `sha256` as it was, and a wrong or
-  missing `sha256`;
+- an edit to any format-2 line, the last one included, that leaves its `sha256` as it was, and a
+  wrong `sha256`;
+- a missing `sha256`: a format-1 line after a format-2 line, or one whose `written_utc` is not
+  before `FORMAT_2_SINCE` (see Format version);
 - a record dated another day than the log's, whether one record was edited (hashes recomputed) or
   another day's whole log was copied under this day's name;
 - a cut-off last line (no newline), a line not in the log's own encoding, a line or record not of
   the shape this log writes (keys, `seq`, a bet the log would refuse, a combination not in the
-  store's order, the flags, `day_status`).
+  store's order, the flags, `day_status`; for a format-1 record, the checks a565ac0 made).
 
 Not detected without an outside anchor:
 
 - the removal of the last whole lines (what remains is a valid shorter chain);
-- a rewrite of the file with every `sha256` and `prev_sha256` recomputed (the chain has no secret).
+- a rewrite of the file with every `sha256` and `prev_sha256` recomputed (the chain has no secret);
+- a format-2 line stripped of its `sha256` with its `written_utc` also rewritten to before
+  `FORMAT_2_SINCE`, and an edit to the last line of a file that is all format 1 (no line after it
+  pins it).

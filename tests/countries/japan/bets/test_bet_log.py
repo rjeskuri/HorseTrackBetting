@@ -12,7 +12,9 @@ Contract pinned here, module ``horsetrack.countries.japan.bets.log``:
   ValueError, and nothing is created (review fix, ruling 1: one log per race day, at one place).
   An open ``BetLog`` re-resolves ``bet_log_path(day)`` before every call (``record``, ``read``,
   ``check``, ``staked_yen``); once that is no longer its path the call raises ValueError and writes
-  nothing anywhere (second review fix).
+  nothing anywhere (second review fix). Paths are compared by filesystem identity, so a data dir
+  spelled in another letter case on a case-insensitive filesystem is the same log, before the
+  day's first bet too; a blank setting is the same ValueError, not ``DataDirNotSet`` (third review).
 - A bet is a dict of ``race_id`` (``jra:<day>:<VENUE>:<NN>``, the log's own day, a jra venue code;
   a WIN5 bet, and only a WIN5 bet, takes the day-level ``jra:<day>:WIN5``), ``pool`` (one of
   POOLS), ``combination`` (horse numbers joined by ``,``, as many as the pool's legs, no leading
@@ -30,6 +32,10 @@ Contract pinned here, module ``horsetrack.countries.japan.bets.log``:
   docs/specs/shadow-log.md describes; ``sha256`` is the sha256 of the line's own encoding without
   ``sha256``, so an edit to the last line is caught too. A broken chain or checksum, or a record
   dated another day than the log's, raises ``BetLogTampered`` on every call.
+- The previous line format (format 1, a565ac0: ``{seq, prev_sha256, record}``) is read as an
+  append-only prefix (third review fix): a file may begin with format-1 lines, chain-verified and
+  their records checked as a565ac0 checked a bet; they count like any other; ``record`` appends a
+  format-2 line chained onto the last of them. A format-1 line after a format-2 line is tampering.
 - Holdout days: bets are written, read back and counted toward the cap like any other day.
 
 Every bet is synthetic. HORSETRACK_DATA_DIR points at tmp_path in every test.
@@ -49,7 +55,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from horsetrack.core import paths
+from horsetrack.core import env, paths
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.countries.japan.bets.log import (
     POOLS,
@@ -899,6 +905,286 @@ def test_earlier_bytes_never_change_and_each_bet_is_fsynced(monkeypatch):
     assert [r["off_flat"] for r in records] == [False, False, True, True, False]
 
 
+# ---------------------------------------------------------------- the previous line format
+
+# Format 1 is the line a565ac0 wrote before review round 1 gave each line its own sha256: exactly
+# {seq, prev_sha256, record}, chained as format 2 is. Review round 3: a day begun in format 1
+# carries on in format 2, append-only. The lines are built here from first principles.
+
+
+def stored_as(seq: int, placed: dict, *, written: str, status: str, over: bool, off: bool) -> dict:
+    """A stored record: the bet as given, then the five fields the log adds, in the log's order."""
+    added = {"seq": seq, "written_utc": written, "day_status": status}
+    return {**placed, **added, "over_cap": over, "off_flat": off}
+
+
+def legacy(seq: int, placed: dict, *, status="development", over=False, off=False) -> dict:
+    """A record as a565ac0 stored it (the combination as given, never reordered), written while
+    format 1 was the branch's format (a565ac0 to f366f20: 2026-11-27, 09:02 to 09:31 UTC)."""
+    written = f"2026-11-27T09:{10 + seq:02d}:00.125000+00:00"
+    return stored_as(seq, placed, written=written, status=status, over=over, off=off)
+
+
+def current(seq: int, placed: dict) -> dict:
+    """A record as the log stores it today, development day, no flags."""
+    written = f"2026-11-28T03:{seq:02d}:00.500000+00:00"
+    return stored_as(seq, placed, written=written, status="development", over=False, off=False)
+
+
+def lines_from(
+    entries: list[tuple[int, dict]], *, seqs: list[int] | None = None, first_prev: str = ZERO
+) -> list[bytes]:
+    """The lines of ``entries``, (format, record) pairs, chained from ``first_prev`` and numbered
+    from 1 (or by ``seqs``): format 1 is ``{seq, prev_sha256, record}``; format 2 adds the sha256
+    of that encoding."""
+    out, prev = [], first_prev
+    for i, (fmt, record) in enumerate(entries):
+        body = {"seq": seqs[i] if seqs else i + 1, "prev_sha256": prev, "record": record}
+        line = encode(body if fmt == 1 else {**body, "sha256": sha(encode(body))})
+        out.append(line)
+        prev = sha(line)
+    return out
+
+
+# name -> (day, the day's format-1 records): bets a565ac0 took, some of which format 2 refuses
+LEGACY_DAYS = {
+    "five bets, 29000 yen": (
+        DEV_DAY,
+        [
+            legacy(1, bet(20_000, race=1, option_id="lb:win:1")),
+            legacy(2, bet(5_000, venue="NAK", race=11, pool="QUINELLA", combination="4,2")),
+            legacy(3, bet(2_000, venue="NAK", race=11, pool="WIN5", combination="3,3,8,1,14")),
+            legacy(4, bet(1_500, venue="KYO", race=5, pool="TRIO", combination="7,7,3")),
+            legacy(
+                5,
+                bet(500, venue="KYO", race=6, pool="FORECAST", combination="7,4", note="中山"),
+                off=True,
+            ),
+        ],
+    ),
+    "one bet, the day before": (
+        DEV_DAY - timedelta(days=1),
+        [legacy(1, bet(1_000, day=DEV_DAY - timedelta(days=1), venue="HSN", combination="12"))],
+    ),
+    "two bets labelled holdout, 29900 yen": (
+        DEV_DAY - timedelta(days=2),
+        [
+            legacy(1, bet(29_000, day=DEV_DAY - timedelta(days=2), race=1), status="holdout"),
+            legacy(
+                2,
+                bet(900, day=DEV_DAY - timedelta(days=2), race=2, pool="PLACE", option_id=None),
+                status="holdout",
+            ),
+        ],
+    ),
+}
+
+
+@pytest.mark.parametrize(("day", "records"), list(LEGACY_DAYS.values()), ids=list(LEGACY_DAYS))
+def test_a_day_begun_in_the_previous_format_carries_on(day, records):
+    path = bet_log_path(day)
+    path.parent.mkdir(parents=True)
+    old = lines_from([(1, record) for record in records])
+    prefix = join_lines(old)
+    path.write_bytes(prefix)
+    total = sum(record["stake_yen"] for record in records)
+    held = any(record["day_status"] == "holdout" for record in records)
+
+    # the format-1 bets are the day's bets, read back exactly as stored, and count toward the cap
+    log = BetLog(path, day=day, limits=NO_FLAT)
+    assert log.read() == records
+    assert log.staked_yen() == total
+    left = CAP - total
+    assert log.check(left) == CapCheck(
+        fits=True, staked_yen=total, remaining_yen=left, off_flat=False
+    )
+    assert log.check(left + 100).fits is False
+    assert path.read_bytes() == prefix
+
+    # the day carries on in format 2, chained onto the last format-1 line, nothing rewritten
+    added, prev, k = [], sha(old[-1]), len(records)
+    for i, (stake, extra) in enumerate([(1_000, {}), (100, {"pool": "PLACE", "combination": "2"})]):
+        placed = bet(stake, day=day, race=12, **extra)
+        before = path.read_bytes()
+        writer = log if i == 0 else BetLog(path, day=day, limits=NO_FLAT)
+        record = writer.record(dict(placed))
+        total += stake
+        status = "holdout" if held or is_holdout_day("japan", day) else "development"
+        assert_stored(record, placed, seq=k + 1 + i, status=status, over=total > CAP, off=False)
+        after = path.read_bytes()
+        assert after[: len(before)] == before and after[: len(prefix)] == prefix
+        lines = split_lines(after)
+        assert len(lines) == k + 1 + i
+        obj = json.loads(lines[-1])
+        assert list(obj) == ["seq", "prev_sha256", "record", "sha256"], "the new line is format 2"
+        assert lines[-1] == encode(obj)
+        assert obj["seq"] == k + 1 + i
+        assert obj["prev_sha256"] == prev, "not chained onto the line before it"
+        assert obj["sha256"] == line_sha(obj)
+        assert obj["record"] == record
+        prev = sha(lines[-1])
+        added.append(record)
+
+    fresh = BetLog(path, day=day, limits=NO_FLAT)
+    assert fresh.read() == records + added
+    assert fresh.staked_yen() == total
+    assert fresh.check(100).staked_yen == total
+
+
+def legacy_three() -> list[tuple[int, dict]]:
+    """Three format-1 lines whose records format 2 would take too, so each edit below is what
+    breaks the file."""
+    return [
+        (1, legacy(1, bet(10_000, race=1))),
+        (1, legacy(2, bet(2_000, race=2, pool="QUINELLA", combination="4,7"))),
+        (1, legacy(3, bet(300, race=3, pool="PLACE", combination="9"))),
+    ]
+
+
+def upgraded() -> list[tuple[int, dict]]:
+    """Two format-1 lines, then two format-2 lines."""
+    first, second, _ = legacy_three()
+    return [
+        first,
+        second,
+        (2, current(3, bet(1_000, race=4))),
+        (2, current(4, bet(500, race=5, pool="QUINELLA", combination="2,6"))),
+    ]
+
+
+def recomputed(change: Callable[[list[tuple[int, dict]]], object], **kw) -> Callable:
+    """``change`` applied to a copy of the entries, then every line and hash rebuilt."""
+
+    def apply(entries: list[tuple[int, dict]]) -> bytes:
+        copy = [(fmt, json.loads(json.dumps(record))) for fmt, record in entries]
+        change(copy)
+        return join_lines(lines_from(copy, **kw))
+
+    return apply
+
+
+def record_set(n: int, **changes) -> Callable:
+    """Record ``n`` (from 0) with ``changes``, every hash recomputed."""
+    return recomputed(lambda entries: entries[n][1].update(changes))
+
+
+def on_built(edit: Callable[[list[bytes]], list[bytes]]) -> Callable:
+    """``edit`` applied to the built lines, no hash recomputed."""
+    return lambda entries: join_lines(edit(lines_from(entries)))
+
+
+def last_stripped(**changes) -> Callable:
+    """The last line without its sha256, its record changed by ``changes``, its prev kept."""
+
+    def edit(lines: list[bytes]) -> list[bytes]:
+        obj = json.loads(lines[-1])
+        del obj["sha256"]
+        obj["record"].update(changes)
+        return [*lines[:-1], encode(obj)]
+
+    return on_built(edit)
+
+
+def renumbered(seqs: list[int]) -> Callable:
+    def change(entries):
+        for (_, record), seq in zip(entries, seqs, strict=True):
+            record["seq"] = seq
+
+    return recomputed(change, seqs=seqs)
+
+
+LEGACY_TAMPERED = {  # name -> (the file as written, the edit)
+    # the format order: format 1 only before the first format-2 line
+    "a format-1 line after the format-2 lines": (
+        upgraded,
+        recomputed(lambda e: e.append((1, legacy(5, bet(100, race=6))))),
+    ),
+    "a format-2 line between format-1 lines": (
+        legacy_three,
+        recomputed(lambda e: e.__setitem__(1, (2, e[1][1]))),
+    ),
+    "the last format-2 line stripped of its sha256": (upgraded, last_stripped()),
+    "the last format-2 line stripped of its sha256, its stake edited": (
+        upgraded,
+        last_stripped(stake_yen=800),
+    ),
+    # the chain through the format-1 lines
+    "a format-1 stake edited, a format-1 line after it": (
+        legacy_three,
+        on_built(lambda ls: [swap(b'"stake_yen":10000', b'"stake_yen":80000')(ls[0]), *ls[1:]]),
+    ),
+    "the last format-1 stake edited, a format-2 line after it": (
+        upgraded,
+        on_built(
+            lambda ls: [ls[0], swap(b'"stake_yen":2000', b'"stake_yen":8000')(ls[1]), *ls[2:]]
+        ),
+    ),
+    "a format-1 line deleted": (legacy_three, on_built(lambda ls: [ls[0], ls[2]])),
+    "the first format-1 line not chained onto zeros": (
+        legacy_three,
+        recomputed(lambda e: None, first_prev=sha(b"another file")),
+    ),
+    "format-1 seqs skipping one, hashes recomputed": (legacy_three, renumbered([1, 3, 4])),
+    "format-1 seqs from 2, hashes recomputed": (legacy_three, renumbered([2, 3, 4])),
+    "a format-1 record's seq not its line's": (legacy_three, record_set(1, seq=3)),
+    "a format-1 line re-spaced, same JSON": (
+        legacy_three,
+        on_built(lambda ls: [respace(ls[0]), *ls[1:]]),
+    ),
+    # records a565ac0 could not have written, hashes recomputed
+    "a format-1 record dated another day": (
+        legacy_three,
+        record_set(1, race_id="jra:2026-11-23:TOK:02"),
+    ),
+    "a format-1 record of an unknown pool": (legacy_three, record_set(1, pool="SHOW")),
+    "a format-1 record at an unknown venue": (
+        legacy_three,
+        record_set(1, race_id="jra:2026-11-22:XXX:02"),
+    ),
+    "a format-1 WIN5 bet on the day key, which a565ac0 did not take": (
+        legacy_three,
+        record_set(1, race_id="jra:2026-11-22:WIN5", pool="WIN5", combination="1,2,3,4,5"),
+    ),
+    "a format-1 combination of the wrong number of legs": (
+        legacy_three,
+        record_set(1, combination="4"),
+    ),
+    "a format-1 stake JRA does not sell": (legacy_three, record_set(1, stake_yen=150)),
+    "a format-1 placed_utc without an offset": (
+        legacy_three,
+        record_set(1, placed_utc="2026-11-22T05:40:00"),
+    ),
+    "a format-1 blank option_id": (legacy_three, record_set(1, option_id="")),
+    "a format-1 record with a key the log does not write": (legacy_three, record_set(1, odds=3.4)),
+    "a format-1 record without written_utc": (
+        legacy_three,
+        recomputed(lambda e: e[1][1].pop("written_utc")),
+    ),
+    "a format-1 flag that is not a boolean": (legacy_three, record_set(1, over_cap=0)),
+}
+
+
+@pytest.mark.parametrize(
+    ("base", "edit"), list(LEGACY_TAMPERED.values()), ids=list(LEGACY_TAMPERED)
+)
+def test_a_previous_format_prefix_is_verified(base, edit):
+    entries = base()
+    path = bet_log_path(DEV_DAY)
+    path.parent.mkdir(parents=True)
+    good = join_lines(lines_from(entries))
+    path.write_bytes(good)
+    records = [record for _, record in entries]
+    log = BetLog(path, day=DEV_DAY, limits=NO_FLAT)  # unedited, the file is the day's log
+    assert log.read() == records
+    assert log.staked_yen() == sum(record["stake_yen"] for record in records)
+
+    tampered = edit(entries)
+    assert tampered != good
+    assert [record for _, record in entries] == records, "the edit changed the base"
+    path.write_bytes(tampered)
+    assert_tampered(path)
+
+
 # ---------------------------------------------------------------- where it lives
 
 
@@ -1011,6 +1297,129 @@ def test_an_open_log_refuses_every_call_once_the_data_dir_moves(D, tmp_path, mon
     assert log.record(bet(100, race=2))["seq"] == 2
     assert BetLog(path, day=DEV_DAY, limits=NO_FLAT).staked_yen() == 1_100
     assert not moved.exists()
+
+
+def case_insensitive(folder: Path) -> bool:
+    """Whether ``folder``'s filesystem ignores letter case (macOS's default APFS does, Linux's
+    ext4 does not)."""
+    probe = folder / "case-probe"
+    probe.touch()
+    try:
+        return (folder / "CASE-PROBE").exists()
+    finally:
+        probe.unlink()
+
+
+def test_an_open_log_takes_the_data_dir_in_another_letter_case(D, monkeypatch):
+    # review round 3: the setting spelled in another case can name the same directory; the open log
+    # and a fresh one then use the same file, compared by filesystem identity
+    log, path = open_log()
+    first = log.record(bet(1_000, race=1))
+    spellings = {
+        "the data dir's name": D.with_name(D.name.swapcase()),
+        "the data dir's name, mixed": D.with_name("dAtA"),
+        "a folder above it": D.parent.with_name(D.parent.name.swapcase()) / D.name,
+    }
+    assert all(str(spelled) != str(D) for spelled in spellings.values())
+
+    if not case_insensitive(D.parent):
+        # here another spelling is another directory, refused as a moved data dir is
+        before = path.read_bytes()
+        for how, spelled in spellings.items():
+            monkeypatch.setenv(paths.DATA_DIR_VAR, str(spelled))
+            for call in (lambda: log.record(bet(100, race=2)), log.read, log.staked_yen):
+                with pytest.raises(ValueError):
+                    call()
+            assert not spelled.exists(), how
+        assert path.read_bytes() == before
+        return
+
+    recorded, total = [first], 1_000
+    for i, (how, spelled) in enumerate(spellings.items()):
+        assert os.path.samefile(spelled, D), how
+        monkeypatch.setenv(paths.DATA_DIR_VAR, str(spelled))
+        assert bet_log_path(DEV_DAY) != path, how  # another spelling of the same file
+        assert log.read() == recorded, how
+        assert log.staked_yen() == total, how
+        assert log.check(100) == CapCheck(
+            fits=True, staked_yen=total, remaining_yen=CAP - total, off_flat=False
+        ), how
+        stake = 100 * (i + 2)
+        recorded.append(log.record(bet(stake, race=2 + i)))
+        total += stake
+        assert recorded[-1]["seq"] == i + 2, how
+        for given in (bet_log_path(DEV_DAY), path):  # either spelling is the day's log
+            assert BetLog(given, day=DEV_DAY, limits=NO_FLAT).read() == recorded, how
+    assert [obj["record"] for obj in chain(path.read_bytes())] == recorded
+    assert [p.name for p in D.parent.iterdir()] == [D.name], "one data dir, under its own name"
+
+
+@pytest.mark.parametrize("made", [True, False], ids=["the data dir made", "nothing made yet"])
+def test_a_day_before_its_first_bet_takes_another_letter_case(D, monkeypatch, made):
+    if not case_insensitive(D.parent):
+        pytest.skip("a case-sensitive filesystem: another spelling is another directory")
+    if made:  # the data dir exists, bets/japan does not
+        D.mkdir()
+        spelled = D.with_name(D.name.swapcase())
+    else:  # only the folder above the data dir exists
+        spelled = D.parent.with_name(D.parent.name.swapcase()) / D.name
+    name = f"{DEV_DAY.isoformat()}.jsonl"
+    own_path = D / "bets" / "japan" / name
+
+    early = BetLog(spelled / "bets" / "japan" / name, day=DEV_DAY, limits=NO_FLAT)
+    assert not (D / "bets").exists(), "the constructor created the log's folder"
+    assert early.read() == [] and early.staked_yen() == 0
+    assert early.check(CAP) == CapCheck(fits=True, staked_yen=0, remaining_yen=CAP, off_flat=False)
+    own = BetLog(bet_log_path(DEV_DAY), day=DEV_DAY, limits=NO_FLAT)
+
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(spelled))  # the setting in the other spelling
+    assert own.staked_yen() == 0 and own.check(100).fits is True
+    first = own.record(bet(1_000, race=1))
+    assert first["seq"] == 1
+    assert early.read() == [first]
+    second = early.record(bet(200, race=2))
+    assert second["seq"] == 2
+    assert BetLog(own_path, day=DEV_DAY, limits=NO_FLAT).staked_yen() == 1_200
+
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(D))
+    assert own.read() == early.read() == [first, second]
+    assert [obj["record"] for obj in chain(own_path.read_bytes())] == [first, second]
+    assert [p.name for p in D.parent.iterdir()] == [D.name], "one data dir, under its own name"
+
+
+@pytest.mark.parametrize("blank", ["", "   "], ids=["empty", "spaces"])
+def test_an_open_log_refuses_every_call_once_the_data_dir_is_blank(D, tmp_path, monkeypatch, blank):
+    # review round 3: a blank setting is the documented refusal, a ValueError, not DataDirNotSet
+    log, path = open_log()
+    first = log.record(bet(1_000, race=1))
+    before = path.read_bytes()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)  # where a blank read as "." would write
+    monkeypatch.setenv(paths.DATA_DIR_VAR, blank)  # set, so the repo-root .env is not read
+    assert env.get_setting(paths.DATA_DIR_VAR) == blank
+
+    calls = {
+        "record": lambda: log.record(bet(100, race=2)),
+        "read": lambda: log.read(),
+        "check": lambda: log.check(100),
+        "staked_yen": lambda: log.staked_yen(),
+    }
+    for name, call in calls.items():
+        try:
+            call()
+        except Exception as err:
+            assert isinstance(err, ValueError), f"{name} raised {type(err).__name__}: {err}"
+            assert not isinstance(err, (BetLogTampered, BetRefused)), f"{name}: {err!r}"
+        else:
+            pytest.fail(f"{name} on an open log ran with {paths.DATA_DIR_VAR} blank")
+        assert path.read_bytes() == before, f"{name} wrote to the log"
+        assert list(cwd.iterdir()) == [], f"{name} wrote under the working directory"
+
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(D))  # set again, the same object works
+    assert log.read() == [first]
+    assert log.record(bet(100, race=2))["seq"] == 2
+    assert log.staked_yen() == 1_100
 
 
 @pytest.mark.parametrize(
