@@ -134,10 +134,27 @@ reach the store, and documents the mapping.
   requested subset), in declared or requested order whatever the file's order, cast to their
   declared types. A name that is not in `schemas.TABLES` (case-sensitive) raises `ValueError`, as
   does a column the table does not declare. A missing file raises `FileNotFoundError` naming the
-  table and the source.
+  table and the source. `filters=`, a `pyarrow.dataset` expression, is applied by the Parquet
+  scan (`pyarrow.parquet.read_table(..., filters=...)`), so an excluded row never reaches the
+  frame.
 - `tables.connect(source) -> duckdb.DuckDBPyConnection`: an in-memory DuckDB with one view per
   declared table whose file exists for that source, named after the table. File paths are quoted
-  as SQL strings, so a data directory with a `'` in it works.
+  as SQL strings, so a data directory with a `'` in it works. The views apply no holdout
+  predicate: development readers do not use them.
+
+### Development reads and the holdout (#415)
+
+The development readers (`countries/japan/models/v0/store.read_store_table`, and the speed
+study's `studies/speed_run.read_inputs`) pass `core.eval.holdout.development_filter(country,
+start, end)` to the scan: the inclusive date range minus the holdout days, built from the
+calendar and the committed `holdout.yaml`, never from the rows. No table or record batch the
+scan returns holds a holdout row. What is skipped on disk is narrower: Parquet prunes a row group
+only from its min/max statistics, so a row group whose race days mix development and holdout
+days (any group spanning more than one day after the holdout start) is still read and decoded,
+and its holdout rows are dropped by the scan's filter before a table is built. Every store table
+is Parquet; the other files under `$HORSETRACK_DATA_DIR` (the ingest manifest, JSONL logs, the
+raw page cache) have no row-group statistics and are not development reads. `LockedHoldout.open`
+remains the only way to holdout rows.
 
 ## Build
 

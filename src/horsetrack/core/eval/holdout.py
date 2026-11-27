@@ -14,6 +14,17 @@ A race day (its local date) on or after ``start`` is holdout when
 development. ``is_holdout_day(country, day)`` applies that rule to one day. A missing or invalid
 definition raises ``HoldoutConfigError``; there is no default.
 
+``development_filter(country, start, end, *, column="race_date")`` is the same rule as a
+``pyarrow.dataset`` expression for a scan (#415): true for the rows whose ``column`` lies in
+``start <= day <= end`` (inclusive) and is not a holdout day; a null day is not a development
+row. It is built from the calendar alone (every day from ``start`` to ``end`` is asked
+``is_holdout_day``, looked up at call time), so a reader passes it to the scan and no
+holdout row, outcomes included, reaches a table. Pruning is limited by what the file records:
+Parquet skips a row group only from its min/max statistics, so a row group whose days mix
+development and holdout days is still read from disk and decoded, and the scan's filter drops
+its holdout rows before any table is returned. ``split_off`` and ``LockedHoldout.open`` below are
+unchanged and remain the only way to the holdout rows.
+
 The holdout rows are reached only through ``LockedHoldout.open(ticket=..., purpose=...,
 family=...)``, which appends one JSON line to ``<countries_dir>/<country>/holdout_log.jsonl``
 before it returns them. An opening is gated (#126, docs/problem-statement.md D12, D15):
@@ -59,6 +70,8 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.dataset as ds
 import yaml
 
 from horsetrack.core.config import load_country_yaml
@@ -91,7 +104,8 @@ def _read_yaml(countries_dir: Path, country: str, stem: str) -> tuple[Any, Path]
     Raises ``FileNotFoundError`` when the file is absent."""
     path = countries_dir / country / "config" / f"{stem}.yaml"
     try:
-        if countries_dir.resolve() == DEFAULT_COUNTRIES_DIR.resolve():
+        default = countries_dir is DEFAULT_COUNTRIES_DIR  # skips resolve(): it is called per day
+        if default or countries_dir.resolve() == DEFAULT_COUNTRIES_DIR.resolve():
             return load_country_yaml(country, stem), path
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -247,6 +261,28 @@ def is_holdout_day(country: str, day: date) -> bool:
         raise TypeError(f"day must be a date, got {day!r}")
     start, seed, _ = _load_definition(DEFAULT_COUNTRIES_DIR, country)
     return day >= start and _is_holdout_day(seed, day.isoformat())
+
+
+def development_filter(
+    country: str, start: date, end: date, *, column: str = "race_date"
+) -> ds.Expression:
+    """A dataset expression true exactly for the development days of ``country`` in ``start <=
+    column <= end`` (both inclusive; a null day is excluded), for a scan to apply before any row
+    is materialized. Built from the calendar, not the data: every day from ``start`` to ``end``
+    is asked ``is_holdout_day`` (looked up at call time, so a stand-in for it is honoured on
+    every day, before the holdout start too). Raises ``HoldoutConfigError`` when the country has
+    no valid holdout definition."""
+    for value in (start, end):
+        if not isinstance(value, date) or isinstance(value, datetime):
+            raise TypeError(f"start and end must be dates, got {value!r}")
+    _load_definition(DEFAULT_COUNTRIES_DIR, country)  # no definition: refuse, even for no days
+    day = ds.field(column)
+    keep = (day >= pa.scalar(start, pa.date32())) & (day <= pa.scalar(end, pa.date32()))
+    calendar = (start + timedelta(days=k) for k in range((end - start).days + 1))
+    held = [d for d in calendar if is_holdout_day(country, d)]
+    if held:
+        keep = keep & ~day.isin(pa.array(held, pa.date32()))
+    return keep
 
 
 def _race_days(frame: pd.DataFrame, date_col: str) -> pd.Series:

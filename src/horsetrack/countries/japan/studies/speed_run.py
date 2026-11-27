@@ -24,7 +24,9 @@ cell alone? The null is that it does not.
   replicate here draws whole meetings the same way and recomputes both RMSEs over the pooled races
   of the draw, model and baseline on the same draw (paired).
 - `rmse_table`: the overall row and one row per distinct `by` value, each with its own bounds.
-- `read_inputs()`: the JRA store's races and runners, column-scoped, holdout days dropped.
+- `read_inputs()`: the JRA store's races and runners, column-scoped, holdout days excluded by
+  the Parquet scan (#415), so none is materialized; a row group mixing development and holdout
+  days is still read from disk (pruning is by min/max statistics only).
 
 The study (`run_study`; CLI `python -m horsetrack.countries.japan.studies.speed_run --run [--out
 DIR]`, an `--out` inside the repository refused) freezes its spec in the run registry before any
@@ -51,12 +53,15 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow.compute as pc
+import pyarrow.dataset as ds
+import pyarrow.parquet as pq
 
 from horsetrack.core import paths
 from horsetrack.core.config import load_country_yaml
 from horsetrack.core.eval.bootstrap import _MAX_DRAWS_PER_CHUNK
 from horsetrack.core.eval.folds import FoldScheme, load_country_scheme, walk_forward
-from horsetrack.core.eval.holdout import _git_sha, is_holdout_day
+from horsetrack.core.eval.holdout import _git_sha, development_filter, is_holdout_day
 from horsetrack.core.eval.registry import (
     FoldMetric,
     RunRecord,
@@ -420,12 +425,52 @@ def rmse_table(
 # --------------------------------------------------------------------------- reading
 
 
+def _day_span(name: str) -> tuple[date, date] | None:
+    """The first and last race_date of the store table `name` from its Parquet footer statistics
+    (no row is read), or None when it holds no dated row, has no race_date or does not exist
+    (read_table then says so). A row group without statistics falls back to reading the
+    race_date column alone, a calendar column with no outcome in it."""
+    path = table_path(SOURCE, name)
+    if not path.exists():
+        return None
+    meta = pq.ParquetFile(path).metadata
+    lows, highs = [], []
+    for g in range(meta.num_row_groups):
+        group = meta.row_group(g)
+        chunk = next(
+            (
+                group.column(c)
+                for c in range(group.num_columns)
+                if group.column(c).path_in_schema == "race_date"
+            ),
+            None,
+        )
+        if chunk is None:
+            return None
+        stats = chunk.statistics
+        if group.num_rows == 0 or (stats is not None and stats.null_count == group.num_rows):
+            continue
+        if stats is None or not stats.has_min_max:
+            days = pc.min_max(pq.ParquetFile(path).read(columns=["race_date"])["race_date"])
+            low, high = days["min"].as_py(), days["max"].as_py()
+            return None if low is None else (low, high)
+        lows.append(stats.min)
+        highs.append(stats.max)
+    return (min(lows), max(highs)) if lows else None
+
+
 def read_inputs() -> tuple[pd.DataFrame, pd.DataFrame]:
     """The JRA store's races (RACE_COLUMNS) and runners (RUNNER_COLUMNS and race_date),
-    column-scoped, holdout days dropped. No JRDB table is read (D21)."""
-    races = read_table(SOURCE, "races", columns=list(RACE_COLUMNS))
-    runners = read_table(SOURCE, "runners", columns=[*RUNNER_COLUMNS, "race_date"])
-    return _development(races), _development(runners)
+    column-scoped. Holdout days are excluded by the scan (`development_filter` over each table's
+    first to last race_date, #415), so no holdout row is materialized. No JRDB table is read
+    (D21)."""
+    frames = []
+    for name, columns in (("races", RACE_COLUMNS), ("runners", (*RUNNER_COLUMNS, "race_date"))):
+        span = _day_span(name)
+        keep = ds.scalar(False) if span is None else development_filter(COUNTRY, *span)
+        frames.append(read_table(SOURCE, name, columns=list(columns), filters=keep))
+    races, runners = frames
+    return races, runners
 
 
 # --------------------------------------------------------------------------- the study

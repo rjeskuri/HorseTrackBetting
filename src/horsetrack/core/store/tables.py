@@ -14,6 +14,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 from horsetrack.core.paths import processed_dir
@@ -44,9 +45,18 @@ def table_path(source: str, name: str) -> Path:
     return processed_dir(source) / f"{_spec(name).name}.parquet"
 
 
-def read_table(source: str, name: str, columns: Sequence[str] | None = None) -> pd.DataFrame:
+def read_table(
+    source: str,
+    name: str,
+    columns: Sequence[str] | None = None,
+    *,
+    filters: ds.Expression | None = None,
+) -> pd.DataFrame:
     """A source's table as a frame: the requested (default: all declared) columns, in that order,
-    cast to their declared types."""
+    cast to their declared types. `filters`, a dataset expression (it may name columns not read),
+    is applied by the Parquet scan, so a row it excludes never reaches the frame; row groups are
+    skipped only by their min/max statistics, and a row group that mixes kept and excluded rows is
+    still read from disk."""
     spec = _spec(name)
     wanted = list(spec.columns) if columns is None else list(columns)
     unknown = [c for c in wanted if c not in spec.columns]
@@ -59,7 +69,7 @@ def read_table(source: str, name: str, columns: Sequence[str] | None = None) -> 
     if missing:
         raise ValueError(f"table {name!r} of source {source!r}: {path} has no column {missing}")
     target = pa.schema([(c, ARROW_TYPES[spec.columns[c]]) for c in wanted])
-    data = pq.read_table(path, columns=wanted).select(wanted).cast(target)
+    data = pq.read_table(path, columns=wanted, filters=filters).select(wanted).cast(target)
     frame = data.to_pandas(types_mapper=_PANDAS_TYPES.get)
     for column in wanted:
         if spec.columns[column] == schemas.STR:  # pandas 3 reads strings as `str`, NaN for missing
