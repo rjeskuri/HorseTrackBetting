@@ -51,6 +51,7 @@ text, which holds no figure from the data.
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 import math
 import re
@@ -92,6 +93,7 @@ COUNTRY = "japan"
 SOURCE = "jravan"
 SOURCES = (SOURCE,)
 SPEC_NAME = "pool_depth"
+COPLACER_V2 = "pool_depth_coplacer_v2"  # the co-placer variant re-registered on the core rule
 TICKET = 432
 HYPOTHESIS_ID = "P432"
 FOLD_SCHEME = "development-days"
@@ -103,6 +105,15 @@ AT_T_POOLS = ("WIN", "PLACE", "QUINELLA")  # the pools of the jravan time series
 CO_PLACER = ("PLACE", "QUINELLA_PLACE")  # stake-back-share pools: no single-winner capacity
 TERTILES = ("low", "mid", "high")
 VARIANT_DEPTH, VARIANT_COPLACER, VARIANT_EXACTA = "depth", "co-placer", "exacta-own-impact"
+# the spec files `pool-depth run --spec` takes, and the variants each one registers
+SPECS = {
+    SPEC_NAME: (VARIANT_DEPTH, VARIANT_COPLACER, VARIANT_EXACTA),
+    COPLACER_V2: (VARIANT_COPLACER,),
+}
+# place_wide.co_placer.rule -> the rule's code: `jra` 1 + (rV - sum W) / (P W_i) per yen (frozen
+# in japan-pool-depth-v1), `core` r(1 + (V - sum W) / (P W_i)) (core.pricing, japan-pool-depth-
+# coplacer-v2)
+RULES = {"jra-stake-back-share": "jra", "core-stake-back-share": "core"}
 UNIT, STEP, FLOOR = 100, 10, 110  # yen per ticket, breakage, the Plus-10 minimum
 CONFIRMED = ("4", "5")  # データ区分 確定 and 確定(月曜): the final records (2 is the day before's)
 BATCH_ROWS = 65_536
@@ -192,6 +203,32 @@ def coplacer_capacities(
         stake = (1 - c) * (a + places * combo) / denominator
     stake = np.where(denominator > 0, stake, np.inf)
     return np.where((a > 0) & (combo > 0) & np.isfinite(d0), stake, np.nan)
+
+
+def core_coplacer_capacities(
+    pool: np.ndarray,
+    combo: np.ndarray,
+    paid_money: np.ndarray,
+    places: np.ndarray,
+    edge: float,
+    share: float,
+) -> np.ndarray:
+    """The co-placer capacity by the rule of `core.pricing.stake_back_share_dividend` (family
+    japan-pool-depth-coplacer-v2): per yen d = r(1 + B / (P W_i)), B = V - sum W the losers'
+    money. Own stake s on combination i adds s to V and to sum W, so B stays and
+    d(s) = r(1 + B / (P(W_i + s))); (1 + e) d(s) / d(0) = 1 + k gives, with c = (1 + k) / (1 + e),
+    s = (1 - c)(B + P W_i) / (P(c - 1) + c B / W_i), whatever r is; at P = 1 it is
+    `capacity_stake`. NaN where W_i <= 0, B < 0 or a value is missing; inf where the edge is
+    never eaten that far."""
+    k = edge * (1 - share)
+    c = (1 + k) / (1 + edge)
+    lost = pool - paid_money
+    with np.errstate(divide="ignore", invalid="ignore"):
+        denominator = places * (c - 1) + c * lost / combo
+        stake = (1 - c) * (lost + places * combo) / denominator
+    stake = np.where(denominator > 0, stake, np.inf)
+    ok = (combo > 0) & (lost >= 0) & np.isfinite(lost) & np.isfinite(places)
+    return np.where(ok, stake, np.nan)
 
 
 def _rule_dividends(pool, combo, paid_money, places, rate, *, rule: str) -> np.ndarray:
@@ -611,14 +648,15 @@ def depth_table(
 
 def coplacer_rows(
     rows: pd.DataFrame, paid: pd.DataFrame, *, rates: Mapping[str, float], edges: Sequence[float],
-    share_lost: float,
+    share_lost: float, rule: str = "jra",
 ) -> pd.DataFrame:  # fmt: skip
     """Every paid Place and Wide combination of `paid` (`dividends` rows, refunds dropped), each
     with its `rows` row (`depth_rows` of those pools) where it has one, given the race's realised
     co-placers: the depth columns (NaN where the combination has no votes or final price), places
     (P, the race's paying combinations), paid_yen (their money), dividend (as paid), jra_dividend
     and core_dividend (the two rules at no own stake; NaN where a money row is missing) and
-    `capacity_{e:g}` per edge (by the pre-registered rule)."""
+    `capacity_{e:g}` per edge by `rule` (`jra`, `coplacer_capacities`, the rule frozen in
+    japan-pool-depth-v1; `core`, `core_coplacer_capacities`)."""
     _columns(paid, "paid", [*KEYS, "dividend", "is_refund"])
     refund = paid["is_refund"].astype("boolean").fillna(False).to_numpy(dtype=bool)
     paid = paid.loc[paid["pool"].isin(list(CO_PLACER)).to_numpy(dtype=bool) & ~refund]
@@ -642,9 +680,13 @@ def coplacer_rows(
         "core_dividend": _rule_dividends(pool_yen, combo, paid_yen, places, rate, rule="core"),
     }
     share = _check_share(share_lost)
+    if rule not in RULES.values():
+        raise ValueError(f"rule must be one of {sorted(RULES.values())}, not {rule!r}")
     for e in _edges(edges):
-        columns[capacity_column(e)] = coplacer_capacities(
-            pool_yen, combo, paid_yen, places, rate, e, share
+        columns[capacity_column(e)] = (
+            coplacer_capacities(pool_yen, combo, paid_yen, places, rate, e, share)
+            if rule == "jra"
+            else core_coplacer_capacities(pool_yen, combo, paid_yen, places, e, share)
         )
     out = out.assign(pool_yen=pool_yen, dividend=_numbers(out["dividend"]), **columns)
     return out.reset_index(drop=True)
@@ -653,12 +695,17 @@ def coplacer_rows(
 # --------------------------------------------------------------------------- the spec and records
 
 
-def load_spec() -> tuple[str, dict[str, Any]]:
-    """The shipped spec (a copy) and its family_id, checked; ValueError when malformed."""
-    spec = copy.deepcopy(dict(load_country_yaml(COUNTRY, SPEC_NAME)))
+def load_spec(name: str = SPEC_NAME) -> tuple[str, dict[str, Any]]:
+    """The shipped spec `config/<name>.yaml` (a copy) and its family_id, checked; ValueError
+    when malformed or not one of SPECS."""
+    if name not in SPECS:
+        raise ValueError(f"spec must be one of {sorted(SPECS)}, not {name!r}")
+    spec = copy.deepcopy(dict(load_country_yaml(COUNTRY, name)))
     family = spec.get("family_id")
     if not isinstance(family, str) or not family.strip():
-        raise ValueError(f"config/{SPEC_NAME}.yaml names no family_id")
+        raise ValueError(f"config/{name}.yaml names no family_id")
+    if spec["place_wide"]["co_placer"]["rule"] not in RULES:
+        raise ValueError(f"place_wide.co_placer.rule must be one of {sorted(RULES)}")
     _edges(spec["edges"])
     _check_share(spec["share_lost"])
     _quantile_list(spec["quantiles"])
@@ -686,18 +733,22 @@ class _Run:
 
 
 def _preflight(
-    registry: Registry | None, date_from: date, date_to: date | None, out_dir: Path | str
+    registry: Registry | None,
+    date_from: date,
+    date_to: date | None,
+    out_dir: Path | str,
+    spec_name: str = SPEC_NAME,
 ) -> _Run:
     """NotPreRegistered before anything is read or written; then the span (D10; date_to None is
     the store's last race day, looked up in the recorded attempt) and out_dir."""
-    family, spec = load_spec()
+    family, spec = load_spec(spec_name)
     registry = default_registry(COUNTRY) if registry is None else registry
     spec_hash = _spec_hash(spec)
     frozen = registry.frozen_spec_hash(family)
     if frozen != spec_hash:
         raise NotPreRegistered(
             f"family {family!r} has no freeze of this spec (sha256 {spec_hash}, frozen: {frozen}); "
-            "run `horsetrack japan pool-depth freeze` first"
+            f"run `horsetrack japan pool-depth freeze --spec {spec_name}` first"
         )
     _check_span(date_from, date_from if date_to is None else date_to)
     if is_inside(Path(out_dir), env.repo_root()):
@@ -1033,13 +1084,16 @@ def _depth_metrics(table: pd.DataFrame, spec: Mapping[str, Any]) -> list[FoldMet
 
 @dataclass(frozen=True)
 class CoplacerResult:
-    """`rule_match`, `core_match` and `coverage` per pool (PLACE, QUINELLA_PLACE): the share of
-    the eligible paid combinations the pre-registered rule and the core rule reproduce, and the
-    share that have their votes and final price (NaN for a pool with no eligible payout)."""
+    """Per pool (PLACE, QUINELLA_PLACE): `rule_match`, the share of the eligible paid
+    combinations the spec's rule (`rule`, a RULES code) reproduces, the one the gate reads;
+    `jra_match` and `core_match`, the shares of both rules; `coverage`, the share with their
+    votes and final price (NaN for a pool with no eligible payout)."""
 
     table: pd.DataFrame
     status: str
+    rule: str
     rule_match: Mapping[str, float]
+    jra_match: Mapping[str, float]
     core_match: Mapping[str, float]
     coverage: Mapping[str, float]
     n_paid: Mapping[str, int]
@@ -1085,17 +1139,21 @@ def run_coplacer(
     date_to: date | None,
     out_dir: Path | str,
     registry: Registry | None = None,
+    spec_name: str = SPEC_NAME,
 ) -> CoplacerResult:
-    """The co-placer variant of Place and Wide: the capacity of each paying combination given
-    the race's realised co-placers (module docstring), per pool x class group x odds band, with
-    the rule checked against every eligible paid dividend (refunds and the races of an excluded
+    """The co-placer variant of Place and Wide under the spec `spec_name` (default the frozen
+    japan-pool-depth-v1; COPLACER_V2, its re-registration on the core rule): the capacity of each
+    paying combination given the race's realised co-placers by the spec's
+    `place_wide.co_placer.rule` (module docstring), per pool x class group x odds band, with the
+    rule checked against every eligible paid dividend (refunds and the races of an excluded
     status aside), per pool: a paid combination without its votes or final price is one the rule
     does not reproduce. Recorded "failed" when either pool's share is below the spec's
     `place_wide.co_placer.min_rule_match` (or the pool has no payout), or when it raised."""
-    run = _preflight(registry, date_from, date_to, out_dir)
+    run = _preflight(registry, date_from, date_to, out_dir, spec_name)
     spec = run.spec
     bands = {p: spec["odds_bands"][p] for p in CO_PLACER}
     gate = float(spec["place_wide"]["co_placer"]["min_rule_match"])
+    rule = RULES[spec["place_wide"]["co_placer"]["rule"]]
 
     def body(inputs: _Inputs, date_to: date):
         races = _read_races(date_from, date_to, inputs)
@@ -1108,12 +1166,13 @@ def run_coplacer(
                               exclude_status=spec["exclude_status"])  # fmt: skip
             month = ((day >= pd.Timestamp(a)) & (day <= pd.Timestamp(b))).to_numpy(dtype=bool)
             parts.append(coplacer_rows(rows, paid.loc[month], rates=rates, edges=spec["edges"],
-                                       share_lost=spec["share_lost"]))  # fmt: skip
+                                       share_lost=spec["share_lost"], rule=rule))  # fmt: skip
         rows = pd.concat(parts, ignore_index=True)
         dividend = rows["dividend"].to_numpy(dtype=float)
         priced = rows["class_group"].notna().to_numpy(dtype=bool)
         jra = _shares(rows, rows["jra_dividend"].to_numpy(dtype=float) == dividend)
         core = _shares(rows, rows["core_dividend"].to_numpy(dtype=float) == dividend)
+        registered = jra if rule == "jra" else core
         coverage = _shares(rows, priced)
         n_paid = {p: int((rows["pool"].to_numpy() == p).sum()) for p in CO_PLACER}
         matched = rows.loc[priced].reset_index(drop=True)
@@ -1126,8 +1185,10 @@ def run_coplacer(
             edges=spec["edges"],
             stakes=spec["flat_stakes_yen"],
         )
-        status = "scored" if all(jra[p] >= gate for p in CO_PLACER) else "failed"
-        result = CoplacerResult(table, status, jra, core, coverage, n_paid, Path(), "")
+        status = "scored" if all(registered[p] >= gate for p in CO_PLACER) else "failed"
+        result = CoplacerResult(
+            table, status, rule, registered, jra, core, coverage, n_paid, Path(), ""
+        )
         text = _coplacer_report(result, matched, spec, run, date_from, date_to, gate)
         metrics = []
         for pool in CO_PLACER:
@@ -1343,23 +1404,29 @@ def _coplacer_report(result, rows, spec, run, date_from, date_to, gate) -> str:
             "pool": list(CO_PLACER),
             "paid_combinations": [result.n_paid[p] for p in CO_PLACER],
             "with_votes_and_price": [result.coverage[p] for p in CO_PLACER],
-            "rule_match": [result.rule_match[p] for p in CO_PLACER],
+            "jra_rule_match": [result.jra_match[p] for p in CO_PLACER],
             "core_rule_match": [result.core_match[p] for p in CO_PLACER],
         }
     )
+    registered = {
+        "jra": "1 + (rV - sum W) / (P W_i) (`jra-stake-back-share`)",
+        "core": "r(1 + (V - sum W) / (P W_i)) (`core-stake-back-share`, "
+        "core.pricing.stake_back_share_dividend)",
+    }[result.rule]
     lines = [
         "# Place and Wide capacity with the realised co-placers (N3, #432): private report",
         "",
         *_about(run.family_id, run.spec_hash, VARIANT_COPLACER, date_from, date_to),
         "## The rule against the paid dividends",
         "",
-        "The pre-registered rule: per yen 1 + (rV - sum W) / (P W_i), broken to 10 yen, at "
-        "least 110, V net of refunds, P the race's paying combinations, r the base payout rate "
-        "(boosted days are not adjusted). Every eligible paid combination counts; one without "
-        f"its votes or final price is not reproduced. Gate: each pool's rule_match >= {gate}.",
+        f"The registered rule, per yen: {registered}, broken to 10 yen, at least 110, V net of "
+        "refunds, P the race's paying combinations, r the base payout rate (boosted days are not "
+        "adjusted). jra_rule_match and core_rule_match: the two rules' shares. Every eligible "
+        "paid combination counts; one without its votes or final price is not reproduced. Gate: "
+        f"each pool's share by the registered rule >= {gate}.",
         "",
         *_markdown(check),
-        f"- matched paying combinations without a capacity (A <= 0): {no_cap:,}",
+        f"- matched paying combinations without a capacity (no positive stake or W): {no_cap:,}",
         f"- status: **{result.status}**",
         "",
         "## Capacity of the paying combinations per pool x class group x odds band",
@@ -1542,11 +1609,16 @@ def _last_store_day() -> date:
     return max(days)
 
 
+SPEC_HELP = f"the spec file under config/ ({', '.join(SPECS)})"
+
+
 @pool_depth_app.command("freeze")
-def freeze_command() -> None:
-    """Freeze config/pool_depth.yaml in the japan registry (irreversible; again is a no-op)."""
+def freeze_command(
+    spec_name: Annotated[str, typer.Option("--spec", help=SPEC_HELP)] = SPEC_NAME,
+) -> None:
+    """Freeze config/<spec>.yaml in the japan registry (irreversible; again is a no-op)."""
     try:
-        family, spec = load_spec()
+        family, spec = load_spec(spec_name)
         spec_hash = default_registry(COUNTRY).freeze_family(family, spec)
     except (ValueError, FamilyAlreadyFrozen) as exc:
         typer.echo(f"not frozen: {exc}", err=True)
@@ -1558,26 +1630,38 @@ def freeze_command() -> None:
 def run_command(
     out: Annotated[Path | None, typer.Option(help="report folder, outside the repo")] = None,
     public: Annotated[bool, typer.Option(help="write docs/experiments/pool-depth-japan.md")] = True,
+    spec_name: Annotated[str, typer.Option("--spec", help=SPEC_HELP)] = SPEC_NAME,
 ) -> None:
-    """Run the three registered variants on every development day from the spec's date_from to
-    the store's last race day, record each run and update this family's file and index entry in
-    the committed summary. The freeze is checked before the store is touched; the last race day
-    is looked up inside each recorded attempt. Prints run identities and file names only; exits
-    1 when a run failed."""
-    family, spec = load_spec()
+    """Run the variants the spec registers (SPECS: pool_depth the three, pool_depth_coplacer_v2
+    the co-placer one) on every development day from the spec's date_from to the store's last
+    race day, record each run, rewrite the public report from every run of the study's families
+    and update their files and index entries in the committed summary. The freeze is checked
+    before the store is touched; the last race day is looked up inside each recorded attempt.
+    Prints run identities and file names only; exits 1 when a run failed."""
+    try:
+        _, spec = load_spec(spec_name)
+    except ValueError as exc:
+        typer.echo(f"not run: {exc}", err=True)
+        raise typer.Exit(1) from None
     registry = default_registry(COUNTRY)
     folder = paths.reports_dir() if out is None else paths.outside_repo(out, what="out")
     date_from = date.fromisoformat(spec["date_from"])
     try:
-        _preflight(registry, date_from, None, folder)
+        _preflight(registry, date_from, None, folder, spec_name)
     except (NotPreRegistered, LicensedOutputInRepo, ValueError) as exc:
         typer.echo(f"not run: {exc}", err=True)
         raise typer.Exit(1) from None
-    depth, reports, failed = None, {}, False
-    for variant, runner in ((VARIANT_DEPTH, run_depth), (VARIANT_COPLACER, run_coplacer),
-                            (VARIANT_EXACTA, run_exacta_impact)):  # fmt: skip
+    runners = {
+        VARIANT_DEPTH: run_depth,
+        VARIANT_COPLACER: functools.partial(run_coplacer, spec_name=spec_name),
+        VARIANT_EXACTA: run_exacta_impact,
+    }
+    reports, failed = {}, False
+    for variant in SPECS[spec_name]:
         try:
-            result = runner(date_from=date_from, date_to=None, out_dir=folder, registry=registry)
+            result = runners[variant](
+                date_from=date_from, date_to=None, out_dir=folder, registry=registry
+            )
         except (NotPreRegistered, RecordRefused) as exc:
             typer.echo(f"{variant}: not run ({exc})", err=True)
             raise typer.Exit(1) from None
@@ -1589,16 +1673,33 @@ def run_command(
         failed = failed or status == "failed"
         reports[result.run_id] = result.report_path.name
         typer.echo(f"{variant}: {status} run_id={result.run_id} report={result.report_path.name}")
-        depth = result if variant == VARIANT_DEPTH else depth
+    families = [load_spec(name)[0] for name in SPECS]
+    depth = _latest_depth(registry, reports)
     if public and depth is not None:
         doc = env.repo_root() / "docs" / "experiments" / "pool-depth-japan.md"
-        runs = family_runs(registry, [family], reports)
+        runs = family_runs(registry, families, reports)
         write_report(doc, render_public_report(depth, variants=runs), sources=())
         typer.echo(f"wrote {doc.relative_to(env.repo_root())}")
-    update_summary(registry, [family], summary_dir(COUNTRY))
-    typer.echo(f"updated the committed summary of {family}")
+    update_summary(registry, families, summary_dir(COUNTRY))
+    typer.echo(f"updated the committed summary of {', '.join(families)}")
     if failed:
         raise typer.Exit(1)
+
+
+def _latest_depth(registry: Registry, reports: Mapping[str, str]) -> DepthResult | None:
+    """The study's latest scored depth run, as the public report names it (no table), or None:
+    its private report is the one `reports` names, else `pool-depth-japan-<id16>.md`."""
+    family, _ = load_spec(SPEC_NAME)
+    scored = [
+        r for r in registry.records(family) if r.variant == VARIANT_DEPTH and r.status == "scored"
+    ]
+    if not scored:
+        return None
+    record = scored[-1]
+    run_id = _run_id(record)
+    report = Path(reports.get(run_id, f"pool-depth-japan-{run_id[:16]}.md"))
+    days = [date.fromisoformat(record.params[k]) for k in ("date_from", "date_to")]
+    return DepthResult(pd.DataFrame(), report, family, record.params["spec_hash"], run_id, *days)
 
 
 def family_runs(
