@@ -24,6 +24,7 @@
 | `japan/131-exacta-category-b3-v2` | E1″: B3 Harville calibration, reported | λ2 {`full_development`, 1} × 3 × 14 (84) | `493253276d7a803446716325353bb6c18e01409868dc6dbec53eec09a9b4912f` |
 | `japan/131-exacta-logscore-v2` | C: log-score total | λ2 {`full_development`, 1} (2) | `084244a2f3cb69154da1dc97615044b58e0cf534f8077ed1cbd459a98e3650bd` |
 | `japan/131-exacta-rule-v3` | E2: ratio-cut rules | 2 categories × 4 cuts × 2 scopes (16) | `9104e173371668a34b4594b6e4970546649b886cdccc4e726ec9749188701f0d` |
+| `japan/282-exacta-fav-first-avoidance-v1` | L: fav_first loss avoidance (#282, section 5) | 4 cuts × 2 scopes (8) | `8ae769a7a9767f962d100d959b6567f09b8f8e154c282978d19fa018ece0434f` |
 
 `japan/131-exacta-rule-v3` (frozen 2026-11-27) supersedes `japan/131-exacta-rule-v2` (hash
 `2d6678f59291476bf3d3028b2818bc00e631dea516bc0f01276ac4e0af8cdb75`, frozen 2026-11-27, not
@@ -199,8 +200,39 @@ a segment.
 - **History cannot score E2:** only the winner's `q_c` is known, so the selection set is
   unobservable. E2 is frozen now and scored only on #130-logged development days, once there are
   at least 100 meetings. Until then it is reported as "not yet scorable".
-- Buying fav_first is not in E2. A loss-avoidance rule (D18: "do not buy fav_first when
-  r_c(t) is above a cut") becomes a follow-up ticket.
+- Buying fav_first is not in E2. The loss-avoidance rule (D18: "do not buy fav_first when
+  r_c(t) is above a cut") is family L, below (#282).
+
+**Family L, fav_first loss avoidance** (D18; `japan/282-exacta-fav-first-avoidance-v1`, #282).
+Approved as drafted by the owner on #282, 2026-11-26, and reframed 2026-11-27 (no 100-meeting
+gate; both sets are leaderboard rows). Frozen 2026-11-27, before any scored run, with hash
+`8ae769a7a9767f962d100d959b6567f09b8f8e154c282978d19fa018ece0434f` (the sha256 of the sorted,
+compact JSON of `exacta_loss_avoidance.family_specs()`).
+
+- Rule: at T−2, skip a fav_first exacta c when `r_c(t) = q_c(t)/p_c(t) > k`, strictly above the
+  cut. A ratio equal to k, or a `q_c` not identified (at or below ¥110), is kept: the rule skips
+  only on evidence that the pool overloads c. `q_c(t)` and `p_c(t)` are E2's (exacta board at t,
+  Harville on the Win board at t, λ2 = #115's full-development fit). The favourite and the fav_first
+  combinations come from the T−2 boards; a favourite from final odds is look-ahead.
+- Cuts k: 1.1, 1.2, 1.3, 1.5. Scopes: all races, and the headline cell (favourite's Win odds at
+  T−2 ≥ 3.0 and less popular). 4 cuts × 2 scopes = **8 members, family size 8**.
+- "Less popular" on logged days: the lower tertile (`ceil(n/3)` of the day's `n` logged races, all
+  venues together) of the exacta pool total **at T−2**, within the day. Section 6 does not say
+  which instant; T−2 is used so that no member's scope reads a total published after its
+  selection time.
+- Comparator: buy every fav_first combination of the T−2 exacta board at ¥100, on the same races.
+- Metric: return per ¥ at the final dividend (takeout and breakage in; no own impact, section 7's
+  ledger assumption) of the kept set minus the comparator's, with a meeting-cluster bootstrap
+  (95% one-sided bounds in each direction, `n_boot` 10,000, seed 282) and a max-statistic over the
+  8 members for `adj_lo` and `adj_hi`. The skipped set (the combinations the rule would not buy)
+  is a row of its own with the same metric. Nothing is dropped.
+- Data and exclusions: #130-logged development days only, a holdout day's race dropped before
+  anything else of it is read; E2's exclusions, plus a board with no fav_first combination. **No
+  meeting minimum**: every run scores the meetings logged, with n and the interval; none logged
+  gives an n = 0 record per member.
+- One registry record per member (8), carrying the kept and the skipped metrics. Family L is not in
+  E1's or E2's max test. Code: `exacta_loss_avoidance.py`
+  (`python -m horsetrack.countries.japan.research.exacta_loss_avoidance {freeze|score|summary}`).
 
 ## 6. Segments (marginal cells, not crossed, plus one pre-stated cross)
 
