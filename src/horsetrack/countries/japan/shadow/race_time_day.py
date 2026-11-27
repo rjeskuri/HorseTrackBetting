@@ -16,8 +16,9 @@
 - `load_speed_model(race_date)`: #305's model (`studies.speed_run`: its race table, its keys and
   its primary t5 error) fitted on the store's races strictly before race_date, holdout days
   dropped as speed_run drops them; the holdout is never opened. `load_day_races(race_date)`: the
-  store's races of the day with the model's keys and their top-3 time (NaN until resulted); on a
-  holdout day no runner (outcome) is read, so every time is NaN.
+  store's races of the day with the model's keys and their top-3 time (NaN until resulted).
+- D14: on a Japan holdout day `run_race_time_day`, `load_day_races` and the command raise
+  `HoldoutDayError` before any read (card, sidecar or store) and write no log.
 
 Seams for the command, looked up at call time: `utc_now`, `sleep`, `load_speed_model`,
 `load_day_races`. Nothing is adopted (D16).
@@ -44,6 +45,7 @@ from horsetrack.core.store.tables import read_table
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board.snapshot import jra_day_dir, load_decision_grid
 from horsetrack.countries.japan.models.speed import SpeedModel, SpeedSpec
+from horsetrack.countries.japan.models.v0.nowcast import HoldoutDayError
 from horsetrack.countries.japan.shadow.race_time import coverage, record_race
 from horsetrack.countries.japan.studies import speed_run
 
@@ -115,6 +117,12 @@ def _card_version(race_date: date, card: pd.DataFrame) -> str:
     return f"card:{race_date.isoformat()}:{hashlib.sha256(text.encode()).hexdigest()[:16]}"
 
 
+def _refuse_holdout(race_date: date) -> None:
+    """D14: a holdout day is fully locked, outcomes and odds alike; refuse before any read."""
+    if is_holdout_day(COUNTRY, race_date):
+        raise HoldoutDayError(f"{race_date.isoformat()} is a {COUNTRY} holdout day (D14)")
+
+
 def run_race_time_day(
     race_date: date,
     *,
@@ -127,6 +135,7 @@ def run_race_time_day(
     day_dir: Path | None = None,
 ) -> RaceTimeRun:
     """Record every race of the day once (see the module docstring)."""
+    _refuse_holdout(race_date)
     folder = jra_day_dir(race_date, day_dir)
     path = race_time_log_path(race_date)
     primary = timedelta(minutes=load_decision_grid().primary)
@@ -197,16 +206,16 @@ def load_speed_model(race_date: date) -> tuple[SpeedModel, str]:
 
 def load_day_races(race_date: date) -> pd.DataFrame:
     """The store's races of the day: race_id, venue, the model's keys and top3_time_s."""
+    _refuse_holdout(race_date)
     races = read_table(SOURCE, "races", columns=list(speed_run.RACE_COLUMNS))
     races = races.loc[(speed_run._race_days(races["race_date"]) == race_date).to_numpy()]
     if races.empty:
         raise LookupError(f"the {SOURCE} store has no race on {race_date.isoformat()}")
     top3 = pd.Series(dtype=float)
-    if not is_holdout_day(COUNTRY, race_date):  # a holdout day's outcomes are never read
-        runners = read_table(SOURCE, "runners", columns=list(speed_run.RUNNER_COLUMNS))
-        runners = runners.loc[runners["race_id"].isin(races["race_id"])]
-        if not runners.empty:
-            top3, _ = speed_run._mean_placed_1_3(runners)
+    runners = read_table(SOURCE, "runners", columns=list(speed_run.RUNNER_COLUMNS))
+    runners = runners.loc[runners["race_id"].isin(races["race_id"])]
+    if not runners.empty:
+        top3, _ = speed_run._mean_placed_1_3(runners)
     out = pd.DataFrame({"race_id": races["race_id"].to_numpy(), "venue": races["venue"].to_numpy()})
     for key, column in speed_run.KEYS.items():
         values = races[column].astype(object)
@@ -232,6 +241,7 @@ def race_time_command(
         typer.echo(f"ERROR --date {race_date!r} is not a YYYY-MM-DD date", err=True)
         raise typer.Exit(EXIT_ERROR) from exc
     try:
+        _refuse_holdout(day)
         model, version = load_speed_model(day)
         typer.echo(f"race-time {day.isoformat()} model={version} replay={replay}")
         run = run_race_time_day(

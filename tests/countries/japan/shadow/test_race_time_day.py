@@ -30,6 +30,12 @@ Contract pinned here (`horsetrack.countries.japan.shadow.race_time_day`; the cod
   `load_speed_model(race_date) -> (SpeedModel, model_version)` and `load_day_races(race_date) ->
   DataFrame` (the `races()` frame). It prints the coverage, one line per venue naming the venue
   and its counts; exit 0.
+- D14 (holdout days fully locked, outcomes and odds paths alike): on a Japan holdout day
+  (`core.eval.holdout.is_holdout_day("japan", d)`) `run_race_time_day` (prospective and replay)
+  and `load_day_races` raise an exception whose message names the date and the holdout, before
+  any read: no `races()` call, no sidecar read, no store table read, no log written. The command
+  exits non-zero with that message and writes no log. Development days (also those on or after
+  the holdout start) run as before.
 
 Every race, fit, sidecar and clock is synthetic; the fake sleep only moves the fake clock.
 """
@@ -398,3 +404,219 @@ def test_the_race_time_command_runs_a_day_and_a_replay(model, monkeypatch):
         for venue in VENUES:
             lines = [line for line in out.splitlines() if venue in line]
             assert any(re.search(rf"\b{SCHEDULED[venue]}\b", line) for line in lines), (venue, out)
+
+
+# --------------------------------------------------------------------------- D14: the holdout
+
+HOLDOUT_YAML = Path(__file__).parents[4] / "src/horsetrack/countries/japan/config/holdout.yaml"
+
+
+def _first_days() -> tuple[date, date]:
+    """(the first holdout day, the first development day) on or after the committed start, by
+    the pre-registered rule (sha256 of "<seed>:<date>", even means holdout), not by the module."""
+    import hashlib
+
+    import yaml
+
+    section = yaml.safe_load(HOLDOUT_YAML.read_text(encoding="utf-8"))["holdout"]
+    start = section["start"]
+    start = start if isinstance(start, date) else date.fromisoformat(str(start))
+    held = dev = None
+    for k in range(60):
+        d = start + timedelta(days=k)
+        digest = hashlib.sha256(f"{section['seed']}:{d.isoformat()}".encode()).hexdigest()
+        if int(digest, 16) % 2 == 0:
+            held = held or d
+        else:
+            dev = dev or d
+    assert held is not None and dev is not None and DAY < start
+    return held, dev
+
+
+HOLD_DAY, DEV_AFTER_START = _first_days()
+
+
+class Leak(AssertionError):
+    """A read that a holdout day forbids (its text never says holdout)."""
+
+
+def _says_holdout(text: str, day: date) -> bool:
+    return day.isoformat() in text and "holdout" in text.lower()
+
+
+def _tripwires(monkeypatch) -> list[str]:
+    """Every sidecar and store read is recorded and raises Leak; the holdout day's results
+    sidecars are directories, so any other way of opening them fails too."""
+    from horsetrack.core.store import tables
+
+    calls: list[str] = []
+
+    def tripwire(name):
+        def read(*args, **kwargs):
+            calls.append(name)
+            raise Leak(f"{name} was read")
+
+        return read
+
+    for name in ("read_published", "read_unpublished", "read_post_times", "_read_results"):
+        if hasattr(odds_log, name):
+            monkeypatch.setattr(odds_log, name, tripwire(f"odds_log.{name}"))
+    monkeypatch.setattr(tables, "read_table", tripwire("tables.read_table"))
+    monkeypatch.setattr(race_time_day, "read_table", tripwire("read_table"), raising=False)
+    for venue in VENUES:
+        folder = paths.odds_snapshot_path("jra", HOLD_DAY.isoformat(), venue).parent
+        (folder / f"{venue}.results.json").mkdir(parents=True, exist_ok=True)
+    return calls
+
+
+def _one_race_card(day: date) -> pd.DataFrame:
+    return pd.DataFrame(
+        [{"race_id": rid("TOK", 1, day), "venue": "TOK", **keys_of(T16), "top3_time_s": np.nan}]
+    )
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["prospective", "replay"])
+def test_run_race_time_day_refuses_a_holdout_day_before_any_read(model, monkeypatch, replay):
+    """D14: on a holdout day the runner raises, naming the date and the holdout, before it reads
+    the card, a sidecar or the store, and writes no log. A development day on or after the
+    holdout start still runs (one race, no sidecar: recorded as skipped)."""
+    from horsetrack.core.eval.holdout import is_holdout_day
+
+    assert is_holdout_day("japan", HOLD_DAY) and not is_holdout_day("japan", DEV_AFTER_START)
+    dev = race_time_day.run_race_time_day(
+        DEV_AFTER_START,
+        model=model,
+        model_version=MV,
+        races=lambda: _one_race_card(DEV_AFTER_START),
+        now=FakeTime(at(0, 30, day=DEV_AFTER_START)).now,
+        sleep=no_sleep,
+        replay=replay,
+    )
+    assert [(r["race_id"], r["status"]) for r in dev.records] == [
+        (rid("TOK", 1, DEV_AFTER_START), "skipped")
+    ]
+
+    leaks = _tripwires(monkeypatch)
+    card_reads: list[int] = []
+
+    def races():
+        card_reads.append(1)
+        raise Leak("races() was read")
+
+    with pytest.raises(Exception) as info:  # noqa: PT011 - the type is the coder's; the text is pinned
+        race_time_day.run_race_time_day(
+            HOLD_DAY,
+            model=model,
+            model_version=MV,
+            races=races,
+            now=FakeTime(at(0, 30, day=HOLD_DAY)).now,
+            sleep=no_sleep,
+            replay=replay,
+        )
+    assert not isinstance(info.value, Leak), info.value
+    assert _says_holdout(str(info.value), HOLD_DAY), str(info.value)
+    assert card_reads == [] and leaks == []
+    assert not race_time_day.race_time_log_path(HOLD_DAY).exists()
+
+
+def _store(days: tuple[date, ...]) -> dict[str, pd.DataFrame]:
+    """A synthetic JRA store: two races a day; runners placed 1, 2, 3, 3 (a dead heat for third),
+    their times varying by day and race."""
+    races, runners = [], []
+    for d_i, day in enumerate(days):
+        for no, (venue, surface, dist) in enumerate(
+            (("TOK", "turf", 1600), ("KYO", "dirt", 1800)), 1
+        ):
+            race_id = rid(venue, no, day)
+            races.append(
+                {
+                    "race_id": race_id,
+                    "meeting_id": f"{day.isoformat()}:{venue}",
+                    "race_date": day.isoformat(),
+                    "venue": venue,
+                    "surface": surface,
+                    "distance_m": dist,
+                    "course_config": "outer",
+                    "rail_setting": "B",
+                    "race_class": 3,
+                    "post_time_local": f"1{no}:40",
+                }
+            )
+            base = dist / 16.6 + d_i + 0.3 * no
+            for pos, t in (
+                (1, base),
+                (2, base + 0.2),
+                (3, base + 0.5),
+                (3, base + 0.9),
+                (4, base + 2),
+            ):
+                runners.append(
+                    {"race_id": race_id, "finish_pos": pos, "finish_time_s": t, "race_date": day}
+                )
+    return {"races": pd.DataFrame(races), "runners": pd.DataFrame(runners)}
+
+
+def test_load_day_races_refuses_a_holdout_day_before_any_store_read(monkeypatch):
+    """D14: load_day_races on a holdout day raises, naming the date and the holdout, and reads no
+    store table (no races, no runners). On a development day on or after the start it returns
+    the day's races with their top-3 times, (1st + 2nd + mean of the 3rds) / 3."""
+    from horsetrack.core.store import tables
+
+    store = _store((DEV_AFTER_START, HOLD_DAY))
+
+    def fake_read_table(source, name, columns=None):
+        frame = store[name]
+        return frame if columns is None else frame.loc[:, list(columns)]
+
+    monkeypatch.setattr(tables, "read_table", fake_read_table)
+    monkeypatch.setattr(race_time_day, "read_table", fake_read_table, raising=False)
+    got = race_time_day.load_day_races(DEV_AFTER_START)
+    assert sorted(got["race_id"]) == sorted(
+        [rid("TOK", 1, DEV_AFTER_START), rid("KYO", 2, DEV_AFTER_START)]
+    )
+    want = {}
+    for race_id, group in store["runners"].groupby("race_id"):
+        t = dict(zip(group["finish_pos"], group["finish_time_s"], strict=False))
+        thirds = group.loc[group["finish_pos"] == 3, "finish_time_s"].mean()
+        want[race_id] = (t[1] + t[2] + thirds) / 3
+    for row in got.to_dict("records"):
+        assert row["top3_time_s"] == pytest.approx(want[row["race_id"]], abs=1e-9), row
+        assert row["track"] == row["venue"]
+
+    leaks = _tripwires(monkeypatch)
+    with pytest.raises(Exception) as info:  # noqa: PT011 - the type is the coder's; the text is pinned
+        race_time_day.load_day_races(HOLD_DAY)
+    assert not isinstance(info.value, Leak), info.value
+    assert _says_holdout(str(info.value), HOLD_DAY), str(info.value)
+    assert leaks == []
+
+
+def test_the_race_time_command_refuses_a_holdout_day(model, monkeypatch):
+    """D14: `japan race-time --date <holdout day>` (and with --replay) exits non-zero with a
+    message naming the date and the holdout, reads no card, sidecar or store, and writes no
+    log."""
+    leaks = _tripwires(monkeypatch)
+    card_reads: list[date] = []
+
+    def load_day_races(day):
+        card_reads.append(day)
+        raise Leak("load_day_races was called")
+
+    clock = FakeTime(at(0, 30, day=HOLD_DAY))
+    monkeypatch.setattr(race_time_day, "utc_now", clock.now)
+    monkeypatch.setattr(race_time_day, "sleep", no_sleep)
+    monkeypatch.setattr(race_time_day, "load_speed_model", lambda day: (model, MV))
+    monkeypatch.setattr(race_time_day, "load_day_races", load_day_races)
+    from horsetrack.cli import app
+
+    for extra in ([], ["--replay"]):
+        result = CliRunner().invoke(
+            app, ["japan", "race-time", "--date", HOLD_DAY.isoformat(), *extra]
+        )
+        text = ANSI.sub("", result.output)  # stdout and stderr together
+        assert result.exit_code != 0, text
+        assert not isinstance(result.exception, Leak), text
+        # one line of the message names both the date and the holdout
+        assert any(_says_holdout(line, HOLD_DAY) for line in text.splitlines()), text
+    assert card_reads == [] and leaks == []
+    assert not race_time_day.race_time_log_path(HOLD_DAY).exists()
