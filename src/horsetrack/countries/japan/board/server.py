@@ -20,11 +20,13 @@ bind is 127.0.0.1; the board has no login.
 
 With `--tunnel` (ticket #505) the server is exposed to a phone through a cloudflared quick tunnel
 (`tunnel.quick_tunnel`), whose URL is public, so every path needs an access token: a fresh one per
-run (`write_access_token`, kept in $HORSETRACK_DATA_DIR/board/access-token, mode 0600), given as
-`?t=<token>` on first load, after which an HttpOnly, SameSite=Strict cookie (Secure behind https)
-carries it on the page's fetches. Missing or wrong, it is the empty 404 of an unknown path; the
-check holds for 127.0.0.1 too, since the tunnel connects from there. The phone URL is printed once
-and the token appears nowhere else. Without `--tunnel` nothing changes. docs/specs/board-feed.md.
+run, held in memory until the server is bound and the tunnel up, then kept in
+$HORSETRACK_DATA_DIR/board/access-token (`write_access_token`, mode 0600; a start that fails leaves
+the file as it was), given as `?t=<token>` on first load, after which an HttpOnly, SameSite=Strict
+cookie (Secure behind https) carries it on the page's fetches. Missing or wrong, it is the empty
+404 of an unknown path; the check holds for 127.0.0.1 too, since the tunnel connects from there.
+The phone URL is printed once and the token appears nowhere else. Without `--tunnel` nothing
+changes. docs/specs/board-feed.md.
 
     horsetrack japan board-serve --date 2026-11-29 [--port 8765] [--host 127.0.0.1] [--page P]
         [--from-vm ALIAS] [--tunnel]
@@ -193,13 +195,23 @@ def _etag_matches(header: str | None, etag: str) -> bool:
     return etag in asked or "*" in asked
 
 
-def write_access_token() -> str:
-    """A fresh access token, written alone to $HORSETRACK_DATA_DIR/board/access-token with mode
-    0600 (replacing the last run's) and returned."""
-    path = paths.data_dir() / "board" / "access-token"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    token = secrets.token_urlsafe(24)
-    fd, tmp = tempfile.mkstemp(prefix=".access-token.", dir=path.parent)
+def _fresh_token() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def write_access_token(token: str | None = None) -> str:
+    """`token` (URL-safe characters), or a fresh one when None, written alone to
+    $HORSETRACK_DATA_DIR/board/access-token with mode 0600 (replacing the last run's) and
+    returned. The `board/` folder is resolved, a symlink followed, and DataDirInsideRepo raised
+    before any file is created when it lies in the repository."""
+    if token is None:
+        token = _fresh_token()
+    elif not _TOKEN_CHARS.fullmatch(token):
+        raise ValueError("token: a non-empty string of [A-Za-z0-9_-], or None for a fresh one")
+    folder = paths.outside_repo(paths.data_dir() / "board", what=f"{paths.DATA_DIR_VAR}/board")
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "access-token"
+    fd, tmp = tempfile.mkstemp(prefix=".access-token.", dir=folder)
     try:
         with os.fdopen(fd, "w", encoding="ascii") as fh:
             os.fchmod(fh.fileno(), 0o600)
@@ -413,16 +425,21 @@ def board_serve_command(
         typer.echo(f"error: shadow models: {' '.join(str(exc).split())[:300]}", err=True)
         raise typer.Exit(1) from exc
     fits = ",".join(f"{k}={v}" for k, v in models.ids.items()) if models else "none (values null)"
-    token = None
-    if tunnel:
-        try:
-            token = write_access_token()
-        except OSError as exc:
-            typer.echo(f"error: access token: {exc}", err=True)
-            raise typer.Exit(1) from exc
-    server = make_server(
-        day, host=host, port=port, page_path=page_path, models=models, day_dir=day_dir, token=token
-    )
+    # in memory until the tunnel is up: a start that fails keeps the running one's token file
+    token = _fresh_token() if tunnel else None
+    try:
+        server = make_server(
+            day,
+            host=host,
+            port=port,
+            page_path=page_path,
+            models=models,
+            day_dir=day_dir,
+            token=token,
+        )
+    except OSError as exc:  # the port is taken, most often by an earlier board-serve
+        typer.echo(f"error: cannot listen on {host}:{port}: {exc}", err=True)
+        raise typer.Exit(1) from exc
     bound_host, bound_port = server.server_address[:2]
     typer.echo(f"serving the board of {day} on http://{bound_host}:{bound_port}/")
     typer.echo(f"shadow page on http://{bound_host}:{bound_port}/shadow, models={fits}")
@@ -434,6 +451,11 @@ def board_serve_command(
                 for sig in (signal.SIGINT, signal.SIGTERM):
                     stack.callback(signal.signal, sig, signal.signal(sig, _interrupt))
                 url = stack.enter_context(quick_tunnel(bound_port))
+                try:
+                    write_access_token(token)
+                except (OSError, paths.DataDirInsideRepo) as exc:
+                    typer.echo(f"error: access token: {exc}", err=True)
+                    raise typer.Exit(1) from exc
                 typer.echo(f"open on the phone: {url}/shadow?t={token}")
             server.serve_forever()
     except KeyboardInterrupt:

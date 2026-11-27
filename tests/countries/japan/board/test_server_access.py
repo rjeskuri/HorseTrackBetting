@@ -3,12 +3,15 @@
 Contract pinned here (`horsetrack.countries.japan.board.server`):
 
 The access token
-- `write_access_token() -> str`: a fresh `secrets.token_urlsafe(24)` (32 characters of
-  [A-Za-z0-9_-]) on every call, written alone (a trailing newline allowed) to `paths.data_dir() /
+- `write_access_token(token: str | None = None) -> str`: writes `token` as given, or, when None (the
+  default), a fresh `secrets.token_urlsafe(24)` (32 characters of [A-Za-z0-9_-]) on every call, and
+  returns what it wrote. It is written alone (a trailing newline allowed) to `paths.data_dir() /
   "board" / "access-token"`, the `board/` folder created when missing, with mode 0600 whatever the
   umask and whatever mode an earlier file had; it replaces the earlier token. A data dir inside the
-  repository raises `paths.DataDirInsideRepo` and nothing is written. No other file is left in
-  `board/`.
+  repository raises `paths.DataDirInsideRepo` and nothing is written. So does a `board/` that
+  resolves inside the repository (a symlink into the checkout): the token folder is resolved and
+  checked before any file, temporary or final, is created, and nothing is written there. No other
+  file is left in `board/`.
 
 The gate: `make_server(..., token: str | None = None)`
 - `token=None`, the default: today's behaviour, unchanged. No token is needed, no cookie is set and
@@ -38,33 +41,45 @@ Headers
 
 The tunnel
 - `parse_tunnel_url(output: str) -> str | None`: the quick-tunnel URL
-  `https://<name>.trycloudflare.com` (no trailing slash) in cloudflared's output, else None.
-  `api.trycloudflare.com`, which cloudflared's error lines name, and the other Cloudflare URLs of
-  its banner are never it.
+  `https://<name>.trycloudflare.com` (no trailing slash) in cloudflared's output, else None, under
+  either banner ("Your quick Tunnel has been created!" or "Your protected quick Tunnel has been
+  created!"). `api.trycloudflare.com`, which cloudflared's error lines name, and the other
+  Cloudflare URLs of its banner are never it.
 - `quick_tunnel(port: int, *, timeout_s: float = 30.0)`, a context manager. On entry it finds
   `cloudflared` on PATH at call time, starts `cloudflared tunnel --url http://127.0.0.1:<port>
   --no-autoupdate` (exactly that argv after the executable), reads the child's output (cloudflared
-  prints its banner on stderr) until `parse_tunnel_url` finds the URL, and yields the URL. It keeps
-  draining the child's output afterwards, so cloudflared never blocks on a full pipe. `TunnelError`
-  (exported by the module, its message naming cloudflared) when cloudflared is not on PATH, when the
-  child exits before printing a URL, or when no URL came within `timeout_s`; in each case no child
-  is left running. On exit, normal or by an exception (KeyboardInterrupt included, which
-  propagates), the child is terminated and, if it is still running a few seconds later (at most 5),
-  killed, so the exit takes under 10 s even for a child that ignores SIGTERM.
+  prints its banner on stderr) until `parse_tunnel_url` finds the URL and then on until the first
+  registered connection, a line holding `Registered tunnel connection`, and only then yields the
+  URL. `Unregistered tunnel connection`, `Registered session`, `Register tunnel error from server
+  side` and the other lines of a failing connection are not a registration. It keeps draining the
+  child's output afterwards, so cloudflared never blocks on a full pipe. `TunnelError` (exported by
+  the module, its message naming cloudflared) when cloudflared is not on PATH, when the child exits
+  before printing a URL or before a connection registered, or when the URL and a registered
+  connection did not both come within `timeout_s`; in each case no child is left running. On exit,
+  normal or by an exception (KeyboardInterrupt included, which propagates), the child is terminated
+  and, if it is still running a few seconds later (at most 5), killed, so the exit takes under 10 s
+  even for a child that ignores SIGTERM.
 
 The command
-- `horsetrack japan board-serve --date D --tunnel [--port N] [--page P]` writes a fresh token
-  (`write_access_token`), serves with `make_server(..., token=<it>)`, opens `quick_tunnel` on the
-  bound port (so `--port 0` works) and prints exactly one line holding the token: the phone URL
-  `https://<name>.trycloudflare.com/shadow?t=<token>` (path `/shadow`, `/` or empty, query only `t`;
-  stdout or stderr). The token appears nowhere else in its stdout or stderr, nor in any file under
-  the data dir but the token file. On SIGINT or SIGTERM it stops within 15 s and the cloudflared
-  child is gone. Without cloudflared on PATH it exits non-zero, naming cloudflared on stderr.
-  Without `--tunnel` nothing changes: no token, no token file, no cloudflared started.
+- `horsetrack japan board-serve --date D --tunnel [--port N] [--page P]` makes a token in memory,
+  serves with `make_server(..., token=<it>)`, opens `quick_tunnel` on the bound port (so `--port 0`
+  works), and only once the server is bound and the tunnel is up (a connection registered) writes
+  the token to the token file (`write_access_token`), before it prints exactly one line holding the
+  token: the phone URL `https://<name>.trycloudflare.com/shadow?t=<token>` (path `/shadow`, `/` or
+  empty, query only `t`; stdout or stderr). The token file then holds the token of that URL. The
+  token appears nowhere else in its stdout or stderr, nor in any file under the data dir but the
+  token file. On SIGINT or SIGTERM it stops within 15 s and the cloudflared child is gone. A start
+  that fails, the port taken, cloudflared missing from PATH, or cloudflared exiting before its URL
+  or before a connection registered, exits non-zero, prints no phone URL, leaves no cloudflared
+  running and leaves the token file as it was: an earlier one byte for byte, none when there was
+  none. Without cloudflared on PATH it names cloudflared on stderr. Without `--tunnel` nothing
+  changes: no token, no token file, no cloudflared started.
 
 No real cloudflared ever runs: a fake `cloudflared` (a sh wrapper exec-ing this interpreter on a
 small script) is the only one on a PATH of it and /usr/bin:/bin. It records its argv and pid, prints
-a realistic quick-tunnel banner on stderr and sleeps. Ports are 0 or unused; no external network.
+a realistic quick-tunnel banner and, by default, a registered connection on stderr, then sleeps;
+a test can make it print more later, pause, leave a marker file, or exit. Ports are 0, unused, or
+held by the test; no external network.
 """
 
 from __future__ import annotations
@@ -549,6 +564,27 @@ def test_write_access_token_tightens_and_replaces_an_earlier_file(data_dir):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_write_access_token_writes_a_given_token_as_it_is(data_dir):
+    path = token_file(data_dir)
+    path.parent.mkdir()
+    path.write_text("old-token-0000000000000000000000\n", "utf-8")
+    path.chmod(0o644)
+    old_umask = os.umask(0)
+    try:
+        given = ["Zq-_0aB9xY-_kLmN0pQrStUvWx-_12Ab", fresh_token(), fresh_token()]
+        for token in given:
+            assert server_module().write_access_token(token) == token
+
+            assert path.read_text("utf-8").strip() == token
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600, oct(path.stat().st_mode)
+        fresh = server_module().write_access_token(None)
+    finally:
+        os.umask(old_umask)
+    assert TOKEN_RE.fullmatch(fresh) and fresh not in given, fresh
+    assert path.read_text("utf-8").strip() == fresh
+    assert sorted(p.name for p in path.parent.iterdir()) == ["access-token"]
+
+
 def test_the_token_file_is_never_written_inside_the_repo(monkeypatch):
     inside = env.repo_root() / f".token-test-{secrets.token_hex(4)}"
     monkeypatch.setenv(paths.DATA_DIR_VAR, str(inside))
@@ -560,14 +596,55 @@ def test_the_token_file_is_never_written_inside_the_repo(monkeypatch):
         shutil.rmtree(inside, ignore_errors=True)
 
 
+def test_a_board_folder_linked_into_the_repo_is_refused(data_dir):
+    root = env.repo_root().resolve()
+    target = root / f".token-link-test-{secrets.token_hex(4)}"
+    target.mkdir()
+    try:
+        assert target.resolve().is_relative_to(root) and not data_dir.resolve().is_relative_to(root)
+        (data_dir / "board").symlink_to(target, target_is_directory=True)
+
+        write = server_module().write_access_token
+        for call in (lambda: write(), lambda: write(fresh_token())):  # generated, then given
+            with pytest.raises(paths.DataDirInsideRepo):
+                call()
+
+            assert sorted(p.name for p in target.iterdir()) == [], "a file was written in the repo"
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+    assert not target.exists()
+
+
 # ---------------------------------------------------------------- cloudflared's output
 
 STAMP = "2026-11-28T00:41:07Z"
 
 
-def banner(name: str | None, port: int = 8765) -> str:
-    """cloudflared's quick-tunnel banner as it prints it on stderr; without the URL box when
-    `name` is None."""
+REGISTERED = (
+    f"{STAMP} INF Registered tunnel connection connIndex=0 "
+    "connection=0c5f3e8a-7d1b-4c2e-8f90-1a2b3c4d5e6f event=0 ip=198.41.200.13 "
+    "location=nrt01 protocol=quic\n"
+)
+# a connection that does not come up: none of these lines is a registered connection
+NOT_REGISTERED = (
+    f'{STAMP} ERR Unable to establish connection with Cloudflare edge error="TLS handshake '
+    'timeout" connIndex=0 event=0 ip=198.41.200.13\n'
+    f'{STAMP} ERR Register tunnel error from server side error="Unauthorized: Failed to get '
+    'tunnel" connIndex=0 event=0 ip=198.41.200.13\n'
+    f"{STAMP} DBG Registered session sessionID=4f2a9c1e0b7d4e6a8c3f5b1d2e9a7c40\n"
+    f"{STAMP} INF Unregistered tunnel connection connIndex=0 event=0 ip=198.41.200.13\n"
+    f'{STAMP} ERR Serve tunnel error error="connection with edge closed" connIndex=0 event=0 '
+    "ip=198.41.200.13\n"
+    f"{STAMP} INF Retrying connection in up to 2s connIndex=0 event=0 ip=198.41.200.13\n"
+)
+
+
+def banner(
+    name: str | None, port: int = 8765, *, registered: bool = True, protected: bool = False
+) -> str:
+    """cloudflared's quick-tunnel banner as it prints it on stderr, ending on its first registered
+    connection unless `registered` is False; without the URL box when `name` is None; the
+    protected-tunnel wording of the box when `protected`."""
     lines = [
         f"{STAMP} INF Thank you for trying Cloudflare Tunnel. Doing so, without a Cloudflare "
         "account, is a quick way to experiment and try it out. However, be aware that these "
@@ -579,9 +656,9 @@ def banner(name: str | None, port: int = 8765) -> str:
         f"{STAMP} INF Requesting new quick Tunnel on trycloudflare.com...",
     ]
     if name is not None:
-        width = 92
-        visit = "Your quick Tunnel has been created! Visit it at (it may take some time to be "
-        visit += "reachable):"
+        visit = "Your protected quick Tunnel" if protected else "Your quick Tunnel"
+        visit += " has been created! Visit it at (it may take some time to be reachable):"
+        width = max(92, len(visit) + 4)
         url = f"https://{name}.trycloudflare.com"
         lines += [
             f"{STAMP} INF +{'-' * width}+",
@@ -605,11 +682,8 @@ def banner(name: str | None, port: int = 8765) -> str:
         f"{STAMP} INF Initial protocol quic",
         f"{STAMP} INF ICMP proxy will use 192.0.2.10 as source for IPv4",
         f"{STAMP} INF Starting metrics server on 127.0.0.1:20241/metrics",
-        f"{STAMP} INF Registered tunnel connection connIndex=0 "
-        "connection=0c5f3e8a-7d1b-4c2e-8f90-1a2b3c4d5e6f event=0 ip=198.41.192.27 "
-        "location=nrt01 protocol=quic",
     ]
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n" + (REGISTERED if registered else "")
 
 
 OFFLINE = (
@@ -640,10 +714,12 @@ def test_parse_tunnel_url_finds_the_quick_tunnel_url(name):
     want = f"https://{name}.trycloudflare.com"
     parse = server_module().parse_tunnel_url
 
-    assert parse(banner(name, port=secrets.randbelow(40000) + 20000)) == want
-    assert parse(OFFLINE + banner(name)) == want, "api.trycloudflare.com is not the tunnel"
-    only_box = [line for line in banner(name).splitlines() if "trycloudflare.com" in line]
-    assert parse("\n".join(only_box)) == want
+    for protected in (False, True):
+        text = banner(name, port=secrets.randbelow(40000) + 20000, protected=protected)
+        assert parse(text) == want, f"protected={protected}"
+        assert parse(OFFLINE + text) == want, "api.trycloudflare.com is not the tunnel"
+        only_box = [line for line in text.splitlines() if "trycloudflare.com" in line]
+        assert parse("\n".join(only_box)) == want, f"protected={protected}"
 
 
 @pytest.mark.parametrize(
@@ -670,6 +746,14 @@ if CONFIG["ignore_term"]:
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 sys.stderr.write(CONFIG["banner"])
 sys.stderr.flush()
+for kind, arg in CONFIG["later"]:
+    if kind == "write":
+        sys.stderr.write(arg)
+        sys.stderr.flush()
+    elif kind == "sleep":
+        time.sleep(arg)
+    elif kind == "mark":
+        open(os.path.join(CONFIG["records"], str(pid) + "." + arg), "w").close()
 if CONFIG["flood"]:
     line = ("2026-11-28T01:02:03Z INF Registered tunnel connection connIndex=1 event=0 "
             "ip=198.41.200.13 location=nrt01 protocol=quic\\n")
@@ -716,14 +800,18 @@ class FakeCloudflared:
         self,
         banner: str,
         *,
+        later: tuple[tuple[str, Any], ...] = (),
         then: str = "sleep",
         life_s: float = 20,
         ignore_term: bool = False,
         flood: int = 0,
     ) -> None:
+        """`banner` on stderr at once, then the `later` steps in order: ("write", text),
+        ("sleep", seconds) or ("mark", name), a file `marked(pid, name)` sees; then `then`."""
         config = {
             "records": str(self.records),
             "banner": banner,
+            "later": [list(step) for step in later],
             "then": then,
             "life_s": life_s,
             "ignore_term": ignore_term,
@@ -756,7 +844,10 @@ class FakeCloudflared:
         return runs[0]
 
     def drained(self, pid: int) -> bool:
-        return (self.records / f"{pid}.drained").exists()
+        return self.marked(pid, "drained")
+
+    def marked(self, pid: int, name: str) -> bool:
+        return (self.records / f"{pid}.{name}").exists()
 
 
 @pytest.fixture
@@ -858,6 +949,61 @@ def test_cloudflared_exiting_without_a_url_is_a_tunnel_error(fake, output):
     assert "cloudflared" in str(caught.value).lower()
 
 
+AFTER_THE_URL = [
+    pytest.param("", id="silent"),
+    pytest.param(NOT_REGISTERED, id="failing-connection"),
+]
+
+
+@pytest.mark.parametrize("after", AFTER_THE_URL)
+def test_cloudflared_exiting_after_its_url_but_before_a_connection_is_a_tunnel_error(fake, after):
+    board_server = server_module()
+    fake.install(banner(random_name(), 18423, registered=False) + after, then="exit")
+    started = time.monotonic()
+
+    with pytest.raises(board_server.TunnelError) as caught:
+        with board_server.quick_tunnel(18423, timeout_s=30):
+            pytest.fail(
+                "cloudflared exited before a connection registered, yet the tunnel was entered"
+            )
+
+    assert time.monotonic() - started < 10, "an exited child was waited on until the timeout"
+    assert "cloudflared" in str(caught.value).lower()
+    assert gone_within(fake.the_run()["pid"], 5)
+
+
+@pytest.mark.parametrize("after", AFTER_THE_URL)
+def test_no_registered_connection_within_the_timeout_is_a_tunnel_error(fake, after):
+    board_server = server_module()
+    fake.install(banner(random_name(), 18423, registered=False) + after, life_s=20)
+    started = time.monotonic()
+
+    with pytest.raises(board_server.TunnelError) as caught:
+        with board_server.quick_tunnel(18423, timeout_s=1.0):
+            pytest.fail("no connection registered, yet the tunnel was entered")
+
+    assert time.monotonic() - started < 8, "the wait for a connection outlasted timeout_s"
+    assert "cloudflared" in str(caught.value).lower()
+    assert gone_within(fake.the_run()["pid"], 5), "a child without a connection was left running"
+
+
+@pytest.mark.parametrize("before", AFTER_THE_URL)
+def test_the_url_is_yielded_only_once_a_connection_registered(fake, before):
+    name = random_name()
+    fake.install(
+        banner(name, 18423, registered=False),
+        later=(("write", before), ("sleep", 0.8), ("mark", "registering"), ("write", REGISTERED)),
+    )
+
+    with server_module().quick_tunnel(18423, timeout_s=10) as url:
+        pid = fake.the_run()["pid"]
+        assert fake.marked(pid, "registering"), "the URL came before a connection registered"
+        assert url == f"https://{name}.trycloudflare.com"
+        assert alive(pid)
+
+    assert gone_within(pid, 5)
+
+
 def test_cloudflared_missing_from_path_is_a_clear_error(tmp_path, monkeypatch):
     board_server = server_module()
     empty = tmp_path / "empty-bin"
@@ -955,13 +1101,16 @@ def test_board_serve_tunnel_prints_one_phone_url_and_stops_the_tunnel(
     name = random_name()
     host = f"{name}.trycloudflare.com"
     fake.install(banner(name), life_s=60)
+    old = fresh_token()  # the last run's token, which this run replaces
+    token_file(data_dir).parent.mkdir()
+    token_file(data_dir).write_text(old + "\n", "utf-8")
     cmd = command(
         ["--date", DAY.isoformat(), "--port", "0", "--page", str(site / "board.html"), "--tunnel"]
     )
 
     line = cmd.wait_for_line(lambda text: host in text and "t=" in text)
-    token = token_file(data_dir).read_text("utf-8").strip()
-    assert TOKEN_RE.fullmatch(token), token
+    token = token_file(data_dir).read_text("utf-8").strip()  # written before the URL is printed
+    assert TOKEN_RE.fullmatch(token) and token != old, token
     assert stat.S_IMODE(token_file(data_dir).stat().st_mode) == 0o600
     run = fake.the_run()
     target = re.fullmatch(
@@ -1017,8 +1166,65 @@ def test_board_serve_tunnel_without_cloudflared_fails_clearly(
     assert code is not None, "board-serve kept running without a tunnel"
     assert code != 0
     assert "cloudflared" in "".join(cmd.err).lower(), cmd.text()
-    if token_file(data_dir).exists():
-        assert token_file(data_dir).read_text("utf-8").strip() not in cmd.text()
+    assert not token_file(data_dir).exists(), "a token file for a run that never served"
+
+
+PHONE_URL = re.compile(r"trycloudflare\.com[^\s]*\?t=")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["port-taken", "no-cloudflared", "exits-before-url", "exits-before-a-connection"],
+)
+def test_a_failed_start_leaves_the_token_file_as_it_was(
+    fake, command, site, data_dir, tmp_path, monkeypatch, failure
+):
+    path = token_file(data_dir)
+    path.parent.mkdir()
+    prior = (fresh_token() + "\n").encode("ascii")  # what an earlier run, still serving, wrote
+    path.write_bytes(prior)
+    path.chmod(0o600)
+    port, holder = "0", None
+    if failure == "port-taken":  # a second launch on a port the first one holds
+        fake.install(banner(random_name()))
+        holder = socket.socket()
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        port = str(holder.getsockname()[1])
+    elif failure == "no-cloudflared":
+        empty = tmp_path / "empty-bin"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+    elif failure == "exits-before-url":
+        fake.install(OFFLINE, then="exit")
+    else:
+        fake.install(banner(random_name(), registered=False) + NOT_REGISTERED, then="exit")
+    try:
+        cmd = command(
+            [
+                "--date",
+                DAY.isoformat(),
+                "--port",
+                port,
+                "--page",
+                str(site / "board.html"),
+                "--tunnel",
+            ]
+        )
+        code = cmd.finish(timeout=20)
+    finally:
+        if holder is not None:
+            holder.close()
+
+    assert code is not None, f"board-serve kept running after a failed start:\n{cmd.text()}"
+    assert code != 0, cmd.text()
+    assert path.read_bytes() == prior, "a failed start replaced the token a running tunnel serves"
+    assert sorted(p.name for p in path.parent.iterdir()) == ["access-token"]
+    assert not PHONE_URL.search(cmd.text()), f"a phone URL for a tunnel that is down:\n{cmd.text()}"
+    if failure == "port-taken":
+        assert fake.runs() == [], "cloudflared started for a server that never bound"
+    for run in fake.runs():
+        assert gone_within(run["pid"], 5), "a cloudflared child outlived the failed start"
 
 
 def free_port() -> int:
