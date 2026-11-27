@@ -44,6 +44,24 @@ what these tests call):
   appended and the private report's file name, carries 'withheld (D21)', and shows no figure from
   the rows and no absolute data-directory path.
 
+Spec v2 (review of PR #496), pinned on small synthetic stores of their own:
+
+- A cell mixing payout rates (a Super Premium day's 80% beside a pool's ordinary rate) has
+  `1 + shrunk_edge` equal to its mean over bets of rate x omega: for 'all' = newcomer (boosted) +
+  conditions (ordinary), the bet-weighted mean of the two class cells' `1 + shrunk_edge`
+  ('readings', omega_full weighted by payout rate), not mean omega x mean rate.
+- A PLACE or Wide odds band with bets and no winner ('zero_return_band'): every cell with bets has
+  finite `omega`, bounds and `shrunk_edge`; the band's cells have omega 0 with bounds 0 (baseline
+  0, sd 0); each class x band cell's two registered readings on `MAIN_SPAN` (metric
+  `omega[<cell_id>]`) are 0 (omega_full) and 1 (segment_effect, the family's prior mean).
+- A race and pool sold on the board with no dividends row ('exclusions') is left out of that pool
+  (its counts and mean return are the settled races' alone), counted in
+  `result.pool_excluded[pool]['unsettled: no paying dividends row']`, and scored in its other pools.
+- A narrower rerun on the same registry, where a cell scored by the earlier run has no bets
+  ('spa_stepm'): `result.snooping[pool]` holds `spa` (pvalue, `n_rules` = this run's cells with
+  bets, `family_size` = the registry size of `spa_family(pool)`) and `stepm` (a subset of those
+  cells), and no `error`.
+
 The stores are synthetic and built here (`write_store`): five runners per race, every pool's board
 priced so that each combination's realised wins over a unit of races match its implied
 probability exactly (counts per unit below), so every cell's flat return is known in closed form:
@@ -167,9 +185,10 @@ def wins_for(pool: str, race_class: str, boost: float) -> tuple[int, tuple[int, 
     return unit, wins
 
 
-def prices(pool: str, race_class: str) -> list[float]:
+def prices(pool: str, race_class: str, rate: float | None = None) -> list[float]:
+    """The board's final odds, priced at `rate` (None: the pool's ordinary payout rate)."""
     unit, counts = counts_for(pool, race_class)
-    return [RATES[pool] * unit / c for c in counts]
+    return [(RATES[pool] if rate is None else rate) * unit / c for c in counts]
 
 
 def paying_slots(unit: int, wins: Sequence[int]) -> list[list[int]]:
@@ -193,6 +212,19 @@ def _check_profiles() -> None:
     _, planted = wins_for("WIN", "DEBUT", PLANTED_BOOST)
     assert planted == (24, 16, 8, 8, 8)
     assert all(1 <= len(s) <= 2 for s in paying_slots(WIN_UNIT, planted))
+    for pool, counts in LONGSHOT_COUNTS.items():
+        fair = [c for c in COMBOS[pool] if LONGSHOT_HORSE not in c.split(",")]
+        assert len(fair) == len(counts) and sum(counts) == LONGSHOT_UNIT * PAYING[pool]
+        assert all(len(s) == PAYING[pool] for s in paying_slots(LONGSHOT_UNIT, counts))
+
+
+# A PLACE or Wide board whose combinations with horse 5 never pay on the span: horse 5 at odds 8
+# on PLACE (band 5.0-10.0), its pairs at odds 30 on Wide (band 20.0-50.0), bands no other price
+# falls in; the other combinations are fair over a unit of 20 races.
+LONGSHOT_HORSE = "5"
+LONGSHOT_UNIT = 20
+LONGSHOT_ODDS = {"PLACE": 8.0, "QUINELLA_PLACE": 30.0}
+LONGSHOT_COUNTS = {"PLACE": (14, 10, 9, 7), "QUINELLA_PLACE": (14, 12, 10, 10, 8, 6)}
 
 
 _check_profiles()
@@ -210,7 +242,11 @@ class Race:
     surface: str
     position: int  # the race's place in its class's unit (which combinations pay)
     pool_rank: int  # the race's pool size, in steps of 1e6 yen
-    win_boost: float = 1.0
+    win_boost: float = 1.0  # realised wins over implied, in the pools `boost_pools`
+    boost_pools: tuple[str, ...] = ("WIN",)
+    priced_at: float | None = None  # the payout rate every board is priced at (None: RATES)
+    longshot: bool = False  # PLACE and Wide boards carry the never-paying long shot
+    unpaid: tuple[str, ...] = ()  # pools sold on the board with no dividends row
 
     @property
     def race_id(self) -> str:
@@ -219,6 +255,37 @@ class Race:
     @property
     def meeting_id(self) -> str:
         return f"jravan:{self.day.isoformat()}:{self.venue}"
+
+
+def board_for(pool: str, race: Race) -> tuple[int, list[float], tuple[int, ...]]:
+    """(unit, final odds per combination in COMBOS order, realised wins per combination over the
+    unit) of `pool`'s board in `race`."""
+    if race.longshot and pool in LONGSHOT_ODDS:
+        counts, price, wins = iter(LONGSHOT_COUNTS[pool]), [], []
+        for combination in COMBOS[pool]:
+            if LONGSHOT_HORSE in combination.split(","):
+                price.append(LONGSHOT_ODDS[pool])
+                wins.append(0)
+            else:
+                c = next(counts)
+                price.append(RATES[pool] * LONGSHOT_UNIT / c)
+                wins.append(c)
+        return LONGSHOT_UNIT, price, tuple(wins)
+    boost = race.win_boost if pool in race.boost_pools else 1.0
+    unit, wins = wins_for(pool, race.race_class, boost)
+    return unit, prices(pool, race.race_class, race.priced_at), wins
+
+
+def paying(pool: str, race: Race) -> list[int]:
+    """The combinations (indices into COMBOS[pool]) that pay in `race`."""
+    unit, _, wins = board_for(pool, race)
+    return paying_slots(unit, wins)[(7 * race.position) % unit]
+
+
+def race_return(pool: str, race: Race) -> float:
+    """The flat box's return in `race` at the final dividend (a dead heat pays each winner)."""
+    _, price, _ = board_for(pool, race)
+    return sum(price[i] for i in paying(pool, race))
 
 
 def write_store(data: Path, races: Sequence[Race]) -> None:
@@ -233,8 +300,7 @@ def write_store(data: Path, races: Sequence[Race]) -> None:
         base = {"jurisdiction": "jra", "race_id": rid, "race_date": race.day, "venue": race.venue}
         base["race_no"] = race.race_no
         for pool in POOLS:
-            unit, wins = wins_for(pool, race.race_class, race.win_boost if pool == "WIN" else 1.0)
-            price = prices(pool, race.race_class)
+            _, price, _ = board_for(pool, race)
             order = sorted(range(len(price)), key=lambda i, price=price: (price[i], i))
             rank = {i: r + 1 for r, i in enumerate(order)}
             for i, (combination, odds) in enumerate(zip(COMBOS[pool], price, strict=True)):
@@ -266,8 +332,9 @@ def write_store(data: Path, races: Sequence[Race]) -> None:
                     "data_kubun": "4",
                 }
             )
-            slot = (7 * race.position) % unit
-            for i in paying_slots(unit, wins)[slot]:
+            if pool in race.unpaid:
+                continue
+            for i in paying(pool, race):
                 paid.append(
                     {
                         "jurisdiction": "jra",
@@ -946,6 +1013,256 @@ def test_candidate_cells_follow_the_schema(planted):
             if of_group:
                 want = races_per_class * len(COMBOS[pool])
                 assert max(c["n_bets"] for c in of_group) == want, (pool, group)
+
+
+# ---------------------------------------------------------------------------------------------
+# Review of PR #496 (spec v2): a cell mixing payout rates ranks by its mean expected return
+# ---------------------------------------------------------------------------------------------
+
+SUPER_PREMIUM = takeout.SUPER_PREMIUM_RATE  # a Super Premium day pays 80% in every pool
+# The #78 pools whose ordinary rate is below 80%, so that Super Premium raises it (WIN pays 80%
+# either way, and a premium, which may be withheld, leaves the race out).
+MIXED_POOLS = ("QUINELLA", "FORECAST", "TRIO")
+MIXED_BOOST = 2.0
+MIXED_PER_DAY = 10
+
+
+def super_premium_days(year: int, venue: str, race_nos: Sequence[int]) -> list[date]:
+    """Days of `year` on which every MIXED_POOLS pool of races `race_nos` at `venue` matches
+    Super Premium entries only (no premium and no age entry), read off the shipped calendar."""
+    calendar = takeout.shipped_boosts()
+    days = {e.date for e in calendar.entries if e.kind == "super_premium" and e.date.year == year}
+    return [
+        day
+        for day in sorted(days)
+        if {
+            (e.kind, e.age)
+            for n in race_nos
+            for pool in MIXED_POOLS
+            for e in calendar.matching(day, venue, n, pool)
+        }
+        == {("super_premium", None)}
+    ]
+
+
+def mixed_rate_races() -> list[Race]:
+    """20 newcomer races on two Super Premium days, their boards priced at 80% and their
+    MIXED_POOLS combinations winning twice as often as they imply; 20 fair conditions races on
+    two ordinary days."""
+    race_nos = range(1, MIXED_PER_DAY + 1)
+    boosted = super_premium_days(2019, "TOK", race_nos)[:2]
+    assert len(boosted) == 2, "the shipped calendar should hold two such days in 2019"
+    ordinary = boost_free_days(date(2019, 1, 5), 2, ("TOK",), race_nos)
+    races = [
+        Race(day, "TOK", n, "DEBUT", "turf", j, 1 + j % 5, MIXED_BOOST, MIXED_POOLS, SUPER_PREMIUM)
+        for j, (day, n) in enumerate(itertools.product(boosted, race_nos))
+    ]
+    races += [
+        Race(day, "TOK", n, "C1", "turf", j, 1 + (j + 2) % 5)
+        for j, (day, n) in enumerate(itertools.product(ordinary, race_nos))
+    ]
+    return races
+
+
+def test_a_mixed_rate_cell_ranks_by_its_rate_weighted_expected_return(tmp_path, monkeypatch):
+    data = data_dir(tmp_path, monkeypatch)
+    races = mixed_rate_races()
+    write_store(data, races)
+    registry, _ = frozen_registry(tmp_path)
+    guard(monkeypatch)
+
+    result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    per_class = sum(r.race_class == "DEBUT" for r in races)
+    assert per_class == sum(r.race_class == "C1" for r in races)
+    for pool in MIXED_POOLS:
+        cells = {r["cell_id"]: r for r in pool_rows(result.rows, pool)}
+        boosted, ordinary, mixed = cells["class:newcomer"], cells["class:conditions"], cells["all"]
+        n = per_class * len(COMBOS[pool])
+        assert (boosted["n_bets"], ordinary["n_bets"], mixed["n_bets"]) == (n, n, 2 * n), pool
+        assert boosted["payout_rate"] == pytest.approx(SUPER_PREMIUM, abs=1e-12), pool
+        assert ordinary["payout_rate"] == pytest.approx(RATES[pool], abs=1e-12), pool
+        assert mixed["payout_rate"] == pytest.approx((SUPER_PREMIUM + RATES[pool]) / 2), pool
+        for r in (boosted, ordinary, mixed):
+            assert r["omega"] is not None and r["shrunk_edge"] is not None, (pool, r["cell_id"])
+            want = r["omega"] * r["payout_rate"] - 1
+            assert r["shrunk_edge"] == pytest.approx(want, abs=1e-12), (pool, r["cell_id"])
+        # Expected return is the mean over bets of rate x omega, and a bet's omega is the same in
+        # every cell that holds it, so the mixed cell's expected return is the bet-weighted mean
+        # of its two single-rate halves'.
+        halves = (2 + boosted["shrunk_edge"] + ordinary["shrunk_edge"]) / 2
+        assert 1 + mixed["shrunk_edge"] == pytest.approx(halves, rel=1e-9), pool
+        # The fixture tells it apart from mean omega x mean rate.
+        assert boosted["omega"] > ordinary["omega"] + 0.3, pool
+        naive = (boosted["omega"] + ordinary["omega"]) / 2 * mixed["payout_rate"]
+        assert abs(halves - naive) > 1e-3, pool
+
+
+# ---------------------------------------------------------------------------------------------
+# Review of PR #496 (spec v2, 'zero_return_band'): a Place or Wide band with bets and no winner
+# ---------------------------------------------------------------------------------------------
+
+
+def longshot_races() -> list[Race]:
+    """A maiden and a conditions race on each of 20 days, every PLACE and Wide board carrying the
+    long shot (LONGSHOT_ODDS), which never places."""
+    classes = ("MAIDEN", "C1")
+    days = boost_free_days(date(2019, 1, 5), LONGSHOT_UNIT, ("TOK",), [RACE_NO[c] for c in classes])
+    return [
+        Race(day, "TOK", RACE_NO[c], c, "turf", j, DEV_RANKS[c], longshot=True)
+        for j, day in enumerate(days)
+        for c in classes
+    ]
+
+
+# A winless band's loss is constant per bet, so arch warns that its studentized statistic is
+# degenerate; SPA is not what this test is about.
+@pytest.mark.filterwarnings("ignore:The loss differential has a variance of 0")
+def test_a_winless_place_or_wide_band_keeps_finite_readings(tmp_path, monkeypatch):
+    data = data_dir(tmp_path, monkeypatch)
+    races = longshot_races()
+    write_store(data, races)
+    registry, _ = frozen_registry(tmp_path)
+    guard(monkeypatch)
+
+    result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    records = registry.records(psr.FAMILY_ID)
+    run = {GROUP[c]: sum(r.race_class == c for r in races) for c in {r.race_class for r in races}}
+    for pool in RANGE_POOLS:
+        mine = with_bets(pool_rows(result.rows, pool))
+        for r in mine:
+            figures = [r[k] for k in ("omega", "omega_lo", "omega_hi", "shrunk_edge")]
+            assert all(v is not None and math.isfinite(v) for v in figures), (pool, r["cell_id"])
+            assert r["omega_lo"] <= r["omega"] <= r["omega_hi"], (pool, r["cell_id"])
+        longshots = sum(LONGSHOT_HORSE in c.split(",") for c in COMBOS[pool])
+        winless = [
+            r
+            for r in mine
+            if r["odds_band"] is not None and r["mean_odds"] == pytest.approx(LONGSHOT_ODDS[pool])
+        ]
+        # the band itself, and its cross with each class run
+        assert sorted(r["class_group"] or "" for r in winless) == sorted(["", *run]), pool
+        for r in winless:
+            group = r["class_group"]
+            want = longshots * (run[group] if group else len(races))
+            assert r["n_bets"] == want, (pool, r["cell_id"])
+            assert r["mean_return"] == 0.0, (pool, r["cell_id"])
+            # its band baseline is 0, so omega_full is 0 with sd 0 and the expected return 0
+            got = (r["omega"], r["omega_lo"], r["omega_hi"], r["shrunk_edge"])
+            assert got == pytest.approx((0.0, 0.0, 0.0, -1.0), abs=1e-12), (pool, r["cell_id"])
+            if group is None:
+                continue
+            # both readings are registered: omega_full 0, segment_effect the family's prior mean 1
+            name = f"omega[{r['cell_id']}]"
+            shown = [
+                m
+                for rec in records
+                if rec.params.get("pool") == pool
+                for m in rec.metrics
+                if m.metric == name and m.fold == psr.MAIN_SPAN
+            ]
+            values = sorted(m.value for m in shown)
+            assert values == pytest.approx([0.0, 1.0], abs=1e-12), (pool, name, values)
+            for m in shown:
+                assert None not in (m.lo, m.hi), (pool, name)
+                assert math.isfinite(m.lo) and math.isfinite(m.hi), (pool, name)
+                assert m.lo <= m.value <= m.hi, (pool, name)
+
+
+# ---------------------------------------------------------------------------------------------
+# Review of PR #496 (spec v2, 'exclusions'): a sold race and pool with no paying dividends row
+# ---------------------------------------------------------------------------------------------
+
+UNSETTLED_REASON = "unsettled: no paying dividends row"
+UNSETTLED = (("QUINELLA",), ("TRIO",), ("TRIO", "PLACE"))  # one extra race each, unpaid pools
+
+
+def unsettled_races() -> list[Race]:
+    """40 settled conditions races on 20 days, then one race a day per UNSETTLED entry whose
+    pools named there have no dividends row (sold: priced, with a pool total)."""
+    race_nos = (3, 4)
+    days = boost_free_days(date(2019, 1, 5), 20 + len(UNSETTLED), ("TOK",), race_nos)
+    races = [
+        Race(day, "TOK", n, "C1", "turf", 2 * j + k, 1 + (2 * j + k) % 3)
+        for j, day in enumerate(days[:20])
+        for k, n in enumerate(race_nos)
+    ]
+    races += [
+        Race(day, "TOK", 3, "C1", "turf", 5 + k, 2, unpaid=pools)
+        for k, (day, pools) in enumerate(zip(days[20:], UNSETTLED, strict=True))
+    ]
+    return races
+
+
+def test_a_sold_pool_without_a_paying_dividend_is_excluded_and_counted(tmp_path, monkeypatch):
+    data = data_dir(tmp_path, monkeypatch)
+    races = unsettled_races()
+    write_store(data, races)
+    registry, _ = frozen_registry(tmp_path)
+    guard(monkeypatch)
+
+    result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    for pool in POOLS:
+        settled = [r for r in races if pool not in r.unpaid]
+        n = len(settled) * len(COMBOS[pool])
+        whole = next(r for r in pool_rows(result.rows, pool) if r["cell_id"] == "all")
+        assert whole["n_bets"] == n, pool
+        assert whole["n_race_days"] == len({r.day for r in settled}), pool
+        # the settled races alone: an unsettled one is not scored as if every ticket lost
+        want = sum(race_return(pool, r) for r in settled) / n
+        assert whole["mean_return"] == pytest.approx(want, rel=1e-9), pool
+        counted = result.pool_excluded.get(pool, {}).get(UNSETTLED_REASON, 0)
+        assert counted == len(races) - len(settled), pool
+
+
+# ---------------------------------------------------------------------------------------------
+# Review of PR #496 (spec v2, 'spa_stepm'): a narrower rerun on the same registry
+# ---------------------------------------------------------------------------------------------
+
+
+NARROW_FROM = 10  # the narrower rerun starts on this day of narrowing_races
+
+
+def narrowing_races() -> tuple[list[date], list[Race]]:
+    """30 days, one meeting each: a maiden and a conditions race on the first 10, a conditions
+    race alone on the last 20 (more meetings than SPA_BLOCK, so the narrower run can be tested)."""
+    days = boost_free_days(date(2019, 1, 5), 30, ("TOK",), (RACE_NO["MAIDEN"], RACE_NO["C1"]))
+    assert len(days) - NARROW_FROM > psr.SPA_BLOCK
+    races = [
+        Race(day, "TOK", RACE_NO[c], c, "turf", j, DEV_RANKS[c] + j % 2)
+        for j, day in enumerate(days)
+        for c in (("MAIDEN", "C1") if j < NARROW_FROM else ("C1",))
+    ]
+    return days, races
+
+
+def test_a_narrower_rerun_on_the_same_registry_still_runs_spa_and_stepm(tmp_path, monkeypatch):
+    data = data_dir(tmp_path, monkeypatch)
+    days, races = narrowing_races()
+    write_store(data, races)
+    registry, _ = frozen_registry(tmp_path)
+    guard(monkeypatch)
+
+    full = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+    narrow = scan(data, registry, date_from=days[NARROW_FROM], date_to=date(2019, 12, 31))
+
+    for pool in POOLS:
+        before = {r["cell_id"]: r for r in pool_rows(full.rows, pool)}
+        after = {r["cell_id"]: r for r in pool_rows(narrow.rows, pool)}
+        assert before["class:maiden"]["n_bets"] > 0, pool
+        assert after["class:maiden"]["n_bets"] == 0, pool
+        for result, rows in ((full, before), (narrow, after)):
+            snoop = result.snooping[pool]
+            assert "error" not in snoop, (pool, snoop.get("error"))
+            tested = {cell for cell, r in rows.items() if r["n_bets"] > 0}
+            assert 0.0 <= snoop["spa"]["pvalue"] <= 1.0, pool
+            assert snoop["spa"]["n_rules"] == len(tested), pool
+            assert set(snoop["stepm"]) <= tested, pool
+        # the narrower run's SPA reports every variant tried, both runs' cell rules included
+        size = registry.family_size(psr.spa_family(pool))
+        assert narrow.snooping[pool]["spa"]["family_size"] == size, pool
 
 
 # ---------------------------------------------------------------------------------------------
