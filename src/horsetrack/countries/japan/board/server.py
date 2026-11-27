@@ -12,7 +12,8 @@ X-Content-Type-Options nosniff.
 
 The feed is rebuilt at most every `min_rebuild_s`, and only when a file of the day folder (an odds
 log or a post-time sidecar) appeared, went away, or changed size or mtime, or when a race's
-post - 20 min or post - 2 min passed (its T-20 / T-2 reference fills then, #498; the clock is
+post - 20, 10, 5 or 2 min passed (its T-20 / T-10 / T-5 / T-2 reference fills then, #498, #499;
+the clock is
 `feed.utc_now`). A log being appended
 reads safely: `odds_log` counts whole gzip members only, so a torn last member is ignored. A build
 that fails keeps the last good feed. The shadow feed is rebuilt at most every `min_rebuild_s` too,
@@ -65,13 +66,13 @@ Fingerprint = tuple[tuple[str, int, int], ...]
 
 
 def _next_cutoff(board: dict[str, Any], now: datetime) -> datetime | None:
-    """The first post - 20 min or post - 2 min of a race on `board` still after `now`."""
+    """The first post - 20, 10, 5 or 2 min of a race on `board` still after `now`."""
     cutoffs = [
         datetime.fromisoformat(race["post_utc"]) - offset
         for venue in board["venues"]
         for race in venue["races"]
         if race.get("post_utc")
-        for offset in (board_feed.T20, board_feed.T2)
+        for offset in board_feed.CHECKPOINTS
     ]
     return min((at for at in cutoffs if at > now), default=None)
 
@@ -118,7 +119,7 @@ class Feed:
             return (self._gzipped if gzipped else self._body), self._etag
 
     def _build(self) -> dict[str, Any] | None:
-        """The new feed, or None when no file changed and no T-20 / T-2 cutoff passed since the
+        """The new feed, or None when no file changed and no checkpoint cutoff passed since the
         last one (a reference fills at its cutoff without a log write)."""
         fingerprint = self._day_files()
         now = board_feed.utc_now()
