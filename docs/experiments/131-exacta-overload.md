@@ -285,14 +285,15 @@ loss and the paid-return results above are unchanged.
   and B3 and C at λ2 = 0.8104 are partly in-sample. Spec section 4's reading of B2 and B3
   together ("B2 < rate on fav_first with B3 ≈ 1" as a cross-pool overload) is withdrawn: B3's
   equal weighting can point the other way from the cross-pool ratio.
-- E2 (ratio-cut rules, `japan/131-exacta-rule-v3`): **not scored, and its selection spec is not
-  fit to execute.** Its headline scope ranks "less popular" by the tertile of pool totals within
-  each logged day, so an early race can be classified with later races' totals, information not
-  available when it is selected. #281 freezes a replacement with a complete availability
-  contract before E2 is scored; the v3 freeze stays in the registry as history. No logged exacta
-  board exists yet (two logged Kyoto days, 2026-11-21 and 22, with WIN, PLACE, QUINELLA and
-  QUINELLA_PLACE only). The frozen spec's 100-meeting gate (`min_meetings` 100) is not enforced:
-  the owner's 2026-11-27 reframe scores the logged days available at each run (#281).
+- E2 (ratio-cut rules, `japan/131-exacta-rule-v4`): **not scored.** rule-v3's headline scope
+  ranked "less popular" by the tertile of pool totals within each logged day, so an early race
+  could be classified with later races' totals, information not available when it is selected.
+  rule-v4 (owner, 2026-11-27) takes "less popular" from the race card instead, the same
+  definition as E1's headline cell (race_no 1–4 or a DEBUT/MAIDEN race), reports the tertile only
+  as the proxy's agreement diagnostic, and has no meeting gate: it scores the #130-logged
+  development days available at each run, with n and the CI (#281). The v3 freeze stays in the
+  registry as history, not executed. No logged exacta board exists yet (two logged Kyoto days,
+  2026-11-21 and 22, with WIN, PLACE, QUINELLA and QUINELLA_PLACE only).
 - D (full-board Σq/Σp descriptive): not run, for the same reason: no logged exacta board exists.
 
 ## Variants tried
@@ -308,11 +309,13 @@ families (frozen 2026-11-27, run at git `5d68473`):
 - C `japan/131-exacta-logscore-v2`: 2 members, scored (above).
 - Max test `japan/131-exacta-category-v2/max-test`: one record (SPA p 0.175, StepM at a 5%
   family-wise error: no member).
-- E2 `japan/131-exacta-rule-v3`: frozen 2026-11-27, 16 members, not scored (above). It
-  supersedes `japan/131-exacta-rule-v2` (frozen the same day, not scored, its freeze kept), whose
-  favourite came from the final Win odds; v3 selects on the Win board at T-2, as spec sections 5
-  and 6 require. v3 is unsuitable for execution pending #281 (its daily-tertile "less popular"
-  cutoff uses later races' pool totals).
+- E2 `japan/131-exacta-rule-v4`: frozen 2026-11-27, 16 members, not scored (above). It
+  supersedes `japan/131-exacta-rule-v3` (frozen the same day, not scored and not executed, its
+  freeze kept), whose daily-tertile "less popular" cutoff used later races' pool totals; v4 uses
+  the race-card proxy and drops the meeting gate. v3 in turn superseded
+  `japan/131-exacta-rule-v2` (frozen the same day, not scored, its freeze kept), whose favourite
+  came from the final Win odds; v3 and v4 select on the Win board at T-2, as spec sections 5 and
+  6 require.
 - Breakage `japan/131-exacta-breakage`: post-hoc and descriptive, not a test and not in any
   family's max test; two records (one per λ2), each with the breakage share and the unrounded ρ
   of all 42 category × cell members (git `27af886`, 30 s, 0.44 GB peak).
@@ -348,7 +351,8 @@ whose records stay in the registry:
 - Two-sided tests: the owner signed one-sided directions (answer 2).
 - Crossed segment cells: 14 marginal cells plus one pre-stated cross keep the family at 84.
 - Historical rule tests selected on final odds: look-ahead; E2 selects its favourite from the
-  board at T-2 (its daily-tertile popularity cutoff is not yet decision-time: #281).
+  board at T-2, and rule-v4 its "less popular" from the race card (rule-v3's daily pool-total
+  tertile used later races' totals; it is now an agreement diagnostic only).
 
 ## What this rules out
 
@@ -383,8 +387,9 @@ in-sample).
 All `status:proposed` under epic #72:
 
 - #281 Score #131's E2 exacta ratio-cut rules on logged boards (with the D descriptive on the same
-  days; the owner's 2026-11-27 reframe drops its 100-meeting gate). It first freezes a selection
-  spec whose popularity cutoff uses only information available when each race is selected.
+  days; the owner's 2026-11-27 reframe drops its 100-meeting gate). It scores
+  `japan/131-exacta-rule-v4`, frozen 2026-11-27, whose race-card popularity cutoff uses only
+  information available when each race is selected.
 - #282 Pre-register a fav_first exacta loss-avoidance rule (family L); its cuts become ranked rows.
 - #283 Check the ¥100 exacta own-impact assumption against #130 pool totals.
 - #284 Refit λ2 per walk-forward fold for #131's B3 and C, so both are strictly out-of-sample.

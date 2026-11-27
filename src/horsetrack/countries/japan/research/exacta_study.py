@@ -67,15 +67,19 @@ E1_B1_ID = "japan/131-exacta-category-b1-v2"
 E1_B3_ID = "japan/131-exacta-category-b3-v2"
 C_ID = "japan/131-exacta-logscore-v2"
 # E2 v3 (review of 0c39a8d): rule-v2 took its favourite from _COMMON's final Win odds, against
-# the signed spec's section 5 ("Selection uses only the board at t"). v3 changes only E2's
-# selection keys (_E2_SELECTION) and supersedes rule-v2, whose freeze stays in the registry.
-E2_ID = "japan/131-exacta-rule-v3"
+# the signed spec's section 5 ("Selection uses only the board at t"); v3 changed only E2's
+# selection keys. E2 v4 (review of 83684eb, owner 2026-11-27): v3's headline ranked "less
+# popular" by the lower tertile of pool totals within each logged day, so an early race was
+# classified with later races' totals. v4 takes "less popular" from the race card (E1's
+# popularity segment), reports the tertile as an agreement diagnostic only and drops the
+# 100-meeting gate. Each version supersedes the last; the v2 and v3 freezes stay in the registry.
+E2_ID = "japan/131-exacta-rule-v4"
 SUPERSEDES = {
     E1_ID: "japan/131-exacta-category-v1",
     E1_B1_ID: "japan/131-exacta-category-b1-v1",
     E1_B3_ID: "japan/131-exacta-category-b3-v1",
     C_ID: "japan/131-exacta-logscore-v1",
-    E2_ID: "japan/131-exacta-rule-v2",
+    E2_ID: "japan/131-exacta-rule-v3",
 }
 FITTED = "full_development"  # #115's one lambda2 fit over the development out-of-fold races
 LAMBDA2S = [FITTED, 1.0]
@@ -391,9 +395,10 @@ _SEGMENTS = {
 }
 
 
-# E2's selection keys (v3). Signed spec section 5: "at T-2 ... Selection uses only the board at
+# E2's selection keys (v4). Signed spec section 5: "at T-2 ... Selection uses only the board at
 # t. A selection variable taken from final odds is look-ahead"; section 6: the favourite's Win
-# odds are "at t for E2". primary_metric: the owner's reframe of 2026-11-27 on #131.
+# odds are "at t for E2". primary_metric: the owner's reframe of 2026-11-27 on #131. The
+# headline's "less popular" is section 6's race-card proxy, the rule segment_cells applies.
 _E2_SELECTION = {
     "selection_time": "T-2",
     "favourite": "lowest Win odds on the Win board at T-2 (the board at t), ties to the lowest "
@@ -402,16 +407,32 @@ _E2_SELECTION = {
     "Win board at T-2 (combo_category)",
     "scopes": {
         "all": "every scored race",
-        "headline": "favourite's Win odds at T-2 >= 3.0 and less popular; on #130 days, spec "
-        "section 6: 'the real exacta pool total exists (the odds log's investment row). There, "
-        'the lower tertile within each logged day defines "less popular"\'',
+        "headline": {
+            "rule": "favourite's Win odds at T-2 >= 3.0 and less popular; less popular = race_no "
+            "1-4 or a DEBUT/MAIDEN race, from the race card (E1's popularity segment)",
+            "fav_odds_min": 3.0,
+            "less_popular": {"race_no_max": 4, "race_classes": ["DEBUT", "MAIDEN"]},
+            "information_cutoff": {
+                "race_no": "race card",
+                "race_class": "race card",
+                "fav_win_odds": "T-2",
+            },
+        },
+    },
+    "diagnostics": {
+        "less_popular_agreement": "the lower tertile of exacta pool totals within each logged "
+        "day (the odds log's investment row), reported as its agreement with the race-card "
+        "proxy, not a selection variable: a whole-day tertile uses later races' totals",
     },
     "primary_metric": "expected return per 100 yen staked at the final dividend, takeout and "
     "breakage in, with its CI (owner reframe 2026-11-27 on #131: rank every option by expected "
     "return at the final price, CI beside it)",
-    "revision": "v3 (review of 0c39a8d, 2026-11-27): rule-v2 took the favourite from the lowest "
-    "final Win odds; v3 takes the favourite and the category from the board at T-2, as the "
-    "signed spec's sections 5 and 6 say, and changes nothing else",
+    "revision": 'v4 (review of 83684eb, 2026-11-27): rule-v3\'s headline took "less popular" '
+    "from the lower tertile of each logged day's pool totals, which later races set; v4 takes it "
+    "from the race card (race_no 1-4 or DEBUT/MAIDEN, E1's popularity segment), reports the "
+    "tertile as an agreement diagnostic only and scores the logged development days available "
+    "at each run with no meeting gate, and changes nothing else. v3 (review of 0c39a8d): the "
+    "favourite and the category from the board at T-2, not the final Win odds",
 }
 
 
@@ -485,13 +506,13 @@ def family_specs() -> dict[str, dict]:
             ],
             "cuts": [0.6, 0.7, 0.8, 0.9],
             "stake_yen": 100,
-            "min_meetings": 100,
             "lambda2": FITTED,
             "family_size": 16,
             "judged_at": "final dividends, own impact from the payout identity with the race's "
             "logged pool totals",
             "benchmark": "no bet (loss 0)",
-            "scored_on": "#130-logged development meetings only, once there are min_meetings",
+            "scored_on": "#130-logged development days available at each run, with n and the CI, "
+            "re-scored as more days are logged",
             **copy.deepcopy(_E2_SELECTION),
         },
     }

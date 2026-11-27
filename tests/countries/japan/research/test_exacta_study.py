@@ -50,7 +50,7 @@ API pinned here (module ``horsetrack.countries.japan.research.exacta_study``, no
   "estimator", "members" (E1-type: {"category", "cell"}; E2: {"category", "cut", "scope"}),
   "lambda2" ("full_development", 1.0 or a list of them), "block_size", "n_boot", "level",
   "cluster" ("meeting"); E1-type specs carry "directions" {category: "less" | "greater"}; E2 carries
-  "cuts", "stake_yen" and "min_meetings".
+  "cuts" and "stake_yen", and no "min_meetings" (v4).
   Owner 2026-11-26: #115's single full-development lambda2 fit (partly in-sample) is labelled
   "full_development", and no spec says "in_fold". The v1 families (tests/fixtures/synthetic/
   exacta_131_v1_family_specs.py, frozen 2026-11-25 with the hashes in V1_HASHES) stay in the
@@ -63,6 +63,21 @@ API pinned here (module ``horsetrack.countries.japan.research.exacta_study``, no
   and never final odds; and "scopes" {"all", "headline"}, the headline naming the favourite's odds
   at T-2 >= 3.0. It differs from v2 only in E2_SELECTION_KEYS; the four other v2 families keep
   their frozen ids and hashes.
+  E2 v4 (review of 83684eb, owner 2026-11-27): rule-v3 (tests/fixtures/synthetic/
+  exacta_131_v3_rule_spec.py, V3_RULE_HASH) ranked "less popular" by the lower tertile of exacta
+  pool totals within each logged day, which uses later races' totals. ``E2_ID`` is
+  "japan/131-exacta-rule-v4" and ``SUPERSEDES[E2_ID]`` is "japan/131-exacta-rule-v3". v4 differs
+  from v3 only in E2_V4_KEYS:
+  - ``scopes["headline"]`` is a dict with at least
+    {"fav_odds_min": 3.0,
+     "less_popular": {"race_no_max": 4, "race_classes": ["DEBUT", "MAIDEN"]},
+     "information_cutoff": {"race_no": "race card", "race_class": "race card",
+                            "fav_win_odds": "T-2"}}
+    (other keys, e.g. prose, are allowed), and no key or string in it names a tertile, a pool or
+    the investment row; ``scopes["all"]`` is v3's.
+  - ``diagnostics`` {"less_popular_agreement": str naming the logged-day pool-total tertile}: the
+    tertile is a reported diagnostic only.
+  - no "min_meetings" key, and no string in the spec names min_meetings; "scored_on" changes.
 """
 
 # Ruff reads the module under test as third-party until it exists, then as first-party; the
@@ -72,6 +87,7 @@ from __future__ import annotations  # noqa: I001
 import copy
 import hashlib
 import importlib.util
+import inspect
 import json
 import math
 from datetime import date
@@ -81,10 +97,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from horsetrack.core.eval.registry import Registry
+from horsetrack.core.eval.registry import FamilyAlreadyFrozen, Registry
 from horsetrack.countries.japan.research.exacta_consistency import CATEGORIES
 from horsetrack.countries.japan.research.exacta_study import (
+    E2_ID,
     SEGMENT_CELLS,
+    SUPERSEDES,
     box_returns,
     e1_loss,
     eb_shrink,
@@ -818,7 +836,7 @@ def test_e2_spec_has_16_rule_members_and_the_signed_settings():
     }
     assert sorted(e2["cuts"]) == [0.6, 0.7, 0.8, 0.9]
     assert e2["stake_yen"] == 100
-    assert e2["min_meetings"] == 100
+    assert "min_meetings" not in e2  # v4: the owner's 2026-11-27 reframe drops the gate
     assert e2["block_size"] == 5
     assert e2["cluster"] == "meeting"
 
@@ -950,40 +968,179 @@ def test_e2_takes_the_favourite_and_category_from_the_decision_time_board():
         assert _at_decision_time(e2.get(key)), (key, e2.get(key))
     assert set(e2["scopes"]) == {m["scope"] for m in e2["members"]} == {"all", "headline"}
     headline = e2["scopes"]["headline"]  # favourite odds >= 3.0, read at t, not at the close
-    assert _at_decision_time(headline) and "3.0" in headline, headline
+    assert isinstance(headline, dict), headline
+    assert headline["fav_odds_min"] == 3.0
+    assert headline["information_cutoff"]["fav_win_odds"] == "T-2", headline
     # E1 keeps the final-odds favourite: it is scored on history, where only final odds exist.
     for estimator in ("B2", "B1", "B3", "C"):
         assert "final" in specs[_family_id(specs, estimator)]["favourite"]
 
 
-def test_corrected_e2_freezes_under_a_new_id_beside_rule_v1_and_rule_v2(tmp_path):
+# ---------------------------------------------------------------------------------------------
+# E2 v4: the headline's "less popular" from the race card (review of 83684eb, exacta_study.py:405)
+# ---------------------------------------------------------------------------------------------
+
+# The v3 E2 family frozen 2026-11-27 (docs/specs/exacta-overload-prereg.md). Its headline ranked
+# "less popular" by the lower tertile of pool totals within each logged day, so an early race was
+# classified with later races' totals. Owner 2026-11-27: v4 uses section 6's race-card proxy (the
+# same as E1's popularity segment), keeps the tertile only as a reported agreement diagnostic and
+# drops the 100-meeting gate; everything else is v3's.
+V3_RULE_ID = "japan/131-exacta-rule-v3"
+V4_RULE_ID = "japan/131-exacta-rule-v4"
+V3_RULE_HASH = "9104e173371668a34b4594b6e4970546649b886cdccc4e726ec9749188701f0d"
+V3_RULE_FIXTURE = FIXTURES / "exacta_131_v3_rule_spec.py"
+# The keys v4 may change against v3, and the ones it must change.
+E2_V4_KEYS = {"scopes", "diagnostics", "min_meetings", "scored_on", "revision", "supersedes"}
+E2_V4_MUST_CHANGE = {"scopes", "min_meetings", "scored_on", "supersedes"}
+# Keys the ticket names as v3's, checked one by one so a failure names the key.
+E2_KEPT_KEYS = (
+    "estimator", "rule", "members", "cuts", "stake_yen", "family_size", "lambda2",
+    "selection_time", "favourite", "category", "primary_metric", "judged_at", "benchmark",
+    "block_size", "n_boot", "level", "seed", "cluster", "exclusions", "pool", "sources",
+    "hypothesis_id", "ticket", "data", "rate", "win_probabilities", "ordering",
+)  # fmt: skip
+# Words that mark a selection variable built from the day's pool totals.
+POOL_WORDS = ("tertile", "pool", "investment")
+RACE_CLASSES = ("DEBUT", "MAIDEN", "C1", "C2", "C3", "OP", "L", "G1", "G2", "G3")
+
+
+def _v3_rule() -> tuple[str, dict]:
+    loader = importlib.util.spec_from_file_location("exacta_131_v3_rule_spec", V3_RULE_FIXTURE)
+    module = importlib.util.module_from_spec(loader)
+    loader.loader.exec_module(module)
+    assert module.V3_RULE_ID == V3_RULE_ID
+    assert _hash(module.V3_RULE_SPEC) == V3_RULE_HASH  # the frozen v3 record
+    return module.V3_RULE_ID, module.V3_RULE_SPEC
+
+
+def _e2() -> dict:
+    specs = family_specs()
+    assert _family_id(specs, "rule") == E2_ID
+    return specs[E2_ID]
+
+
+def test_e2_is_rule_v4_superseding_rule_v3():
+    assert E2_ID == V4_RULE_ID
+    assert SUPERSEDES[E2_ID] == V3_RULE_ID
+    assert _e2()["supersedes"] == V3_RULE_ID
+    # the frozen v3 fixture is the record v4 supersedes, and itself superseded v2
+    _, v3 = _v3_rule()
+    assert v3["supersedes"] == "japan/131-exacta-rule-v2"
+
+
+def test_rule_v4_freezes_beside_rule_v1_v2_and_v3_and_leaves_v3_untouched(tmp_path):
     v1 = _v1_specs()
     v1_id = _v1_id(v1, "rule")
     v2_id, v2 = _v2_rule()
-    specs = family_specs()
-    e2_id = _family_id(specs, "rule")
-    assert e2_id not in {v1_id, v2_id}
-    assert e2_id not in V1_HASHES and e2_id not in {fid for fid, _ in V2_HASHES.values()}
-    assert _hash(specs[e2_id]) not in {V1_HASHES[v1_id], V2_RULE_HASH}
-    assert specs[e2_id]["supersedes"] == v2_id
+    v3_id, v3 = _v3_rule()
+    e2 = _e2()
+    assert E2_ID not in {v1_id, v2_id, v3_id}
+    assert _hash(e2) not in {V1_HASHES[v1_id], V2_RULE_HASH, V3_RULE_HASH}
 
     reg = Registry(tmp_path / "japan.jsonl", holdout_log=tmp_path / "holdout_log.jsonl")
     assert reg.freeze_family(v1_id, v1[v1_id]) == V1_HASHES[v1_id]
     assert reg.freeze_family(v2_id, v2) == V2_RULE_HASH
-    assert reg.freeze_family(e2_id, specs[e2_id]) == _hash(specs[e2_id])  # not already frozen
+    assert reg.freeze_family(v3_id, v3) == V3_RULE_HASH
+    assert reg.freeze_family(E2_ID, e2) == _hash(e2)  # a new id: not already frozen
+    assert reg.freeze_family(E2_ID, _e2()) == _hash(e2)  # deterministic: a no-op
+    with pytest.raises(FamilyAlreadyFrozen):  # v4 cannot overwrite the v3 record
+        reg.freeze_family(v3_id, e2)
     assert reg.frozen_spec_hash(v1_id) == V1_HASHES[v1_id]
     assert reg.frozen_spec_hash(v2_id) == V2_RULE_HASH
+    assert reg.frozen_spec_hash(v3_id) == V3_RULE_HASH
+    assert reg.frozen_spec_hash(E2_ID) == _hash(e2)
     reg.verify()
 
 
-def test_the_e2_correction_changes_only_e2_s_selection_keys():
+def test_rule_v4_changes_only_the_headline_scope_and_the_meeting_gate_over_rule_v3():
+    _, v3 = _v3_rule()
+    e2 = _e2()
+    changed = {k for k in set(v3) | set(e2) if v3.get(k) != e2.get(k)}
+    assert changed <= E2_V4_KEYS, sorted(changed - E2_V4_KEYS)
+    assert E2_V4_MUST_CHANGE <= changed, sorted(E2_V4_MUST_CHANGE - changed)
+    for key in E2_KEPT_KEYS:
+        assert key in v3, key
+        assert e2.get(key) == v3[key], key
+    assert e2["family_size"] == len(e2["members"]) == 16
+    assert set(e2["scopes"]) == set(v3["scopes"]) == {"all", "headline"}
+    assert e2["scopes"]["all"] == v3["scopes"]["all"]
+    # the history the fixtures carry: v3 changed only v2's selection keys, and the four other
+    # families stay the frozen v2 records (ids and hashes)
     _, v2 = _v2_rule()
+    v2_to_v3 = {k for k in set(v2) | set(v3) if v2.get(k) != v3.get(k)}
+    assert v2_to_v3 <= E2_SELECTION_KEYS, sorted(v2_to_v3 - E2_SELECTION_KEYS)
     specs = family_specs()
-    e2 = specs[_family_id(specs, "rule")]
-    changed = {k for k in set(v2) | set(e2) if v2.get(k) != e2.get(k)}
-    assert changed <= E2_SELECTION_KEYS, sorted(changed - E2_SELECTION_KEYS)
-    assert {"favourite", "selection_time", "supersedes"} <= changed
-    # the other four families stay the frozen v2 records (ids and hashes), favourite included
     for estimator, (family_id, frozen) in V2_HASHES.items():
         assert _family_id(specs, estimator) == family_id
         assert _hash(specs[family_id]) == frozen, estimator
+
+
+def test_rule_v4_has_no_meeting_gate():
+    e2 = _e2()
+    assert "min_meetings" not in e2
+    assert not [k for k in e2 if k.startswith("min_")]
+    assert [s for s in _strings(e2) if "min_meetings" in s] == []  # scored_on names no gate
+    assert isinstance(e2["scored_on"], str) and e2["scored_on"]
+
+
+def test_rule_v4_headline_is_the_race_card_proxy_known_by_t_minus_2():
+    e2 = _e2()
+    headline = e2["scopes"]["headline"]
+    assert isinstance(headline, dict), headline
+    assert headline["fav_odds_min"] == 3.0
+    less = headline["less_popular"]
+    assert less["race_no_max"] == 4
+    assert sorted(less["race_classes"]) == ["DEBUT", "MAIDEN"]
+    # every input of the headline is known at or before the decision time: the race card before
+    # the day, the favourite's Win odds on the board at T-2
+    assert headline["information_cutoff"] == {
+        "race_no": "race card",
+        "race_class": "race card",
+        "fav_win_odds": "T-2",
+    }
+    # no within-day pool-total tertile (or any pool total) is a selection variable
+    for text in _strings(headline):
+        assert not any(w in text.lower() for w in POOL_WORDS), text
+    for key in ("scopes", "favourite", "category", "rule", "members", "selection_time"):
+        for text in _strings(e2[key]):
+            assert "tertile" not in text.lower(), (key, text)
+    # the tertile stays only as a reported agreement diagnostic for the proxy
+    agreement = e2["diagnostics"]["less_popular_agreement"]
+    assert isinstance(agreement, str) and "tertile" in agreement.lower()
+    # the v3 record is the one whose headline used the tertile
+    _, v3 = _v3_rule()
+    assert "tertile" in v3["scopes"]["headline"]
+
+
+def _spec_headline(headline: dict, *, fav_odds: float, race_class: str, race_no: int) -> bool:
+    less = headline["less_popular"]
+    is_less = race_no <= less["race_no_max"] or race_class in less["race_classes"]
+    return fav_odds >= headline["fav_odds_min"] and is_less
+
+
+def test_rule_v4_headline_matches_the_segment_classifier_on_race_card_inputs_only():
+    headline = _e2()["scopes"]["headline"]
+    assert isinstance(headline, dict), headline
+    # the classifier's inputs are the race card and the favourite's odds: no pool totals of this
+    # or any other race on the day, so later races cannot move an early race's headline
+    params = set(inspect.signature(segment_cells).parameters)
+    assert params == {"fav_odds", "field_size", "race_class", "race_no"}
+    seen = set()
+    for race_no in range(1, 13):
+        for race_class in RACE_CLASSES:
+            for fav_odds in (1.2, 2.9, 3.0, 3.1, 4.9, 5.0, 18.5):
+                for field_size in (5, 12, 18):
+                    from_spec = _spec_headline(
+                        headline, fav_odds=fav_odds, race_class=race_class, race_no=race_no
+                    )
+                    ref = "headline" in ref_cells(fav_odds, field_size, race_class, race_no)
+                    cells = segment_cells(
+                        fav_odds=fav_odds,
+                        field_size=field_size,
+                        race_class=race_class,
+                        race_no=race_no,
+                    )
+                    key = (fav_odds, race_class, race_no, field_size)
+                    assert from_spec == ref == ("headline" in cells), key
+                    seen.add(from_spec)
+    assert seen == {True, False}
