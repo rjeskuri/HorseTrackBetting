@@ -2,18 +2,161 @@
 
 Ticket #430 (epic #72). **Every figure is withheld (D21)**: the scan reads the JRA-VAN store, a licensed source, so this report says what ran and where its figures are, and gives no count, rate, span, sign, bound or rank derived from that data. Nothing is adopted, no bet follows from it, and the holdout is not opened.
 
-- Registry family `japan-n1-pool-scan-v4`, spec sha256 `a166d99f7320b9596ffc31d1db4d1efdd33e0a3c84a2aad0a16c98a92139a91c` (`docs/specs/pool-scan-prereg.md` quotes the spec). Claude registered and froze it before the run read any row.
+- Registry family `japan-n1-pool-scan-v5`, spec sha256 `43b7ad67f504f923ac079b38be4e740f4e3771934b94f55a38a3d856fa9fc6b8` (`docs/specs/pool-scan-prereg.md` quotes the spec). Claude registered and froze it before the run read any row.
 - Authority: the owner's reframe of 2026-11-27 on #430 removed the sign-off ("Claude pre-registers the cell list and metrics and freezes them in the registry before the run. No owner sign-off.") and the kill rule ("It ranks every cell by expected return per 100 yen at the final price (takeout included, CI beside it). None is closed, and models aim at the top-ranked cells first."). The frozen spec quotes it in full (`authority`).
-- It supersedes v3, `japan-n1-pool-scan-v3` (spec sha256 `785a45700efca6286c8cd85c4f5b0cd17409b4f5cbcde1abb27368a6f19a356c`), v2, `japan-n1-pool-scan-v2` (spec sha256 `ac3050eb8d4191f4bf9c2bfb0a4978e69438544129d209dffe9f789e33359fb6`), and v1, `japan-n1-pool-scan` (spec sha256 `74da5fd2789d242fef9da1fbc9ecb7335c5ccfd5869ed8498c64e319d34bddd9`), all frozen and run on 2026-11-27 (UTC). The third review of PR #496 found that v3 read a Place or Wide cell with no hit, in an odds band that pays in other cells, as a certain total loss: its meeting-bootstrap se is 0, so its shrink weight was 1 and its omega and upper bound exactly 0. v4 gives such a cell the Jeffreys zero-hit se and changes nothing for a cell that paid. The second review found that v2 scored a race whose dividend named a combination off the priced board as if every ticket lost, read a Place or Wide band that paid nothing as a known zero, reported variants searched as the family size, decoded price row groups that span a holdout day, crossed class with three dimensions only, and gave Place and Wide no #78 fit. v1's defects are in the spec (`supersedes`). Their records stay in the registry, superseded; nothing is deleted.
+- It supersedes v4, `japan-n1-pool-scan-v4` (spec sha256 `a166d99f7320b9596ffc31d1db4d1efdd33e0a3c84a2aad0a16c98a92139a91c`), v3, `japan-n1-pool-scan-v3` (spec sha256 `785a45700efca6286c8cd85c4f5b0cd17409b4f5cbcde1abb27368a6f19a356c`), v2, `japan-n1-pool-scan-v2` (spec sha256 `ac3050eb8d4191f4bf9c2bfb0a4978e69438544129d209dffe9f789e33359fb6`), and v1, `japan-n1-pool-scan` (spec sha256 `74da5fd2789d242fef9da1fbc9ecb7335c5ccfd5869ed8498c64e319d34bddd9`), all frozen and run on 2026-11-27 (UTC). The fifth review of PR #496 found that v4 skipped whole every price row group that spans a holdout day, so once an export holds a holdout day a year's development races in its annual row group would go unscored, and that its one-winner #78 fits credited a dead heat at the board price, dropping the settled dividend (raw rho was already settled). v5 reads such row groups through the scan's day filter and fits settled wins. The third review of PR #496 found that v3 read a Place or Wide cell with no hit, in an odds band that pays in other cells, as a certain total loss: its meeting-bootstrap se is 0, so its shrink weight was 1 and its omega and upper bound exactly 0. v4 gives such a cell the Jeffreys zero-hit se and changes nothing for a cell that paid. The second review found that v2 scored a race whose dividend named a combination off the priced board as if every ticket lost, read a Place or Wide band that paid nothing as a known zero, reported variants searched as the family size, decoded price row groups that span a holdout day, crossed class with three dimensions only, and gave Place and Wide no #78 fit. v1's defects are in the spec (`supersedes`). Their records stay in the registry, superseded; nothing is deleted.
 - Requested range: development days from 2014-06-07 to 2026-11-27 (the run's arguments, not the store's measured span); holdout days are never read and `LockedHoldout` is never opened.
-- The price rows (D14, #502): from the footer statistics of `final_odds`, a row group whose race_date range spans a holdout day is never decoded. Prices are read only on the day windows no such row group touches, each through `read_store_table`, whose scan prunes by the same statistics every row group outside the window and drops holdout days. The jravan builders write one row group per year, so until #502 isolates row groups by day a year whose row group spans a holdout day is skipped whole, its development days unscored; the private report counts the row groups skipped. `races` (no price or result) is read on the same windows and `dividends` filtered in its scan to the windows' development race ids: their row groups are filtered, not skipped, so one spanning a holdout day would still be decoded, its holdout rows dropped inside the scan, until #502 isolates them too; the private report counts them. That meets the owner's D14 boundary for study tickets (2026-11-27, on #82): a development read meets D14 when no holdout value reaches Python, and Arrow decoding a mixed row group in C++ before the filter is accepted; isolating holdout days at the file or row-group level is #502's scope (`store_reader_guarantee`, `d14_boundary`).
-- Seed 20261127; code at `520f1001c2c4`; command `uv run horsetrack japan pool-scan run --from 2014-06-07 --to 2026-11-27 --seed 20261127`.
-- Family size 32 (this family's distinct variants in the registry); variants searched 112 (that plus v1's, v2's and v3's, whose variants ran on the same days). Both are on every row.
-- Private report: `$HORSETRACK_DATA_DIR/reports/pool-scan-japan-a166d99f7320b9596ffc31d1db4d1efdd33e0a3c84a2aad0a16c98a92139a91c.md`; candidate cells: `$HORSETRACK_DATA_DIR/reports/candidate-cells/pool-scan.json`; both written through `write_report` with the source `jravan`.
+- The store reads (D14, #502): `final_odds` and `races` are read one year at a time through `read_store_table`, whose dataset filter drops holdout days inside the Parquet scan, and `dividends` is filtered in its scan to the development race ids. A row group that mixes development and holdout days (the jravan builders' annual row group once an export holds a holdout day) is decoded in the scan and its development days are scored; a row group of a single holdout day is pruned by its statistics. That is the owner's D14 boundary for study tickets (2026-11-27, on #82): a development read meets D14 when no holdout value reaches Python, and Arrow decoding a mixed row group in C++ before the filter is accepted; isolating holdout days at the file or row-group level is #502's scope, and the private report counts, per table, the row groups that span a holdout day until then (`store_reader_guarantee`, `d14_boundary`).
+- Seed 20261127; code at `65687a137713`; command `uv run horsetrack japan pool-scan run --from 2014-06-07 --to 2026-11-27 --seed 20261127`.
+- Family size 32 (this family's distinct variants in the registry); variants searched 144 (that plus v1's to v4's, whose variants ran on the same days). Both are on every row.
+- Private report: `$HORSETRACK_DATA_DIR/reports/pool-scan-japan-43b7ad67f504f923ac079b38be4e740f4e3771934b94f55a38a3d856fa9fc6b8.md`; candidate cells: `$HORSETRACK_DATA_DIR/reports/candidate-cells/pool-scan.json`; both written through `write_report` with the source `jravan`.
 
 ## Registry records
 
-One record per pool, shrinkage, reading and span in `japan-n1-pool-scan-v4`, in spec order:
+One record per pool, shrinkage, reading and span in `japan-n1-pool-scan-v5`, in spec order:
+
+| variant | run id |
+| --- | --- |
+| `WIN/omega_full/from-2014-06-07` | `c1bcf7b417c32bec46abc8127f5fa986f3ea79bc7fccc18616105584886bcb7a` |
+| `WIN/omega_full/from-2024-01-01` | `911a79a1708f5de245ab807da8d28b4f0d6876b199c19c0c3a4714c75f48a25a` |
+| `WIN/segment_effect/from-2014-06-07` | `414ccb9908696ae62a39a5803cc145ca13c4ae477b211088edfed30c0ae436d8` |
+| `WIN/segment_effect/from-2024-01-01` | `b48a70c41ae6948b8674a21467f92388e4df1433df114d7a70f676386aa6074b` |
+| `PLACE/omega_full/from-2014-06-07` | `f4bc7a8ad28508da89ab5e3ef42791e9ee2babb1dc40a36d1db27f8bbb73e4ef` |
+| `PLACE/omega_full/from-2024-01-01` | `ed0b7f3cbc28227a48798656974ec15ad11737322e3a0844696c9b8707090c50` |
+| `PLACE/segment_effect/from-2014-06-07` | `ac0a8e0975510b8c6cb9fd15afbff070eaca22ba6f53dc420b6b52bf8da08756` |
+| `PLACE/segment_effect/from-2024-01-01` | `dae0a97e6bded495b692c8cc5ee751dd15db421c1921c9f52dabab023ef2e859` |
+| `PLACE/roi78-omega_full/from-2014-06-07` | `e1470195a0529bb49270ef9694695c57f27c11cb6816b70e827580be96682541` |
+| `PLACE/roi78-omega_full/from-2024-01-01` | `6e562fde958dbee5b85d323e0a88cb3efa64fbd76b9bcae327a2b6effe3bc0be` |
+| `PLACE/roi78-segment_effect/from-2014-06-07` | `0f7830db21607b6e1360d9648b24ad8dcbb9c6b1be466a05c90c320bc9838768` |
+| `PLACE/roi78-segment_effect/from-2024-01-01` | `b4e055d7dce24fbee982ccc2f62ed072a422fa988ee433b42936474b91589fd2` |
+| `QUINELLA/omega_full/from-2014-06-07` | `2b435df28ea4f48066c26a8e69ec58b9fa3e1c81e2a46d03431a34e0ce80c105` |
+| `QUINELLA/omega_full/from-2024-01-01` | `50a7cefe619d7ed6700a87c02a28f0e7a3be36bef6bccdb6116fa0e87a19a65d` |
+| `QUINELLA/segment_effect/from-2014-06-07` | `f23d45505fb9a7909459e8e35135bfccd2cd0d81756f32c9bd1ac7417fae0a3c` |
+| `QUINELLA/segment_effect/from-2024-01-01` | `442d36255d6cba009184085c743cf016dbdc88d7af3b3a5fb98b0eda00cd2888` |
+| `QUINELLA_PLACE/omega_full/from-2014-06-07` | `51c2b46491d66013f605cf401219d25524b30c79bc3f461b933484ad12bc52d7` |
+| `QUINELLA_PLACE/omega_full/from-2024-01-01` | `5c1513b59015eeb56adaf64df2424b671984b19139c6a745c343805ef7debe6b` |
+| `QUINELLA_PLACE/segment_effect/from-2014-06-07` | `eb0a049d781689f1cfb433d4c4e311d1f26038c6ba63f664f5ce8820a867502a` |
+| `QUINELLA_PLACE/segment_effect/from-2024-01-01` | `8d19394cf618351a666126211df0907af10a8857377685ec6891b0401538f281` |
+| `QUINELLA_PLACE/roi78-omega_full/from-2014-06-07` | `979b8ef4b0c2ed628f71407458df004c4ba24c339dccd61811ead06cac0589a9` |
+| `QUINELLA_PLACE/roi78-omega_full/from-2024-01-01` | `defcc790031cb475762a4f2ed82bd7141a1031b9244eb5f44ac2104aca392037` |
+| `QUINELLA_PLACE/roi78-segment_effect/from-2014-06-07` | `da57278bfec05d47615ebd2a9ccb2bf1edcdba5d65e9d815ab03e6a27dcf9d5c` |
+| `QUINELLA_PLACE/roi78-segment_effect/from-2024-01-01` | `6c4b2f1dc30a906f58cc91e8ee84bca663c63c8a77efe9bd8b45b4da1c06d8fd` |
+| `FORECAST/omega_full/from-2014-06-07` | `baae827ef9176862fb3fa5897772caf04468717835327eb40fd4e035c6c8042c` |
+| `FORECAST/omega_full/from-2024-01-01` | `83ebc0505197bc2549c2c8498bf3fe103bb9b813688fbb8d3cf1f1c8aa3a2112` |
+| `FORECAST/segment_effect/from-2014-06-07` | `f48f6b36148e0857d78ff645fc623c8bde98933a72993927ea73d7245e80fdd1` |
+| `FORECAST/segment_effect/from-2024-01-01` | `93d49d2af27074b2326a367f10427ced1166ae5324e9e5b88e0463d097acbb00` |
+| `TRIO/omega_full/from-2014-06-07` | `7216b3d0c81fceee14ba1e84baeacd34b25a129582b90f3481bcb63993e8ee2c` |
+| `TRIO/omega_full/from-2024-01-01` | `3b1dbdf6bfd33341022413894e8a2dbaf2957f3ac8a6f7feb8430258976b6588` |
+| `TRIO/segment_effect/from-2014-06-07` | `ea2b164fa3b9135bc47dcf8c759f7a36b11ddc321c605249f820174d1c304b9f` |
+| `TRIO/segment_effect/from-2024-01-01` | `b94fad23fbfdddf3ba7971b8173440d5471dbb0a0e4131cf48b464b741efb6fa` |
+
+The cell rules SPA and StepM test are one record per pre-registered cell in each pool's family; their run ids are in the private report, and the sha256 of each family's sorted run ids is:
+
+| SPA family | run ids sha256 |
+| --- | --- |
+| `japan-n1-pool-scan-v5-cells-win` | `44fd86191ee928b09feb73a0b7df41c0f160e3346397ab638a718de55285b4c5` |
+| `japan-n1-pool-scan-v5-cells-place` | `61e9ac0101e7967609e6ec8be95aba99affc026d75621654b6214f5e7be32f8e` |
+| `japan-n1-pool-scan-v5-cells-quinella` | `94e53f35563a8a692d71ba90930b6c976ca4df79529a3ebef80fb71d577d54eb` |
+| `japan-n1-pool-scan-v5-cells-quinella_place` | `ec43f4aa9a51bbaacbd9ec0fdebb23488268da62d851d88feee4e7809ce7e7a9` |
+| `japan-n1-pool-scan-v5-cells-forecast` | `b9a867ebd15248c450649f10cc22878e56d906b93b765250f048abd1164309f9` |
+| `japan-n1-pool-scan-v5-cells-trio` | `346b724d27282f442a15d84b23c5e33249d6f1b914dc55783c5bbdcdcc664be8` |
+
+## Hypothesis
+
+E8, as frozen: in some pre-registered cell of a JRA pool's final board the hierarchical omega differs from 1 once the favourite-longshot bias is taken out as odds-band fixed effects, and some cell's expected return per unit at the final price reaches break-even (omega at or above 1 / payout rate). The null, the starting point: every cell is priced like its pool.
+
+## Variants tried
+
+Per pool (WIN, PLACE, QUINELLA, QUINELLA_PLACE = Wide, FORECAST = exacta, TRIO): two omega readings (`omega_full`, the band effects included; `segment_effect`, the segment effect alone) on two spans (from 2014-06-07; from 2024-01-01, reported apart). The cells are `all`, each odds band, each level of class, field size, favourite strength, pool size, surface and venue, and class crossed with each of the other six. The shrinkage is #78's hierarchical fit for the one-winner pools, on settled wins (a dead heat that splits the pool counts for its dividend over its board odds), its omega weighted by payout rate. For Place and Wide it is an empirical-Bayes shrink of the realised return over odds-band baselines that carry their posterior (a band that paid nothing keeps a Jeffreys posterior, not a known zero, and a cell with no hit in bands that pay keeps the Jeffreys zero-hit se in its shrink), which ranks them; beside it, as variants of their own (`roi78`), #78's fit on a representative price: each combination's low-end odds times its band's realised return per unit of low-end odds when it pays, the outcome being whether it paid. Every cell of every pool is ranked by its shrunk expected return (the owner's reframe: none is closed); the ranks, the omegas and their bounds are withheld (D21). Which variants failed, and their figures, are withheld (D21): the private report gives each reason, and the registry summary shows no status of a licensed-source run. v1's to v4's variants, superseded, are records of `japan-n1-pool-scan`, `japan-n1-pool-scan-v2`, `japan-n1-pool-scan-v3` and `japan-n1-pool-scan-v4` and count toward variants searched.
+
+## Alternatives rejected and why
+
+- The full joint cross (odds band x class x field x favourite x pool size x surface x venue, 33600 cells per pool): most cells would hold a handful of races or none, so none could show an effect at any useful power, and SPA over that many rules would test nothing. The cross cells are Claude's to register (the owner's reframe, 2026-11-27, on #430): the cells cross class, the owner's axis (maidens and debuts against the big graded races), with each other dimension: 150 of each pool's 186 cells.
+- v4's skip of every price row group that spans a holdout day: with one row group per year it would drop a year's development races once an export holds a holdout day, beyond what the owner's D14 boundary asks. v4's board-price hits in the one-winner fits: a dead heat paid below the board odds was credited at the quoted price. A settlement factor per odds band would spread a dead heat's shortfall over its band's other cells, and a raw per-cell factor on the shrunk omega would leave the segment effect unsettled; settled wins carry the settlement through the fit.
+- v3's bootstrap se of 0 for a Place or Wide cell with no hit in bands that pay: a few losing bets would read as a certain total loss. The zero-hit se in the family's tau^2 as well: it is a model sd after zero hits, largest for the sparsest cells, so a few of them could drive tau^2 to 0 and move every cell of the family to the prior. The zero-hit cell's Jeffreys posterior unshrunk: a sparse cell with no hit could rank above cells that paid.
+- #78's fit on Place and Wide at the bare low end of the range: its omega would describe the probability of placing at that price, not the return; the representative price scales each band by its realised return when it pays.
+- A point baseline for a Place or Wide band that paid nothing (v2): a sparse band can pay nothing by chance, so a known zero would rule out a return it cannot rule out.
+- A kill rule (close a pool with no open cell): removed by the owner's reframe; every cell is ranked and none is closed.
+- Exact odds in the fit for every price: a Trio board's long tail makes the grouped rows too many for the 16 GB limit; from odds 10 a 1.1 log grid with the harmonic-mean price keeps the mean implied probability exact.
+- A fixed yen basis for the pool-size tertiles: pool totals move with sales from year to year, so a fixed basis could sort the cells by year.
+- Trifecta and bracket quinella: a follow-up that runs after N1 (owner, 2026-11-27).
+
+## What this rules out
+
+withheld (D21): the private report gives, per pool, which cells' one-sided bounds cover break-even, the SPA p and the StepM survivors. Whatever it shows, an N1 cell is a calibration target at the final price (bands, favourite and pool size are read from the final board, look-ahead for selection, #88), not a betting rule.
+
+## Follow-ups filed
+
+- #501: Trifecta and bracket quinella on the same scan (proposed).
+- #502: date-isolated row groups in the jravan store, so no holdout day is decoded (proposed).
+- #462: Family P on development folds: the top-ranked cells as decision-time rules (proposed).
+- #436: N6: the A2 holdout power table for the top-ranked cells.
+
+## Runs, memory and the registry summary
+
+Everything above this section is `render_public_report`'s output for the run of record: v5, run
+at commit `65687a1`. This section records the trail.
+
+- **v5 freeze.** `uv run horsetrack japan pool-scan freeze` ran on 2026-11-28 (JST) at commit
+  `65687a1`, before any scored read of `japan-n1-pool-scan-v5`. It wrote the family's only freeze
+  line in the japan registry.
+- **v5 run of record, at `65687a1`** (the tables above). `/usr/bin/time -l` gave a maximum
+  resident set size of 2,054,586,368 bytes (about 2.05 GB, under the 2.5 GB cap) and 1,239 s of
+  wall time on this 16 GB Mac. It ran on 2026-11-28 from 08:15 to 08:36 JST, a JRA race day, and
+  finished before racing. No other job of this ticket ran beside it; another ticket's study run
+  (#219), CPU-bound with a resident set of about 27 MB, was running on the machine throughout.
+  The read path is v4's with one change: each year of the store is one `read_store_table` read
+  through its day filter, with no row group skipped. One year of the store, one pool's board at
+  a time, was in memory, and one fit ran at a time.
+- **What v5 changes.** Two things: the store reads (`store_reader_guarantee` in the spec) and
+  settled wins in the one-winner fits (`settlement`). Checked against v4's candidate-cell file:
+  the same cells; every row's raw figures (bets, race days, meetings, mean return and its se,
+  mean odds, payout rate) hold v4's, and every Place and Wide row holds all of v4's figures.
+  Whether and where a one-winner row's shrunk reading changed is withheld (D21).
+- **The `local` test.**
+  `tests/countries/japan/research/test_pool_scan_run.py::test_real_store_one_month_reads_development_days_only`
+  scans the store's last month into a temporary registry and a temporary report directory. Its
+  outputs were not read and informed nothing in any spec.
+- **Registry summary.** The run wrote N1's pages only (`write_committed_summary`, as main's
+  cross-pool study does): v5's seven family files under `docs/experiments/registry/japan/`, each
+  from its family's records alone, and their seven links merged into `README.md`, every other line
+  of the index kept (`summary_error` is null). `git status` after the run showed those seven new
+  files and `README.md`, and nothing else under `docs/`. v5's files show only each record's E id
+  and variant, its status and values withheld (licensed source).
+
+### Superseded: v4, `japan-n1-pool-scan-v4`
+
+v4 (spec sha256 `a166d99f7320b9596ffc31d1db4d1efdd33e0a3c84a2aad0a16c98a92139a91c`) was frozen at
+commit `520f100` on 2026-11-28 (JST), and its run of record ran there. The fifth review of PR
+#496 found the two defects that v5 fixes (above): it skipped whole every price row group whose
+race_date range spans a holdout day, so once an export holds a holdout day a rerun would leave
+that year's development races unscored, and its one-winner #78 fits credited a dead heat at the
+board price. Its records stay in the registry, superseded: every variant is a record and nothing
+is deleted. Its variants count toward variants searched. Its private report stays under
+`$HORSETRACK_DATA_DIR/reports/pool-scan-japan-a166d99f7320b9596ffc31d1db4d1efdd33e0a3c84a2aad0a16c98a92139a91c.md`,
+and its run of record's candidate-cell file under
+`$HORSETRACK_DATA_DIR/reports/candidate-cells/pool-scan-superseded-v4.json`.
+
+- **v4 freeze.** `uv run horsetrack japan pool-scan freeze` ran on 2026-11-28 (JST) at commit
+  `520f100`, before any scored read of `japan-n1-pool-scan-v4`. It wrote the family's only freeze
+  line in the japan registry.
+- **v4 run of record, at `520f100`.** `/usr/bin/time -l` gave a maximum resident set size of
+  1,411,399,680 bytes (about 1.41 GB) and 1,513 s of wall time on this 16 GB Mac, with no other
+  heavy job beside it. It ran on 2026-11-28 from 02:37 to 03:03 JST, a JRA race day, and
+  finished before racing. The read path was that of v3's run of record (`826c665`): one year of
+  the store, one pool's board at a time, was in memory, and one fit ran at a time.
+- **What v4 changed.** Only the zero-hit cell rule of Place and Wide (`zero_hit_cell` in the
+  spec). Checked against v3's candidate-cell file: every row of the one-winner pools, and every
+  Place and Wide row whose cell paid, held v3's figures. Whether and where a zero-hit cell's row
+  changed is withheld (D21).
+- **v4's registry summary.** The v4 run's `write_summary` regenerated the summary of every family
+  in the japan registry (`summary_error` was null). The committed summary took v4's seven files
+  and `README.md` from a read-only view of the japan registry that held only the families it
+  already held plus v4's, into a temporary directory; every other file there was as before the
+  run. v4's files show only each record's E id and variant, its status and values withheld
+  (licensed source).
+
+v4's run of record, one record per pool, shrinkage, reading and span:
 
 | variant | run id |
 | --- | --- |
@@ -50,7 +193,7 @@ One record per pool, shrinkage, reading and span in `japan-n1-pool-scan-v4`, in 
 | `TRIO/segment_effect/from-2014-06-07` | `9a1481f6865ec3929c0932d54de78b579d6cf822e0a1eb30b92f4512a5946b7a` |
 | `TRIO/segment_effect/from-2024-01-01` | `45e6703144aae89613c973a0624e2115e3520f2a934234400effd68f723ab2b5` |
 
-The cell rules SPA and StepM test are one record per pre-registered cell in each pool's family; their run ids are in the private report, and the sha256 of each family's sorted run ids is:
+The sha256 of the sorted run ids of each of its SPA families:
 
 | SPA family | run ids sha256 |
 | --- | --- |
@@ -60,66 +203,6 @@ The cell rules SPA and StepM test are one record per pre-registered cell in each
 | `japan-n1-pool-scan-v4-cells-quinella_place` | `ee2354dbd9ac6feb96d89c712de6c57230af215180e29a71250c6b1e0ef489b6` |
 | `japan-n1-pool-scan-v4-cells-forecast` | `5881b84a77fca391f3db019bdf28e8eb5bbafd5a4a0df9198087b5e88fb01a0d` |
 | `japan-n1-pool-scan-v4-cells-trio` | `b22385f5dbecf5fb1b332d2abac39bad18a554a8f431e80c637e0ea10a4a69e8` |
-
-## Hypothesis
-
-E8, as frozen: in some pre-registered cell of a JRA pool's final board the hierarchical omega differs from 1 once the favourite-longshot bias is taken out as odds-band fixed effects, and some cell's expected return per unit at the final price reaches break-even (omega at or above 1 / payout rate). The null, the starting point: every cell is priced like its pool.
-
-## Variants tried
-
-Per pool (WIN, PLACE, QUINELLA, QUINELLA_PLACE = Wide, FORECAST = exacta, TRIO): two omega readings (`omega_full`, the band effects included; `segment_effect`, the segment effect alone) on two spans (from 2014-06-07; from 2024-01-01, reported apart). The cells are `all`, each odds band, each level of class, field size, favourite strength, pool size, surface and venue, and class crossed with each of the other six. The shrinkage is #78's hierarchical fit for the one-winner pools, its omega weighted by payout rate. For Place and Wide it is an empirical-Bayes shrink of the realised return over odds-band baselines that carry their posterior (a band that paid nothing keeps a Jeffreys posterior, not a known zero, and a cell with no hit in bands that pay keeps the Jeffreys zero-hit se in its shrink), which ranks them; beside it, as variants of their own (`roi78`), #78's fit on a representative price: each combination's low-end odds times its band's realised return per unit of low-end odds when it pays, the outcome being whether it paid. Every cell of every pool is ranked by its shrunk expected return (the owner's reframe: none is closed); the ranks, the omegas and their bounds are withheld (D21). Which variants failed, and their figures, are withheld (D21): the private report gives each reason, and the registry summary shows no status of a licensed-source run. v1's, v2's and v3's variants, superseded, are records of `japan-n1-pool-scan`, `japan-n1-pool-scan-v2` and `japan-n1-pool-scan-v3` and count toward variants searched.
-
-## Alternatives rejected and why
-
-- The full joint cross (odds band x class x field x favourite x pool size x surface x venue, 33600 cells per pool): most cells would hold a handful of races or none, so none could show an effect at any useful power, and SPA over that many rules would test nothing. The cross cells are Claude's to register (the owner's reframe, 2026-11-27, on #430): the cells cross class, the owner's axis (maidens and debuts against the big graded races), with each other dimension: 150 of each pool's 186 cells.
-- v3's bootstrap se of 0 for a Place or Wide cell with no hit in bands that pay: a few losing bets would read as a certain total loss. The zero-hit se in the family's tau^2 as well: it is a model sd after zero hits, largest for the sparsest cells, so a few of them could drive tau^2 to 0 and move every cell of the family to the prior. The zero-hit cell's Jeffreys posterior unshrunk: a sparse cell with no hit could rank above cells that paid.
-- #78's fit on Place and Wide at the bare low end of the range: its omega would describe the probability of placing at that price, not the return; the representative price scales each band by its realised return when it pays.
-- A point baseline for a Place or Wide band that paid nothing (v2): a sparse band can pay nothing by chance, so a known zero would rule out a return it cannot rule out.
-- A kill rule (close a pool with no open cell): removed by the owner's reframe; every cell is ranked and none is closed.
-- Exact odds in the fit for every price: a Trio board's long tail makes the grouped rows too many for the 16 GB limit; from odds 10 a 1.1 log grid with the harmonic-mean price keeps the mean implied probability exact.
-- A fixed yen basis for the pool-size tertiles: pool totals move with sales from year to year, so a fixed basis could sort the cells by year.
-- Trifecta and bracket quinella: a follow-up that runs after N1 (owner, 2026-11-27).
-
-## What this rules out
-
-withheld (D21): the private report gives, per pool, which cells' one-sided bounds cover break-even, the SPA p and the StepM survivors. Whatever it shows, an N1 cell is a calibration target at the final price (bands, favourite and pool size are read from the final board, look-ahead for selection, #88), not a betting rule.
-
-## Follow-ups filed
-
-- #501: Trifecta and bracket quinella on the same scan (proposed).
-- #502: date-isolated row groups in the jravan store, so no holdout day is decoded (proposed).
-- #462: Family P on development folds: the top-ranked cells as decision-time rules (proposed).
-- #436: N6: the A2 holdout power table for the top-ranked cells.
-
-## Runs, memory and the registry summary
-
-Everything above this section is `render_public_report`'s output for the run of record: v4, run
-at commit `520f100`. This section records the trail.
-
-- **v4 freeze.** `uv run horsetrack japan pool-scan freeze` ran on 2026-11-28 (JST) at commit
-  `520f100`, before any scored read of `japan-n1-pool-scan-v4`. It wrote the family's only freeze
-  line in the japan registry.
-- **v4 run of record, at `520f100`** (the tables above). `/usr/bin/time -l` gave a maximum
-  resident set size of 1,411,399,680 bytes (about 1.41 GB) and 1,513 s of wall time on this 16 GB
-  Mac, with no other heavy job beside it. It ran on 2026-11-28 from 02:37 to 03:03 JST, a JRA race
-  day, and finished before racing. The read path is that of v3's run of record (`826c665`): one
-  year of the store, one pool's board at a time, was in memory, and one fit ran at a time.
-- **What v4 changes.** Only the zero-hit cell rule of Place and Wide (`zero_hit_cell` in the
-  spec). Checked against v3's candidate-cell file: every row of the one-winner pools, and every
-  Place and Wide row whose cell paid, holds v3's figures. Whether and where a zero-hit cell's row
-  changed is withheld (D21).
-- **The `local` test.**
-  `tests/countries/japan/research/test_pool_scan_run.py::test_real_store_one_month_reads_development_days_only`
-  scans the store's last month into a temporary registry and a temporary report directory. Its
-  outputs were not read and informed nothing in any spec.
-- **Registry summary.** The v4 run's `write_summary` regenerated the summary of every family in
-  the japan registry (`summary_error` is null). As in the earlier rounds, the committed summary
-  under `docs/experiments/registry/japan/` holds only the families it already held plus v4's
-  seven. `write_summary` was run on a read-only view of the japan registry that holds only those
-  families' records, into a temporary directory; v4's seven files and `README.md` were taken from
-  it, and every other file there is as before the run (v1's, v2's and v3's regenerate
-  identically). The families of other open tickets wait for their own PRs. v4's files show only
-  each record's E id and variant, its status and values withheld (licensed source).
 
 ### Superseded: v3, `japan-n1-pool-scan-v3`
 
