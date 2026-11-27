@@ -36,6 +36,7 @@ The same inputs give the same bytes.
 | `timeseries` | `timeseries.py` | `odds_timeseries/<YYYY-MM-DD>.parquet` | the odds log's schema | that of `odds_timeseries` |
 | `masters` | `masters.py` | `horses`, `horse_pedigree`; `jockeys`, `trainers` | store tables; jravan-only | `horses` refused, `horse_pedigree` `static`; `current_value` with `in_view` |
 | `bloodlines` | `bloodlines.py` | `breeding_horses`, `produce`, `lineages` | jravan-only | `static` |
+| `workouts` | `handicap/workouts_jravan.py` | `workouts` | jravan-only | none: its readers apply the module's own publication rule (#229), and the as-of views refuse it |
 | `dump` | `dump.py` | `interim/jravan/records/` | not tables | none |
 | `reconcile` | `reconcile.py` | `reports/jravan-reconcile.md` | not a table | n/a |
 
@@ -736,3 +737,33 @@ jravan table, a jravan-only table, the time-series day files or a dumped family
 report goes to `reports/data-coverage.md`; `--write-doc` writes the committed
 [docs/data-coverage.md](../data-coverage.md), where every JRA-VAN and JRDB supply shows
 `withheld (D21)` and no figure.
+
+## HC and WC: workouts (#229)
+
+`horsetrack.countries.japan.handicap.workouts_jravan` (beside #137's JRDB `workouts`);
+`horsetrack japan jravan workouts`. JRA-VAN's 坂路 (HC) and ウッド (WC) automatic workout times as a
+second, first-party workout source with #137's columns:
+
+- `build_workout_table(raw=None, out=None)` reads every `stored/SLOP/HC/<YYYY>.jvd` and
+  `stored/WOOD/WC/<YYYY>.jvd` (a missing folder is no rows; neither is a `FileNotFoundError`),
+  keeps one version per key (`records.latest_versions` on the layout's key items, across all the
+  year files of a record type; a kept deletion has no row) and writes `workouts.parquet`, sorted
+  by workout date, centre, course, time and horse, through `records.write_parquet`. An `out`
+  inside the repository is `paths.DataDirInsideRepo`.
+- Columns: `horse_id` (血統登録番号 as printed, the store's id; blank or all zeros null, the row
+  kept), `workout_date` and `race_date` (both 調教年月日; `race_date` lets `read_store_table` scope
+  and drop holdout days by workout date), `workout_time` (調教時刻, `HH:MM`), `centre` (トレセン区分
+  0 `miho`, 1 `ritto`, else `other`), `course` (`hill` for HC, `wood` for WC), `furlongs` (the
+  largest n whose n-furlong total is measured), `split_first_s` (that total), `split_mid_s` (the
+  3-furlong total), `final_furlong_s` (the 200 m to 0 m lap). Times are tenths of a second; all
+  zeros (no measure) or all nines (over the limit) is null. The totals are found by the distance
+  in the item name, since one name is spelled differently from the others. `effort` and `partner`
+  are null: the source has neither.
+- As of t (owner decisions on #229, 2026-11-27): a workout counts from `published_at`, (workout
+  date + 1 day) 00:00 Asia/Tokyo, strictly before t, and only for a race on a later day;
+  データ作成年月日 is ignored, and the latest stored version is used at every t (accepted
+  look-ahead, as for the masters). `workout_table` and `workout_features` are #137's with these
+  rules: `days_since_hard` is always null, and no JRDB table or `HORSETRACK_JRDB_FEATURES` is read.
+- The command writes the build counts to `reports/jravan-workouts.json` and the coverage per
+  centre and course (first and last workout date, rows, horses; holdout days not read) to
+  `reports/jravan-workouts-coverage.json`, both through `write_report`.

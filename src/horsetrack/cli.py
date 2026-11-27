@@ -6,6 +6,9 @@ from horsetrack import __version__
 from horsetrack.core.ingest.cli import scrape_app
 from horsetrack.core.store.cli import store_app
 from horsetrack.countries.japan.board.server import board_serve_command
+from horsetrack.countries.japan.handicap.workouts_jravan import (
+    workouts_command as jravan_workouts_command,
+)
 from horsetrack.countries.japan.jra.going_fetch import fetch_going_command
 from horsetrack.countries.japan.jra.win_sales_fetch import fetch_win_sales_command
 from horsetrack.countries.japan.jravan.bloodlines import (
@@ -76,6 +79,7 @@ jravan.command("reconcile")(jravan_reconcile_command)
 jravan.command("runners")(jravan_runners_command)
 jravan.command("timeseries")(jravan_timeseries_command)
 jravan.command("votes")(jravan_votes_command)
+jravan.command("workouts")(jravan_workouts_command)
 
 
 def _version_callback(value: bool) -> None:
