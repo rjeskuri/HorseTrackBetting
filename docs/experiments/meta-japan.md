@@ -257,3 +257,17 @@ What each form is:
   `meeting_clustered:` records), so no follow-up ticket is needed. #276 is the counterpart for #77's β.
 - D9 at level 2 (the 5-season minimum) and level 1 (the season refit): answered (b) on #87, 2026-11-25. The
   replication run is a documented failure to meet D9; the D9-compliant run is #91/#98.
+
+## On the leaderboard (2026-11-27)
+
+Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
+adoption verdicts. Nothing is adopted or rejected: every option, model and member is a row on
+`horsetrack japan leaderboard` (#452), ranked by its shrunk return per ¥100 at the final price, and a row with no
+measured return is listed after the ranking, never dropped. Where this report says "not adopted", "rules out" or
+"rejected", read a measured position. This section reopens and re-runs nothing.
+
+- Registry family: `japan-c4-meta-final-win`.
+- Task 4 (#451) lists it as a model with no return yet. Its member-based records are withheld (D21): the public
+  leaderboard shows the family's id only, with no figure.
+- "Nothing is adopted" above now reads as a measured position, not a verdict. The run stays on the record as a
+  documented failure to meet D9, as the owner's answer (b) on #87 records.

@@ -107,3 +107,18 @@ Filed as `status:proposed` tickets under epic #72, for the owner to promote or d
    ledger's row asks.
 4. #325: grow the WIN5 carryover sample, recording each new carryover day's pool-level return as new days run (the
    [1, 2) bin has 1 net-pool day; the [2, inf) bin has none).
+
+## On the leaderboard (2026-11-27)
+
+Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
+adoption verdicts. Nothing is adopted or rejected: every option, model and member is a row on
+`horsetrack japan leaderboard` (#452), ranked by its shrunk return per ¥100 at the final price, and a row with no
+measured return is listed after the ranking, never dropped. Where this report says "not adopted", "rules out" or
+"rejected", read a measured position. This section reopens and re-runs nothing.
+
+- Registry family: `win5-carryover-v1`.
+- Task 4 (#451) maps each carryover-ratio bin's pool-level day value to a measured WIN5 cell row with its one-sided
+  lower bound only, labelled look-ahead, because the net pool is known only after the close. The gross-pool
+  carryover-day metric gives no row.
+- "Nothing is adopted" and "the null result stands for any buyable WIN5 rule" now read as a measured position: the
+  rows are pool-level values, not a buyable ticket rule, and rank as such. The follow-ups #322 to #325 stay as filed.

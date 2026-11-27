@@ -116,3 +116,17 @@ Win sales before the post are #278.
 - #278: per-race Win sales before the post, for the low-turnover segment.
 - Not yet filed: re-run E18, E10 and E21 as the logged days grow, so the meeting bootstrap has enough clusters to
   read, and build each logged day's results into the store as part of that run.
+
+## On the leaderboard (2026-11-27)
+
+Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
+adoption verdicts. Nothing is adopted or rejected: every option, model and member is a row on
+`horsetrack japan leaderboard` (#452), ranked by its shrunk return per ¥100 at the final price, and a row with no
+measured return is listed after the ranking, never dropped. Where this report says "not adopted", "rules out" or
+"rejected", read a measured position. This section reopens and re-runs nothing.
+
+- Registry family: `japan-board-quality-by-horizon` (diagnostic, not frozen). It has no file in the committed registry
+  summary: `docs/experiments/registry/japan/README.md` does not list it. The leaderboard reads the run registry under
+  the data directory, not the summary, and task 4 (#451) names this family as a model listed with no return.
+- What this report rules out now reads as a measured position on the board at each horizon against the final board.
+  It carries no return, so it ranks nowhere yet; the re-run named in its follow-ups stays a follow-up.

@@ -260,3 +260,19 @@ None filed by this run. Proposed, for the orchestrator to file under epic #72 as
 - Find a public source of per-runner Place money, or show that none exists, so that step 3 can run. Until then
   step 3 stays data pending on #4.
 - E15 on the JRDB 10am board is #84 (existing; it reuses this module's selection).
+
+## On the leaderboard (2026-11-27)
+
+Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
+adoption verdicts. Nothing is adopted or rejected: every option, model and member is a row on
+`horsetrack japan leaderboard` (#452), ranked by its shrunk return per ¥100 at the final price, and a row with no
+measured return is listed after the ranking, never dropped. Where this report says "not adopted", "rules out" or
+"rejected", read a measured position. This section reopens and re-runs nothing.
+
+- Registry family: `japan-coplacer-place-e15`.
+- Task 4 (#451) maps step 1's raw Place returns (the `step1:<fields>:raw` variants) to measured Place rows with their
+  one-sided bounds, labelled look-ahead, because the favourite's band is read on the final price. The odds-matched
+  variants (a difference from an expectation, not a return) and the data-pending step 2 and step 3 variants are
+  listed with no return.
+- "Nothing enters Family P" above now reads as no adoption to make: under D18 as amended there is one leaderboard,
+  and the raw rows rank among the other Place rows. Step 2 and step 3 stay data pending, as filed.

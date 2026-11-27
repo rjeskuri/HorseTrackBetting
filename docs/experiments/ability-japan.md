@@ -258,3 +258,19 @@ None by this PR. Proposed, for the orchestrator to file under epic #73 as `statu
 - Feed v2's export (u, σ_i, p_ability; `ability-japan-12b1eed01095-9a3f58d49fb3.parquet`) into #98's meld.
 - Note in `core/eval/folds.py` (or its spec) that min_train does not count a partial first unit, so a study whose
   signed split names dates should set them explicitly, as this one does.
+
+## On the leaderboard (2026-11-27)
+
+Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
+adoption verdicts. Nothing is adopted or rejected: every option, model and member is a row on
+`horsetrack japan leaderboard` (#452), ranked by its shrunk return per ¥100 at the final price, and a row with no
+measured return is listed after the ranking, never dropped. Where this report says "not adopted", "rules out" or
+"rejected", read a measured position. This section reopens and re-runs nothing.
+
+- Registry families: `japan-c2-ability-final-win-v2` (the result of record) and `japan-c2-ability-final-win` (v1,
+  superseded; its records stay on the record and on the board as superseded, not deleted).
+- Task 4 (#451) maps no return for either, so both are listed with no return yet. Their records are withheld (D21):
+  the public leaderboard shows their ids only, with no figure. A member's return in the leaderboard's format is a
+  follow-up of epic #447, not a re-run started here.
+- "Nothing is adopted" above now reads as a member measured against the final Win price and waiting for a return,
+  not as a verdict on it.

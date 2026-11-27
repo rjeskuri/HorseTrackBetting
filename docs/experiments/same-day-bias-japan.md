@@ -97,3 +97,17 @@ and the final price already carries most of what it holds. The scored races (22,
 None filed by this run. Proposed for the orchestrator (`status:proposed` under #73): re-run E32 against the D4
 calibrated-market baseline and at the T-2 board price once logged odds cover enough development days, and re-run when
 `result_published_utc` replaces the post + 30 min proxy (#260).
+
+## On the leaderboard (2026-11-27)
+
+Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
+adoption verdicts. Nothing is adopted or rejected: every option, model and member is a row on
+`horsetrack japan leaderboard` (#452), ranked by its shrunk return per ¥100 at the final price, and a row with no
+measured return is listed after the ranking, never dropped. Where this report says "not adopted", "rules out" or
+"rejected", read a measured position. This section reopens and re-runs nothing.
+
+- Registry family: `japan-same-day-bias-final-win`.
+- Task 4 (#451) lists it as a member with no return yet. A member's return in the leaderboard's format is a
+  follow-up of epic #447, not a re-run started here.
+- What this report rules out now reads as a measured position of the same-day bias column beside the final Win
+  price. The re-runs proposed in its follow-ups stay proposals.

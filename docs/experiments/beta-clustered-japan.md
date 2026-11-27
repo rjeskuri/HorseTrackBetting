@@ -151,3 +151,17 @@ KYO 0.9907 [0.9635, 1.0178] 0.957; FKS 0.9870 [0.9513, 1.0227] 0.923.
 
 None. Adopting the clustered interval for β (in `calibration.py`'s tables, or in the A6 family's segment β) waits on
 the owner's call; if made, it needs a new spec, because #77's family stays frozen.
+
+## On the leaderboard (2026-11-27)
+
+Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
+adoption verdicts. Nothing is adopted or rejected: every option, model and member is a row on
+`horsetrack japan leaderboard` (#452), ranked by its shrunk return per ¥100 at the final price, and a row with no
+measured return is listed after the ranking, never dropped. Where this report says "not adopted", "rules out" or
+"rejected", read a measured position. This section reopens and re-runs nothing.
+
+- Registry family: `japan-beta-clustered-final-win`. It is a calibration interval, not a return, so task 4 (#451)
+  lists it as a model with no return yet. #77's family `japan-crowd-calibration-final-win`, cited above, has its own
+  section in `crowd-calibration-japan.md`.
+- "Nothing is adopted" above now reads as a measured comparison of two intervals for the same β. Which interval the
+  tables carry is a reporting choice, not an adoption.
