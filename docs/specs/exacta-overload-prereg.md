@@ -34,6 +34,13 @@ T−2 ≥ 3.0 and less popular, by section 6's logged-day tertile), `primary_met
 per ¥100 at the final dividend, the owner's 2026-11-27 reframe) and `revision`; nothing else
 changes, `min_meetings` included.
 
+> **rule-v3 is unsuitable for execution, pending #281** (review of f4c7db6, 2026-11-27). Its
+> headline scope's "less popular" is the lower tertile of pool totals within each logged day, so
+> an early race can be classified with later races' totals, which are not available when it is
+> selected. #281 freezes a replacement with a complete availability contract before E2 is
+> scored; the v3 freeze stays in the registry as history. Its `min_meetings` 100 gate is not
+> enforced: the owner's 2026-11-27 reframe scores the logged days available at each run.
+
 The superseded v1 families, frozen 2026-11-25 with the label `in_fold` for the same fit, and
 scored that day (their records stay in the registry):
 
@@ -61,8 +68,8 @@ deviations, documented, and land", with the λ2 relabel (the v2 note above).
   used #115's full-development fit (λ2 = 0.8104, partly in-sample; fit `2b822d643cf7`): one fit
   over the development out-of-fold races, which saw the scored races' first two places. v1's
   specs labelled it `in_fold`; the v2 specs label it `full_development`, as the owner asked.
-  Effect: B3 (E1″) and C at λ2 = 0.8104 are partly in-sample. B2's null (ρ = 1 under π = q) does
-  not depend on p, so E1's ranking and its SPA and StepM context stand. A per-fold refit for B3
+  Effect: B3 (E1″) and C at λ2 = 0.8104 are partly in-sample. B2's null (ρ = 1 under π = q,
+  before rounding) does not depend on p, so E1's ranking and its SPA and StepM context stand. A per-fold refit for B3
   and C is #284.
 - (b) Scored span, owner-accepted 2026-11-26 ("the scored span from 2020-01-05 stands as
   documented"). The signed scope runs from 2014-06-07 (section 2). The scored races start
@@ -142,12 +149,21 @@ Why B2:
 - It needs only the winner's dividend. Every combination in S is staked, so selecting on the
   winner adds no bias.
 - Harville weights keep its variance far below the flat box.
-- Its null value is `rate` for every S, whether or not Harville is right.
+- Its null value is `rate` for every S, whether or not Harville is right (with q the unrounded
+  share; at the paid, rounded-down dividend it is slightly below `rate`).
+- It is a p-weighted average over S: a value near `rate` can hide over- and underpriced
+  combinations that offset, so it does not show that every combination is fairly priced.
 
-The cross-pool question ("overload relative to Win plus ordering") is read from B2 and B3 together:
+The cross-pool question ("overload relative to Win plus ordering") was to be read from B2 and B3
+together:
 
 - B2 < rate on fav_first with B3 ≈ 1: the exacta pool overloads the favourite.
 - B2 and B3 both below 1: the bias sits in the Win pool or the ordering model, not the exacta pool.
+
+> **Withdrawn** (review of f4c7db6, 2026-11-27): B3 is the equal-weighted mean of `π/p` over S,
+> while the cross-pool ratio `Σ_S q / Σ_S p` weights by p, so B3 can sit on the other side of 1
+> from it even when outcomes follow the exacta pool. B3 is reported as an outcome-calibration
+> diagnostic of Harville only; no direction of the cross-pool ratio is read from B2 and B3.
 
 D is reported on the logged days alongside B2 for the same races, as a check that the two agree in
 direction.
@@ -155,8 +171,10 @@ direction.
 Estimand (owner, 2026-11-25): `ρ_S = Σ_r R^{B2}_{S,r} / Σ_r rate_r`, where the sum runs over the races of
 a segment.
 
-- `ρ_S < 1` on fav_first means the pool overloads the favourite-first combinations.
-- `ρ_S > 1` on fav_second or no_fav means those combinations return more than the takeout allows.
+- `ρ_S < 1` on fav_first means the pool overloads the favourite-first combinations, against the
+  outcomes and on the Harville-weighted average.
+- `ρ_S > 1` on fav_second or no_fav means those combinations return more than the takeout allows,
+  on the same average.
 - A betting profit additionally needs `Σ R / Σ stake > 1`, that is `ρ_S > 1/rate` (about 1.33).
 
 ## 5. Families (to freeze in the registry, all variants listed before scoring)
@@ -198,7 +216,9 @@ a segment.
 - Benchmark: no bet (loss 0).
 - **History cannot score E2:** only the winner's `q_c` is known, so the selection set is
   unobservable. E2 is frozen now and scored only on #130-logged development days, once there are
-  at least 100 meetings. Until then it is reported as "not yet scorable".
+  at least 100 meetings. Until then it is reported as "not yet scorable". (The 100-meeting gate
+  is not enforced after the owner's 2026-11-27 reframe, and rule-v3 is not executed before #281
+  replaces its popularity cutoff: the note under the family table.)
 - Buying fav_first is not in E2. A loss-avoidance rule (D18: "do not buy fav_first when
   r_c(t) is above a cut") becomes a follow-up ticket.
 
@@ -220,7 +240,8 @@ of the day, or a newcomer or maiden race.
 
 On #130 days the real exacta pool total exists (the odds log's `investment` row). There,
 the lower tertile within each logged day defines "less popular", and the proxy's
-agreement with it is reported.
+agreement with it is reported. (A whole-day tertile uses later races' totals, so it is not a
+decision-time selection variable for E2; #281 replaces it.)
 
 ## 7. Metric, inference and shrinkage
 

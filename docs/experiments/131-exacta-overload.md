@@ -59,8 +59,8 @@ Stated before scoring (spec sections 1, 4 and 5):
   deviation the owner accepted on 2026-11-26, asking for the `full_development` label (spec,
   "Deviations from the signed spec"). v1 called the same fit `in_fold`.
 - What the deviation touches: B3 (E1″) and C at λ2 = 0.8104 are partly in-sample. B2's null
-  (ρ = 1 under π = q) does not depend on p, so E1's ranking and its SPA and StepM context stand at
-  any λ2.
+  (ρ = 1 under π = q, before rounding) does not depend on p, so E1's ranking and its SPA and StepM
+  context stand at any λ2.
 - Scored span: 2020-01-05 onward (23,629 of the 43,058 development races), not the signed
   2014-06-07 onward, forced by #114's out-of-fold span; owner-accepted on 2026-11-26 ("the scored
   span from 2020-01-05 stands as documented").
@@ -193,20 +193,23 @@ Reading the ranked rows (the null result, as rows rather than a closed verdict):
 
 ### What B2 measures, and what it does not
 
-- B2 measures the historical paid return of a category's box against the payout rate: whether
-  the exacta pool's prices are fair against the outcomes. Its expectation is
-  `rate · Σ_S π_c p_c/q_c ÷ Σ_S p_c` (spec section 4). When outcomes follow the exacta pool
-  (π = q), that is `rate` exactly, so expected ρ = 1, however much more mass the pool puts on
-  favourite-first combinations than Win plus Harville does.
+- B2 measures the historical paid return of a category's Harville-weighted box against the
+  payout rate. Its expectation is `rate · Σ_S π_c p_c/q_c ÷ Σ_S p_c` (spec section 4), a
+  p-weighted average of `π_c/q_c` over the category: a ρ near 1 can hide over- and underpriced
+  combinations that offset, so it does not show that each combination is priced fairly. When
+  outcomes follow the exacta pool's unrounded shares (π = q), the expectation is `rate`, so
+  expected ρ = 1, however much more mass the pool puts on favourite-first combinations than Win
+  plus Harville does; at the paid, rounded-down dividend it is slightly below 1 (Breakage below).
 - So ρ ≈ 1 does not show that the pool agrees with Win plus Harville. The direct cross-pool
   ratio (the pool's `Σ_S q / Σ_S p` against Win-implied Harville, the ticket's quantity) is not
   measured by B2. History cannot compute it, since only the paying exacta's dividend is stored;
   it needs full exacta boards (D, on #130-logged days, #281).
-- Two results bear on the cross-pool ratio only indirectly, and both are partly in-sample at
-  λ2 = 0.8104 (#115's full-development fit; #284 refits it per fold):
-  - B3 (E1″) measures Harville's calibration against outcomes. With B2 ≈ 1 (prices fair against
-    outcomes), B3 ≠ 1 on a category means the pool and Harville differ there in B3's direction,
-    but B3 gives no size for `Σ_S q / Σ_S p`.
+- Two further results are reported beside B2; both are partly in-sample at λ2 = 0.8104 (#115's
+  full-development fit; #284 refits it per fold):
+  - B3 (E1″) is an outcome-calibration diagnostic of Harville: the equal-weighted mean of `π/p`
+    over the category's combinations. It gives neither the direction nor the size of the
+    cross-pool ratio `Σ_S q / Σ_S p`, which weights by p: the equal-weighted mean can sit on the
+    other side of 1 from it, even when outcomes follow the exacta pool.
   - C measures the pool's log-score gain over Harville on the paying exacta. A positive gain
     means the two differ and the pool forecasts better; it gives no sign or size by category.
 
@@ -217,29 +220,35 @@ E1 centres its loss on the nominal payout rate, while B2 is paid at dividends ro
 share of the category's unrounded payout that rounding takes. Short dividends lose more to
 rounding, so `b_S` is largest for fav_first. Computed from the same 23,629 development races
 (`exacta_run breakage`, git `27af886`, registry family `japan/131-exacta-breakage`, one record
-per λ2), with the unrounded dividend taken at `D + 5`, uniform within the ¥10 step, as
-`implied_share` does. The frozen E1 loss and the paid-return results above are unchanged.
+per λ2), with the unrounded dividend taken at the midpoint `D + 5` of its ¥10 step, as
+`implied_share` does. Every `b_S` and unrounded ρ below is that midpoint estimate, not a bound:
+the actual rounding loss of a dividend lies anywhere from ¥0 to just under ¥10. The frozen E1
+loss and the paid-return results above are unchanged.
 
-| Category | b_S, cell "all" (λ2 0.8104 / 1) | b_S over the 14 cells | ρ paid, "all" (λ2 0.8104) | ρ unrounded, "all" [95% lower, upper] |
+| Category | b_S at D + 5, cell "all" (λ2 0.8104 / 1) | b_S at D + 5 over the 14 cells | ρ paid, "all" (λ2 0.8104) | ρ at D + 5, "all" [95% lower, upper] |
 |---|---|---|---|---|
 | fav_first | 0.36% / 0.39% | 0.07% to 0.68% | 1.0245 | 1.0282 [1.0116, 1.0450] |
 | fav_second | 0.28% / 0.28% | 0.07% to 0.44% | 1.0031 | 1.0059 [0.9828, 1.0293] |
 | no_fav | 0.09% / 0.10% | 0.05% to 0.16% | 0.9955 | 0.9964 [0.9840, 1.0090] |
 
-- Rounding takes under 0.7% of the payout in every cell (most in fav_first with the favourite
-  at 1.9 or less: 0.63% and 0.68%). It pushes the paid ρ down, most for fav_first, so it can
-  make a fair pool look like a favourite-first shortfall, by at most that much.
-- The observed fav_first departures are not within the breakage effect. Overall, fav_first's ρ
-  is above 1 (1.024), the opposite of a shortfall; with breakage added back it moves further
-  above 1 (1.028, lower bound 1.012). The one nominal fav_first exclusion in the registered
-  direction, class:open (paid ρ 0.935), stays below 1 unrounded: 0.938, upper bound 0.9998 at
-  λ2 0.8104; 0.933, upper bound 0.994 plain. Its 6.5% departure is about 20 times its 0.30%
-  breakage share.
+- At the midpoint, rounding takes an estimated 0.05% to 0.68% of the payout across the cells
+  (most in fav_first with the favourite at 1.9 or less: 0.63% and 0.68%). It pushes the paid ρ
+  down, most for fav_first, so it can make a fair pool look like a favourite-first shortfall. The
+  midpoint estimate is not the largest such effect: a larger actual rounding loss gives a larger
+  one.
+- Overall, fav_first's paid ρ is above 1 (1.024, lower bound 1.008), the opposite of a
+  shortfall; adding any rounding loss back can only raise it (1.028, lower bound 1.012, at the
+  midpoint).
+- The one nominal fav_first exclusion in the registered direction, class:open (paid ρ 0.935,
+  upper bound 0.997 at λ2 0.8104), is 0.938 at the midpoint with upper bound 0.9998 (0.933,
+  upper bound 0.994 plain). That upper bound is 0.0002 below 1, so whether the nominal exclusion
+  holds once breakage is added back depends on the within-step assumption; this report draws no
+  conclusion either way.
 - The other nominal exclusions (fav_second class:maiden and popularity:less, no_fav class:open)
-  are above 1 and move further above it unrounded.
-- Limits: the uniform-within-the-step assumption, and the ¥100 minimum payout (dividends at the
-  floor are not rounded down from a uniform value). Both matter only for the shortest dividends.
-  The bounds are E1's one-sided 95% meeting-bootstrap bounds, unadjusted for the 84 cells.
+  are above 1, and adding a rounding loss back only raises them.
+- Limits: the midpoint assumption, and the ¥100 minimum payout (dividends at the floor are not
+  rounded down from a uniform value). The bounds are E1's one-sided 95% meeting-bootstrap
+  bounds, unadjusted for the 84 cells.
 
 ### Variants searched (context, not a pass/fail test)
 
@@ -264,20 +273,26 @@ per λ2), with the unrounded dividend taken at `D + 5`, uniform within the ¥10 
 - E1″ (B3, Harville's calibration, mean return, null 1), "all": #115's full-development fit
   (`full_development`, λ2 = 0.8104, partly in-sample) fav_first 0.931 [0.902, 0.962], fav_second
   0.864 [0.808, 0.924], no_fav 1.053 [0.974, 1.148]; plain Harville 1.191 [1.136, 1.247], 0.736
-  [0.688, 0.786], 1.501 [1.351, 1.686]. The ordering model is miscalibrated by category, plain
-  Harville badly so; the exacta pool is not.
-- Read together: B2 ≈ 1 in every category says the exacta pool's paid returns are fair against
-  the outcomes; B3 departing from 1 says Harville is not. Neither measures how far the pool's
-  prices sit from Win plus Harville (section "What B2 measures"), and B3 and C at λ2 = 0.8104
-  are partly in-sample. Spec section 4 reads "B2 < rate on fav_first with B3 ≈ 1" as a
-  cross-pool overload: B2 < rate would show the pool overloading favourite-first against the
-  outcomes, and B3 ≈ 1 would carry that over to Harville. Here B2 ≈ 1, which is consistent with
-  any cross-pool ratio.
-- E2 (ratio-cut rules, `japan/131-exacta-rule-v3`): **not yet scorable.** The frozen family needs at least 100 #130-logged
-  development meetings with exacta boards; the data directory holds 0 (two logged Kyoto days,
-  2026-11-21 and 22, with WIN, PLACE, QUINELLA and QUINELLA_PLACE only). The owner's 2026-11-27
-  reframe drops the 100-meeting gate in favour of scoring the logged days available at each run;
-  that change belongs to #281, and the frozen E2 spec keeps `min_meetings` 100 here.
+  [0.688, 0.786], 1.501 [1.351, 1.686]. As an outcome-calibration diagnostic: Harville's
+  equal-weighted mean of outcome over model probability departs from 1 by category, plain
+  Harville more so.
+- Read together: B2's weighted paid return, "all" at λ2 = 0.8104, is 1.024 [1.008, 1.041]
+  favourite-first, 1.003 [0.980, 1.026] favourite-second and 0.995 [0.983, 1.008] without the
+  favourite, and the shrunk ρ of every member lies between 0.995 and 1.030. These are weighted
+  averages over each category: they do not show that every combination is fairly priced, since
+  over- and underpriced combinations can offset. B3 says nothing about the pool. Neither
+  measures how far the pool's prices sit from Win plus Harville (section "What B2 measures"),
+  and B3 and C at λ2 = 0.8104 are partly in-sample. Spec section 4's reading of B2 and B3
+  together ("B2 < rate on fav_first with B3 ≈ 1" as a cross-pool overload) is withdrawn: B3's
+  equal weighting can point the other way from the cross-pool ratio.
+- E2 (ratio-cut rules, `japan/131-exacta-rule-v3`): **not scored, and its selection spec is not
+  fit to execute.** Its headline scope ranks "less popular" by the tertile of pool totals within
+  each logged day, so an early race can be classified with later races' totals, information not
+  available when it is selected. #281 freezes a replacement with a complete availability
+  contract before E2 is scored; the v3 freeze stays in the registry as history. No logged exacta
+  board exists yet (two logged Kyoto days, 2026-11-21 and 22, with WIN, PLACE, QUINELLA and
+  QUINELLA_PLACE only). The frozen spec's 100-meeting gate (`min_meetings` 100) is not enforced:
+  the owner's 2026-11-27 reframe scores the logged days available at each run (#281).
 - D (full-board Σq/Σp descriptive): not run, for the same reason: no logged exacta board exists.
 
 ## Variants tried
@@ -296,7 +311,8 @@ families (frozen 2026-11-27, run at git `5d68473`):
 - E2 `japan/131-exacta-rule-v3`: frozen 2026-11-27, 16 members, not scored (above). It
   supersedes `japan/131-exacta-rule-v2` (frozen the same day, not scored, its freeze kept), whose
   favourite came from the final Win odds; v3 selects on the Win board at T-2, as spec sections 5
-  and 6 require.
+  and 6 require. v3 is unsuitable for execution pending #281 (its daily-tertile "less popular"
+  cutoff uses later races' pool totals).
 - Breakage `japan/131-exacta-breakage`: post-hoc and descriptive, not a test and not in any
   family's max test; two records (one per λ2), each with the breakage share and the unrounded ρ
   of all 42 category × cell members (git `27af886`, 30 s, 0.44 GB peak).
@@ -331,12 +347,14 @@ whose records stay in the registry:
   exactas' dividends are unknown on history. Normal-normal EB on the bootstrap SEs instead.
 - Two-sided tests: the owner signed one-sided directions (answer 2).
 - Crossed segment cells: 14 marginal cells plus one pre-stated cross keep the family at 84.
-- Historical rule tests selected on final odds: look-ahead; E2 selects only from the board at T-2.
+- Historical rule tests selected on final odds: look-ahead; E2 selects its favourite from the
+  board at T-2 (its daily-tertile popularity cutoff is not yet decision-time: #281).
 
 ## What this rules out
 
-All of it is about the historical paid-return proxy: whether the pool's prices are fair against
-the outcomes. B2 does not measure the direct cross-pool ratio (the pool against Win-implied
+All of it is about the historical paid-return proxy: the Harville-weighted paid return of each
+category's box against the payout rate, an average that can hide offsetting over- and
+underpriced combinations. B2 does not measure the direct cross-pool ratio (the pool against Win-implied
 Harville), so nothing here rules out the pool putting more mass on favourite-first combinations
 than Harville does ("What B2 measures"; B3 and C bear on it only indirectly and are partly
 in-sample).
@@ -344,7 +362,8 @@ in-sample).
 - A favourite-first shortfall in the paid return, overall: ρ_fav_first is 1.024 with a
   one-sided 95% lower bound of 1.008, so a paid return below the payout rate (ρ < 1) is
   excluded at that level; the favourite-first box returns slightly more than the pool-fair rate,
-  not less, and more again with breakage added back (1.028, lower bound 1.012). This direction
+  not less, and more again with breakage added back (1.028, lower bound 1.012, at the D + ¥5
+  midpoint; any rounding loss added back only raises it). This direction
   was not the registered alternative, so it is an observation, not a tested claim.
 - A paid return of favourite-second or no-favourite boxes above the payout rate by more than
   about 2.6% and 0.8% (upper bounds 1.026 and 1.008 overall, λ2 = 0.8104), and, in the owner's
@@ -364,7 +383,8 @@ in-sample).
 All `status:proposed` under epic #72:
 
 - #281 Score #131's E2 exacta ratio-cut rules on logged boards (with the D descriptive on the same
-  days; the owner's 2026-11-27 reframe drops its 100-meeting gate).
+  days; the owner's 2026-11-27 reframe drops its 100-meeting gate). It first freezes a selection
+  spec whose popularity cutoff uses only information available when each race is selected.
 - #282 Pre-register a fav_first exacta loss-avoidance rule (family L); its cuts become ranked rows.
 - #283 Check the ¥100 exacta own-impact assumption against #130 pool totals.
 - #284 Refit λ2 per walk-forward fold for #131's B3 and C, so both are strictly out-of-sample.

@@ -14,7 +14,14 @@
 Before writing anything, score and max-test refuse (``RunRefused``) a family frozen with a spec
 other than the one in use, and a Win or ordering fit other than the one the family's scored
 records hold: a refreshed fit needs its own frozen family. A rerun reuses identical records, so
-an interrupted run completes and a repeated one appends nothing.
+an interrupted run completes and a repeated one appends nothing. The max-test command runs both
+checks before it builds any frame.
+
+A member whose cell is empty, or a statistic that cannot be computed (a 0 / 0 breakage share, a
+shrinkage without a positive SE), keeps its row with its count; the statistic is NaN in the
+returned rows, ``n/a`` in a markdown table, ``null`` in a JSON report, and in the registry it is no
+FoldMetric but an entry of ``params["unavailable"]`` with the reason. Report names hold the commit
+and a digest of ``data_builds``, so two data builds at one commit keep separate files.
 
 D14: race days are filtered with ``is_holdout_day`` from the races table's dates (the only column
 read for every row) before any outcome, odds, class or dividend is read, and the readers take only
@@ -96,6 +103,47 @@ def _spec_hash(spec: dict) -> str:
     """The hash ``Registry.freeze_family`` gives ``spec``."""
     text = json.dumps(spec, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _build_tag(meta: dict) -> str:
+    """The data part of a report's name: 8 hex digits of sha256 over ``data_builds``."""
+    text = json.dumps(meta["data_builds"], sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+
+
+def _stem(prefix: str, sha: str, meta: dict) -> str:
+    return f"{prefix}-{sha[:12]}-{_build_tag(meta)}"
+
+
+def _available(value) -> bool:
+    return value is not None and math.isfinite(value)
+
+
+def _json_safe(value):
+    """``value`` with every non-finite float as None, so a JSON report holds null, not NaN."""
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (float, np.floating)) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _fmt(value, digits: int) -> str:
+    return f"{value:.{digits}f}" if _available(value) else "n/a"
+
+
+def _metrics(fold: str, entries, n: int) -> tuple[list[FoldMetric], list[dict]]:
+    """FoldMetrics of the available ``(metric, value, lo, hi, reason)`` entries; the others as
+    ``params["unavailable"]`` entries carrying their reason."""
+    metrics, unavailable = [], []
+    for metric, value, lo, hi, reason in entries:
+        if _available(value):
+            metrics.append(FoldMetric(fold, metric, float(value), lo, hi, n))
+        else:
+            unavailable.append({"fold": fold, "metric": metric, "reason": reason})
+    return metrics, unavailable
 
 
 def _record_key(record: RunRecord) -> str:
@@ -335,13 +383,22 @@ def _record(family, variant, params, components, metrics, meta, sha, status="sco
     )
 
 
+EMPTY_CELL = "no scored race in the cell"
+
+
 def _member_metrics(sub: pd.DataFrame, column: str, ratio: bool, seed: int, n_boot: int) -> dict:
+    """rho, its meeting-bootstrap SE and one-sided bounds; all NaN for an empty cell. A cell of
+    one meeting redraws that meeting in every replicate, so its SE is 0 (not float residue)."""
+    if sub.empty:
+        return {"rho": math.nan, "se": math.nan, "lo": math.nan, "hi": math.nan, "n": 0,
+                "meetings": 0}  # fmt: skip
     rates = sub["rate"].to_numpy() if ratio else np.ones(len(sub))
     upper = study.rho_interval(sub[column], rates, sub["meeting_id"], alternative="less",
                                n_boot=n_boot, seed=seed)  # fmt: skip
     lower = study.rho_interval(sub[column], rates, sub["meeting_id"], alternative="greater",
                                n_boot=n_boot, seed=seed)  # fmt: skip
-    return {"rho": upper.rho, "se": upper.se, "lo": lower.bound, "hi": upper.bound,
+    se = 0.0 if upper.n_meetings == 1 else upper.se
+    return {"rho": upper.rho, "se": se, "lo": lower.bound, "hi": upper.bound,
             "n": len(sub), "meetings": upper.n_meetings}  # fmt: skip
 
 
@@ -380,7 +437,14 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
                 & (table["lambda2"].astype(str) == str(key))
                 & (table["category"] == category)
             ]
-            table.loc[idx, "rho_eb"] = study.eb_shrink(table.loc[idx, "rho"], table.loc[idx, "se"])
+            # Shrunk among the members with a finite estimate and a positive SE; the others
+            # keep rho_eb NaN (no precision is invented for a zero-SE or empty cell).
+            rho, se = table.loc[idx, "rho"], table.loc[idx, "se"]
+            usable = idx[(np.isfinite(rho) & np.isfinite(se) & (se > 0)).to_numpy()]
+            if len(usable):
+                table.loc[usable, "rho_eb"] = study.eb_shrink(
+                    table.loc[usable, "rho"], table.loc[usable, "se"]
+                )
 
     components = {"win": meta["win_fit"]}
     for row in table.itertuples(index=False):
@@ -390,15 +454,18 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
         if row.estimator == "B1":
             comps = dict(components)
         metric = "rho" if row.estimator != "B3" else "mean_return"
-        n = int(row.n)
-        metrics = [
-            FoldMetric("development", metric, float(row.rho), float(row.lo), float(row.hi), n),
-            FoldMetric("development", "bootstrap_se", float(row.se), None, None, n),
+        entries = [
+            (metric, row.rho, float(row.lo), float(row.hi), EMPTY_CELL),
+            ("bootstrap_se", row.se, None, None, EMPTY_CELL),
         ]
         if row.estimator == "B2":
-            metrics.append(FoldMetric("development", "rho_eb", float(row.rho_eb), None, None, n))
+            why = EMPTY_CELL if row.n == 0 else "bootstrap SE is 0: no precision to shrink with"
+            entries.append(("rho_eb", row.rho_eb, None, None, why))
+        metrics, unavailable = _metrics("development", entries, int(row.n))
         params = {"estimator": row.estimator, "lambda2": row.lambda2, "category": row.category,
                   "cell": row.cell, "direction": study.DIRECTIONS[row.category]}  # fmt: skip
+        if unavailable:
+            params["unavailable"] = unavailable
         append(_record(row.family, variant, params, comps, metrics, meta, sha))
 
     # C: the log-score total, one paired comparison per lambda2.
@@ -483,17 +550,18 @@ def max_test(registry, frames, meta, sha, *, n_boot: int = 10000, note: str | No
 
 def write_outputs(summary: dict, sha: str, out: Path) -> None:
     """The full member table and summary, through write_report (aggregates only)."""
-    text = json.dumps(summary, indent=1, default=str, allow_nan=True)
-    write_report(out / f"e1-{sha[:12]}.json", text, sources=SOURCES)
+    stem = _stem("e1", sha, summary["meta"])
+    text = json.dumps(_json_safe(summary), indent=1, default=str, allow_nan=False)
+    write_report(out / f"{stem}.json", text, sources=SOURCES)
     table = pd.DataFrame(summary["members"])
     lines = [f"# #131 exacta study: E1 results ({sha[:12]})", "",
              "| estimator | lambda2 | category | cell | n | estimate | 95% lo | 95% hi | EB |",
              "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]  # fmt: skip
     for r in table.itertuples(index=False):
-        eb = "" if pd.isna(r.rho_eb) else f"{r.rho_eb:.3f}"
+        eb = "" if r.estimator != "B2" else _fmt(r.rho_eb, 3)
         lines.append(f"| {r.estimator} | {r.lambda2} | {r.category} | {r.cell} | {r.n} | "
-                     f"{r.rho:.3f} | {r.lo:.3f} | {r.hi:.3f} | {eb} |")  # fmt: skip
-    write_report(out / f"e1-{sha[:12]}.md", "\n".join(lines) + "\n", sources=SOURCES)
+                     f"{_fmt(r.rho, 3)} | {_fmt(r.lo, 3)} | {_fmt(r.hi, 3)} | {eb} |")  # fmt: skip
+    write_report(out / f"{stem}.md", "\n".join(lines) + "\n", sources=SOURCES)
 
 
 def breakage(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10000):
@@ -505,34 +573,48 @@ def breakage(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int =
     (a pool fair before rounding has a paid rho of about 1 - breakage_share) and
     ``rho_unrounded`` = sum R' / sum rate, null 1, with E1's one-sided meeting-bootstrap bounds.
     E1's races and frozen loss are unchanged; one registry record per lambda2. ``RunRefused``
-    unless E1 is frozen with the spec in use and ``meta``'s fits are E1's."""
+    unless E1 is frozen with the spec in use and ``meta``'s fits are E1's. Holdout races are
+    dropped (D14) before any dividend is read. An empty cell keeps its row with every statistic
+    NaN; a cell without a winning return has rho 0 and a NaN share (0 / 0)."""
     _check_frozen(registry, (study.E1_ID,))
     _check_fits(registry, meta, (study.E1_ID,))
+    races = [r for r in races if not is_holdout_day(COUNTRY, r["race_date"])]
     dividend = {r["race_id"]: r["exacta"][0][1] for r in races if r["exacta"]}
     append = _appender(registry)
     rows = []
     for key, frame in score_frames(races, meta).items():
         d = frame["race_id"].map(dividend)
         frame = frame.assign(b2_unrounded=frame["b2"] * (d + BREAKAGE_STEP / 2) / d)
-        metrics = []
+        metrics, unavailable = [], []
         for category in CATEGORIES:
             for cell in study.SEGMENT_CELLS:
                 sub = frame[(frame["category"] == category) & frame[cell]]
-                share = float(1 - sub["b2"].sum() / sub["b2_unrounded"].sum())
                 m = _member_metrics(sub, "b2_unrounded", True, 131, n_boot)
+                unrounded = sub["b2_unrounded"].sum()
+                if sub.empty:
+                    paid, share, why = math.nan, math.nan, EMPTY_CELL
+                else:
+                    paid = study.rho(sub["b2"], sub["rate"])
+                    share = float(1 - sub["b2"].sum() / unrounded) if unrounded > 0 else math.nan
+                    why = "no winning return in the cell: the share is 0 / 0"
                 rows.append({"lambda2": key, "category": category, "cell": cell, "n": m["n"],
-                             "rho": study.rho(sub["b2"], sub["rate"]), "breakage_share": share,
+                             "rho": paid, "breakage_share": share,
                              "rho_unrounded": m["rho"], "lo": m["lo"], "hi": m["hi"]})  # fmt: skip
-                fold = f"development:{category}:{cell}"
-                metrics += [
-                    FoldMetric(fold, "breakage_share", share, None, None, m["n"]),
-                    FoldMetric(fold, "rho_unrounded", m["rho"], m["lo"], m["hi"], m["n"]),
-                ]
+                got, missing = _metrics(
+                    f"development:{category}:{cell}",
+                    [("breakage_share", share, None, None, why),
+                     ("rho_unrounded", m["rho"], m["lo"], m["hi"], EMPTY_CELL)],
+                    m["n"],
+                )  # fmt: skip
+                metrics += got
+                unavailable += missing
         comps = {"win": meta["win_fit"], "ordering": meta["ordering_fit"] if key == study.FITTED
                  else "plain_harville"}  # fmt: skip
         params = {"estimator": "B2 breakage", "lambda2": key, "step_yen": BREAKAGE_STEP,
                   "unrounded": "D + step / 2", "family": study.E1_ID,
                   "role": "post-hoc descriptive (review of 0c39a8d), not a test"}  # fmt: skip
+        if unavailable:
+            params["unavailable"] = unavailable
         append(_record(BREAKAGE_ID, f"breakage|lambda2={key}", params, comps, metrics, meta, sha))
     return rows
 
@@ -544,9 +626,9 @@ def _breakage_markdown(rows: list[dict], sha: str) -> str:
              "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]  # fmt: skip
     for r in rows:
         lines.append(f"| {r['lambda2']} | {r['category']} | {r['cell']} | {r['n']} | "
-                     f"{r['rho']:.4f} | {r['breakage_share']:.4f} | "
-                     f"{1 - r['breakage_share']:.4f} | {r['rho_unrounded']:.4f} | "
-                     f"{r['lo']:.4f} | {r['hi']:.4f} |")  # fmt: skip
+                     f"{_fmt(r['rho'], 4)} | {_fmt(r['breakage_share'], 4)} | "
+                     f"{_fmt(1 - r['breakage_share'], 4)} | {_fmt(r['rho_unrounded'], 4)} | "
+                     f"{_fmt(r['lo'], 4)} | {_fmt(r['hi'], 4)} |")  # fmt: skip
     return "\n".join(lines) + "\n"
 
 
@@ -586,20 +668,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.action == "max-test":  # SPA and StepM alone, on E1's recorded members
         sha, registry = _git_sha(), default_registry(COUNTRY)
         races, meta = load_races()
+        _check_frozen(registry, (study.E1_ID,))  # before any frame is built
+        _check_fits(registry, meta, (study.E1_ID, MAX_TEST_ID))
         result = _recorded(registry, MAX_TEST_ID, meta, sha, lambda: max_test(
             registry, score_frames(races, meta), meta, sha, note=args.note))  # fmt: skip
-        write_report(out / f"max-test-{sha[:12]}.json", json.dumps(result, indent=1),
-                     sources=SOURCES)  # fmt: skip
+        write_report(out / f"{_stem('max-test', sha, meta)}.json",
+                     json.dumps(_json_safe(result), indent=1), sources=SOURCES)  # fmt: skip
         write_summary(registry, summary_dir(COUNTRY))
     elif args.action == "breakage":  # the committed summary is regenerated separately
         sha, registry = _git_sha(), default_registry(COUNTRY)
         races, meta = load_races()
         rows = _recorded(registry, BREAKAGE_ID, meta, sha,
                          lambda: breakage(registry, races, meta, sha))  # fmt: skip
-        write_report(out / f"breakage-{sha[:12]}.json", json.dumps(rows, indent=1, default=str),
+        stem = _stem("breakage", sha, meta)
+        write_report(out / f"{stem}.json", json.dumps(_json_safe(rows), indent=1, default=str),
                      sources=SOURCES)  # fmt: skip
-        write_report(out / f"breakage-{sha[:12]}.md", _breakage_markdown(rows, sha),
-                     sources=SOURCES)  # fmt: skip
+        write_report(out / f"{stem}.md", _breakage_markdown(rows, sha), sources=SOURCES)
         result = [r for r in rows if r["cell"] == "all"]
     else:
         sha, registry = _git_sha(), default_registry(COUNTRY)
@@ -609,7 +693,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         write_outputs(result, sha, out)
         write_summary(registry, summary_dir(COUNTRY))
         result = {k: result[k] for k in ("meta", "spa", "stepm", "log_score")}
-    print(json.dumps(result, indent=1, default=str))
+    print(json.dumps(_json_safe(result), indent=1, default=str))
     return 0
 
 

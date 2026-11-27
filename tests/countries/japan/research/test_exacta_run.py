@@ -28,6 +28,29 @@ Contract pinned here:
   equals its tested rules (84).
 - ``main(["freeze"])`` on a fresh data directory records the frozen specs and never drops an
   existing family file or index entry of the committed summary.
+
+Restart of f4c7db6 (Astra review, sections 3-5), sections 6 to 9 below:
+
+- The CLI ``main(["max-test"])`` refuses (``RunRefused`` raised, or a non-zero exit) when E1 is
+  not frozen, frozen with another spec, or holds scored records under another fit, before any
+  frame is built (``score_frames`` / ``exacta_study.score_races`` are never called); nothing is
+  recorded and no report is written.
+- ``breakage(registry, races, meta, sha, *, n_boot)`` given development and holdout races never
+  reads a holdout race's ``"exacta"`` (its dividends) and returns what the development races
+  alone give.
+- Unavailable statistics. A member whose cell is empty, whose category has no winning return in
+  the cell, or whose bootstrap SE is zero keeps its row (``score()["members"]``, ``breakage()``
+  rows) with its count ``n``; a statistic that cannot be computed is unavailable: ``None`` or NaN
+  in the returned rows, never 0, and never rendered as nan/inf in a markdown report. A populated
+  cell without a winning return has the valid estimate 0.0. In the registry an unavailable
+  statistic is no FoldMetric; the record lists it in ``params["unavailable"]``, a list of
+  ``{"fold", "metric", "reason"}`` dicts (reason non-blank). B2's ``rho_eb`` is unavailable for a
+  member without a finite estimate and a positive SE; the other members of its lambda2 x category
+  group are shrunk among themselves (``eb_shrink`` on their estimates and SEs). Every other
+  member, C and the max test are still recorded.
+- Report artifacts: two data builds at one commit keep separate e1, breakage and max-test
+  artifacts (each name holds the 12-digit SHA and more); the first build's files are unchanged
+  after the second. RunRecord's fields are unchanged.
 """
 
 from __future__ import annotations
@@ -39,7 +62,7 @@ import itertools
 import json
 import math
 import re
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -52,7 +75,7 @@ import yaml
 
 from horsetrack.core import env
 from horsetrack.core.eval import registry as registry_module
-from horsetrack.core.eval.registry import Registry
+from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord
 from horsetrack.countries.japan.research import exacta_run
 from horsetrack.countries.japan.research import exacta_study as study
 
@@ -534,8 +557,9 @@ def test_the_score_command_completes_an_interrupted_run_and_reruns_without_a_fai
         assert _counts(reg) == EXPECTED_COUNTS, attempt
         assert [r for r in reg.records() if r.status == "failed"] == [], attempt
     reports = isolated["data"] / "reports" / "japan" / "131-exacta"
-    assert (reports / f"e1-{SHA[:12]}.json").is_file()
-    assert (reports / f"e1-{SHA[:12]}.md").is_file()
+    # Named by the commit and more (section 9): one e1 report pair for this commit and data.
+    assert len(list(reports.glob(f"e1-{SHA[:12]}*.json"))) == 1
+    assert len(list(reports.glob(f"e1-{SHA[:12]}*.md"))) == 1
 
 
 # ---------------------------------------------------------------------------------------------
@@ -611,3 +635,477 @@ def test_freeze_on_a_fresh_data_dir_records_the_specs_and_drops_no_summary_entry
     readme = (summary / "README.md").read_text(encoding="utf-8")
     for family, stem in entries.items():
         assert f"- [{family}]({stem})" in readme, family
+
+
+# ---------------------------------------------------------------------------------------------
+# Shared by sections 6 to 9
+# ---------------------------------------------------------------------------------------------
+
+REPORTS = ("reports", "japan", "131-exacta")
+LAMBDA_KEYS = (study.FITTED, 1.0)
+
+
+def _reports(data: Path) -> Path:
+    return data.joinpath(*REPORTS)
+
+
+def _is_unavailable(value) -> bool:
+    return value is None or (isinstance(value, (float, np.floating)) and math.isnan(value))
+
+
+def _finite(value) -> bool:
+    return (
+        isinstance(value, (int, float, np.integer, np.floating))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _unavailable(record: RunRecord) -> dict[tuple[str, str], str]:
+    """The record's ``params["unavailable"]`` as {(fold, metric): reason}."""
+    entries = record.params.get("unavailable", [])
+    assert isinstance(entries, list), record.variant
+    out = {}
+    for entry in entries:
+        assert isinstance(entry, dict) and {"fold", "metric", "reason"} <= set(entry), entry
+        assert isinstance(entry["reason"], str) and entry["reason"].strip(), entry
+        out[(entry["fold"], entry["metric"])] = entry["reason"]
+    return out
+
+
+def _cli_n_boot(monkeypatch) -> None:
+    for name in ("score", "breakage", "max_test"):
+        real = getattr(exacta_run, name)
+        monkeypatch.setattr(exacta_run, name, functools.partial(real, n_boot=N_BOOT))
+
+
+def _cli_registry(data: Path) -> Registry:
+    path = data / "registry" / "japan.jsonl"
+    return Registry(path, holdout_log=path.parent / "none.jsonl")
+
+
+def _markdown_cells(text: str) -> tuple[list[str], list[str]]:
+    """The table body rows (separator rows dropped) and every cell, lower-cased and stripped."""
+    rows = [line for line in text.splitlines() if line.startswith("|")]
+    body = [r for r in rows if not set(r.replace("|", "").strip()) <= set("-: ")]
+    cells = [c.strip().lower() for r in body for c in r.strip().strip("|").split("|")]
+    return body, cells
+
+
+# ---------------------------------------------------------------------------------------------
+# 6. The max-test command refuses before any frame is built (Astra 3, exacta_run.py:590)
+# ---------------------------------------------------------------------------------------------
+
+
+class FramesBuilt(BaseException):
+    """The frame builder ran: not an Exception, so no failure record catches it."""
+
+
+def _guard_frames(monkeypatch, *, refusal_expected: bool) -> None:
+    def builder(*args, **kwargs):
+        if refusal_expected:
+            pytest.fail("frames were built before the max test's freeze and fit checks")
+        raise FramesBuilt
+
+    monkeypatch.setattr(exacta_run, "score_frames", builder)
+    monkeypatch.setattr(study, "score_races", builder)
+
+
+def _scored_under_another_fit() -> RunRecord:
+    return RunRecord(
+        hypothesis_id="E43", family_id=study.E1_ID,
+        variant=f"b2|lambda2={study.FITTED}|fav_first|all", ticket=131, git_sha=SHA,
+        data_builds={"jra_races": "processed/jra/races.parquet@00000000000000aa"},
+        sources=("jra",), fold_scheme="oof:#114 walk-forward test quarters (folds.yaml)",
+        components={"win": "winfitZ9999", "ordering": "ordfitZ9999"},
+        params={"estimator": "B2"},
+        metrics=(FoldMetric("development", "rho", 1.0, 0.9, 1.1, 10),), status="scored",
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "case", ["not_frozen", "frozen_differs", "spec_in_use_differs", "fit_differs", "matches"]
+)
+def test_the_max_test_command_checks_the_freeze_and_fits_before_building_frames(
+    isolated, monkeypatch, case
+):
+    data = isolated["data"]
+    _setup(data)
+    e1 = _family_of("B2")
+    specs = study.family_specs()
+    (data / "registry").mkdir(parents=True, exist_ok=True)
+    if case == "frozen_differs":
+        _frozen_registry(data / "registry", {**specs, e1: _altered(specs[e1])})
+    elif case != "not_frozen":
+        assert exacta_run.main(["freeze"]) == 0
+    if case == "spec_in_use_differs":
+        in_use = {**specs, e1: _altered(specs[e1])}
+        monkeypatch.setattr(study, "family_specs", lambda: copy.deepcopy(in_use))
+    if case == "fit_differs":
+        _cli_registry(data).append(_scored_under_another_fit())
+    before = _canonical_records(_cli_registry(data))
+
+    refusal_expected = case != "matches"
+    _guard_frames(monkeypatch, refusal_expected=refusal_expected)
+    if not refusal_expected:  # the guard is conditional: a matching freeze builds frames
+        with pytest.raises(FramesBuilt):
+            exacta_run.main(["max-test", "--note", case])
+        return
+    try:
+        code = exacta_run.main(["max-test", "--note", case])
+    except exacta_run.RunRefused:
+        code = None
+    assert code != 0, "the max test ran on a family it should have refused"
+    assert _canonical_records(_cli_registry(data)) == before  # no record, no failure record
+    assert list(_reports(data).glob("max-test-*")) == []  # no report written
+
+
+# ---------------------------------------------------------------------------------------------
+# 7. breakage never reads a holdout race's dividends (Astra 3, exacta_run.py:511)
+# ---------------------------------------------------------------------------------------------
+
+
+class HoldoutDividendRead(BaseException):
+    """A held-out race's exacta rows were read: not an Exception, so nothing swallows it."""
+
+
+class _SealedExacta:
+    """A held-out race's exacta rows: any read raises."""
+
+    def _read(self, *args, **kwargs):
+        raise HoldoutDividendRead("a holdout race's exacta dividend was read")
+
+    __iter__ = __len__ = __getitem__ = __bool__ = __contains__ = __reversed__ = _read
+
+
+class HeldOutRace(dict):
+    """A scoring input of a holdout day whose ``"exacta"`` raises when read."""
+
+    def __getitem__(self, key):
+        if key == "exacta":
+            raise HoldoutDividendRead(f"{dict.__getitem__(self, 'race_id')}: exacta read")
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        if key == "exacta":
+            raise HoldoutDividendRead(f"{dict.__getitem__(self, 'race_id')}: exacta read")
+        return super().get(key, default)
+
+
+def _holdout_scoring_races() -> list[HeldOutRace]:
+    out = []
+    for r in _base_races():
+        if r["race_date"] not in HOLDOUT_DAYS:
+            continue
+        out.append(HeldOutRace({
+            "race_id": r["race_id"], "race_date": r["race_date"], "meeting_id": r["meeting_id"],
+            "race_no": r["race_no"], "race_class": r["race_class"],
+            "win_odds": {h: float(o) for h, o in r["odds"].items()}, "p": dict(r["p"]),
+            "rate": 0.75, "boost_may_be_withheld": False, "exacta": _SealedExacta(),
+        }))  # fmt: skip
+    return out
+
+
+def _direct_breakage(races: list[dict], lambda2: float) -> dict[tuple[str, str], dict]:
+    """Per (category, cell): paid rho, breakage share and rho at D + 5, computed here from
+    score_races' B2 returns and each race's paid dividend."""
+    frame = study.score_races(races, holdout_day=lambda country, day: _ref_holdout(day),
+                              lambda2=lambda2)  # fmt: skip
+    d = frame["race_id"].map({r["race_id"]: r["exacta"][0][1] for r in races})
+    unrounded = frame["b2"] * (d + 5.0) / d
+    out = {}
+    for category in CATEGORIES:
+        for cell in study.SEGMENT_CELLS:
+            mask = (frame["category"] == category) & frame[cell]
+            paid, up = frame["b2"][mask].sum(), unrounded[mask].sum()
+            rate = frame["rate"][mask].sum()
+            out[(category, cell)] = {
+                "n": int(mask.sum()),
+                "rho": paid / rate,
+                "breakage_share": 1 - paid / up,
+                "rho_unrounded": up / rate,
+            }
+    return out
+
+
+def test_breakage_skips_holdout_races_before_reading_their_dividends(loaded, tmp_path):
+    races, meta = loaded
+    held = _holdout_scoring_races()
+    assert len(held) == 12 and all(_ref_holdout(r["race_date"]) for r in held)
+
+    # The development races alone: the populated-sample values are the direct computation.
+    reg_dev = _frozen_registry(tmp_path / "dev")
+    dev_rows = exacta_run.breakage(reg_dev, copy.deepcopy(races), copy.deepcopy(meta), SHA,
+                                   n_boot=N_BOOT)  # fmt: skip
+    assert len(dev_rows) == len(LAMBDA_KEYS) * len(CATEGORIES) * len(study.SEGMENT_CELLS)
+    for key, value in zip(LAMBDA_KEYS, (meta["lambda2_full_development"], 1.0), strict=True):
+        direct = _direct_breakage(races, value)
+        for row in (r for r in dev_rows if str(r["lambda2"]) == str(key)):
+            want = direct[(row["category"], row["cell"])]
+            assert row["n"] == want["n"]
+            for stat in ("rho", "breakage_share", "rho_unrounded"):
+                assert row[stat] == pytest.approx(want[stat], rel=1e-12), (key, row, stat)
+            assert row["lo"] <= row["rho_unrounded"] <= row["hi"]
+    for record in reg_dev.records(exacta_run.BREAKAGE_ID):
+        assert "unavailable" not in record.params  # nothing unavailable: the params as recorded
+
+    # Holdout races mixed in: never read, and the result is the development races' result.
+    dev = copy.deepcopy(races)
+    mixed = [*dev[:100], *held[:6], *dev[100:], *held[6:]]
+    rows = exacta_run.breakage(_frozen_registry(tmp_path / "mixed"), mixed, copy.deepcopy(meta),
+                               SHA, n_boot=N_BOOT)  # fmt: skip
+    pd.testing.assert_frame_equal(pd.DataFrame(rows), pd.DataFrame(dev_rows))
+
+
+# ---------------------------------------------------------------------------------------------
+# 8. Empty, zero-return and zero-variance cells keep their rows (Astra 3 and 5)
+# ---------------------------------------------------------------------------------------------
+
+BANDS = ("le1.9", "2.0-2.9", "3.0-4.9", "ge5.0")  # FAV_ODDS 1.6, 2.5, 3.8, 6.5
+FIELD_BANDS = ("5-10", "11-14", "15-18")  # FIELDS 7, 12, 16
+CLASS_GROUPS = ("maiden", "win1-3", "open")  # CLASSES MAIDEN, C2, OP
+
+
+def _ref_cells(band: int, field: int, klass: int, slot: int) -> set[str]:
+    """The signed cells of a design entry, from the spec's definitions (slot 0 = races 1-4)."""
+    less = slot == 0 or klass == 0
+    cells = {
+        "all",
+        f"fav_odds:{BANDS[band]}",
+        f"field:{FIELD_BANDS[field]}",
+        f"class:{CLASS_GROUPS[klass]}",
+        "popularity:less" if less else "popularity:rest",
+    }
+    if band >= 2 and less:
+        cells.add("headline")
+    return cells
+
+
+def _sparse_store() -> tuple[list[dict], list[tuple]]:
+    """Development races with no 16-runner field (field:15-18 empty), no favourite-second
+    winner at favourite odds >= 5.0 (a populated zero-return cell) and one open race (class:open
+    in one meeting: zero bootstrap variance), plus six holdout races."""
+    rng = np.random.default_rng(1312)
+    full = itertools.product(range(4), range(2), range(2), range(2), CATEGORIES)
+    design = [d for d in full if not (d[0] == 3 and d[4] == "fav_second")]
+    design.append((0, 0, 2, 1, "fav_first"))
+    design = [design[i] for i in rng.permutation(len(design))]
+    dev = _allocate(DEV_DAYS, VENUES, design, rng)
+    holdout = _allocate(HOLDOUT_DAYS, ("TOK", "HSN"), design[:6], rng, start=3)
+    return dev + holdout, design
+
+
+def _sparse_expectations(dev: list[dict], design: list[tuple]) -> dict:
+    n = dict.fromkeys(study.SEGMENT_CELLS, 0)
+    meetings: dict[str, set] = {cell: set() for cell in study.SEGMENT_CELLS}
+    wins = {(c, cell): 0 for c in CATEGORIES for cell in study.SEGMENT_CELLS}
+    for race, entry in zip(dev, design, strict=True):
+        for cell in _ref_cells(*entry[:4]):
+            n[cell] += 1
+            meetings[cell].add(race["meeting_id"])
+            wins[(entry[4], cell)] += 1
+    empty = {cell for cell, k in n.items() if k == 0}
+    zero_return = {m for m, k in wins.items() if k == 0 and m[1] not in empty}
+    one_meeting = {cell for cell, ms in meetings.items() if len(ms) == 1}
+    # The design is what this section needs: one empty cell and populated zero-return cells
+    # (every bootstrap replicate is exactly 0, so the SE is exactly 0), beside ordinary cells.
+    # The one-meeting cell's SE is 0 up to rounding (about 1e-16): no expectation is pinned on
+    # its SE or shrinkage, only that its row and estimate are kept.
+    assert empty == {"field:15-18"}
+    assert {("fav_second", "fav_odds:ge5.0"), ("fav_second", "class:open")} <= zero_return
+    assert one_meeting == {"class:open"}
+    return {"n_races": len(dev), "n": n, "meetings": {c: len(m) for c, m in meetings.items()},
+            "empty": empty, "zero_return": zero_return, "one_meeting": one_meeting}  # fmt: skip
+
+
+@pytest.fixture
+def sparse(isolated):
+    races, design = _sparse_store()
+    _write_store(isolated["data"], races)
+    _write_fits(isolated["data"], races, **FIT_A)
+    loaded_races, meta = exacta_run.load_races()
+    return loaded_races, meta, _sparse_expectations(races[: len(design)], design)
+
+
+def test_score_keeps_empty_zero_return_and_zero_variance_members(sparse, tmp_path):
+    races, meta, exp = sparse
+    reg = _frozen_registry(tmp_path)
+    result = _score(reg, races, meta)
+    assert result["meta"]["scored_races"] == exp["n_races"]
+    assert len(result["log_score"]) == 2 and "spa" in result and "stepm" in result
+
+    members = result["members"]
+    lambdas_of = {"B2": LAMBDA_KEYS, "B1": (study.FITTED,), "B3": LAMBDA_KEYS}
+    want_keys = {(e, str(k), c, cell) for e, ks in lambdas_of.items() for k in ks
+                 for c in CATEGORIES for cell in study.SEGMENT_CELLS}  # fmt: skip
+    got_keys = [(m["estimator"], str(m["lambda2"]), m["category"], m["cell"]) for m in members]
+    assert len(got_keys) == len(want_keys) and set(got_keys) == want_keys  # no member dropped
+
+    for m in members:
+        member, b2 = (m["category"], m["cell"]), m["estimator"] == "B2"
+        assert m["n"] == exp["n"][m["cell"]], m
+        assert m["meetings"] == exp["meetings"][m["cell"]], m
+        if m["cell"] in exp["empty"]:  # unavailable, never a zero estimate
+            for stat in ("rho", "se", "lo", "hi", *(("rho_eb",) if b2 else ())):
+                assert _is_unavailable(m[stat]), (m, stat)
+            continue
+        for stat in ("rho", "lo", "hi"):
+            assert _finite(m[stat]), (m, stat)
+        if member in exp["zero_return"]:  # zero SE: every replicate is 0
+            assert m["rho"] == 0.0, m  # a valid zero-return estimate
+            assert _is_unavailable(m["se"]) or m["se"] == 0.0, m
+            if b2:
+                assert _is_unavailable(m["rho_eb"]), m  # no invented precision
+            continue
+        assert m["rho"] > 0, m
+        if m["cell"] not in exp["one_meeting"]:
+            assert _finite(m["se"]) and m["se"] > 0, m
+            if b2:
+                assert _finite(m["rho_eb"]), m
+
+    # rho_eb: the group's members that carry one are shrunk among themselves.
+    for key in LAMBDA_KEYS:
+        for category in CATEGORIES:
+            group = [m for m in members if m["estimator"] == "B2"
+                     and str(m["lambda2"]) == str(key) and m["category"] == category]  # fmt: skip
+            usable = [m for m in group if not _is_unavailable(m["rho_eb"])]
+            assert len(usable) >= 10, (key, category)
+            want = study.eb_shrink([m["rho"] for m in usable], [m["se"] for m in usable])
+            got = [m["rho_eb"] for m in usable]
+            assert got == pytest.approx(list(want), rel=1e-12), (key, category)
+
+    # The registry: every member recorded, unavailable statistics listed with a reason, never
+    # written as a metric.
+    assert _counts(reg) == EXPECTED_COUNTS
+    assert all(r.status == "scored" for r in reg.records())
+    by_variant = {(r.family_id, r.variant): r for r in reg.records()}
+    for m in members:
+        est = m["estimator"]
+        record = by_variant[(_family_of(est), f"{est.lower()}|lambda2={m['lambda2']}|"
+                                              f"{m['category']}|{m['cell']}")]  # fmt: skip
+        present = {(f.fold, f.metric): f for f in record.metrics}
+        missing = _unavailable(record)
+        assert not set(present) & set(missing), record.variant
+        assert all(f.n == m["n"] for f in present.values()), record.variant
+        estimate = ("development", "mean_return" if est == "B3" else "rho")
+        wanted = {estimate, ("development", "bootstrap_se")}
+        if est == "B2":
+            wanted.add(("development", "rho_eb"))
+        assert wanted <= set(present) | set(missing), record.variant
+        member = (m["category"], m["cell"])
+        if m["cell"] in exp["empty"]:
+            assert wanted <= set(missing), record.variant
+        elif member in exp["zero_return"]:
+            assert present[estimate].value == 0.0, record.variant
+            if est == "B2":
+                assert ("development", "rho_eb") in missing, record.variant
+        elif m["cell"] in exp["one_meeting"]:
+            assert present[estimate].value == m["rho"], record.variant
+        else:
+            assert wanted <= set(present), record.variant
+            assert "unavailable" not in record.params, record.variant  # params as recorded
+
+
+def test_breakage_keeps_empty_and_zero_return_cells(sparse, tmp_path):
+    races, meta, exp = sparse
+    reg = _frozen_registry(tmp_path)
+    rows = exacta_run.breakage(reg, races, meta, SHA, n_boot=N_BOOT)
+    got = [(str(r["lambda2"]), r["category"], r["cell"]) for r in rows]
+    want = {(str(k), c, cell) for k in LAMBDA_KEYS for c in CATEGORIES
+            for cell in study.SEGMENT_CELLS}  # fmt: skip
+    assert len(got) == len(want) and set(got) == want
+
+    for r in rows:
+        member = (r["category"], r["cell"])
+        assert r["n"] == exp["n"][r["cell"]], r
+        if r["cell"] in exp["empty"]:
+            for stat in ("rho", "breakage_share", "rho_unrounded", "lo", "hi"):
+                assert _is_unavailable(r[stat]), (r, stat)
+        elif member in exp["zero_return"]:
+            assert r["rho"] == 0.0 and r["rho_unrounded"] == 0.0, r  # valid zero returns
+            assert _is_unavailable(r["breakage_share"]), r  # 0 / 0: no share
+            assert _finite(r["lo"]) and _finite(r["hi"]), r
+        else:
+            assert _finite(r["breakage_share"]) and 0 < r["breakage_share"] < 1, r
+            assert 0 < r["rho"] < r["rho_unrounded"], r
+
+    records = reg.records(exacta_run.BREAKAGE_ID)
+    variants = sorted(f"breakage|lambda2={k}" for k in LAMBDA_KEYS)
+    assert sorted(r.variant for r in records) == variants
+    for record in records:
+        present = {(f.fold, f.metric): f for f in record.metrics}
+        missing = _unavailable(record)
+        assert not set(present) & set(missing)
+        for category in CATEGORIES:
+            for cell in study.SEGMENT_CELLS:
+                fold = f"development:{category}:{cell}"
+                share, unrounded = (fold, "breakage_share"), (fold, "rho_unrounded")
+                if cell in exp["empty"]:
+                    assert share in missing and unrounded in missing, fold
+                elif (category, cell) in exp["zero_return"]:
+                    assert share in missing, fold
+                    assert present[unrounded].value == 0.0, fold
+                else:
+                    assert share in present and unrounded in present, fold
+
+
+def test_the_score_and_breakage_commands_report_a_sparse_sample(sparse, isolated, monkeypatch):
+    _, _, exp = sparse
+    data = isolated["data"]
+    _cli_n_boot(monkeypatch)
+    assert exacta_run.main(["freeze"]) == 0
+    assert exacta_run.main(["score"]) == 0
+    assert exacta_run.main(["breakage"]) == 0
+    reg = _cli_registry(data)
+    assert [r for r in reg.records() if r.status == "failed"] == []
+    counts = _counts(reg)
+    assert counts.pop(None) == len(LAMBDA_KEYS)  # the breakage records, under no E1 family
+    assert counts == EXPECTED_COUNTS
+    assert len(reg.records(exacta_run.BREAKAGE_ID)) == len(LAMBDA_KEYS)
+
+    n_members = (2 + 1 + 2) * len(CATEGORIES) * len(study.SEGMENT_CELLS)
+    for prefix, n_rows in (("e1-", n_members), ("breakage-", 2 * 3 * len(study.SEGMENT_CELLS))):
+        (md,) = _reports(data).glob(f"{prefix}{SHA[:12]}*.md")
+        body, cells = _markdown_cells(md.read_text(encoding="utf-8"))
+        assert len(body) >= n_rows + 1, prefix  # a header and every member
+        assert not {"nan", "-nan", "inf", "-inf", "+inf"} & set(cells), prefix
+        (js,) = _reports(data).glob(f"{prefix}{SHA[:12]}*.json")
+        assert js.stat().st_size > 0
+    assert exp["empty"]  # the sample has an empty cell to render
+
+
+# ---------------------------------------------------------------------------------------------
+# 9. Two data builds at one commit keep separate report artifacts (Astra 5, exacta_run.py:487)
+# ---------------------------------------------------------------------------------------------
+
+ARTIFACT_KINDS = (("e1-", ".json"), ("e1-", ".md"), ("breakage-", ".json"), ("breakage-", ".md"),
+                  ("max-test-", ".json"))  # fmt: skip
+RUN_RECORD_FIELDS = ["hypothesis_id", "family_id", "variant", "ticket", "git_sha", "data_builds",
+                     "sources", "fold_scheme", "components", "params", "metrics", "status",
+                     "holdout_open", "owner_signoff"]  # fmt: skip
+
+
+def test_two_data_builds_at_one_commit_keep_separate_report_artifacts(isolated, monkeypatch):
+    data = isolated["data"]
+    base = _setup(data)
+    _cli_n_boot(monkeypatch)
+    assert exacta_run.main(["freeze"]) == 0
+
+    def build() -> dict[str, bytes]:
+        for action in (["score"], ["breakage"], ["max-test", "--note", "data refresh"]):
+            assert exacta_run.main(action) == 0, action
+        return {p.name: p.read_bytes() for p in _reports(data).iterdir() if SHA[:12] in p.name}
+
+    def count(files, kind) -> int:
+        return sum(1 for name in files if name.startswith(kind[0]) and name.endswith(kind[1]))
+
+    first = build()
+    assert all(count(first, kind) == 1 for kind in ARTIFACT_KINDS), sorted(first)
+    _write_store(data, _with_dev_dividend_changed(base))  # same commit, another data build
+    second = build()
+    for name, raw in first.items():
+        assert second.get(name) == raw, f"{name} was overwritten by the second build"
+    assert all(count(second, kind) == 2 for kind in ARTIFACT_KINDS), sorted(second)
+    builds = {r.data_builds["jra_dividends"] for r in _cli_registry(data).records()}
+    assert len(builds) == 2  # the registry tells the builds apart as before
+    assert [f.name for f in fields(RunRecord)] == RUN_RECORD_FIELDS  # no schema change
