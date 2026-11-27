@@ -21,7 +21,9 @@ log is exactly the board over its tier-1 rows, and a day's trifecta boards are n
                     pools: {POOL: {investment,
                                    rows: [{combination, odds, odds_hi, status,
                                            morning_odds, move_morning_pct,
-                                           t20_odds, move_t20_pct}]}}}]}]}
+                                           t20_odds, move_t20_pct,
+                                           t10_odds, t5_odds,
+                                           t2_odds, move_t20_t2_pct}]}}}]}]}
 ```
 
 - The feed is JSON-ready: `race_date` is ISO date text, every timestamp is ISO-8601 UTC text,
@@ -34,7 +36,8 @@ log is exactly the board over its tier-1 rows, and a day's trifecta boards are n
 - `pools`: every pool the race's rows name, sorted by name. `investment` is the `investment` of
   the latest `__pool__` row of that pool that carries one, else null; `__pool__` is never a row.
 - `rows`: one per logged `combination` text, in numeric order (`'2'` before `'10'`, `'1,7'` before
-  `'3,7'`). `odds` and `odds_hi` are the current row's (`odds_hi` null for single-figure pools),
+  `'3,7'`); the board and shadow pages redraw them favourite first (#498), the feed's order
+  stays. `odds` and `odds_hi` are the current row's (`odds_hi` null for single-figure pools),
   `status` its `status_raw` as logged.
 - No key names a probability, an expected value, a fair price, a bet or a stake: the feed shows
   prices and their moves only.
@@ -57,8 +60,23 @@ that moment. `generated_utc` is `now()`.
 - T-20 reference (`t20_odds`): the latest row of the combination captured at or before
   post - 20 min, when that row is priced. Null while `now` is before post - 20 min, without a post
   time, and when the combination has no row by then.
+- T-2 reference (`t2_odds`, ticket #498): picked exactly as `t20_odds` is, at post - 2 min: the
+  latest row captured at or before post - 2 min, when that row is priced; null while `now` is
+  before post - 2 min, without a post time, and when the combination has no row by then.
+- T-10 and T-5 references (`t10_odds`, `t5_odds`, ticket #499): picked exactly as `t20_odds` is,
+  at post - 10 min and post - 5 min. The shadow page's odds ladder falls back to these four
+  references when a row has no shadow ladder, and, as the two feeds refresh apart, shows a
+  non-null reference as observed in place of a projected or null ladder point (an observed
+  ladder point stays), but only when the plain race's `post_utc` equals the shadow race's: on a
+  delayed post one feed may still carry the old post time, its checkpoints are for another
+  schedule, and the ladder shows as it is. The race header (post time and minutes to post)
+  shows the later of the two feeds' post times. `board-serve` rebuilds `/feed` when any of post - 20,
+  10, 5 or 2 min passes, so each reference fills at its cutoff without a log write.
 - Move: `current / reference - 1`, in percent rounded to one decimal, on `odds` (the low figure
   of a ranged pool such as PLACE or QUINELLA_PLACE). Null when either figure is missing.
+- T-20 -> T-2 move (`move_t20_t2_pct`): `t2_odds / t20_odds - 1`, rounded the same way; null
+  without both references. The shadow page no longer shows it (#499 replaced its T-20→T-2 column
+  with the odds ladder); the field stays for the record.
 
 ## Scratches
 
@@ -93,9 +111,9 @@ cache=None) -> dict`
 {race_date, generated_utc,
  models: {win, ordering, nowcast} | null,
  races: [{race_id, venue, race_no, post_utc, minutes_to_post, tau_bucket_min, board_capture_utc,
-          pools: {WIN:            {"7":   {value_mean, value_q05, value_q95, flags}},
-                  PLACE:          {"7":   {value_at_low, value_at_high, flags}},
-                  QUINELLA_PLACE: {"3,7": {value_at_low, value_at_high, flags}}}}],
+          pools: {WIN:            {"7":   {value_mean, value_q05, value_q95, flags, ladder}},
+                  PLACE:          {"7":   {value_at_low, value_at_high, flags, ladder}},
+                  QUINELLA_PLACE: {"3,7": {value_at_low, value_at_high, flags, ladder}}}}],
  win5: {race_date, capture_utc, investment, carryover, pool_ev} | null}
 ```
 
@@ -127,10 +145,48 @@ cache=None) -> dict`
   board; the plain feed and board page stay free of it.
 - No key names a stake, a bet, Kelly, an amount or a wager.
 
+### The odds ladder
+
+`ladder` (ticket #499): the entry's odds at the checkpoints 20, 10, 5 and 2 minutes before the
+post and at the final, keyed `20`, `10`, `5`, `2`, `0` (text once JSON), each
+`{"odds": x, "observed": true}`, `{"odds": x, "observed": false}` or null. Display only: it feeds
+no value, flag, row order, shadow log record or `verify()`.
+
+- Observed, k > 0: once `now` is at or after post - k, the latest row of the combination captured
+  (`snapshot_utc`) at or before post - k among the rows available by `now`, the `t20_odds` rule of
+  the plain feed; null when that row is unpriced or there is none, and always without a post time.
+- Observed, the final (0): once the final board exists (`final_board` over the captures that show
+  a final price, available by `now`), that board's figure. Until then the final is projected.
+- Projected: a checkpoint still ahead, from O_now (the board's current figure) with the nowcast
+  the values use (`models.nowcast`, the loader pointer's fit; read, never refitted):
+  `ln O_k = ln O_now + mu(tau_now, b) - mu(k, b)`, `b = band_of(O_now, nowcast.bands)` for both
+  terms. `mu(pool, tau, b)` is the fitted cell's mean, the expected `ln O_final - ln O_tau`, on the
+  nowcast's grid; between neighbouring grid taus (T-20, T-10, an off-grid tau_now) it is linear in
+  tau, below the smallest grid tau linear toward `mu(0) = 0`, and beyond the largest (T-60) it is
+  that cell's. mu reads only the cells it needs (the exact grid cell, or the two bracketing tau);
+  a checkpoint whose projection needs a cell the fit lacks (for tau_now or for k) is null, the
+  others still project. `tau_now` is the minutes from the fetch of the row O_now comes from to
+  the post, 0 after the post: the row's availability (`fetched_utc`, else `snapshot_utc`;
+  `snapshot._available`), the row being the latest by availability (then log order) among those
+  available by `now`. The native logger stamps a capture before it fetches the odds pages, so a
+  row snapped at post - 12 and fetched at post - 11 projects from tau 11. With staggered captures
+  each pool projects from its own row's fetch, not from the race's newest capture of another
+  pool. The observed checkpoints keep the capture rule above (`snapshot_utc` at or before
+  post - k, among the rows available by `now`). The figure shown is `exp(ln O_k)`, the median odds under the nowcast's
+  log-normal drift (the mean would add `sigma^2 / 2`; the median is the forecast a reader can hold
+  half above and half below), floored at 1.0 and rounded to two decimals. It is a forecast of the
+  crowd's drift, not a value and not a signal.
+- Pools: the low figure throughout (Place and Wide). Projections exist for the nowcast's pools,
+  WIN, PLACE and QUINELLA_PLACE; a pool the nowcast has no cells for, a nowcast without cells
+  (a fake), no models or no post time gives null for every checkpoint ahead, the observed ones
+  staying.
+
 Recompute: `cache` is a mapping the caller keeps between builds (the server keeps one). A race's
 values are recomputed only when its board (`board_capture_utc` and its figures) or its bucket
 changed; flags read the clock on every build. The same mapping holds the log readers, so a build
-parses only the members appended since the last one; a clock that goes back reads the logs again.
+parses only the members appended since the last one; a clock that goes back, or a change of the
+day's post times, reads the logs again. The ladder is formed on every build (it follows the clock)
+from per-checkpoint references kept as the rows are read, so no capture history is held.
 
 Serving: `/shadow-feed` has the headers, gzip, ETag and 304 of `/feed`. It is rebuilt at most
 every `min_rebuild_s`, whether or not a log changed (buckets and the stale flag follow the clock),

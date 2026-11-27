@@ -11,7 +11,10 @@ Cache-Control no-store, X-Robots-Tag noindex nofollow, Referrer-Policy no-referr
 X-Content-Type-Options nosniff.
 
 The feed is rebuilt at most every `min_rebuild_s`, and only when a file of the day folder (an odds
-log or a post-time sidecar) appeared, went away, or changed size or mtime. A log being appended
+log or a post-time sidecar) appeared, went away, or changed size or mtime, or when a race's
+post - 20, 10, 5 or 2 min passed (its T-20 / T-10 / T-5 / T-2 reference fills then, #498, #499;
+the clock is
+`feed.utc_now`). A log being appended
 reads safely: `odds_log` counts whole gzip members only, so a torn last member is ignored. A build
 that fails keeps the last good feed. The shadow feed is rebuilt at most every `min_rebuild_s` too,
 whether or not a file changed (its buckets and stale flags follow the clock), and its body and
@@ -30,7 +33,7 @@ import logging
 import sys
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -38,6 +41,7 @@ from typing import Any
 import typer
 
 from horsetrack.core import paths
+from horsetrack.countries.japan.board import feed as board_feed
 from horsetrack.countries.japan.board.feed import build_board
 from horsetrack.countries.japan.board.flags import FlagRules, load_flag_rules
 from horsetrack.countries.japan.board.shadow_feed import build_shadow
@@ -61,6 +65,18 @@ HEADERS = {
 Fingerprint = tuple[tuple[str, int, int], ...]
 
 
+def _next_cutoff(board: dict[str, Any], now: datetime) -> datetime | None:
+    """The first post - 20, 10, 5 or 2 min of a race on `board` still after `now`."""
+    cutoffs = [
+        datetime.fromisoformat(race["post_utc"]) - offset
+        for venue in board["venues"]
+        for race in venue["races"]
+        if race.get("post_utc")
+        for offset in board_feed.CHECKPOINTS
+    ]
+    return min((at for at in cutoffs if at > now), default=None)
+
+
 class Feed:
     """The day's board as JSON bytes and its ETag, rebuilt only when the day folder changed."""
 
@@ -74,6 +90,7 @@ class Feed:
         self._body: bytes | None = None
         self._gzipped: bytes | None = None
         self._etag: str | None = None
+        self._next_cutoff: datetime | None = None
 
     def _day_files(self) -> Fingerprint:
         day_dir = jra_day_dir(self.race_date, self.day_dir)
@@ -102,12 +119,15 @@ class Feed:
             return (self._gzipped if gzipped else self._body), self._etag
 
     def _build(self) -> dict[str, Any] | None:
-        """The new feed, or None when nothing changed since the last one."""
+        """The new feed, or None when no file changed and no checkpoint cutoff passed since the
+        last one (a reference fills at its cutoff without a log write)."""
         fingerprint = self._day_files()
-        if fingerprint == self._fingerprint and self._body is not None:
+        now = board_feed.utc_now()
+        due = self._next_cutoff is not None and now >= self._next_cutoff
+        if fingerprint == self._fingerprint and self._body is not None and not due:
             return None
-        board = build_board(self.race_date, day_dir=self.day_dir)
-        self._fingerprint = fingerprint
+        board = build_board(self.race_date, now=lambda: now, day_dir=self.day_dir)
+        self._fingerprint, self._next_cutoff = fingerprint, _next_cutoff(board, now)
         return board
 
     def _refresh(self) -> None:
