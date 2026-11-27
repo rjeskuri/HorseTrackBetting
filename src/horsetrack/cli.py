@@ -14,11 +14,17 @@ from horsetrack.countries.japan.jra.win_sales_fetch import fetch_win_sales_comma
 from horsetrack.countries.japan.jravan.bloodlines import (
     bloodlines_command as jravan_bloodlines_command,
 )
+from horsetrack.countries.japan.jravan.card_versions import (
+    card_versions_command as jravan_card_versions_command,
+)
 from horsetrack.countries.japan.jravan.check import check_command as jravan_check_command
 from horsetrack.countries.japan.jravan.dividends import (
     dividends_command as jravan_dividends_command,
 )
 from horsetrack.countries.japan.jravan.dump import dump_command as jravan_dump_command
+from horsetrack.countries.japan.jravan.horse_runs import (
+    horse_runs_command as jravan_horse_runs_command,
+)
 from horsetrack.countries.japan.jravan.masters import masters_command as jravan_masters_command
 from horsetrack.countries.japan.jravan.odds import final_odds_command as jravan_final_odds_command
 from horsetrack.countries.japan.jravan.races import races_command as jravan_races_command
@@ -42,6 +48,7 @@ from horsetrack.countries.japan.research.exacta_impact import exacta_impact_comm
 from horsetrack.countries.japan.research.win5_backfill import win5_history_command
 from horsetrack.countries.japan.research.win5_study import win5_study_app
 from horsetrack.countries.japan.shadow.day import shadow_day_command
+from horsetrack.countries.japan.studies.ability import ability_study_command
 from horsetrack.countries.japan.studies.nowcast import nowcast_study_command
 
 app = typer.Typer(no_args_is_help=True)
@@ -62,6 +69,7 @@ japan.command("fetch-going")(fetch_going_command)
 japan.command("fetch-win-sales")(fetch_win_sales_command)
 japan.command("exacta-impact")(exacta_impact_command)
 japan.command("nowcast-study")(nowcast_study_command)
+japan.command("ability-study")(ability_study_command)
 japan.command("coverage")(coverage_command)
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
 japan.add_typer(jrdb, name="jrdb")
@@ -69,10 +77,12 @@ jrdb.command("build")(jrdb_build_command)
 jravan = typer.Typer(no_args_is_help=True, help="JRA-VAN DataLab (JV-Data) commands.")
 japan.add_typer(jravan, name="jravan")
 jravan.command("bloodlines")(jravan_bloodlines_command)
+jravan.command("card-versions")(jravan_card_versions_command)
 jravan.command("check")(jravan_check_command)
 jravan.command("dividends")(jravan_dividends_command)
 jravan.command("dump")(jravan_dump_command)
 jravan.command("final-odds")(jravan_final_odds_command)
+jravan.command("horse-runs")(jravan_horse_runs_command)
 jravan.command("masters")(jravan_masters_command)
 jravan.command("races")(jravan_races_command)
 jravan.command("reconcile")(jravan_reconcile_command)

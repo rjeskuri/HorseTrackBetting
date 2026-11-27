@@ -1,7 +1,12 @@
 /* The board page (#42): renders the live-board feed (docs/specs/board-feed.md) and polls it.
  *
  * Pure render functions first (exported for node), then the browser glue: poll `feed` every 5 s
- * with If-None-Match, redraw #board, switch venue tabs, keep the race strip on the next race.
+ * with If-None-Match, redraw #board, switch venue tabs.
+ * One race per page (#498): the race whose hash is in the URL (`#race-<race_id>`, so reload and
+ * back keep it), else the venue's next race to post, else its last race. The race strip's links
+ * set the hash; a venue tab puts that venue's default race in it; a poll redraws the same race.
+ * Pool rows run favourite first (#498): by the crowd's current odds (the low end of Place and
+ * Wide), ties in combination order, the rows without odds last; the feed itself is not reordered.
  * Feed text is untrusted: every feed string goes through esc() before it reaches the markup.
  * The shadow page (#122) reuses renderBoard with `opts.columns` (extra cells per row) and finds
  * these functions on window.HorseBoard in the browser.
@@ -125,6 +130,49 @@
     return best;
   }
 
+  /* The race a venue shows without a choice: the next to post, else the venue's last race. */
+  function defaultRaceId(races, nowMs) {
+    var next = nextRaceId(races, nowMs);
+    if (next !== null || !races.length) return next;
+    return races[races.length - 1].race_id;
+  }
+
+  /* Numeric combination parts ('2,10' -> [2, 10]), or null when a part is not a whole number. */
+  function comboParts(combination) {
+    var parts = String(combination).split(",");
+    for (var i = 0; i < parts.length; i++) {
+      if (!/^\s*\d+\s*$/.test(parts[i])) return null;
+      parts[i] = Number(parts[i]);
+    }
+    return parts;
+  }
+
+  /* Combination order: '2' before '10', '2,3' before '2,10'; non-numeric ones after, as text. */
+  function comboOrder(a, b) {
+    var pa = comboParts(a), pb = comboParts(b);
+    if (pa === null || pb === null) {
+      if (pa !== pb) return pa === null ? 1 : -1;
+      return String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0;
+    }
+    for (var i = 0; i < Math.min(pa.length, pb.length); i++) {
+      if (pa[i] !== pb[i]) return pa[i] - pb[i];
+    }
+    return pa.length - pb.length;
+  }
+
+  function rowOdds(line) { return line.status === "SCR" ? null : num(line.odds); }
+
+  /* A copy of a pool's rows, favourite first: priced rows by odds, then the rest. */
+  function favouriteFirst(rows) {
+    return rows.slice().sort(function (a, b) {
+      var oa = rowOdds(a), ob = rowOdds(b);
+      if (oa === null || ob === null) {
+        if (oa !== ob) return oa === null ? 1 : -1;
+      } else if (oa !== ob) return oa - ob;
+      return comboOrder(a.combination, b.combination);
+    });
+  }
+
   function oddsText(line) {
     var lo = num(line.odds), hi = num(line.odds_hi);
     if (line.status === "SCR") return "Scratched";
@@ -151,7 +199,7 @@
       '<th scope="col" class="num">Odds</th><th scope="col" class="num">Since morning</th>' +
       '<th scope="col" class="num">Since T-20</th>' + (columns ? columns.head : "") +
       "</tr></thead><tbody>";
-    rows.forEach(function (line) {
+    favouriteFirst(rows).forEach(function (line) {
       var scr = line.status === "SCR";
       out += "<tr" + (scr ? ' class="scratched"' : "") + ' data-combination="' +
         esc(line.combination) + '"><th scope="row" class="combo mono">' +
@@ -164,7 +212,19 @@
     return out + "</tbody></table></section>";
   }
 
-  function renderRace(venue, race, nowMs, nextId, columns) {
+  function raceLabel(race) {
+    var no = num(race.race_no);
+    return no === null ? esc(race.race_id) : no + "R";
+  }
+
+  /* A previous / next race link beside the title; an empty placeholder at either end. */
+  function stepLink(race, label, arrowFirst) {
+    if (!race) return '<span class="step" aria-hidden="true"></span>';
+    return '<a class="step mono" href="#' + esc(anchor(race.race_id)) + '" aria-label="' + label +
+      '">' + (arrowFirst ? "‹ " + raceLabel(race) : raceLabel(race) + " ›") + "</a>";
+  }
+
+  function renderRace(venue, race, nowMs, nextId, columns, prev, next) {
     var postMs = instantMs(race.post_utc);
     var lastMs = instantMs(race.last_capture_utc);
     var stale = isStale(race.last_capture_utc, nowMs);
@@ -173,7 +233,9 @@
       (postMs !== null && postMs <= nowMs ? " off" : "");
     var out = '<article class="' + cls + '" id="' + esc(anchor(race.race_id)) +
       '" data-race="' + esc(race.race_id) + '"><header class="race-head">' +
-      "<h2>" + raceTitle(venue, race) + "</h2><p class=\"meta mono\">";
+      '<div class="race-title">' + stepLink(prev, "Previous race", true) +
+      "<h2>" + raceTitle(venue, race) + "</h2>" + stepLink(next, "Next race", false) +
+      '</div><p class="meta mono">';
     if (postMs === null) out += "<span>No post time</span>";
     else {
       out += "<span>Post " + jstClock(postMs) + " JST</span><span>" +
@@ -188,19 +250,33 @@
     return out + "</article>";
   }
 
-  /* The HTML of the board for one venue of a feed (the feed's first venue by default). */
+  /* The venue of a feed named `code`, else the feed's first venue (null on an empty day). */
+  function venueOf(feed, code) {
+    var venues = (feed && feed.venues) || [];
+    var shown = null;
+    venues.forEach(function (v) { if (!shown && v.venue === code) shown = v; });
+    return shown || venues[0] || null;
+  }
+
+  /* The HTML of the board for one race of one venue of a feed: opts.venue (the feed's first
+   * venue by default) and opts.race when that race is of the venue, else the venue's default. */
   function renderBoard(feed, opts) {
     opts = opts || {};
     var nowMs = num(opts.now);
     if (nowMs === null) nowMs = Date.now();
     var venues = (feed && feed.venues) || [];
-    var shown = null;
-    venues.forEach(function (v) { if (!shown && v.venue === opts.venue) shown = v; });
-    if (!shown) shown = venues[0] || null;
+    var shown = venueOf(feed, opts.venue);
     if (!shown) return '<p class="empty muted">No odds logged for this day yet.</p>';
 
     var races = shown.races || [];
     var nextId = nextRaceId(races, nowMs);
+    var at = -1;
+    races.forEach(function (r, i) { if (at < 0 && r.race_id === opts.race) at = i; });
+    if (at < 0) {
+      var fallback = defaultRaceId(races, nowMs);
+      races.forEach(function (r, i) { if (at < 0 && r.race_id === fallback) at = i; });
+    }
+    var selId = at < 0 ? null : races[at].race_id;
     var out = '<nav class="tabs" aria-label="Venues">';
     venues.forEach(function (v) {
       out += '<button type="button" class="tab" data-venue="' + esc(v.venue) +
@@ -211,18 +287,19 @@
     races.forEach(function (r) {
       var postMs = instantMs(r.post_utc), no = num(r.race_no);
       var cls = "rbtn" + (r.race_id === nextId ? " next" : "") +
-        (postMs !== null && postMs <= nowMs ? " off" : "");
+        (r.race_id === selId ? " sel" : "") + (postMs !== null && postMs <= nowMs ? " off" : "");
       out += '<a class="' + cls + '" href="#' + esc(anchor(r.race_id)) + '"' +
-        (r.race_id === nextId ? ' aria-current="true"' : "") + "><b>" +
+        (r.race_id === selId ? ' aria-current="page"' : "") + "><b>" +
         (no === null ? esc(r.race_id) : no + "R") + "</b><span>" +
         (postMs === null ? "--:--" : jstClock(postMs)) + "</span><i>" +
         (r.race_id === nextId ? "next" : postMs !== null && postMs <= nowMs ? "off" : "&nbsp;") +
         "</i></a>";
     });
     out += '</nav><div class="races">';
-    races.forEach(function (r) {
-      out += renderRace(shown.venue, r, nowMs, nextId, opts.columns);
-    });
+    if (at >= 0) {
+      out += renderRace(shown.venue, races[at], nowMs, nextId, opts.columns,
+        races[at - 1] || null, races[at + 1] || null);
+    }
     if (!races.length) out += '<p class="empty muted">No races captured at this venue yet.</p>';
     return out + "</div>";
   }
@@ -230,6 +307,35 @@
   /* ------------------------------------------------------------ the browser glue */
 
   var state = { etag: null, feed: null, venue: null };
+
+  /* The race the URL hash names in a feed, {venue, race}, or null. A hash naming another
+   * venue's race switches to that venue, so a reload shows the race the page last showed. */
+  function hashRace(feed) {
+    var hash = typeof location !== "undefined" ? String(location.hash || "") : "";
+    if (!hash) return null;
+    var found = null;
+    ((feed && feed.venues) || []).forEach(function (v) {
+      (v.races || []).forEach(function (r) {
+        if (!found && "#" + anchor(r.race_id) === hash) found = { venue: v.venue, race: r.race_id };
+      });
+    });
+    return found;
+  }
+
+  /* The selection to draw: the hash's race (and its venue), else `venue`'s default race. */
+  function selection(feed, venue) {
+    return hashRace(feed) || { venue: venue, race: null };
+  }
+
+  /* A venue tab: put that venue's default race in the URL (no race: clear the hash). */
+  function chooseVenue(feed, venue, nowMs) {
+    var shown = venueOf(feed, venue);
+    var id = shown ? defaultRaceId(shown.races || [], nowMs) : null;
+    if (id !== null) location.hash = "#" + anchor(id);
+    else if (typeof history !== "undefined" && history.replaceState) {
+      history.replaceState(null, "", location.pathname + location.search);
+    }
+  }
 
   function setStatus(text, cls) {
     if (typeof document === "undefined") return;
@@ -239,18 +345,28 @@
     el.className = "chip" + (cls ? " " + cls : "");
   }
 
-  function followNext() {
-    var strip = document.querySelector("#board .strip");
-    var next = document.querySelector("#board .strip .next");
-    if (!strip || !next || typeof next.offsetLeft !== "number") return;
-    strip.scrollLeft = Math.max(0, next.offsetLeft - strip.clientWidth / 2 + next.offsetWidth / 2);
+  /* Scroll the race strip of `root` to the selected race. */
+  function followSelected(root) {
+    var strip = document.querySelector(root + " .strip");
+    var sel = document.querySelector(root + " .strip .sel");
+    if (!strip || !sel || typeof sel.offsetLeft !== "number") return;
+    strip.scrollLeft = Math.max(0, sel.offsetLeft - strip.clientWidth / 2 + sel.offsetWidth / 2);
+  }
+
+  /* The viewport to the top of the page: a newly selected race starts there (the browser
+   * resolved its fragment before the race was drawn). A poll never moves the viewport. */
+  function toTop() {
+    if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
   }
 
   function draw() {
     var board = document.getElementById("board");
     if (!board || !state.feed) return;
-    board.innerHTML = renderBoard(state.feed, { now: Date.now(), venue: state.venue });
-    followNext();
+    var pick = selection(state.feed, state.venue);
+    state.venue = pick.venue;
+    board.innerHTML = renderBoard(state.feed,
+      { now: Date.now(), venue: pick.venue, race: pick.race });
+    followSelected("#board");
   }
 
   /* One GET of the feed with If-None-Match; a new feed redraws, a 304 keeps it (times refresh). */
@@ -281,13 +397,21 @@
     var tab = target && target.closest ? target.closest("[data-venue]") : null;
     if (!tab) return;
     state.venue = tab.getAttribute("data-venue");
+    chooseVenue(state.feed, state.venue, Date.now());
     draw();
-    if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
+    toTop();
+  }
+
+  /* A strip link, a step link or back: draw the race the hash names, from its top. */
+  function onHashChange() {
+    draw();
+    toTop();
   }
 
   function start() {
     var board = document.getElementById("board");
     if (board) board.addEventListener("click", onClick);
+    window.addEventListener("hashchange", onHashChange);
     (function tick() {
       poll().then(function () { setTimeout(tick, POLL_MS); });
     })();
@@ -295,7 +419,8 @@
 
   var api = {
     formatMove: formatMove, moveClass: moveClass, isStale: isStale, renderBoard: renderBoard,
-    poll: poll, esc: esc, num: num,
+    poll: poll, esc: esc, num: num, selection: selection, chooseVenue: chooseVenue,
+    followSelected: followSelected, toTop: toTop,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.HorseBoard = api;
