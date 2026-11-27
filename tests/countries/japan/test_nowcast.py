@@ -1829,6 +1829,96 @@ def test_a_scratch_counts_on_the_wide_board_from_its_page_fetch():
     assert 5.0 in kept_at[race_id_of(day, 2)] and 2.0 not in kept_at[race_id_of(day, 2)]
 
 
+def fetch_timed(rows: list[dict], lag_s) -> list[dict]:
+    """`rows` with fetched_utc = snapshot_utc + `lag_s(row)` seconds, or no fetch time where
+    `lag_s(row)` is None."""
+    out = []
+    for r in rows:
+        lag = lag_s(r)
+        out.append(
+            {
+                **r,
+                "fetched_utc": None if lag is None else r["snapshot_utc"] + timedelta(seconds=lag),
+            }
+        )
+    return out
+
+
+PREVIOUS_ROUND = {2: 5, 5: 6}  # the capture round before the one at a grid tau (SNAPSHOTS)
+
+
+def round_figures(rows: list[dict], race_id: str, pool: str, minute: float):
+    """The input's figures of one capture round: {combination: (odds, odds_hi)} and the pool
+    total."""
+    at = [r for r in rows if r["race_id"] == race_id and r["pool"] == pool
+          and r["minutes_to_post"] == minute]  # fmt: skip
+    prices = {
+        r["combination"]: (r["odds"], r["odds_hi"]) for r in at if r["combination"] != POOL_ROW
+    }
+    (total,) = [r["investment"] for r in at if r["combination"] == POOL_ROW]
+    return prices, total
+
+
+def test_logged_prices_and_totals_count_from_their_page_fetch():
+    """#411 review (round 3): a logged price and pool total count from their page's fetched_utc,
+    their snapshot_utc where they have none, as a scratch does, so a capture round that starts at
+    a grid cutoff and fetches its pages after it never mixes them into that board. Each round's
+    snapshot is on its minute (T-6, T-5, T-2, ...), and a store is logged, compacted and read as
+    the study reads a logged day. Per store, the round whose figures the WIN and Wide boards of
+    race 1 carry at T-2 and T-5 (odds, high odds and pool total, on `race_view` and on the case):
+    - late: every page fetched 20 s after its round starts: each board is the previous round's
+      (T-5 at T-2, T-6 at T-5);
+    - on time: every page fetched as its round starts: each board is its own round's;
+    - no fetch time: timed by snapshot_utc, each board is its own round's;
+    - mixed: only the WIN pages of the T-2 round late (30 s): the WIN board at T-2 is the T-5
+      round's, the Wide board at T-2 its own round's."""
+    day = TEST_DAYS[2]
+    race_id = race_id_of(day, 1)
+    base = race_rows(np.random.default_rng(4117), day, 1, WIDE_RUNNERS) + wide_rows(day, 1)
+
+    def late_win_at_two(r):
+        return 30.0 if r["pool"] == WIN and r["minutes_to_post"] == 2 else 0.0
+
+    stores = {  # name: (lag of a row, {(pool, tau): the round its board carries})
+        "late": (lambda r: FETCH_LAG_S, {(WIN, 2): 5, (WIN, 5): 6, (WIDE, 2): 5, (WIDE, 5): 6}),
+        "on-time": (lambda r: 0.0, {(WIN, 2): 2, (WIN, 5): 5, (WIDE, 2): 2, (WIDE, 5): 5}),
+        "no-fetch-time": (lambda r: None, {(WIN, 2): 2, (WIN, 5): 5, (WIDE, 2): 2, (WIDE, 5): 5}),
+        "mixed": (late_win_at_two, {(WIN, 2): 5, (WIN, 5): 5, (WIDE, 2): 2, (WIDE, 5): 5}),
+    }
+    root = Path(paths.data_dir())
+    for name, (lag_s, expected) in stores.items():
+        rows = fetch_timed(base, lag_s)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv(paths.DATA_DIR_VAR, str(root / name))
+            write_logged_day(day, rows)
+            path = paths.processed_dir("jra") / "odds_timeseries" / f"{day.isoformat()}.parquet"
+            own = study.read_logged_day(path, None)
+        cases, _, _ = extract(own.frame, scratches=own.scratches)
+        for (pool, tau), minute in expected.items():
+            prices, total = round_figures(rows, race_id, pool, minute)
+            other = round_figures(
+                rows, race_id, pool, PREVIOUS_ROUND[tau] if minute == tau else tau
+            )
+            assert other[1] != total, (name, pool, tau)  # the two candidate rounds differ
+            board = race_view(own.frame, race_id, tau_min=tau).pools[pool]
+            (i,) = np.flatnonzero((cases.pool == pool) & (cases.tau == tau))
+            r = cases.rows(i)
+            case_prices = zip(
+                cases.combination[r], cases.odds_t[r], cases.odds_hi_t[r], strict=True
+            )
+            for got, got_total in (
+                (zip(board.combinations, board.odds, board.odds_hi, strict=True), board.total),
+                (case_prices, cases.total_t[i]),
+            ):
+                got = {c: (lo, hi) for c, lo, hi in got}
+                assert set(got) == set(prices), (name, pool, tau)
+                for c, (lo, hi) in prices.items():
+                    assert got[c][0] == pytest.approx(lo, rel=1e-9), (name, pool, tau, c)
+                    if hi is not None:
+                        assert got[c][1] == pytest.approx(hi, rel=1e-9), (name, pool, tau, c)
+                assert got_total == pytest.approx(total, rel=1e-9), (name, pool, tau)
+
+
 # ---------------------------------------------------------------- #411 review: the study
 
 
@@ -1899,6 +1989,40 @@ def test_a_run_whose_only_fold_holds_wide_only_logs_renders_its_report(run_on):
     assert dump["wide"]["reason"] in text
     records = default_registry(COUNTRY).records()
     assert records and all(r.family_id.startswith(LOGGED_FAMILY) for r in records)
+
+
+NO_FOLD = re.compile(r"\bno folds?\b", re.IGNORECASE)
+
+
+def test_a_run_with_no_fold_completes_and_says_why_wide_is_not_fitted(run_on):
+    """#411 review (round 3): a run whose development days end before the first test window
+    (`--end` early, or too few weeks for FOLD_SCHEME's min_train of 3) has no fold. JRA-VAN on
+    two days of one week and one logged Wide day (post times, final captures) the next week: the
+    run completes, reports no fold and no scored case, does not fit Wide, says in its report that
+    the run has no fold, and is in the registry. With the rest of JRAVAN_DAYS added the same store
+    has a fold, and the reason no longer says the run has none."""
+    jravan = {d: day_rows(d, races=2) for d in TRAIN_DAYS[:2]}
+    logged = {TRAIN_DAYS[2]: wide_rows(TRAIN_DAYS[2], 1) + wide_rows(TRAIN_DAYS[2], 2)}
+    dump, text = run_on("no-fold", jravan=jravan, logged=logged)
+
+    assert dump["counts"]["folds"] == 0 and dump["folds"] == [], dump["folds"]
+    assert dump["counts"]["development_days"] == 3
+    assert dump["counts"]["own_logged_day_files"] == 1
+    assert dump["counts"]["cases"] > 0  # the logged Wide day gave cases, none of them scored
+    scored = [r for comparison in dump["gains"].values() for r in comparison.get("day", [])
+              if r.get("n_cases")]  # fmt: skip
+    assert not scored, scored
+    wide = dump["wide"]
+    assert wide["fitted"] is False
+    assert NO_FOLD.search(wide["reason"]), wide["reason"]
+    assert wide["reason"] in text
+    records = default_registry(COUNTRY).records()
+    assert records and all(r.family_id.startswith(LOGGED_FAMILY) for r in records)
+
+    with_fold = jravan | {d: day_rows(d, races=2) for d in JRAVAN_DAYS[3:]}
+    folded, _ = run_on("with-a-fold", jravan=with_fold, logged=logged)
+    assert folded["counts"]["folds"] > 0
+    assert not NO_FOLD.search(folded["wide"].get("reason") or ""), folded["wide"]
 
 
 FINAL_CAPTURE = re.compile(r"final capture", re.IGNORECASE)
