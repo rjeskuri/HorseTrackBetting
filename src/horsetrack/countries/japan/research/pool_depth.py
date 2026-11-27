@@ -8,8 +8,8 @@ stake moves the dividend from rate x V / W to rate x (V + s) / (W + s), so a bet
 worth (1 + e)(V + s)W / (V(W + s)) once it is in; `capacity_stake` solves that for
 1 + e(1 - share_lost): s = (e - k)VW / ((1 + k)V - (1 + e)W) with k = e(1 - share_lost). The
 ticket's closed form kVW / ((1 + k)V - (1 + e)W) is the same at share_lost 0.5 only (e - k = k).
-No breakage and no floor: the stake is continuous. As the pool deepens it falls to W k' / (1 + k')
-with k' = (e - k) / (1 + k) (W k / (1 + k) at one half); a shallower pool allows more.
+No breakage and no floor: the stake is continuous. As the pool deepens it falls to
+W(e - k) / (1 + k) (W k / (1 + k) at one half); a shallower pool allows more.
 
 V and W are the money that pays: W is the combination's final votes x 100 and V the pool's
 `__pool__` votes net of its refunded votes, (votes - refund_votes) x 100 (`pool_votes` counts
@@ -25,21 +25,27 @@ taken as JRA's) pays per yen d = 1 + (rV - sum W) / (P W_i), the
 sum over the P paying combinations; own stake s on combination i adds s to V, to W_i and to the
 sum, and the capacity solves (1 + e) d(s) / d(0) = 1 + k. With c = (1 + k) / (1 + e) and
 A = rV - sum W that is s = (1 - c)(A + P W_i) / ((c d(0) - 1) P + 1 - r); at P = 1 it is the
-single-winner identity again. The run checks the rule against the paid dividends and is recorded
-failed when it reproduces fewer than the spec's share; the rule of
+single-winner identity again. The run checks the rule against the paid dividends, per pool, every
+eligible paid combination counting (one without its votes or final price is one not reproduced),
+and is recorded failed when either pool's share is below the spec's; the rule of
 `core.pricing.stake_back_share_dividend`, r(1 + (V - sum W) / (P W_i)), is checked beside it as a
 diagnostic only. `run_exacta_impact` is #350's measure: the
 own impact of 100 yen on one exacta (FORECAST) combination by pool size
 (`research.exacta_impact.own_impact`, its POOL_BIN_EDGES), from the final votes.
 
-The readers stream `processed/jravan/{pool_votes,final_odds,races}.parquet` a batch at a time,
-year by year (a year is one row group; decoding it whole costs about a gigabyte), with only the
-columns named and the holdout days dropped by `core.eval.holdout.file_development_filter`; a
-time-series day file of a holdout day is skipped by its name before it is opened, and
-`LockedHoldout` is never opened. No read starts before 2014-06-07 (D10). Every run after the
-freeze is one RunRecord (failures included) in the registry; every report built on the store goes
-through `core.eval.reports.write_report` (sources ('jravan',)), so it never lands in the
-repository. `render_public_report` writes the public text, which holds no figure from the data.
+The readers scan `processed/jravan/{pool_votes,final_odds,races}.parquet` one row group (a year)
+at a time with only the columns named, the predicate of `core.eval.holdout.
+file_development_filter` (the span, holdout days dropped) and the reader's own pushed into the
+scan, so no row of a holdout day or from before 2014-06-07 (D10) reaches Python; `pool_votes` and
+`final_odds` keep the confirmed records only (データ区分 4 確定 and 5 確定(月曜); a race whose
+kept record is the day before's close, 2, has no final money). A time-series day file of a
+holdout day is skipped by its name before it is opened, and `LockedHoldout` is never opened. Every
+run after the freeze is one RunRecord (failures included) in the registry, identified by what it
+read: a digest of the rows each table gave the run and of the bytes of each development day file
+read, so a refresh of holdout or pre-2014-06-07 rows leaves it unchanged. Every report built on
+the store goes through `core.eval.reports.write_report` (sources ('jravan',)), so it never lands
+in the repository, under a name carrying the run's id. `render_public_report` writes the public
+text, which holds no figure from the data.
 """
 
 from __future__ import annotations
@@ -47,6 +53,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import math
+import re
+import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -96,7 +104,9 @@ CO_PLACER = ("PLACE", "QUINELLA_PLACE")  # stake-back-share pools: no single-win
 TERTILES = ("low", "mid", "high")
 VARIANT_DEPTH, VARIANT_COPLACER, VARIANT_EXACTA = "depth", "co-placer", "exacta-own-impact"
 UNIT, STEP, FLOOR = 100, 10, 110  # yen per ticket, breakage, the Plus-10 minimum
+CONFIRMED = ("4", "5")  # データ区分 確定 and 確定(月曜): the final records (2 is the day before's)
 BATCH_ROWS = 65_536
+RUN_SLOT = "<run-id>"  # replaced in a private report by the run's registry id
 _EPS = 1e-9
 
 
@@ -271,31 +281,44 @@ def _scan(
     end: date,
     *,
     where: ds.Expression | None = None,
-    where_columns: Sequence[str] = (),
 ) -> pa.Table:
     """The development rows of the jravan store table `name` with start <= race_date <= end:
-    exactly `columns`, narrowed by `where` (on `where_columns`). Streamed a batch at a time, so
-    no more than a batch of a row group is decoded at once; each batch is filtered by
-    `file_development_filter` (holdout days and days outside the range dropped) and `where`."""
+    exactly `columns`, narrowed by `where` (which may name columns not read). The predicate
+    (`file_development_filter`: the span, holdout days dropped, and `where`) runs inside the
+    scan, one row group at a time, so no other row reaches Python and no more than one row
+    group's columns are decoded at once; strings are decoded as dictionaries there, and only the
+    rows kept as plain strings."""
     _check_span(start, end)
     columns = list(columns)
-    read = list(dict.fromkeys([*columns, "race_date", *where_columns]))
     with pa.OSFile(str(_store_path(name))) as handle:
         keep = file_development_filter(handle, COUNTRY, start=start, end=end, where=where)
-        reader = pq.ParquetFile(handle)
-        missing = [c for c in read if c not in reader.schema_arrow.names]
+        whole = ds.ParquetFileFormat().make_fragment(handle)
+        schema = whole.physical_schema
+        missing = [c for c in columns if c not in schema.names]
         if missing:
             raise KeyError(f"{name} has no column(s): {', '.join(missing)}")
-        parts = [
-            pa.Table.from_batches([batch]).filter(keep).select(columns)
-            for batch in reader.iter_batches(
-                batch_size=BATCH_ROWS,
-                row_groups=_row_groups(reader.metadata, start, end),
-                columns=read,
+        strings = {f.name for f in schema if pa.types.is_string(f.type)}
+        options = ds.ParquetReadOptions(dictionary_columns=strings)
+        out = pa.schema([schema.field(c) for c in columns])
+        batches = []
+        for group in _row_groups(whole.metadata, start, end):
+            piece = ds.ParquetFileFormat(read_options=options).make_fragment(
+                handle, row_groups=[group]
             )
-        ]
-        schema = pa.schema([reader.schema_arrow.field(c) for c in columns])
-    return pa.concat_tables(parts) if parts else schema.empty_table()
+            scanner = ds.Scanner.from_fragment(
+                piece, columns=columns, filter=keep, batch_size=BATCH_ROWS
+            )
+            batches.extend(b.cast(out) for b in scanner.to_batches() if b.num_rows)
+    table = pa.Table.from_batches(batches, schema=out)
+    del batches
+    pa.default_memory_pool().release_unused()  # the decoded row group, back to the system
+    return table
+
+
+def _confirmed(where: ds.Expression | None = None) -> ds.Expression:
+    """The confirmed records of `pool_votes` or `final_odds` (CONFIRMED), and `where`."""
+    keep = ds.field("data_kubun").isin(list(CONFIRMED))
+    return keep if where is None else keep & where
 
 
 def _between(table: pa.Table, start: date, end: date) -> pa.Table:
@@ -333,11 +356,39 @@ def _day_files(date_from: date, date_to: date) -> list[tuple[date, Path]]:
     return out
 
 
+class _Inputs:
+    """What a run read, for its identity: per store table a sha256 over the frames the run took
+    from it (their columns and pandas row hashes, in read order), and per development day file
+    read its bytes. Holdout and pre-2014-06-07 rows never reach a frame, so they never count."""
+
+    def __init__(self) -> None:
+        self._digests: dict[str, Any] = {}
+
+    def add(self, name: str, frame: pd.DataFrame) -> None:
+        digest = self._digests.setdefault(name, hashlib.sha256())
+        digest.update(("\x1f".join(map(str, frame.columns)) + "\n").encode())
+        digest.update(pd.util.hash_pandas_object(frame, index=False).to_numpy().tobytes())
+
+    def add_files(self, name: str, files: Sequence[tuple[date, Path]]) -> None:
+        digest = self._digests.setdefault(name, hashlib.sha256())
+        for day, path in files:
+            digest.update(f"{day.isoformat()}:{_sha16(path)}\n".encode())
+
+    def builds(self) -> dict[str, str]:
+        """data_builds: each table's path, then the digest of what the run read of it."""
+        out = {}
+        for name, digest in sorted(self._digests.items()):
+            where = name if name == "odds_timeseries" else f"{name}.parquet"
+            out[name] = f"processed/{SOURCE}/{where}@{digest.hexdigest()[:16]}"
+        return out
+
+
 def pool_totals(*, date_from: date, date_to: date, minutes_before: float = 2.0) -> pd.DataFrame:
     """Per race and pool the store sold on a development day in date_from..date_to: race_id,
-    pool, final_yen (the `__pool__` row's votes x 100, gross sales: `final_odds` investment) and
-    at_t_yen (WIN, PLACE and QUINELLA: the investment of the latest time-series `__pool__`
-    capture with minutes_to_post >= minutes_before, a capture at t included; NaN otherwise)."""
+    pool, final_yen (the confirmed `__pool__` row's votes x 100, gross sales: `final_odds`
+    investment; a race whose kept record is the day before's has no row) and at_t_yen (WIN,
+    PLACE and QUINELLA: the investment of the latest time-series `__pool__` capture with
+    minutes_to_post >= minutes_before, a capture at t included; NaN otherwise)."""
     _check_span(date_from, date_to)
     minutes = _finite("minutes_before", minutes_before)
     finals = []
@@ -347,8 +398,7 @@ def pool_totals(*, date_from: date, date_to: date, minutes_before: float = 2.0) 
             ["race_id", "pool", "votes"],
             start,
             end,
-            where=ds.field("combination") == POOL_ROW,
-            where_columns=("combination",),
+            where=_confirmed(ds.field("combination") == POOL_ROW),
         )
         finals.append(table.to_pandas())
     final = pd.concat(finals, ignore_index=True)
@@ -563,17 +613,19 @@ def coplacer_rows(
     rows: pd.DataFrame, paid: pd.DataFrame, *, rates: Mapping[str, float], edges: Sequence[float],
     share_lost: float,
 ) -> pd.DataFrame:  # fmt: skip
-    """The paying Place and Wide combinations of `rows` (`depth_rows` of those pools) given the
-    race's realised co-placers (`paid`, `dividends` rows): the depth columns plus places (P, the
-    race's paying combinations), paid_yen (their money), dividend (as paid), jra_dividend and
-    core_dividend (the two rules at no own stake) and `capacity_{e:g}` per edge (by the
-    pre-registered rule)."""
+    """Every paid Place and Wide combination of `paid` (`dividends` rows, refunds dropped), each
+    with its `rows` row (`depth_rows` of those pools) where it has one, given the race's realised
+    co-placers: the depth columns (NaN where the combination has no votes or final price), places
+    (P, the race's paying combinations), paid_yen (their money), dividend (as paid), jra_dividend
+    and core_dividend (the two rules at no own stake; NaN where a money row is missing) and
+    `capacity_{e:g}` per edge (by the pre-registered rule)."""
     _columns(paid, "paid", [*KEYS, "dividend", "is_refund"])
     refund = paid["is_refund"].astype("boolean").fillna(False).to_numpy(dtype=bool)
     paid = paid.loc[paid["pool"].isin(list(CO_PLACER)).to_numpy(dtype=bool) & ~refund]
-    paid = paid[[*KEYS, "dividend"]]
-    if paid.empty or rows.empty:
-        return pd.DataFrame()
+    paid = paid[[*KEYS, "dividend"]].astype({c: object for c in KEYS})
+    if rows.empty:
+        rows = pd.DataFrame({c: pd.Series(dtype=object) for c in [*KEYS, "class_group", "band"]})
+        rows = rows.assign(**{c: pd.Series(dtype=float) for c in ("odds", "combo_yen", "pool_yen")})
     out = paid.merge(rows, on=KEYS, how="left")
     race_pool = ["race_id", "pool"]
     group = out.groupby(race_pool, sort=False)
@@ -595,7 +647,7 @@ def coplacer_rows(
             pool_yen, combo, paid_yen, places, rate, e, share
         )
     out = out.assign(pool_yen=pool_yen, dividend=_numbers(out["dividend"]), **columns)
-    return out.loc[out["class_group"].notna().to_numpy()].reset_index(drop=True)
+    return out.reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------- the spec and records
@@ -634,9 +686,10 @@ class _Run:
 
 
 def _preflight(
-    registry: Registry | None, date_from: date, date_to: date, out_dir: Path | str
+    registry: Registry | None, date_from: date, date_to: date | None, out_dir: Path | str
 ) -> _Run:
-    """NotPreRegistered before anything is read or written; then the span (D10) and out_dir."""
+    """NotPreRegistered before anything is read or written; then the span (D10; date_to None is
+    the store's last race day, looked up in the recorded attempt) and out_dir."""
     family, spec = load_spec()
     registry = default_registry(COUNTRY) if registry is None else registry
     spec_hash = _spec_hash(spec)
@@ -646,7 +699,7 @@ def _preflight(
             f"family {family!r} has no freeze of this spec (sha256 {spec_hash}, frozen: {frozen}); "
             "run `horsetrack japan pool-depth freeze` first"
         )
-    _check_span(date_from, date_to)
+    _check_span(date_from, date_from if date_to is None else date_to)
     if is_inside(Path(out_dir), env.repo_root()):
         raise LicensedOutputInRepo(f"{out_dir} is inside the repository: the report is licensed")
     return _Run(registry, family, spec, spec_hash)
@@ -658,19 +711,6 @@ def _sha16(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()[:16]
-
-
-def _builds(names: Sequence[str], series: tuple[date, date] | None = None) -> dict[str, str]:
-    """The store files' identities: each table's path, then a digest of its bytes after the `@`
-    (a refresh of the same table is the same variant); with `series`, the time-series day files
-    of the span's development days by name and size."""
-    builds = {n: f"processed/{SOURCE}/{n}.parquet@{_sha16(_store_path(n))}" for n in names}
-    if series is not None:
-        digest = hashlib.sha256()
-        for day, path in _day_files(*series):
-            digest.update(f"{day.isoformat()}:{path.stat().st_size}\n".encode())
-        builds["odds_timeseries"] = f"processed/{SOURCE}/odds_timeseries@{digest.hexdigest()[:16]}"
-    return builds
 
 
 def _commit() -> str:
@@ -697,53 +737,69 @@ def _record(run: _Run, variant: str, params: dict, builds: dict, metrics, status
     )
 
 
+def _run_id(record: RunRecord) -> str:
+    """The id the registry gives the record (the sha256 of its canonical form)."""
+    return _sha256(_canonical(asdict(record)))
+
+
 def _append(registry: Registry, record: RunRecord) -> str:
     """The run's id; the record is appended unless the registry already holds this exact run."""
     if record not in registry.records(record.family_id):
         return registry.append(record)
-    return _sha256(_canonical(asdict(record)))
+    return _run_id(record)
+
+
+Body = Callable[[_Inputs, date], tuple[list[FoldMetric], str, str, Any]]
 
 
 def _recorded(
     run: _Run,
     variant: str,
-    params: dict,
-    tables: Sequence[str],
-    body: Callable[[], tuple[list[FoldMetric], str, str, Path, Any]],
-    series: tuple[date, date] | None = None,
+    span: tuple[date, date | None],
+    out_dir: Path | str,
+    stem: str,
+    body: Body,
 ) -> tuple[str, str, Path, Any]:
-    """Run `body` (metrics, status, report text, report path, payload), write its report and
-    record it; any failure after the freeze is recorded as failed and raised again."""
-    builds: dict[str, str] = {}
+    """Run `body(inputs, date_to)` (metrics, status, report text, payload) on the span, date_to
+    None being the store's last race day (looked up here, inside the attempt), and record it:
+    the record's data_builds are what the run read (`_Inputs`), its report is written to
+    `<stem>-<first 16 hex of the run id>.md` under out_dir. Any failure after the freeze is
+    recorded as failed and raised again."""
+    date_from, date_to = span
+    inputs = _Inputs()
+    params = {"date_from": date_from.isoformat(), "date_to": None}
     try:
-        builds = _builds(tables, series)
-        metrics, status, text, path, payload = body()
-        report = write_report(path, text, sources=SOURCES)
+        date_to = _last_store_day() if date_to is None else date_to
+        params["date_to"] = date_to.isoformat()
+        _check_span(date_from, date_to)
+        metrics, status, text, payload = body(inputs, date_to)
+        record = _record(run, variant, params, inputs.builds(), metrics, status)
+        run_id = _run_id(record)
+        path = Path(out_dir) / f"{stem}-{run_id[:16]}.md"
+        report = write_report(path, text.replace(RUN_SLOT, run_id), sources=SOURCES)
     except Exception:
-        _append(run.registry, _record(run, variant, params, builds, (), "failed"))
+        _append(run.registry, _record(run, variant, params, inputs.builds(), (), "failed"))
         raise
-    run_id = _append(run.registry, _record(run, variant, params, builds, metrics, status))
-    return run_id, status, report, payload
-
-
-def _span_params(date_from: date, date_to: date) -> dict[str, str]:
-    return {"date_from": date_from.isoformat(), "date_to": date_to.isoformat()}
+    return _append(run.registry, record), status, report, payload
 
 
 # --------------------------------------------------------------------------- the passes
 
 
-def _read_races(date_from: date, date_to: date) -> pd.DataFrame:
-    columns = ["race_id", "race_class", "status"]
-    frames = [_scan("races", columns, a, b).to_pandas() for a, b in _years(date_from, date_to)]
-    return pd.concat(frames, ignore_index=True)
+def _read_races(date_from: date, date_to: date, inputs: _Inputs) -> pd.DataFrame:
+    """race_id, race_date, race_class and status of the development races in the span."""
+    columns = ["race_id", "race_date", "race_class", "status"]
+    races = _scan("races", columns, date_from, date_to).to_pandas()
+    inputs.add("races", races)
+    return races
 
 
 def _chunks(
-    date_from: date, date_to: date, pools: Sequence[str]
-) -> Iterator[tuple[pd.DataFrame, pd.DataFrame]]:
-    """(votes, board) frames a month at a time: the `pool_votes` rows of `pools` (slots and pool
-    rows) and their `final_odds` rows (priced slots and pool rows), read a year at a time."""
+    date_from: date, date_to: date, pools: Sequence[str], inputs: _Inputs
+) -> Iterator[tuple[date, date, pd.DataFrame, pd.DataFrame]]:
+    """(first day, last day, votes, board) a month at a time: the confirmed `pool_votes` rows of
+    `pools` (slots and pool rows) and their confirmed `final_odds` rows (priced slots and pool
+    rows), read a year at a time; each frame counts toward the run's inputs."""
     in_pools = ds.field("pool").isin(list(pools))
     priced = (ds.field("combination") == POOL_ROW) | ds.field("odds").is_valid()
     for start, end in _years(date_from, date_to):
@@ -752,19 +808,21 @@ def _chunks(
             ["race_date", *KEYS, "votes", "refund_votes"],
             start,
             end,
-            where=in_pools,
-            where_columns=("pool",),
+            where=_confirmed(in_pools),
         )
         board = _scan(
             "final_odds",
             ["race_date", *KEYS, "odds", "investment"],
             start,
             end,
-            where=in_pools & priced,
-            where_columns=("pool", "combination", "odds"),
+            where=_confirmed(in_pools & priced),
         )
         for a, b in _months(start, end):
-            yield _between(votes, a, b).to_pandas(), _between(board, a, b).to_pandas()
+            month_votes = _between(votes, a, b).to_pandas()
+            month_board = _between(board, a, b).to_pandas()
+            inputs.add("pool_votes", month_votes)
+            inputs.add("final_odds", month_board)
+            yield a, b, month_votes, month_board
         del votes, board
         pa.default_memory_pool().release_unused()
 
@@ -865,21 +923,26 @@ class DepthResult:
 
 
 def run_depth(
-    *, date_from: date, date_to: date, out_dir: Path | str, registry: Registry | None = None
+    *,
+    date_from: date,
+    date_to: date | None,
+    out_dir: Path | str,
+    registry: Registry | None = None,
 ) -> DepthResult:
-    """The depth variant on development days from date_from to date_to: `depth_table` of the
-    run's `depth_rows` with the spec's odds bands, edges and quantiles (Place and Wide depth
-    only), the pool-size tertile cells, the flat-stake shares and the pool totals at t, written
-    to the private report under `out_dir` and recorded as one RunRecord ("failed" when it
-    raised). NotPreRegistered unless the registry has the shipped spec frozen."""
+    """The depth variant on development days from date_from to date_to (None: the store's last
+    race day): `depth_table` of the run's `depth_rows` with the spec's odds bands, edges and
+    quantiles (Place and Wide depth only), the pool-size tertile cells, the flat-stake shares and
+    the pool totals at t, written to the run's private report under `out_dir` and recorded as one
+    RunRecord ("failed" when it raised). NotPreRegistered unless the registry has the shipped
+    spec frozen."""
     run = _preflight(registry, date_from, date_to, out_dir)
     spec = run.spec
 
-    def body():
-        races = _read_races(date_from, date_to)
+    def body(inputs: _Inputs, date_to: date):
+        races = _read_races(date_from, date_to, inputs)
         depth = _Depth(races.loc[~races["status"].isin(spec["exclude_status"])], spec["odds_bands"])
         check: dict[str, int] = {}
-        for votes, board in _chunks(date_from, date_to, list(spec["odds_bands"])):
+        for _, _, votes, board in _chunks(date_from, date_to, list(spec["odds_bands"]), inputs):
             for key, n in _pool_check(votes, board).items():
                 check[key] = check.get(key, 0) + n
             depth.add(depth_rows(votes, board, races, band_edges=spec["odds_bands"],
@@ -895,32 +958,33 @@ def run_depth(
             del frame
         table = pd.concat(tables, ignore_index=True)
         tertile_table = pd.concat(tertiles, ignore_index=True)
-        totals = _totals_by_class(date_from, date_to, races, spec)
+        totals = _totals_by_class(date_from, date_to, races, spec, inputs)
         result = DepthResult(table, Path(), run.family_id, run.spec_hash, "", date_from, date_to,
                              tertile_table, totals)  # fmt: skip
         text = _depth_report(result, spec, check, pd.concat(counts, ignore_index=True))
-        path = Path(out_dir) / f"pool-depth-japan-{run.spec_hash[:12]}.md"
-        return _depth_metrics(table, spec), "scored", text, path, result
+        return _depth_metrics(table, spec), "scored", text, result
 
     run_id, _, report, result = _recorded(
-        run,
-        VARIANT_DEPTH,
-        _span_params(date_from, date_to),
-        ("pool_votes", "final_odds", "races"),
-        body,
-        series=(date_from, date_to),
+        run, VARIANT_DEPTH, (date_from, date_to), out_dir, "pool-depth-japan", body
     )
     return replace(result, report_path=report, run_id=run_id)
 
 
 def _totals_by_class(
-    date_from: date, date_to: date, races: pd.DataFrame, spec: Mapping[str, Any]
+    date_from: date,
+    date_to: date,
+    races: pd.DataFrame,
+    spec: Mapping[str, Any],
+    inputs: _Inputs,
 ) -> pd.DataFrame:
     """Per pool at t (WIN, PLACE, QUINELLA) x class group: races, races with a total at t, and the
-    quantiles of the final total, the total at t and their ratio (#349's history)."""
+    quantiles of the final total, the total at t and their ratio (#349's history). The totals
+    count toward the run's pool_votes input and the day files read toward its odds_timeseries."""
+    inputs.add_files("odds_timeseries", _day_files(date_from, date_to))
     totals = pool_totals(
         date_from=date_from, date_to=date_to, minutes_before=spec["minutes_before"]
     )
+    inputs.add("pool_votes", totals)
     totals = totals.loc[totals["pool"].isin(list(AT_T_POOLS)).to_numpy()]
     totals = totals.merge(_race_groups(races, spec["exclude_status"]), on="race_id")
     rows = []
@@ -969,28 +1033,36 @@ def _depth_metrics(table: pd.DataFrame, spec: Mapping[str, Any]) -> list[FoldMet
 
 @dataclass(frozen=True)
 class CoplacerResult:
+    """`rule_match`, `core_match` and `coverage` per pool (PLACE, QUINELLA_PLACE): the share of
+    the eligible paid combinations the pre-registered rule and the core rule reproduce, and the
+    share that have their votes and final price (NaN for a pool with no eligible payout)."""
+
     table: pd.DataFrame
     status: str
-    rule_match: float
-    core_match: float
+    rule_match: Mapping[str, float]
+    core_match: Mapping[str, float]
+    coverage: Mapping[str, float]
+    n_paid: Mapping[str, int]
     report_path: Path
     run_id: str
 
 
-def _paid(races: pd.DataFrame) -> pd.DataFrame:
-    """The Place and Wide `dividends` rows of the development races read (the table has no day
-    column: the scan keeps the race ids the development `races` read returned)."""
+def _paid(races: pd.DataFrame, inputs: _Inputs) -> pd.DataFrame:
+    """The Place and Wide `dividends` rows of `races` (the table has no day column: the scan keeps
+    the race ids of the development races read)."""
     keep = ds.field("race_id").isin(races["race_id"].tolist()) & ds.field("pool").isin(
         list(CO_PLACER)
     )
     columns = [*KEYS, "dividend", "is_refund"]
-    return pq.read_table(_store_path("dividends"), columns=columns, filters=keep).to_pandas()
+    paid = pq.read_table(_store_path("dividends"), columns=columns, filters=keep).to_pandas()
+    inputs.add("dividends", paid)
+    return paid
 
 
 def _rates(races: pd.DataFrame) -> dict[str, float]:
     """1 - each Place/Wide pool's base takeout (config/jra.yaml) on the first race day read; the
     run refuses a span over which the base rate changes."""
-    days = pd.to_datetime(races["race_id"].str.split(":").str[1]).dt.date
+    days = pd.to_datetime(races["race_date"]).dt.date
     pools = load_source(COUNTRY, "jra").pools
     rates = {}
     for pool in CO_PLACER:
@@ -1001,54 +1073,77 @@ def _rates(races: pd.DataFrame) -> dict[str, float]:
     return rates
 
 
+def _shares(rows: pd.DataFrame, hits: np.ndarray) -> dict[str, float]:
+    """Per co-placer pool, the share of its rows where `hits` holds (NaN for no row)."""
+    pool = rows["pool"].to_numpy()
+    return {p: float(hits[pool == p].mean()) if (pool == p).any() else math.nan for p in CO_PLACER}
+
+
 def run_coplacer(
-    *, date_from: date, date_to: date, out_dir: Path | str, registry: Registry | None = None
+    *,
+    date_from: date,
+    date_to: date | None,
+    out_dir: Path | str,
+    registry: Registry | None = None,
 ) -> CoplacerResult:
     """The co-placer variant of Place and Wide: the capacity of each paying combination given
     the race's realised co-placers (module docstring), per pool x class group x odds band, with
-    the rule checked against the paid dividends; recorded "failed" when the rule reproduces fewer
-    than the spec's `place_wide.co_placer.min_rule_match` of them, or when it raised."""
+    the rule checked against every eligible paid dividend (refunds and the races of an excluded
+    status aside), per pool: a paid combination without its votes or final price is one the rule
+    does not reproduce. Recorded "failed" when either pool's share is below the spec's
+    `place_wide.co_placer.min_rule_match` (or the pool has no payout), or when it raised."""
     run = _preflight(registry, date_from, date_to, out_dir)
     spec = run.spec
     bands = {p: spec["odds_bands"][p] for p in CO_PLACER}
     gate = float(spec["place_wide"]["co_placer"]["min_rule_match"])
 
-    def body():
-        races = _read_races(date_from, date_to)
-        paid, rates = _paid(races), _rates(races)
+    def body(inputs: _Inputs, date_to: date):
+        races = _read_races(date_from, date_to, inputs)
+        eligible = races.loc[~races["status"].isin(spec["exclude_status"]).to_numpy(dtype=bool)]
+        paid, rates = _paid(eligible, inputs), _rates(races)
+        day = pd.to_datetime(paid["race_id"].map(eligible.set_index("race_id")["race_date"]))
         parts = []
-        for votes, board in _chunks(date_from, date_to, CO_PLACER):
+        for a, b, votes, board in _chunks(date_from, date_to, CO_PLACER, inputs):
             rows = depth_rows(votes, board, races, band_edges=bands,
                               exclude_status=spec["exclude_status"])  # fmt: skip
-            mine = paid.loc[paid["race_id"].isin(set(votes["race_id"])).to_numpy()]
-            parts.append(coplacer_rows(rows, mine, rates=rates, edges=spec["edges"],
+            month = ((day >= pd.Timestamp(a)) & (day <= pd.Timestamp(b))).to_numpy(dtype=bool)
+            parts.append(coplacer_rows(rows, paid.loc[month], rates=rates, edges=spec["edges"],
                                        share_lost=spec["share_lost"]))  # fmt: skip
         rows = pd.concat(parts, ignore_index=True)
         dividend = rows["dividend"].to_numpy(dtype=float)
-        jra = float(np.mean(rows["jra_dividend"].to_numpy(dtype=float) == dividend))
-        core = float(np.mean(rows["core_dividend"].to_numpy(dtype=float) == dividend))
-        caps = {e: rows[capacity_column(e)].to_numpy(dtype=float) for e in spec["edges"]}
+        priced = rows["class_group"].notna().to_numpy(dtype=bool)
+        jra = _shares(rows, rows["jra_dividend"].to_numpy(dtype=float) == dividend)
+        core = _shares(rows, rows["core_dividend"].to_numpy(dtype=float) == dividend)
+        coverage = _shares(rows, priced)
+        n_paid = {p: int((rows["pool"].to_numpy() == p).sum()) for p in CO_PLACER}
+        matched = rows.loc[priced].reset_index(drop=True)
+        caps = {e: matched[capacity_column(e)].to_numpy(dtype=float) for e in spec["edges"]}
         table = _table(
-            rows,
+            matched,
             by=CELL,
             quantiles=spec["quantiles"],
             capacities=lambda pool, index: {e: c[index] for e, c in caps.items()},
             edges=spec["edges"],
             stakes=spec["flat_stakes_yen"],
         )
-        status = "scored" if jra >= gate else "failed"
-        result = CoplacerResult(table, status, jra, core, Path(), "")
-        text = _coplacer_report(result, rows, spec, run, date_from, date_to, gate)
-        path = Path(out_dir) / f"pool-depth-coplacer-japan-{run.spec_hash[:12]}.md"
-        metrics = [FoldMetric("all", "jra_rule_match", jra, None, None, len(rows)),
-                   FoldMetric("all", "core_rule_match", core, None, None, len(rows))]  # fmt: skip
+        status = "scored" if all(jra[p] >= gate for p in CO_PLACER) else "failed"
+        result = CoplacerResult(table, status, jra, core, coverage, n_paid, Path(), "")
+        text = _coplacer_report(result, matched, spec, run, date_from, date_to, gate)
+        metrics = []
+        for pool in CO_PLACER:
+            if n_paid[pool]:
+                metrics += [
+                    FoldMetric(pool, "jra_rule_match", jra[pool], None, None, n_paid[pool]),
+                    FoldMetric(pool, "core_rule_match", core[pool], None, None, n_paid[pool]),
+                    FoldMetric(pool, "paid_with_votes_and_price", coverage[pool], None, None,
+                               n_paid[pool]),
+                ]  # fmt: skip
         metrics += _depth_metrics(table.assign(pool="co-placer:" + table["pool"]), spec)
-        return metrics, status, text, path, result
+        return metrics, status, text, result
 
-    run_id, status, report, result = _recorded(
-        run, VARIANT_COPLACER, _span_params(date_from, date_to),
-        ("pool_votes", "final_odds", "races", "dividends"), body,
-    )  # fmt: skip
+    run_id, _, report, result = _recorded(
+        run, VARIANT_COPLACER, (date_from, date_to), out_dir, "pool-depth-coplacer-japan", body
+    )
     return replace(result, report_path=report, run_id=run_id)
 
 
@@ -1060,25 +1155,31 @@ class ImpactResult:
     bins: pd.DataFrame
     report_path: Path
     run_id: str
+    status: str = "scored"
 
 
 def run_exacta_impact(
-    *, date_from: date, date_to: date, out_dir: Path | str, registry: Registry | None = None
+    *,
+    date_from: date,
+    date_to: date | None,
+    out_dir: Path | str,
+    registry: Registry | None = None,
 ) -> ImpactResult:
     """#350's measure on history: |own_impact| of the spec's stake on each priced FORECAST
     combination, from its final votes (odds (1 - t) V / W, so own_impact sees W), by the final
-    pool's size bin (exacta_impact.POOL_BIN_EDGES); one RunRecord."""
+    pool's size bin (exacta_impact.POOL_BIN_EDGES); one RunRecord, "failed" when every bin is
+    empty (no priced exacta with its votes) or when it raised."""
     run = _preflight(registry, date_from, date_to, out_dir)
     spec = run.spec
     impact = spec["exacta_impact"]
     pool, stake, takeout = impact["pool"], float(impact["stake"]), float(impact["takeout"])
     edges = tuple(impact["pool_bin_edges"])
 
-    def body():
-        races = _read_races(date_from, date_to)
+    def body(inputs: _Inputs, date_to: date):
+        races = _read_races(date_from, date_to, inputs)
         values: list[list[np.ndarray]] = [[] for _ in edges]
         race_sets: list[set[str]] = [set() for _ in edges]
-        for votes, board in _chunks(date_from, date_to, (pool,)):
+        for _, _, votes, board in _chunks(date_from, date_to, (pool,), inputs):
             rows = depth_rows(votes, board, races, band_edges={pool: spec["odds_bands"][pool]},
                               exclude_status=spec["exclude_status"])  # fmt: skip
             rows = rows.loc[(rows["combo_yen"].to_numpy() > 0) & (rows["pool_yen"].to_numpy() > 0)]
@@ -1102,21 +1203,20 @@ def run_exacta_impact(
                          **{f"q{qq:g}": float(v) for qq, v in zip(spec["quantiles"], q,
                                                                      strict=True)}})  # fmt: skip
         bins = pd.DataFrame(rows)
-        text = _impact_report(bins, spec, run, date_from, date_to)
-        path = Path(out_dir) / f"exacta-impact-history-japan-{run.spec_hash[:12]}.md"
+        status = "scored" if int(bins["n_combinations"].sum()) else "failed"
+        text = _impact_report(bins, spec, run, date_from, date_to, status)
         metrics = [
             FoldMetric(f"pool {r['lo']}..{'inf' if r['hi'] is None else r['hi']}",
                        "median_abs_impact", r["median_abs_impact"], None, r["max_abs_impact"],
                        r["n_races"])
             for r in rows if r["n_combinations"]
         ]  # fmt: skip
-        return metrics, "scored", text, path, ImpactResult(bins, Path(), "")
+        return metrics, status, text, ImpactResult(bins, Path(), "", status)
 
     run_id, _, report, result = _recorded(
-        run, VARIANT_EXACTA, _span_params(date_from, date_to),
-        ("pool_votes", "final_odds", "races"), body,
-    )  # fmt: skip
-    return ImpactResult(result.bins, report, run_id)
+        run, VARIANT_EXACTA, (date_from, date_to), out_dir, "exacta-impact-history-japan", body
+    )
+    return replace(result, report_path=report, run_id=run_id)
 
 
 # --------------------------------------------------------------------------- the reports
@@ -1152,8 +1252,9 @@ def _about(family: str, spec_hash: str, variant: str, date_from: date, date_to: 
         "Built on JRA-VAN (licensed): every figure here stays out of the repository (D21).",
         "",
         f"- family `{family}`, spec sha256 `{spec_hash}`, variant `{variant}`",
+        f"- registry run `{RUN_SLOT}`",
         f"- race days {date_from} to {date_to}, development days only (holdout days dropped "
-        "by the scan; no day before 2014-06-07)",
+        "by the scan; no day before 2014-06-07); confirmed vote and odds records only",
         f"- git `{_commit()}`; written {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "",
     ]
@@ -1237,6 +1338,15 @@ def _coplacer_report(result, rows, spec, run, date_from, date_to, gate) -> str:
     fits = [fits_column(e, s) for e in spec["edges"] for s in spec["flat_stakes_yen"]]
     base = ["pool", "class_group", "band", "quantile", "n_combinations", "n_races"]
     no_cap = int(np.isnan(rows[caps[0]].to_numpy(dtype=float)).sum()) if len(rows) else 0
+    check = pd.DataFrame(
+        {
+            "pool": list(CO_PLACER),
+            "paid_combinations": [result.n_paid[p] for p in CO_PLACER],
+            "with_votes_and_price": [result.coverage[p] for p in CO_PLACER],
+            "rule_match": [result.rule_match[p] for p in CO_PLACER],
+            "core_rule_match": [result.core_match[p] for p in CO_PLACER],
+        }
+    )
     lines = [
         "# Place and Wide capacity with the realised co-placers (N3, #432): private report",
         "",
@@ -1245,13 +1355,11 @@ def _coplacer_report(result, rows, spec, run, date_from, date_to, gate) -> str:
         "",
         "The pre-registered rule: per yen 1 + (rV - sum W) / (P W_i), broken to 10 yen, at "
         "least 110, V net of refunds, P the race's paying combinations, r the base payout rate "
-        "(boosted days are not adjusted).",
+        "(boosted days are not adjusted). Every eligible paid combination counts; one without "
+        f"its votes or final price is not reproduced. Gate: each pool's rule_match >= {gate}.",
         "",
-        f"- paying combinations: {len(rows):,}; without a capacity (A <= 0 or no money row): "
-        f"{no_cap:,}",
-        f"- the pre-registered rule reproduces the paid dividend: {result.rule_match:.4f} "
-        f"(gate {gate}); the rule of core.pricing.stake_back_share_dividend: "
-        f"{result.core_match:.4f}",
+        *_markdown(check),
+        f"- matched paying combinations without a capacity (A <= 0): {no_cap:,}",
         f"- status: **{result.status}**",
         "",
         "## Capacity of the paying combinations per pool x class group x odds band",
@@ -1266,7 +1374,7 @@ def _coplacer_report(result, rows, spec, run, date_from, date_to, gate) -> str:
     return "\n".join(lines)
 
 
-def _impact_report(bins: pd.DataFrame, spec, run, date_from, date_to) -> str:
+def _impact_report(bins: pd.DataFrame, spec, run, date_from, date_to, status) -> str:
     impact = spec["exacta_impact"]
     return "\n".join(
         [
@@ -1275,7 +1383,8 @@ def _impact_report(bins: pd.DataFrame, spec, run, date_from, date_to) -> str:
             *_about(run.family_id, run.spec_hash, VARIANT_EXACTA, date_from, date_to),
             f"|own_impact| of {impact['stake']} yen on one {impact['pool']} combination at its "
             f"final votes, takeout {impact['takeout']}, by the final pool (net of refunds) in "
-            "exacta_impact.POOL_BIN_EDGES.",
+            "exacta_impact.POOL_BIN_EDGES. Status: "
+            f"**{status}** (failed when every bin is empty).",
             "",
             *_markdown(bins),
         ]
@@ -1284,22 +1393,41 @@ def _impact_report(bins: pd.DataFrame, spec, run, date_from, date_to) -> str:
 
 @dataclass(frozen=True)
 class VariantRun:
-    """A run listed in the public report: its variant, status and registry id."""
+    """A run listed in the public report: its variant, status and registry id, and the file name
+    of its private report when the listing knows it."""
 
     variant: str
     status: str
     run_id: str
+    report: str | None = None
+    family_id: str | None = None
 
 
 def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] = ()) -> str:
     """The public experiment report (docs/experiment-report.md headings): what ran, the identity
-    and worked arithmetic on invented numbers, every figure from the data withheld (D21)."""
-    runs = [VariantRun(VARIANT_DEPTH, "scored", result.run_id), *variants]
+    and worked arithmetic on invented numbers, every figure from the data withheld (D21).
+    `variants` lists the runs to show (every run of the family, failures included); without it,
+    the depth run of `result` alone."""
+    runs = list(variants) or [VariantRun(VARIANT_DEPTH, "scored", result.run_id)]
     listed = [
-        f"- `{v.variant}`: {v.status}, registry run `{v.run_id}`; every figure {WITHHELD}."
+        f"- `{v.variant}`"
+        + ("" if v.family_id in (None, result.family_id) else f" (family `{v.family_id}`)")
+        + f": {v.status}, registry run `{v.run_id}`"
+        + ("" if v.report is None else f", private report `{v.report}`")
+        + f"; every figure {WITHHELD}."
         for v in runs
     ]
     report = Path(result.report_path).name
+    validated = any(v.variant == VARIANT_COPLACER and v.status == "scored" for v in runs)
+    coplacer_follow_up = (
+        []
+        if validated
+        else [
+            "- #489: the Place and Wide co-placer capacity re-registered and run on a rule that "
+            "reproduces the paid dividends. Until then the Place and Wide capacity is "
+            "unvalidated, newcomer and maiden cells included: this study gives their depth only."
+        ]
+    )
     return "\n".join(
         [
             "# Pool depth and stake capacity, Japan (N3, #432)",
@@ -1307,9 +1435,10 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
             f"Family `{result.family_id}`, spec sha256 `{result.spec_hash}` (frozen before the "
             "run; docs/specs/pool-depth-prereg.md). Race days from "
             f"{result.date_from.isoformat()} to the run's last day (a span of the store: "
-            f"{WITHHELD}), development days only. The JRA-VAN store is licensed: every figure "
-            "computed from it is "
-            f"{WITHHELD}, in the private report `{report}` under `$HORSETRACK_DATA_DIR/reports/`.",
+            f"{WITHHELD}), development days only, confirmed vote and odds records only. The "
+            "JRA-VAN store is licensed: every figure computed from it is "
+            f"{WITHHELD}, in the private report `{report}` under `$HORSETRACK_DATA_DIR/reports/` "
+            "(each run's report carries the first 16 hex digits of its registry run id).",
             "",
             "## Hypothesis",
             "",
@@ -1350,9 +1479,10 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
             "1 + (rV - sum W) / (P W_i) per yen, the sum over the P paying combinations. With "
             "A = rV - sum W and c = (1 + k) / (1 + e) the capacity is s = (1 - c)(A + P W_i) / "
             "((c d0 - 1) P + 1 - r), d0 the dividend with no stake; at P = 1 it is the "
-            "single-winner identity. The run checks the rule against the paid dividends and is "
-            "recorded failed when it reproduces fewer than the spec's share of them (95%); the "
-            f"share itself is {WITHHELD}.",
+            "single-winner identity. The run checks the rule against every eligible paid "
+            "dividend, Place and Wide apart, a paid combination without its votes or final price "
+            "counting as not reproduced, and is recorded failed when either pool's share is "
+            f"below the spec's (95%); the shares themselves are {WITHHELD}.",
             "- The exacta (#350): 100 yen on one combination moves its dividend by "
             "(V + s) / V x W / (W + s) - 1, with W the combination's final money.",
             "",
@@ -1383,10 +1513,13 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
             "",
             "## Follow-ups filed",
             "",
-            "Proposed, not filed by this run: the co-placer variant re-registered as a new "
-            "family on the rule of `core.pricing.stake_back_share_dividend`; the trifecta's "
-            "depth by a streaming exact quantile; the capacity column beside the leaderboard "
-            "rows; publishable figures from the logged public days (#130).",
+            "Filed as proposed tickets:",
+            "",
+            *coplacer_follow_up,
+            "- #490: the trifecta (TIERCE) and bracket-quinella depth, with a streaming quantile.",
+            "- #491: the capacity beside each leaderboard row.",
+            "",
+            "Publishable figures need the logged public days (#130).",
             "",
         ]
     )
@@ -1427,16 +1560,24 @@ def run_command(
     public: Annotated[bool, typer.Option(help="write docs/experiments/pool-depth-japan.md")] = True,
 ) -> None:
     """Run the three registered variants on every development day from the spec's date_from to
-    the store's last race day, record each run and regenerate the committed summary. Prints run
-    identities and file names only."""
-    _, spec = load_spec()
-    span = dict(date_from=date.fromisoformat(spec["date_from"]), date_to=_last_store_day())
+    the store's last race day, record each run and update this family's file and index entry in
+    the committed summary. The freeze is checked before the store is touched; the last race day
+    is looked up inside each recorded attempt. Prints run identities and file names only; exits
+    1 when a run failed."""
+    family, spec = load_spec()
+    registry = default_registry(COUNTRY)
     folder = paths.reports_dir() if out is None else paths.outside_repo(out, what="out")
-    depth, others, failed = None, [], False
+    date_from = date.fromisoformat(spec["date_from"])
+    try:
+        _preflight(registry, date_from, None, folder)
+    except (NotPreRegistered, LicensedOutputInRepo, ValueError) as exc:
+        typer.echo(f"not run: {exc}", err=True)
+        raise typer.Exit(1) from None
+    depth, reports, failed = None, {}, False
     for variant, runner in ((VARIANT_DEPTH, run_depth), (VARIANT_COPLACER, run_coplacer),
                             (VARIANT_EXACTA, run_exacta_impact)):  # fmt: skip
         try:
-            result = runner(**span, out_dir=folder)
+            result = runner(date_from=date_from, date_to=None, out_dir=folder, registry=registry)
         except (NotPreRegistered, RecordRefused) as exc:
             typer.echo(f"{variant}: not run ({exc})", err=True)
             raise typer.Exit(1) from None
@@ -1445,19 +1586,66 @@ def run_command(
             failed = True
             continue
         status = getattr(result, "status", "scored")
+        failed = failed or status == "failed"
+        reports[result.run_id] = result.report_path.name
         typer.echo(f"{variant}: {status} run_id={result.run_id} report={result.report_path.name}")
-        if variant == VARIANT_DEPTH:
-            depth = result
-        else:
-            others.append(VariantRun(variant, status, result.run_id))
+        depth = result if variant == VARIANT_DEPTH else depth
     if public and depth is not None:
         doc = env.repo_root() / "docs" / "experiments" / "pool-depth-japan.md"
-        write_report(doc, render_public_report(depth, variants=others), sources=())
+        runs = family_runs(registry, [family], reports)
+        write_report(doc, render_public_report(depth, variants=runs), sources=())
         typer.echo(f"wrote {doc.relative_to(env.repo_root())}")
-    try:
-        write_summary(default_registry(COUNTRY), summary_dir(COUNTRY))
-    except ValueError as exc:  # a family of the registry the summary cannot name
-        typer.echo(f"the committed summary was not regenerated: {exc}", err=True)
-        failed = True
+    update_summary(registry, [family], summary_dir(COUNTRY))
+    typer.echo(f"updated the committed summary of {family}")
     if failed:
         raise typer.Exit(1)
+
+
+def family_runs(
+    registry: Registry, families: Sequence[str], reports: Mapping[str, str] | None = None
+) -> list[VariantRun]:
+    """Every run of `families` in the registry, in append order, failures included, with the
+    private report name of those `reports` (run id -> file name) knows."""
+    reports = {} if reports is None else reports
+    out = []
+    for record in registry.records():
+        if record.family_id in families:
+            run_id = _run_id(record)
+            out.append(VariantRun(record.variant, record.status, run_id, reports.get(run_id),
+                                  record.family_id))  # fmt: skip
+    return out
+
+
+_INDEX_ENTRY = re.compile(r"^- \[([^\]]+)\]\(\1\.md\)$", re.MULTILINE)
+
+
+class _Records:
+    """Records for `write_summary` to render (it reads `records()` only)."""
+
+    def __init__(self, records: Sequence[RunRecord]) -> None:
+        self._records = list(records)
+
+    def records(self, family_id: str | None = None) -> list[RunRecord]:
+        return [r for r in self._records if family_id is None or r.family_id == family_id]
+
+
+def update_summary(registry: Registry, families: Sequence[str], directory: Path | str) -> None:
+    """The committed summary in `directory` with `families`' files and index entries written by
+    `write_summary` from their records in `registry`, and every other family's file and index
+    entry kept: the index is `write_summary`'s rendering of the families it already lists plus
+    these (stand-in records name the others; their files are not written)."""
+    directory = Path(directory)
+    index = directory / "README.md"
+    listed = _INDEX_ENTRY.findall(index.read_text(encoding="utf-8")) if index.is_file() else []
+    own = [r for r in registry.records() if r.family_id in families]
+    names = [*dict.fromkeys(r.family_id for r in own), "README"]
+    stand_ins = [
+        RunRecord("P0", name, "-", 1, "-", {}, (), "-", {}, {}, (), "failed")
+        for name in dict.fromkeys(listed)
+        if name not in families
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        write_summary(_Records([*own, *stand_ins]), tmp)
+        for name in names:
+            text = (Path(tmp) / f"{name}.md").read_text(encoding="utf-8")
+            write_report(directory / f"{name}.md", text, sources=())

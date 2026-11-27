@@ -74,6 +74,7 @@ committed seed; elsewhere every day is before the committed holdout start.
 from __future__ import annotations  # noqa: I001
 
 import builtins
+import collections.abc as abc
 import copy
 import hashlib
 import io
@@ -85,22 +86,33 @@ import random
 import re
 import shutil
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 import pytest
+from typer.testing import CliRunner
 
 from horsetrack.core import env, paths
 from horsetrack.core.config import load_country_yaml
 from horsetrack.core.eval import holdout as holdout_module
-from horsetrack.core.eval.registry import Registry, _spec_hash, default_registry, summary_dir
+from horsetrack.core.eval import registry as registry_module
+from horsetrack.core.eval.registry import (
+    FoldMetric,
+    Registry,
+    RunRecord,
+    _spec_hash,
+    default_registry,
+    summary_dir,
+)
 from horsetrack.core.eval.reports import LicensedOutputInRepo
 from horsetrack.core.store import schemas, tables
 from horsetrack.countries.japan.jravan import odds as jravan_odds
@@ -119,6 +131,9 @@ POOL_ROW = "__pool__"
 POOLS = ("WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE", "FORECAST", "TRIO")
 SINGLE_WINNER = ("WIN", "QUINELLA", "FORECAST", "TRIO")
 RANGED = ("PLACE", "QUINELLA_PLACE")  # the board's odds are the low end of a range
+CO_PLACER = ("PLACE", "QUINELLA_PLACE")  # stake-back-share pools
+VARIANTS = ("depth", "co-placer", "exacta-own-impact")
+PRICE_ERA = date(2014, 6, 7)  # D10
 # payout rates (1 - takeout, config/jra.yaml since 2014-06-07), hard-coded here
 RATES = {
     "WIN": 0.80,
@@ -203,13 +218,25 @@ class Race:
     votes: dict[str, dict[str, int]]  # pool -> combination -> votes (100-yen tickets)
     pool_votes: dict[str, int]  # pool -> the `__pool__` row's votes
     odds: dict[str, dict[str, float | None]]  # pool -> combination -> final odds (None: none)
+    refunds: dict[str, int] = field(default_factory=dict)  # pool -> the pool row's refund_votes
+    order: tuple[tuple[int, ...], ...] = ()  # finishing positions; a dead heat shares one
+    status: str = "result"  # races.status
+    votes_kubun: str = (
+        "4"  # データ区分 of its pool_votes records (4 確定, 5 確定(月曜), 2 前日売最終)
+    )
+    board_kubun: str = "4"  # and of its final_odds records
 
     @property
     def race_id(self) -> str:
         return f"jra:{self.day.isoformat()}:{self.venue}:{self.race_no:02d}"
 
     def pool_yen(self, pool: str) -> float:
+        """The gross `__pool__` total in yen (votes x 100, `final_odds` investment)."""
         return 100.0 * self.pool_votes[pool]
+
+    def net_yen(self, pool: str) -> float:
+        """The money that pays: (votes - refund_votes) x 100."""
+        return 100.0 * (self.pool_votes[pool] - self.refunds.get(pool, 0))
 
     def unprice(self, pool: str, combination: str) -> None:
         """No final price and no votes (a zero-vote or cancelled slot)."""
@@ -255,7 +282,7 @@ def votes_rows(race: Race) -> list[dict]:
         "venue": race.venue,
         "race_no": race.race_no,
         "fav_rank": None,
-        "data_kubun": "4",
+        "data_kubun": race.votes_kubun,
     }
     rows = []
     for pool, combos in race.votes.items():
@@ -269,7 +296,7 @@ def votes_rows(race: Race) -> list[dict]:
                 "pool": pool,
                 "combination": POOL_ROW,
                 "votes": race.pool_votes[pool],
-                "refund_votes": 0,
+                "refund_votes": race.refunds.get(pool, 0),
             }
         )
     return rows
@@ -284,7 +311,7 @@ def board_rows(race: Race) -> list[dict]:
         "race_no": race.race_no,
         "fav_rank": None,
         "published_utc": None,
-        "data_kubun": "4",
+        "data_kubun": race.board_kubun,
     }
     rows = []
     for pool, combos in race.odds.items():
@@ -331,30 +358,111 @@ def race_row(race: Race) -> dict:
         "race_class": race.race_class,
         "field_size": len(race.votes["WIN"]) if "WIN" in race.votes else None,
         "surface": "turf",
-        "status": "result",
+        "status": race.status,
     }
 
 
-def store_tables(races: list[Race]) -> dict[str, pa.Table]:
+def dividends_schema() -> pa.Schema:
+    columns = schemas.TABLES["dividends"].columns
+    return pa.schema([(c, tables.ARROW_TYPES[kind]) for c, kind in columns.items()])
+
+
+# JRA's stake-back-share rule for Place and Wide, derived here: of the payout rate x the net pool,
+# the paying combinations' own money goes back to them and the rest is split into P equal shares,
+# P the race's paying combinations of that pool; per 100 yen on paying combination i
+# 100 + 100 (rV - sum W) / (P W_i), broken down to 10 yen and at least 110 (Plus 10).
+PAYOUT_RATE = {"PLACE": Fraction(4, 5), "QUINELLA_PLACE": Fraction(31, 40)}  # 1 - takeout
+
+
+def ranks(race: Race) -> dict[int, int]:
+    """horse -> finishing rank; dead-heaters share a rank and the next rank skips."""
+    out, rank = {}, 1
+    for group in race.order:
+        for horse in group:
+            out[horse] = rank
+        rank += len(group)
+    return out
+
+
+def paying(race: Race, pool: str) -> list[str]:
+    """The race's paying combinations: Place, the horses ranked within the places paid (2 in a
+    field of 5-7, 3 in one of 8 or more); Wide, the pairs of horses ranked in the first three
+    (two horses dead-heating for third are not a pair)."""
+    rank = ranks(race)
+    if pool == "PLACE":
+        places = 3 if len(race.votes["PLACE"]) >= 8 else 2
+        return sorted((str(h) for h, r in rank.items() if r <= places), key=int)
+    top = sorted(h for h, r in rank.items() if r <= 3)
+    return [
+        f"{a},{b}" for a, b in itertools.combinations(top, 2) if not (rank[a] == 3 and rank[b] == 3)
+    ]
+
+
+def per_100(race: Race, pool: str, combination: str) -> Fraction:
+    """JRA's rule before breakage and the floor, exactly."""
+    pays = paying(race, pool)
+    net = 100 * (race.pool_votes[pool] - race.refunds.get(pool, 0))
+    paid = 100 * sum(race.votes[pool][c] for c in pays)
+    stake = 100 * race.votes[pool][combination]
+    return 100 + Fraction(100) * (PAYOUT_RATE[pool] * net - paid) / (len(pays) * stake)
+
+
+def jra_dividend(race: Race, pool: str, combination: str) -> int:
+    return max(110, math.floor(per_100(race, pool, combination) / 10) * 10)
+
+
+def dividend_rows(race: Race) -> list[dict]:
+    """The race's `dividends` rows (a race without a finishing order has none): its Place and
+    Wide payouts by JRA's rule, and a Win row."""
+    if not race.order:
+        return []
+    base = {"jurisdiction": "jra", "race_id": race.race_id, "is_refund": False}
+    rows = []
+    if "WIN" in race.votes:
+        winner = str(race.order[0][0])
+        price = race.odds["WIN"][winner] or 1.0
+        rows.append({**base, "pool": "WIN", "combination": winner, "dividend": 100.0 * price})
+    for pool in CO_PLACER:
+        if pool in race.votes:
+            for c in paying(race, pool):
+                rows.append(
+                    {**base, "pool": pool, "combination": c,
+                     "dividend": float(jra_dividend(race, pool, c))}
+                )  # fmt: skip
+    return rows
+
+
+def store_tables(races: list[Race], *, drop=None) -> dict[str, pa.Table]:
+    """The store tables of `races`; `drop(name, row)` True leaves a row out (a gap in the
+    store). `dividends` holds the races with a finishing order."""
     shuffle = random.Random(432).shuffle  # nothing may rely on the file's row order
     votes = [row for race in races for row in votes_rows(race)]
     board = [row for race in races for row in board_rows(race)]
     meta = [race_row(race) for race in races]
-    for rows in (votes, board, meta):
-        shuffle(rows)
+    paid = [row for race in races for row in dividend_rows(race)]
+    rows = {"pool_votes": votes, "final_odds": board, "races": meta, "dividends": paid}
+    if drop is not None:
+        rows = {name: [r for r in part if not drop(name, r)] for name, part in rows.items()}
+    for part in rows.values():
+        shuffle(part)
     return {
-        "pool_votes": pa.Table.from_pylist(votes, schema=jravan_votes.POOL_VOTES_SCHEMA),
-        "final_odds": pa.Table.from_pylist(board, schema=jravan_odds.FINAL_ODDS_SCHEMA),
-        "races": pa.Table.from_pylist(meta, schema=races_schema()),
+        "pool_votes": pa.Table.from_pylist(
+            rows["pool_votes"], schema=jravan_votes.POOL_VOTES_SCHEMA
+        ),
+        "final_odds": pa.Table.from_pylist(
+            rows["final_odds"], schema=jravan_odds.FINAL_ODDS_SCHEMA
+        ),
+        "races": pa.Table.from_pylist(rows["races"], schema=races_schema()),
+        "dividends": pa.Table.from_pylist(rows["dividends"], schema=dividends_schema()),
     }
 
 
-def write_store(data: Path, races: list[Race], *, skip: tuple[str, ...] = ()) -> None:
-    """`processed/jravan/{pool_votes,final_odds,races}.parquet`, holdout days included, as the
-    builders write them (only readers drop holdout days)."""
+def write_store(data: Path, races: list[Race], *, skip: tuple[str, ...] = (), drop=None) -> None:
+    """`processed/jravan/{pool_votes,final_odds,races,dividends}.parquet`, holdout days included,
+    as the builders write them (only readers drop holdout days)."""
     folder = data / "processed" / "jravan"
     folder.mkdir(parents=True, exist_ok=True)
-    for name, table in store_tables(races).items():
+    for name, table in store_tables(races, drop=drop).items():
         target = folder / f"{name}.parquet"
         if name in skip:
             target.unlink(missing_ok=True)
@@ -427,6 +535,8 @@ def write_day(data: Path, day: date, rows: list[dict]) -> Path:
 def expected_rows(races: list[Race], band_edges: dict) -> pd.DataFrame:
     rows = []
     for race in races:
+        if race.status == "abandoned":  # every ticket refunded: no money on it pays
+            continue
         group = CLASS_GROUPS[race.race_class]
         for pool, combos in race.votes.items():
             if pool not in band_edges:
@@ -445,7 +555,7 @@ def expected_rows(races: list[Race], band_edges: dict) -> pd.DataFrame:
                         "band": pool_scan.odds_band(price, edges),
                         "odds": price,
                         "combo_yen": 100.0 * v,
-                        "pool_yen": race.pool_yen(pool),
+                        "pool_yen": race.net_yen(pool),
                     }
                 )
     return pd.DataFrame(rows)
@@ -1249,3 +1359,749 @@ def test_public_report_carries_no_figures(tmp_path, data_dir):
         for value in values[np.isfinite(values)]:
             for text in renderings(float(value)):
                 assert text not in text_a, f"the figure {text} is in the public report"
+
+
+# --- review round 1: the co-placer rule, the readers, the run identities and the command --------
+#
+# Contract added here (interfaces the tests call, beyond the ones above):
+# - `coplacer_capacities(pool, combo, paid_money, places, rate, edge, share)` (numpy arrays).
+# - `run_coplacer(...)` and `run_exacta_impact(...)` take run_depth's arguments; their results
+#   carry `run_id` and `report_path`; `CoplacerResult` carries `status` and `rule_match` (the
+#   pre-registered rule's share of the paid dividends reproduced: one number, or a mapping per
+#   pool); `ImpactResult.bins` has `n_combinations` and `n_races` per pool-size bin.
+# - A run that fails (raises, or fails its gate) is one registry record with status "failed".
+# - `horsetrack japan pool-depth run [--no-public]` resolves the committed summary through
+#   `summary_dir` (patched here, in this module and in core.eval.registry).
+
+JUNE_DAYS = tuple(date(2019, 6, d) for d in (1, 2, 8, 9, 15, 16))
+JUNE_SPAN = dict(date_from=date(2019, 6, 1), date_to=date(2019, 6, 30))
+
+
+def set_votes(race: Race, pool: str, new: dict[str, int]) -> None:
+    """New votes on some combinations of `pool`: the pool row keeps its money beyond the
+    combinations' sum and the final odds follow the money."""
+    extra = race.pool_votes[pool] - sum(race.votes[pool].values())
+    race.votes[pool].update(new)
+    total = sum(race.votes[pool].values()) + extra
+    race.pool_votes[pool] = total
+    race.odds[pool] = {
+        c: max(1.0, math.floor(10 * RATES[pool] * total / v) / 10)
+        for c, v in race.votes[pool].items()
+    }
+
+
+def finished(race: Race, seed: int, *, dead_heat: int | None = None) -> Race:
+    """`race` with a finishing order drawn from `seed`; with `dead_heat` k, the k-th and the next
+    horse of the order share the k-th position."""
+    n = len(race.votes["PLACE"])
+    groups = [(int(h),) for h in np.random.default_rng(seed).permutation(np.arange(1, n + 1))]
+    if dead_heat is not None:
+        groups[dead_heat - 1 : dead_heat + 1] = [groups[dead_heat - 1] + groups[dead_heat]]
+    race.order = tuple(groups)
+    return race
+
+
+def coplacer_races(
+    n_races: int, *, seed: int = 0, pools: tuple[str, ...] = CO_PLACER, venue: str = "TOK"
+) -> list[Race]:
+    """Races of 5 to 10 runners over June 2019 with the pools `pools` and a finishing order;
+    every third one has refunded votes in its pools."""
+    races = []
+    for i in range(n_races):
+        s = seed + i
+        race = make_race(
+            1000 + s,
+            JUNE_DAYS[i % len(JUNE_DAYS)],
+            venue,
+            1 + i // len(JUNE_DAYS),
+            RUN_CLASSES[s % len(RUN_CLASSES)],
+            5 + s % 6,
+            pools=pools,
+        )
+        if s % 3 == 0:
+            race.refunds = {p: max(1, race.pool_votes[p] // 40) for p in pools}
+        races.append(finished(race, s))
+    return races
+
+
+def jra_rule_races() -> list[Race]:
+    """Eighteen Place and Wide races (fields 5 to 10), with dead heats for third in a field of
+    nine and for second in one of six, and two races whose paying horses hold so much of the
+    Place pool that the rule pays the 110-yen floor."""
+    races = coplacer_races(18)
+    by_field = {n: [r for r in races if len(r.votes["PLACE"]) == n] for n in range(5, 11)}
+    finished(by_field[9][0], 7, dead_heat=3)
+    finished(by_field[6][0], 8, dead_heat=2)
+    for race, heavy in zip(
+        by_field[8][:2],
+        ({"1": 60_000, "2": 50_000, "3": 40_000}, {"1": 18_000, "2": 16_000, "3": 15_000}),
+        strict=True,
+    ):
+        race.order = tuple((h,) for h in range(1, 9))
+        set_votes(race, "PLACE", heavy)
+    return races
+
+
+def statuses(registry: Registry, variant: str) -> list[str]:
+    family = shipped_spec()["family_id"]
+    return [r.status for r in registry.records(family) if r.variant == variant]
+
+
+def run_quietly(run, **kwargs):
+    """The run's result, or None when it raised (a run that fails is recorded, then raised)."""
+    try:
+        return run(**kwargs)
+    except Exception:  # noqa: BLE001 - the registry says what happened
+        return None
+
+
+def match_shares(value) -> list[float]:
+    """The rule's match share(s): one number, or one per pool."""
+    values = list(value.values()) if isinstance(value, abc.Mapping) else [value]
+    return [float(v) for v in values]
+
+
+def bump_dividends(data: Path, chosen) -> int:
+    """Pay 10 yen more on the store's `dividends` rows `chosen(frame)` selects; how many."""
+    path = data / "processed" / "jravan" / "dividends.parquet"
+    paid = pq.read_table(path).to_pandas()
+    rows = chosen(paid)
+    paid.loc[rows, "dividend"] += 10.0
+    table = pa.Table.from_pandas(paid, schema=dividends_schema(), preserve_index=False)
+    pq.write_table(table, path)
+    return int(np.asarray(rows).sum()) if np.asarray(rows).dtype == bool else len(rows)
+
+
+def test_the_coplacer_run_reproduces_dividends_paid_by_jra_rule(tmp_path, data_dir):
+    """Place and Wide dividends paid by JRA's rule (the net pool, P = 2 places in a field of 5-7
+    and 3 in one of 8 or more, dead heats adding paying combinations, breakage to 10 yen, the
+    110-yen floor): the co-placer run reproduces every one of them and is scored. The same store
+    with one paid dividend in eight 10 yen off, in each pool, is recorded failed."""
+    registry, spec = frozen_registry(tmp_path)
+    races = jra_rule_races()
+    place_p = {len(paying(r, "PLACE")) for r in races}
+    wide_p = {len(paying(r, "QUINELLA_PLACE")) for r in races}
+    assert {2, 3, 4} <= place_p and {3, 5} <= wide_p, (place_p, wide_p)
+    raw = [per_100(r, p, c) for r in races for p in CO_PLACER for c in paying(r, p)]
+    assert any(x < 100 for x in raw), "no payout where the paying money exceeds rV"
+    assert any(100 <= x < 110 for x in raw), "no payout the floor lifts after breakage"
+    assert any(x >= 110 and x % 10 for x in raw), "no payout breakage cuts"
+    assert any(r.refunds for r in races)
+    write_store(data_dir, races)
+    out_dir = data_dir / "reports"
+
+    result = depth.run_coplacer(**JUNE_SPAN, out_dir=out_dir, registry=registry)
+
+    assert result.status == "scored"
+    assert match_shares(result.rule_match) and all(
+        v == 1.0 for v in match_shares(result.rule_match)
+    ), result.rule_match
+    assert statuses(registry, "co-placer") == ["scored"]
+
+    bumped = bump_dividends(
+        data_dir, lambda paid: [i for p in CO_PLACER for i in paid.index[paid["pool"] == p][::8]]
+    )
+    assert bumped >= 8
+    run_quietly(depth.run_coplacer, **JUNE_SPAN, out_dir=out_dir, registry=registry)
+    assert statuses(registry, "co-placer") == ["scored", "failed"]
+
+
+def stake_back_value(pool, combo, paid, places, rate, stake):
+    """d(s), JRA's rule per yen once our stake s is on combination i: s goes into the pool, into
+    W_i and into the paying money."""
+    return 1 + (rate * (pool + stake) - (paid + stake)) / (places * (combo + stake))
+
+
+def test_coplacer_capacity_solves_the_stake_back_share_identity():
+    """With V the pool, W_i the money on a paying combination, sum W the money on the race's P
+    paying combinations and r the payout rate, the capacity s solves
+    (1 + e) d(s) / d(0) = 1 + e(1 - share_lost); inf only where no stake gets there; NaN where
+    rV <= sum W; at P = 1 (sum W = W_i) it is the single-winner capacity_stake."""
+    rng = np.random.default_rng(43200)
+    m = 300
+    pool = np.exp(rng.uniform(math.log(1e5), math.log(1e9), m))
+    paid = pool * rng.uniform(0.02, 0.7, m)
+    places = rng.integers(2, 6, m).astype(float)
+    combo = paid * rng.uniform(0.05, 0.95, m)
+    rate = np.where(rng.random(m) < 0.5, 0.8, 0.775)
+    for edge in (0.05, 0.1, 0.2):
+        for share in (0.25, 0.5, 1.0):
+            k = edge * (1 - share)
+            s = np.asarray(
+                depth.coplacer_capacities(pool, combo, paid, places, rate, edge, share), float
+            )
+            assert s.shape == (m,)
+            finite = np.isfinite(s)
+            assert finite.mean() > 0.5, (edge, share)
+            d0 = stake_back_value(pool, combo, paid, places, rate, 0.0)
+            at = np.where(finite, s, 0.0)
+            left = (1 + edge) * stake_back_value(pool, combo, paid, places, rate, at) / d0
+            assert np.all(s[finite] > 0)
+            np.testing.assert_allclose(left[finite], 1 + k, rtol=1e-9)
+            far = (1 + edge) * stake_back_value(pool, combo, paid, places, rate, 1e15) / d0
+            assert np.all(far[~finite] > 1 + k - 1e-9), (edge, share)
+
+    one = np.ones(m)
+    for edge in (0.05, 0.1, 0.2):
+        s = depth.coplacer_capacities(pool, combo, combo, one, rate, edge, 0.5)
+        want = [depth.capacity_stake(v, w, edge) for v, w in zip(pool, combo, strict=True)]
+        np.testing.assert_allclose(np.asarray(s, float), want, rtol=1e-9)
+
+    losing = depth.coplacer_capacities(pool, combo, rate * pool * 1.01, places, rate, 0.1, 0.5)
+    assert np.isnan(np.asarray(losing, float)).all()
+
+
+def coverage_races() -> tuple[list[Race], list[Race]]:
+    """Forty Place and Wide races and forty Place-only races (Wide not sold), every payout by
+    JRA's rule."""
+    return coplacer_races(40, seed=0), coplacer_races(40, seed=40, pools=("PLACE",), venue="HSN")
+
+
+@pytest.mark.parametrize(
+    "gap, k, status",
+    [
+        ("no Wide odds in the store", 40, "failed"),
+        ("the Wide votes and odds of 4 races missing", 4, "failed"),
+        ("Wide paid 10 yen more in 4 races", 4, "failed"),
+        ("the Wide votes and odds of 1 race missing", 1, "scored"),
+    ],
+)
+def test_coplacer_payouts_are_checked_per_pool_and_every_payout_counts(
+    tmp_path, data_dir, gap, k, status
+):
+    """Every eligible payout counts: a paid combination with no votes or odds row is one the run
+    does not reproduce, and the share is checked per pool. A store with no Wide odds fails
+    rather than passing on Place alone; with 4 of 40 Wide races unmatched or mispaid (Wide 90%,
+    both pools together over 95%) the run fails; with 1 of 40 (97.5%) it is scored."""
+    registry, _ = frozen_registry(tmp_path)
+    wide, place_only = coverage_races()
+    missing = {r.race_id for r in wide[:k]}
+    n_wide = sum(len(paying(r, "QUINELLA_PLACE")) for r in wide)
+    n_place = sum(len(paying(r, "PLACE")) for r in wide + place_only)
+    off = sum(len(paying(r, "QUINELLA_PLACE")) for r in wide[:k])
+    if k == 4:  # the pools together would pass; Wide alone does not
+        assert (n_wide - off) / n_wide < 0.95 <= (n_wide + n_place - off) / (n_wide + n_place)
+    if k == 1:
+        assert (n_wide - off) / n_wide >= 0.95
+
+    def drop(name: str, row: dict) -> bool:
+        if gap.startswith("no Wide odds"):
+            return name == "final_odds" and row["pool"] == "QUINELLA_PLACE"
+        if gap.startswith("the Wide votes"):
+            return (
+                name in ("pool_votes", "final_odds")
+                and row["pool"] == "QUINELLA_PLACE"
+                and row["race_id"] in missing
+            )
+        return False
+
+    write_store(data_dir, wide + place_only, drop=drop)
+    if gap.startswith("Wide paid"):
+        bump_dividends(
+            data_dir,
+            lambda paid: (
+                paid["race_id"].isin(missing).to_numpy()
+                & (paid["pool"] == "QUINELLA_PLACE").to_numpy()
+            ),
+        )
+
+    run_quietly(depth.run_coplacer, **JUNE_SPAN, out_dir=data_dir / "reports", registry=registry)
+
+    assert statuses(registry, "co-placer") == [status], gap
+
+
+def n_priced(races: list[Race], pool: str) -> int:
+    return sum(1 for r in races for price in r.odds[pool].values() if price is not None)
+
+
+@pytest.mark.parametrize("table", ["pool_votes", "final_odds"])
+def test_day_before_records_are_not_final(tmp_path, data_dir, table):
+    """A race whose `table` records are the day before's only (データ区分 2, 前日売最終) has no
+    final money: no final_yen in pool_totals (for pool_votes), no depth row and no exacta row.
+    Confirmed records (4 確定, and 5 確定(月曜)) count."""
+    registry, spec = frozen_registry(tmp_path)
+    races = run_races(JUNE, range(9))
+    races[1].votes_kubun = races[1].board_kubun = "5"
+    held = races[4]
+    if table == "pool_votes":
+        held.votes_kubun = "2"
+    else:
+        held.board_kubun = "2"
+    kept = [r for r in races if r is not held]
+    write_store(data_dir, races)
+    out_dir = data_dir / "reports"
+
+    if table == "pool_votes":
+        totals = depth.pool_totals(**JUNE_SPAN)
+        assert totals.loc[totals["race_id"] == held.race_id, "final_yen"].isna().all()
+        got = totals_by_key(totals.loc[totals["race_id"] != held.race_id])
+        assert set(got) == {(r.race_id, p) for r in kept for p in r.pool_votes}
+        for r in kept:
+            for p in r.pool_votes:
+                assert got[(r.race_id, p)][0] == pytest.approx(r.pool_yen(p)), (r.race_id, p)
+
+    result = depth.run_depth(**JUNE_SPAN, out_dir=out_dir, registry=registry)
+    assert_depth_table(result.table, run_expected(kept, spec), spec["edges"])
+
+    impact = depth.run_exacta_impact(**JUNE_SPAN, out_dir=out_dir, registry=registry)
+    assert int(impact.bins["n_combinations"].sum()) == n_priced(kept, "FORECAST")
+    assert int(impact.bins["n_races"].sum()) == len(kept)
+
+
+def test_exacta_impact_without_a_priced_exacta_is_recorded_failed(tmp_path, data_dir):
+    """With the votes but no exacta final odds every pool-size bin is empty: the run is recorded
+    failed, not scored. With the odds, the bins hold every priced exacta and it is scored."""
+    registry, _ = frozen_registry(tmp_path)
+    races = run_races(JUNE, range(9))
+    out_dir = data_dir / "reports"
+    write_store(data_dir, races)
+    impact = depth.run_exacta_impact(**JUNE_SPAN, out_dir=out_dir, registry=registry)
+    assert int(impact.bins["n_combinations"].sum()) == n_priced(races, "FORECAST")
+    assert statuses(registry, "exacta-own-impact") == ["scored"]
+
+    write_store(
+        data_dir, races, drop=lambda name, row: name == "final_odds" and row["pool"] == "FORECAST"
+    )
+    run_quietly(depth.run_exacta_impact, **JUNE_SPAN, out_dir=out_dir, registry=registry)
+
+    assert statuses(registry, "exacta-own-impact") == ["scored", "failed"]
+
+
+def test_run_depth_takes_the_net_pool_and_drops_abandoned_races(tmp_path, data_dir):
+    """V is the money that pays, (votes - refund_votes) x 100, where a pool has refunded votes
+    (the store's pool votes count them); an abandoned race gives no row."""
+    registry, spec = frozen_registry(tmp_path)
+    races = run_races(JUNE, range(9))
+    for race in races[::2]:
+        race.refunds = {p: max(1, race.pool_votes[p] // 20) for p in race.pool_votes}
+    races[3].status = "abandoned"
+    write_store(data_dir, races)
+
+    result = depth.run_depth(**JUNE_SPAN, out_dir=data_dir / "reports", registry=registry)
+
+    assert_depth_table(result.table, run_expected(races, spec), spec["edges"])
+    assert races[3].race_id not in set(expected_rows(races, spec["odds_bands"])["race_id"])
+
+
+# The runs' inputs beside ineligible rows: development races on 2014-06-07/08 and on DEV_DAYS,
+# holdout races on HOLDOUT_DAYS (stand-in) and a race on 2014-06-01, before the price era.
+EARLY_DAY = date(2014, 6, 1)
+ERA_DAYS = (date(2014, 6, 7), date(2014, 6, 8))
+ELIGIBLE_SPAN = dict(date_from=PRICE_ERA, date_to=DEV_DAYS[-1])
+RUNNERS = {
+    "depth": "run_depth",
+    "co-placer": "run_coplacer",
+    "exacta-own-impact": "run_exacta_impact",
+}
+
+
+def runner(variant: str):
+    return getattr(depth, RUNNERS[variant])
+
+
+def mixed_store(data: Path, *, held: int = 1, early: int = 1, dev: int = 1) -> list[Race]:
+    """The store and the time-series day files of every day, holdout and pre-era days included;
+    `held`, `early` and `dev` change the money and finishing order of the holdout races, of the
+    pre-era race and of one development race. Returns the development races."""
+    days = (*ERA_DAYS, *DEV_DAYS)
+    development = [
+        finished(
+            make_race(60 + i, days[i % len(days)], "KOK", 1 + i // len(days),
+                      RUN_CLASSES[i % len(RUN_CLASSES)], 6 + i % 3, scale=dev if i == 0 else 1),
+            i + 100 * (dev - 1) * (i == 0),
+        )
+        for i in range(8)
+    ]  # fmt: skip
+    holdout = [
+        finished(make_race(70 + i, d, "KOK", 1, ("G2", "L", "MAIDEN")[i], 7, scale=1000 * held),
+                 90 + i + 10 * held)
+        for i, d in enumerate(HOLDOUT_DAYS)
+    ]  # fmt: skip
+    pre_era = finished(make_race(80, EARLY_DAY, "KOK", 1, "G3", 8, scale=early), 95 + early)
+    races = [*development, *holdout, pre_era]
+    write_store(data, races)
+    bump = {id(r): held for r in holdout} | {id(pre_era): early}
+    for day in sorted({r.day for r in races}):
+        rows = [
+            capture(r, "WIN", 3, r.pool_yen("WIN") - 50_000 * bump.get(id(r), 1))
+            for r in races
+            if r.day == day
+        ]
+        write_day(data, day, rows)
+    return development
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_the_run_identity_is_derived_from_the_eligible_inputs(
+    tmp_path, data_dir, stand_in_holdout, variant
+):
+    """A run's identity (run id and data_builds) comes from what it may read: a store whose
+    holdout days' rows and day files changed, or whose race before 2014-06-07 changed, gives the
+    same run id and data_builds; a change on a development day gives other data_builds."""
+
+    def identity(name: str, **change) -> tuple[str, dict]:
+        registry, spec = frozen_registry(tmp_path, name)
+        mixed_store(data_dir, **change)
+        run = runner(variant)(**ELIGIBLE_SPAN, out_dir=data_dir / "reports" / name,
+                              registry=registry)  # fmt: skip
+        [record] = [r for r in registry.records(spec["family_id"]) if r.variant == variant]
+        assert record.status == "scored", (name, record.status)
+        return run.run_id, record.data_builds
+
+    base = identity("base")
+    assert identity("holdout-refreshed", held=3) == base, "holdout rows changed the identity"
+    assert identity("pre-era-refreshed", early=3) == base, "pre-2014-06-07 rows changed it"
+    assert identity("development-refreshed", dev=2)[1] != base[1]
+
+
+def row_days(frame) -> list[date]:
+    """The race days of a table, batch or frame: its race_date, else the day in its race_id."""
+    names = list(frame.columns) if isinstance(frame, pd.DataFrame) else frame.schema.names
+    column = "race_date" if "race_date" in names else "race_id" if "race_id" in names else None
+    if column is None:
+        return []
+    if isinstance(frame, pd.DataFrame):
+        values = list(pd.unique(frame[column].dropna()))
+    else:
+        values = [v for v in pc.unique(frame.column(column)).to_pylist() if v is not None]
+    days = []
+    for value in values:
+        if column == "race_date":
+            days.append(pd.Timestamp(value).date())
+            continue
+        try:
+            days.append(date.fromisoformat(str(value).split(":")[1]))
+        except (IndexError, ValueError):
+            continue
+    return days
+
+
+def bare(value):
+    """`value` with every Watched object unwrapped, inside lists and tuples too."""
+    if isinstance(value, Watched):
+        return value._inner
+    if isinstance(value, (list, tuple)):
+        return type(value)(bare(v) for v in value)
+    return value
+
+
+def bare_kwargs(kwargs: dict) -> dict:
+    return {k: bare(v) for k, v in kwargs.items()}
+
+
+class RowSpy:
+    """Checks every table, batch or frame a Parquet reader hands to Python: each row must be of a
+    development day on or after 2014-06-07, by its race_date or, without one, the day in its
+    race_id. `bad` lists the reads that broke it, `rows` counts the rows checked."""
+
+    LAZY = (ds.Dataset, ds.Scanner, ds.Fragment, pa.RecordBatchReader)  # the real classes
+
+    def __init__(self) -> None:
+        self.bad: list[tuple[str, list[str]]] = []
+        self.rows = 0
+
+    def wrap(self, value, where: str):
+        frame = value.record_batch if isinstance(value, ds.TaggedRecordBatch) else value
+        if isinstance(frame, (pa.Table, pa.RecordBatch, pd.DataFrame)):
+            self.rows += len(frame)
+            wrong = sorted(
+                {
+                    d.isoformat()
+                    for d in row_days(frame)
+                    if d < PRICE_ERA or holdout_module.is_holdout_day("japan", d)
+                }
+            )
+            if wrong:
+                self.bad.append((where, wrong))
+            return value
+        if isinstance(value, self.LAZY):
+            return Watched(value, self, where)
+        if isinstance(value, list):
+            return [self.wrap(v, where) for v in value]
+        if isinstance(value, abc.Iterator):
+            return (self.wrap(v, where) for v in value)
+        return value
+
+
+class Watched:
+    """A dataset, scanner, fragment or batch reader whose every table or batch is checked."""
+
+    def __init__(self, inner, spy: RowSpy, where: str) -> None:
+        self.__dict__.update(_inner=inner, _spy=spy, _where=where)
+
+    def __getattr__(self, name: str):
+        value = getattr(self._inner, name)
+        if not callable(value) or isinstance(value, type):
+            return value
+
+        def call(*args, **kwargs):
+            out = value(*bare(args), **bare_kwargs(kwargs))
+            return self._spy.wrap(out, f"{self._where}.{name}")
+
+        return call
+
+    def __iter__(self):
+        return (self._spy.wrap(v, self._where) for v in self._inner)
+
+    def __next__(self):
+        return self._spy.wrap(next(self._inner), self._where)
+
+    def __enter__(self):
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._inner.__exit__(*exc)
+
+
+def install_row_spy(monkeypatch: pytest.MonkeyPatch) -> RowSpy:
+    """From now on every row a Parquet reader hands to Python goes through a RowSpy, whatever
+    route reads it: pq.read_table (and so core.eval.holdout.read_development and
+    pd.read_parquet), pq.ParquetFile's reads, ds.dataset, the ds.Scanner constructors, and the
+    fragments of ds.ParquetFileFormat().make_fragment and the ds.FileSystemDataset built on them
+    (their to_table, to_batches, scanner, head, take and readers)."""
+    spy = RowSpy()
+    real_read_table, real_dataset = pq.read_table, ds.dataset
+    real_scanner, real_format, real_fsd = ds.Scanner, ds.ParquetFileFormat, ds.FileSystemDataset
+
+    def read_table(*args, **kwargs):
+        return spy.wrap(real_read_table(*bare(args), **bare_kwargs(kwargs)), "pq.read_table")
+
+    def dataset(*args, **kwargs):
+        return spy.wrap(real_dataset(*bare(args), **bare_kwargs(kwargs)), "ds.dataset")
+
+    monkeypatch.setattr(pq, "read_table", read_table)
+    monkeypatch.setattr(ds, "dataset", dataset)
+    for name in ("iter_batches", "read", "read_row_group", "read_row_groups"):
+        original = getattr(pq.ParquetFile, name)
+
+        def method(self, *args, _original=original, _name=name, **kwargs):
+            return spy.wrap(_original(self, *args, **kwargs), f"ParquetFile.{_name}")
+
+        monkeypatch.setattr(pq.ParquetFile, name, method)
+
+    class Scanner:
+        @staticmethod
+        def from_dataset(*args, **kwargs):
+            out = real_scanner.from_dataset(*bare(args), **bare_kwargs(kwargs))
+            return spy.wrap(out, "Scanner.from_dataset")
+
+        @staticmethod
+        def from_fragment(*args, **kwargs):
+            out = real_scanner.from_fragment(*bare(args), **bare_kwargs(kwargs))
+            return spy.wrap(out, "Scanner.from_fragment")
+
+        @staticmethod
+        def from_batches(*args, **kwargs):
+            out = real_scanner.from_batches(*bare(args), **bare_kwargs(kwargs))
+            return spy.wrap(out, "Scanner.from_batches")
+
+    class ParquetFileFormat(real_format):
+        def make_fragment(self, *args, **kwargs):
+            out = super().make_fragment(*bare(args), **bare_kwargs(kwargs))
+            return spy.wrap(out, "make_fragment")
+
+    class FileSystemDataset(real_fsd):
+        def __init__(self, fragments, *args, **kwargs):
+            super().__init__(bare(list(fragments)), *bare(args), **bare_kwargs(kwargs))
+
+        def to_table(self, *args, **kwargs):
+            return spy.wrap(super().to_table(*args, **kwargs), "FileSystemDataset.to_table")
+
+        def to_batches(self, *args, **kwargs):
+            return spy.wrap(super().to_batches(*args, **kwargs), "FileSystemDataset.to_batches")
+
+        def scanner(self, *args, **kwargs):
+            return spy.wrap(super().scanner(*args, **kwargs), "FileSystemDataset.scanner")
+
+        def head(self, *args, **kwargs):
+            return spy.wrap(super().head(*args, **kwargs), "FileSystemDataset.head")
+
+        def take(self, *args, **kwargs):
+            return spy.wrap(super().take(*args, **kwargs), "FileSystemDataset.take")
+
+    monkeypatch.setattr(ds, "Scanner", Scanner)
+    monkeypatch.setattr(ds, "ParquetFileFormat", ParquetFileFormat)
+    monkeypatch.setattr(ds, "FileSystemDataset", FileSystemDataset)
+    return spy
+
+
+def test_no_holdout_or_pre_era_row_reaches_python(
+    tmp_path, data_dir, stand_in_holdout, monkeypatch
+):
+    """The store's row groups hold holdout days and a day before 2014-06-07 beside the
+    development days. The development predicate runs inside the scan: no table, batch or frame
+    any reader hands to Python, in the three runs or pool_totals, holds a holdout day or a day
+    before 2014-06-07; and the depth table is the development races' own."""
+    registry, spec = frozen_registry(tmp_path)
+    development = mixed_store(data_dir)
+    out_dir = data_dir / "reports"
+    spy = install_row_spy(monkeypatch)
+
+    result = depth.run_depth(**ELIGIBLE_SPAN, out_dir=out_dir, registry=registry)
+    depth.run_coplacer(**ELIGIBLE_SPAN, out_dir=out_dir, registry=registry)
+    depth.run_exacta_impact(**ELIGIBLE_SPAN, out_dir=out_dir, registry=registry)
+    depth.pool_totals(**ELIGIBLE_SPAN)
+
+    assert spy.rows > 0, "no read went through the watched readers"
+    assert not spy.bad, f"rows of ineligible days reached Python: {spy.bad[:5]}"
+    assert_depth_table(result.table, run_expected(development, spec), spec["edges"])
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_a_rerun_on_refreshed_data_keeps_the_first_report(tmp_path, data_dir, variant):
+    """The private report is the run's own: a run after the store changed writes another file
+    and leaves the first run's report as it was."""
+    registry, _ = frozen_registry(tmp_path)
+    span = dict(**JUNE_SPAN, out_dir=data_dir / "reports", registry=registry)
+    write_store(data_dir, [finished(r, i) for i, r in enumerate(run_races(JUNE, range(9)))])
+    first = runner(variant)(**span)
+    first_path = Path(first.report_path)
+    first_bytes = first_path.read_bytes()
+    refreshed = run_races(JUNE, range(9), scale=3)
+    write_store(data_dir, [finished(r, 20 + i) for i, r in enumerate(refreshed)])
+
+    second = runner(variant)(**span)
+
+    assert second.run_id != first.run_id
+    assert Path(second.report_path) != first_path
+    assert Path(second.report_path).is_file()
+    assert first_path.read_bytes() == first_bytes, "the first run's report was overwritten"
+
+
+def write_plain_day(data: Path, day: date, rows: list[dict]) -> Path:
+    """A day file without compression or dictionaries: a new value of the same type changes its
+    bytes, not its size."""
+    path = day_file(data, day)
+    table = pa.Table.from_pylist(rows, schema=compact.SCHEMA)
+    pq.write_table(table, path, compression="NONE", use_dictionary=False)
+    return path
+
+
+def test_a_same_size_correction_of_a_day_file_changes_the_run_identity(tmp_path, data_dir):
+    """A corrected development-day time-series file of the same size (another total at t) is
+    another input: the run's identity changes."""
+    registry, _ = frozen_registry(tmp_path)
+    races = run_races(JUNE, range(9))
+    write_store(data_dir, races)
+    day = JUNE[0]
+    on_day = [r for r in races if r.day == day]
+
+    def rows(correction: int) -> list[dict]:
+        return [
+            capture(r, "WIN", 3, r.pool_yen("WIN") - 50_000 + (correction if i == 0 else 0))
+            for i, r in enumerate(on_day)
+        ]
+
+    path = write_plain_day(data_dir, day, rows(0))
+    size, before = path.stat().st_size, path.read_bytes()
+    span = dict(**JUNE_SPAN, out_dir=data_dir / "reports", registry=registry)
+    first = depth.run_depth(**span)
+    write_plain_day(data_dir, day, rows(1_000))
+    assert path.stat().st_size == size and path.read_bytes() != before
+
+    second = depth.run_depth(**span)
+
+    assert second.run_id != first.run_id
+
+
+# --- the command ---------------------------------------------------------------------------------
+
+
+def invoke_run(*args: str):
+    from horsetrack.cli import app
+
+    return CliRunner().invoke(app, ["japan", "pool-depth", "run", "--no-public", *args])
+
+
+def output_of(result) -> str:
+    text = result.output or ""
+    try:
+        text += result.stderr or ""
+    except ValueError:  # stderr mixed into output
+        pass
+    return text
+
+
+@pytest.fixture
+def summary_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> abc.Iterator[Path]:
+    """The committed registry summary, at tmp_path, however the command resolves it (through
+    `summary_dir`); the repository's own summary must come out unchanged."""
+    real = REPO / "docs" / "experiments" / "registry" / "japan"
+    committed = {p.name: p.read_bytes() for p in sorted(real.iterdir()) if p.is_file()}
+    folder = tmp_path / "summary"
+    folder.mkdir()
+    monkeypatch.setattr(depth, "summary_dir", lambda country: folder, raising=False)
+    monkeypatch.setattr(registry_module, "summary_dir", lambda country: folder)
+    yield folder
+    after = {p.name: p.read_bytes() for p in sorted(real.iterdir()) if p.is_file()}
+    assert after == committed, "the command wrote the repository's committed summary"
+
+
+def test_the_command_refuses_an_unfrozen_spec_before_touching_the_store(data_dir, summary_folder):
+    """Unfrozen spec and no races table: the command refuses as not pre-registered (an exit, not
+    a missing-file crash) and writes no record, report or summary."""
+    write_store(data_dir, run_races(JUNE, range(9)), skip=("races",))
+
+    result = invoke_run()
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert re.search(r"freez|frozen|pre-?regist", output_of(result), re.I), output_of(result)
+    assert default_registry("japan").records() == []
+    reports = paths.reports_dir()
+    assert not reports.exists() or not any(p.is_file() for p in reports.rglob("*"))
+    assert not any(summary_folder.iterdir())
+
+
+def test_the_command_records_a_failed_run_when_the_races_table_is_missing(data_dir, summary_folder):
+    """Frozen spec, no races table: the failure is a registry record (status failed, nothing
+    scored) and the command exits non-zero without a crash."""
+    spec = shipped_spec()
+    default_registry("japan").freeze_family(spec["family_id"], spec)
+    write_store(data_dir, run_races(JUNE, range(9)), skip=("races",))
+
+    result = invoke_run()
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    found = [r.status for r in default_registry("japan").records(spec["family_id"])]
+    assert found and set(found) == {"failed"}, found
+
+
+def test_the_command_updates_only_its_family_in_the_committed_summary(data_dir, summary_folder):
+    """The local registry holds the pool-depth runs and one run of another family; the committed
+    summary indexes families this registry does not hold. The command adds its own family's file
+    and index entry and keeps every other family's entry and file as they were."""
+    spec = shipped_spec()
+    family = spec["family_id"]
+    registry = default_registry("japan")
+    registry.freeze_family(family, spec)
+    registry.append(
+        RunRecord(
+            hypothesis_id="P1", family_id="japan-other-a", variant="v", ticket=1,
+            git_sha="0" * 40, data_builds={}, sources=("jra",), fold_scheme="development-days",
+            components={}, params={}, metrics=(FoldMetric("all", "m", 0.5, None, None, 3),),
+            status="scored",
+        )
+    )  # fmt: skip
+    others = {
+        name: f"# {name}: the committed summary\n" for name in ("japan-other-a", "japan-other-b")
+    }
+    for name, text in others.items():
+        (summary_folder / f"{name}.md").write_text(text, encoding="utf-8")
+    index = "# Experiment registry index\n\n" + "".join(f"- [{n}]({n}.md)\n" for n in others)
+    (summary_folder / "README.md").write_text(index, encoding="utf-8")
+    write_store(data_dir, [finished(r, i) for i, r in enumerate(run_races(JUNE, range(9)))])
+
+    result = invoke_run()
+
+    assert result.exit_code == 0, output_of(result)
+    for name, text in others.items():
+        assert (summary_folder / f"{name}.md").read_text(encoding="utf-8") == text, name
+    linked = set(
+        re.findall(r"\[([^\]]+)\]\(\1\.md\)", (summary_folder / "README.md").read_text("utf-8"))
+    )
+    assert {*others, family} <= linked, linked
+    own = summary_folder / f"{family}.md"
+    assert own.is_file() and family in own.read_text(encoding="utf-8")
