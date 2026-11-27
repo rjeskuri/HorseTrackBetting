@@ -4,7 +4,8 @@
  * renderShadow draws board.js's renderBoard with extra cells per row: the odds ladder (#499: T-20,
  * T-10, T-5, T-2 and the final from the shadow entry's `ladder`, observed odds as figures coloured
  * by their move since T-20, the nowcast's projection of a checkpoint still ahead as '≈x.x'; without
- * a ladder the plain row's t20/t10/t5/t2_odds and '-' ahead), the value (WIN: mean with its 5-95%
+ * a ladder, or when the shadow race's post time is not /feed's (the schedule authority), the plain
+ * row's t20/t10/t5/t2_odds and '-' ahead), the value (WIN: mean with its 5-95%
  * band; other pools: the value at the low and the high odds), the bucket label and the flag chips.
  * Rows come from the plain feed only, one race per page, in board.js's order: favourite first by
  * the crowd's current odds (#498, the owner's display choice). The shadow feed (#121) is joined on
@@ -103,21 +104,20 @@
     ["ladder-final", "0", null, "Final"],
   ];
 
-  /* The five checkpoints of a row, each {odds, observed} or null: the shadow entry's ladder, else
-   * the plain row's references as observed and null ahead (the final always). The two feeds
-   * refresh apart, so an observed point wins: when both feeds have the race on the same post
-   * (`sameSchedule`), the plain row's reference replaces a projected or null ladder point, and an
-   * observed ladder point stays. On a delayed post one feed may still carry the old post time,
-   * and its checkpoints are for another schedule: the ladder then shows as it is. */
+  /* The five checkpoints of a row, each {odds, observed} or null. /feed is the schedule
+   * authority: the shadow entry's ladder is used only when the shadow race has /feed's post time
+   * (`sameSchedule`); otherwise its checkpoints are for another schedule and are ignored. With a
+   * ladder of the same schedule an observed ladder point stays, else the plain row's reference
+   * replaces a projected or null point (the feeds refresh apart). Without one, the plain row's
+   * references as observed and null ahead (the final always). */
   function ladderOf(entry, line, sameSchedule) {
-    var ladder = own(entry, "ladder");
+    var ladder = sameSchedule ? own(entry, "ladder") : null;
     var hasLadder = ladder && typeof ladder === "object";
     return LADDER.map(function (c) {
       var point = hasLadder ? own(ladder, c[1]) : null;
       if (!point || typeof point !== "object" || num(own(point, "odds")) === null) point = null;
       else point = { odds: num(point.odds), observed: point.observed === true };
       if (point !== null && point.observed) return point;
-      if (hasLadder && !sameSchedule) return point;
       var ref = c[2] === null ? null : num(own(line, c[2]));
       return ref !== null ? { odds: ref, observed: true } : point;
     });
@@ -148,47 +148,41 @@
     '<th scope="col" class="num">Value</th><th scope="col">Read at</th>' +
     '<th scope="col">Flags</th>';
 
-  /* The plain feed with each race's post_utc replaced by the shadow feed's when that is later (a
-   * delay one feed saw first), and race_id -> whether both feeds have the race on the same post. */
-  function withLaterPosts(feed, races) {
+  /* race_id -> whether the shadow race has the plain feed's post time (the same instant). */
+  function sameSchedules(feed, races) {
     var same = {};
-    if (!feed || !Array.isArray(feed.venues)) return { feed: feed, same: same };
-    var venues = feed.venues.map(function (v) {
-      if (!v || !Array.isArray(v.races)) return v;
-      var copy = Object.assign({}, v);
-      copy.races = v.races.map(function (r) {
+    var venues = feed && Array.isArray(feed.venues) ? feed.venues : [];
+    venues.forEach(function (v) {
+      (v && Array.isArray(v.races) ? v.races : []).forEach(function (r) {
         var id = r ? String(r.race_id) : null;
-        var shadow = id !== null && has.call(races, id) ? races[id] : null;
-        if (!shadow) return r;
-        var plainMs = board.instantMs(r.post_utc), shadowMs = board.instantMs(shadow.post_utc);
-        same[id] = plainMs === shadowMs;
-        if (shadowMs === null || (plainMs !== null && shadowMs <= plainMs)) return r;
-        return Object.assign({}, r, { post_utc: shadow.post_utc });
+        if (id === null || !has.call(races, id)) return;
+        var plainMs = board.instantMs(r.post_utc);
+        same[id] = plainMs !== null && plainMs === board.instantMs(races[id].post_utc);
       });
-      return copy;
     });
-    return { feed: Object.assign({}, feed, { venues: venues }), same: same };
+    return same;
   }
 
   /* The HTML of the shadow page for one race of one venue: the board plus ladder, value, bucket
-   * and flag cells. The race header shows the later of the two feeds' post times. */
+   * and flag cells. /feed is the schedule authority: the plain feed is drawn as is, and its post
+   * times set the header, the countdown, the strip and the next-race choice. */
   function renderShadow(feed, shadowFeed, opts) {
     opts = opts || {};
     var races = shadowRaces(shadowFeed);
-    var joined = withLaterPosts(feed, races);
+    var same = sameSchedules(feed, races);
     var columns = {
       head: HEAD,
       cells: function (raceId, code, line) {
         var race = has.call(races, String(raceId)) ? races[String(raceId)] : null;
         var entry = own(own(own(race, "pools"), code), String(line.combination));
-        return ladderCells(entry, line, joined.same[String(raceId)] === true) +
+        return ladderCells(entry, line, same[String(raceId)] === true) +
           '<td data-col="value" class="num val">' + esc(valueText(code, entry)) + "</td>" +
           '<td data-col="bucket" class="mono small">' + esc(race ? bucketText(race) : DASH) +
           "</td>" + '<td data-col="flags" class="flags">' + flagChips(entry) + "</td>";
       },
     };
     return win5Line(shadowFeed) +
-      board.renderBoard(joined.feed,
+      board.renderBoard(feed,
         { now: opts.now, venue: opts.venue, race: opts.race, columns: columns });
   }
 

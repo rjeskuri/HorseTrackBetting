@@ -1343,30 +1343,68 @@ def merged(plain_row: dict, ladder) -> list[dict | None]:
     return out
 
 
+def until_post(post: datetime, now: datetime) -> str:
+    """board.js's countdown, from first principles."""
+    diff = (post - now).total_seconds()
+    if diff > 0:
+        return f"{math.ceil(diff / 60)} min to post"
+    ago = math.floor(-diff / 60)
+    return "at post" if ago < 1 else f"post {ago} min ago"
+
+
+def says(head: str, phrase: str) -> bool:
+    """`phrase` in the header text, not as the tail of a longer number ('2 min' in '12 min')."""
+    return re.search(rf"(?<![\d.]){re.escape(phrase)}", head) is not None
+
+
 @needs_node
 def test_a_delayed_post_merges_only_references_of_the_same_schedule(tmp_path):
-    """TOK 10 was due at 10:02:30 (OLD) and is delayed to 10:12:30 (NEW); NOW is 10:01. The feeds
-    refresh apart, so one carries the new post time while the other still has the old one.
-    - the shadow feed has NEW, the cached plain feed OLD: the plain rows' t10/t5/t2 were taken for
-      OLD (before the delay); the ladder projects T-10 on for NEW. The page shows the ladder as is:
-      no plain reference replaces a projected or null point.
-    - the plain feed has NEW, the cached shadow feed OLD: the plain rows' t20 is NEW's; the stale
-      ladder (observed to T-2 for OLD, null T-20 where OLD had no capture) shows as is.
-    - both feeds on the same post (OLD or NEW): the plain references replace projected and null
-      points, as before.
-    The race header shows the newer (later) post time of the two."""
-    old, new = jst(10, 2, 30), jst(10, 12, 30)
-    # plain rows taken for OLD (every checkpoint passed) and, at a delay, the ladder for NEW
-    after_shadow = {
+    """/feed is the schedule authority (owner, 2026-11-27). The feeds refresh apart, so on a delay
+    or a correction one of them still carries the other post time. The header, the countdown, the
+    strip and the next-race mark use /feed's post_utc, never the later of the two. A shadow ladder
+    is used only when its post_utc equals /feed's: otherwise each cell shows the plain row's
+    observed reference ('-' where it is null, and the Final '-'), as for a row with no ladder. When
+    both agree, the same-schedule merge stays. Quinella rows (no ladder) always show the plain
+    references and '-' ahead. Every plain row below was taken for its own feed's post time."""
+    old, new = jst(10, 2, 30), jst(10, 12, 30)  # TOK 10 was due at OLD, is delayed to NEW
+    corrected, announced = jst(10, 15), jst(10, 20)  # a correction to an earlier post
+    # (plain row, shadow ladder or None for a row without one)
+    # plain for NEW (only T-20 at 9:52:30 passed); ladder for OLD (observed to T-2 at 10:00:30)
+    plain_new_ladder_old = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.5, None, None, None),
+                  (seen(2.8), seen(2.5), seen(2.3), seen(2.26), ahead(2.19))),
+            "2": (ref_line("2", 5.8, 4.9, None, None, None),
+                  (seen(4.6), seen(4.9), seen(5.6), seen(5.9), ahead(6.02))),
+            "3": (ref_line("3", 8.6, None, None, None, None),
+                  (seen(9.3), None, seen(8.8), seen(8.7), None)),
+            "4": (ref_line("4", 31.0, 28.7, None, None, None),
+                  (None, seen(28.7), seen(33.1), seen(35.2), ahead(36.0))),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.3, None, None, None, hi=1.6),
+                  (seen(1.4), seen(1.3), seen(1.24), seen(1.22), ahead(1.18))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.4, None, None, None, hi=4.1),
+                    (seen(3.7), seen(3.4), seen(3.2), seen(3.27), ahead(3.2))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, 7.9, None, None, None), None),
+            "2,4": (ref_line("2,4", 120.5, None, None, None, None), None),
+        },
+    }  # fmt: skip
+    # plain for OLD (every checkpoint passed); ladder for NEW (observed T-20, projected on)
+    plain_old_ladder_new = {
         "WIN": {
             "1": (ref_line("1", 2.2, 2.8, 2.5, 2.3, 2.26),
-                  (seen(2.6), ahead(2.41), ahead(2.33), ahead(2.27), ahead(2.19))),
+                  (seen(2.5), ahead(2.41), ahead(2.33), ahead(2.27), ahead(2.19))),
             "2": (ref_line("2", 5.8, 4.6, 4.9, 5.6, 5.9),
-                  (seen(5.0), None, ahead(5.62), ahead(5.77), ahead(6.02))),
+                  (seen(4.9), ahead(5.43), ahead(5.62), ahead(5.77), ahead(6.02))),
             "3": (ref_line("3", 8.6, 9.3, None, 8.8, 8.7),
-                  (seen(9.1), ahead(9.04), ahead(8.93), None, None)),
+                  (None, ahead(9.04), ahead(8.93), None, None)),
             "4": (ref_line("4", 31.0, None, 28.7, 33.1, 35.2),
-                  (None, ahead(30.2), ahead(32.0), ahead(33.4), ahead(36.0))),
+                  (seen(28.7), ahead(30.2), ahead(32.0), ahead(33.4), ahead(36.0))),
         },
         "PLACE": {
             "1": (ref_line("1", 1.2, 1.4, 1.3, 1.24, 1.22, hi=1.6),
@@ -1374,28 +1412,79 @@ def test_a_delayed_post_merges_only_references_of_the_same_schedule(tmp_path):
         },
         "QUINELLA_PLACE": {
             "1,2": (ref_line("1,2", 3.3, 3.7, 3.4, 3.2, 3.27, hi=4.1),
-                    (seen(3.5), ahead(3.38), ahead(3.31), ahead(3.27), ahead(3.2))),
+                    (seen(3.4), ahead(3.38), ahead(3.31), ahead(3.27), ahead(3.2))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, 8.4, 7.9, 7.6, 7.8), None),
+            "2,4": (ref_line("2,4", 120.5, None, 133.3, 126.0, None), None),
         },
     }  # fmt: skip
-    # plain rows taken for NEW (only T-20 passed) and the ladder still for OLD
-    after_plain = {
+    # plain for the corrected 10:15 (T-20 at 9:55 passed); ladder for 10:20 (T-20 at 10:00)
+    plain_corrected = {
         "WIN": {
-            "1": (ref_line("1", 2.2, 2.6, None, None, None),
-                  (seen(2.8), seen(2.5), seen(2.3), seen(2.26), ahead(2.19))),
-            "2": (ref_line("2", 5.8, 5.0, None, None, None),
-                  (None, seen(4.9), seen(5.6), seen(5.9), ahead(6.02))),
-            "3": (ref_line("3", 8.6, 9.1, None, None, None),
-                  (seen(9.3), None, seen(8.8), seen(8.7), None)),
-            "4": (ref_line("4", 31.0, 30.4, None, None, None),
-                  (None, seen(28.7), seen(33.1), seen(35.2), ahead(36.0))),
+            "1": (ref_line("1", 2.2, 2.4, None, None, None),
+                  (seen(2.3), ahead(2.24), ahead(2.21), ahead(2.18), ahead(2.13))),
+            "2": (ref_line("2", 5.8, 5.3, None, None, None),
+                  (seen(5.6), ahead(5.71), ahead(5.77), ahead(5.83), ahead(5.9))),
+            "3": (ref_line("3", 8.6, None, None, None, None),
+                  (seen(8.9), ahead(8.8), ahead(8.7), None, None)),
         },
         "PLACE": {
             "1": (ref_line("1", 1.2, 1.3, None, None, None, hi=1.6),
-                  (None, seen(1.3), seen(1.24), seen(1.22), ahead(1.18))),
+                  (seen(1.2), ahead(1.18), ahead(1.16), ahead(1.14), ahead(1.11))),
         },
         "QUINELLA_PLACE": {
-            "1,2": (ref_line("1,2", 3.3, 3.5, None, None, None, hi=4.1),
-                    (None, seen(3.4), seen(3.2), seen(3.27), ahead(3.2))),
+            "1,2": (ref_line("1,2", 3.3, 3.6, None, None, None, hi=4.1),
+                    (seen(3.5), ahead(3.42), ahead(3.37), ahead(3.33), ahead(3.31))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, 8.1, None, None, None), None),
+        },
+    }  # fmt: skip
+    # both for OLD: the cached ladder has stale projected or null points the plain feed has crossed
+    both_old = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.8, 2.5, 2.3, 2.26),
+                  (seen(2.8), seen(2.5), seen(2.3), ahead(2.21), ahead(2.14))),
+            "2": (ref_line("2", 5.8, 4.6, 4.9, 5.6, 5.9),
+                  (seen(4.6), seen(4.9), None, ahead(5.71), ahead(6.02))),
+            "3": (ref_line("3", 8.6, 9.3, None, 8.8, None),
+                  (seen(9.3), seen(9.7), ahead(9.04), None, None)),
+            "4": (ref_line("4", 31.0, None, 28.7, 33.1, 35.2),
+                  (None, seen(28.7), seen(33.1), ahead(36.1), ahead(41.27))),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.4, 1.3, 1.24, 1.22, hi=1.6),
+                  (seen(1.4), seen(1.3), ahead(1.21), ahead(1.08), ahead(1.0))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.7, 3.4, 3.2, 3.27, hi=4.1),
+                    (seen(3.7), ahead(3.52), ahead(3.17), ahead(3.02), ahead(2.88))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, 8.4, 7.9, 7.6, 7.8), None),
+        },
+    }  # fmt: skip
+    # both for NEW: a ladder fetched just before T-20, so its T-20 is still projected or null
+    both_new = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.5, None, None, None),
+                  (ahead(2.6), ahead(2.41), ahead(2.33), ahead(2.27), ahead(2.19))),
+            "2": (ref_line("2", 5.8, 4.9, None, None, None),
+                  (None, ahead(5.43), ahead(5.62), ahead(5.77), ahead(6.02))),
+            "3": (ref_line("3", 8.6, None, None, None, None),
+                  (seen(9.1), ahead(9.04), ahead(8.93), None, None)),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.3, None, None, None, hi=1.6),
+                  (ahead(1.36), ahead(1.27), ahead(1.23), ahead(1.21), ahead(1.18))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.4, None, None, None, hi=4.1),
+                    (ahead(3.5), ahead(3.38), ahead(3.31), ahead(3.27), ahead(3.2))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, 7.9, None, None, None), None),
         },
     }  # fmt: skip
 
@@ -1409,52 +1498,95 @@ def test_a_delayed_post_merges_only_references_of_the_same_schedule(tmp_path):
                 })
             ]}],
         }  # fmt: skip
+        shadow_pools = {
+            code: {
+                combo: {**(win(0.9, 0.8, 1.0) if code == "WIN" else rng(0.6, 0.8)),
+                        "ladder": dict(zip(LADDER_KEYS, ladder, strict=True))}
+                for combo, (_, ladder) in rows.items()
+                if ladder is not None
+            }
+            for code, rows in table.items()
+        }  # fmt: skip
         shadow = {
             "race_date": DAY,
             "generated_utc": utc_text(shadow_at),
             "models": {"nowcast": "now-c3"},
-            "races": [shadow_race("TOK", 10, shadow_post, 16, {
-                code: {
-                    combo: {**(win(0.9, 0.8, 1.0) if code == "WIN" else rng(0.6, 0.8)),
-                            "ladder": dict(zip(LADDER_KEYS, ladder, strict=True))}
-                    for combo, (_, ladder) in rows.items()
-                }
-                for code, rows in table.items()
-            })],
+            "races": [shadow_race("TOK", 10, shadow_post, 16,
+                                  {c: p for c, p in shadow_pools.items() if p})],
         }  # fmt: skip
         return plain, shadow
 
-    earlier = NOW - timedelta(seconds=4)
-    # (name, table, plain post, plain generated, shadow post, shadow generated, merge?, header)
+    def before(plain_row, ladder, same) -> list[dict | None]:
+        """The rule this test replaces: a ladder on another schedule shown as it is."""
+        if ladder is None:
+            return expected_ladder(plain_row, None)
+        return merged(plain_row, ladder) if same else list(ladder)
+
+    after_old = jst(10, 3)  # OLD has passed on /feed; NEW is still ahead on /shadow-feed
+    # (name, table, plain post, shadow post, now, which feed refreshed last)
     cases = [
-        ("shadow saw the delay first", after_shadow, old, earlier, new, NOW, False, new),
-        ("plain saw the delay first", after_plain, new, NOW, old, earlier, False, new),
-        ("no delay, the old ladder", after_shadow, old, earlier, old, NOW, True, old),
-        ("both on the delay", after_plain, new, NOW, new, earlier, True, new),
-    ]
+        ("plain saw the delay first", plain_new_ladder_old, new, old, NOW, "plain"),
+        ("shadow saw the delay first", plain_old_ladder_new, old, new, NOW, "shadow"),
+        ("shadow saw the delay first, OLD passed", plain_old_ladder_new, old, new, after_old,
+         "shadow"),
+        ("a correction to an earlier post", plain_corrected, corrected, announced, NOW, "plain"),
+        ("both on the old post", both_old, old, old, NOW, "shadow"),
+        ("both on the delay", both_new, new, new, NOW, "plain"),
+    ]  # fmt: skip
     steps = []
-    for _, table, plain_post, plain_at, shadow_post, shadow_at, _, _ in cases:
+    for _, table, plain_post, shadow_post, now, last in cases:
+        lag = now - timedelta(seconds=4)
+        plain_at, shadow_at = (now, lag) if last == "plain" else (lag, now)
         plain, shadow = feeds(table, plain_post, plain_at, shadow_post, shadow_at)
         steps.append(call("renderShadow", plain, shadow,
-                          {"now": ms(NOW), "venue": "TOK", "race": rid("TOK", 10)}))  # fmt: skip
+                          {"now": ms(now), "venue": "TOK", "race": rid("TOK", 10)}))  # fmt: skip
     pages = [soup(h) for h in results(steps, tmp_path)]
 
-    for (name, table, *_, merge, header_post), page in zip(cases, pages, strict=True):
+    header_reverts = 0
+    for (name, table, plain_post, shadow_post, now, _), page in zip(cases, pages, strict=True):
+        same = plain_post == shadow_post
         block = race_block(page, rid("TOK", 10))
-        differ = 0
+        quinella = differ = vs_merge = vs_plain = 0
         for code, rows in table.items():
             for combo, (plain_row, ladder) in rows.items():
-                want = merged(plain_row, ladder) if merge else list(ladder)
+                plain_cells = expected_ladder(plain_row, None)
+                if ladder is None:
+                    want = plain_cells
+                    quinella += code == "QUINELLA"
+                elif same:
+                    want = merged(plain_row, ladder)
+                else:
+                    want = plain_cells
                 check_ladder_row(row_of(pool_block(block, code), combo), want, (name, code, combo))
-                differ += sum(m != lad for m, lad in zip(merged(plain_row, ladder), ladder,
-                                                         strict=True))  # fmt: skip
-        assert differ >= 4, (name, differ)  # the merge would change cells of this fixture
+                differ += sum(w != b for w, b in zip(want, before(plain_row, ladder, same),
+                                                     strict=True))  # fmt: skip
+                if ladder is not None:
+                    vs_merge += sum(w != m for w, m in zip(want, merged(plain_row, ladder),
+                                                           strict=True))  # fmt: skip
+                    vs_plain += sum(w != p for w, p in zip(want, plain_cells, strict=True))
+                    vs_plain += sum(w != lad for w, lad in zip(want, ladder, strict=True))
+        assert quinella >= 1, (name, "the fixture needs a Quinella row without a ladder")
+        if same:  # the merge changes cells against both the ladder as is and the plain cells
+            assert vs_plain >= 8, (name, vs_plain)
+        else:  # the old rule and a merge across schedules both show other cells
+            assert differ >= 6 and vs_merge >= 6, (name, differ, vs_merge)
+
+        # the header, countdown and next-race mark follow /feed's post only
         head = text(block.find("header"))
-        minutes = math.ceil((header_post - NOW).total_seconds() / 60)
-        assert f"Post {header_post:%H:%M} JST" in head, (name, head)
-        assert f"{minutes} min to post" in head, (name, head)
-        other = old if header_post == new else new
-        assert f"Post {other:%H:%M} JST" not in head, (name, head)
+        assert f"Post {plain_post:%H:%M} JST" in head, (name, head)
+        assert says(head, until_post(plain_post, now)), (name, head)
+        strip = [text(a) for a in page.select(".strip a")]
+        assert len(strip) == 1 and f"{plain_post:%H:%M}" in strip[0], (name, strip)
+        ahead_ = plain_post > now
+        assert ("next" in classes(block)) == ahead_, (name, classes(block))
+        assert ("off" in classes(block)) == (not ahead_), (name, classes(block))
+        if not same:
+            assert f"Post {shadow_post:%H:%M} JST" not in head, (name, head)
+            assert f"{shadow_post:%H:%M}" not in strip[0], (name, strip)
+            if until_post(shadow_post, now) != until_post(plain_post, now):
+                assert not says(head, until_post(shadow_post, now)), (name, head)
+            header_reverts += max(plain_post, shadow_post) != plain_post
+    assert header_reverts >= 3, header_reverts  # the later-post rule would show another header
 
 
 def _write_logged_day(captures: dict[datetime, dict[str, float]], post: datetime) -> None:
