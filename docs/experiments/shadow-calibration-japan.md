@@ -28,11 +28,18 @@ appears here.
   hash and the commit (the first run's the spec hash alone) and keep them. Since review round 2
   the runner names a run's files `shadow-calibration-japan-<spec hash 12>-<commit 7>-<artifact
   id>.json` and `...-settlement.jsonl`: the artifact id is 16 hex digits of the sha256 of the
-  run's registry record ids (each hashes the whole record: its commit, its input builds, which
-  are each shadow and odds log's bytes and the jra store build, and its results) and of its
-  settlement text (each record's outcome at the dividend it used). A new commit, a rebuilt input
-  or a changed result writes new files beside the old ones, and no existing file is replaced: a
-  rerun that reproduces a run's records keeps that run's report and settlement file as written.
+  report's stable results and of its settlement text (each record's outcome at the dividend it
+  used). The stable results are everything the report states but what one invocation adds
+  (`written_utc`, `records_appended`) and the paths, which carry the id: the run's registry
+  record ids (each hashes the whole record: its commit, its input builds, which are each shadow
+  and odds log's bytes and the jra store build, and its results), the counts with the
+  leaderboard's rows and measured rows, the primary estimate, the variants, the pick growth, the
+  hand-played bets by day with each option's leaderboard rank, the day stakes and the settlement
+  file's shape. Hashing the counts and ranks landed after review round 3, so two runs at one
+  commit beside different leaderboards never share an id. A new commit, a rebuilt input, a
+  changed result or another leaderboard writes new files beside the old ones, and no existing
+  file is replaced: a rerun that reproduces a run's results keeps that run's report and
+  settlement file as written.
   A report lists its run's `run_ids` and the `records_appended` by the invocation that wrote it.
   A rerun at another commit is a new run, with twelve new records.
 - Data: the shadow logs of 2026-11-21 and 2026-11-22 (Kyoto), both development days, sealed:

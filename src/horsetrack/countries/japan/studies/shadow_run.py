@@ -8,9 +8,11 @@ variant is one registry record, failures and empty results included. The full ou
 through ``write_report`` under the data dir: the report (strict JSON, a missing value as null)
 and the settlement file, one JSON line per shadow record with its log key, decision time and
 outcome. Both are named by the spec hash, the commit and the run's artifact id (``_artifact_id``:
-its records' run ids and its settlement text), so a new commit, a rebuilt input or a changed
-result writes new files beside the old ones, and a file that exists is never replaced: a rerun
-that reproduces an earlier run keeps that run's report and settlement file as written.
+the report's stable results, its run ids, the leaderboard counts and the played options' ranks
+included, but not ``written_utc`` or ``records_appended``, and its settlement text), so a new
+commit, a rebuilt input, a changed result or another leaderboard writes new files beside the old
+ones, and a file that exists is never replaced: a rerun that reproduces an earlier run keeps that
+run's report and settlement file as written.
 
 Inputs: the spec's days' v0 shadow logs (``models.shadow.read_shadow``: development days only), the
 jra store's dividends with the scratch refunds (``bets.settle.day_dividends``), each race's final
@@ -443,13 +445,18 @@ def _settlement(settled: pd.DataFrame) -> str:
     return "".join(_json(row, ensure_ascii=False) + "\n" for row in rows)
 
 
-def _artifact_id(run_ids: Sequence[str], settlement: str | None) -> str:
-    """The run's artifact id: 16 hex digits of the sha256 of its records' run ids, in plan order,
-    and of its settlement text. A run id is the sha256 of the whole record: its commit, its
-    ``data_builds`` (each shadow and odds log's bytes and the jra store build), its params and
-    results. The settlement text holds each record's outcome at the dividend it used. So the id
-    changes with any of them, and a run that reproduces another has that run's id."""
-    return _sha256(_canonical({"run_ids": list(run_ids), "settlement": settlement}))[:16]
+def _artifact_id(results: dict, settlement: str | None) -> str:
+    """The run's artifact id: 16 hex digits of the sha256 of its stable results and of its
+    settlement text. ``results`` is everything the report states but what one invocation adds
+    (``written_utc``, ``records_appended``) and the paths, which carry the id: the run ids (each
+    the sha256 of the whole record: its commit, its ``data_builds``, which are each shadow and odds
+    log's bytes and the jra store build, its params and results), the counts with the
+    leaderboard's rows and measured rows, the primary estimate, the variants, the pick growth, the
+    hand-played bets by day with each option's rank, the day stakes and the settlement file's
+    shape. The settlement text holds each record's outcome at the dividend it used. So the id
+    changes with any of them, two runs that rank the played options differently never share it,
+    and a run that reproduces another has that run's id."""
+    return _sha256(_canonical({"results": _plain(results), "settlement": settlement}))[:16]
 
 
 def _write_new(path: Path, text: str) -> bool:
@@ -589,33 +596,41 @@ def run_study(out_dir: Path | None = None) -> dict:
             "races_with_final_win_board": len({race for race, _ in finals}),
         }
     lines = None if settled is None else _settlement(settled)
-    artifact_id = _artifact_id(run_ids, lines)
+    shape = None
+    if lines is not None:
+        shape = {
+            "n_records": len(settled),
+            "key": ["race_id", "pool", "combination", "tau_min"],
+            "columns": list(SETTLEMENT_COLUMNS),
+        }
+    # The report less what one invocation adds and the paths, which carry the id: the id's input.
+    results = _plain(
+        {
+            "family_id": FAMILY_ID,
+            "spec_hash": spec_hash,
+            "git_sha": git_sha,
+            "counts": counts,
+            "primary": _primary(variants, spec),
+            "variants": [v | {"metrics": [m.__dict__ for m in v["metrics"]]} for v in variants],
+            **out,
+            "settlement": shape,
+            "run_ids": run_ids,
+        }
+    )
+    artifact_id = _artifact_id(results, lines)
     stem = f"shadow-calibration-{COUNTRY}-{spec_hash[:12]}-{git_sha[:7]}-{artifact_id}"
     settlement, written = None, []
     if lines is not None:
         path = out_dir / f"{stem}-settlement.jsonl"
         written += [str(path)] if _write_new(path, lines) else []
-        settlement = {
-            "path": str(path),
-            "n_records": len(settled),
-            "key": ["race_id", "pool", "combination", "tau_min"],
-            "columns": list(SETTLEMENT_COLUMNS),
-        }
+        settlement = {"path": str(path)} | shape
     payload = _plain(
         {
-            "family_id": FAMILY_ID,
-            "spec_hash": spec_hash,
-            "git_sha": git_sha,
             "artifact_id": artifact_id,
             "written_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "counts": counts,
-            "primary": _primary(variants, spec),
-            "variants": [v | {"metrics": [m.__dict__ for m in v["metrics"]]} for v in variants],
-            **out,
-            "settlement": settlement,
-            "run_ids": run_ids,
-            "records_appended": appended,
         }
+        | results
+        | {"settlement": settlement, "records_appended": appended}
     )
     report = out_dir / f"{stem}.json"
     written += [str(report)] if _write_new(report, _json(payload, indent=2)) else []

@@ -73,6 +73,7 @@ from __future__ import annotations  # noqa: I001 (isort counts models.shadow thi
 
 import ast
 import hashlib
+import json
 import math
 import os
 from datetime import date, datetime, timedelta, timezone
@@ -102,6 +103,7 @@ from horsetrack.countries.japan.models.shadow import (
     settle_shadow,
 )
 from horsetrack.countries.japan.shadow.log import ShadowLog, shadow_log_path
+from horsetrack.countries.japan.studies import shadow_run
 
 UTC = timezone.utc
 JST = timezone(timedelta(hours=9))
@@ -1134,6 +1136,162 @@ def test_manual_bets_settle_at_final_dividends(D):
             assert null(row["rank"]), f"{key}: off the board has no rank"
         else:
             assert row["rank"] == place, key
+
+
+# ---------------------------------------------------------------- the study run's artifact
+
+
+INVOCATION = ("written_utc", "records_appended")  # what one call adds: never part of the id
+RETURNED_ONLY = ("report_path", "written")  # run_study's return beside the report's payload
+# Each leaderboard the run ranks the hand-played options on: its (option id, return per 100, None
+# unmeasured) rows, its row and measured counts and the rank of each played option, by hand
+# (every row has the same se, so the shrunk order is the raw order). Next to "base", each differs
+# in one figure the report carries and no registry record holds.
+BOARDS = {
+    "base": ((("opt-a", 112.0), ("opt-b", 95.0)), 2, 2, {"opt-a": 1, "opt-b": 2}),
+    "ranks swapped": ((("opt-a", 95.0), ("opt-b", 112.0)), 2, 2, {"opt-a": 2, "opt-b": 1}),
+    "a pending row more": (
+        (("opt-a", 112.0), ("opt-b", 95.0), ("opt-u", None)),
+        3,
+        2,
+        {"opt-a": 1, "opt-b": 2},
+    ),
+    "that row measured": (
+        (("opt-a", 112.0), ("opt-b", 95.0), ("opt-u", 50.0)),
+        3,
+        3,
+        {"opt-a": 1, "opt-b": 2},
+    ),
+}
+
+
+def files_of(folder: Path) -> dict[str, tuple[bytes, int]]:
+    return {p.name: (p.read_bytes(), os.stat(p).st_ino) for p in sorted(folder.iterdir())}
+
+
+def test_the_study_run_names_its_report_by_the_leaderboard_ranks(D, tmp_path, monkeypatch):
+    # Synthetic inputs, the same for every run: shadow records of both study days, their
+    # dividends, final WIN boards, the jra store build and a bet log beside the leaderboard.
+    t11, k5, n1, n2 = race(11), race(5, "KYO"), race(1, "NAK", D2), race(2, "NAK", D2)
+    records = [
+        v0_record(t11, "WIN", "4", tau=2, value_mean=1.12),
+        v0_record(t11, "WIN", "2", tau=2, value_mean=0.85),
+        v0_record(t11, "WIN", "4", tau=5, value_mean=1.05),
+        v0_record(k5, "WIN", "1", tau=2, value_mean=0.95),
+        v0_record(k5, "WIN", "8", tau=2, value_mean=1.30),
+        v0_record(n1, "WIN", "3", tau=2, value_mean=1.02),
+        v0_record(n1, "WIN", "6", tau=2, value_mean=0.90),
+    ]
+    paid = {
+        D1: [paying(t11, "WIN", "4", 350), paying(k5, "WIN", "8", 1_200)],
+        D2: [
+            paying(n1, "WIN", "6", 480),
+            paying(n1, "PLACE", "6", 180),
+            paying(n1, "PLACE", "3", 150),
+            paying(n1, "PLACE", "9", 260),
+            paying(n2, "WIN", "1", 1_740),
+        ],
+    }
+    finals = {(t11, "4"): 3.4, (t11, "2"): 6.0, (k5, "1"): 2.5, (k5, "8"): 12.0}
+    finals |= {(n1, "3"): 4.0, (n1, "6"): 4.8}
+    limits = load_limits()
+    placed = {
+        D1: [bet(t11, "WIN", "4", 1_000, "opt-a", "a"), bet(t11, "WIN", "2", 1_000, "opt-b", "b")],
+        D2: [bet(n1, "PLACE", "6", 1_000, "opt-a", "c"), bet(n2, "WIN", "1", 500, None, "d")],
+    }
+    for day, bets in placed.items():
+        log = BetLog(bet_log_path(day), day=day, limits=limits)
+        for b in bets:
+            log.record(b)
+    build = paths.processed_dir("jra") / "_build.json"
+    build.parent.mkdir(parents=True)
+    build.write_text(json.dumps({"snapshot_id": "synthetic-1"}), encoding="utf-8")
+    board: list[LeaderboardRow] = []
+
+    class Clock(datetime):  # each call a minute later: no two invocations share written_utc
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            return datetime(2026, 11, 28, 9, 0, tzinfo=UTC) + timedelta(minutes=cls.calls)
+
+    monkeypatch.setattr(shadow_run, "read_shadow", lambda days: pd.DataFrame(records))
+    monkeypatch.setattr(shadow_run, "day_dividends", lambda day: dividends(paid.get(day, [])))
+    monkeypatch.setattr(shadow_run, "final_win_odds", lambda days: dict(finals))
+    monkeypatch.setattr(shadow_run, "rows_from_registry", lambda registry: list(board))
+    monkeypatch.setattr(shadow_run, "_git_sha", lambda: "0123abc" + "0" * 33)
+    monkeypatch.setattr(shadow_run, "datetime", Clock)
+    shadow_run.freeze()
+    out = (tmp_path / "out").resolve()
+    out.mkdir()
+
+    def study(name: str) -> tuple[dict, dict]:
+        """One run beside the named leaderboard: what it returns and the report at its path."""
+        board[:] = [board_row(option, per_100) for option, per_100 in BOARDS[name][0]]
+        got = shadow_run.run_study(out_dir=out)
+        return got, json.loads(Path(got["report_path"]).read_text(encoding="utf-8"))
+
+    def check(name: str, got: dict, report: dict) -> None:
+        """The returned payload and the report at its path both carry the board's counts and the
+        played options' ranks, and the report is the returned result."""
+        _, n_rows, n_measured, ranks = BOARDS[name]
+        played = {
+            (D1.isoformat(), "opt-a"): ranks["opt-a"],
+            (D1.isoformat(), "opt-b"): ranks["opt-b"],
+            (D2.isoformat(), "opt-a"): ranks["opt-a"],
+            (D2.isoformat(), "off-board"): None,
+        }
+        for where, payload in (("returned", got), (f"report {got['report_path']}", report)):
+            counts = payload["counts"]
+            assert (counts["leaderboard_rows"], counts["leaderboard_measured"]) == (
+                n_rows,
+                n_measured,
+            ), f"{name}: the leaderboard counts {where}"
+            by_option = {
+                (day_text(r["day"]), r["option_id"]): None if null(r["rank"]) else r["rank"]
+                for r in payload["bets_by_day"]
+            }
+            assert by_option == played, f"{name}: the played options' ranks {where}"
+        assert results(report) == results(got), f"{name}: the report at report_path is another's"
+
+    def results(payload: dict) -> dict:
+        return {k: v for k, v in payload.items() if k not in INVOCATION + RETURNED_ONLY}
+
+    # The first run writes its report and settlement file.
+    first, report = study("base")
+    check("base", first, report)
+    written = files_of(out)
+    assert Path(first["report_path"]).name in written
+    assert Path(first["settlement"]["path"]).name in written
+
+    # An identical rerun differs only in what the call itself adds, so it has the same id and
+    # path, and the files already written stay as they are: none replaced, none added.
+    again, report = study("base")
+    assert again["written_utc"] != first["written_utc"], "the fake clock moved between the runs"
+    assert first["records_appended"] and again["records_appended"] != first["records_appended"]
+    assert again["artifact_id"] == first["artifact_id"], "invocation metadata changed the id"
+    assert again["report_path"] == first["report_path"]
+    check("base", again, report)
+    assert files_of(out) == written, "an identical rerun replaced or added a file"
+
+    # A run beside another leaderboard (the same records, settlement and registry records) is
+    # another artifact: its own id and path, its report holding its own counts and ranks.
+    ids = {first["artifact_id"]: "base"}
+    reports = {first["report_path"]: "base"}
+    for name in ("ranks swapped", "a pending row more", "that row measured"):
+        got, report = study(name)
+        assert got["run_ids"] == first["run_ids"], f"{name}: the registry records moved"
+        assert got["artifact_id"] not in ids, (
+            f"{name} shares artifact id {got['artifact_id']} with {ids.get(got['artifact_id'])}"
+        )
+        assert got["report_path"] not in reports, f"{name} reuses {reports.get(got['report_path'])}"
+        check(name, got, report)
+        ids[got["artifact_id"]], reports[got["report_path"]] = name, name
+
+    # The base run's report and settlement file are still as first written.
+    now = files_of(out)
+    assert {name: now[name] for name in written} == written, "a later run replaced a file"
 
 
 # ---------------------------------------------------------------- no code places a bet
