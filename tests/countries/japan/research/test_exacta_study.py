@@ -53,7 +53,7 @@ API pinned here (module ``horsetrack.countries.japan.research.exacta_study``, no
   "cuts", "stake_yen" and "min_meetings".
   Owner 2026-11-26: #115's single full-development lambda2 fit (partly in-sample) is labelled
   "full_development", and no spec says "in_fold". The v1 families (tests/fixtures/synthetic/
-  exacta_131_v1_family_specs.json, frozen 2026-11-25 with the hashes in V1_HASHES) stay in the
+  exacta_131_v1_family_specs.py, frozen 2026-11-25 with the hashes in V1_HASHES) stay in the
   append-only registry, which refuses another spec under a frozen id (FamilyAlreadyFrozen), so the
   relabelled families are frozen under new ids beside them.
 """
@@ -64,6 +64,7 @@ from __future__ import annotations  # noqa: I001
 
 import copy
 import hashlib
+import importlib.util
 import json
 import math
 from datetime import date
@@ -111,7 +112,7 @@ V1_HASHES = {
         "b1577fd3765d5f72b0c0643235aca7cd69317d467470a0a31949da50c65a019f",
 }  # fmt: skip
 FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "synthetic"
-V1_SPECS_FIXTURE = FIXTURES / "exacta_131_v1_family_specs.json"
+V1_SPECS_FIXTURE = FIXTURES / "exacta_131_v1_family_specs.py"
 ESTIMATORS = ("B2", "B1", "B3", "C", "rule")
 
 
@@ -842,7 +843,11 @@ def _hash(spec) -> str:
 
 
 def _v1_specs() -> dict:
-    v1 = json.loads(V1_SPECS_FIXTURE.read_text(encoding="utf-8"))
+    # Loaded by path (tests/ is not a package), executed afresh on each call.
+    loader = importlib.util.spec_from_file_location("exacta_131_v1_family_specs", V1_SPECS_FIXTURE)
+    module = importlib.util.module_from_spec(loader)
+    loader.loader.exec_module(module)
+    v1 = module.V1_FAMILY_SPECS
     assert {fid: _hash(spec) for fid, spec in v1.items()} == V1_HASHES  # the frozen v1 record
     return v1
 
