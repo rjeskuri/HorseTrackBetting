@@ -199,6 +199,8 @@ def t2_odds(r: dict) -> float | None:
     if (r["race_no"] == SCRATCHED_AFTER_T2 and r["race_date"] == SPECIAL_DAY
             and r["horse_no"] == ODD_ONE):  # fmt: skip
         return 1.8  # the T-2 favourite, scratched before the off
+    if r["race_no"] == SCRATCHED_AFTER_T2 and r["race_date"] == SPECIAL_DAY:
+        return 2.5 + 1.5 * r["horse_no"]  # tie-free and all longer than 1.8: ranks 2..FIELD
     return r["win_odds"] if np.isfinite(r["win_odds"]) else 30.0
 
 
