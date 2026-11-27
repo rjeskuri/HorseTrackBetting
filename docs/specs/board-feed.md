@@ -193,3 +193,41 @@ every `min_rebuild_s`, whether or not a log changed (buckets and the stale flag 
 and its body and ETag change only when something other than `generated_utc` and
 `minutes_to_post` did, so the page's poll costs a 304 between captures; the page counts down to
 the post from `post_utc`. `board-serve` loads the models once at start with `load_shadow_models`.
+
+## Access
+
+Code: `src/horsetrack/countries/japan/board/server.py` (the gate, `write_access_token`) and
+`src/horsetrack/countries/japan/board/tunnel.py` (`quick_tunnel`), ticket #505.
+
+- Without `--tunnel`, `board-serve` is as above: bound to 127.0.0.1, no token, no cookie.
+- Tunnel: `board-serve --tunnel` serves on 127.0.0.1 only (another `--host` is refused) and starts
+  `cloudflared tunnel --url http://127.0.0.1:<port> --no-autoupdate` as a child, cloudflared found
+  on PATH (`brew install cloudflared`). It reads the `https://<name>.trycloudflare.com` URL from
+  cloudflared's output (never `api.` or `login.trycloudflare.com`), then waits for the first
+  `Registered tunnel connection` line (the banner comes before the tunnel can serve), and drains
+  the rest unread. cloudflared missing, exiting before the URL is handed over (after a registered
+  connection included), or not printing both within 30 s stops board-serve with an error naming
+  it. The child is terminated, and killed 5 s later if it still runs, whenever the server stops
+  (Ctrl-C, SIGTERM, an error), so no tunnel outlives it; if cloudflared dies first, a warning says
+  so.
+- Token: a quick-tunnel URL is public, so every path needs an access token, a fresh
+  `secrets.token_urlsafe(24)` per run, held in memory until the server is bound and the tunnel is
+  up, then written to `$HORSETRACK_DATA_DIR/board/access-token` (mode 0600, never in the
+  repository, a symlinked `board/` included). A start that fails (the port taken, cloudflared
+  missing or exiting before its URL, a connection or the handoff) exits non-zero and leaves that
+  file as it was, so a tunnel still serving keeps its token there. It is printed once, in the
+  phone URL line `open on the phone: https://<name>.trycloudflare.com/shadow?t=<token>`; the
+  request log blanks query strings and the token.
+- Cookie: a request with the right `?t=` is served and gets `Set-Cookie: board_access=<token>;
+  Path=/; HttpOnly; SameSite=Strict`, with `Secure` when it came over https (`X-Forwarded-Proto:
+  https`), so the page's relative fetches (`feed`, `shadow-feed`, `board.js`, `shadow.js`) carry
+  it. Either is compared with `hmac.compare_digest` on bytes.
+- 404: a missing or wrong token gets a 404 with an empty body, the same response as an unknown
+  path, and before any 503. The check holds for requests from 127.0.0.1 too, since the tunnel
+  connects from there.
+- Headers: every response, in both modes, carries Cache-Control no-store, X-Robots-Tag noindex
+  nofollow, Referrer-Policy no-referrer, X-Content-Type-Options nosniff and X-Frame-Options DENY.
+  The pages carry no data beyond the feeds above.
+
+Race day (#124): `horsetrack japan board-serve --date 2026-11-28 --from-vm htb-vm --tunnel`, then
+open the printed URL on the phone; `/shadow` without the token is a 404.
