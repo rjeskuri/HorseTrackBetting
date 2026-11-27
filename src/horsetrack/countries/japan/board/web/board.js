@@ -420,7 +420,7 @@
   var api = {
     formatMove: formatMove, moveClass: moveClass, isStale: isStale, renderBoard: renderBoard,
     poll: poll, esc: esc, num: num, selection: selection, chooseVenue: chooseVenue,
-    followSelected: followSelected, toTop: toTop,
+    followSelected: followSelected, toTop: toTop, instantMs: instantMs,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.HorseBoard = api;

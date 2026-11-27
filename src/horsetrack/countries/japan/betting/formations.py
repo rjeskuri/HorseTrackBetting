@@ -159,17 +159,22 @@ def formation(pool: str, legs: Sequence[Iterable[int]]) -> TicketSet:
 
 
 def paid_dividend(pool: str, share: float, *, rate: float) -> int:
-    """Yen paid per 100 on a winning ticket holding ``share`` of an equal-split pool.
+    """Yen paid per 100 on a winning ticket holding ``share`` of a single-winner pool.
 
     100 x rate / share, floored to the pool's dividend step and never under its min dividend
-    (jra.yaml). ``rate`` is the race's payout rate (``takeout.race_takeout``). QUINELLA_PLACE
-    returns the stake plus a share of the losers' money: see
-    ``core.pricing.stake_back_share_dividend``.
+    (jra.yaml). ``rate`` is the race's payout rate (``takeout.race_takeout``). With one winning
+    combination, the stake back plus the losers' money (jra.yaml's ``payout_rule``) is this
+    dividend. QUINELLA_PLACE pays three pairs on every result (its ``places_paid`` exceeds its
+    legs), each the stake back plus a third of the losers' money, so one share does not give
+    its dividend: a ValueError, see ``core.pricing.stake_back_share_dividend``.
     """
     _legs(pool)
     spec = config.load_source("japan", "jra").pools[pool]
-    if spec.payout_rule != "equal_split":
-        raise ValueError(f"{pool} is not an equal-split pool: use stake_back_share_dividend")
+    if any(rule.places > spec.legs for rule in spec.places_paid):
+        raise ValueError(
+            f"{pool} pays several combinations on every result, each its stake back plus a "
+            "share of the losers' money: use core.pricing.stake_back_share_dividend"
+        )
     if not share > 0 or not rate > 0:
         raise ValueError(f"share and rate must be positive, got {share!r} and {rate!r}")
     step = spec.dividend_step
