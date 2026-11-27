@@ -8,9 +8,11 @@ own dividends (ticket #99, epic #73; research 08 §3.2 C5, §4 E43, E44).
   boosts included, #76); D, the dividend per 100 yen, is floored to 10 yen, so the 5-yen mean
   breakage is added back (04 §1.3). One winner (P = 1) holds R * 100 / (D + 5) of the pool,
   `dividend_share`; `statute_shares` solves P winners together; `dividend_shares` applies it to
-  every (race_id, pool) of a dividends frame.
+  every (race_id, pool) of a dividends frame; `dividend_floor_bound` marks the race-pools where a
+  dividend is the 110-yen floor rather than the formula.
 - `winning_combinations`: the combinations a result pays, dead heats per 04 §1.4 (every
-  combination some tie-break of the dead heats would make the result).
+  combination some tie-break of the dead heats would make the result), Place's places by the
+  field when sales opened.
 - `Ordering`: the ordered first three from one race's Win probabilities, a softmax over the
   runners left at each stage. Families: "harville"; "henery" (independent unit-variance normal
   running times, means solved so the Win probabilities hold, the trifecta by quadrature);
@@ -32,13 +34,13 @@ import math
 from collections.abc import Mapping, Sequence
 from functools import cache
 from itertools import combinations, groupby, permutations, product
-from numbers import Real
+from numbers import Integral, Real
 
 import numpy as np
 import pandas as pd
 from scipy.integrate import cumulative_trapezoid
 from scipy.optimize import minimize
-from scipy.special import log_ndtr, logsumexp, ndtr
+from scipy.special import log_ndtr, logsumexp, ndtr, ndtri
 
 from horsetrack.core import config
 from horsetrack.countries.japan import takeout
@@ -66,8 +68,16 @@ QC_BOUNDS = ((-3.0, 2.0), (-1.0, 1.0), (-2.0, 2.0), (-2.0, 2.0))
 # fast-decaying win integrals; the nested third-place integral is O(STEP^2) and is renormalised.
 HENERY_STEP = 0.02
 HENERY_PAD = 7.0
-HENERY_TOL = 1e-11
+HENERY_TOL = 1e-11  # |p - P(win)|, every runner
+HENERY_RTOL = 1e-9  # |ln p - ln P(win)|, every runner: a long shot's own Win probability too
 HENERY_MAX_ITER = 100
+# The means solve: each step moves no mean more than HENERY_MAX_MOVE standard deviations, and the
+# means never spread over HENERY_MAX_SPAN: from about 19.5 the trifecta's exp(-ln S_i - ln S_j)
+# overflows at the grid's edge, and a 1e-60 long shot against 17 equals needs 15.8 (1e-80 is
+# refused). So no grid is over HENERY_MAX_POINTS long; `_henery_grid` refuses one that would be.
+HENERY_MAX_MOVE = 1.0
+HENERY_MAX_SPAN = 18.0
+HENERY_MAX_POINTS = int((HENERY_MAX_SPAN + 2 * HENERY_PAD) / HENERY_STEP) + 2
 
 
 # ---------------------------------------------------------------------------------------------
@@ -120,18 +130,18 @@ def dividend_shares(
     as the store's dividends table does: a missing one leaves P short and the others' shares
     too large. An optional `race_class_raw` column is passed on for the age-restricted boosts.
     A combination twice in one race-pool, or a race-pool with two conditions labels, is a
-    ValueError. The Series is on the frame's index, in its order."""
-    missing = [c for c in ("race_id", "pool", "combination", "dividend") if c not in dividends]
-    if missing:
-        raise ValueError(f"the dividends frame is missing columns: {missing}")
+    ValueError. The Series is on the frame's index, in its order.
+
+    A dividend at or under its pool's minimum (110 yen, Plus 10; 100 when the pool cannot fund it)
+    is the floor, not the formula: its share here misstates the money on it and, with P > 1,
+    every co-winner's share too, through K. `dividend_floor_bound` marks those race-pools for the
+    caller; how to treat them is ticket #459's."""
+    groups = _race_pool_groups(dividends)
     labels = (
         [None if pd.isna(x) else str(x) for x in dividends["race_class_raw"]]
         if "race_class_raw" in dividends
         else [None] * len(dividends)
     )
-    groups: dict[tuple, list[int]] = {}
-    for i, key in enumerate(zip(dividends["race_id"], dividends["pool"], strict=True)):
-        groups.setdefault(key, []).append(i)
     combos = dividends["combination"].tolist()
     values = dividends["dividend"].tolist()
     shares = np.empty(len(dividends), dtype=float)
@@ -146,6 +156,37 @@ def dividend_shares(
         ).payout_rate
         shares[rows] = statute_shares([values[i] for i in rows], rate)
     return pd.Series(shares, index=dividends.index, dtype=float, name="share")
+
+
+def dividend_floor_bound(dividends: pd.DataFrame) -> pd.Series:
+    """True on every row of a (race_id, pool) group in which some dividend is at or under the
+    pool's `min_dividend` (jra.yaml, 110 yen), False elsewhere: there JRA paid the floor, not the
+    statute formula, so `dividend_shares` misstates the group's shares (see there). The frame
+    needs `dividend_shares`' columns; a missing one, a pool jra.yaml does not list, or a dividend
+    that is not a positive number is a ValueError. The Series is on the frame's index, in its
+    order."""
+    groups = _race_pool_groups(dividends)
+    values = dividends["dividend"].tolist()
+    pools = _jra_pools()
+    flagged = np.zeros(len(dividends), dtype=bool)
+    for (race_id, pool), rows in groups.items():
+        if pool not in pools:
+            raise ValueError(f"{race_id}: pool {pool!r} is not in jra.yaml")
+        floor = pools[pool].min_dividend
+        lowest = min(_dividend(values[i]) for i in rows)
+        flagged[rows] = floor is not None and lowest <= floor
+    return pd.Series(flagged, index=dividends.index, dtype=bool, name="floor_bound")
+
+
+def _race_pool_groups(dividends: pd.DataFrame) -> dict[tuple, list[int]]:
+    """The row positions of each (race_id, pool) of a dividends frame, in first-seen order."""
+    missing = [c for c in ("race_id", "pool", "combination", "dividend") if c not in dividends]
+    if missing:
+        raise ValueError(f"the dividends frame is missing columns: {missing}")
+    groups: dict[tuple, list[int]] = {}
+    for i, key in enumerate(zip(dividends["race_id"], dividends["pool"], strict=True)):
+        groups.setdefault(key, []).append(i)
+    return groups
 
 
 def _dividend(value: object) -> float:
@@ -186,11 +227,39 @@ def _check_pool(pool: str) -> None:
         raise ValueError(f"unknown pool {pool!r}: expected one of {POOLS}")
 
 
-def _places_paid(pool: str, starters: int) -> int:
-    """The first `places` finishers a pool's combinations are drawn from."""
+def _places_paid(pool: str, field_at_sale: int) -> int:
+    """The first `places` finishers a pool's combinations are drawn from; Place's by the runners
+    when sales opened (jra.yaml `places_paid`), not by those that started."""
     if pool == PLACE:
-        return _jra_pools()[PLACE].places_for(starters)
+        return _jra_pools()[PLACE].places_for(field_at_sale)
     return {WIN: 1, QUINELLA: 2, EXACTA: 2, WIDE: 3, TRIO: 3, TRIFECTA: 3}[pool]
+
+
+def _field_size(field_at_sale: object, runners: int) -> int:
+    """The runners when sales opened: `field_at_sale`, or `runners` (those given) when None.
+    ValueError for one that is not a whole number or is smaller than `runners`."""
+    if field_at_sale is None:
+        return runners
+    if isinstance(field_at_sale, bool) or not isinstance(field_at_sale, Integral):
+        raise ValueError(f"field_at_sale must be a whole number, got {field_at_sale!r}")
+    if field_at_sale < runners:
+        raise ValueError(f"field_at_sale {field_at_sale} is under the {runners} runners given")
+    return int(field_at_sale)
+
+
+def _horse_numbers(horses: Sequence[int] | None, n: int) -> list[int]:
+    """The horse number of each of n runners: `horses`, or 1..n when None. ValueError for a
+    length that is not n, a number twice, or one that is not a positive whole number."""
+    if horses is None:
+        return list(range(1, n + 1))
+    numbers = list(horses)
+    if len(numbers) != n:
+        raise ValueError(f"{len(numbers)} horse numbers for {n} runners")
+    if any(isinstance(h, bool) or not isinstance(h, Integral) or h < 1 for h in numbers):
+        raise ValueError(f"horse numbers must be positive whole numbers, got {numbers!r}")
+    if len(set(numbers)) < n:
+        raise ValueError(f"a horse number is given twice: {numbers!r}")
+    return [int(h) for h in numbers]
 
 
 def _key(horses: Sequence[int]) -> str:
@@ -214,7 +283,9 @@ def _combinations_of(top: Sequence[int], pool: str) -> list[str]:
     return [_key(top[:3])]
 
 
-def winning_combinations(finish: Mapping[int, int], pool: str) -> list[str]:
+def winning_combinations(
+    finish: Mapping[int, int], pool: str, *, field_at_sale: int | None = None
+) -> list[str]:
     """The combinations `pool` pays for a result, each once.
 
     `finish` maps every starter's horse number to its finishing position (ties share a position,
@@ -222,11 +293,13 @@ def winning_combinations(finish: Mapping[int, int], pool: str) -> list[str]:
     heat pays every combination some tie-break of it would make the result (04 §1.4): a dead heat
     for third pays both Trios and both Trifectas, and Wide pays every pair of a possible first
     three, never the two horses that dead-heated for third. PLACE pays the first two or three by
-    the number of starters (jra.yaml); a pool not offered to the field, or a result with too few
-    finishers, pays nothing. ValueError for an unknown pool.
+    `field_at_sale`, the runners when sales opened (jra.yaml; None: the runners in `finish`), so
+    a late scratch from eight to seven still pays three places; no other pool depends on it. A
+    pool not offered to the field, or a result with too few finishers, pays nothing. ValueError
+    for an unknown pool, or a `field_at_sale` smaller than the runners in `finish`.
     """
     _check_pool(pool)
-    places = _places_paid(pool, len(finish))
+    places = _places_paid(pool, _field_size(field_at_sale, len(finish)))
     if places == 0:
         return []
     placed = sorted(
@@ -338,11 +411,20 @@ class Ordering:
         out[idx, idx, :] = 0.0
         return out
 
-    def joint_probs(self, p_win: Sequence[float], pool: str) -> dict[str, float]:
-        """Every combination of `pool` and its probability; p_win[i] is horse number i + 1."""
+    def joint_probs(
+        self,
+        p_win: Sequence[float],
+        pool: str,
+        *,
+        horses: Sequence[int] | None = None,
+        field_at_sale: int | None = None,
+    ) -> dict[str, float]:
+        """Every combination of `pool` and its probability, keyed by horse number: p_win[i] is
+        horse horses[i] (None: i + 1). `field_at_sale` fixes Place's places, as in `pool_array`.
+        """
         _check_pool(pool)
         t = self.trifecta(p_win)
-        return pool_probs(t, pool)
+        return pool_probs(t, pool, horses=horses, field_at_sale=field_at_sale)
 
     # -- fitting ------------------------------------------------------------------------------
 
@@ -364,34 +446,43 @@ class Ordering:
         return fitted
 
 
-def pool_probs(t: np.ndarray, pool: str) -> dict[str, float]:
-    """A pool's combinations and probabilities from a trifecta array (index i = horse i + 1)."""
+def pool_probs(
+    t: np.ndarray,
+    pool: str,
+    *,
+    horses: Sequence[int] | None = None,
+    field_at_sale: int | None = None,
+) -> dict[str, float]:
+    """A pool's combinations and probabilities from a trifecta array whose index i is horse
+    horses[i] (None: i + 1), keyed by horse number: ascending for QUINELLA, QUINELLA_PLACE and
+    TRIO, in finishing order for FORECAST and TIERCE. `field_at_sale`: as in `pool_array`.
+    ValueError for horse numbers that are not one positive, distinct number per runner."""
     _check_pool(pool)
-    arr = pool_array(t, pool)
-    n = t.shape[0]
-    horses = range(1, n + 1)
-    if pool == WIN or pool == PLACE:
-        return {_key([i]): float(arr[i - 1]) for i in horses}
-    if pool == EXACTA:
-        return {_key(c): float(arr[c[0] - 1, c[1] - 1]) for c in permutations(horses, 2)}
-    if pool in (QUINELLA, WIDE):
-        return {_key(c): float(arr[c[0] - 1, c[1] - 1]) for c in combinations(horses, 2)}
-    if pool == TRIO:
-        return {_key(c): float(arr[c[0] - 1, c[1] - 1, c[2] - 1]) for c in combinations(horses, 3)}
-    return {_key(c): float(t[c[0] - 1, c[1] - 1, c[2] - 1]) for c in permutations(horses, 3)}
+    arr = pool_array(t, pool, field_at_sale=field_at_sale)
+    numbers = _horse_numbers(horses, t.shape[0])
+    # Positions in horse-number order, so an unordered pool's combinations list ascending numbers.
+    by_number = sorted(range(len(numbers)), key=numbers.__getitem__)
+    if pool in (WIN, PLACE):
+        return {_key([numbers[i]]): float(arr[i]) for i in by_number}
+    size = 3 if pool in (TRIO, TRIFECTA) else 2
+    choose = permutations if pool in (EXACTA, TRIFECTA) else combinations
+    return {_key([numbers[i] for i in c]): float(arr[c]) for c in choose(by_number, size)}
 
 
-def pool_array(t: np.ndarray, pool: str) -> np.ndarray:
+def pool_array(t: np.ndarray, pool: str, *, field_at_sale: int | None = None) -> np.ndarray:
     """A pool's probabilities as an array indexed by runner position: WIN and PLACE n, FORECAST
     [first, second], QUINELLA and QUINELLA_PLACE symmetric n x n, TRIO symmetric n x n x n,
-    TIERCE the trifecta itself. Every one is a marginal of `t`."""
+    TIERCE the trifecta itself. Every one is a marginal of `t`. PLACE pays the places of
+    `field_at_sale`, the runners when sales opened (None: the n in `t`); ValueError for one
+    smaller than n, in every pool, and for PLACE when it was not sold to that field."""
     _check_pool(pool)
+    field = _field_size(field_at_sale, t.shape[0])
     if pool == WIN:
         return t.sum(axis=(1, 2))
     if pool == PLACE:
-        places = _places_paid(PLACE, t.shape[0])
+        places = _places_paid(PLACE, field)
         if places == 0:
-            raise ValueError(f"PLACE is not sold to a field of {t.shape[0]}")
+            raise ValueError(f"PLACE is not sold to a field of {field}")
         positions = (t.sum(axis=(1, 2)), t.sum(axis=(0, 2)), t.sum(axis=(0, 1)))
         return sum(positions[:places])
     if pool == TRIFECTA:
@@ -413,8 +504,19 @@ def pool_array(t: np.ndarray, pool: str) -> np.ndarray:
 
 
 def _henery_grid(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(z, f): t - theta_i and the normal density on the quadrature grid, HENERY_PAD beyond the
+    means. ValueError for a theta that is not finite or a grid over HENERY_MAX_POINTS, before
+    anything is allocated."""
+    if not np.all(np.isfinite(theta)):
+        raise ValueError("Henery means must be finite")
     lo, hi = theta.min() - HENERY_PAD, theta.max() + HENERY_PAD
-    t = lo + HENERY_STEP * np.arange(int(np.ceil((hi - lo) / HENERY_STEP)) + 1)
+    points = int(np.ceil((hi - lo) / HENERY_STEP)) + 1
+    if points > HENERY_MAX_POINTS:
+        raise ValueError(
+            f"a Henery grid of {points} points is over the bound of {HENERY_MAX_POINTS}: the "
+            f"means spread {hi - lo - 2 * HENERY_PAD:.3g} standard deviations"
+        )
+    t = lo + HENERY_STEP * np.arange(points)
     z = t[None, :] - theta[:, None]
     return z, np.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
 
@@ -438,21 +540,50 @@ def _henery_win(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _henery_means(p: np.ndarray) -> np.ndarray:
-    """Running-time means (unit variance, mean zero) whose win probabilities are p."""
-    theta = -0.6 * np.log(p)
+    """Running-time means (unit variance, mean zero) whose win probabilities are p.
+
+    Gauss-Newton on r = ln p - ln P(win), from theta = -Phi^-1(p): in logs a long shot's
+    equation is as well scaled as the favourite's. Each step moves no mean more than
+    HENERY_MAX_MOVE, keeps the means within HENERY_MAX_SPAN and is halved until |r| falls (a
+    backtracking line search), so the solve cannot run off the grid (an undamped step on
+    p - P(win) did, on ordinary 18-runner fields: the review of PR #461). Converged when every
+    |p - P(win)| < HENERY_TOL and every |r| < HENERY_RTOL. When no step lowers |r| first (the
+    quadrature's own floor), the means are kept if every |p - P(win)| <= 1e-8 and every
+    |r| <= 1e-4; otherwise, and for a field that needs a wider spread, a ValueError.
+    """
+    log_p = np.log(p)
+    theta = np.clip(-ndtri(p), -HENERY_MAX_SPAN, HENERY_MAX_SPAN)
+    theta = np.minimum(theta, theta.min() + HENERY_MAX_SPAN)
     theta -= theta.mean()
-    for _ in range(HENERY_MAX_ITER):
+
+    def residual(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         win, jac = _henery_win(theta)
-        resid = p - win
-        if np.abs(resid).max() < HENERY_TOL:
+        with np.errstate(divide="ignore"):
+            return log_p - np.log(win), win, jac
+
+    r, win, jac = residual(theta)
+    for _ in range(HENERY_MAX_ITER):
+        if np.abs(p - win).max() < HENERY_TOL and np.abs(r).max() < HENERY_RTOL:
             return theta
-        step = np.linalg.lstsq(jac, resid, rcond=None)[0]
-        theta = theta + step
-        theta -= theta.mean()
-    win, _ = _henery_win(theta)
-    if np.abs(p - win).max() > 1e-8:
-        raise ValueError("Henery means did not converge for these Win probabilities")
-    return theta
+        if not np.all(np.isfinite(r)):
+            break
+        step = np.linalg.lstsq(jac / win[:, None], r, rcond=None)[0]
+        step *= min(1.0, HENERY_MAX_MOVE / max(np.abs(step).max(), 1e-300))
+        merit, alpha = float(r @ r), 1.0
+        while alpha > 1e-6:
+            trial = theta + alpha * step
+            trial -= trial.mean()
+            if np.ptp(trial) <= HENERY_MAX_SPAN:
+                r_trial, win_trial, jac_trial = residual(trial)
+                if float(r_trial @ r_trial) <= (1.0 - 1e-4 * alpha) * merit:  # False for NaN
+                    break
+            alpha *= 0.5
+        else:
+            break  # no step lowers the residual: at the quadrature's floor, or stuck
+        theta, r, win, jac = trial, r_trial, win_trial, jac_trial
+    if np.abs(p - win).max() <= 1e-8 and np.abs(r).max() <= 1e-4:
+        return theta
+    raise ValueError("Henery means did not converge for these Win probabilities")
 
 
 def _henery_trifecta(p: np.ndarray) -> np.ndarray:
@@ -473,7 +604,10 @@ def _henery_trifecta(p: np.ndarray) -> np.ndarray:
     out[:, idx, idx] = 0.0
     out[idx, :, idx] = 0.0
     out = np.clip(out, 0.0, None)
-    return out / out.sum()
+    total = out.sum()
+    if not (np.isfinite(total) and total > 0):
+        raise ValueError("the Henery trifecta quadrature failed for these Win probabilities")
+    return out / total
 
 
 # ---------------------------------------------------------------------------------------------

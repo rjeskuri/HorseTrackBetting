@@ -56,6 +56,24 @@ Contract pinned here (`horsetrack.countries.japan.models.exotic`):
   sum to 1, on p_model's index in p_model's order (q_pool is aligned by label). A combination of
   p_model missing from q_pool (no full board) is a ValueError.
 
+Review round 1 on PR #461:
+- Henery on full fields: `Ordering("henery").trifecta(p)` on 12-18 runners with long shots (seeded
+  logit fields, a lone 0.01% runner) is finite, non-negative, sums to 1, and its first-place
+  marginal is p_win (atol 1e-3 and within 5% of each runner's own p). An input it cannot solve
+  raises ValueError; it never returns NaN or builds an unbounded quadrature grid.
+- `horses: Sequence[int] | None = None` on `Ordering.joint_probs` and `pool_probs`: the horse
+  number of each entry of p_win (each axis index of t), in order; default 1..n. Keys use those
+  numbers (ascending for unordered pools, finishing order for ordered ones). A length that does
+  not match, a duplicate or a non-positive number is a ValueError.
+- `field_at_sale: int | None = None` on `winning_combinations`, `Ordering.joint_probs` and
+  `pool_probs`: the runners when sales opened, which fix Place's places paid (8+ pay 3, 5-7 pay
+  2, 4 or fewer not sold), so a late scratch from 8 to 7 still pays three places; default the
+  runners given. Smaller than the runners given is a ValueError. Other pools are unchanged.
+- `dividend_floor_bound(dividends) -> pd.Series` of bools, on the frame's index in its order: True
+  on every row of a (race_id, pool) group in which any dividend is at or under the pool's
+  `min_dividend` (jra.yaml, 110 yen), False otherwise; the same required columns as
+  `dividend_shares`, a missing one a ValueError.
+
 Expected values are derived independently: closed-form Harville, the stage weights written out
 here, JRA's published payout rates with the boost calendar's rules, a quadrature value of Henery's
 model, and hand-listed JRA dead-heat payouts. All data is synthetic and every RNG is seeded.
@@ -72,6 +90,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from horsetrack.core import config
 from horsetrack.core.eval.folds import FoldScheme, walk_forward
 
 MODULE = "horsetrack.countries.japan.models.exotic"
@@ -116,6 +135,52 @@ def make_ordering(family: str):
 
 def key(*horses: int) -> str:
     return ",".join(str(h) for h in horses)
+
+
+# A correct Henery solve of any field in this file spans a grid of under 2,000 points.
+HENERY_GRID_LIMIT = 20_000
+
+
+class GridGuard:
+    """What `henery_grid_guard` saw: whether it wraps the grid, and every grid it refused."""
+
+    def __init__(self) -> None:
+        self.installed = False
+        self.trips: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def henery_grid_guard(monkeypatch):
+    """A resource guard, not part of the contract. A Henery means solve that runs away asks for a
+    quadrature grid of millions of points, n x n of them at once, and fills the machine's memory
+    and swap (two hung processes in the review of PR #461). This wraps the module's
+    `_henery_grid(theta)`: before calling through, it works out the grid's length from theta as
+    the module builds it (theta's span plus HENERY_PAD each side, every HENERY_STEP) and raises
+    AssertionError instead of allocating more than HENERY_GRID_LIMIT points, or on a theta that is
+    not finite. Every refusal is recorded, and the Henery tests check none was swallowed."""
+    guard = GridGuard()
+    module = exotic()
+    original = getattr(module, "_henery_grid", None)
+    if original is not None:
+
+        def guarded(theta, *args, **kwargs):
+            th = np.asarray(theta, dtype=float)
+            step = float(getattr(module, "HENERY_STEP", 0.02))
+            pad = float(getattr(module, "HENERY_PAD", 7.0))
+            with np.errstate(over="ignore", invalid="ignore"):
+                span = float(th.max() - th.min()) if th.size else math.inf
+            points = (span + 2 * pad) / step + 1
+            if not points <= HENERY_GRID_LIMIT:  # NaN and inf too
+                guard.trips.append(f"{points:.3g} points")
+                raise AssertionError(
+                    f"resource guard: a Henery grid of {points:.3g} points (limit "
+                    f"{HENERY_GRID_LIMIT}): the means solve ran away"
+                )
+            return original(theta, *args, **kwargs)
+
+        monkeypatch.setattr(module, "_henery_grid", guarded)
+        guard.installed = True
+    return guard
 
 
 # ---------------------------------------------------------------------------------------------
@@ -882,3 +947,418 @@ def test_pool_blend_needs_the_full_board():
     p_model, q_pool = _blend_inputs()
     with pytest.raises(ValueError):
         exotic().pool_blend(p_model, q_pool.drop(q_pool.index[3]), a=0.5, b=0.5)
+
+
+# ---------------------------------------------------------------------------------------------
+# Henery on full fields: the means solve converges or refuses, and never runs away (#461 review)
+# ---------------------------------------------------------------------------------------------
+
+
+def logit_field(seed: int, n: int, draw: int) -> np.ndarray:
+    """The `draw`-th (from 0) n-runner field of default_rng(seed): logits N(0, 1.5), softmaxed."""
+    rng = np.random.default_rng(seed)
+    for _ in range(draw + 1):
+        logits = rng.normal(0.0, 1.5, n)
+    p = np.exp(logits - logits.max())
+    return p / p.sum()
+
+
+def review_field() -> np.ndarray:
+    """The review's case: default_rng(0) drawing three fields each of 8, 12 and 16 runners, then
+    18; the second 18-runner field, p from 0.179 down to 0.00063."""
+    rng = np.random.default_rng(0)
+    for n in (8, 8, 8, 12, 12, 12, 16, 16, 16, 18, 18):
+        logits = rng.normal(0.0, 1.5, n)
+    p = np.exp(logits - logits.max())
+    return p / p.sum()
+
+
+def lone_long_shot(n: int, p_long: float) -> np.ndarray:
+    """One runner (the first) at p_long, the other n - 1 sharing the rest equally."""
+    return np.array([p_long] + [(1.0 - p_long) / (n - 1)] * (n - 1))
+
+
+# Ordinary full fields with long shots down to 0.01%, each one on which an undamped Newton solve
+# runs away: seeded logit fields ((seed = runners, draw)) and lone long shots.
+FULL_FIELDS = {
+    "review_18": review_field(),
+    **{
+        f"logit_{n}_draw{k}": logit_field(n, n, k)
+        for n, k in ((12, 30), (14, 0), (16, 20), (16, 27), (16, 34))
+        + ((18, 6), (18, 10), (18, 13), (18, 15), (18, 18))
+    },
+    "long_shot_1e-4_of_18": lone_long_shot(18, 1e-4),
+    "long_shot_1e-4_of_14": lone_long_shot(14, 1e-4),
+    "long_shot_3e-4_of_16": lone_long_shot(16, 3e-4),
+}
+# At the edge of what a quadrature holds: a runner at 1e-60 or 1e-30, a near-certain favourite.
+EXTREME_FIELDS = {
+    "long_shot_1e-60_of_18": lone_long_shot(18, 1e-60),
+    "long_shot_1e-30_of_12": lone_long_shot(12, 1e-30),
+    "favourite_of_18": np.array([1 - 17e-9] + [1e-9] * 17),
+    "favourite_of_12": np.array([1 - 11e-7] + [1e-7] * 11),
+}
+
+
+def assert_valid_trifecta(t, p: np.ndarray, rtol: float | None = None) -> None:
+    """An n x n x n trifecta, finite and non-negative, summing to 1, whose first-place marginal is
+    p (atol 1e-3, as the Henery tests above accept; with `rtol`, also relative to each runner's
+    own p, so a long shot's Win probability is held too)."""
+    n = len(p)
+    assert isinstance(t, np.ndarray) and t.shape == (n, n, n)
+    assert np.all(np.isfinite(t)), "the trifecta has NaN or inf"
+    assert np.all(t >= 0)
+    assert t.sum() == pytest.approx(1.0, abs=1e-6)
+    first = t.sum(axis=(1, 2))
+    np.testing.assert_allclose(first, p, atol=1e-3)
+    if rtol is not None:
+        np.testing.assert_allclose(first, p, rtol=rtol, atol=0.0)
+
+
+@pytest.mark.parametrize("field", list(FULL_FIELDS))
+def test_henery_solves_full_fields_with_long_shots(field, henery_grid_guard):
+    assert henery_grid_guard.installed, "the resource guard needs the module's _henery_grid"
+    p = FULL_FIELDS[field]
+    # The fixtures' own check: full fields, each with a runner at 0.1% or less.
+    assert 12 <= len(p) <= 18 and p.min() <= 1e-3
+    if field == "review_18":
+        assert p.max() == pytest.approx(0.1785, abs=1e-4)
+        assert p.min() == pytest.approx(6.27e-4, abs=1e-6)
+    t = exotic().Ordering("henery").trifecta(p)
+    assert_valid_trifecta(t, p, rtol=0.05)
+    assert not henery_grid_guard.trips, "a refused grid was swallowed"
+
+
+@pytest.mark.parametrize("field", list(EXTREME_FIELDS))
+def test_henery_returns_a_valid_trifecta_or_refuses(field, henery_grid_guard):
+    """Either answer is allowed: a valid trifecta (first-place marginal within atol 1e-3, nothing
+    relative for a 1e-60 runner), or a ValueError raised before any oversized grid. Never NaN and
+    never a runaway solve."""
+    assert henery_grid_guard.installed, "the resource guard needs the module's _henery_grid"
+    p = EXTREME_FIELDS[field]
+    try:
+        t = exotic().Ordering("henery").trifecta(p)
+    except ValueError:
+        assert not henery_grid_guard.trips, "refused only after asking for an oversized grid"
+        return
+    assert_valid_trifecta(t, p)
+    assert not henery_grid_guard.trips, "a refused grid was swallowed"
+
+
+# ---------------------------------------------------------------------------------------------
+# Horse numbers: a field with a scratch keys its combinations by the runners' own numbers
+# ---------------------------------------------------------------------------------------------
+
+ALL_POOLS = (WIN, PLACE, QUINELLA, WIDE, EXACTA, TRIO, TRIFECTA)
+P4 = np.array([0.4, 0.3, 0.2, 0.1])
+P7 = np.array([0.28, 0.22, 0.16, 0.12, 0.10, 0.08, 0.04])
+P9 = np.array([0.22, 0.18, 0.14, 0.12, 0.10, 0.09, 0.07, 0.05, 0.03])
+QC_AB = {**ZERO, "a2": -0.3, "b2": -0.03, "a3": -0.6, "b3": -0.05}
+
+
+def jra_places(starters: int) -> int:
+    """Place's places paid by the runners at the start of sales (jra.yaml): 8 or more pay 3, 5-7
+    pay 2, 4 or fewer are not sold."""
+    return 3 if starters >= 8 else 2 if starters >= 5 else 0
+
+
+def numbered_pools(trifecta: dict[str, float], numbers, places: int) -> dict[str, dict[str, float]]:
+    """Every pool's probabilities keyed by horse number, summed here from a trifecta keyed by
+    position + 1 ("1,2,3" is positions 0, 1, 2): numbers[i] is the horse at position i, unordered
+    pools list numbers ascending, and PLACE pays the first `places`."""
+    out: dict[str, dict[str, float]] = {pool: {} for pool in ALL_POOLS}
+
+    def add(pool: str, combination: str, value: float) -> None:
+        out[pool][combination] = out[pool].get(combination, 0.0) + value
+
+    for combination, value in trifecta.items():
+        i, j, k = (numbers[h - 1] for h in horses(combination))
+        add(WIN, key(i), value)
+        for h in (i, j, k)[:places]:
+            add(PLACE, key(h), value)
+        add(EXACTA, key(i, j), value)
+        add(QUINELLA, key(*sorted((i, j))), value)
+        for pair in combinations(sorted((i, j, k)), 2):
+            add(WIDE, key(*pair), value)
+        add(TRIO, key(*sorted((i, j, k))), value)
+        add(TRIFECTA, key(i, j, k), value)
+    return out
+
+
+def trifecta_array(trifecta: dict[str, float], n: int) -> np.ndarray:
+    """A trifecta keyed by position + 1 as an n x n x n array."""
+    t = np.zeros((n, n, n))
+    for combination, value in trifecta.items():
+        i, j, k = horses(combination)
+        t[i - 1, j - 1, k - 1] = value
+    return t
+
+
+def reference_trifecta(family: str, p: np.ndarray) -> dict[str, float]:
+    if family == "quadratic_context":
+        w2 = stage_weight(p, QC_AB["a2"], QC_AB["b2"])
+        w3 = stage_weight(p, QC_AB["a3"], QC_AB["b3"])
+        return trifecta_reference(p, w2, w3)
+    return harville_closed_form(p)
+
+
+# (p_win, the horse number of each entry, or None for the default). Horse 6 scratched from ten:
+# nine probabilities for horses 1-5 and 7-10. Unsorted two-digit numbers: position order is not
+# number order, so an unordered key sorts by number ("3,12", not "12,3").
+NUMBERED_FIELDS = {
+    "scratch_6_of_10": (P9, (1, 2, 3, 4, 5, 7, 8, 9, 10)),
+    "unsorted_two_digit": (P6_FAV4, (12, 3, 7, 1, 10, 5)),
+    "explicit_1_to_8": (P8, tuple(range(1, 9))),
+    "default_none": (P8, None),
+}
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+@pytest.mark.parametrize("field", list(NUMBERED_FIELDS))
+def test_joint_probs_key_combinations_by_horse_number(field, family):
+    p, numbers = NUMBERED_FIELDS[field]
+    n = len(p)
+    labels = numbers if numbers is not None else tuple(range(1, n + 1))
+    ordering = exotic().Ordering(family, dict(QC_AB) if family == "quadratic_context" else None)
+    expected = numbered_pools(reference_trifecta(family, p), labels, jra_places(n))
+    for pool in ALL_POOLS:
+        got = ordering.joint_probs(p, pool, horses=numbers)
+        assert set(got) == set(expected[pool]), pool
+        if family != "henery":
+            assert max_abs_diff(got, expected[pool]) < 1e-12, pool
+    if family == "henery":  # no closed form: its keys above, and its Win probabilities by number
+        win = ordering.joint_probs(p, WIN, horses=numbers)
+        np.testing.assert_allclose([win[key(h)] for h in labels], p, atol=1e-3)
+
+
+@pytest.mark.parametrize("field", list(NUMBERED_FIELDS))
+def test_pool_probs_key_combinations_by_horse_number(field):
+    p, numbers = NUMBERED_FIELDS[field]
+    n = len(p)
+    labels = numbers if numbers is not None else tuple(range(1, n + 1))
+    reference = harville_closed_form(p)
+    t = trifecta_array(reference, n)
+    expected = numbered_pools(reference, labels, jra_places(n))
+    for pool in ALL_POOLS:
+        got = exotic().pool_probs(t, pool, horses=numbers)
+        assert max_abs_diff(got, expected[pool]) < 1e-12, pool
+
+
+# Horse numbers that do not describe P9's nine runners.
+BAD_HORSES = {
+    "one_short": (1, 2, 3, 4, 5, 7, 8, 9),
+    "one_long": (1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+    "duplicate": (1, 2, 3, 4, 5, 7, 8, 9, 9),
+    "zero": (0, 1, 2, 3, 4, 5, 7, 8, 9),
+    "negative": (-10, 1, 2, 3, 4, 5, 7, 8, 9),
+}
+
+
+@pytest.mark.parametrize("bad", list(BAD_HORSES))
+def test_horse_numbers_must_describe_the_field(bad):
+    numbers = BAD_HORSES[bad]
+    t = trifecta_array(harville_closed_form(P9), len(P9))
+    for pool in (WIN, TRIO):
+        with pytest.raises(ValueError):
+            exotic().Ordering("harville").joint_probs(P9, pool, horses=numbers)
+        with pytest.raises(ValueError):
+            exotic().pool_probs(t, pool, horses=numbers)
+
+
+# ---------------------------------------------------------------------------------------------
+# Places paid by the field at the start of sales: a late scratch keeps Place's three places
+# ---------------------------------------------------------------------------------------------
+
+LATE_SCRATCH = {3: 1, 8: 2, 1: 3, 2: 4, 4: 5, 5: 6, 7: 7}  # horse 6 scratched after sales opened
+FIVE_LEFT = {2: 1, 5: 2, 1: 3, 3: 4, 4: 5}
+FOUR_LEFT = {4: 1, 1: 2, 2: 3, 3: 4}
+# (finish, field at sale, PLACE winners with it, PLACE winners by default: the runners given).
+PLACE_AT_SALE = {
+    "late_scratch_8_to_7": (LATE_SCRATCH, 8, ["3", "8", "1"], ["3", "8"]),
+    "late_scratch_dead_heat_third": (
+        {1: 1, 2: 2, 3: 3, 4: 3, 5: 5, 7: 6, 8: 7},
+        8,
+        ["1", "2", "3", "4"],
+        ["1", "2"],
+    ),
+    "eight_at_sale_five_left": (FIVE_LEFT, 8, ["2", "5", "1"], ["2", "5"]),
+    "five_at_sale_four_left": (FOUR_LEFT, 5, ["4", "1"], []),
+    "four_at_sale_not_sold": (FOUR_LEFT, 4, [], []),
+    "seven_at_sale_seven_run": (LATE_SCRATCH, 7, ["3", "8"], ["3", "8"]),
+    "nine_at_sale_nine_run": (_field({9: 1, 2: 2, 6: 3}, 9), 9, ["9", "2", "6"], ["9", "2", "6"]),
+}
+
+
+@pytest.mark.parametrize("case", list(PLACE_AT_SALE))
+def test_place_settles_on_the_field_at_sale(case):
+    finish, at_sale, with_sale, by_default = PLACE_AT_SALE[case]
+    got = exotic().winning_combinations(finish, PLACE, field_at_sale=at_sale)
+    assert len(got) == len(set(got))
+    assert sorted(got) == sorted(with_sale)
+    assert sorted(exotic().winning_combinations(finish, PLACE, field_at_sale=None)) == sorted(
+        by_default
+    )
+    assert settle(finish, PLACE) == sorted(by_default)
+
+
+# The other pools pay the same first two or three whatever the field at sale.
+OTHER_POOLS_AT_SALE = {
+    "late_scratch_8_to_7": (
+        LATE_SCRATCH,
+        8,
+        {
+            WIN: ["3"],
+            QUINELLA: ["3,8"],
+            EXACTA: ["3,8"],
+            WIDE: ["1,3", "1,8", "3,8"],
+            TRIO: ["1,3,8"],
+            TRIFECTA: ["3,8,1"],
+        },
+    ),
+    "eight_at_sale_five_left": (
+        FIVE_LEFT,
+        8,
+        {
+            WIN: ["2"],
+            QUINELLA: ["2,5"],
+            EXACTA: ["2,5"],
+            WIDE: ["1,2", "1,5", "2,5"],
+            TRIO: ["1,2,5"],
+            TRIFECTA: ["2,5,1"],
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(OTHER_POOLS_AT_SALE))
+def test_field_at_sale_moves_only_place(case):
+    finish, at_sale, expected = OTHER_POOLS_AT_SALE[case]
+    for pool, winners in expected.items():
+        got = exotic().winning_combinations(finish, pool, field_at_sale=at_sale)
+        assert sorted(got) == sorted(winners), pool
+        assert settle(finish, pool) == sorted(winners), pool
+
+
+# (p_win, horse numbers or None, field at sale): Place's probabilities are each runner's chance of
+# the places the field at sale pays, so eight at sale sum to 3 whatever ran.
+PLACE_PROB_FIELDS = {
+    "late_scratch_8_to_7": (P7, None, 8),
+    "late_scratch_numbered": (P7, (1, 2, 3, 4, 5, 7, 8), 8),
+    "eight_at_sale_five_left": (P5, None, 8),
+    "five_at_sale_four_left": (P4, None, 5),
+    "seven_at_sale_seven_run": (P7, None, 7),
+    "nine_at_sale_nine_run": (P9, None, 9),
+}
+
+
+@pytest.mark.parametrize("case", list(PLACE_PROB_FIELDS))
+def test_place_probabilities_pay_the_places_of_the_field_at_sale(case):
+    p, numbers, at_sale = PLACE_PROB_FIELDS[case]
+    n = len(p)
+    labels = numbers if numbers is not None else tuple(range(1, n + 1))
+    kwargs = {"field_at_sale": at_sale}
+    if numbers is not None:
+        kwargs["horses"] = numbers
+    reference = harville_closed_form(p)
+    t = trifecta_array(reference, n)
+    expected = numbered_pools(reference, labels, jra_places(at_sale))
+    ordering = exotic().Ordering("harville")
+    for got in (ordering.joint_probs(p, PLACE, **kwargs), exotic().pool_probs(t, PLACE, **kwargs)):
+        assert max_abs_diff(got, expected[PLACE]) < 1e-12
+        assert sum(got.values()) == pytest.approx(jra_places(at_sale), abs=1e-9)
+    for pool in (WIN, WIDE, TRIO):  # the field at sale moves Place alone
+        assert max_abs_diff(ordering.joint_probs(p, pool, **kwargs), expected[pool]) < 1e-12, pool
+    if jra_places(n):  # by default the runners given are the field at sale
+        default = numbered_pools(reference, tuple(range(1, n + 1)), jra_places(n))[PLACE]
+        assert max_abs_diff(ordering.joint_probs(p, PLACE), default) < 1e-12
+        assert max_abs_diff(exotic().pool_probs(t, PLACE, field_at_sale=None), default) < 1e-12
+
+
+@pytest.mark.parametrize("pool", (PLACE, TRIO))
+@pytest.mark.parametrize("at_sale", (7, 0))
+def test_field_at_sale_cannot_be_smaller_than_the_runners(at_sale, pool):
+    finish = _field({1: 1, 2: 2, 3: 3}, 8)
+    t = trifecta_array(harville_closed_form(P8), len(P8))
+    with pytest.raises(ValueError):
+        exotic().winning_combinations(finish, pool, field_at_sale=at_sale)
+    with pytest.raises(ValueError):
+        exotic().Ordering("harville").joint_probs(P8, pool, field_at_sale=at_sale)
+    with pytest.raises(ValueError):
+        exotic().pool_probs(t, pool, field_at_sale=at_sale)
+
+
+# ---------------------------------------------------------------------------------------------
+# Dividends at the 110-yen floor: every row of a race-pool with one is flagged
+# ---------------------------------------------------------------------------------------------
+
+# (race_id, pool, combination, dividend, flagged). A race-pool is flagged on every row once any of
+# its dividends is at or under the pool's minimum (jra.yaml `min_dividend`, 110 yen: Plus 10),
+# since one floored dividend moves every co-winner's statute share through K.
+FLOOR_ROWS = [
+    # Place with one placer at the floor: all three rows.
+    ("jra:2026-10-11:TOK:3", PLACE, "3", 110, True),
+    ("jra:2026-10-11:TOK:3", PLACE, "7", 240, True),
+    ("jra:2026-10-11:TOK:3", PLACE, "5", 580, True),
+    # The same race's Win and Wide; 120, just above the floor, is not flagged.
+    ("jra:2026-10-11:TOK:3", WIN, "3", 150, False),
+    ("jra:2026-10-11:TOK:3", WIDE, "3,7", 120, False),
+    ("jra:2026-10-11:TOK:3", WIDE, "3,5", 340, False),
+    ("jra:2026-10-11:TOK:3", WIDE, "5,7", 1210, False),
+    # The next race's Place: the same pool in another race is its own group.
+    ("jra:2026-10-11:TOK:4", PLACE, "2", 120, False),
+    ("jra:2026-10-11:TOK:4", PLACE, "8", 150, False),
+    ("jra:2026-10-11:TOK:4", PLACE, "11", 300, False),
+    # 元返し: a pool that cannot pay the 110-yen minimum pays the stake back, 100 yen.
+    ("jra:2026-09-21:HSN:5", PLACE, "1", 100, True),
+    ("jra:2026-09-21:HSN:5", PLACE, "4", 130, True),
+    ("jra:2026-09-21:HSN:5", PLACE, "9", 410, True),
+    ("jra:2026-09-21:HSN:5", QUINELLA, "1,4", 120, False),
+    # One winner at the floor; the same race's Trifecta is not.
+    ("jra:2025-10-26:TOK:11", WIN, "3", 110, True),
+    ("jra:2025-10-26:TOK:11", TRIFECTA, "3,1,7", 25670, False),
+    # Wide with a dead heat for third, two of five pairs at the floor (one written as a float).
+    ("jra:2023-12-28:NAK:11", WIDE, "1,2", 110, True),
+    ("jra:2023-12-28:NAK:11", WIDE, "1,3", 110.0, True),
+    ("jra:2023-12-28:NAK:11", WIDE, "1,4", 180, True),
+    ("jra:2023-12-28:NAK:11", WIDE, "2,3", 160, True),
+    ("jra:2023-12-28:NAK:11", WIDE, "2,4", 450, True),
+    ("jra:2023-12-28:NAK:11", TRIO, "1,2,3", 890, False),
+    ("jra:2023-12-28:NAK:11", TRIO, "1,2,4", 1450, False),
+    # A dead heat for first: one of the two Win dividends at the floor.
+    ("jra:2016-07-02:FKS:5", WIN, "12", 110, True),
+    ("jra:2016-07-02:FKS:5", WIN, "4", 250, True),
+    ("jra:2026-10-10:TOK:3", EXACTA, "4,12", 9800, False),
+    ("jra:2026-10-10:TOK:3", EXACTA, "12,4", 27000, False),
+]
+
+
+def floor_frame() -> pd.DataFrame:
+    frame = pd.DataFrame(
+        [(*row[:4], None, row[4]) for row in FLOOR_ROWS],
+        columns=[*DIVIDEND_COLUMNS, "flagged"],
+    )
+    frame.index = pd.Index([f"row{n:02d}" for n in range(len(frame))])
+    return frame.iloc[np.random.default_rng(110).permutation(len(frame))]
+
+
+def test_dividend_floor_bound_flags_every_row_of_a_floored_race_pool():
+    pools = config.load_source("japan", "jra").pools
+    # The fixture's own checks: every pool here has jra.yaml's 110-yen minimum, and the shuffle
+    # splits race-pools, so no group is a run of rows.
+    assert {pools[row[1]].min_dividend for row in FLOOR_ROWS} == {110}
+    frame = floor_frame()
+    group_key = frame["race_id"] + "|" + frame["pool"]
+    assert (group_key != group_key.shift()).sum() > group_key.nunique() + 5
+
+    got = exotic().dividend_floor_bound(frame[DIVIDEND_COLUMNS])
+    assert isinstance(got, pd.Series)
+    assert list(got.index) == list(frame.index)
+    assert got.dtype == bool
+    assert got.tolist() == frame["flagged"].tolist()
+
+
+@pytest.mark.parametrize("column", ["race_id", "pool", "combination", "dividend"])
+def test_dividend_floor_bound_needs_the_dividends_columns(column):
+    frame = floor_frame()[DIVIDEND_COLUMNS].drop(columns=[column])
+    with pytest.raises(ValueError):
+        exotic().dividend_floor_bound(frame)
