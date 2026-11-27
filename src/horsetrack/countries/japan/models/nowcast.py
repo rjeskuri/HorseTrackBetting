@@ -24,7 +24,8 @@ Shares (per pool, over the combinations priced on a board)
 - `late_composition(v1, s1, v2, s2)` = (v2 s2 - v1 s1) / (v2 - v1), the money bet in between.
 
 The board at t (`race_view`; rows in `logger.compact.SCHEMA`)
-- t = post_utc - tau. A row counts from its snapshot_utc (owner, 2026-11-26: no lag); each
+- t = post_utc - tau. A row counts from its fetched_utc, its snapshot_utc where it has none
+  (docs/specs/board-at-t.md; owner, 2026-11-26: no lag), prices and pool totals alike; each
   combination takes its latest row at or before t, and a latest row without a positive price
   leaves the combination off the board. `total` is the latest `__pool__` investment at or before
   t; the lag boards are read the same way at t - 5 and t - 15 minutes, aligned to the board's
@@ -534,9 +535,21 @@ def _final_board(series: _Series) -> tuple[tuple[str, ...], np.ndarray, np.ndarr
     return tuple(series.combinations[i] for i in state.index), shares, state.lo
 
 
+def _available(rows: pd.DataFrame) -> np.ndarray:
+    """Each row's availability instant (microseconds): its page's fetched_utc, its snapshot_utc
+    where it has none (docs/specs/board-at-t.md), so a capture round that straddles a grid cutoff
+    puts only the pages fetched by the cutoff on that board, prices and totals alike."""
+    known = rows["snapshot_utc"]
+    if "fetched_utc" in rows.columns:
+        known = pd.to_datetime(rows["fetched_utc"], utc=True).fillna(
+            pd.to_datetime(known, utc=True)
+        )
+    return _micros(known)
+
+
 def _prepare(frame: pd.DataFrame) -> pd.DataFrame:
     rows = frame[frame["pool"].isin(POOLS)]
-    rows = rows.assign(snap=_micros(rows["snapshot_utc"]), post=_micros(rows["post_utc"]))
+    rows = rows.assign(snap=_available(rows), post=_micros(rows["post_utc"]))
     return rows[rows["snap"] > np.iinfo(np.int64).min]
 
 
@@ -555,12 +568,7 @@ def _scratches(*frames: pd.DataFrame | None) -> dict[str, dict[int, int]]:
             & (frame["combination"] != POOL_ROW)
         ]
         if len(rows):
-            known = rows["snapshot_utc"]
-            if "fetched_utc" in rows.columns:
-                known = pd.to_datetime(rows["fetched_utc"], utc=True).fillna(
-                    pd.to_datetime(known, utc=True)
-                )
-            marked.append(rows.assign(snap=_micros(known))[
+            marked.append(rows.assign(snap=_available(rows))[
                 ["race_id", "combination", "snap"]])  # fmt: skip
     out: dict[str, dict[int, int]] = {}
     if not marked:

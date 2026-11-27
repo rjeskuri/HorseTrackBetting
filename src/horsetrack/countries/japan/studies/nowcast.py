@@ -16,7 +16,9 @@ pools plus status_raw, fetched_utc and `is_final_state`, with `--end` applied to
   close gives no case and no growth observation and is counted (`no_final_capture`);
 - a runner scratched in our logged WIN or PLACE rows takes its Wide pairs off the Wide board from
   the reporting page's fetched_utc on (its snapshot_utc where it has none;
-  `models.nowcast.extract`, `scratches=`), JRA-VAN's WIN rows or not.
+  `models.nowcast.extract`, `scratches=`), JRA-VAN's WIN rows or not; our logged prices and pool
+  totals count from their page's fetched_utc too, so a capture round that straddles a grid
+  cutoff never mixes pages fetched after it into that board.
 D14: holdout days of either source are dropped by `is_holdout_day` on the file name, before any
 read; the holdout is not opened. Grades are the jravan races table's `race_class` (None for a
 race it does not hold). Wide is fitted and scored where the folds' training days hold Wide
@@ -113,10 +115,14 @@ COLUMNS = [
     "odds_hi",
     "investment",
 ]
-# Our logs add the scratch markers (Wide boards), each page's fetch time (when a scratch is
-# known) and the final-state flag (compact.py).
+# Our logs add the scratch markers (Wide boards), each page's fetch time (when its prices, totals
+# and scratches are known) and the final-state flag (compact.py).
 LOGGED_COLUMNS = [*COLUMNS, "status_raw", "fetched_utc"]
 FINAL_STATE = "is_final_state"
+# A fold's score table (`nc.score_cases` and the fold's label)
+SCORE_COLUMNS = ["case", "forecaster", "log_score", "crps", "kl", "race_id", "day", "venue"] + [
+    "pool", "tau_min", "fold"
+]  # fmt: skip
 FORECASTERS = ("structural", "no_features", "random_walk", "drift_v0")
 COMPARISONS = (
     ("structural", "random_walk"),
@@ -182,8 +188,9 @@ def read_logged_day(path: Path, jravan: pd.DataFrame | None) -> LoggedDay:
     the paths with a confirmed final capture (counted per pool, `final_capture`): a logged path
     whose capture stopped before the close has no final board or V_final, so it is no target and
     no growth observation, and is counted (`no_final_capture`). A file compacted before #411 has
-    no final-state flag, so none of its paths is kept (recompact). The scratch rows keep their
-    fetched_utc: a scratch is known from its page's fetch (`models.nowcast._scratches`)."""
+    no final-state flag, so none of its paths is kept (recompact). The rows keep their
+    fetched_utc: a logged price, total or scratch is known from its page's fetch
+    (`models.nowcast._available`)."""
     present = set(pq.read_schema(path).names)
     frame = read_day(path, [c for c in (*LOGGED_COLUMNS, FINAL_STATE) if c in present])
     scratches = frame[(frame["status_raw"] == SCRATCHED) & frame["pool"].isin((nc.WIN, nc.PLACE))]
@@ -283,12 +290,12 @@ def wide_status(
     final_capture: int = 0,
 ) -> dict:
     """Whether Wide (D3) was fitted, and when not, a sentence saying why: no Wide in our logs, no
-    post time on the logged Wide races, no logged Wide path giving a case, Wide cases on no fold's
-    training day, or too few of them for a cell. Confirmed finals are tracked apart from usable
-    grid boards, and a path-level reason names each missing input: `no_final_capture` Wide paths
-    dropped for want of a final capture, `final_capture` Wide paths kept with one that still give
-    no case (no usable board before the post on the tau grid). The Wide cases and days are
-    counted either way."""
+    post time on the logged Wide races, no logged Wide path giving a case, no fold at all, Wide
+    cases on no fold's training day, or too few of them for a cell. Confirmed finals are tracked
+    apart from usable grid boards, and a path-level reason names each missing input:
+    `no_final_capture` Wide paths dropped for want of a final capture, `final_capture` Wide paths
+    kept with one that still give no case (no usable board before the post on the tau grid). The
+    Wide cases and days are counted either way."""
     logged = coverage["own_logged_days"]
     wide_races = sum(e["wide_races"] for e in logged)
     with_post = sum(e["wide_races_with_post_time"] for e in logged)
@@ -324,6 +331,11 @@ def wide_status(
             "Wide is not fitted: no logged Wide path with a post time gives a case; "
             + "; ".join(missing)
             + ".",
+        ),
+        (
+            not folds,
+            "Wide is not fitted: the run has no fold (its development days end before D9's "
+            "first test window), so no cell of any pool is fitted.",
         ),
         (
             not trained,
@@ -433,6 +445,10 @@ def _logged_spec(v2: dict) -> dict:
         "source": f"processed/{SOURCE}/odds_timeseries (JRA-VAN 0B41/0B42) and "
         f"processed/{LOGGED_SOURCE}/odds_timeseries (our own compacted logged days, #411)",
         "holdout": "holdout days of either source are skipped by file name before any read (D14)",
+        "snapshot_rule": "a row counts from its page's fetched_utc, its snapshot_utc where it "
+        "has none (JRA-VAN rows; docs/specs/board-at-t.md; owner 2026-11-26: no lag), prices, "
+        "pool totals and scratches alike, so a capture round that straddles a grid cutoff puts "
+        "only the pages fetched by the cutoff on that board",
         "merge": "per day and per (race, pool): the JRA-VAN path where it has a post time, else "
         "our logged path (its rows with a post time); each path is timed by its own source's "
         "post time",
@@ -686,7 +702,7 @@ def run_study(
 
     rng = np.random.default_rng(SEED)
     scores, pit_acc, cells, phi_rows, fold_rows = [], {}, [], [], []
-    offset = 0
+    offset = wide_scored = 0
     try:
         for train, test, fold in folds:
             label = f"{fold.test_start.year}Q{(fold.test_start.month - 1) // 3 + 1}"
@@ -751,6 +767,7 @@ def run_study(
                 }
             )
             offset += len(test_cases)
+            wide_scored += int((test_cases.pool == nc.WIDE).sum())
             log(f"  fold {label}: {len(test_cases)} cases scored ({_progress(started)})")
     except Exception as exc:
         for a, b in COMPARISONS:
@@ -772,7 +789,10 @@ def run_study(
         write_summary(registry, summary_dir(COUNTRY))
         raise
 
-    scores = pd.concat([t for t in scores if len(t)] or scores, ignore_index=True)
+    # A run with no fold (`--end` before D9's first test window) has no score table: an empty one
+    # with the scored columns lets every comparison and the report render with no scored case.
+    empty = pd.DataFrame(columns=SCORE_COLUMNS)
+    scores = pd.concat([t for t in scores if len(t)] or scores or [empty], ignore_index=True)
     gains, records = {}, []
     for a, b in COMPARISONS:
         pair = scores[scores["forecaster"].isin([a, b])]
@@ -841,7 +861,9 @@ def run_study(
     }
     coverage = wide_coverage(logged)  # the logged days the folds read
     report_data["wide"] = (
-        wide_status(coverage, cases, folds, cells, no_final_wide, final_wide) | coverage
+        wide_status(coverage, cases, folds, cells, no_final_wide, final_wide)
+        | {"wide_scored_cases": wide_scored}
+        | coverage
     )
     about = {
         "family": f"`{family}`, spec sha256 `{spec_hash}`",
@@ -1104,7 +1126,13 @@ def render_report(gains: dict, data: dict, about: dict, grid) -> str:
         "",
         "The JRA-VAN series carries no Wide pool: Wide comes from our own logged days only (D3).",
         "",
-        "Wide was fitted and scored (its rows are in the tables above)."
+        (
+            f"Wide was fitted and {wide['wide_scored_cases']} Wide case(s) scored (its rows are "
+            "in the tables above)."
+            if wide["wide_scored_cases"]
+            else "Wide was fitted (a fold's training days give a Wide cell), but no Wide test "
+            "case was scored: no fold's scored test days hold a Wide case its fits cover."
+        )
         if wide["fitted"]
         else wide["reason"],
         "",
