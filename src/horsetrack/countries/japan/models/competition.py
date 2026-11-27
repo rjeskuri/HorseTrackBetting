@@ -2,6 +2,10 @@
 
 Opponent strength is implicit in Plackett-Luce, so it enters in two ways.
 
+This module builds the terms only. Their measurement (each term's ΔLL with its CI, standalone and
+at the final price, its leaderboard member row, and R_eff against the meta-model's residual by
+bucket) is #531's study, split from #94's outline 4 under the size cap.
+
 Field strength. `field_strength(frame, *, rating_col)` gives each runner the mean and max of
 rating_col over the other runners of its race_id, never the runner itself (a lone runner, or one
 whose race has no other rated runner, gets NaN). `interaction_columns(frame, *, rating_col)` adds
@@ -19,6 +23,13 @@ starters joins each of its n(n - 1)/2 pairs with weight 1/(n - 1), the Plackett-
 weighting of rank breaking (Hajek, Oh and Xu 2014), so a two-runner race is one unit edge and every
 race gives each starter one unit of degree; meetings add. The Graph holds the sparse Laplacian, the
 horse index and the connected components (`scipy.sparse.csgraph`).
+
+race_utc must be each race's actual post time in UTC: the cutoff is only as point-in-time as the
+stamps it compares. `studies.rating.read_results()` stamps a race at midnight JST of race_date plus
+race_no minutes, a stand-in that keeps a day's races in order but is not a post time. On such
+stamps only a before_utc at a JST day boundary is safe; an intraday before_utc can admit same-day
+races that had not yet run at that time. Callers that cut intraday (#531, #98) must supply real
+post times.
 
 `effective_resistance(graph, a, b)` is (e_a - e_b)' L^+ (e_a - e_b), so Var(s_a - s_b) =
 sigma^2 * R_eff(a, b) (05 §3.4): horses who met, or met through many short paths, are comparable.
