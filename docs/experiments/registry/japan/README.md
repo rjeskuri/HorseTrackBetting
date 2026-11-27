@@ -8,6 +8,7 @@ per family, each holding that family's runs.
 - [japan-c1-nowcast-final-shares-trial](japan-c1-nowcast-final-shares-trial.md)
 - [japan-c1-nowcast-final-shares-v2](japan-c1-nowcast-final-shares-v2.md)
 - [japan-c1-nowcast-final-shares-v3](japan-c1-nowcast-final-shares-v3.md)
+- [japan-c1-nowcast-final-shares-v4](japan-c1-nowcast-final-shares-v4.md)
 - [japan-c2-rating-final-win](japan-c2-rating-final-win.md)
 - [japan-c4-meta-final-win](japan-c4-meta-final-win.md)
 - [japan-calibrated-market-final-win](japan-calibrated-market-final-win.md)
