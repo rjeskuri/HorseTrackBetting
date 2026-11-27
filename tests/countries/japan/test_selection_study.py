@@ -5,9 +5,13 @@ Contract pinned here (`horsetrack.countries.japan.studies.selection`), with the 
 
 - `RuleSpec(rule_id, claim, segment, selection_cols, thresholds, direction)` and
   `FamilySpec(family_id, rules, decision_time, cluster_unit, benchmark, max_stat,
-  odds_band_cut_points)` are dataclasses. `claim` is 'beta', 'alpha' or 'omega'. Three fields
-  extend the ticket's signature; each is an owner decision with no default, so it is frozen with
-  the family rather than read from code (the values below are test inputs, not the owner's):
+  odds_band_cut_points, dropped_variants=[])` are dataclasses. `claim` is 'beta', 'alpha' or
+  'omega'. `dropped_variants` (default empty, so a spec without one still builds) lists the
+  variant ids screened and dropped before the freeze (08 §5.2 step 1: the family size counts
+  them); it is frozen with the spec, and `run_study` records each as a failed variant of the
+  family. Three more fields extend the ticket's signature; each is an owner decision with no
+  default, so it is frozen with the family rather than read from code (the values below are test
+  inputs, not the owner's):
   - `max_stat`: the multiple-testing settings, `{"level": StepM's family-wise level,
     "block_size": the stationary bootstrap's mean block length in clusters, "n_boot": SPA's and
     StepM's replicates}`, passed to #75's `spa` and `stepm`.
@@ -50,10 +54,13 @@ Contract pinned here (`horsetrack.countries.japan.studies.selection`), with the 
   natural cubic spline in ln q (`models.v0.calibration`), fitted in fold. A favourite-longshot bias
   the whole market shares is in the benchmark, so no segment is credited with it.
 - Look-ahead: `odds_final`, every `final_*` column and the store's final-price columns `win_odds`
-  and `win_fav_rank` are final-price columns. They may condition a probability claim (the
+  and `win_fav_rank` are final-price columns, and every column Japan's availability config
+  classifies as a label (`core.store.asof.load_availability("japan")`: any table's
+  `label_columns`, or a name one of its `label_prefixes` starts) is a result a view at t never
+  returns (`finish_pos`, `last_3f_s`, a payout...). They may condition a probability claim (the
   log-loss stage at the final price, the omega model's odds bands) but never select a bet: a rule
-  naming one in `selection_cols` is refused with `LookAheadSelection`. Board-at-t columns
-  (`odds_t`) are allowed.
+  naming one in `selection_cols` or in its `segment` is refused with `LookAheadSelection`.
+  Board-at-t columns (`odds_t`) are allowed.
 - `run_study(...) -> StudyReport(family_size, stages, survivors, p_beats_takeout, rungs)`:
   - `stages` holds "log_loss", "max_stat", "omega" and "roi" in that order (other keys allowed):
     `stages["log_loss"][rule_id]["passed"]` (bool) for every rule (its probability claim on all
@@ -70,13 +77,25 @@ Contract pinned here (`horsetrack.countries.japan.studies.selection`), with the 
     (`fit_segment_roi`, its `p_beats_takeout`) fitted on the rule's selected bets (owner answer
     4), with the family's odds bands as fixed effects: one rule's gaps never blank another's.
     Reported only: it never changes a survivor or a rung.
+  - `stages["omega"][rule_id]`, for every rule: its `p_beats_takeout` and `omega_selected`, the
+    posterior mean of the return multiplier of the rule's selected bets (the mean over those
+    bets of each bet's omega, band and segment effects combined: every bet of the fit is in the
+    rule's segment, so that mix is what the bets identify, not a segment effect apart from the
+    bands). Only a survivor's entry carries a return: its posterior predictive ROI,
+    `predictive_roi_100` ([low, high, level], 08 §5.2 step 4); a non-survivor's entry, and its
+    registry records, carry no ROI of any kind.
   - `rungs[rule_id]`: "S1" (shadow) for a survivor, "S0" for every other rule (owner answer 5);
     nothing is adopted.
   - `family_size`: `registry.family_size(family_id)` after the run: the rules (one registry record
-    each, variant = rule_id) plus the variants already in the family, failed (dropped) included.
+    each, variant = rule_id), the spec's `dropped_variants` (failed records) and the variants
+    already in the family, failed (dropped) included.
   - The holdout passed in is never opened: the study completes with one whose `open` raises.
+  - A rerun on a refreshed frame: a rule the registry already holds scored that the new frame
+    cannot score is a ValueError naming the rule, raised before the rerun appends any record
+    (the max-statistic stage would otherwise refuse the family after the first records).
 - `load_family("japan")` reads the committed config/selection_family.yaml, signed off by the
-  owner on #88; a copy without the sign-off raises `FamilyNotApproved`.
+  owner on #88, its `dropped` variants carried as the spec's `dropped_variants`; a copy without
+  the sign-off raises `FamilyNotApproved`.
 
 Not pinned: the log-loss bootstrap's level and replicates (D7, config/scoring.yaml), the form of
 a claim against the spline (a power on p_cal or a slope on ln q), the omega model's draws and
@@ -96,6 +115,7 @@ from __future__ import annotations  # noqa: I001
 
 import dataclasses
 import math
+import re
 import sys
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -116,6 +136,7 @@ from horsetrack.core.eval.holdout import (
 from horsetrack.core.eval.registry import Registry, RunRecord
 from horsetrack.core.eval.segment_roi import fit_segment_roi
 from horsetrack.core.eval.snooping import stepm
+from horsetrack.core.store.asof import load_availability
 from horsetrack.countries.japan.studies.selection import (
     FamilyNotApproved,
     FamilyNotFrozen,
@@ -155,6 +176,7 @@ MAIN_SEED = 8802
 OMEGA_SEED = 8803
 FLB_SEED = 8804
 DIRECTION_SEED = 8805
+FINISH_SEED = 8806  # the finishing order behind the synthetic result-label columns
 STUDY_SEED = 88
 BENCHMARK = "calibrated_market"
 MAX_STAT = {"level": 0.05, "block_size": 4, "n_boot": 500}  # test inputs, not the owner's
@@ -163,6 +185,10 @@ LOOK_AHEAD = ("odds_final", "final_odds_band", "final_rank", "final_entropy")
 HOLDOUT_LOG = DEFAULT_COUNTRIES_DIR / "japan" / LOG_NAME
 FAMILY_FILE = DEFAULT_COUNTRIES_DIR / "japan" / "config" / "selection_family.yaml"
 CLEAR_Z = 2.5  # a selection's realised return this many standard errors from breakeven
+# The reported return multiplier of a rule's bets, times (1 - t), within this many standard errors
+# of their realised return at the final odds (an unbiased estimate of the same mean).
+MIX_Z = 3.5
+FOLLOW_UP_RUN = "#462"  # the development-fold run of the committed family
 
 # (rule_id, claim, segment, selection_cols, thresholds, direction); only segment A's claim is
 # real. Every rule backs favourites; against the calibrated market (pulled towards A's bias) B, C
@@ -363,6 +389,32 @@ def roi_z(rows: pd.DataFrame) -> float:
     """The selection's realised return per unit stake over its standard error (0 = breakeven)."""
     pay = rows["won"] * rows["win_dividend"].fillna(0.0) - 1.0
     return float(pay.mean() / (pay.std(ddof=1) / math.sqrt(len(pay))))
+
+
+def finish_positions(data: pd.DataFrame) -> np.ndarray:
+    """A finishing order per race: the winner 1, the other runners 2 to n in a seeded order."""
+    rng = np.random.default_rng(FINISH_SEED)
+    key = -data["won"].to_numpy(dtype=float) + 0.5 * rng.random(len(data))
+    return pd.Series(key).groupby(data["race_id"].to_numpy()).rank(method="first").to_numpy()
+
+
+def is_availability_label(name: str) -> bool:
+    """Whether Japan's availability config keeps the column out of every view at t."""
+    return any(rule.is_label(name) for rule in load_availability("japan").values())
+
+
+def availability_labels() -> list[str]:
+    """Every label column Japan's availability config names (any table's `label_columns`), and
+    one name under each of its `label_prefixes`."""
+    rules = load_availability("japan").values()
+    names = {col for rule in rules for col in rule.label_columns}
+    names |= {f"{prefix}win_odds" for rule in rules for prefix in rule.label_prefixes}
+    return sorted(names)
+
+
+def roi_keys(mapping) -> list[str]:
+    """The keys of a stage entry, or the metric names of a record, that report a return."""
+    return [name for name in mapping if "roi" in str(name).lower()]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -726,6 +778,11 @@ def test_roi_needs_both_the_log_loss_and_the_max_statistic_stage(tmp_path, main_
         report = run.report
         assert list(report.survivors) == [], gate
         assert report.stages["roi"] == {}, gate
+        # No survivor, so no return anywhere: omega still reports P for each rule, and no ROI.
+        for rid in (rule[0] for rule in MAIN_RULES[:2]):
+            entry = report.stages["omega"][rid]
+            assert roi_keys(entry) == [], (gate, rid, sorted(entry))
+            assert 0.0 <= report.p_beats_takeout[rid] <= 1.0, (gate, rid)
         if gate == "max_stat":
             assert report.stages["max_stat"]["superior"] == []
             assert report.stages["log_loss"][MAIN_REAL]["passed"] is True
@@ -849,6 +906,77 @@ def test_the_stores_final_price_columns_are_look_ahead(tmp_path, monkeypatch, ma
         assert holdout.calls == [], col
 
 
+def _accepted(tmp_path: Path, name: str, cases: list[tuple], data: pd.DataFrame) -> list[str]:
+    """The cases (a label, a rule) whose one-rule family run_study accepts; each refused case
+    must be refused with LookAheadSelection, without opening the holdout."""
+    accepted = []
+    for k, (label, rule) in enumerate(cases):
+        registry = new_registry(tmp_path / f"{name}{k}")
+        spec = make_family(f"test-88-{name}-{k}", [rule])
+        freeze(registry, spec)
+        holdout = TrippedHoldout()
+        try:
+            run_study(spec, data, registry=registry, holdout=holdout, seed=1)
+        except LookAheadSelection:
+            pass
+        else:
+            accepted.append(label)
+        assert holdout.calls == [], label
+    return accepted
+
+
+def test_every_label_of_the_availability_config_is_refused_as_a_selection_column(
+    tmp_path, monkeypatch, main_runners
+):
+    """A view at t never returns a label column (Japan's availability config: each table's
+    `label_columns`, and every name under a `label_prefixes` entry), so no bet is selected on
+    one. Each label column, holding the finishing position, is the only selection column of the
+    real rule (segment A, which survives): [1, 1] would bet the winners only and report their
+    return. Every run is refused."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    check_main_premise(main_runners)
+    labels = availability_labels()
+    # Premise: the config's results are among them, beyond the final price.
+    assert {"finish_pos", "placing_code", "last_3f_s", "result_published_utc"} <= set(labels)
+    assert {"dividend", "is_final_capture"} <= set(labels)  # the board's payout columns
+    assert any(name.endswith("win_odds") and name != "win_odds" for name in labels)  # a prefix
+    assert all(is_availability_label(name) for name in labels)
+    finish = finish_positions(main_runners)
+    data = main_runners.assign(**dict.fromkeys(labels, finish))
+    assert (data.loc[data["won"] == 1, "finish_pos"] == 1).all()
+    assert (data.loc[data["won"] == 0, "finish_pos"] >= 2).all()
+
+    cases = [
+        (col, ("P4-seg-a", "beta", {"seg": "A"}, [col], {col: [1, 1]}, "above")) for col in labels
+    ]
+    accepted = _accepted(tmp_path, "label-selection", cases, data)
+    assert accepted == [], f"label columns accepted as a selection column: {accepted}"
+
+
+def test_a_segment_on_a_look_ahead_column_is_refused(tmp_path, monkeypatch, main_runners):
+    """The segment half of selection hygiene: a rule whose segment is read from a result label
+    or a final-price column is refused like a selection column. Runner-level segments that are
+    the winners (`finish_pos` 1) or the final favourites (`final_rank` 1), and segment A's races
+    (the real claim) under the name of a race result, a board payout or a prefixed label."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    renamed = ["result_published_utc", "dividend", "tyb_segment"]
+    assert all(is_availability_label(name) for name in ["finish_pos", *renamed])
+    data = main_runners.assign(
+        finish_pos=finish_positions(main_runners), **{col: main_runners["seg"] for col in renamed}
+    )
+    anywhere = {"odds_t": [None, None]}
+    cases = [
+        ("finish_pos", ("P4-winners", "omega", {"finish_pos": 1}, ["odds_t"], anywhere, "above")),
+        ("final_rank", ("P4-final-fav", "omega", {"final_rank": 1}, ["odds_t"], anywhere, "above")),
+    ]
+    cases += [
+        (col, ("P4-seg-a", "beta", {col: "A"}, ["odds_t"], {"odds_t": [1.5, 4.0]}, "above"))
+        for col in renamed
+    ]
+    accepted = _accepted(tmp_path, "label-segment", cases, data)
+    assert accepted == [], f"look-ahead columns accepted as a segment: {accepted}"
+
+
 # ---------------------------------------------------------------------------------------------
 # DoD: the holdout is not opened
 # ---------------------------------------------------------------------------------------------
@@ -919,6 +1047,43 @@ def test_report_family_size_includes_dropped_variants(main_run, omega_run):
         assert run.report.family_size == run.registry.family_size(family_id)
         variants = {record.variant for record in run.registry.records(family_id)}
         assert set(ids) | set(dropped) == variants  # each rule recorded, the dropped kept
+
+
+RERUN_RULES = [
+    MAIN_RULES[1],
+    ("P4-seg2-x", "beta", {"seg2": "X"}, ["odds_t"], {"odds_t": [None, 3.0]}, "above"),
+]
+
+
+def test_a_rerun_that_cannot_score_a_scored_rule_writes_nothing(
+    tmp_path, monkeypatch, main_runners
+):
+    """The registry is append-only, so a rule scored once stays in the family. A rerun on a
+    refresh every rule can still be scored on is another run; a rerun on a refresh where
+    `seg2` has no usable value, so P4-seg2-x can no longer be scored, is a ValueError naming that
+    rule, raised before the rerun appends a record (not part-way, after its first records)."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    k = pd.factorize(main_runners["race_id"])[0] % 3
+    data = main_runners.assign(seg2=np.where(k == 0, "X", "Y"))
+    first = run_frozen(tmp_path / "rerun", "test-88-rerun", RERUN_RULES, data)
+    assert_claims_scored(first)
+    registry, spec = first.registry, first.spec
+    before = registry.records()
+
+    refresh = data.assign(win_dividend=data["win_dividend"].where(data["won"] == 1))
+    report = run_study(spec, refresh, registry=registry, holdout=TrippedHoldout(), seed=STUDY_SEED)
+    assert set(report.rungs) == {rule[0] for rule in RERUN_RULES}
+    grown = registry.records()
+    assert len(grown) > len(before)  # a refresh is another run of the family
+
+    blank = refresh.assign(seg2=None)
+    holdout = TrippedHoldout()
+    with pytest.raises(ValueError) as caught:
+        run_study(spec, blank, registry=registry, holdout=holdout, seed=STUDY_SEED)
+    assert not isinstance(caught.value, LookAheadSelection)
+    assert "P4-seg2-x" in str(caught.value)
+    assert registry.records() == grown, "the refused rerun appended records"
+    assert holdout.calls == []
 
 
 def test_report_states_p_beats_takeout_per_segment(main_run, omega_run):
@@ -1003,6 +1168,88 @@ def test_a_gap_in_one_rules_segment_column_leaves_every_p_finite(gap_run):
         assert 0.0 <= value <= 1.0, (rid, value)
 
 
+def test_only_a_survivor_is_given_a_predictive_roi(main_run, omega_run, direction_run, flb_run):
+    """ROI is computed for survivors only (DoD), the omega stage's posterior predictive ROI
+    included: a non-survivor's omega entry and registry records carry no return of any kind,
+    while P(omega_s > 1/(1 - t)) is still reported for every rule. A survivor keeps its
+    predictive interval. In the market-bias family nothing survives."""
+    seen = {"survivor": [], "other": []}
+    for run in (main_run, omega_run, direction_run, flb_run):
+        report = run.report
+        records = run.registry.records(run.spec.family_id)
+        for rid in (rule[0] for rule in run.rules):
+            entry = report.stages["omega"][rid]
+            p = report.p_beats_takeout[rid]
+            assert isinstance(p, float) and 0.0 <= p <= 1.0, (rid, p)
+            assert entry["p_beats_takeout"] == pytest.approx(p, abs=1e-12), rid
+            if rid in report.survivors:
+                low, high, level = entry["predictive_roi_100"]
+                assert math.isfinite(low) and math.isfinite(high) and low < high, (rid, entry)
+                assert 0.0 < level < 1.0, (rid, entry)
+                seen["survivor"].append(rid)
+            else:
+                assert roi_keys(entry) == [], (rid, sorted(entry))
+                metrics = [m.metric for r in records if r.variant == rid for m in r.metrics]
+                assert roi_keys(metrics) == [], (rid, sorted(set(metrics)))
+                seen["other"].append(rid)
+    assert flb_run.report.survivors == []
+    assert len(seen["survivor"]) >= 3 and len(seen["other"]) >= 8, seen
+
+
+# The same bets as omega_run's J1 and J2 rules, under another segment: an extra column every
+# runner shares, or J2 under another column name and label.
+LONGER = {"odds_t": [3.0, None]}
+TWIN_RULES = [
+    ("P4-j1-twin", "omega", {"jockey": "J1", "always": "yes"}, ["odds_t"], LONGER, "above"),
+    ("P4-j2-twin", "omega", {"jockey": "J2", "always": "yes"}, ["odds_t"], LONGER, "above"),
+    ("P4-r2", "omega", {"rider": "R2"}, ["odds_t"], LONGER, "above"),
+]
+TWIN_OF = {"P4-j1-twin": "P4-j1", "P4-j2-twin": "P4-j2", "P4-r2": "P4-j2"}
+
+
+def with_twins(data: pd.DataFrame) -> pd.DataFrame:
+    """`data` with `always` ('yes' for every runner) and `rider` (the jockey relabelled R1...)."""
+    return data.assign(always="yes", rider=data["jockey"].str.replace("J", "R", regex=False))
+
+
+def test_omega_reports_the_return_multiplier_its_selected_bets_identify(
+    tmp_path, monkeypatch, omega_runners, omega_run, main_run, direction_run, flb_run
+):
+    """Every bet of a rule's omega fit is in the rule's segment, so the bets cannot tell a segment
+    effect from the odds bands' fixed effects; what they identify is the return multiplier of
+    their own mix, `omega_selected`. (1) The same bets under another segment (an extra column all
+    runners share, another column name and label) report the same multiplier and the same
+    P(omega_s > 1/(1 - t)). (2) The multiplier times (1 - t) is the bets' expected return at the
+    final odds, and agrees with their realised return there, sum(won * odds_final) / n_bets (an
+    unbiased estimate of it), within MIX_Z standard errors, for every rule of every family."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    twins = run_frozen(tmp_path / "twins", "test-88-twins", TWIN_RULES, with_twins(omega_runners))
+    for twin, plain in TWIN_OF.items():
+        twin_rule = next(rule for rule in TWIN_RULES if rule[0] == twin)
+        plain_rule = next(rule for rule in OMEGA_RULES if rule[0] == plain)
+        bets = selected(twins.data, twin_rule)
+        assert bets.index.equals(selected(omega_runners, plain_rule).index), twin  # premise
+        a, b = twins.report.stages["omega"][twin], omega_run.report.stages["omega"][plain]
+        assert "omega_selected" in a and "omega_selected" in b, (sorted(a), sorted(b))
+        assert a["omega_selected"] == pytest.approx(b["omega_selected"], rel=0.02), twin
+        p_twin = twins.report.p_beats_takeout[twin]
+        assert p_twin == pytest.approx(omega_run.report.p_beats_takeout[plain], abs=0.03), twin
+
+    realised = {}
+    for run in (omega_run, twins, main_run, direction_run, flb_run):
+        for rule in run.rules:
+            entry = run.report.stages["omega"][rule[0]]
+            rows = selected(run.data, rule)
+            assert len(rows) > 50 and "omega_selected" in entry, (rule[0], sorted(entry))
+            pay = rows["won"] * rows["odds_final"]
+            se = float(pay.std(ddof=1) / math.sqrt(len(pay)))
+            expected = entry["omega_selected"] * (1.0 - TAKEOUT)
+            assert abs(expected - pay.mean()) <= MIX_Z * se, (rule[0], expected, pay.mean(), se)
+            realised[(run.spec.family_id, rule[0])] = float(pay.mean())
+    # Premise: the realised returns run from far below breakeven to far above it.
+    assert min(realised.values()) < 0.5 and max(realised.values()) > 1.4, realised
+
+
 def test_the_odds_bands_are_frozen_with_the_family(tmp_path, monkeypatch, main_runners):
     """The omega model's odds bands come from the frozen cut points: editing them after the
     freeze is refused like any edit, and the study runs on data that carry no band column."""
@@ -1060,13 +1307,51 @@ def _owner_family_frame(data: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _prose(text: str) -> list[str]:
+    """A yaml file's sentences: each run of comment lines joined and split after a full stop,
+    and each other line on its own."""
+    units, block = [], []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            block.append(stripped.lstrip("#").strip())
+            continue
+        if block:
+            units.append(" ".join(block))
+            block = []
+        units.append(stripped)
+    if block:
+        units.append(" ".join(block))
+    return [sentence for unit in units for sentence in re.split(r"(?<=[.!?])\s+", unit)]
+
+
+def test_the_committed_family_cites_its_run_and_awaits_no_confirmation():
+    """The file names the follow-up development-fold run (#462), not a follow-up blocked by the
+    closed #369, and no sentence of it asks for the odds-band cut points to be confirmed: they
+    are proposed and frozen with the family (owner answer 7; the 2026-11-27 reframe, under which
+    a study no longer stops for sign-off)."""
+    text = FAMILY_FILE.read_text(encoding="utf-8")
+    assert re.search(rf"{FOLLOW_UP_RUN}\b", text), f"the file does not cite {FOLLOW_UP_RUN}"
+    prose = _prose(text)
+    stale = [s for s in prose if re.search(r"blocked\s+by\s+#369\b", s, re.I)]
+    assert stale == [], stale
+    cut_points = [s for s in prose if re.search(r"cut.?point", s, re.I)]
+    asks = [s for s in cut_points if re.search(r"confirm", s, re.I)]
+    assert asks == [], asks
+
+
 def test_the_committed_family_is_the_one_the_owner_approved(tmp_path, monkeypatch, main_runners):
     """`load_family("japan")` reads the signed file: Family P's three runnable rules with their
     thresholds and directions, decision time T-2, meeting clusters, the max-statistic settings,
-    the calibrated market and the odds-band cut points. Without the sign-off a copy is refused;
-    the family freezes as plain JSON and the study runs it."""
+    the calibrated market, the odds-band cut points and the six E4 variants the owner dropped
+    (`dropped_variants`, frozen with the spec). Without the sign-off a copy is refused; the family
+    freezes as plain JSON and the study runs it, recording each dropped variant as failed, so the
+    family size is 3 + 6 = 9 (08 §5.2 step 1)."""
     raw = yaml.safe_load(FAMILY_FILE.read_text(encoding="utf-8"))
     assert raw["owner_signoff"] == 88
+    dropped = [entry["variant"] for entry in raw["dropped"]]
+    assert len(dropped) == len(set(dropped)) == 6 and not set(dropped) & set(OWNER_RULES)
+
     spec = load_family("japan")
     assert isinstance(spec, FamilySpec)
     assert sorted(rule.rule_id for rule in spec.rules) == sorted(OWNER_RULES)
@@ -1095,7 +1380,12 @@ def test_the_committed_family_is_the_one_the_owner_approved(tmp_path, monkeypatc
     assert set(run.report.rungs) == set(OWNER_RULES)
     assert set(run.report.rungs.values()) <= {"S0", "S1"}
     records = run.registry.records(spec.family_id)
-    assert {record.variant for record in records} == set(OWNER_RULES)
-    assert all(record.status == "scored" for record in records)
+    assert {record.variant for record in records} == set(OWNER_RULES) | set(dropped)
+    status = {(record.variant, record.status) for record in records}
+    assert status == {(rid, "scored") for rid in OWNER_RULES} | {(v, "failed") for v in dropped}
+    assert run.report.family_size == len(OWNER_RULES) + len(dropped) == 9
+    assert run.report.family_size == run.registry.family_size(spec.family_id)
     for rid, value in run.report.p_beats_takeout.items():
         assert math.isfinite(value) and 0.0 <= value <= 1.0, (rid, value)
+    # The dropped variants are part of the frozen spec, so the freeze covers them too.
+    assert list(getattr(spec, "dropped_variants", None) or []) == dropped

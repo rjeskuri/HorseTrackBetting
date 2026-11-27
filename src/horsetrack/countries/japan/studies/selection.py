@@ -5,12 +5,18 @@ development rows the caller passes (one row per starter, `split_off`'s developme
 owner's answers on #88 (2026-11-26) set the benchmark, the one-sided pass, the omega basis, the
 odds bands and the rungs; each is cited below as "answer N".
 
-0. Freeze. `run_study` raises `FamilyNotFrozen` before it scores or writes anything unless the
-   registry holds the family frozen with exactly this spec: the hash `Registry.freeze_family`
-   gives `dataclasses.asdict(spec)` (a direction and the odds-band cut points included). The owner
-   approves the family and the caller freezes it; the study never freezes it itself. A row on a
-   holdout day (`core.eval.holdout.is_holdout_day`) is a ValueError, also before anything is
-   scored or written.
+0. Freeze and hygiene. `run_study` raises `FamilyNotFrozen` before it scores or writes anything
+   unless the registry holds the family frozen with exactly this spec: the hash
+   `Registry.freeze_family` gives `dataclasses.asdict(spec)` (a direction, the odds-band cut
+   points and the dropped variants included). The owner approves the family and the caller
+   freezes it; the study never freezes it itself. Then, also before anything is scored or
+   written: a rule whose segment or selection names a look-ahead column refuses the run with
+   `LookAheadSelection` (every rule, survivor or not). Look-ahead is the final price and the
+   result (`odds_final`, `won`, `win_dividend`, any `final_*`, the store's `win_odds` and
+   `win_fav_rank`) and every label of Japan's availability config
+   (`core.store.asof.load_availability`: a table's `label_columns`, or a name one of its
+   `label_prefixes` starts), which a view at t never returns. A row on a holdout day
+   (`core.eval.holdout.is_holdout_day`) is a ValueError.
 1. Log loss. The benchmark is D4's calibrated market (`calibrated_market`, answer 3): the
    conditional-logit natural cubic spline in ln q of `models.v0.calibration`, refitted on each of
    D9's walk-forward folds (config/folds.yaml) on the fold's training rows of every race, so a
@@ -33,19 +39,27 @@ odds bands and the rungs; each is cited below as "answer N".
    `direction` side of the null (answer 6): "above" needs beta_s > 1 (gamma_s > 0), "below"
    beta_s < 1 (gamma_s < 0). The coefficient judged is the mean of the per-fold fits weighted by
    the segment races each fold scores: the fits the out-of-fold predictions used.
+   Stage 1 writes nothing. Before the first record: SPA and StepM test every variant the family
+   holds scored, so a rerun whose frame cannot score one is a ValueError naming it and its stage-1
+   error (the registry unchanged). Then the spec's `dropped_variants` are recorded as failed
+   variants (one each, skipping a variant the family already holds, so none counts twice), and
+   each rule's stage-1 record.
 2. Max statistic. #75's SPA and StepM over the rules scored at stage 1 (their registry records
    are appended first, so the family check sees them), on per-race losses of every scored race
    (the calibrated market's outside a rule's segment), in `cluster_unit` clusters ordered by race
    date, with the family's frozen `max_stat` settings.
-3. Omega. Before any rule's bets are read, a rule whose segment or selection names a look-ahead
-   column (`odds_final`, `won`, `win_dividend`, any `final_*`, and the store's final-price
-   columns `win_odds` and `win_fav_rank`) refuses the run with `LookAheadSelection`. Then, per
-   rule, #78's hierarchical model (`fit_segment_roi`) on the rule's selected bets only (answer 4),
-   at the final Win odds, with fixed effects per odds band cut from the final odds at the family's
-   `odds_band_cut_points` (answer 7; a price on a cut point is in the band above it) and the
-   rule's segment columns as its random effects: P(omega_s > 1/(1 - t) | data) for the rule and
-   the predictive ROI of its next PREDICTIVE_BETS bets (08 §5.2 step 4). One fit per rule, so one
-   rule's gaps never touch another's. Reported only: it never changes a survivor or a rung.
+3. Omega. Per rule, #78's hierarchical model (`fit_segment_roi`) on the rule's selected bets only
+   (answer 4), at the final Win odds, with fixed effects per odds band cut from the final odds at
+   the family's `odds_band_cut_points` (answer 7; a price on a cut point is in the band above it)
+   and the rule's segment columns as its random effects. Every bet of the fit is in the rule's
+   segment, so the segment effect is not identified apart from the bands; what the bets identify
+   is their own mix: `omega_selected`, the posterior mean of the bets' mean omega (band and
+   segment effects combined), `p_beats_takeout`, the posterior probability that the same mean
+   exceeds 1/(1 - t) (#78's, on the same bets), and `ln_omega_by_band`, each band's ln omega with
+   the segment effect added.
+   A survivor's entry also carries the predictive ROI of its next PREDICTIVE_BETS bets (08 §5.2
+   step 4); no other rule's entry or record carries a return. One fit per rule, so one rule's gaps
+   never touch another's. Reported only: it never changes a survivor or a rung.
 4. ROI, for the survivors only (passed stage 1 and found superior by StepM): one unit to Win on
    each runner of the segment whose selection columns are all in [lo, hi] (inclusive, None an
    open end, a missing value never selected), paid at `win_dividend`. A loser pays 0 (its
@@ -55,11 +69,12 @@ odds bands and the rungs; each is cited below as "answer N".
 Rungs: S1 (shadow) for a survivor, S0 (avoid) for every other rule (answer 5); nothing goes above
 S1 and no record is adopted. The holdout passed in is never opened.
 
-Records: one per rule (variant = rule_id, hypothesis id = its leading P/E/L id) before StepM,
-status 'failed' when its claim could not be scored, and a second one at the end carrying every
-stage's metrics (a survivor's ROI as `roi_win_dividend`). A record already in the registry is not
-appended again. `sources` defaults to a licensed source (fails closed, D21): pass the sources
-`data` was built from.
+Records: one failed record per dropped variant the family does not hold yet, one per rule
+(variant = rule_id, hypothesis id = its leading P/E/L id) before StepM, status 'failed' when its
+claim could not be scored, and a second one per rule at the end carrying every stage's metrics (a
+survivor's ROI as `roi_win_dividend`). A record already in the registry is not appended again.
+`sources` defaults to a licensed source (fails closed, D21): pass the sources `data` was built
+from.
 
 Memory: one column-scoped copy of `data`; every fold works on positions into it, and the
 benchmark's ln p_cal is held for one fold at a time.
@@ -87,6 +102,7 @@ from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord, _spec
 from horsetrack.core.eval.scoring import gain, per_race_log_loss
 from horsetrack.core.eval.segment_roi import fit_segment_roi
 from horsetrack.core.eval.snooping import spa, stepm
+from horsetrack.core.store.asof import load_availability
 from horsetrack.countries.japan.models.condlogit import fit_conditional_logit
 from horsetrack.countries.japan.models.v0.calibration import fit_win_calibration
 from horsetrack.countries.japan.studies.calibration import bootstrap_settings, devig_normalised
@@ -102,7 +118,8 @@ MAX_STAT_KEYS = frozenset({"level", "block_size", "n_boot"})
 FINAL_ODDS, DIVIDEND, TAKEOUT = "odds_final", "win_dividend", "takeout"
 ODDS_BAND = "odds_band"  # the omega model's favourite-longshot band, cut from the final odds
 BASE_COLUMNS = ["race_id", "race_date", "won", FINAL_ODDS, DIVIDEND, TAKEOUT]
-# The final price, the result, and the store's names for the final Win odds and favourite rank.
+# The final price, the result, and the store's names for the final Win odds and favourite rank;
+# every label of Japan's availability config is look-ahead too (`_check_look_ahead`).
 LOOK_AHEAD = frozenset({FINAL_ODDS, DIVIDEND, "won", "win_odds", "win_fav_rank"})
 LOOK_AHEAD_PREFIX = "final_"
 OMEGA_DRAWS = 4000  # posterior draws of the omega model: Monte Carlo precision only
@@ -148,6 +165,7 @@ class FamilySpec:
     benchmark: str
     max_stat: dict
     odds_band_cut_points: list[float]
+    dropped_variants: list[str] = dataclasses.field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -171,14 +189,15 @@ def load_family(path_or_country: str | Path = COUNTRY, *, proposed: bool = False
     """The family in a country's `config/selection_family.yaml`, or in the yaml at a path.
 
     Refused with `FamilyNotApproved` unless the file's `owner_signoff` names the issue where the
-    owner approved it; `proposed=True` reads a proposal for review. `status`, `dropped` (variants
-    to record as failed before the freeze) and `deferred` are for the reader. Nothing is frozen.
+    owner approved it; `proposed=True` reads a proposal for review. `dropped` (each entry's
+    `variant`, in the file's order) becomes the spec's `dropped_variants`, which `run_study`
+    records as failed variants; `status` and `deferred` are for the reader. Nothing is frozen.
     """
     if isinstance(path_or_country, Path) or str(path_or_country).endswith((".yaml", ".yml")):
         raw = yaml.safe_load(Path(path_or_country).read_text(encoding="utf-8")) or {}
     else:
         raw = load_country_yaml(str(path_or_country), FAMILY_CONFIG)
-    fields = [f.name for f in dataclasses.fields(FamilySpec)]
+    fields = [f.name for f in dataclasses.fields(FamilySpec) if f.name != "dropped_variants"]
     unknown = sorted(set(raw) - {*fields, "status", "owner_signoff", "dropped", "deferred"})
     missing = [name for name in fields if name not in raw]
     if unknown or missing:
@@ -201,9 +220,14 @@ def load_family(path_or_country: str | Path = COUNTRY, *, proposed: bool = False
                 direction=entry["direction"],
             )
         )
+    dropped = []
+    for entry in raw.get("dropped") or []:
+        if not (isinstance(entry, dict) and isinstance(entry.get("variant"), str)):
+            raise ValueError(f"a dropped entry needs its variant id: {entry!r}")
+        dropped.append(entry["variant"])
     values = {name: raw[name] for name in fields}
     values["odds_band_cut_points"] = list(raw["odds_band_cut_points"])
-    return FamilySpec(**{**values, "rules": rules})
+    return FamilySpec(**{**values, "rules": rules, "dropped_variants": dropped})
 
 
 def _hypothesis_id(rule_id: object) -> str:
@@ -234,6 +258,29 @@ def _check_frozen(spec: FamilySpec, registry: Registry) -> str:
 
 def _real(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and np.isfinite(value)
+
+
+def _check_look_ahead(spec: FamilySpec) -> None:
+    """Selection hygiene (08 §5.2): refuse a family any of whose rules selects its bets, through
+    its segment or a selection column, on a final-price or result column. Every rule, survivor
+    or not, so a family's validity never depends on what the data let through."""
+    tables = load_availability(COUNTRY).values()
+
+    def look_ahead(col: str) -> bool:
+        final = col in LOOK_AHEAD or col.startswith(LOOK_AHEAD_PREFIX)
+        return final or any(table.is_label(col) for table in tables)
+
+    offending = {
+        rule.rule_id: cols
+        for rule in spec.rules
+        if (cols := [col for col in [*rule.segment, *rule.selection_cols] if look_ahead(col)])
+    }
+    if offending:
+        raise LookAheadSelection(
+            f"rules select on look-ahead columns {offending}: a bet is selected from the board "
+            "at t or from as-of features only (08 §5.2, selection hygiene; a label of "
+            f"countries/{COUNTRY}/config/availability.yaml is never in a view at t)"
+        )
 
 
 def _check_spec(spec: FamilySpec, data: pd.DataFrame, seed: object) -> list[str]:
@@ -285,6 +332,15 @@ def _check_spec(spec: FamilySpec, data: pd.DataFrame, seed: object) -> list[str]
             if None not in bounds and bounds[0] > bounds[1]:
                 raise ValueError(f"{rule.rule_id}: {col}'s range {bounds} is empty")
         columns += [*rule.segment, *cols]
+    dropped = spec.dropped_variants
+    if not (isinstance(dropped, (list, tuple)) and all(isinstance(v, str) for v in dropped)):
+        raise ValueError(f"dropped_variants must be a list of variant ids: {dropped!r}")
+    for variant in dropped:
+        if not _HYPOTHESIS.match(variant):
+            raise ValueError(f"dropped variant {variant!r} must start with its hypothesis id")
+    if len(set(dropped)) != len(dropped) or set(dropped) & set(ids):
+        raise ValueError(f"dropped_variants must be distinct and no rule's id: {list(dropped)}")
+    _check_look_ahead(spec)
     columns = list(dict.fromkeys(columns))
     missing = [col for col in columns if col not in data.columns]
     if missing:
@@ -327,10 +383,6 @@ def _selected(frame: pd.DataFrame, rule: RuleSpec) -> np.ndarray:
         if hi is not None:
             keep &= values <= hi
     return keep
-
-
-def _look_ahead(col: str) -> bool:
-    return col in LOOK_AHEAD or col.startswith(LOOK_AHEAD_PREFIX)
 
 
 def _race_ll(p: pd.Series, frame: pd.DataFrame, rows: np.ndarray) -> pd.Series:
@@ -444,10 +496,10 @@ def run_study(
 ) -> StudyReport:
     """Run the frozen family on development rows (module docstring) and report every stage.
 
-    Raises `FamilyNotFrozen` (before anything is scored or written), `AlphaMemberUnnamed` or
-    ValueError for a spec or frame the study cannot run, a row on a holdout day included (also
-    before anything is scored), and `LookAheadSelection` before the first stage that reads a
-    rule's bets. `holdout` is held, never opened.
+    Raises, before anything is scored or written: `FamilyNotFrozen`, `AlphaMemberUnnamed`,
+    `LookAheadSelection`, or ValueError for a spec or frame the study cannot run (a row on a
+    holdout day included). Raises ValueError before the first record when the frame cannot score
+    a variant the family holds scored. `holdout` is held, never opened.
     """
     if not isinstance(spec, FamilySpec):
         raise TypeError(f"spec must be a FamilySpec, got {type(spec).__name__}")
@@ -497,6 +549,20 @@ def run_study(
             params=params,
             metrics=tuple(metrics),
             status="failed" if failed else "scored",
+            **identity,
+        )
+
+    def dropped(variant: str) -> RunRecord:
+        """A variant screened and dropped before the freeze: a failed variant with no metrics."""
+        return RunRecord(
+            hypothesis_id=_hypothesis_id(variant),
+            family_id=spec.family_id,
+            variant=variant,
+            ticket=TICKET,
+            components={"claim": "dropped", "benchmark": spec.benchmark},
+            params={"spec_sha256": frozen_hash, "dropped_before_freeze": True},
+            metrics=(),
+            status="failed",
             **identity,
         )
 
@@ -589,7 +655,27 @@ def run_study(
         column = bench.copy()  # the calibrated market's loss outside the rule's races
         column.loc[g.per_race.index] = ll.loc[g.per_race.index]
         losses[rid] = column
-    append([record(rules[rid], metrics[rid], rid not in losses) for rid in rules])
+
+    # Nothing is written yet. SPA and StepM test every variant the family holds scored, so a
+    # rerun that cannot score one is refused here, not after its first records.
+    held = registry.records(spec.family_id)
+    lost = sorted({r.variant for r in held if r.status != "failed"} - set(losses))
+    if lost:
+        why = {
+            v: log_loss[v]["error"] if v in log_loss else "not a rule of this spec" for v in lost
+        }
+        raise ValueError(
+            f"family {spec.family_id!r}: the registry holds {lost} scored, and this frame "
+            f"cannot score them ({why}); the max-statistic stage tests every scored variant of "
+            "the family, so the run is refused before it writes a record"
+        )
+    # The dropped variants first (one record each, unless the family already holds that variant,
+    # so the family size never counts one twice), then each rule's stage-1 record.
+    known = {r.variant for r in held}
+    append(
+        [dropped(v) for v in spec.dropped_variants if v not in known]
+        + [record(rules[rid], metrics[rid], rid not in losses) for rid in rules]
+    )
 
     # Stage 2: SPA ("does any rule beat the calibrated market") and StepM ("which ones").
     tested = list(losses)
@@ -616,21 +702,12 @@ def run_study(
             "n_clusters": found.n_clusters,
         }
     survivors = [rid for rid in rules if log_loss[rid]["passed"] and rid in max_stat["superior"]]
-
-    # Selection hygiene, before any stage reads a rule's bets (every rule, survivors or not).
-    offending = {
-        rid: cols
-        for rid, rule in rules.items()
-        if (cols := [col for col in [*rule.segment, *rule.selection_cols] if _look_ahead(col)])
-    }
-    if offending:
-        raise LookAheadSelection(
-            f"rules select on look-ahead columns {offending}: a bet is selected from the board "
-            "at t or from as-of features only (08 §5.2, selection hygiene)"
-        )
-    bets_of = {rid: _selected(frame, rule) for rid, rule in rules.items()}
+    bets_of = {rid: _selected(frame, rule) for rid, rule in rules.items()}  # hygiene: _check_spec
 
     # Stage 3: #78's omega model on each rule's selected bets, odds-band fixed effects. Reported.
+    # Every bet of a fit is in the rule's segment, so the bets identify only their own mix's
+    # multiplier (band and segment effects together): omega_selected, and P that it beats the
+    # takeout. A return (the predictive ROI) is a survivor's only.
     odds = frame[FINAL_ODDS].to_numpy(dtype=float)
     labels = np.array(_band_labels(spec.odds_band_cut_points))
     band = labels[np.digitize(odds, spec.odds_band_cut_points)]
@@ -639,7 +716,7 @@ def run_study(
     for rid, rule in rules.items():
         bet = bets_of[rid]
         n_bets = int(bet.sum())
-        entry = {"n_bets": n_bets, "p_beats_takeout": float("nan")}
+        entry = {"n_bets": n_bets, "p_beats_takeout": float("nan"), "omega_selected": np.nan}
         entry["breakeven_omega"] = float(1.0 / (1.0 - takeout[bet].mean())) if n_bets else np.nan
         try:
             if not n_bets:
@@ -656,13 +733,21 @@ def run_study(
                 seed=seed,
                 draws=OMEGA_DRAWS,
             )
-            interval = model.predictive_roi(query, PREDICTIVE_BETS)
+            segment_effect = model.posterior_mean(query)  # alone, only the priors' split
             entry |= {
                 "p_beats_takeout": float(model.p_beats_takeout(query)),
-                "ln_omega_segment": model.posterior_mean(query),
-                "band_effects": dict(model.band_effects),
-                f"predictive_roi_{PREDICTIVE_BETS}": [interval.low, interval.high, interval.level],
+                "omega_selected": float(model.omega_mean(query)),
+                "ln_omega_by_band": {
+                    b: float(mu + segment_effect) for b, mu in model.band_effects.items()
+                },
             }
+            if rid in survivors:
+                interval = model.predictive_roi(query, PREDICTIVE_BETS)
+                entry[f"predictive_roi_{PREDICTIVE_BETS}"] = [
+                    interval.low,
+                    interval.high,
+                    interval.level,
+                ]
         except Exception as exc:  # reported with the stage; the other stages stand
             entry["error"] = f"{exc!r}"
         omega[rid] = entry

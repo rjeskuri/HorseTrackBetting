@@ -43,9 +43,10 @@ check: 20 wins at odds 1.0 beside three null levels gives a tau posterior mean o
 be fitted at any tau and raises.
 
 Queries name a segment as ``{column: level}`` for one or more segment columns. Its omega is the
-mean over the segment's own bets of each bet's fitted omega (its band, its levels of every column),
-and ``p_beats_takeout`` is the probability that the segment's mean expected return per unit stake,
-``mean(omega_i * (1 - t_i))``, exceeds 1; with one takeout that is ``P(omega_s > 1 / (1 - t))``.
+mean over the segment's own bets of each bet's fitted omega (its band, its levels of every column;
+``omega_mean`` gives its posterior mean), and ``p_beats_takeout`` is the probability that the
+segment's mean expected return per unit stake, ``mean(omega_i * (1 - t_i))``, exceeds 1; with one
+takeout that is ``P(omega_s > 1 / (1 - t))``.
 Every bet counts once (flat stakes): the stake column is not used.
 """
 
@@ -224,6 +225,15 @@ class SegmentROI:
         """Posterior mean of the sum of the named random effects (ln-omega scale)."""
         codes = self._codes_of(segment)
         return float(sum(self._mean[self._offsets[c] + code] for c, code in codes.items()))
+
+    def omega_mean(self, segment: dict[str, str]) -> float:
+        """Posterior mean of the segment's omega: the mean over its own bets of each bet's omega
+        (its band and its level of every column combined), the multiplier `p_beats_takeout`
+        judges against 1 / (1 - t)."""
+        rows = self._rows(segment)
+        cells, local = np.unique(self._cell[rows], return_inverse=True)
+        weight = np.bincount(local.ravel()) / rows.sum()
+        return float(np.mean(np.exp(self._draws @ self._design[cells].T) @ weight))
 
     def p_beats_takeout(self, segment: dict[str, str]) -> float:
         """P(mean expected return per unit stake of the segment's bets > 1 | data)."""

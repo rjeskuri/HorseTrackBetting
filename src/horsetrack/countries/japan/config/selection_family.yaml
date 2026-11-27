@@ -8,18 +8,18 @@
 # 0.05, block 6 meetings, n_boot 10000. The owner also answered: the benchmark is D4's calibrated
 # market fitted in fold (answer 3); omega is fitted on each rule's selected bets and reported only
 # (answer 4); a pre-registered non-survivor sits at S0 (answer 5); a stage-1 pass needs the claim
-# pointing the way the rule bets, one-sided (answer 6: `direction`); the odds-band cut points are
-# proposed here and frozen with the family (answer 7): the values below came after the sign-off,
-# so the owner confirms them on the pull request before the follow-up freezes the family. Once
-# frozen, changing any value is an owner decision and a new family id, not an edit.
+# pointing the way the rule bets, one-sided (answer 6: `direction`); the odds-band cut points
+# were proposed under answer 7 and are frozen with the family. Once frozen, changing any value is
+# an owner decision and a new family id, not an edit.
 #
-# NOT FROZEN, NOT RUN HERE. The development-fold run is a follow-up ticket blocked by #369 (epic
-# #359): every rule selects on the Win board at t (odds_t, rank_t, entropy_t_bin), which the
-# development store holds for two logged days only; years of it come from the JRA-VAN boards at t
-# once #369 parses them. That run freezes dataclasses.asdict(load_family("japan")) in the run
-# registry, after recording `dropped` as failed variants and before it reads a row. Its figures
-# are JRA-VAN-derived and withheld under D21: a private report through
-# core.eval.reports.write_report, cited in the repository as withheld.
+# NOT FROZEN, NOT RUN HERE. The development-fold run is follow-up #462 (epic #72): every rule
+# selects on the Win board at t (odds_t, rank_t, entropy_t_bin), which the development store holds
+# for two logged days only; years of it come from the JRA-VAN boards at t (#369, epic #359). That
+# run freezes dataclasses.asdict(load_family("japan")) in the run registry before it reads a row;
+# run_study then records each `dropped` variant (the spec's dropped_variants) as a failed variant
+# of the family, unless the family already holds it. Its figures are JRA-VAN-derived and withheld
+# under D21: a private report through core.eval.reports.write_report, cited in the repository as
+# withheld.
 #
 # Thresholds restate 08 §5.1's rule definitions; no result figure (returns, intervals, counts) is
 # copied here (D21: several earlier screens are built on JRDB). Each rule is one RuleSpec: claim
@@ -103,8 +103,9 @@ rules:
     thresholds: {rank_t: [1, 1]}
     direction: above
 
-# Variants screened before the freeze and not carried (the owner dropped the E4 variants): to be
-# recorded as failed variants of this family before it is frozen, so its family size counts them
+# Variants screened before the freeze and not carried (the owner dropped the E4 variants):
+# load_family carries each `variant` as the spec's dropped_variants (frozen with it), and
+# run_study records each as a failed variant of this family, so its family size counts them
 # (08 §5.2 step 1). #77's in-sample E4 screen fitted every segment of config/calibration.yaml;
 # handicap is P3 and R12 is P4 above. Each: an E4 segment screened in-sample by #77, dropped by the
 # owner on #88.
