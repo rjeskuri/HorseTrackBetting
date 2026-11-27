@@ -1,12 +1,17 @@
 /* The shadow page (#122): the live board (board.js, #42) plus each row's shadow value, the bucket
  * the value was read at, and the avoid flags (#117, candidate rules of #82, none adopted).
  *
- * renderShadow draws board.js's renderBoard with four extra cells per row: the move since T-2, the
- * value (WIN: mean with its 5-95% band; other pools: the value at the low and the high odds), the
- * bucket label and the flag chips. Rows come from the plain feed only and keep its order; the
- * shadow feed (#121) is joined on (race_id, pool, combination) and never sorts, highlights or
- * colours a row (a selection rule is the owner's, D19). Values are gross return per 1 yen at the
- * final price: information only, nothing here is a bet.
+ * renderShadow draws board.js's renderBoard with extra cells per row: the odds ladder (#499: T-20,
+ * T-10, T-5, T-2 and the final from the shadow entry's `ladder`, observed odds as figures coloured
+ * by their move since T-20, the nowcast's projection of a checkpoint still ahead as '≈x.x'; without
+ * a ladder, or when the shadow race's post time is not /feed's (the schedule authority), the plain
+ * row's t20/t10/t5/t2_odds and '-' ahead), the value (WIN: mean with its 5-95%
+ * band; other pools: the value at the low and the high odds), the bucket label and the flag chips.
+ * Rows come from the plain feed only, one race per page, in board.js's order: favourite first by
+ * the crowd's current odds (#498, the owner's display choice). The shadow feed (#121) is joined on
+ * (race_id, pool, combination) and never sorts, highlights or colours a row by shadow value (a
+ * selection rule is the owner's, D19). The race follows the URL hash as on the board page.
+ * Values are gross return per 1 yen at the final price: information only, nothing here is a bet.
  * On a WIN5 day (#135) a line above the board, the element with data-win5, shows the shadow feed's
  * `win5`: the whole WIN5 pool's gross return per 1 yen with the carryover (two decimals), the
  * carryover and the tickets sold so far. No such element when `win5` is null.
@@ -90,29 +95,102 @@
       '<span class="mono">' + esc(yen(own(w, "investment"))) + "</span></p>";
   }
 
-  var HEAD = '<th scope="col" class="num">Since T-2</th>' +
+  /* The odds ladder (#499): [column, shadow ladder key, plain-feed reference, header]. */
+  var LADDER = [
+    ["ladder-t20", "20", "t20_odds", "T-20"],
+    ["ladder-t10", "10", "t10_odds", "T-10"],
+    ["ladder-t5", "5", "t5_odds", "T-5"],
+    ["ladder-t2", "2", "t2_odds", "T-2"],
+    ["ladder-final", "0", null, "Final"],
+  ];
+
+  /* The five checkpoints of a row, each {odds, observed} or null. /feed is the schedule
+   * authority: the shadow entry's ladder is used only when the shadow race has /feed's post time
+   * (`sameSchedule`); otherwise its timed checkpoints and a projected Final are for another
+   * schedule and are ignored, but an observed Final is the price that paid and always stays.
+   * With a ladder of the same schedule an observed ladder point stays, else the plain row's
+   * reference replaces a projected or null point (the feeds refresh apart). Without one, the
+   * plain row's references as observed and null ahead (the final unless observed). */
+  function ladderOf(entry, line, sameSchedule) {
+    var ladder = own(entry, "ladder");
+    var hasLadder = ladder && typeof ladder === "object";
+    return LADDER.map(function (c) {
+      var point = hasLadder ? own(ladder, c[1]) : null;
+      if (!point || typeof point !== "object" || num(own(point, "odds")) === null) point = null;
+      else point = { odds: num(point.odds), observed: point.observed === true };
+      if (point !== null && !sameSchedule && !(c[1] === "0" && point.observed)) point = null;
+      if (point !== null && point.observed) return point;
+      var ref = c[2] === null ? null : num(own(line, c[2]));
+      return ref !== null ? { odds: ref, observed: true } : point;
+    });
+  }
+
+  /* Observed odds with one decimal, coloured up / down against an observed T-20; projected ones
+   * as '≈' and the odds, muted; '-' for none. */
+  function ladderCells(entry, line, sameSchedule) {
+    var points = ladderOf(entry, line, sameSchedule);
+    var t20 = points[0] && points[0].observed ? points[0].odds : null;
+    return points.map(function (p, i) {
+      var cls = "num lad", shown = DASH;
+      if (p !== null && p.observed) {
+        shown = p.odds.toFixed(1);
+        if (i > 0 && t20 !== null && p.odds !== t20) {
+          cls += " mv " + (p.odds > t20 ? "up" : "down");
+        }
+      } else if (p !== null) {
+        shown = "≈" + p.odds.toFixed(1);
+        cls += " projected";
+      }
+      return '<td data-col="' + LADDER[i][0] + '" class="' + cls + '">' + esc(shown) + "</td>";
+    }).join("");
+  }
+
+  var HEAD = LADDER.map(function (c) { return '<th scope="col" class="num">' + c[3] + "</th>"; })
+    .join("") +
     '<th scope="col" class="num">Value</th><th scope="col">Read at</th>' +
     '<th scope="col">Flags</th>';
 
-  /* The HTML of the shadow page for one venue: the board plus value, bucket and flag cells. */
+  /* race_id -> whether the shadow race has the plain feed's post time (the same instant, or a
+   * null post time on both feeds: the same unknown schedule). */
+  function sameSchedules(feed, races) {
+    var same = {};
+    var venues = feed && Array.isArray(feed.venues) ? feed.venues : [];
+    venues.forEach(function (v) {
+      (v && Array.isArray(v.races) ? v.races : []).forEach(function (r) {
+        var id = r ? String(r.race_id) : null;
+        if (id === null || !has.call(races, id)) return;
+        if (r.post_utc == null && races[id].post_utc == null) {
+          same[id] = true;
+          return;
+        }
+        var plainMs = board.instantMs(r.post_utc);
+        same[id] = plainMs !== null && plainMs === board.instantMs(races[id].post_utc);
+      });
+    });
+    return same;
+  }
+
+  /* The HTML of the shadow page for one race of one venue: the board plus ladder, value, bucket
+   * and flag cells. /feed is the schedule authority: the plain feed is drawn as is, and its post
+   * times set the header, the countdown, the strip and the next-race choice. */
   function renderShadow(feed, shadowFeed, opts) {
     opts = opts || {};
     var races = shadowRaces(shadowFeed);
+    var same = sameSchedules(feed, races);
     var columns = {
       head: HEAD,
       cells: function (raceId, code, line) {
         var race = has.call(races, String(raceId)) ? races[String(raceId)] : null;
         var entry = own(own(own(race, "pools"), code), String(line.combination));
-        var mv = board.moveClass(line.move_t2_pct);
-        return '<td data-col="move-t2" class="num mv' + (mv ? " " + mv : "") + '">' +
-          esc(board.formatMove(line.move_t2_pct)) + "</td>" +
+        return ladderCells(entry, line, same[String(raceId)] === true) +
           '<td data-col="value" class="num val">' + esc(valueText(code, entry)) + "</td>" +
           '<td data-col="bucket" class="mono small">' + esc(race ? bucketText(race) : DASH) +
           "</td>" + '<td data-col="flags" class="flags">' + flagChips(entry) + "</td>";
       },
     };
     return win5Line(shadowFeed) +
-      board.renderBoard(feed, { now: opts.now, venue: opts.venue, columns: columns });
+      board.renderBoard(feed,
+        { now: opts.now, venue: opts.venue, race: opts.race, columns: columns });
   }
 
   /* ------------------------------------------------------------ the browser glue */
@@ -127,10 +205,39 @@
     el.className = "chip" + (cls ? " " + cls : "");
   }
 
+  /* The race drawn in #shadow, or null. */
+  function drawnRace(root) {
+    var block = root.querySelector ? root.querySelector("[data-race]") : null;
+    return block && block.getAttribute ? block.getAttribute("data-race") : null;
+  }
+
+  /* Each pool's horizontal scroll ({pool code: scrollLeft}); the .pool sections scroll sideways
+   * on a narrow screen and innerHTML replaces them. */
+  function poolScroll(root) {
+    var out = {};
+    var pools = root.querySelectorAll ? root.querySelectorAll("[data-pool]") : [];
+    Array.prototype.forEach.call(pools, function (e) {
+      out[e.getAttribute("data-pool")] = e.scrollLeft;
+    });
+    return out;
+  }
+
   function draw() {
     var root = document.getElementById("shadow");
     if (!root || !state.feed) return;
-    root.innerHTML = renderShadow(state.feed, state.shadow, { now: Date.now(), venue: state.venue });
+    var pick = board.selection(state.feed, state.venue);
+    state.venue = pick.venue;
+    var race = drawnRace(root), scroll = poolScroll(root);
+    root.innerHTML = renderShadow(state.feed, state.shadow,
+      { now: Date.now(), venue: pick.venue, race: pick.race });
+    if (race !== null && drawnRace(root) === race) {  // the same race redrawn: keep each pool
+      var pools = root.querySelectorAll ? root.querySelectorAll("[data-pool]") : [];
+      Array.prototype.forEach.call(pools, function (e) {
+        var code = e.getAttribute("data-pool");
+        if (has.call(scroll, code) && scroll[code]) e.scrollLeft = scroll[code];
+      });
+    }
+    board.followSelected("#shadow");
   }
 
   /* One GET with If-None-Match: resolves to the HTTP status (200 stores the body and its ETag). */
@@ -173,13 +280,21 @@
     var tab = target && target.closest ? target.closest("[data-venue]") : null;
     if (!tab) return;
     state.venue = tab.getAttribute("data-venue");
+    board.chooseVenue(state.feed, state.venue, Date.now());
     draw();
-    if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
+    board.toTop();
+  }
+
+  /* A strip link, a step link or back: draw the race the hash names, from its top. */
+  function onHashChange() {
+    draw();
+    board.toTop();
   }
 
   function start() {
     var root = document.getElementById("shadow");
     if (root) root.addEventListener("click", onClick);
+    window.addEventListener("hashchange", onHashChange);
     (function tick() {
       poll().then(function () { setTimeout(tick, POLL_MS); });
     })();
