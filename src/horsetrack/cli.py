@@ -47,6 +47,7 @@ from horsetrack.countries.japan.logger.systemd import systemd_command
 from horsetrack.countries.japan.models.v0.nowcast_store import nowcast_fit_command
 from horsetrack.countries.japan.research.coverage import coverage_command
 from horsetrack.countries.japan.research.exacta_impact import exacta_impact_command
+from horsetrack.countries.japan.research.leaderboard_build import leaderboard_command
 from horsetrack.countries.japan.research.pool_depth import pool_depth_app
 from horsetrack.countries.japan.research.spread_scan import spread_scan_app
 from horsetrack.countries.japan.research.win5_backfill import win5_history_command
@@ -79,6 +80,7 @@ japan.command("nowcast-fit")(nowcast_fit_command)
 japan.command("ability-study")(ability_study_command)
 japan.command("debut-members")(debut_members_command)
 japan.command("coverage")(coverage_command)
+japan.command("leaderboard")(leaderboard_command)
 japan.add_typer(spread_scan_app, name="spread-scan")
 japan.add_typer(bets_app, name="bets")
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
