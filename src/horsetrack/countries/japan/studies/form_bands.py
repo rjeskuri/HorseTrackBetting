@@ -28,8 +28,14 @@ Each gain is the gain of the registered meld over v0: b_g on a masked ln h also 
 intercept, and every variant refits the market weight a (`READING`). The frozen spec defines no
 favourite-vs-longshot comparison rule, so the report answers the primary question "inconclusive"
 and reads each group on its own (`PRIMARY`). v0's file leaves out first-place dead heats, races
-without a priced winner and starters without a final price; `read_rows` counts those races by
-reason and never reads a missing v0 row as a scratch. Each run writes its own private report.
+without a priced winner and starters without a final price; `read_rows` refits v0's fold fits
+from the store (checked to reproduce the file) to score first-place dead heats, checks every v0
+row against the store, counts each race it leaves out once by reason and never reads a missing
+v0 row as a scratch. Each run writes its own private report.
+
+Families: v1 (`FAMILY_ID_V1`, `build_spec` / `data_description`) is the owner's pre-registration
+as frozen and first run; v2 (`FAMILY_ID`, `build_spec_v2` / `data_description_v2`) is the same
+design with the corrected eligibility (reviews of PR #473), the family the study records under.
 
 T-2 bands come from JRA-VAN, a licensed source (D21): every record carries the source `jravan`,
 the committed registry summary withholds its figures, and the report goes through `write_report`
@@ -54,6 +60,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import polars as pl
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from horsetrack.core import paths
@@ -67,6 +75,11 @@ from horsetrack.core.eval.snooping import spa, stepm
 from horsetrack.core.pricing import clean_odds
 from horsetrack.countries.japan.handicap.factors import handicap_dir
 from horsetrack.countries.japan.models.condlogit import fit_conditional_logit
+from horsetrack.countries.japan.models.v0.calibration import (
+    STORE_COLUMNS,
+    _development_frame,
+    fit_win_calibration,
+)
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
 from horsetrack.countries.japan.studies.calibration import _markdown_table, store_builds
 from horsetrack.countries.japan.studies.cross_pool import boards_at
@@ -74,11 +87,13 @@ from horsetrack.countries.japan.studies.cross_pool import boards_at
 COUNTRY = "japan"
 TICKET = 218
 HYPOTHESIS_ID = "E218"  # no 08 §4 number: the ticket's, as #256's E256
-FAMILY_ID = "japan-form-bands-t2-win"
+FAMILY_ID_V1 = "japan-form-bands-t2-win"  # the pre-registered family, frozen and run first
+FAMILY_ID = "japan-form-bands-t2-win-v2"  # the corrected eligibility (review of PR #473)
 BOOTSTRAP_SEED = 218
 N_BOOT = 2000  # the approved pre-registration's meeting resamples
 FWE_LEVEL = 0.05
 BLOCK_SIZE = 1  # meetings: the stationary bootstrap's block 1 is D7's i.i.d. meeting resampling
+MIN_MEETINGS = 3  # arch's SPA / StepM need at least three observations (meetings)
 SOURCES = ("jra", "jravan")  # the store's results (netkeiba) and the JRA-VAN T-2 boards
 REFERENCE = "P0"
 VARIANTS = ("P0", "B1", "B2", "B3", "B4", "B5", "R1", "R2", "R3", "R4", "BA", "RA")
@@ -304,9 +319,10 @@ def gain_interval(per_race: pd.DataFrame, *, n_boot: int, seed: int) -> GainInte
 
 
 def build_spec(n_boot: int, data: Mapping | None = None) -> dict:
-    """The approved pre-registration as frozen in the registry (owner, #218, 2026-11-25)."""
+    """v1: the approved pre-registration as frozen in the registry (owner, #218, 2026-11-25).
+    Kept byte-identical: the v1 family's frozen hash is built from it."""
     return {
-        "family_id": FAMILY_ID,
+        "family_id": FAMILY_ID_V1,
         "ticket": TICKET,
         "hypothesis_id": HYPOTHESIS_ID,
         "question": "does #129's meld weight on form, negative given the market in most folds, "
@@ -372,6 +388,36 @@ def build_spec(n_boot: int, data: Mapping | None = None) -> dict:
         "T-2 boards from JRA-VAN (2026-11-25), reframed 2026-11-27",
         "adoption": "by rank (owner, 2026-11-27); nothing is adopted here",
         "sources": list(SOURCES),
+    }
+
+
+def build_spec_v2(n_boot: int, data: Mapping | None = None) -> dict:
+    """v2: v1's design exactly (variants, groups, meld, walk-forward, scoring, inference), with
+    the corrected eligibility of the rows in `data` (`data_description_v2`)."""
+    spec = build_spec(n_boot, data)
+    spec["inputs"] = {
+        **spec["inputs"],
+        "p_cal": f"v0, the calibrated-market Win probability out of fold ({V0_OOF}, #114); a "
+        "first-place dead heat, which that file leaves out, gets its fold's v0 fit refitted "
+        "from the store as models.v0.calibration.run_fit makes it, the refit checked to "
+        "reproduce the file on every race the file holds and the run keeps",
+    }
+    spec["rulings"] = [
+        *spec["rulings"],
+        "a race v0 cannot score (void, no priced winner) is dropped and counted by reason",
+        "every v0 row is checked against the store's current starter fields; a race where they "
+        "disagree, a confirmed starter without a v0 row, an unnumbered confirmed starter or a "
+        "T-2 runner the store does not hold takes its race out, each race counted once",
+    ]
+    return {
+        **spec,
+        "family_id": FAMILY_ID,
+        "supersedes": f"{FAMILY_ID_V1}: its data.rows rule read a T-2 runner missing from v0 as "
+        "a scratch and its rows left out first-place dead heats (round-1 and round-2 reviews of "
+        "PR #473); the design is unchanged",
+        "approved": "v1's pre-registration (owner on #218, 2026-11-25; reframed 2026-11-27), "
+        "with the eligibility corrected and frozen by Claude under the 2026-11-27 reframe (later "
+        "variants added by Claude and counted, without a new sign-off)",
     }
 
 
@@ -482,13 +528,17 @@ def _free_stem(out_dir: Path, stem: str) -> str:
 
 
 def _family_tests(runs: dict[str, MeldRun], rows: pd.DataFrame, registry, n_boot: int):
-    """SPA and StepM over the scored non-reference variants against v0, on their common races."""
+    """SPA and StepM over the scored non-reference variants against v0, on their common races,
+    and why they did not run (None when they did)."""
     names = [v for v in NON_REFERENCE if v in runs]
     if not names:
-        return None, None
+        return None, None, "no non-reference variant scored"
     common = set.intersection(*(set(runs[v].per_race["race_id"]) for v in names))
     frames = {v: runs[v].per_race.set_index("race_id").loc[sorted(common)] for v in names}
     first = frames[names[0]]
+    meetings = first["meeting_id"].nunique()
+    if meetings < MIN_MEETINGS:
+        return None, None, f"{meetings} meeting(s) scored; the bootstrap needs {MIN_MEETINGS}"
     losses = pd.DataFrame({v: frames[v]["ll_variant"] for v in names})
     day = rows.drop_duplicates("race_id").set_index("race_id")["race_date"]
     kwargs = dict(
@@ -509,6 +559,7 @@ def _family_tests(runs: dict[str, MeldRun], rows: pd.DataFrame, registry, n_boot
          "races": len(common)},
         {"superior": sorted(m.superior, key=VARIANTS.index), "family_size": m.family_size,
          "n_meetings": m.n_clusters},
+        None,
     )  # fmt: skip
 
 
@@ -529,7 +580,7 @@ def run_family(
     the repository before anything is written."""
     _refuse_holdout(rows)
     out_dir = paths.outside_repo(Path(out_dir), what="out_dir")
-    spec = build_spec(n_boot, data)
+    spec = build_spec_v2(n_boot, data)
     spec_hash = registry.freeze_family(FAMILY_ID, spec)
 
     groups = assign_groups(rows)
@@ -580,7 +631,7 @@ def run_family(
     if not set(appended) <= set(run_ids):
         raise RuntimeError("an appended record id differs from the run's own record ids")
     view = _RunView(registry, records)
-    spa_result, stepm_result = _family_tests(runs, rows, view, n_boot)
+    spa_result, stepm_result, not_run = _family_tests(runs, rows, view, n_boot)
 
     result = {
         "family_id": FAMILY_ID,
@@ -593,6 +644,7 @@ def run_family(
         "errors": errors,
         "spa": spa_result,
         "stepm": stepm_result,
+        "family_test_not_run": not_run,
         "counts": {**dict(counts or {}), **drops, "folds": len(folds)},
     }
     now = datetime.now(timezone.utc)
@@ -619,19 +671,22 @@ READING = (
     "- Every gain here is the gain of the registered meld over v0, not a measure of form alone. "
     "Two confounds are built into the frozen design (round-1 review of PR #473):",
     "  - Group intercept: b_g multiplies ln h masked to group g, and ln h within a race shares a "
-    "normaliser and a typical level, so b_g also acts as a group intercept. A negative b_g can "
-    "raise or lower a whole group's probability (an under- or over-priced band) without using "
-    "the form differences between its runners.",
+    "normaliser and a typical level, so b_g also acts as a group intercept. Since ln h <= 0, a "
+    "b_g < 0 adds b_g ln h >= 0 to each of the group's runners: against b_g = 0 it raises (or "
+    "keeps) the group's share of the race, as an under-priced group would need, whether or not "
+    "it uses the form differences between the group's runners.",
     "  - Market refit: every variant refits the market weight a, while v0 is unchanged, so each "
     "gain and the family test (SPA / StepM against v0) also credit the market refit of a, not "
     "only the form terms.",
     "  - A comparison that holds group intercepts and the market refit fixed is a new family "
     "for the owner to approve (#474); none is run or implied here.",
     "- v0's out-of-fold file leaves out first-place dead heats, races without a priced winner and "
-    "starters without a final price. Those races are not scored here; they are counted by reason "
-    "in the data table (dropped_dead_heat, dropped_no_priced_winner, dropped_void, "
-    "dropped_starter_without_v0). v0 is not rebuilt for them: the pre-registration names its "
-    "file.",
+    "starters without a final price. A first-place dead heat with every starter priced is scored "
+    "here with its fold's v0 fit refitted from the store (dead_heat_races_refit); the refit "
+    "reproduces the file on every race the file holds and the run keeps, or the run stops. The "
+    "other races are dropped and counted, each once, in the data table (dropped_void, "
+    "dropped_no_priced_winner, dropped_starter_without_v0, dropped_v0_disagrees_with_store, "
+    "dropped_unnumbered_starter and the rest).",
 )
 PRIMARY = (
     "Asked before the run: is b < 0 and the gain > 0 in the favourite groups (R1, R2) more than "
@@ -713,7 +768,7 @@ def render_report(result: dict, runs: dict[str, MeldRun], folds: Sequence[Fold],
     n_rules = result["spa"]["n_rules"] if result["spa"] else 0
     lines += ["", f"## Family test over this run's {n_rules} scored non-reference variants", ""]
     if result["spa"] is None:
-        lines.append("_Not run: no non-reference variant scored._")
+        lines.append(f"_Not run: {result['family_test_not_run']}._")
     else:
         lines += [
             _markdown_table([{"test": "SPA", **result["spa"]}]),
@@ -773,82 +828,213 @@ def _files_digest(files: list[Path]) -> str:
     return h.hexdigest()[:16]
 
 
-def _absent_reasons(runners: pd.DataFrame, absent: set[str]) -> dict[str, int]:
-    """Why each store race absent from v0 is absent, counted: no winner (void), two or more
-    winners (a dead heat, which v0's generator leaves out), no winner with a final price, or
-    another reason."""
-    mine = runners[runners["race_id"].isin(absent)]
-    starter = ~mine["is_scratched"].fillna(False).to_numpy(dtype=bool)
-    won = mine["finish_pos"].eq(1).fillna(False).to_numpy(dtype=bool) & starter
-    priced = won & np.isfinite(mine["win_odds"].to_numpy(dtype=float))
-    per = pd.DataFrame({"race_id": mine["race_id"].to_numpy(), "won": won, "priced": priced})
-    per = per.groupby("race_id").agg(winners=("won", "sum"), priced=("priced", "any"))
-    per = per.reindex(sorted(absent)).fillna({"winners": 0, "priced": False})
-    void = per["winners"] == 0
-    dead_heat = ~void & (per["winners"] >= 2)
-    unpriced = ~void & ~dead_heat & ~per["priced"].astype(bool)
+def data_description_v2(date_from: date, date_to: date, scheme: FoldScheme) -> dict:
+    """v2's rows: v1's sources, with the eligibility the reviews of PR #473 corrected."""
     return {
-        "dropped_void": int(void.sum()),
-        "dropped_dead_heat": int(dead_heat.sum()),
-        "dropped_no_priced_winner": int(unpriced.sum()),
-        "dropped_not_in_v0_other": int((~void & ~dead_heat & ~unpriced).sum()),
+        "days": f"development race days {date_from.isoformat()} to {date_to.isoformat()}",
+        "population": "the store's races on those days (processed/jra races and runners)",
+        "p_cal": f"{V0_OOF}; for a first-place dead heat with every starter priced (which that "
+        "file leaves out) the fold's v0 fit refitted from the store as "
+        "models.v0.calibration.run_fit makes it (fit_win_calibration on the fold's training "
+        "rows from 2014-06-07), predict_many on the race's normalised 1/odds, each co-winner "
+        "won; the refit must reproduce the file on every race it holds and the run keeps",
+        "h": "features/jra/handicap/<day>.parquet: handicap_score",
+        "t2": "processed/jravan/odds_timeseries/<day>.parquet: WIN rows only",
+        "store": "processed/jra runners (race_date, horse_no, win_odds, finish_pos, "
+        "is_scratched, dead_heat; horse_no may be null), races (meeting_id, race_date)",
+        "rows": "each race's starters are the store's confirmed starters (is_scratched not "
+        "True); a runner the store scratches but the T-2 board prices is a scratched row (it "
+        "ranks, it is not scored); a missing v0 row is never read as a scratch",
+        "dropped": "each race once, counted under its first reason: void (no winner); no "
+        "priced winner; a dead heat with an unpriced starter; not in v0 for another reason; an "
+        "unnumbered confirmed starter; a v0 row the store's current starter fields contradict "
+        "(runner absent, scratched or unpriced, or its normalised 1/odds changed); a confirmed "
+        "starter without a v0 row; a T-2 runner the store does not hold; a starter without h",
+        "fold_scheme": dataclasses.asdict(scheme),
     }
 
 
-def read_rows(date_from: date, date_to: date, scheme: FoldScheme) -> tuple:
-    """The run's rows, the folds, the counts and the data builds (see `data_description`).
+def _per_race(store: pd.DataFrame) -> pd.DataFrame:
+    """Per store race: its winners, dead-heat winners, a priced winner, and whether it has an
+    unnumbered or an unpriced numbered confirmed starter."""
+    starter = store["starter"].to_numpy()
+    numbered = store["horse_no"].notna().to_numpy()
+    priced = np.isfinite(store["win_odds"].to_numpy(dtype=float))
+    first = store["finish_pos"].eq(1).fillna(False).to_numpy(dtype=bool) & starter
+    flags = pd.DataFrame(
+        {
+            "race_id": store["race_id"].to_numpy(),
+            "winners": first,
+            "dh_winners": first & store["dead_heat"].fillna(False).to_numpy(dtype=bool),
+            "priced_winner": first & priced,
+            "unnumbered": starter & ~numbered,
+            "unpriced": starter & numbered & ~priced,
+        }
+    )
+    return flags.groupby("race_id").agg(
+        winners=("winners", "sum"),
+        dh_winners=("dh_winners", "sum"),
+        priced_winner=("priced_winner", "any"),
+        unnumbered=("unnumbered", "any"),
+        unpriced=("unpriced", "any"),
+    )
 
-    The population is the store's races on the development days read. A race v0 leaves out is
-    counted by its reason (`_absent_reasons`). In a v0 race, a confirmed starter (store
-    `is_scratched` False or unknown) with no v0 row, or a runner priced at T-2 the store does not
-    hold, takes the race out (counted); a runner the store scratched but the T-2 board prices is
-    a scratched row (it ranks, it is not scored). One day of odds is read at a time, WIN rows
-    only."""
+
+def _store_q(store: pd.DataFrame) -> pd.DataFrame:
+    """The store's numbered, priced confirmed starters with q, their normalised 1/odds."""
+    usable = store[
+        store["starter"].to_numpy()
+        & store["horse_no"].notna().to_numpy()
+        & np.isfinite(store["win_odds"].to_numpy(dtype=float))
+    ][["race_id", "horse_no", "win_odds"]].copy()
+    usable["horse_no"] = usable["horse_no"].astype("int64")
+    inv = 1.0 / usable["win_odds"].to_numpy(dtype=float)
+    totals = pd.Series(inv).groupby(usable["race_id"].to_numpy()).transform("sum").to_numpy()
+    usable["q"] = inv / totals
+    return usable[["race_id", "horse_no", "q"]]
+
+
+def _refit_p_cal(
+    frame: pd.DataFrame, v0_folds: Sequence[Fold], fold_rows: dict[int, pd.DataFrame]
+) -> dict[int, np.ndarray]:
+    """For each fold k, v0's fold fit refitted (`fit_win_calibration` on its training rows, as
+    `run_fit`) and its p_cal for `fold_rows[k]` (race_id, q)."""
+    out = {}
+    for k, part in sorted(fold_rows.items()):
+        model = fit_win_calibration(frame.iloc[v0_folds[k].train_idx])
+        out[k] = model.predict_many(part["q"].to_numpy(dtype=float), part["race_id"].to_numpy())
+        del model
+    return out
+
+
+def read_rows(date_from: date, date_to: date, scheme: FoldScheme) -> tuple:
+    """The run's rows, the folds, the counts and the data builds (see `data_description_v2`).
+
+    The population is the store's races on the development days read; each race left out is
+    counted once, under its first reason (`data_description_v2`'s "dropped"). v0's fold fits are
+    refitted from the store as `models.v0.calibration.run_fit` makes them; they must reproduce
+    the v0 file's p_cal on every race the file holds and the run keeps (else ValueError), and
+    they give a first-place dead heat its p_cal. One day of odds is read at a time, WIN rows
+    only; the store is read column-scoped."""
     data = paths.data_dir()
-    oof = pq.read_table(data / V0_OOF, columns=["race_id", "horse_no", "fold", "p_cal"])
+    oof = pq.read_table(data / V0_OOF, columns=["race_id", "horse_no", "fold", "q", "p_cal"])
     oof = oof.to_pandas()
     oof["race_date"] = pd.to_datetime(oof["race_id"].str.slice(4, 14)).dt.date
     oof = oof[(oof["race_date"] >= date_from) & (oof["race_date"] <= date_to)]
     oof = oof[~oof["race_date"].map(lambda d: is_holdout_day(COUNTRY, d))]
     oof = oof.astype({"horse_no": "int64"})
 
-    races = read_store_table(
-        "races", columns=["race_id", "race_date", "meeting_id"], start=PRICE_ERA_START,
-        end=date_to, touches_price=False,
-    ).to_pandas()  # fmt: skip
-    store_days = sorted(set(races["race_date"]))
-    folds = walk_forward(store_days, scheme=scheme)
-    fold_of = {}
-    for k, fold in enumerate(folds):
-        for i in fold.test_idx:
-            fold_of[store_days[i]] = k
-    mine = oof["race_date"].map(fold_of)
+    table = read_store_table(
+        "runners", columns=STORE_COLUMNS, start=PRICE_ERA_START, end=date_to, touches_price=True
+    )
+    frame, _, _ = _development_frame(table)  # v0's development frame, as run_fit builds it
+    store = table.filter(
+        pc.and_(
+            pc.greater_equal(table["race_date"], pa.scalar(date_from, pa.date32())),
+            pc.less_equal(table["race_date"], pa.scalar(date_to, pa.date32())),
+        )
+    ).to_pandas()
+    del table
+    folds = walk_forward(frame["race_date"], scheme=scheme)  # v0's folds (run_fit)
+
+    def fold_of(day: date) -> int | None:
+        for k, fold in enumerate(folds):
+            if fold.test_start <= day <= fold.test_end:
+                return k
+        return None
+
+    day_fold = {d: fold_of(d) for d in sorted(set(oof["race_date"]) | set(store["race_date"]))}
+    mine = oof["race_date"].map(day_fold)
     if mine.isna().any() or not (mine.astype(int) == oof["fold"]).all():
-        raise ValueError("the v0 OOF folds differ from #70's folds over the store's days")
-    in_range = (races["race_date"] >= date_from) & (races["race_date"] <= date_to)
-    store_races = races[in_range.to_numpy()]
-    store_races = store_races[~store_races["race_date"].map(lambda d: is_holdout_day(COUNTRY, d))]
-    runners = read_store_table(
-        "runners", columns=["race_id", "horse_no", "finish_pos", "is_scratched", "win_odds"],
-        start=date_from, end=date_to, touches_price=True,
+        raise ValueError("the v0 OOF folds differ from #70's folds over v0's development frame")
+
+    races = read_store_table(
+        "races", columns=["race_id", "race_date", "meeting_id"], start=date_from, end=date_to,
+        touches_price=False,
     ).to_pandas()  # fmt: skip
-    runners = runners[runners["race_id"].isin(set(store_races["race_id"]))]
-    runners["horse_no"] = runners["horse_no"].astype("int64")
-    runners["win_odds"] = clean_odds(runners["win_odds"].to_numpy())
-    runners["won"] = runners["finish_pos"].eq(1).fillna(False).astype(bool)
-    runners["store_scratched"] = runners["is_scratched"].fillna(False).astype(bool)
+    store = store[~store["race_date"].map(lambda d: is_holdout_day(COUNTRY, d))]
+    store["horse_no"] = store["horse_no"].astype("Int64")
+    store["win_odds"] = clean_odds(store["win_odds"].to_numpy())
+    store["starter"] = ~store["is_scratched"].eq(True).to_numpy(dtype=bool, na_value=False)
+    per = _per_race(store)
 
     v0_races = set(oof["race_id"])
-    absent = set(store_races["race_id"]) - v0_races
-    reasons = _absent_reasons(runners, absent)
-    oof = oof[oof["race_id"].isin(set(store_races["race_id"]))]
-    v0_keys = pd.MultiIndex.from_frame(oof[["race_id", "horse_no"]])
-    in_v0 = runners["race_id"].isin(v0_races).to_numpy()
-    keys = pd.MultiIndex.from_frame(runners[["race_id", "horse_no"]])
-    missing = in_v0 & ~runners["store_scratched"].to_numpy() & ~keys.isin(v0_keys)
-    no_v0_races = set(runners.loc[missing, "race_id"])
-    oof = oof[~oof["race_id"].isin(no_v0_races)]
+    order: list[tuple[str, set[str]]] = []
+    absent = per.loc[~per.index.isin(v0_races)]
+    void = set(absent.index[absent["winners"] == 0])
+    dead_heat = set(absent.index[(absent["winners"] >= 2) & (absent["dh_winners"] >= 2)]) - void
+    unpriced_winner = set(absent.index[~absent["priced_winner"]]) - void - dead_heat
+    dh_unpriced = {r for r in dead_heat if per.at[r, "unpriced"]}
+    other = set(absent.index) - void - dead_heat - unpriced_winner
+    order += [("dropped_void", void), ("dropped_no_priced_winner", unpriced_winner),
+              ("dropped_dead_heat_unpriced_starter", dh_unpriced),
+              ("dropped_not_in_v0_other", other)]  # fmt: skip
+    candidates = (set(per.index) & v0_races) | (dead_heat - dh_unpriced)
+    unnumbered = {r for r in candidates if per.at[r, "unnumbered"]}
+    order.append(("dropped_unnumbered_starter", unnumbered))
+    candidates -= unnumbered
+
+    # B: every v0 row against the store's current starter fields
+    store_q = _store_q(store)
+    v0 = oof.merge(store_q, on=["race_id", "horse_no"], how="left", suffixes=("", "_store"))
+    agrees = np.isclose(v0["q"], v0["q_store"], rtol=1e-9, atol=1e-12) & v0["q_store"].notna()
+    disagree = (set(v0.loc[~agrees.to_numpy(), "race_id"]) & candidates) | (
+        set(v0["race_id"]) - set(per.index)
+    )
+    in_v0_store = store_q[store_q["race_id"].isin(v0_races)]
+    extra = in_v0_store.merge(oof[["race_id", "horse_no"]], how="left", indicator=True)
+    disagree |= set(extra.loc[extra["_merge"] == "left_only", "race_id"]) & candidates
+    order.append(("dropped_v0_disagrees_with_store", disagree))
+    candidates -= disagree
+    confirmed = store[store["starter"].to_numpy() & store["horse_no"].notna().to_numpy()]
+    confirmed = confirmed[confirmed["race_id"].isin(v0_races & candidates)]
+    keys = pd.MultiIndex.from_arrays(
+        [confirmed["race_id"], confirmed["horse_no"].astype("int64")]
+    )  # fmt: skip
+    without_v0 = set(
+        confirmed.loc[~keys.isin(pd.MultiIndex.from_frame(oof[["race_id", "horse_no"]])),
+                      "race_id"]
+    )  # fmt: skip
+    order.append(("dropped_starter_without_v0", without_v0))
+    candidates -= without_v0
+
+    # A: v0's fold fits refitted; they must reproduce the file, and they price the dead heats
+    kept_v0 = oof[oof["race_id"].isin(candidates)]
+    dh_rows = store_q[store_q["race_id"].isin(candidates - v0_races)].copy()
+    dh_rows["race_date"] = pd.to_datetime(dh_rows["race_id"].str.slice(4, 14)).dt.date
+    dh_rows["fold"] = dh_rows["race_date"].map(day_fold)
+    no_fold = set(dh_rows.loc[dh_rows["fold"].isna(), "race_id"])
+    order.append(("dropped_dead_heat_no_fold", no_fold))
+    candidates -= no_fold
+    dh_rows = dh_rows[~dh_rows["race_id"].isin(no_fold)].astype({"fold": "int64"})
+    fold_rows = {}
+    for k in sorted(set(kept_v0["fold"].astype(int)) | set(dh_rows["fold"])):
+        fold_rows[k] = pd.concat(
+            [kept_v0.loc[kept_v0["fold"] == k, ["race_id", "q"]],
+             dh_rows.loc[dh_rows["fold"] == k, ["race_id", "q"]]], ignore_index=True,
+        )  # fmt: skip
+    refit = _refit_p_cal(frame, folds, fold_rows)
+    del frame
+    for k, p in refit.items():
+        n_v0 = int((kept_v0["fold"] == k).sum())
+        file_p = kept_v0.loc[kept_v0["fold"] == k, "p_cal"].to_numpy(dtype=float)
+        if not np.allclose(p[:n_v0], file_p, rtol=1e-6, atol=1e-9):
+            worst = float(np.max(np.abs(p[:n_v0] - file_p)))
+            raise ValueError(
+                f"v0's fold {k} refitted from the store does not reproduce {V0_OOF} "
+                f"(largest p_cal difference {worst:.3g}): the store's training rows changed"
+            )
+        dh_rows.loc[dh_rows["fold"] == k, "p_cal"] = p[n_v0:]
+    dh_rows = dh_rows[["race_id", "horse_no", "fold", "q", "p_cal", "race_date"]]
+    oof = pd.concat([kept_v0, dh_rows], ignore_index=True)
     days = sorted(set(oof["race_date"]))
+    runners = store[store["horse_no"].notna().to_numpy()].copy()
+    runners["horse_no"] = runners["horse_no"].astype("int64")
+    runners["won"] = (
+        runners["finish_pos"].eq(1).fillna(False).to_numpy(dtype=bool)
+        & runners["starter"].to_numpy()
+    )
+    runners["store_scratched"] = ~runners["starter"]
 
     h_parts, t2_parts, odds_files, no_odds, no_h = [], [], [], 0, 0
     for day in days:
@@ -878,7 +1064,8 @@ def read_rows(date_from: date, date_to: date, scheme: FoldScheme) -> tuple:
     t2 = t2[t2["race_id"].isin(set(oof["race_id"]))]
 
     starters = (
-        oof.merge(h, on=["race_id", "horse_no"], how="left", validate="one_to_one")
+        oof.drop(columns="q")
+        .merge(h, on=["race_id", "horse_no"], how="left", validate="one_to_one")
         .merge(runners[["race_id", "horse_no", "won"]], on=["race_id", "horse_no"], how="left")
         .merge(races[["race_id", "meeting_id"]], on="race_id", how="left", validate="many_to_one")
         .merge(t2, on=["race_id", "horse_no"], how="left", validate="one_to_one")
@@ -901,12 +1088,14 @@ def read_rows(date_from: date, date_to: date, scheme: FoldScheme) -> tuple:
     extra = extra.assign(p_cal=np.nan, h=np.nan, won=False, scratched=True)
     rows = pd.concat([starters, extra[starters.columns]], ignore_index=True)
     rows = rows.sort_values(["race_date", "race_id", "horse_no"], kind="stable")
+    order += [("dropped_t2_runner_not_in_store", not_in_store),
+              ("races_with_a_starter_without_h", no_h_races)]  # fmt: skip
     counts = {
-        "store_races": len(store_races),
-        **reasons,
-        "dropped_starter_without_v0": len(no_v0_races),
-        "dropped_t2_runner_not_in_store": len(not_in_store),
-        "races_with_a_starter_without_h": len(no_h_races),
+        "store_races": len(per),
+        **{key: len(found) for key, found in order},
+        "dead_heat_races_refit": int(
+            starters.loc[~starters["race_id"].isin(v0_races), "race_id"].nunique()
+        ),  # fmt: skip
         "race_days": len(days),
         "days_without_odds_file": no_odds,
         "days_without_handicap_file": no_h,
@@ -934,9 +1123,9 @@ def run_study(
     """The real run: freeze the spec before any row is read, build the rows and run the family."""
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     scheme = load_country_scheme(COUNTRY)
-    data = data_description(date_from, date_to, scheme)
+    data = data_description_v2(date_from, date_to, scheme)
     registry = default_registry(COUNTRY)
-    registry.freeze_family(FAMILY_ID, build_spec(n_boot, data))  # before any row is read
+    registry.freeze_family(FAMILY_ID, build_spec_v2(n_boot, data))  # before any row is read
     rows, folds, counts, builds = read_rows(date_from, date_to, scheme)
     return run_family(
         rows, folds, registry=registry, out_dir=out_dir, n_boot=n_boot, data=data,

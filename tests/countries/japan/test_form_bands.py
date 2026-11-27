@@ -97,6 +97,7 @@ here) and `core.eval.bootstrap.paired_bootstrap`; never from the module under te
 # block is written in its final order and I001 is waived so lint passes before and after.
 from __future__ import annotations  # noqa: I001
 
+import hashlib
 import json
 import math
 from datetime import date, datetime, timedelta, timezone
@@ -934,3 +935,26 @@ def test_the_report_labels_gains_as_the_registered_melds_and_states_the_confound
     assert "gain of the registered meld over v0" in text
     assert "group intercept" in text
     assert "market refit" in text
+
+
+# ---------------------------------------------------------------- 8. round-2 review: v2 family
+
+
+def test_run_family_freezes_and_records_under_the_v2_family(noise_run):
+    result, registry = noise_run[0], noise_run[1]
+    spec = fb.build_spec_v2(N_BOOT, None)
+    want = hashlib.sha256(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert fb.FAMILY_ID == "japan-form-bands-t2-win-v2" == spec["family_id"]
+    assert registry.frozen_spec_hash(fb.FAMILY_ID) == want == result["spec_hash"]
+    assert registry.frozen_spec_hash(fb.FAMILY_ID_V1) is None
+    assert registry.records(fb.FAMILY_ID_V1) == []
+
+
+def test_the_report_never_says_a_negative_b_lowers_its_groups_probability(noise_run):
+    # ln h <= 0, so b_g < 0 adds b_g ln h >= 0: it raises or keeps the group's mass, never lowers
+    text = " ".join(Path(noise_run[0]["report_path"]).read_text().lower().split())
+    assert "raise or lower" not in text
+    assert "lower a whole group" not in text
+    assert "group intercept" in text  # the caveat itself stays
