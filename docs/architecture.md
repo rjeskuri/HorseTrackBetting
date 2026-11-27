@@ -278,7 +278,7 @@ flowchart TD
 | store tables | `core/store/schemas.py`, `core/store/tables.py`; one set per source key (`jra`, `nar`, `hkjc`, `jravan`; `docs/specs/store.md`) |
 | store checks, rebuild check | `core/store/checks.py`, `scripts/check_store_rebuild.py` |
 | as-of views | `core/store/asof.py`, `countries/japan/config/availability.yaml` (owner decisions); spec `docs/specs/as-of.md` |
-| handicap features | `countries/japan/handicap/pp.py`, `countries/japan/handicap/factors.py`, `countries/japan/handicap/workouts.py`, `countries/japan/handicap/track_bias.py` |
+| handicap features | `countries/japan/handicap/pp.py`, `countries/japan/handicap/factors.py`, `countries/japan/handicap/workouts.py`, `countries/japan/handicap/workouts_jravan.py`, `countries/japan/handicap/track_bias.py` |
 | model fits | `countries/japan/models/v0/` (scoped reader `countries/japan/models/v0/store.py`), `countries/japan/studies/calibration.py` |
 
 The as-of views exist, but the features and fits do not read through them yet; the dashed arrows are
@@ -302,7 +302,7 @@ flowchart TD
   folds["walk-forward folds"]
   study["pre-registered study"]
   score["scoring and<br>paired bootstrap"]
-  snoop["SPA / StepM,<br>segment shrinkage"]
+  snoop["SPA / StepM,<br>segment shrinkage,<br>tail-return curve"]
   reg[("run registry")]
   rep["experiment report"]
   ledger["ledger"]
@@ -333,7 +333,7 @@ flowchart TD
 | walk-forward folds | `core/eval/folds.py` |
 | pre-registered study | e.g. `countries/japan/studies/calibration.py` |
 | scoring and paired bootstrap | `core/eval/scoring.py`, `core/eval/bootstrap.py` |
-| SPA / StepM, segment shrinkage | `core/eval/snooping.py`, `core/eval/segment_roi.py` (D17) |
+| SPA / StepM, segment shrinkage, tail-return curve | `core/eval/snooping.py`, `core/eval/segment_roi.py` (D17); `core/eval/tail.py` (realised return by claim quantile band, meeting bootstrap, D7) |
 | run registry | `core/eval/registry.py`; summary `docs/experiments/registry/japan/` |
 | experiment report | template `docs/experiment-report.md`; reports in `docs/experiments/`; licensed-source outputs through `core/eval/reports.py` into the data dir |
 | ledger | `docs/ledger.md` |

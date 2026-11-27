@@ -8,11 +8,19 @@ cell alone? The null is that it does not.
   store's races and runners only (no JRDB table, D21). The estimand has no default; the one it
   knows, "mean_placed_1_3", is the owner's (#96, 2026-11-25) with its dead-heat reading (#305,
   2026-11-25): each runner placed 1 or 2 counts once, the runners placed 3rd share one slot (their
-  mean), and a race without a 3rd-placed runner uses the runners placed 1-2 present (partly
-  placed, counted). Jump races, races without a post time and races with no placed, timed runner
-  are left out and counted, in that order. post_utc is post_time_local on the Asia/Tokyo wall clock
-  of race_date (as-of.md, #227); result_available_utc = post_utc + 30 min, the same-day dividends
-  rule (availability.yaml; the owner's answers on #80 and #96).
+  mean), and a race without a 3rd-placed runner uses the runners placed 1-2 present. The label
+  averages the placed runners that have a time; #416 leaves it unchanged (a change is the owner's
+  decision). Jump races, races without a post time and races with no placed, timed runner are left
+  out and counted, in that order; of the last, n_untimed_order (#416) counts the official orders
+  without a time (a runner placed 1-3, none of them timed), apart from races nobody placed in
+  (abandoned), and neither is counted again in the kept races' coverage. The kept races' coverage
+  (#416) is read from finish_pos before any time: n_missing_timing (a runner placed 1-3 has no
+  time), n_short_order (fewer than three runners placed 1-3; a dead heat for 2nd is three) and
+  n_tie (a place in 1-3 shared), each counted on its own; the bool column complete_timing is True
+  when every runner placed 1-3 has a time.
+  post_utc is post_time_local on the Asia/Tokyo wall clock of race_date (as-of.md, #227);
+  result_available_utc = post_utc + 30 min, the same-day dividends rule (availability.yaml; the
+  owner's answers on #80 and #96).
 - `predict_folds(table, *, spec, scheme, decision_min)`: holdout days dropped first, then #70's
   walk-forward folds over the development races. Per fold a model is fitted on the training races,
   observes the test races' results, and predicts each test race at t = post_utc - decision_min
@@ -24,14 +32,30 @@ cell alone? The null is that it does not.
   replicate here draws whole meetings the same way and recomputes both RMSEs over the pooled races
   of the draw, model and baseline on the same draw (paired).
 - `rmse_table`: the overall row and one row per distinct `by` value, each with its own bounds.
-- `read_inputs()`: the JRA store's races and runners, column-scoped, holdout days dropped.
+- `timing_sensitivity` (#416): the fold loop twice per error model on the same fold windows, those
+  of every development race. "existing" is `predict_folds` on the full table, the published
+  comparison. "complete" is the table restricted to complete_timing: the other races are in no
+  fit, the same-day variant reads only complete-timing races' results, and they are not scored. A
+  fold with no complete-timing race to train or to test on is skipped and recorded with its reason
+  (attrs["folds"], attrs["n_skipped_folds"]); the arm fails only when no race is scored in both.
+  Per prediction, each arm's `RmseDiff` against par_only and `gain_change_bootstrap`'s paired
+  change on the races both arms score (delta = gain_complete - gain_existing, D7's bounds from
+  meeting draws that recompute all four RMSEs on the same draw).
+- `read_inputs()`: the JRA store's races and runners, column-scoped, holdout days excluded by
+  the Parquet scan (#415), so none is materialized; a row group mixing development and holdout
+  days is still read from disk (pruning is by min/max statistics only).
 
 The study (`run_study`; CLI `python -m horsetrack.countries.japan.studies.speed_run --run [--out
 DIR]`, an `--out` inside the repository refused) freezes its spec in the run registry before any
 outcome is read, runs the fold loop at the primary decision time (config/decision.yaml) for each
 error model, appends one registry record per variant (failures included), rewrites the committed
-registry summary and writes the full report (every cell) through `write_report`. Nothing is
-adopted (D16), and the holdout is never opened.
+registry summary and writes the full report (every cell) through `write_report`. Next to each
+variant N, `N:complete_timing` records the complete-timing arm (its gain and the paired change) in
+#416's own family, `japan-speed-top3-c3-timing`, whose spec (#305's plus the sensitivity) is frozen
+with #305's before any outcome is read; #305's frozen spec is unchanged. A record identical to one
+already in the registry, its commit included, is not appended again; a rerun at another commit is,
+so the registry names the code behind each result. Nothing is adopted (D16), and the holdout is
+never opened.
 """
 
 from __future__ import annotations
@@ -74,6 +98,12 @@ TICKET = 305
 FAMILY_ID = "japan-speed-top3-c3"
 HYPOTHESIS_ID = "E39"  # 08 §4: C3's figure; this is its standalone time test (08 §8 B6)
 BOOTSTRAP_SEED = 305  # reproducibility only; scoring.yaml signs no seed
+# #416's complete-timing sensitivity: its own family, since #305's spec is frozen
+TIMING_TICKET = 416
+TIMING_FAMILY_ID = "japan-speed-top3-c3-timing"
+TIMING_ARM = "complete_timing"
+TIMING_SUFFIX = ":" + TIMING_ARM
+TIMING_PARAMS = {"arm": TIMING_ARM, "fold_windows": "full_table"}
 
 ESTIMANDS = ("mean_placed_1_3",)
 JST = "Asia/Tokyo"
@@ -134,9 +164,9 @@ def _post_utc(days: pd.Series, clock: pd.Series) -> pd.Series:
     return local.dt.tz_localize(JST).dt.tz_convert("UTC")
 
 
-def _mean_placed_1_3(runners: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+def _mean_placed_1_3(runners: pd.DataFrame) -> pd.Series:
     """Per race id with a placed, timed runner: the top-3 time (each runner placed 1 or 2 once,
-    the runners placed 3rd as one slot at their mean) and whether a 3rd-placed runner is present."""
+    the runners placed 3rd as one slot at their mean), over the placed runners that have a time."""
     pos = pd.array(runners["finish_pos"], dtype="Int64")
     secs = pd.to_numeric(runners["finish_time_s"], errors="raise").astype(float).to_numpy()
     ok = np.asarray(pd.Series(pos).isin([1, 2, 3]).fillna(False), dtype=bool) & ~np.isnan(secs)
@@ -152,7 +182,33 @@ def _mean_placed_1_3(runners: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     ids = upper.index.union(third.index)
     total = upper["sum"].reindex(ids, fill_value=0.0) + third.reindex(ids, fill_value=0.0)
     slots = upper["count"].reindex(ids, fill_value=0) + ids.isin(third.index).astype(int)
-    return total / slots, pd.Series(ids.isin(third.index), index=ids)
+    return total / slots
+
+
+def _coverage(runners: pd.DataFrame) -> pd.DataFrame:
+    """Per race id with a runner placed 1-3, who placed read from finish_pos alone (#416):
+    missing_timing (a runner placed 1-3 has no finish time), short_order (fewer than three
+    runners placed 1-3) and tie (two or more runners share a place in 1-3)."""
+    pos = pd.array(runners["finish_pos"], dtype="Int64")
+    placed = np.asarray(pd.Series(pos).isin([1, 2, 3]).fillna(False), dtype=bool)
+    secs = pd.to_numeric(runners["finish_time_s"], errors="raise").astype(float).to_numpy()
+    frame = pd.DataFrame(
+        {
+            "race_id": runners["race_id"].to_numpy()[placed],
+            "pos": pos[placed].to_numpy(dtype=int),
+            "untimed": np.isnan(secs[placed]),
+        }
+    )
+    groups = frame.groupby("race_id")
+    n_places = groups["pos"].nunique()
+    n_runners = groups["pos"].size()
+    return pd.DataFrame(
+        {
+            "missing_timing": groups["untimed"].any(),
+            "short_order": n_runners < 3,
+            "tie": n_places < n_runners,
+        }
+    )
 
 
 def build_race_table(
@@ -184,12 +240,18 @@ def build_race_table(
     counts["n_no_post_time"] = int((~timed).sum())
     races, days, post = races.loc[timed], days[timed], post[timed]
 
-    top3, has_third = _mean_placed_1_3(runners.loc[:, list(RUNNER_COLUMNS)])
-    top3_time = races["race_id"].map(top3).astype(float)
+    runners = runners.loc[:, list(RUNNER_COLUMNS)]
+    top3_time = races["race_id"].map(_mean_placed_1_3(runners)).astype(float)
     placed = top3_time.notna().to_numpy()
     counts["n_no_placed_time"] = int((~placed).sum())
+    by_race = _coverage(runners)
+    # of those, an official order placed 1-3 without a time, apart from races nobody placed in
+    counts["n_untimed_order"] = int(races.loc[~placed, "race_id"].isin(by_race.index).sum())
     races, days, post, top3_time = races[placed], days[placed], post[placed], top3_time[placed]
-    counts["n_partly_placed"] = int((~races["race_id"].map(has_third).astype(bool)).sum())
+    # every kept race has a runner placed 1-3, so each has its coverage row
+    coverage = by_race.reindex(races["race_id"]).astype(bool)
+    for flag in ("missing_timing", "short_order", "tie"):
+        counts[f"n_{flag}"] = int(coverage[flag].sum())
 
     table = pd.DataFrame(
         {
@@ -198,6 +260,7 @@ def build_race_table(
             "race_date": days.to_numpy(),
             "post_utc": post.to_numpy(),
             "top3_time_s": top3_time.to_numpy(),
+            "complete_timing": ~coverage["missing_timing"].to_numpy(dtype=bool),
         }
     )
     table["post_utc"] = pd.to_datetime(table["post_utc"], utc=True)
@@ -230,6 +293,21 @@ def predict_folds(
     """One row per scored development test race: the top-3 time, the three predictions at
     t = post_utc - decision_min, its fold and its cell (see the module docstring). attrs:
     n_unseen_cell, n_holdout_dropped and `folds`, one dict per fold."""
+    return _predict_folds(table, spec=spec, scheme=scheme, decision_min=decision_min)
+
+
+def _predict_folds(
+    table: pd.DataFrame,
+    *,
+    spec: SpeedSpec,
+    scheme: FoldScheme,
+    decision_min: float,
+    only: str | None = None,
+) -> pd.DataFrame:
+    """`predict_folds`; with `only`, a boolean column, the folds are still those of every
+    development race, but only the races where it is True are fitted, observed and scored, and a
+    fold with none of them to train or to test on is skipped: its `folds` entry carries the reason
+    under "skipped", and attrs["n_skipped_folds"] counts them."""
     if (
         isinstance(decision_min, bool)
         or not isinstance(decision_min, Real)
@@ -243,10 +321,24 @@ def predict_folds(
         "variant_on": dataclasses.replace(spec, same_day_variant=True),
         "variant_off": dataclasses.replace(spec, same_day_variant=False),
     }
+    kept = np.ones(len(dev), dtype=bool) if only is None else dev[only].to_numpy(dtype=bool)
     rows, folds = [], []
     for k, fold in enumerate(walk_forward(dev["race_date"], scheme=scheme)):
         label = fold_label(k, fold.test_start, fold.test_end)
-        train, test = dev.iloc[fold.train_idx], dev.iloc[fold.test_idx]
+        train = dev.iloc[fold.train_idx[kept[fold.train_idx]]]
+        test = dev.iloc[fold.test_idx[kept[fold.test_idx]]]
+        skip = None
+        if only is not None and train.empty:
+            skip = f"no {only} training race to fit on"
+        elif only is not None and test.empty:
+            skip = f"no {only} test race to score"
+        if skip is not None:
+            folds.append(
+                {"fold": label, "train_end": fold.train_end.isoformat()}
+                | {"n_train": len(train), "n_test": len(test), "n_scored": 0}
+                | {"n_unseen_cell": 0, "skipped": skip}
+            )
+            continue
         models = {}
         for name, variant_spec in specs.items():  # one fit at a time
             models[name] = SpeedModel(variant_spec).fit(train).observe(test)
@@ -278,6 +370,9 @@ def predict_folds(
         out[column] = pd.to_datetime(out[column], utc=True)
     out.attrs["n_unseen_cell"] = sum(f["n_unseen_cell"] for f in folds)
     out.attrs["n_holdout_dropped"] = len(table) - len(dev)
+    if only is not None:
+        out.attrs[f"n_not_{only}"] = int((~kept).sum())
+        out.attrs["n_skipped_folds"] = sum(1 for f in folds if f.get("skipped"))
     out.attrs["folds"] = folds
     return out
 
@@ -417,15 +512,141 @@ def rmse_table(
     return out
 
 
+# --------------------------------------------------------------------------- complete timing
+
+
+def _errors(predictions: pd.DataFrame, column: str) -> pd.Series:
+    actual = predictions["top3_time_s"].to_numpy(dtype=float)
+    return pd.Series(
+        predictions[column].to_numpy(dtype=float) - actual, index=predictions["race_id"].to_numpy()
+    )
+
+
+def _arm_gain(predictions: pd.DataFrame, model: str, boot: dict) -> RmseDiff:
+    clusters = pd.Series(predictions["meeting_id"].to_numpy(), index=predictions["race_id"])
+    return rmse_diff_bootstrap(
+        _errors(predictions, model), _errors(predictions, BASELINE), clusters, **boot
+    )
+
+
+def gain_change_bootstrap(
+    existing: pd.DataFrame,
+    complete: pd.DataFrame,
+    model: str,
+    *,
+    n_boot: int,
+    level: float,
+    seed: int,
+) -> dict:
+    """Over the races both arms score: each arm's gain (rmse_par_only - rmse_model), delta =
+    gain_complete - gain_existing, and D7's one-sided bounds on delta. Each replicate draws as many
+    meetings as there are, with replacement, and recomputes the four RMSEs over the pooled races
+    of the draw, both arms on the same draw (paired)."""
+    if isinstance(level, bool) or not isinstance(level, Real) or not 0.0 < level < 1.0:
+        raise ValueError(f"level must be a fraction in (0, 1), got {level!r}")
+    if isinstance(n_boot, bool) or not isinstance(n_boot, Integral) or n_boot < 1:
+        raise ValueError(f"n_boot must be a positive integer, got {n_boot!r}")
+    old, new = existing.set_index("race_id"), complete.set_index("race_id")
+    common = old.index.intersection(new.index)
+    if len(common) == 0:
+        raise ValueError("no race is scored in both arms")
+    old, new = old.loc[common].reset_index(), new.loc[common].reset_index()
+    errors = [_errors(f, c).to_numpy() for f in (old, new) for c in (model, BASELINE)]
+    if not all(np.isfinite(e).all() for e in errors):
+        raise ValueError("an error is missing or not finite")
+    codes, _ = pd.factorize(old["meeting_id"], sort=True)
+    n_clusters = int(codes.max()) + 1
+    sq = np.stack([np.bincount(codes, weights=e**2, minlength=n_clusters) for e in errors])
+    sizes = np.bincount(codes, minlength=n_clusters).astype(float)
+
+    def gains(sums: np.ndarray, n: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        rmse = np.sqrt(sums / n)  # rows: existing model, existing par, complete model, par
+        return rmse[1] - rmse[0], rmse[3] - rmse[2]
+
+    gain_old, gain_new = gains(sq.sum(axis=1, keepdims=True), np.array([sizes.sum()]))
+    rng = np.random.default_rng(seed)
+    chunk = max(1, _MAX_DRAWS_PER_CHUNK // n_clusters)
+    deltas = np.empty(n_boot)
+    for start in range(0, n_boot, chunk):
+        stop = min(start + chunk, n_boot)
+        drawn = rng.integers(0, n_clusters, size=(stop - start, n_clusters))
+        g_old, g_new = gains(sq[:, drawn].sum(axis=2), sizes[drawn].sum(axis=1))
+        deltas[start:stop] = g_new - g_old
+    return {
+        "n_races": len(common),
+        "n_meetings": n_clusters,
+        "gain_existing": float(gain_old[0]),
+        "gain_complete": float(gain_new[0]),
+        "delta": float(gain_new[0] - gain_old[0]),
+        "lo": float(np.quantile(deltas, 1.0 - level)),
+        "hi": float(np.quantile(deltas, level)),
+    }
+
+
+def timing_sensitivity(
+    table: pd.DataFrame,
+    *,
+    spec: SpeedSpec,
+    scheme: FoldScheme,
+    decision_min: float,
+    n_boot: int,
+    level: float,
+    seed: int,
+) -> dict:
+    """The fold loop on the full table ("existing", the published comparison) and on the races
+    with complete_timing alone ("complete", on the full table's fold windows), and per prediction
+    each arm's gain over par_only and the paired change on the races both score (see the module
+    docstring)."""
+    if "complete_timing" not in table.columns:
+        raise ValueError("the table has no complete_timing column (build_race_table, #416)")
+    existing = predict_folds(table, spec=spec, scheme=scheme, decision_min=decision_min)
+    boot = {"n_boot": n_boot, "level": level, "seed": seed}
+    fold_loop = {"spec": spec, "scheme": scheme, "decision_min": decision_min}
+    return _timing_arms(table, existing, **fold_loop, **boot)
+
+
+def _timing_arms(
+    table: pd.DataFrame,
+    existing: pd.DataFrame,
+    *,
+    spec: SpeedSpec,
+    scheme: FoldScheme,
+    decision_min: float,
+    **boot: Any,
+) -> dict:
+    """`timing_sensitivity` given the existing arm's predictions."""
+    if "complete_timing" not in table.columns:
+        raise ValueError("the table has no complete_timing column (build_race_table, #416)")
+    complete = _predict_folds(
+        table, spec=spec, scheme=scheme, decision_min=decision_min, only="complete_timing"
+    )
+    # a fold the complete arm skips is not a failure; no race scored in both arms is
+    if not existing["race_id"].isin(complete["race_id"]).any():
+        raise ValueError("no development test race with complete timing is scored in both arms")
+    gains = {
+        model: {
+            "existing": _arm_gain(existing, model, boot),
+            "complete": _arm_gain(complete, model, boot),
+            "paired": gain_change_bootstrap(existing, complete, model, **boot),
+        }
+        for model in PREDICTIONS
+    }
+    return {"existing": existing, "complete": complete, "gains": gains}
+
+
 # --------------------------------------------------------------------------- reading
 
 
 def read_inputs() -> tuple[pd.DataFrame, pd.DataFrame]:
     """The JRA store's races (RACE_COLUMNS) and runners (RUNNER_COLUMNS and race_date),
-    column-scoped, holdout days dropped. No JRDB table is read (D21)."""
-    races = read_table(SOURCE, "races", columns=list(RACE_COLUMNS))
-    runners = read_table(SOURCE, "runners", columns=[*RUNNER_COLUMNS, "race_date"])
-    return _development(races), _development(runners)
+    column-scoped. Holdout days are excluded by the scan (`read_table(..., development=COUNTRY)`,
+    #415: each table's own race_date bounds and its scan from one open handle), so no holdout row
+    is materialized. No JRDB table is read (D21)."""
+    races = read_table(SOURCE, "races", columns=list(RACE_COLUMNS), development=COUNTRY)
+    runners = read_table(
+        SOURCE, "runners", columns=[*RUNNER_COLUMNS, "race_date"], development=COUNTRY
+    )
+    return races, runners
 
 
 # --------------------------------------------------------------------------- the study
@@ -512,6 +733,39 @@ def build_spec(boot: dict, scheme: FoldScheme, minutes: int) -> dict:
     }
 
 
+def build_timing_spec(boot: dict, scheme: FoldScheme, minutes: int) -> dict:
+    """#416's family: #305's spec, unchanged, plus the complete-timing sensitivity's definition,
+    frozen before any outcome is read."""
+    return build_spec(boot, scheme, minutes) | {
+        "family_id": TIMING_FAMILY_ID,
+        "ticket": TIMING_TICKET,
+        "base_family": FAMILY_ID,
+        "coverage": {
+            "who_placed": "the runners with finish_pos 1, 2 or 3, read before any time",
+            "missing_timing": "a runner placed 1-3 has no finish time",
+            "short_order": "fewer than three runners placed 1-3 (a dead heat for 2nd is three)",
+            "tie": "two or more runners share a place in 1-3",
+            "complete_timing": "every runner placed 1-3 has a finish time (not missing_timing)",
+            "counted_over": "the kept races; each flag on its own, so a race may have several",
+            "label": "unchanged: the signed estimand over the placed runners that have a time; "
+            "a definition change is the owner's decision",
+        },
+        "sensitivity": {
+            "null": "dropping the races without complete timing does not change the time gain of "
+            "the same-day variant over the par: delta = gain_complete - gain_existing = 0",
+            "existing": "the published fold loop on every kept race (family " + FAMILY_ID + ")",
+            "complete": "the races with complete_timing only, on the existing arm's fold windows "
+            "(walk_forward over every development race); the other races are in no fit, are not "
+            "observed by the same-day variant and are not scored",
+            "metrics": {
+                "rmse_gain_s": "the complete arm's gain over its scored races, D7's bounds",
+                "rmse_gain_change_s": "delta over the races both arms score, D7's bounds from a "
+                "meeting-clustered paired bootstrap (both arms' RMSEs on the same draw)",
+            },
+        },
+    }
+
+
 @dataclass(frozen=True)
 class Variant:
     name: str
@@ -562,7 +816,8 @@ def compute_study(
     table: pd.DataFrame, spec: dict, scheme: FoldScheme, minutes: int
 ) -> tuple[list[Variant], dict, dict]:
     """Per error model, the fold loop and its scored variants; the tables for the report; the
-    run counts. A failed error model is two failed variants, never dropped."""
+    run counts. Next to each variant N, its complete-timing arm `N:complete_timing` (#416). A
+    failed error model is four failed variants, a failed complete arm two, never dropped."""
     boot = spec["bootstrap"]
     kwargs = {k: boot[k] for k in ("n_boot", "level", "seed")}
     variants, tables, counts = [], {}, {}
@@ -575,8 +830,9 @@ def compute_study(
             if predictions.empty:
                 raise ValueError("no development test race was scored")
         except Exception as exc:  # every failure is a registry record, never dropped
-            for model in PREDICTIONS:
-                variants.append(_variant(error_name, model, params, error=_why(exc)))
+            for p in (params, params | TIMING_PARAMS):
+                for model in PREDICTIONS:
+                    variants.append(_variant(error_name, model, p, error=_why(exc)))
             continue
         counts[error_name] = {
             "n_scored": len(predictions),
@@ -611,8 +867,50 @@ def compute_study(
                 variants.append(_variant(error_name, model, params, error=_why(exc)))
                 continue
             variants.append(_variant(error_name, model, params, metrics=tuple(metrics)))
-        del predictions
+        timing_params = params | TIMING_PARAMS
+        try:
+            arms = _timing_arms(
+                table, predictions, spec=speed, scheme=scheme, decision_min=minutes, **kwargs
+            )
+        except Exception as exc:  # the complete arm failed: one failed record per prediction
+            for model in PREDICTIONS:
+                variants.append(_variant(error_name, model, timing_params, error=_why(exc)))
+            del predictions
+            continue
+        complete = arms["complete"]
+        counts[error_name] |= {
+            "n_scored_complete_timing": len(complete),
+            "n_not_complete_timing": complete.attrs["n_not_complete_timing"],
+            "n_skipped_folds_complete_timing": complete.attrs["n_skipped_folds"],
+            "n_scored_both": arms["gains"][PREDICTIONS[0]]["paired"]["n_races"],
+        }
+        tables[f"folds:{error_name}{TIMING_SUFFIX}"] = complete.attrs["folds"]
+        for model in PREDICTIONS:
+            try:
+                metrics = _timing_metrics(complete, model, arms["gains"][model])
+            except Exception as exc:
+                variants.append(_variant(error_name, model, timing_params, error=_why(exc)))
+                continue
+            variants.append(_variant(error_name, model, timing_params, metrics=tuple(metrics)))
+        del predictions, complete, arms
     return variants, tables, counts
+
+
+def _timing_metrics(complete: pd.DataFrame, model: str, gains: dict) -> list[FoldMetric]:
+    """The complete arm's overall gain with its bounds, both RMSEs and its per-fold gains (as
+    `variant_metrics`), then the paired change on the races both arms score and each arm's gain
+    on those races."""
+    arm, paired = gains["complete"], gains["paired"]
+    overall = pd.Series(
+        {"n_races": arm.n_races, "gain": arm.gain, "lo": arm.lo, "hi": arm.hi}
+        | {"rmse_model": arm.rmse_model, "rmse_baseline": arm.rmse_baseline}
+    )
+    n = paired["n_races"]
+    return variant_metrics(complete, model, overall) + [
+        _metric("all", "rmse_gain_change_s", paired["delta"], n, paired["lo"], paired["hi"]),
+        _metric("all", "rmse_gain_paired_existing_s", paired["gain_existing"], n),
+        _metric("all", "rmse_gain_paired_complete_s", paired["gain_complete"], n),
+    ]
 
 
 def _why(exc: Exception) -> str:
@@ -622,7 +920,18 @@ def _why(exc: Exception) -> str:
 def _variant(error_name: str, model: str, params: dict, **outcome: Any) -> Variant:
     components = {"model": "countries.japan.models.speed.SpeedModel", "prediction": model}
     components |= {"baseline": BASELINE, "error_model": error_name, "estimand": ESTIMANDS[0]}
-    return Variant(f"{error_name}:{model}_vs_{BASELINE}", components, params, **outcome)
+    name = f"{error_name}:{model}_vs_{BASELINE}"
+    if params.get("arm") == TIMING_ARM:
+        components |= {"arm": TIMING_ARM}
+        name += TIMING_SUFFIX
+    return Variant(name, components, params, **outcome)
+
+
+def _family(variant: Variant) -> tuple[str, int]:
+    """The registry family and ticket of a variant: the complete-timing arms are #416's."""
+    if variant.name.endswith(TIMING_SUFFIX):
+        return TIMING_FAMILY_ID, TIMING_TICKET
+    return FAMILY_ID, TICKET
 
 
 def _sha_prefix(path: Path) -> str:
@@ -643,11 +952,12 @@ def store_builds() -> dict[str, str]:
 
 def _record(variant: Variant, git_sha: str, builds: dict[str, str], fold_scheme: str) -> RunRecord:
     params = variant.params | ({"error": variant.error} if variant.error else {})
+    family_id, ticket = _family(variant)
     return RunRecord(
         hypothesis_id=HYPOTHESIS_ID,
-        family_id=FAMILY_ID,
+        family_id=family_id,
         variant=variant.name,
-        ticket=TICKET,
+        ticket=ticket,
         git_sha=git_sha,
         data_builds=builds,
         sources=(SOURCE,),
@@ -681,6 +991,35 @@ def markdown_table(rows: list[dict] | pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
+def timing_rows(variants: list[Variant]) -> list[dict]:
+    """Per existing variant: its gain, its complete-timing arm's gain and the paired change on the
+    races both score, side by side."""
+    by_name = {v.name: v for v in variants}
+
+    def metric(v: Variant | None, name: str) -> FoldMetric | None:
+        if v is None:
+            return None
+        return next((m for m in v.metrics if (m.fold, m.metric) == ("all", name)), None)
+
+    rows = []
+    for v in variants:
+        if v.name.endswith(TIMING_SUFFIX):
+            continue
+        arm = by_name.get(v.name + TIMING_SUFFIX)
+        old, new = metric(v, "rmse_gain_s"), metric(arm, "rmse_gain_s")
+        change = metric(arm, "rmse_gain_change_s")
+        row = {"variant": v.name}
+        row |= {"gain_existing": old.value if old else None, "n_existing": old.n if old else None}
+        row |= {"gain_complete": new.value if new else None, "n_complete": new.n if new else None}
+        if change:
+            row |= {"change": change.value, "change_lo": change.lo, "change_hi": change.hi}
+            row |= {"n_both": change.n}
+        if arm is None or arm.error:
+            row["error"] = arm.error if arm else "no complete-timing arm"
+        rows.append(row)
+    return rows
+
+
 def render_report(variants: list[Variant], tables: dict, counts: dict, about: dict) -> str:
     """Aggregates only (no race row): counts, folds, the overall and by-cell RMSE tables."""
     lines = [f"# Expected top-3 time against the par-only baseline ({COUNTRY}, #{TICKET})", ""]
@@ -700,6 +1039,8 @@ def render_report(variants: list[Variant], tables: dict, counts: dict, about: di
         for v in variants
     ]
     lines += ["", "## Variants (one registry record each)", "", markdown_table(rows)]
+    timing = markdown_table(timing_rows(variants))
+    lines += ["", "## Complete-timing sensitivity (#416)", "", timing]
     for key, frame in tables.items():
         title = key.replace(":", ", ")
         lines += ["", f"## {title}", "", markdown_table(frame)]
@@ -712,10 +1053,13 @@ def run_study(out_dir: Path | None = None) -> dict:
     report outside the tree."""
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     scheme, minutes = load_country_scheme(COUNTRY), decision_min()
-    spec = build_spec(bootstrap_settings(), scheme, minutes)
+    boot = bootstrap_settings()
+    spec = build_spec(boot, scheme, minutes)
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
-    spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any outcome is read
+    # both families before any outcome is read; #305's spec is unchanged, so its freeze is a no-op
+    spec_hash = registry.freeze_family(FAMILY_ID, spec)
+    timing_hash = registry.freeze_family(TIMING_FAMILY_ID, build_timing_spec(boot, scheme, minutes))
 
     builds = store_builds()
     races, runners = read_inputs()
@@ -728,29 +1072,36 @@ def run_study(out_dir: Path | None = None) -> dict:
     variants, tables, counts = compute_study(table, spec, scheme, minutes)
     counts = {"builder": builder} | counts
 
-    existing = registry.records(FAMILY_ID)
+    existing = registry.records(FAMILY_ID) + registry.records(TIMING_FAMILY_ID)
     fold_scheme = scheme_label(scheme)
     records = [_record(v, git_sha, builds, fold_scheme) for v in variants]
     run_ids = {}
     for variant, record in zip(variants, records, strict=True):
+        # only an exact match, its commit included, is already recorded: the registry names
+        # the code behind each result
         if record not in existing:
             run_ids[variant.name] = registry.append(record)
-    write_summary(registry, summary_dir(COUNTRY))
     about = {
         "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
+        "complete-timing family": f"`{TIMING_FAMILY_ID}`, spec sha256 `{timing_hash}`",
         "git": git_sha,
         "store": ", ".join(builds.values()),
         "run ids": ", ".join(f"{k} `{v}`" for k, v in run_ids.items()) or "already recorded",
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     report = write_report(
-        out_dir / f"speed-{COUNTRY}-{spec_hash[:12]}.md",
+        out_dir / f"speed-{COUNTRY}-{spec_hash[:12]}-{timing_hash[:12]}.md",
         render_report(variants, tables, counts, about),
         sources=(SOURCE,),
     )
+    # last: another ticket's family id in the shared registry can make it raise (#344, #391)
+    write_summary(registry, summary_dir(COUNTRY))
     return {
         "family_id": FAMILY_ID,
         "spec_hash": spec_hash,
+        "timing_family_id": TIMING_FAMILY_ID,
+        "timing_spec_hash": timing_hash,
+        "timing": timing_rows(variants),
         "report_path": str(report),
         "registry_path": str(registry.path),
         "run_ids": run_ids,

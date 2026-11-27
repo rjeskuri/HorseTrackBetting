@@ -218,7 +218,7 @@ flowchart TD
     REG["Registry: every run is a record,<br/>failures too, hash-chained<br/>#74 core/eval/registry.py"]
     OOF["Walk-forward out-of-fold fits<br/>on development days (D9, D14)<br/>#70 core/eval/folds.py"]
     BOOT["Log-loss gain over the final price,<br/>meeting bootstrap (D7)<br/>#69 core/eval/scoring.py, core/eval/bootstrap.py"]
-    SNOOP["SPA and StepM over the whole family (D17)<br/>#75 core/eval/snooping.py<br/>segment shrinkage #78 core/eval/segment_roi.py"]
+    SNOOP["SPA and StepM over the whole family (D17)<br/>#75 core/eval/snooping.py<br/>segment shrinkage #78 core/eval/segment_roi.py<br/>tail-return curve by claim #433 core/eval/tail.py"]
     HOLD["Holdout opening: by the owner, once per<br/>family, at its power target (D15)<br/>#71, #126 core/eval/holdout.py"]
     D16["D16 on the holdout: gain interval above 0,<br/>encompassing weight above 0, and the<br/>full-stack gain for a stack member<br/>encompassing test #87 planned"]
     subgraph TRACKS["Betting rules: two tracks (D18)"]

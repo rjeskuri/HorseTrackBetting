@@ -335,7 +335,12 @@ def workout_table(race_id: str, *, as_of: datetime) -> pl.DataFrame:
     return frame.select([pl.col(c).cast(t) for c, t in _TYPES.items()])
 
 
-def _pars(pool: pl.DataFrame, day: date, as_of: datetime) -> pl.DataFrame:
+def _pars(pool: pl.DataFrame, day: date, as_of: datetime, min_workouts=None) -> pl.DataFrame:
+    """Median final furlong per (centre, course) of `pool`'s records from before race day `day`
+    published before `as_of`, where at least `min_workouts` (default `PAR_MIN_WORKOUTS`) have
+    one."""
+    if min_workouts is None:
+        min_workouts = PAR_MIN_WORKOUTS
     return (
         pool.filter(
             (pl.col("race_date") < day)
@@ -345,30 +350,36 @@ def _pars(pool: pl.DataFrame, day: date, as_of: datetime) -> pl.DataFrame:
         )
         .group_by("centre", "course")
         .agg(pl.col("final_furlong_s").median().alias("par"), pl.len().alias("_n"))
-        .filter(pl.col("_n") >= PAR_MIN_WORKOUTS)
+        .filter(pl.col("_n") >= min_workouts)
         .select("centre", "course", "par")
+    )
+
+
+def _best_and_trend(counted: pl.DataFrame, pars: pl.DataFrame, tie_break: str) -> pl.DataFrame:
+    """Per horse_id of `counted`: `ff_best_vs_par_s` and `ff_trend_s` over its newest `N_RECENT`
+    workouts with a par in `pars` (newest by workout_date, then `tie_break`)."""
+    n, xbar = N_RECENT, (N_RECENT - 1) / 2
+    sxx = sum((k - xbar) ** 2 for k in range(n))
+    recent = (
+        counted.join(pars, on=["centre", "course"], how="inner")
+        .with_columns((pl.col("final_furlong_s") - pl.col("par")).alias("rel"))
+        .filter(pl.col("rel").is_not_null() & pl.col("rel").is_not_nan())
+        .sort(["horse_id", "workout_date", tie_break], descending=[False, True, True])
+        .with_columns(pl.int_range(pl.len()).over("horse_id").alias("_k"))
+        .filter(pl.col("_k") < n)
+        .with_columns((n - 1 - pl.col("_k") - xbar).alias("_x"))  # 0 = oldest
+    )
+    slope = (pl.col("_x") * pl.col("rel")).sum() / sxx if sxx > 0 else pl.lit(None)
+    return recent.group_by("horse_id").agg(
+        pl.col("rel").min().alias("ff_best_vs_par_s"),
+        pl.when(pl.len() == n).then(slope).otherwise(None).alias("ff_trend_s"),
     )
 
 
 def _features_from(entries, records, pool, counts, day: date, as_of: datetime) -> pl.DataFrame:
     """The features of `entries` (one race day) from unfiltered records, par pool and CYB rows."""
     counted = _counted(records, entries, day, as_of)
-    n, xbar = N_RECENT, (N_RECENT - 1) / 2
-    sxx = sum((k - xbar) ** 2 for k in range(n))
-    recent = (
-        counted.join(_pars(pool, day, as_of), on=["centre", "course"], how="inner")
-        .with_columns((pl.col("final_furlong_s") - pl.col("par")).alias("rel"))
-        .filter(pl.col("rel").is_not_null() & pl.col("rel").is_not_nan())
-        .sort(["horse_id", "workout_date", "race_date"], descending=[False, True, True])
-        .with_columns(pl.int_range(pl.len()).over("horse_id").alias("_k"))
-        .filter(pl.col("_k") < n)
-        .with_columns((n - 1 - pl.col("_k") - xbar).alias("_x"))  # 0 = oldest
-    )
-    slope = (pl.col("_x") * pl.col("rel")).sum() / sxx if sxx > 0 else pl.lit(None)
-    recent = recent.group_by("horse_id").agg(
-        pl.col("rel").min().alias("ff_best_vs_par_s"),
-        pl.when(pl.len() == n).then(slope).otherwise(None).alias("ff_trend_s"),
-    )
+    recent = _best_and_trend(counted, _pars(pool, day, as_of), "race_date")
     hard = (
         counted.filter(pl.col("effort").is_in(sorted(HARD_EFFORTS)))
         .group_by("horse_id")

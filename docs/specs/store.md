@@ -130,14 +130,54 @@ reach the store, and documents the mapping.
 
 ## Read access
 
-- `tables.read_table(source, name, columns=None) -> pandas.DataFrame`: the declared columns (or the
-  requested subset), in declared or requested order whatever the file's order, cast to their
-  declared types. A name that is not in `schemas.TABLES` (case-sensitive) raises `ValueError`, as
-  does a column the table does not declare. A missing file raises `FileNotFoundError` naming the
-  table and the source.
+- `tables.read_table(source, name, columns=None, *, filters=None, development=None) ->
+  pandas.DataFrame`: the declared columns (or the requested subset), in declared or requested
+  order whatever the file's order, cast to their declared types. A name that is not in
+  `schemas.TABLES` (case-sensitive) raises `ValueError`, as does a column the table does not
+  declare. A missing file raises `FileNotFoundError` naming the table and the source. `filters=`,
+  a `pyarrow.dataset` expression (it may name columns not read), is applied by the Parquet scan
+  (`pyarrow.parquet.read_table(..., filters=...)`), so an excluded row never reaches the frame.
+  `development=<country>` reads only that country's development rows, through
+  `core.eval.holdout.read_development` (below), so a holdout row never reaches the frame; with
+  both, `filters` is passed as that read's `where`, narrowing the development scan.
 - `tables.connect(source) -> duckdb.DuckDBPyConnection`: an in-memory DuckDB with one view per
   declared table whose file exists for that source, named after the table. File paths are quoted
-  as SQL strings, so a data directory with a `'` in it works.
+  as SQL strings, so a data directory with a `'` in it works. The views apply no holdout
+  predicate: development readers do not use them.
+
+### Development reads and the holdout (#415)
+
+The development readers take two routes over one open handle (`pyarrow.memory_map`) of the
+table's file. The speed study's `studies/speed_run.read_inputs`, through
+`tables.read_table(..., development=...)`, reads through
+`core.eval.holdout.read_development(handle, country, ...)`, which scans the handle with
+`pyarrow.parquet.read_table`. `countries/japan/models/v0/store.read_store_table` builds the same
+predicate with `core.eval.holdout.file_development_filter` on the handle and scans a `ds.dataset`
+of the file's path on a one-file read-only filesystem served from that handle, so its read is a
+dataset scan with the predicate as its filter. Either way the predicate first narrows the
+requested range to the file's own first and last race_date: from each row group's footer
+statistics, or, for a row group written without them, by one Acero plan over those row groups
+together (a scan of race_date, a projection and a min/max aggregate of the in-range days with a
+null count), so the file is scanned once for its bounds and only the two bounds and the count,
+never a race_date column, reach Python. An open-ended read (`end=date.max`, as several callers
+pass) so asks the holdout rule only about the days the file can hold, and a range outside the
+file returns no row. The price-era guard of `read_store_table` checks the requested start,
+before this narrowing. The predicate is then `development_filter(country, start, end)`: the
+narrowed inclusive range minus the holdout days, built from the calendar and the committed
+`holdout.yaml`, never from the rows. A null race_date is not a development row; `read_table`
+(`dated=True` on `read_development`) refuses a table with one, `ValueError` before any row is
+read (the null count comes from the footers or the same bounds scan), rather than dropping it,
+so the speed study never runs on an incomplete field. Bounds and scan read one snapshot: a file
+atomically replaced at its path (`os.replace`, as a rebuild does) during the read is read as it
+was. No table or record batch the scan returns holds a holdout row. What is skipped on disk is
+narrower: Parquet prunes a row group only from its min/max statistics, so a row group holding
+both rows the scan needs and rows it excludes (a development and a holdout day, say 2026-12-02
+and 2026-12-03) is still read and decoded, and its excluded rows are dropped by the scan's
+filter before a table is built. A multi-day group after the holdout start is not necessarily
+such a group: 2026-12-03 and 12-04 are both holdout days. Every store table
+is Parquet; the other files under `$HORSETRACK_DATA_DIR` (the ingest manifest, JSONL logs, the
+raw page cache) have no row-group statistics and are not development reads. `LockedHoldout.open`
+remains the only way to holdout rows.
 
 ## Build
 
@@ -228,7 +268,7 @@ store's.
   (e.g. `rating`, `gear_raw` and `brand_raw` on runners).
 - **Jravan-only tables** are outside `schemas.TABLES`: `final_odds`, `pool_votes` (final odds and
   pool votes per combination), `jockeys`, `trainers` (the masters), `breeding_horses`, `produce`
-  and `lineages` (bloodlines). Each is a Parquet file in `processed/jravan/` whose schema is
+  and `lineages` (bloodlines), and `workouts` (the HC and WC workouts, #229). Each is a Parquet file in `processed/jravan/` whose schema is
   its builder module's, so `read_table` and `connect` refuse or ignore them; a reader opens the
   file itself.
 - **`processed/jravan/odds_timeseries/<YYYY-MM-DD>.parquet`**: the time-series odds, one file per
@@ -238,7 +278,8 @@ store's.
   availability.yaml`, docs/specs/as-of.md), the shared ones by their own entries and the
   jravan-only ones by the owner's request on #376: `final_odds` and `pool_votes` are `label_only`,
   `jockeys` and `trainers` are `current_value` with `in_view`, `breeding_horses`, `produce` and
-  `lineages` are `static`. A table without an entry is refused by the as-of views, so no
+  `lineages` are `static`. `workouts` has no entry: its readers (`handicap/workouts_jravan.py`)
+  apply their own publication rule (#229). A table without an entry is refused by the as-of views, so no
   jravan-only table is readable at t by accident. The dump of unmapped families
   (`interim/jravan/records/`) is not a store table and has no rule.
 - **Guards**: the holdout (D14) and D10 apply to a jravan read as to any other: `read_store_table`

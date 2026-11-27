@@ -6,16 +6,25 @@ from horsetrack import __version__
 from horsetrack.core.ingest.cli import scrape_app
 from horsetrack.core.store.cli import store_app
 from horsetrack.countries.japan.board.server import board_serve_command
+from horsetrack.countries.japan.handicap.workouts_jravan import (
+    workouts_command as jravan_workouts_command,
+)
 from horsetrack.countries.japan.jra.going_fetch import fetch_going_command
 from horsetrack.countries.japan.jra.win_sales_fetch import fetch_win_sales_command
 from horsetrack.countries.japan.jravan.bloodlines import (
     bloodlines_command as jravan_bloodlines_command,
+)
+from horsetrack.countries.japan.jravan.card_versions import (
+    card_versions_command as jravan_card_versions_command,
 )
 from horsetrack.countries.japan.jravan.check import check_command as jravan_check_command
 from horsetrack.countries.japan.jravan.dividends import (
     dividends_command as jravan_dividends_command,
 )
 from horsetrack.countries.japan.jravan.dump import dump_command as jravan_dump_command
+from horsetrack.countries.japan.jravan.horse_runs import (
+    horse_runs_command as jravan_horse_runs_command,
+)
 from horsetrack.countries.japan.jravan.masters import masters_command as jravan_masters_command
 from horsetrack.countries.japan.jravan.odds import final_odds_command as jravan_final_odds_command
 from horsetrack.countries.japan.jravan.races import races_command as jravan_races_command
@@ -68,16 +77,19 @@ jrdb.command("build")(jrdb_build_command)
 jravan = typer.Typer(no_args_is_help=True, help="JRA-VAN DataLab (JV-Data) commands.")
 japan.add_typer(jravan, name="jravan")
 jravan.command("bloodlines")(jravan_bloodlines_command)
+jravan.command("card-versions")(jravan_card_versions_command)
 jravan.command("check")(jravan_check_command)
 jravan.command("dividends")(jravan_dividends_command)
 jravan.command("dump")(jravan_dump_command)
 jravan.command("final-odds")(jravan_final_odds_command)
+jravan.command("horse-runs")(jravan_horse_runs_command)
 jravan.command("masters")(jravan_masters_command)
 jravan.command("races")(jravan_races_command)
 jravan.command("reconcile")(jravan_reconcile_command)
 jravan.command("runners")(jravan_runners_command)
 jravan.command("timeseries")(jravan_timeseries_command)
 jravan.command("votes")(jravan_votes_command)
+jravan.command("workouts")(jravan_workouts_command)
 
 
 def _version_callback(value: bool) -> None:
