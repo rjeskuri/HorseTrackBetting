@@ -23,6 +23,11 @@ Python dict per row (a tier-2 day runs to millions of rows):
   totals included; at the same instant the later logged row wins, as `odds_log.latest_prices`.
 - dividend, is_refund: left join on exact (race_id, pool, combination) to
   `processed/<source>/dividends.parquet`; null without a match or without the table.
+- is_final_state (`DAY_SCHEMA` only): the logged row shows the page's final state
+  (docs/specs/board-at-t.md, `board.snapshot._is_final`: `source_update_utc` null and 最終オッズ
+  in `page_state` or `status_raw`), the two fields compaction does not keep (#411). The day file
+  is `DAY_SCHEMA`, `SCHEMA` (shared with the JRA-VAN series, `jravan/timeseries.py`, which records
+  no page state) plus this column; a reader of `SCHEMA`'s columns reads either.
 
 Identical logs give identical bytes: rows are sorted on their content, the schema is fixed, and the
 file carries no wall-clock metadata.
@@ -42,7 +47,7 @@ import pyarrow.parquet as pq
 import typer
 
 from horsetrack.core import paths
-from horsetrack.countries.japan.board.snapshot import card_post_times
+from horsetrack.countries.japan.board.snapshot import _is_final, card_post_times
 from horsetrack.countries.japan.odds_log import _instant, iter_members, read_post_times
 
 _LOG_SUFFIX = ".jsonl.gz"
@@ -70,9 +75,11 @@ SCHEMA = pa.schema(
         ("is_refund", pa.bool_()),
     ]
 )
+# Our logged day files: SCHEMA plus the row's final-state flag (#411).
+DAY_SCHEMA = SCHEMA.append(pa.field("is_final_state", pa.bool_()))
 # The columns a logged row gives on its own; the rest need the whole day (or the dividends).
 _LOGGED = pa.schema(
-    [f for f in SCHEMA if f.name not in ("is_final_capture", "dividend", "is_refund")]
+    [f for f in DAY_SCHEMA if f.name not in ("is_final_capture", "dividend", "is_refund")]
 )
 # A total order on the row's content, so the bytes do not depend on file or log order.
 _SORT_COLUMNS = (
@@ -87,6 +94,7 @@ _SORT_COLUMNS = (
     "odds_hi",
     "investment",
     "status_raw",
+    "is_final_state",
 )
 
 
@@ -135,7 +143,7 @@ def compact_day(race_date: str, source: str = "jra") -> Path:
     for i, part in enumerate(parts):
         parts[i] = _with_derived(part, start, finals, dividends)
         start += part.num_rows
-    table = pa.concat_tables(parts) if parts else SCHEMA.empty_table()
+    table = pa.concat_tables(parts) if parts else DAY_SCHEMA.empty_table()
     del parts
     # null last and strings in code-point order, as a Python sort on (is None, value) would give
     table = table.sort_by([(name, "ascending") for name in _SORT_COLUMNS])
@@ -185,6 +193,7 @@ def _record(row: dict[str, Any], venue: str, post_times: dict[int, datetime]) ->
         "odds_hi": _number(row.get("odds_hi")),
         "investment": _number(row.get("investment")),
         "status_raw": row.get("status_raw"),
+        "is_final_state": _is_final(row),
     }
 
 
@@ -223,7 +232,7 @@ def _read_dividends(path: Path, race_ids: set[Any]) -> _Dividends:
 
 def _with_derived(part: pa.Table, start: int, finals: set[int], dividends: _Dividends) -> pa.Table:
     """A member's table (rows at log positions start...) with is_final_capture and the dividend
-    join added, in SCHEMA's column order."""
+    join added, in DAY_SCHEMA's column order."""
     final = [start + i in finals for i in range(part.num_rows)]
     if dividends:
         keys = zip(*(part[field].to_pylist() for field in _JOIN_KEY), strict=True)
@@ -237,8 +246,8 @@ def _with_derived(part: pa.Table, start: int, finals: set[int], dividends: _Divi
         "is_refund": pa.chunked_array([pa.array(refund, pa.bool_())]),
     }
     return pa.table(
-        [part[name] if name in part.column_names else columns[name] for name in SCHEMA.names],
-        schema=SCHEMA,
+        [part[name] if name in part.column_names else columns[name] for name in DAY_SCHEMA.names],
+        schema=DAY_SCHEMA,
     )
 
 

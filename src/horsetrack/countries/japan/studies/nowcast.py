@@ -6,13 +6,21 @@ exactly `logger.compact.SCHEMA`), read one day at a time by column and with the 
 only. D10: race days from 2014-06-07 (`PRICE_ERA_START`) only, since the nowcast is the price
 half. Our own compacted logged days, `processed/jra/odds_timeseries/<YYYY-MM-DD>.parquet` (owner,
 #85: added to the training as they accrue; #411), are read beside them, by the same columns and
-pools and with `--end` applied to both: only their rows with a post time, and for a race in both
-sources only the pools the JRA-VAN rows lack (JRA-VAN wins per (race, pool); in practice our logs
-add Wide, D3). D14: holdout days of either source are dropped by `is_holdout_day` on the file
-name, before any read; the holdout is not opened. Grades are the jravan races table's
-`race_class` (None for a race it does not hold). Wide is fitted and scored where the folds'
-training days hold Wide cases; the report states plainly why when they do not, and a (pool, tau)
-a fold's training gives no fit for is not scored there (counted per fold, `unscored_no_fit`).
+pools plus status_raw and `is_final_state`, with `--end` applied to both (`read_logged_day`):
+- only their rows with a post time;
+- per (race, pool), the JRA-VAN path wins where it has a post time; otherwise our logged path
+  supplies it (in practice our logs add Wide, D3). Each path is timed by its own source's post;
+- a logged path counts only with a confirmed final capture (a capture whose priced rows of that
+  pool all show the final state, docs/specs/board-at-t.md); one whose capture stopped before the
+  close gives no case and no growth observation and is counted (`no_final_capture`);
+- a runner scratched in our logged WIN or PLACE rows takes its Wide pairs off the Wide board from
+  that capture on (`models.nowcast.extract`, `scratches=`), JRA-VAN's WIN rows or not.
+D14: holdout days of either source are dropped by `is_holdout_day` on the file name, before any
+read; the holdout is not opened. Grades are the jravan races table's `race_class` (None for a
+race it does not hold). Wide is fitted and scored where the folds' training days hold Wide
+cases; the report states plainly why when they do not, and a (pool, tau) a fold's training gives
+no fit for is not scored there (counted per fold, `unscored_no_fit`; a fold of such cases only
+is reported with no PIT). Wide coverage reads the logged days the folds read.
 
 Folds: D9's walk-forward (`config/folds.yaml`) over the development race days. Each fold fits on
 its training days only: the structural nowcast, the same with beta = 0 (`no_features`), and #116's
@@ -35,9 +43,12 @@ tau across folds; the phi_t profile against the observed V_t / V_final; the boar
 Place rule's check; Wide coverage (development days only: a holdout day's file is never read,
 D14); counts. One registry record per comparison (E19), failures included, then `write_summary`
 regenerates the committed summary. Family `japan-c1-nowcast-final-shares-v2` supersedes
-`japan-c1-nowcast-final-shares`, whose spec dropped late-scratch cases against #69. A `--trial`
-run is a run too: its records go to the family's `-trial` family with `params["trial"] = True`,
-and it never freezes or alters the family's spec.
+`japan-c1-nowcast-final-shares`, whose spec dropped late-scratch cases against #69; it is the
+family of a run on JRA-VAN days alone. A run that reads our logged days registers under
+`japan-c1-nowcast-final-shares-v3` (#411), whose spec names both sources and the rules above,
+and writes its reports as `nowcast-japan-v3-<spec hash>`, so v2's reports are never replaced. A
+`--trial` run is a run too: its records go to the family's `-trial` family with
+`params["trial"] = True`, and it never freezes or alters the family's spec.
 """
 
 from __future__ import annotations
@@ -70,7 +81,7 @@ from horsetrack.core.eval.registry import (
     write_summary,
 )
 from horsetrack.core.eval.reports import write_report
-from horsetrack.countries.japan.board.snapshot import RaceBoard, load_decision_grid
+from horsetrack.countries.japan.board.snapshot import SCRATCHED, RaceBoard, load_decision_grid
 from horsetrack.countries.japan.models import nowcast as nc
 from horsetrack.countries.japan.models.v0.nowcast import NowcastV0
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START
@@ -79,9 +90,11 @@ COUNTRY = "japan"
 TICKET = 85
 SOURCE = "jravan"
 HYPOTHESIS = "E19"
-FAMILY_ID = "japan-c1-nowcast-final-shares-v2"
+FAMILY_ID = "japan-c1-nowcast-final-shares-v2"  # JRA-VAN days alone (#85)
 TRIAL_FAMILY_ID = f"{FAMILY_ID}-trial"  # trial runs' records; a trial never freezes FAMILY_ID
 SUPERSEDES = "japan-c1-nowcast-final-shares"
+LOGGED_FAMILY_ID = "japan-c1-nowcast-final-shares-v3"  # with our own logged days (#411)
+LOGGED_SOURCE = "jra"  # our own compacted logs, processed/jra/odds_timeseries
 COLUMNS = [
     "race_id",
     "venue",
@@ -94,6 +107,9 @@ COLUMNS = [
     "odds_hi",
     "investment",
 ]
+# Our logs add the scratch markers (Wide boards) and the final-state flag (compact.py).
+LOGGED_COLUMNS = [*COLUMNS, "status_raw"]
+FINAL_STATE = "is_final_state"
 FORECASTERS = ("structural", "no_features", "random_walk", "drift_v0")
 COMPARISONS = (
     ("structural", "random_walk"),
@@ -122,21 +138,63 @@ def day_files(start: date, end: date | None, source: str = SOURCE) -> list[tuple
     return out
 
 
-def read_logged_day(path: Path, jravan: pd.DataFrame | None) -> pd.DataFrame:
-    """One of our own compacted logged days, as `read_day`, keeping only rows with a post time
-    (a row without one cannot be placed on the tau grid) and only the (race, pool) pairs the
-    same day's JRA-VAN rows `jravan` do not hold: JRA-VAN wins where both have a pool."""
-    frame = read_day(path)
+@dataclasses.dataclass(frozen=True)
+class LoggedDay:
+    frame: pd.DataFrame  # the paths our log supplies
+    scratches: pd.DataFrame  # every WIN / PLACE scratch row of the log (for the Wide boards)
+    no_final_capture: dict[str, int]  # per pool: paths dropped for want of a final capture
+
+
+def _paths(frame: pd.DataFrame) -> pd.MultiIndex:
+    return pd.MultiIndex.from_frame(frame[["race_id", "pool"]])
+
+
+def _final_paths(frame: pd.DataFrame) -> pd.MultiIndex:
+    """The (race, pool) paths with a confirmed final capture: a capture (rows sharing a
+    snapshot_utc) whose priced rows of that pool all show the final state (`is_final_state`;
+    docs/specs/board-at-t.md, as `board.snapshot._pool_rows_final`)."""
+    priced = frame[
+        (frame["combination"] != nc.POOL_ROW)
+        & (frame["odds"] > 0)
+        & (frame["status_raw"] != SCRATCHED)
+    ]
+    final = priced[FINAL_STATE].eq(True) if FINAL_STATE in priced.columns else False
+    captures = priced.assign(_final=final).groupby(["race_id", "pool", "snapshot_utc"])["_final"]
+    done = captures.all()
+    return pd.MultiIndex.from_tuples(
+        sorted({(r, p) for (r, p, _), ok in done.items() if ok}), names=["race_id", "pool"]
+    )
+
+
+def read_logged_day(path: Path, jravan: pd.DataFrame | None) -> LoggedDay:
+    """One of our own compacted logged days, as `read_day` (with status_raw and, where the file
+    has it, `is_final_state`). Kept: rows with a post time (a row without one cannot be placed on
+    the tau grid); the (race, pool) paths the same day's JRA-VAN rows `jravan` do not hold with a
+    post time (JRA-VAN wins a path only where it can be timed); and, of those, the paths with a
+    confirmed final capture: a logged path whose capture stopped before the close has no final
+    board or V_final, so it is no target and no growth observation, and is counted. A file
+    compacted before #411 has no final-state flag, so none of its paths is kept (recompact)."""
+    present = set(pq.read_schema(path).names)
+    frame = read_day(path, [c for c in (*LOGGED_COLUMNS, FINAL_STATE) if c in present])
+    scratches = frame[(frame["status_raw"] == SCRATCHED) & frame["pool"].isin((nc.WIN, nc.PLACE))]
     frame = frame[frame["post_utc"].notna()]
     if jravan is not None and len(jravan) and len(frame):
-        theirs = pd.MultiIndex.from_frame(jravan[["race_id", "pool"]].drop_duplicates())
-        frame = frame[~pd.MultiIndex.from_frame(frame[["race_id", "pool"]]).isin(theirs)]
-    return frame.reset_index(drop=True)
+        timed = jravan[jravan["post_utc"].notna()][["race_id", "pool"]].drop_duplicates()
+        frame = frame[~_paths(frame).isin(pd.MultiIndex.from_frame(timed))]
+    final = _final_paths(frame)
+    paths = frame[["race_id", "pool"]].drop_duplicates()
+    stopped = paths[~_paths(paths).isin(final)]
+    frame = frame[_paths(frame).isin(final)].drop(columns=[FINAL_STATE], errors="ignore")
+    return LoggedDay(
+        frame.reset_index(drop=True),
+        scratches.reset_index(drop=True),
+        {str(k): int(v) for k, v in stopped["pool"].value_counts().items()},
+    )
 
 
-def read_day(path: Path) -> pd.DataFrame:
+def read_day(path: Path, columns: list[str] = COLUMNS) -> pd.DataFrame:
     """One day file, by column and with the model's pools only; Arrow's pool is released after."""
-    table = pq.read_table(path, columns=COLUMNS, filters=[("pool", "in", list(nc.POOLS))])
+    table = pq.read_table(path, columns=columns, filters=[("pool", "in", list(nc.POOLS))])
     frame = table.to_pandas()
     del table
     pa.default_memory_pool().release_unused()
@@ -173,23 +231,28 @@ def data_builds(
         "jravan_races": f"processed/{SOURCE}/races.parquet@{race_digest}",
     }
     if logged:
-        builds["jra_odds_timeseries"] = f"processed/jra/odds_timeseries@{_files_digest(logged)}"
+        builds["jra_odds_timeseries"] = (
+            f"processed/{LOGGED_SOURCE}/odds_timeseries@{_files_digest(logged)}"
+        )
     return builds
 
 
-def wide_coverage() -> dict:
+def wide_coverage(logged: list[tuple[str, Path]] | None = None) -> dict:
     """Our own logged development days (processed/jra/odds_timeseries): Wide rows and post times.
-    A holdout day is fully locked (D14): it is skipped by its file name, before any read."""
-    folder = paths.processed_dir("jra") / "odds_timeseries"
+    `logged`: the day files the run reads (its `--end` applied); by default every file in the
+    folder. A holdout day is fully locked (D14): it is skipped by its file name, before any read."""
+    if logged is None:
+        folder = paths.processed_dir(LOGGED_SOURCE) / "odds_timeseries"
+        logged = [(p.stem, p) for p in sorted(folder.glob("*.parquet"))] if folder.is_dir() else []
     days = []
-    for path in sorted(folder.glob("*.parquet")) if folder.is_dir() else []:
-        if is_holdout_day(COUNTRY, date.fromisoformat(path.stem)):
+    for day, path in logged:
+        if is_holdout_day(COUNTRY, date.fromisoformat(day)):
             continue
         t = pq.read_table(path, columns=["race_id", "pool", "post_utc"]).to_pandas()
         wide = t[t["pool"] == nc.WIDE]
         days.append(
             {
-                "day": path.stem,
+                "day": day,
                 "wide_races": int(wide["race_id"].nunique()),
                 "wide_races_with_post_time": int(
                     wide.dropna(subset=["post_utc"])["race_id"].nunique()
@@ -199,10 +262,13 @@ def wide_coverage() -> dict:
     return {"own_logged_days": days}
 
 
-def wide_status(coverage: dict, cases: nc.Cases, folds, cells: list[dict]) -> dict:
+def wide_status(
+    coverage: dict, cases: nc.Cases, folds, cells: list[dict], no_final_capture: int = 0
+) -> dict:
     """Whether Wide (D3) was fitted, and when not, a sentence saying why: no Wide in our logs, no
-    post time on the logged Wide races, Wide cases on no fold's training day, or too few of them
-    for a cell. The Wide cases and days are counted either way."""
+    post time on the logged Wide races, no logged Wide path with a final capture
+    (`no_final_capture` Wide paths dropped), Wide cases on no fold's training day, or too few of
+    them for a cell. The Wide cases and days are counted either way."""
     logged = coverage["own_logged_days"]
     wide_races = sum(e["wide_races"] for e in logged)
     with_post = sum(e["wide_races_with_post_time"] for e in logged)
@@ -220,6 +286,13 @@ def wide_status(coverage: dict, cases: nc.Cases, folds, cells: list[dict]) -> di
             f"Wide is not fitted: none of the {wide_races} Wide races on our logged development "
             "days has a post time, so no Wide board can be placed on the tau grid (recompact the "
             "days: the race card now gives the post times, #411).",
+        ),
+        (
+            not wide_days and no_final_capture > 0,
+            f"Wide is not fitted: none of the {no_final_capture} logged Wide paths with a post "
+            "time reached a confirmed final capture (a capture showing the final state), so none "
+            "gives a final board (a day compacted before #411 carries no final-state flag: "
+            "recompact it).",
         ),
         (
             not trained,
@@ -243,9 +316,10 @@ def wide_status(coverage: dict, cases: nc.Cases, folds, cells: list[dict]) -> di
     }
 
 
-def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
-    """The family's design, frozen before any development row is read."""
-    return {
+def build_spec(grid, scheme, bootstrap: dict, v0_config: dict, *, logged: bool = False) -> dict:
+    """The family's design, frozen before any development row is read: #85's v2 on the JRA-VAN
+    days alone, or with `logged` (our own logged development days are read, #411) v3."""
+    spec = {
         "family_id": FAMILY_ID,
         "supersedes": f"{SUPERSEDES}: its spec dropped late-scratch cases, against the owner's "
         "#69 rule (core/eval/scoring.py); found in #85's review",
@@ -301,6 +375,44 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
             "cal_seed": nc.CAL_SEED,
         },
     }
+    return _logged_spec(spec) if logged else spec
+
+
+def _logged_spec(v2: dict) -> dict:
+    """v3: v2's design on the JRA-VAN days and our own logged development days (#411)."""
+    spec = {k: v for k, v in v2.items() if k != "supersedes"}
+    spec["family_id"] = LOGGED_FAMILY_ID
+    spec["extends"] = (
+        f"{FAMILY_ID}: the same design, with our own logged development days read beside the "
+        "JRA-VAN days and Wide (D3) fitted from them (#411); v2 stays the family of a run on "
+        "JRA-VAN days alone"
+    )
+    spec["hypotheses"] = {
+        HYPOTHESIS: v2["hypotheses"][HYPOTHESIS].replace(
+            "of the Win and Place pools", "of the Win, Place and Wide pools"
+        )
+    }
+    spec["data"] = v2["data"] | {
+        "source": f"processed/{SOURCE}/odds_timeseries (JRA-VAN 0B41/0B42) and "
+        f"processed/{LOGGED_SOURCE}/odds_timeseries (our own compacted logged days, #411)",
+        "holdout": "holdout days of either source are skipped by file name before any read (D14)",
+        "merge": "per day and per (race, pool): the JRA-VAN path where it has a post time, else "
+        "our logged path (its rows with a post time); each path is timed by its own source's "
+        "post time",
+        "final_capture": "a logged (race, pool) path counts only with a confirmed final capture, "
+        "a capture whose priced rows of that pool all show the final state (最終オッズ, no page "
+        "clock: docs/specs/board-at-t.md; compaction's is_final_state); otherwise it gives no "
+        "case and no growth observation and is counted (no_final_capture)",
+        "wide_shares": "the low figures inverted by JRA's pair rule (models.nowcast.wide_money): "
+        "the pair {a,b} wins with {a,x} and {b,x} for one third runner x, its low figure with "
+        "max over x of (m_ax + m_bx); the drift's Wide draws are read back by the same rule",
+        "wide_scratches": "a runner scratched in our logged WIN or PLACE rows (status_raw SCR) "
+        "takes its Wide pairs off the Wide board from that capture on (JRA's page stops listing "
+        "them), so a case from before the scratch is renormalised by #69's rule",
+        "unscored": "a (pool, tau) a fold's training days give no fit for (Wide before our logs "
+        "accrue) is not scored in that fold and is counted (unscored_no_fit)",
+    }
+    return spec
 
 
 # ---------------------------------------------------------------- the drift baseline
@@ -326,8 +438,8 @@ def drift_examples(cases: nc.Cases, days: list[str]) -> pd.DataFrame:
 
 def drift_forecaster(model: NowcastV0):
     """#116's drift as a share forecaster: its odds draws, read back into shares by the pool's
-    share rule (WIN 1/O, PLACE and Wide the stake-back inverse). A Wide pair's shock is v0's
-    (eps_a + eps_b) / sqrt 2 of per-runner shocks."""
+    share rule (WIN 1/O, PLACE the stake-back inverse, Wide the pair rule's, `nc.wide_money`). A
+    Wide pair's shock is v0's (eps_a + eps_b) / sqrt 2 of per-runner shocks."""
 
     def forecast(view: nc.RaceView, *, pool: str, n: int, seed: int) -> nc.Draws:
         board = view.pools[pool]
@@ -347,7 +459,7 @@ def drift_forecaster(model: NowcastV0):
         eps = np.random.default_rng(seed).standard_normal((n, len(runners)))
         shocks = {h: eps[:, j] for j, h in enumerate(runners)}
         drawn = model.draws(race, pool=pool, tau_min=int(round(view.tau_min)), shocks=shocks)
-        shares, _ = nc.pool_shares(pool, drawn.odds)
+        shares, _ = nc.pool_shares(pool, drawn.odds, combinations=drawn.combinations)
         return nc.Draws(shares=shares, v_final=np.full(n, np.nan))
 
     return forecast
@@ -463,24 +575,28 @@ def run_study(
     scoring = config.load_country_yaml(COUNTRY, "scoring")["bootstrap"]
     bootstrap = {"n_boot": int(scoring["n_boot"]), "level": float(scoring["level"]), "seed": SEED}
     v0_config = config.load_country_yaml(COUNTRY, "nowcast_v0")
-    spec = build_spec(grid, scheme, bootstrap, v0_config)
+
+    # D14: both sources' holdout days are dropped by file name, before any of their files is read.
+    files = day_files(PRICE_ERA_START, end)
+    logged = day_files(PRICE_ERA_START, end, source=LOGGED_SOURCE)
+    held = sorted({d for d, _ in files + logged if is_holdout_day(COUNTRY, date.fromisoformat(d))})
+    files = [(d, p) for d, p in files if d not in set(held)]
+    logged = [(d, p) for d, p in logged if d not in set(held)]
+
+    # A run that reads our logged days is v3 (#411); one on JRA-VAN days alone stays #85's v2.
+    base = LOGGED_FAMILY_ID if logged else FAMILY_ID
+    sources = (SOURCE, LOGGED_SOURCE) if logged else (SOURCE,)
+    spec = build_spec(grid, scheme, bootstrap, v0_config, logged=bool(logged))
     # The registry's spec hash (sorted, compact JSON), so a trial's names the spec it would freeze.
     spec_hash = hashlib.sha256(
         json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     registry = default_registry(COUNTRY)
-    family = TRIAL_FAMILY_ID if trial else FAMILY_ID
+    family = f"{base}-trial" if trial else base
     if not trial:  # a trial's spec may still change, so it is not frozen
-        spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any development row is read
+        spec_hash = registry.freeze_family(base, spec)  # before any development row is read
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     git_sha = _git_sha()
-
-    # D14: both sources' holdout days are dropped by file name, before any of their files is read.
-    files = day_files(PRICE_ERA_START, end)
-    logged = day_files(PRICE_ERA_START, end, source="jra")
-    held = sorted({d for d, _ in files + logged if is_holdout_day(COUNTRY, date.fromisoformat(d))})
-    files = [(d, p) for d, p in files if d not in set(held)]
-    logged = [(d, p) for d, p in logged if d not in set(held)]
     builds = data_builds(files, logged)
     grades = read_grades(PRICE_ERA_START)
     by_day: dict[str, list[Path | None]] = defaultdict(lambda: [None, None])
@@ -492,17 +608,24 @@ def run_study(
     log(f"reading {len(days)} development days ({len(files)} JRA-VAN, {len(logged)} our logs)")
     case_chunks, growth_chunks, case_parts, growth_parts = [], [], [], []
     counts: dict[str, int] = defaultdict(int)
+    if logged:
+        counts["no_final_capture"] = 0
+    no_final_wide = 0
     for i, (_, (jravan_path, logged_path)) in enumerate(days):
         frame = None if jravan_path is None else read_day(jravan_path)
+        scratches = None
         if logged_path is not None:
             own = read_logged_day(logged_path, frame)
+            counts["no_final_capture"] += sum(own.no_final_capture.values())
+            no_final_wide += own.no_final_capture.get(nc.WIDE, 0)
+            scratches = own.scratches
             if frame is None:
-                frame = own
-            elif len(own):
-                frame = pd.concat([frame, own], ignore_index=True)
+                frame = own.frame
+            elif len(own.frame):  # a JRA-VAN path without a post time gives way to our log's
+                frame = pd.concat([frame[frame["post_utc"].notna()], own.frame], ignore_index=True)
             del own
-        day_cases, day_growth, c = nc.extract(frame, grades=grades)
-        del frame
+        day_cases, day_growth, c = nc.extract(frame, grades=grades, scratches=scratches)
+        del frame, scratches
         case_parts.append(day_cases)
         growth_parts.append(day_growth)
         for key, value in c.items():
@@ -559,7 +682,8 @@ def run_study(
             table["case"] += offset
             table["fold"] = label
             pit["case"] += offset
-            _pit_summary(pit, test_cases, offset, pit_acc)
+            if len(test_cases):  # a fold of unscorable cases only has no PIT to add
+                _pit_summary(pit, test_cases, offset, pit_acc)
             scores.append(table)
             for cell in structural.cells.values():
                 cells.append({"fold": label, **cell.__dict__, "beta": list(cell.beta)})
@@ -597,7 +721,8 @@ def run_study(
                 spec_hash,
                 test_days_per_fold,
                 n_draws,
-                trial=trial,
+                family=family,
+                sources=sources,
                 status="failed",
                 error=f"{type(exc).__name__}: {exc}",
             )
@@ -605,7 +730,7 @@ def run_study(
         write_summary(registry, summary_dir(COUNTRY))
         raise
 
-    scores = pd.concat(scores, ignore_index=True)
+    scores = pd.concat([t for t in scores if len(t)] or scores, ignore_index=True)
     gains, records = {}, []
     for a, b in COMPARISONS:
         pair = scores[scores["forecaster"].isin([a, b])]
@@ -649,7 +774,8 @@ def run_study(
                 spec_hash,
                 test_days_per_fold,
                 n_draws,
-                trial=trial,
+                family=family,
+                sources=sources,
             )
         )
 
@@ -671,8 +797,8 @@ def run_study(
         "cells": cells,
         "pit": _pit_rows(pit_acc),
     }
-    coverage = wide_coverage()
-    report_data["wide"] = wide_status(coverage, cases, folds, cells) | coverage
+    coverage = wide_coverage(logged)  # the logged days the folds read
+    report_data["wide"] = wide_status(coverage, cases, folds, cells, no_final_wide) | coverage
     about = {
         "family": f"`{family}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
@@ -684,9 +810,11 @@ def run_study(
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "trial (records marked params.trial, spec not frozen)": trial,
     }
-    stem = f"nowcast-{COUNTRY}-{spec_hash[:12]}" + ("-trial" if trial else "")
+    # v3's reports carry their family's version, so they never take a v2 report's name.
+    version = "-v3" if logged else ""
+    stem = f"nowcast-{COUNTRY}{version}-{spec_hash[:12]}" + ("-trial" if trial else "")
     report = write_report(
-        out_dir / f"{stem}.md", render_report(gains, report_data, about, grid), sources=(SOURCE,)
+        out_dir / f"{stem}.md", render_report(gains, report_data, about, grid), sources=sources
     )
     dump = {k: v for k, v in report_data.items()} | {
         "gains": {
@@ -702,9 +830,7 @@ def run_study(
         },
         "about": about,
     }
-    write_report(
-        out_dir / f"{stem}.json", json.dumps(dump, indent=1, default=str), sources=(SOURCE,)
-    )
+    write_report(out_dir / f"{stem}.json", json.dumps(dump, indent=1, default=str), sources=sources)
     appended = 0
     existing = registry.records(family)
     for record in records:
@@ -805,10 +931,13 @@ def _record(
     days_per_fold,
     n_draws,
     *,
-    trial: bool = False,
+    family: str = FAMILY_ID,
+    sources: tuple[str, ...] = (SOURCE,),
     status: str = "scored",
     error: str | None = None,
 ) -> RunRecord:
+    """One comparison's record in `family` (a `-trial` family marks the record a trial)."""
+    trial = family.endswith("-trial")
     params = {
         "candidate": candidate,
         "baseline": baseline,
@@ -823,12 +952,12 @@ def _record(
         params["error"] = error
     return RunRecord(
         hypothesis_id=HYPOTHESIS,
-        family_id=TRIAL_FAMILY_ID if trial else FAMILY_ID,
+        family_id=family,
         variant=f"{candidate}_vs_{baseline}",
         ticket=TICKET,
         git_sha=git_sha,
         data_builds=builds,
-        sources=(SOURCE,),
+        sources=sources,
         fold_scheme="walk_forward:"
         + json.dumps(dataclasses.asdict(load_country_scheme(COUNTRY)), sort_keys=True),
         components={
