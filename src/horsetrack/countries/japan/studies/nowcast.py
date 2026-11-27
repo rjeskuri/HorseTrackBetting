@@ -97,6 +97,7 @@ SUPERSEDES = "japan-c1-nowcast-final-shares-v4"
 PLACE_TICKET = 410
 PLACE_VARIANT = "place_rule_vs_votes"  # the Place rule measured against the final votes (#410)
 POOL_VOTES = "pool_votes"
+NULL_FIELD = "\\N"  # how `place_rule_builds` writes a null field; no count or data_kubun is it
 # H1 データ区分 of a final record: 4 確定, 5 確定(月曜); 2 (前日売最終) is the day-before close
 # and 9 a cancelled race, so their votes are not the money the closing board was printed from
 PLACE_FINAL_KUBUN = ("4", "5")
@@ -244,18 +245,22 @@ def place_rule_builds(votes: pd.DataFrame) -> dict[str, str]:
     (`final_place_votes` of the development days, as the odds build covers them), not of the
     whole file, so votes outside them (holdout days among them) never enter it. The rows are
     serialised as sorted tab-separated lines (votes as integers), so the digest does not depend
-    on the scan's row order."""
-    text = (
-        votes["race_id"].astype(str)
-        + "\t"
-        + votes["combination"].astype(str)
-        + "\t"
-        + votes["votes"].astype("Int64").astype(str)
-        + "\t"
-        + votes["data_kubun"].astype(str)
+    on the scan's row order. A null field (a blank vote count, a missing data_kubun) is written as
+    `NULL_FIELD`, a value of its own, before the sort: it never raises, whatever string dtype
+    pandas gives, and it differs from any count and from the row dropped. The build keeps the
+    table identity the registered records carry, `processed/{SOURCE}/pool_votes.parquet`; only
+    the digest after the `@` follows the rows."""
+    fields = (
+        votes["race_id"],
+        votes["combination"],
+        votes["votes"].astype("Int64"),
+        votes["data_kubun"],
     )
-    digest = hashlib.sha256("".join(f"{line}\n" for line in sorted(text)).encode())
-    return {"jravan_pool_votes": f"processed/{SOURCE}/{POOL_VOTES}@{digest.hexdigest()[:16]}"}
+    cells = [[NULL_FIELD if pd.isna(v) else str(v) for v in column] for column in fields]
+    lines = sorted("\t".join(row) for row in zip(*cells, strict=True))
+    digest = hashlib.sha256("".join(f"{line}\n" for line in lines).encode())
+    table = f"processed/{SOURCE}/{POOL_VOTES}.parquet"
+    return {"jravan_pool_votes": f"{table}@{digest.hexdigest()[:16]}"}
 
 
 def jra_place_figures(share: np.ndarray, places: int) -> tuple[np.ndarray, np.ndarray]:

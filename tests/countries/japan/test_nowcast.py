@@ -118,9 +118,11 @@ HORSETRACK_DATA_DIR points at a tmp dir.
 # block is written in its final order and I001 is waived so lint passes before and after.
 from __future__ import annotations  # noqa: I001
 
+import contextlib
 import itertools
 import json
 import math
+import re
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -2222,3 +2224,138 @@ def test_place_pit_is_split_by_closing_board_read(data_dir, tmp_path, monkeypatc
     assert {(r["forecaster"], float(r["tau_min"])): int(r["n"]) for r in diag_rows} == {
         k[:2]: int(v["n"]) for k, v in diagnostic.items()
     }
+
+
+# ---------------------------------------------------------------- round 6 (#410 restart)
+
+# The votes build keeps the identity the registered v5 records carry (`registry._tables` counts
+# everything before the last `@` toward the variant): only the digest after it changes.
+VOTES_BUILD = re.compile(r"processed/jravan/pool_votes\.parquet@[0-9a-f]{16}")
+# Strings as CI's pandas 3 makes them: `astype(str)` keeps a null as a missing value, not as text.
+# Locally (pandas 2) the `future.infer_string` option gives the same strings; on pandas 3 it is
+# already the default.
+STRING_MODES = ("default", "pandas3")
+
+
+@contextlib.contextmanager
+def string_mode(mode: str):
+    if mode == "default":
+        yield
+        return
+    try:
+        pd.get_option("future.infer_string")
+    except (KeyError, pd.errors.OptionError):  # a pandas without the option infers already
+        yield
+        return
+    with pd.option_context("future.infer_string", True):
+        yield
+
+
+def votes_frame(rows: list[tuple], votes_dtype: str) -> pd.DataFrame:
+    """(race_id, combination, votes, data_kubun) rows, the votes in `votes_dtype` (None a null)."""
+    frame = pd.DataFrame(rows, columns=["race_id", "combination", "votes", "data_kubun"])
+    if votes_dtype == "Int64":
+        frame["votes"] = pd.array(list(frame["votes"]), dtype="Int64")
+    elif votes_dtype == "float64":
+        frame["votes"] = frame["votes"].astype("float64")  # a null as NaN: pandas 2's reader
+    else:
+        frame["votes"] = frame["votes"].astype(object)
+    return frame
+
+
+def votes_build_of(rows: list[tuple], votes_dtype: str) -> str:
+    builds = study.place_rule_builds(votes_frame(rows, votes_dtype))
+    assert set(builds) == {"jravan_pool_votes"}, builds
+    return builds["jravan_pool_votes"]
+
+
+@pytest.mark.parametrize("mode", STRING_MODES)
+@pytest.mark.parametrize("votes_dtype", ["Int64", "float64", "object"])
+def test_the_votes_build_serialises_a_blank_count(mode, votes_dtype):
+    """Restart fix 1 and 2: the JRA-VAN parser emits null for a blank vote count. The votes
+    build of rows with a null count (and a null data_kubun) is computed under pandas 3's strings
+    as under pandas 2's: it keeps the identity `processed/jravan/pool_votes.parquet` with a
+    16-hex digest, does not depend on the rows' order, and the null is a value of its own: it
+    differs from the same slot with any count, from the slot dropped, and a null data_kubun from
+    a final one. A changed count elsewhere changes the build too."""
+    a, b = race_id_of(TEST_DAYS[0], 1), race_id_of(TEST_DAYS[0], 2)
+    rows = [
+        (a, "1", 4100, "4"),
+        (a, "2", 900, "4"),
+        (a, "3", None, "4"),  # a blank count
+        (b, "1", 700, "5"),
+        (b, "2", 650, None),  # a blank data_kubun
+        (b, "3", 120, "5"),
+    ]
+    with string_mode(mode):
+        build = votes_build_of(rows, votes_dtype)
+        assert VOTES_BUILD.fullmatch(build), build
+        rng = np.random.default_rng(410)
+        for _ in range(4):
+            shuffled = [rows[i] for i in rng.permutation(len(rows))]
+            assert votes_build_of(shuffled, votes_dtype) == build
+        variants = {
+            "count_0": [r if r[:2] != (a, "3") else (a, "3", 0, "4") for r in rows],
+            "count_350": [r if r[:2] != (a, "3") else (a, "3", 350, "4") for r in rows],
+            "slot_dropped": [r for r in rows if r[:2] != (a, "3")],
+            "kubun_final": [r if r[:2] != (b, "2") else (b, "2", 650, "5") for r in rows],
+            "other_count": [r if r[:2] != (a, "1") else (a, "1", 4101, "4") for r in rows],
+        }
+        got = {name: votes_build_of(v, votes_dtype) for name, v in variants.items()}
+    for name, value in got.items():
+        assert VOTES_BUILD.fullmatch(value), (name, value)
+    assert build not in got.values(), (build, got)
+    assert len(set(got.values())) == len(got), got
+
+
+def test_a_blank_place_count_leaves_the_complete_boards_scored(data_dir, tmp_path, monkeypatch):
+    """Restart fix 1 and 2, through the study under pandas 3's strings: one registered Place slot
+    of one scored race has a blank (null) vote count, and a training day's record a null
+    data_kubun. The run completes; the Place measurement has no error, its other scored board is
+    validated and the blank-count board is counted unavailable for the missing vote, so the
+    Place record stays scored. Every comparison record (and the Place record) carries one
+    `jravan_pool_votes` build with the identity `processed/jravan/pool_votes.parquet`, and the
+    blank is in it: the same store with that count filled builds a different digest."""
+    dev_days = TRAIN_DAYS + TEST_DAYS[:1]
+    write_jravan_store(data_dir, dev_days)
+    base = final_votes_of(dev_days)
+    blank = (race_id_of(TEST_DAYS[0], 2), "3")
+    no_kubun = (race_id_of(TRAIN_DAYS[0], 1), "2")
+    assert sum((r["race_id"], r["combination"]) == blank for r in base) == 1
+    assert sum((r["race_id"], r["combination"]) == no_kubun for r in base) == 1
+    blanked = [
+        r | {"votes": None}
+        if (r["race_id"], r["combination"]) == blank
+        else r | {"data_kubun": None}
+        if (r["race_id"], r["combination"]) == no_kubun
+        else r
+        for r in base
+    ]
+    filled = [r | {"data_kubun": None} if (r["race_id"], r["combination"]) == no_kubun else r
+              for r in base]  # fmt: skip
+    comparisons = {f"{a}_vs_{b}" for a, b in study.COMPARISONS}
+    builds = {}
+    with string_mode("pandas3"):
+        for name, rows in (("blank", blanked), ("filled", filled)):
+            run = votes_build_run(data_dir, tmp_path, monkeypatch, f"r6-{name}", rows)
+            measured = run["dump"]["place_measurement"]
+            assert "error" not in measured, (name, measured.get("error"))
+            counts = measured["counts"]
+            assert counts["boards_scored"] == 2, (name, counts)
+            missing = sum(
+                n for k, n in counts.items()
+                if k.startswith("unavailable_votes_missing_on_a_priced_runner")
+            )  # fmt: skip
+            assert counts["boards_validated"] == (1 if name == "blank" else 2), (name, counts)
+            assert missing == (1 if name == "blank" else 0), (name, counts)
+            assert study.place_validated(measured), (name, measured["summary"])
+            place = run["records"][study.PLACE_VARIANT]
+            assert place.status == "scored", (name, place.status, place.params)
+            assert place.params.get("unvalidated") is not True
+            assert comparisons <= set(run["records"]), (name, sorted(run["records"]))
+            votes = {run["records"][c].data_builds.get("jravan_pool_votes") for c in comparisons}
+            assert len(votes) == 1 and None not in votes, (name, votes)
+            builds[name] = votes.pop()
+            assert VOTES_BUILD.fullmatch(builds[name]), (name, builds[name])
+            assert place.data_builds.get("jravan_pool_votes") == builds[name], name
+    assert builds["blank"] != builds["filled"], builds
