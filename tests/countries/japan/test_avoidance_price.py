@@ -60,18 +60,27 @@ Contract pinned here (`horsetrack.countries.japan.studies.avoidance_price`, buil
   final price (the favourite on the final Win odds whose Place paid at most 110), the Plus-10
   prediction from its race's PLACE pool in
   `$HORSETRACK_DATA_DIR/processed/jravan/pool_votes.parquet` (`jravan.votes.POOL_VOTES_SCHEMA`, a
-  label-only table read for the settled race, never at t; development races only). Sales are the
-  `__pool__` row's votes less its `refund_votes`, x 100 yen. JRA's Place rule: the net pool (80% of
-  sales, the Place takeout since 2014-06-07) first returns the placed horses' stakes (votes x 100),
-  the profit left is split equally over the placed horses and paid per ticket rounded down to 10
-  yen, and a horse whose share is under 10 yen a ticket (or with nothing left) is paid 100. The
-  top-ups are 10 yen a ticket on each placed horse paid 100; then `predicted_floor_dividend`'s
-  rule. The record's metrics hold one count per cell of predicted (100, 110) x realised (100, 110,
-  above 110), named `predicted_<p>_realised_<r>` (r `100`, `110` or `above_110`, either order),
-  with n the favourites predicted; a cell left out counts 0. The fixture's pools sit far from every
-  boundary (payout plus top-ups at 85%, 93.5% or 107% of sales), so any faithful reading gives
-  the same predictions, and each race's WIN pool tells the opposite story, so a prediction read
-  from the WIN rows flips.
+  label-only table read for the settled race, never at t; development races only). S, the
+  pool's tickets, is the `__pool__` row's votes less its `refund_votes`; sales are S x 100 yen.
+  JRA's Place rule (払戻金の計算方法, the stake-back share; `core.pricing.
+  stake_back_share_dividend`): with P placed horses, W_h the tickets on placed horse h and D = S -
+  the placed horses' W the tickets on starters that did not place, horse h's payout pool is (W_h +
+  D/P) x 0.80 (R0, the Place rate without any premium), shared over its own tickets, so its base
+  dividend per 100 yen is 0.80 x (W_h + D/P) / W_h x 100 rounded down to 10 yen, never under 100.
+  `place_payout(votes, placed, sales, payout_rate)` (votes: tickets by horse, unplaced horses
+  allowed; sales in yen) returns (each placed horse's base dividend, 100 at the floor; the base
+  total payout, the sum of base x W; the top-ups, 10 yen a ticket on each placed horse at base
+  100), D read from `sales`. Plus-10 then pays a horse at base 100
+  `predicted_floor_dividend(total, top_ups, sales)`, on the base total (premium excluded). On a
+  premium race (`takeout.race_takeout`'s boost `premium` or `ultra_premium` on the PLACE pool),
+  each placed horse then gains 5% of sales split equally over the P horses and paid per ticket,
+  rounded down to 10 yen by itself: 10 x floor(S / (2 P W_h)) yen. The record's metrics hold one
+  count per cell of predicted (100, 110) x realised (100, 110, above 110), named
+  `predicted_<p>_realised_<r>` (r `100`, `110` or `above_110`, either order), with n the
+  favourites predicted; once one cell is present, a cell left out counts 0. The fixture's pools
+  sit far from every boundary (payout plus top-ups at 94.2%, 91.6% or 105.4% of sales), so any
+  faithful reading gives the same predictions, and each race's WIN pool tells the opposite story,
+  so a prediction read from the WIN rows flips.
 - D21: the votes are JRA-VAN's (`core.eval.reports.WITHHELD_SOURCES`). The 100-vs-110 record, and
   every record whose figures move with the votes, declares a withheld source in `sources`; the L3
   and L7 records read the jra store alone and do not. Every file the study writes goes through
@@ -112,6 +121,26 @@ Review round 1 of b9a6b6d (each pinned by its own test below):
   cell counts a favourite). The public report still gives the realised counts and never says
   that no floor-bound favourite placed.
 
+Review round 2 of 360216f (each pinned by its own test below):
+
+- The Place rule above, JRA's stake-back share, replaces the equal split of the profit: hand-worked
+  cases of `place_payout` (P = 2, 3 and 4, Plus-10 paid and withheld), the fixture's realised
+  dividends from the same rule, and a premium race whose realised dividends carry the premium
+  (the boost calendar patched in memory).
+- Eligible favourites whose prediction cannot be made (the votes missing or unreadable): the
+  prediction is unavailable, shown by absent cells: the record holds no `predicted_*` cell and no
+  `validation` metric, and no written row gives the check a verdict (`within`). A covered
+  selection with no eligible favourite keeps its scored zero: its cells present, all 0.
+- A scratch at t: a runner whose latest WIN or PLACE row at t is SCR has no price in any pool at
+  t, Wide pairs included, even when an older row of the other pool still prices it (the
+  board-at-t rule of docs/specs/board-at-t.md and `board.snapshot`).
+- A failed reconstruction check: each row of that variant in the private plus10 CSV has its
+  prediction cleared or a `why` naming the failure; its realised dividend stays.
+- The post-time input of the at-t records is one data build `<identity>@<digest>` (a hex digest
+  of the race -> post-time mapping): the identity the same whatever the coverage, the digest
+  moving when one race's post time changes or is backfilled, so the registry counts one family
+  size over such runs. The coverage counts stay in the report.
+
 How the run-level tests prove it without fixing the owner's betting rules: the same synthetic
 store is run under one change at a time and the registry records are compared. Rows not available
 at t, and the final odds, must not move any board-at-t record; the board at t must not move any
@@ -133,6 +162,7 @@ declared in memory by patching the holdout definition.
 from __future__ import annotations  # noqa: I001
 
 import copy
+import io
 import itertools
 import json
 import math
@@ -140,6 +170,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 
 import duckdb
@@ -156,7 +187,7 @@ from horsetrack.core.eval.reports import is_withheld
 from horsetrack.core.store import schemas
 from horsetrack.core.store.asof import load_availability
 from horsetrack.core.store.tables import ARROW_TYPES
-from horsetrack.countries.japan import odds_log
+from horsetrack.countries.japan import odds_log, takeout
 from horsetrack.countries.japan.board.snapshot import SCRATCHED
 from horsetrack.countries.japan.jravan import votes as jravan_votes
 from horsetrack.countries.japan.logger.compact import SCHEMA as ODDS_SCHEMA
@@ -173,6 +204,7 @@ from horsetrack.countries.japan.studies.avoidance_price import (
     at_floor,
     drop_tail,
     entropy_quintile,
+    place_payout,
     plus10_withheld,
     predicted_floor_dividend,
     win_ranks,
@@ -455,6 +487,85 @@ def test_plus10_refuses_an_input_that_is_not_a_number():
                 plus10_withheld(*args)
             with pytest.raises(ValueError):
                 predicted_floor_dividend(*args)
+
+
+# ---------------------------------------------------------------------------------------------
+# JRA's Place rule (払戻金の計算方法): the stake-back share, then Plus-10, then any premium
+# ---------------------------------------------------------------------------------------------
+
+R0 = Fraction(4, 5)  # the Place payout rate without any premium (takeout 20% since 2014-06-07)
+
+
+def reference_place_payout(
+    votes: dict[int, int], placed, tickets: int
+) -> tuple[dict[int, int], int, int]:
+    """JRA's base Place payout, from first principles in exact arithmetic: with P placed horses
+    and D = tickets - their tickets, horse h's pool (W_h + D/P) x R0 is shared over its own W_h
+    tickets, rounded down to 10 yen per 100, never under 100. (Base dividends, base total payout
+    in yen, top-ups: 10 yen a ticket on each placed horse at base 100.)"""
+    w = {h: votes[h] for h in placed}
+    p, lost = len(w), tickets - sum(w.values())
+    base = {}
+    for h, n in w.items():
+        raw = R0 * (n + Fraction(lost, p)) / n * 100
+        base[h] = max(100, 10 * math.floor(raw / 10))
+    total = sum(base[h] * n for h, n in w.items())
+    top_ups = sum(10 * n for h, n in w.items() if base[h] == 100)
+    return base, total, top_ups
+
+
+# (every horse's tickets, the placed horses, base dividends, base total, top-ups, paid after
+# Plus-10), each worked by hand: S = the tickets, D = S - the placed tickets, the base
+# 0.8 x (W + D/P) / W x 100 rounded down to 10 and at least 100, Plus-10 on the base total
+PLACE_CASES = [
+    # the review's case: S 1,000, D 350; 98.7 -> 100, 173.3 -> 170, 266.7 -> 260; 80,000 plus
+    # 5,000 top-ups is within 100,000 sales: 110. (The equal split gives 110 / 150 / 200.)
+    ({1: 500, 2: 100, 3: 50, 4: 200, 5: 150}, (1, 2, 3),
+     {1: 100, 2: 170, 3: 260}, 80_000, 5_000, {1: 110, 2: 170, 3: 260}),
+    # no floor horse: D 550; 153.3 -> 150, 177.8 -> 170, 226.7 -> 220
+    ({1: 200, 2: 150, 3: 100, 4: 300, 5: 250}, (1, 2, 3),
+     {1: 150, 2: 170, 3: 220}, 77_500, 0, {1: 150, 2: 170, 3: 220}),
+    # Plus-10 withheld: D 50; 81.6 -> 100, 102.2 -> 100, 113.3 -> 110 (a base 110, not Plus-10);
+    # 95,400 plus 9,100 exceeds 100,000: 100
+    ({4: 850, 7: 60, 9: 40, 1: 30, 2: 20}, (4, 7, 9),
+     {4: 100, 7: 100, 9: 110}, 95_400, 9_100, {4: 100, 7: 100, 9: 110}),
+    # P = 2, Plus-10 paid: D 210; 92.0 -> 100, 173.3 -> 170; 85,300 plus 7,000: 110
+    ({3: 700, 5: 90, 1: 120, 2: 90}, (3, 5),
+     {3: 100, 5: 170}, 85_300, 7_000, {3: 110, 5: 170}),
+    # P = 2, withheld: D 55; 82.4 -> 100, 128.9 -> 120; 95,400 plus 9,000 exceeds 100,000: 100
+    ({6: 900, 2: 45, 1: 30, 3: 25}, (6, 2),
+     {6: 100, 2: 120}, 95_400, 9_000, {6: 100, 2: 120}),
+    # P = 4 (a dead heat): D 245; 92.3 -> 100, 104.5 -> 100, 124.5 -> 120, 188.9 -> 180;
+    # 81,300 plus 6,000: 110 for both horses at the floor
+    ({1: 400, 2: 200, 3: 110, 4: 45, 5: 145, 6: 100}, (1, 2, 3, 4),
+     {1: 100, 2: 100, 3: 120, 4: 180}, 81_300, 6_000, {1: 110, 2: 110, 3: 120, 4: 180}),
+    # the fixture's plus10 pool: S 1,000,000, D 250,000; 89.5 -> 100, 302.2 -> 300, 413.3 -> 410;
+    # 87.2m plus 7m top-ups within 100m: 110
+    ({1: 700_000, 2: 30_000, 3: 20_000, 4: 250_000}, (1, 2, 3),
+     {1: 100, 2: 300, 3: 410}, 87_200_000, 7_000_000, {1: 110, 2: 300, 3: 410}),
+]  # fmt: skip
+
+
+def test_place_payout_shares_the_losing_stakes_by_stake_back():
+    """Review 2 (high): JRA's Place rule is the stake-back share, (W_h + D/P) x 0.80 over horse
+    h's own tickets, not the placed stakes back and the profit split equally; Plus-10 on the base
+    total. D comes from the sales, so the votes may hold the placed horses only."""
+    for votes, placed, base, total, top_ups, paid in PLACE_CASES:
+        tickets = sum(votes.values())
+        sales = 100.0 * tickets
+        # the reference rule agrees with the hand-worked figures
+        assert reference_place_payout(votes, placed, tickets) == (base, total, top_ups), placed
+        floor = 100 if total + top_ups > sales else 110
+        assert {h: d if d > 100 else floor for h, d in base.items()} == paid, placed
+
+        for given in (votes, {h: votes[h] for h in placed}):
+            got, got_total, got_top_ups = place_payout(given, list(placed), sales, 0.80)
+            assert {int(h): d for h, d in got.items()} == base, (placed, got)
+            assert math.isclose(got_total, total, abs_tol=1e-6), (placed, got_total)
+            assert math.isclose(got_top_ups, top_ups, abs_tol=1e-6), (placed, got_top_ups)
+            dividend = predicted_floor_dividend(got_total, got_top_ups, sales)
+            final = {int(h): d if d > 100 else dividend for h, d in got.items()}
+            assert final == paid, (placed, final)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -810,13 +921,16 @@ def r10(x: float) -> int:
     return int(round(x / 10.0)) * 10
 
 
-def dividend_rows(race: Race, place: dict[int, int] | None = None) -> list[dict]:
+def dividend_rows(
+    race: Race, place: dict[int, int] | None = None, *, premium: bool = False
+) -> list[dict]:
     """The race's paying rows in every pool, from its own (base) final odds; the PLACE rows from
-    the reference Place payout of its (base) votes, then `race.place`, then `place` (M)."""
+    the reference Place payout of its (base) votes (with the 5% premium on a premium race, Q),
+    then `race.place`, then `place` (M)."""
     o, (first, second, third) = race.final, race.finish
     top3 = race.finish
     votes = place_votes(race, VOTES.get(race.race_id, "mid"))
-    paid = reference_place_dividends(votes, top3) | race.place | (place or {})
+    paid = reference_place_dividends(votes, top3, premium=premium) | race.place | (place or {})
     rows = [("WIN", str(first), max(100, r10(100 * o[first])))]
     rows += [("PLACE", str(h), paid[h]) for h in top3]
     for a, b in itertools.combinations(sorted(top3), 2):
@@ -898,10 +1012,13 @@ def board_capture(
     timed=True,
     place=True,
     scratched=frozenset(),
+    stale=frozenset(),
 ) -> list:
     """One capture of the race's WIN, PLACE and Wide boards. `timed` False: the rows carry no
     post_utc (N, N0). `place` False: no PLACE row (W, P); a set of horses: only those priced on
-    the PLACE board, the others' rows unpriced (P). A `scratched` horse's rows are unpriced."""
+    the PLACE board, the others' rows unpriced (P). A `scratched` horse's rows are unpriced. A
+    `stale` horse's WIN row is SCR while its PLACE and Wide rows are left out of the capture, so
+    an older capture's priced rows of those pools stay its latest (X)."""
     post, paying = post_of(race_id), paying or {}
     priced_place = set(HORSES) if place is True else set(place or ())
     rows = []
@@ -920,11 +1037,15 @@ def board_capture(
         )
     if place is False:
         rows = [r for r in rows if r["pool"] != "PLACE"]
+
+    def horses_of(row) -> set[int]:
+        combination = row["combination"]
+        return set() if combination == POOL_TOTAL else set(map(int, combination.split(",")))
+
+    rows = [r for r in rows if r["pool"] == "WIN" or not horses_of(r) & set(stale)]
     for r in rows:
-        horses = (
-            set() if r["combination"] == POOL_TOTAL else set(map(int, r["combination"].split(",")))
-        )
-        if horses & set(scratched):
+        horses = horses_of(r)
+        if horses & set(scratched) or (r["pool"] == "WIN" and horses & set(stale)):
             r |= {"odds": None, "odds_hi": None, "status_raw": SCRATCHED}
         if not timed:
             r |= {"post_utc": None, "minutes_to_post": None}
@@ -956,9 +1077,10 @@ FLOOR_FAVOURITES = {
 }
 # race -> its votes profile; every other race (the holdout day's too) is "mid"
 VOTES = {H1: "floor110", H5: "withheld", H6: "plus10", G1: "plus10", G4: "withheld", G6: "plus10"}
-# V: other Place votes, every price and dividend unchanged. Each flip is between the two all-floor
-# profiles, so every placed horse of the race stays within one 10-yen step of its realised
-# dividend and the reconstruction check still passes.
+# V: other Place votes, every price and dividend unchanged. Each flip is between floor110 and
+# withheld, whose other two placed horses hold the same share of the losing stakes and so are paid
+# the same: every placed horse of the race stays within one 10-yen step of its realised dividend
+# (the favourite's 110 against 100) and the reconstruction check still passes.
 V_VOTES = {H1: "withheld", G4: "floor110"}
 PREDICTED = {"plus10": 110, "floor110": 110, "withheld": 100}
 REFUNDED = {H6: 12_000}  # tickets refunded in the Place pool (in the pool row, on no runner)
@@ -977,16 +1099,19 @@ def _shares(race: Race, favourite: int, placed: tuple[int, ...], unplaced) -> di
 
 
 def place_votes(race: Race, profile: str) -> dict[int, int]:
-    """Each runner's final Place votes (100-yen tickets), refunds excluded.
+    """Each runner's final Place votes (100-yen tickets), refunds excluded: S = 1,000,000. By
+    JRA's rule (`reference_place_dividends`), with D the tickets on the unplaced runners, a placed
+    horse's base is 0.8 x (W + D/3) / W x 100 rounded down to 10 yen, at least 100.
 
-    plus10: the favourite holds 70% and the other two placed runners 3% and 2%. The profit left
-    after the placed stakes (5% of sales) leaves the favourite 2.4 yen a ticket, so it is paid 100,
-    and payout plus its top-ups are 85.1% of sales: 110 (the other two 150 and 180).
-    floor110: 80%, 3% and 2%. The net pool (80%) does not cover the placed stakes (85%), every
-    placed runner is paid 100, and the top-ups take the total to 93.5% of sales: 110 for all three.
-    withheld: 88%, 5% and 4%. The net pool (80%) does not cover the placed stakes (97%), every
-    placed runner is paid 100, and the top-ups take the total to 106.7% of sales: 100.
-    mid: by final Win price, 26% down to 2%: every placed runner is paid at least 120."""
+    plus10: the favourite 700,000, the other two placed runners 30,000 and 20,000 (D 250,000):
+    89.5 -> 100, 302.2 -> 300, 413.3 -> 410; payout 87.2m plus 7m top-ups is 94.2% of sales: 110.
+    floor110: 600,000, 120,000 and 80,000 (D 200,000): 88.9 -> 100, 124.4 -> 120, 146.7 -> 140;
+    payout 85.6m plus 6m top-ups is 91.6% of sales: 110.
+    withheld: 900,000, 30,000 and 20,000 (D 50,000): 81.5 -> 100, 124.4 -> 120, 146.7 -> 140;
+    payout 96.4m plus 9m top-ups is 105.4% of sales: 100. The other two hold the same W / D as
+    under floor110, so they are paid the same.
+    mid: by final Win price, 26% down to 2%: every placed runner is paid at least 120 (the
+    favourite's 260,000 with the next two, 180,000 and 140,000, leaves D 420,000: 123.1)."""
     if profile == "mid":
         return dict(zip(sorted(race.final, key=race.final.get), MID_VOTES, strict=True))
     favourite = min(race.final, key=race.final.get)
@@ -994,11 +1119,11 @@ def place_votes(race: Race, profile: str) -> dict[int, int]:
         unplaced = (50_000, 40_000, 40_000, 35_000, 30_000, 30_000, 25_000)
         return _shares(race, favourite, (700_000, 30_000, 20_000), unplaced)
     if profile == "floor110":
-        unplaced = (30_000, 25_000, 25_000, 20_000, 20_000, 15_000, 15_000)
-        return _shares(race, favourite, (800_000, 30_000, 20_000), unplaced)
+        unplaced = (40_000, 35_000, 30_000, 30_000, 25_000, 20_000, 20_000)
+        return _shares(race, favourite, (600_000, 120_000, 80_000), unplaced)
     assert profile == "withheld"
-    unplaced = (6_000, 5_000, 5_000, 4_000, 4_000, 3_000, 3_000)
-    return _shares(race, favourite, (880_000, 50_000, 40_000), unplaced)
+    unplaced = (10_000, 9_000, 8_000, 7_000, 6_000, 5_000, 5_000)
+    return _shares(race, favourite, (900_000, 30_000, 20_000), unplaced)
 
 
 def win_votes(race: Race, profile: str) -> dict[int, int]:
@@ -1014,22 +1139,22 @@ def win_votes(race: Race, profile: str) -> dict[int, int]:
     return dict(zip(order, shares, strict=True))
 
 
-def reference_place_dividends(votes: dict[int, int], placed) -> dict[int, int]:
-    """The Place dividend per 100 yen JRA pays each placed horse, from first principles (04 §1.3):
-    sales are the pool's tickets (refunds excluded) x 100; the net pool, 80% of sales, first
-    returns the placed stakes; the profit left is split equally over the placed horses and paid
-    per ticket, rounded down to 10 yen (100 when nothing is left). A horse paid 100 is topped up to
-    110, 10 yen a ticket on every placed horse paid 100, unless payout plus top-ups exceed sales."""
-    sales = 100 * sum(votes.values())
-    profit = sales * (1 - PLACE_TAKEOUT) - sum(100 * votes[h] for h in placed)
-    paid = {}
-    for h in placed:
-        per_ticket = profit / len(placed) / votes[h] if profit > 0 else 0.0
-        paid[h] = 100 + int(per_ticket // 10) * 10
-    payout = sum(paid[h] * votes[h] for h in placed)
-    top_ups = sum(10 * votes[h] for h in placed if paid[h] == 100)
-    floor = 100 if payout + top_ups > sales else 110
-    return {h: d if d > 100 else floor for h, d in paid.items()}
+def reference_place_dividends(votes: dict[int, int], placed, *, premium=False) -> dict[int, int]:
+    """The Place dividend per 100 yen JRA pays each placed horse, from first principles (JRA's
+    払戻金の計算方法): S, the pool's tickets (refunds excluded), x 100 yen are the sales; the base
+    is `reference_place_payout`'s stake-back share at 0.80; a horse at base 100 is topped up to
+    110 unless the base payout plus the top-ups (10 yen a ticket on each such horse) exceed sales;
+    on a premium race each placed horse then gains 5% of sales over the P horses, per ticket,
+    rounded down to 10 yen by itself (10 x floor(S / (2 P W)))."""
+    assert R0 == 1 - Fraction(str(PLACE_TAKEOUT))
+    tickets = sum(votes.values())
+    base, payout, top_ups = reference_place_payout(votes, placed, tickets)
+    floor = 100 if payout + top_ups > 100 * tickets else 110
+    paid = {h: d if d > 100 else floor for h, d in base.items()}
+    if premium:
+        p = len(paid)
+        paid = {h: d + 10 * (tickets // (2 * p * votes[h])) for h, d in paid.items()}
+    return paid
 
 
 def reference_floor_dividend(votes: dict[int, int], placed, horse: int) -> int:
@@ -1089,6 +1214,13 @@ class Scenario:
     no_place_at_t: frozenset = frozenset()  # races with no PLACE row at t (W, W1, P)
     place_at_t: dict = field(default_factory=dict)  # race -> the only horses priced at t (P)
     votes_file: str = "parquet"  # "garbage" (U) or "missing" (U0)
+    # review round 2 of 360216f
+    premium: frozenset = frozenset()  # races whose PLACE pool pays JRA's 5% premium (Q)
+    # race -> a horse scratched by t: SCR on its WIN row at T-3, whose PLACE and Wide rows are not
+    # refreshed after T-20; the results mark it scratched (X)
+    stale_scratch: dict = field(default_factory=dict)
+    # race -> minutes added to its scheduled post time, None: left out of the schedule (N1, N2)
+    post_shift: dict = field(default_factory=dict)
 
 
 def store_schema(table: str) -> pa.Schema:
@@ -1122,6 +1254,13 @@ def write_store(data_dir: Path, scenario: Scenario) -> None:
 
     finals = {r.race_id: {**r.final, **scenario.final.get(r.race_id, {})} for r in races}
     meetings = {race_keys(r.race_id)["meeting_id"]: race_keys(r.race_id) for r in races}
+    out = scenario.scratched | scenario.stale_scratch  # race -> the horse the results scratch
+
+    def paying_rows(r: Race) -> list[dict]:
+        return dividend_rows(
+            r, scenario.place.get(r.race_id), premium=r.race_id in scenario.premium
+        )
+
     tables = {
         "meetings": [
             {k: keys[k] for k in ("jurisdiction", "meeting_id", "race_date", "venue")}
@@ -1142,13 +1281,9 @@ def write_store(data_dir: Path, scenario: Scenario) -> None:
             for r in races
         ],
         "runners": [
-            row
-            for r in races
-            for row in runner_rows(r, finals[r.race_id], scenario.scratched.get(r.race_id))
+            row for r in races for row in runner_rows(r, finals[r.race_id], out.get(r.race_id))
         ],
-        "dividends": [
-            row for r in races for row in dividend_rows(r, scenario.place.get(r.race_id))
-        ],
+        "dividends": [row for r in races for row in paying_rows(r)],
     }
     for name, rows in tables.items():
         pq.write_table(
@@ -1162,20 +1297,22 @@ def write_store(data_dir: Path, scenario: Scenario) -> None:
         late = mirrored(race.final) if scenario.late else race.final
         paying = {
             (row["pool"], row["combination"]): row["dividend"]
-            for row in dividend_rows(race, scenario.place.get(race_id))
+            for row in paying_rows(race)
             if row["pool"] in ("WIN", "PLACE", "QUINELLA_PLACE")
         }
         shift = 1.7 if scenario.late else 1.0
         timed = race_id not in scenario.untimed
         place = race_id not in scenario.no_place_at_t and scenario.place_at_t.get(race_id, True)
         before = {"timed": timed, "place": place}  # the captures on the board at t
-        after = {"timed": timed, "scratched": {scenario.scratched.get(race_id)} - {None}}
+        after = {"timed": timed, "scratched": {out.get(race_id)} - {None}}
+        stale = {scenario.stale_scratch.get(race_id)} - {None}
         rows = [
             # T-20 (the A board at t in every scenario), T-3 (the board at t)
             *board_capture(race_id, post - timedelta(minutes=20),
                            post - timedelta(minutes=20) + 3 * s, race.at_t, totals=0.35, **before),
             *board_capture(race_id, post - timedelta(minutes=3),
-                           post - timedelta(minutes=3) + 2 * s, at_t, totals=0.75, **before),
+                           post - timedelta(minutes=3) + 2 * s, at_t, totals=0.75, stale=stale,
+                           **before),
             # taken before t but fetched after it, then the final capture: not on the board at t
             *board_capture(race_id, post - timedelta(minutes=2, seconds=20),
                            post - timedelta(seconds=100), late, totals=0.9 * shift, **after),
@@ -1187,17 +1324,24 @@ def write_store(data_dir: Path, scenario: Scenario) -> None:
     for day, rows in by_day.items():
         table = pa.Table.from_pylist(rows, schema=ODDS_SCHEMA)
         pq.write_table(table, folder / "odds_timeseries" / f"{day}.parquet")
-    write_schedules(data_dir, scenario.schedule)
+    write_schedules(data_dir, scenario.schedule, scenario.post_shift)
     if scenario.holdout:  # never opened: reading it would fail
         (folder / "odds_timeseries" / f"{HOLDOUT_DAY}.parquet").write_bytes(b"holdout: unread")
 
 
-def write_schedules(data_dir: Path, schedule: dict) -> None:
+def write_schedules(data_dir: Path, schedule: dict, post_shift: dict | None = None) -> None:
     """The scheduled post times `board.snapshot.post_times_for` reads (N): a `<VENUE>.races.json`
     sidecar beside the day's odds logs (the logger's own writer), or HKTrack's stored card
-    `processed/jra/upcoming/jra_<day>_<VENUE>/races.parquet` (post_time_local in JST)."""
+    `processed/jra/upcoming/jra_<day>_<VENUE>/races.parquet` (post_time_local in JST). A race in
+    `post_shift` is scheduled that many minutes later, or left out with None (N1, N2)."""
+    post_shift = post_shift or {}
     for (day, venue), (kind, minutes) in schedule.items():
-        posts = {no: post_of(rid(day, venue, no)) + timedelta(minutes=minutes) for no in POST_LOCAL}
+        posts = {
+            no: post_of(rid(day, venue, no))
+            + timedelta(minutes=minutes + post_shift.get(rid(day, venue, no), 0))
+            for no in POST_LOCAL
+            if post_shift.get(rid(day, venue, no), 0) is not None
+        }
         if kind == "sidecar":
             sidecar = data_dir / "odds_snapshots" / "jra" / day / f"{venue}.races.json"
             odds_log.write_post_times(
@@ -1218,6 +1362,27 @@ def use_synthetic_holdout(mp: pytest.MonkeyPatch) -> None:
         holdout_module, "_load_definition", lambda countries_dir, country: (start, "s", None)
     )
     mp.setattr(holdout_module, "_is_holdout_day", lambda seed, day: day == HOLDOUT_DAY)
+
+
+def use_premium(mp: pytest.MonkeyPatch, races) -> None:
+    """The boost calendar (config/takeout_boosts.yaml, in memory only) holds one `premium` entry on
+    the PLACE pool of each race in `races` and nothing else (Q)."""
+    entries = []
+    for race_id in sorted(races):
+        _, day, venue, race_no = race_id.split(":")
+        entries.append({"kind": "premium", "date": day, "venue": venue, "race_no": int(race_no)})
+        entries[-1]["pools"] = ["PLACE"]
+    loader = core_config.load_country_yaml
+
+    def load(country, name, *args, **kwargs):
+        if name == "takeout_boosts":
+            return {"boosts": copy.deepcopy(entries)}
+        return loader(country, name, *args, **kwargs)
+
+    mp.setattr(core_config, "load_country_yaml", load)
+    mp.setattr(avoidance_price, "load_country_yaml", load, raising=False)
+    calendar = takeout.load_boosts()
+    mp.setattr(takeout, "shipped_boosts", lambda: calendar)
 
 
 HEXES = re.compile(r"\b[0-9a-f]{12,64}\b")  # git and spec hashes, file digests
@@ -1295,6 +1460,8 @@ def run_scenario(base: Path, scenario: Scenario, owner: dict) -> Outcome:
         mp.setenv("HORSETRACK_DATA_DIR", str(data_dir))
         use_owner_config(mp, owner)
         use_synthetic_holdout(mp)
+        if scenario.premium:
+            use_premium(mp, scenario.premium)
         mp.setattr(Registry, "freeze_family", freeze)
         for module in (reports_module, avoidance_price, avoidance):
             mp.setattr(module, "write_report", write_report, raising=False)
@@ -1328,6 +1495,17 @@ SCENARIOS = {
     "P": lambda: (Scenario(no_place_at_t=frozenset({G5}), place_at_t={G1: {2}}), owner_config()),
     "U": lambda: (Scenario(votes_file="garbage"), owner_config()),
     "U0": lambda: (Scenario(votes_file="missing"), owner_config()),
+    # review round 2 of 360216f
+    "Q": lambda: (Scenario(premium=frozenset({PREMIUM_RACE})), owner_config()),
+    "X": lambda: (Scenario(stale_scratch={STALE_RACE: STALE_HORSE}), owner_config()),
+    "N1": lambda: (
+        Scenario(untimed=UNTIMED, schedule=SCHEDULE, post_shift={SHIFTED_RACE: 1}),
+        owner_config(),
+    ),
+    "N2": lambda: (
+        Scenario(untimed=UNTIMED, schedule=SCHEDULE, post_shift={SHIFTED_RACE: None}),
+        owner_config(),
+    ),
 }
 LOGGED_IDS = tuple(race.race_id for race in LOGGED)
 # N: D3 TOK's captures keep their post_utc beside a stale sidecar (one minute late) that must not
@@ -1345,6 +1523,13 @@ SCRATCH_RACE, SCRATCH_HORSE = G7, 6
 # M: a non-floor placed horse's realised Place dividend, 30 yen above its reconstruction
 MISPRICED_RACE, MISPRICED_HORSE, MISPRICE = H6, 2, 30
 VALIDATION_TOLERANCE = 10  # yen per 100 staked, in the frozen spec
+# Q: a floor-favourite race (in both 100-vs-110 checks) whose PLACE pool pays the 5% premium
+PREMIUM_RACE = G6
+# X: G8's 19/1 shot (unplaced) is SCR on the WIN board at T-3, its PLACE and Wide rows still the
+# T-20 prices; the results mark it scratched
+STALE_RACE, STALE_HORSE = G8, 7
+# N1, N2: G8's scheduled post (its captures carry none in N) a minute later, or not scheduled
+SHIFTED_RACE = G8
 
 
 def mispriced() -> dict:
@@ -1693,6 +1878,10 @@ def test_the_100_vs_110_table_reports_predicted_against_realised_dividends(study
             if race.race_id not in FLOOR_FAVOURITES and favourite in race.finish:
                 votes = place_votes(race, profiles.get(race.race_id, "mid"))
                 assert reference_floor_dividend(votes, race.finish, favourite) >= 120
+    # By hand under JRA's stake-back rule (place_votes' docstring): plus10 and floor110 predict
+    # 110, withheld 100. A: H1 floor110 (110, paid 110), H5 withheld (100, paid 110 by hand), H6
+    # plus10 (110, paid 100 by hand), G1 and G6 plus10 (110, paid 110), G4 withheld (100, paid
+    # 100). V: H1 withheld (100, paid 110), G4 floor110 (110, paid 100), the rest as in A.
     assert expected_cross_tab(VOTES) == {(110, "110"): 3, (110, "100"): 1, (100, "110"): 1,
                                          (100, "100"): 1}  # fmt: skip
     assert expected_cross_tab(VOTES | V_VOTES) == {(110, "110"): 2, (110, "100"): 2,
@@ -1842,10 +2031,13 @@ def public_report(outcome: Outcome) -> str:
 
 
 def plus10_names(outcome: Outcome) -> dict[str, str]:
-    """The 100-vs-110 checks' variants: 'final' (the look-ahead one) and 'at t'."""
+    """The 100-vs-110 checks' variants: 'final' (the look-ahead one) and 'at t': the L2 records
+    holding its cells, or built on the JRA-VAN votes (D21: a failed one holds no cell)."""
     found: dict[str, str] = {}
     for record in outcome.records:
-        if record["hypothesis_id"] == "L2" and cross_tab(record):
+        if record["hypothesis_id"] == "L2" and (
+            cross_tab(record) or realised_counts(record) or is_withheld(record["sources"])
+        ):
             tag = "final" if is_look_ahead(record) else "at t" if is_at_t(record) else None
             assert tag and tag not in found, record["variant"]
             found[tag] = record["variant"]
@@ -2162,3 +2354,261 @@ def test_realised_floor_dividends_survive_without_the_votes(study):
         rows = table_rows(text)
         for cells in shown:
             assert any(set(cells) <= set(other) for other in rows), cells
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 2 of 360216f: JRA's Place rule and its premium, a prediction that cannot be made,
+# a scratch at t with a stale price opposite it, the rejected predictions' CSV rows, the
+# post-time build's identity
+# ---------------------------------------------------------------------------------------------
+
+VERDICT_CELL = re.compile(r"(?i)^within( tolerance)?$")
+HEX_DIGEST = re.compile(r"[0-9a-f]{8,64}")
+
+
+def test_a_premium_race_is_rebuilt_with_its_premium(study):
+    """Review 2 (high): on a premium race the Place dividends carry 5% of sales split over the
+    placed horses, per ticket, rounded down to 10 yen by itself, after Plus-10 on the base payout
+    (the base rate stays 0.80). The check rebuilds them and still scores."""
+    a, q = study("A"), study("Q")
+    race = RACES[PREMIUM_RACE]
+    favourite, realised = FLOOR_FAVOURITES[PREMIUM_RACE]
+    votes = place_votes(race, VOTES[PREMIUM_RACE])
+    base = reference_place_dividends(votes, race.finish)
+    paid = reference_place_dividends(votes, race.finish, premium=True)
+    # the fixture, by hand: the favourite (700,000 tickets) gains nothing and stays at 110; the
+    # others (30,000 and 20,000) gain 10 x floor(1,000,000 / 180,000) = 50 and 10 x floor(
+    # 1,000,000 / 120,000) = 80, more than the tolerance; at a 0.85 rate the last would be 430
+    others = [h for h in race.finish if h != favourite]
+    assert paid[favourite] == base[favourite] == realised == 110
+    assert [paid[h] - base[h] for h in others] == [50, 80]
+    assert [base[h] for h in others] == [300, 410]
+    assert {h: d for h, d in place_paid(race).items()} == base  # A's store: no premium
+    # the boost calendar of Q marks the race's PLACE pool, and only that pool
+    with pytest.MonkeyPatch.context() as mp:
+        use_premium(mp, {PREMIUM_RACE})
+        assert takeout.race_takeout(PREMIUM_RACE, "PLACE").boost == "premium"
+        assert takeout.race_takeout(PREMIUM_RACE, "WIN").boost is None
+        assert takeout.race_takeout(G1, "PLACE").boost is None
+
+    names = plus10_names(a)
+    races = {"final": len(FLOOR_FAVOURITES), "at t": len(AT_T_FLOOR_FAVOURITES)}
+    for tag, name in names.items():
+        record = q.by_variant()[name]
+        assert record["status"] == "scored", (tag, record["metrics"])
+        checks = [x for x in record["metrics"] if re.search("validat", x["metric"].lower())]
+        assert checks and max(x["n"] for x in checks) >= 3 * races[tag], (tag, checks)
+        assert cross_tab(record) == cross_tab(a.by_variant()[name]), tag
+        assert realised_counts(record) == realised_counts(a.by_variant()[name]), tag
+
+
+def test_unreadable_votes_leave_the_prediction_unavailable(study):
+    """Review 2 (medium): with floor-bound placed favourites and no votes to rebuild any of them,
+    the check is not run and the prediction is unavailable (absent cells): no predicted cell, no
+    validation figure, no 'within' verdict anywhere. A covered selection with no eligible
+    favourite keeps its scored zero, every cell present at 0."""
+    a, w1 = study("A"), study("W1")
+    names = plus10_names(a)
+    for outcome in (study("U"), study("U0")):
+        for tag, name in names.items():
+            record = outcome.by_variant()[name]
+            assert record["status"] == "scored", (tag, name)  # the realised counts stand
+            assert any(value for value, _ in realised_counts(record).values()), tag
+            assert cross_tab(record) == {}, (tag, cross_tab(record))
+            validation = [m["metric"] for m in record["metrics"] if "validat" in m["metric"]]
+            assert validation == [], (tag, validation)
+            verdicts = [c for cells in rows_naming(outcome, name) for c in cells]
+            assert not [c for c in verdicts if VERDICT_CELL.match(c)], (tag, verdicts)
+
+    # W1: one covered race, its favourite off the floor: a scored zero, not an unavailable one
+    record = w1.by_variant()[names["at t"]]
+    assert record["status"] == "scored"
+    cells = cross_tab(record)
+    assert cells and not any(value for value, _ in cells.values()), cells
+
+
+def raw_board_at_t(outcome: Outcome, race_id: str) -> pd.DataFrame:
+    """The race's odds_timeseries rows at t in the outcome's store, through #81's view_at."""
+    day = race_id.split(":")[1]
+    path = outcome.base / "data" / "processed" / "jra" / "odds_timeseries" / f"{day}.parquet"
+    con = duckdb.connect(":memory:")
+    try:
+        con.register("_rows", pq.read_table(path))
+        con.execute('CREATE TABLE "odds_timeseries" AS SELECT * FROM _rows')
+        con.unregister("_rows")
+        t = post_of(race_id) - timedelta(minutes=DECISION_MIN)
+        return view_at(con, race_id, t, rules=load_availability("japan")).board
+    finally:
+        con.close()
+
+
+def sets_of(pool: str, horses) -> list[tuple[int, ...]]:
+    legs = EXOTIC_LEGS.get(pool, 1)
+    if pool in ORDERED_POOLS:
+        return list(itertools.permutations(sorted(horses), legs))
+    return list(itertools.combinations(sorted(horses), legs))
+
+
+def flat_return(race: Race, pool: str, tickets) -> float:
+    """One unit on each ticket (a tuple of horses, in the pool's order), at the race's dividends:
+    the payout per unit staked."""
+    paid = {(r["pool"], r["combination"]): r["dividend"] for r in dividend_rows(race)}
+    return sum(paid.get((pool, ",".join(map(str, t))), 0.0) for t in tickets) / (100 * len(tickets))
+
+
+def stale_race_returns(record: dict, runners) -> tuple[float, float]:
+    """(rule, comparator) return in STALE_RACE of an at-t L2 PLACE or Wide record, or an at-t L3
+    rank record, when the runners at t are `runners`, from the frozen rules on its board at t."""
+    race = RACES[STALE_RACE]
+    win = {h: race.at_t[h] for h in runners}
+    pool, cut = record["params"]["pool"], record["params"].get("cut")
+    comparator = sets_of(pool, runners)
+    if record["hypothesis_id"] == "L2":  # the sets priced at t less those at the floor
+        low = {
+            "PLACE": lambda s: place_of(win[s[0]])[0],
+            "QUINELLA_PLACE": lambda s: wide_of(win[s[0]], win[s[1]])[0],
+        }[pool]
+        rule = [s for s in comparator if low(s) > 1.1]
+    else:  # the combinations whose worst rank by WIN odds at t is better than the cut
+        ranks = {h: 1 + sum(o < win[h] for o in win.values()) for h in win}
+        rule = [s for s in comparator if max(ranks[h] for h in s) < cut]
+    return flat_return(race, pool, rule), flat_return(race, pool, comparator)
+
+
+def test_a_scratch_at_t_clears_the_runner_from_every_pool(study):
+    """Review 2 (medium): the board-at-t rule (docs/specs/board-at-t.md): a runner whose latest
+    WIN or PLACE row at t is SCR is scratched and has no price in any pool, Wide pairs included.
+    A stale PLACE or Wide price opposite the SCR row does not make it a runner at t: L2 does not
+    bet it, and L3 keeps the race, ranking the runners left."""
+    a, x = study("A"), study("X")
+    race, horse = RACES[STALE_RACE], STALE_HORSE
+    # the fixture: the horse is unplaced, not the favourite at t, and nothing of the race is at
+    # the floor at t; on X's raw board at t its WIN row is SCR while its PLACE row and its Wide
+    # pairs still carry the T-20 prices
+    assert horse not in race.finish and min(race.at_t, key=race.at_t.get) != horse
+    assert all(place_of(o)[0] > 1.1 for o in race.at_t.values())
+    board = raw_board_at_t(x, STALE_RACE)
+    rows = {(p, c): r for p, c, r in zip(board["pool"], board["combination"],
+                                         board.to_dict("records"), strict=True)}  # fmt: skip
+    win_row, place_row = rows[("WIN", str(horse))], rows[("PLACE", str(horse))]
+    assert win_row["status_raw"] == SCRATCHED and pd.isna(win_row["odds"])
+    assert math.isclose(place_row["odds"], place_of(race.at_t[horse])[0])
+    pairs = [
+        r for (p, c), r in rows.items() if p == "QUINELLA_PLACE" and str(horse) in c.split(",")
+    ]
+    assert len(pairs) == len(HORSES) - 1 and all(pd.notna(r["odds"]) for r in pairs)
+
+    ra, rx = a.by_variant(), x.by_variant()
+    left = [h for h in HORSES if h != horse]
+    checked = Counter()
+    for name, record in ra.items():
+        if not (is_at_t(record) and is_comparison(record)):
+            continue
+        rule, pool = record["hypothesis_id"], record["params"]["pool"]
+        if not (
+            (rule == "L2" and pool in ("PLACE", "QUINELLA_PLACE"))
+            or (rule == "L3" and pool in EXOTIC_LEGS)
+        ):
+            continue
+        rule_a, comparator_a, n = paired_means(record)
+        assert rx[name]["status"] == "scored", name
+        rule_x, comparator_x, n_x = paired_means(rx[name])
+        assert n_x == n, (name, n_x, n)  # the race stays paired
+        before, after = stale_race_returns(record, HORSES), stale_race_returns(record, left)
+        want = ((after[0] - before[0]) / n, (after[1] - before[1]) / n)
+        got = (rule_x - rule_a, comparator_x - comparator_a)
+        assert all(
+            math.isclose(g, w, rel_tol=1e-9, abs_tol=1e-12) for g, w in zip(got, want, strict=True)
+        ), (name, got, want)
+        if rule == "L2":  # the horse's own tickets are gone, not refunded
+            assert want[1] != 0, name
+        checked[(rule, pool)] += 1
+    assert set(checked) == {("L2", "PLACE"), ("L2", "QUINELLA_PLACE")} | {
+        ("L3", pool) for pool in EXOTIC_LEGS
+    }, checked
+
+
+def plus10_csv(outcome: Outcome) -> pd.DataFrame:
+    """The private companion CSV of the 100-vs-110 check (written with the JRA-VAN source)."""
+    found = [
+        text
+        for path, text, sources in outcome.writes
+        if path.suffix == ".csv" and "plus10" in path.name and is_withheld(sources)
+    ]
+    assert len(found) == 1, [str(path) for path, _, _ in outcome.writes]
+    return pd.read_csv(io.StringIO(found[0]))
+
+
+def test_a_failed_check_leaves_no_prediction_in_its_csv(study):
+    """Review 2 (medium): when the reconstruction check fails, the private CSV keeps each
+    floor-bound placed favourite's realised dividend, and its rejected prediction is cleared or
+    labelled with the failure, never exported as a plain prediction."""
+    a, m = study("A"), study("M")
+    names = plus10_names(a)
+    assert m.by_variant()[names["final"]]["status"] == "failed"
+
+    for outcome in (m, a):
+        frame = plus10_csv(outcome)
+        rows = frame.loc[frame["variant"].eq(names["final"])]
+        got = {(r, int(h)): float(d) for r, h, d in zip(rows["race_id"], rows["horse_no"],
+                                                       rows["realised"], strict=True)}  # fmt: skip
+        assert got == {(r, h): float(d) for r, (h, d) in FLOOR_FAVOURITES.items()}, got
+        for row in rows.to_dict("records"):
+            why = "" if pd.isna(row["why"]) else str(row["why"])
+            if outcome is m:  # rejected by the check: cleared, or labelled as failed
+                assert pd.isna(row["predicted"]) or "fail" in why.lower(), row
+            else:  # validated: the prediction, not labelled
+                assert row["predicted"] == PREDICTED[VOTES[row["race_id"]]], row
+                assert "fail" not in why.lower(), row
+
+
+def post_builds(outcome: Outcome) -> dict[str, tuple[str, str, str]]:
+    """Each at-t record's post-time data build: variant -> (build name, identity, refresh)."""
+    found = {}
+    for record in outcome.records:
+        if not is_at_t(record):
+            continue
+        keys = [k for k in record["data_builds"] if "post" in k.lower()]
+        assert len(keys) == 1, (record["variant"], record["data_builds"])
+        identity, _, refresh = record["data_builds"][keys[0]].rpartition("@")
+        found[record["variant"]] = (keys[0], identity, refresh)
+    assert found
+    return found
+
+
+def test_the_post_time_build_keeps_one_identity(study, tmp_path):
+    """Review 2 (medium): the at-t records' post-time input is one build, '<identity>@<digest>',
+    the digest a hex digest of the race -> post-time mapping. One race's post time moved (N1) or
+    backfilled (N against N2) moves the digest, never the identity, so the registry counts one
+    family size over those runs; the coverage counts stay in the report."""
+    outcomes = {name: study(name) for name in ("A", "N", "N1", "N2")}
+    assert len({o.spec_hash for o in outcomes.values()}) == 1
+    builds = {name: post_builds(o) for name, o in outcomes.items()}
+    for name, found in builds.items():
+        for variant, (_, identity, refresh) in found.items():
+            assert identity and HEX_DIGEST.fullmatch(refresh), (name, variant, identity, refresh)
+    identities = {
+        (key, identity) for found in builds.values() for key, identity, _ in found.values()
+    }
+    assert len(identities) == 1, identities  # whatever the coverage, one identity
+
+    def refreshes(name: str) -> set[str]:
+        return {refresh for _, _, refresh in builds[name].values()}
+
+    for other in ("N1", "N2"):  # one race's post time changed, or backfilled: another digest
+        assert not refreshes("N") & refreshes(other), (other, refreshes("N"), refreshes(other))
+
+    combined = Registry(tmp_path / "combined.jsonl", holdout_log=tmp_path / "no-holdout.jsonl")
+    family = outcomes["A"].freezes[0]["family_id"]
+    for outcome in outcomes.values():
+        reader = Registry(outcome.registry_path, holdout_log=tmp_path / "no-holdout.jsonl")
+        present = combined.records()
+        for record in reader.records(family):
+            if record not in present:
+                combined.append(record)
+    assert combined.family_size(family) == outcomes["A"].spec["family_size"]
+
+    def coverage(outcome: Outcome) -> list[list[str]]:
+        return [cells for cells in table_rows(public_report(outcome)) if "post" in cells[0]]
+
+    assert coverage(outcomes["N"]) and coverage(outcomes["N"]) != coverage(outcomes["N2"])

@@ -36,8 +36,9 @@ Contract pinned here (the coder implements what these tests call):
 - ``write_summary(registry, directory)`` writes one file per family (``<family_id>.md``) plus an
   index ``README.md``; the family files hold the family, E id, variant, status and per-fold metric,
   value, CI and n of each run, and nothing else from the record. A run with a source in
-  ``WITHHELD_SOURCES`` (in any spelling) shows ``withheld (licensed source)`` in place of its
-  values, or is refused at append.
+  ``WITHHELD_SOURCES`` (in any spelling) shows its identity (E id, variant) and ``withheld
+  (licensed source)`` in place of its status and values (a status such as ``failed`` would tell
+  the result of a withheld check, #82), or is refused at append.
 - ``default_registry(country)`` stores at ``data_dir()/registry/<country>.jsonl`` and creates the
   directory.
 
@@ -1146,6 +1147,49 @@ def test_a_licensed_source_in_another_spelling_is_still_withheld(tmp_path, sourc
     if appended:
         assert WITHHELD_LABEL in text
     assert [num for num in PUBLIC_NUMBERS if shows_number(text, num)] == PUBLIC_NUMBERS
+
+
+STATUS_WORD = re.compile(r"(?i)\b(failed|scored|rejected|adopted)\b")
+
+
+def test_summary_masks_the_status_of_licensed_source_runs(tmp_path):
+    """Review of #82, round 2: the status of a licensed-source run (a failed Plus-10 check built
+    on JRA-VAN votes, say) tells its withheld result. Its rows keep its identity, the E id and the
+    variant, and show the withheld label in place of the status; a public run's status shows."""
+    reg, _, _ = open_registry(tmp_path)
+    licensed = [
+        make_record(hypothesis_id="L41", family_id="FAM-mask", variant="var-lic-one",
+                    sources=("jra", "jravan"), metrics=(), status="failed"),
+        make_record(hypothesis_id="L42", family_id="FAM-mask", variant="var-lic-two",
+                    sources=("jrdb",), metrics=LICENSED_METRICS, status="scored"),
+        make_record(hypothesis_id="P43", family_id="FAM-mask", variant="var-lic-three",
+                    sources=("jravan",), metrics=LICENSED_METRICS[:1], status="rejected"),
+        make_record(hypothesis_id="E44", family_id="FAM-mask", variant="var-lic-four",
+                    sources=("netkeiba", "jravan"), metrics=LICENSED_METRICS[1:],
+                    status="adopted", owner_signoff=141),
+    ]  # fmt: skip
+    public = [
+        make_record(hypothesis_id="E6", family_id="FAM-mask", variant="var-pub-one",
+                    sources=("netkeiba",), metrics=(), status="failed"),
+        make_record(hypothesis_id="E7", family_id="FAM-mask", variant="var-pub-two",
+                    sources=("netkeiba",), metrics=PUBLIC_METRICS, status="rejected"),
+    ]  # fmt: skip
+    for record in (*public, *licensed):
+        reg.append(record)
+
+    text = summary_of(reg, tmp_path)
+    for record in licensed:
+        lines = [line for line in text.splitlines() if record.variant in line]
+        assert lines, f"the summary drops the licensed run {record.variant}"
+        for line in lines:
+            assert record.hypothesis_id in line, line  # its identity stays
+            assert "withheld" in line.lower(), line
+            assert not STATUS_WORD.search(line), f"a licensed run's status shows: {line!r}"
+    for record in public:
+        lines = [line for line in text.splitlines() if record.variant in line]
+        assert lines and all(record.status in line for line in lines), lines
+    leaked = [num for num in LICENSED_NUMBERS if shows_number(text, num)]
+    assert leaked == [], f"the summary shows values of a licensed-source run: {leaked}"
 
 
 # --------------------------------------------------------------------------- default registry
