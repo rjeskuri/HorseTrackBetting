@@ -302,7 +302,7 @@ flowchart TD
   folds["walk-forward folds"]
   study["pre-registered study"]
   score["scoring and<br>paired bootstrap"]
-  snoop["SPA / StepM,<br>segment shrinkage"]
+  snoop["SPA / StepM,<br>segment shrinkage,<br>tail-return curve"]
   reg[("run registry")]
   rep["experiment report"]
   ledger["ledger"]
@@ -333,7 +333,7 @@ flowchart TD
 | walk-forward folds | `core/eval/folds.py` |
 | pre-registered study | e.g. `countries/japan/studies/calibration.py` |
 | scoring and paired bootstrap | `core/eval/scoring.py`, `core/eval/bootstrap.py` |
-| SPA / StepM, segment shrinkage | `core/eval/snooping.py`, `core/eval/segment_roi.py` (D17) |
+| SPA / StepM, segment shrinkage, tail-return curve | `core/eval/snooping.py`, `core/eval/segment_roi.py` (D17); `core/eval/tail.py` (realised return by claim quantile band, meeting bootstrap, D7) |
 | run registry | `core/eval/registry.py`; summary `docs/experiments/registry/japan/` |
 | experiment report | template `docs/experiment-report.md`; reports in `docs/experiments/`; licensed-source outputs through `core/eval/reports.py` into the data dir |
 | ledger | `docs/ledger.md` |
