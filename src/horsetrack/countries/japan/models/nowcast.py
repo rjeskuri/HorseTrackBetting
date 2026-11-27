@@ -1366,7 +1366,9 @@ class ShadowNowcast:
     one pool of a `RaceBoard` from shared per-runner shocks. WIN draws keep the board's sum of
     1/O; PLACE and Wide print the stake-back-share figures of the drawn money, floored at the
     minimum dividend. A RaceBoard carries no lag boards, so the velocity features are 0 here, and
-    a Wide pair's shock is (eps_a + eps_b) / sqrt 2 as in v0."""
+    a Wide pair's shock is (eps_a + eps_b) / sqrt 2 as in v0. The race's grade is its
+    `race_class` on the meeting's stored card (`snapshot.card_race_classes`), None (the
+    "grade=none" effect) where the card leaves it null or there is no card."""
 
     model: Nowcast
 
@@ -1398,12 +1400,15 @@ class ShadowNowcast:
         minutes = float(tau_min)
         if board.post_utc is not None:
             minutes = (board.post_utc - board.capture_utc).total_seconds() / 60.0
-        _, _, venue, race_no = board.race_id.split(":")
+        _, race_day, venue, race_no = board.race_id.split(":")
+        grade = snapshot.card_race_classes(date.fromisoformat(race_day[:10]), venue).get(
+            int(race_no)
+        )
         view = RaceView(
             board.race_id,
             venue,
             int(race_no),
-            None,
+            grade,
             float(tau_min),
             {pool: PoolBoard(combinations, shares, board.totals.get(pool), None, None, minutes)},
         )

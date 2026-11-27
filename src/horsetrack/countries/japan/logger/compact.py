@@ -12,7 +12,10 @@ Python dict per row (a tier-2 day runs to millions of rows):
 - race_id, venue, race_no, pool, combination: venue is the log file's; race_no from the race_id.
 - snapshot_utc, fetched_utc: as logged, tz-aware UTC; fetched_utc null when absent or null.
 - post_utc: the *scheduled* post time from the venue's own sidecar, by race number; not the actual
-  off. Null when the venue has no sidecar or the sidecar has no entry for the race.
+  off. Where the sidecar has no entry for the race (or there is no sidecar), the meeting's stored
+  race card (`processed/jra/upcoming/jra_<date>_<VENUE>/races.parquet`, `post_time_local`, Tokyo
+  time without an offset; `board.snapshot.card_post_times`; source "jra" only). Null when
+  neither gives one.
 - minutes_to_post: (post_utc - (fetched_utc or snapshot_utc)) in minutes, against that scheduled
   time; negative after the scheduled post, null without a post time.
 - odds, odds_hi, investment, status_raw: as logged; null when absent.
@@ -39,6 +42,7 @@ import pyarrow.parquet as pq
 import typer
 
 from horsetrack.core import paths
+from horsetrack.countries.japan.board.snapshot import card_post_times
 from horsetrack.countries.japan.odds_log import _instant, iter_members, read_post_times
 
 _LOG_SUFFIX = ".jsonl.gz"
@@ -113,7 +117,7 @@ def compact_day(race_date: str, source: str = "jra") -> Path:
     position = 0
     for log_path in logs:
         venue = log_path.name[: -len(_LOG_SUFFIX)]
-        post_times = read_post_times(log_path.with_name(venue + _SIDECAR_SUFFIX))
+        post_times = _post_times(day, venue, source, log_path.with_name(venue + _SIDECAR_SUFFIX))
         for member in iter_members(log_path):
             records = [_record(row, venue, post_times) for row in member]
             for rec in records:
@@ -140,6 +144,13 @@ def compact_day(race_date: str, source: str = "jra") -> Path:
     target = day_file(day, source)
     _write_atomic(target, sink.getvalue().to_pybytes())
     return target
+
+
+def _post_times(day: str, venue: str, source: str, sidecar: Path) -> dict[int, datetime]:
+    """Race number -> scheduled post (aware UTC): the venue's sidecar entry, else (JRA only) the
+    meeting's stored race card."""
+    card = card_post_times(date.fromisoformat(day), venue) if source == "jra" else {}
+    return card | read_post_times(sidecar)
 
 
 def _race_no(race_id: Any) -> int | None:

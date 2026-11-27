@@ -74,6 +74,15 @@ The study: `studies/nowcast.py`, `horsetrack japan nowcast-study`
   failures included, is a registry record), each marked as a trial; a full run's are not. The
   registry has no trial status, so a marker is "trial" in the family id or the variant,
   `params["trial"] is True`, or a params value "trial".
+- (#411) `run_study` reads our own compacted logged days (`processed/jra/odds_timeseries`) beside
+  the JRA-VAN day files: a development logged day with post times enters the folds exactly as the
+  same rows in a JRA-VAN file would. A race in both sources is read once per pool: the JRA-VAN
+  rows where JRA-VAN has the pool (WIN, PLACE), our log's for the pools it alone has (Wide). A
+  logged holdout day is skipped by its file name, before any read (D14).
+- Wide (D3) is fitted and scored where the folds' training days hold Wide paths with post times.
+  The report's JSON (`<report>.json`, beside the rendered `.md`) carries `wide["fitted"]` (bool);
+  when False, `wide["reason"]` is a sentence, printed in the rendered report, that names why (it
+  differs between "no post time" and "no Wide on any training day"). `own_logged_days` stays.
 
 Expected values are derived here from first principles (money, the stated formulas, scipy), never
 from the module under test. All data are synthetic and in memory or under tmp, and
@@ -84,6 +93,7 @@ HORSETRACK_DATA_DIR points at a tmp dir.
 # block is written in its final order and I001 is waived so lint passes before and after.
 from __future__ import annotations  # noqa: I001
 
+import json
 import math
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
@@ -1049,3 +1059,262 @@ def test_a_trial_run_is_a_registry_record_marked_as_a_trial(data_dir, tmp_path, 
     full = registry.records()[len(trial) :]
     assert full
     assert not any(marked_trial(r) for r in full), [(r.variant, r.params) for r in full]
+
+
+# ---------------------------------------------------------------- our own logged days (#411)
+
+WIDE_TAKEOUT = 0.225  # config/jra.yaml
+WIDE_FLOOR = 1.1  # min_dividend 110
+WIDE_RUNNERS = 6
+WIDE_PAIRS = tuple(
+    f"{a},{b}" for a in range(1, WIDE_RUNNERS + 1) for b in range(a + 1, WIDE_RUNNERS + 1)
+)
+JRAVAN_DAYS = TRAIN_DAYS + (date(2026, 10, 31), date(2026, 11, 1))  # one fold on their own
+STUDY_DAYS = JRAVAN_DAYS + TEST_DAYS  # three folds
+LATE_ENTRY = "99"  # a WIN runner our log prices only at the close (see logged_copy)
+
+
+def wide_odds(shares: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Low and high Wide figures of pair money `shares` by the stake-back-share rule with three
+    winning pairs: the net pool less the three winning pairs' stakes split in three, each third
+    over its pair's stakes; low with the two most-backed other pairs, high with the two least."""
+    net = 1.0 - WIDE_TAKEOUT
+    lo, hi = np.empty(len(shares)), np.empty(len(shares))
+    for i, own in enumerate(shares):
+        others = np.sort(np.delete(shares, i))
+        lo[i] = 1.0 + (net - own - others[-2:].sum()) / (3.0 * own)
+        hi[i] = 1.0 + (net - own - others[:2].sum()) / (3.0 * own)
+    return np.maximum(lo, WIDE_FLOOR), np.maximum(hi, WIDE_FLOOR)
+
+
+def wide_rows(day: date, race_no: int, *, post: bool = True) -> list[dict]:
+    """A race's Wide path in our own log: every pair and the pool total at every snapshot, the
+    pool growing as the WIN and PLACE pools do. `post=False` is a logged day compacted without a
+    post time (null post_utc and minutes_to_post), as our days were before #411."""
+    rng = np.random.default_rng(day.toordinal() * 100 + race_no)
+    race_id, at_post = race_id_of(day, race_no), post_of(day, race_no)
+    v_final = 3e7 * math.exp(0.3 * rng.standard_normal())
+    path = pool_path(rng, len(WIDE_PAIRS), 0.05, 0.3, v_final)
+    rows = []
+    for minutes, (pool_total, shares) in zip(SNAPSHOTS, path, strict=True):
+        final = minutes == FINAL_MIN
+        lo, hi = wide_odds(shares)
+        for j, pair in enumerate(WIDE_PAIRS):
+            rows.append(
+                row(race_id, race_no, WIDE, pair, at_post, minutes, odds=lo[j], odds_hi=hi[j],
+                    final=final)
+            )  # fmt: skip
+        rows.append(
+            row(race_id, race_no, WIDE, POOL_ROW, at_post, minutes, investment=pool_total,
+                final=final)
+        )  # fmt: skip
+    if not post:
+        rows = [{**r, "post_utc": None, "minutes_to_post": None} for r in rows]
+    return rows
+
+
+def logged_copy(rows: list[dict]) -> list[dict]:
+    """Our own log of races the JRA-VAN file also holds: the same WIN and PLACE rows, plus a WIN
+    runner LATE_ENTRY priced only at the final capture. Read in place of the JRA-VAN rows, or
+    beside them, every WIN case of those races changes (it is dropped as added_by_close, or
+    counted twice), so only a study that keeps one source per race and pool scores what the
+    JRA-VAN file alone gives."""
+    out = list(rows)
+    for race_id in sorted({r["race_id"] for r in rows}):
+        sample = next(r for r in rows if r["race_id"] == race_id)
+        out.append(
+            row(race_id, sample["race_no"], WIN, LATE_ENTRY, sample["post_utc"], FINAL_MIN,
+                odds=150.0, final=True)
+        )  # fmt: skip
+    return out
+
+
+def only_races(rows: list[dict], race_nos) -> list[dict]:
+    return [r for r in rows if r["race_no"] in set(race_nos)]
+
+
+def held_days(n: int) -> list[date]:
+    start = date(2026, 11, 28)
+    days = [start + timedelta(days=i) for i in range(60)]
+    return [d for d in days if is_holdout_day(COUNTRY, d)][:n]
+
+
+def write_store(root: Path, *, jravan: dict, logged: dict) -> Path:
+    """A data dir with JRA-VAN day files (`processed/jravan/odds_timeseries`), our own compacted
+    logged days (`processed/jra/odds_timeseries`; a bytes value is written as is) and the jravan
+    races table over every race of both."""
+    data = root / "data"
+    race_ids = set()
+    for source, days in (("jravan", jravan), ("jra", logged)):
+        for day, rows in days.items():
+            path = data / "processed" / source / "odds_timeseries" / f"{day.isoformat()}.parquet"
+            if isinstance(rows, bytes):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(rows)
+                continue
+            write_day(path, rows)
+            race_ids |= {r["race_id"] for r in rows}
+    race_ids = sorted(race_ids)
+    races = pa.table(
+        {
+            "race_id": race_ids,
+            "race_class": ["G3" if i % 3 == 0 else None for i in range(len(race_ids))],
+            "race_date": [date.fromisoformat(race_day(r)) for r in race_ids],
+        }
+    )
+    pq.write_table(races, data / "processed" / "jravan" / "races.parquet")
+    return data
+
+
+@pytest.fixture
+def run_on(tmp_path, monkeypatch):
+    """run_on(name, jravan=..., logged=...) -> (the report's JSON dump, the rendered report):
+    one trial run of the study on its own data dir, D9's folds replaced by FOLD_SCHEME."""
+    summary = tmp_path / "summary"
+    monkeypatch.setattr(study, "load_country_scheme", lambda country: FOLD_SCHEME)
+    monkeypatch.setattr(study, "summary_dir", lambda country: summary)
+    monkeypatch.setattr("horsetrack.core.eval.registry.summary_dir", lambda country: summary)
+
+    def run(name: str, *, jravan: dict, logged: dict, n_draws: int = 24):
+        data = write_store(tmp_path / name, jravan=jravan, logged=logged)
+        monkeypatch.setenv(paths.DATA_DIR_VAR, str(data))
+        result = study.run_study(
+            trial=True, n_draws=n_draws, out_dir=tmp_path / name / "out", log=lambda *a: None
+        )
+        report = Path(result["report_path"])
+        dump = json.loads(report.with_suffix(".json").read_text(encoding="utf-8"))
+        return dump, report.read_text(encoding="utf-8")
+
+    return run
+
+
+def scored_by_pool(dump: dict, comparison: str = "structural_vs_random_walk") -> dict[str, int]:
+    """Scored cases per pool, from the comparison's race-day gain table."""
+    out: dict[str, int] = {}
+    for r in dump["gains"][comparison]["day"]:
+        out[r["pool"]] = out.get(r["pool"], 0) + int(r["n_cases"])
+    return out
+
+
+def fold_facts(dump: dict) -> dict:
+    counts = dump["counts"]
+    return {
+        "development_days": counts["development_days"],
+        "cases": counts["cases"],
+        "added_by_close": counts["added_by_close"],
+        "folds": dump["folds"],
+        "scored": scored_by_pool(dump),
+    }
+
+
+def test_logged_development_days_join_the_folds_as_jravan_days_do(run_on):
+    """#411: our own compacted logged days with post times enter the study's folds. A store whose
+    last three days (TEST_DAYS) are only in our logs, and whose day `dup` is in both (races 1-2
+    in the JRA-VAN file, races 1-3 in our log, race 3 absent from JRA-VAN), gives the same
+    development days, cases, folds and scored cases per pool as the store holding every day as a
+    JRA-VAN file; the JRA-VAN-only subset gives fewer. The duplicated races are read once, from
+    JRA-VAN (their logged copy carries a late entry that would change every WIN case it
+    reached); race 3, held only in our log and without the late entry, is read from the log."""
+    first, last = JRAVAN_DAYS, TEST_DAYS
+    dup = JRAVAN_DAYS[3]
+    every_day = {d: day_rows(d, races=3 if d == dup else 2) for d in STUDY_DAYS}
+
+    all_jravan, _ = run_on("all-jravan", jravan=every_day, logged={})
+    split, _ = run_on(
+        "split",
+        jravan={d: only_races(every_day[d], (1, 2)) for d in first},
+        logged={d: every_day[d] for d in last}
+        | {dup: logged_copy(only_races(every_day[dup], (1, 2))) + only_races(every_day[dup], (3,))},
+    )
+    subset, _ = run_on(
+        "jravan-subset", jravan={d: only_races(every_day[d], (1, 2)) for d in first}, logged={}
+    )
+
+    assert all_jravan["counts"]["development_days"] == len(STUDY_DAYS)
+    assert subset["counts"]["development_days"] == len(first)
+    assert fold_facts(split) == fold_facts(all_jravan)
+    assert fold_facts(subset) != fold_facts(all_jravan)
+
+
+def test_a_holdout_logged_day_is_never_read(run_on, monkeypatch):
+    """D14: a logged holdout day is fully locked. Of two logged holdout days, one is a valid day
+    file with races and post times, the other is not parquet at all, so a read of it raises; every
+    parquet open is watched and none may name a holdout day. The logged development days are read
+    (they enter the folds beside the JRA-VAN days), and the run completes."""
+    held = held_days(2)
+    assert len(held) == 2
+    jravan = {d: day_rows(d, races=2) for d in JRAVAN_DAYS}
+    logged = {d: day_rows(d, races=2) for d in TEST_DAYS}
+    logged[held[0]] = day_rows(held[0], races=2) + wide_rows(held[0], 1)
+    logged[held[1]] = b"a locked holdout day\n"
+
+    opened: list[str] = []
+    for module, name in ((pq, "read_table"), (pq, "ParquetFile"), (pq, "ParquetDataset"),
+                         (pq, "read_metadata"), (pq, "read_schema"), (ds, "dataset")):  # fmt: skip
+        real = getattr(module, name)
+
+        def spy(source, *args, _real=real, **kwargs):
+            opened.append(str(source))
+            return _real(source, *args, **kwargs)
+
+        monkeypatch.setattr(module, name, spy)
+
+    try:
+        dump, _ = run_on("holdout", jravan=jravan, logged=logged)
+    except Exception as exc:  # the second holdout file is not parquet: reading it raises
+        pytest.fail(f"the study read a holdout day's file: {exc!r}")
+
+    touched = [p for p in opened if any(d.isoformat() in p for d in held)]
+    assert not touched, touched
+    assert dump["counts"]["development_days"] == len(STUDY_DAYS)
+    logged_read = [p for p in opened if any(f"{d.isoformat()}.parquet" in p for d in TEST_DAYS)]
+    assert logged_read, "the logged development days were not read"
+
+
+def test_wide_is_fitted_and_scored_from_our_logged_days(run_on):
+    """D3 (#411): JRA-VAN has no Wide series, so Wide comes from our own logs. With every study
+    day in JRA-VAN (WIN, PLACE) and in our logs (the same races, with Wide paths and post times),
+    the structural nowcast is fitted for Wide (Wide cells) and Wide cases are scored against the
+    random walk with finite gains; the report says Wide was fitted. WIN and PLACE are scored on
+    exactly the cases of the JRA-VAN files alone: the logged copies add Wide, not duplicates."""
+    jravan = {d: day_rows(d, races=2) for d in STUDY_DAYS}
+    logged = {d: logged_copy(day_rows(d, races=2)) + wide_rows(d, 1) + wide_rows(d, 2)
+              for d in STUDY_DAYS}  # fmt: skip
+
+    alone, _ = run_on("jravan-alone", jravan=jravan, logged={})
+    dump, _ = run_on("with-wide", jravan=jravan, logged=logged)
+
+    scored = scored_by_pool(dump)
+    assert WIDE not in scored_by_pool(alone)
+    assert scored.get(WIDE, 0) > 0, scored
+    assert {p: n for p, n in scored.items() if p != WIDE} == scored_by_pool(alone)
+    wide_gains = [r for r in dump["gains"]["structural_vs_random_walk"]["day"] if r["pool"] == WIDE]
+    assert {r["tau_min"] for r in wide_gains} <= set(GRID)
+    assert all(np.isfinite(r["log_score_gain"]) and np.isfinite(r["crps_gain"]) for r in wide_gains)
+    assert any(c["pool"] == WIDE for c in dump["cells"]), "no Wide cell was fitted"
+    assert dump["wide"]["fitted"] is True
+
+
+def test_the_report_states_why_wide_is_not_fitted(run_on):
+    """#411: where the logged days do not allow a Wide fit, the run still completes, scores no
+    Wide case, and the report says so and why: `wide["fitted"]` is False and `wide["reason"]` is
+    a sentence that appears in the rendered report. Two causes, two different reasons: the logged
+    Wide paths have no post time; and Wide is logged only on the last (scored) day, so no fold
+    trains on it. Our logged days are still listed (`own_logged_days`)."""
+    jravan = {d: day_rows(d, races=2) for d in STUDY_DAYS}
+    no_post = {d: wide_rows(d, 1, post=False) + wide_rows(d, 2, post=False) for d in STUDY_DAYS}
+    last_only = {STUDY_DAYS[-1]: wide_rows(STUDY_DAYS[-1], 1) + wide_rows(STUDY_DAYS[-1], 2)}
+
+    reasons = []
+    for name, logged in (("no-post-time", no_post), ("scored-day-only", last_only)):
+        dump, text = run_on(name, jravan=jravan, logged=logged)
+        assert WIDE not in scored_by_pool(dump), name
+        assert not any(c["pool"] == WIDE for c in dump["cells"]), name
+        wide = dump["wide"]
+        assert wide["fitted"] is False, name
+        reason = wide["reason"]
+        assert isinstance(reason, str) and reason.strip(), name
+        assert reason in text, f"{name}: the report does not state {reason!r}"
+        assert {e["day"] for e in wide["own_logged_days"]} == {d.isoformat() for d in logged}
+        reasons.append(reason)
+    assert reasons[0] != reasons[1], reasons

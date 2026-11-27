@@ -4,9 +4,15 @@ Data (owner, 2026-11-26): the JRA-VAN time-series paths in the store,
 `processed/jravan/odds_timeseries/<YYYY-MM-DD>.parquet` (0B41 WIN, PLACE, bracket; 0B42 QUINELLA;
 exactly `logger.compact.SCHEMA`), read one day at a time by column and with the model's pools
 only. D10: race days from 2014-06-07 (`PRICE_ERA_START`) only, since the nowcast is the price
-half. D14: holdout days are dropped by `is_holdout_day`; the holdout is not opened. Grades are the
-jravan races table's `race_class`. The JRA-VAN series has no Wide pool; our own logged days are
-counted for Wide coverage only (see the report).
+half. Our own compacted logged days, `processed/jra/odds_timeseries/<YYYY-MM-DD>.parquet` (owner,
+#85: added to the training as they accrue; #411), are read beside them, by the same columns and
+pools and with `--end` applied to both: only their rows with a post time, and for a race in both
+sources only the pools the JRA-VAN rows lack (JRA-VAN wins per (race, pool); in practice our logs
+add Wide, D3). D14: holdout days of either source are dropped by `is_holdout_day` on the file
+name, before any read; the holdout is not opened. Grades are the jravan races table's
+`race_class` (None for a race it does not hold). Wide is fitted and scored where the folds'
+training days hold Wide cases; the report states plainly why when they do not, and a (pool, tau)
+a fold's training gives no fit for is not scored there (counted per fold, `unscored_no_fit`).
 
 Folds: D9's walk-forward (`config/folds.yaml`) over the development race days. Each fold fits on
 its training days only: the structural nowcast, the same with beta = 0 (`no_features`), and #116's
@@ -105,14 +111,27 @@ _AT = datetime(2000, 1, 1, tzinfo=timezone.utc)  # the drift's RaceBoard needs a
 # ---------------------------------------------------------------- inputs
 
 
-def day_files(start: date, end: date | None) -> list[tuple[str, Path]]:
-    folder = paths.processed_dir(SOURCE) / "odds_timeseries"
+def day_files(start: date, end: date | None, source: str = SOURCE) -> list[tuple[str, Path]]:
+    """The day files of `source` from `start` to `end`, by file name; nothing is opened."""
+    folder = paths.processed_dir(source) / "odds_timeseries"
     out = []
-    for path in sorted(folder.glob("*.parquet")):
+    for path in sorted(folder.glob("*.parquet")) if folder.is_dir() else []:
         day = path.stem
         if day >= start.isoformat() and (end is None or day <= end.isoformat()):
             out.append((day, path))
     return out
+
+
+def read_logged_day(path: Path, jravan: pd.DataFrame | None) -> pd.DataFrame:
+    """One of our own compacted logged days, as `read_day`, keeping only rows with a post time
+    (a row without one cannot be placed on the tau grid) and only the (race, pool) pairs the
+    same day's JRA-VAN rows `jravan` do not hold: JRA-VAN wins where both have a pool."""
+    frame = read_day(path)
+    frame = frame[frame["post_utc"].notna()]
+    if jravan is not None and len(jravan) and len(frame):
+        theirs = pd.MultiIndex.from_frame(jravan[["race_id", "pool"]].drop_duplicates())
+        frame = frame[~pd.MultiIndex.from_frame(frame[["race_id", "pool"]]).isin(theirs)]
+    return frame.reset_index(drop=True)
 
 
 def read_day(path: Path) -> pd.DataFrame:
@@ -135,16 +154,27 @@ def read_grades(start: date) -> dict[str, str | None]:
     )
 
 
-def data_builds(files: list[tuple[str, Path]]) -> dict[str, str]:
+def _files_digest(files: list[tuple[str, Path]]) -> str:
     digest = hashlib.sha256()
     for day, path in files:
         digest.update(f"{day}:{path.stat().st_size}\n".encode())
+    return digest.hexdigest()[:16]
+
+
+def data_builds(
+    files: list[tuple[str, Path]], logged: list[tuple[str, Path]] | None = None
+) -> dict[str, str]:
+    """The inputs' builds: the JRA-VAN day files and races table, and our own logged development
+    days when any were read (by name and size; a holdout day is not among them)."""
     races = paths.processed_dir(SOURCE) / "races.parquet"
     race_digest = hashlib.sha256(races.read_bytes()).hexdigest()[:16]
-    return {
-        "jravan_odds_timeseries": f"processed/{SOURCE}/odds_timeseries@{digest.hexdigest()[:16]}",
+    builds = {
+        "jravan_odds_timeseries": f"processed/{SOURCE}/odds_timeseries@{_files_digest(files)}",
         "jravan_races": f"processed/{SOURCE}/races.parquet@{race_digest}",
     }
+    if logged:
+        builds["jra_odds_timeseries"] = f"processed/jra/odds_timeseries@{_files_digest(logged)}"
+    return builds
 
 
 def wide_coverage() -> dict:
@@ -167,6 +197,50 @@ def wide_coverage() -> dict:
             }
         )
     return {"own_logged_days": days}
+
+
+def wide_status(coverage: dict, cases: nc.Cases, folds, cells: list[dict]) -> dict:
+    """Whether Wide (D3) was fitted, and when not, a sentence saying why: no Wide in our logs, no
+    post time on the logged Wide races, Wide cases on no fold's training day, or too few of them
+    for a cell. The Wide cases and days are counted either way."""
+    logged = coverage["own_logged_days"]
+    wide_races = sum(e["wide_races"] for e in logged)
+    with_post = sum(e["wide_races_with_post_time"] for e in logged)
+    wide_days = sorted(set(cases.day[cases.pool == nc.WIDE].tolist()))
+    trained = sorted({d for train, _, _ in folds for d in train} & set(wide_days))
+    fitted = any(c["pool"] == nc.WIDE for c in cells)
+    reasons = (
+        (
+            not wide_races,
+            f"Wide is not fitted: none of our {len(logged)} logged development days holds a Wide "
+            "race (the JRA-VAN series has no Wide pool).",
+        ),
+        (
+            not with_post,
+            f"Wide is not fitted: none of the {wide_races} Wide races on our logged development "
+            "days has a post time, so no Wide board can be placed on the tau grid (recompact the "
+            "days: the race card now gives the post times, #411).",
+        ),
+        (
+            not trained,
+            f"Wide is not fitted: the Wide cases are on {len(wide_days)} logged day(s) "
+            f"({', '.join(wide_days) or 'none'}), none of them a training day of any fold, so no "
+            "fold can fit Wide yet; too few logged days hold Wide.",
+        ),
+        (
+            True,
+            f"Wide is not fitted: the folds' training days hold Wide cases on {len(trained)} "
+            "day(s), too few for a pool-growth profile or any (pool, tau) cell.",
+        ),
+    )
+    reason = None if fitted else next(text for applies, text in reasons if applies)
+    return {
+        "fitted": fitted,
+        "reason": reason,
+        "wide_cases": int((cases.pool == nc.WIDE).sum()),
+        "wide_case_days": wide_days,
+        "wide_training_days": trained,
+    }
 
 
 def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
@@ -252,23 +326,26 @@ def drift_examples(cases: nc.Cases, days: list[str]) -> pd.DataFrame:
 
 def drift_forecaster(model: NowcastV0):
     """#116's drift as a share forecaster: its odds draws, read back into shares by the pool's
-    share rule (WIN 1/O, PLACE the stake-back inverse)."""
+    share rule (WIN 1/O, PLACE and Wide the stake-back inverse). A Wide pair's shock is v0's
+    (eps_a + eps_b) / sqrt 2 of per-runner shocks."""
 
     def forecast(view: nc.RaceView, *, pool: str, n: int, seed: int) -> nc.Draws:
         board = view.pools[pool]
-        keys = [int(c) for c in board.combinations]
+        keys = [nc._combination_key(c) for c in board.combinations]
+        keys = [k if pool == nc.WIDE else k[0] for k in keys]
         lo = np.asarray(board.odds, dtype=float)
         hi = np.asarray(board.odds_hi, dtype=float)
         win = dict(zip(keys, lo.tolist(), strict=True)) if pool == nc.WIN else {}
-        place = {}
-        if pool == nc.PLACE:
-            place = {
-                h: (o, None if not np.isfinite(x) else x)
-                for h, o, x in zip(keys, lo.tolist(), hi.tolist(), strict=True)
-            }
-        race = RaceBoard(view.race_id, None, _AT, _AT, False, win, place, {}, {}, frozenset())
-        eps = np.random.default_rng(seed).standard_normal((n, len(keys)))
-        shocks = {h: eps[:, j] for j, h in enumerate(keys)}
+        figures = {
+            k: (o, None if not np.isfinite(x) else x)
+            for k, o, x in zip(keys, lo.tolist(), hi.tolist(), strict=True)
+        }
+        place = figures if pool == nc.PLACE else {}
+        wide = figures if pool == nc.WIDE else {}
+        race = RaceBoard(view.race_id, None, _AT, _AT, False, win, place, wide, {}, frozenset())
+        runners = sorted({h for k in keys for h in k}) if pool == nc.WIDE else keys
+        eps = np.random.default_rng(seed).standard_normal((n, len(runners)))
+        shocks = {h: eps[:, j] for j, h in enumerate(runners)}
         drawn = model.draws(race, pool=pool, tau_min=int(round(view.tau_min)), shocks=shocks)
         shares, _ = nc.pool_shares(pool, drawn.odds)
         return nc.Draws(shares=shares, v_final=np.full(n, np.nan))
@@ -398,26 +475,43 @@ def run_study(
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     git_sha = _git_sha()
 
+    # D14: both sources' holdout days are dropped by file name, before any of their files is read.
     files = day_files(PRICE_ERA_START, end)
-    held = [d for d, _ in files if is_holdout_day(COUNTRY, date.fromisoformat(d))]
+    logged = day_files(PRICE_ERA_START, end, source="jra")
+    held = sorted({d for d, _ in files + logged if is_holdout_day(COUNTRY, date.fromisoformat(d))})
     files = [(d, p) for d, p in files if d not in set(held)]
-    builds = data_builds(files)
+    logged = [(d, p) for d, p in logged if d not in set(held)]
+    builds = data_builds(files, logged)
     grades = read_grades(PRICE_ERA_START)
+    by_day: dict[str, list[Path | None]] = defaultdict(lambda: [None, None])
+    for slot, source_files in enumerate((files, logged)):
+        for d, p in source_files:
+            by_day[d][slot] = p
+    days = sorted(by_day.items())
     started = time.monotonic()
-    log(f"reading {len(files)} development days")
+    log(f"reading {len(days)} development days ({len(files)} JRA-VAN, {len(logged)} our logs)")
     case_chunks, growth_chunks, case_parts, growth_parts = [], [], [], []
     counts: dict[str, int] = defaultdict(int)
-    for i, (_, path) in enumerate(files):
-        day_cases, day_growth, c = nc.extract(read_day(path), grades=grades)
+    for i, (_, (jravan_path, logged_path)) in enumerate(days):
+        frame = None if jravan_path is None else read_day(jravan_path)
+        if logged_path is not None:
+            own = read_logged_day(logged_path, frame)
+            if frame is None:
+                frame = own
+            elif len(own):
+                frame = pd.concat([frame, own], ignore_index=True)
+            del own
+        day_cases, day_growth, c = nc.extract(frame, grades=grades)
+        del frame
         case_parts.append(day_cases)
         growth_parts.append(day_growth)
         for key, value in c.items():
             counts[key] += value
-        if len(case_parts) == 100 or i == len(files) - 1:
+        if len(case_parts) == 100 or i == len(days) - 1:
             case_chunks.append(nc.Cases.concat(case_parts))
             growth_chunks.append(nc.Growth.concat(growth_parts))
             case_parts, growth_parts = [], []
-            log(f"  {i + 1}/{len(files)} days read ({_progress(started)})")
+            log(f"  {i + 1}/{len(days)} days read ({_progress(started)})")
     cases = nc.Cases.concat(case_chunks)
     growth = nc.Growth.concat(growth_chunks)
     del case_chunks, growth_chunks
@@ -443,6 +537,16 @@ def run_study(
                 prior_n=float(v0_config["prior_n"]),
             )
             test_cases = cases.select_days(scored_days)
+            # A (pool, tau) the training days give no fit for (Wide before our logs accrue) is
+            # not scored: every forecaster needs its cell.
+            fitted = [
+                (pool, int(tau)) in structural.cells
+                and (pool, int(tau)) in plain.cells
+                and (pool, int(tau)) in drift.sigma0
+                for pool, tau in zip(test_cases.pool, test_cases.tau, strict=True)
+            ]
+            unscored = len(test_cases) - sum(fitted)
+            test_cases = test_cases.select(np.array(fitted, dtype=bool))
             forecasters = {
                 "structural": structural.draws,
                 "no_features": plain.draws,
@@ -476,6 +580,7 @@ def run_study(
                     "test_days": len(test),
                     "scored_days": len(scored_days),
                     "cases": len(test_cases),
+                    "unscored_no_fit": unscored,
                     "train_end": fold.train_end.isoformat(),
                 }
             )
@@ -553,6 +658,8 @@ def run_study(
         "counts": dict(counts)
         | {
             "development_days": len(dev_days),
+            "jravan_day_files": len(files),
+            "own_logged_day_files": len(logged),
             "holdout_days_dropped": len(held),
             "cases": len(cases),
             "folds": len(folds),
@@ -563,8 +670,9 @@ def run_study(
         "phi": _phi_diagnostics(phi),
         "cells": cells,
         "pit": _pit_rows(pit_acc),
-        "wide": wide_coverage(),
     }
+    coverage = wide_coverage()
+    report_data["wide"] = wide_status(coverage, cases, folds, cells) | coverage
     about = {
         "family": f"`{family}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
@@ -737,6 +845,7 @@ def _record(
 
 
 def render_report(gains: dict, data: dict, about: dict, grid) -> str:
+    wide = data["wide"]
     lines = [
         f"# The C1 final-price nowcast against the random walk and #116's drift "
         f"({COUNTRY}, #{TICKET})",
@@ -820,9 +929,18 @@ def render_report(gains: dict, data: dict, about: dict, grid) -> str:
         "",
         "## Wide coverage",
         "",
-        "The JRA-VAN series carries no Wide pool. Our own logged days:",
+        "The JRA-VAN series carries no Wide pool: Wide comes from our own logged days only (D3).",
         "",
-        _table(data["wide"]["own_logged_days"]),
+        "Wide was fitted and scored (its rows are in the tables above)."
+        if wide["fitted"]
+        else wide["reason"],
+        "",
+        f"Wide cases: {wide['wide_cases']} on {len(wide['wide_case_days'])} day(s), of which "
+        f"{len(wide['wide_training_days'])} are a fold's training day.",
+        "",
+        "Our own logged development days:",
+        "",
+        _table(wide["own_logged_days"]),
         "",
     ]
     return "\n".join(lines)
