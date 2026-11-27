@@ -4,8 +4,10 @@ Pre-registration: docs/specs/shadow-calibration-prereg.md; the frozen spec is ``
 ``python -m horsetrack.countries.japan.studies.shadow_run --freeze`` freezes it in the japan
 registry (``Registry.freeze_family``; again with the same spec is a no-op), and ``--run`` refuses
 to read a record, a dividend or a board unless the family is frozen with exactly that spec. Every
-variant is one registry record, failures and empty results included, and the full output is one
-report through ``write_report`` under the data dir.
+variant is one registry record, failures and empty results included. The full output goes
+through ``write_report`` under the data dir, named by the spec hash and the commit so a rerun
+keeps every earlier run's files: the report (strict JSON, a missing value as null) and the
+settlement file, one JSON line per shadow record with its log key, decision time and outcome.
 
 Inputs: the spec's days' v0 shadow logs (``models.shadow.read_shadow``: development days only), the
 jra store's dividends with the scratch refunds (``bets.settle.day_dividends``), each race's final
@@ -19,7 +21,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
+from collections import Counter
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -37,7 +41,7 @@ from horsetrack.core.eval.registry import FoldMetric, RunRecord, _spec_hash, def
 from horsetrack.core.eval.reports import write_report
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.bets.log import load_limits
-from horsetrack.countries.japan.bets.settle import SETTLED, day_dividends, settle_bets
+from horsetrack.countries.japan.bets.settle import SETTLED, _day_of, day_dividends, settle_bets
 from horsetrack.countries.japan.board import snapshot
 from horsetrack.countries.japan.models.shadow import (
     NotEstimable,
@@ -65,6 +69,18 @@ TAUS = (2, 1, 5, 16, 30, 60)  # the shadow grid; T-2 is D2's decision time and t
 DRIFT_LAGS = (3, 11, 14)
 PICK_OPTION = "pick-rule-q05-t2"
 BOOTSTRAP_SEED = TICKET
+# the settlement file's columns: a record's key in its log, its decision time, how it settled
+SETTLEMENT_COLUMNS = (
+    "race_id",
+    "pool",
+    "combination",
+    "tau_min",
+    "decision_utc",
+    "outcome",
+    "return_per_100",
+    "claimed_ev",
+    "realised",
+)
 
 
 def bootstrap_settings() -> dict:
@@ -197,15 +213,21 @@ def _meetings(race_ids: pd.Series) -> pd.Series:
     return race_ids.str.rsplit(":", n=1).str[0]
 
 
-def _slope(name: str, fit: Callable[[], tuple[float, float, float, int]]) -> Outcome:
-    """The slope with its interval, or, when only the interval is not estimable, the point slope
-    alone and a failed variant: the pre-registered estimate is the slope with its interval."""
+def _slope(
+    name: str, unit: str, fit: Callable[[], tuple[float, float, float, int, int]]
+) -> Outcome:
+    """The slope with its interval and ``n_clusters[<unit>]``, the clusters the bootstrap resamples;
+    when only the interval is not estimable, the point slope and that count (one meeting reads as
+    1, not as an absence) and a failed variant: the pre-registered estimate has its interval."""
+    count = f"n_clusters[{unit}]"
     try:
-        slope, lo, hi, n = fit()
+        slope, lo, hi, n, k = fit()
     except NotEstimable as exc:
         point = [] if exc.slope is None else [_metric(name, exc.slope, exc.n)]
+        if exc.n_clusters is not None:
+            point.append(_metric(count, exc.n_clusters, exc.n))
         return point, f"not estimable: {exc}", True
-    return [_metric(name, slope, n, lo, hi)], None, False
+    return [_metric(name, slope, n, lo, hi), _metric(count, k, n)], None, False
 
 
 def _calibration(settled: pd.DataFrame, tau: int, clusters: str, boot: dict) -> Callable:
@@ -214,15 +236,15 @@ def _calibration(settled: pd.DataFrame, tau: int, clusters: str, boot: dict) -> 
         used = rows[rows["claimed_ev"].notna() & rows["realised"].notna()]
         unit = _meetings(rows["race_id"]) if clusters == "meeting" else rows["race_id"]
 
-        def fit() -> tuple[float, float, float, int]:
+        def fit() -> tuple[float, float, float, int, int]:
             got = calibration_slope(rows["claimed_ev"], rows["realised"], unit, **boot)
-            return got.mean, got.lo, got.hi, len(used)
+            return got.mean, got.lo, got.hi, len(used), got.n_clusters
 
         means = [
             _metric("mean_claimed_ev", used["claimed_ev"].mean(), len(used)),
             _metric("mean_realised", used["realised"].mean(), len(used)),
         ]
-        slope, note, failed = _slope("calibration_slope", fit)
+        slope, note, failed = _slope("calibration_slope", clusters, fit)
         return (means if len(used) else []) + slope, note, failed
 
     return run
@@ -238,18 +260,73 @@ def _picks(settled: pd.DataFrame, tau: int, floor: float) -> pd.DataFrame:
     return picks.assign(rank=order.rank(ascending=False, method="first"))
 
 
+def _day_counts(frame: pd.DataFrame) -> Counter:
+    return Counter(_day_of(race_id) for race_id in frame["race_id"])
+
+
+def _growth_rows(
+    settled: pd.DataFrame, staked: pd.DataFrame, growth: pd.DataFrame, rule: dict, days: list
+) -> list[dict]:
+    """One row per study day of the pick rule's paper stakes, by ``status``: 'settled' (the log
+    growth over its settled picks), 'no picks' (the rule read the day's claims and picked nothing:
+    nothing staked, the day's money kept, growth 0), 'pending' (picks, none settled yet) or 'no
+    claims' (no record at the rule's decision time carries ``value_q05``, so the rule had no input).
+    The last two have a null growth and say why; so does a day that ends at 0 yen (ln 0)."""
+    at_tau = settled[(settled["pool"] == POOL) & (settled["tau_min"] == rule["tau"])]
+    read, picks = _day_counts(settled), _day_counts(staked)
+    claims = _day_counts(at_tau[pd.to_numeric(at_tau["value_q05"]).notna()])
+    figures = {g["day"]: g for g in growth.to_dict("records")}
+    at = f"T-{rule['tau']}"
+    rows = []
+    for day in days:
+        got = figures.get(day)
+        money = dict.fromkeys(("n_settled", "staked_yen", "returned_yen", "ending_yen"))
+        value, reason = None, None
+        if got is not None and not math.isnan(got["log_growth"]):
+            status, money = "settled", {name: got[name] for name in money}
+            if math.isinf(got["log_growth"]):
+                reason = "the day ended at 0 yen: ln 0 has no value"
+            else:
+                value = got["log_growth"]
+        elif picks[day]:
+            status, reason = "pending", f"{picks[day]} pick(s), none staked and settled yet"
+        elif claims[day]:
+            status, value, reason = "no picks", 0.0, f"no record at {at} met the rule"
+            money = {"n_settled": 0, "staked_yen": 0, "returned_yen": 0}
+            money["ending_yen"] = rule["bankroll_yen"]  # nothing staked: the day's money kept
+        else:
+            status = "no claims"
+            reason = (
+                f"no record at {at} carries value_q05: the rule had no input"
+                if read[day]
+                else "no shadow record was read for the day"
+            )
+        rows.append(
+            {"day": day, "status": status}
+            | {"n_records": read[day], "n_claims": claims[day], "n_picks": picks[day]}
+            | money
+            | {"log_growth": value, "reason": reason}
+        )
+    return rows
+
+
 def _pick_rule(settled: pd.DataFrame, spec: dict, limits, boot: dict, out: dict) -> Callable:
     rule = spec["pick_rule"]
+    days = [date.fromisoformat(d) for d in spec["days"]]
 
     def run() -> Outcome:
         staked = flat_stakes(_picks(settled, rule["tau"], rule["value_q05_above"]), limits=limits)
         growth = log_growth_by_day(staked, bankroll_yen=rule["bankroll_yen"])
-        out["pick_growth"] = growth.to_dict("records")
+        out["pick_growth"] = _growth_rows(settled, staked, growth, rule, days)
         metrics = [_metric("n_picks", len(staked), len(staked))]
+        metrics += [
+            _metric(f"n_claims[{g['day']}]", g["n_claims"], g["n_claims"])
+            for g in out["pick_growth"]
+        ]
         metrics += [
             _metric(f"log_growth[{g['day']}]", g["log_growth"], g["n_settled"])
             for g in out["pick_growth"]
-            if np.isfinite(g["log_growth"])
+            if g["log_growth"] is not None
         ]
         bets = staked[staked["outcome"].isin(SETTLED) & (staked["stake_yen"] > 0)]
         if not len(bets):
@@ -268,11 +345,11 @@ def _drift(shadow: pd.DataFrame, finals: dict, lag: int, boot: dict) -> Callable
         keys = zip(rows["race_id"], rows["combination"], strict=True)
         frame = rows.assign(final_odds=[finals.get(key, np.nan) for key in keys])
 
-        def fit() -> tuple[float, float, float, int]:
+        def fit() -> tuple[float, float, float, int, int]:
             got = selection_drift(frame, lag_minutes=float(lag), **boot)
-            return got.slope, got.lo, got.hi, got.n
+            return got.slope, got.lo, got.hi, got.n, got.n_clusters
 
-        return _slope("drift_slope", fit)
+        return _slope("drift_slope", "meeting", fit)
 
     return run
 
@@ -324,6 +401,60 @@ def _bets(ranked: list, limits, out: dict) -> Callable:
 def freeze() -> str:
     """Freeze ``build_spec()`` in the japan registry and return its hash."""
     return default_registry(COUNTRY).freeze_family(FAMILY_ID, build_spec())
+
+
+def _plain(value: Any) -> Any:
+    """``value`` for strict JSON: a missing value (None, NaN, NA, NaT) as None, a numpy scalar as
+    its Python value, a date as ISO text, containers item by item. An infinity is kept, so
+    ``json.dumps(..., allow_nan=False)`` refuses it rather than write a token JSON does not have."""
+    if isinstance(value, dict):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if value is None or value is pd.NA or value is pd.NaT:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    return value.isoformat() if isinstance(value, date) else value
+
+
+def _json(value: Any, **kwargs: Any) -> str:
+    return json.dumps(_plain(value), allow_nan=False, **kwargs)
+
+
+def _settlement(settled: pd.DataFrame) -> str:
+    """One JSON line per shadow record, in log order: its key in the log (race_id, pool,
+    combination, tau_min), its decision_utc and how it settled (outcome, return_per_100,
+    claimed_ev, realised; null where not measured), so each claim joins back to its log line."""
+    rows = settled.reindex(columns=list(SETTLEMENT_COLUMNS)).to_dict("records")
+    return "".join(_json(row, ensure_ascii=False) + "\n" for row in rows)
+
+
+def _primary(variants: list[dict], spec: dict) -> dict:
+    """The primary estimate stated whole: P5 at the primary tau with D7's meeting clusters, its
+    slope and either its interval or why there is none, and the meetings behind it."""
+    name = f"calibration-win-t{spec['calibration']['primary_tau']}-meeting"
+    variant = next(v for v in variants if v["variant"] == name)
+    got = {m.metric: m for m in variant["metrics"]}
+    slope, meetings = got.get("calibration_slope"), got.get("n_clusters[meeting]")
+    k = None if meetings is None else int(meetings.value)
+    if slope is not None and slope.lo is not None:
+        interval = "D7: a bootstrap of whole meetings"
+    elif k is not None:
+        interval = f"not estimable: {k} meeting(s), and D7's bootstrap resamples whole meetings"
+    else:
+        interval = variant["params"].get("note", "not estimable")
+    return {
+        "variant": name,
+        "slope": None if slope is None else slope.value,
+        "lo": None if slope is None else slope.lo,
+        "hi": None if slope is None else slope.hi,
+        "n": None if slope is None else slope.n,
+        "n_meetings": k,
+        "interval": interval,
+    }
 
 
 def _record(v: dict, git_sha: str, builds: dict, components: dict) -> RunRecord:
@@ -427,21 +558,33 @@ def run_study(out_dir: Path | None = None) -> dict:
             },
             "races_with_final_win_board": len({race for race, _ in finals}),
         }
-    payload = {
-        "family_id": FAMILY_ID,
-        "spec_hash": spec_hash,
-        "git_sha": git_sha,
-        "written_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "counts": counts,
-        "variants": [v | {"metrics": [m.__dict__ for m in v["metrics"]]} for v in variants],
-        **out,
-        "records_appended": run_ids,
-    }
-    report = write_report(
-        out_dir / f"shadow-calibration-{COUNTRY}-{spec_hash[:12]}.json",
-        json.dumps(payload, indent=2, default=str),
-        sources=(SOURCE,),
+    stem = f"shadow-calibration-{COUNTRY}-{spec_hash[:12]}-{git_sha[:7]}"
+    settlement = None
+    if settled is not None:
+        path = write_report(
+            out_dir / f"{stem}-settlement.jsonl", _settlement(settled), sources=(SOURCE,)
+        )
+        settlement = {
+            "path": str(path),
+            "n_records": len(settled),
+            "key": ["race_id", "pool", "combination", "tau_min"],
+            "columns": list(SETTLEMENT_COLUMNS),
+        }
+    payload = _plain(
+        {
+            "family_id": FAMILY_ID,
+            "spec_hash": spec_hash,
+            "git_sha": git_sha,
+            "written_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "counts": counts,
+            "primary": _primary(variants, spec),
+            "variants": [v | {"metrics": [m.__dict__ for m in v["metrics"]]} for v in variants],
+            **out,
+            "settlement": settlement,
+            "records_appended": run_ids,
+        }
     )
+    report = write_report(out_dir / f"{stem}.json", _json(payload, indent=2), sources=(SOURCE,))
     return payload | {"report_path": str(report)}
 
 
@@ -455,7 +598,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.freeze:
         print(f"frozen family={FAMILY_ID} spec_hash={freeze()}")
         return 0
-    print(json.dumps(run_study(args.out), indent=2, default=str))
+    print(_json(run_study(args.out), indent=2))
     return 0
 
 

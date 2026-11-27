@@ -87,12 +87,16 @@ class NotEstimable(ValueError):
     """Too few pairs, no spread in the score, or too few clusters for a slope or its interval.
 
     ``slope`` is the point slope when only the interval is not estimable (one cluster, or a
-    replicate with no spread), else None; ``n`` is the number of pairs either way."""
+    replicate with no spread), else None; ``n`` is the number of pairs either way, and
+    ``n_clusters`` the clusters of those pairs when the slope exists, else None."""
 
-    def __init__(self, message: str, *, n: int, slope: float | None = None) -> None:
+    def __init__(
+        self, message: str, *, n: int, slope: float | None = None, n_clusters: int | None = None
+    ) -> None:
         super().__init__(message)
         self.n = n
         self.slope = slope
+        self.n_clusters = n_clusters
 
 
 @dataclass(frozen=True)
@@ -305,7 +309,10 @@ def _cluster_ols(
     k = int(codes.max()) + 1
     if k < 2:
         raise NotEstimable(
-            "one cluster: a bootstrap of whole clusters has no spread", n=pairs, slope=slope
+            "one cluster: a bootstrap of whole clusters has no spread",
+            n=pairs,
+            slope=slope,
+            n_clusters=k,
         )
     sums = [np.bincount(codes, weights=w, minlength=k) for w in (None, xc, yc, xc * xc, xc * yc)]
     rng = np.random.default_rng(seed)
@@ -318,7 +325,10 @@ def _cluster_ols(
         spread = sx2 - sx * sx / size
         if not (spread > 0).all():
             raise NotEstimable(
-                "a replicate's score has no spread: too few clusters", n=pairs, slope=slope
+                "a replicate's score has no spread: too few clusters",
+                n=pairs,
+                slope=slope,
+                n_clusters=k,
             )
         slopes[start:stop] = (sxy - sx * sy / size) / spread
     lo, hi = np.quantile(slopes, [1.0 - level, level])
