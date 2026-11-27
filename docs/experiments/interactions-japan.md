@@ -57,7 +57,10 @@ never a bet trigger.
 - The full report is at `$HORSETRACK_DATA_DIR/reports/interactions-japan-2dde55836222-28bea4f0bfa3.md`, with its
   tables as JSON beside it; the per-runner export (each member's out-of-fold u, for #98's meld) is at
   `$HORSETRACK_DATA_DIR/features/japan/interactions-japan-2dde55836222-28bea4f0bfa3.parquet`. v1's are beside them
-  (`interactions-japan-3060dfbf9626-faff16a8cb38.*`).
+  (`interactions-japan-3060dfbf9626-faff16a8cb38.*`). These are the paths v1's and v2's records cite. Since #93's
+  review (round 5) a launch's artifacts are named by the spec, the builds and a digest of its results, and an existing
+  one is never rewritten: a later launch that changes a result (a retry that recovers a failed fold) writes
+  `interactions-japan-<spec>-<builds>-<results>.*` beside these, and only its new records cite it.
 - **The families' registry summaries are not committed.** `write_summary` renders each over the public-tree guard's
   256 KB cap (`scripts/check_public_tree.py`, rule `size`), and a hand-cut copy is not allowed. The study writes them
   unchanged to `$HORSETRACK_DATA_DIR/reports/registry-summary-japan-c2-interactions-final-win-v2.md` and
@@ -337,20 +340,20 @@ horse_aptitude fits (git `56d0669`).
 Each in-scope claim as the ticket states it (08 §3.3, 05 §4.3 and 08 §8 B5, quoted from #93; the 05 and 08 reports
 are local and partly JRDB-derived, so none of their figures is copied here), against this study's evidence. Every
 figure is v2's, from the records named; the ΔLLs are nats per race over the 23,871 scored races, one-sided 95% meeting
-bounds in brackets, and "at the final price" is the block member's stage-2 meta against the base's.
+bounds in brackets, and "at the final price" is the block member's stage-2 meta against the base's. A ΔLL is the
+member's as scored, with every term it fits; no member fits one of its terms without the others, so a τ interval
+describes that term's fit, never its share of the member's gain.
 
 | Claim (as #93 states it) | Evidence here (records) | Conclusion |
 | --- | --- | --- |
 | Horse × jockey cells hold 1–10 runs, so only τ_hj is estimable | Prior runs per out-of-fold start: mean 1.5, median 0, p90 4; 51% of starts are the pair's first, none in a cell of 100+ (`cells:horse_x_jockey`). τ_hj at the empirical-Bayes floor in all 48 folds, upper bound 0.017 on the last (`tau:horse_x_jockey`) | Holds: most cells hold 0 to 4 prior runs, so only the spread τ_hj is estimated; it is at the floor, and a τ_hj above 0.017 is ruled out. |
 | ... and τ_hj is never a bet trigger | Standalone +0.00000006 (+0.00000006, +0.00000007); at the final price +0.0000000002 (−0.0000000001, +0.0000000005) (`level1:horse_x_jockey_vs_base`, `marginal:stage2:horse_x_jockey_vs_base`) | Consistent: nothing to trigger on. The estimate is read as predictive only (booking endogeneity, 05 §4.2); no rule here bets on it. |
 | Horse × trainer is aliased with horse | 75,912 of 86,502 horses (87.8%) keep one trainer, and 78.2% of out-of-fold starts are such a horse's; `drop_aliased` drops the block on those horses' rows (`horse_x_trainer:not_fitted`, `cells:horse_x_trainer`) | Holds where the trainer is constant: the block is not fitted, and its record (status failed, not fitted) carries the cell counts. |
-| Horse × course cells fail, hence the structured form | Horse × course (venue, surface, distance) cells: mean 0.9 prior runs, 60.1% of starts a cell's first (`cells:horse_x_course`). The structured distance and surface aptitude: τ 0.115 (0.094, 0.140); its rank-one horse × track term at the floor (upper 0.016); standalone +0.00103 (+0.00084, +0.00122); at the final price −0.0000059 (−0.0000123, +0.0000005) (`tau:horse_aptitude`, `level1:horse_aptitude_vs_base`, `marginal:stage2:horse_aptitude_vs_base`) | Holds: per-course cells are mostly empty, and the structured form carries a standalone gain with its lower bound above 0. It adds nothing at the final price. |
-| Trainer × track is learnable if τ ≥ 0.05 | One-factor east/west term τ 0.0499 (0.0417, 0.0593); cell-by-cell variance component 0.0267 (0, 0.0460) (`tau:trainer_x_track`). Standalone +0.00037 (+0.00005, +0.00068); at the final price −0.0000102 (−0.0000207, +0.0000002) (`level1:trainer_x_track_vs_base`, `marginal:stage2:trainer_x_track_vs_base`) | τ ≥ 0.05 is not shown: the frozen rule reads learnability from τ's lower bound, and 0.042 sits below 0.05; τ below 0.042 is ruled out. A standalone gain, priced at the final price. |
-| Drop horse × trainer in favour of a trainer debut prior (08 §8 B5) | τ 0.426 (0.392, 0.480) over 620 trainer × debut cells; the debut indicator −0.53 per fold (median); standalone +0.00561 (+0.00455, +0.00669); at the final price −0.0000218 (−0.0000573, +0.0000135) (`tau:trainer_debut`, `level1:trainer_debut_vs_base`, `marginal:stage2:trainer_debut_vs_base`) | The largest standalone gain of the blocks, with its lower bound above 0. It adds nothing at the final price. |
-| ... and a transfer step, applied only after a stable change (08 §8 B5) | 67,331 starts after a stable change of trainer (the new trainer kept for 2 consecutive runs); coefficient −0.061 per fold (median; −0.097 to −0.010); standalone +0.00058 (+0.00041, +0.00076); at the final price −0.0000034 (−0.0000093, +0.0000025) (`tau:transfer_step`, `level1:transfer_step_vs_base`, `marginal:stage2:transfer_step_vs_base`) | A standalone gain with its lower bound above 0; priced at the final price. |
-
-The ticket's expected-gain rule (about 0.42·τ²·w nats per race, before asking whether the market has it) is not
-scored: the ticket does not define w.
+| Horse × course cells fail, hence the structured form | Horse × course (venue, surface, distance) cells: mean 0.9 prior runs, 60.1% of starts a cell's first (`cells:horse_x_course`). The horse_aptitude member's terms: the structured distance and surface aptitude, τ 0.115 (0.094, 0.140), and the rank-one horse × track term, at the floor (upper 0.016). The member standalone +0.00103 (+0.00084, +0.00122); at the final price −0.0000059 (−0.0000123, +0.0000005) (`tau:horse_aptitude`, `level1:horse_aptitude_vs_base`, `marginal:stage2:horse_aptitude_vs_base`) | Holds for the cells: per-course cells are mostly empty. The horse_aptitude member, the structured form and the rank-one horse × track term fitted together, gains standalone with its lower bound above 0; of its two terms only the structured one is off τ's floor, but the gain is the member's. It adds nothing at the final price. |
+| Trainer × track is learnable if τ ≥ 0.05 | One-factor east/west term τ 0.0499 (0.0417, 0.0593); cell-by-cell variance component 0.0267 (0, 0.0460) (`tau:trainer_x_track`). The member, both terms together, standalone +0.00037 (+0.00005, +0.00068); at the final price −0.0000102 (−0.0000207, +0.0000002) (`level1:trainer_x_track_vs_base`, `marginal:stage2:trainer_x_track_vs_base`) | τ ≥ 0.05 is not shown for either term: the frozen rule reads learnability from τ's lower bound, and the one-factor term's 0.042 sits below 0.05 (a τ below 0.042 is ruled out for it); the cell-by-cell component's interval reaches 0, and a τ above 0.046 is ruled out for it. The trainer_x_track member, both terms fitted together, gains standalone; which term produced the gain is not measured. Priced at the final price. |
+| Drop horse × trainer in favour of a trainer debut prior (08 §8 B5) | τ 0.426 (0.392, 0.480) over 620 trainer × debut cells; the debut indicator −0.53 per fold (median); standalone +0.00561 (+0.00455, +0.00669); at the final price −0.0000218 (−0.0000573, +0.0000135) (`tau:trainer_debut`, `level1:trainer_debut_vs_base`, `marginal:stage2:trainer_debut_vs_base`) | The trainer_debut member, the debut indicator and the trainer × debut component fitted together, has the largest standalone gain of the members, its lower bound above 0; the two terms' shares are not separated. It adds nothing at the final price. |
+| ... and a transfer step, applied only after a stable change (08 §8 B5) | 67,331 starts after a stable change of trainer (the new trainer kept for 2 consecutive runs); coefficient −0.061 per fold (median; −0.097 to −0.010); standalone +0.00058 (+0.00041, +0.00076); at the final price −0.0000034 (−0.0000093, +0.0000025) (`tau:transfer_step`, `level1:transfer_step_vs_base`, `marginal:stage2:transfer_step_vs_base`) | The transfer_step member, its one indicator, gains standalone with its lower bound above 0; priced at the final price. |
+| Expected gain is about 0.42·τ²·w nats per race, before asking whether the market has it | Both sides are nats per race (each ΔLL here is a mean over the scored races), so w is a pure number: the w that reconciles the rule with a member's standalone ΔLL is ΔLL / (0.42 · Στ²) over the member's τ terms, one w for both terms of a two-term member; in brackets, the span of the printed bounds (ΔLL's lower over τ's upper, its upper over τ's lower; not a confidence interval). horse_x_jockey: τ at the floor, so any w from 0.0005 (at τ's upper bound, 0.017) reconciles +0.00000006. trainer_x_track: 0.27 (0.021, 0.93); 0.35 were the whole gain the one-factor term's, 1.2 were it the cell-by-cell component's. horse_aptitude: 0.19 (0.10, 0.33), its rank-one term at the floor adding almost nothing to Στ². trainer_debut: 0.074 (0.047, 0.10) were the whole gain the variance component's; less by the debut indicator's share, which is not separated. transfer_step: no τ (one coefficient), so the rule does not apply. Arithmetic on the rows above; no new read | Indeterminate. 05 §4.3 defines w per cell, w(n) = nIτ²/(1 + nIτ²), the posterior weight on a cell of n runs, states the gain for a race whose every runner sits in such a cell, and qualifies the rule as "second order, independent offsets, the share of runners covered". How w averages over cells of different sizes, and which I it takes (08's 0.176 for top-3 training, or the base's measured 0.106), is not stated in 05, 08 or #93, and this report publishes no runner-level w(n), so the rule's predicted gain is not computed here and the reconciling w is not checked against one. No measurement contradicts the rule: every member's span reaches below w(n)'s ceiling of 1. The market's side is determined: at the final price every member adds at most +0.000014 per race, whatever w is. |
 
 ## What this rules out
 
@@ -360,19 +363,23 @@ Measurements, not verdicts; nothing is adopted or rejected. One run on one store
   jockey spread above 0.017 on the log-odds scale is ruled out (one-sided 95%) beside the base. Its cells add 6e-8
   nats per race standalone and nothing at the final price. E35's "τ_hj < 0.1, cells useless" holds. Read as
   predictive only (booking endogeneity); never a bet trigger.
-- **E36 (trainer × track):** the one-factor east/west term carries it: τ 0.050 (0.042, 0.059), steady over the folds,
-  while the cell-by-cell variance component adds 0.027 (0, 0.046). The rule reads "learnable" from the lower bound
-  against 0.05, and 0.042 sits below it, so τ ≥ 0.05 is not shown; τ below 0.042 is ruled out. Standalone it gains
-  +0.00037 nats per race (lower bound +0.00005); at the final price it gains nothing (−0.00001, upper bound +0.0000002):
+- **E36 (trainer × track):** the member fits two terms together. Their fits: the one-factor east/west term's τ is
+  0.050 (0.042, 0.059), steady over the folds, and the cell-by-cell variance component's 0.027 (0, 0.046). The rule
+  reads "learnable" from the lower bound against 0.05, and 0.042 sits below it, so τ ≥ 0.05 is not shown; τ below
+  0.042 is ruled out for the one-factor term, and τ above 0.046 for the cell-by-cell component. Standalone the member
+  gains +0.00037 nats per race (lower bound +0.00005); no member fits one term without the other, so which term
+  produced the gain is not measured. At the final price the member gains nothing (−0.00001, upper bound +0.0000002):
   "probably priced" holds.
-- **E93 (aptitude, debut prior, transfer step):** each gains standalone with its lower bound above 0: the trainer debut
-  prior most (+0.0056 nats per race; τ 0.43, the trainer's debut runners differ from its later ones by a spread of
-  0.4 on the log-odds scale), then the structured distance and surface aptitude (+0.0010; τ 0.115) and the transfer
-  step (+0.0006; −0.06 after a stable change). The rank-one horse × track term is at the floor (upper 0.016).
+- **E93 (aptitude, debut prior, transfer step):** each member gains standalone with its lower bound above 0:
+  trainer_debut most (+0.0056 nats per race; the debut indicator, −0.53, and the trainer × debut component, τ 0.43:
+  the trainer's debut runners differ from its later ones by a spread of 0.4 on the log-odds scale), then
+  horse_aptitude (+0.0010; the structured distance and surface term, τ 0.115, and the rank-one horse × track term,
+  at the floor with upper 0.016) and transfer_step (+0.0006; its one coefficient, −0.06 after a stable change). Each
+  gain is the member's, all its terms fitted together; a τ describes its term's fit, not its share of the gain.
 - **At the final price nothing adds:** every block member's paired ΔLL against the base's stage-2 meta has its upper
   bound at or below +0.000014 nats per race, and four of the five point estimates are negative. A gain above
-  +0.000014 per race from any of these blocks, given the base and the final price, is ruled out (one-sided 95%). The
-  final Win price already holds what the blocks measure.
+  +0.000014 per race from any of these members, given the base and the final price, is ruled out (one-sided 95%). The
+  final Win price already holds what the members measure.
 - **The base itself** (#92's model without the sire) adds to the market-only stage-2 meta: +0.000315 nats per race
   (+0.000140, +0.000493), with a negative stage-2 weight (α ≈ −0.053), as #91's rating had: the market overweights what
   the ability member measures. Neither stage-2 meta beats D4's calibrated market (upper bounds near +0.00007).

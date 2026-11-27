@@ -61,7 +61,11 @@ stopped launch resumes and a level-2 amendment re-scores the saved out-of-fold p
 member-fold keeps the git revision it was fitted at, and every record after level 1 names them
 (`params.fit_revisions`); every failed member-fold fit, an earlier launch's included, is a failed
 record of its own (`fit_failures`); a stopped or failed launch records every planned variant as
-failed.
+failed. A completed launch's artifacts (the report, its JSON, the export) are named by the spec,
+the builds and a digest of its results (`artifact_stem`, `results_digest`), and its records cite
+them; an existing artifact is never rewritten. So a launch that changes a result (a retry that
+recovers a failed fold) writes beside the earlier launch's files, whose records keep citing
+them, and a record equal to a held one but for git_sha and its artifacts is not appended again.
 
 Family `japan-c2-interactions-final-win-v2` supersedes `japan-c2-interactions-final-win` (#93's
 review, round 1), whose records stay in the registry: v1 settled a winner at its final odds over
@@ -1388,11 +1392,42 @@ def render_report(study: Study, spec: dict, about: dict, record_ids: dict[str, s
     )
 
 
-def artifact_stem(spec_hash: str, builds: dict, trial: bool) -> str:
+def artifact_stem(spec_hash: str, builds: dict, trial: bool, results: str) -> str:
+    """A launch's artifacts (the report, its JSON, the export): the spec, the data builds and
+    `results`, the digest of what the launch computed (`results_digest`). A launch that changes
+    a result (a retry recovering a failed fold) names new files; one that reproduces every
+    result names the same ones."""
     digest = hashlib.sha256(
         json.dumps(dict(builds), sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    return f"interactions-{COUNTRY}-{spec_hash[:12]}-{digest[:12]}" + ("-trial" if trial else "")
+    stem = f"interactions-{COUNTRY}-{spec_hash[:12]}-{digest[:12]}-{results[:12]}"
+    return stem + ("-trial" if trial else "")
+
+
+def results_digest(records: list[RunRecord], study: Study, export: pd.DataFrame) -> str:
+    """The sha256 of a launch's results: its records but for git_sha and the artifacts they
+    cite (`_identity`), the report's counts and tables, and the export's columns and rows."""
+    digest = hashlib.sha256()
+    for record in records:
+        digest.update(_identity(record).encode())
+    shown = {"counts": study.counts, "tables": study.tables}
+    digest.update(json.dumps(shown, separators=(",", ":"), default=str).encode())
+    digest.update(json.dumps([str(c) for c in export.columns]).encode())
+    digest.update(pd.util.hash_pandas_object(export, index=False).to_numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _publish_parquet(frame: pd.DataFrame, path: Path) -> None:
+    """`frame` as a parquet at `path`, written beside it and published by rename, so a stop
+    mid-write never leaves a partial file under a results digest."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    os.close(fd)
+    try:
+        frame.to_parquet(tmp, index=False)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def level1_key(spec: dict, builds: dict) -> str:
@@ -1419,17 +1454,16 @@ def _file_build(name: str) -> str:
     return f"processed/{SOURCE}/{name}.parquet@{digest.hexdigest()[:16]}"
 
 
-def _record(variant, git_sha, builds, spec_hash, trial, *, artifacts=True) -> RunRecord:
+def _record(variant, git_sha, builds, spec_hash, trial, *, stem: str | None = None) -> RunRecord:
+    """The variant's registry record; with `stem`, it cites the artifacts its launch wrote."""
     params = dict(variant.params) | {"spec_sha256": spec_hash}
     if trial:
         params["trial"] = True
     if variant.error:
         params["error"] = variant.error
     data_builds = dict(builds)
-    if artifacts:
-        data_builds[ARTIFACTS] = (
-            f"reports+features/{COUNTRY}@{artifact_stem(spec_hash, builds, trial)}"
-        )
+    if stem is not None:
+        data_builds[ARTIFACTS] = f"reports+features/{COUNTRY}@{stem}"
     return RunRecord(
         hypothesis_id=variant.hypothesis_id,
         family_id=TRIAL_FAMILY_ID if trial else FAMILY_ID,
@@ -1446,15 +1480,22 @@ def _record(variant, git_sha, builds, spec_hash, trial, *, artifacts=True) -> Ru
     )
 
 
+def _identity(record: RunRecord) -> str:
+    """A record's result: its run id but for git_sha and the artifacts it cites."""
+    builds = {k: v for k, v in record.data_builds.items() if k != ARTIFACTS}
+    return _run_id(dataclasses.replace(record, git_sha="", data_builds=builds))
+
+
 def append_new(registry, records: list[RunRecord]) -> tuple[list[str], list[str]]:
-    """Append each record its family does not hold yet (equal but for git_sha); each record's
-    run id (the held one's when held), and the variants appended."""
+    """Append each record its family does not hold yet (`_identity`: a held record equal but
+    for git_sha and the artifacts it cites keeps citing its own launch's, which hold the same
+    result); each record's run id (the held one's when held), and the variants appended."""
     held = {}
     for family in {r.family_id for r in records}:
-        held |= {_run_id(dataclasses.replace(r, git_sha="")): r for r in registry.records(family)}
+        held |= {_identity(r): r for r in registry.records(family)}
     ids, appended = [], []
     for record in records:
-        key = _run_id(dataclasses.replace(record, git_sha=""))
+        key = _identity(record)
         if key in held:
             ids.append(_run_id(held[key]))
             continue
@@ -1561,7 +1602,6 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
     git_sha = _git_sha()
     level1_builds = store_builds()
     builds = level1_builds | {f"{SOURCE}_dividends": _file_build("dividends")}
-    stem = artifact_stem(spec_hash, builds, trial)
     checkpoint = checkpoint_path(spec, level1_builds, trial)
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     fold_scheme = "walk_forward:" + json.dumps(spec["folds"], sort_keys=True)
@@ -1571,6 +1611,8 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
         study, export = compute_study(
             inputs, spec, scheme, checkpoint=checkpoint, revision=git_sha, log=log
         )
+        bare = [_record(v, git_sha, builds, spec_hash, trial) for v in study.variants]
+        stem = artifact_stem(spec_hash, builds, trial, results_digest(bare, study, export))
     except (Exception, KeyboardInterrupt) as exc:  # a launch stopped by hand is a run too
         stopped = datetime.now(timezone.utc).isoformat(timespec="seconds")
         failed = [
@@ -1584,23 +1626,25 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
             )
             for hypothesis, name in planned()
         ]
-        records = [_record(v, git_sha, builds, spec_hash, trial, artifacts=False) for v in failed]
+        records = [_record(v, git_sha, builds, spec_hash, trial) for v in failed]
         append_new(registry, records)
         if checkpoint.exists():  # its failed fits, in case no launch resumes it
             saved, _ = load_checkpoint(checkpoint)
             fits = fit_failures(saved["failures"], fold_scheme)
-            append_new(
-                registry,
-                [_record(v, git_sha, builds, spec_hash, trial, artifacts=False) for v in fits],
-            )
+            append_new(registry, [_record(v, git_sha, builds, spec_hash, trial) for v in fits])
         write_committed_summary(registry)
         raise
     log(f"computed ({_progress(started)})")
 
-    records = [
-        _record(v, git_sha, builds, spec_hash, trial, artifacts=not v.name.startswith("fit:"))
-        for v in study.variants
-    ]
+    report_path, json_path = out_dir / f"{stem}.md", out_dir / f"{stem}.json"
+    export_path = paths.data_dir() / "features" / COUNTRY / f"{stem}.parquet"
+    kept = {p for p in (report_path, json_path, export_path) if p.exists()}
+    for path in sorted(kept):  # an earlier launch with these results wrote it: never replaced
+        log(f"{path.name} exists (the same results digest): kept, not rewritten")
+    records = []
+    for v in study.variants:  # a failed fit's record cites no artifact (as an aborted run's)
+        cites = None if v.name.startswith("fit:") else stem
+        records.append(_record(v, git_sha, builds, spec_hash, trial, stem=cites))
     ids, appended = append_new(registry, records)
     record_ids = {r.variant: run_id for r, run_id in zip(records, ids, strict=True)}
     by_revision: dict[str, int] = {}
@@ -1614,30 +1658,25 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
         fits: ", ".join(f"`{r[:7]}` ({n} member-folds)" for r, n in sorted(by_revision.items())),
         "level-1 checkpoint": f"`{checkpoint.name}`",
         "data": ", ".join(builds.values()),
-        "artifacts (report, JSON, export)": f"`{stem}`",
+        "artifacts (report, JSON, export; the spec, the builds, the results' digest)": f"`{stem}`",
         "records": f"{len(appended)} appended; {len(record_ids) - len(appended)} already held",
         "trial (records marked params.trial, spec not frozen)": trial,
         "run time": _progress(started),
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    report = write_report(
-        out_dir / f"{stem}.md", render_report(study, spec, about, record_ids), sources=SOURCES
-    )
-    write_report(
-        out_dir / f"{stem}.json",
-        json.dumps(
-            {"about": about, "counts": study.counts, "tables": study.tables}, indent=1, default=str
-        ),
-        sources=SOURCES,
-    )
-    export_path = paths.data_dir() / "features" / COUNTRY / f"{stem}.parquet"
-    export.to_parquet(export_path, index=False)
+    if report_path not in kept:
+        write_report(report_path, render_report(study, spec, about, record_ids), sources=SOURCES)
+    if json_path not in kept:
+        shown = {"about": about, "counts": study.counts, "tables": study.tables}
+        write_report(json_path, json.dumps(shown, indent=1, default=str), sources=SOURCES)
+    if export_path not in kept:
+        _publish_parquet(export, export_path)
     write_committed_summary(registry)
     return {
         "family_id": family,
         "spec_hash": spec_hash,
         "artifact_stem": stem,
-        "report_path": str(report),
+        "report_path": str(report_path),
         "export_path": str(export_path),
         "registry_path": str(registry.path),
         "records_appended": len(appended),
@@ -1735,7 +1774,7 @@ def record_v1_launches(log=print) -> list[str]:
 
     def v1(variant: Variant, sha: str) -> RunRecord:
         variant = dataclasses.replace(variant, params=variant.params | {"backfilled": V1_NOTE})
-        record = _record(variant, sha, builds, SUPERSEDED_SPEC, False, artifacts=False)
+        record = _record(variant, sha, builds, SUPERSEDED_SPEC, False)
         return dataclasses.replace(record, family_id=SUPERSEDES)
 
     records = [
