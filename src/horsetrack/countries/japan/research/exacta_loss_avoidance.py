@@ -32,9 +32,12 @@ import argparse
 import hashlib
 import json
 import math
+import re
+import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -48,6 +51,7 @@ from horsetrack.core.eval.registry import (
     RunRecord,
     default_registry,
     summary_dir,
+    summary_stem,
     write_summary,
 )
 from horsetrack.core.eval.reports import write_report
@@ -297,7 +301,8 @@ def member_table(
         stake, ret, all_stake, all_ret = totals[k]
         col = reps[:, k]
         finite = col[np.isfinite(col)]
-        have = len(finite) > 1 and np.isfinite(point[k])
+        # one meeting: every draw is the point estimate, so no bound says anything (spec section 7)
+        have = cell["n_meetings"] > 1 and len(finite) > 1 and np.isfinite(point[k])
         out.append({
             "cut": cell["cut"], "scope": cell["scope"], "set": cell["set"],
             "n_races": cell["n_races"], "n_meetings": cell["n_meetings"],
@@ -433,11 +438,6 @@ def freeze(registry) -> dict[str, str]:
     return {fid: registry.freeze_family(fid, spec) for fid, spec in family_specs().items()}
 
 
-def _num(value) -> float | None:
-    value = float(value)
-    return value if math.isfinite(value) else None
-
-
 def score(
     registry,
     races: Iterable[Mapping],
@@ -478,13 +478,15 @@ def score(
             metrics = [FoldMetric("development", "n_races", float(n), None, None, n)]
             for name, row in (("kept", kept), ("skipped", skipped)):
                 if row.stake > 0:
-                    metrics += [
-                        FoldMetric("development", f"{name}_per_yen", row.per_yen, None, None, n),
-                        FoldMetric("development", f"{name}_minus_all", row.diff, _num(row.lo),
-                                   _num(row.hi), n),
-                        FoldMetric("development", f"{name}_minus_all_max_stat", row.diff,
-                                   _num(row.adj_lo), _num(row.adj_hi), n),
-                    ]  # fmt: skip
+                    # a NaN bound (fewer than two meetings): the estimate and n stay, the bounds
+                    # are an "unavailable" marker, as exacta_run records them (spec section 7)
+                    metrics.append(
+                        FoldMetric("development", f"{name}_per_yen", row.per_yen, None, None, n)
+                    )
+                    metrics += exacta_run._metrics("development", [
+                        (f"{name}_minus_all", row.diff, row.lo, row.hi, ""),
+                        (f"{name}_minus_all_max_stat", row.diff, row.adj_lo, row.adj_hi, ""),
+                    ], n)  # fmt: skip
             if math.isfinite(kept.all_per_yen):
                 metrics.append(
                     FoldMetric("development", "all_per_yen", kept.all_per_yen, None, None, n)
@@ -601,11 +603,20 @@ def load_logged_races(
 ) -> tuple[list[dict], dict, dict]:
     """The `races` input of ``score`` from the #130 odds logs and the store, and the run's meta:
     (races, meta, info). Development days only; ``meta`` carries the ordering fit, its lambda2
-    and the data builds."""
+    and the data builds.
+
+    ``data_builds`` holds the one build ``odds_log`` whatever the data, so an empty run and a
+    populated rerun are the same variants (``Registry.family_size``). What the run read of the
+    store is provenance: the fingerprints of those rows are in ``meta["store_reads"]`` and, with
+    the logs', in the ``odds_log`` refresh digest (after its ``@``), which is not identity.
+
+    A race with a horse of its T-2 Win board that the final results mark scratched has its exacta
+    refunded (the store's dividend rows do not say so: ``is_refund`` is False on every row): its
+    rows are marked refunds here, so scoring excludes the race as #131's E2 does."""
     found, info = _logged_boards(minutes_before, holdout_day)
     _, _, ordering_id, lambda2 = exacta_run._fits()
     digest = hashlib.sha256("\n".join(info["logs"]).encode()).hexdigest()[:16]
-    builds = {"odds_log": f"odds_snapshots/jra/{FORECAST}@{digest}"}
+    store_reads: dict[str, str] = {}
     races: list[dict] = []
     if found:
         base, ids = paths.processed_dir("jra"), sorted(found)
@@ -619,11 +630,23 @@ def load_logged_races(
             columns=["race_id", "combination", "dividend", "is_refund"],
             filters=pc.field("race_id").isin(ids) & (pc.field("pool") == FORECAST),
         ).to_pandas()
+        runners = pq.read_table(
+            base / "runners.parquet",
+            columns=["race_id", "horse_no", "is_scratched"],
+            filters=pc.field("race_id").isin(ids),
+        ).to_pandas()
+        gone = runners[runners["is_scratched"].astype("boolean").fillna(False).to_numpy(bool)]
+        scratched = {k: {int(h) for h in g["horse_no"]} for k, g in gone.groupby("race_id")}
         paying: dict[str, list] = {}
+        refunded = 0
         for r in dividends.itertuples(index=False):
+            on_board = set(found[r.race_id]["win_board_t2"])
+            by_scratch = bool(on_board & scratched.get(r.race_id, set()))
+            refunded += by_scratch and r.race_id not in paying
             paying.setdefault(r.race_id, []).append(
-                (_combo(r.combination), float(r.dividend), bool(r.is_refund))
+                (_combo(r.combination), float(r.dividend), bool(r.is_refund) or by_scratch)
             )
+        info["refunded_by_scratch"] = refunded
         for m in meta_rows.sort_values("race_id").itertuples(index=False):
             t = takeout.race_takeout(m.race_id, FORECAST, race_class_raw=m.race_class_raw)
             races.append({"race_id": m.race_id, "meeting_id": m.meeting_id,
@@ -632,13 +655,17 @@ def load_logged_races(
                           "rate": t.payout_rate,
                           "boost_may_be_withheld": t.boost_may_be_withheld,
                           **found[m.race_id], "exacta": paying.get(m.race_id, [])})  # fmt: skip
-        builds["jra_races"] = f"processed/jra/races.parquet@{exacta_run._fingerprint(meta_rows)}"
-        builds["jra_dividends"] = (
-            f"processed/jra/dividends.parquet@{exacta_run._fingerprint(dividends)}"
-        )
+        store_reads = {
+            f"jra_{name}": f"processed/jra/{name}.parquet@{exacta_run._fingerprint(frame)}"
+            for name, frame in (("races", meta_rows), ("dividends", dividends),
+                                ("runners", runners))
+        }  # fmt: skip
+        joined = "\n".join([digest, *store_reads.values()])
+        digest = hashlib.sha256(joined.encode()).hexdigest()[:16]
     info["dropped"]["not_in_store"] = len(found) - len(races)
     meta = {"ordering_fit": ordering_id, "lambda2_full_development": lambda2,
-            "data_builds": builds}  # fmt: skip
+            "data_builds": {"odds_log": f"odds_snapshots/jra/{FORECAST}@{digest}"},
+            "store_reads": store_reads}  # fmt: skip
     return races, meta, info
 
 
@@ -664,6 +691,50 @@ def _render(table: pd.DataFrame, meta: Mapping, sha: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+class _Families:
+    """The registry restricted to some families, for ``write_summary``."""
+
+    def __init__(self, registry, families: set[str]) -> None:
+        self._registry, self._families = registry, families
+
+    def records(self, family_id: str | None = None):
+        return [r for r in self._registry.records(family_id) if r.family_id in self._families]
+
+
+_INDEX_LINE = re.compile(r"- \[([^\]]+)\]\(([^)]+)\.md\)")
+
+
+def _index_family(line: str) -> str | None:
+    """The family a line of write_summary's index lists (its label, whose summary file the line
+    links: a legacy '/' id links its '--' file), or None for any other line."""
+    match = _INDEX_LINE.fullmatch(line)
+    return match[1] if match and summary_stem(match[1]) == match[2] else None
+
+
+def write_committed_summary(registry) -> None:
+    """This ticket's family files, by ``write_summary`` over its families of ``registry``, and the
+    committed index with their lines added, ordered by family id: every family the index lists
+    stays, and no other family's file is written, so a local registry holding only this ticket's
+    runs drops no other study's link and no other ticket's uncommitted family enters (as
+    ``studies.ability``)."""
+    directory = summary_dir(COUNTRY)
+    mine = _Families(registry, {FAMILY_ID, V1_ID})
+    if not mine.records():
+        return
+    with tempfile.TemporaryDirectory() as scratch:
+        write_summary(mine, scratch)
+        for path in sorted(Path(scratch).glob("*.md")):
+            if path.stem != "README":
+                write_report(directory / path.name, path.read_text("utf-8"), sources=())
+        fresh = Path(scratch, "README.md").read_text("utf-8").splitlines()
+    index = directory / "README.md"
+    committed = index.read_text("utf-8").splitlines() if index.exists() else []
+    entries = {family: line for line in committed + fresh if (family := _index_family(line))}
+    head = [line for line in fresh if not _index_family(line)]
+    lines = [*head, *(entries[family] for family in sorted(entries))]
+    write_report(index, "\n".join(lines) + "\n", sources=())
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m horsetrack.countries.japan.research.exacta_loss_avoidance"
@@ -674,7 +745,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.action == "freeze":
         result = freeze(registry)
     elif args.action == "summary":  # the committed summary, regenerated from the registry
-        write_summary(registry, summary_dir(COUNTRY))
+        write_committed_summary(registry)
         result = {"summary": str(summary_dir(COUNTRY))}
     else:
         sha = exacta_run._git_sha()
@@ -694,15 +765,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         table, run_meta = out["members"], out["meta"]
         run_meta["less_popular_agreement"] = less_popular_agreement(races)
         folder = paths.reports_dir() / COUNTRY / "282-exacta-loss-avoidance"
-        write_report(folder / f"l-{sha[:12]}.md", _render(table, run_meta, sha), sources=SOURCES)
-        write_report(
-            folder / f"l-{sha[:12]}.json",
-            json.dumps({"meta": run_meta, "read": {k: v for k, v in info.items() if k != "logs"},
-                        "members": table.to_dict(orient="records")}, indent=1, default=str),
-            sources=SOURCES,
-        )  # fmt: skip
-        result = {"meta": run_meta, "read": {k: v for k, v in info.items() if k != "logs"},
-                  "members": table.to_dict(orient="records")}  # fmt: skip
+        stem = exacta_run._stem("l", sha, run_meta)  # the commit and the data build: no overwrite
+        result = exacta_run._json_safe({
+            "meta": run_meta, "read": {k: v for k, v in info.items() if k != "logs"},
+            "members": table.to_dict(orient="records"),
+        })  # fmt: skip
+        write_report(folder / f"{stem}.md", _render(table, run_meta, sha), sources=SOURCES)
+        write_report(folder / f"{stem}.json", json.dumps(result, indent=1, default=str),
+                     sources=SOURCES)  # fmt: skip
     print(json.dumps(result, indent=1, default=str))
     return 0
 
