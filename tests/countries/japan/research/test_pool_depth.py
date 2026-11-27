@@ -101,7 +101,7 @@ import pyarrow.parquet as pq
 import pytest
 from typer.testing import CliRunner
 
-from horsetrack.core import env, paths
+from horsetrack.core import env, paths, pricing
 from horsetrack.core.config import load_country_yaml
 from horsetrack.core.eval import holdout as holdout_module
 from horsetrack.core.eval import registry as registry_module
@@ -2105,3 +2105,454 @@ def test_the_command_updates_only_its_family_in_the_committed_summary(data_dir, 
     assert {*others, family} <= linked, linked
     own = summary_folder / f"{family}.md"
     assert own.is_file() and family in own.read_text(encoding="utf-8")
+
+
+# --- review round 2: the co-placer variant re-registered on the core rule (family v2) -----------
+#
+# Contract added here (interfaces the tests call, beyond the ones above):
+# - `core_coplacer_capacities(pool, combo, paid_money, places, edge, share)` (numpy arrays): the
+#   capacity of paying combinations under the rule of `core.pricing.stake_back_share_dividend`,
+#   per yen d = r(1 + B / (P W_i)), B = V - sum W the losers' money, our stake s going into V, into
+#   sum W and into W_i. NaN where W_i <= 0, B < 0 or a value is missing; inf where no finite
+#   stake eats that much of the edge.
+# - `run_coplacer(..., spec_name="pool_depth_coplacer_v2")`: the co-placer variant under
+#   config/pool_depth_coplacer_v2.yaml (family japan-pool-depth-coplacer-v2), refused unless that
+#   spec is frozen under that family; `coplacer_rows(..., rule="core")` takes that rule.
+# - `horsetrack japan pool-depth freeze|run --spec pool_depth_coplacer_v2`.
+
+V2 = "pool_depth_coplacer_v2"
+V2_FAMILY = "japan-pool-depth-coplacer-v2"
+# the frozen spec's sha256, as docs/specs/pool-depth-prereg.md ("Co-placer v2") registers it
+V2_HASH = "82a471b219bfee2e65f53c5c12e2f66514757169d82184b6be45b35b2454e89a"
+# the only keys v2 changes from v1, and their v2 values
+V2_CHANGES = {
+    ("family_id",): V2_FAMILY,
+    ("place_wide", "variants"): ["co-placer"],
+    ("place_wide", "co_placer", "rule"): "core-stake-back-share",
+}
+
+
+def v2_spec() -> dict:
+    return copy.deepcopy(load_country_yaml("japan", V2))
+
+
+def both_frozen(tmp_path: Path, name: str = "registry") -> Registry:
+    """A registry under tmp_path with v1's and v2's shipped specs frozen under their families."""
+    registry = Registry(tmp_path / f"{name}.jsonl", holdout_log=tmp_path / f"{name}-holdout.jsonl")
+    for spec in (copy.deepcopy(shipped_spec()), v2_spec()):
+        registry.freeze_family(spec["family_id"], spec)
+    return registry
+
+
+# The core rule for Place and Wide, derived here: the payout rate is taken on the whole net pool,
+# the paying combinations' own money included; per 100 yen on paying combination i
+# 100 r (1 + B / (P W_i)), B = V - sum W, broken down to 10 yen and at least 110.
+
+
+def core_per_100(race: Race, pool: str, combination: str) -> Fraction:
+    """The core rule before breakage and the floor, exactly."""
+    pays = paying(race, pool)
+    net = 100 * (race.pool_votes[pool] - race.refunds.get(pool, 0))
+    paid = 100 * sum(race.votes[pool][c] for c in pays)
+    stake = 100 * race.votes[pool][combination]
+    return 100 * PAYOUT_RATE[pool] * (1 + Fraction(net - paid, len(pays) * stake))
+
+
+def core_dividend(race: Race, pool: str, combination: str) -> float:
+    """The dividend `core.pricing.stake_back_share_dividend` pays: shares of the net pool."""
+    pays = paying(race, pool)
+    net = race.pool_votes[pool] - race.refunds.get(pool, 0)
+    votes = race.votes[pool]
+    return pricing.stake_back_share_dividend(
+        votes[combination] / net,
+        [votes[c] / net for c in pays if c != combination],
+        rate=float(PAYOUT_RATE[pool]),
+        unit=100,
+        dividend_step=10,
+        min_dividend=110,
+    )
+
+
+def pay_by_core_rule(data: Path, races: list[Race]) -> None:
+    """The store's Place and Wide `dividends` rows paid by the core rule instead (Win as it was)."""
+    path = data / "processed" / "jravan" / "dividends.parquet"
+    paid = pq.read_table(path).to_pandas()
+    by_id = {r.race_id: r for r in races}
+    co = paid["pool"].isin(CO_PLACER).to_numpy()
+    keys = paid.loc[co, ["race_id", "pool", "combination"]].itertuples(index=False)
+    paid.loc[co, "dividend"] = [core_dividend(by_id[r], p, c) for r, p, c in keys]
+    pq.write_table(
+        pa.Table.from_pandas(paid, schema=dividends_schema(), preserve_index=False), path
+    )
+
+
+def payouts(races: list[Race], pool: str) -> list[tuple[Race, str]]:
+    return [(r, c) for r in races for c in paying(r, pool)]
+
+
+def assert_rule_races(races: list[Race]) -> None:
+    """The races exercise every part of both rules, and the two rules pay differently: in each
+    pool, more than one payout in twenty differs between them."""
+    place_p = {len(paying(r, "PLACE")) for r in races}
+    wide_p = {len(paying(r, "QUINELLA_PLACE")) for r in races}
+    assert {2, 3, 4} <= place_p and {3, 5} <= wide_p, (place_p, wide_p)
+    assert any(r.refunds for r in races)
+    raw = [core_per_100(r, p, c) for p in CO_PLACER for r, c in payouts(races, p)]
+    assert any(x < 110 for x in raw), "no core payout the floor lifts"
+    assert any(x >= 110 and x % 10 for x in raw), "no core payout breakage cuts"
+    for pool in CO_PLACER:
+        for race, c in payouts(races, pool):
+            want = max(110, math.floor(core_per_100(race, pool, c) / 10) * 10)
+            assert core_dividend(race, pool, c) == want, (race.race_id, pool, c)
+        same = [
+            jra_dividend(r, pool, c) == core_dividend(r, pool, c) for r, c in payouts(races, pool)
+        ]
+        assert np.mean(same) < 0.95, (pool, np.mean(same))
+
+
+def core_value(pool, combo, paid, places, rate, stake):
+    """d(s), the core rule per yen once our stake s is on paying combination i: s goes into the
+    pool V, into the paying money sum W and into W_i."""
+    return rate * (1 + ((pool + stake) - (paid + stake)) / (places * (combo + stake)))
+
+
+def core_capacity(pool, combo, paid, places, edge, share, *, rate=0.8) -> float:
+    """The stake solving (1 + e) d(s) / d(0) = 1 + e(1 - share), by bisection on core_value; inf
+    when d(s), falling to r as s grows, never gets there."""
+    k = edge * (1 - share)
+    d0 = core_value(pool, combo, paid, places, rate, 0.0)
+
+    def gap(s: float) -> float:
+        return (1 + edge) * core_value(pool, combo, paid, places, rate, s) / d0 - (1 + k)
+
+    if (1 + edge) * rate / d0 >= 1 + k:
+        return math.inf
+    lo, hi = 0.0, float(combo)
+    while gap(hi) > 0:
+        hi *= 2
+    for _ in range(400):
+        mid = (lo + hi) / 2
+        if mid in (lo, hi):
+            break
+        lo, hi = (mid, hi) if gap(mid) > 0 else (lo, mid)
+    return (lo + hi) / 2
+
+
+def linear_quantile(values, q: float) -> float:
+    """numpy's linear interpolation, with +inf values sorting last: inf wherever the interpolation
+    reaches one."""
+    x = sorted(float(v) for v in values)
+    h = (len(x) - 1) * q
+    lo, hi = math.floor(h), math.ceil(h)
+    if lo == hi:
+        return x[lo]
+    if math.isinf(x[hi]):
+        return math.inf
+    return x[lo] + (x[hi] - x[lo]) * (h - lo)
+
+
+def expected_core_cells(races: list[Race], spec: dict) -> dict[tuple, dict[str, float]]:
+    """(pool, class_group, band, quantile) -> what the v2 co-placer run's table must give: over
+    the paying combinations, the money on them, the pool (each race once), the core-rule capacity
+    at each edge and the share of capacities reaching each flat stake."""
+    edges, stakes, share = spec["edges"], spec["flat_stakes_yen"], float(spec["share_lost"])
+    rows = []
+    for pool in CO_PLACER:
+        bands = [float(e) for e in spec["odds_bands"][pool]]
+        for race in races:
+            pays = paying(race, pool)
+            paid = 100.0 * sum(race.votes[pool][c] for c in pays)
+            for c in pays:
+                w = 100.0 * race.votes[pool][c]
+                caps = {e: core_capacity(race.net_yen(pool), w, paid, len(pays), e, share)
+                        for e in edges}  # fmt: skip
+                rows.append(
+                    {"key": (pool, CLASS_GROUPS[race.race_class],
+                             pool_scan.odds_band(race.odds[pool][c], bands)),
+                     "race": race.race_id, "combo": w, "pool": race.net_yen(pool), "caps": caps}
+                )  # fmt: skip
+    cells: dict[tuple, list[dict]] = {}
+    for row in rows:
+        cells.setdefault(row["key"], []).append(row)
+    out = {}
+    for key, cell in cells.items():
+        once = {r["race"]: r["pool"] for r in cell}
+        for q in spec["quantiles"]:
+            q = float(q)
+            values = {
+                "n_combinations": len(cell),
+                "n_races": len(once),
+                "combo_yen": float(np.quantile([r["combo"] for r in cell], q)),
+                "pool_yen": float(np.quantile(list(once.values()), q)),
+            }
+            for e in edges:
+                caps = [r["caps"][e] for r in cell]
+                values[f"capacity_{float(e):g}"] = linear_quantile(caps, q)
+                for s in stakes:
+                    values[f"fits_{float(e):g}_{float(s):g}"] = float(np.mean(np.array(caps) >= s))
+            out[(*key, round(q, 9))] = values
+    return out
+
+
+def test_core_coplacer_capacity_solves_the_core_rule_identity():
+    """Under the core rule d(s) = r(1 + B / (P(W_i + s))) (B = V - sum W stays as our stake goes
+    into V and sum W alike), the capacity s solves (1 + e) d(s) / d(0) = 1 + e(1 - share_lost)
+    whatever the payout rate r; it is inf exactly where d(s), falling to r, never gets there; at
+    P = 1 (sum W = W_i) it is the single-winner capacity_stake."""
+    rng = np.random.default_rng(43202)
+    m = 400
+    pool = np.exp(rng.uniform(math.log(1e5), math.log(1e9), m))
+    paid = pool * rng.uniform(0.02, 0.98, m)
+    places = rng.integers(2, 6, m).astype(float)
+    combo = paid * rng.uniform(0.03, 0.97, m)
+    unbounded = 0
+    for edge in (0.05, 0.1, 0.2):
+        for share in (0.25, 0.5, 1.0):
+            k = edge * (1 - share)
+            s = np.asarray(depth.core_coplacer_capacities(pool, combo, paid, places, edge, share),
+                           float)  # fmt: skip
+            assert s.shape == (m,)
+            assert not np.isnan(s).any(), (edge, share)
+            finite = np.isfinite(s)
+            assert finite.mean() > 0.5, (edge, share)
+            assert np.all(s[finite] > 0)
+            unbounded += int((~finite).sum())
+            at = np.where(finite, s, 0.0)
+            for rate in (0.8, 0.775):
+                d0 = core_value(pool, combo, paid, places, rate, 0.0)
+                left = (1 + edge) * core_value(pool, combo, paid, places, rate, at) / d0
+                np.testing.assert_allclose(left[finite], 1 + k, rtol=1e-9)
+                limit = (1 + edge) * rate / d0  # (1 + e) d(s) / d(0) as s grows without bound
+                clear = np.abs(limit - (1 + k)) > 1e-9
+                np.testing.assert_array_equal(finite[clear], (limit < 1 + k)[clear])
+            want = [core_capacity(*row, edge, share) for row in
+                    zip(pool[:20], combo[:20], paid[:20], places[:20], strict=True)]  # fmt: skip
+            np.testing.assert_allclose(s[:20], want, rtol=1e-9)
+    assert unbounded > 0, "no unbounded capacity in the sample"
+
+    def single_winner(v: float, w: float, edge: float, share: float) -> float:
+        try:
+            return depth.capacity_stake(v, w, edge, share_lost=share)
+        except ValueError:  # no stake eats that much of the edge
+            return math.inf
+
+    one = np.ones(m)
+    single = pool * rng.uniform(0.01, 0.99, m)
+    for edge in (0.05, 0.1, 0.2):
+        for share in (0.25, 0.5, 1.0):
+            s = depth.core_coplacer_capacities(pool, single, single, one, edge, share)
+            want = [single_winner(v, w, edge, share) for v, w in zip(pool, single, strict=True)]
+            assert np.isfinite(want).any() and np.isinf(want).any(), (edge, share)
+            np.testing.assert_allclose(np.asarray(s, float), want, rtol=1e-9)
+
+
+def test_core_coplacer_capacity_without_money_or_losers():
+    """NaN where the combination holds no money, the paying money exceeds the pool (B < 0) or a
+    value is missing; inf where every yen of the pool is on the paying combinations (B = 0: the
+    rule pays r whatever the stake). The rows are independent of one another."""
+    nan = math.nan
+    cases = [  # pool, combo, paid, places, what
+        (1e6, 2e4, 6e4, 3, "finite"),
+        (1e6, 0.0, 6e4, 3, "nan"),
+        (1e6, -1e3, 6e4, 3, "nan"),
+        (1e6, 2e4, 1.2e6, 3, "nan"),
+        (nan, 2e4, 6e4, 3, "nan"),
+        (1e6, nan, 6e4, 3, "nan"),
+        (1e6, 2e4, nan, 3, "nan"),
+        (1e6, 2e4, 6e4, nan, "nan"),
+        (1e6, 4e5, 1e6, 3, "inf"),
+        (3e5, 1e5, 2e5, 2, "finite"),
+    ]
+    columns = [np.array(c, dtype=float) for c in list(zip(*cases, strict=True))[:4]]
+    for edge, share in ((0.05, 0.5), (0.1, 0.25), (0.2, 1.0)):
+        s = np.asarray(depth.core_coplacer_capacities(*columns, edge, share), float)
+        for (v, w, b, p, what), got in zip(cases, s, strict=True):
+            if what == "nan":
+                assert math.isnan(got), (v, w, b, p, got)
+            elif what == "inf":
+                assert got == math.inf, (v, w, b, p, got)
+            else:
+                assert got == pytest.approx(core_capacity(v, w, b, p, edge, share), rel=1e-9)
+
+
+@pytest.mark.parametrize("paid_by", ["core", "jra"])
+def test_the_registered_rule_decides_the_coplacer_status(tmp_path, data_dir, paid_by):
+    """Place and Wide dividends paid by `core.pricing.stake_back_share_dividend` (the net pool,
+    P = 2 places in a field of 5-7 and 3 in one of 8 or more, dead heats, breakage to 10 yen, the
+    110-yen floor): the v2 co-placer run reproduces every one, is scored, and its table is the
+    core-rule capacity; v1's run on the same store is recorded failed. Paid by v1's rule, the
+    converse. One record per run, in each spec's own family."""
+    registry = both_frozen(tmp_path)
+    v1_family = shipped_spec()["family_id"]
+    races = jra_rule_races()
+    assert_rule_races(races)
+    write_store(data_dir, races)
+    if paid_by == "core":
+        pay_by_core_rule(data_dir, races)
+    out_dir = data_dir / "reports"
+
+    v2 = run_quietly(depth.run_coplacer, **JUNE_SPAN, out_dir=out_dir, registry=registry,
+                     spec_name=V2)  # fmt: skip
+    v1 = run_quietly(depth.run_coplacer, **JUNE_SPAN, out_dir=out_dir, registry=registry)
+
+    reproduces, rejects = (v2, v1) if paid_by == "core" else (v1, v2)
+    assert reproduces is not None and reproduces.status == "scored"
+    assert set(reproduces.rule_match) == set(CO_PLACER), reproduces.rule_match
+    assert all(float(v) == 1.0 for v in reproduces.rule_match.values()), reproduces.rule_match
+    if rejects is not None:
+        assert rejects.status == "failed"
+        assert min(float(v) for v in rejects.rule_match.values()) < 0.95, rejects.rule_match
+    v2_status, v1_status = ("scored", "failed") if paid_by == "core" else ("failed", "scored")
+    for family, status, spec in (
+        (V2_FAMILY, v2_status, v2_spec()),
+        (v1_family, v1_status, shipped_spec()),
+    ):
+        records = registry.records(family)
+        assert [(r.variant, r.status) for r in records] == [("co-placer", status)], family
+        record = records[0]
+        assert (record.hypothesis_id, record.ticket, tuple(record.sources)) == (
+            HYPOTHESIS_ID,
+            TICKET,
+            SOURCES,
+        )
+        assert record.params["spec_hash"] == _spec_hash(spec)
+    assert len(registry.records()) == 2
+    registry.verify()
+    if paid_by == "core":
+        assert_depth_table(v2.table, expected_core_cells(races, v2_spec()), v2_spec()["edges"])
+
+
+def test_coplacer_v2_refuses_until_its_own_spec_is_frozen(tmp_path, data_dir):
+    """No v2 run before v2's freeze: nothing frozen, only v1 frozen, v2's family frozen with
+    another spec, or v2's spec frozen under another family all refuse with NotPreRegistered and
+    write nothing. Freezing v2 itself lets the same call run. An unknown spec is refused."""
+    races = jra_rule_races()
+    write_store(data_dir, races)
+    pay_by_core_rule(data_dir, races)
+    out_dir = data_dir / "reports"
+    span = dict(**JUNE_SPAN, out_dir=out_dir)
+
+    def registry(name: str, *freezes: tuple[str, dict]) -> Registry:
+        r = Registry(tmp_path / f"{name}.jsonl", holdout_log=tmp_path / "h.jsonl")
+        for family, spec in freezes:
+            r.freeze_family(family, spec)
+        return r
+
+    v1 = copy.deepcopy(shipped_spec())
+    changed = v2_spec()
+    changed["place_wide"]["co_placer"]["min_rule_match"] = 0.5
+    refused = [
+        registry("empty"),
+        registry("v1-only", (v1["family_id"], v1)),
+        registry("v2-changed", (V2_FAMILY, changed)),
+        registry("v2-elsewhere", (f"{V2_FAMILY}-not-this-one", v2_spec()), (v1["family_id"], v1)),
+    ]
+    for r in refused:
+        with pytest.raises(depth.NotPreRegistered):
+            depth.run_coplacer(**span, registry=r, spec_name=V2)
+    with pytest.raises(depth.NotPreRegistered):
+        depth.run_coplacer(**span, spec_name=V2)  # the default registry, nothing frozen in it
+    with pytest.raises(ValueError):
+        depth.run_coplacer(**span, registry=refused[1], spec_name="pool_depth_coplacer_v9")
+
+    assert not out_dir.exists() or not any(p.is_file() for p in out_dir.rglob("*"))
+    for r in [*refused, default_registry("japan")]:
+        assert r.records() == []
+
+    unlocked = refused[1]
+    unlocked.freeze_family(V2_FAMILY, v2_spec())
+    result = depth.run_coplacer(**span, registry=unlocked, spec_name=V2)
+    assert result.status == "scored"
+    assert [r.family_id for r in unlocked.records()] == [V2_FAMILY]
+
+
+def test_coplacer_rows_refuse_bad_inputs_under_the_core_rule():
+    """`coplacer_rows(..., rule="core")` runs; an unknown rule, a share lost outside (0, 1] or a
+    missing or non-positive edge is refused."""
+    frames = store_tables(jra_rule_races()[:6])
+    votes, board, meta = (frames[n].to_pandas() for n in ("pool_votes", "final_odds", "races"))
+    bands = {p: v2_spec()["odds_bands"][p] for p in CO_PLACER}
+    rows = depth.depth_rows(votes, board, meta, band_edges=bands)
+    paid = frames["dividends"].to_pandas()
+    kwargs = dict(rates={p: float(PAYOUT_RATE[p]) for p in CO_PLACER}, edges=[0.1],
+                  share_lost=0.5, rule="core")  # fmt: skip
+    assert len(depth.coplacer_rows(rows, paid, **kwargs)) == int(paid["pool"].isin(CO_PLACER).sum())
+    for bad in (dict(rule="nope"), dict(share_lost=0.0), dict(share_lost=1.5),
+                dict(edges=[0.0]), dict(edges=[-0.1]), dict(edges=[])):  # fmt: skip
+        with pytest.raises(ValueError):
+            depth.coplacer_rows(rows, paid, **{**kwargs, **bad})
+
+
+def test_the_command_freezes_and_runs_coplacer_v2_alone(data_dir, summary_folder):
+    """`pool-depth run --spec pool_depth_coplacer_v2` is refused before `pool-depth freeze --spec
+    pool_depth_coplacer_v2`, which freezes v2 alone. Then it runs the co-placer variant alone
+    under v2 (one scored record in v2's family, one private report) and of the committed summary
+    adds v2's file and index entry, every other family's file and entry, v1's included, kept."""
+    v1, v2 = shipped_spec(), v2_spec()
+    races = jra_rule_races()
+    write_store(data_dir, races)
+    pay_by_core_rule(data_dir, races)
+    others = {name: f"# {name}: the committed summary\n"
+              for name in ("japan-other-a", v1["family_id"])}  # fmt: skip
+    for name, text in others.items():
+        (summary_folder / f"{name}.md").write_text(text, encoding="utf-8")
+    index = "# Experiment registry index\n\n" + "".join(f"- [{n}]({n}.md)\n" for n in others)
+    (summary_folder / "README.md").write_text(index, encoding="utf-8")
+    registry = default_registry("japan")
+
+    early = invoke_run("--spec", V2)
+    assert early.exit_code != 0
+    assert isinstance(early.exception, SystemExit), repr(early.exception)
+    assert registry.records() == []
+
+    from horsetrack.cli import app
+
+    frozen = CliRunner().invoke(app, ["japan", "pool-depth", "freeze", "--spec", V2])
+    assert frozen.exit_code == 0, output_of(frozen)
+    assert registry.frozen_spec_hash(V2_FAMILY) == _spec_hash(v2)
+    assert registry.frozen_spec_hash(v1["family_id"]) is None
+
+    result = invoke_run("--spec", V2)
+
+    assert result.exit_code == 0, output_of(result)
+    records = registry.records()
+    assert [(r.family_id, r.variant, r.status) for r in records] == [
+        (V2_FAMILY, "co-placer", "scored")
+    ]
+    reports = [p for p in paths.reports_dir().rglob("*") if p.is_file()]
+    assert len(reports) == 1, reports
+    for name, text in others.items():
+        assert (summary_folder / f"{name}.md").read_text(encoding="utf-8") == text, name
+    linked = set(
+        re.findall(r"\[([^\]]+)\]\(\1\.md\)", (summary_folder / "README.md").read_text("utf-8"))
+    )
+    assert linked == {*others, V2_FAMILY}, linked
+    own = summary_folder / f"{V2_FAMILY}.md"
+    assert own.is_file() and V2_FAMILY in own.read_text(encoding="utf-8")
+
+
+def leaves(value, path: tuple = ()) -> dict[tuple, object]:
+    """Every leaf of a nested mapping by its key path (lists are leaves)."""
+    if isinstance(value, abc.Mapping):
+        out = {}
+        for key, inner in value.items():
+            out |= leaves(inner, (*path, key))
+        return out
+    return {path: value}
+
+
+def test_the_shipped_v2_spec_is_v1_with_the_core_rule_alone(tmp_path):
+    """config/pool_depth_coplacer_v2.yaml is config/pool_depth.yaml with three keys changed: its
+    family, the co-placer variant alone, and the core rule. It loads, is plain JSON and freezes
+    to the hash the pre-registration records."""
+    v1, v2 = leaves(shipped_spec()), leaves(v2_spec())
+    differ = {p for p in v1.keys() | v2.keys() if v1.get(p, KeyError) != v2.get(p, KeyError)}
+    assert differ == set(V2_CHANGES), sorted(differ)
+    assert {p: v2[p] for p in V2_CHANGES} == V2_CHANGES
+    assert v1[("place_wide", "co_placer", "rule")] == "jra-stake-back-share"
+
+    family, spec = depth.load_spec(V2)
+    assert family == V2_FAMILY and spec == v2_spec()
+    json.dumps(spec, allow_nan=False)
+    registry = Registry(tmp_path / "r.jsonl", holdout_log=tmp_path / "h.jsonl")
+    assert registry.freeze_family(V2_FAMILY, spec) == _spec_hash(spec) == V2_HASH
