@@ -1,7 +1,19 @@
 # N8: the popularity-rank spread scan, pre-registration (ticket #503)
 
-Status: **PROPOSED** (not frozen yet). Families: the six `japan-n8-spread-scan-<pool>` families
-below. The spec is `horsetrack.countries.japan.research.spread_scan.family_spec(<family>)`, plain
+Status: **FROZEN** on 2026-11-27 at commit `c59a484`, before any scored read (it was PROPOSED
+until then). All six specs together (`spread_scan.spec_hash()`): sha256
+`6f041ec1399564dc0505f7408f205c7d34b6146a13c9b5442e97f8009b08be00`; per family:
+
+| Family | Spec sha256 |
+| --- | --- |
+| `japan-n8-spread-scan-exacta` | `a380b3aaca6d675cbe9393b780970b8b72a81b0057143a59ffcdfc099b38499b` |
+| `japan-n8-spread-scan-quinella` | `f30589a50bf50545eced734496c8fd87e9113ebbeaa280c65db23162421d65aa` |
+| `japan-n8-spread-scan-wide` | `e33234f83cf4a7ff6fb43f299e96594072ce2b100e18ba527d634cd5001fab52` |
+| `japan-n8-spread-scan-trio` | `fc1bb54bac4fc1752ce7f3f793ac2992b326dc827efa22d52898dc806ecd5611` |
+| `japan-n8-spread-scan-trifecta` | `27bc2561847e5437136002010745f343a27dd4d42c1a6de00655f2d2b26126f8` |
+| `japan-n8-spread-scan-bracket` | `5b509a0e1d97d78c03e32bb9ab685b748bce98b342813d3475c55eb851c1597c` |
+
+Families: the six `japan-n8-spread-scan-<pool>` families below. The spec is `horsetrack.countries.japan.research.spread_scan.family_spec(<family>)`, plain
 JSON; `uv run horsetrack japan spread-scan freeze` freezes each family's spec with
 `Registry.freeze_family` in `$HORSETRACK_DATA_DIR/registry/japan.jsonl` (append-only: a freeze
 cannot be undone). `run_scan` reads no store row unless every family is frozen with exactly its

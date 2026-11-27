@@ -1,0 +1,113 @@
+# Experiment report: N8, the popularity-rank spread scan (Japan, #503)
+
+Ticket #503 (epic #72). **Every figure is withheld (D21)**: the scan reads the JRA-VAN store, a
+licensed source, so this report says what ran and where its figures are, and gives no count, rate,
+span, sign, bound or rank derived from that data. Nothing is adopted, no bet follows from it, and
+the holdout is not opened.
+
+- Registry families (one per pool), each frozen with `Registry.freeze_family` on 2026-11-27 before
+  the run read any row (`uv run horsetrack japan spread-scan freeze`; the spec is quoted in
+  `docs/specs/spread-scan-prereg.md`):
+
+  | family | spec sha256 |
+  | --- | --- |
+  | `japan-n8-spread-scan-exacta` | `a380b3aaca6d675cbe9393b780970b8b72a81b0057143a59ffcdfc099b38499b` |
+  | `japan-n8-spread-scan-quinella` | `f30589a50bf50545eced734496c8fd87e9113ebbeaa280c65db23162421d65aa` |
+  | `japan-n8-spread-scan-wide` | `e33234f83cf4a7ff6fb43f299e96594072ce2b100e18ba527d634cd5001fab52` |
+  | `japan-n8-spread-scan-trio` | `fc1bb54bac4fc1752ce7f3f793ac2992b326dc827efa22d52898dc806ecd5611` |
+  | `japan-n8-spread-scan-trifecta` | `27bc2561847e5437136002010745f343a27dd4d42c1a6de00655f2d2b26126f8` |
+  | `japan-n8-spread-scan-bracket` | `5b509a0e1d97d78c03e32bb9ab685b748bce98b342813d3475c55eb851c1597c` |
+
+  The pre-registration's hash (all six specs together, `spread_scan.spec_hash()`):
+  `6f041ec1399564dc0505f7408f205c7d34b6146a13c9b5442e97f8009b08be00`.
+- Requested range: development days from 2014-06-07 to 2026-11-27 (the run's arguments, not the
+  store's measured span); holdout days are never read and `LockedHoldout` is never opened.
+- Seed 20261127, 1,000 meeting-bootstrap replicates; code at `c59a484`; command
+  `uv run horsetrack japan spread-scan run --from 2014-06-07 --to 2026-11-27`.
+- Variants searched: 27 spreads, 2 variants per family (`t2`, `lookahead`), 12 registry records;
+  by design at most 78 cell labels per spread, so at most 2,106 ranked rows per variant.
+- Private report: `$HORSETRACK_DATA_DIR/reports/spread-scan-japan-6f041ec1399564dc0505f7408f205c7d34b6146a13c9b5442e97f8009b08be00.md`;
+  candidate cells: `$HORSETRACK_DATA_DIR/reports/candidate-cells/spread-scan.json`; both written
+  through `write_report` with the source `jravan`.
+
+## Registry records
+
+One record per (family, variant), in spec order:
+
+| family / variant | run id |
+| --- | --- |
+| `japan-n8-spread-scan-exacta/t2` | `766f5030441eaa8d4c9190be9e2f7615a1e530a3bfd9ce23cb442387d558ad41` |
+| `japan-n8-spread-scan-exacta/lookahead` | `6118b378944d2db49b3d2ead4e2069d673527b73eacaacbee3f2180299ac157c` |
+| `japan-n8-spread-scan-quinella/t2` | `e8055f6d4f996b9549f40dda6c3cdd1d30e462ab2b40b35eea0788c8a386bdd6` |
+| `japan-n8-spread-scan-quinella/lookahead` | `1d3f2d947b5af39d2b24705000794375b9a34be7abac7338faa7aa7a59d24d17` |
+| `japan-n8-spread-scan-wide/t2` | `69e4b1507b577c014b73336376aae04a368691aabaf44fb01e951c61f1abbe5d` |
+| `japan-n8-spread-scan-wide/lookahead` | `48ab792ed1a67654bbbeac0cc5f92594ab03a6a1dce2b71ac1018f32050db903` |
+| `japan-n8-spread-scan-trio/t2` | `36d8a8919ffb3be5ca6d5602d342eeac3e69c619ff4316c706bb1c1e3eb1d2eb` |
+| `japan-n8-spread-scan-trio/lookahead` | `cc5b2954edc9a7a6636454ecc4d77c6286e052a7447757b8fb2559786828a0e1` |
+| `japan-n8-spread-scan-trifecta/t2` | `d072a53c97f3fee21c6026071d8c1742d43fefc16ba60dc8869cc3179ad93a88` |
+| `japan-n8-spread-scan-trifecta/lookahead` | `317b1b5d990866dbaa327b08374b580cd9865e0c808d7b4378be7a84788ecde3` |
+| `japan-n8-spread-scan-bracket/t2` | `7cdc83dabb6e47e11d2987baf69193f1e3dd26816139e1f6bf51bd9463f49659` |
+| `japan-n8-spread-scan-bracket/lookahead` | `4a6f7799428bb6b4e4218b331c10906ac286d43207a1ded2b13f65c62448caa9` |
+
+## Hypothesis
+
+P503, as frozen: some pre-registered spread, bought on the T-2 Win popularity ranks, returns more
+than its stake at the paid dividends in some cell of race class, field size, favourite strength,
+surface, pool-size tertile, class x favourite or class x field (shrunk edge above 0). The null, the
+starting point: no spread beats the takeout in any cell. The look-ahead variant ranks on the final
+Win board and is a ceiling, not a strategy.
+
+## Variants tried
+
+Per family and variant one record: the exacta family (eight spreads: the favourite over ranks
+2..k, ranks 2..k over the favourite, boxes 1-3 and 1-4), quinella and Wide (the favourite with
+ranks 2..k, box 1-4, box 2-5), trio (the favourite as axis with 2-5 and 2-6, boxes 1-4 and 1-5,
+formation 1-2 / 1-4 / 2-6), trifecta (1 / 2-4 / 2-4, 1 / 2-4 / 2-7, 2-4 / 1 / 2-7) and bracket
+quinella (the favourite's bracket with those of ranks 2 and 3), each on the T-2 ranks (`t2`) and
+on the final ranks (`lookahead`). Every cell with a bet is a ranked row with its rho, its
+one-sided meeting-bootstrap bounds, its shrunk edge and P(return > 100 yen); the ranks, the rhos,
+their bounds and the shrunk edges are withheld (D21). No variant failed (the registry summary
+lists every run's status).
+
+## Alternatives rejected and why
+
+- #78's hierarchical fit (`core.eval.segment_roi`): its likelihood needs one combination's odds per
+  bet, and a spread is several tickets priced at the paid dividends, not at a board price; the
+  scan uses N1's normal empirical-Bayes shrink of the realised return (its Place and Wide method),
+  with a pooled-dispersion floor on each cell's se so a cell of one or two meetings is not taken
+  as exact.
+- Ranks from each exotic pool's own board at T-2: the jravan time series holds Win, Place, bracket
+  quinella and quinella boards only, so every spread ranks on the Win board.
+- Buying the ranks that exist in a field smaller than a spread's highest rank: it would change the
+  spread's definition race to race; those races are skipped for that spread and counted.
+- A pass/fail gate or kill rule: replaced by the owner's reframe (2026-11-27); every cell is a row.
+- SPA and StepM over the spreads: not in this ticket's outline; listed as a follow-up.
+
+## What this rules out
+
+withheld (D21): the private report gives, per variant, each spread's return on all races and the
+top-ranked cells with their bounds. Whatever it shows, a `t2` cell is a candidate rule for the
+leaderboard (#447) and a `lookahead` cell is a ceiling only; nothing here is adopted.
+
+## Follow-ups
+
+- The top-ranked `t2` cells as decision-time rules on later development days and in the holdout
+  ranking check (owner reframe, 2026-11-27), through #447's leaderboard and #451's backfill.
+- SPA and StepM over the spread cells, as N1 runs per pool.
+- Spreads over other rank sources (model probabilities, #139's optimiser) once they exist.
+
+## Runs, memory and the registry summary
+
+- **Freeze.** `uv run horsetrack japan spread-scan freeze` ran on 2026-11-27 at commit
+  `c59a484`, before any scored read of the six families. It wrote each family's only freeze line in
+  the japan registry.
+- **Run of record, at `c59a484`** (the table above), the only run. `/usr/bin/time -l` gave a
+  maximum resident set size of 1,460,813,824 bytes (about 1.46 GB) and 159 s of wall time on this
+  16 GB Mac, one calendar year of the store in memory at a time; `final_odds` is read for its WIN
+  rows only, by byte range (`read_development` on an `OSFile`), not through the memory-mapped
+  reader.
+- **Registry summary.** Main's `write_summary` refuses the full japan registry (#131's and #282's
+  family ids contain `/`, PR #280), so the command regenerates the committed summary under
+  `docs/experiments/registry/japan/` with `write_summary` over the families it already holds plus
+  the six N8 families. Every existing file came out byte-identical, the six N8 files are new, and
+  `README.md` gains their six lines.
