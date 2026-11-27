@@ -127,10 +127,15 @@ def data_builds(files: list[tuple[str, Path]]) -> dict[str, str]:
 def unhashed_builds(files: list[tuple[str, Path]]) -> dict[str, str]:
     """The data build of a run whose files were not hashed: a digest of each selected day's name,
     size and mtime (stat works on an unreadable file too), so the same failure on a refreshed store
-    is a new run and on unchanged files the same one."""
+    is a new run and on unchanged files the same one. A file gone since discovery digests as
+    `missing`, so the run still reaches its failed-record handler."""
     digest = hashlib.sha256()
     for day, path in files:
-        st = path.stat()
+        try:
+            st = path.stat()
+        except OSError:
+            digest.update(f"{day}:missing\n".encode())
+            continue
         digest.update(f"{day}:{st.st_size}:{st.st_mtime_ns}\n".encode())
     build = f"unhashed@{digest.hexdigest()[:16]}"
     return {"jravan_odds_timeseries": f"{build} ({len(files)} development days)"}
