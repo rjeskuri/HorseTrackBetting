@@ -91,8 +91,9 @@ never a bet trigger.
 - **Level 2:** `studies.meta.store_frame`, the priced starters of run races with a priced winner from 2014-06-07, and
   each member's ln p renormalised over the race's priced starters.
 - **Settlement (v2):** the store's `dividends` rows of pool WIN for those races, joined by race and the runners'
-  horse number (`win_paid`): a runner pays its dividend / ¥100, a refund row its stake, no row 0. The claim bands
-  stay at the final odds (p × O_final).
+  horse number (`win_paid`): a runner pays its dividend / ¥100, a refund row its stake, no row 0. A race with no WIN
+  row at all is unsettled (an interrupted store refresh), not a race every starter lost: the launch fails and records
+  every planned variant as failed (no race here). The claim bands stay at the final odds (p × O_final).
 
 - Counts: 821,458 level-1 starters in 58,406 races (2010-01-05 to 2026-11-23), 3,929 without a placing, 78
   dead-heat races; 86,502 horses (so 86,502 debut starts), 67,331 starts after a stable change of trainer; 572,772

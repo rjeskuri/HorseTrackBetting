@@ -44,7 +44,8 @@ Win return per unit stake of every scored runner banded by its stage-2 claim p x
 (`core.eval.tail.tail_curve`, D7's meeting bounds), the top band a leaderboard row. A runner is
 settled at the store's recorded Win dividend for its race and horse number (`win_paid`): a JRA
 dead heat pays each winner its own dividend, and a dividend paid before a later disqualification
-stands.
+stands. A scored race with no WIN row at all is unsettled (an interrupted store refresh), never
+a race every starter lost: the launch fails and records every planned variant as failed.
 
 Every variant, failures included, is a registry record; the JRA store is netkeiba results (no
 JRDB, no JRA-VAN), so the records carry the source `jra` and their figures are public. Holdout
@@ -793,7 +794,11 @@ def win_paid(
     price: pd.DataFrame, numbers: pd.DataFrame, dividends: pd.DataFrame, unit: float
 ) -> tuple[np.ndarray, dict]:
     """Each priced starter's Win return per unit stake at the recorded dividends: its race's WIN
-    row for its horse number pays dividend / unit (a refund row, the stake); no row pays 0."""
+    row for its horse number pays dividend / unit (a refund row, the stake); no row pays 0.
+
+    A race with no WIN row at all is unsettled, not a race every starter lost (the store
+    publishes runners before dividends, so an interrupted refresh leaves such races): it raises,
+    and the launch records every planned variant as failed."""
     keyed = price[["race_id", "horse_id"]].astype(object)
     numbers = numbers.astype({"race_id": object, "horse_id": object})
     rows = keyed.merge(numbers, on=["race_id", "horse_id"], how="left", validate="one_to_one")
@@ -812,18 +817,24 @@ def win_paid(
     )
     if paying["horse_no"].isna().any() or not np.isfinite(pays).all():
         raise ValueError("a WIN dividend row is not one horse number with a finite dividend")
+    races = pd.Series(price["race_id"].astype(object).unique())
+    unsettled = races.loc[~races.isin(set(paying["race_id"]))]
+    if len(unsettled):
+        raise ValueError(
+            f"{len(unsettled)} priced races have no WIN dividend row (unsettled, e.g. "
+            f"{', '.join(map(str, unsettled.head(3)))}): refresh the store's dividends"
+        )
     joined = pd.DataFrame({"race_id": rows["race_id"], "horse_no": horse_no}).merge(
         paying, on=["race_id", "horse_no"], how="left", validate="many_to_one"
     )
     paid = joined["pays"].fillna(0.0).to_numpy(dtype=float)
     won = price["won"].to_numpy(dtype=bool)
-    races = pd.Series(price["race_id"].astype(object).unique())
     counts = {
         "win_dividend_rows": len(paying),
         "win_dividend_rows_without_a_priced_starter": int(
             len(paying) - joined["pays"].notna().sum()
         ),
-        "races_without_a_win_dividend": int((~races.isin(set(paying["race_id"]))).sum()),
+        "races_without_a_win_dividend": len(unsettled),  # 0: an unsettled race raises
         "paid_starters": int((paid > 0).sum()),
         "paid_starters_not_placed_first": int(((paid > 0) & ~won).sum()),
         "first_placed_starters_without_a_dividend": int((won & (paid == 0)).sum()),
