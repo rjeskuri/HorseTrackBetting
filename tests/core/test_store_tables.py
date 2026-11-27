@@ -32,6 +32,8 @@ VAR = "HORSETRACK_DATA_DIR"
 TABLE_NAMES = (
     "meetings", "races", "runners", "dividends", "sectionals", "incidents", "running_comments",
     "horses", "horse_runs", "horse_pedigree", "jrdb_pre_race", "jrdb_post_race",
+    "track_condition",  # #90: JRA rail, cushion and moisture as published
+    "win_sales",  # #278: JRA per-race Win sales, one row per publication
 )  # fmt: skip
 
 # kind -> the Arrow type the store writes it as (independent of the code under test)

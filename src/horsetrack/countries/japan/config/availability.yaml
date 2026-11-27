@@ -7,8 +7,12 @@
 # races derive post_utc from race_date and post_time_local (Asia/Tokyo; #227). Since then the horse
 # weights and the same-day going are in the views, null until post_utc - 60 min of their race, and
 # the result tables enter the views at post_utc + 30 min of their race, read by race_id from races
-# (the owner's answer on #80, 2026-11-24). A race without a post time never shows either. The
-# result columns of races and runners stay label_columns. A table without an entry here is refused.
+# (the owner's answer on #80, 2026-11-24). Since #305 the finish (races finish_time_s; runners
+# finish_pos, dead_heat, finish_time_s) is in the views too, null until post_utc + 30 min of its
+# race, the same rule as same-day dividends (the owner's answer on #96, 2026-11-25). A race without
+# a post time never shows any of these. The other result columns of races and runners stay
+# label_columns. The JRA-VAN-only tables at the end (#376) are not store tables: they are read
+# from processed/jravan/ parquet. A table without an entry here is refused.
 tables:
   # The board at t: the latest capture fetched by t. HKTrack rows have no fetched_utc, so their
   # snapshot_utc counts. The payout and the final-capture flag come from the whole day's log.
@@ -43,11 +47,15 @@ tables:
       - columns: [going, going_raw]
         anchor: post_utc
         offset_min: -60
+      # the finish: in the view, null until post_utc + 30 min, the same-day dividends rule
+      # (#305; the owner's answer on #96, 2026-11-25)
+      - columns: [finish_time_s]
+        anchor: post_utc
+        offset_min: 30
     # field_size and status stay in the view: accepted leak (see above)
-    # results; result_published_utc and result_unpublished_utc (#225): never in a view (owner
-    # decision, answer on #80, 2026-11-25). rail_setting stays in.
+    # the other results; result_published_utc and result_unpublished_utc (#225): never in a view
+    # (owner decision, answer on #80, 2026-11-25). rail_setting stays in.
     label_columns:
-      - finish_time_s
       - split_times_s
       - result_published_utc
       - result_unpublished_utc
@@ -63,14 +71,17 @@ tables:
         via: {table: races, match: [race_id]}
         anchor: post_utc
         offset_min: -60
+      # the finish: in the view, null until post_utc + 30 min of the runner's race, the same-day
+      # dividends rule (#305; the owner's answer on #96, 2026-11-25)
+      - columns: [finish_pos, dead_heat, finish_time_s]
+        via: {table: races, match: [race_id]}
+        anchor: post_utc
+        offset_min: 30
     # is_scratched stays in the view: accepted leak (see above)
-    # results
+    # the other results
     label_columns:
-      - finish_pos
       - placing_raw
       - placing_code
-      - dead_heat
-      - finish_time_s
       - lbw_raw
       - lbw_lengths
       - running_positions
@@ -131,3 +142,47 @@ tables:
     label_prefixes: [tyb_]
   jrdb_post_race:
     kind: label_only
+
+  # JRA's going measurements (#90): a row counts from its publication, available_utc (=
+  # published_utc, the page's or yearly record's own 発表 time). The owner's rule, not a ruling:
+  # his #136 request ("Ingest them as of their publication time", 2026-11-24), #228's outline step
+  # 4 ("available_utc = published_utc as in #136") and his answer on #87 (usable once JRA has
+  # officially published it, with its publication timestamp, 2026-11-24). No label columns.
+  track_condition:
+    kind: column
+    column: available_utc
+
+  # Per-race Win sales (#278): each publication from its own time, published_utc. A live page's
+  # figure is published at the page's clock, a final (最終オッズ) page's at its printed post + 30
+  # min, or at its fetch when it prints no post time (the owner's answer on #278, rule A,
+  # 2026-11-25).
+  win_sales:
+    kind: column
+    column: published_utc
+
+  # The JRA-VAN-only tables (processed/jravan/, not in schemas.TABLES), each rule the owner's
+  # request on #376 (2026-11-26). None has label columns.
+  # Final odds and pool votes: labels or conditioners only, never features at t (owner, #376,
+  # 2026-11-26).
+  final_odds:
+    kind: label_only
+  pool_votes:
+    kind: label_only
+  # The jockey and trainer masters: current values, "the master row as exported is used, with no
+  # history" (owner, #376, 2026-11-26). In every view at any t, so a view carries the export's
+  # look-ahead (retirement, licence revocation, affiliation, stable, apprentice status, name):
+  # accepted (docs/specs/as-of.md, "Accepted look-ahead: the jockey and trainer masters").
+  jockeys:
+    kind: current_value
+    in_view: true
+  trainers:
+    kind: current_value
+    in_view: true
+  # Pedigree (breeding horses, produce, lineages): static, known at any t (owner, #376,
+  # 2026-11-26).
+  breeding_horses:
+    kind: static
+  produce:
+    kind: static
+  lineages:
+    kind: static
