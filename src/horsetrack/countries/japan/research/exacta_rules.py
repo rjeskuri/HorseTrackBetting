@@ -1,7 +1,8 @@
 """`horsetrack japan exacta-rules`: #131's E2 ratio-cut rules scored on #130-logged boards (#281).
 
-docs/specs/exacta-overload-prereg.md sections 5-7, family ``exacta_study.E2_ID`` (rule-v4, frozen
-hash ``FROZEN_E2_HASH``), recorded under ``E2_RULE_ID``, the same id without "/" (#525). With the
+docs/specs/exacta-overload-prereg.md sections 5-7, family ``exacta_study.E2_ID`` (rule-v5, frozen
+hash ``FROZEN_E2_HASH``; rule-v4 is history, never executed), recorded under ``E2_RULE_ID``, the
+same id without "/" (#525). With the
 owner's reframe of 2026-11-27 nothing is refused for small n: zero logged meetings give an n = 0
 result. All 16 members are decision-time rules: every selection input is on the race card or on
 the boards at t.
@@ -9,9 +10,10 @@ the boards at t.
 - Selection at t = post - 2 min, from the boards at t only: p_i the normalised 1/odds of the Win
   board, p_c their discounted Harville exacta, q_c the exacta board's implied share, the favourite
   the lowest Win odds. Member (X, k, scope) buys c of category X when q_c / p_c < k.
-- Scope "headline" (v4): the favourite's Win odds at t >= 3.0 and the race "less popular" on its
-  race card (race_no 1-4 or DEBUT/MAIDEN, E1's popularity segment). The day's pool-total tertile
-  is only the agreement diagnostic (``proxy_agreement``), never a selection input.
+- Scope "headline" (v5, as in v4): the favourite's Win odds at t >= 3.0 and the race "less
+  popular" on its race card (race_no 1-4 or DEBUT/MAIDEN, E1's popularity segment). The day's
+  pool-total tertile is only the agreement diagnostic (``proxy_agreement``), never a selection
+  input.
 - Each member stakes 100 yen per selected combination, settled at the final dividend with its own
   impact from the payout identity on the race's final logged FORECAST pool (#283): the published
   dividend's 10 yen breakage is added back, and the result is rounded down to 10 yen with the 110
@@ -99,7 +101,7 @@ TAKEOUT = 0.25
 MINUTES_BEFORE_POST = 2
 BLOCK_SIZE = 5
 STEPM_FWER = exacta_run.STEPM_FWER
-FROZEN_E2_HASH = "28929cd783cd9e25ae8c7f39f30f2b0891720b60864a38fdbb13d7dcd2a8d3bc"  # rule-v4
+FROZEN_E2_HASH = "37d8abb85db2bf8480f619b46440e0ea80a5ed68af992ef344b64e0b36dc2817"  # rule-v5
 E2_RULE_ID = exacta_run.E2_REGISTRY_ID  # #525: no "/"; `exacta_run freeze` freezes it too
 MAX_TEST_ID = f"{E2_RULE_ID}-max-test"
 COUNTRY = "japan"
@@ -353,7 +355,8 @@ def score_e2(
     is not appended again. Refuses unless E2 is frozen at its spec's hash under E2_RULE_ID, and,
     before appending anything, when the ordering fit's training races reach (`trained_through` on
     or after) the earliest scored race date."""
-    # owner, 2026-11-26 on #281: take the hash from #280's final head (rule-v4 since 2026-11-27)
+    # owner, 2026-11-26 on #281: take the hash from #280's final head (rule-v5 since 2026-11-28,
+    # #131's re-freeze; rule-v4 is history and never executed)
     frozen = registry.frozen_spec_hash(E2_RULE_ID)
     expected = _spec_hash(study.family_specs()[study.E2_ID])
     if frozen is None or frozen != expected or frozen != FROZEN_E2_HASH:

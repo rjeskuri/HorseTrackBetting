@@ -1,15 +1,18 @@
 """#131's E2 ratio-cut rules scored on #130-logged boards (ticket #281).
 
 docs/specs/exacta-overload-prereg.md sections 5-7. The owner's decisions: score the 16 frozen
-members of rule-v4 (``exacta_study.E2_ID``; it supersedes rule-v3, owner 2026-11-27 on #131) on
-whatever development meetings are logged, refusing nothing for small n (owner 2026-11-27 on #281);
-no registry family id contains "/" (#525). Every figure here is synthetic; HORSETRACK_DATA_DIR
+members of rule-v5 (``exacta_study.E2_ID``, ``japan-131-exacta-rule-v5``; re-frozen on #131
+2026-11-28, it supersedes rule-v4: p_c(t) from the T-2 Win board's normalised implied shares, and
+every #130-logged development day with T-2 Win and exacta boards eligible) on whatever
+development meetings are logged, refusing nothing for small n (owner 2026-11-27 on #281); no
+registry family id contains "/" (#525). Rule-v4 is history: its freeze stays in the registry and
+the scorer never executes it. Every figure here is synthetic; HORSETRACK_DATA_DIR
 points at tmp_path and the registry is a tmp file.
 
 API pinned here (module ``horsetrack.countries.japan.research.exacta_rules``):
 
 - Constants: ``CUTS``, ``RULE_CATEGORIES``, ``SCOPES``, ``STAKE = 100``,
-  ``MINUTES_BEFORE_POST = 2``, ``BLOCK_SIZE = 5``, ``FROZEN_E2_HASH`` (v4's spec hash),
+  ``MINUTES_BEFORE_POST = 2``, ``BLOCK_SIZE = 5``, ``FROZEN_E2_HASH`` (v5's spec hash),
   ``E2_RULE_ID = E2_ID.replace("/", "-")`` and ``MAX_TEST_ID = E2_RULE_ID + "-max-test"``. Every
   record the scorer appends is under one of these two; the frozen-hash check reads
   ``registry.frozen_spec_hash(E2_RULE_ID)`` against the spec ``family_specs()[E2_ID]``.
@@ -81,7 +84,12 @@ from horsetrack.core.eval import registry as registry_module
 from horsetrack.countries.japan import odds_log, takeout
 from horsetrack.countries.japan.models.v0 import ordering as ordering_fitter
 from horsetrack.countries.japan.research import exacta_impact, exacta_run
-from horsetrack.countries.japan.research.exacta_study import E2_ID, family_specs
+from horsetrack.countries.japan.research.exacta_study import (
+    E2_ID,
+    E2_V4_ID,
+    family_specs,
+    superseded_specs,
+)
 from horsetrack.countries.japan.research import exacta_rules as er
 
 UTC = timezone.utc
@@ -91,8 +99,10 @@ ALL_CATS = ("fav_first", "fav_second", "no_fav")
 SCOPES = ("all", "headline")
 RATE = 0.75
 LAMBDA2 = 0.8104
-FROZEN = "28929cd783cd9e25ae8c7f39f30f2b0891720b60864a38fdbb13d7dcd2a8d3bc"  # rule-v4
+FROZEN = "37d8abb85db2bf8480f619b46440e0ea80a5ed68af992ef344b64e0b36dc2817"  # rule-v5
+FROZEN_V4 = "28929cd783cd9e25ae8c7f39f30f2b0891720b60864a38fdbb13d7dcd2a8d3bc"  # rule-v4: history
 RULE_ID = E2_ID.replace("/", "-")  # #525: no "/" in a registry family id
+SLASH_ID = "japan/131-exacta-rule-v5"  # the pre-#525 spelling of the scored family: never used
 MAX_ID = f"{RULE_ID}-max-test"
 BUILDS = {"odds_log": "odds_snapshots/jra/FORECAST@aaaa"}
 FLOOR = (100.0, 110.0)  # floor-bound published dividends: the winning investment is unidentified
@@ -687,16 +697,17 @@ def by_member(result) -> dict[tuple, dict]:
     return members
 
 
-def test_the_frozen_e2_hash_is_the_v4_spec_under_the_dashed_family_ids():
-    assert E2_ID.endswith("131-exacta-rule-v4")
+def test_the_frozen_e2_hash_is_the_v5_spec_under_the_dashed_family_ids():
+    assert E2_ID.endswith("131-exacta-rule-v5")
     spec = family_specs()[E2_ID]
     digest = hashlib.sha256(
         json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     assert er.FROZEN_E2_HASH == FROZEN == digest
-    assert er.E2_RULE_ID == RULE_ID and "/" not in er.E2_RULE_ID
+    assert er.E2_RULE_ID == RULE_ID == "japan-131-exacta-rule-v5" and "/" not in er.E2_RULE_ID
     assert er.MAX_TEST_ID == MAX_ID and "/" not in er.MAX_TEST_ID
-    # the references here follow v4's frozen headline: race card plus the favourite at T-2
+    # the references here follow v5's frozen headline (v4's, unchanged): race card plus the
+    # favourite at T-2
     headline = spec["scopes"]["headline"]
     assert headline["fav_odds_min"] == 3.0
     assert headline["less_popular"] == {"race_no_max": 4, "race_classes": ["DEBUT", "MAIDEN"]}
@@ -874,7 +885,8 @@ def test_every_record_is_under_the_dashed_family_ids(tmp_path):
     families = Counter(r.family_id for r in reg.records())
     assert families == {RULE_ID: 32, MAX_ID: 1}
     assert not any("/" in f for f in families)
-    assert reg.records(E2_ID) == []
+    assert SLASH_ID.replace("/", "-") == RULE_ID == E2_ID
+    assert reg.records(SLASH_ID) == []
 
 
 def test_shrinkage_status_counts_and_meetings_are_registry_results_not_params(tmp_path):
@@ -1055,7 +1067,7 @@ def test_scoring_refuses_unless_e2_is_frozen_at_its_hash_under_the_dashed_id(tmp
         reg.freeze_family(RULE_ID, spec)
     if state == "frozen only under the slash id":
         try:  # once #525 lands a "/" id may be refused outright: then nothing is frozen at all
-            reg.freeze_family(E2_ID, family_specs()[E2_ID])
+            reg.freeze_family(SLASH_ID, family_specs()[E2_ID])
         except Exception:  # noqa: BLE001
             pass
     before = reg.records()
@@ -1063,6 +1075,35 @@ def test_scoring_refuses_unless_e2_is_frozen_at_its_hash_under_the_dashed_id(tmp
         er.score_e2(make_races(281, DAYS[:1]), registry=reg, git_sha="abc1234",
                     lambda2=LAMBDA2, data_builds=BUILDS, n_boot=50)  # fmt: skip
     assert reg.records() == before == []
+
+
+def test_v4_is_history_the_scorer_runs_only_v5_at_its_hash(tmp_path):
+    """#131 re-froze E2 as rule-v5: a registry holding only v4's freeze (under its own id, or v4's
+    spec under the v5 id) is refused with nothing appended; with v5 frozen beside v4 the 16
+    members are recorded under the v5 id at v5's hash, and v4's id gains no record."""
+    v4 = superseded_specs()[E2_V4_ID]
+    assert E2_V4_ID == "japan-131-exacta-rule-v4" != RULE_ID
+    kw = {"git_sha": "abc1234", "lambda2": LAMBDA2, "data_builds": BUILDS, "n_boot": 50}
+    races = make_races(281, DAYS)
+
+    only_v4 = new_registry(tmp_path / "only-v4", freeze=False)
+    only_v4.freeze_family(E2_V4_ID, v4)
+    assert only_v4.frozen_spec_hash(E2_V4_ID) == FROZEN_V4
+    v4_under_v5 = new_registry(tmp_path / "v4-under-v5", freeze=False)
+    v4_under_v5.freeze_family(RULE_ID, v4)
+    for reg in (only_v4, v4_under_v5):
+        with pytest.raises((RuntimeError, ValueError)):
+            er.score_e2(races, registry=reg, **kw)
+        assert reg.records() == []
+
+    only_v4.freeze_family(RULE_ID, family_specs()[E2_ID])
+    er.score_e2(races, registry=only_v4, **kw)
+    members = only_v4.records(RULE_ID)
+    assert len(members) == 16 and {r.params["spec_hash"] for r in members} == {FROZEN}
+    assert FROZEN != FROZEN_V4
+    assert only_v4.records(E2_V4_ID) == []
+    assert only_v4.frozen_spec_hash(E2_V4_ID) == FROZEN_V4
+    assert {r.family_id for r in only_v4.records()} == {RULE_ID, MAX_ID}
 
 
 def test_scoring_selects_on_the_board_at_t_not_the_final_board(tmp_path):
@@ -2260,12 +2301,15 @@ def scored_metric(record, name: str):
 def test_the_real_freeze_then_score_workflow_uses_one_dashed_id(unfrozen_command, data_dir):
     """Finding :345 (high): ``exacta_run freeze`` (#131's freeze command, run here for real, not a
     hand-made freeze) and the scorer use the one dashed id: the scorer accepts the freeze and
-    records its 16 members under ``japan-131-exacta-rule-v4``."""
+    records its 16 members under ``japan-131-exacta-rule-v5`` at v5's hash; v4's freeze, made by
+    the same command under ``japan-131-exacta-rule-v4``, gains no record."""
     reg = unfrozen_command
     build_logged_day(data_dir)
     assert exacta_run.main(["freeze"]) == 0
     assert reg.frozen_spec_hash(RULE_ID) == FROZEN
+    assert reg.frozen_spec_hash(E2_V4_ID) == FROZEN_V4  # v4 stays frozen, as history
     er.exacta_rules_command()  # no refusal
+    assert reg.records(E2_V4_ID) == []
     members = reg.records(RULE_ID)
     assert len(members) == 16 and {r.status for r in members} == {"scored"}
     assert all(r.params["spec_hash"] == FROZEN for r in members)
@@ -2529,8 +2573,9 @@ def test_an_absolute_oof_path_whose_bytes_changed_since_the_fit_refuses_the_run(
 
 
 def downgrade(reg_path: Path, records: list, fit_id: str) -> Registry:
-    """The registry as 8a58d47 wrote it: the same runs under the dashed v4 ids, with the ordering
-    fit id as their ordering component (the revision before ORDERING_MODEL)."""
+    """The registry as 8a58d47 wrote it: the same runs under the scored family's dashed ids
+    (rule-v5's E2_RULE_ID and MAX_TEST_ID), with the ordering fit id as their ordering component
+    (the revision before ORDERING_MODEL)."""
     reg_path.unlink()
     reg = default_registry("japan")
     reg.freeze_family(RULE_ID, family_specs()[E2_ID])
