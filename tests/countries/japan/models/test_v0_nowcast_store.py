@@ -32,9 +32,11 @@ a tmp HORSETRACK_DATA_DIR.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import importlib
 import json
 import math
+import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1194,27 +1196,17 @@ def test_a_new_data_build_with_the_same_fit_gets_its_own_record(data_dir, monkey
     assert len(scored(default_registry(COUNTRY).records(), fit_id)) == 2
 
 
-def test_an_unreadable_development_file_records_one_failed_run(data_dir, monkeypatch, tmp_path):
-    """Round 2, low: when opening one development file raises PermissionError (on any open or
-    parquet read of it), the command fails, exactly one "failed" record naming the error is
-    appended, and the models folder is unchanged."""
+def refusing_reads(monkeypatch, name: str) -> None:
+    """Every open or parquet read of the development file `name` raises PermissionError, as on an
+    unreadable file; its stat still works."""
     import builtins
     import io
-
-    from horsetrack.cli import app
-
-    variant = VARIANTS["four-days"]
-    write_store(data_dir, variant)
-    write_current_fits(data_dir)
-    bad = f"{sorted(variant['days'])[1].isoformat()}.parquet"
-    before = snapshot_models(data_dir)
-    store_module(monkeypatch, tmp_path)
 
     def refuse(owner, attr, *, method: bool) -> None:
         real = getattr(owner, attr)
 
         def check(source) -> None:
-            if str(source).endswith(bad):
+            if str(source).endswith(name):
                 raise PermissionError(13, "Permission denied", str(source))
 
         if method:
@@ -1236,6 +1228,21 @@ def test_an_unreadable_development_file_records_one_failed_run(data_dir, monkeyp
                         (pq, "ParquetDataset"), (ds, "dataset"), (pd, "read_parquet")):  # fmt: skip
         refuse(owner, attr, method=False)
 
+
+def test_an_unreadable_development_file_records_one_failed_run(data_dir, monkeypatch, tmp_path):
+    """Round 2, low: when opening one development file raises PermissionError (on any open or
+    parquet read of it), the command fails, exactly one "failed" record naming the error is
+    appended, and the models folder is unchanged."""
+    from horsetrack.cli import app
+
+    variant = VARIANTS["four-days"]
+    write_store(data_dir, variant)
+    write_current_fits(data_dir)
+    bad = f"{sorted(variant['days'])[1].isoformat()}.parquet"
+    before = snapshot_models(data_dir)
+    store_module(monkeypatch, tmp_path)
+    refusing_reads(monkeypatch, bad)
+
     result = CliRunner().invoke(app, ["japan", "nowcast-fit", "--from-store"])
 
     assert result.exit_code not in (0, None), command_output(result)
@@ -1243,3 +1250,117 @@ def test_an_unreadable_development_file_records_one_failed_run(data_dir, monkeyp
     assert [r.status for r in records] == ["failed"], records
     assert "PermissionError" in json.dumps(records[0].params), records[0].params
     assert snapshot_models(data_dir) == before
+
+
+CORRECTED_ID = "c0ffee116a02"
+
+
+@pytest.mark.parametrize("pool", [WIN, PLACE])
+def test_a_corrected_logged_fit_with_the_same_wide_cells_gets_its_own_record(
+    pool, data_dir, monkeypatch, tmp_path
+):
+    """Review round 3, medium: the operator points current.json at a corrected logged fit whose
+    WIN or PLACE cells changed but whose Wide cells, sigma0 and days did not, so the merged fit_id
+    and the data build are unchanged. The rerun's manifest names the corrected fit as its Wide
+    source, and the record its run_id names must say the same: a second success record whose
+    params.wide_fit_id and components.wide_fit are the corrected fit's id, the first record
+    (naming the old logged fit) kept. A further unchanged rerun appends no third record."""
+    write_store(data_dir, VARIANTS["four-days"])
+    write_current_fits(data_dir)
+    folder = models_dir(data_dir)
+    pointer = folder / "current.json"
+    module = store_module(monkeypatch, tmp_path)
+
+    first = module.fit_from_store()
+    merged = first["fit_id"]
+    assert first["wide_fit_id"] == OLD_ID
+
+    old = old_nowcast()
+    cells = dict(old.cells)
+    key = (pool, 2, 1)
+    cells[key] = DriftCell(pool, 2, 1, 321, -0.25, 0.4)  # a corrected WIN or PLACE cell
+    assert cells[key] != old.cells.get(key)
+    corrected = dataclasses.replace(old, cells=cells, fit_id=CORRECTED_ID)
+    corrected_file = folder / f"nowcast-{CORRECTED_ID}.json"
+    corrected_file.write_text(corrected.to_json(), encoding="utf-8")
+    names = json.loads(pointer.read_text())
+    pointer.write_text(json.dumps({**names, "nowcast": corrected_file.name}), encoding="utf-8")
+
+    second = module.fit_from_store()
+
+    assert second["fit_id"] == merged  # the scenario: the same merged fit
+    assert second["data_builds"] == first["data_builds"]  # on the same data build
+    for manifest in (second, stored_manifest(data_dir, merged)):
+        assert manifest["wide_fit_id"] == CORRECTED_ID
+        wide_file = resolve(pointer, manifest["wide_fit_file"]).resolve()
+        assert wide_file == corrected_file.resolve()
+        assert manifest["run_id"] == second["run_id"]
+    assert second["run_id"] != first["run_id"]
+    runs = registry_runs()
+    for manifest, wide_id in ((first, OLD_ID), (second, CORRECTED_ID)):
+        record = runs[manifest["run_id"]]
+        assert record["status"] != "failed"
+        assert record["params"]["fit_id"] == merged
+        assert record["params"]["wide_fit_id"] == wide_id
+        assert record["components"]["wide_fit"] == wide_id
+        assert record["data_builds"] == manifest["data_builds"]
+    assert len(scored(default_registry(COUNTRY).records(), merged)) == 2
+
+    third = module.fit_from_store()
+
+    assert third["fit_id"] == merged and third["wide_fit_id"] == CORRECTED_ID
+    assert third["run_id"] == second["run_id"]
+    assert len(scored(default_registry(COUNTRY).records(), merged)) == 2
+
+
+@pytest.mark.parametrize("changed", ["the-unreadable-day", "another-day"])
+def test_a_repeated_hashing_failure_on_a_refreshed_store_gets_its_own_record(
+    changed, data_dir, monkeypatch, tmp_path
+):
+    """Review round 3, low: one development file cannot be read, so the files are never hashed
+    and the failed record's dates and error are the same from run to run. The same failure twice
+    on unchanged files is one failed record; after a development file is rewritten (new content,
+    size and mtime: the unreadable day itself, or another day), the same failure is a run on a
+    new store and gets a record of its own, which a repeat on that store does not duplicate."""
+    variant = VARIANTS["four-days"]
+    write_store(data_dir, variant)
+    write_current_fits(data_dir)
+    days = sorted(variant["days"])
+    bad = days[1]
+    target = bad if changed == "the-unreadable-day" else days[2]
+    module = store_module(monkeypatch, tmp_path)
+
+    def fail() -> None:
+        with monkeypatch.context() as m:
+            refusing_reads(m, f"{bad.isoformat()}.parquet")
+            with pytest.raises(PermissionError):
+                module.fit_from_store()
+
+    def failed() -> list:
+        return [r for r in default_registry(COUNTRY).records() if r.status == "failed"]
+
+    fail()
+    fail()
+    assert len(failed()) == 1
+
+    path = jravan_dir(data_dir) / f"{target.isoformat()}.parquet"
+    before = path.stat()
+    rows = day_rows(target, variant["days"][target], scale=variant["scale"],
+                    scratch=target == variant["scratch_day"])  # fmt: skip
+    extra = [{**r, "combination": "2,4", "odds": 21.5} for r in rows if r["pool"] == "QUINELLA"]
+    write_parquet(path, rows + extra)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 7_000_000_000))
+    after = path.stat()
+    assert after.st_size != before.st_size and after.st_mtime_ns != before.st_mtime_ns
+
+    fail()
+
+    records = failed()
+    assert len(records) == 2, records
+    assert records[0].params["error"] == records[1].params["error"]  # the scenario: same error
+    assert records[0].params["jravan_days"] == records[1].params["jravan_days"]  # same dates
+
+    fail()
+
+    assert len(failed()) == 2
+    assert not [r for r in default_registry(COUNTRY).records() if r.status != "failed"]

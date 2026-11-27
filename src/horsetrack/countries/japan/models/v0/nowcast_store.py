@@ -27,11 +27,13 @@ Outputs (JRA-VAN-derived, D21, through `write_report`, which refuses the reposit
 `$HORSETRACK_DATA_DIR/models/japan/v0/nowcast-<fit_id>.json` and `manifest-nowcast-<fit_id>.json`;
 then `current.json`'s "nowcast" entry names the new file (every other entry and the old fit file
 kept). One registry record per fit (family `japan-v0-nowcast-drift`), a failed fit too (an
-unreadable day file included), and one success record per (fit_id, data build): a new data build
-that leaves the fit unchanged appends a record of its own, which the manifest then names, while an
-unchanged rerun, or a retry after a crash between the record and the pointer, completes the writes
-without a second record. A rerun of the fit the pointer already names keeps the first run's Wide
-source and rollback target (`previous_nowcast`).
+unreadable day file included, keyed by the files' names, sizes and mtimes since they could not be
+hashed), and one success record per (fit_id, data build, Wide source): a new data build, or a
+corrected logged fit with the same Wide cells, that leaves the fit unchanged appends a record of
+its own, which the manifest then names, while an unchanged rerun, or a retry after a crash
+between the record and the pointer, completes the writes without a second record. A rerun of the fit
+the pointer already names keeps the first run's Wide source and rollback target
+(`previous_nowcast`).
 """
 
 from __future__ import annotations
@@ -119,6 +121,18 @@ def data_builds(files: list[tuple[str, Path]]) -> dict[str, str]:
                 content.update(chunk)
         digest.update(f"{day}:{path.stat().st_size}:{content.hexdigest()}\n".encode())
     build = f"processed/{SOURCE}/odds_timeseries@{digest.hexdigest()[:16]}"
+    return {"jravan_odds_timeseries": f"{build} ({len(files)} development days)"}
+
+
+def unhashed_builds(files: list[tuple[str, Path]]) -> dict[str, str]:
+    """The data build of a run whose files were not hashed: a digest of each selected day's name,
+    size and mtime (stat works on an unreadable file too), so the same failure on a refreshed store
+    is a new run and on unchanged files the same one."""
+    digest = hashlib.sha256()
+    for day, path in files:
+        st = path.stat()
+        digest.update(f"{day}:{st.st_size}:{st.st_mtime_ns}\n".encode())
+    build = f"unhashed@{digest.hexdigest()[:16]}"
     return {"jravan_odds_timeseries": f"{build} ({len(files)} development days)"}
 
 
@@ -252,14 +266,15 @@ def _record(*, status: str, params: dict, builds: dict, git_sha: str, wide_fit_i
     )
 
 
-def _success_run_id(registry: Registry, fit_id: str, builds: dict) -> str | None:
-    """The run id of `fit_id`'s success record on the data build `builds`, when the registry
-    holds one already."""
+def _success_run_id(registry: Registry, fit_id: str, builds: dict, wide_fit_id: str) -> str | None:
+    """The run id of `fit_id`'s success record on the data build `builds` with Wide taken from the
+    logged fit `wide_fit_id`, when the registry holds one already."""
     for record in registry.records(FAMILY_ID):
         if (
             record.status != "failed"
             and record.params.get("fit_id") == fit_id
             and record.data_builds == builds
+            and record.params.get("wide_fit_id") == wide_fit_id
         ):
             return _sha256(_canonical(asdict(record)))  # as Registry.append names a run
     return None
@@ -286,7 +301,7 @@ def fit_from_store() -> dict:
     grid = load_decision_grid()
     files, held = development_files()
     # until the files are hashed, inside the try below, so an unreadable one is a failed run
-    builds = {"jravan_odds_timeseries": f"unhashed ({len(files)} development days)"}
+    builds = unhashed_builds(files)
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
     params = {
@@ -337,7 +352,7 @@ def fit_from_store() -> dict:
     else:
         previous, created = source.names.get("nowcast"), None
     write_report(fit_path, model.to_json(), sources=(SOURCE,))
-    run_id = _success_run_id(registry, model.fit_id, builds)
+    run_id = _success_run_id(registry, model.fit_id, builds, wide.fit_id)
     if run_id is None:
         run_id = registry.append(
             _record(
