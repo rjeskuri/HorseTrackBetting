@@ -25,15 +25,32 @@ Contract pinned here (`horsetrack.countries.japan.studies.board_vs_final`):
   to an attempt-named file alone, and the exit is 1. An identical rerun appends nothing and returns
   the held records' own run ids.
 
+Review round 2:
+
+- Every writer, not only the CLI: `write_outputs(tables, out_dir=...)` and
+  `write_attempt(tables, out_dir=..., attempt=...)` raise `OutsideDataDir` for a directory that
+  does not resolve under `$HORSETRACK_DATA_DIR` and write nothing; inside the repository they
+  still raise `LicensedOutputInRepo`; under the data directory (a symlink resolving into it
+  included) they write as before.
+- A store missing one of the files the run fingerprints (runners, races, dividends,
+  jrdb_pre_race under processed/jra) fails inside the run's failure handling: `main(["--run"])`
+  returns 1, every table gets its `failed` records, only an attempt report is written, and each
+  record's data builds keep the available files with their sha256 prefix and mark the missing one
+  without a digest (suggested marker `processed/jra/<name>.parquet@missing`, not pinned).
+- An attempt report never replaces another: two failed runs at the same instant, or
+  `write_attempt` called again with the same `attempt`, leave each report in its own file.
+
 All data is synthetic: no JRDB file or value. Expected values come from the hand-written fixtures
 and from sums over the trifecta array written out here, never from the code under test.
 """
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import math
+import re
 import shutil
 import uuid
 from collections import Counter
@@ -65,6 +82,7 @@ from horsetrack.countries.japan.studies.board_vs_final import (
     pool_loglik,
     post_times,
     read_development,
+    write_attempt,
     write_outputs,
 )
 
@@ -524,8 +542,8 @@ def write_store(data: Path, *, tyb: str) -> None:
         pq.write_table(pa.Table.from_pylist(rows, schema=schema), store / f"{name}.parquet")
 
 
-def last_complete_outputs(out: Path) -> dict[Path, bytes]:
-    """The fixed-name outputs a complete run left in `out` (write_outputs on synthetic tables)."""
+def synthetic_tables() -> dict:
+    """A cross_apply table per (hypothesis, pool) on synthetic prices, as a complete run holds."""
     frame = pd.DataFrame(
         [
             {"race_id": f"r{k}", "meeting_id": f"m{k // 2}", "horse_no": h, FINAL: q, BOARD: q}
@@ -540,7 +558,7 @@ def last_complete_outputs(out: Path) -> dict[Path, bytes]:
         return pd.Series(value, index=pd.Index(pd.unique(rows["race_id"]), name="race_id"))
 
     boot = {"n_boot": 50, "level": 0.95, "seed": 1}
-    tables = {
+    return {
         key: cross_apply(
             frame,
             fit_price=FINAL,
@@ -551,7 +569,11 @@ def last_complete_outputs(out: Path) -> dict[Path, bytes]:
         )
         for key in sorted(ALL_KEYS)
     }
-    written = write_outputs(tables, out_dir=out)
+
+
+def last_complete_outputs(out: Path) -> dict[Path, bytes]:
+    """The fixed-name outputs a complete run left in `out` (write_outputs on synthetic tables)."""
+    written = write_outputs(synthetic_tables(), out_dir=out)
     paths_written = written.values() if isinstance(written, dict) else written
     files = {Path(p).resolve(): Path(p).read_bytes() for p in paths_written}
     assert files and all(path.parent == out.resolve() for path in files)
@@ -630,3 +652,196 @@ def test_a_run_without_its_tables_keeps_the_last_outputs_and_exits_non_zero(
     for path, data in before.items():
         assert path.read_bytes() == data, f"{path.name}: touched by the rerun"
     assert all("-attempt-" in p.name for p in files_under(out) if p.resolve() not in before)
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 2: every writer guards its out dir
+# ---------------------------------------------------------------------------------------------
+
+WRITERS = ["write_outputs", "write_attempt"]
+
+
+def call_writer(writer: str, out: Path) -> list[Path]:
+    """`writer` on synthetic tables into `out`; the paths it returns."""
+    tables = synthetic_tables()
+    if writer == "write_outputs":
+        written = write_outputs(tables, out_dir=out)
+    else:
+        failed = {("E45", TRIO): "synthetic failure"}
+        written = write_attempt(tables, out_dir=out, attempt="20261128T120000Z", failures=failed)
+    return [Path(p) for p in (written.values() if isinstance(written, dict) else written)]
+
+
+@pytest.mark.parametrize("where", OUTSIDE)
+@pytest.mark.parametrize("writer", WRITERS)
+def test_each_writer_refuses_an_out_dir_outside_the_data_dir(data_dir, tmp_path, writer, where):
+    out = outside_of(data_dir, tmp_path, where)
+    before = files_under(tmp_path)
+
+    with pytest.raises(OutsideDataDir):
+        call_writer(writer, out)
+
+    assert files_under(tmp_path) == before, f"{writer} wrote under a refused out dir ({where})"
+
+
+@pytest.mark.parametrize("writer", WRITERS)
+def test_each_writer_still_refuses_the_repository_and_writes_under_the_data_dir(
+    data_dir, tmp_path, writer
+):
+    """Regression rows for the new guard: the repository keeps its own exception, and a
+    directory under the data dir, spelled plainly or through a symlink into it, is written."""
+    inside = env.repo_root() / f".tmp-board-vs-final-{uuid.uuid4().hex[:8]}"
+    try:
+        with pytest.raises(LicensedOutputInRepo):
+            call_writer(writer, inside)
+        assert files_under(inside) == []
+    finally:
+        shutil.rmtree(inside, ignore_errors=True)
+
+    (data_dir / "reports").mkdir()
+    link = tmp_path / "into-the-data-dir"
+    link.symlink_to(data_dir / "reports", target_is_directory=True)
+    for out in (data_dir / "reports" / "plain", link / "via-symlink"):
+        written = call_writer(writer, out)
+        assert written, out
+        for path in written:
+            assert path.is_file() and path.stat().st_size > 0, path
+            assert path.resolve().is_relative_to(data_dir.resolve()), path
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 2: a store missing a fingerprinted file still records the failure
+# ---------------------------------------------------------------------------------------------
+
+FINGERPRINTED = ("runners", "races", "dividends", "jrdb_pre_race")  # under processed/jra
+DIGEST = re.compile(r"[0-9a-f]{16}")
+
+
+def sha256_prefix(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+@pytest.mark.parametrize("missing", FINGERPRINTED)
+def test_a_store_missing_a_fingerprinted_file_still_records_the_failure(
+    data_dir, tmp_path, capsys, missing
+):
+    write_store(data_dir, tyb="null")
+    store = data_dir / "processed" / "jra"
+    out = data_dir / "reports"
+    out.mkdir()
+    before = last_complete_outputs(out)
+    (store / f"{missing}.parquet").unlink()
+    available = {
+        name: sha256_prefix(store / f"{name}.parquet") for name in FINGERPRINTED if name != missing
+    }
+    existing = {p.resolve() for p in files_under(data_dir)}
+
+    code, result = run_cli(["--run"], capsys)  # not an exception: the failure is handled
+
+    assert code == 1, f"a store without {missing}.parquet exits 1"
+    assert {tuple(key) for key in result["failed"]} == ALL_KEYS
+    for path, data in before.items():
+        assert path.read_bytes() == data, f"{path.name}: the last complete output was touched"
+    registry_dir = (data_dir / "registry").resolve()
+    new = [
+        p.resolve()
+        for p in files_under(data_dir)
+        if p.resolve() not in existing and not p.resolve().is_relative_to(registry_dir)
+    ]
+    assert len(new) == 1, f"only an attempt report, got {[p.name for p in new]}"
+    attempt = new[0]
+    assert "-attempt-" in attempt.name and attempt.suffix == ".md"
+    assert attempt.parent == out.resolve()
+    assert attempt.stat().st_size > 0
+    assert {Path(p).resolve() for p in result["outputs"].values()} == {attempt}
+
+    registry_path = data_dir / "registry" / "japan.jsonl"
+    registry = Registry(registry_path, holdout_log=tmp_path / "no-holdout-log.jsonl")
+    registry.verify()
+    assert registry.frozen_spec_hash(bvf.FAMILY_ID) == result["spec_hash"]
+    records = registry.records(bvf.FAMILY_ID)
+    assert {r.status for r in records} == {"failed"}
+    assert all(r.ticket == 103 and "jrdb" in r.sources for r in records)
+    fitted = Counter(
+        (r.hypothesis_id, r.components["pool"], r.components["fit_price"]) for r in records
+    )
+    want = {(h, pool, price): 1 for h, pool in ALL_KEYS for price in (FINAL, BOARD)}
+    assert dict(fitted) == want, "a failed record per table and price fitted on"
+    assert result["records_appended"] == len(records) == len(run_ids(registry_path))
+
+    for record in records:
+        entries = [f"{k}={v}" for k, v in record.data_builds.items()]
+        for name, digest in available.items():
+            assert any(f"{name}.parquet" in e and digest in e for e in entries), (
+                f"{record.variant}: {name}.parquet and its digest {digest} not in {entries}"
+            )
+        marked = [e for e in entries if f"{missing}.parquet" in e]
+        assert marked, (
+            f"{record.variant}: the missing {missing}.parquet was dropped from the builds"
+        )
+        assert not any(DIGEST.search(e) for e in marked), (
+            f"{record.variant}: a digest claimed for the missing file: {marked}"
+        )
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 2: attempt reports never overwrite each other
+# ---------------------------------------------------------------------------------------------
+
+FROZEN = datetime(2026, 11, 28, 12, 0, 0, 123456, tzinfo=timezone.utc)
+
+
+class FrozenClock(datetime):
+    """The module's `datetime` with `now` fixed at FROZEN: two runs finish in the same instant."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return FROZEN if tz is None else FROZEN.astimezone(tz)
+
+
+def attempt_path(result: dict) -> Path:
+    paths_written = {Path(p).resolve() for p in result["outputs"].values()}
+    assert len(paths_written) == 1, result["outputs"]
+    return paths_written.pop()
+
+
+def test_two_failed_runs_in_the_same_instant_keep_both_attempt_reports(
+    data_dir, capsys, monkeypatch
+):
+    write_store(data_dir, tyb="null")
+    out = data_dir / "reports"
+    monkeypatch.setattr(bvf, "datetime", FrozenClock)
+
+    code, first = run_cli(["--run"], capsys)
+    assert code == 1
+    first_path = attempt_path(first)
+    first_bytes = first_path.read_bytes()
+    assert first_bytes
+
+    code, second = run_cli(["--run"], capsys)
+    assert code == 1
+    second_path = attempt_path(second)
+
+    attempts = [p.resolve() for p in files_under(out) if "-attempt-" in p.name]
+    assert len(attempts) == 2, f"two attempts, two reports: {[p.name for p in attempts]}"
+    assert second_path != first_path, "the second attempt took the first one's file"
+    assert first_path.read_bytes() == first_bytes, "the first attempt's report was replaced"
+    assert second_path.is_file() and second_path.stat().st_size > 0
+
+
+def test_write_attempt_never_overwrites_an_attempt_of_the_same_name(data_dir):
+    out = data_dir / "reports" / "board-vs-final"
+    attempt = "20261128T120000Z"
+    written = []
+    for k in range(3):
+        failed = {("E2", WIN): f"synthetic failure number {k}"}
+        result = write_attempt({}, out_dir=out, attempt=attempt, failures=failed)
+        (path,) = [Path(p) for p in (result.values() if isinstance(result, dict) else result)]
+        written.append((path.resolve(), path.read_bytes()))
+
+    assert len({path for path, _ in written}) == 3, [path.name for path, _ in written]
+    for k, (path, data) in enumerate(written):
+        assert path.read_bytes() == data, f"call {k}'s report was replaced by a later call"
+        assert f"synthetic failure number {k}" in data.decode("utf-8"), path.name
+        assert "-attempt-" in path.name and attempt in path.name and path.suffix == ".md"
+        assert path.parent == out.resolve()

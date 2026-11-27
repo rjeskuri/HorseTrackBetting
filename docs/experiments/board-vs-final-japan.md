@@ -37,8 +37,10 @@ Code: `src/horsetrack/countries/japan/studies/board_vs_final.py` (tested in
 `tests/countries/japan/test_board_vs_final.py`); the run choices each spec freezes are read from
 `src/horsetrack/countries/japan/config/board_vs_final.yaml`. To reproduce, run
 `uv run python -m horsetrack.countries.japan.studies.board_vs_final --run`. `--out DIR` must lie under
-`$HORSETRACK_DATA_DIR`. A run in which a table cannot be produced appends its failed records, writes only an
-attempt-named report (`…-attempt-<UTC time>.md`), leaves the last complete outputs as they are and exits non-zero.
+`$HORSETRACK_DATA_DIR`, and every writer of the outputs refuses one that does not. A run in which a table cannot be
+produced (a store file it fingerprints missing included) appends its failed records, writes only an attempt-named
+report (`…-attempt-<UTC time>.md`, with a `-<n>` suffix when that name is taken, so no attempt replaces another),
+leaves the last complete outputs as they are and exits non-zero.
 
 ## Hypothesis
 

@@ -36,6 +36,7 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
@@ -72,7 +73,7 @@ from horsetrack.countries.japan.models.condlogit import fit_conditional_logit
 from horsetrack.countries.japan.models.exotic import PLACE, TRIO, WIDE, WIN, Ordering, pool_array
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
 from horsetrack.countries.japan.research.pool_depth import update_summary
-from horsetrack.countries.japan.studies.calibration import _markdown_table, store_builds
+from horsetrack.countries.japan.studies.calibration import _markdown_table
 
 COUNTRY = "japan"
 TICKET = 103
@@ -391,11 +392,10 @@ def render_report(
 def write_outputs(tables: Mapping, *, out_dir: Path | str, **report) -> dict[str, Path]:
     """The report, the private leaderboard (Markdown and JSON) and the cross tables (JSON) under
     `out_dir`, through `write_report` with JRDB among the sources. A directory inside the
-    repository raises LicensedOutputInRepo before any file is written. `report` goes to
-    `render_report` (coefficients, about, failures)."""
-    out_dir = Path(out_dir)
-    if is_inside(out_dir, env.repo_root()):
-        raise LicensedOutputInRepo(f"{out_dir} is inside the repository (D21)")
+    repository raises LicensedOutputInRepo, and one not under $HORSETRACK_DATA_DIR
+    OutsideDataDir, before any file is written. `report` goes to `render_report`
+    (coefficients, about, failures)."""
+    out_dir = _guarded(out_dir)
     stem = _stem()
     rows = leaderboard_rows(tables)
     cells = [
@@ -423,14 +423,35 @@ def _stem() -> str:
     return f"board-vs-final-{COUNTRY}-{FAMILY_ID}"
 
 
-def write_attempt(tables: Mapping, *, out_dir: Path | str, attempt: str, **report) -> dict:
-    """A run with a failed table: its report alone, under `out_dir` in a file named by `attempt`,
-    through `write_report`. `write_outputs`' files, the last complete run's, are not touched."""
-    out_dir = Path(out_dir)
+def _guarded(out_dir: Path | str) -> Path:
+    """`out_dir` resolved, once it is outside the repository (LicensedOutputInRepo) and under
+    $HORSETRACK_DATA_DIR (`output_dir`'s OutsideDataDir)."""
     if is_inside(out_dir, env.repo_root()):
         raise LicensedOutputInRepo(f"{out_dir} is inside the repository (D21)")
-    path = out_dir / f"{_stem()}-attempt-{attempt}.md"
-    return {"attempt": write_report(path, render_report(tables, **report), sources=SOURCES)}
+    return output_dir(out_dir)
+
+
+def write_attempt(tables: Mapping, *, out_dir: Path | str, attempt: str, **report) -> dict:
+    """A run with a failed table: its report alone, under `out_dir` in a file named by `attempt`,
+    through `write_report`, guarded as `write_outputs`. A name already taken gets the first free
+    `-<n>` suffix, so no attempt report replaces another; `write_outputs`' files, the last
+    complete run's, are not touched."""
+    out_dir = _guarded(out_dir)
+    text = render_report(tables, **report)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name, n = f"{_stem()}-attempt-{attempt}", 1
+    while True:  # claim the name (O_EXCL) so a concurrent attempt cannot take it as well
+        path = out_dir / (f"{name}.md" if n == 1 else f"{name}-{n}.md")
+        try:
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666))
+            break
+        except FileExistsError:
+            n += 1
+    try:
+        return {"attempt": write_report(path, text, sources=SOURCES)}
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 # --------------------------------------------------------------------------- the two fits
@@ -931,7 +952,9 @@ def output_dir(out_dir: Path | str | None) -> Path:
         return paths.reports_dir()
     resolved = paths.outside_repo(Path(out_dir), what="out")
     data = paths.data_dir()
-    if not is_inside(resolved, data):
+    # A data dir not created yet holds no symlink: both resolved paths compare as written.
+    inside = is_inside(resolved, data) if data.exists() else resolved.is_relative_to(data)
+    if not inside:
         raise OutsideDataDir(f"out={resolved} is not under {paths.DATA_DIR_VAR}={data}")
     return resolved
 
@@ -942,7 +965,10 @@ def run_study(out_dir: Path | str | None = None) -> dict:
     report is written (`write_attempt`); the result's `failed` lists the tables."""
     out_dir = output_dir(out_dir)
     registry, boot, spec_hash = freeze()  # before any outcome is read
-    builds = {**store_builds(), **{name: _build(name) for name in ("dividends", "jrdb_pre_race")}}
+    builds = {
+        **{f"jra_{name}": _build(name) for name in ("runners", "races")},  # store_builds' keys
+        **{name: _build(name) for name in ("dividends", "jrdb_pre_race")},
+    }
     notes: dict = {}
     try:
         data = read_development()
@@ -985,8 +1011,16 @@ def run_study(out_dir: Path | str | None = None) -> dict:
 
 
 def _build(name: str) -> str:
+    """'processed/jra/<name>.parquet@<sha256 prefix>' of the store file; '@missing' (or
+    '@unreadable') and no digest when it cannot be opened, so the read then fails inside the
+    run's failure handling, each table a failed record."""
     digest = hashlib.sha256()
-    with open(paths.processed_dir("jra") / f"{name}.parquet", "rb") as fh:
+    try:
+        fh = open(paths.processed_dir("jra") / f"{name}.parquet", "rb")
+    except OSError as exc:
+        state = "missing" if isinstance(exc, FileNotFoundError) else "unreadable"
+        return f"processed/jra/{name}.parquet@{state}"
+    with fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return f"processed/jra/{name}.parquet@{digest.hexdigest()[:16]}"
