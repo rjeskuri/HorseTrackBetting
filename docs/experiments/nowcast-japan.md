@@ -100,7 +100,9 @@ days (Wide coverage, below) are not JRA-VAN data and are given.
   the v1 frozen run, the high figures were also inverted by the same rule and did not total 1 either, so neither end of
   the Place range follows the simple rule. The final per-runner votes (H1, #368) were checked against the final WIN
   board on one day and did not reconcile with it exactly, so they were not used as Place money. That check was an
-  exploration and is not part of either frozen run.
+  exploration and is not part of either frozen run. **Superseded by #410 (below):** the inversion used a rule that
+  took the takeout off the pool, not JRA's rule, which applies the rate to the whole dividend; v3 reads Place by
+  JRA's rule, measured against the final Place votes.
 - **Wide.** The JRA-VAN series has no Wide pool. Our own logged development days (`processed/jra/odds_timeseries`)
   are 2026-11-21 and 2026-11-22, each with 12 Wide races, and neither file has a post time (`post_utc` is null, as
   the logger writes no race-card sidecar for them). So no Wide board at t can be placed, Wide is neither fitted nor
@@ -161,7 +163,7 @@ age at t and the Place rule's check.
 ## Failures
 
 - Place: the stake-back inversion of the low figure fails its money-total check on JRA-VAN boards (see Data), so
-  Place is a diagnostic. Only Win stands as a result.
+  Place is a diagnostic in v1 and v2. Only Win stands as a result there. #410's v3 (below) replaces the rule.
 - Wide: no case can be built (see Data). This is a coverage failure, not a modelling result.
 - v1's scratch handling: v1 dropped late-scratch cases against the owner's #69 rule, so its five records are
   superseded by v2's (above). This is a failure of the v1 study design, found in review, not a modelling result.
@@ -201,7 +203,8 @@ age at t and the Place rule's check.
 The figures are withheld, so the repository states no size or direction of any gain, and nothing here supports
 adoption: D16 needs a holdout bound, and the holdout is not opened. The run does rule out the stake-back inversion of
 the board's low figures as a source of Place money shares on JRA-VAN boards. Until that is resolved, any Place
-nowcast built on those shares forecasts a quantity that is not money over the pool.
+nowcast built on those shares forecasts a quantity that is not money over the pool. #410 (below) found the cause:
+the inversion's rule was not JRA's.
 
 ## Follow-ups filed
 
@@ -214,3 +217,70 @@ None by this PR. Proposed, for the orchestrator to file under epic #73 as `statu
 - Near-post boards: score T-2 and T-1 on our own logs, which capture every ~30 s, once they cover enough days. On
   5-6 minute paths those horizons mostly see an older board.
 - Pre-registered model variants: σ by odds band (where #116's drift has its cells), and a random V_final.
+
+## #410: Place shares by JRA's rule (family v3)
+
+Ticket #410 (epic #73). **Every figure is withheld (D21)**: the measurement and the re-run read JRA-VAN data.
+Nothing is adopted, and the holdout is not opened.
+
+- **Hypothesis.** v1 and v2 inverted Place's low figures by m_i (P lo_i − P + 1) = (1 − takeout) − (the P − 1
+  largest other m_j), which takes the takeout off the pool and returns stakes at 1. JRA's rule
+  (`core.pricing.stake_back_share_dividend`, pinned by `tests/core/test_pricing.py`) pays rate × (1 + D / (P s_i))
+  per unit, rate = 1 − takeout applied to the whole dividend, truncated to 10 yen and floored at the minimum
+  dividend. The hypothesis: under JRA's rule the printed figures follow from the money, and shares read from both
+  figures are money shares within a stated tolerance. Null: they are not, and Place stays a diagnostic.
+- **Measurement** (`studies/nowcast.py`, `place_rule_measurement`, run inside the study before the folds). On the
+  final board of every development day the study reads, the final PLACE figures
+  (`processed/jravan/final_odds.parquet@daaea94abd5d223c`) are set against the final PLACE votes (H1,
+  `processed/jravan/pool_votes.parquet@cd743283ba0f094a`) of the runners priced with both figures. Per board it
+  checks whether the rule gives every printed low and high figure from the votes, and how far the shares read from
+  the figures are from the vote shares. Tolerance: 7.5% relative and 0.01 of the pool absolute on every runner. The
+  tests derive it from the 10-yen truncation, which moves the share a figure of 2.0 implies by up to 6.8%.
+- **Variants tried**, both measured on the same boards:
+  - `joint`, the board path: `models.nowcast.place_money_fit` reads both figures by least squares at each figure's
+    truncation midpoint, re-weighted by the order of the money. Figures at the floor are left out, since they only
+    bound the payment.
+  - `low_only`, the owner's fallback for a board without high figures: the low figures alone, read in closed form
+    by the same rule (`stake_back_money`), with floored figures read at the floor.
+  - Number of places P from the priced runners, and again from the registered slots (H1). The second is the cheap
+    check of the 2-place mismatches (P from the starters at sale, or after scratches).
+- **Result** (qualitative; the figures are in the private report):
+  - JRA's rule reproduces every printed figure from the votes on the large majority of boards. Boards it misses
+    remain on both counts of P. Taking P from the registered slots changes P on few boards and recovers few of the
+    misses, so the 2-place question stays open (below).
+  - The `joint` read is within the tolerance on the large majority of boards, and its money total sits close to 1.
+  - The `low_only` read is within the tolerance on a minority of boards. It misses most where the favourite's low
+    figure is at the floor, as the synthetic boards in the tests show. It stays the fallback only where a board has
+    no high figure.
+  - So Place shares are money shares within the stated tolerance on the boards the study reads. **The v3 Place rows
+    are a result, not a diagnostic**, with the caveat that a minority of boards fall outside the tolerance.
+- **The re-run.** Family `japan-c1-nowcast-final-shares-v3`, spec sha256
+  `4cb84e2f74e25d5cc1de9ec471dd84912e0ec09b1c16cfba3d1dc07d387fad83`, frozen at the start of the run before any
+  development row was read (the owner's 2026-11-27 reframe: Claude pre-registers and logs every variant). v3
+  supersedes v2 and changes only the Place share rule (`place_shares`), the measurement (`place_rule_measurement`)
+  and #116's drift draws on Place. The drift's draws are printed as JRA prints them (truncated, floored) and read by
+  the same rule as the boards. Win, the folds, the grid, the scores, the bootstrap and the model constants are v2's.
+  v2's freeze and records are untouched and are superseded for Place. Git `8eda1d0`. Data builds: v2's, plus the two
+  above. Private report `$HORSETRACK_DATA_DIR/reports/nowcast-japan-4cb84e2f74e2.md`, with JSON beside it.
+  Records, all `scored`: `place_rule_vs_votes` `fbadab006dbc59e4` (#410's measurement),
+  `structural_vs_random_walk` `22024f6ca46f2c7a`, `structural_vs_drift_v0` `65711e9b1951b6c7`,
+  `no_features_vs_random_walk` `b8b06b6f158ae3e0`, `structural_vs_no_features` `eb239abaf9ab6446` and
+  `drift_v0_vs_random_walk` `4963fec9404d273d`. They are summarised in
+  `docs/experiments/registry/japan/japan-c1-nowcast-final-shares-v3.md`, where every one shows as withheld. The
+  run took about 95 minutes, with a peak resident memory of about 1.6 GB. The drift's Place draws are read through
+  the least-squares fit, which accounts for most of the extra time over v2. As in v1 and v2, the command exited 1 at
+  `write_summary` on #131's family ids containing `/` (#344, #391), after the report and all six records were
+  written. The summary was regenerated the same way as before: committed families plus v3, which added the v3 file
+  and its index line only. No v3 trial was run.
+- **Wide.** `stake_back_money` and `stake_back_odds` now follow JRA's rule for every stake-back pool, so Wide
+  (QUINELLA_PLACE) and `ShadowNowcast`'s Place and Wide draws use it too. Wide is not measured against money here (a
+  follow-up), and no Wide case exists (above).
+- **Alternatives rejected.** The v2 rule, which the measurement replaces. The low figures alone on boards that
+  print high figures, since they fail on floored favourites. Reading the drift's draws unprinted, since a
+  midpoint read of an untruncated figure is biased by half a step.
+- **What this rules out.** The v2 finding (Place's figures are not the stake-back rule) was a wrong rule, not a
+  property of JRA's boards. It no longer stops a Place nowcast. Nothing is adopted (D16).
+- **Open question.** The boards the rule does not reproduce, the 2-place boards among them: final figures
+  published from a different count of starters or votes than H1's are one candidate. It is not fixed here.
+- **Follow-ups**, proposed for the orchestrator: Wide's inversion measured against Wide money; the boards the Place
+  rule misses.

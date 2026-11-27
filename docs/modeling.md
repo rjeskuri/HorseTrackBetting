@@ -70,7 +70,7 @@ flowchart TB
     end
     subgraph L1["C1: final-price nowcast"]
         NC0["Drift by pool, odds band and horizon<br/>#116 japan/models/v0/nowcast.py<br/>v0"]
-        NC1["Structural nowcast φ_t × s_late, scored for Win (Place diagnostic)<br/>#85 japan/models/nowcast.py; board quality by horizon #86<br/>built, not adopted"]
+        NC1["Structural nowcast φ_t × s_late, scored for Win and Place (Place by JRA's rule, #410)<br/>#85 japan/models/nowcast.py; board quality by horizon #86<br/>built, not adopted"]
     end
     subgraph L2["C2: per-horse ability and interactions"]
         ABIL["Dynamic rating #91, Plackett-Luce ability #92,<br/>jockey, trainer and track #93,<br/>competition #94, lineage #95<br/>planned"]
