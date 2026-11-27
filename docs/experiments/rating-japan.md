@@ -144,13 +144,14 @@ None filed with this change. Proposed for the orchestrator to file under epic #7
 ## On the leaderboard (2026-11-27)
 
 Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
-adoption verdicts. Nothing is adopted or rejected: every option, model and member is a row on
-`horsetrack japan leaderboard` (#452), ranked by its shrunk return per ¥100 at the final price, and a row with no
-measured return is listed after the ranking, never dropped. Where this report says "not adopted", "rules out" or
-"rejected", read a measured position. This section reopens and re-runs nothing.
+adoption verdicts. Nothing is adopted or rejected: every option, model and member will be a row on the planned
+`horsetrack japan leaderboard` (#452; this revision does not have the command yet), ranked by its shrunk return per
+¥100 at the final price, and a row with no measured return will be listed after the ranking, never dropped. Where
+this report says "not adopted", "rules out" or "rejected", read a measured position. This section reopens and
+re-runs nothing.
 
 - Registry family: `japan-c2-rating-final-win`.
-- Task 4 (#451) lists it as a member with no return yet. A member's return in the leaderboard's format is a
-  follow-up of epic #447, not a re-run started here.
+- As task 4 (#451, planned) specifies, it will be listed as a member with no return yet. A member's return in the
+  leaderboard's format is a follow-up of epic #447, not a re-run started here.
 - What this report rules out about the member's stage-2 weight now reads as a measured position of the member beside
   the final Win price, not as a verdict on it.

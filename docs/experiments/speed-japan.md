@@ -388,14 +388,15 @@ is exactly 0.
 ## On the leaderboard (2026-11-27)
 
 Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
-adoption verdicts. Nothing is adopted or rejected: every option, model and member is a row on
-`horsetrack japan leaderboard` (#452), ranked by its shrunk return per ¥100 at the final price, and a row with no
-measured return is listed after the ranking, never dropped. Where this report says "not adopted", "rules out" or
-"rejected", read a measured position. This section reopens and re-runs nothing.
+adoption verdicts. Nothing is adopted or rejected: every option, model and member will be a row on the planned
+`horsetrack japan leaderboard` (#452; this revision does not have the command yet), ranked by its shrunk return per
+¥100 at the final price, and a row with no measured return will be listed after the ranking, never dropped. Where
+this report says "not adopted", "rules out" or "rejected", read a measured position. This section reopens and
+re-runs nothing.
 
 - Registry families: `japan-speed-top3-c3` (#305) and `japan-speed-top3-c3-timing` (#416, the complete-timing
   sensitivity).
-- Both measure a time forecast, not a return, so task 4 (#451) lists both with no return yet. The forecast's marginal
-  against the final price is E39's test, open as #97.
+- Both measure a time forecast, not a return, so, as task 4 (#451, planned) specifies, both will be listed with no
+  return yet. The forecast's marginal against the final price is E39's test, open as #97.
 - "Nothing is adopted" and what this report rules out now read as measured positions on the time forecast. The open
   questions for the owner above are unchanged.

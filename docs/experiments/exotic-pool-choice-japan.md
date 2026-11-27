@@ -217,16 +217,17 @@ Both are filed under epic #72 as `status:proposed`.
 ## On the leaderboard (2026-11-27)
 
 Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
-adoption verdicts. Nothing is adopted or rejected: every option, model and member is a row on
-`horsetrack japan leaderboard` (#452), ranked by its shrunk return per ¥100 at the final price, and a row with no
-measured return is listed after the ranking, never dropped. Where this report says "not adopted", "rules out" or
-"rejected", read a measured position. This section reopens and re-runs nothing.
+adoption verdicts. Nothing is adopted or rejected: every option, model and member will be a row on the planned
+`horsetrack japan leaderboard` (#452; this revision does not have the command yet), ranked by its shrunk return per
+¥100 at the final price, and a row with no measured return will be listed after the ranking, never dropped. Where
+this report says "not adopted", "rules out" or "rejected", read a measured position. This section reopens and
+re-runs nothing.
 
 - Registry family: `japan-family-l-exotic-pool-choice`.
-- Task 4 (#451) maps each L1 and L4 rule and its comparator to measured rows (comparators deduplicated), each labelled
-  by its selection: look-ahead for the final-price variants, decision time for the board-at-t variants, card only for
-  the variant that reads no price. The board-at-t variants, data pending above, are listed with their failed status
-  and no return. L5, the takeout calendar, is listed with no return.
+- As task 4 (#451, planned) specifies, each L1 and L4 rule and its comparator will be a measured row (comparators
+  deduplicated), each labelled by its selection: look-ahead for the final-price variants, decision time for the
+  board-at-t variants, card only for the variant that reads no price. The board-at-t variants, data pending above,
+  will be listed with their failed status and no return. L5, the takeout calendar, will be listed with no return.
 - "No rule is adopted" above now reads as a measured position: under D18 as amended, a loss-avoidance rule and its
-  stated comparator are each a row, with the paired difference beside them, and no Family L standard is needed
+  stated comparator will each be a row, with the paired difference beside them, and no Family L standard is needed
   before either ranks. The re-runs filed as #352 and #353 stay follow-ups.

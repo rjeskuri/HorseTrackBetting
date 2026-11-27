@@ -261,13 +261,14 @@ What each form is:
 ## On the leaderboard (2026-11-27)
 
 Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
-adoption verdicts. Nothing is adopted or rejected: every option, model and member is a row on
-`horsetrack japan leaderboard` (#452), ranked by its shrunk return per ¥100 at the final price, and a row with no
-measured return is listed after the ranking, never dropped. Where this report says "not adopted", "rules out" or
-"rejected", read a measured position. This section reopens and re-runs nothing.
+adoption verdicts. Nothing is adopted or rejected: every option, model and member will be a row on the planned
+`horsetrack japan leaderboard` (#452; this revision does not have the command yet), ranked by its shrunk return per
+¥100 at the final price, and a row with no measured return will be listed after the ranking, never dropped. Where
+this report says "not adopted", "rules out" or "rejected", read a measured position. This section reopens and
+re-runs nothing.
 
 - Registry family: `japan-c4-meta-final-win`.
-- Task 4 (#451) lists it as a model with no return yet. Its member-based records are withheld (D21): the public
-  leaderboard shows the family's id only, with no figure.
+- As task 4 (#451, planned) specifies, it will be listed as a model with no return yet. Its member-based records are
+  withheld (D21): the public leaderboard will show the family's id only, with no figure.
 - "Nothing is adopted" above now reads as a measured position, not a verdict. The run stays on the record as a
   documented failure to meet D9, as the owner's answer (b) on #87 records.

@@ -155,13 +155,14 @@ the owner's call; if made, it needs a new spec, because #77's family stays froze
 ## On the leaderboard (2026-11-27)
 
 Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
-adoption verdicts. Nothing is adopted or rejected: every option, model and member is a row on
-`horsetrack japan leaderboard` (#452), ranked by its shrunk return per ¥100 at the final price, and a row with no
-measured return is listed after the ranking, never dropped. Where this report says "not adopted", "rules out" or
-"rejected", read a measured position. This section reopens and re-runs nothing.
+adoption verdicts. Nothing is adopted or rejected: every option, model and member will be a row on the planned
+`horsetrack japan leaderboard` (#452; this revision does not have the command yet), ranked by its shrunk return per
+¥100 at the final price, and a row with no measured return will be listed after the ranking, never dropped. Where
+this report says "not adopted", "rules out" or "rejected", read a measured position. This section reopens and
+re-runs nothing.
 
-- Registry family: `japan-beta-clustered-final-win`. It is a calibration interval, not a return, so task 4 (#451)
-  lists it as a model with no return yet. #77's family `japan-crowd-calibration-final-win`, cited above, has its own
-  section in `crowd-calibration-japan.md`.
+- Registry family: `japan-beta-clustered-final-win`. It is a calibration interval, not a return, so, as task 4
+  (#451, planned) specifies, it will be listed as a model with no return yet. #77's family
+  `japan-crowd-calibration-final-win`, cited above, has its own section in `crowd-calibration-japan.md`.
 - "Nothing is adopted" above now reads as a measured comparison of two intervals for the same β. Which interval the
   tables carry is a reporting choice, not an adoption.
