@@ -6,20 +6,21 @@ unit staked (payout / stake) at final dividends and the paired per-race differen
 meeting-clustered one-sided bounds. Under the owner's reframe of 2026-11-27, every option is a ranked row: the rule's
 tickets and its comparator's are both rows, an avoid rule drops nothing from the data, and there is no pass/fail.
 **Nothing here is adopted.** Every figure below is an aggregate over the JRA results store (netkeiba race results,
-final Win odds and dividends), our own logged boards and the shipped boost calendar. The 100-vs-110 prediction and its
-reconstruction check read the JRA-VAN H1 votes; their figures and their result are withheld (D21) and are in a private
-report only. There is no race or runner row here.
+final Win odds and dividends), our own logged boards and the shipped boost calendar. The 100-vs-110 prediction, its
+reconstruction diagnostic and its counts of predictions read the JRA-VAN H1 votes; their figures and their result are
+withheld (D21) and are in a private report only. There is no race or runner row here.
 
-- Registry family `japan-family-l-floor-tail-favourite-v4`, spec sha256
-  `1e8f6cc0d7d7f3a7a6887c6eade09a0cbe61bc2d9ebe07b138522cb7f48e6ffb`. `run_study` froze the spec before it read any
+- Registry family `japan-family-l-floor-tail-favourite-v5`, spec sha256
+  `dd4d0926b6bc8d557739653a8612eb0d648085a57f4b733fa6b74ccfd4c32183`. `run_study` froze the spec before it read any
   row; the freeze line is the record of the owner's inputs (there is no sign-off key). The spec holds the rules, the
   tail odds and ranks, the entropy cut points, the comparators, the selections, the decision time (T-2) and its
   post-time source, who counts as a runner at t (a scratch at t included) and how a later scratch is settled, L2's
-  no-bet race, the board fields, the bootstrap, the Place-votes reading, the Place rule and its premium, the
-  reconstruction check and its tolerance, what an unavailable prediction records, and the 50 variant names
-  (`family_size` 50). Its `supersedes` entry names the three earlier families of this ticket and why each was
-  replaced (below).
-- Code at `acc0e2b` (`countries/japan/studies/avoidance_price.py`, built on #81's `studies/avoidance.py`). Owner
+  no-bet race, the board fields, the bootstrap, the Place-votes reading, the Place rule (a premium PLACE pool has no
+  prediction), the reconstruction diagnostic and its tolerance, the counts of predictions, the walk-forward scheme
+  (`config/folds.yaml`'s, under `evaluation`), and the 98 variant names (`family_size` 98: 50 descriptive records
+  and a walk-forward record for each of the 48 paired comparisons). Its `supersedes` entry names the four earlier
+  families of this ticket and why each was replaced (below).
+- Code at `64ccd07` (`countries/japan/studies/avoidance_price.py`, built on #81's `studies/avoidance.py`). Owner
   inputs are in `countries/japan/config/avoidance_price.yaml`. To reproduce, run
   `uv run python -m horsetrack.countries.japan.studies.avoidance_price --run`. The family is frozen, so a rerun with
   this spec adds runs of the same variants. Another spec is refused (`FamilyAlreadyFrozen`).
@@ -32,22 +33,27 @@ report only. There is no race or runner row here.
   sidecar, else the card)@af0475f243f53b16`, the part after `@` a digest of the race -> scheduled post mapping; the
   coverage counts are in the full report. The JRA-VAN build read by the 100-vs-110 check is named in the private
   report.
-- The full report is under the data directory, at `reports/floor-tail-favourite-japan-1e8f6cc0d7d7.md`, with
-  `-dropped.csv` beside it. The 100-vs-110 check is in `reports/floor-tail-favourite-japan-1e8f6cc0d7d7-plus10-jravan.md`
+- The full report is under the data directory, at `reports/floor-tail-favourite-japan-dd4d0926b6bc.md`, with
+  `-dropped.csv` beside it. The 100-vs-110 check is in `reports/floor-tail-favourite-japan-dd4d0926b6bc-plus10-jravan.md`
   and its `.csv` (private, JRA-VAN-derived). Every record is in
-  `docs/experiments/registry/japan/japan-family-l-floor-tail-favourite-v4.md`; the two 100-vs-110 records show
-  neither their status nor any value there (licensed source).
-- One run, 2026-11-27: 156 s, 1.09 GB peak resident memory.
+  `docs/experiments/registry/japan/japan-family-l-floor-tail-favourite-v5.md`, each walk-forward record with its 28
+  per-window differences; the two 100-vs-110 records show neither their status nor any value there (licensed
+  source). The command's printed summary names them only as withheld.
+- One run, 2026-11-27: 191 s, 1.87 GB peak resident memory (v4: 156 s, 1.09 GB). Most of the rise is the votes read,
+  which now filters inside pyarrow's dataset scan so that no holdout row reaches Python (C below); that scan decodes
+  each selected row group of `pool_votes` at once.
 
 ## Runs of this ticket
 
-Every run is in the registry; the three earlier families keep their records and are superseded, not deleted. Their
+Every run is in the registry; the four earlier families keep their records and are superseded, not deleted. Their
 final-price rows are the same as v4's to the last digit (the changes below touch only the board at t and the
-100-vs-110 check), and v3's board-at-t rows are the same as v4's.
+100-vs-110 check), v3's board-at-t rows are the same as v4's, and each of v5's 48 descriptive comparison records
+equals v4's (status, every metric, n and bound).
 
 | Family | Spec sha256 | Git | Records | Status |
 | --- | --- | --- | ---: | --- |
-| `japan-family-l-floor-tail-favourite-v4` | `1e8f6cc0d7d7...` | `acc0e2b` | 50 | Current. The 48 paired comparisons (23 at the final price, 25 at t) are scored; the two 100-vs-110 records are withheld (D21). |
+| `japan-family-l-floor-tail-favourite-v5` | `dd4d0926b6bc...` | `64ccd07` | 98 | Current. The 48 descriptive paired comparisons and their 48 walk-forward records (23 + 23 at the final price, 25 + 25 at t) are scored; the two 100-vs-110 records are withheld (D21). |
+| `japan-family-l-floor-tail-favourite-v4` | `1e8f6cc0d7d7...` | `acc0e2b` | 50 | Superseded by fix round 4 (below): a premium PLACE pool was rebuilt with its premium taken as paid, one reconstruction miss rejected the whole 100-vs-110 table, and no record scored the walk-forward test windows alone. Its 48 comparison records equal v5's descriptive ones. |
 | `japan-family-l-floor-tail-favourite-v3` | `c726de4222a4...` | `6b75cac` | 50 | Superseded by the second review (below): its 100-vs-110 check rebuilt Place dividends with an equal split of the profit, not JRA's published rule. |
 | `japan-family-l-floor-tail-favourite-v2` | `d987d60b9b3b...` | `2321118` | 50 | Superseded: at t it counted a horse scratched before t as a runner (below). |
 | `japan-family-l-floor-tail-favourite` | `a3bfd6a65fa8...` | `88c40aa` | 50 | Superseded by the review of 2026-11-27 (below). 24 scored at the final price; all 26 board-at-t variants data pending (no post time on the logged days). |
@@ -56,6 +62,58 @@ A first attempt at `f0d90a1` was stopped before it scored or appended anything; 
 freeze line, which that family's run reused.
 
 ## What changed in this round and why
+
+Fix round 4 follows the owner-requested restart plan (GPT-6 Astra's review of `1774fb3`, posted on #82 on
+2026-11-27). Its diagnosis: the churn came from turning a paired comparison into a general check of JRA's settlement.
+The 100-vs-110 table is in scope; certifying every placed horse's dividend, handling every premium exception and
+rejecting the whole table on one discrepancy are not. So observations, predictions and reconstruction diagnostics are
+now kept apart, and every realised result and every attempted prediction stays, each with its status. Each change is
+pinned by a test in `tests/countries/japan/test_avoidance_price.py` or `tests/countries/japan/models/test_v0_store.py`,
+and the changed pre-registration is a new family, v5, frozen before any read:
+
+- **A. An unresolved premium.** v4 added the 5% Place premium to every race the boost calendar marks premium or ultra
+  premium, but JRA may withhold it when betting is very concentrated (`takeout`'s `boost_may_be_withheld`) and the
+  store holds no signal of whether it was paid. Such a race now has its prediction unavailable, with a reason naming
+  the unresolved premium; the premium is never inferred from the realised dividends. Its realised dividend stays and
+  no other race moves. Verified premium settlement is #481.
+- **B. No whole-table rejection.** In v4 one placed horse off its realised dividend by more than the tolerance failed
+  the record: the registry kept no metric and the rebuilt predictions were cleared. The reconstruction check is now a
+  diagnostic: a race with such a miss has its row labelled discrepant and keeps its prediction, the predicted x
+  realised table counts every available prediction, and the record stays scored with its metrics. The counts come
+  from the rows' final statuses: attempted (the floor-bound placed favourites), available (with a prediction),
+  unavailable (without one, each with its reason) and discrepant (available, labelled by the diagnostic). They agree
+  across the registry record, the private report and its CSV; the public report gives the attempted count only (its
+  realised table), the others being built on the votes (D21).
+- **C. The holdout read boundary (D14).** `models/v0/store.read_store_table`, which #81's development read uses,
+  materialised the asked columns for the whole date range and only then dropped holdout days, so holdout prices and
+  outcomes entered memory outside `LockedHoldout.open`. It now reads the date column first and scopes the scan of the
+  other columns to the development days, so a row group of holdout days alone is skipped on its statistics and no
+  other column of a holdout day reaches Python; what it returns for development days is unchanged for every caller.
+  The votes reader decoded each selected row group's batches into Python before filtering to the wanted races; it now
+  filters inside the dataset scan. The tests trace the read itself (no Python frame of the package or of pyarrow ever
+  holds a holdout value), not only its output.
+- **D. A votes file that cannot be opened.** A `pool_votes.parquet` that exists but cannot be read for its digest
+  aborted the run after the freeze. The votes' data build now records the failure (`(unreadable: PermissionError)`),
+  scoring goes on, the realised counts stand and the prediction is unavailable.
+- **E. Walk-forward rows.** Every development race was scored once (`paired_same_races:development`), the first
+  training span included. Each paired comparison now has, beside that descriptive record (#81's scheme and its name,
+  unchanged), a walk-forward record named `<variant>:walk_forward`: the same per-race returns over the races in the
+  test windows of `core.eval.folds.walk_forward` under Japan's scheme (`config/folds.yaml`: quarters, expanding,
+  min_train 22, a 7-day embargo; the first test window is 2020-Q1). Its pooled figures carry D7's bounds, and each
+  window's paired difference and n are in the registry record, labelled with the window. Nothing is fitted, so the
+  scheme only decides which races are scored; #77's entropy cut points come from 2014-06-07 to 2019-12-31, the first
+  window's training span, so the walk-forward rows are out of their sample. The 100-vs-110 check has no walk-forward
+  record.
+- **F. The command's printed summary (D21).** `run_study`'s returned summary, which `main` prints, named a failed
+  100-vs-110 record among `failed_or_pending_variants`, telling the withheld check's result outside `write_report`.
+  It now lists only the jra-store variants there and names the two votes-built records under `withheld_variants`.
+- **G. A new family.** The changed semantics are frozen as `japan-family-l-floor-tail-favourite-v5`, superseding v4;
+  the earlier families keep their records.
+
+Every jra-store figure of v5's descriptive records equals v4's to the last digit; at t, each walk-forward record equals
+its descriptive one (the two logged days are in the 2026-Q4 test window).
+
+### Round 2 (v3 to v4)
 
 The review of v3 (2026-11-27, round 2) found one defect in the 100-vs-110 check's Place rule and five smaller ones.
 Each is now pinned by a test in `tests/countries/japan/test_avoidance_price.py` or
@@ -135,8 +193,9 @@ a runner at t from the WIN and PLACE boards only, which mark a scratched runner 
 | D7 | Bootstrap clusters are meetings (venue x day); bounds are 95% one-sided (`config/scoring.yaml`). | §3, #14 |
 | D10 | Only races from 2014-06-07. | §4, #14 |
 | D11, D14, D15 | Holdout A2 from 2026-11-28 is fully locked for outcomes and prices. It is not read or opened here. | §5, #14; `config/holdout.yaml` |
-| D17 | The family size counts every variant, each cut point and pool included: 50. Every record carries it as `variants_searched`. | §6, #14 |
-| D21 | No figure from a licensed source is in the repository. The 100-vs-110 prediction and its reconstruction check are JRA-VAN-derived and withheld, their result included. | §8, #14; owner 2026-11-26 (strict) |
+| D17 | The family size counts every variant, each cut point, pool and evaluation included: 98. Every record carries it as `variants_searched`. | §6, #14 |
+| D9 | The walk-forward test windows: Japan's scheme in `config/folds.yaml` (quarters anchored on January, expanding, min_train 22, embargo 7 days), read through `core.eval.folds.load_country_scheme` and frozen in the spec. | §4, #14; #70 |
+| D21 | No figure from a licensed source is in the repository. The 100-vs-110 prediction, its reconstruction diagnostic and its counts of predictions are JRA-VAN-derived and withheld, their result and status included. | §8, #14; owner 2026-11-26 (strict) |
 | Floor | A board price at or below 1.1 is at the floor. | owner, 2026-11-24 |
 | #82 answer | `l3_tail_odds: [51.0, 101.0]` (fractional 50/1 and 100/1, #77's convention); `l7_entropy_cut_points`: #77's quintiles (0.6952092433071905, 0.7467255002267639, 0.7851488760086348, 0.8215443360884407, from `config/calibration.yaml`), applied to final and board-at-t entropy; `sets: every_set`; `favourite_ties: lower_horse_no`; `l7_favourite_boxes: top3_box`; `l7_skipped_race: stake_back`; `plus10_inputs: jravan_pool_votes`. Confirmed: L3's ranks and L7's box read only the WIN board at t (BRACKET_QUINELLA excluded); L2 reads the PLACE and Wide boards at t only. | #82, owner comment of 2026-11-26 |
 | Reframe | Every rule x variant is a ranked row against its comparator with n, CI and the variants searched; no D18 pass/fail; no sign-off key; an avoid rule drops nothing from the data. | #82, owner comment of 2026-11-27 |
@@ -159,16 +218,19 @@ rule returning more per unit staked than its comparator on the same races.
 
 ## Variants tried
 
-The family has 50 variants (`Registry.family_size`) and 50 records, all from one run at git `acc0e2b`: the 48 paired
-comparisons, all scored (23 at the final price, 25 at t), and the two 100-vs-110 records (one per selection), which
-are withheld (D21).
+The family has 98 variants (`Registry.family_size`) and 98 records, all from one run at git `64ccd07`: the 48
+descriptive paired comparisons and their 48 walk-forward records, all scored (23 + 23 at the final price, 25 + 25 at
+t), and the two 100-vs-110 records (one per selection, descriptive only), which are withheld (D21). The tables below
+up to the ranked options are the descriptive records, unchanged from v4; the walk-forward rows follow them.
 
 Data and split:
 - Development days from 2014-06-07 to 2026-11-23: 43,130 run races on 3,597 meetings, 601,265 starters, 2,454
   handicaps. The dividend rows read are WIN, PLACE, QUINELLA_PLACE, QUINELLA, FORECAST, TRIO and TIERCE: 474,675.
 - No day in the store is a holdout day (the store ends 2026-11-23). The readers drop holdout days anyway; the votes
   reader refuses a holdout race; `LockedHoldout` was not opened.
-- Nothing is fitted: every development race is used once (`paired_same_races:development`).
+- Nothing is fitted. A descriptive record uses every development race once (`paired_same_races:development`); a
+  walk-forward record uses the races of the 28 quarterly test windows from 2020-Q1 to 2026-Q4 alone (23,871 races on
+  1,991 meetings; the training span 2014-06-07 to 2019-12-31 is scored by none of them).
 
 Selections:
 - `final (look-ahead)`: the choice reads the final Win odds (`runners.win_odds`), which are not known at a decision
@@ -184,7 +246,7 @@ minus comparator. Lower and upper are the 5% and 95% quantiles of the bootstrap 
 seed 82), each a one-sided 95% bound, per variant, with no family-wise correction. Under `stake_back`, an L7 race the
 rule skips returns its stake (1.0), and so does an L2 race whose every ticket is at the floor.
 
-### Paired comparisons at the final price (look-ahead)
+### Paired comparisons at the final price (look-ahead, descriptive)
 
 The base strategy is one unit on every starter (WIN, PLACE) or every combination of the starters (exotics), flat.
 L2's comparator is the same tickets with those at the floor; L3's, the same tickets with the tail; L7's, the same
@@ -217,7 +279,7 @@ race. No race was dropped from any scored variant.
 | L7 | TRIO | handicap, top-3 box | 43,130 | 0.7845 [0.7624, 0.8073] | 0.7711 [0.7478, 0.7956] | +0.01339 | +0.00634 | +0.02017 | 2,454 |
 | L7 | TIERCE | handicap, top-3 box | 43,130 | 0.6982 [0.6777, 0.7195] | 0.6767 [0.6552, 0.6988] | +0.02151 | +0.01553 | +0.02730 | 2,454 |
 
-### Paired comparisons at the board at t (T-2)
+### Paired comparisons at the board at t (T-2, descriptive)
 
 The same rules and comparators, chosen on the board at t: 21 races on 2 meetings (Kyoto, 2026-11-21 and 2026-11-22),
 the same 21 races in every row; the 3 races without a board at t are dropped from each. **Single-run and small.** With
@@ -255,6 +317,46 @@ bounds are not a sampling interval here, and none of these rows is evidence on i
 
 L7's handicap rows at t rest on the one handicap of the two days, and its flattest-quintile row on 5 races. The ranked
 options at t, from the same records, are in the full report.
+
+### Walk-forward rows (the test windows of `config/folds.yaml`, v5)
+
+Each descriptive comparison above has one walk-forward record, `<variant>:walk_forward` (fold scheme
+`walk_forward:quarter x1 step 1, expanding, min_train 22, embargo 7d, anchor month 1`): the same per-race returns over
+the races in the 28 quarterly test windows from 2020-01-01 to 2026-12-31 alone, the first training span (2014-06-07
+to 2019-12-31) scored by none. These are the evaluation rows; the descriptive rows above are the historical
+description. Bounds are D7's meeting-clustered one-sided bounds over the windows' races (1,991 meetings at the final
+price); each window's own paired difference and n are in the registry summary, and "Windows +/-" counts the windows
+whose difference is above or below 0 (a window at exactly 0 is in neither). At the final price (look-ahead):
+
+| Rule | Pool | Cut | Races | Rule return [lower, upper] | Comparator return [lower, upper] | Paired difference | Lower (5%) | Upper (95%) | Races changed | Windows +/- |
+| --- | --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| L2 | WIN | floor | 23,871 | 0.7206 [0.7063, 0.7346] | 0.7209 [0.7066, 0.7348] | -0.00028 | -0.00038 | -0.00018 | 119 | 6 / 21 |
+| L3 | WIN | above 51 | 23,871 | 0.7909 [0.7822, 0.7995] | 0.7209 [0.7066, 0.7348] | +0.07001 | +0.05568 | +0.08448 | 23,309 | 28 / 0 |
+| L3 | PLACE | above 51 | 23,871 | 0.7964 [0.7921, 0.8007] | 0.7301 [0.7239, 0.7364] | +0.06629 | +0.05988 | +0.07269 | 23,309 | 28 / 0 |
+| L3 | WIN | above 101 | 23,871 | 0.7784 [0.7676, 0.7890] | 0.7209 [0.7066, 0.7348] | +0.05749 | +0.04539 | +0.06907 | 21,119 | 25 / 3 |
+| L3 | PLACE | above 101 | 23,871 | 0.7832 [0.7783, 0.7884] | 0.7301 [0.7239, 0.7364] | +0.05311 | +0.04773 | +0.05840 | 21,119 | 28 / 0 |
+| L3 | QUINELLA_PLACE | rank 9 or worse | 23,871 | 0.7571 [0.7503, 0.7642] | 0.6201 [0.6115, 0.6289] | +0.13704 | +0.12594 | +0.14834 | 22,529 | 28 / 0 |
+| L3 | QUINELLA | rank 9 or worse | 23,871 | 0.7253 [0.7144, 0.7362] | 0.5989 [0.5848, 0.6135] | +0.12637 | +0.10913 | +0.14364 | 22,529 | 28 / 0 |
+| L3 | FORECAST | rank 9 or worse | 23,871 | 0.7181 [0.7067, 0.7296] | 0.5987 [0.5829, 0.6147] | +0.11943 | +0.10040 | +0.13835 | 22,529 | 28 / 0 |
+| L3 | TRIO | rank 9 or worse | 23,871 | 0.6958 [0.6830, 0.7090] | 0.5256 [0.5110, 0.5409] | +0.17021 | +0.15079 | +0.18952 | 22,529 | 28 / 0 |
+| L3 | TIERCE | rank 9 or worse | 23,871 | 0.6963 [0.6819, 0.7112] | 0.5592 [0.5387, 0.5807] | +0.13711 | +0.11179 | +0.16140 | 22,529 | 28 / 0 |
+| L3 | QUINELLA_PLACE | rank 13 or worse | 23,871 | 0.6834 [0.6756, 0.6914] | 0.6201 [0.6115, 0.6289] | +0.06337 | +0.05539 | +0.07131 | 16,342 | 28 / 0 |
+| L3 | QUINELLA | rank 13 or worse | 23,871 | 0.6665 [0.6531, 0.6803] | 0.5989 [0.5848, 0.6135] | +0.06761 | +0.05517 | +0.07967 | 16,342 | 27 / 1 |
+| L3 | FORECAST | rank 13 or worse | 23,871 | 0.6655 [0.6502, 0.6810] | 0.5987 [0.5829, 0.6147] | +0.06678 | +0.05313 | +0.08003 | 16,342 | 25 / 3 |
+| L3 | TRIO | rank 13 or worse | 23,871 | 0.6007 [0.5866, 0.6151] | 0.5256 [0.5110, 0.5409] | +0.07509 | +0.06035 | +0.08980 | 16,342 | 28 / 0 |
+| L3 | TIERCE | rank 13 or worse | 23,871 | 0.6265 [0.6088, 0.6444] | 0.5592 [0.5387, 0.5807] | +0.06729 | +0.04640 | +0.08719 | 16,342 | 26 / 2 |
+| L7 | PLACE | flattest quintile | 23,871 | 0.8883 [0.8826, 0.8940] | 0.8460 [0.8391, 0.8528] | +0.04237 | +0.03837 | +0.04638 | 4,761 | 28 / 0 |
+| L7 | WIN | handicap | 23,871 | 0.8081 [0.7961, 0.8199] | 0.7943 [0.7820, 0.8066] | +0.01388 | +0.01051 | +0.01723 | 1,326 | 25 / 3 |
+| L7 | PLACE | handicap | 23,871 | 0.8575 [0.8508, 0.8641] | 0.8460 [0.8391, 0.8528] | +0.01150 | +0.00954 | +0.01345 | 1,326 | 27 / 1 |
+| L7 | QUINELLA_PLACE | handicap, top-3 box | 23,871 | 0.8195 [0.8094, 0.8297] | 0.8073 [0.7969, 0.8181] | +0.01221 | +0.00919 | +0.01518 | 1,326 | 24 / 4 |
+| L7 | QUINELLA | handicap, top-3 box | 23,871 | 0.8008 [0.7864, 0.8153] | 0.7852 [0.7704, 0.8004] | +0.01561 | +0.01163 | +0.01943 | 1,326 | 25 / 3 |
+| L7 | FORECAST | handicap, top-3 box | 23,871 | 0.7759 [0.7615, 0.7903] | 0.7588 [0.7441, 0.7740] | +0.01704 | +0.01308 | +0.02077 | 1,326 | 24 / 4 |
+| L7 | TRIO | handicap, top-3 box | 23,871 | 0.7890 [0.7584, 0.8203] | 0.7800 [0.7478, 0.8130] | +0.00902 | -0.00160 | +0.01894 | 1,326 | 17 / 11 |
+| L7 | TIERCE | handicap, top-3 box | 23,871 | 0.6962 [0.6680, 0.7256] | 0.6771 [0.6475, 0.7075] | +0.01916 | +0.01052 | +0.02726 | 1,326 | 22 / 6 |
+
+No race in a window was dropped from any of these. At t (T-2), both logged days fall in the 2026-Q4 window, so each of
+the 25 walk-forward records at t scores the same 21 races as its descriptive record and equals it figure for figure
+(the table above at t); it is one window, not a walk-forward history.
 
 ### L7: what the skipped favourites returned (derived)
 
@@ -339,11 +441,13 @@ At t a floor price on the board need not end at the floor: one of the nine paid 
 The prediction of each of these dividends (100 or 110) from its race's settled PLACE pool reads the JRA-VAN H1 votes
 (the jravan `pool_votes` table, #368): sales from the pool row net of refunds, the placed horses from the jra
 dividends, and the frozen Place rule, JRA's published stake-back share (`core.pricing.stake_back_share_dividend` at the
-base Place rate, 0.80), then `predicted_floor_dividend` on the base payout, then the 5% premium on a PLACE pool the
-boost calendar marks premium or ultra premium. Before the predicted x realised table, the frozen reconstruction check
-compares every placed horse's rebuilt Place dividend with the realised one (tolerance 10 yen per 100). The
-reconstruction check, the cross-tab and the two records' status are in the private report (withheld, D21):
-`floor-tail-favourite-japan-1e8f6cc0d7d7-plus10-jravan.md` under the data directory.
+Place rate, 0.80), then `predicted_floor_dividend` on the base payout. A race whose PLACE pool the boost calendar marks
+premium or ultra premium has no prediction (its premium settlement is unresolved; #481). The frozen reconstruction
+diagnostic compares every placed horse's rebuilt Place dividend with the realised one (tolerance 10 yen per 100) and
+labels a race with a larger miss discrepant, keeping its prediction in the predicted x realised table. The diagnostic,
+the cross-tab, the counts of predictions attempted, available, unavailable and discrepant, and the two records'
+status are in the private report (withheld, D21): `floor-tail-favourite-japan-dd4d0926b6bc-plus10-jravan.md` under the
+data directory. The attempted count is the realised table above.
 
 ## Alternatives rejected and why
 
@@ -362,26 +466,47 @@ reconstruction check, the cross-tab and the two records' status are in the priva
 - **A reconstruction tolerance of 0.** JRA rounds Place dividends down to 10 yen, and a floor horse's 100 or 110 is
   the check's own question, so one rounding step is the frozen tolerance.
 - **Reading the Place votes through `read_label`.** The view reads a label-only table whole; `pool_votes` is about
-  1.2 GB. The reader prunes row groups by race_id statistics and reads five columns in 1M-row batches, PLACE rows of
-  the wanted development races only.
+  1.2 GB. The reader prunes row groups by race_id statistics and reads five columns, PLACE rows of the wanted
+  development races only, filtered inside the scan.
+- **Filtering the votes in Python, batch by batch (v1 to v4).** It held about 0.6 GB at its peak against about 2.4 GB
+  for the scan filter when the votes are read alone, but each batch of a row group mixing development and holdout
+  races reached Python whole, holdout votes included (D14). The boundary wins; smaller row groups in `pool_votes`
+  would bring the memory back down.
+- **Rejecting the whole 100-vs-110 table on one reconstruction miss (v1 to v4).** One placed horse off its realised
+  dividend erased every prediction and the record's metrics. The miss is now a diagnostic on its race's row, and the
+  rest of the evidence stays (B).
+- **Taking a premium as paid (v4), or inferring it from the realised dividends.** JRA may withhold the premium and the
+  store holds no settlement signal; either choice would decide the prediction from an assumption or from the answer.
+  The prediction is unavailable instead (A); verified premium settlement is #481.
+- **Re-scoring each walk-forward window from the races up.** Nothing is fitted, so a race's paired returns are the
+  same in either evaluation; the walk-forward record restricts the descriptive record's per-race returns to the test
+  windows' races. The pooled figures are bootstrapped over those races' meetings; the per-window differences carry no
+  bounds of their own (a point and n per window, 28 windows by 48 comparisons).
 - **The equal split of the Place profit (v1 to v3).** It is not JRA's published Place rule. JRA pays each placed
   horse (its own stakes plus an equal share of the losing stakes) times the payout rate, shared over its own tickets
   (the stake-back share). `core.pricing.stake_back_share_dividend` already implements it, so the study reuses it
   rather than a second copy.
 - **Rebuilding a premium race at its boosted rate (v1 to v3).** The premium is 5% of sales split equally over the
-  placed horses and paid after Plus-10, not a higher rate inside the stake-back share, so the base rate stays 0.80
-  and `takeout.race_takeout`'s boost only says whether the premium is added. Plus-10 is tested on the base payout
-  alone.
+  placed horses and paid after Plus-10, not a higher rate inside the stake-back share. v4 added it after Plus-10 at
+  the base rate 0.80; v5 makes no prediction for such a race (above).
 - **A scored zero when the votes cannot be read (v2, v3).** Eligible favourites with no prediction are not zero
   favourites; the record now holds no check and no predicted cell, and the realised counts stand.
 - **`drop_race` for tied Win prices and no L7 boxes.** The owner chose `lower_horse_no` and `top3_box`.
-- **A family-wise correction over the 50 variants.** The reframe ranks options; the leaderboard (#449) shrinks within
+- **A family-wise correction over the 98 variants.** The reframe ranks options; the leaderboard (#449) shrinks within
   each pool. The bounds here are per variant, and the family size is on every record.
 
 ## What this rules out
 
 The history rows are look-ahead, development days 2014-06-07 to 2026-11-23; the board-at-t rows are 21 races on two
 meetings. Nothing below adopts a rule, and no option at the final price returns above its stake.
+
+- **The walk-forward rows (v5) against the descriptive ones.** Over the 28 test windows from 2020-Q1 (23,871 races)
+  every rule keeps the sign and roughly the size of its descriptive difference. L3's tail rules return more than
+  their comparators by +0.053 to +0.070 (WIN and PLACE) and +0.063 to +0.170 (exotics), every lower bound above
+  +0.045, and in 25 to 28 of the 28 windows. L2's WIN floor rule stays just below its comparator (-0.00028, bounds
+  -0.00038 and -0.00018; 21 windows below 0, 6 above). L7's rules return more than their comparators under
+  stake-back (+0.009 to +0.042); the handicap TRIO box is the one whose lower bound is below 0 (-0.0016; 17 windows
+  above, 11 below). At t the walk-forward rows are the descriptive ones: one window, two meetings.
 
 - **L3, the tail, at the final price.** Dropping WIN or PLACE tickets on runners whose final WIN odds are above 51 or
   101 raises the per-race mean return by +0.055 to +0.069 per unit staked, every lower bound above +0.050. Dropping
@@ -404,8 +529,8 @@ meetings. Nothing below adopts a rule, and no option at the final price returns 
   bounds 0.646 to 0.889). At t, the two logged days hold one handicap and 5 flattest-quintile races: too few to read.
 - **The 100-vs-110 check, realised part.** Of 10,236 floor-bound placed favourites, 607 (5.9%) were paid 100, so
   Plus-10 was withheld in about one floor-bound case in seventeen at the final price. At t, 9 favourites priced at the
-  floor on the PLACE board placed: 2 paid 100, 6 paid 110 and 1 above 110. The prediction of which ones pay 100, and
-  the reconstruction check before it, are in the private report (withheld, D21).
+  floor on the PLACE board placed: 2 paid 100, 6 paid 110 and 1 above 110. The prediction of which ones pay 100, the
+  reconstruction diagnostic and the counts of predictions are in the private report (withheld, D21).
 - **A decision time, first look only.** Every rule now has its board-at-t rows, on 21 races over 2 meetings; more
   logged days are needed before any of them can rank a rule.
 
@@ -423,5 +548,10 @@ Filed under epic #72 as `status:proposed`:
 - #352: the post-time sidecar backfill. This study now takes the scheduled post from `post_times_for`, but #81's board
   at t still reads the captures' `post_utc` only.
 - #344: `write_summary` refuses a family id with a '/', which other tickets' families in the registry hold, so this
-  summary was written over the families already indexed plus v4.
+  summary was written over the families already indexed plus v4, and for v5 over those plus v5 (only v5's file and the
+  index changed).
+- #481: the Place premium's settlement on premium days from a verified signal, so a premium race can have a
+  prediction again (v5 leaves it unavailable).
+- The votes read's memory: smaller row groups in `pool_votes` (or a race-scoped layout) would bring the scan filter's
+  peak back near the old batch loop's without letting a holdout row reach Python. Not filed yet.
 - This frozen family re-run as more days are logged, so its board-at-t rows rest on more than two meetings.
