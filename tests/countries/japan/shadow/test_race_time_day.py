@@ -33,6 +33,15 @@ Contract pinned here (`horsetrack.countries.japan.shadow.race_time_day`; the cod
     min(its cutoff, the pass's read instant), its cutoff taken from the post after the sidecar
     override; else "unknown" (never the rail `races()` or the store's races.rail_setting
     gives). The inputs' rail carries that value and its available_utc (null when unknown).
+  - Round 6, rails from the cached going pages (馬場情報): when `track_condition` holds no turf
+    publication of a venue and day, that venue's turf races take their rail from
+    `race_time_day._going_page_rails(race_date) -> DataFrame[venue, rail, available_utc]` (the
+    day's going-page rails with their publication instants, from the raw cache; a module seam,
+    looked up at call time), under the same bound min(post - primary, read instant), the post
+    after the sidecar override. A going-page rail published after the bound stays "unknown".
+  - Round 6: a sidecar whose sightings mix whole-second and fractional-second instants gives
+    every record and the coverage, each instant keeping its sub-second value; every record
+    carries "format": 2, and `verify_replay` returns `.problems` ([] when clean) and `.legacy`.
   - Round 5, one clock in two roles: each pass reads the clock before the card, store and
     sidecars (the records' input snapshot) and again after them to schedule, so a slow load
     does not push a forecast past its cutoff. The latest post read after a computation reads
@@ -248,10 +257,15 @@ POSTS = {rid(v, no): post for v, no, _, post, _, _ in DAY_RACES}
 CELL = {rid(v, no): cell for v, no, cell, _, _, _ in DAY_RACES}
 
 
-def expected(model: SpeedModel, race_id: str, as_of: datetime) -> tuple[float, float, set[str]]:
+def expected(
+    model: SpeedModel, race_id: str, as_of: datetime, seen_at: dict | None = None
+) -> tuple[float, float, set[str]]:
     """(par, par + variant, the same-group results used) from a separate copy of the #305 model
-    that observes only the results first seen by `as_of`."""
+    that observes only the results first seen by `as_of`; `seen_at` (race id -> instant)
+    replaces those races' first sightings."""
     src = source_results()
+    for race_id_, instant in (seen_at or {}).items():
+        src.loc[src["race_id"] == race_id_, "first_seen_utc"] = pd.Timestamp(instant)
     seen = src[src["first_seen_utc"] <= pd.Timestamp(as_of)]
     ref = copy.deepcopy(model)
     ref.observe(
@@ -401,7 +415,7 @@ def test_a_prospective_day_records_every_race_at_its_cutoff(model, start, want):
             assert inputs["rail"] == {"value": "unknown", "available_utc": None}, race_id
         listed = {r["race_id"] for r in inputs["results"]}
         assert listed - {race_id} == set(POSTS) - {race_id}, race_id  # every race of the day
-    assert verify_replay(read_log(), model=model, model_version=MV) == []
+    assert verify_replay(read_log(), model=model, model_version=MV).problems == []
 
 
 # --------------------------------------------------------------------------- replay
@@ -423,7 +437,7 @@ def test_a_replay_records_only_replays_and_a_rerun_appends(model):
     assert after.startswith(before) and len(after) > len(before)
     stored = read_log()
     assert stored == json.loads(json.dumps(live.records + again.records))
-    assert verify_replay(stored, model=model, model_version=MV) == []
+    assert verify_replay(stored, model=model, model_version=MV).problems == []
     for venue in VENUES:
         counts = again.coverage[venue]
         assert counts["scheduled"] == SCHEDULED[venue]
@@ -684,7 +698,7 @@ def test_the_command_runs_from_the_upcoming_card_before_any_result_or_sidecar(
         from_sidecar = race_id in {rid("TOK", n) for n in tok} | {rid("KYO", n) for n in kyo}
         assert rec["inputs"]["target"]["post_source"] == ("sidecar" if from_sidecar else "card")
         assert utc(rec["inputs"]["target"]["post_utc"]) == want_post[race_id], race_id
-    assert verify_replay(stored, model=card_model, model_version=MV) == []
+    assert verify_replay(stored, model=card_model, model_version=MV).problems == []
     for venue, n in (("TOK", 4), ("KYO", 3)):
         lines = [line for line in out.splitlines() if venue in line]
         assert any(re.search(rf"\b{n}\b", line) for line in lines), (venue, out)
@@ -719,11 +733,11 @@ def test_each_record_keeps_the_card_it_was_made_from_and_verifies_alone(model):
 
     assert kyo_r2_post_in(ok[rid("TOK", 1)]) == POSTS[rid("KYO", 2)]
     assert kyo_r2_post_in(ok[rid("KYO", 1)]) == kyo_r2
-    assert verify_replay(read_log(), model=model, model_version=MV) == []
+    assert verify_replay(read_log(), model=model, model_version=MV).problems == []
 
     run(model, datetime(2025, 2, 18, 0, 0, tzinfo=UTC), replay=True)
     log = race_time_day.race_time_log_path(DAY)
-    assert verify_replay(read_log(), model=model, model_version=MV) == []
+    assert verify_replay(read_log(), model=model, model_version=MV).problems == []
     assert sorted(p.name for p in log.parent.iterdir()) == [log.name]
 
 
@@ -1096,7 +1110,7 @@ def test_a_turf_rail_is_the_track_condition_published_by_the_cutoff_and_the_read
             assert utc(rec["inputs"]["rail"]["available_utc"]) == available, race_id
         assert rec["inputs"]["target"]["rail"] == rail, race_id
     assert utc(recs[rid("TOK", 3)]["post_utc_at_cutoff"]) == TOK_R3_MOVED
-    assert verify_replay(read_log(), model=rail_model, model_version=MV) == []
+    assert verify_replay(read_log(), model=rail_model, model_version=MV).problems == []
 
 
 class MovingCardModel(SpeedModel):
@@ -1325,4 +1339,236 @@ def test_a_sighting_logged_after_the_runner_read_its_clock_is_not_an_input(
 
     row = next(r for r in rec["inputs"]["results"] if r["race_id"] == early)
     assert utc(row["first_seen_utc"]) == seen  # kept as read, even when after the read instant
-    assert verify_replay(got.records, model=model, model_version=MV) == []
+    assert verify_replay(got.records, model=model, model_version=MV).problems == []
+
+
+# --------------------------------------------------------------------------- round 6
+
+MS = timedelta(milliseconds=1)
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["prospective", "replay"])
+@pytest.mark.parametrize(
+    ("r3_vs_r4_cutoff", "r3_used_in_replay"),
+    [(250 * MS, False), (-250 * MS, True)],
+    ids=["Tokyo R3 seen 0.25 s after R4's cutoff", "0.25 s before it"],
+)
+def test_a_sidecar_mixing_whole_and_fractional_seconds_gives_every_record(
+    model, replay, r3_vs_r4_cutoff, r3_used_in_replay
+):
+    """Round-5 finding rt:221: the results sidecar mixes whole-second sightings with fractional
+    ones (Tokyo R1 at 01:12:00.5, Tokyo R3 a quarter second either side of Tokyo R4's 02:43
+    cutoff); the day still records every race, appends every record (format 2) and reports the
+    coverage, and each instant keeps its sub-second value: in a replay Tokyo R4 uses R3 only when
+    it was seen before the cutoff. The log verifies from its own inputs."""
+    tok4 = rid("TOK", 4)
+    seen_at = {
+        rid("TOK", 1): at(1, 12) + 500 * MS,
+        rid("TOK", 3): POSTS[tok4] - PRIMARY + r3_vs_r4_cutoff,
+    }
+    for venue in VENUES:
+        posts = {no: post for v, no, _, post, _, _ in DAY_RACES if v == venue and post}
+        odds_log.write_post_times(sidecar(venue, ".races.json"), posts, at(0, 0))
+        for v, no, _, _, seen, _ in DAY_RACES:
+            if v == venue and seen is not None:
+                instant = seen_at.get(rid(v, no), seen)
+                odds_log.record_published(sidecar(venue, ".results.json"), [no], instant)
+    read = odds_log.read_published(sidecar("TOK", ".results.json"))
+    assert read[3] == seen_at[rid("TOK", 3)] and read[2].microsecond == 0  # the sidecar mixes
+    write_rails()
+    clock = FakeTime(datetime(2025, 2, 18, 0, 0, tzinfo=UTC) if replay else at(0, 30))
+    got = race_time_day.run_race_time_day(
+        DAY,
+        model=model,
+        model_version=MV,
+        races=store_races,
+        now=clock.now,
+        sleep=no_sleep if replay else clock.sleep,
+        replay=replay,
+    )
+    stored = read_log()
+    assert len(got.records) == len(stored) == len(DAY_RACES)
+    assert [r["format"] for r in stored] == [2] * len(DAY_RACES)
+    for venue in VENUES:
+        assert got.coverage[venue]["scheduled"] == SCHEDULED[venue]
+    assert (got.coverage["TOK"]["forecast"], got.coverage["KYO"]["forecast"]) == (4, 2)
+    recs = {r["race_id"]: r for r in got.records}
+    for race_id, rec in recs.items():
+        if rec["status"] != "ok":
+            continue
+        cutoff = POSTS[race_id] - PRIMARY
+        as_of = min(cutoff, utc(rec["input_snapshot_utc"]))
+        _, same_day, used = expected(model, race_id, as_of, seen_at)
+        assert rec["same_day_s"] == pytest.approx(same_day, abs=1e-9), race_id
+        assert {u["race_id"] for u in rec["results_used"]} == used, race_id
+    rec = recs[tok4]
+    assert (rid("TOK", 3) in {u["race_id"] for u in rec["results_used"]}) is (
+        replay and r3_used_in_replay
+    )
+    for early, instant in seen_at.items():
+        row = next(r for r in rec["inputs"]["results"] if r["race_id"] == early)
+        assert utc(row["first_seen_utc"]) == instant, early  # the sub-second value kept
+    check = verify_replay(stored, model=model, model_version=MV)
+    assert list(check.problems) == [] and list(check.legacy) == []
+
+
+def with_rail_cell(cell: tuple, rail: str) -> tuple:
+    return (*cell[:4], rail, cell[5])
+
+
+# the fit knows these turf cells only with a rail: an unproven ("unknown") turf race is skipped
+GOING_PAR = {
+    with_rail_cell(CT16, "B"): 95.6,
+    with_rail_cell(CT16, "C"): 94.4,
+    CTD14: 85.9,
+    with_rail_cell(CK16, "B"): 94.9,
+}
+GOING_CARD = (  # (venue, no, cell as the card gives it, the card's post)
+    ("TOK", 1, CT16, at(1, 0)),
+    ("TOK", 2, CTD14, at(1, 35)),
+    ("TOK", 3, CT16, at(2, 10)),
+    ("KYO", 2, CK16, at(1, 45)),
+    ("KYO", 4, CK16, at(2, 55)),
+)
+TOK1, TOK2, TOK3, KYO2, KYO4 = (rid(v, no) for v, no, _, _ in GOING_CARD)
+GOING_CASES = {
+    # case: (replay, going-page rows, track_condition rows, TOK sidecar posts, want per race:
+    #        (rail, its available_utc) or None for a race skipped as unknown)
+    "published before every read": (
+        False,
+        (("TOK", "B", at(0, 20)), ("KYO", "B", at(0, 25))),
+        (),
+        {},
+        {
+            TOK1: ("B", at(0, 20)),
+            TOK3: ("B", at(0, 20)),
+            KYO2: ("B", at(0, 25)),
+            KYO4: ("B", at(0, 25)),
+        },
+    ),
+    "published after some cutoffs": (
+        True,
+        (("TOK", "B", at(1, 30)), ("KYO", "B", at(2, 0))),
+        (),
+        {},
+        {TOK1: None, TOK3: ("B", at(1, 30)), KYO2: None, KYO4: ("B", at(2, 0))},
+    ),
+    "published after the read, before the cutoff": (
+        False,
+        (("TOK", "B", at(0, 57, 30)), ("KYO", "B", at(0, 20))),
+        (),
+        {},
+        {TOK1: None, TOK3: ("B", at(0, 57, 30)), KYO2: ("B", at(0, 20)), KYO4: ("B", at(0, 20))},
+    ),
+    "the cutoff from the sidecar's post": (
+        True,
+        (("TOK", "B", at(1, 30)),),
+        (),
+        {1: at(1, 40)},  # Tokyo R1 moved from 01:00 to 01:40: its cutoff 01:38 follows 01:30
+        {TOK1: ("B", at(1, 30)), TOK3: ("B", at(1, 30)), KYO2: None, KYO4: None},
+    ),
+    "track_condition first, going pages for a venue it lacks": (
+        True,
+        (("TOK", "B", at(0, 40)), ("KYO", "B", at(0, 40))),
+        (
+            ("TOK", DAY, "turf", "C", at(0, 30)),
+            ("KYO", WEEK_BEFORE, "turf", "C", at(0, 30, day=WEEK_BEFORE)),  # another day
+        ),
+        {},
+        {
+            TOK1: ("C", at(0, 30)),
+            TOK3: ("C", at(0, 30)),
+            KYO2: ("B", at(0, 40)),
+            KYO4: ("B", at(0, 40)),
+        },
+    ),
+}
+
+
+@pytest.fixture(scope="module")
+def going_model() -> SpeedModel:
+    return SpeedModel(SPEC).fit(fit_frame(GOING_PAR))
+
+
+def going_card() -> pd.DataFrame:
+    """The day's card as `races()` gives it: turf rails unknown (the card has none), no result."""
+    frame = pd.DataFrame(
+        [
+            {
+                "race_id": rid(v, no),
+                "venue": v,
+                **keys_of(cell),
+                "top3_time_s": np.nan,
+                "post_utc": post,
+            }
+            for v, no, cell, post in GOING_CARD
+        ]
+    )
+    frame["post_utc"] = pd.to_datetime(frame["post_utc"], utc=True)
+    return frame
+
+
+@pytest.mark.parametrize("case", list(GOING_CASES))
+def test_a_turf_rail_comes_from_the_cached_going_pages_when_track_condition_has_none(
+    going_model, monkeypatch, case
+):
+    """Round-5 finding day:307: the normal store build leaves track_condition empty, but the
+    cached going pages (馬場情報) prove when each venue's rail was published. When track_condition
+    has no turf publication of a venue and day, its turf races take the latest going-page rail
+    (`_going_page_rails`) published by min(their cutoff, the read), the cutoff from the post
+    after the sidecar override; the fitted turf cells exist only with a rail, so a race proven B
+    is forecast with B, and one whose rail came later stays "unknown" and is skipped. A venue
+    with a track_condition publication that day keeps it. Dirt stays "unknown". The inputs carry
+    the rail and its going-page publication time, and the log verifies."""
+    replay, going, conditions, tok_posts, want = GOING_CASES[case]
+    with pytest.raises(KeyError):  # no par for an unknown turf rail
+        going_model.par(**keys_of(CT16))
+    calls: list = []
+
+    def going_page_rails(race_date):
+        calls.append(race_date)
+        frame = pd.DataFrame(going, columns=["venue", "rail", "available_utc"])
+        frame["available_utc"] = pd.to_datetime(frame["available_utc"], utc=True)
+        return frame
+
+    monkeypatch.setattr(race_time_day, "_going_page_rails", going_page_rails)
+    if conditions:
+        write_rails(conditions)
+    if tok_posts:
+        odds_log.write_post_times(sidecar("TOK", ".races.json"), tok_posts, at(0, 0))
+    clock = FakeTime(datetime(2025, 2, 18, 0, 0, tzinfo=UTC) if replay else at(0, 30))
+    got = race_time_day.run_race_time_day(
+        DAY,
+        model=going_model,
+        model_version=MV,
+        races=going_card,
+        now=clock.now,
+        sleep=no_sleep if replay else clock.sleep,
+        replay=replay,
+    )
+    assert calls and set(calls) == {DAY}
+    recs = {r["race_id"]: r for r in got.records}
+    assert set(recs) == {TOK1, TOK2, TOK3, KYO2, KYO4}
+    if not replay:  # where the reads sit against the publications
+        assert utc(recs[TOK1]["input_snapshot_utc"]) < at(0, 57, 30)
+    cells = {rid(v, no): cell for v, no, cell, _ in GOING_CARD}
+    for race_id, proven in {**want, TOK2: ("unknown", None)}.items():
+        rec = recs[race_id]
+        if proven is None:
+            assert rec["status"] == "skipped", (race_id, rec)
+            assert isinstance(rec["reason"], str) and rec["reason"].strip()
+            assert rec["par_s"] is None
+            continue
+        rail, available = proven
+        assert rec["status"] == "ok", (race_id, rec)
+        cell = cells[race_id] if rail == "unknown" else with_rail_cell(cells[race_id], rail)
+        par = going_model.par(**keys_of(cell))
+        assert rec["par_s"] == pytest.approx(par, abs=1e-9), (race_id, rail)
+        assert rec["inputs"]["rail"]["value"] == rail, race_id
+        assert rec["inputs"]["target"]["rail"] == rail, race_id
+        if available is None:
+            assert rec["inputs"]["rail"]["available_utc"] is None, race_id
+        else:
+            assert utc(rec["inputs"]["rail"]["available_utc"]) == available, race_id
+    check = verify_replay(read_log(), model=going_model, model_version=MV)
+    assert list(check.problems) == [] and list(check.legacy) == []

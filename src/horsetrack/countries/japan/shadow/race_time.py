@@ -20,28 +20,35 @@ loader. Nothing here is adopted (D16) and nothing reads an outcome of the race f
   variant group, in a cell with a fitted par; each is listed in results_used with its sighting
   and top-3 time. A result of that set without a top-3 time is listed in results_pending (id and
   sighting) and feeds nothing. par_s is the cell's par, same_day_s the par plus the same-day
-  variant's mean at the cutoff. A race without a post, in a cell the fit never saw, or whose
-  results the model refuses is "skipped", with its own reason.
+  variant's mean at the cutoff. A known rail without a publication time, or published after
+  min(cutoff, read_utc), counts as "unknown" when the cell is chosen (unknown unless proven); the
+  inputs keep it as read, as they keep a late sighting. A race without a post, in a cell the fit
+  never saw, or whose results the model refuses is "skipped", with its own reason. Instants are
+  ISO-8601 text or datetimes, whole and fractional seconds mixed.
 - `record_race(race, *, model, results, model_version, card_version, now, replay=False,
   latest_post=None, inputs_utc=None)`: one JSON-ready record for one card race: build_inputs at
   the input snapshot, forecast, the post check and the completion read; the record carries the
-  snapshot as "inputs". `now()` is read before the computation and after it (completion_utc);
-  input_snapshot_utc is the first read, or `inputs_utc` (the instant the caller began reading
-  `results`) when that is earlier. `latest_post()` (default: the post at the cutoff) is read
-  after the computation: latest_post_utc. mode is "live" when completion_utc is at or before both
-  cutoffs (each post less the primary minutes), "replay" at or after either post or whenever
-  replay=True, else "late". mode is provisional: `coverage` rejudges it against the latest card.
+  snapshot as "inputs" and "format": FORMAT (2). `now()` is read before the computation and after
+  it (completion_utc); input_snapshot_utc is the first read, or `inputs_utc` (the instant the
+  caller began reading `results`) when that is earlier. `latest_post()` (default: the post at the
+  cutoff) is read after the computation: latest_post_utc. mode is "live" when completion_utc is
+  at or before both cutoffs (each post less the primary minutes), "replay" at or after either
+  post or whenever replay=True, else "late". mode is provisional: `coverage` rejudges it against
+  the latest card.
 - `coverage(records, card)`: per venue and "all", every race of the latest card in the
   denominator. A race counts once; readiness is judged against both the post recorded at the
   cutoff and the latest card's post, so a post moved earlier after the record cannot leave it on
   time.
-- `verify_replay(records, *, model, model_version)`: [] when every ok record matches, else one
-  problem per mismatch, each naming its race id. Each ok record is recomputed from its own
-  `inputs` only (no card, no store, no sidecar): its model version, inputs for its own race, its
-  snapshot, post and cutoff, par_s, same_day_s, results_used and results_pending must agree with
-  them, and every sighting it lists and a known rail's publication time must be at or before
-  min(cutoff, read_utc); a rail of "unknown" needs no time. A changed input value is a problem
-  even when the forecast it gives is unchanged.
+- `verify_replay(records, *, model, model_version) -> Verification`: `.problems`, [] when every
+  ok record matches, else one problem per mismatch, each naming its race id; `.legacy`, the race
+  ids in log order of ok rows the earlier recorder wrote (no "format" and no "inputs"), which the
+  record cannot verify and which are never a problem. Every other ok record is recomputed from
+  its own `inputs` only (no card, no store, no sidecar): its format (2), its model version,
+  inputs for its own race, its snapshot, post and cutoff, par_s, same_day_s, results_used and
+  results_pending must agree with them, and every sighting it lists must be at or before
+  min(cutoff, read_utc). A rail unproven by then recomputes as "unknown", as `forecast` took it,
+  so a rail time changed since moves or skips the recomputation. A changed input value is a
+  problem even when the forecast it gives is unchanged.
 """
 
 from __future__ import annotations
@@ -49,6 +56,7 @@ from __future__ import annotations
 import copy
 import math
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -64,6 +72,8 @@ NO_POST = "no scheduled post time on the card at the cutoff"
 UNSEEN_CELL = "the race's cell has no par in the fitted model"
 REFUSED = "the model refused the day's results"
 RAIL_UNKNOWN = "unknown"
+RAIL_KEY = "rail"  # the model key the inputs' rail gives
+FORMAT = 2  # the record format: frozen inputs, verified from them alone
 COUNTS = (
     "scheduled",
     "forecast",
@@ -75,7 +85,15 @@ COUNTS = (
 )
 TOLERANCE_S = 1e-9
 
-__all__ = ["build_inputs", "coverage", "forecast", "record_race", "verify_replay"]
+__all__ = [
+    "FORMAT",
+    "Verification",
+    "build_inputs",
+    "coverage",
+    "forecast",
+    "record_race",
+    "verify_replay",
+]
 
 
 def _stamp(value: Any) -> pd.Timestamp | None:
@@ -107,6 +125,12 @@ def _native(value: Any) -> Any:
     return value
 
 
+def _instants(values: Any) -> Any:
+    """Aware UTC instants (a Series for a Series) from datetimes or ISO-8601 text, whole and
+    fractional seconds mixed: one inferred format would refuse such a column."""
+    return pd.to_datetime(values, utc=True, format="ISO8601")
+
+
 def _time(value: Any) -> float | None:
     return None if value is None or pd.isna(value) else float(value)
 
@@ -132,9 +156,10 @@ def _eligible(results: pd.DataFrame, race: Mapping, model: SpeedModel, as_of: pd
     group, in a cell with a fitted par, first seen at or before `as_of`; renamed for
     `SpeedModel.observe`. Returns (timed, pending): pending have no top-3 time yet. One positional
     mask selects the rows, posts and sightings, whatever the index labels are."""
-    seen = pd.to_datetime(results["first_seen_utc"], utc=True).reset_index(drop=True)
-    posts = pd.to_datetime(results["post_utc"], utc=True).reset_index(drop=True)
-    keep = (seen.notna() & (seen <= as_of) & posts.notna()).to_numpy()
+    seen = _instants(results["first_seen_utc"]).reset_index(drop=True)
+    posts = _instants(results["post_utc"]).reset_index(drop=True)
+    # a writable copy: under pandas 3 (copy-on-write) to_numpy() can give a read-only view
+    keep = (seen.notna() & (seen <= as_of) & posts.notna()).to_numpy(dtype=bool, copy=True)
     keep &= (results["race_id"] != race["race_id"]).to_numpy()
     day = _stamp(race["post_utc"]).tz_convert(JST).date()
     keep &= (posts.dt.tz_convert(JST).dt.date == day).to_numpy()
@@ -170,6 +195,21 @@ def _refuse_observed(model: SpeedModel) -> None:
         )
 
 
+def _unproven_rail(rail: Mapping, as_of: pd.Timestamp) -> str | None:
+    """Why the inputs' known rail cannot be used by `as_of` (no publication time, or a later
+    one), or None when it can or there is none to use."""
+    value = rail.get("value")
+    if value is None or value == RAIL_UNKNOWN:
+        return None
+    published = _stamp(rail.get("available_utc"))
+    if published is None:
+        return f"rail {value!r} has no publication time, counted as {RAIL_UNKNOWN}"
+    if published > as_of:
+        when = f"published {_iso(published)}, after {_iso(as_of)}"
+        return f"rail {value!r} {when}, counted as {RAIL_UNKNOWN}"
+    return None
+
+
 def build_inputs(
     race: Mapping, results: pd.DataFrame, *, model: SpeedModel, read_utc: datetime
 ) -> dict[str, Any]:
@@ -193,8 +233,8 @@ def build_inputs(
     rows: list[dict[str, Any]] = []
     if post is not None:  # without a post the target has no day: no result is one of its day
         day = post.tz_convert(JST).date()
-        posts = pd.to_datetime(results["post_utc"], utc=True)
-        seen = pd.to_datetime(results["first_seen_utc"], utc=True)
+        posts = _instants(results["post_utc"])
+        seen = _instants(results["first_seen_utc"])
         for row, at, first in zip(results.to_dict("records"), posts, seen, strict=True):
             if row["race_id"] == race["race_id"]:
                 continue
@@ -218,9 +258,9 @@ def _results_frame(entries: list, keys: list[str]) -> pd.DataFrame:
     frame = pd.DataFrame([{c: e.get(c) for c in columns} for e in entries], columns=columns).astype(
         object
     )
-    frame["first_seen_utc"] = pd.to_datetime([e.get("first_seen_utc") for e in entries], utc=True)
+    frame["first_seen_utc"] = _instants([e.get("first_seen_utc") for e in entries])
     frame["top3_time_s"] = pd.Series([_time(e.get("top3_time_s")) for e in entries], dtype=float)
-    frame["post_utc"] = pd.to_datetime(frame["post_utc"], utc=True)
+    frame["post_utc"] = _instants(frame["post_utc"])
     return frame
 
 
@@ -244,15 +284,19 @@ def forecast(inputs: Mapping, model: SpeedModel) -> dict[str, Any]:
     if read is None:
         raise ValueError("the inputs have no read_utc")
     cutoff = post - _primary()
+    as_of = min(cutoff, read)
+    race = {**target, "post_utc": post}
+    unproven = _unproven_rail(inputs.get("rail") or {}, as_of)
+    if unproven is not None and RAIL_KEY in race:
+        race[RAIL_KEY] = RAIL_UNKNOWN  # never a rail not yet published at the cutoff and read
     local = copy.deepcopy(model)  # the caller's model observes nothing
     try:
-        par_s = float(local.par(**{key: target.get(key) for key in model.spec.par_keys}))
+        par_s = float(local.par(**{key: race.get(key) for key in model.spec.par_keys}))
     except KeyError:
-        out["reason"] = UNSEEN_CELL
+        out["reason"] = UNSEEN_CELL if unproven is None else f"{UNSEEN_CELL} ({unproven})"
         return out
-    race = {**target, "post_utc": post}
     frame = _results_frame(list(inputs.get("results") or ()), _model_keys(model))
-    timed, waiting = _eligible(frame, race, model, min(cutoff, read))
+    timed, waiting = _eligible(frame, race, model, as_of)
     try:
         local.observe(timed)
     except ValueError as exc:
@@ -320,6 +364,7 @@ def record_race(
         "results_used": got["results_used"],
         "results_pending": got["results_pending"],
         "mode": _mode(completion, (post, latest), replay),
+        "format": FORMAT,
         "inputs": inputs,
     }
 
@@ -424,30 +469,40 @@ def _check(rec: Mapping, inputs: Mapping, model: SpeedModel) -> list[str]:
                     f"{kind} has {entry.get('race_id')} first seen {_iso(seen)}, not by "
                     f"{_iso(as_of)}"
                 )
-    rail = inputs.get("rail") or {}
-    value = rail.get("value")
-    if "rail" in target and target["rail"] != value:
-        problems.append(f"its target's rail {target['rail']!r} is not the input rail {value!r}")
-    if value is not None and value != RAIL_UNKNOWN:
-        published = _stamp(rail.get("available_utc"))
-        if published is None:
-            problems.append(f"rail {value!r} has no publication time")
-        elif published > as_of:
-            problems.append(f"rail {value!r} published {_iso(published)}, after {_iso(as_of)}")
+    # a rail unproven by as_of was recomputed as unknown, as the forecast took it: an honest
+    # record agrees with that, and a rail time changed since moves or skips the recomputation
+    value = (inputs.get("rail") or {}).get("value")
+    if RAIL_KEY in target and target[RAIL_KEY] != value:
+        problems.append(f"its target's rail {target[RAIL_KEY]!r} is not the input rail {value!r}")
     return problems
+
+
+@dataclass(frozen=True)
+class Verification:
+    """`problems`: one text per mismatch, each naming its race id ([] when clean); `legacy`: the
+    race ids, in log order, of ok rows of the earlier recorder (no format, no inputs)."""
+
+    problems: list[str]
+    legacy: list[str]
 
 
 def verify_replay(
     records: Iterable[Mapping], *, model: SpeedModel, model_version: str
-) -> list[str]:
-    """The problems found recomputing each ok record from its own inputs; [] when none (see the
-    module docstring)."""
+) -> Verification:
+    """Each ok record recomputed from its own inputs (see the module docstring)."""
     _refuse_observed(model)
     problems: list[str] = []
+    legacy: list[str] = []
     for rec in records:
         if rec.get("status") != OK:
             continue
         race_id = rec["race_id"]
+        if "format" not in rec and "inputs" not in rec:
+            legacy.append(race_id)  # the earlier recorder's: not verifiable from the record
+            continue
+        if "format" in rec and rec["format"] != FORMAT:
+            problems.append(f"{race_id}: format {rec['format']!r} is not {FORMAT}")
+            continue
         if rec.get("model_version") != model_version:
             problems.append(
                 f"{race_id}: model_version {rec.get('model_version')!r} is not {model_version!r}"
@@ -461,4 +516,4 @@ def verify_replay(
         except (KeyError, TypeError, ValueError) as exc:
             found = [f"its inputs cannot be recomputed ({exc!r})"]
         problems += [f"{race_id}: {p}" for p in found]
-    return problems
+    return Verification(problems=problems, legacy=legacy)

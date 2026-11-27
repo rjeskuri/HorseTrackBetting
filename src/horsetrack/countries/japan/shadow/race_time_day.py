@@ -8,8 +8,10 @@
   day_dir)`, re-read on every pass; each race's post_source says which gave its post ("sidecar"
   or "card"). A turf race's rail is the latest turf rail of its venue and day in the store's
   `track_condition` table published by min(its cutoff, the pass's read instant), its cutoff from
-  the post after the sidecar override, with that publication time as rail_available_utc; any
-  other race, or a turf race with none, is "unknown" (the rail `races()` gives is never used).
+  the post after the sidecar override, with that publication time as rail_available_utc; for a
+  venue track_condition has no turf publication of that day, the same from the cached going pages
+  (`_going_page_rails`, their 発表 times); any other race, or a turf race with none, is "unknown"
+  (the rail `races()` gives is never used). Sidecar instants may mix whole and fractional seconds.
   Each pass reads the clock before it reads the card, store and sidecars, and its records take
   that instant as their input snapshot (`inputs_utc`), so a sighting logged after the read is
   never counted as seen by it; it reads the clock again after them to schedule, so a slow load
@@ -59,12 +61,14 @@ import typer
 
 from horsetrack.core import paths
 from horsetrack.core.eval.holdout import is_holdout_day
+from horsetrack.core.ingest.adapters import get_adapter
+from horsetrack.core.store import build, parse_worker
 from horsetrack.core.store.tables import read_table, table_path
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board.snapshot import jra_day_dir, load_decision_grid
 from horsetrack.countries.japan.models.speed import SpeedModel, SpeedSpec
 from horsetrack.countries.japan.models.v0.nowcast import HoldoutDayError
-from horsetrack.countries.japan.shadow.race_time import coverage, record_race
+from horsetrack.countries.japan.shadow.race_time import _instants, coverage, record_race
 from horsetrack.countries.japan.studies import speed_run
 
 COUNTRY = "japan"
@@ -128,16 +132,16 @@ def _card(
     seen = {v: odds_log.read_published(folder / f"{v}.results.json") for v in venues}
     keys = list(zip(card["venue"], card["race_id"].map(_race_no), strict=True))
     own = pd.Series(
-        pd.to_datetime(card["post_utc"], utc=True) if "post_utc" in card else [pd.NaT] * len(card),
+        _instants(card["post_utc"]) if "post_utc" in card else [pd.NaT] * len(card),
         dtype="datetime64[ns, UTC]",
     )
-    side = pd.Series(pd.to_datetime([posts[v].get(n) for v, n in keys], utc=True))
+    side = pd.Series(_instants([posts[v].get(n) for v, n in keys]))
     card["post_utc"] = side.where(side.notna(), own)
     card["post_source"] = [
         "sidecar" if pd.notna(s) else ("card" if pd.notna(c) else None)
         for s, c in zip(side, own, strict=True)
     ]
-    card["first_seen_utc"] = pd.to_datetime([seen[v].get(n) for v, n in keys], utc=True)
+    card["first_seen_utc"] = _instants([seen[v].get(n) for v, n in keys])
     card["rail"], card["rail_available_utc"] = _proven_rails(card, race_date, read_at)
     return card
 
@@ -153,7 +157,7 @@ def _latest_post(race: dict, folder: Path, races: Callable[[], pd.DataFrame]) ->
     frame = races()
     card = None
     if "post_utc" in frame:
-        posts = pd.to_datetime(frame.loc[frame["race_id"] == race["race_id"], "post_utc"], utc=True)
+        posts = _instants(frame.loc[frame["race_id"] == race["race_id"], "post_utc"])
         posts = posts.dropna()
         card = None if posts.empty else posts.iloc[0]
     side = odds_log.read_post_times(path)  # again, after the card read
@@ -294,17 +298,59 @@ def _course_rails(race_date: date) -> pd.DataFrame:
     rows = read_table(SOURCE, "track_condition", columns=columns)
     keep = (speed_run._race_days(rows["race_date"]) == race_date).to_numpy()
     rows = rows.loc[keep & (rows["surface"] == "turf").to_numpy() & rows["rail"].notna().to_numpy()]
-    rows = rows.assign(available_utc=pd.to_datetime(rows["available_utc"], utc=True))
+    rows = rows.assign(available_utc=_instants(rows["available_utc"]))
     return rows.sort_values(["available_utc", "ingested_utc"], kind="mergesort")
+
+
+def _going_page_rails(race_date: date) -> pd.DataFrame:
+    """The day's turf rails printed on the cached going pages (馬場情報, #253): venue, rail and
+    available_utc (the page's 発表 time, never its fetch time), ordered by availability. Read from
+    the raw cache as the store build reads them (manifest rows of the adapter's going page type,
+    `parse_going`); no network. Empty without a manifest or a going page; a page that cannot be
+    read or parsed is left out."""
+    empty = pd.DataFrame(columns=["venue", "rail", "available_utc"])
+    adapter = get_adapter(SOURCE)
+    going_type = getattr(adapter, "going_page_type", None)
+    try:
+        manifest = build.read_manifest(SOURCE)
+    except FileNotFoundError:
+        return empty
+    parts = []
+    for row in manifest:
+        if going_type is None or row["page_type"] != going_type:
+            continue
+        page = parse_worker.read_raw_page(build._job(SOURCE, row, ""))
+        if page is None:
+            continue
+        try:
+            parts.append(adapter.parse_going(page))
+        except Exception:  # an error page or a redesign: proves nothing
+            continue
+    if not parts:
+        return empty
+    rows = pd.concat(parts, ignore_index=True)
+    keep = (rows["race_date"] == race_date) & (rows["surface"] == "turf")
+    rows = rows.loc[(keep & rows["rail_setting"].notna()).to_numpy()]
+    rows = rows.assign(rail=rows["rail_setting"], available_utc=_instants(rows["available_utc"]))
+    rows = rows.sort_values(["available_utc", "fetched_utc"], kind="mergesort")
+    return rows.loc[:, ["venue", "rail", "available_utc"]].reset_index(drop=True)
 
 
 def _proven_rails(card: pd.DataFrame, race_date: date, read_at: pd.Timestamp) -> tuple[list, list]:
     """Each race's (rail, available_utc), unknown unless proven: a turf race takes the latest
-    track_condition rail of its venue and day published by min(its cutoff, read_at), the cutoff
-    from its effective post; any other race, or a turf race without one, is ("unknown", NaT).
-    The rail `races()` or the store's races.rail_setting gives is never used: neither has a time."""
+    turf rail of its venue and day published by min(its cutoff, read_at), the cutoff from its
+    effective post, from track_condition, or from the cached going pages (`_going_page_rails`)
+    for a venue track_condition has no publication of that day; any other race, or a turf race
+    without one, is ("unknown", NaT). The rail `races()` or the store's races.rail_setting gives
+    is never used: neither has a time."""
     primary = pd.Timedelta(minutes=load_decision_grid().primary)
     course = _course_rails(race_date)
+    turf = card.loc[(card["surface"] == "turf").to_numpy()] if "surface" in card else card.iloc[:0]
+    if not set(turf["venue"]) <= set(course["venue"]):  # a venue track_condition lacks
+        pages = _going_page_rails(race_date)
+        pages = pages.loc[~pages["venue"].isin(set(course["venue"])).to_numpy()]
+        parts = [f.loc[:, ["venue", "rail", "available_utc"]] for f in (course, pages) if len(f)]
+        course = pd.concat(parts, ignore_index=True) if parts else pages
     rails, times = [], []
     for row in card.to_dict("records"):
         rail, available = speed_run.UNKNOWN, pd.NaT
@@ -313,7 +359,7 @@ def _proven_rails(card: pd.DataFrame, race_date: date, read_at: pd.Timestamp) ->
             known = course.loc[
                 (course["venue"] == row["venue"]).to_numpy()
                 & (course["available_utc"] <= bound).to_numpy()
-            ]
+            ].sort_values("available_utc", kind="mergesort")
             if not known.empty:
                 rail, available = known["rail"].iloc[-1], known["available_utc"].iloc[-1]
         rails.append(rail)

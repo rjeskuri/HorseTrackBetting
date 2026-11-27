@@ -81,6 +81,21 @@ Round 5 (the design review's plan, section 2): the record carries its own frozen
   even when the forecast it gives is unchanged. A model holding observations is refused
   (ValueError).
 
+Round 6 (review round 5 on PR #420):
+- Mixed precision: the inputs' and the results' timestamps may mix whole-second and
+  fractional-second ISO text (`...T01:12:00+00:00` beside `...T01:47:00.250000+00:00`); every
+  record is still written, each instant keeping its sub-second value when compared.
+- Standalone rail check: `forecast` (hence `record_race`) never uses a rail whose available_utc is
+  missing or later than min(cutoff, read_utc); that rail counts as "unknown" when the par is
+  chosen. Without a fitted par for the unknown cell the race is skipped with a reason; with one,
+  the forecast is the unknown cell's, and the honest record verifies. A rail published at or
+  before the bound is used.
+- Format version: every new record carries "format": 2. `verify_replay` now returns a result with
+  `problems` (the list of texts above, [] when clean) and `legacy` (the race ids, in log order,
+  of ok rows written by the earlier recorder: no "format" and no "inputs"). A legacy row is not
+  verifiable from the record: it is listed in `legacy` and is never a problem, so a log holding
+  both formats verifies its new rows as before. A format-2 row without inputs is still a problem.
+
 Every race, fit and result is synthetic (a planted par per cell and variant per day); expected
 forecasts come from a separate copy of the #305 model fed only the eligible results, never from
 the recorder. Each turf race of the card carries rail B published at 00:00 UTC (09:00 JST).
@@ -138,7 +153,9 @@ FIELDS = {
     "results_used",
     "results_pending",
     "mode",
+    "format",  # round 6: the record format version, 2 for every new record
 }
+FORMAT = 2
 OK_FIELDS = FIELDS | {"inputs"}  # round 5: an ok record carries its frozen inputs
 MODEL_KEYS = tuple(dict.fromkeys([*PAR_KEYS, *VARIANT_KEYS]))
 
@@ -346,7 +363,10 @@ def by_id(records: list[dict]) -> dict[str, dict]:
 
 
 def verify(records, model, mv=MV) -> list[str]:
-    return verify_replay(records, model=model, model_version=mv)
+    """The problems of a log of new-format records only (round 6: none of them is legacy)."""
+    got = verify_replay(records, model=model, model_version=mv)
+    assert list(got.legacy) == [], got.legacy
+    return list(got.problems)
 
 
 def same_time(text, want) -> bool:
@@ -1330,32 +1350,102 @@ def test_an_earlier_result_missing_from_the_card_verifies_on_its_own_keys(model,
     assert verify(json.loads(json.dumps([rec])), model) == []
 
 
-@pytest.mark.parametrize(
-    ("rail_vs_cutoff_s", "read_vs_cutoff_s", "clean"),
-    [
-        (-90, -60, True),  # published before the read
-        (-30, -60, False),  # after the read, before the cutoff
-        (-30, 3 * 3600, True),  # a replay read: the cutoff bounds it
-        (1, 3 * 3600, False),  # published after the cutoff
-    ],
+RAIL_CASES = (  # (race, rail publication vs its cutoff in s (None: no time), read vs cutoff, used)
+    (rid("TOK", 3), -90, -60, True),  # published before the read
+    (rid("TOK", 3), -60, -60, True),  # published at the read: at the bound
+    (rid("TOK", 3), -30, 3 * 3600, True),  # a replay read: the cutoff bounds it
+    (rid("TOK", 3), 0, 3 * 3600, True),  # published at the cutoff: at the bound
+    (rid("KYO", 4), -600, -1, True),
+    (rid("TOK", 3), -30, -60, False),  # after the read, before the cutoff
+    (rid("TOK", 3), 1, 3 * 3600, False),  # published after the cutoff
+    (rid("KYO", 4), None, -60, False),  # no publication time
+    (rid("TOK", 1), 60, -60, False),  # post 10:00 JST, read 09:57, rail B published 09:59
 )
-def test_a_rail_counts_only_when_published_by_the_cutoff_and_the_read(
-    model, results, rail_vs_cutoff_s, read_vs_cutoff_s, clean
-):
-    """Plan section 2 (unknown unless proven): a known rail whose publication time is after
-    min(cutoff, read_utc) makes the record a problem naming its race."""
-    race_id = rid("TOK", 3)
+RAIL_ARGS = ("race_id", "rail_vs_cutoff_s", "read_vs_cutoff_s", "used")
+RAIL_IDS = [f"{r[-6:]} rail {p} read {q} {'used' if u else 'unknown'}" for r, p, q, u in RAIL_CASES]
+
+
+def rail_case(race_id, rail_vs_cutoff_s, read_vs_cutoff_s) -> tuple[dict, datetime]:
     cutoff = cutoff_of(race_id)
-    race = {**CARD[race_id], "rail_available_utc": cutoff + timedelta(seconds=rail_vs_cutoff_s)}
-    when = cutoff + timedelta(seconds=read_vs_cutoff_s)
+    published = None if rail_vs_cutoff_s is None else cutoff + timedelta(seconds=rail_vs_cutoff_s)
+    return {**CARD[race_id], "rail_available_utc": published}, cutoff + timedelta(
+        seconds=read_vs_cutoff_s
+    )
+
+
+@pytest.mark.parametrize(RAIL_ARGS, RAIL_CASES, ids=RAIL_IDS)
+def test_a_rail_counts_only_when_published_by_the_cutoff_and_the_read(
+    model, results, race_id, rail_vs_cutoff_s, read_vs_cutoff_s, used
+):
+    """Plan section 2 and round-5 finding rt:249 (unknown unless proven, standalone): a turf rail
+    published at or before min(cutoff, read_utc) gives rail B's par; one published later, or
+    without a time, counts as "unknown", whose turf cell the fit never saw, so the race is
+    skipped with a reason, never an ok (let alone live) record made with B."""
+    race, when = rail_case(race_id, rail_vs_cutoff_s, read_vs_cutoff_s)
     rec = record(model, results, race_id, when, race=race, replay=read_vs_cutoff_s > 0)
-    assert rec["status"] == "ok"
-    assert same_time(rec["inputs"]["rail"]["available_utc"], race["rail_available_utc"])
-    problems = verify([rec], model)
-    if clean:
-        assert problems == []
+    json.dumps(rec)
+    if used:
+        assert rec["status"] == "ok", rec
+        par, same_day = expected(model, race, results, min(cutoff_of(race_id), when))
+        assert rec["par_s"] == pytest.approx(par, abs=1e-9)
+        assert rec["same_day_s"] == pytest.approx(same_day, abs=1e-9)
+        assert same_time(rec["inputs"]["rail"]["available_utc"], race["rail_available_utc"])
+        assert verify([rec], model) == []
     else:
-        assert any(race_id in p for p in problems), problems
+        assert rec["status"] == "skipped", rec
+        assert isinstance(rec["reason"], str) and rec["reason"].strip()
+        assert rec["par_s"] is None and rec["same_day_s"] is None
+        assert rec["results_used"] == [] and rec["results_pending"] == []
+    assert forecast(rec["inputs"], model)["status"] == rec["status"]
+
+
+def unknown_rail(cell: tuple) -> tuple:
+    return (*cell[:4], "unknown", cell[5])
+
+
+UNKNOWN_RAIL_PAR = {unknown_rail(T16): 99.0, unknown_rail(T20): 123.9, unknown_rail(K16): 98.1}
+
+
+@pytest.fixture(scope="module")
+def unknown_rail_model() -> SpeedModel:
+    """The planted fit plus a fitted par for each turf cell with its rail unknown, 2.6-3.4 s off
+    the rail-B par."""
+    rng = np.random.default_rng(4140)
+    rows = [
+        {
+            "race_id": f"jra:{day.isoformat()}:{cell[0]}:{20 + n:02d}",
+            "race_utc": at(day, 5, 10 * n),
+            **keys_of(cell),
+            "top3_time_s": par + rng.normal(0.0, 0.2),
+            "result_available_utc": at(day, 5, 10 * n) + timedelta(minutes=30),
+        }
+        for day in TRAIN_DAYS
+        for n, (cell, par) in enumerate(UNKNOWN_RAIL_PAR.items())
+    ]
+    return SpeedModel(SPEC).fit(pd.concat([fit_frame(), pd.DataFrame(rows)], ignore_index=True))
+
+
+@pytest.mark.parametrize(RAIL_ARGS, RAIL_CASES, ids=RAIL_IDS)
+def test_an_unproven_rail_forecasts_with_the_unknown_cell_when_it_has_a_par(
+    unknown_rail_model, results, race_id, rail_vs_cutoff_s, read_vs_cutoff_s, used
+):
+    """Round-5 finding rt:249: with a fitted par for the turf cell of unknown rail, a rail
+    published after min(cutoff, read_utc) (or without a time) is forecast as that cell, not as
+    rail B; a rail published by the bound is forecast as B. Either honest record verifies from
+    its own inputs, read back from JSON too."""
+    m = unknown_rail_model
+    race, when = rail_case(race_id, rail_vs_cutoff_s, read_vs_cutoff_s)
+    rec = record(m, results, race_id, when, race=race, replay=read_vs_cutoff_s > 0)
+    assert rec["status"] == "ok", rec
+    as_seen = race if used else {**race, "rail": "unknown"}
+    par, same_day = expected(m, as_seen, results, min(cutoff_of(race_id), when))
+    other = m.par(**{**{k: race[k] for k in PAR_KEYS}, "rail": "unknown" if used else "B"})
+    assert abs(par - other) > 2.0  # the two cells' pars are far apart
+    assert rec["par_s"] == pytest.approx(par, abs=1e-9)
+    assert rec["same_day_s"] == pytest.approx(same_day, abs=1e-9)
+    assert forecast(rec["inputs"], m)["par_s"] == pytest.approx(par, abs=1e-9)
+    assert verify([rec], m) == []
+    assert verify(json.loads(json.dumps([rec])), m) == []
 
 
 @pytest.mark.parametrize(
@@ -1391,3 +1481,134 @@ def test_the_input_snapshot_is_the_earlier_of_the_read_and_now(
     assert rec["same_day_s"] == pytest.approx(same_day, abs=1e-9)
     assert utc(rec["inputs"]["read_utc"]) == snapshot
     assert verify([rec], model) == []
+
+
+# --------------------------------------------------------------------------- round 6
+
+MIXED = {  # case -> (result, column, its new instant, used by TOK R5's replay at its cutoff)
+    "a fractional sighting used": (rid("TOK", 3), "first_seen_utc", at(DAY, 2, 19), True),
+    "a fractional late sighting": (rid("TOK", 6), "first_seen_utc", at(DAY, 4, 8), False),
+    "0.25 s after the cutoff": (rid("TOK", 3), "first_seen_utc", None, False),
+    "0.25 s before the cutoff": (rid("TOK", 3), "first_seen_utc", None, True),
+    "a fractional post": (rid("TOK", 1), "post_utc", at(DAY, 1, 0), True),
+}
+FRACTION = {
+    "a fractional sighting used": timedelta(milliseconds=250),
+    "a fractional late sighting": timedelta(milliseconds=500),
+    "0.25 s after the cutoff": timedelta(milliseconds=250),
+    "0.25 s before the cutoff": timedelta(milliseconds=-250),
+    "a fractional post": timedelta(milliseconds=500),
+}
+
+
+def mixed_source(results: pd.DataFrame, case: str) -> tuple[pd.DataFrame, str, str, datetime]:
+    """The day's results with one instant moved by a fraction of a second; every other instant
+    stays on a whole second, so the ISO texts mix both precisions."""
+    target = rid("TOK", 5)
+    race_id, column, base, _ = MIXED[case]
+    base = cutoff_of(target) if base is None else base
+    instant = base + FRACTION[case]
+    assert instant.microsecond != 0
+    source = results.copy()
+    source.loc[source["race_id"] == race_id, column] = pd.Timestamp(instant)
+    for col in ("post_utc", "first_seen_utc"):
+        source[col] = pd.to_datetime(source[col], utc=True)
+        whole = source.loc[source["race_id"] != race_id, col].dropna()
+        assert (whole.dt.microsecond == 0).all()  # the rest stay whole-second
+    return source, race_id, column, instant
+
+
+def as_text(frame: pd.DataFrame) -> pd.DataFrame:
+    """The frame with its instants as ISO text (a snapshot read back from JSON)."""
+    out = frame.copy()
+    for col in ("post_utc", "first_seen_utc"):
+        out[col] = [None if pd.isna(v) else v.isoformat() for v in frame[col]]
+    return out
+
+
+@pytest.mark.parametrize("text", [False, True], ids=["instants", "ISO text"])
+@pytest.mark.parametrize("case", list(MIXED))
+def test_mixed_whole_and_fractional_second_instants_still_give_every_record(
+    model, results, case, text
+):
+    """Round-5 finding rt:221: results whose sightings or posts mix whole-second and
+    fractional-second ISO text (as given, or after the inputs freeze them as text) give every
+    record of the day and its coverage; the fractional instant keeps its sub-second value, so a
+    sighting 0.25 s after TOK R5's cutoff is not used and one 0.25 s before it is. Each record
+    verifies from its own inputs."""
+    source, changed, column, instant = mixed_source(results, case)
+    given = as_text(source) if text else source
+    records = [record(model, given, r, REPLAY_AT, replay=True) for r in CARD]
+    assert all(r["format"] == FORMAT for r in records)
+    got = coverage(records, card_frame())
+    for venue in ("TOK", "KYO"):
+        assert (got[venue]["forecast"], got[venue]["skipped"]) == (6, 1), (venue, got)
+    target = rid("TOK", 5)
+    rec = by_id(records)[target]
+    assert rec["status"] == "ok", rec
+    _, same_day = expected(model, CARD[target], source, cutoff_of(target))
+    assert rec["same_day_s"] == pytest.approx(same_day, abs=1e-9)
+    assert (changed in used_ids(rec)) is MIXED[case][3]
+    entry = _input(rec, changed)
+    assert utc(entry[column]) == instant  # the sub-second value kept
+    if column == "first_seen_utc" and MIXED[case][3]:
+        listed = next(u for u in rec["results_used"] if u["race_id"] == changed)
+        assert utc(listed["first_seen_utc"]) == instant
+    assert forecast(rec["inputs"], model)["same_day_s"] == pytest.approx(same_day, abs=1e-9)
+    assert verify(records, model) == []
+    assert verify(json.loads(json.dumps(records)), model) == []
+
+
+def test_every_new_record_carries_format_2(model, results):
+    """Round-5 finding rt:455: ok and skipped records, live and replay, carry "format": 2."""
+    live = [record(model, results, r, cutoff_of(r) - timedelta(seconds=20)) for r in FORECASTABLE]
+    skipped = [
+        record(model, results, rid("TOK", 7), at(DAY, 4, 0)),
+        record(model, results, rid("KYO", 7), at(DAY, 3, 0)),
+    ]
+    records = replay_day(model, results) + live + skipped
+    assert {r["status"] for r in skipped} == {"skipped"}
+    assert [r["format"] for r in records] == [FORMAT] * len(records)
+    assert all(json.loads(json.dumps(r))["format"] == FORMAT for r in records)
+
+
+def legacy_of(records: list[dict]) -> list[dict]:
+    """The rows the earlier recorder wrote for the same races: no format, no inputs."""
+    old = copy.deepcopy(records)
+    for rec in old:
+        rec.pop("inputs", None)
+        rec.pop("format", None)
+    return old
+
+
+def test_rows_of_the_earlier_format_are_reported_as_legacy_not_as_problems(model, results):
+    """Round-5 finding rt:455: a rehearsal log from the earlier recorder (rows without format or
+    inputs) followed by a replay appended after the upgrade: the earlier ok rows are listed as
+    legacy, in log order, and are no problem; the new rows verify as before. A log of legacy
+    rows alone is not rejected either."""
+    old = legacy_of(replay_day(model, results))
+    new = replay_day(model, results)
+    old_ok = [r["race_id"] for r in old if r["status"] == "ok"]
+    assert len(old_ok) == len(FORECASTABLE)
+    for log in (old + new, json.loads(json.dumps(old + new)), old):
+        got = verify_replay(log, model=model, model_version=MV)
+        assert list(got.problems) == [], got.problems
+        assert list(got.legacy) == old_ok
+    got = verify_replay(new, model=model, model_version=MV)
+    assert list(got.problems) == [] and list(got.legacy) == []
+
+
+@pytest.mark.parametrize(
+    "tamper", [_bump_same_day, _publish_the_rail_after_the_cutoff, _drop_the_inputs]
+)
+def test_a_mismatched_new_row_still_fails_beside_legacy_rows(model, results, tamper):
+    """Round-5 finding rt:455: beside legacy rows of the same races, a changed new row is still a
+    problem naming its race (a format-2 row without inputs included: it is not legacy), the
+    legacy rows stay legacy and are no problem."""
+    old = legacy_of(replay_day(model, results))
+    new = replay_day(model, results)
+    race_id = tamper(new)
+    got = verify_replay(old + new, model=model, model_version=MV)
+    problems = list(got.problems)
+    assert problems and all(race_id in p for p in problems), problems
+    assert list(got.legacy) == [r["race_id"] for r in old if r["status"] == "ok"]
