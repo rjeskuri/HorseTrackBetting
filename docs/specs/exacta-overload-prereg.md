@@ -5,14 +5,36 @@
 > with `default_registry("japan").freeze_family(...)` on 2026-11-25, before any scored run. The
 > frozen specs are `exacta_study.family_specs()`; the hash is the sha256 of each spec's sorted,
 > compact JSON.
+>
+> **v2, relabelled 2026-11-27.** The owner, 2026-11-26 on #131: "Relabel λ2 honestly: it is
+> #115's single full-development fit (partly in-sample), not 'in_fold'. Use a label such as
+> `full_development` in the frozen spec and the report." The registry is append-only and refuses
+> another spec under a frozen id, so the relabelled families were frozen on 2026-11-27 under the
+> `-v2` ids below, beside the v1 records, which stay as frozen. v1 is superseded only for the
+> label: each v2 spec is its v1 spec with the λ2 label `full_development` in place of `in_fold`,
+> the ordering text saying the fit is partly in-sample, and two added keys (`relabel`, the
+> owner's answer; `supersedes`, the v1 id). Members, family sizes, directions, segments, cells,
+> cuts, block size, replicates, level, seed and exclusions are v1's. The scored runs were
+> re-run under v2 on 2026-11-27 (git `5d68473`) and gave v1's values.
 
 | Family | Role | Members (family size) | Spec hash |
 |---|---|---|---|
-| `japan/131-exacta-category-v1` | E1: B2 category returns, the max test | λ2 {`in_fold`, 1} × 3 categories × 14 cells (84) | `9ac3b740d1bbdde9645091d3fd14247442b1a210b2d109c5e58ade0983769a8f` |
-| `japan/131-exacta-category-b1-v1` | E1′: B1 flat box, reported | 3 × 14 (42) | `f0e915f51cc13c7b40ef478076f6c44b1b5d22b52722b321c46359e5c2bf5e8f` |
-| `japan/131-exacta-category-b3-v1` | E1″: B3 Harville calibration, reported | λ2 {`in_fold`, 1} × 3 × 14 (84) | `07721b74cc11fd7181b812c42450ac523371e07435047c623cd9d159d0d3fbcb` |
-| `japan/131-exacta-logscore-v1` | C: log-score total | λ2 {`in_fold`, 1} (2) | `0af318b97297b3085d82434921cf4c2f651864321a3e63ae03560b3e2b81c715` |
-| `japan/131-exacta-rule-v1` | E2: ratio-cut rules | 2 categories × 4 cuts × 2 scopes (16) | `b1577fd3765d5f72b0c0643235aca7cd69317d467470a0a31949da50c65a019f` |
+| `japan/131-exacta-category-v2` | E1: B2 category returns, the max test | λ2 {`full_development`, 1} × 3 categories × 14 cells (84) | `eb900ab7144a6c88b5ebf4058d6aaf22570a9a5fb06d7803dbaa7a7cf89bf247` |
+| `japan/131-exacta-category-b1-v2` | E1′: B1 flat box, reported | 3 × 14 (42) | `fb6844a9a189ee689f6390b6f2fde58a318370b9e73834ab5b28fbad735ec49b` |
+| `japan/131-exacta-category-b3-v2` | E1″: B3 Harville calibration, reported | λ2 {`full_development`, 1} × 3 × 14 (84) | `493253276d7a803446716325353bb6c18e01409868dc6dbec53eec09a9b4912f` |
+| `japan/131-exacta-logscore-v2` | C: log-score total | λ2 {`full_development`, 1} (2) | `084244a2f3cb69154da1dc97615044b58e0cf534f8077ed1cbd459a98e3650bd` |
+| `japan/131-exacta-rule-v2` | E2: ratio-cut rules | 2 categories × 4 cuts × 2 scopes (16) | `2d6678f59291476bf3d3028b2818bc00e631dea516bc0f01276ac4e0af8cdb75` |
+
+The superseded v1 families, frozen 2026-11-25 with the label `in_fold` for the same fit, and
+scored that day (their records stay in the registry):
+
+| Family (v1, superseded for the label) | Spec hash |
+|---|---|
+| `japan/131-exacta-category-v1` | `9ac3b740d1bbdde9645091d3fd14247442b1a210b2d109c5e58ade0983769a8f` |
+| `japan/131-exacta-category-b1-v1` | `f0e915f51cc13c7b40ef478076f6c44b1b5d22b52722b321c46359e5c2bf5e8f` |
+| `japan/131-exacta-category-b3-v1` | `07721b74cc11fd7181b812c42450ac523371e07435047c623cd9d159d0d3fbcb` |
+| `japan/131-exacta-logscore-v1` | `0af318b97297b3085d82434921cf4c2f651864321a3e63ae03560b3e2b81c715` |
+| `japan/131-exacta-rule-v1` | `b1577fd3765d5f72b0c0643235aca7cd69317d467470a0a31949da50c65a019f` |
 
 Registry hypothesis id: `E43` (08 §4, "exotic pools are efficient relative to the Win pool and
 the ordering model"). E1 and E2 are this spec's family labels, not 08's E1 and E2.
@@ -21,17 +43,20 @@ Code: `src/horsetrack/countries/japan/research/exacta_consistency.py` (pure math
 `exacta_study.py` (the scoring maths and the frozen specs) and `exacta_run.py` (freeze, the row
 count and the scored run).
 
-## Deviations from the signed spec, for owner confirmation
+## Deviations from the signed spec, accepted by the owner (2026-11-26)
 
-Found after the scored run (2026-11-25); the frozen specs and their hashes are unchanged.
+Found after the scored run (2026-11-25). The owner, 2026-11-26 on #131: "accept both
+deviations, documented, and land", with the λ2 relabel (the v2 note above).
 
-- (a) λ2. The owner signed "λ2 in-fold fitted" (answer 8). The run used #115's full-development
-  fit (λ2 = 0.8104, partly in-sample; fit `2b822d643cf7`): one fit over the development
-  out-of-fold races, which saw the scored races' first two places. The registry label `in_fold`
-  in the frozen specs stays as frozen and means this fit. Effect: B3 (E1″) and C at λ2 = 0.8104
-  are partly in-sample. B2's null (ρ = 1 under π = q) does not depend on p, so the E1 SPA and
-  StepM outcome stands. A per-fold refit for B3 and C is #284.
-- (b) Scored span. The signed scope runs from 2014-06-07 (section 2). The scored races start
+- (a) λ2, owner-accepted 2026-11-26. The owner signed "λ2 in-fold fitted" (answer 8). The run
+  used #115's full-development fit (λ2 = 0.8104, partly in-sample; fit `2b822d643cf7`): one fit
+  over the development out-of-fold races, which saw the scored races' first two places. v1's
+  specs labelled it `in_fold`; the v2 specs label it `full_development`, as the owner asked.
+  Effect: B3 (E1″) and C at λ2 = 0.8104 are partly in-sample. B2's null (ρ = 1 under π = q) does
+  not depend on p, so E1's ranking and its SPA and StepM context stand. A per-fold refit for B3
+  and C is #284.
+- (b) Scored span, owner-accepted 2026-11-26 ("the scored span from 2020-01-05 stands as
+  documented"). The signed scope runs from 2014-06-07 (section 2). The scored races start
   2020-01-05: 23,629 of the 43,058 development races, forced by #114's out-of-fold span (its
   walk-forward test quarters from 2020-Q1), since B2, B3 and C need #114's p.
 
@@ -62,9 +87,9 @@ then returns the race's payout rate less breakage, so it loses about 25%.
   starters. They exist for #114's walk-forward test quarters only (2020-Q1 onward), so the scored
   races are the development races from 2020-01-01 that have them. Ordering model: discounted
   Harville at #115's full-development fit (λ2 = 0.8104, partly in-sample; registry label
-  `in_fold`; `ordering_v0.yaml`: one fit on the development out-of-fold races; its fit id is
-  recorded with each run; see deviation (a)), and plain Harville (λ2 = 1) as a
-  registered variant. `harville_exacta` reuses `ordering._order_probs`, so the study and the v0
+  `full_development`, `in_fold` in v1; `ordering_v0.yaml`: one fit on the development
+  out-of-fold races; its fit id is recorded with each run; see deviation (a)), and plain
+  Harville (λ2 = 1) as a registered variant. `harville_exacta` reuses `ordering._order_probs`, so the study and the v0
   model share one formula.
 - Precondition, checked by counting rows only (no scoring): the store holds `FORECAST` dividend
   rows for the development period. If it does not, the historical half waits on an ingest ticket.
@@ -127,11 +152,10 @@ a segment.
 
 ## 5. Families (to freeze in the registry, all variants listed before scoring)
 
-**Family E1, category returns on history** (`japan/131-exacta-category-v1`).
+**Family E1, category returns on history** (`japan/131-exacta-category-v2`).
 
-- Members: 2 ordering variants (λ2 `in_fold`, #115's full-development fit, and plain Harville
-  λ2 = 1) × 3 categories × 14
-  segment cells (section 6), using estimator B2. **Family size 84**: SPA and StepM run over all 84.
+- Members: 2 ordering variants (λ2 `full_development`, #115's full-development fit, and plain
+  Harville λ2 = 1) × 3 categories × 14 segment cells (section 6), using estimator B2. **Family size 84**: SPA and StepM run over all 84.
   Plain Harville is in the family because the owner registered it as a variant (answer 8), and a
   registered variant counts toward the multiple-testing burden.
 - Per-race loss: `rate_r − R_{S,r}` for fav_second and no_fav, and the sign flipped for fav_first.
@@ -144,9 +168,9 @@ a segment.
 - C (total) is a single paired comparison per λ2 (2 members), with races paying at or below ¥110
   left out (the share is not identified there).
 - SPA and StepM results are a registry record of their own,
-  `japan/131-exacta-category-v1/max-test`, so they do not add a variant to E1.
+  `japan/131-exacta-category-v2/max-test` (v1: `…-v1/max-test`), so they do not add a variant to E1.
 
-**Family E2, ratio-cut rules** (D18 positive-edge; `japan/131-exacta-rule-v1`).
+**Family E2, ratio-cut rules** (D18 positive-edge; `japan/131-exacta-rule-v2`).
 
 - Rule form: "at T−2, buy exacta c in category X ∈ {fav_second, no_fav} when
   `r_c(t) = q_c(t)/p_c(t) < k`".
@@ -232,6 +256,8 @@ The questions as put before the freeze, each with the owner's answer (comment on
    5 starters? **Yes, as listed.**
 8. λ2: the in-fold fitted λ2 only, or plain Harville (λ2 = 1) also, as a registered sensitivity
    variant that adds to the family size? **In-fold fitted, and plain Harville also registered as a
-   variant.** It adds to the family size: E1 is 84 members (section 5).
+   variant.** It adds to the family size: E1 is 84 members (section 5). The fit used is #115's
+   full-development one, labelled `full_development`: deviation (a), accepted by the owner on
+   2026-11-26.
 9. Own impact on history: "¥100 per race is negligible" as a ledger assumption, checked against
    #130 pool totals? **Yes** (`docs/ledger.md`).
