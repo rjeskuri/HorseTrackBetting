@@ -89,6 +89,7 @@ MAP_TOL = 1e-8  # the largest step on any parameter when a MAP solve stops
 PROFILE_TOL = 1e-6  # the same, for the MAP at a profile point
 MAX_SWEEPS = 1_000  # a solve that needs more fails (and its variant is recorded failed)
 EB_SWITCH = 1e-3  # an alternating fit solves its MAP fully at each update once the residual is here
+EB_LOCAL_TOL = 1e-4  # EB_TOL for a fit with local terms, whose alternating MAP resolves no finer
 TAU_LEVEL = 0.95  # each bound of tau one-sided at this level (D7's convention)
 TAU_ZERO = 1e-5  # the prior sd at which a block counts as removed (tau = 0)
 PROFILE_BISECTIONS = 7  # per bound: tau to 1/128 of the point below it, to 1.1% above
@@ -860,12 +861,17 @@ class _Model:
         update until the residual is within EB_TOL (EB_SWITCH for a fit with local or low-rank
         terms, whose single sweep leaves the MAP behind), then the MAP solved to MAP_TOL at each z
         from there on, so the fit stops at a MAP_TOL MAP whose z meets the fixed point within
-        EB_TOL."""
+        EB_TOL (EB_LOCAL_TOL with local terms: their alternating MAP leaves residual noise of that
+        order). Where the secant has no valid slope, a group whose residual keeps its sign doubles
+        its plain step (up to EB_JUMP), so a nearly flat fixed point (a weakly identified
+        variance) is crossed in a few updates instead of crawled to."""
         z = self.z
         floor = math.log(TAU2_FLOOR)
         alternating = self.has_local or any(t.kind == LOW_RANK for t in self.terms)
         switch = EB_SWITCH if alternating else EB_TOL
+        tol = EB_LOCAL_TOL if self.has_local else EB_TOL
         last, tight = None, not len(self.groups)
+        gain = np.ones(len(self.groups))
         for _ in range(EB_MAX):
             if tight:
                 self.solve(z, MAP_TOL)
@@ -880,7 +886,7 @@ class _Model:
                 ratio = square / effective if effective > 0 and square > 0 else 0.0
                 update[g] = max(math.log(ratio), floor) if ratio > 0 else floor
             r = update - z
-            if tight and np.abs(r).max() < EB_TOL:
+            if tight and np.abs(r).max() < tol:
                 self.z = z
                 return
             if not tight and np.abs(r).max() < switch:
@@ -892,7 +898,9 @@ class _Model:
                 with np.errstate(divide="ignore", invalid="ignore"):
                     secant = -r * dz / dr
                 valid = (dz != 0) & (dr * dz < 0) & np.isfinite(secant)
-                step = np.where(valid, secant, r)
+                same = np.sign(r) == np.sign(last[1])
+                gain = np.where(valid | ~same, 1.0, np.minimum(2.0 * gain, 1024.0))
+                step = np.where(valid, secant, gain * r)
             last = (z, r)
             z = np.maximum(z + np.clip(step, -EB_JUMP, EB_JUMP), floor)
         else:

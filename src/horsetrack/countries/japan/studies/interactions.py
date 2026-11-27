@@ -540,21 +540,27 @@ def level1_members(
     if checkpoint is not None and checkpoint.exists():
         saved = json.loads(checkpoint.with_suffix(".json").read_text("utf-8"))
         arrays = np.load(checkpoint)
-        out.u = {m: arrays[m] for m in MEMBERS}
-        out.taus, out.errors, done = saved["taus"], saved["errors"], set(saved["done"])
+        out.u = {m: np.array(arrays[m]) for m in MEMBERS}
+        out.taus, done = saved["taus"], set(saved["done"])
         out.seconds, out.local, out.prior_sd = saved["seconds"], saved["local"], saved["prior_sd"]
-        log(f"  resumed {len(done)} folds from {checkpoint.name}")
+        # a member-fold without a prediction (one that failed) is fitted again, and its error,
+        # if it recurs, recorded again
+        log(f"  resumed {len(done)} folds from {checkpoint.name}; earlier errors {saved['errors']}")
     started = time.monotonic()
     for i, (fold, pick) in enumerate(zip(outer, picks, strict=True)):
         label = fold.test_start.isoformat()
         last = i == len(outer) - 1
-        if label in done and not (last and intervals):
+        todo = [m for m in MEMBERS if np.isnan(out.u[m][fold.test_idx]).any()]
+        if label in done and not todo and not (last and intervals):
             continue
         pair = (pick["drift_var_per_day"], pick["scale"])
         fold_data = data.assign(**{RATING: rating[pair].to_numpy()})
         train, test = fold_data.iloc[fold.train_idx], fold_data.iloc[fold.test_idx]
-        row = {"fold": label, "train_rows": len(train), "test_rows": len(test)}
+        row = next((dict(t) for t in out.taus if t["fold"] == label), {"fold": label})
+        row |= {"train_rows": len(train), "test_rows": len(test)}
         for member, (blocks, _) in MEMBERS.items():
+            if member not in todo and not (last and intervals and (blocks or member == BASE)):
+                continue
             t0 = time.monotonic()
             try:
                 if not blocks:
