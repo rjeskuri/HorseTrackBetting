@@ -284,15 +284,14 @@ def jra_place_figures(share: np.ndarray, places: int) -> tuple[np.ndarray, np.nd
     return lo, hi
 
 
-def place_rule_measurement(
-    boards: Iterable[tuple[str, tuple[str, ...], np.ndarray, np.ndarray]], votes: pd.DataFrame
-) -> dict:
+def place_rule_measurement(boards: Iterable[tuple], votes: pd.DataFrame) -> dict:
     """#410: the Place rule against the money on the closing boards the study scores. `boards`
-    are (race_id, combinations, low, high) as `models.nowcast.closing_boards` gives them (every
-    priced runner, a high figure NaN where the board has none); `votes` the PLACE H1 rows
-    (`race_id`, `combination`, `votes`, `data_kubun`). Each board is read as the study reads it
-    (`models.nowcast.place_shares`: P from its priced runners, `joint`, `undetermined` or
-    `low_only`; an undetermined board is counted under its own read, a diagnostic). It is
+    are (race_id, combinations, low, high[, starters]) as `models.nowcast.closing_boards` gives
+    them (every priced runner, a high figure NaN where the board has none, the field at the start
+    of sales); `votes` the PLACE H1 rows (`race_id`, `combination`, `votes`, `data_kubun`). Each
+    board is read as the study reads it (`models.nowcast.place_shares`: P from the field at sale,
+    or from its priced runners on a board without one, `joint`, `undetermined` or `low_only`; an
+    undetermined board is counted under its own read, a diagnostic). It is
     validated when its race's H1 record is final (data_kubun in `PLACE_FINAL_KUBUN`) with positive
     votes on every priced runner; otherwise it is unavailable, counted by reason. Per validated
     board: whether the rule reproduces every printed figure from the votes (P as scored, and
@@ -302,13 +301,14 @@ def place_rule_measurement(
     place_pool = config.load_source(COUNTRY, "jra").pools[nc.PLACE]
     counts: dict[str, int] = defaultdict(int)
     scored, rows = [], []
-    for race_id, combinations, lo, hi in boards:
+    for race_id, combinations, lo, hi, *field in boards:
+        starters = field[0] if field else None
         lo, hi = np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
-        got, rule_sum, reader = nc.place_shares(lo, hi)
+        got, rule_sum, reader = nc.place_shares(lo, hi, starters=starters)
         if got is None:
             counts["boards_not_sold"] += 1
             continue
-        places = place_pool.places_for(len(lo))
+        places = place_pool.places_for(len(lo) if starters is None else int(starters))
         scored.append({"reader": reader, "places": places})
         g = by_race.get(race_id)
         if g is None:
@@ -337,7 +337,7 @@ def place_rule_measurement(
         row["reproduced_with_slot_places"] = (
             row["reproduced"] if alt == places else alt >= 2 and _reproduces(share, lo, hi, alt)
         )
-        low_only, _ = nc.pool_shares(nc.PLACE, lo)
+        low_only, _ = nc.pool_shares(nc.PLACE, lo, starters=starters)
         for name, read in (("as_scored", got), ("low_only", low_only)):
             err = np.abs(np.asarray(read) - share)
             row[f"{name}_max_rel_error"] = float((err / share).max())
@@ -502,8 +502,9 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
             "scored Place case (the folds' test cases after test-day sampling; no broader "
             "development measurement) "
             "(models.nowcast.closing_boards: the final board the cases score, every priced "
-            "runner kept), read as scored (models.nowcast.place_shares: P from the priced "
-            "runners, the joint, undetermined or low-only read), against the PLACE votes (H1) of "
+            "runner kept), read as scored (models.nowcast.place_shares: P from the field at the "
+            "start of sales, the runners priced on the race's earliest PLACE board, the joint, "
+            "undetermined or low-only read), against the PLACE votes (H1) of "
             "processed/"
             f"{SOURCE}/{POOL_VOTES}.parquet, read by the store's scoped reader (development "
             "days only); a board is validated when its H1 record is final (data_kubun "

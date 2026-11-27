@@ -279,20 +279,28 @@ below. Nothing is adopted, and the holdout is not opened.
   an empty measurement would have registered as `scored`. Its reads also filtered the days after reading each
   batch, not inside the scan; the export predates the holdout start (2026-11-28), so no holdout row existed to
   reach it. v3's records stay in the registry and support no Place claim here.
-- **Result, v4, superseded.** v4's record `place_rule_vs_votes` `8810ca538e68f8e4` is `scored` because boards read
-  `joint` or `low_only` had final votes. #410's re-check found that this took coverage for agreement (a read could
-  stand with none of its boards within the tolerance), that v4 measured every extracted Place race rather than the
+- **Result, v4, superseded.** v4's record `place_rule_vs_votes` `8810ca538e68f8e4` was registered under v4's rule,
+  by which a determined read stood once its boards had final votes. #410's re-check found that this took coverage
+  for agreement (a read could stand with none of its boards within the tolerance), that v4 measured every extracted
+  Place race rather than the
   scored ones, and that its Place gains pooled the `undetermined` boards' cases with the rest. v4's records stay in
   the registry; its Place verdict is superseded by v5's (below) and supports no Place claim here. Its figures are in
   the private report `$HORSETRACK_DATA_DIR/reports/nowcast-japan-3e07f46516e3.md`.
-- **Result, v5.** The measurement ran on the closing boards of the scored Place cases. The `joint` read stands as
-  a result: it meets the criterion stated above (`place_result_readers`), so the record `place_rule_vs_votes` `86795d4a880bbd20` is `scored`. The
-  private report reads the Place rows of the `joint` boards as a result, which meets DoD (b) for them, and its
-  Place gains hold only those boards' cases. Every other read is a diagnostic, not a result: the `undetermined`
-  boards' Place cases are reported apart (`gains_undetermined`), as would be those of any `low_only` board
-  (`gains_unvalidated`). Per read and per P, the coverage, the reproduction, the agreement and the errors are in
-  the private report `$HORSETRACK_DATA_DIR/reports/nowcast-japan-a07a5be8273d.md` and are withheld here (D21); this
-  report does not assert the tolerance on every board. v3's and v4's Place verdicts stay superseded.
+- **Result, v5.** The measurement ran on the closing boards of the scored Place cases; its record is
+  `place_rule_vs_votes` `86795d4a880bbd20`. Whether each read stands as a result under the criterion stated above
+  (`place_result_readers`), and so which Place rows of the private report are a result and which Place cases its
+  gains report apart (`gains_undetermined`, `gains_unvalidated`): withheld (D21), see the private report
+  `$HORSETRACK_DATA_DIR/reports/nowcast-japan-a07a5be8273d.md`. Per read and per P, the coverage, the reproduction,
+  the agreement and the errors are there too; this report does not assert the tolerance on every board. v3's and
+  v4's Place verdicts stay superseded.
+- **Places at the start of sales (#410 round 7).** v5 read every board with P from its priced runners, so a race
+  that lost a runner after sales opened (8 starters at sale, 7 priced at the close) was read with 2 places where
+  JRA prints its figures under 3. From this change on, every PLACE board read (`race_view`, `extract`'s board at t
+  and final board, `closing_boards` and `place_rule_measurement`) takes P from the field at the start of sales:
+  the runners priced on the race's earliest PLACE board (a runner priced there and scratched later counts; one
+  never priced does not), never fewer than the runners priced on the board read. `place_shares` and `pool_shares`
+  take it as `starters`. v5's records were measured before this change; no run under the new rule is made here.
+  `ShadowNowcast`'s draws still take P from the board's priced runners.
 - **The v3 re-run.** Family `japan-c1-nowcast-final-shares-v3`, spec sha256
   `4cb84e2f74e25d5cc1de9ec471dd84912e0ec09b1c16cfba3d1dc07d387fad83`, frozen at the start of the run before any
   development row was read (the owner's 2026-11-27 reframe: Claude pre-registers and logs every variant). v3

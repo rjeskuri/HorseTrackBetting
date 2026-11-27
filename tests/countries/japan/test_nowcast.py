@@ -1273,16 +1273,20 @@ PLACE_REL_TOL = 0.075  # per runner: |share - money share| / money share
 PLACE_ABS_TOL = 0.01  # per runner, in units of the pool
 
 
-def jra_place_figures(money_yen: Sequence[int]) -> tuple[np.ndarray, np.ndarray, int]:
+def jra_place_figures(
+    money_yen: Sequence[int], *, places: int | None = None
+) -> tuple[np.ndarray, np.ndarray, int]:
     """(low, high, places): JRA's printed Place figures for per-runner money in yen. For every
-    placed set S of P runners (P = `places_for(starters)`), each runner i in S is paid JRA's
+    placed set S of P runners (P = `places_for(starters)`, or `places` when given: the places of
+    the field at the start of sales after a scratch), each runner i in S is paid JRA's
     stake-back-share dividend, `core.pricing.stake_back_share_dividend` (pinned by
     tests/core/test_pricing.py): 100 x rate x (1 + D / (P x s_i)) yen per 100-yen ticket, s_i its
     share of the pool, D the share on the runners outside S, rate = 1 - takeout; truncated down to
     10 yen and paid at least the minimum dividend. The low figure is the least of runner i's
     payments over the sets holding it, the high the greatest."""
     money = [int(m) for m in money_yen]
-    places = PLACE_POOL.places_for(len(money))
+    if places is None:
+        places = PLACE_POOL.places_for(len(money))
     assert places >= 2, len(money)
     pool = float(sum(money))
     lo = [math.inf] * len(money)
@@ -1858,7 +1862,7 @@ def test_closing_boards_are_the_final_boards_with_their_figures():
     no_post = {**row(race_id_of(day, 3), 3, PLACE, "1", post_of(day, 3), 5, odds=2.0, odds_hi=3.0)}
     rows.append({**no_post, "post_utc": None, "minutes_to_post": None})
 
-    got = {race_id: (combos, lo, hi) for race_id, combos, lo, hi in closing_boards(
+    got = {race_id: (combos, lo, hi) for race_id, combos, lo, hi, *_ in closing_boards(
         to_frame(rows), PLACE)}  # fmt: skip
     assert set(got) == set(expected)
     for race_id, keep in expected.items():
@@ -2056,7 +2060,7 @@ def test_score_rows_carry_the_closing_board_place_read():
     board `closing_boards` yields, read by `place_shares`); WIN cases carry no Place read."""
     day = TEST_DAYS[0]
     frame = to_frame(day_with_an_undetermined_race(day))
-    closing = {rid: place_shares(lo, hi)[2] for rid, _, lo, hi in closing_boards(frame, PLACE)}
+    closing = {rid: place_shares(lo, hi)[2] for rid, _, lo, hi, *_ in closing_boards(frame, PLACE)}
     assert closing == {race_id_of(day, 1): "joint", race_id_of(day, 2): "undetermined"}, closing
     cases, _, _ = extract(frame)
     table, _ = score_cases({"board": board_forecaster}, cases, n=4, seed=410)
@@ -2510,3 +2514,171 @@ def test_a_blank_place_count_leaves_the_complete_boards_scored(data_dir, tmp_pat
             assert VOTES_BUILD.fullmatch(builds[name]), (name, builds[name])
             assert place.data_builds.get("jravan_pool_votes") == builds[name], name
     assert builds["blank"] != builds["filled"], builds
+
+
+# ---------------------------------------------------------------- #410 round 7: places at sale
+#
+# Owner's restart (2026-11-28), round-7 finding 1: the number of places Place pays, P, is the
+# places of the field at the start of sales (config/jra.yaml: 8+ starters pay 3, 5-7 pay 2), not
+# of the runners still priced after a scratch (the rule #506 applied to the shadow feed). An
+# 8-runner race that loses a runner after sales open prints its 7 figures under the 3-place rule.
+# Contract pinned here:
+# - `place_shares(odds, odds_hi=None, *, starters=None)` and
+#   `pool_shares(pool, odds, investment=None, *, odds_hi=None, starters=None)` take P from
+#   `places_for(starters)` when `starters` (the field at the start of sales) is given, else from
+#   the priced combinations as before.
+# - The board reads (`race_view`, `extract`'s board at t and final board, `closing_boards` and the
+#   study's `place_rule_measurement` on them) take the field at sale from the race's rows: the
+#   runners priced on its earliest board. A runner priced there and scratched later counts; one
+#   already without a price there (scratched before the logs open) does not.
+# - `closing_boards` may carry the field at sale after its first four elements (race_id,
+#   combinations, low, high); `place_rule_measurement` still reads a four-element board with P
+#   from its priced runners.
+
+# (id, money of the runners priced after the scratch, field at the start of sales, places paid)
+SCRATCHED_PLACE_BOARDS = [
+    ("8-at-sale-1-scratched", _yen([5200, 1100, 900, 700, 500, 400, 300]), 8, 3),
+    ("8-at-sale-2-scratched", _yen([4600, 1300, 1000, 800, 600, 400]), 8, 3),
+    ("9-at-sale-1-scratched", _yen([4800, 1000, 900, 800, 600, 500, 400, 300]), 9, 3),
+    ("7-at-sale-none-scratched", _yen([5200, 1100, 900, 700, 500, 400, 300]), 7, 2),
+    ("7-at-sale-1-scratched", _yen([4600, 1300, 1000, 800, 600, 400]), 7, 2),
+    ("5-at-sale-1-scratched", _yen([4000, 1600, 1200, 900]), 5, 2),
+]
+RULE_SUM_TOL = 0.05  # the rule's money total at the right P on these boards: within 0.04 of 1
+
+
+@pytest.mark.parametrize(
+    ("money", "at_sale", "places"),
+    [(m, s, p) for _, m, s, p in SCRATCHED_PLACE_BOARDS],
+    ids=[b[0] for b in SCRATCHED_PLACE_BOARDS],
+)
+def test_place_shares_take_the_places_from_the_field_at_sale(money, at_sale, places):
+    """Round-7 finding 1: a Place board printed under the places of the field at the start of
+    sales is read with that P when `starters` says the field: the shares total 1 and recover the
+    money within `test_place_shares_recover_the_money_on_a_known_board`'s tolerance, read `joint`,
+    with the rule's money total near 1, by `place_shares` and `pool_shares` alike; the low figures
+    alone are read with the same P. A board whose priced runners would give another P prints
+    other figures, so a read with the priced runners' P cannot pass."""
+    assert places == PLACE_POOL.places_for(at_sale)  # config/jra.yaml's rule, as stated above
+    lo, hi, got_places = jra_place_figures(money, places=places)
+    assert got_places == places
+    assert_readable(money, hi)
+    priced_places = PLACE_POOL.places_for(len(money))
+    if priced_places != places and priced_places >= 2:  # precondition: P is visible in figures
+        other_lo, other_hi, _ = jra_place_figures(money, places=priced_places)
+        assert np.abs(other_lo - lo).max() > 0.05 or np.abs(other_hi - hi).max() > 0.05
+
+    shares, rule_sum, reader = place_shares(lo, hi, starters=at_sale)
+    assert reader == "joint", reader
+    assert_recovers(shares, money)
+    assert abs(rule_sum - 1.0) <= RULE_SUM_TOL, rule_sum
+    pooled, pooled_sum = pool_shares(PLACE, lo, odds_hi=hi, starters=at_sale)
+    np.testing.assert_allclose(pooled, shares, rtol=1e-12, atol=0.0)
+    assert pooled_sum == pytest.approx(rule_sum, rel=1e-12)
+
+    low, low_sum = pool_shares(PLACE, lo, starters=at_sale)
+    assert low is not None
+    low = np.asarray(low, dtype=float)
+    assert low.sum() == pytest.approx(1.0, abs=1e-9) and (low > 0).all(), low
+    assert abs(low_sum - 1.0) <= RULE_SUM_TOL, low_sum
+
+    if at_sale == len(money):  # no scratch: the field at sale is the priced runners, as before
+        bare, bare_sum, bare_reader = place_shares(lo, hi)
+        np.testing.assert_allclose(bare, shares, rtol=1e-12, atol=0.0)
+        assert (bare_sum, bare_reader) == (pytest.approx(rule_sum, rel=1e-12), reader)
+
+
+# Three races of one day, each with 7 runners priced from minute 20 on. Race 1 had 8 at the start
+# of sales and lost runner 8 at minute 20 (3 places); race 2 had 7 (2 places); race 3's runner 8
+# was scratched before the logs open, without a price on any board (2 places).
+SALE_OPENING_MIN = 900  # the earliest board, the evening before
+SCRATCH_MIN = 20
+AT_SALE_TAUS = (30.0, 5.0)  # the board at t before and after the scratch
+SEVEN_AT_T = _yen([5200, 1100, 900, 700, 500, 400, 300])
+SEVEN_FINAL = _yen([4400, 1500, 1100, 800, 600, 450, 350])
+EIGHT_AT_SALE = _yen([4600, 1000, 800, 700, 500, 400, 300, 900])
+AT_SALE_RACES = {  # race number: (field at sale, money by minute, the runner never priced)
+    1: (8, {SALE_OPENING_MIN: EIGHT_AT_SALE, SCRATCH_MIN: SEVEN_AT_T, 5: SEVEN_AT_T,
+            FINAL_MIN: SEVEN_FINAL}, None),
+    2: (7, {SALE_OPENING_MIN: SEVEN_AT_T, SCRATCH_MIN: SEVEN_AT_T, 5: SEVEN_AT_T,
+            FINAL_MIN: SEVEN_FINAL}, None),
+    3: (7, {SALE_OPENING_MIN: SEVEN_AT_T, SCRATCH_MIN: SEVEN_AT_T, 5: SEVEN_AT_T,
+            FINAL_MIN: SEVEN_FINAL}, "8"),
+}  # fmt: skip
+
+
+def at_sale_rows(day: date) -> list[dict]:
+    """The WIN and PLACE rows of `AT_SALE_RACES`: each board's PLACE figures as JRA prints them
+    from its money under the places of the race's field at sale; a runner off a board (scratched,
+    or never priced) has rows with no price, as the store writes a scratch."""
+    rows = []
+    for race_no, (at_sale, boards, never) in AT_SALE_RACES.items():
+        race_id, post = race_id_of(day, race_no), post_of(day, race_no)
+        places = PLACE_POOL.places_for(at_sale)
+        for minutes, money in boards.items():
+            final = minutes == FINAL_MIN
+            lo, hi, _ = jra_place_figures(money, places=places)
+            assert_readable(money, hi)
+            for j in range(len(money)):
+                c = str(j + 1)
+                rows.append(row(race_id, race_no, PLACE, c, post, minutes, odds=lo[j],
+                                odds_hi=hi[j], final=final))  # fmt: skip
+                rows.append(row(race_id, race_no, WIN, c, post, minutes, odds=2.0 + j,
+                                final=final))  # fmt: skip
+            off = [str(j + 1) for j in range(len(money), at_sale)] + ([never] if never else [])
+            for c in off:
+                for pool in (WIN, PLACE):
+                    rows.append({**row(race_id, race_no, pool, c, post, minutes, final=final),
+                                 "status_raw": "----"})  # fmt: skip
+            rows.append(row(race_id, race_no, PLACE, POOL_ROW, post, minutes,
+                            investment=float(np.sum(money)), final=final))  # fmt: skip
+    return rows
+
+
+def test_board_reads_take_the_places_from_the_field_at_sale():
+    """Round-7 finding 1 on the study's board reads: `race_view`'s board at t, `extract`'s board
+    at t and final board, and `closing_boards` read through `place_rule_measurement`, take P from
+    the field at the start of sales. Race 1 (8 at sale, 7 priced after a scratch) is read with 3
+    places, races 2 and 3 (7 at sale; race 3's eighth runner never priced) with 2, though all
+    three price 7 runners at the close; each read recovers the money it was printed from."""
+    day = TEST_DAYS[0]
+    frame = to_frame(at_sale_rows(day))
+    seven = tuple(str(j + 1) for j in range(7))
+    for race_no, (_, boards, _) in AT_SALE_RACES.items():
+        race_id = race_id_of(day, race_no)
+        for tau in AT_SALE_TAUS:
+            board = race_view(frame, race_id, tau_min=tau).pools[PLACE]
+            money = boards[SALE_OPENING_MIN] if tau > SCRATCH_MIN else boards[5]
+            want = tuple(str(j + 1) for j in range(len(money)))
+            assert board.combinations == want, (race_no, tau, board.combinations)
+            assert_recovers(board.shares, money)
+
+    cases, _, _ = extract(frame, taus=AT_SALE_TAUS)
+    place_cases = [i for i in range(len(cases)) if cases.pool[i] == PLACE]
+    assert len(place_cases) == len(AT_SALE_RACES) * len(AT_SALE_TAUS)
+    for i in place_cases:
+        race_no = int(str(cases.race_id[i]).rsplit(":", 1)[1])
+        boards = AT_SALE_RACES[race_no][1]
+        r = cases.rows(i)
+        combos, s_t, s_f = tuple(cases.combination[r]), cases.s_t[r], cases.s_f[r]
+        on_final = np.isfinite(s_f)
+        assert tuple(np.asarray(combos)[on_final]) == seven, (race_no, combos)
+        assert_recovers(s_f[on_final], SEVEN_FINAL)
+        before = float(cases.tau[i]) > SCRATCH_MIN
+        assert_recovers(s_t, boards[SALE_OPENING_MIN] if before else boards[5])
+        assert cases.reader[i] == "joint", (race_no, cases.reader[i])
+
+    closing = list(closing_boards(frame, PLACE))
+    assert sorted(b[0] for b in closing) == [race_id_of(day, n) for n in AT_SALE_RACES]
+    for b in closing:
+        assert tuple(b[1]) == seven, b[1]
+    votes = [r for n in AT_SALE_RACES for r in place_votes_rows(race_id_of(day, n), SEVEN_FINAL)]
+    measured = study.place_rule_measurement(closing, pd.DataFrame(votes))
+    assert measured["counts"]["boards_validated"] == 3, measured["counts"]
+    p3 = summary_row(measured, "joint", "P=3")
+    assert (p3["n_scored"], p3["n"]) == (1, 1), measured["summary"]
+    p2 = summary_row(measured, "joint", "P=2")
+    assert (p2["n_scored"], p2["n"]) == (2, 2), measured["summary"]
+    for got in (p3, p2):  # every board reproduced from its votes at its P, and read within
+        assert got["share_reproduced"] == pytest.approx(1.0), got
+        assert got["share_within_tolerance"] == pytest.approx(1.0), got

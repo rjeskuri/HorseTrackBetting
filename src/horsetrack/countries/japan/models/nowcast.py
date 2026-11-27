@@ -10,8 +10,11 @@ Shares (per pool, over the combinations priced on a board)
   several combinations on every result (PLACE, QUINELLA_PLACE: `places_paid` in config/jra.yaml
   exceeds `legs`) invert their figures by the stake-back-share rule every JRA pool pays by,
   `core.pricing.stake_back_share_dividend`: placed in a set S of P (from
-  `places_for(starters)`), combination i pays rate (1 + (1 - M_S) / (P m_i)) in units of the
-  pool, rate = 1 - takeout, truncated to the dividend step and floored at the minimum dividend.
+  `places_for(starters)`; for a PLACE board the starters are the field at the start of sales,
+  the runners priced on the race's earliest PLACE board, so a race that loses a runner after
+  sales open keeps its P, #410 round 7), combination i pays rate (1 + (1 - M_S) / (P m_i)) in
+  units of the pool, rate = 1 - takeout, truncated to the dividend step and floored at the
+  minimum dividend.
   The low figure prices i with the P - 1 most-backed others, the high with the P - 1
   least-backed. A PLACE board with a high figure on every combination is read from both
   (`place_money_fit`, #410: least squares at each figure's truncation midpoint, floored figures
@@ -352,36 +355,44 @@ def pool_shares(
     investment: np.ndarray | None = None,
     *,
     odds_hi: np.ndarray | None = None,
+    starters: int | None = None,
 ) -> tuple[np.ndarray | None, float]:
     """(shares, rule_sum) of one board's priced combinations (or, for 2-D `odds`, of each row).
     `odds` are the low figures, `odds_hi` the high (PLACE only: a board, or row, with a high
     figure on every combination is read by `place_money_fit`, else by `stake_back_money` from the
-    low figures). `rule_sum` is the money's total in units of the pool (1 when the rule holds),
-    NaN when no rule was used; shares are None when the pool is not sold for this many runners
-    (Wide counts its pairs, which gives its three places from 4 runners, as `places_for` does)."""
-    shares, rule_sum, _ = _read_shares(pool, odds, investment, odds_hi, rank=False)
+    low figures). P is `places_for(starters)` when `starters` (the field at the start of sales)
+    is given, else `places_for` of the priced combinations. `rule_sum` is the money's total in
+    units of the pool (1 when the rule holds), NaN when no rule was used; shares are None when
+    the pool is not sold for this many runners (Wide counts its pairs, which gives its three
+    places from 4 runners, as `places_for` does)."""
+    shares, rule_sum, _ = _read_shares(
+        pool, odds, investment, odds_hi, rank=False, starters=starters
+    )
     return shares, rule_sum
 
 
 def place_shares(
-    odds: np.ndarray, odds_hi: np.ndarray | None = None
+    odds: np.ndarray, odds_hi: np.ndarray | None = None, *, starters: int | None = None
 ) -> tuple[np.ndarray | None, float, str | None]:
-    """One PLACE board's (shares, rule_sum) exactly as `pool_shares` reads it, and the read it
-    used: `joint` (`place_money_fit` over both figures), `undetermined` (the same fit, whose used
-    figures do not determine the money, `place_fit_determined`: the minimum-norm shares, read
-    and flagged, not dropped) or `low_only` (`stake_back_money`); None when the pool is not sold
-    for this many runners."""
+    """One PLACE board's (shares, rule_sum) exactly as `pool_shares` reads it (P from
+    `starters`, the field at the start of sales, when given), and the read it used: `joint`
+    (`place_money_fit` over both figures), `undetermined` (the same fit, whose used figures do
+    not determine the money, `place_fit_determined`: the minimum-norm shares, read and flagged,
+    not dropped) or `low_only` (`stake_back_money`); None when the pool is not sold for this
+    many runners."""
     odds = np.asarray(odds, dtype=float)
     if odds.ndim != 1:
         raise ValueError("place_shares reads one board: odds must be 1-D")
-    shares, rule_sum, reader = _read_shares(PLACE, odds, None, odds_hi, rank=True)
+    shares, rule_sum, reader = _read_shares(
+        PLACE, odds, None, odds_hi, rank=True, starters=starters
+    )
     if shares is None:
         return None, rule_sum, None
     return shares, rule_sum, str(reader[0])
 
 
 def _read_shares(
-    pool: str, odds, investment, odds_hi, *, rank: bool
+    pool: str, odds, investment, odds_hi, *, rank: bool, starters: int | None = None
 ) -> tuple[np.ndarray | None, float, np.ndarray | None]:
     """`pool_shares`, and per row the Place read used (`place_shares`; None off the rule). The
     fit's rank, which tells `joint` from `undetermined`, is computed only with `rank`; without it
@@ -394,7 +405,7 @@ def _read_shares(
     if not _pays_several(pool):
         inverse = 1.0 / odds
         return inverse / inverse.sum(axis=-1, keepdims=True), math.nan, None
-    places = _pool_config(pool).places_for(odds.shape[-1])
+    places = _pool_config(pool).places_for(odds.shape[-1] if starters is None else int(starters))
     if places == 0 or odds.shape[-1] < places:
         return None, math.nan, None
     rate = 1.0 - float(_pool_config(pool).takeout)
@@ -554,8 +565,27 @@ def _total_at(series: _Series, at: int) -> float | None:
     return float(series.total_values[j]) if j >= 0 else None
 
 
-def _shares_of(pool: str, state: _State) -> tuple[np.ndarray | None, float]:
-    return pool_shares(pool, state.lo, state.inv, odds_hi=state.hi)
+def _field_at_sale(series: _Series) -> int | None:
+    """PLACE: the field at the start of sales, the runners priced on the race's earliest PLACE
+    board (a runner priced there and scratched later counts; one never priced does not, #410
+    round 7). None for the other pools, whose P stays that of the priced combinations."""
+    if series.pool != PLACE:
+        return None
+    state = _state_at(series, int(series.times[0]))
+    return None if state is None else len(state.index)
+
+
+def _starters(series: _Series, state: _State) -> int | None:
+    """The starters P is read from on `state`: the field at sale, never fewer than the runners
+    priced on `state` (an earliest board missing a runner's row does not lower P)."""
+    field = _field_at_sale(series)
+    return None if field is None else max(field, len(state.index))
+
+
+def _shares_of(series: _Series, state: _State) -> tuple[np.ndarray | None, float]:
+    return pool_shares(
+        series.pool, state.lo, state.inv, odds_hi=state.hi, starters=_starters(series, state)
+    )
 
 
 def _pool_board(series: _Series, post: int, tau_min: float) -> tuple[PoolBoard, float] | None:
@@ -563,13 +593,13 @@ def _pool_board(series: _Series, post: int, tau_min: float) -> tuple[PoolBoard, 
     state = _state_at(series, at)
     if state is None:
         return None
-    shares, rule_sum = _shares_of(series.pool, state)
+    shares, rule_sum = _shares_of(series, state)
     if shares is None:
         return None
     lags = []
     for lag in LAGS_MIN:
         then = _state_at(series, at - int(round(lag * _US_PER_MIN)))
-        lag_shares = None if then is None else _shares_of(series.pool, then)[0]
+        lag_shares = None if then is None else _shares_of(series, then)[0]
         if lag_shares is None:
             lags.append(None)
             continue
@@ -598,7 +628,9 @@ def _final_board(
     state = _state_at(series, _FAR_FUTURE)
     if state is None:
         return None
-    shares, _, reader = _read_shares(series.pool, state.lo, state.inv, state.hi, rank=True)
+    shares, _, reader = _read_shares(
+        series.pool, state.lo, state.inv, state.hi, rank=True, starters=_starters(series, state)
+    )
     if shares is None:
         return None
     read = str(reader[0]) if series.pool == PLACE and reader is not None else None
@@ -607,10 +639,11 @@ def _final_board(
 
 def closing_boards(
     frame: pd.DataFrame, pool: str
-) -> Iterator[tuple[str, tuple[str, ...], np.ndarray, np.ndarray]]:
-    """(race_id, combinations, low figures, high figures) of the final board of `pool` of each
-    race of `frame` with a post time: the board `extract` scores as the final (each combination's
-    latest row, the priced ones kept), before it is read into shares."""
+) -> Iterator[tuple[str, tuple[str, ...], np.ndarray, np.ndarray, int | None]]:
+    """(race_id, combinations, low figures, high figures, starters) of the final board of `pool`
+    of each race of `frame` with a post time: the board `extract` scores as the final (each
+    combination's latest row, the priced ones kept), before it is read into shares; `starters`
+    is the field at sale its P is read from (PLACE; None for the other pools)."""
     for race in _races(frame[frame["pool"] == pool], None):
         series = race.series.get(pool)
         state = None if series is None else _state_at(series, _FAR_FUTURE)
@@ -620,6 +653,7 @@ def closing_boards(
                 tuple(series.combinations[i] for i in state.index),
                 state.lo,
                 state.hi,
+                _starters(series, state),
             )
 
 
