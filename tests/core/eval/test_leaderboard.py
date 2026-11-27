@@ -23,7 +23,8 @@ Contract pinned here (the coder implements what these tests call):
   of the rendered rows' sources; ``to_json`` / ``from_json`` round-trip rows exactly.
 
 Every row is synthetic and built here. Expected shrunk values come from ``dersimonian_laird``
-below, written from the ticket's formulas, and expected standard errors from the standard
+below, written from the ticket's formulas (C in its cancellation-free form, shown equal to the
+written one on ordinary pools), and expected standard errors from the standard
 library's ``NormalDist``; nothing expected is computed by the module under test. Every write goes
 under ``tmp_path``, except one refused write aimed at the real repository, which is cleaned up.
 """
@@ -32,6 +33,7 @@ from __future__ import annotations  # noqa: I001 (leaderboard sorts as third-par
 
 import dataclasses
 import json
+import math
 import random
 import re
 import uuid
@@ -119,14 +121,33 @@ def expected_se(row: LeaderboardRow) -> float | None:
     return None
 
 
-def dersimonian_laird(xs: list[float], ses: list[float]) -> tuple[float, float, list[float]]:
-    """(tau^2, mu, shrunk values) from the ticket's formulas, for k >= 2 rows."""
+def c_as_written(w: list[float]) -> float:
+    """The Context's C as written, sum(w) - sum(w^2) / sum(w): it cancels to 0 when one weight
+    dwarfs the rest by more than double precision holds (se 1e-8 beside se 5)."""
+    sw = sum(w)
+    return sw - sum(wi**2 for wi in w) / sw
+
+
+def c_cross(w: list[float]) -> float:
+    """The same C, free of cancellation: sum_i w_i * (sum_{j != i} w_j) / sum(w), equal to
+    2 * sum_{i<j} w_i w_j / sum(w); every term is positive, so nothing cancels."""
+    sw = sum(w)
+    return sum(wi * sum(wj for j, wj in enumerate(w) if j != i) for i, wi in enumerate(w)) / sw
+
+
+def dersimonian_laird(
+    xs: list[float], ses: list[float], *, c_of=c_cross
+) -> tuple[float, float, list[float]]:
+    """(tau^2, mu, shrunk values) from the ticket's formulas, for k >= 2 rows. C comes from
+    ``c_cross`` by default, which equals the Context's C on every ordinary pool (see
+    ``test_a_near_degenerate_pair_matches_the_two_row_closed_form``) and stays exact on a pool
+    whose standard errors differ widely."""
     k = len(xs)
     w = [1.0 / s**2 for s in ses]
     sw = sum(w)
     xbar = sum(wi * xi for wi, xi in zip(w, xs, strict=True)) / sw
     q = sum(wi * (xi - xbar) ** 2 for wi, xi in zip(w, xs, strict=True))
-    c = sw - sum(wi**2 for wi in w) / sw
+    c = c_of(w)
     tau2 = max(0.0, (q - (k - 1)) / c)
     mu = sum(x / (s**2 + tau2) for x, s in zip(xs, ses, strict=True)) / sum(
         1.0 / (s**2 + tau2) for s in ses
@@ -135,14 +156,19 @@ def dersimonian_laird(xs: list[float], ses: list[float]) -> tuple[float, float, 
     return tau2, mu, shrunk
 
 
-def expected_shrunk(rows: list[LeaderboardRow]) -> dict[str, float | None]:
-    """option id -> the shrunk value the ticket's formulas give, per pool."""
-    out: dict[str, float | None] = {r.option_id: None for r in rows}
+def pools_of(rows: list[LeaderboardRow]) -> dict[str, list[LeaderboardRow]]:
+    """pool -> its rows with a return, a pool and a se, in order."""
     pools: dict[str, list[LeaderboardRow]] = {}
     for r in rows:
         if r.return_per_100 is not None and r.pool is not None and expected_se(r) is not None:
             pools.setdefault(r.pool, []).append(r)
-    for members in pools.values():
+    return pools
+
+
+def expected_shrunk(rows: list[LeaderboardRow]) -> dict[str, float | None]:
+    """option id -> the shrunk value the ticket's formulas give, per pool."""
+    out: dict[str, float | None] = {r.option_id: None for r in rows}
+    for members in pools_of(rows).values():
         if len(members) == 1:
             out[members[0].option_id] = members[0].return_per_100
             continue
@@ -532,6 +558,102 @@ def test_the_ticket_se_example_is_6_0796():
     assert both.se() == pytest.approx(20 / (2 * 1.6448536), abs=1e-6)
     assert both.se() == pytest.approx(6.0796, abs=1e-4)
     assert lower.se() == pytest.approx(both.se(), abs=TOL)
+
+
+# --------------------------------------------------------------------------- widely different se
+
+# WIN pools whose standard errors differ so widely (se 1e-8 beside se 5: weights 1e16 beside
+# 0.04) that the Context's C, computed as written, cancels to exactly 0 (PR #521 review).
+# Comparisons here are relative: the weights span more orders of magnitude than a double holds,
+# so two cancellation-free arrangements of the formulas agree only to a few ulps of each value's
+# own size (~1e2 here, so ~1e-14 absolute). REL_WIDE = 1e-9 is the ticket's tolerance read
+# relative to that size: far above that rounding, far below what a cancelled or half-fixed C
+# gives (tau^2 off by a factor of 2 or more, so shrunk values off by whole units).
+REL_WIDE = 1e-9
+
+WIDE_WIN_POOLS = [
+    pytest.param([70.0, 90.0], [1e-8, 5.0], id="pair-se-1e-8-5"),
+    pytest.param([70.0, 90.0, 60.0], [1e-8, 5.0, 7.0], id="triple-se-1e-8-5-7"),
+    pytest.param([62.0, 81.0, 95.0], [4.0, 1e-8, 9.0], id="triple-tiny-se-in-middle"),
+]
+
+
+def wide_rows(xs: list[float], ses: list[float]) -> list[LeaderboardRow]:
+    """The WIN rows ``wide-<i>`` and an ordinary PLACE pool beside them."""
+    rows = [make_row(f"wide-{i}", x, s) for i, (x, s) in enumerate(zip(xs, ses, strict=True))]
+    rows += [
+        make_row("place-a", 55.0, 3.0, pool="PLACE"),
+        make_row("place-b", 75.0, 6.0, pool="PLACE"),
+        make_row("place-c", 61.0, 2.5, pool="PLACE"),
+    ]
+    return rows
+
+
+@pytest.mark.parametrize(("xs", "ses"), WIDE_WIN_POOLS)
+def test_shrinkage_survives_widely_different_standard_errors(xs, ses):
+    w = [1.0 / s**2 for s in ses]
+    assert c_cross(w) > 0 and c_as_written(w) <= 1e-6 * c_cross(w)  # premise: it cancels here
+
+    rows = wide_rows(xs, ses)
+    want = expected_shrunk(rows)
+    assert all(v is not None for v in want.values())
+    for order in (rows, list(reversed(rows))):
+        got = by_id(shrink(order))  # must not raise
+        for oid, value in want.items():
+            shrunk = got[oid].shrunk_per_100
+            assert shrunk is not None and math.isfinite(shrunk), oid
+            assert shrunk == pytest.approx(value, rel=REL_WIDE), oid
+
+
+def test_a_near_degenerate_pair_matches_the_two_row_closed_form():
+    # The helper's cancellation-free C is the Context's C: on every ordinary pool the two agree.
+    for rows in (_fixed_pools(), _random_pools(449), _random_pools(2026), three_win_rows()):
+        for members in (m for m in pools_of(rows).values() if len(m) > 1):
+            xs = [m.return_per_100 for m in members]
+            ses = [expected_se(m) for m in members]
+            assert c_cross([1 / s**2 for s in ses]) == pytest.approx(
+                c_as_written([1 / s**2 for s in ses]), rel=1e-12
+            )
+            t_a, mu_a, s_a = dersimonian_laird(xs, ses, c_of=c_as_written)
+            t_b, mu_b, s_b = dersimonian_laird(xs, ses)
+            assert t_b == pytest.approx(t_a, rel=1e-12, abs=1e-12)
+            assert mu_b == pytest.approx(mu_a, rel=1e-12)
+            assert s_b == pytest.approx(s_a, rel=1e-12)
+
+    # k = 2 by hand: Q = d^2 / (v1 + v2) and C = 2 / (v1 + v2), so tau^2 = (d^2 - v1 - v2) / 2.
+    x1, x2, se1, se2 = 70.0, 90.0, 1e-8, 5.0
+    v1, v2 = se1**2, se2**2
+    tau2 = ((x2 - x1) ** 2 - v1 - v2) / 2
+    mu = (x1 * (v2 + tau2) + x2 * (v1 + tau2)) / (v1 + v2 + 2 * tau2)
+    by_hand = [mu + tau2 / (tau2 + v) * (x - mu) for x, v in ((x1, v1), (x2, v2))]
+    assert (tau2, mu) == pytest.approx((187.5, 79.375), rel=REL_WIDE)
+    assert by_hand == pytest.approx([70.0, 88.75], rel=REL_WIDE)
+    t, m, s = dersimonian_laird([x1, x2], [se1, se2])
+    assert (t, m) == pytest.approx((tau2, mu), rel=REL_WIDE)
+    assert s == pytest.approx(by_hand, rel=REL_WIDE)
+
+    got = by_id(shrink([make_row("near-exact", x1, se1), make_row("noisy", x2, se2)]))
+    assert got["near-exact"].shrunk_per_100 == pytest.approx(70.0, rel=REL_WIDE)
+    assert got["noisy"].shrunk_per_100 == pytest.approx(88.75, rel=REL_WIDE)
+
+
+def test_a_pool_with_widely_different_standard_errors_renders_and_writes(tmp_path):
+    rows = [*wide_rows([70.0, 90.0, 60.0], [1e-8, 5.0, 7.0]), make_row("wide-none", family="fb")]
+    want = expected_shrunk(rows)
+    order = sorted((o for o, v in want.items() if v is not None), key=lambda o: -want[o])
+    assert order[:2] == ["wide-1", "wide-0"]  # premise: 87.42 then 70.00
+
+    for public in (False, True):
+        text = render_markdown(rows, title=TITLE, public=public)
+        target = tmp_path / ("public" if public else "private") / "leaderboard.md"
+        assert write_leaderboard(target, rows, title=TITLE, public=public) == target
+        assert target.read_text(encoding="utf-8") == text
+        positions = [text.index(table_line(text, oid)) for oid in [*order, "wide-none"]]
+        assert positions == sorted(positions), public
+        for position, oid in enumerate(order, start=1):
+            line = cells(table_line(text, oid))
+            assert line[0] == str(position), (public, oid)
+            assert f"{want[oid]:.2f}" in line, (public, oid)
 
 
 # --------------------------------------------------------------------------- withholding

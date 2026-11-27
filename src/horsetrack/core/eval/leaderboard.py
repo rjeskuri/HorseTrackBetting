@@ -15,6 +15,9 @@ DerSimonian-Laird:
     mu = sum(x_i / (se_i^2 + tau^2)) / sum(1 / (se_i^2 + tau^2)),
     shrunk_i = mu + tau^2 / (tau^2 + se_i^2) * (x_i - mu).
 
+C is evaluated as 2 sum_{i<j} w_i w_j / sum(w) and Q around the pool's most precise row: the same
+quantities, free of the cancellation that zeroes C as written when one se is far below the rest.
+
 A pool of one keeps its raw return. A row without a pool or a positive se gets no shrunk value
 and ranks on its raw return.
 
@@ -199,9 +202,23 @@ def _dersimonian_laird(xs: list[float], variances: list[float]) -> list[float]:
         return list(xs)
     w = [1.0 / v for v in variances]
     sw = sum(w)
-    x_bar = sum(wi * xi for wi, xi in zip(w, xs, strict=True)) / sw
-    q = sum(wi * (xi - x_bar) ** 2 for wi, xi in zip(w, xs, strict=True))
-    c = sw - sum(wi * wi for wi in w) / sw
+    # The Context's formulas, arranged so that a pool mixing a near-exact row with ordinary ones
+    # (se 1e-8 beside se 5: weights 1e16 beside 0.04) loses nothing to cancellation.
+    # x_bar is taken relative to the most precise row p: x_bar - x_p = sum(w_i (x_i - x_p)) / sum(w)
+    # holds no huge term, so Q's term for p, w_p (x_p - x_bar)^2, is not an ulp of x_bar squared
+    # and multiplied by 1e16.
+    p = max(range(k), key=w.__getitem__)
+    d = [xi - xs[p] for xi in xs]
+    shift = sum(wi * di for wi, di in zip(w, d, strict=True)) / sw
+    q = sum(wi * (di - shift) ** 2 for wi, di in zip(w, d, strict=True))
+    # C = sum(w) - sum(w^2) / sum(w) = 2 * sum_{i<j} w_i w_j / sum(w). As written, the subtraction
+    # rounds to 0 there and tau^2 divides by it; here every term is positive, so nothing cancels.
+    c = 0.0
+    before = 0.0
+    for wi in w:
+        c += wi / sw * before
+        before += wi
+    c *= 2.0
     tau2 = max(0.0, (q - (k - 1)) / c)
     mu = sum(x / (v + tau2) for x, v in zip(xs, variances, strict=True)) / sum(
         1.0 / (v + tau2) for v in variances
