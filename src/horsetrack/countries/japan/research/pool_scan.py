@@ -7,6 +7,13 @@ flat rho = sum(return) / sum(payout rate) is 1 when the segment is priced like t
 rows grouped by (segment levels, odds band, odds) with a count and wins are the input of
 `core.eval.segment_roi.fit_segment_roi(..., count_col='count')` (#78).
 
+A refunded combination is staked nowhere: it is counted, not summed. It is refunded when
+`dividends` has an `is_refund` row for it or when the board printed it cancelled after sale
+(null `odds`, `status_raw` asterisks only, `****`); the jravan `dividends` table writes no refund
+rows (#443), so on that store the board's text is the only refund signal. A cancelled combination
+has no price and counts under the odds band `unpriced`. Every race is in a cell of each segment,
+a field of 1-4 starters in `field:le4` (owner 2026-11-27: keep all data).
+
 The functions take frames and return frames; nothing here reads the store, the registry or the
 holdout. `combination_returns` takes the store's `final_odds` rows of one pool and its `dividends`
 rows (`docs/specs/store.md`), a day's or a year's races at once, and every step is vectorised over
@@ -39,7 +46,8 @@ CLASS_GROUPS = {
     "G2": "graded",
     "G3": "graded",
 }
-MIN_STARTERS, MAX_STARTERS = 5, 18
+MIN_STARTERS, MAX_STARTERS = 1, 18
+UNPRICED = "unpriced"  # the band of a refunded combination the board printed no price for
 
 
 def class_group(race_class: str) -> str:
@@ -71,14 +79,23 @@ def race_cells(
 ) -> frozenset[str]:
     """The cells a race is in: 'all' and one `segment:level` of each segment (module docstring).
 
-    Field bands 5-10, 11-14 and 15-18 and favourite bands le1.9, 2.0-2.9, 3.0-4.9 and ge5.0 (lower
-    edge inclusive) as in #131's `exacta_study.segment_cells`; the pool size is low below the
-    first edge, mid from it to the second and high from the second.
+    Field bands le4, 5-10, 11-14 and 15-18 (the last three as in #131's
+    `exacta_study.segment_cells`; le4 keeps a race of 1-4 starters, owner 2026-11-27: keep all
+    data) and favourite bands le1.9, 2.0-2.9, 3.0-4.9 and ge5.0 (lower edge inclusive); the pool
+    size is low below the first edge, mid from it to the second and high from the second. A field
+    size that is not an integer from 1 to 18 raises ValueError.
     """
     group = class_group(race_class)
-    if not isinstance(field_size, Integral) or not MIN_STARTERS <= field_size <= MAX_STARTERS:
+    if (
+        isinstance(field_size, bool)
+        or not isinstance(field_size, Integral)
+        or not MIN_STARTERS <= field_size <= MAX_STARTERS
+    ):
         raise ValueError(f"field size {field_size!r} is outside {MIN_STARTERS}-{MAX_STARTERS}")
-    field = "5-10" if field_size <= 10 else "11-14" if field_size <= 14 else "15-18"
+    if field_size <= 4:
+        field = "le4"
+    else:
+        field = "5-10" if field_size <= 10 else "11-14" if field_size <= 14 else "15-18"
     fav_odds = _finite("fav_odds", fav_odds, 1.0)
     if fav_odds < 2.0:
         fav = "le1.9"
@@ -138,23 +155,35 @@ def _columns(frame: pd.DataFrame, name: str, needed: Sequence[str]) -> None:
 
 
 def combination_returns(board: pd.DataFrame, paid: pd.DataFrame, *, pool: str) -> pd.DataFrame:
-    """The return at the final dividend of every priced combination of `pool` on `board`.
+    """The return at the final dividend of every priced or refunded combination of `pool`.
 
     `board` is `final_odds` rows (only those of `pool` are read), `paid` is `dividends` rows of
-    any pools; both may hold many races. A priced combination is a board row other than the pool
-    row with a non-null `odds`; it matches `paid` on (race_id, combination) within `pool`, its
-    text as stored. One row per priced combination: race_id, combination, odds, won (it paid),
-    ret (dividend / 100 when it paid, else 0) and refunded (`paid` has an `is_refund` row for it).
-    In a dead heat every paying row pays its own combination.
+    any pools; both may hold many races. A combination is a board row other than the pool row:
+    priced when its `odds` is non-null, cancelled after sale (sold, then refunded) when its `odds`
+    is null and its `status_raw`, stripped, is asterisks only (`****`, docs/specs/jravan.md). The
+    other null-odds rows (`0000`, `----`, blank, null text) were never staked and give no row, and
+    without a `status_raw` column no row is cancelled after sale. A combination matches `paid` on
+    (race_id, combination) within `pool`, its text as stored. One row per priced or cancelled
+    combination: race_id, combination, odds (NaN when cancelled), won (it paid), ret (dividend /
+    100 when it paid, else 0) and refunded (cancelled after sale, or `paid` has an `is_refund` row
+    for it). In a dead heat every paying row pays its own combination. ValueError when `paid` pays
+    a combination the board cancelled after sale.
     """
     if pool not in POOLS:
         raise ValueError(f"unknown pool {pool!r} (have {POOLS})")
     _columns(board, "board", ["race_id", "pool", "combination", "odds"])
     _columns(paid, "paid", ["race_id", "pool", "combination", "dividend", "is_refund"])
     mine = board["pool"].to_numpy() == pool
-    priced = board.loc[mine & (board["combination"].to_numpy() != POOL_ROW), [*KEYS, "odds"]]
-    priced = priced[priced["odds"].notna()].reset_index(drop=True)
-    if priced.duplicated(KEYS).any():
+    slots = board.loc[mine & (board["combination"].to_numpy() != POOL_ROW)]
+    priced = slots["odds"].notna().to_numpy()
+    cancelled = np.zeros(len(slots), dtype=bool)
+    if "status_raw" in slots.columns:
+        starred = slots["status_raw"].astype("string").str.strip().str.fullmatch(r"\*+")
+        cancelled = ~priced & starred.fillna(False).to_numpy(dtype=bool)
+    keep = priced | cancelled
+    kept = slots.loc[keep, [*KEYS, "odds"]].assign(cancelled=cancelled[keep])
+    kept = kept.reset_index(drop=True)
+    if kept.duplicated(KEYS).any():
         raise ValueError(f"board has a {pool} combination twice in a race")
 
     paid = paid[paid["pool"].to_numpy() == pool]
@@ -166,8 +195,11 @@ def combination_returns(board: pd.DataFrame, paid: pd.DataFrame, *, pool: str) -
     if not (np.isfinite(dividend) & (dividend > 0)).all():
         raise ValueError(f"paid has a {pool} dividend that is not a positive number")
 
-    out = priced.merge(paying, on=KEYS, how="left")
+    out = kept.merge(paying, on=KEYS, how="left")
     won = out["dividend"].notna().to_numpy()
+    cancelled = out["cancelled"].to_numpy(dtype=bool)
+    if (won & cancelled).any():
+        raise ValueError(f"paid pays a {pool} combination the board cancelled after sale")
     refunds = pd.MultiIndex.from_frame(paid.loc[refund, KEYS])
     return pd.DataFrame(
         {
@@ -176,7 +208,7 @@ def combination_returns(board: pd.DataFrame, paid: pd.DataFrame, *, pool: str) -
             "odds": out["odds"].astype(float),
             "won": won,
             "ret": out["dividend"].fillna(0.0).to_numpy(dtype=float) / 100,
-            "refunded": pd.MultiIndex.from_frame(out[KEYS]).isin(refunds),
+            "refunded": pd.MultiIndex.from_frame(out[KEYS]).isin(refunds) | cancelled,
         }
     )
 
@@ -195,14 +227,22 @@ def race_returns(
 
     n_staked, ret_sum and rate_sum (payout_rate per combination staked) cover the unrefunded
     combinations; n_refunded counts the refunded ones. Flat rho is ret_sum.sum() / rate_sum.sum().
+    A refunded combination without a price (NaN odds, cancelled after sale) is in the band
+    `unpriced`; an unrefunded one without a price raises ValueError.
     """
     rate = _rate(payout_rate)
     _columns(rows, "rows", ["race_id", "odds", "ret", "refunded"])
     refunded = rows["refunded"].astype(bool).to_numpy()
+    odds = rows["odds"].to_numpy(dtype=float)
+    unpriced = np.isnan(odds)
+    if (unpriced & ~refunded).any():
+        raise ValueError("rows has an unrefunded combination without a price")
+    band = np.full(len(odds), UNPRICED, dtype=object)
+    band[~unpriced] = _bands(odds[~unpriced], band_edges)
     frame = pd.DataFrame(
         {
             "race_id": rows["race_id"].to_numpy(),
-            "band": _bands(rows["odds"].to_numpy(dtype=float), band_edges),
+            "band": band,
             "n_staked": (~refunded).astype(int),
             "ret_sum": np.where(refunded, 0.0, rows["ret"].to_numpy(dtype=float)),
             "n_refunded": refunded.astype(int),
@@ -220,8 +260,9 @@ def grouped_bets(
 ) -> pd.DataFrame:
     """`combination_returns` rows with the segment columns `by` as grouped bets for #78.
 
-    One row per distinct (*by, band, odds) of the unrefunded rows with takeout = 1 - payout_rate,
-    count (its combinations) and won (the wins among them): the input of
+    One row per distinct (*by, band, odds) of the unrefunded rows (refunded ones, priced or
+    cancelled after sale, are left out) with takeout = 1 - payout_rate, count (its combinations)
+    and won (the wins among them): the input of
     `fit_segment_roi(..., odds_band_col='band', takeout_col='takeout', count_col='count')`.
     """
     by = list(by)
