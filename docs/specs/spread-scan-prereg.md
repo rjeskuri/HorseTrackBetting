@@ -71,7 +71,10 @@ a run ranks at most 27 x 78 = 2,106 rows per variant. These counts are the desig
 - **No bet** in a race for a spread when the board ranks fewer runners than the spread's highest
   rank (each spread keeps one definition), when the race has no `dividends` row of the spread's
   pool (not sold, e.g. a bracket quinella in a small field, or not settled), or, for
-  `bracket:1/2-3`, when a rank 1-3 runner has no bracket. The private report counts each.
+  `bracket:1/2-3`, when a rank 1-3 runner has no bracket. The private report counts each. Since
+  both variants bet the same races, each rule is decided once per (race, spread) for both boards:
+  a spread is bought in both variants or in neither (made explicit by PR #524's review fixes; the
+  frozen spec is unchanged).
 - **Race skipped** (both variants): status other than `run`; no T-2 Win board, no T-2 Win pool
   total or no final Win board; segments undefined (`race_cells` refuses).
 
@@ -85,7 +88,7 @@ a run ranks at most 27 x 78 = 2,106 rows per variant. These counts are the desig
 - **Surface:** `races.surface`.
 - **Pool size:** the T-2 Win `__pool__` investment, in tertiles per calendar year of that year's
   scored races (numpy linear 1/3 and 2/3 quantiles; low below the first edge, mid below the second,
-  high from it).
+  high from it). A scored race holds at least one bet after the segment and no-bet rules.
 - **Cells:** per race 'all', one level of each segment, class x favourite and class x field; a row
   per (variant, spread, cell) with at least one bet.
 
@@ -127,12 +130,17 @@ a run ranks at most 27 x 78 = 2,106 rows per variant. These counts are the desig
 
 ## Outputs
 
-- Private report `$HORSETRACK_DATA_DIR/reports/spread-scan-japan-<spec hash>.md` and every row in
-  the candidate-cell schema (#430's keys plus `spread_id`, `variant`, `segment`, `rank`,
-  `n_tickets`, `ci_lo`, `ci_hi`, `p_return_above_100`) in
-  `$HORSETRACK_DATA_DIR/reports/candidate-cells/spread-scan.json`, both through `write_report`.
+- Private report `$HORSETRACK_DATA_DIR/reports/spread-scan-japan-<run key>.md`, one per run (the
+  run key: the first 16 hex digits of the sha256 of the spec hash, range, seed, replicates, commit
+  and store fingerprint; PR #524's review fixes, the first run's report was named by the spec hash
+  alone), and every row in the candidate-cell schema (#430's keys plus `spread_id`, `variant`,
+  `segment`, `rank`, `n_tickets`, `ci_lo`, `ci_hi`, `p_return_above_100`) in
+  `$HORSETRACK_DATA_DIR/reports/candidate-cells/spread-scan.json` (the latest scored run's), both
+  through `write_report`.
 - One registry record per (family, variant), failures included, hypothesis id `P503`, metrics per
-  row (`mean_return[<spread>]` with its bounds and `shrunk_edge[<spread>]`, fold = segment).
+  row (`mean_return[<spread>]` with its bounds and `shrunk_edge[<spread>]`, fold = segment); each
+  scored record names its report in `params.report`. A range without a bet is recorded as failed
+  and writes neither file.
 
 ## Rulings (reversible implementation choices)
 

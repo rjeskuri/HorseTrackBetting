@@ -22,17 +22,39 @@ the holdout is not opened.
   `6f041ec1399564dc0505f7408f205c7d34b6146a13c9b5442e97f8009b08be00`.
 - Requested range: development days from 2014-06-07 to 2026-11-27 (the run's arguments, not the
   store's measured span); holdout days are never read and `LockedHoldout` is never opened.
-- Seed 20261127, 1,000 meeting-bootstrap replicates; code at `c59a484`; command
-  `uv run horsetrack japan spread-scan run --from 2014-06-07 --to 2026-11-27`.
-- Variants searched: 27 spreads, 2 variants per family (`t2`, `lookahead`), 12 registry records;
-  by design at most 78 cell labels per spread, so at most 2,106 ranked rows per variant.
-- Private report: `$HORSETRACK_DATA_DIR/reports/spread-scan-japan-6f041ec1399564dc0505f7408f205c7d34b6146a13c9b5442e97f8009b08be00.md`;
-  candidate cells: `$HORSETRACK_DATA_DIR/reports/candidate-cells/spread-scan.json`; both written
-  through `write_report` with the source `jravan`.
+- Seed 20261127, 1,000 meeting-bootstrap replicates; run of record at code `65fcbfc` (PR #524's
+  review fixes); command
+  `uv run horsetrack japan spread-scan run --from 2014-06-07 --to 2026-11-27`. The first run, at
+  `c59a484`, is superseded (see "Runs, memory and the registry summary").
+- Variants searched: 27 spreads, 2 variants per family (`t2`, `lookahead`), 12 registry records
+  per run; by design at most 78 cell labels per spread, so at most 2,106 ranked rows per variant.
+- Private report of the run of record:
+  `$HORSETRACK_DATA_DIR/reports/spread-scan-japan-9291d2e5b95029e4.md` (named per run, and named
+  in each of its records as `params.report`); candidate cells:
+  `$HORSETRACK_DATA_DIR/reports/candidate-cells/spread-scan.json`; both written through
+  `write_report` with the source `jravan`.
 
 ## Registry records
 
-One record per (family, variant), in spec order:
+Run of record, at `65fcbfc`: one record per (family, variant), in spec order:
+
+| family / variant | run id |
+| --- | --- |
+| `japan-n8-spread-scan-exacta/t2` | `5f8dc63395d20a80f1ff38a8c8c64575cceeac5dd010fdc15c274ec2283eca53` |
+| `japan-n8-spread-scan-exacta/lookahead` | `0318f87edfaee94d956d44025dc348fd50357aab6c67c3c6874ea36ca8394641` |
+| `japan-n8-spread-scan-quinella/t2` | `6f29fe50a6f6a6bdb8845f7b97d853a8a8b5fe59b04a788046a45d94e5bea7a7` |
+| `japan-n8-spread-scan-quinella/lookahead` | `7974e5971b4548577ae24c3178d5e287165e4352ef09ea81a46db544df20d6e7` |
+| `japan-n8-spread-scan-wide/t2` | `bb475e11aa113307aae6a4c1fcb5e8a652a9dea221af3898733b8ab06384c2e5` |
+| `japan-n8-spread-scan-wide/lookahead` | `ce533a5081455e6166c55a3e3a155f943b85275590976bc47514ce52cf6e544d` |
+| `japan-n8-spread-scan-trio/t2` | `7189e522dbff80db95f0dd1ac0f0272b6cebac5d7a8ead1446624a6255c170ec` |
+| `japan-n8-spread-scan-trio/lookahead` | `beba22bee7e9504b4acc3b7d0f3c682d4282a6bc4bd823de4dbeeb97830f0687` |
+| `japan-n8-spread-scan-trifecta/t2` | `46505b8b645c063d516abde8ccd5eb96f03fc5a3680cc1396afcd4162633f38c` |
+| `japan-n8-spread-scan-trifecta/lookahead` | `27397d795c50404bf569219ae566778e99248dbd9b19c297cbc08281af780976` |
+| `japan-n8-spread-scan-bracket/t2` | `b00553e4f34e4ebf15067fb36b63a44799391198fd7550f6b41b519227df36a9` |
+| `japan-n8-spread-scan-bracket/lookahead` | `331fe612b91a219355a8b6264089ffd8d052e3b1629f179a91c23c39d189b8ad` |
+
+The first run, at `c59a484`, superseded by the review fixes; its records stay in the registry
+(append-only):
 
 | family / variant | run id |
 | --- | --- |
@@ -66,8 +88,8 @@ formation 1-2 / 1-4 / 2-6), trifecta (1 / 2-4 / 2-4, 1 / 2-4 / 2-7, 2-4 / 1 / 2-
 quinella (the favourite's bracket with those of ranks 2 and 3), each on the T-2 ranks (`t2`) and
 on the final ranks (`lookahead`). Every cell with a bet is a ranked row with its rho, its
 one-sided meeting-bootstrap bounds, its shrunk edge and P(return > 100 yen); the ranks, the rhos,
-their bounds and the shrunk edges are withheld (D21). No variant failed (the registry summary
-lists every run's status).
+their bounds and the shrunk edges are withheld (D21). No variant failed in either run (the
+registry summary lists every run's status).
 
 ## Alternatives rejected and why
 
@@ -100,14 +122,26 @@ leaderboard (#447) and a `lookahead` cell is a ceiling only; nothing here is ado
 
 - **Freeze.** `uv run horsetrack japan spread-scan freeze` ran on 2026-11-27 at commit
   `c59a484`, before any scored read of the six families. It wrote each family's only freeze line in
-  the japan registry.
-- **Run of record, at `c59a484`** (the table above), the only run. `/usr/bin/time -l` gave a
-  maximum resident set size of 1,460,813,824 bytes (about 1.46 GB) and 159 s of wall time on this
-  16 GB Mac, one calendar year of the store in memory at a time; `final_odds` is read for its WIN
-  rows only, by byte range (`read_development` on an `OSFile`), not through the memory-mapped
-  reader.
+  the japan registry. The review fixes change no family's spec (the hashes above are unchanged),
+  so that freeze stands for both runs.
+- **First run, at `c59a484`, superseded.** Its 12 records (the second table above) and its
+  private report, `$HORSETRACK_DATA_DIR/reports/spread-scan-japan-6f041ec1399564dc0505f7408f205c7d34b6146a13c9b5442e97f8009b08be00.md`,
+  stay. PR #524's review found that its code could let the two variants bet different races
+  where the two boards rank fields of different lengths, and cut the pool-size tertiles over races
+  holding no bet, both against the frozen spec; the fixed code follows the spec, and the scan was
+  run again on it.
+- **Run of record, at `65fcbfc`** (the first table above), same range, seed and replicates.
+- **Memory and wall time.** Both runs ran under `/usr/bin/time -l` on this 16 GB Mac; their wall
+  time and peak memory are withheld (D21), as `docs/specs/jravan.md` withholds the store's, in the
+  private run note `$HORSETRACK_DATA_DIR/reports/spread-scan-japan-runs.md`. The scan holds one
+  calendar year of the store in memory at a time and reads named columns only; `final_odds` is
+  read for its WIN rows only, by byte range (`read_development` on an `OSFile`), not through the
+  memory-mapped reader, and each development day's `odds_timeseries` file for its WIN rows.
 - **Registry summary.** Main's `write_summary` refuses the full japan registry (#131's and #282's
-  family ids contain `/`, PR #280), so the command regenerates the committed summary under
-  `docs/experiments/registry/japan/` with `write_summary` over the families it already holds plus
-  the six N8 families. Every existing file came out byte-identical, the six N8 files are new, and
-  `README.md` gains their six lines.
+  family ids contain `/`, PR #280). The first run's command regenerated the committed summary
+  under `docs/experiments/registry/japan/` with `write_summary` over the families it already held
+  plus the six N8 families (every existing file byte-identical, six new N8 files, six new
+  `README.md` lines). Since the review fixes the command writes the six N8 files from their own
+  records only and merges their lines into `README.md`, keeping every family it lists
+  (`studies/ability.py`'s way); the run of record adds its 12 rows to the six N8 files and leaves
+  every other file, `README.md` included, as it was.

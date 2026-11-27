@@ -10,3 +10,5 @@ built on a licensed source shows no values here.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | P503 | t2 | scored | withheld (licensed source) | | | | |
 | P503 | lookahead | scored | withheld (licensed source) | | | | |
+| P503 | t2 | scored | withheld (licensed source) | | | | |
+| P503 | lookahead | scored | withheld (licensed source) | | | | |
