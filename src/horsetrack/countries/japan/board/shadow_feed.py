@@ -9,6 +9,11 @@ Rules (docs/specs/board-feed.md, "The shadow feed"):
   stake, a bet, Kelly, an amount or a wager.
 - `win5` (ticket #135): on a WIN5 day the WIN5 pool total, carryover and pool EV as of now()
   (`research.win5.live_pool_ev` over the log's WIN5 `__pool__` rows); None on any other day.
+- `ladder` (ticket #499), per entry: the odds at T-20, T-10, T-5, T-2 and the final, keyed 20, 10,
+  5, 2, 0; a checkpoint passed is observed (the latest row captured at or before it, the plain
+  feed's `t20_odds` rule; the final from `final_board`), one ahead is projected from the current
+  figure with the drift cells of `models.nowcast` (docs/specs/board-feed.md, "The odds ladder").
+  Display only: values, flags and the shadow log do not read it.
 - `cache`: a mapping the caller keeps between builds. A race's values are recomputed only when its
   board (capture time and figures) or its bucket changed; flags read the clock on every build. The
   log readers live in the same mapping, so a rebuild parses only the members appended since.
@@ -34,10 +39,12 @@ from horsetrack.countries.japan.board.snapshot import (
     RaceBoard,
     board_at,
     bucket_for,
+    final_board,
     jra_day_dir,
     load_decision_grid,
     post_times_for,
 )
+from horsetrack.countries.japan.models.v0.nowcast import FLOOR, band_of
 from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels, shadow_values
 from horsetrack.countries.japan.research.win5 import live_pool_ev
 from horsetrack.countries.japan.shadow.day import point_seed
@@ -48,6 +55,7 @@ WIN_FIELDS = ("value_mean", "value_q05", "value_q95")
 RANGE_FIELDS = ("value_at_low", "value_at_high")
 
 Entry = tuple[datetime, int, dict[str, Any]]  # (available, seq, row)
+LADDER_MINUTES = (20, 10, 5, 2)  # the ladder's checkpoints before the post; 0 is the final
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -63,11 +71,15 @@ def _finite(value: float | None) -> float | None:
 
 class _DayRows:
     """The rows a board as of now needs, per race: the latest row per board key available by the
-    last now, plus every row available after it (a replay's later captures). A clock that goes
-    back reads the logs again from the start."""
+    last now, plus every row available after it (a replay's later captures). For the odds ladder
+    (#499) it also keeps, of the rows available by now, the latest captured at or before each
+    checkpoint post - k per board key, the rows of the captures showing a final price and the
+    latest capture time. A clock that goes back, or a change of post times, reads the logs again
+    from the start."""
 
     def __init__(self, race_date: date, day_dir: Path | None = None) -> None:
         self.race_date, self.day_dir = race_date, day_dir
+        self.posts: dict[str, dict[int, datetime]] = {}
         self._reset()
 
     def _reset(self) -> None:
@@ -77,6 +89,11 @@ class _DayRows:
         self.horizon: datetime | None = None
         self.seq = 0
         self.win5: list[dict[str, Any]] = []  # the WIN5 rows read so far, whatever their time
+        # race_id -> checkpoint minutes -> board key -> (capture, seq, row)
+        self.refs: dict[str, dict[int, dict[tuple, tuple[datetime, int, dict]]]] = {}
+        self.final_snaps: dict[str, set[datetime]] = {}  # captures holding a final row
+        self.finals: dict[str, list[dict[str, Any]]] = {}  # their rows, once available
+        self.last_capture: dict[str, datetime] = {}
 
     def _offer(self, race_id: str, entry: Entry) -> None:
         slot = self.latest.setdefault(race_id, {})
@@ -84,10 +101,46 @@ class _DayRows:
         current = slot.get(key)
         if current is None or entry[:2] >= current[:2]:
             slot[key] = entry
+        self._note(race_id, key, entry)
 
-    def update(self, venues: list[str], now_utc: datetime) -> None:
-        if self.horizon is not None and now_utc < self.horizon:
+    def _note(self, race_id: str, key: tuple, entry: Entry) -> None:
+        """The ladder's bookkeeping for a row now available."""
+        _, seq, row = entry
+        snap = odds_log._instant(row.get("snapshot_utc"))
+        if snap is None or key[1] == odds_log.POOL_TOTAL:
+            return
+        if snap in self.final_snaps.get(race_id, ()):
+            self.finals.setdefault(race_id, []).append(row)
+        last = self.last_capture.get(race_id)
+        if last is None or snap > last:
+            self.last_capture[race_id] = snap
+        post = self.post_of(race_id)
+        if post is None:
+            return
+        refs = self.refs.setdefault(race_id, {})
+        for k in LADDER_MINUTES:
+            if snap > post - timedelta(minutes=k):
+                continue
+            slot = refs.setdefault(k, {})
+            current = slot.get(key)
+            if current is None or (snap, seq) >= current[:2]:
+                slot[key] = (snap, seq, row)
+
+    def post_of(self, race_id: str) -> datetime | None:
+        parts = race_id.split(":")
+        no = _race_no(race_id)
+        return None if len(parts) != 4 or no is None else self.posts.get(parts[2], {}).get(no)
+
+    def update(
+        self,
+        venues: list[str],
+        now_utc: datetime,
+        posts: dict[str, dict[int, datetime]] | None = None,
+    ) -> None:
+        posts = {} if posts is None else posts
+        if (self.horizon is not None and now_utc < self.horizon) or posts != self.posts:
             self._reset()
+        self.posts = posts
         for venue in venues:
             path = jra_day_dir(self.race_date, self.day_dir) / f"{venue}{_LOG_SUFFIX}"
             tail = self.tails.setdefault(venue, odds_log.LogTail(path))
@@ -100,6 +153,10 @@ class _DayRows:
                     continue
                 if snapshot._key(row) is None:
                     continue
+                if snapshot._is_final(row):  # a capture is one gzip member, read whole
+                    snap = odds_log._instant(row.get("snapshot_utc"))
+                    if snap is not None:
+                        self.final_snaps.setdefault(race_id, set()).add(snap)
                 self.seq += 1
                 self.later.setdefault(race_id, []).append((available, self.seq, row))
         for race_id, entries in self.later.items():
@@ -170,7 +227,112 @@ def _values(
     return values
 
 
-def _pools(board: RaceBoard, flags: dict, values: dict) -> dict[str, dict[str, dict]]:
+# ---------------------------------------------------------------- the odds ladder (#499)
+
+
+def _drift(nowcast: Any, pool: str) -> Callable[[float, int], float] | None:
+    """mu(tau, band) of the nowcast's cells for `pool`: the cell mean on the grid, linear in tau
+    between neighbouring grid taus (and from mu(0) = 0 below the smallest), the largest grid tau's
+    cell beyond it; None when the nowcast has no cells for the pool (or no cells at all)."""
+    cells, grid = getattr(nowcast, "cells", None), getattr(nowcast, "grid", None)
+    if not isinstance(cells, dict) or grid is None or not hasattr(nowcast, "cell"):
+        return None
+    if not any(key[0] == pool for key in cells):
+        return None
+    taus = sorted(int(t) for t in grid.minutes)
+
+    def mu(tau: float, band: int) -> float:
+        if tau <= 0:
+            return 0.0
+        if tau >= taus[-1]:
+            return float(nowcast.cell(pool, taus[-1], band).mu)
+        points = [(0, 0.0)] + [(t, float(nowcast.cell(pool, t, band).mu)) for t in taus]
+        for (t0, m0), (t1, m1) in zip(points, points[1:], strict=False):
+            if t0 <= tau <= t1:
+                return m0 + (tau - t0) / (t1 - t0) * (m1 - m0)
+        raise AssertionError(tau)  # unreachable: 0 < tau < taus[-1]
+
+    return mu
+
+
+def _projector(models: ShadowModels | None, tau_now: float | None):
+    """pool -> (odds_now, k) -> the projected median odds at post - k, or None for a pool the
+    nowcast cannot project: exp(ln O_now + mu(tau_now, b) - mu(k, b)), b the band of O_now,
+    floored at 1.0 and rounded to two decimals."""
+    nowcast = None if models is None else models.nowcast
+    bands = getattr(nowcast, "bands", None)
+    drifts: dict[str, Any] = {}
+
+    def project(pool: str, odds_now: float, k: int) -> float | None:
+        if tau_now is None or bands is None or odds_now <= 0:
+            return None
+        if pool not in drifts:
+            drifts[pool] = _drift(nowcast, pool)
+        mu = drifts[pool]
+        if mu is None:
+            return None
+        band = band_of(odds_now, bands)
+        try:
+            shift = mu(tau_now, band) - mu(k, band)
+        except KeyError:  # a pool or tau the fit has no data for
+            return None
+        return round(max(FLOOR, math.exp(math.log(odds_now) + shift)), 2)
+
+    return project
+
+
+def _low(figure: float | tuple[float, float | None] | None) -> float | None:
+    if figure is None:
+        return None
+    return float(figure[0] if isinstance(figure, tuple) else figure)
+
+
+def _ladders(
+    board: RaceBoard,
+    day_rows: _DayRows,
+    post: datetime | None,
+    now_utc: datetime,
+    models: ShadowModels | None,
+) -> dict[tuple[str, str], dict[int, dict | None]]:
+    """(pool, combination) -> {20, 10, 5, 2, 0: {"odds", "observed"} or None} (docs/specs/
+    board-feed.md, "The odds ladder"). Display only: nothing here feeds a value or a flag."""
+    race_id = board.race_id
+    final = None
+    if day_rows.finals.get(race_id):
+        final = final_board(day_rows.finals[race_id], race_id, post_utc=post)
+    last = day_rows.last_capture.get(race_id)
+    tau_now = None
+    if post is not None and last is not None:
+        tau_now = max(0.0, (post - last) / timedelta(minutes=1))
+    project = _projector(models, tau_now)
+    refs = day_rows.refs.get(race_id, {})
+    figures = {WIN: board.win, PLACE: board.place, WIDE: board.wide}
+    finals = {} if final is None else {WIN: final.win, PLACE: final.place, WIDE: final.wide}
+    out: dict[tuple[str, str], dict[int, dict | None]] = {}
+    for pool, shown in figures.items():
+        for runners, figure in shown.items():
+            combination = f"{runners[0]},{runners[1]}" if pool == WIDE else str(runners)
+            odds_now, key = _low(figure), (pool, runners)  # key: the board key of snapshot._key
+            ladder: dict[int, dict | None] = {}
+            for k in (*LADDER_MINUTES, 0):
+                if k == 0:
+                    seen = _low(finals.get(pool, {}).get(runners))
+                    if seen is not None:
+                        ladder[0] = {"odds": seen, "observed": True}
+                        continue
+                elif post is not None and now_utc >= post - timedelta(minutes=k):
+                    ref = refs.get(k, {}).get(key)
+                    row = None if ref is None else ref[2]
+                    priced = row is not None and snapshot._priced(row)
+                    ladder[k] = {"odds": float(row["odds"]), "observed": True} if priced else None
+                    continue
+                odds = None if odds_now is None else project(pool, odds_now, k)
+                ladder[k] = None if odds is None else {"odds": odds, "observed": False}
+            out[(pool, combination)] = ladder
+    return out
+
+
+def _pools(board: RaceBoard, flags: dict, values: dict, ladders: dict) -> dict[str, dict]:
     keys = (
         [(WIN, str(h)) for h in sorted(board.win)]
         + [(PLACE, str(h)) for h in sorted(board.place)]
@@ -182,6 +344,7 @@ def _pools(board: RaceBoard, flags: dict, values: dict) -> dict[str, dict[str, d
         names = WIN_FIELDS if pool == WIN else RANGE_FIELDS
         entry = {n: None if value is None else _finite(getattr(value, n)) for n in names}
         entry["flags"] = list(flags.get((pool, combination), ()))
+        entry["ladder"] = ladders.get((pool, combination))
         out[pool][combination] = entry
     return out
 
@@ -214,11 +377,12 @@ def build_shadow(
         day_rows = _DayRows(race_date, day_dir)
         if cache is not None:
             cache[key] = day_rows
-    day_rows.update(logged, now_utc)
+    post_times = {venue: post_times_for(race_date, venue, day_dir=day_dir) for venue in logged}
+    day_rows.update(logged, now_utc, post_times)
 
     races = []
     for venue in logged:
-        posts = post_times_for(race_date, venue, day_dir=day_dir)
+        posts = post_times[venue]
         for race_id in day_rows.race_ids(venue):
             race_no = _race_no(race_id)
             if race_no is None:
@@ -244,7 +408,9 @@ def build_shadow(
                     "minutes_to_post": None if minutes is None else round(minutes, 2),
                     "tau_bucket_min": bucket,
                     "board_capture_utc": _iso(board.capture_utc),
-                    "pools": _pools(board, flags, values),
+                    "pools": _pools(
+                        board, flags, values, _ladders(board, day_rows, post, now_utc, models)
+                    ),
                 }
             )
     return {

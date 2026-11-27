@@ -1,9 +1,11 @@
 /* The shadow page (#122): the live board (board.js, #42) plus each row's shadow value, the bucket
  * the value was read at, and the avoid flags (#117, candidate rules of #82, none adopted).
  *
- * renderShadow draws board.js's renderBoard with four extra cells per row: the T-20→T-2 move
- * (`move_t20_t2_pct`, '-' until the T-2 capture exists), the value (WIN: mean with its 5-95% band;
- * other pools: the value at the low and the high odds), the bucket label and the flag chips.
+ * renderShadow draws board.js's renderBoard with extra cells per row: the odds ladder (#499: T-20,
+ * T-10, T-5, T-2 and the final from the shadow entry's `ladder`, observed odds as figures coloured
+ * by their move since T-20, the nowcast's projection of a checkpoint still ahead as '≈x.x'; without
+ * a ladder the plain row's t20/t10/t5/t2_odds and '-' ahead), the value (WIN: mean with its 5-95%
+ * band; other pools: the value at the low and the high odds), the bucket label and the flag chips.
  * Rows come from the plain feed only, one race per page, in board.js's order: favourite first by
  * the crowd's current odds (#498, the owner's display choice). The shadow feed (#121) is joined on
  * (race_id, pool, combination) and never sorts, highlights or colours a row by shadow value (a
@@ -92,11 +94,56 @@
       '<span class="mono">' + esc(yen(own(w, "investment"))) + "</span></p>";
   }
 
-  var HEAD = '<th scope="col" class="num">T-20→T-2</th>' +
+  /* The odds ladder (#499): [column, shadow ladder key, plain-feed reference, header]. */
+  var LADDER = [
+    ["ladder-t20", "20", "t20_odds", "T-20"],
+    ["ladder-t10", "10", "t10_odds", "T-10"],
+    ["ladder-t5", "5", "t5_odds", "T-5"],
+    ["ladder-t2", "2", "t2_odds", "T-2"],
+    ["ladder-final", "0", null, "Final"],
+  ];
+
+  /* The five checkpoints of a row, each {odds, observed} or null: the shadow entry's ladder, else
+   * the plain row's references as observed and null ahead (the final always). */
+  function ladderOf(entry, line) {
+    var ladder = own(entry, "ladder");
+    return LADDER.map(function (c) {
+      if (ladder && typeof ladder === "object") {
+        var point = own(ladder, c[1]);
+        if (!point || typeof point !== "object" || num(own(point, "odds")) === null) return null;
+        return { odds: num(point.odds), observed: point.observed === true };
+      }
+      var ref = c[2] === null ? null : num(own(line, c[2]));
+      return ref === null ? null : { odds: ref, observed: true };
+    });
+  }
+
+  /* Observed odds with one decimal, coloured up / down against an observed T-20; projected ones
+   * as '≈' and the odds, muted; '-' for none. */
+  function ladderCells(entry, line) {
+    var points = ladderOf(entry, line);
+    var t20 = points[0] && points[0].observed ? points[0].odds : null;
+    return points.map(function (p, i) {
+      var cls = "num lad", shown = DASH;
+      if (p !== null && p.observed) {
+        shown = p.odds.toFixed(1);
+        if (i > 0 && t20 !== null && p.odds !== t20) {
+          cls += " mv " + (p.odds > t20 ? "up" : "down");
+        }
+      } else if (p !== null) {
+        shown = "≈" + p.odds.toFixed(1);
+        cls += " projected";
+      }
+      return '<td data-col="' + LADDER[i][0] + '" class="' + cls + '">' + esc(shown) + "</td>";
+    }).join("");
+  }
+
+  var HEAD = LADDER.map(function (c) { return '<th scope="col" class="num">' + c[3] + "</th>"; })
+    .join("") +
     '<th scope="col" class="num">Value</th><th scope="col">Read at</th>' +
     '<th scope="col">Flags</th>';
 
-  /* The HTML of the shadow page for one race of one venue: the board plus move, value, bucket
+  /* The HTML of the shadow page for one race of one venue: the board plus ladder, value, bucket
    * and flag cells. */
   function renderShadow(feed, shadowFeed, opts) {
     opts = opts || {};
@@ -106,9 +153,7 @@
       cells: function (raceId, code, line) {
         var race = has.call(races, String(raceId)) ? races[String(raceId)] : null;
         var entry = own(own(own(race, "pools"), code), String(line.combination));
-        var mv = board.moveClass(line.move_t20_t2_pct);
-        return '<td data-col="move-t20-t2" class="num mv' + (mv ? " " + mv : "") + '">' +
-          esc(board.formatMove(line.move_t20_t2_pct)) + "</td>" +
+        return ladderCells(entry, line) +
           '<td data-col="value" class="num val">' + esc(valueText(code, entry)) + "</td>" +
           '<td data-col="bucket" class="mono small">' + esc(race ? bucketText(race) : DASH) +
           "</td>" + '<td data-col="flags" class="flags">' + flagChips(entry) + "</td>";
