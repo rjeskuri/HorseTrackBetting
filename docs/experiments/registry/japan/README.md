@@ -11,6 +11,7 @@ per family, each holding that family's runs.
 - [japan-131-exacta-category-v2-max-test](japan-131-exacta-category-v2-max-test.md)
 - [japan-131-exacta-logscore-v2](japan-131-exacta-logscore-v2.md)
 - [japan-131-exacta-logscore-v3](japan-131-exacta-logscore-v3.md)
+- [japan-282-exacta-fav-first-avoidance-v2](japan-282-exacta-fav-first-avoidance-v2.md)
 - [japan-beta-clustered-final-win](japan-beta-clustered-final-win.md)
 - [japan-c1-nowcast-final-shares](japan-c1-nowcast-final-shares.md)
 - [japan-c1-nowcast-final-shares-trial](japan-c1-nowcast-final-shares-trial.md)
@@ -54,4 +55,5 @@ per family, each holding that family's runs.
 - [japan/131-exacta-category-v2/max-test](japan--131-exacta-category-v2--max-test.md)
 - [japan/131-exacta-logscore-v1](japan--131-exacta-logscore-v1.md)
 - [japan/131-exacta-logscore-v2](japan--131-exacta-logscore-v2.md)
+- [japan/282-exacta-fav-first-avoidance-v1](japan--282-exacta-fav-first-avoidance-v1.md)
 - [win5-carryover-v1](win5-carryover-v1.md)

@@ -26,6 +26,8 @@
 | `japan-131-exacta-rule-v5` | E2: ratio-cut rules | 2 categories × 4 cuts × 2 scopes (16) | `37d8abb85db2bf8480f619b46440e0ea80a5ed68af992ef344b64e0b36dc2817` |
 | `japan-131-exacta-rule-v4` | E2, superseded by v5: history, not executed | 2 categories × 4 cuts × 2 scopes (16) | `28929cd783cd9e25ae8c7f39f30f2b0891720b60864a38fdbb13d7dcd2a8d3bc` |
 | `japan/131-exacta-rule-v3` | E2, superseded by v4: history, not executed | 2 categories × 4 cuts × 2 scopes (16) | `9104e173371668a34b4594b6e4970546649b886cdccc4e726ec9749188701f0d` |
+| `japan-282-exacta-fav-first-avoidance-v2` | L: fav_first loss avoidance (#282, section 5) | 4 cuts × 2 scopes (8) | `9309ef5eb7b105e125b2c9d6513a5badab83b122a629b0d8cfe30b2e3919c89a` |
+| `japan/282-exacta-fav-first-avoidance-v1` | L, superseded by v2: history, scored once on 0 logged exacta meetings | 4 cuts × 2 scopes (8) | `8ae769a7a9767f962d100d959b6567f09b8f8e154c282978d19fa018ece0434f` |
 
 `japan-131-exacta-rule-v5` (frozen 2026-11-28, GPT-6.2 Sol review round 5 of 2c73ca0)
 supersedes `japan-131-exacta-rule-v4`. v4 inherited the E1 families' Win probabilities (#114's
@@ -286,8 +288,62 @@ the race-card popularity cutoff, which superseded `-rule-v2` for the decision-ti
   it) scores the eligible logged development days available at each run, reported with n and
   the CI, and is re-scored as more days are logged (the owner's 2026-11-27 reframe). rule-v3
   and rule-v4 are history and not executed: the notes under the family table.
-- Buying fav_first is not in E2. A loss-avoidance rule (D18: "do not buy fav_first when
-  r_c(t) is above a cut") becomes a follow-up ticket.
+- Buying fav_first is not in E2. The loss-avoidance rule (D18: "do not buy fav_first when
+  r_c(t) is above a cut") is family L, below (#282).
+
+**Family L, fav_first loss avoidance** (D18; `japan-282-exacta-fav-first-avoidance-v2`, #282).
+Approved as drafted by the owner on #282, 2026-11-26, and reframed 2026-11-27 (no 100-meeting
+gate; both sets are leaderboard rows). v2 was frozen 2026-11-28 with hash
+`9309ef5eb7b105e125b2c9d6513a5badab83b122a629b0d8cfe30b2e3919c89a` (the sha256 of the sorted,
+compact JSON of `exacta_loss_avoidance.family_specs()`). It supersedes
+`japan/282-exacta-fav-first-avoidance-v1` (hash
+`8ae769a7a9767f962d100d959b6567f09b8f8e154c282978d19fa018ece0434f`, frozen 2026-11-27 and scored
+once on 0 logged exacta meetings, so 8 n = 0 records): superseded, history, not executed again.
+Its `supersedes` and `revision` fields name v1 by id and hash and say why. v2 changes the headline
+cut and the id, and nothing else:
+
+- **Headline "less popular":** v1 took it from the lower tertile of each logged day's exacta pool
+  totals at T−2. A whole-day tertile ranks an early race by later races' totals, which is
+  look-ahead for a decision made at T−2 (#131's review of rule-v3 found the same). v2 takes
+  section 6's race-card proxy, as E2's rule-v4 and rule-v5 do: race_no 1–4, or a DEBUT or MAIDEN
+  race (`race_class` from the store's races table). Its `scopes["headline"]` names the
+  favourite's Win odds at T−2 ≥ 3.0 (`fav_odds_min`), the proxy (`less_popular`: `race_no_max`
+  4, `race_classes` DEBUT and MAIDEN) and each input's `information_cutoff`: race_no and
+  race_class from the race card, the favourite's Win odds from the board at T−2. No pool total
+  enters any selection; a race whose class is missing from the store is less popular by its race
+  number alone.
+- **Tertile:** the lower tertile of exacta pool totals within each logged day (`ceil(n/3)` of the
+  day's `n` logged races with a total) is reported only, as the proxy's agreement diagnostic
+  (`diagnostics.less_popular_agreement`, in each run's report), never as a selection variable.
+  A race with no logged pool total is still scored.
+- **Id:** the registry refuses a `/` in a new family id, so v2 is `japan-282-…`. v1's records
+  stay under its legacy id (its summary file maps the `/` to `--`).
+
+The rest is v1's:
+
+- Rule: at T−2, skip a fav_first exacta c when `r_c(t) = q_c(t)/p_c(t) > k`, strictly above the
+  cut. A ratio equal to k, or a `q_c` not identified (at or below ¥110), is kept: the rule skips
+  only on evidence that the pool overloads c. `q_c(t)` is the exacta board's implied share at
+  T−2 (`implied_share(odds × 100, rate)`, E2's). `p_c(t)` is the discounted Harville exacta of
+  the Win board at T−2 with the Win shares `1 / odds` renormalised over the starters on that
+  board (as E2's rule-v5; no model fit of final odds), at λ2 = #115's full-development fit (the
+  ordering fit id is recorded with each run). The favourite and the fav_first combinations come
+  from the T−2 boards; a favourite from final odds is look-ahead.
+- Cuts k: 1.1, 1.2, 1.3, 1.5. Scopes: all races, and the headline cell. 4 cuts × 2 scopes =
+  **8 members, family size 8**.
+- Comparator: buy every fav_first combination of the T−2 exacta board at ¥100, on the same races.
+- Metric: return per ¥ at the final dividend (takeout and breakage in; no own impact, section 7's
+  ledger assumption) of the kept set minus the comparator's, with a meeting-cluster bootstrap
+  (95% one-sided bounds in each direction, `n_boot` 10,000, seed 282) and a max-statistic over the
+  8 members for `adj_lo` and `adj_hi`. The skipped set (the combinations the rule would not buy)
+  is a row of its own with the same metric. Nothing is dropped.
+- Data and exclusions: #130-logged development days only, a holdout day's race dropped before
+  anything else of it is read; E2's exclusions, plus a board with no fav_first combination. **No
+  meeting minimum**: every run scores the meetings logged, with n and the interval; none logged
+  gives an n = 0 record per member.
+- One registry record per member (8), carrying the kept and the skipped metrics. Family L is not in
+  E1's or E2's max test. Code: `exacta_loss_avoidance.py`
+  (`python -m horsetrack.countries.japan.research.exacta_loss_avoidance {freeze|score|summary}`).
 
 ## 6. Segments (marginal cells, not crossed, plus one pre-stated cross)
 
