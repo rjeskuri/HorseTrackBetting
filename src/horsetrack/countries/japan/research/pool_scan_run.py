@@ -23,8 +23,8 @@ it) and both omega readings; one registry record per pool, shrinkage, reading an
 `FAMILY_ID`, failures included, and one per cell rule in the pool's SPA family (`spa_family`); SPA
 and StepM per pool over this scan's cell records, beside the ranking; the private report and the
 candidate-cell file through `write_report`; for the default registry, `write_summary`. `FAMILY_ID`
-is v3: v1 and v2 (`SUPERSEDED_FAMILIES`) stay in the registry, superseded, and their variants count
-toward `variants_searched`, reported apart from the family size.
+is v4: v1, v2 and v3 (`SUPERSEDED_FAMILIES`) stay in the registry, superseded, and their variants
+count toward `variants_searched`, reported apart from the family size.
 
 D21: every figure comes from the jravan store, so both outputs go under the data directory and
 `render_public_report` names the run without a figure. Selection hygiene (#88): odds bands,
@@ -83,14 +83,15 @@ TICKET = 430
 HYPOTHESIS_ID = "E8"
 SOURCE = "jravan"
 STUDY = "pool-scan"
-FAMILY_ID = "japan-n1-pool-scan-v3"
-# v1 and v2, each frozen and run on 2026-11-27 and superseded after review (prereg_spec
+FAMILY_ID = "japan-n1-pool-scan-v4"
+# v1, v2 and v3, each frozen and run on 2026-11-27 and superseded after review (prereg_spec
 # 'supersedes'); their records stay in the registry and their variants count toward variants
 # searched.
-SUPERSEDED_FAMILIES = ("japan-n1-pool-scan", "japan-n1-pool-scan-v2")
+SUPERSEDED_FAMILIES = ("japan-n1-pool-scan", "japan-n1-pool-scan-v2", "japan-n1-pool-scan-v3")
 SUPERSEDED_SPECS = {
     "japan-n1-pool-scan": "74da5fd2789d242fef9da1fbc9ecb7335c5ccfd5869ed8498c64e319d34bddd9",
     "japan-n1-pool-scan-v2": "ac3050eb8d4191f4bf9c2bfb0a4978e69438544129d209dffe9f789e33359fb6",
+    "japan-n1-pool-scan-v3": "785a45700efca6286c8cd85c4f5b0cd17409b4f5cbcde1abb27368a6f19a356c",
 }
 UNSETTLED_REASON = "unsettled: no paying dividends row"
 OFF_BOARD_REASON = "unsettled: dividend not on the priced board"
@@ -253,11 +254,22 @@ def prereg_spec() -> dict[str, Any]:
                 "searched as the family size ('variants'), decoded final_odds row groups that "
                 "span a holdout day before filtering them ('store_reader_guarantee'), crossed "
                 "class with three dimensions only ('cells') and gave Place and Wide no #78 fit "
-                "('shrinkage'); v3 fixes each",
+                "('shrinkage'); v3 fixed each",
+            },
+            {
+                "family_id": SUPERSEDED_FAMILIES[2],
+                "spec_sha256": SUPERSEDED_SPECS[SUPERSEDED_FAMILIES[2]],
+                "why": "v3. The third review of PR #496 found the zero-hit cell rule wrong: a "
+                "Place or Wide cell with an expected return under the point baselines and no hit "
+                "(effect 0, in a band that pays in other cells) has a meeting-bootstrap se of 0, "
+                "every resample returning nothing, so with a positive family tau^2 its shrink "
+                "weight was 1 and its omega and upper bound exactly 0, a certain total loss the "
+                "data cannot show; v4 gives such a cell the Jeffreys zero-hit se ('shrinkage', "
+                "'zero_hit_cell'), and changes nothing for a cell that paid",
             },
         ],
-        "superseded_records": "v1's and v2's records stay in the registry, superseded: nothing is "
-        "deleted, and their variants count toward variants searched ('variants')",
+        "superseded_records": "v1's, v2's and v3's records stay in the registry, superseded: "
+        "nothing is deleted, and their variants count toward variants searched ('variants')",
         "hypothesis": "E8: in some pre-registered cell of a JRA pool's final board the "
         "hierarchical omega (realised wins over takeout-adjusted implied probability; for Place "
         "and Wide the realised return over the payout rate) differs from 1 once the "
@@ -310,6 +322,13 @@ def prereg_spec() -> dict[str, Any]:
             "id jra:<YYYY-MM-DD>:<VENUE>:<NN> encodes; or one without statistics) is decoded and "
             "its holdout rows dropped inside the scan; the private report counts such row groups "
             "per table until #502 isolates them too",
+            "d14_boundary": "the owner's decision (2026-11-27, on #82, for study tickets; #430's "
+            "definition of done quotes it): a development read meets D14 when no holdout value "
+            "reaches Python, a pyarrow dataset filter dropping holdout days or holdout race ids "
+            "inside the scan; Arrow decoding, in C++ before the filter, the column chunks of a "
+            "row group that mixes development and holdout days is accepted, and isolating holdout "
+            "days at the file or row-group level is #502's scope. The races and dividends reads "
+            "meet this boundary; skipping final_odds's spanning row groups goes beyond it",
         },
         "exclusions": [
             "a holdout day (D14) and any day before 2014-06-07 (D10)",
@@ -373,6 +392,12 @@ def prereg_spec() -> dict[str, Any]:
             "'<segment>:<level>' for each segment and level; then 'class:<group>&<other>:<level>' "
             "for other in crossed_with_class, in that order, every class group and level; a cell "
             "with no bets is a row with null figures",
+            "decided_by": "Claude, under the owner's decision (reframe, 2026-11-27, on #430; its "
+            "definition of done quotes it): the cross cells are among the 'Items for the spec' "
+            "that Claude decides and registers, each alternative a counted variant, and the "
+            "members are task 1's marginal cells plus the crosses Claude registers, so a cross "
+            "this spec does not register (the full joint cross included, 'alternatives_not_run') "
+            "is a choice recorded here",
             "crossed_with_class": list(CROSSED),
             "per_pool": "1 + 7 bands + 28 segment levels + 5 classes x (7 bands + 4 field + 4 fav "
             "+ 3 pool size + 2 surface + 10 venue) = 36 + 150 = 186 cells, the same list for the "
@@ -407,8 +432,10 @@ def prereg_spec() -> dict[str, Any]:
                 "effect e = sum(return) / sum(rate x rho_b) over its bets, rho_b at its point "
                 "estimate (0 for a band that paid nothing, so e is over the cell's bets in bands "
                 "that paid), with its meeting-bootstrap se; tau^2 of a family = max(0, mean over "
-                "its cells with a finite e of (e - 1)^2 - se^2); B = tau^2 / (tau^2 + se^2) (0 "
-                "when both are 0); shrunk effect normal, mean 1 + B (e - 1), sd sqrt(B) se",
+                "its cells with a finite e of (e - 1)^2 - se^2), each cell's meeting-bootstrap se; "
+                "a cell's shrink weight B = tau^2 / (tau^2 + s^2) (0 when both are 0), s its "
+                "meeting-bootstrap se, or for a cell with no hit its zero-hit se "
+                "('zero_hit_cell'); shrunk effect normal, mean 1 + B (e - 1), sd sqrt(B) s",
                 "band_baseline": "each band's rho_b carries its posterior, N_DRAWS draws per band "
                 "shared by the pool's cells on the span: for a band that paid, a gamma with rho_b "
                 "as mean and the band cell's meeting-bootstrap sd of rho as sd (a point at rho_b "
@@ -422,6 +449,17 @@ def prereg_spec() -> dict[str, Any]:
                 "expected return under the point baselines (e is 0 / 0): it holds no information "
                 "on its effect, which is the family's prior, N(1, tau^2), and it enters no "
                 "family's tau^2; its omega_full keeps its bands' baseline posterior",
+                "zero_hit_cell": "a cell with an expected return under the point baselines "
+                "(D = sum(rate x rho_b) > 0) and no hit has e = 0 and a meeting-bootstrap se of 0, "
+                "every resample returning nothing, which would make B 1 and its omega a certain 0. "
+                "Its s is instead the Jeffreys zero-hit sampling error, the construction "
+                "'band_baseline' uses for a band that paid nothing: the cell's sum of returns is "
+                "its mean odds (mean_odds, low-end; a paid combination pays at least about it) "
+                "times its expected hits, whose Jeffreys posterior after zero hits is Gamma(1/2, "
+                "1), sd sqrt(1/2); so s = sqrt(1/2) x mean_odds / D. B < 1 then, and the shrunk "
+                "effect keeps a spread that narrows as the cell's losing bets grow. Only s "
+                "changes: e stays 0, the cell enters its family's tau^2 with its meeting-bootstrap "
+                "se as every cell does, and a cell that paid reads as in v3",
                 "draws": "numpy default_rng(SeedSequence([run seed, pool index, span index, 1])): "
                 "the band draws, then each cell's effect draws in spec order",
                 "families": "class, field, fav, pool_size, surface, venue, and class&<other> for "
@@ -507,10 +545,10 @@ def prereg_spec() -> dict[str, Any]:
             "family_size": "registry.family_size(family_id) after the run, on every row and in "
             "the result",
             "variants_searched": "family_size + registry.family_size(f) for each superseded "
-            "family f (v1, v2) after the run, on every row and in the result, reported apart from "
-            "family_size: their variants ran on the same days and count too; each SPA family's "
-            "size and its variants searched (the same sum over its v1 and v2 SPA families) are "
-            "reported beside its SPA p",
+            "family f (v1, v2, v3) after the run, on every row and in the result, reported apart "
+            "from family_size: their variants ran on the same days and count too; each SPA "
+            "family's size and its variants searched (the same sum over its v1, v2 and v3 SPA "
+            "families) are reported beside its SPA p",
             "failures": "a pool with a data error in any year (pool_scan refuses a malformed board "
             "or dividend row) is failed on both spans, its cell rules too; a shrinkage that does "
             "not fit fails that pool and span; the private report gives each reason",
@@ -519,10 +557,11 @@ def prereg_spec() -> dict[str, Any]:
             "joint_cross": "the full joint cross odds band x class x field x favourite x pool "
             "size x surface x venue, 7 x 5 x 4 x 4 x 3 x 2 x 10 = 33600 cells per pool: most "
             "would hold a handful of races or none, no cell could show an effect at any useful "
-            "power, and SPA over that many rules would test nothing. The outline registers task "
-            "1's marginal cells plus stated crosses; the crosses run are class, the owner's axis "
-            "(maidens and debuts against the big graded races), with each other dimension, 150 "
-            "of the 186 cells",
+            "power, and SPA over that many rules would test nothing. The cross cells are Claude's "
+            "to register (owner's reframe, 2026-11-27, on #430; 'cells', 'decided_by'): the "
+            "members are task 1's marginal cells plus the crosses registered, and the crosses run "
+            "are class, the owner's axis (maidens and debuts against the big graded races), with "
+            "each other dimension, 150 of the 186 cells",
             "segment_roi_78_at_the_low_end": "#78's fit on Place or Wide at the bare low end of "
             "the range: its omega would describe the probability of placing at that price, not "
             "the return, which depends on the co-placers; roi78 scales each band's price by its "
@@ -530,6 +569,18 @@ def prereg_spec() -> dict[str, Any]:
             "point_band_baseline": "v2's point baseline for a Place or Wide band that paid "
             "nothing: a sparse band can pay nothing by chance, so a known zero would rule out a "
             "return the data cannot rule out ('band_baseline')",
+            "bootstrap_se_for_a_zero_hit_cell": "v3's meeting-bootstrap se of 0 for a Place or "
+            "Wide cell with no hit in bands that pay: a few losing bets would read as a certain "
+            "total loss ('zero_hit_cell')",
+            "zero_hit_se_in_tau2": "the zero-hit se in the family's tau^2 as well: it is a model "
+            "sd after zero hits, not the bootstrap sampling sd the moment estimate subtracts, and "
+            "it is largest for the sparsest cells, so a few sparse zero-hit cells could drive a "
+            "family's tau^2 to 0 and move every cell of the family, those that paid included, to "
+            "the prior with no spread",
+            "zero_hit_cell_unshrunk": "a zero-hit cell's effect as its Jeffreys posterior alone, "
+            "unshrunk: its mean, half of mean_odds / D, grows as the cell gets sparser, so a "
+            "sparse cell with no hit could rank above cells that paid, its family's information "
+            "unused",
             "skipping_races_and_dividends_row_groups": "skipping a races or dividends row group "
             "that spans a holdout day as final_odds's are skipped: their row groups do not follow "
             "the price windows (the jravan builders write races in one row group and dividends in "
@@ -1056,6 +1107,7 @@ def _span_sums(pool: str, start: date, store: _Store, races: pd.DataFrame, seed_
                 "flat_rho": returned / float(rate[m].sum()),
                 "mean_odds": float(odds[m].sum() / bets),
                 "effect": returned / due if due > 0 else float("nan"),
+                "expected": due,  # sum(rate x rho_b), the effect's denominator
             }
         out[cell] = info
     rng = np.random.default_rng(seed_seq)
@@ -1100,13 +1152,22 @@ def _band_draws(span: _Span, rng: np.random.Generator) -> np.ndarray:
     return out
 
 
+def _zero_hit_se(c: dict) -> float:
+    """The sampling error of a zero-hit cell's effect (prereg_spec 'zero_hit_cell'): its sum of
+    returns taken as its mean odds x the Jeffreys zero-hit posterior of its expected hits,
+    Gamma(1/2, 1), whose sd is sqrt(1/2), over its expected return sum(rate x rho_b)."""
+    return float(np.sqrt(JEFFREYS) * c["mean_odds"] / c["expected"])
+
+
 def _eb_readings(span: _Span, seed_seq) -> None:
     """Place and Wide: the normal empirical-Bayes shrink of each family's cell effects over band
     baselines that carry their posterior (`_band_draws`). A cell's omega_full draws are its
     rate-weighted baseline draws times its effect's draws (normal, censored at 0); a cell whose
     bets all sit in bands that paid nothing has no expected return under the point baselines (its
     effect is 0 / 0): its effect is the family's prior, N(1, tau^2), and it enters no tau^2
-    (prereg_spec 'zero_return_band')."""
+    (prereg_spec 'zero_return_band'). A cell with an expected return and no hit (effect 0) has no
+    bootstrap spread: its shrink takes the Jeffreys zero-hit se (`_zero_hit_se`), while tau^2 keeps
+    every cell's bootstrap se (prereg_spec 'zero_hit_cell')."""
     tau2: dict[str, float] = {}
     for family in {_family_of(c) for c in span.cells} - {None}:
         e = [
@@ -1134,6 +1195,8 @@ def _eb_readings(span: _Span, seed_seq) -> None:
             continue
         if np.isfinite(c["effect"]):
             se = c["se_effect"] if np.isfinite(c["se_effect"]) else 0.0
+            if c["effect"] == 0.0:  # no hit: every resample returns nothing, so se would be 0
+                se = _zero_hit_se(c)
             t2 = tau2[family]
             b = t2 / (t2 + se**2) if t2 + se**2 > 0 else 0.0
             effect, sd = 1 + b * (c["effect"] - 1), float(np.sqrt(b) * se)
@@ -1737,7 +1800,7 @@ def _digest(ids: list[str]) -> str:
 def render_public_report(result: ScanResult) -> str:
     """The public report: what ran and where its figures are, with no figure (D21)."""
     withheld = "withheld (D21)"
-    v1, v2 = SUPERSEDED_FAMILIES
+    v1, v2, v3 = SUPERSEDED_FAMILIES
     lines = [
         f"# Experiment report: N1, the final-board segment scan of six pools (Japan, #{TICKET})",
         "",
@@ -1755,14 +1818,19 @@ def render_public_report(result: ScanResult) -> str:
         "per 100 yen at the final price (takeout included, CI beside it). None is closed, and "
         'models aim at the top-ranked cells first."). The frozen spec quotes it in full '
         "(`authority`).",
-        f"- It supersedes v2, `{v2}` (spec sha256 `{SUPERSEDED_SPECS[v2]}`), and v1, `{v1}` (spec "
-        f"sha256 `{SUPERSEDED_SPECS[v1]}`), both run the same day. The second review of PR #496 "
-        "found that v2 scored a race whose dividend named a combination off the priced board as "
-        "if every ticket lost, read a Place or Wide band that paid nothing as a known zero, "
-        "reported variants searched as the family size, decoded price row groups that span a "
-        "holdout day, crossed class with three dimensions only, and gave Place and Wide no #78 "
-        "fit. v1's defects are in the spec (`supersedes`). Their records stay in the registry, "
-        "superseded; nothing is deleted.",
+        f"- It supersedes v3, `{v3}` (spec sha256 `{SUPERSEDED_SPECS[v3]}`), v2, `{v2}` (spec "
+        f"sha256 `{SUPERSEDED_SPECS[v2]}`), and v1, `{v1}` (spec sha256 "
+        f"`{SUPERSEDED_SPECS[v1]}`), all run on 2026-11-27. The third review of PR #496 found "
+        "that v3 read a Place or Wide cell with no hit, in an odds band that pays in other "
+        "cells, as a certain total loss: its meeting-bootstrap se is 0, so its shrink weight was "
+        "1 and its omega and upper bound exactly 0. v4 gives such a cell the Jeffreys zero-hit "
+        "se and changes nothing for a cell that paid. The second review found that v2 scored a "
+        "race whose dividend named a combination off the priced board as if every ticket lost, "
+        "read a Place or Wide band that paid nothing as a known zero, reported variants searched "
+        "as the family size, decoded price row groups that span a holdout day, crossed class "
+        "with three dimensions only, and gave Place and Wide no #78 fit. v1's defects are in the "
+        "spec (`supersedes`). Their records stay in the registry, superseded; nothing is "
+        "deleted.",
         f"- Requested range: development days from {result.start} to {result.end} (the run's "
         "arguments, not the store's measured span); holdout days are never read and "
         "`LockedHoldout` is never opened.",
@@ -1776,12 +1844,16 @@ def render_public_report(result: ScanResult) -> str:
         "(no price or result) is read on the same windows and `dividends` filtered in its scan "
         "to the windows' development race ids: their row groups are filtered, not skipped, so "
         "one spanning a holdout day would still be decoded, its holdout rows dropped inside the "
-        "scan, until #502 isolates them too; the private report counts them.",
+        "scan, until #502 isolates them too; the private report counts them. That meets the "
+        "owner's D14 boundary for study tickets (2026-11-27, on #82): a development read meets "
+        "D14 when no holdout value reaches Python, and Arrow decoding a mixed row group in C++ "
+        "before the filter is accepted; isolating holdout days at the file or row-group level is "
+        "#502's scope (`store_reader_guarantee`, `d14_boundary`).",
         f"- Seed {result.seed}; code at `{result.git_sha[:12]}`; command `uv run horsetrack japan "
         f"pool-scan run --from {result.start} --to {result.end} --seed {result.seed}`.",
         f"- Family size {result.family_size} (this family's distinct variants in the registry); "
-        f"variants searched {result.variants_searched} (that plus v1's and v2's, whose variants "
-        "ran on the same days). Both are on every row.",
+        f"variants searched {result.variants_searched} (that plus v1's, v2's and v3's, whose "
+        "variants ran on the same days). Both are on every row.",
         f"- Private report: `$HORSETRACK_DATA_DIR/{result.report_name}`; candidate cells: "
         f"`$HORSETRACK_DATA_DIR/{result.candidates_name}`; both written through `write_report` "
         "with the source `jravan`.",
@@ -1819,23 +1891,31 @@ def render_public_report(result: ScanResult) -> str:
         "shrinkage is #78's hierarchical fit for the one-winner pools, its omega weighted by "
         "payout rate. For Place and Wide it is an empirical-Bayes shrink of the realised return "
         "over odds-band baselines that carry their posterior (a band that paid nothing keeps a "
-        "Jeffreys posterior, not a known zero), which ranks them; beside it, as variants of their "
-        f"own (`{ROI78}`), #78's fit on a representative price: each combination's low-end odds "
-        "times its band's realised return per unit of low-end odds when it pays, the outcome "
-        "being whether it paid. Every cell of every pool is ranked by its shrunk expected return "
-        f"(the owner's reframe: none is closed); the ranks, the omegas and their bounds are "
+        "Jeffreys posterior, not a known zero, and a cell with no hit in bands that pay keeps "
+        "the Jeffreys zero-hit se in its shrink), which ranks them; beside it, as variants of "
+        f"their own (`{ROI78}`), #78's fit on a representative price: each combination's "
+        "low-end odds times its band's realised return per unit of low-end odds when it pays, the "
+        "outcome being whether it paid. Every cell of every pool is ranked by its shrunk expected "
+        f"return (the owner's reframe: none is closed); the ranks, the omegas and their bounds are "
         f"{withheld}. Which variants failed, and their figures, are {withheld}: the private "
         "report gives each reason, and the registry summary shows no status of a licensed-source "
-        f"run. v1's and v2's variants, superseded, are records of `{v1}` and `{v2}` and count "
-        "toward variants searched.",
+        f"run. v1's, v2's and v3's variants, superseded, are records of `{v1}`, `{v2}` and "
+        f"`{v3}` and count toward variants searched.",
         "",
         "## Alternatives rejected and why",
         "",
         "- The full joint cross (odds band x class x field x favourite x pool size x surface x "
         "venue, 33600 cells per pool): most cells would hold a handful of races or none, so none "
         "could show an effect at any useful power, and SPA over that many rules would test "
-        "nothing. The cells cross class, the owner's axis (maidens and debuts against the big "
+        "nothing. The cross cells are Claude's to register (the owner's reframe, 2026-11-27, on "
+        "#430): the cells cross class, the owner's axis (maidens and debuts against the big "
         "graded races), with each other dimension: 150 of each pool's 186 cells.",
+        "- v3's bootstrap se of 0 for a Place or Wide cell with no hit in bands that pay: a few "
+        "losing bets would read as a certain total loss. The zero-hit se in the family's tau^2 "
+        "as well: it is a model sd after zero hits, largest for the sparsest cells, so a few of "
+        "them could drive tau^2 to 0 and move every cell of the family to the prior. The "
+        "zero-hit cell's Jeffreys posterior unshrunk: a sparse cell with no hit could rank above "
+        "cells that paid.",
         "- #78's fit on Place and Wide at the bare low end of the range: its omega would describe "
         "the probability of placing at that price, not the return; the representative price "
         "scales each band by its realised return when it pays.",

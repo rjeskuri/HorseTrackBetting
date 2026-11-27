@@ -86,6 +86,17 @@ Review round 2 of PR #496, pinned the same way (the coder honours these names):
 - R6. PLACE and Wide also run #78's `fit_segment_roi` on their boards, registered as variants of
   FAMILY_ID whose name holds ROI78, scored or failed, beside the empirical-Bayes variants.
 
+Review round 3 of PR #496:
+
+- The planted-cell test runs on the planted store with QUINELLA sold in one unit of races only
+  (`planted_thin`), so that a fair pool's cells are sparse enough for their omega_full bounds (the
+  row's `omega_lo`, `omega_hi`) to cover break-even, 1 / payout rate, from both sides.
+- A PLACE or Wide class whose few bets in an odds band all lose, inside a band that pays in other
+  classes (the class-by-band family's cells differing, so its between-cell variance is positive),
+  is no certain total loss: its omega_full has an upper bound above 0 and a spread, its registered
+  segment_effect reading a spread, and with more such losing bets its upper bounds are lower.
+  No estimator is pinned.
+
 The stores are synthetic and built here (`write_store`): five runners per race, every pool's board
 priced so that each combination's realised wins over a unit of races match its implied
 probability exactly (counts per unit below), so every cell's flat return is known in closed form:
@@ -106,7 +117,7 @@ import shutil
 import subprocess
 import uuid
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -256,6 +267,36 @@ LONGSHOT_UNIT = 20
 LONGSHOT_ODDS = {"PLACE": 8.0, "QUINELLA_PLACE": 30.0}
 LONGSHOT_COUNTS = {"PLACE": (14, 10, 9, 7), "QUINELLA_PLACE": (14, 12, 10, 10, 8, 6)}
 
+# Review round 3: an odds band that pays in some classes and never in others. Horse 5 (its pairs
+# on Wide) sits at SPARSE_ODDS on every such board, the only price in its band (PLACE 5.0-10.0,
+# Wide 10.0-20.0). On a 'pays' board it pays as often as its price implies over a unit of 20 races
+# (SPARSE_SHOT_WINS per combination); on a 'loses' board never. The other combinations are fair and
+# sit in one low band; on a 'loses' board they share the places evenly, so its other bets return
+# the payout rate in every race.
+SPARSE_UNIT = 20
+SPARSE_SHOT_WINS = {"PLACE": 3, "QUINELLA_PLACE": 1}
+SPARSE_ODDS = {pool: RATES[pool] * SPARSE_UNIT / w for pool, w in SPARSE_SHOT_WINS.items()}
+SPARSE_COUNTS = {
+    "pays": {"PLACE": (10, 9, 9, 9), "QUINELLA_PLACE": (10, 10, 9, 9, 9, 9)},
+    "loses": {"PLACE": (10, 10, 10, 10), "QUINELLA_PLACE": (10, 10, 10, 10, 10, 10)},
+}
+
+
+def _check_sparse_profiles() -> None:
+    for pool, odds in SPARSE_ODDS.items():
+        assert math.isclose(RATES[pool] * SPARSE_UNIT / SPARSE_SHOT_WINS[pool], odds), pool
+        shots = sum(LONGSHOT_HORSE in c.split(",") for c in COMBOS[pool])
+        for kind, by_pool in SPARSE_COUNTS.items():
+            counts = by_pool[pool]
+            assert len(counts) + shots == len(COMBOS[pool]), (pool, kind)
+            fair = [RATES[pool] * SPARSE_UNIT / c for c in counts]
+            assert max(fair) < odds / 2, (pool, kind)  # no other price in the long shot's band
+            shot = SPARSE_SHOT_WINS[pool] if kind == "pays" else 0
+            assert sum(counts) + shots * shot == SPARSE_UNIT * PAYING[pool], (pool, kind)
+            race = Race(date(2019, 1, 5), "TOK", 1, "C1", "turf", 0, 1, sparse_shot=kind)
+            unit, _, wins = board_for(pool, race)
+            assert all(len(s) == PAYING[pool] for s in paying_slots(unit, wins)), (pool, kind)
+
 
 _check_profiles()
 
@@ -276,7 +317,11 @@ class Race:
     boost_pools: tuple[str, ...] = ("WIN",)
     priced_at: float | None = None  # the payout rate every board is priced at (None: RATES)
     longshot: bool = False  # PLACE and Wide boards carry the never-paying long shot
+    # PLACE and Wide boards carry the long shot at SPARSE_ODDS: 'pays' as often as its price
+    # implies, or 'loses' (never pays); None: the class's ordinary board
+    sparse_shot: str | None = None
     unpaid: tuple[str, ...] = ()  # pools sold on the board with no dividends row
+    unsold: tuple[str, ...] = ()  # pools not sold: no board, no pool total, no dividends row
     # (pool, defect): the pool's first paying combination is paid (a non-refund dividends row) but
     # not on the priced, non-refunded board (OFF_BOARD_DEFECTS)
     off_board: tuple[tuple[str, str], ...] = ()
@@ -304,6 +349,18 @@ def board_for(pool: str, race: Race) -> tuple[int, list[float], tuple[int, ...]]
                 price.append(RATES[pool] * LONGSHOT_UNIT / c)
                 wins.append(c)
         return LONGSHOT_UNIT, price, tuple(wins)
+    if race.sparse_shot is not None and pool in SPARSE_ODDS:
+        counts, price, wins = iter(SPARSE_COUNTS[race.sparse_shot][pool]), [], []
+        shot = SPARSE_SHOT_WINS[pool] if race.sparse_shot == "pays" else 0
+        for combination in COMBOS[pool]:
+            if LONGSHOT_HORSE in combination.split(","):
+                price.append(SPARSE_ODDS[pool])
+                wins.append(shot)
+            else:
+                c = next(counts)
+                price.append(RATES[pool] * SPARSE_UNIT / c)
+                wins.append(c)
+        return SPARSE_UNIT, price, tuple(wins)
     boost = race.win_boost if pool in race.boost_pools else 1.0
     unit, wins = wins_for(pool, race.race_class, boost)
     return unit, prices(pool, race.race_class, race.priced_at), wins
@@ -369,6 +426,8 @@ def write_store(
         base = {"jurisdiction": "jra", "race_id": rid, "race_date": race.day, "venue": race.venue}
         base["race_no"] = race.race_no
         for pool in POOLS:
+            if pool in race.unsold:
+                continue
             _, price, _ = board_for(pool, race)
             order = sorted(range(len(price)), key=lambda i, price=price: (price[i], i))
             rank = {i: r + 1 for r, i in enumerate(order)}
@@ -882,6 +941,42 @@ def planted(tmp_path_factory: pytest.TempPathFactory) -> PlantedRun:
     )
 
 
+# Review round 3: the planted store with a fair QUINELLA pool sparse enough that its cells' bounds
+# cover break-even (1 / payout rate) as well as omega 1. QUINELLA is sold in the conditions races
+# at TOK only (positions 0-39: two QUINELLA units, every paying slot twice); every other race's
+# QUINELLA pool is not sold. A populated QUINELLA cell then holds whole units, so its flat return
+# is still exactly the payout rate, and every band holds enough winners for omega to stay near 1.
+# Every other pool is the planted one.
+THIN_QUINELLA = ("C1", "TOK")
+
+
+def thin_quinella_races(days: Sequence[date]) -> list[Race]:
+    out = []
+    for race in planted_races(days):
+        sold = (race.race_class, race.venue) == THIN_QUINELLA
+        out.append(race if sold else replace(race, unsold=("QUINELLA",)))
+    sold = sum("QUINELLA" not in r.unsold for r in out)
+    assert sold == len(days) and sold % OTHER_COUNTS["QUINELLA"][0] == 0, sold
+    return out
+
+
+@pytest.fixture(scope="module")
+def planted_thin(tmp_path_factory: pytest.TempPathFactory):
+    """The planted run's result on the planted store with QUINELLA sold in one unit of races."""
+    root = tmp_path_factory.mktemp("planted-thin")
+    data = (root / "data").resolve()
+    data.mkdir()
+    days = boost_free_days(date(2019, 1, 5), PLANTED_DAYS, PLANTED_VENUES, RACE_NO.values())
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(DATA_VAR, str(data))
+        write_store(data, thin_quinella_races(days))
+        registry, _ = frozen_registry(root)
+        calls = guard(mp)
+        result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+    assert calls["holdout_open"] == []
+    return result
+
+
 # ---------------------------------------------------------------------------------------------
 # DoD: the family's freeze line comes before every scored record
 # ---------------------------------------------------------------------------------------------
@@ -989,8 +1084,8 @@ def test_a_row_group_spanning_a_holdout_day_is_skipped_unread(tmp_path, monkeypa
 # ---------------------------------------------------------------------------------------------
 
 
-def test_a_planted_cell_ranks_first(planted):
-    rows = planted.result.rows
+def test_a_planted_cell_ranks_first(planted_thin):
+    rows = planted_thin.rows
     win = with_bets(pool_rows(rows, "WIN"))
     assert win
     top = win[0]
@@ -1013,6 +1108,8 @@ def test_a_planted_cell_ranks_first(planted):
     first = next(i for i, r in enumerate(rows) if r is top)
     quinella = [(i, r) for i, r in enumerate(rows) if r["pool"] == "QUINELLA" and r["n_bets"] > 0]
     assert quinella
+    # the fair pool is the races that sold it: every combination of the 40, no more
+    assert max(r["n_bets"] for _, r in quinella) == PLANTED_DAYS * len(COMBOS["QUINELLA"])
     break_even = 1 / RATES["QUINELLA"]
     quinella_mean_odds = np.mean(prices("QUINELLA", "C1"))
     for i, r in quinella:
@@ -1026,6 +1123,9 @@ def test_a_planted_cell_ranks_first(planted):
         assert lo <= 1.0 <= hi, f"{r['cell_id']}: [{lo}, {hi}] misses the fair omega 1"
         # the one-sided lower bound covers break-even: no fair cell is shown to beat the takeout
         assert lo <= break_even, r["cell_id"]
+        # and, on a pool this sparse, neither is it shown to lose to the takeout: the ranking's
+        # reading (the row's omega_full bounds) covers break-even from both sides
+        assert lo <= break_even <= hi, f"{r['cell_id']}: [{lo}, {hi}] misses {break_even}"
         assert abs(omega - 1.0) <= 0.1, r["cell_id"]
     # every other fair pool returns exactly its payout rate in every cell
     for pool in ("PLACE", "QUINELLA_PLACE", "FORECAST", "TRIO"):
@@ -1488,6 +1588,104 @@ def test_a_winless_place_or_wide_band_keeps_finite_readings(tmp_path, monkeypatc
                     p = metrics.get(f"p_beats_takeout[{cell}]")
                     assert p is not None and math.isfinite(p.value), (pool, cell)
                     assert 0.0 <= p.value <= 1.0, (pool, cell, p.value)
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 3: a Place or Wide class whose few bets in an odds band all lose, inside a band
+# that pays in other classes, keeps its uncertainty after zero hits
+# ---------------------------------------------------------------------------------------------
+
+_check_sparse_profiles()
+
+SPARSE_PAYING = ("C1", "OP")  # every race of SPARSE_UNIT days, the long shot paying (fair)
+SPARSE_WINLESS = {"DEBUT": 3, "MAIDEN": 10}  # races run, the long shot never paying
+
+
+def sparse_band_races() -> list[Race]:
+    """One TOK meeting on each of 20 days: a conditions and an open race every day, whose long
+    shot pays as its price implies, and a newcomer race on the first 3 days and a maiden race on
+    the first 10, whose long shot never pays. The long shot's band thus pays regularly (in two
+    classes) while two classes' few bets in it all lose, the newcomer's fewer than the maiden's;
+    within the class-by-band family the cells' realised returns differ (0 beside the payout rate),
+    so the family's between-cell variance is positive."""
+    classes = (*SPARSE_PAYING, *SPARSE_WINLESS)
+    days = boost_free_days(date(2019, 1, 5), SPARSE_UNIT, ("TOK",), [RACE_NO[c] for c in classes])
+    races = []
+    for j, day in enumerate(days):
+        for c in classes:
+            if c in SPARSE_WINLESS and j >= SPARSE_WINLESS[c]:
+                continue
+            kind = "pays" if c in SPARSE_PAYING else "loses"
+            races.append(Race(day, "TOK", RACE_NO[c], c, "turf", j, DEV_RANKS[c], sparse_shot=kind))
+    return races
+
+
+@pytest.mark.filterwarnings("ignore:The loss differential has a variance of 0")
+def test_a_winless_class_in_a_paying_place_or_wide_band_keeps_its_uncertainty(
+    tmp_path, monkeypatch
+):
+    data = data_dir(tmp_path, monkeypatch)
+    write_store(data, sparse_band_races())
+    registry, _ = frozen_registry(tmp_path)
+    guard(monkeypatch)
+
+    result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    records = registry.records(psr.FAMILY_ID)
+    for pool in RANGE_POOLS:
+        shots = sum(LONGSHOT_HORSE in c.split(",") for c in COMBOS[pool])
+        band = {
+            r["class_group"]: r
+            for r in with_bets(pool_rows(result.rows, pool))
+            if r["odds_band"] is not None and r["mean_odds"] == pytest.approx(SPARSE_ODDS[pool])
+        }
+        # the band itself and its cross with each class run
+        assert set(band) == {None, "conditions", "open", "newcomer", "maiden"}, (pool, set(band))
+        # the band pays: in the paying classes exactly as its price implies
+        for group in ("conditions", "open"):
+            assert band[group]["n_bets"] == shots * SPARSE_UNIT, (pool, group)
+            assert band[group]["mean_return"] == pytest.approx(RATES[pool], abs=1e-9), pool
+        assert band[None]["mean_return"] > 0.0, pool
+        # the empirical-Bayes readings of the pool on the main span (R6's #78 variants aside)
+        eb = [rec for rec in records if rec.params.get("pool") == pool and ROI78 not in rec.variant]
+        readings = {
+            reading: {
+                m.metric: m
+                for rec in eb
+                if rec.params.get("reading") == reading
+                for m in rec.metrics
+                if m.fold == psr.MAIN_SPAN
+            }
+            for reading in psr.READINGS
+        }
+        upper: dict[str, dict[str, float]] = {}
+        for group, race_class in (("newcomer", "DEBUT"), ("maiden", "MAIDEN")):
+            r = band[group]
+            cell = r["cell_id"]
+            assert r["n_bets"] == shots * SPARSE_WINLESS[race_class], (pool, cell)
+            assert r["mean_return"] == 0.0, (pool, cell)
+            figures = [r[k] for k in ("omega", "omega_lo", "omega_hi", "shrunk_edge")]
+            assert all(v is not None and math.isfinite(v) for v in figures), (pool, cell, figures)
+            assert 0.0 <= r["omega_lo"] <= r["omega"] <= r["omega_hi"], (pool, cell, figures)
+            # a few bets that lost are not a certain total loss: the ranking's reading keeps an
+            # upper bound above 0 and a spread
+            assert r["omega_hi"] > 0.0, (pool, cell, r["omega_hi"])
+            assert r["omega_hi"] > r["omega_lo"], (pool, cell, r["omega_lo"], r["omega_hi"])
+            upper[group] = {"omega_full": r["omega_hi"]}
+            # both registered readings: finite, ordered, with a spread and an upper bound above 0
+            for reading in psr.READINGS:
+                m = readings[reading].get(f"omega[{cell}]")
+                assert m is not None, (pool, reading, cell)
+                assert None not in (m.lo, m.hi), (pool, reading, cell)
+                assert all(math.isfinite(v) for v in (m.value, m.lo, m.hi)), (pool, reading, cell)
+                assert m.lo <= m.value <= m.hi, (pool, reading, cell)
+                assert m.hi > m.lo, (pool, reading, cell, m.lo, m.hi)
+                assert m.hi > 0.0, (pool, reading, cell, m.hi)
+                upper[group][reading + " (registry)"] = m.hi
+        # not a constant: more losing bets in the same band, a lower upper bound
+        for reading, fewer in upper["newcomer"].items():
+            more = upper["maiden"][reading]
+            assert more < fewer, (pool, reading, f"maiden {more} >= newcomer {fewer}")
 
 
 # ---------------------------------------------------------------------------------------------
