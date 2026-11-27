@@ -27,10 +27,14 @@ API pinned here (module ``horsetrack.countries.japan.research.exacta_rules``):
   unrounded identity 100 (1 - t) (P + n s) / (W + s), equal to
   (D + 5) (1 + ``exacta_impact.own_impact(P, (D + 5) / 100, s, n, t)``).
   ``own_impact_dividend(...)`` (same arguments) is the dividend that pays: the raw value rounded
-  DOWN to a 10 yen step, never below 110 yen.
+  DOWN to a 10 yen step, never below 110 yen. JRA's Plus-10 exception: a published dividend of
+  exactly 100 yen (110 yen per winning ticket was not funded) leaves the winning share
+  unidentified, so it pays the published 100 yen whatever pool, n_bets and stake (never raised
+  to 110).
 - ``settle(selected, winner, dividend, *, pool, stake=STAKE, takeout=0.25) -> dict`` with
-  ``n_bets`` (len(selected)), ``stake`` (stake * n_bets, yen) and ``payout`` (yen:
-  stake / 100 * own_impact_dividend(...) when the winner is selected, else 0).
+  ``n_bets`` (len(selected)), ``stake`` (stake * n_bets, yen), ``payout`` (yen:
+  stake / 100 * own_impact_dividend(...) when the winner is selected, else 0) and
+  ``impact_available`` (False exactly when the published dividend is 100 yen).
 - ``lower_tertile_by_day(races, *, key) -> {race_id: bool}``: per race_date, the cutoff is the
   day's 1/3 quantile (linear interpolation, numpy's default) of ``race[key]`` over the races of
   that day whose value is finite and positive; a race is True when its value is at or below the
@@ -38,44 +42,56 @@ API pinned here (module ``horsetrack.countries.japan.research.exacta_rules``):
 - ``race_scopes(win_odds, *, less_popular) -> frozenset``: always "all"; "headline" when the
   favourite's Win odds *at t* are >= 3.0 and ``less_popular`` (v3's frozen scope: the race's
   exacta pool total in the lower tertile of its logged day). The race 1-4 / maiden proxy is not
-  the scope; it lives only in ``proxy_agreement``.
+  the scope; it lives only in ``proxy_agreement``. The frozen cutoff is kept and labelled
+  retrospective: the day's tertile uses later races' T-2 pools, unknown at an early race's t.
 - ``score_e2(races, *, registry, git_sha, lambda2, data_builds, n_boot=10000, seed=131,
   holdout_day=is_holdout_day) -> dict``. Each race is a mapping with race_id, race_date (date),
   meeting_id, race_no, race_class, rate, boost_may_be_withheld, win_odds_t {horse: odds},
   exacta_odds_t {(first, second): odds}, final_win_odds, final_exacta_odds, n_starters (the
   actual starters: runners not scratched at the off), pool_total (the race's FORECAST pool on its
-  final capture, yen; None when the log has no final FORECAST capture), pool_total_t (the latest
-  FORECAST pool total available by t), less_popular (bool, set by the loader over the whole
-  logged day) and exacta [(combination, dividend, is_refund)] (the paying rows).
+  final capture, yen; None when the log has no final FORECAST capture or that capture has no
+  pool total row), pool_total_t (the latest FORECAST pool total available by t), less_popular
+  (bool, set by the loader over the whole logged day) and exacta [(combination, dividend,
+  is_refund)] (the paying rows). win_odds_t and exacta_odds_t are {} when nothing was available
+  at t.
   A race with ``holdout_day("japan", race_date)`` is dropped before anything else of it is read;
-  a race with pool_total None is excluded as ``no_final_board``; ``exacta_study.exclusion_reason``
-  with ``n_starters=race["n_starters"]`` drops the rest; all counted in ``result["excluded"]``.
+  a race with an empty win_odds_t or exacta_odds_t is excluded as ``no_board_at_t``; one with
+  pool_total None as ``no_final_board``; ``exacta_study.exclusion_reason`` with
+  ``n_starters=race["n_starters"]`` drops the rest; all counted in ``result["excluded"]``.
   Selection and scope use the boards at t; each member (category, cut, scope) is a standalone
   rule: in each in-scope race it stakes ``STAKE`` on its selected set and is settled with its own
   n at the final pool. Refuses (RuntimeError or ValueError, nothing appended) unless ``registry``
   holds E2_ID frozen at the hash of ``exacta_study.family_specs()[E2_ID]``. Appends one record per
   member (family E2_ID, status "scored", params with category, cut, scope and spec_hash; a metric
-  "n_bets" always, "roi" when the member bet) and, when any race is scored, one SPA + StepM record
+  "n_bets" always, "roi" when the member bet, and "retrospective_cutoff" always: value 1.0 for a
+  headline member (its cutoff is the full-day T-2 pool tertile, retrospective), 0.0 for "all",
+  n the member's n_races; the label lives in the metrics, never in params, components, variant
+  or fold_scheme, so family_size stays 16) and, when any race is scored, one SPA + StepM record
   under MAX_TEST_ID (params block_size 5) over the 16 members with meetings as clusters. A record
   already in the registry is not appended again (no error): the same inputs twice add nothing,
   and a run that stopped part-way is completed by appending only the missing records.
-  Result: n_races, n_meetings, excluded, members (16 dicts: category, cut, scope, n_bets, n_races,
-  n_meetings, stake, payout, roi, lo, hi), spa (dict with pvalue, n_rules, family_size,
-  n_clusters; None with no race), stepm (dict with superior; None with no race), bets (one dict
-  per member x race x selected combination: category, cut, scope, race_id, meeting_id,
-  combination, odds (the combination's odds on the final board), won, stake, payout) and
-  shrinkage ({"status": "fitted", "band_effects": {band: float}, ...} from
-  ``core.eval.segment_roi.fit_segment_roi`` on the bets with exacta odds bands as the fixed
-  effects; {"status": "not_run", "reason": str} with no bet; {"status": "failed", "reason": str}
-  when the fit raises).
+  Result: n_races, n_meetings, excluded, impact_unavailable (the scored races whose published
+  winning dividend is 100 yen), members (16 dicts: category, cut, scope, retrospective (scope ==
+  "headline"), n_bets, n_races, n_meetings, stake, payout, roi, lo, hi, shrinkage), spa (dict
+  with pvalue, n_rules, family_size, n_clusters; None with no race), stepm (dict with superior;
+  None with no race), bets (one dict per member x race x selected combination: category, cut,
+  scope, race_id, meeting_id, combination, odds (the combination's odds on the final board), won,
+  stake, payout). A member's shrinkage is fitted on that member's own bet rows alone
+  (``core.eval.segment_roi.fit_segment_roi``, exacta odds bands as the fixed effects), so other
+  members selecting the same combinations cannot change it: {"status": "fitted", "n_bets": int,
+  "band_effects": {band: float}, "p_beats_takeout": float in [0, 1], ...}; {"status":
+  "not_run", "reason": str} when the member has no bet; {"status": "failed", "reason": str} when
+  its fit raises.
 - ``d_descriptive(races, *, lambda2) -> {category: {"n_races", "mean", "median"}}``: D, the
   full-board ratio sum_S q / sum_S p of ``exacta_consistency.race_ratios`` on the final boards
   (p from final_win_odds as above, dividends 100 * final_exacta_odds), over the three CATEGORIES;
-  a race with pool_total None (no final board) is left out.
+  every race with non-empty final_win_odds and final_exacta_odds counts, whatever its pool_total
+  and its boards at t; a race with no final FORECAST prices is left out.
 - ``proxy_agreement(races) -> dict`` with n_races, n_days, both_less, proxy_only, tertile_only,
   neither, agreement: "less popular" by the lower tertile of the final pool_total within each
   race *day* (all venues of the day together) against the frozen proxy (race 1-4 or DEBUT/MAIDEN).
-  The command passes every loaded logged race, not only the E2-scored ones.
+  The command passes every loaded logged race, not only the E2-scored ones: a race without a
+  board at t still counts when it has a final pool total.
 - ``load_logged_races(*, minutes_before=MINUTES_BEFORE_POST) -> list[dict]``: the race mappings
   above, from ``$HORSETRACK_DATA_DIR/odds_snapshots/jra/<day>/<VENUE>.jsonl.gz`` with its
   ``<VENUE>.races.json`` post times (t = post - minutes_before; a row is available at its
@@ -83,13 +99,20 @@ API pinned here (module ``horsetrack.countries.japan.research.exacta_rules``):
   ``processed/jra/races.parquet``, ``runners.parquet`` and ``dividends.parquet`` (pool FORECAST).
   less_popular is ``lower_tertile_by_day`` on pool_total_t over every logged race of the day that
   has one, whatever its E2 eligibility. A race whose log has no final FORECAST capture is loaded
-  with pool_total None and final_exacta_odds {} (never a pre-final total). Development days only:
-  a holdout day's folder is never opened (D14). rate is
+  with pool_total None and final_exacta_odds {} (never a pre-final total); one whose final
+  FORECAST capture has prices but no pool total row is loaded with pool_total None and those
+  final prices; one with FORECAST rows but nothing available at t is loaded with win_odds_t {}
+  and exacta_odds_t {} and its final boards. Development days only: a holdout day's folder is
+  never opened (D14). rate is
   ``takeout.race_takeout(race_id, "FORECAST", race_class_raw=...).payout_rate``.
-- ``exacta_rules_command()`` (``horsetrack japan exacta-rules``): the data_builds keys recorded
-  with each member are the same for a zero-race run and a populated run; the JSON report under
-  ``reports_dir()`` carries ``d`` and ``proxy``; the Markdown report renders the max test's status
-  (a failed max test's reason), D and the proxy agreement beside the member table.
+- ``exacta_rules_command()`` (``horsetrack japan exacta-rules``): each member record's
+  data_builds has exactly the keys odds_log, jra_races, jra_runners and jra_dividends, for a
+  zero-race run and a populated run alike; the store fingerprints cover only the rows the command
+  consumes (the logged development races' rows), so store rows of other races (holdout or
+  unlogged days) change no build id and a rerun appends nothing, while a changed consumed row
+  changes its table's id. The JSON report under ``reports_dir()`` carries ``d`` and ``proxy``;
+  the Markdown report renders the max test's status (a failed max test's reason), D and the proxy
+  agreement beside the member table, and labels each headline row retrospective.
 """
 
 # Ruff reads the module under test as third-party until it exists, then as first-party.
@@ -213,7 +236,10 @@ def ref_raw(dividend, pool, n, stake=100, t=0.25) -> float:
 
 
 def ref_paid(dividend, pool, n, stake=100, t=0.25) -> float:
-    """The raw dividend rounded down to 10 yen, never below the 110 yen minimum."""
+    """The raw dividend rounded down to 10 yen, never below the 110 yen minimum; a published 100
+    yen (Plus-10 not funded: the winning share is unidentified) pays 100 yen as published."""
+    if dividend == 100:
+        return 100.0
     return max(110.0, 10.0 * math.floor(ref_raw(dividend, pool, n, stake, t) / 10))
 
 
@@ -571,6 +597,40 @@ def test_settle_with_nothing_selected_costs_and_pays_nothing():
     assert (got["n_bets"], got["stake"], got["payout"]) == (0, 0, 0)
 
 
+# (pool, n, stake, takeout): the raw identity would land at, above and below 110 yen
+PLUS10_CASES = [(300_000, 1, 100, 0.25), (5_000_000, 12, 100, 0.25), (80_000, 3, 1000, 0.20),
+                (1_000_000_000, 40, 100, 0.25)]  # fmt: skip
+
+
+@pytest.mark.parametrize("pool, n, stake, t", PLUS10_CASES)
+def test_a_published_100_yen_dividend_pays_100_yen_and_flags_the_impact_unavailable(
+    pool, n, stake, t
+):
+    """JRA's Plus-10 exception: 100 yen published means 110 yen per winning ticket was not funded,
+    so the winning share is unidentified and settlement pays the published 100 yen."""
+    paid = er.own_impact_dividend(100.0, pool=pool, n_bets=n, stake=stake, takeout=t)
+    assert paid == 100.0
+    winner = (2, 4)
+    others = [(a, b) for a in range(1, 9) for b in range(1, 9) if a != b and (a, b) != winner]
+    hit = er.settle({winner, *others[: n - 1]}, winner, 100.0, pool=pool, stake=stake, takeout=t)
+    assert hit["n_bets"] == n and hit["stake"] == pytest.approx(stake * n)
+    assert hit["payout"] == pytest.approx(stake)  # 100 yen per 100 staked, never 110
+    assert hit["impact_available"] is False
+    miss = er.settle(set(others[:n]), winner, 100.0, pool=pool, stake=stake, takeout=t)
+    assert miss["payout"] == 0 and miss["impact_available"] is False
+
+
+@pytest.mark.parametrize("dividend, pool, n, stake, t", IMPACT_CASES)
+def test_any_other_published_dividend_keeps_the_floor_and_minimum_and_its_impact(
+    dividend, pool, n, stake, t
+):
+    winner = (3, 5)
+    got = er.settle({winner}, winner, dividend, pool=pool, stake=stake, takeout=t)
+    assert got["impact_available"] is True
+    assert got["payout"] == pytest.approx(stake / 100 * ref_paid(dividend, pool, 1, stake, t))
+    assert ref_paid(dividend, pool, 1, stake, t) >= 110
+
+
 def test_settle_defaults_to_a_hundred_yen_and_the_exacta_takeout():
     got = er.settle({(2, 1), (3, 1)}, (2, 1), 5_000.0, pool=600_000)
     assert er.STAKE == 100
@@ -706,32 +766,80 @@ def test_score_e2_keeps_every_selection_and_fits_the_odds_band_shrinkage(tmp_pat
                 if (b["category"], b["cut"], b["scope"]) == (cat, k, scope)]  # fmt: skip
         assert len(rows) == m["n_bets"]
         assert sum(b["payout"] for b in rows) == pytest.approx(m["payout"], rel=1e-9)
-    shrink = result["shrinkage"]
-    assert shrink["status"] == "fitted"
-    effects = shrink["band_effects"]
+        shrink = m["shrinkage"]
+        assert shrink["status"] in ("fitted", "failed"), (cat, k, scope)
+        if shrink["status"] == "fitted":  # fitted on this member's own rows only
+            assert shrink["n_bets"] == sum(b["odds"] is not None for b in rows)
+            assert 0.0 <= shrink["p_beats_takeout"] <= 1.0
+    widest = members[("no_fav", 0.9, "all")]["shrinkage"]
+    assert widest["status"] == "fitted"
+    effects = widest["band_effects"]
     assert len(effects) >= 2 and all(math.isfinite(float(v)) for v in effects.values())
+
+
+def cheapen_the_selected_no_fav(races: list[dict]) -> list[dict]:
+    """The same races with every no_fav combination the 0.9 cut buys repriced at t to ratio 0.55,
+    so the 0.6-0.8 cuts buy exactly the 0.9 cut's combinations; nothing else changes."""
+    out = []
+    for race in races:
+        win, exacta = race["win_odds_t"], dict(race["exacta_odds_t"])
+        model = ref_harville(ref_p(win), LAMBDA2)
+        for combo in ref_select(win, exacta, race["rate"], LAMBDA2)[("no_fav", 0.9)]:
+            exacta[combo] = odds_for_ratio(model[combo], 0.55, race["rate"])
+        out.append(dict(race, exacta_odds_t=exacta))
+    return out
+
+
+def test_a_members_shrinkage_is_unchanged_when_other_members_select_the_same_bets(tmp_path):
+    """Each member is fitted on its own rows: a nested member duplicating its bets adds no
+    evidence to it (one winning ticket must not count once per member that holds it)."""
+    races = make_races(281, DAYS)
+    dup = cheapen_the_selected_no_fav(races)
+    kw = {"git_sha": "abc1234", "lambda2": LAMBDA2, "data_builds": BUILDS, "n_boot": 50}
+    base = by_member(er.score_e2(races, registry=new_registry(tmp_path / "a"), **kw))
+    more = by_member(er.score_e2(dup, registry=new_registry(tmp_path / "b"), **kw))
+    for scope in SCOPES:
+        assert more[("no_fav", 0.6, scope)]["n_bets"] == more[("no_fav", 0.9, scope)]["n_bets"]
+        assert base[("no_fav", 0.6, scope)]["n_bets"] < base[("no_fav", 0.9, scope)]["n_bets"]
+        for key in (("no_fav", 0.9, scope), *(("fav_second", k, scope) for k in CUTS)):
+            assert more[key]["n_bets"] == base[key]["n_bets"], key
+            assert more[key]["shrinkage"]["status"] == base[key]["shrinkage"]["status"], key
+            if base[key]["shrinkage"]["status"] == "fitted":
+                assert more[key]["shrinkage"]["n_bets"] == base[key]["shrinkage"]["n_bets"]
+                assert more[key]["shrinkage"]["p_beats_takeout"] == pytest.approx(
+                    base[key]["shrinkage"]["p_beats_takeout"], abs=1e-9), key  # fmt: skip
+                assert more[key]["shrinkage"]["band_effects"] == pytest.approx(
+                    base[key]["shrinkage"]["band_effects"], abs=1e-9), key  # fmt: skip
+    assert base[("no_fav", 0.9, "all")]["shrinkage"]["status"] == "fitted"
 
 
 def test_shrinkage_is_not_run_without_bets_and_a_failed_fit_is_reported(tmp_path):
     empty = er.score_e2([], registry=new_registry(tmp_path / "a"), git_sha="abc1234",
                         lambda2=LAMBDA2, data_builds=BUILDS, n_boot=50)  # fmt: skip
     assert empty["bets"] == []
-    assert empty["shrinkage"]["status"] == "not_run" and empty["shrinkage"]["reason"]
+    for m in by_member(empty).values():
+        assert m["shrinkage"]["status"] == "not_run" and m["shrinkage"]["reason"]
 
-    # one race, one cheap combination (fav_second) and it wins: every bet won, so the
-    # band's omega has no finite mode and segment_roi's fit raises
+    # one race, one cheap combination at t (fav_second) and it wins: each fav_second member
+    # fits one all-won row. The shrinkage prices it on the final board, here 1.5: an all-won
+    # bet at odds this short has no interior mode, so segment_roi's fit raises even on n = 1
+    # (at the t price, ~18, a single row fits; only duplicated rows would fail there)
     race = make_races(281, DAYS[:1])[0]
     win = {1: 2.4, 2: 4.0, 3: 5.0, 4: 7.0, 5: 11.0, 6: 16.0}
     model = ref_harville(ref_p(win), LAMBDA2)
     exacta = {c: odds_for_ratio(model[c], 0.55 if c == (3, 1) else 1.2, RATE) for c in model}
     race.update(win_odds_t=win, exacta_odds_t=exacta, final_win_odds=win, n_starters=6,
-                final_exacta_odds=exacta, less_popular=False,
+                final_exacta_odds={**exacta, (3, 1): 1.5}, less_popular=False,
                 exacta=[((3, 1), 4_560.0, False)])  # fmt: skip
     result = er.score_e2([race], registry=new_registry(tmp_path / "b"), git_sha="abc1234",
                          lambda2=LAMBDA2, data_builds=BUILDS, n_boot=50)  # fmt: skip
     assert result["bets"] and all(b["won"] for b in result["bets"])
     assert {b["combination"] for b in result["bets"]} == {(3, 1)}
-    assert result["shrinkage"]["status"] == "failed" and result["shrinkage"]["reason"]
+    for (cat, _, scope), m in by_member(result).items():
+        if cat == "fav_second" and scope == "all":  # every one of its bets won
+            assert m["shrinkage"]["status"] == "failed" and m["shrinkage"]["reason"]
+        else:  # no bet (no_fav buys nothing; the favourite at 2.4 is not headline)
+            assert m["shrinkage"]["status"] == "not_run" and m["shrinkage"]["reason"]
 
 
 def test_score_e2_records_every_member_and_the_max_test_against_the_frozen_hash(tmp_path):
@@ -752,8 +860,14 @@ def test_score_e2_records_every_member_and_the_max_test_against_the_frozen_hash(
         assert metrics["n_bets"].value == expected[key]["n_bets"]
         want_roi = expected[key]["payout"] / expected[key]["stake"]
         assert metrics["roi"].value == pytest.approx(want_roi, rel=1e-9)
+        retro = metrics["retrospective_cutoff"]
+        assert retro.value == (1.0 if key[2] == "headline" else 0.0), key
+        assert retro.n == expected[key]["n_races"]
     assert seen == set(expected)
     assert not reg.records("japan/131-exacta-rule-v2")
+    assert reg.family_size(E2_ID) == 16
+    for m in result["members"]:
+        assert m["retrospective"] is (m["scope"] == "headline")
 
     (max_test,) = reg.records(f"{E2_ID}/max-test")
     assert max_test.params["block_size"] == 5
@@ -762,6 +876,24 @@ def test_score_e2_records_every_member_and_the_max_test_against_the_frozen_hash(
     assert 0.0 <= result["spa"]["pvalue"] <= 1.0
     assert set(result["stepm"]["superior"]) <= {r.variant for r in records}
     reg.verify()
+
+
+def test_the_retrospective_label_is_not_a_new_variant_of_the_records_already_made(tmp_path):
+    """Records written before the label (the same params, no retrospective_cutoff metric) and a
+    labelled run are one family of 16: the label changes no params, components or variant."""
+    races = make_races(281, DAYS)
+    kw = {"git_sha": "abc1234", "lambda2": LAMBDA2, "data_builds": BUILDS, "n_boot": 50}
+    labelled = new_registry(tmp_path / "new")
+    er.score_e2(races, registry=labelled, **kw)
+    older = new_registry(tmp_path / "old")
+    for r in labelled.records(E2_ID):
+        kept = tuple(m for m in r.metrics if m.metric != "retrospective_cutoff")
+        assert len(kept) == len(r.metrics) - 1
+        older.append(registry_module.RunRecord(**{**asdict(r), "metrics": kept,
+                                                  "git_sha": "def5678"}))  # fmt: skip
+    er.score_e2(races, registry=older, **kw)
+    assert len(older.records(E2_ID)) == 32
+    assert older.family_size(E2_ID) == 16
 
 
 def test_scoring_the_same_inputs_twice_adds_nothing(tmp_path):
@@ -840,6 +972,9 @@ def test_zero_logged_meetings_give_an_n_zero_result_and_records(tmp_path):
     for r in records:
         assert r.metrics and all(m.n == 0 for m in r.metrics)
         assert "roi" not in {m.metric for m in r.metrics}
+        retro = {m.metric: m.value for m in r.metrics}["retrospective_cutoff"]
+        assert retro == (1.0 if r.params["scope"] == "headline" else 0.0)
+    assert result["impact_unavailable"] == 0
 
 
 class Poison(dict):
@@ -985,18 +1120,39 @@ def test_excluded_races_place_no_bets_and_are_counted(tmp_path):
     late = dict(base, race_id="jra:2026-11-14:KYO:12", n_starters=4)
     assert len(late["win_odds_t"]) >= 5
     unfinished = dict(base, race_id="jra:2026-11-14:KYO:11", pool_total=None)
+    # loaded for D and the proxy, but nothing (or no exacta price) was available at t
+    blind = dict(base, race_id="jra:2026-11-14:KYO:10", win_odds_t={}, exacta_odds_t={})
+    no_exacta_t = dict(base, race_id="jra:2026-11-14:KYO:09", exacta_odds_t={})
     reg = new_registry(tmp_path)
-    result = er.score_e2([*keep, boost, refund, heat, late, unfinished], registry=reg,
-                         git_sha="abc1234", lambda2=LAMBDA2, data_builds=BUILDS,
+    result = er.score_e2([*keep, boost, refund, heat, late, unfinished, blind, no_exacta_t],
+                         registry=reg, git_sha="abc1234", lambda2=LAMBDA2, data_builds=BUILDS,
                          n_boot=50)  # fmt: skip
     assert result["n_races"] == 2
     assert {k: v for k, v in result["excluded"].items() if v} == {
         "boost_may_be_withheld": 1, "refund": 1, "dead_heat": 1, "under_5_starters": 1,
-        "no_final_board": 1}  # fmt: skip
+        "no_final_board": 1, "no_board_at_t": 2}  # fmt: skip
     want = expected_members(keep)
     for key, got in by_member(result).items():
         assert got["n_bets"] == want[key]["n_bets"]
         assert got["payout"] == pytest.approx(want[key]["payout"], rel=1e-9)
+
+
+def test_a_published_100_yen_winner_is_settled_at_100_yen_and_counted(tmp_path):
+    races = make_races(281, DAYS)
+    hit = next(i for i, r in enumerate(races)
+               if r["exacta"][0][0] in ref_select(r["win_odds_t"], r["exacta_odds_t"], RATE,
+                                                  LAMBDA2)[("no_fav", 0.9)])  # fmt: skip
+    winner = races[hit]["exacta"][0][0]
+    races[hit] = dict(races[hit], exacta=[(winner, 100.0, False)])
+    expected = expected_members(races)  # ref_paid pays 100 yen at a published 100
+    result = er.score_e2(races, registry=new_registry(tmp_path), git_sha="abc1234",
+                         lambda2=LAMBDA2, data_builds=BUILDS, n_boot=50)  # fmt: skip
+    assert result["n_races"] == 18 and result["impact_unavailable"] == 1
+    for key, got in by_member(result).items():
+        assert got["payout"] == pytest.approx(expected[key]["payout"], rel=1e-9), key
+    paid = [b["payout"] for b in result["bets"]
+            if b["race_id"] == races[hit]["race_id"] and b["won"]]  # fmt: skip
+    assert paid and all(p == pytest.approx(100.0) for p in paid)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1021,15 +1177,21 @@ def test_d_is_the_full_board_category_ratio_on_the_final_boards():
                {"fav_first": 1.1, "fav_second": 0.9, "no_fav": 1.0}),
         d_race("c", {1: 5.5, 2: 7.0, 3: 1.7, 4: 12.0, 5: 25.0},
                {"fav_first": 2.0, "fav_second": 0.6, "no_fav": 0.8}),
-        # no final FORECAST capture: its (pre-final) board is not D's
-        d_race("d", {1: 2.5, 2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0},
-               {"fav_first": 3.0, "fav_second": 0.2, "no_fav": 0.3}, pool=None),
+        # final prices but no pool total on the final capture (and no board at t): still D's
+        dict(d_race("d", {1: 2.5, 2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0},
+                    {"fav_first": 1.6, "fav_second": 0.7, "no_fav": 1.2}, pool=None),
+             win_odds_t={}, exacta_odds_t={}),
+        # no final FORECAST prices: not D's, whatever its pool total
+        dict(d_race("e", {1: 2.5, 2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0},
+                    {"fav_first": 3.0, "fav_second": 0.2, "no_fav": 0.3}),
+             final_exacta_odds={}),
     ]  # fmt: skip
     got = er.d_descriptive(races, lambda2=LAMBDA2)
     assert set(got) == set(ALL_CATS)
-    want = {"fav_first": [1.3, 1.1, 2.0], "fav_second": [1.0, 0.9, 0.6], "no_fav": [1.0, 1.0, 0.8]}
+    want = {"fav_first": [1.3, 1.1, 2.0, 1.6], "fav_second": [1.0, 0.9, 0.6, 0.7],
+            "no_fav": [1.0, 1.0, 0.8, 1.2]}  # fmt: skip
     for cat, values in want.items():
-        assert got[cat]["n_races"] == 3
+        assert got[cat]["n_races"] == 4
         assert got[cat]["mean"] == pytest.approx(statistics.mean(values), rel=1e-9)
         assert got[cat]["median"] == pytest.approx(statistics.median(values), rel=1e-9)
 
@@ -1084,7 +1246,8 @@ def at(day: date, hh: int, mm: int, ss: int = 0) -> str:
 
 
 def capture(day, venue, no, snap, win, forecast, pool, *, final=False, fetched=None, scr=()):
-    """One capture's rows; forecast None leaves FORECAST (and its pool total) out."""
+    """One capture's rows; forecast None leaves FORECAST (and its pool total) out, pool None
+    only the pool total row (the parser emits it only when the page prints a ticket count)."""
     rid = f"jra:{day.isoformat()}:{venue}:{no:02d}"
     extra = {"page_state": FINAL_TEXT, "source_update_utc": None} if final else {
         "source_update_utc": snap}  # fmt: skip
@@ -1102,9 +1265,10 @@ def capture(day, venue, no, snap, win, forecast, pool, *, final=False, fetched=N
             rows.append({"snapshot_utc": snap, "race_id": rid, "pool": "FORECAST",
                          "combination": f"{a},{b}", "odds": o, "status_raw": None,
                          **extra})  # fmt: skip
-        rows.append({"snapshot_utc": snap, "race_id": rid, "pool": "FORECAST", "combination":
-                     odds_log.POOL_TOTAL, "odds": None, "status_raw": None, "investment": pool,
-                     **extra})  # fmt: skip
+        if pool is not None:
+            rows.append({"snapshot_utc": snap, "race_id": rid, "pool": "FORECAST",
+                         "combination": odds_log.POOL_TOTAL, "odds": None, "status_raw": None,
+                         "investment": pool, **extra})  # fmt: skip
     rows.append({"snapshot_utc": snap, "race_id": rid, "pool": "QUINELLA", "combination": "1,2",
                  "odds": 99.0, "status_raw": None, **extra})  # fmt: skip # never exacta
     return rows
@@ -1142,7 +1306,7 @@ def store_runners(rid: str, horses, scratched=()) -> list[dict]:
              "is_scratched": h in scratched} for h in horses]  # fmt: skip
 
 
-def build_logged_day(data: Path) -> dict:
+def build_logged_day(data: Path, *, extra_day: bool = False) -> dict:
     """Six Tokyo races on one development day.
 
     1 MAIDEN: horse 6 scratched before t; a capture snapped before t but fetched after it.
@@ -1152,7 +1316,7 @@ def build_logged_day(data: Path) -> dict:
     5 MAIDEN (the old proxy), favourite 3.4 at t, pool 1.5M at t.
     6 C2, favourite 3.3 at t, the smallest pool at t (250k): the only headline race.
     Pools at t 700k, 450k, 350k, 900k, 1.5M, 250k: lower-tertile cutoff 416.7k (races 3, 6);
-    final pools 1.0M, 3.0M, none, 0.5M, 1.1M, 0.9M.
+    final pools 1.0M, 3.0M, none, 0.5M, 1.1M, 0.9M. ``extra_day`` adds ``build_second_day``.
     """
     day_dir = data / "odds_snapshots" / "jra" / LOG_DAY.isoformat()
     log = day_dir / "TOK.jsonl.gz"
@@ -1240,22 +1404,76 @@ def build_logged_day(data: Path) -> dict:
     dividends = [{"race_id": RID[no], "pool": "FORECAST", "combination": f"{c[0]},{c[1]}",
                   "dividend": d, "is_refund": False}
                  for no, (c, d) in boards["winners"].items()]  # fmt: skip
-    write_store(
-        data,
-        [store_race(LOG_DAY, "TOK", 1, "MAIDEN"), store_race(LOG_DAY, "TOK", 2, "C1"),
-         store_race(LOG_DAY, "TOK", 3, "C1"), store_race(LOG_DAY, "TOK", 4, "C1", field=5),
-         store_race(LOG_DAY, "TOK", 5, "MAIDEN"), store_race(LOG_DAY, "TOK", 6, "C2"),
-         store_race(HOLD_DAY, "NAK", 1, "C1")],
-        [{"race_id": RID[1], "pool": "WIN", "combination": "2", "dividend": 420.0,
-          "is_refund": False}, *dividends,
-         {"race_id": "jra:2026-11-29:NAK:01", "pool": "FORECAST", "combination": "1,2",
-          "dividend": 990.0, "is_refund": False}],
-        [*store_runners(RID[1], h6, scratched=(6,)), *store_runners(RID[2], h6),
-         *store_runners(RID[3], h6), *store_runners(RID[4], h5, scratched=(5,)),
-         *store_runners(RID[5], h6), *store_runners(RID[6], h6),
-         *store_runners("jra:2026-11-29:NAK:01", h6)],
-    )  # fmt: skip
+    store = {
+        "races": [store_race(LOG_DAY, "TOK", 1, "MAIDEN"), store_race(LOG_DAY, "TOK", 2, "C1"),
+                  store_race(LOG_DAY, "TOK", 3, "C1"), store_race(LOG_DAY, "TOK", 4, "C1", field=5),
+                  store_race(LOG_DAY, "TOK", 5, "MAIDEN"), store_race(LOG_DAY, "TOK", 6, "C2"),
+                  store_race(HOLD_DAY, "NAK", 1, "C1")],
+        "dividends": [{"race_id": RID[1], "pool": "WIN", "combination": "2", "dividend": 420.0,
+                       "is_refund": False}, *dividends,
+                      {"race_id": "jra:2026-11-29:NAK:01", "pool": "FORECAST",
+                       "combination": "1,2", "dividend": 990.0, "is_refund": False}],
+        "runners": [*store_runners(RID[1], h6, scratched=(6,)), *store_runners(RID[2], h6),
+                    *store_runners(RID[3], h6), *store_runners(RID[4], h5, scratched=(5,)),
+                    *store_runners(RID[5], h6), *store_runners(RID[6], h6),
+                    *store_runners("jra:2026-11-29:NAK:01", h6)],
+    }  # fmt: skip
+    if extra_day:
+        boards.update(build_second_day(data, store))
+    write_store(data, store["races"], store["dividends"], store["runners"])
     return boards
+
+
+DAY2 = date(2026, 11, 22)
+assert not is_holdout_day("japan", DAY2)
+RID2 = {no: f"jra:2026-11-22:KYO:{no:02d}" for no in range(1, 4)}
+
+
+def build_second_day(data: Path, store: dict) -> dict:
+    """Kyoto, 2026-11-22, three C1 races of six (t = post - 2 min):
+
+    1 its only capture is the final one (01:01): no board at t; final pool 800k.
+    2 boards at t (pool 600k at t); its final FORECAST capture prices every combination but has
+      no pool total row.
+    3 an ordinary race: pool 300k at t, final pool 2.0M.
+    """
+    day_dir = data / "odds_snapshots" / "jra" / DAY2.isoformat()
+    day_dir.mkdir(parents=True)
+    post = {no: datetime(2026, 11, 22, 1, 0, tzinfo=UTC) + timedelta(minutes=30 * (no - 1))
+            for no in range(1, 4)}  # fmt: skip
+    odds_log.write_post_times(
+        day_dir / "KYO.races.json", post, datetime(2026, 11, 21, 23, 0, tzinfo=UTC)
+    )
+    h6 = range(1, 7)
+    b = {
+        "k1_win_f": {1: 2.6, 2: 3.9, 3: 5.2, 4: 8.0, 5: 12.0, 6: 18.0},
+        "k1_fc_f": forecast_board(h6, 1.1),
+        "k2_win_t": {1: 4.1, 2: 2.3, 3: 5.6, 4: 7.7, 5: 10.0, 6: 21.0},
+        "k2_win_f": {1: 4.4, 2: 2.2, 3: 5.9, 4: 7.1, 5: 11.0, 6: 19.0},
+        "k2_fc_f": forecast_board(h6, 1.7),
+        "k3_win_t": {1: 3.6, 2: 3.9, 3: 4.2, 4: 6.5, 5: 9.5, 6: 16.0},
+        "k3_win_f": {1: 3.4, 2: 4.1, 3: 4.0, 4: 6.9, 5: 9.0, 6: 17.0},
+        "k3_fc_f": forecast_board(h6, 2.2),
+    }
+    b["k2_fc_t"], b["k3_fc_t"] = ratio_board(b["k2_win_t"]), ratio_board(b["k3_win_t"])
+    log = day_dir / "KYO.jsonl.gz"
+    for rows in (
+        capture(DAY2, "KYO", 1, at(DAY2, 1, 1), b["k1_win_f"], b["k1_fc_f"], 800_000, final=True),
+        capture(DAY2, "KYO", 2, at(DAY2, 1, 20), b["k2_win_t"], b["k2_fc_t"], 600_000),
+        capture(DAY2, "KYO", 2, at(DAY2, 1, 31), b["k2_win_f"], b["k2_fc_f"], None, final=True),
+        capture(DAY2, "KYO", 3, at(DAY2, 1, 50), b["k3_win_t"], b["k3_fc_t"], 300_000),
+        capture(DAY2, "KYO", 3, at(DAY2, 2, 1), b["k3_win_f"], b["k3_fc_f"], 2_000_000,
+                final=True),
+    ):  # fmt: skip
+        odds_log.append_capture(log, rows)
+    winners = {1: ((1, 2), 550.0), 2: ((2, 3), 1360.0), 3: ((4, 1), 2640.0)}
+    for no, (c, d) in winners.items():
+        store["races"].append(store_race(DAY2, "KYO", no, "C1"))
+        store["dividends"].append({"race_id": RID2[no], "pool": "FORECAST",
+                                   "combination": f"{c[0]},{c[1]}", "dividend": d,
+                                   "is_refund": False})  # fmt: skip
+        store["runners"].extend(store_runners(RID2[no], h6))
+    return b
 
 
 def guard_holdout_reads(monkeypatch) -> None:
@@ -1337,6 +1555,79 @@ def test_less_popular_is_the_day_tertile_of_the_pool_at_t_over_every_logged_race
 
 def test_load_logged_races_on_an_empty_data_dir_gives_no_races():
     assert er.load_logged_races() == []
+
+
+def test_races_without_a_board_at_t_or_a_final_pool_total_are_still_loaded(data_dir, monkeypatch):
+    boards = build_logged_day(data_dir, extra_day=True)
+    guard_holdout_reads(monkeypatch)
+    races = {r["race_id"]: r for r in er.load_logged_races()}
+    assert set(races) == set(RID.values()) | set(RID2.values())
+    k1, k2, k3 = races[RID2[1]], races[RID2[2]], races[RID2[3]]
+    assert not k1["win_odds_t"] and not k1["exacta_odds_t"]  # nothing available at t
+    assert k1["final_win_odds"] == boards["k1_win_f"]
+    assert k1["final_exacta_odds"] == boards["k1_fc_f"] and k1["pool_total"] == 800_000
+    assert k1["pool_total_t"] is None and k1["less_popular"] is False
+    assert k2["win_odds_t"] == boards["k2_win_t"] and k2["exacta_odds_t"] == boards["k2_fc_t"]
+    assert k2["final_win_odds"] == boards["k2_win_f"]
+    assert k2["final_exacta_odds"] == boards["k2_fc_f"]  # verified final prices are kept
+    assert k2["pool_total"] is None and k2["pool_total_t"] == 600_000
+    assert k3["pool_total"] == 2_000_000 and k3["final_exacta_odds"] == boards["k3_fc_f"]
+    # day 2's tertile at t over 600k and 300k: cutoff 400k
+    assert (k2["less_popular"], k3["less_popular"]) == (False, True)
+
+
+def ref_d(win: dict, exacta: dict, rate: float) -> dict[str, float]:
+    """sum_S q / sum_S p per category on one final board (q NaN at 110 yen: in neither sum)."""
+    p = ref_p(win)
+    h = ref_harville(p, LAMBDA2)
+    fav = ref_fav(win)
+    q_sum, p_sum = dict.fromkeys(ALL_CATS, 0.0), dict.fromkeys(ALL_CATS, 0.0)
+    for combo, odds in exacta.items():
+        if odds is None or combo[0] not in p or combo[1] not in p:
+            continue
+        q = ref_q(odds, rate)
+        if not math.isnan(q):
+            q_sum[ref_cat(combo, fav)] += q
+            p_sum[ref_cat(combo, fav)] += h[combo]
+    return {c: q_sum[c] / p_sum[c] if p_sum[c] else math.nan for c in ALL_CATS}
+
+
+def test_d_and_the_proxy_count_the_races_e2_cannot_score(data_dir, monkeypatch, tmp_path):
+    """D over every race with final Win and FORECAST prices (Kyoto 1 has no board at t, Kyoto 2
+    no final pool total); the proxy over every race with a final pool total (Kyoto 1 included)."""
+    boards = build_logged_day(data_dir, extra_day=True)
+    guard_holdout_reads(monkeypatch)
+    races = er.load_logged_races()
+    finals = {
+        RID[1]: (boards["win_f"], boards["fc_f"]),
+        RID[2]: (boards["win_r2_f"], boards["fc_r2_f"]),
+        RID[4]: (boards["win_r4_f"], forecast_board(range(1, 5), 1.3)),
+        RID[5]: (boards["win_r5_f"], boards["fc_r5_f"]),
+        RID[6]: (boards["win_r6_f"], boards["fc_r6_f"]),
+        **{RID2[no]: (boards[f"k{no}_win_f"], boards[f"k{no}_fc_f"]) for no in (1, 2, 3)},
+    }  # race 3 of day 1 has no final FORECAST capture
+    rate = takeout.race_takeout(RID[1], "FORECAST", race_class_raw="3歳未勝利").payout_rate
+    ratios = [ref_d(win, fc, rate) for win, fc in finals.values()]
+    got = er.d_descriptive(races, lambda2=LAMBDA2)
+    for cat in ALL_CATS:
+        values = [r[cat] for r in ratios if not math.isnan(r[cat])]
+        assert got[cat]["n_races"] == len(values) == 8, cat
+        assert got[cat]["mean"] == pytest.approx(statistics.mean(values), rel=1e-6), cat
+        assert got[cat]["median"] == pytest.approx(statistics.median(values), rel=1e-6), cat
+
+    proxy = er.proxy_agreement(races)
+    # day 1 as before (1, 3, 1, 0); day 2's final pools 800k and 2.0M: cutoff 1.2M, Kyoto 1 in;
+    # both are races 1-4 (the proxy)
+    assert (proxy["n_races"], proxy["n_days"]) == (7, 2)
+    assert (proxy["both_less"], proxy["proxy_only"], proxy["tertile_only"], proxy["neither"]) == (
+        2, 4, 1, 0)  # fmt: skip
+    assert proxy["agreement"] == pytest.approx(2 / 7)
+
+    result = er.score_e2(races, registry=new_registry(tmp_path / "reg"), git_sha="abc1234",
+                         lambda2=LAMBDA2, data_builds=BUILDS, n_boot=50)  # fmt: skip
+    assert result["n_races"] == 5 and result["n_meetings"] == 2
+    assert {k: v for k, v in result["excluded"].items() if v} == {
+        "no_final_board": 2, "under_5_starters": 1, "no_board_at_t": 1}  # fmt: skip
 
 
 def test_logged_races_score_end_to_end(data_dir, monkeypatch, tmp_path):
@@ -1435,8 +1726,64 @@ def test_an_empty_run_then_a_populated_run_keep_one_family_of_16(command, data_d
     er.exacta_rules_command()
     records = command.records(E2_ID)
     assert len(records) == 32
-    assert len({tuple(sorted(r.data_builds)) for r in records}) == 1
+    assert {tuple(sorted(r.data_builds)) for r in records} == {BUILD_KEYS}
     assert command.family_size(E2_ID) == 16
+
+
+BUILD_KEYS = ("jra_dividends", "jra_races", "jra_runners", "odds_log")
+
+
+def rewrite_table(data: Path, name: str, change) -> None:
+    path = data / "processed" / "jra" / f"{name}.parquet"
+    frame = change(pd.read_parquet(path))
+    frame.to_parquet(path, index=False)
+
+
+def add_other_races(data: Path) -> None:
+    """Store rows of a holdout race and of an unlogged development race: nothing consumes them."""
+    others = ["jra:2026-11-29:NAK:02", "jra:2026-11-08:HSN:01"]
+    races = [store_race(date(2026, 11, 29), "NAK", 2, "C1"), store_race(date(2026, 11, 8), "HSN",
+                                                                          1, "MAIDEN")]  # fmt: skip
+    dividends = [{"race_id": rid, "pool": pool, "combination": combo, "dividend": d,
+                  "is_refund": False}
+                 for rid in others for pool, combo, d in (("FORECAST", "3,1", 4410.0),
+                                                          ("WIN", "3", 610.0))]  # fmt: skip
+    runners = [row for rid in others for row in store_runners(rid, range(1, 9))]
+    for name, rows in (("races", races), ("dividends", dividends), ("runners", runners)):
+        rewrite_table(data, name, lambda f, rows=rows: pd.concat([f, pd.DataFrame(rows)],
+                                                                  ignore_index=True))  # fmt: skip
+
+
+def test_build_ids_fingerprint_only_the_consumed_development_rows(command, data_dir):
+    build_logged_day(data_dir)
+    er.exacta_rules_command()
+    before = [record_key(r) for r in command.records()]
+    builds = {json.dumps(r.data_builds, sort_keys=True) for r in command.records(E2_ID)}
+    assert len(builds) == 1 and tuple(sorted(json.loads(builds.pop()))) == BUILD_KEYS
+    add_other_races(data_dir)
+    er.exacta_rules_command()
+    assert [record_key(r) for r in command.records()] == before
+
+    # a consumed development row is another build of its table, and only of that table
+    edits = [
+        ("jra_dividends", "dividends", lambda f: f.assign(dividend=[
+            1240.0 if (r == RID[1] and p == "FORECAST") else d
+            for r, p, d in zip(f["race_id"], f["pool"], f["dividend"], strict=True)])),
+        ("jra_races", "races", lambda f: f.assign(race_class=[
+            "C2" if r == RID[2] else c for r, c in zip(f["race_id"], f["race_class"],
+                                                       strict=True)])),
+        ("jra_runners", "runners", lambda f: f.assign(is_scratched=[
+            True if (r == RID[2] and h == 6) else s
+            for r, h, s in zip(f["race_id"], f["horse_no"], f["is_scratched"], strict=True)])),
+    ]  # fmt: skip
+    for key, table, change in edits:
+        old = command.records(E2_ID)[-1].data_builds
+        rewrite_table(data_dir, table, change)
+        er.exacta_rules_command()
+        new = command.records(E2_ID)[-1].data_builds
+        assert new[key] != old[key], key
+        assert {k: v for k, v in new.items() if k != key} == {
+            k: v for k, v in old.items() if k != key}, key  # fmt: skip
 
 
 def test_rerunning_the_command_on_the_same_inputs_adds_nothing(command, data_dir):
@@ -1461,6 +1808,15 @@ def test_the_command_reports_the_proxy_over_every_loaded_race(command, data_dir)
     assert proxy["agreement"] == pytest.approx(1 / 5)
 
 
+def test_the_command_reports_d_and_the_proxy_over_races_e2_does_not_score(command, data_dir):
+    build_logged_day(data_dir, extra_day=True)
+    er.exacta_rules_command()
+    report = json.loads(latest_report(".json").read_text(encoding="utf-8"))
+    assert (report["proxy"]["n_races"], report["proxy"]["n_days"]) == (7, 2)
+    assert {c: report["d"][c]["n_races"] for c in ALL_CATS} == dict.fromkeys(ALL_CATS, 8)
+    assert report["n_races"] == 5
+
+
 def shows(text: str, value: float) -> bool:
     return any(f"{value:.{k}f}" in text for k in (2, 3, 4))
 
@@ -1479,3 +1835,10 @@ def test_the_markdown_report_renders_the_max_test_d_and_the_proxy(command, data_
     assert d["n_races"] > 0 and shows(md, d["mean"])  # fav_first appears only in D
     assert "fav_first" in md
     assert "agreement" in md.lower() and shows(md, report["proxy"]["agreement"])
+    rows = [(line, [c.strip() for c in line.strip("|").split("|")])
+            for line in md.splitlines() if line.startswith("|")]  # fmt: skip
+    headline = [line for line, cells in rows if any(c.startswith("headline") for c in cells)]
+    every = [line for line, cells in rows if "all" in cells]
+    assert len(headline) == len(every) == 8
+    assert all("retrospective" in line.lower() for line in headline)  # labelled beside each
+    assert not any("retrospective" in line.lower() for line in every)
