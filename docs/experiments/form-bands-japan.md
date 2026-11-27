@@ -11,23 +11,39 @@ This report says what was pre-registered, what ran, where the full report lives 
   pre-registration (the draft of 2026-11-24 on #218, corrected on 2026-11-25 to read bands and ranks from the T-2
   board, with JRA-VAN named as the T-2 source the same day, and reframed on 2026-11-27). It was frozen in the
   registry before the run read any row.
-- Twelve records, one per variant, all appended by the one run: run ids `3fe170189fe62eba` (P0),
-  `04ad26d0cb345057` (B1), `d02f95cd43c45b52` (B2), `dabbc4558a368c0f` (B3), `1a341e83bc72144b` (B4),
-  `859f8c530c79f2cb` (B5), `d53b8b253b2647d1` (R1), `579d34cb0e08de76` (R2), `3758c6cecf22c7ec` (R3),
-  `b07c5d28368ec6f6` (R4), `983ac7cfac9fcb80` (BA) and `c1476a950951ff48` (RA). Variants searched: 12. Each
-  record carries the sources `jra` and `jravan`, so `docs/experiments/registry/japan/japan-form-bands-t2-win.md`
-  shows each one as withheld.
-- Code at `3e34967`: `countries/japan/studies/form_bands.py` (tested in `tests/countries/japan/test_form_bands.py`)
-  and the `reference_variants` argument of `core/eval/snooping.py`. To reproduce, run
+- **The run of record** is the second run, at git `f4c0acd`, after the round-1 review of PR #473. Its twelve
+  records, one per variant: run ids `4c7dea4e42c2f518` (P0), `20a9069c61117f4a` (B1), `4537f408d1a34c26` (B2),
+  `570898b9f44b6f20` (B3), `aed79d91002c40bb` (B4), `9e195ed56d5874ec` (B5), `737cbfa04736738b` (R1),
+  `81573ebb829227d0` (R2), `8d041ce3effb2fc9` (R3), `72de994ece80707b` (R4), `a4fa71a6043226c2` (BA) and
+  `0294e37a29f7de22` (RA). Variants searched: 12 (the family size counts each variant once across runs).
+- **The first run** (git `3e34967`, run ids `3fe170189fe62eba`, `04ad26d0cb345057`, `d02f95cd43c45b52`,
+  `dabbc4558a368c0f`, `1a341e83bc72144b`, `859f8c530c79f2cb`, `d53b8b253b2647d1`, `579d34cb0e08de76`,
+  `3758c6cecf22c7ec`, `b07c5d28368ec6f6`, `983ac7cfac9fcb80`, `c1476a950951ff48`) stays in the append-only
+  registry and is superseded. The review found that its reader treated a starter missing from the v0 file as a
+  scratch and did not count the races v0 leaves out, and that its private report gave no answer to the primary
+  question and did not state the design's confounds (below). The frozen spec did not change, so the second run is
+  in the same family.
+- Every record carries the sources `jra` and `jravan`, so `docs/experiments/registry/japan/japan-form-bands-t2-win.md`
+  shows its values as withheld. Its Status column (scored or failed) is shown, by the registry's design; the
+  values behind each status are not.
+- Code at `f4c0acd`: `countries/japan/studies/form_bands.py` (tested in `tests/countries/japan/test_form_bands.py`
+  and `test_form_bands_reader.py`), the `reference_variants` argument of `core/eval/snooping.py` (tested in
+  `tests/core/eval/test_snooping_reference.py`) and `Registry.frozen_spec`. To reproduce, run
   `uv run python -m horsetrack.countries.japan.studies.form_bands`. It reads one day of the time series at a
-  time, WIN rows only, and prints only identifiers (family, spec hash, run ids, report path), never a figure.
-- Data builds: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`,
+  time, WIN rows only, and prints only identifiers (family, spec hash, run ids, report path), never a figure. Each
+  run writes its own private report, named by its UTC start time, so no earlier report is overwritten, and the
+  report lists the ids of the records holding its results (appended, or reproduced from an identical earlier
+  run).
+- Data builds, the same for both runs: `processed/jra/runners.parquet@6f3cec95347e0132`,
+  `processed/jra/races.parquet@9cce511831074b64`,
   `models/japan/v0/win_calibration_oof-aac501f927b0.parquet@e61c7078ac0a6e46`,
   `features/jra/handicap@51777b77c4c5c478` and `processed/jravan/odds_timeseries@6f5ac71d1926c803`.
-- The full report is under the data directory at `reports/form-bands-japan-3585a45d05f6.md`, with its figures as
-  JSON beside it (`form-bands-japan-3585a45d05f6.json`). Both were written through `write_report` with the source
-  `jravan`. It holds the ranked leaderboard (gain, one-sided bound and two-sided interval per variant), the group
-  coefficients and sizes, the primary question's table, SPA and StepM, and every fold's fit.
+- The full report of the run of record is under the data directory at
+  `reports/form-bands-japan-3585a45d05f6-20261127T051515786538Z.md`, with its figures as JSON beside it (same
+  stem, `.json`). The first run's report is `reports/form-bands-japan-3585a45d05f6.md`. All were written through
+  `write_report` with the source `jravan`. The report holds the ranked leaderboard (the gain of the registered
+  meld over v0, its one-sided bound and two-sided interval per variant), the drop counts by reason, the group
+  coefficients and sizes, the primary question's section, SPA and StepM, and every fold's fit.
 
 ## Owner decisions used
 
@@ -45,12 +61,22 @@ This report says what was pre-registered, what ran, where the full report lives 
 
 ## Data and method
 
-- **Rows.** One row per v0 starter of the v0 out-of-fold file (`win_calibration_oof-aac501f927b0`, #114's
-  calibrated market, the input #129's V2 used): its `p_cal`, #129's out-of-fold `handicap_score` as `h`
+- **Rows.** The population is the store's races on the development race days 2020-01-01 to 2026-11-15. Each
+  scored race holds its v0 starters from the v0 out-of-fold file (`win_calibration_oof-aac501f927b0`, #114's
+  calibrated market, the input #129's V2 used): each starter's `p_cal`, #129's out-of-fold `handicap_score` as `h`
   (`features/jra/handicap/<day>.parquet`, built from the netkeiba store only), the store's winner and meeting, and
-  its T-2 Win odds. Development race days 2020-01-01 to 2026-11-15. A runner priced on the T-2 board but not a v0
-  starter (a scratch after T-2) is kept as a scratched row: it takes part in the ranking and is never scored. A
-  race with a starter without `h` or without a T-2 price, and a race without a winner, is dropped and counted.
+  its T-2 Win odds.
+- **What v0 leaves out.** v0's generator writes no prediction for a race with a first-place dead heat, a race
+  without a priced winner, or a starter without a final price. Such races cannot be scored against v0 here. Each
+  one is dropped and counted by its reason (void, dead heat, no priced winner, or a confirmed starter without a v0
+  row), with the counts in the private report. A missing v0 row is never read as a scratch: a runner the store
+  does not flag as scratched but v0 lacks takes its race out. v0 is not rebuilt for these races, since the
+  pre-registration names the v0 file. So the D6 rule is applied to the races v0 scores, and the races v0 leaves
+  out (dead heats among them) are outside this study's population.
+- **Scratches after T-2.** A runner the store flags as scratched but the T-2 board still prices is kept as a
+  scratched row. It takes part in the ranking and is never scored. A race with a starter without `h` or without a
+  T-2 price, a race whose T-2 board prices a runner the store does not hold, and a race without a winner, is
+  dropped and counted.
 - **The T-2 board.** For each race, each runner's latest WIN row at 2 minutes or more before the scheduled post,
   read as `studies.cross_pool.boards_at` reads it. A runner whose latest row is scratched or unpriced is off the
   board. The time series is a sequence of snapshots, so the board read at T-2 is the latest snapshot at or
@@ -69,7 +95,26 @@ This report says what was pre-registered, what ran, where the full report lives 
 - **Family test.** Hansen's SPA ("no variant beats v0") and Romano-Wolf StepM at 5% family-wise, over the 11
   non-reference variants, on the per-meeting sums of the per-race losses in date order, with 2000 replicates,
   seed 218 and block size 1 (meetings drawn i.i.d., as D7's bootstrap draws them). P0 is the reference and is not
-  in the test.
+  in the test. `core.eval.snooping` accepts P0 as a reference only because the frozen spec lists it among its
+  variants and not among the family-test rules. The test reads the current run's records: a variant that scored
+  in an earlier run and fails in this one is tested as failed, and the registry keeps both records.
+
+## How to read the results
+
+These caveats are part of the method, not findings. They hold whatever the figures show.
+
+- **The gain of the registered meld over v0.** Every gain in the private report is the gain of the registered
+  meld over v0. It is not a measure of form alone, for two reasons built into the frozen design.
+- **Group intercept.** b_g multiplies ln h only inside group g. Within a race, ln h shares the race's normaliser
+  and has a typical level, so b_g also acts as an intercept for the whole group. A b_g of either sign can shift
+  the probability of a whole band or rank group, for example a group the market under- or over-prices, without
+  using the form differences between its runners. So the sign of b_g does not by itself give the sign of a form
+  effect.
+- **Market refit.** Every variant refits the market weight a, while v0 is unchanged. Each gain, and the family
+  test against v0, therefore credits the refit of a as well as the form terms.
+- **No conclusion about the sign of the form effect.** That needs a comparison that holds the group intercepts
+  and the market refit fixed. Such a comparison is a new family for the owner to approve (#474). It is not run,
+  and nothing here stands in for it.
 
 ## Hypothesis
 
@@ -80,33 +125,34 @@ and the gain over v0 > 0 in the favourite groups (rank 1 and ranks 2-3) more tha
 negative b that appears only at [50, ∞) would read as the favourite-longshot bias already in v0, not as form being
 overweighted. The null, the starting point, is b_g = 0 and no gain over v0 in every group.
 
-What would show the hypothesis wrong: no favourite-group variant (R1, R2, B1) with b < 0 and a lower bound above
-zero, or such an effect at least as strong in the longshot bands as in the favourite groups.
-
-The answer to the primary question is in the private report. It is a figure-derived result and is not stated here.
+The frozen spec defines no favourite-vs-longshot comparison rule: no measure or threshold says when the effect
+in the favourite groups counts as stronger than in the longshot bands. No such rule is chosen after the run. So
+the comparison itself is inconclusive under the frozen spec, whatever the figures are. This follows from the
+spec, not from the data. The private report reads each group on its own (its b by fold and its gain of the
+registered meld over v0) and gives no verdict. A deciding rule needs a new, owner-approved family. The group
+readings are figure-derived and are not stated here.
 
 ## Variants tried
 
-All 12 were registered before the run and all 12 are recorded, whatever they show. They were scored on the
-same development races and folds (D9 walk-forward, 2020-Q2 to 2026-Q4, 2020-Q1 training only). Each variant's
-gain, one-sided bound and two-sided 95% interval are withheld (D21) and are in the private report.
+All 12 were registered before the run, and every run records all 12, whatever they show. They were scored on
+the same development races and folds (D9 walk-forward, 2020-Q2 to 2026-Q4, 2020-Q1 training only). Each
+variant's gain of the registered meld over v0, with its one-sided bound and two-sided 95% interval, is withheld
+(D21) and is in the private report. Each record's status (scored or failed) is in the committed registry summary.
 
-| Variant | Design | Registry run id |
-| --- | --- | --- |
-| P0 | one b over every runner (#129's V2, the reference) | `3fe170189fe62eba` |
-| B1 | one b for odds band [1, 3) only | `04ad26d0cb345057` |
-| B2 | one b for odds band [3, 7) only | `d02f95cd43c45b52` |
-| B3 | one b for odds band [7, 15) only | `dabbc4558a368c0f` |
-| B4 | one b for odds band [15, 50) only | `1a341e83bc72144b` |
-| B5 | one b for odds band [50, ∞) only | `859f8c530c79f2cb` |
-| R1 | one b for the T-2 favourite only | `d53b8b253b2647d1` |
-| R2 | one b for ranks 2-3 only | `579d34cb0e08de76` |
-| R3 | one b for ranks 4-6 only | `3758c6cecf22c7ec` |
-| R4 | one b for ranks 7 and longer only | `b07c5d28368ec6f6` |
-| BA | all five band coefficients together | `983ac7cfac9fcb80` |
-| RA | all four rank coefficients together | `c1476a950951ff48` |
-
-Whether any variant failed, and which, is part of the result and is in the private report.
+| Variant | Design | Run of record | First run (superseded) |
+| --- | --- | --- | --- |
+| P0 | one b over every runner (#129's V2, the reference) | `4c7dea4e42c2f518` | `3fe170189fe62eba` |
+| B1 | one b for odds band [1, 3) only | `20a9069c61117f4a` | `04ad26d0cb345057` |
+| B2 | one b for odds band [3, 7) only | `4537f408d1a34c26` | `d02f95cd43c45b52` |
+| B3 | one b for odds band [7, 15) only | `570898b9f44b6f20` | `dabbc4558a368c0f` |
+| B4 | one b for odds band [15, 50) only | `aed79d91002c40bb` | `1a341e83bc72144b` |
+| B5 | one b for odds band [50, ∞) only | `9e195ed56d5874ec` | `859f8c530c79f2cb` |
+| R1 | one b for the T-2 favourite only | `737cbfa04736738b` | `d53b8b253b2647d1` |
+| R2 | one b for ranks 2-3 only | `81573ebb829227d0` | `579d34cb0e08de76` |
+| R3 | one b for ranks 4-6 only | `8d041ce3effb2fc9` | `3758c6cecf22c7ec` |
+| R4 | one b for ranks 7 and longer only | `72de994ece80707b` | `b07c5d28368ec6f6` |
+| BA | all five band coefficients together | `a4fa71a6043226c2` | `983ac7cfac9fcb80` |
+| RA | all four rank coefficients together | `0294e37a29f7de22` | `c1476a950951ff48` |
 
 ## Alternatives rejected and why
 
@@ -124,16 +170,25 @@ Whether any variant failed, and which, is part of the result and is in the priva
 
 ## What this rules out
 
-Withheld (D21). What the result excludes depends on its intervals and on the family test, all derived from the
-JRA-VAN board. The private report states it variant by variant. In every case it is a development-day,
-single-family, single-run result: it is no holdout claim and supports no adoption by itself.
+The figures are withheld (D21). What the result excludes depends on its intervals and on the family test, all
+derived from the JRA-VAN board, and the private report gives it variant by variant. Two limits hold whatever the
+figures are:
+
+- Every result is a gain of the registered meld over v0. It includes the group-intercept and market-refit terms,
+  so it rules nothing in or out about form alone (see "How to read the results").
+- It covers only the races v0 scores. The races v0 leaves out (first-place dead heats, races without a priced
+  winner, races with a starter without a final price) are outside it.
+
+In every case it is a development-day, single-family result with one run of record. It is no holdout claim and
+supports no adoption by itself.
 
 ## Follow-ups filed
 
-None filed by this pull request. Proposed (each a new pre-registered family, `status:proposed` under epic #73):
-
-- The same meld with ln p_cal also split by group, so that a group's b on form can be told apart from a
-  group-specific reshaping of v0's favourite-longshot curve, which the primary question's own caveat names.
-- The same family on our own logged T-2 boards (#130) once a training fold holds enough logged development days,
-  as a second source for the bands.
+- #474: a new family that holds the group effects and the market recalibration constant (group-intercept
+  controls, ln p_cal split by group), so that a group's coefficient on form can be told apart from a group
+  intercept and from a group-specific reshaping of v0. The owner approves it before any run.
+- #475: the same family on our own logged T-2 boards (#130) once a training fold holds enough logged development
+  days, as a second source for the bands.
+- #476: `write_summary` refuses the registry while another family's id holds a `/`. This family's summary file
+  was written from a view of the well-named families.
 - #87 and #102 take this family's records as a candidate input, by rank.
