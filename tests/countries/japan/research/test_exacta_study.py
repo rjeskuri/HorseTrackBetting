@@ -66,7 +66,7 @@ API pinned here (module ``horsetrack.countries.japan.research.exacta_study``, no
   E2 v4 (review of 83684eb, owner 2026-11-27): rule-v3 (tests/fixtures/synthetic/
   exacta_131_v3_rule_spec.py, V3_RULE_HASH) ranked "less popular" by the lower tertile of exacta
   pool totals within each logged day, which uses later races' totals. ``E2_ID`` is
-  "japan/131-exacta-rule-v4" and ``SUPERSEDES[E2_ID]`` is "japan/131-exacta-rule-v3". v4 differs
+  "japan-131-exacta-rule-v4" and ``SUPERSEDES[E2_ID]`` is "japan/131-exacta-rule-v3". v4 differs
   from v3 only in E2_V4_KEYS:
   - ``scopes["headline"]`` is a dict with at least
     {"fav_odds_min": 3.0,
@@ -78,6 +78,15 @@ API pinned here (module ``horsetrack.countries.japan.research.exacta_study``, no
   - ``diagnostics`` {"less_popular_agreement": str naming the logged-day pool-total tertile}: the
     tertile is a reported diagnostic only.
   - no "min_meetings" key, and no string in the spec names min_meetings; "scored_on" changes.
+  Family ids (owner, from #525, 2026-11-27): ``Registry.append`` and ``freeze_family`` refuse an
+  id with "/", so every family this module defines takes the ``japan-131-...`` form: E1
+  "japan-131-exacta-category-v2", E1' "japan-131-exacta-category-b1-v2", E1''
+  "japan-131-exacta-category-b3-v2", C "japan-131-exacta-logscore-v2", E2
+  "japan-131-exacta-rule-v4". Only the id changes: each spec, and so its hash, is the one frozen
+  under the legacy "japan/131-..." id. ``supersedes`` and SUPERSEDES keep naming the legacy ids,
+  the records as they stand in the registry (#525 maps their summary files). The legacy freezes
+  are written into the test registries line by line (``_seal_legacy_freezes``), as they sit in
+  the real log, since ``freeze_family`` now refuses their ids.
 """
 
 # Ruff reads the module under test as third-party until it exists, then as first-party; the
@@ -97,7 +106,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from horsetrack.core.eval.registry import FamilyAlreadyFrozen, Registry
+from horsetrack.core.eval.registry import FamilyAlreadyFrozen, RecordRefused, Registry
 from horsetrack.countries.japan.research.exacta_consistency import CATEGORIES
 from horsetrack.countries.japan.research.exacta_study import (
     E2_ID,
@@ -882,11 +891,37 @@ def _v1_id(v1, estimator) -> str:
     return found
 
 
+def _seal_legacy_freezes(path: Path, freezes: dict[str, dict]) -> None:
+    """Append freezes of legacy "/" ids as the registry writes its lines (canonical JSON linked
+    by ``prev`` to the last line's sha256, sealed with the sha256 of the line without ``seal``),
+    bypassing ``freeze_family``'s check: the way the #131 freezes made before #525 sit in the
+    real Japan log."""
+
+    def canonical(value) -> str:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        )
+
+    data = path.read_bytes() if path.exists() else b""
+    head = hashlib.sha256(data[:-1].split(b"\n")[-1]).hexdigest() if data else "0" * 64
+    with open(path, "ab") as handle:
+        for i, (family_id, spec) in enumerate(freezes.items()):
+            body = {"kind": "freeze", "family_id": family_id, "spec": spec,
+                    "spec_hash": _hash(spec), "prev": head,
+                    "utc": f"2026-11-2{5 + i % 3}T08:00:00+00:00"}  # fmt: skip
+            body["seal"] = hashlib.sha256(canonical(body).encode("ascii")).hexdigest()
+            line = canonical(body).encode("ascii")
+            handle.write(line + b"\n")
+            head = hashlib.sha256(line).hexdigest()
+
+
 def test_relabelled_families_freeze_under_new_ids_beside_the_frozen_v1_families(tmp_path):
     v1 = _v1_specs()
-    reg = Registry(tmp_path / "japan.jsonl", holdout_log=tmp_path / "holdout_log.jsonl")
-    for family_id, spec in v1.items():
-        assert reg.freeze_family(family_id, spec) == V1_HASHES[family_id]
+    path = tmp_path / "japan.jsonl"
+    _seal_legacy_freezes(path, v1)
+    reg = Registry(path, holdout_log=tmp_path / "holdout_log.jsonl")
+    for family_id in v1:
+        assert reg.frozen_spec_hash(family_id) == V1_HASHES[family_id]
 
     specs = family_specs()
     assert set(specs).isdisjoint(V1_HASHES)  # every v1 spec changes (its λ2 label): new ids
@@ -930,17 +965,25 @@ def test_the_relabel_changes_the_lambda2_label_and_not_the_design(estimator):
 # favourite's Win odds are "final for E1, at t for E2". The corrected E2 is a new family.
 V2_RULE_HASH = "2d6678f59291476bf3d3028b2818bc00e631dea516bc0f01276ac4e0af8cdb75"
 V2_RULE_FIXTURE = FIXTURES / "exacta_131_v2_rule_spec.py"
-# The four v2 families E2's correction leaves alone, with their documented frozen hashes.
+# The four v2 families E2's correction leaves alone, with their documented frozen hashes: the
+# family id the study defines now (#525 rename) and the legacy id the hash is frozen under.
 V2_HASHES = {
-    "B2": ("japan/131-exacta-category-v2",
+    "B2": ("japan-131-exacta-category-v2", "japan/131-exacta-category-v2",
            "eb900ab7144a6c88b5ebf4058d6aaf22570a9a5fb06d7803dbaa7a7cf89bf247"),
-    "B1": ("japan/131-exacta-category-b1-v2",
+    "B1": ("japan-131-exacta-category-b1-v2", "japan/131-exacta-category-b1-v2",
            "fb6844a9a189ee689f6390b6f2fde58a318370b9e73834ab5b28fbad735ec49b"),
-    "B3": ("japan/131-exacta-category-b3-v2",
+    "B3": ("japan-131-exacta-category-b3-v2", "japan/131-exacta-category-b3-v2",
            "493253276d7a803446716325353bb6c18e01409868dc6dbec53eec09a9b4912f"),
-    "C": ("japan/131-exacta-logscore-v2",
+    "C": ("japan-131-exacta-logscore-v2", "japan/131-exacta-logscore-v2",
           "084244a2f3cb69154da1dc97615044b58e0cf534f8077ed1cbd459a98e3650bd"),
 }  # fmt: skip
+# The v1 family each current family supersedes (the legacy ids, as recorded).
+V1_SUPERSEDED = {
+    "B2": "japan/131-exacta-category-v1",
+    "B1": "japan/131-exacta-category-b1-v1",
+    "B3": "japan/131-exacta-category-b3-v1",
+    "C": "japan/131-exacta-logscore-v1",
+}
 # The keys the E2 correction may change: the selection keys, their provenance note, the link.
 E2_SELECTION_KEYS = {
     "favourite", "category", "selection_time", "scopes", "primary_metric", "supersedes",
@@ -986,7 +1029,7 @@ def test_e2_takes_the_favourite_and_category_from_the_decision_time_board():
 # same as E1's popularity segment), keeps the tertile only as a reported agreement diagnostic and
 # drops the 100-meeting gate; everything else is v3's.
 V3_RULE_ID = "japan/131-exacta-rule-v3"
-V4_RULE_ID = "japan/131-exacta-rule-v4"
+V4_RULE_ID = "japan-131-exacta-rule-v4"  # frozen under its #525 id; v3 stays a legacy id
 V3_RULE_HASH = "9104e173371668a34b4594b6e4970546649b886cdccc4e726ec9749188701f0d"
 V3_RULE_FIXTURE = FIXTURES / "exacta_131_v3_rule_spec.py"
 # The keys v4 may change against v3, and the ones it must change.
@@ -1037,13 +1080,12 @@ def test_rule_v4_freezes_beside_rule_v1_v2_and_v3_and_leaves_v3_untouched(tmp_pa
     assert E2_ID not in {v1_id, v2_id, v3_id}
     assert _hash(e2) not in {V1_HASHES[v1_id], V2_RULE_HASH, V3_RULE_HASH}
 
-    reg = Registry(tmp_path / "japan.jsonl", holdout_log=tmp_path / "holdout_log.jsonl")
-    assert reg.freeze_family(v1_id, v1[v1_id]) == V1_HASHES[v1_id]
-    assert reg.freeze_family(v2_id, v2) == V2_RULE_HASH
-    assert reg.freeze_family(v3_id, v3) == V3_RULE_HASH
+    path = tmp_path / "japan.jsonl"
+    _seal_legacy_freezes(path, {v1_id: v1[v1_id], v2_id: v2, v3_id: v3})
+    reg = Registry(path, holdout_log=tmp_path / "holdout_log.jsonl")
     assert reg.freeze_family(E2_ID, e2) == _hash(e2)  # a new id: not already frozen
     assert reg.freeze_family(E2_ID, _e2()) == _hash(e2)  # deterministic: a no-op
-    with pytest.raises(FamilyAlreadyFrozen):  # v4 cannot overwrite the v3 record
+    with pytest.raises((FamilyAlreadyFrozen, RecordRefused)):  # v4 cannot overwrite v3
         reg.freeze_family(v3_id, e2)
     assert reg.frozen_spec_hash(v1_id) == V1_HASHES[v1_id]
     assert reg.frozen_spec_hash(v2_id) == V2_RULE_HASH
@@ -1070,9 +1112,48 @@ def test_rule_v4_changes_only_the_headline_scope_and_the_meeting_gate_over_rule_
     v2_to_v3 = {k for k in set(v2) | set(v3) if v2.get(k) != v3.get(k)}
     assert v2_to_v3 <= E2_SELECTION_KEYS, sorted(v2_to_v3 - E2_SELECTION_KEYS)
     specs = family_specs()
-    for estimator, (family_id, frozen) in V2_HASHES.items():
+    for estimator, (family_id, _legacy_id, frozen) in V2_HASHES.items():
         assert _family_id(specs, estimator) == family_id
         assert _hash(specs[family_id]) == frozen, estimator
+
+
+# ---------------------------------------------------------------------------------------------
+# Family ids the summary can name (owner, from #525, 2026-11-27)
+# ---------------------------------------------------------------------------------------------
+
+CURRENT_IDS = {
+    "B2": "japan-131-exacta-category-v2",
+    "B1": "japan-131-exacta-category-b1-v2",
+    "B3": "japan-131-exacta-category-b3-v2",
+    "C": "japan-131-exacta-logscore-v2",
+    "rule": "japan-131-exacta-rule-v4",
+}
+
+
+def test_the_renamed_families_keep_their_frozen_specs_and_supersede_the_legacy_ids(tmp_path):
+    specs = family_specs()
+    assert {spec["estimator"]: fid for fid, spec in specs.items()} == CURRENT_IDS
+    assert E2_ID == CURRENT_IDS["rule"]
+    assert not [fid for fid in specs if "/" in fid]
+    # Only the id changes: each spec hashes to the record frozen under its legacy id, and its
+    # supersedes still names the legacy predecessor as recorded.
+    for estimator, (family_id, legacy_id, frozen) in V2_HASHES.items():
+        assert family_id == CURRENT_IDS[estimator] and family_id != legacy_id
+        assert _hash(specs[family_id]) == frozen, estimator
+        assert specs[family_id]["supersedes"] == SUPERSEDES[family_id]
+        assert SUPERSEDES[family_id] == V1_SUPERSEDED[estimator], estimator
+    assert SUPERSEDES[E2_ID] == specs[E2_ID]["supersedes"] == V3_RULE_ID
+
+    # A registry holding the legacy freezes takes the renamed freezes beside them.
+    path = tmp_path / "japan.jsonl"
+    legacy = {legacy_id: specs[family_id] for family_id, legacy_id, _ in V2_HASHES.values()}
+    _seal_legacy_freezes(path, legacy)
+    reg = Registry(path, holdout_log=tmp_path / "holdout_log.jsonl")
+    for family_id, spec in specs.items():
+        assert reg.freeze_family(family_id, spec) == _hash(spec), family_id
+    for family_id, legacy_id, frozen in V2_HASHES.values():
+        assert reg.frozen_spec_hash(legacy_id) == reg.frozen_spec_hash(family_id) == frozen
+    reg.verify()
 
 
 def test_rule_v4_has_no_meeting_gate():

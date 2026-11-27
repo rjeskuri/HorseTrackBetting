@@ -62,10 +62,10 @@ MIN_STARTERS = 5
 # v2 (owner, 2026-11-26): the v1 families, frozen 2026-11-25, labelled #115's single
 # full-development lambda2 fit "in_fold". The relabelled specs are frozen under new ids beside
 # them; the registry is append-only, so v1 stays as frozen. Only the label and its text change.
-E1_ID = "japan/131-exacta-category-v2"
-E1_B1_ID = "japan/131-exacta-category-b1-v2"
-E1_B3_ID = "japan/131-exacta-category-b3-v2"
-C_ID = "japan/131-exacta-logscore-v2"
+E1_ID = "japan-131-exacta-category-v2"
+E1_B1_ID = "japan-131-exacta-category-b1-v2"
+E1_B3_ID = "japan-131-exacta-category-b3-v2"
+C_ID = "japan-131-exacta-logscore-v2"
 # E2 v3 (review of 0c39a8d): rule-v2 took its favourite from _COMMON's final Win odds, against
 # the signed spec's section 5 ("Selection uses only the board at t"); v3 changed only E2's
 # selection keys. E2 v4 (review of 83684eb, owner 2026-11-27): v3's headline ranked "less
@@ -73,7 +73,10 @@ C_ID = "japan/131-exacta-logscore-v2"
 # classified with later races' totals. v4 takes "less popular" from the race card (E1's
 # popularity segment), reports the tertile as an agreement diagnostic only and drops the
 # 100-meeting gate. Each version supersedes the last; the v2 and v3 freezes stay in the registry.
-E2_ID = "japan/131-exacta-rule-v4"
+# Ids (#525, owner 2026-11-27): the registry refuses "/" in a family id, so the live families take
+# the "japan-131-..." form with the specs (and hashes) frozen under the legacy "japan/131-..." ids;
+# SUPERSEDES names the legacy records as they stand in the registry.
+E2_ID = "japan-131-exacta-rule-v4"
 SUPERSEDES = {
     E1_ID: "japan/131-exacta-category-v1",
     E1_B1_ID: "japan/131-exacta-category-b1-v1",

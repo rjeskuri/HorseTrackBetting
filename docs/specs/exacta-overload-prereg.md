@@ -19,14 +19,22 @@
 
 | Family | Role | Members (family size) | Spec hash |
 |---|---|---|---|
-| `japan/131-exacta-category-v2` | E1: B2 category returns, the max test | λ2 {`full_development`, 1} × 3 categories × 14 cells (84) | `eb900ab7144a6c88b5ebf4058d6aaf22570a9a5fb06d7803dbaa7a7cf89bf247` |
-| `japan/131-exacta-category-b1-v2` | E1′: B1 flat box, reported | 3 × 14 (42) | `fb6844a9a189ee689f6390b6f2fde58a318370b9e73834ab5b28fbad735ec49b` |
-| `japan/131-exacta-category-b3-v2` | E1″: B3 Harville calibration, reported | λ2 {`full_development`, 1} × 3 × 14 (84) | `493253276d7a803446716325353bb6c18e01409868dc6dbec53eec09a9b4912f` |
-| `japan/131-exacta-logscore-v2` | C: log-score total | λ2 {`full_development`, 1} (2) | `084244a2f3cb69154da1dc97615044b58e0cf534f8077ed1cbd459a98e3650bd` |
-| `japan/131-exacta-rule-v4` | E2: ratio-cut rules | 2 categories × 4 cuts × 2 scopes (16) | `28929cd783cd9e25ae8c7f39f30f2b0891720b60864a38fdbb13d7dcd2a8d3bc` |
+| `japan-131-exacta-category-v2` | E1: B2 category returns, the max test | λ2 {`full_development`, 1} × 3 categories × 14 cells (84) | `eb900ab7144a6c88b5ebf4058d6aaf22570a9a5fb06d7803dbaa7a7cf89bf247` |
+| `japan-131-exacta-category-b1-v2` | E1′: B1 flat box, reported | 3 × 14 (42) | `fb6844a9a189ee689f6390b6f2fde58a318370b9e73834ab5b28fbad735ec49b` |
+| `japan-131-exacta-category-b3-v2` | E1″: B3 Harville calibration, reported | λ2 {`full_development`, 1} × 3 × 14 (84) | `493253276d7a803446716325353bb6c18e01409868dc6dbec53eec09a9b4912f` |
+| `japan-131-exacta-logscore-v2` | C: log-score total | λ2 {`full_development`, 1} (2) | `084244a2f3cb69154da1dc97615044b58e0cf534f8077ed1cbd459a98e3650bd` |
+| `japan-131-exacta-rule-v4` | E2: ratio-cut rules | 2 categories × 4 cuts × 2 scopes (16) | `28929cd783cd9e25ae8c7f39f30f2b0891720b60864a38fdbb13d7dcd2a8d3bc` |
 | `japan/131-exacta-rule-v3` | E2, superseded by v4: history, not executed | 2 categories × 4 cuts × 2 scopes (16) | `9104e173371668a34b4594b6e4970546649b886cdccc4e726ec9749188701f0d` |
 
-`japan/131-exacta-rule-v4` (frozen 2026-11-27, owner decision of 2026-11-27 on the review of
+**Ids renamed 2026-11-27 (#525).** The registry refuses a `/` in a family id (it cannot name a
+summary file), so the live families take the `japan-131-…` form above: the same specs, so the
+same hashes, first frozen under the legacy ids `japan/131-exacta-category-v2`, `-b1-v2`,
+`-b3-v2`, `japan/131-exacta-logscore-v2` and `japan/131-exacta-rule-v4`. The max test and
+breakage records go to `japan-131-exacta-category-v2-max-test` and `japan-131-exacta-breakage`.
+Records written before the rename stay under the legacy ids (their summary files map each `/` to
+`--`), and each spec's `supersedes` names its legacy predecessor as recorded.
+
+`japan-131-exacta-rule-v4` (frozen 2026-11-27, owner decision of 2026-11-27 on the review of
 83684eb) supersedes `japan/131-exacta-rule-v3` (hash above). The v3 freeze stays in the registry
 as history and is not executed. v4 changes three things and nothing else:
 
@@ -192,15 +200,17 @@ direction.
 Estimand (owner, 2026-11-25): `ρ_S = Σ_r R^{B2}_{S,r} / Σ_r rate_r`, where the sum runs over the races of
 a segment.
 
-- `ρ_S < 1` on fav_first means the pool overloads the favourite-first combinations, against the
-  outcomes and on the Harville-weighted average.
+- `ρ_S < 1` on fav_first is a paid-return shortfall: the favourite-first box pays back less than
+  the payout rate, on the Harville-weighted average. Rounding the dividend down to ¥10 alone puts
+  the paid ρ slightly below 1, so only a shortfall beyond that rounding loss reads as the pool
+  overloading the favourite-first combinations against the outcomes.
 - `ρ_S > 1` on fav_second or no_fav means those combinations return more than the takeout allows,
   on the same average.
 - A betting profit additionally needs `Σ R / Σ stake > 1`, that is `ρ_S > 1/rate` (about 1.33).
 
 ## 5. Families (to freeze in the registry, all variants listed before scoring)
 
-**Family E1, category returns on history** (`japan/131-exacta-category-v2`).
+**Family E1, category returns on history** (`japan-131-exacta-category-v2`).
 
 - Members: 2 ordering variants (λ2 `full_development`, #115's full-development fit, and plain
   Harville λ2 = 1) × 3 categories × 14 segment cells (section 6), using estimator B2. **Family size 84**: SPA and StepM run over all 84.
@@ -216,14 +226,15 @@ a segment.
 - C (total) is a single paired comparison per λ2 (2 members), with races paying at or below ¥110
   left out (the share is not identified there).
 - SPA and StepM results are a registry record of their own,
-  `japan/131-exacta-category-v2/max-test` (v1: `…-v1/max-test`), so they do not add a variant to E1.
+  `japan-131-exacta-category-v2-max-test` (before #525: `japan/131-exacta-category-v2/max-test`;
+  v1: `…-v1/max-test`), so they do not add a variant to E1.
 
-**Family E2, ratio-cut rules** (D18 positive-edge; `japan/131-exacta-rule-v4`, superseding
+**Family E2, ratio-cut rules** (D18 positive-edge; `japan-131-exacta-rule-v4`, superseding
 `-rule-v3` for the race-card popularity cutoff, which superseded `-rule-v2` for the
 decision-time favourite).
 
 - The owner's 2026-11-27 reframe on #131 ranks every member by expected return at the final
-  price with its CI and drops the 100-meeting gate; scoring E2 that way is #281.
+  price with its CI and drops the meeting gate; scoring E2 that way is #281.
 
 - Rule form: "at T−2, buy exacta c in category X ∈ {fav_second, no_fav} when
   `r_c(t) = q_c(t)/p_c(t) < k`".
@@ -237,11 +248,10 @@ decision-time favourite).
   4 cuts × 2 scopes = 16 members.
 - Benchmark: no bet (loss 0).
 - **History cannot score E2:** only the winner's `q_c` is known, so the selection set is
-  unobservable. E2 is frozen now and scored only on #130-logged development days, once there are
-  at least 100 meetings. Until then it is reported as "not yet scorable". (rule-v4 has no
-  meeting gate, after the owner's 2026-11-27 reframe: it scores the logged development days
-  available at each run, with n and the CI, and rule-v3 is not executed: the note under the
-  family table.)
+  unobservable. E2 is scored only on #130-logged development days: rule-v4 scores the eligible
+  logged development days available at each run, reported with n and the CI, and is re-scored
+  as more days are logged (the owner's 2026-11-27 reframe). rule-v3 is history and not
+  executed: the note under the family table.
 - Buying fav_first is not in E2. A loss-avoidance rule (D18: "do not buy fav_first when
   r_c(t) is above a cut") becomes a follow-up ticket.
 
@@ -270,7 +280,13 @@ tertile is only its reported agreement diagnostic.)
 ## 7. Metric, inference and shrinkage
 
 - Intervals: meeting (venue × day) cluster bootstrap, 95% one-sided, `n_boot` 10,000
-  (`config/scoring.yaml`, D7).
+  (`config/scoring.yaml`, D7). A cell drawn from fewer than two meetings keeps its estimate and
+  n but has no interval (every replicate redraws its one meeting, so `[x, x]` is no 95%
+  interval): its bounds are reported as unavailable with the reason.
+- Unavailable statistics (an empty cell, a 0 / 0 breakage share, a shrinkage without a positive
+  SE, a one-meeting cell's bounds) are listed in the record's metrics as
+  `<name>:unavailable:<reason>`, never in its params: the params are the variant's identity, so
+  a change in data coverage reruns a variant and never adds one to the family.
 - Multiple testing:
   - Hansen SPA ("does any member depart in its stated direction") and Romano-Wolf StepM ("which"),
     both over meetings (`core/eval/snooping.py`, D17).

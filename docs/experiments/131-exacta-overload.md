@@ -21,6 +21,13 @@ v1 families of 2026-11-25 only for the λ2 label: the owner, 2026-11-26 on #131,
 honestly: it is #115's single full-development fit (partly in-sample), not 'in_fold'". The v2
 re-run gave v1's values in every record (Variants tried).
 
+Family ids (#525, owner 2026-11-27): the registry now refuses a `/` in a family id, so the live
+families are `japan-131-exacta-category-v2`, `-category-b1-v2`, `-category-b3-v2`,
+`japan-131-exacta-logscore-v2`, `japan-131-exacta-rule-v4`, the max test
+`japan-131-exacta-category-v2-max-test` and the breakage diagnostic `japan-131-exacta-breakage`,
+with the same specs and hashes. The results below were recorded before the rename and stay under
+the legacy `japan/131-…` ids named with them; a re-run writes to the new ids.
+
 Leaderboard: every E1 and E2 member becomes a leaderboard row (option, family, pool, segment, n,
 expected return, CI, variants searched) once the leaderboard writer (#449) lands. This report
 does not build one; the ranked table below is E1's part of it.
@@ -285,7 +292,7 @@ loss and the paid-return results above are unchanged.
   and B3 and C at λ2 = 0.8104 are partly in-sample. Spec section 4's reading of B2 and B3
   together ("B2 < rate on fav_first with B3 ≈ 1" as a cross-pool overload) is withdrawn: B3's
   equal weighting can point the other way from the cross-pool ratio.
-- E2 (ratio-cut rules, `japan/131-exacta-rule-v4`): **not scored.** rule-v3's headline scope
+- E2 (ratio-cut rules, `japan-131-exacta-rule-v4`): **not scored.** rule-v3's headline scope
   ranked "less popular" by the tertile of pool totals within each logged day, so an early race
   could be classified with later races' totals, information not available when it is selected.
   rule-v4 (owner, 2026-11-27) takes "less popular" from the race card instead, the same
@@ -309,7 +316,8 @@ families (frozen 2026-11-27, run at git `5d68473`):
 - C `japan/131-exacta-logscore-v2`: 2 members, scored (above).
 - Max test `japan/131-exacta-category-v2/max-test`: one record (SPA p 0.175, StepM at a 5%
   family-wise error: no member).
-- E2 `japan/131-exacta-rule-v4`: frozen 2026-11-27, 16 members, not scored (above). It
+- E2 `japan-131-exacta-rule-v4`: frozen 2026-11-27 (first under the legacy id
+  `japan/131-exacta-rule-v4`, the same spec), 16 members, not scored (above). It
   supersedes `japan/131-exacta-rule-v3` (frozen the same day, not scored and not executed, its
   freeze kept), whose daily-tertile "less popular" cutoff used later races' pool totals; v4 uses
   the race-card proxy and drops the meeting gate. v3 in turn superseded
@@ -387,8 +395,8 @@ in-sample).
 All `status:proposed` under epic #72:
 
 - #281 Score #131's E2 exacta ratio-cut rules on logged boards (with the D descriptive on the same
-  days; the owner's 2026-11-27 reframe drops its 100-meeting gate). It scores
-  `japan/131-exacta-rule-v4`, frozen 2026-11-27, whose race-card popularity cutoff uses only
+  days; the owner's 2026-11-27 reframe drops its meeting gate). It scores
+  `japan-131-exacta-rule-v4`, frozen 2026-11-27, whose race-card popularity cutoff uses only
   information available when each race is selected.
 - #282 Pre-register a fav_first exacta loss-avoidance rule (family L); its cuts become ranked rows.
 - #283 Check the ¥100 exacta own-impact assumption against #130 pool totals.

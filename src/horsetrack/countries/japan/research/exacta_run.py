@@ -20,8 +20,12 @@ checks before it builds any frame.
 A member whose cell is empty, or a statistic that cannot be computed (a 0 / 0 breakage share, a
 shrinkage without a positive SE), keeps its row with its count; the statistic is NaN in the
 returned rows, ``n/a`` in a markdown table, ``null`` in a JSON report, and in the registry it is no
-FoldMetric but an entry of ``params["unavailable"]`` with the reason. Report names hold the commit
-and a digest of ``data_builds``, so two data builds at one commit keep separate files.
+FoldMetric of the statistic: the record's metrics hold the marker ``"<name>:unavailable:<reason>"``
+instead (value 0.0, a placeholder; no bounds), never an entry in params, which are the variant's
+identity, so a coverage change (a backfill) reruns a variant and never makes a new one. A cell of
+fewer than two meetings keeps its estimate without bootstrap bounds (``<estimate>_bounds`` is
+unavailable): redrawing one meeting gives a degenerate [x, x]. Report names hold the commit and a
+digest of ``data_builds``, so two data builds at one commit keep separate files.
 
 D14: race days are filtered with ``is_holdout_day`` from the races table's dates (the only column
 read for every row) before any outcome, odds, class or dividend is read, and the readers take only
@@ -69,9 +73,9 @@ from horsetrack.countries.japan.research.exacta_consistency import (
 COUNTRY = "japan"
 FIRST_DAY = date(2014, 6, 7)
 SOURCES = ("jra",)
-MAX_TEST_ID = f"{study.E1_ID}/max-test"
+MAX_TEST_ID = f"{study.E1_ID}-max-test"
 SCORED_FAMILIES = (study.E1_ID, study.E1_B1_ID, study.E1_B3_ID, study.C_ID)
-BREAKAGE_ID = "japan/131-exacta-breakage"
+BREAKAGE_ID = "japan-131-exacta-breakage"
 BREAKAGE_STEP = 10.0  # JRA pays per 100 yen rounded down to 10 yen
 STEPM_FWER = 0.05  # the spec's 95% level as a family-wise error rate
 RACE_COLUMNS = ["race_id", "meeting_id", "race_date", "race_no", "race_class", "race_class_raw"]
@@ -134,16 +138,30 @@ def _fmt(value, digits: int) -> str:
     return f"{value:.{digits}f}" if _available(value) else "n/a"
 
 
-def _metrics(fold: str, entries, n: int) -> tuple[list[FoldMetric], list[dict]]:
-    """FoldMetrics of the available ``(metric, value, lo, hi, reason)`` entries; the others as
-    ``params["unavailable"]`` entries carrying their reason."""
-    metrics, unavailable = [], []
+UNAVAILABLE_VALUE = 0.0  # the registry needs a finite value; an unavailable marker carries none
+FEW_MEETINGS = "fewer than two meetings: no bootstrap interval"
+
+
+def _unavailable_metric(fold: str, name: str, reason: str, n: int) -> FoldMetric:
+    """The marker of an unavailable statistic: ``"<name>:unavailable:<reason>"``, no bounds."""
+    return FoldMetric(fold, f"{name}:unavailable:{reason}", UNAVAILABLE_VALUE, None, None, n)
+
+
+def _metrics(fold: str, entries, n: int) -> list[FoldMetric]:
+    """FoldMetrics of ``(metric, value, lo, hi, reason)`` entries. An unavailable value is its
+    marker with ``reason``. Bounds of None are not part of the statistic; a NaN bound of an
+    available value (a cell of fewer than two meetings) leaves the value without bounds and adds
+    the ``<metric>_bounds`` marker."""
+    metrics = []
     for metric, value, lo, hi, reason in entries:
-        if _available(value):
+        if not _available(value):
+            metrics.append(_unavailable_metric(fold, metric, reason, n))
+        elif (lo is None and hi is None) or (_available(lo) and _available(hi)):
             metrics.append(FoldMetric(fold, metric, float(value), lo, hi, n))
         else:
-            unavailable.append({"fold": fold, "metric": metric, "reason": reason})
-    return metrics, unavailable
+            metrics.append(FoldMetric(fold, metric, float(value), None, None, n))
+            metrics.append(_unavailable_metric(fold, f"{metric}_bounds", FEW_MEETINGS, n))
+    return metrics
 
 
 def _record_key(record: RunRecord) -> str:
@@ -388,7 +406,8 @@ EMPTY_CELL = "no scored race in the cell"
 
 def _member_metrics(sub: pd.DataFrame, column: str, ratio: bool, seed: int, n_boot: int) -> dict:
     """rho, its meeting-bootstrap SE and one-sided bounds; all NaN for an empty cell. A cell of
-    one meeting redraws that meeting in every replicate, so its SE is 0 (not float residue)."""
+    one meeting redraws that meeting in every replicate, so its SE is 0 (not float residue) and
+    its bounds are NaN: the degenerate [x, x] would read as a 95% interval."""
     if sub.empty:
         return {"rho": math.nan, "se": math.nan, "lo": math.nan, "hi": math.nan, "n": 0,
                 "meetings": 0}  # fmt: skip
@@ -397,8 +416,9 @@ def _member_metrics(sub: pd.DataFrame, column: str, ratio: bool, seed: int, n_bo
                                n_boot=n_boot, seed=seed)  # fmt: skip
     lower = study.rho_interval(sub[column], rates, sub["meeting_id"], alternative="greater",
                                n_boot=n_boot, seed=seed)  # fmt: skip
-    se = 0.0 if upper.n_meetings == 1 else upper.se
-    return {"rho": upper.rho, "se": se, "lo": lower.bound, "hi": upper.bound,
+    few = upper.n_meetings < 2
+    return {"rho": upper.rho, "se": 0.0 if few else upper.se,
+            "lo": math.nan if few else lower.bound, "hi": math.nan if few else upper.bound,
             "n": len(sub), "meetings": upper.n_meetings}  # fmt: skip
 
 
@@ -461,11 +481,9 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
         if row.estimator == "B2":
             why = EMPTY_CELL if row.n == 0 else "bootstrap SE is 0: no precision to shrink with"
             entries.append(("rho_eb", row.rho_eb, None, None, why))
-        metrics, unavailable = _metrics("development", entries, int(row.n))
+        metrics = _metrics("development", entries, int(row.n))
         params = {"estimator": row.estimator, "lambda2": row.lambda2, "category": row.category,
                   "cell": row.cell, "direction": study.DIRECTIONS[row.category]}  # fmt: skip
-        if unavailable:
-            params["unavailable"] = unavailable
         append(_record(row.family, variant, params, comps, metrics, meta, sha))
 
     # C: the log-score total, one paired comparison per lambda2.
@@ -585,7 +603,7 @@ def breakage(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int =
     for key, frame in score_frames(races, meta).items():
         d = frame["race_id"].map(dividend)
         frame = frame.assign(b2_unrounded=frame["b2"] * (d + BREAKAGE_STEP / 2) / d)
-        metrics, unavailable = [], []
+        metrics = []
         for category in CATEGORIES:
             for cell in study.SEGMENT_CELLS:
                 sub = frame[(frame["category"] == category) & frame[cell]]
@@ -600,21 +618,17 @@ def breakage(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int =
                 rows.append({"lambda2": key, "category": category, "cell": cell, "n": m["n"],
                              "rho": paid, "breakage_share": share,
                              "rho_unrounded": m["rho"], "lo": m["lo"], "hi": m["hi"]})  # fmt: skip
-                got, missing = _metrics(
+                metrics += _metrics(
                     f"development:{category}:{cell}",
                     [("breakage_share", share, None, None, why),
                      ("rho_unrounded", m["rho"], m["lo"], m["hi"], EMPTY_CELL)],
                     m["n"],
                 )  # fmt: skip
-                metrics += got
-                unavailable += missing
         comps = {"win": meta["win_fit"], "ordering": meta["ordering_fit"] if key == study.FITTED
                  else "plain_harville"}  # fmt: skip
         params = {"estimator": "B2 breakage", "lambda2": key, "step_yen": BREAKAGE_STEP,
                   "unrounded": "D + step / 2", "family": study.E1_ID,
                   "role": "post-hoc descriptive (review of 0c39a8d), not a test"}  # fmt: skip
-        if unavailable:
-            params["unavailable"] = unavailable
         append(_record(BREAKAGE_ID, f"breakage|lambda2={key}", params, comps, metrics, meta, sha))
     return rows
 
