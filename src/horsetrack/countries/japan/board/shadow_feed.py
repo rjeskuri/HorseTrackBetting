@@ -14,9 +14,16 @@ Rules (docs/specs/board-feed.md, "The shadow feed"):
   feed's `t20_odds` rule; the final from `final_board`), one ahead is projected from the current
   figure with the drift cells of `models.nowcast` (docs/specs/board-feed.md, "The odds ladder").
   Display only: values, flags and the shadow log do not read it.
+- `p_model` (ticket #506), per race: {pool: {combination: probability}} of the board as of now.
+  WIN is `models.win.predict(q, board.context())` with q the board's 1/O_WIN normalised; every
+  other pool is `model_probabilities(p, models.ordering, brackets=...)`, brackets by JRA's draw of
+  the largest horse number on the board (scratched included). Scratched runners are off the board,
+  so they have no key and the rest renormalise. Without an ordering fit only WIN; without models
+  None. Display only: it never reaches a value, a flag or the shadow log.
 - `cache`: a mapping the caller keeps between builds. A race's values are recomputed only when its
-  board (capture time and figures) or its bucket changed; flags read the clock on every build. The
-  log readers live in the same mapping, so a rebuild parses only the members appended since.
+  board (capture time and figures) or its bucket changed, its p_model only when its board did;
+  flags read the clock on every build. The log readers live in the same mapping, so a rebuild
+  parses only the members appended since.
 """
 
 from __future__ import annotations
@@ -28,6 +35,8 @@ from collections.abc import Callable, MutableMapping
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board import snapshot
@@ -46,7 +55,12 @@ from horsetrack.countries.japan.board.snapshot import (
     post_times_for,
 )
 from horsetrack.countries.japan.models.v0.nowcast import FLOOR, band_of
-from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels, shadow_values
+from horsetrack.countries.japan.models.v0.ordering import OrderingFit
+from horsetrack.countries.japan.models.v0.shadow_values import (
+    ShadowModels,
+    model_probabilities,
+    shadow_values,
+)
 from horsetrack.countries.japan.research.win5 import live_pool_ev
 from horsetrack.countries.japan.shadow.day import point_seed
 
@@ -221,6 +235,65 @@ def _values(
     if cache is not None:
         cache[slot] = (key, values)
     return values
+
+
+# ---------------------------------------------------------------- model probabilities (#506)
+
+
+def _brackets(drawn: int) -> dict[int, int] | None:
+    """JRA's draw of horses 1..drawn into the 8 brackets, in number order: N // 8 horses each and
+    one more in the last N % 8 brackets (9-16: brackets 1..16-N take one, the rest two; 17: bracket
+    8 takes three; 18: brackets 7 and 8). None with 8 or fewer (no bracket quinella) or above 18."""
+    if not 9 <= drawn <= 18:
+        return None
+    base, extra = divmod(drawn, 8)
+    out, horse = {}, 1
+    for bracket in range(1, 9):
+        for _ in range(base + (bracket > 8 - extra)):
+            out[horse] = bracket
+            horse += 1
+    return out
+
+
+def _p_model(
+    board: RaceBoard, models: ShadowModels, cache: MutableMapping | None
+) -> dict[str, dict[str, float]] | None:
+    """The board's p_model (docs/specs/board-feed.md), from the cache while the board is the one
+    last computed for the race; None when it cannot be formed."""
+    runners = sorted(board.win)
+    if not runners:
+        return None
+    numbers = set(board.win) | set(board.place) | set(board.scratched)
+    numbers |= {h for pair in board.wide for h in pair}
+    drawn = max(numbers)  # the draw was made before any scratch
+    key = (
+        board.race_id,
+        _iso(board.capture_utc),
+        tuple(sorted(models.ids.items())),
+        tuple(sorted(board.win.items())),
+        drawn,
+    )
+    slot = ("p_model", board.race_id)
+    if cache is not None:
+        hit = cache.get(slot)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+    try:
+        inv = np.array([1.0 / board.win[h] for h in runners])
+        p = np.asarray(models.win.predict(inv / inv.sum(), board.context()), dtype=float)
+        if p.shape != (len(runners),):
+            raise ValueError(f"win.predict returned shape {p.shape}, expected ({len(runners)},)")
+        # ordered finishes need the fit's discounts: another ordering model gives WIN only
+        ordering = models.ordering if isinstance(models.ordering, OrderingFit) else None
+        found = model_probabilities(
+            dict(zip(runners, p.tolist(), strict=True)), ordering, brackets=_brackets(drawn)
+        )
+    except Exception:  # the race shows without probabilities; tried again on the next build
+        log.exception("%s: model probabilities failed; shown without", board.race_id)
+        return None
+    if cache is not None:
+        cache[slot] = (key, found)
+    return found
 
 
 # ---------------------------------------------------------------- the odds ladder (#499)
@@ -418,6 +491,7 @@ def build_shadow(
                     "pools": _pools(
                         board, flags, values, _ladders(board, day_rows, post, now_utc, models)
                     ),
+                    "p_model": None if models is None else _p_model(board, models, cache),
                 }
             )
     return {

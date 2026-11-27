@@ -4,11 +4,12 @@ Code: `src/horsetrack/countries/japan/board/feed.py`. Input: a race day's odds s
 (docs/specs/odds-log.md), streamed member by member with `odds_log.iter_members`, and the post
 times of `snapshot.post_times_for`. The feed never requests anything over the network.
 
-The feed carries tier-1 pools only: `WIN`, `PLACE`, `QUINELLA`, `QUINELLA_PLACE` (`BOARD_POOLS`).
-Tier-2 (`BRACKET_QUINELLA`, `FORECAST`, `TRIO`, `TIERCE`) and `WIN5` rows in the same log are
-dropped row by row as each member is read, before anything below: they never reach a pool, a race
-with only such rows is not on the board, and they do not move `last_capture_utc`. The board over a
-log is exactly the board over its tier-1 rows, and a day's trifecta boards are never held in memory.
+The feed carries the tier-1 pools `WIN`, `PLACE`, `QUINELLA`, `QUINELLA_PLACE` (`BOARD_POOLS`)
+with their histories and references, as below, and, since ticket #506, the tier-2 pools
+`BRACKET_QUINELLA`, `FORECAST`, `TRIO`, `TIERCE` (`TIER2_POOLS`) as their latest capture only
+("Tier-2 pools"). Tier-2 rows put no race on the board (a race with only such rows is not listed)
+and do not move `last_capture_utc`: the board over a log, less its tier-2 pools, is exactly the
+board over its tier-1 rows. `WIN5` rows are dropped as each member is read.
 
 `build_board(race_date, *, venues=None, now=utc_now, morning_from='07:00') -> dict`
 
@@ -23,7 +24,9 @@ log is exactly the board over its tier-1 rows, and a day's trifecta boards are n
                                            morning_odds, move_morning_pct,
                                            t20_odds, move_t20_pct,
                                            t10_odds, t5_odds,
-                                           t2_odds, move_t20_t2_pct}]}}}]}]}
+                                           t2_odds, move_t20_t2_pct}]},
+                           TIER2_POOL: {investment, capture_utc,
+                                        rows: [{combination, odds, odds_hi, status}]}}}]}]}
 ```
 
 - The feed is JSON-ready: `race_date` is ISO date text, every timestamp is ISO-8601 UTC text,
@@ -89,7 +92,32 @@ number (whole numbers of the comma-separated pair: runner 1 matches `'1,10'`, no
 reported the same way: status `SCR`, null `odds`, `odds_hi` and moves, references kept. This
 holds whether or not the source still lists the combination: after a scratch it stops listing the
 runner's pairs, whose last row would otherwise stand as current. The carry stays within the race
-and starts only once the `SCR` row is captured at or before `now()`.
+and starts only once the `SCR` row is captured at or before `now()`. In the tier-2 pools it
+reaches `FORECAST`, `TRIO` and `TIERCE` rows of the latest capture (status `SCR`, null `odds` and
+`odds_hi`), never `BRACKET_QUINELLA`, whose combinations are bracket numbers, not runners.
+
+## Tier-2 pools
+
+Ticket #506 (the shadow page's exotic boards). The logger captures `BRACKET_QUINELLA` (枠連),
+`FORECAST` (馬単, exacta), `TRIO` (3連複) and `TIERCE` (3連単, trifecta) at the decision grid's
+points, each capture one gzip member of the same log (an 18-runner race: 36 + 306 + 816 + 4,896
+prices). For a race on the board:
+
+- `pools[POOL]` is `{investment, capture_utc, rows}`, once the pool has a capture at or before
+  `now()`; a pool not yet captured is absent. `capture_utc` is that latest capture's
+  `snapshot_utc`; `rows` are the rows sharing it, one per combination (at one instant the later
+  row in the log wins), in the numeric order of tier 1 (`'12,3'` sorts as 12 then 3), each with
+  `combination`, `odds`, `odds_hi` (null: single-figure pools) and `status` (its `status_raw`) and
+  nothing else: no morning or checkpoint references, no moves. A capture holding part of a pool
+  shows that part; the earlier capture's other rows are not merged in.
+- `investment` is the latest `__pool__` figure of the pool at or before `now()`, as for tier 1.
+- Combination texts are the odds log's: `FORECAST` and `TIERCE` in finishing order, `TRIO`
+  ascending, `BRACKET_QUINELLA` the two bracket numbers ascending (`'3,3'` when one bracket holds
+  both), so they join the shadow feed's `p_model`.
+- Memory: the members are streamed and only the latest capture per (race, pool) is kept as they
+  are read (an older one is dropped when a newer arrives), never a day's trifecta boards
+  (`tests/countries/japan/test_tier2_log_readers.py` bounds the peak).
+- The board page (`board.js`) draws the tier-1 pools only; the tier-2 pools are the shadow page's.
 
 ## Post times
 
@@ -113,7 +141,8 @@ cache=None) -> dict`
  races: [{race_id, venue, race_no, post_utc, minutes_to_post, tau_bucket_min, board_capture_utc,
           pools: {WIN:            {"7":   {value_mean, value_q05, value_q95, flags, ladder}},
                   PLACE:          {"7":   {value_at_low, value_at_high, flags, ladder}},
-                  QUINELLA_PLACE: {"3,7": {value_at_low, value_at_high, flags, ladder}}}}],
+                  QUINELLA_PLACE: {"3,7": {value_at_low, value_at_high, flags, ladder}}},
+          p_model: {POOL: {combination: probability}} | null}],
  win5: {race_date, capture_utc, investment, carryover, pool_ev} | null}
 ```
 
@@ -143,7 +172,60 @@ cache=None) -> dict`
   `carryover` stays null; null without an `investment`). Null on a day without WIN5 rows. WIN5 rows
   never become a race in `races`. The shadow page draws it as one line (`data-win5`) above the
   board; the plain feed and board page stay free of it.
+- `p_model` (ticket #506): see "Model probabilities" below.
 - No key names a stake, a bet, Kelly, an amount or a wager.
+
+### Model probabilities
+
+`p_model` (ticket #506): per race, `{pool: {combination: probability}}` of the board as of `now()`,
+keyed by the odds log's combination texts, so it joins the plain feed's rows (tier 1 and tier 2).
+Display only: it is not in `pools`, whose entries keep exactly their value fields, and it never
+reaches a value, a flag, the shadow log or `verify()`.
+
+- WIN: the calibrated Win model on the board's current WIN odds, `q = (1/O_WIN) / sum(1/O_WIN)`
+  over the board's runners and `p = models.win.predict(q, board.context())` (not an average over
+  nowcast draws).
+- Every other pool: `shadow_values.model_probabilities(p, models.ordering, brackets=...)`, exact
+  sums over the v0 ordering model's ordered first three (discounted Harville,
+  P(i, j, k) = p_i * p_j^l2 / sum_{l != i} p_l^l2 * p_k^l3 / sum_{l not in {i, j}} p_l^l3): PLACE
+  `"7"` P(in the first `places`, from the jra config for the board's starters), QUINELLA `"a,b"`
+  (a < b) P({first two} = {a, b}), QUINELLA_PLACE `"a,b"` P(both in the first three), FORECAST
+  `"a,b"` P(a first, b second), TRIO `"a,b,c"` (ascending) P({first three} = {a, b, c}), TIERCE
+  `"a,b,c"` P(a, b, c in that order), BRACKET_QUINELLA `"x,y"` (x <= y) P({bracket of the first,
+  bracket of the second} = {x, y}). Totals: WIN, QUINELLA, FORECAST, TRIO, TIERCE and
+  BRACKET_QUINELLA 1, PLACE the places paid, Wide 3. Computed per race (an 18-runner race has
+  4,896 ordered triples), never per day at once.
+- Scratches: a runner with a current SCR WIN or PLACE row is off the board, so it has no key and
+  the others renormalise, as the shadow values do.
+- The bracket draw: N is the largest horse number on the board, scratched runners included (the
+  draw was made before the scratch). N <= 8: no bracket quinella. 9 to 16: brackets 1..16-N take
+  one horse each and the rest two, in number order; 17: bracket 8 takes three; 18: brackets 7 and
+  8 take three (N // 8 horses per bracket, one more in the last N % 8). A bracket left with two
+  runners or more has its `"x,x"` key; a bracket all of whose runners are out has no key.
+- Without an ordering fit (or with an ordering model that has no discounts) only WIN; without
+  models `p_model` is null; a failed computation is logged and shows null, tried again next build.
+- Recompute: cached with the values (`cache`), recomputed only when the board (capture time, WIN
+  figures, largest number) or the model ids changed.
+
+### The shadow page
+
+`board/web/shadow.js` (#122, #506) draws one race at a time, with one section (`data-pool`) per
+bet type whatever the plain feed holds, in this order: Win, Place, Quinella, Wide, Exacta
+(`FORECAST`), Trio, Trifecta (`TIERCE`), Bracket quinella.
+
+- Rows: Win, Place, Quinella, Wide and Bracket quinella list every row of the plain feed's pool,
+  favourite first (#498). Exacta, Trio and Trifecta list the 15 combinations with the largest
+  `p_model` (all of them when fewer exist), most likely first, each joined to the plain feed's
+  latest-capture row for its odds (`-` without one); without a shadow feed they list none.
+- Model p: every row has a `Model p` cell (`data-col="p-model"`), `p_model[pool][combination]` as
+  a percent with one decimal, `-` without one.
+- Value: Win, Place and Wide keep the shadow values. Quinella, Bracket quinella, Exacta, Trio and
+  Trifecta have no price forecast (no nowcast, #400): value = Model p x the plain row's current
+  odds (gross return per 1 yen if the odds stood), two decimals, `-` without both, and the section
+  says `no price forecast`.
+- Capture age: each tier-2 section states its capture's age at now in whole minutes
+  (`data-capture-age`), or that nothing is captured yet.
+- Never coloured or highlighted by value or probability.
 
 ### The odds ladder
 

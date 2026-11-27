@@ -24,20 +24,33 @@ v0 limits:
   range figures, not the dividend given who else places;
 - no parameter uncertainty from refits of the win, ordering or nowcast models (#100 adds it);
 - the Win-Place covariance comes only through the shared shocks.
+
+`model_probabilities` (ticket #506) gives the shadow page's `p_model`, display only: every pool's
+probability per combination from one Win vector and the ordering fit's ordered finishes, exact
+sums over the ordered first three. It sits beside the values and never enters a ShadowValue.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import permutations
 from typing import Protocol
 
 import numpy as np
 
 from horsetrack.core.config import load_source
 from horsetrack.countries.japan.board.snapshot import PLACE, WIDE, WIN, RaceBoard, RaceContext
+from horsetrack.countries.japan.models.v0.ordering import (
+    OrderingFit,
+    _check_family,
+    _check_p,
+    _order_probs,
+)
 
 QUANTILES = (0.05, 0.95)
+QUINELLA, FORECAST, TRIO, TIERCE = "QUINELLA", "FORECAST", "TRIO", "TIERCE"
+BRACKET_QUINELLA = "BRACKET_QUINELLA"
 
 
 class WinModel(Protocol):
@@ -230,4 +243,96 @@ def shadow_values(
                     value_at_high=_mean_or_none(prob[:, j], high[:, j]),
                 )
             )
+    return out
+
+
+# ---------------------------------------------------------------- model probabilities (#506)
+
+
+def model_probabilities(
+    p: Mapping[int, float],
+    ordering: OrderingFit | None,
+    *,
+    brackets: Mapping[int, int] | None = None,
+) -> dict[str, dict[str, float]]:
+    """Pool -> combination text (the odds log's) -> probability, for the runners in `p`.
+
+    `p` (horse number -> Win probability, scratched runners left out) is renormalised to sum to 1
+    and WIN is that; without an ordering fit WIN is all there is. With one, P(i, j, k first three
+    in that order) is the fit's discounted Harville model (`ordering._order_probs`) and every other
+    pool is an exact sum over those ordered triples:
+    - PLACE "7": P(7 in the first `places`), places from the jra config for len(p) runners;
+    - QUINELLA "a,b" (a < b): P({first two} = {a, b}); FORECAST "a,b": P(a first, b second);
+    - QUINELLA_PLACE "a,b" (a < b): P(a and b both in the first `places`, 3 from 4 runners);
+    - TRIO "a,b,c" (a < b < c): P({first three} = {a, b, c}); TIERCE "a,b,c": P(a, b, c in order);
+    - BRACKET_QUINELLA "x,y" (x <= y), only with `brackets` (horse -> bracket; horses not in `p`
+      are ignored): P({bracket of the first, bracket of the second} = {x, y}).
+    Each pool keys every combination of the runners and no other; a pool the config does not sell
+    for len(p) runners is left out, and so is every pool but WIN with fewer than three runners.
+    One race at a time: an 18-runner race has 4,896 ordered triples.
+    """
+    horses = sorted(int(h) for h in p)
+    if not horses:
+        return {}
+    q = _check_p(np.array([float(p[h]) for h in horses]))
+    names = [str(h) for h in horses]
+    out: dict[str, dict[str, float]] = {WIN: dict(zip(names, q.tolist(), strict=True))}
+    n = len(horses)
+    if ordering is None or n < 3:
+        return out
+    _check_family(ordering.family)
+    triples = _order_probs(q, ordering.lambdas, 3)  # [i, j, k]: i first, j second, k third
+    # two positions at a time: (first, second), (first, third), (second, third)
+    pairs = {(0, 1): triples.sum(axis=2), (0, 2): triples.sum(axis=1), (1, 2): triples.sum(axis=0)}
+    marginals = [triples.sum(axis=(1, 2)), triples.sum(axis=(0, 2)), triples.sum(axis=(0, 1))]
+    pools = load_source("japan", "jra").pools
+    every = range(n)
+
+    places = pools[PLACE].places_for(n)
+    if places:
+        place = sum(marginals[:places]).tolist()
+        out[PLACE] = {names[i]: place[i] for i in every}
+    first_two = pairs[(0, 1)].tolist()
+    out[QUINELLA] = {
+        f"{names[i]},{names[j]}": first_two[i][j] + first_two[j][i]
+        for i in every
+        for j in every
+        if i < j
+    }
+    places = pools[WIDE].places_for(n)
+    if places:
+        one_way = sum(m for (a, b), m in pairs.items() if b < places)
+        wide = (one_way + one_way.T).tolist()
+        out[WIDE] = {f"{names[i]},{names[j]}": wide[i][j] for i in every for j in every if i < j}
+    out[FORECAST] = {
+        f"{names[i]},{names[j]}": first_two[i][j] for i in every for j in every if i != j
+    }
+    unordered = sum(triples.transpose(axes) for axes in permutations(range(3))).tolist()
+    out[TRIO] = {
+        f"{names[i]},{names[j]},{names[k]}": unordered[i][j][k]
+        for i in every
+        for j in every
+        for k in every
+        if i < j < k
+    }
+    ordered = triples.tolist()
+    out[TIERCE] = {
+        f"{names[i]},{names[j]},{names[k]}": ordered[i][j][k]
+        for i in every
+        for j in every
+        for k in every
+        if i != j and k not in (i, j)
+    }
+    if brackets is not None:
+        missing = [h for h in horses if h not in brackets]
+        if missing:
+            raise ValueError(f"runners {missing} have no bracket")
+        of = [int(brackets[h]) for h in horses]
+        sums: dict[tuple[int, int], float] = {}
+        for i in every:
+            for j in every:
+                if i != j:
+                    key = (min(of[i], of[j]), max(of[i], of[j]))
+                    sums[key] = sums.get(key, 0.0) + first_two[i][j]
+        out[BRACKET_QUINELLA] = {f"{x},{y}": v for (x, y), v in sorted(sums.items())}
     return out
