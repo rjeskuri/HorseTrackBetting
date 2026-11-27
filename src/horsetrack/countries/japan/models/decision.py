@@ -28,7 +28,10 @@ EV over nowcast draws, per yen staked (08 §3.2 C6: (1/M) sum_m sum_o P(o | x, Q
 D_c(o, Q^(m), s) - 1):
 - Draws are `models.nowcast.Draws`: row m one draw of the pool's final shares in the board's
   combination order, and its final pool V_m. They carry no labels, so every EV function takes
-  `combinations=`, the board's `PoolBoard.combinations`; W_j = shares[m, j] x v_final[m].
+  `combinations=`, the board's `PoolBoard.combinations`. The money on combination j in draw m is
+  W_j = shares[m, j] x v_final[m], the share and the pool each read as the decimal it prints as
+  and multiplied exactly: a 0.14 share of 300,000 is 42,000, not the 42,000.00000000001 of
+  binary floating point, so a dividend of exactly 560 is not broken to 550.
 - `ev_single_winner`: the mean over draws of p_fn(q_m) x D_m / 100, less the stake: the mean of
   P x D, never P-bar x D-bar (08 R5).
 - `place_outcomes`: every ordered top three of the runners. `ev_place_wide` enumerates them in
@@ -38,9 +41,19 @@ D_c(o, Q^(m), s) - 1):
 - `ev_distribution`: one EV per refit of C4/C5, the parameter uncertainty reported beside a row.
 - `ShadowDecider(mode="shadow", meta=, nowcast=, exotic=)`: `meta[r].predict(q, view)` gives
   P(win) of the Win board's runners from Win draw q, `exotic[r].trifecta(p_win)` the ordered top
-  three (`models.exotic.Ordering`'s interface), `nowcast.draws(view, pool=, n=, seed=)` C1's
-  draws. Draw m of the Win pool gives P, draw m of the record's own pool the dividend, at the
-  race's payout rate (`takeout.race_takeout`) with config/betting.yaml's flat stake inside it.
+  three (`models.exotic.Ordering`'s interface), `nowcast.draws_from_shocks(view, pool=, shocks=)`
+  C1's draws (`models.nowcast.Nowcast`). Draw m of the Win pool gives P, draw m of the record's
+  own pool the dividend, at the race's payout rate (`takeout.race_takeout`) with
+  config/betting.yaml's flat stake inside it.
+- The pools are coupled through shared shocks: `decide` draws one matrix of iid N(0, 1) shocks
+  per (seed, race, tau), n_draws by the Win board's runners, from a stable sha256 hash, and hands
+  the same {horse number: column} to every pool, so draw m of Win, Place and Wide moves with the
+  same per-runner shocks (late Win money on a horse raises its place chance and lowers its Place
+  dividend in the same draw). Pairing independently seeded draws by index would estimate
+  P-bar x D-bar across pools.
+- `decide(view, field_at_sale=)`: the runners when sales opened set the places Place pays
+  (jra.yaml `places_paid`: a race sold to 8 pays three after a scratch leaves 7); None is the Win
+  board's runners, and a field below them is a ValueError.
 """
 
 from __future__ import annotations
@@ -127,6 +140,11 @@ def own_stake_dividend(
         raise ValueError(f"pool_total must be positive, not {pool_total!r}")
     if not 0 <= combo <= pool:
         raise ValueError(f"combo_money must be in [0, pool_total], not {combo_money!r}")
+    return _single_dividend(pool, combo, own, rate)
+
+
+def _single_dividend(pool: Fraction, combo: Fraction, own: Fraction, rate: Fraction) -> int:
+    """`own_stake_dividend` on exact values it has already checked."""
     if combo + own == 0:
         raise ValueError("no money on the combination: it has no dividend")
     raw = UNIT * rate * (pool + own) / (combo + own)
@@ -162,13 +180,17 @@ def _coplacer_dividend(
     return UNIT if others + FLOOR * ours > UNIT * (pool + own) else FLOOR
 
 
-def _yen_units(pool: float, money: np.ndarray, own: Fraction) -> tuple[int, list[int], int]:
-    """(V, W per column, s) as integers in one unit: the decimals they print as, scaled by the
-    least common denominator."""
-    values = [_decimal(pool), *(_decimal(x) for x in money), own]
-    scale = math.lcm(*(x.denominator for x in values))
-    ints = [x.numerator * (scale // x.denominator) for x in values]
-    return ints[0], ints[1:-1], ints[-1]
+def _yen_units(pool: float, shares: np.ndarray, own: Fraction) -> tuple[int, list[int], int]:
+    """(V, W per column, s) as integers in one unit, W_j = share_j x V with the share and V each
+    read as the decimal it prints as: V = c / d and share_j = a_j / common, so one unit is
+    1 / (d x common x per) yen, `per` making room for the stake's denominator."""
+    v = _decimal(pool)
+    parts = [_decimal(x) for x in shares]
+    common = math.lcm(*(x.denominator for x in parts))
+    scale = math.lcm(v.denominator * common, own.denominator)
+    per = scale // (v.denominator * common)
+    held = [x.numerator * (common // x.denominator) * v.numerator * per for x in parts]
+    return v.numerator * common * per, held, own.numerator * (scale // own.denominator)
 
 
 # ---------------------------------------------------------------- inputs
@@ -199,10 +221,9 @@ def _column(labels: tuple[str, ...], combo: str) -> int:
     return labels.index(combo)
 
 
-def _draws_money(draws: Draws, labels: tuple[str, ...]) -> tuple[np.ndarray, ...]:
-    """(shares, money, v_final) of `draws`, money[m, j] = shares[m, j] x v_final[m] in yen.
-    ValueError unless there is at least one draw, a column per combination, a share row in [0, 1]
-    summing to 1 and a finite, positive pool per draw."""
+def _checked_draws(draws: Draws, labels: tuple[str, ...]) -> tuple[np.ndarray, np.ndarray]:
+    """(shares, v_final) of `draws`. ValueError unless there is at least one draw, a column per
+    combination, a share row in [0, 1] summing to 1 and a finite, positive pool per draw."""
     shares = np.asarray(draws.shares, dtype=float)
     v = np.asarray(draws.v_final, dtype=float)
     if shares.ndim != 2 or shares.shape[1] != len(labels):
@@ -217,7 +238,7 @@ def _draws_money(draws: Draws, labels: tuple[str, ...]) -> tuple[np.ndarray, ...
         raise ValueError("every draw's shares must sum to 1")
     if not np.all(np.isfinite(v) & (v > 0)):
         raise ValueError("every draw's final pool must be finite and positive")
-    return shares, shares * v[:, None], v
+    return shares, v
 
 
 def _horses(label: str) -> tuple[int, ...]:
@@ -240,16 +261,18 @@ def _field_at_sale(value: object, runners: int) -> int:
 
 
 def _single_winner_evs(
-    p: np.ndarray, money: np.ndarray, v: np.ndarray, stake: float, payout_rate: float
+    p: np.ndarray, shares: np.ndarray, v: np.ndarray, stake: float, payout_rate: float
 ) -> np.ndarray:
     """EV[r, t] = mean over draws m of p[r, m, t] x D[m, t] / 100, less 1: D the dividend of the
-    combination of column t of `money` (n, T) in draw m, priced only where a refit gives it a
-    chance. `p` is (refits, draws, T)."""
-    _stake(stake)
-    _rate(payout_rate)
-    dividend = np.zeros(money.shape)
+    combination of column t of `shares` (n, T) in draw m, its money share x V with each read as
+    the decimal it prints as, priced only where a refit gives it a chance. `p` is (refits, draws,
+    T)."""
+    own, rate = _stake(stake), _rate(payout_rate)
+    pools = [_decimal(x) for x in v]
+    dividend = np.zeros(shares.shape)
     for m, t in zip(*np.nonzero((p > 0).any(axis=0)), strict=True):
-        dividend[m, t] = own_stake_dividend(float(v[m]), float(money[m, t]), stake, payout_rate)
+        pool = pools[m]
+        dividend[m, t] = _single_dividend(pool, _decimal(shares[m, t]) * pool, own, rate)
     return (p * dividend / UNIT).mean(axis=1) - 1.0
 
 
@@ -263,9 +286,9 @@ def _single_winner_by_refit(
 ) -> np.ndarray:
     labels = _labels(combinations)
     j = _column(labels, combo)
-    shares, money, v = _draws_money(draws, labels)
+    shares, v = _checked_draws(draws, labels)
     p = np.array([[_probability(f(q)) for q in shares] for f in refits], dtype=float)
-    return _single_winner_evs(p[:, :, None], money[:, [j]], v, stake, payout_rate)[:, 0]
+    return _single_winner_evs(p[:, :, None], shares[:, [j]], v, stake, payout_rate)[:, 0]
 
 
 def ev_single_winner(
@@ -367,7 +390,7 @@ def _paying_chances(board: _Coplacers, probs: object) -> dict[tuple[int, ...], f
 def _coplacer_evs(
     board: _Coplacers,
     probs: Sequence[Sequence[object]],
-    money: np.ndarray,
+    shares: np.ndarray,
     v: np.ndarray,
     targets: Iterable[int],
     stake: float,
@@ -375,15 +398,15 @@ def _coplacer_evs(
 ) -> np.ndarray:
     """EV[r, t] = (1/n) sum_m sum_o probs[r][m](o) x D(o, m) / 100 - 1 for the combination of
     column targets[t]: o every ordered top three of the board's runners, D its dividend when o's
-    paying combinations pay (0 when it is not among them). Each dividend is priced once per draw
-    and shared by every refit."""
+    paying combinations pay (0 when it is not among them), from draw m's `shares` and pool (n,).
+    Each dividend is priced once per draw and shared by every refit."""
     own = _stake(stake)
     rate = _rate(payout_rate)
     target_of = {j: t for t, j in enumerate(targets)}
     total = np.zeros((len(probs), len(target_of)))
     for m in range(len(v)):
         chances = [_paying_chances(board, by_draw[m]) for by_draw in probs]
-        pool, held, ours = _yen_units(v[m], money[m], own)
+        pool, held, ours = _yen_units(v[m], shares[m], own)
         dividends: dict[tuple[tuple[int, ...], int], int] = {}
         for r, by_paying in enumerate(chances):
             for paying, p in by_paying.items():
@@ -409,9 +432,9 @@ def _coplacer_by_refit(
 ) -> np.ndarray:
     board = _coplacers(combinations, field_at_sale, pool)
     j = _column(board.labels, combo)
-    shares, money, v = _draws_money(draws, board.labels)
+    shares, v = _checked_draws(draws, board.labels)
     probs = [[f(q) for q in shares] for f in refits]
-    return _coplacer_evs(board, probs, money, v, [j], stake, payout_rate)[:, 0]
+    return _coplacer_evs(board, probs, shares, v, [j], stake, payout_rate)[:, 0]
 
 
 def ev_place_wide(
@@ -500,11 +523,19 @@ def _flat_stake_yen() -> int:
     return flat
 
 
-def _draw_seed(seed: int, race_id: str, pool: str, tau_min: float) -> int:
-    """The nowcast's seed for one (race, pool, tau): a stable hash, the same on every run and
-    machine (as shadow/day.py's point_seed, with the pool)."""
-    digest = hashlib.sha256(f"{seed}|{race_id}|{pool}|{float(tau_min):g}".encode()).digest()
+def _shock_seed(seed: int, race_id: str, tau_min: float) -> int:
+    """The shocks' seed for one (race, tau): a stable hash, the same on every run and machine (as
+    shadow/day.py's point_seed), never Python's hash(), which varies with PYTHONHASHSEED."""
+    digest = hashlib.sha256(f"{seed}|{race_id}|{float(tau_min)!r}".encode()).digest()
     return int.from_bytes(digest[:8], "big")
+
+
+def _runner_shocks(numbers: Sequence[int], n: int, seed: int) -> dict[int, np.ndarray]:
+    """One column of n iid standard normal shocks per runner, read-only so no pool's nowcast can
+    alter another's (as v0's shadow values)."""
+    matrix = np.random.default_rng(seed).standard_normal((n, len(numbers)))
+    matrix.setflags(write=False)
+    return {h: matrix[:, j] for j, h in enumerate(numbers)}
 
 
 def _win_chances(value: object, runners: int) -> np.ndarray:
@@ -533,9 +564,9 @@ class ShadowDecider:
     `meta` and `exotic` are refits of C4 and C5 paired by index: `meta[r].predict(q, view)` gives
     P(win) of the Win board's runners in the board's order from q, one Win draw's share row, and
     `exotic[r].trifecta(p_win)` the (n, n, n) array of P(i first, j second, k third) indexed as
-    p_win. `nowcast.draws(view, *, pool, n, seed)` is C1's interface; the EV is a mean over the
-    draws it returns. `n_draws` and `seed` set those draws (the seed per race, pool and tau is a
-    stable hash). ValueError for any mode but "shadow".
+    p_win. `nowcast.draws_from_shocks(view, *, pool, shocks)` is C1's interface; the EV is a mean
+    over the draws it returns. `n_draws` and `seed` set the shocks every pool is drawn from (one
+    matrix per race and tau, its seed a stable hash). ValueError for any mode but "shadow".
     """
 
     def __init__(
@@ -563,32 +594,32 @@ class ShadowDecider:
         self.seed = int(seed)
         self.stake_yen = _flat_stake_yen()
 
-    def decide(self, view: RaceView) -> list[ShadowDecision]:
+    def decide(self, view: RaceView, *, field_at_sale: int | None = None) -> list[ShadowDecision]:
         """One ShadowDecision per combination on the board of each pool in `view` (WIN, PLACE,
-        QUINELLA_PLACE), in board order: no selection, no threshold. ValueError for a pool it does
-        not price, a view without its Win board, a Place or Wide board without a Win runner that
-        can place, or pools drawn a different number of times."""
+        QUINELLA_PLACE), in board order: no selection, no threshold. Every pool is drawn from the
+        same per-runner shocks. `field_at_sale` is the runners when sales opened, from which Place
+        and Wide pay (None: the Win board's runners). ValueError for a pool it does not price, a
+        view without its Win board, a field at sale below the Win board's runners, a Place or
+        Wide board without a Win runner that can place, or pools drawn a different number of
+        times."""
         pools = tuple(view.pools)
         unpriced = [pool for pool in pools if pool not in DECIDED_POOLS]
         if unpriced:
             raise ValueError(f"the decider prices {DECIDED_POOLS}, not {unpriced}")
         if WIN not in view.pools:
             raise ValueError("the decider reads P(win) from the Win board's draws: no Win board")
-        draws = {
-            pool: self.nowcast.draws(
-                view,
-                pool=pool,
-                n=self.n_draws,
-                seed=_draw_seed(self.seed, view.race_id, pool, view.tau_min),
-            )
-            for pool in pools
-        }
         win_labels = _labels(view.pools[WIN].combinations)
         horses = [_horses(c) for c in win_labels]
         if any(len(h) != 1 for h in horses):
             raise ValueError("Win combinations name one horse each")
         numbers = [h for (h,) in horses]
-        win_shares, win_money, win_v = _draws_money(draws[WIN], win_labels)
+        field = _field_at_sale(field_at_sale, len(numbers))
+        seed = _shock_seed(self.seed, view.race_id, view.tau_min)
+        shocks = _runner_shocks(numbers, self.n_draws, seed)
+        draws = {
+            pool: self.nowcast.draws_from_shocks(view, pool=pool, shocks=shocks) for pool in pools
+        }
+        win_shares, win_v = _checked_draws(draws[WIN], win_labels)
         p_win = np.array(
             [
                 [_win_chances(f.predict(q, view), len(numbers)) for q in win_shares]
@@ -608,14 +639,14 @@ class ShadowDecider:
             rate = takeout.race_takeout(view.race_id, pool).payout_rate
             if pool == WIN:
                 labels = win_labels
-                ev = _single_winner_evs(p_win, win_money, win_v, self.stake_yen, rate)
+                ev = _single_winner_evs(p_win, win_shares, win_v, self.stake_yen, rate)
             else:
-                spec = _coplacers(board.combinations, None, pool)
+                spec = _coplacers(board.combinations, field, pool)
                 labels = spec.labels
-                _, money, v = _draws_money(draws[pool], labels)
+                shares, v = _checked_draws(draws[pool], labels)
                 if len(v) != len(win_v):
                     raise ValueError(f"{len(v)} {pool} draws for {len(win_v)} Win draws")
-                ev = _coplacer_evs(spec, top3, money, v, range(len(labels)), self.stake_yen, rate)
+                ev = _coplacer_evs(spec, top3, shares, v, range(len(labels)), self.stake_yen, rate)
             out += [
                 ShadowDecision(
                     race_id=view.race_id,

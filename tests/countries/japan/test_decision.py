@@ -19,7 +19,9 @@ it, 08 §3.2 C6: EV = (1/M) sum_m sum_o P(o | x, Q^(m)) x D_c(o, Q^(m), s) - 1):
   the board's combination order, and `v_final` (n,), that draw's final pool in yen. Draws carry no
   labels, so every EV function takes `combinations=` (keyword only): the k combination texts of
   the columns, in order (the board's `PoolBoard.combinations`). The money on combination j in
-  draw m is W_j = shares[m, j] x v_final[m].
+  draw m is W_j = shares[m, j] x v_final[m], the share and the pool each read as the decimal it
+  prints as (#100 review: a 0.14 share of 300,000 is 42,000, not the 42,000.00000000001 of binary
+  floating point, so a dividend of exactly 560 is not broken to 550).
 - `ev_single_winner(p_fn, draws, combo, stake, payout_rate, *, combinations) -> float`, for a pool
   that pays one combination per result (WIN, QUINELLA, ...): (1/n) sum_m p_fn(q_m) x D_m / 100 - 1,
   q_m the 1-D share row of draw m, p_fn(q) = P(combo | x, q), and
@@ -49,15 +51,25 @@ it, 08 §3.2 C6: EV = (1/M) sum_m sum_o P(o | x, Q^(m)) x D_c(o, Q^(m), s) - 1):
   `meta`: a sequence of C4 refits, each `predict(q, view)` -> P(win) of the Win board's runners in
   the board's order, q one Win draw's share row; `exotic`: C5 refits, paired with meta by index,
   each `trifecta(p_win)` -> the (n, n, n) array of P(i first, j second, k third) indexed as p_win
-  (`models.exotic.Ordering.trifecta`); `nowcast`: C1's `draws(view, *, pool, n, seed) -> Draws`,
-  averaged over however many draws it returns.
-- `decide(view) -> list[ShadowDecision]`: one record per combination on the board of each pool
-  in the view (no selection, no EV threshold, no uncertainty gate: owner, 2026-11-27), each with
+  (`models.exotic.Ordering.trifecta`); `nowcast`: C1's
+  `draws_from_shocks(view, *, pool, shocks) -> Draws` (`models.nowcast.Nowcast`), averaged over
+  however many draws it returns. #100 review: decide() draws one matrix of iid standard normal
+  shocks per (seed, race, tau), n_draws by the Win board's runners, from a stable hash, and hands
+  the same per-runner columns ({horse number: (n_draws,) array}) to every pool, so draw m of every
+  pool comes from the same shocks: late Win money on a horse raises its place chance and lowers
+  its Place dividend in the same draw, and the EV keeps that covariance (pairing independent
+  draws by index would estimate P-bar x D-bar across pools).
+- `decide(view, *, field_at_sale=None) -> list[ShadowDecision]`: one record per combination on
+  the board of each pool in the view (no selection, no EV threshold, no uncertainty gate: owner,
+  2026-11-27), each with
   `race_id`, `pool`, `combination`, `tau_min`, `board` (that pool's PoolBoard at t), `ev` (an
   np.ndarray, one EV per refit) and `stake_yen` (config/betting.yaml's flat stake, within its
   race-day cap). The EV is priced with that stake inside the dividend, at the race's payout rate
   (jra.yaml's on a day without a boost). Draw m of the Win pool gives P (WIN: meta's P(win); PLACE
   and Wide: meta, then exotic's trifecta); draw m of the record's own pool gives the dividend.
+  `field_at_sale` is the number of runners when sales opened, from which jra.yaml's
+  `places_paid` sets the places Place pays (a race sold to 8 pays three after a scratch leaves
+  7); None means the runners on the Win board, and a field below them is a ValueError.
   Nothing here submits, places or logs a bet: the owner places bets by hand.
 
 Place and Wide pay by the stake-back-share rule of `config/jra.yaml`, `core.pricing` and
@@ -109,7 +121,9 @@ def expected_dividend(pool: int, combo: int, stake: int, rate: str) -> int:
 
 
 def _exact(value: object) -> Fraction:
-    """`value` as the decimal it prints as (how decision.py reads a number)."""
+    """`value` as the decimal it prints as (how decision.py reads a number); a Fraction as it is."""
+    if isinstance(value, Fraction):
+        return value
     if isinstance(value, str):
         return Fraction(value)
     if isinstance(value, (int, np.integer)):
@@ -187,7 +201,7 @@ def ref_ev_single(
     j = list(combinations).index(combo)
     total = 0.0
     for p, q, v in zip(p_by_draw, draws.shares, draws.v_final, strict=True):
-        total += p * paid_dividend(float(v), float(q[j] * v), stake, rate) / 100
+        total += p * paid_dividend(float(v), _exact(q[j]) * _exact(v), stake, rate) / 100
     return total / len(p_by_draw) - 1
 
 
@@ -210,7 +224,7 @@ def ref_ev_coplacer(
     runners = runners_of(combinations)
     total = 0.0
     for probs, q, v in zip(probs_by_draw, draws.shares, draws.v_final, strict=True):
-        money = {c: float(q[j] * v) for j, c in enumerate(combinations)}
+        money = {c: _exact(q[j]) * _exact(v) for j, c in enumerate(combinations)}
         dividends: dict[frozenset, int] = {}
         acc = 0.0
         for outcome in itertools.permutations(runners, 3):
@@ -862,12 +876,12 @@ class FakeOrdering:
 
 
 class FakeNowcast:
-    """C1's draws interface: fixed draws per pool, whatever n and seed."""
+    """C1's shared-shock interface: fixed draws per pool, whatever the shocks."""
 
     def __init__(self, draws: Mapping[str, Draws]) -> None:
         self._draws = dict(draws)
 
-    def draws(self, view, *, pool, n, seed):
+    def draws_from_shocks(self, view, *, pool, shocks):
         assert view.race_id == RACE_ID
         return self._draws[pool]
 
@@ -1039,6 +1053,438 @@ def test_shadow_mode_never_emits_a_bet(monkeypatch):
     for owner in (decision, decision.ShadowDecider, decision.ShadowDecision):
         for name in dir(owner):
             assert not (BET_NAME.search(name) and callable(getattr(owner, name))), (owner, name)
+
+
+# ---------------------------------------------------------------- #100 review: shared shocks
+
+
+class PowerMeta:
+    """A C4 refit for any field: P(win) = q**power normalised, from one Win draw's shares."""
+
+    def __init__(self, power: float) -> None:
+        self.power = power
+
+    def predict(self, q, view):
+        q = np.asarray(q, dtype=float)
+        assert q.shape == (len(view.pools[WIN].combinations),), q.shape
+        w = q**self.power
+        return w / w.sum()
+
+
+class HarvilleOrdering:
+    """A C5 refit for any field, with `Ordering.trifecta`'s interface."""
+
+    def __init__(self, lam: float) -> None:
+        self.lam = lam
+
+    def trifecta(self, p_win):
+        return trifecta_array(p_win, self.lam)
+
+
+def shock_draws(board: PoolBoard, shocks: Mapping[int, np.ndarray], phi: float, sigma: float):
+    """The known nowcast of one board from per-runner shocks, as `Nowcast.draws_from_shocks`: eps a
+    runner's shock, a Wide pair's (eps_a + eps_b) / sqrt 2; s_final = phi s + (1 - phi)
+    softmax(ln s + sigma eps); V_final = V_t / phi."""
+    s = np.asarray(board.shares, dtype=float)
+    s = s / s.sum()
+    columns = []
+    for c in board.combinations:
+        horses = [int(h) for h in c.split(",")]
+        columns.append(sum(np.asarray(shocks[h], dtype=float) for h in horses) / len(horses) ** 0.5)
+    z = np.log(s) + sigma * np.column_stack(columns)
+    late = np.exp(z - z.max(axis=1, keepdims=True))
+    late /= late.sum(axis=1, keepdims=True)
+    return Draws(shares=phi * s + (1 - phi) * late, v_final=np.full(len(z), board.total / phi))
+
+
+class ShockNowcast:
+    """C1 behind `draws_from_shocks`: each pool's draws built from the shocks the decider hands it,
+    so the draws of every pool move with the same shocks; it keeps the shocks each pool got."""
+
+    def __init__(self, phi: float = 0.4, sigma: float = 1.2) -> None:
+        self.phi, self.sigma = phi, sigma
+        self.got: dict[str, dict[int, np.ndarray]] = {}
+
+    def draws_from_shocks(self, view, *, pool, shocks):
+        self.got[pool] = {h: np.asarray(x, dtype=float).copy() for h, x in shocks.items()}
+        return shock_draws(view.pools[pool], shocks, self.phi, self.sigma)
+
+
+def coupled_view(horses=HORSES, *, race_id: str = RACE_ID, tau: float = 2.0) -> RaceView:
+    """Win, Place and Wide boards of `horses` (the first the favourite), small pools so 1,000 yen
+    moves the dividends, and no heavy favourite in Place (no draw reaches the withheld Plus 10)."""
+    rank = np.arange(len(horses), 0, -1, dtype=float)
+    place = (rank + 3) / (rank + 3).sum()
+    strength = dict(zip(horses, place, strict=True))
+    pairs = pair_labels(horses)
+    wide = np.array([strength[int(a)] * strength[int(b)] for a, b in (p.split(",") for p in pairs)])
+
+    def board(combinations, shares, total):
+        shares = shares / shares.sum()
+        return PoolBoard(tuple(combinations), shares, total, None, None, 2.0, 0.8 / shares)
+
+    pools = {
+        WIN: board((str(h) for h in horses), rank**1.2, 300_000.0),
+        PLACE: board((str(h) for h in horses), place, 120_000.0),
+        WIDE: board(pairs, wide, 90_000.0),
+    }
+    _, _, venue, race_no = race_id.split(":")
+    return RaceView(race_id, venue, int(race_no), None, float(tau), pools)
+
+
+def reference_records(
+    view: RaceView,
+    draws: Mapping[str, Draws],
+    *,
+    stake: float,
+    field: int,
+    powers: Sequence[float] = (1.0, 1.25),
+    lams: Sequence[float] = (1.0, 0.8),
+) -> dict[tuple[str, str], list[float]]:
+    """{(pool, combination): [EV per refit]} from first principles: Win draw m gives P (PowerMeta,
+    then the trifecta for Place and Wide), draw m of the record's own pool the dividend; Place
+    pays place_places(field) places, Wide three."""
+    win_labels = view.pools[WIN].combinations
+    horses = [int(c) for c in win_labels]
+    win = draws[WIN]
+    p_win = [[PowerMeta(g).predict(q, view) for q in win.shares] for g in powers]
+    out: dict[tuple[str, str], list[float]] = {}
+    for j, combo in enumerate(win_labels):
+        out[(WIN, combo)] = [
+            ref_ev_single([p[j] for p in by_draw], win, win_labels, combo, stake, POOL_RATE[WIN])
+            for by_draw in p_win
+        ]
+    positions = list(itertools.permutations(range(len(horses)), 3))
+    probs = [
+        [
+            {tuple(horses[x] for x in ijk): float(t[ijk]) for ijk in positions}
+            for t in (trifecta_array(p, lam) for p in by_draw)
+        ]
+        for by_draw, lam in zip(p_win, lams, strict=True)
+    ]
+    for pool in (PLACE, WIDE):
+        if pool not in view.pools:
+            continue
+        labels = view.pools[pool].combinations
+        places = 3 if pool == WIDE else place_places(field)
+        for combo in labels:
+            rate = POOL_RATE[pool]
+            out[(pool, combo)] = [
+                ref_ev_coplacer(
+                    p, draws[pool], labels, combo, stake, rate, places, withheld_ok=False
+                )
+                for p in probs
+            ]
+    return out
+
+
+def records(out) -> dict[tuple[str, str], np.ndarray]:
+    assert type(out) is list and all(isinstance(r, decision.ShadowDecision) for r in out)
+    got = {(rec.pool, rec.combination): np.asarray(rec.ev, dtype=float) for rec in out}
+    assert len(got) == len(out)
+    return got
+
+
+def coupled_decider(nowcast, *, n_draws: int, seed: int, refits: int = 2):
+    return decision.ShadowDecider(
+        mode="shadow",
+        meta=[PowerMeta(1.0), PowerMeta(1.25)][:refits],
+        nowcast=nowcast,
+        exotic=[HarvilleOrdering(1.0), HarvilleOrdering(0.8)][:refits],
+        n_draws=n_draws,
+        seed=seed,
+    )
+
+
+def test_place_and_wide_ev_keep_the_covariance_with_the_win_draw():
+    """Review round 1, finding 1 (DoD: the mean over draws of P x D, never P-bar x D-bar): Place
+    and Wide take P from the Win draw and D from their own draw, so the two must come from the
+    same shocks. decide() hands every pool the same per-runner shock columns, one per Win runner
+    and n_draws long, and the Place and Wide EVs are the joint-draw reference; pairing the Win
+    draws with Place and Wide draws of other shocks (rolled by one draw) moves them by more than
+    0.05, so the fixture tells the two apart."""
+    flat, _ = betting_limits()
+    view = coupled_view()
+    n = 40
+    nowcast = ShockNowcast()
+    got = records(coupled_decider(nowcast, n_draws=n, seed=7).decide(view))
+
+    assert set(nowcast.got) == {WIN, PLACE, WIDE}
+    shocks = nowcast.got[WIN]
+    assert set(shocks) == set(HORSES)
+    for pool in (PLACE, WIDE):
+        assert set(nowcast.got[pool]) == set(HORSES), pool
+        for h in HORSES:
+            assert shocks[h].shape == (n,)
+            assert np.array_equal(nowcast.got[pool][h], shocks[h]), (pool, h)
+    matrix = np.column_stack([shocks[h] for h in HORSES])
+    assert np.all(np.isfinite(matrix)) and np.linalg.matrix_rank(matrix) == len(HORSES)
+
+    phi, sigma = nowcast.phi, nowcast.sigma
+    joint = {pool: shock_draws(view.pools[pool], shocks, phi, sigma) for pool in view.pools}
+    rolled = {h: np.roll(x, 1) for h, x in shocks.items()}
+    apart = {WIN: joint[WIN]} | {
+        pool: shock_draws(view.pools[pool], rolled, phi, sigma) for pool in (PLACE, WIDE)
+    }
+    want = reference_records(view, joint, stake=flat, field=len(HORSES))
+    independent = reference_records(view, apart, stake=flat, field=len(HORSES))
+    for pool in (PLACE, WIDE):
+        gap = max(abs(want[k][r] - independent[k][r]) for k in want if k[0] == pool for r in (0, 1))
+        assert gap > 0.05, (pool, gap)
+
+    assert set(got) == set(want)
+    for key, ev in got.items():
+        assert np.allclose(ev, want[key], rtol=TOL, atol=TOL), (key, ev, want[key])
+
+
+def test_the_shocks_come_from_the_seed_the_race_and_tau():
+    """One matrix of iid standard normal shocks per (seed, race, tau), n_draws by the Win board's
+    runners: the same three give the same shocks and the same records; another seed, race or tau
+    gives other shocks (and another seed other EVs). Over 2,000 draws each runner's column has mean
+    0 and sd 1, and the columns are uncorrelated."""
+
+    def run(view, seed, n=12):
+        nowcast = ShockNowcast()
+        out = records(coupled_decider(nowcast, n_draws=n, seed=seed, refits=1).decide(view))
+        return np.column_stack([nowcast.got[WIN][h] for h in HORSES]), out
+
+    shocks, recs = run(coupled_view(), seed=5)
+    assert shocks.shape == (12, len(HORSES))
+    again, recs_again = run(coupled_view(), seed=5)
+    assert np.array_equal(shocks, again)
+    assert set(recs) == set(recs_again)
+    assert all(np.array_equal(recs[k], recs_again[k]) for k in recs)
+
+    for view, seed in (
+        (coupled_view(), 6),
+        (coupled_view(race_id="jra:2026-11-22:KYO:10"), 5),
+        (coupled_view(tau=5.0), 5),
+    ):
+        other, other_recs = run(view, seed)
+        assert other.shape == shocks.shape
+        assert not np.allclose(other, shocks), (view.race_id, view.tau_min, seed)
+        if seed != 5:
+            assert any(not np.allclose(other_recs[k], recs[k]) for k in recs)
+
+    win_only = coupled_view()
+    win_only = RaceView(RACE_ID, "KYO", 11, None, 2.0, {WIN: win_only.pools[WIN]})
+    big, _ = run(win_only, seed=5, n=2_000)
+    assert big.shape == (2_000, len(HORSES))
+    assert np.all(np.abs(big.mean(axis=0)) < 0.15)
+    assert np.all(np.abs(big.std(axis=0) - 1.0) < 0.1)
+    corr = np.corrcoef(big, rowvar=False)[~np.eye(len(HORSES), dtype=bool)]
+    assert np.all(np.abs(corr) < 0.15)
+
+
+SOLD_8 = (1, 2, 3, 4, 6, 7, 8)  # sold to eight runners; horse 5 scratched after sales opened
+
+
+def test_decide_prices_place_by_the_field_at_sale():
+    """Review round 1, finding 2: Place pays by the runners when sales opened (jra.yaml
+    `places_paid`), so a race sold to eight pays three places after a scratch leaves seven.
+    decide(view, field_at_sale=8) prices Place over three places, decide(view) and
+    field_at_sale=7 over two (the Win board's runners), and the two differ by more than 0.02; Win
+    and Wide (three places from 4) are the same either way. A field at sale below the runners on
+    the board is refused."""
+    flat, _ = betting_limits()
+    view = coupled_view(SOLD_8)
+    want_by_field = {}
+    for field in (8, None, 7):
+        nowcast = ShockNowcast(phi=0.5, sigma=0.6)
+        decider = coupled_decider(nowcast, n_draws=6, seed=3)
+        kwargs = {} if field is None else {"field_at_sale": field}
+        got = records(decider.decide(view, **kwargs))
+        shocks = nowcast.got[WIN]
+        draws = {pool: shock_draws(view.pools[pool], shocks, 0.5, 0.6) for pool in view.pools}
+        places_field = len(SOLD_8) if field is None else field
+        want = reference_records(view, draws, stake=flat, field=places_field)
+        assert set(got) == set(want), field
+        for key, ev in got.items():
+            assert np.allclose(ev, want[key], rtol=TOL, atol=TOL), (field, key, ev, want[key])
+        want_by_field[field] = want
+
+    three, two = want_by_field[8], want_by_field[None]
+    gap = max(abs(three[k][r] - two[k][r]) for k in three if k[0] == PLACE for r in (0, 1))
+    assert gap > 0.02, gap
+    for key in three:
+        if key[0] != PLACE:
+            assert np.allclose(three[key], two[key], rtol=TOL, atol=TOL), key
+
+    for field in (6, 0):
+        with pytest.raises(ValueError):
+            coupled_decider(ShockNowcast(), n_draws=6, seed=3).decide(view, field_at_sale=field)
+
+
+# ---------------------------------------------------------------- #100 review: breakage
+
+
+def float_money(share: object, pool: object) -> Fraction:
+    """The wrong reading: share x V multiplied in binary floating point, then read as the decimal
+    the product prints as."""
+    return Fraction(repr(float(share) * float(pool)))
+
+
+def win_boundaries(stake: int, rate: str, pools=(100_000, 300_000, 1_000_000, 2_500_000)):
+    """(V, share, D): a round pool and a share of at most four decimals at which the dividend is
+    exactly D, a multiple of 10: 100 r (V + s) / (share V + s) = D."""
+    r = Fraction(rate)
+    for v in pools:
+        for d in range(110, 10_000, 10):
+            w = 100 * r * (v + stake) / d - stake
+            if w <= 0:
+                break
+            share = w / v
+            if share < 1 and (share * 10_000).denominator == 1:
+                yield v, share, d
+
+
+def place_boundaries(stake: int, rate: str, pools=(100_000, 300_000, 1_000_000)):
+    """(V, the eight runners' shares, D): Place over eight runners, 1-2-3 home, horse 1's dividend
+    exactly D: 100 r (1 + L / (3 (W_1 + s))) = D, L the money on 4 to 8, horses 2 and 3 halving
+    the rest, every share of at most four decimals."""
+    r = Fraction(rate)
+    for v in pools:
+        for k in range(50, 2_000, 50):
+            w1 = Fraction(k, 10_000) * v
+            for d in range(120, 3_000, 10):
+                lost = (Fraction(d, 100) / r - 1) * 3 * (w1 + stake)
+                rest = v - lost - w1
+                if rest <= 0:
+                    break
+                shares = tuple(w / v for w in (w1, rest / 2, rest / 2, *[lost / 5] * 5))
+                if all((x * 10_000).denominator == 1 for x in shares):
+                    yield v, shares, d
+
+
+def place_money(v, shares) -> dict[str, Fraction]:
+    return {str(h): x * v for h, x in zip(range(1, 9), shares, strict=True)}
+
+
+def place_dividend_of_1(v, money, stake, rate) -> int:
+    """Horse 1's Place dividend with 1-2-3 home, three places, from money per horse."""
+    return coplacer_dividend(v, money, ["1", "2", "3"], "1", stake, rate, 3)
+
+
+def float_place_money(v, shares) -> dict[str, Fraction]:
+    return {str(h): float_money(x, v) for h, x in zip(range(1, 9), shares, strict=True)}
+
+
+def one_draw(shares, v) -> Draws:
+    """One draw of the given decimal shares (each prints as itself) and pool V."""
+    assert all(Fraction(repr(float(x))) == x for x in shares)
+    return Draws(shares=np.array([[float(x) for x in shares]]), v_final=np.array([float(v)]))
+
+
+def spread(first: Fraction, k: int) -> tuple[Fraction, ...]:
+    """`first`, then k - 1 shares of at most four decimals making up the rest exactly."""
+    units = int((1 - first) * 10_000)
+    parts = [units // (k - 1)] * (k - 1)
+    parts[0] += units - sum(parts)
+    return (first, *(Fraction(u, 10_000) for u in parts))
+
+
+def constant(p: float):
+    def p_fn(q):
+        return p
+
+    return p_fn
+
+
+def share_of_first(q) -> float:
+    """P(the first combination) = its share of the draw."""
+    return float(np.asarray(q)[0])
+
+
+HOME = {(1, 2, 3): 0.6, (4, 5, 6): 0.4}  # 1 places with 2 and 3, or 4-5-6 and it misses
+
+
+def test_breakage_reads_share_and_pool_as_the_decimals_they_print_as():
+    """Review round 1, finding 3 (DoD: breakage applies to the dividend): the money on a
+    combination is share x V, each read as the decimal it prints as. A 300,000-yen pool, a 0.14
+    share, a 1,000-yen stake and a rate of 0.8 pay 100 x 0.8 x 301,000 / 43,000 = 560 exactly,
+    though 0.14 x 300,000 is 42,000.00000000001 in binary floating point, which breaks to 550: the
+    draw is worth P x 5.6 - 1. Place, 100,000 yen, 1,000 on horse 1 (0.005: 500 yen), 0.07 on 2
+    and 3, 1-2-3 home: 0.8 (1 + 85,500 / 4,500) = 16.0, so 1,600 and not 1,590. Then every exact
+    boundary of a sweep of round pools and four-decimal shares, single-winner and Place (at least
+    20 of each that the float reading breaks the wrong way), and decide()'s Win and Place rows at
+    such a boundary with the flat stake inside."""
+    combos = ("1", "2")
+    one = one_draw(spread(Fraction("0.14"), 2), 300_000)
+    assert paid_dividend(300_000, Fraction("0.14") * 300_000, 1_000, "0.8") == 560
+    assert paid_dividend(300_000, float_money(0.14, 300_000), 1_000, "0.8") == 550  # the trap
+    for p in (0.25, 0.5, 1.0):
+        ev = decision.ev_single_winner(constant(p), one, "1", 1_000, 0.8, combinations=combos)
+        assert ev == pytest.approx(p * 5.6 - 1, abs=1e-12), p
+
+    hand = tuple(Fraction(x) for x in ("0.005", "0.07", "0.07", *["0.171"] * 5))
+    assert place_dividend_of_1(100_000, place_money(100_000, hand), 1_000, "0.8") == 1600
+    assert place_dividend_of_1(100_000, float_place_money(100_000, hand), 1_000, "0.8") == 1590
+    hand_draw = one_draw(hand, 100_000)
+    ev = decision.ev_place_wide(certain(HOME), hand_draw, "1", 1_000, 0.8, combinations=PLACE_8)
+    assert ev == pytest.approx(0.6 * 16.0 - 1, abs=1e-12)
+
+    trapped = 0
+    for stake in (0, 100, 1_000, 10_000):
+        for rate in RATES:
+            for v, share, d in win_boundaries(stake, rate):
+                assert paid_dividend(v, share * v, stake, rate) == d
+                trapped += paid_dividend(v, float_money(share, v), stake, rate) != d
+                draws = one_draw(spread(share, 2), v)
+                got = decision.ev_single_winner(
+                    share_of_first, draws, "1", stake, float(rate), combinations=combos
+                )
+                want = float(share) * d / 100 - 1
+                assert got == pytest.approx(want, abs=1e-12), (v, str(share), stake, rate, d)
+    assert trapped >= 20, trapped
+
+    trapped = 0
+    for stake, rate in ((1_000, "0.8"), (100, "0.8"), (10_000, "0.775")):
+        for v, shares, d in place_boundaries(stake, rate):
+            assert place_dividend_of_1(v, place_money(v, shares), stake, rate) == d
+            trapped += place_dividend_of_1(v, float_place_money(v, shares), stake, rate) != d
+            got = decision.ev_place_wide(
+                certain(HOME), one_draw(shares, v), "1", stake, float(rate), combinations=PLACE_8
+            )
+            want = 0.6 * d / 100 - 1
+            assert got == pytest.approx(want, abs=1e-12), (v, list(map(str, shares)), stake, d)
+    assert trapped >= 20, trapped
+
+    # decide(): eight runners, a Win draw and a Place draw each at a boundary the float reading
+    # breaks the wrong way, priced with the flat stake inside.
+    flat, _ = betting_limits()
+    v_win, share = next(
+        (v, x)
+        for v, x, d in win_boundaries(flat, "0.8")
+        if x <= Fraction("0.3") and paid_dividend(v, float_money(x, v), flat, "0.8") != d
+    )
+    v_place, shares = next(
+        (v, x)
+        for v, x, d in place_boundaries(flat, "0.8")
+        if max(x) <= Fraction("0.35")
+        and place_dividend_of_1(v, float_place_money(v, x), flat, "0.8") != d
+    )
+    win_row = spread(share, 8)
+    draws = {WIN: one_draw(win_row, v_win), PLACE: one_draw(shares, v_place)}
+
+    def board(row, total):
+        row = np.array([float(x) for x in row])
+        return PoolBoard(PLACE_8, row, float(total), None, None, 2.0, 0.8 / row)
+
+    pools = {WIN: board(win_row, v_win), PLACE: board(shares, v_place)}
+    view = RaceView(RACE_ID, "KYO", 11, None, 2.0, pools)
+    decider = decision.ShadowDecider(
+        mode="shadow",
+        meta=[PowerMeta(1.0)],
+        nowcast=FakeNowcast(draws),
+        exotic=[HarvilleOrdering(1.0)],
+    )
+    got = records(decider.decide(view))
+    want = reference_records(view, draws, stake=flat, field=8, powers=(1.0,), lams=(1.0,))
+    top = trifecta_array(PowerMeta(1.0).predict(draws[WIN].shares[0], view), 1.0)
+    assert sum(top[ijk] for ijk in itertools.permutations(range(3))) > 1e-3  # 1-2-3 home matters
+    assert set(got) == set(want)
+    for key, ev in got.items():
+        assert np.allclose(ev, want[key], rtol=0, atol=1e-12), (key, ev, want[key])
 
 
 # ---------------------------------------------------------------- #100: inputs the EV refuses
