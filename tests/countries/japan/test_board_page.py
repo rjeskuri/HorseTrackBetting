@@ -1,4 +1,4 @@
-"""The board page (ticket #42): `board.html` and `board.js` in
+"""The board page (tickets #42, #498): `board.html` and `board.js` in
 `src/horsetrack/countries/japan/board/web/`, driven from node under a tiny fake DOM.
 
 Contract pinned here (the coder implements against it):
@@ -12,33 +12,42 @@ at least these four functions:
 - `isStale(lastCaptureUtc, nowMs) -> boolean`: true when the capture (ISO-8601 UTC text, as in the
   feed) is more than 2 minutes (120 s) older than `nowMs` (milliseconds since the epoch, as
   `Date.now()`); exactly 120 s is not stale.
-- `renderBoard(feed, {now, venue}) -> string`: the HTML of the board for one venue of a feed
+- `renderBoard(feed, {now, venue, race}) -> string`: the HTML of the board for one venue of a feed
   (docs/specs/board-feed.md shape), `venue` defaulting to the feed's first venue, `now` in ms.
-  The HTML carries these hooks (any tags, any layout around them):
+  One race per page (#498): it draws the race whose `race_id` is `race` when that race is of the
+  venue, else the venue's default: the race to post next (the earliest post still after `now`),
+  else the venue's last race. The HTML carries these hooks (any tags, any layout around them):
   - one venue tab per venue of the feed, an element with `data-venue="<venue>"`;
-  - every race of that venue as an element with `data-race="<race_id>"` that contains its pools
-    (a race strip may also use `data-race`, but only the race block contains `data-pool`); the
-    race block's text shows the post time in Japan time as `HH:MM` and the word 'stale' exactly
-    when `isStale(last_capture_utc, now)`;
+  - the race strip: one link per race of the venue, an `a` outside the race block whose `href`
+    is `#<hash>` and whose text starts with `<no>R`; following it selects that race;
+  - the selected race, and only it, as an element with `data-race="<race_id>"` that contains its
+    pools (a race strip may also use `data-race`, but only the race block contains `data-pool`);
+    the race block's text shows the post time in Japan time as `HH:MM` and the word 'stale'
+    exactly when `isStale(last_capture_utc, now)`;
   - every pool of the race as an element with `data-pool="<POOL>"` inside the race block, with one
-    element per feed row, `data-combination="<combination>"`, in feed order; a row whose status is
-    'SCR' has class `scratched`, others do not;
+    element per feed row, `data-combination="<combination>"`, favourite first (#498): priced rows
+    by current `odds` ascending (the low end of Place/Wide), ties in combination order ('2' before
+    '10', '2,3' before '2,10'); then the rows without odds (unpriced, scratched) in combination
+    order. A row whose status is 'SCR' has class `scratched`, others do not;
   - in each row, cells with `data-col="odds"`, `data-col="move-morning"` and `data-col="move-t20"`.
     The odds cell of a priced row shows `odds` with one decimal, or `low-high` (an en dash is
     allowed, spaces around it too) when `odds_hi` is not null. A move cell's text is
     `formatMove(pct)`, and its class list has `up` for a positive move, `down` for a negative one,
     neither for zero or null.
 - `poll() -> Promise`: one GET of the feed (`/feed` or `feed`) with `If-None-Match` set to the last
-  ETag seen; on 200 it sets the innerHTML of the element with id `board` to
-  `renderBoard(feed, {now: Date.now(), venue})` for the selected venue (the feed's first venue by
-  default); on 304 the board stays. The page polls every 5 s (`setInterval` or `setTimeout` with
-  5000 ms).
+  ETag seen; on 200 it sets the innerHTML of the element with id `board` to the board of the
+  selected venue (the feed's first venue by default) and the selected race; on 304 the board
+  stays. The page polls every 5 s (`setInterval` or `setTimeout` with 5000 ms).
+- In the browser (#498): the URL hash selects the race at load (the strip's `#<hash>`); following
+  a strip link draws that race alone and leaves its hash in the URL; a hash change (back) selects
+  that race; a poll redraws the selected race and never jumps back to the default; a venue tab
+  draws that venue's default race.
 
 No word or field of a probability, fair odds, a bet, EV, a ticket or a stake appears in board.html
 or board.js (a pure-Python scan; it runs without node).
 
 The feed fixture is built by `feed.build_board` itself from synthetic odds logs under tmp_path, so
-its shape and field names are the real ones.
+its shape and field names are the real ones; the ordering cases are a hand-built synthetic feed.
 """
 
 from __future__ import annotations
@@ -57,6 +66,18 @@ from bs4 import BeautifulSoup
 
 from horsetrack.core import paths
 from horsetrack.countries.japan import odds_log
+
+# isort: split
+from page_fakes import (
+    BROWSER_FAKES,
+    chain_of,
+    click_target,
+    combination_key,
+    favourite_order,
+    kept_in_place,
+    moved_to_race,
+    strip_links,
+)
 
 REPO = Path(__file__).resolve().parents[3]
 WEB = REPO / "src" / "horsetrack" / "countries" / "japan" / "board" / "web"
@@ -103,7 +124,8 @@ function makeEl(id) {
     querySelector(sel) { return el("q:" + sel); }, querySelectorAll() { return []; },
     appendChild(c) { this.children.push(c); return c; }, append() {}, prepend() {},
     replaceChildren() { this.innerHTML = ""; }, closest() { return null; },
-    scrollIntoView() {}, focus() {}, matches() { return false; },
+    scrollIntoView(arg) { noteIntoView(this.id, arg); }, focus() {},
+    matches() { return false; },
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
   };
   return e;
@@ -119,11 +141,12 @@ global.document = {
   removeEventListener() {}, hidden: false, visibilityState: "visible",
 };
 global.addEventListener = (t, fn) => { (docHandlers[t] = docHandlers[t] || []).push(fn); };
+global.removeEventListener = () => {};
+/*BROWSER_FAKES*/
 global.setInterval = (fn, delay) => { timers.push(Number(delay)); return timers.length; };
 global.setTimeout = (fn, delay) => { timers.push(Number(delay)); return timers.length; };
 global.clearInterval = () => {}; global.clearTimeout = () => {};
 global.requestAnimationFrame = (cb) => setImmediate(() => cb(Date.now()));
-global.scrollTo = () => {};
 let server = input.server || null;
 global.fetch = async (url, init = {}) => {
   const h = init.headers || {};
@@ -155,24 +178,39 @@ const settle = async () => { for (let i = 0; i < 5; i++) await tick(); };
   for (const step of input.steps) {
     if (step.call) {
       results.push({ result: board[step.call](...step.args) });
-    } else if (step.poll) {
-      if (step.server) server = step.server;
-      const before = requests.length;
-      await board.poll();
-      await settle();
-      results.push({ board: el("board").innerHTML, requests: requests.slice(before) });
+      continue;
     }
+    const before = requests.length;
+    resetViewport();
+    if (step.poll) {
+      if (step.server) server = step.server;
+      await board.poll();
+    } else if (step.click) {
+      clickChain(step.click, step.root || "board");
+    } else if (typeof step.hash === "string") {
+      location.hash = step.hash;
+    }
+    await settle();
+    results.push({ board: el("board").innerHTML, hash: location.hash,
+      requests: requests.slice(before), viewport: viewportState() });
   }
   fs.writeFileSync(OUT, JSON.stringify({ results, timers, requests }));
 })().catch((e) => { console.error(e && e.stack ? e.stack : String(e)); process.exit(1); });
-"""
+""".replace("/*BROWSER_FAKES*/", BROWSER_FAKES)
 
 
-def run_js(steps: list[dict], tmp_path: Path, server: dict | None = None) -> dict:
+def run_js(
+    steps: list[dict],
+    tmp_path: Path,
+    server: dict | None = None,
+    *,
+    now: datetime = NOW,
+    hash_: str = "",
+) -> dict:
     out = tmp_path / "node-out.json"
     proc = subprocess.run(
         [NODE, "-e", HARNESS, str(SCRIPT), str(out)],
-        input=json.dumps({"steps": steps, "server": server}),
+        input=json.dumps({"steps": steps, "server": server, "now": ms(now), "hash": hash_}),
         capture_output=True,
         text=True,
         timeout=60,
@@ -333,6 +371,27 @@ def _check_fixture(board: dict) -> None:
     assert any(line["odds_hi"] is not None for line in lines)
     assert any(line["status"] == "SCR" for line in lines)
     assert any(line["move_morning_pct"] is None and line["odds"] is not None for line in lines)
+    # the favourite-first order differs from the feed's own order somewhere, with a tie
+    assert any(
+        favourite_order(body["rows"]) != [r["combination"] for r in body["rows"]]
+        for *_, body in _pools(board)
+    )
+    assert any(
+        len({r["odds"] for r in body["rows"] if r["odds"] is not None})
+        < len([r for r in body["rows"] if r["odds"] is not None])
+        for *_, body in _pools(board)
+    )
+
+
+def _pools(board: dict):
+    for venue in board["venues"]:
+        for race in venue["races"]:
+            for pool, body in race["pools"].items():
+                yield venue["venue"], race, pool, body
+
+
+def races_of(board: dict, venue: str) -> list[dict]:
+    return next(v for v in board["venues"] if v["venue"] == venue)["races"]
 
 
 # ---------------------------------------------------------------- reading the rendered HTML
@@ -346,8 +405,12 @@ def text(node) -> str:
     return " ".join(node.get_text(" ").split())
 
 
+def race_blocks(page: BeautifulSoup) -> list:
+    return [e for e in page.select("[data-race]") if e.select("[data-pool]")]
+
+
 def race_block(page: BeautifulSoup, race_id: str):
-    found = [e for e in page.select(f'[data-race="{race_id}"]') if e.select("[data-pool]")]
+    found = [e for e in race_blocks(page) if e["data-race"] == race_id]
     assert len(found) == 1, f"race {race_id}: {len(found)} race blocks with pools"
     return found[0]
 
@@ -374,10 +437,16 @@ def classes(node) -> list[str]:
     return list(node.get("class") or [])
 
 
+def shown_races(page: BeautifulSoup) -> list[str]:
+    return [b["data-race"] for b in race_blocks(page)]
+
+
 def render_all(feed: dict, tmp_path: Path, now: datetime = NOW) -> dict[str, BeautifulSoup]:
-    venues = [v["venue"] for v in feed["venues"]]
-    steps = [call("renderBoard", feed, {"now": ms(now), "venue": v}) for v in venues]
-    return {v: soup(html) for v, html in zip(venues, results(steps, tmp_path), strict=True)}
+    """race_id -> the page of its venue with that race selected."""
+    keys = [(v["venue"], r["race_id"]) for v in feed["venues"] for r in v["races"]]
+    steps = [call("renderBoard", feed, {"now": ms(now), "venue": v, "race": r}) for v, r in keys]
+    shown = results(steps, tmp_path)
+    return {r: soup(html) for (_, r), html in zip(keys, shown, strict=True)}
 
 
 def move_text_ok(shown: str, pct) -> bool:
@@ -426,14 +495,19 @@ def test_renders_every_race_and_pool_of_a_feed(feed, tmp_path):
     pages = render_all(feed, tmp_path)
     venues = {v["venue"] for v in feed["venues"]}
     for venue in feed["venues"]:
-        page = pages[venue["venue"]]
-        tabs = {e["data-venue"] for e in page.select("[data-venue]")}
-        assert tabs == venues, f"venue tabs on {venue['venue']}: {tabs}"
-        assert not forbidden_in(text(page)), forbidden_in(text(page))
         for race in venue["races"]:
+            page = pages[race["race_id"]]
+            tabs = {e["data-venue"] for e in page.select("[data-venue]")}
+            assert tabs == venues, f"venue tabs on {race['race_id']}: {tabs}"
+            assert not forbidden_in(text(page)), forbidden_in(text(page))
+            # one race per page: no other race's block, pools or rows
+            assert shown_races(page) == [race["race_id"]], shown_races(page)
             block = race_block(page, race["race_id"])
             shown = {e["data-pool"] for e in block.select("[data-pool]")}
             assert shown == set(race["pools"]), f"{race['race_id']} pools {shown}"
+            assert len(page.select("[data-pool]")) == len(race["pools"])
+            n_rows = sum(len(body["rows"]) for body in race["pools"].values())
+            assert len(page.select("[data-combination]")) == n_rows, race["race_id"]
             if race["post_utc"] is not None:
                 post = instant(race["post_utc"])
                 assert post.astimezone(JST).strftime("%H:%M") in text(block), race["race_id"]
@@ -441,22 +515,236 @@ def test_renders_every_race_and_pool_of_a_feed(feed, tmp_path):
             for pool, body in race["pools"].items():
                 pool_el = pool_block(block, pool)
                 combos = [e["data-combination"] for e in pool_el.select("[data-combination]")]
-                assert combos == [line["combination"] for line in body["rows"]], pool
+                assert combos == favourite_order(body["rows"]), (race["race_id"], pool)
                 for line in body["rows"]:
                     row_el = row_of(pool_el, line["combination"])
                     assert ("scratched" in classes(row_el)) == (line["status"] == "SCR")
                     if line["odds"] is not None and line["odds_hi"] is None:
                         assert text(cell(row_el, "odds")) == f"{line['odds']:.1f}", line
-    # the other venue's races are not on this venue's board
-    for venue in feed["venues"]:
-        others = [r for v in feed["venues"] if v is not venue for r in v["races"]]
-        page = pages[venue["venue"]]
-        for race in others:
-            assert not [
-                e
-                for e in page.select(f'[data-race="{race["race_id"]}"]')
-                if e.select("[data-pool]")
-            ]
+
+
+# A hand-built feed for the ordering rule: rows in the feed's numeric order, odds not; ties across
+# '2'/'10' and '2,3'/'2,10' (numeric and text order disagree); morning odds in another order.
+def _hand(combination, odds, hi=None, *, scr=False, morning=None) -> dict:
+    return {
+        "combination": combination,
+        "odds": None if scr else odds,
+        "odds_hi": None if scr else hi,
+        "status": "SCR" if scr else "10時00分現在",
+        "morning_odds": morning,
+        "move_morning_pct": None,
+        "t20_odds": None,
+        "move_t20_pct": None,
+        "t2_odds": None,
+        "move_t20_t2_pct": None,
+    }
+
+
+ORDER_POOLS = {
+    "WIN": [
+        _hand("1", 8.5, morning=1.5),
+        _hand("2", 3.1, morning=20.0),
+        _hand("3", None, scr=True, morning=2.0),
+        _hand("4", 3.1, morning=4.0),
+        _hand("5", None, morning=3.0),  # listed, not priced
+        _hand("6", 1.9, morning=50.0),
+        _hand("10", 3.1, morning=6.0),
+        _hand("11", 45.0, morning=1.2),
+        _hand("12", None, scr=True),
+    ],
+    "PLACE": [
+        _hand("1", 1.5, 5.0),
+        _hand("2", 1.6, 1.9),
+        _hand("3", None, scr=True),
+        _hand("4", 1.1, 1.3),
+        _hand("10", 1.5, 2.0),
+        _hand("11", 1.1, 1.2),
+    ],
+    "QUINELLA": [
+        _hand("1,2", 15.0),
+        _hand("1,4", 6.2),
+        _hand("2,4", 6.2),
+        _hand("4,10", 2.5),
+    ],
+    "QUINELLA_PLACE": [
+        _hand("1,2", 9.0, 12.0),
+        _hand("1,10", None),
+        _hand("2,3", 4.4, 6.0),
+        _hand("2,4", 30.0, 41.0),
+        _hand("2,10", 4.4, 5.0),
+    ],
+}
+ORDER_WANT = {  # derived by hand from the rule
+    "WIN": ["6", "2", "4", "10", "1", "11", "3", "5", "12"],
+    "PLACE": ["4", "11", "1", "10", "2", "3"],
+    "QUINELLA": ["4,10", "1,4", "2,4", "1,2"],
+    "QUINELLA_PLACE": ["2,3", "2,10", "1,2", "2,4", "1,10"],
+}
+
+
+def order_feed() -> dict:
+    race = {
+        "race_no": 5,
+        "race_id": rid("TOK", 5),
+        "post_utc": jst(11, 0).astimezone(UTC).isoformat(),
+        "last_capture_utc": NOW.astimezone(UTC).isoformat(),
+        "pools": {p: {"investment": 1_000_000, "rows": rows} for p, rows in ORDER_POOLS.items()},
+    }
+    return {
+        "race_date": DAY.isoformat(),
+        "generated_utc": NOW.astimezone(UTC).isoformat(),
+        "venues": [{"venue": "TOK", "races": [race]}],
+    }
+
+
+@needs_node
+def test_pool_rows_run_favourite_to_longest_with_unpriced_last(tmp_path):
+    for pool, rows in ORDER_POOLS.items():
+        assert [r["combination"] for r in rows] == sorted(
+            (r["combination"] for r in rows), key=combination_key
+        ), "the hand feed keeps the feed's numeric order"
+        assert favourite_order(rows) == ORDER_WANT[pool], pool
+    feed = order_feed()
+    shown = results([call("renderBoard", feed, {"now": ms(NOW)})], tmp_path)[0]
+    block = race_block(soup(shown), rid("TOK", 5))
+    for pool, want in ORDER_WANT.items():
+        pool_el = pool_block(block, pool)
+        combos = [e["data-combination"] for e in pool_el.select("[data-combination]")]
+        assert combos == want, pool
+        rows = pool_el.select("[data-combination]")
+        assert [("scratched" in classes(r)) for r in rows] == [
+            next(x for x in ORDER_POOLS[pool] if x["combination"] == c)["status"] == "SCR"
+            for c in want
+        ], pool
+    # the page sorts; the feed it was given is untouched
+    assert feed == order_feed()
+
+
+@needs_node
+def test_one_race_per_page_the_next_to_post_by_default(feed, tmp_path):
+    kyo3, kyo10 = rid("KYO", 3), rid("KYO", 10)
+    tok1, tok2, tok11 = rid("TOK", 1), rid("TOK", 2), rid("TOK", 11)
+    # (venue, now, race option, the race drawn)
+    cases = [
+        ("TOK", jst(9, 0), None, tok1),
+        ("TOK", NOW, None, tok1),
+        ("TOK", jst(10, 5), None, tok2),  # at its post a race is off: the next one
+        ("TOK", jst(10, 6), None, tok2),
+        ("TOK", jst(10, 40), None, tok11),
+        ("TOK", jst(16, 0), None, tok11),  # every post passed: the last race
+        ("KYO", NOW, None, kyo3),
+        ("KYO", jst(10, 20), None, kyo10),  # KYO 3 is off, KYO 10 has no post: the last race
+        (None, jst(10, 20), None, kyo10),  # the first venue by default
+        ("TOK", NOW, tok11, tok11),
+        ("TOK", NOW, tok2, tok2),
+        ("TOK", jst(16, 0), tok1, tok1),
+        ("KYO", NOW, kyo10, kyo10),
+        ("TOK", NOW, kyo3, tok1),  # another venue's race: this venue's default
+        ("KYO", jst(10, 20), rid("KYO", 99), kyo10),  # no such race: the default
+    ]
+    steps = []
+    for venue, now, race, _ in cases:
+        opts = {"now": ms(now)}
+        if venue is not None:
+            opts["venue"] = venue
+        if race is not None:
+            opts["race"] = race
+        steps.append(call("renderBoard", feed, opts))
+    for (venue, now, race, want), html in zip(cases, results(steps, tmp_path), strict=True):
+        page = soup(html)
+        where = (venue, now.strftime("%H:%M"), race)
+        assert shown_races(page) == [want], (where, shown_races(page))
+        venue_races = races_of(feed, venue or feed["venues"][0]["venue"])
+        drawn = next(r for r in venue_races if r["race_id"] == want)
+        assert len(page.select("[data-pool]")) == len(drawn["pools"]), where
+        # the strip still lists every race of the venue, each with its own hash
+        links = strip_links(page, race_blocks(page))
+        assert set(links) == {r["race_no"] for r in venue_races}, (where, sorted(links))
+        assert len({a["href"] for a in links.values()}) == len(links), where
+
+
+@needs_node
+def test_the_hash_and_the_strip_pick_the_race_and_a_poll_keeps_it(feed, tmp_path):
+    kyo3, kyo10, tok1 = rid("KYO", 3), rid("KYO", 10), rid("TOK", 1)
+    first = soup(results([call("renderBoard", feed, {"now": ms(NOW)})], tmp_path)[0])
+    assert shown_races(first) == [kyo3], "KYO 3 is the next race to post at NOW"
+    links = strip_links(first, race_blocks(first))
+    assert set(links) == {3, 10}
+    to3, to10 = links[3]["href"], links[10]["href"]
+    tok_tab = first.select_one('[data-venue="TOK"]')
+    assert tok_tab is not None
+
+    newer = copy.deepcopy(feed)
+    for venue in newer["venues"]:
+        for race in venue["races"]:
+            for line in race["pools"]["WIN"]["rows"]:
+                if line["odds"] is not None:
+                    line["odds"] = round(line["odds"] + 0.3, 1)
+    a, b = {"feed": feed, "etag": '"a1"'}, {"feed": newer, "etag": '"b2"'}
+    steps = [
+        {"poll": True},  # loaded with KYO 10's hash
+        {"poll": True, "server": b},  # a new feed
+        {"click": chain_of(click_target(links[3]), "board")},  # 3R on the strip
+        {"poll": True},  # 304
+        {"click": chain_of(click_target(links[10]), "board")},  # 10R
+        {"poll": True, "server": a},
+        {"hash": to3},  # back to KYO 3's hash
+        {"poll": True},
+        {"click": chain_of(tok_tab, "board")},  # the TOK tab
+        {"poll": True},
+    ]
+    out = run_js(steps, tmp_path, server=a, hash_=to10)
+    want = [kyo10, kyo10, kyo3, kyo3, kyo10, kyo10, kyo3, kyo3, tok1, tok1]
+    got = [shown_races(soup(r["board"])) for r in out["results"]]
+    assert got == [[w] for w in want], got
+    hashes = [r["hash"] for r in out["results"]]
+    assert hashes[2] == to3 and hashes[4] == to10, hashes  # the selection is in the URL
+    # the new feed's odds are drawn for the kept race
+    kyo10_win = race_block(soup(out["results"][1]["board"]), kyo10)
+    new_rows = races_of(newer, "KYO")[1]["pools"]["WIN"]["rows"]
+    for line in new_rows:
+        if line["odds"] is not None:
+            shown = text(cell(row_of(pool_block(kyo10_win, "WIN"), line["combination"]), "odds"))
+            assert shown == f"{line['odds']:.1f}", line
+
+
+@needs_node
+def test_a_newly_selected_race_moves_the_viewport_and_a_poll_leaves_it(feed, tmp_path):
+    # The reader is page_fakes.READ_Y px down (the bottom of a race's tables) before every step.
+    # Picking another race (strip link, back) brings its race to the top of the viewport; a
+    # poll, with or without a new feed, leaves the viewport where the reader put it.
+    kyo3, kyo10, tok1 = rid("KYO", 3), rid("KYO", 10), rid("TOK", 1)
+    first = soup(results([call("renderBoard", feed, {"now": ms(NOW)})], tmp_path)[0])
+    links = strip_links(first, race_blocks(first))
+    to10 = links[10]["href"]
+    tok_tab = first.select_one('[data-venue="TOK"]')
+    newer = copy.deepcopy(feed)
+    for venue in newer["venues"]:
+        for race in venue["races"]:
+            for line in race["pools"]["WIN"]["rows"]:
+                if line["odds"] is not None:
+                    line["odds"] = round(line["odds"] + 0.2, 1)
+    a, b = {"feed": feed, "etag": '"a1"'}, {"feed": newer, "etag": '"b2"'}
+    # (step, race drawn after it, the viewport moves to the race)
+    table = [
+        ({"poll": True}, kyo10, False),  # 304
+        ({"poll": True, "server": b}, kyo10, False),  # a new feed, same race
+        ({"click": chain_of(click_target(links[3]), "board")}, kyo3, True),  # 3R on the strip
+        ({"poll": True, "server": a}, kyo3, False),
+        ({"hash": to10}, kyo10, True),  # back
+        ({"poll": True}, kyo10, False),
+        ({"click": chain_of(tok_tab, "board")}, tok1, True),  # the TOK tab
+        ({"poll": True, "server": b}, tok1, False),
+    ]
+    out = run_js([step for step, _, _ in table], tmp_path, server=a, hash_=to10)
+    got = [shown_races(soup(r["board"])) for r in out["results"]]
+    assert got == [[race] for _, race, _ in table], got
+    for i, ((step, race, moves), result) in enumerate(zip(table, out["results"], strict=True)):
+        where = (i, sorted(step)[0], race, result["viewport"])
+        if moves:
+            assert moved_to_race(result["viewport"]), ("left deep in the new race", where)
+        else:
+            assert kept_in_place(result["viewport"]), ("a poll moved the reader", where)
 
 
 @needs_node
@@ -466,9 +754,7 @@ def test_renders_without_a_venue_option_and_for_an_empty_day(feed, tmp_path):
         [call("renderBoard", feed, {"now": ms(NOW)}), call("renderBoard", empty, {"now": ms(NOW)})],
         tmp_path,
     )
-    first = feed["venues"][0]
-    for race in first["races"]:
-        race_block(soup(default), race["race_id"])
+    assert shown_races(soup(default)) == [rid("KYO", 3)]  # the first venue's next race
     assert not soup(blank).select("[data-pool]")
 
 
@@ -489,9 +775,9 @@ def test_redraws_on_a_new_feed_and_sends_the_etag(feed, tmp_path):
     )
     shown_a, again, shown_b = out["results"]
 
-    for r in first["races"]:
-        race_block(soup(shown_a["board"]), r["race_id"])
-        race_block(soup(again["board"]), r["race_id"])
+    default = first["races"][0]["race_id"]  # KYO 3, the next race to post at NOW
+    assert shown_races(soup(shown_a["board"])) == [default]
+    assert shown_races(soup(again["board"])) == [default]
     assert again["requests"] and again["requests"][-1]["if_none_match"] == '"a1"'
     page_b = soup(shown_b["board"])
     win = pool_block(race_block(page_b, race["race_id"]), "WIN")
@@ -513,9 +799,10 @@ def test_moves_show_sign_and_percent(feed, tmp_path):
         assert move_text_ok(text_, pct), f"formatMove({pct}) = {text_!r}"
 
     pages = render_all(feed, tmp_path)
-    for venue, race, pool, line in all_rows(feed):
+    for _, race, pool, line in all_rows(feed):
         row_el = row_of(
-            pool_block(race_block(pages[venue], race["race_id"]), pool), line["combination"]
+            pool_block(race_block(pages[race["race_id"]], race["race_id"]), pool),
+            line["combination"],
         )
         for col, key in (("move-morning", "move_morning_pct"), ("move-t20", "move_t20_pct")):
             pct, el = line[key], cell(row_el, col)
@@ -531,9 +818,10 @@ def test_null_moves_show_a_dash(feed, tmp_path):
     assert results([call("formatMove", None)], tmp_path) == ["-"]
     pages = render_all(feed, tmp_path)
     nulls = 0
-    for venue, race, pool, line in all_rows(feed):
+    for _, race, pool, line in all_rows(feed):
         row_el = row_of(
-            pool_block(race_block(pages[venue], race["race_id"]), pool), line["combination"]
+            pool_block(race_block(pages[race["race_id"]], race["race_id"]), pool),
+            line["combination"],
         )
         for col, key in (("move-morning", "move_morning_pct"), ("move-t20", "move_t20_pct")):
             if line[key] is None:
@@ -562,7 +850,8 @@ def test_a_capture_older_than_two_minutes_is_flagged_stale(feed, tmp_path):
         for venue in feed["venues"]:
             for race in venue["races"]:
                 age = (now - instant(race["last_capture_utc"])).total_seconds()
-                said = "stale" in text(race_block(pages[venue["venue"]], race["race_id"])).lower()
+                block = race_block(pages[race["race_id"]], race["race_id"])
+                said = "stale" in text(block).lower()
                 assert said == (age > 120), f"{race['race_id']} at age {age:.0f} s, now {now}"
 
 
@@ -570,11 +859,12 @@ def test_a_capture_older_than_two_minutes_is_flagged_stale(feed, tmp_path):
 def test_ranged_pools_show_low_and_high(feed, tmp_path):
     pages = render_all(feed, tmp_path)
     ranged = 0
-    for venue, race, pool, line in all_rows(feed):
+    for _, race, pool, line in all_rows(feed):
         if line["odds"] is None:
             continue
         row_el = row_of(
-            pool_block(race_block(pages[venue], race["race_id"]), pool), line["combination"]
+            pool_block(race_block(pages[race["race_id"]], race["race_id"]), pool),
+            line["combination"],
         )
         shown = text(cell(row_el, "odds"))
         if line["odds_hi"] is None:
