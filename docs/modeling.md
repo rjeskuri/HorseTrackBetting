@@ -39,9 +39,10 @@ flowchart LR
     PROB["Outcome half: chance of the outcome given the final price<br/>C2 to C4; v0 is the calibrated market<br/>#114 japan/models/v0/calibration.py"]
     PRICE["Price half: draws of the final pools from the board at t<br/>C1; v0 nowcast<br/>#116 japan/models/v0/nowcast.py"]
     MIX["Average of p · O_final over the draws (D1)<br/>#118 japan/models/v0/shadow_values.py"]
-    TEST{"E[p · O_final | info_t] #gt; 1 ?"}
-    YES["Worth a bet in principle: logged in shadow<br/>#119 japan/shadow/log.py;<br/>played by hand only if the option ranks<br/>at the top of the leaderboard (D19)"]
-    NO["No claimed value: not played, the avoid rung (D19);<br/>the option stays a row on the leaderboard"]
+    TEST{"Measured: E[p · O_final | info_t] #gt; 1 ?"}
+    YES["Claimed value: logged in shadow<br/>#119 japan/shadow/log.py"]
+    NO["No claimed value: recorded as measured,<br/>not a bar to play"]
+    RANK["Play is set by the leaderboard rank, not by this test:<br/>a top-ranked option is played by hand (D16, D19),<br/>a loss-avoidance option even with every return negative (D18);<br/>any other option is the avoid rung<br/>leaderboard #449 planned, diagram 5"]
     HIST --> PROB
     LOGS --> PRICE
     INFO --> PROB
@@ -52,10 +53,13 @@ flowchart LR
     MIX --> TEST
     TEST -->|"yes"| YES
     TEST -->|"no"| NO
+    YES -.-> RANK
+    NO -.-> RANK
 ```
 
-A bet pays the final odds, which nobody knows until betting closes, so a bet is worth making only
-when its chance of winning times the final price is, on average, more than the stake. The chance
+A bet pays the final odds, which nobody knows until betting closes, so a bet has positive value only
+when its chance of winning times the final price is, on average, more than the stake. That test is a
+measurement; whether an option is played is set by its rank on the leaderboard (diagram 5). The chance
 comes from models trained on years of results at the price that actually paid; the final price
 comes from a forecast, the nowcast, of how the odds will move between now and the close. For each
 simulated final price the chance is worked out again and multiplied by that price, and only then
@@ -222,8 +226,13 @@ flowchart TD
     RET["Return per ¥100 at the final dividend,<br/>takeout and breakage included,<br/>with its meeting-bootstrap CI (D7)<br/>#69 core/eval/bootstrap.py;<br/>read from every record: #450 planned"]
     SHRINK["Shrinkage of the ranking (D17):<br/>hierarchical within a study #78 core/eval/segment_roi.py,<br/>per pool across studies #449 planned"]
     LB["Leaderboard: every option, model and member a row,<br/>failed variants too, with its CI and the<br/>number of variants searched (D16)<br/>#449 core/eval/leaderboard.py planned;<br/>horsetrack japan leaderboard and<br/>docs/leaderboard/japan.md #452 planned"]
+    SEL{"Top-ranked row: is its selection<br/>read from the final price (look-ahead)?"}
+    PROXY["Look-ahead row: played only through its<br/>board-at-t proxy, labelled as such (D16, D19)<br/>labels #455 planned"]
     PLAY["Top-ranked options: shadowed, and played by hand<br/>with flat stakes, at most ¥30,000 per race day (D19)<br/>shadow log #119 japan/shadow/log.py;<br/>the day's shortlist #455 planned"]
-    BETS["Bet log, every hand-placed bet,<br/>settled against the final dividends<br/>#453 japan/bets/ planned, settlement #454 planned"]
+    BETS["Bet log, every hand-placed bet, logged and<br/>counted toward the day cap, holdout days too<br/>#453 japan/bets/ planned"]
+    DAY{"Holdout day? (D14)"}
+    SETTLE["Development day: settled against<br/>the final dividends<br/>#454 planned"]
+    DEFER["Holdout day: not settled at routine settlement;<br/>settled only at the owner's opening (D15,<br/>LockedHoldout.open), its results kept out of<br/>the development ranking (D14)<br/>#454 planned, core/eval/holdout.py"]
     HOLD["Holdout opening by the owner (D15), once per family<br/>at its power target: checks whether the ranking<br/>holds up, adopts or rejects nothing<br/>#71, #126 core/eval/holdout.py"]
     DIAG["Reported diagnostics, gating nothing:<br/>log-loss gain over the final price #69 core/eval/scoring.py,<br/>encompassing weight #87 planned,<br/>SPA and StepM #75 core/eval/snooping.py,<br/>tail-return curve #433 core/eval/tail.py"]
     PRE --> REG
@@ -233,9 +242,16 @@ flowchart TD
     RET --> SHRINK
     SHRINK -.-> LB
     DIAG -.->|"beside the row"| LB
-    LB -.-> PLAY
+    LB -.-> SEL
+    SEL -.->|"no: decision-time"| PLAY
+    SEL -.->|"yes"| PROXY
+    PROXY -.-> PLAY
     PLAY -.-> BETS
-    BETS -.->|"settled bets feed back as rows"| LB
+    BETS -.-> DAY
+    DAY -.->|"no"| SETTLE
+    DAY -.->|"yes"| DEFER
+    SETTLE -.->|"settled bets feed back as rows"| LB
+    DEFER -.->|"opened with the family's block"| HOLD
     LB -.->|"ranking checked"| HOLD
 ```
 
@@ -247,8 +263,11 @@ known and printed beside each row. Each option is fitted and scored on developme
 measured by its return per ¥100 at the dividend that actually paid, with a bootstrap interval over
 meetings. Because many options are searched, each return is shrunk toward its pool's own average
 before ranking, so a lucky small sample does not top the list (D17). The top-ranked options are
-shadowed and played by hand with small flat stakes, at most ¥30,000 per race day, and every bet is
-logged and settled against the final dividends, so real bets feed back as data (D19). A
+shadowed and played by hand with small flat stakes, at most ¥30,000 per race day; a look-ahead row,
+whose selection is read from the final price, is played only through its board-at-t proxy, labelled
+as such. Every bet is logged and counts toward the cap; a development-day bet is settled against the
+final dividends, so real bets feed back as data, while a holdout-day bet is settled only when the
+owner opens the holdout and stays out of the development ranking (D14, D15, D19). A
 loss-avoidance rule and its stated alternative are each a row, with their paired difference beside
 them (D18). The owner opens the locked holdout once per family at its power target, to check
 whether the ranking holds up, not to pass or fail anything (D15). The log-loss gain over the final

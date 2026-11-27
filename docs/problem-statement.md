@@ -569,8 +569,10 @@ What the brief fixes:
   inclusion, model adoption, staking and betting rules. They are taken through `needs-input` on the ticket or a
   pre-registered spec the owner approves.
   - Amended 2026-11-27: the decisions that stay the owner's, taken through `needs-input` and never a Ruling, are this
-    statement's decisions and their amendments, every holdout opening, staking and caps, and any publication of a
-    licensed-source figure (D21). There is no adoption to decide (D16 as amended). Claude pre-registers each study,
+    statement's decisions and their amendments, every holdout opening, staking and caps, and any D21 publication
+    question. D21 bars licensed-source figures from the public repository: no `needs-input` answer or ticket
+    approval permits one, and changing that takes an amendment of D21 itself, signed off under D21's own amendment
+    rule and logged in the change log. There is no adoption to decide (D16 as amended). Claude pre-registers each study,
     its spec frozen before any scored read, logs every variant in the registry and runs the study without waiting
     for sign-off; the study's modeling choices live in that frozen spec, never in a `Ruling:` line.
 - **Sign-off level:** this statement as a whole, plus each adoption decision.
