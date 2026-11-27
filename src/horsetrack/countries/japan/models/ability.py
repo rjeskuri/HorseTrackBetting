@@ -21,7 +21,10 @@ entity column's effects have a N(0, tau_e^2) prior, so a level seen in few races
 tau_e^2 is set on the training rows by empirical Bayes: MacKay's evidence fixed point
 tau_e^2 = |gamma_e|^2 / (n_e - tr(Sigma_e) / tau_e^2), n_e the levels seen and Sigma the Laplace
 posterior covariance, the inverse of the penalised Hessian at the MAP (floored at TAU2_FLOOR).
-The fit reads only the rows it is given: they are its training window.
+The fit reads only the rows it is given: they are its training window. Each update of the fixed
+point but the last takes one Newton step; once the residual is within EB_TOL the MAP is solved
+to STEP_TOL at the same prior variances and the residual re-checked there, so a fit stops only at
+a MAP within STEP_TOL whose prior variances meet the fixed point within EB_TOL.
 
 `predict` reads race_id, horse_id, the features and the entity columns only. se_u = sqrt(d' Sigma
 d), d the runner's design row (the standard error of u itself, not of u less its race mean); an
@@ -34,8 +37,10 @@ weight w^2 <= w. p_ability = softmax(u) within race.
 loss of AbilityModels fitted on each fold's training rows and predicting its test rows. It reads
 only the rows the folds name.
 
-Memory: flat arrays sorted by choice set (np.add.reduceat over segments) and a sparse design; the
-only dense matrices are P x P, P the features plus the entity levels.
+Memory and time: flat arrays sorted by choice set (np.add.reduceat over segments) and a sparse
+design over the input rows; the information's choice-set term is formed race by race (`_Problem`),
+and the penalised Hessian is solved and inverted by Cholesky. The only dense matrices are P x P,
+P the features plus the entity levels.
 """
 
 from __future__ import annotations
@@ -46,10 +51,13 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+import scipy.linalg
 import scipy.sparse as sp
 
 MAX_STEPS = 200
 STEP_TOL = 1e-10  # the largest Newton step on a coefficient when a fit stops
+LOOSE_TOL = 1e-6  # the same, for the MAP inside an empirical-Bayes update before the last
+INNER_STEPS = 1  # at most this many Newton steps per empirical-Bayes update before the last
 HALVINGS = 60
 EB_MAX = 100
 EB_TOL = 1e-6  # the largest change in ln tau2 the fixed point still asks for when it stops
@@ -73,6 +81,8 @@ class _Stages:
     sizes: np.ndarray
     weight: np.ndarray  # per stacked row: the stage's discount / m on a chosen row, else 0
     discount: np.ndarray  # per choice set
+    race: np.ndarray  # per choice set: its race code
+    stage: np.ndarray  # per choice set: its stage s
 
 
 def _discounts(k: int, discounts: Sequence[float] | None) -> tuple[float, ...]:
@@ -97,7 +107,7 @@ def _race_codes(race_id) -> np.ndarray:
 
 def _stages(codes: np.ndarray, pos: np.ndarray, discounts: tuple[float, ...]) -> _Stages:
     n_races = int(codes.max()) + 1 if len(codes) else 0
-    rows, sets, weight, discount = [], [], [], []
+    rows, sets, weight, discount, race, stage = [], [], [], [], [], []
     for s, w in enumerate(discounts, start=1):
         if w == 0:
             continue
@@ -108,10 +118,13 @@ def _stages(codes: np.ndarray, pos: np.ndarray, discounts: tuple[float, ...]) ->
         rows.append(keep)
         sets.append(codes[keep] + (s - 1) * n_races)
         weight.append(np.where(chosen[keep], w / m[codes[keep]], 0.0))
-        discount.append(np.full(int((m > 0).sum()), w))
+        has = np.flatnonzero(m > 0)  # the stage's races, in the order of its sets
+        discount.append(np.full(len(has), w))
+        race.append(has)
+        stage.append(np.full(len(has), s))
     if not rows or not sum(len(r) for r in rows):
         empty = np.array([], dtype=np.int64)
-        return _Stages(empty, empty, empty, np.array([]), np.array([]))
+        return _Stages(empty, empty, empty, np.array([]), np.array([]), empty, empty)
     sets = np.concatenate(sets)
     starts = np.flatnonzero(np.r_[True, sets[1:] != sets[:-1]])
     return _Stages(
@@ -120,6 +133,8 @@ def _stages(codes: np.ndarray, pos: np.ndarray, discounts: tuple[float, ...]) ->
         sizes=np.diff(np.r_[starts, len(sets)]),
         weight=np.concatenate(weight),
         discount=np.concatenate(discount),
+        race=np.concatenate(race),
+        stage=np.concatenate(stage),
     )
 
 
@@ -226,20 +241,13 @@ class AbilityModel:
         st = _stages(codes, pos, self.discounts)
         if not len(st.rows):
             raise ValueError("no race has a placed runner to fit")
-        Ds = D[st.rows]
-        agg = sp.csr_matrix(
-            (
-                np.ones(len(st.rows)),
-                (np.repeat(np.arange(len(st.starts)), st.sizes), np.arange(len(st.rows))),
-            ),
-            shape=(len(st.starts), len(st.rows)),
-        )
+        problem = _problem(D, codes, pos, st)
         f = len(self.features)
         blocks, at = [], f
         for col in self.entity_cols:
             blocks.append(np.arange(at, at + len(self._levels[col])))
             at += len(self._levels[col])
-        theta, loglik, cov, tau2 = _empirical_bayes(Ds, agg, st, blocks)
+        theta, loglik, cov, tau2 = _empirical_bayes(problem, blocks)
 
         self.coef_ = pd.Series(theta[:f], index=self.features, dtype=float)
         self.effects_ = {
@@ -287,62 +295,160 @@ class AbilityModel:
         )[OUT_COLUMNS]
 
 
-def _evaluate(theta, Ds, agg, st: _Stages):
-    """The log-likelihood, the score and the information at theta."""
-    v = Ds @ theta
+@dataclass(frozen=True)
+class _Problem:
+    """A fit's design over its input rows and the structure of its choice sets.
+
+    A race's sets are nested (stage s keeps the runners not placed before s), so set k's
+    p-weighted design row is (a_r + e_k) / Z_k: a_r sums q * d over `base`, the rows still in at
+    the race's last stage, e_k over `extra`, the rows set k holds beyond them (placed from s_k up
+    to the last stage), with q = exp(u - the largest u in base) and Z_k the sum of q over set k.
+    The information's second term, sum_k w_k m_k m_k', is then one outer product per race and
+    small ones per set, all sums of products of positive weights."""
+
+    D: sp.csr_matrix
+    st: _Stages
+    row_race: np.ndarray
+    base_rows: np.ndarray  # input rows, race by race
+    base_indptr: np.ndarray  # per race code
+    nonempty: np.ndarray  # race codes with a base row
+    extra_rows: np.ndarray  # input rows, set by set
+    extra_indptr: np.ndarray  # per choice set
+    to_race: sp.csr_matrix  # races x sets: 1 where the set is the race's
+
+
+def _problem(D: sp.csr_matrix, codes: np.ndarray, pos: np.ndarray, st: _Stages) -> _Problem:
+    n_races, n_sets = int(codes.max()) + 1, len(st.starts)
+    last = np.zeros(n_races)
+    np.maximum.at(last, st.race, st.stage)
+    row_last = last[codes]
+    base = np.flatnonzero((row_last > 0) & ~(pos < row_last))  # a missing place stays in
+    base = base[np.argsort(codes[base], kind="stable")]
+    per_race = np.bincount(codes[base], minlength=n_races)
+    lookup = np.full((int(st.stage.max()) + 1, n_races), -1)
+    lookup[st.stage, st.race] = np.arange(n_sets)
+    sets, rows = [], []
+    for s in np.unique(st.stage):
+        held = np.flatnonzero((pos >= s) & (pos < row_last))  # placed s .. the last stage - 1
+        k = lookup[s, codes[held]]
+        sets.append(k[k >= 0])
+        rows.append(held[k >= 0])
+    sets, rows = np.concatenate(sets), np.concatenate(rows)
+    order = np.lexsort((rows, sets))
+    return _Problem(
+        D=D,
+        st=st,
+        row_race=codes,
+        base_rows=base,
+        base_indptr=np.r_[0, np.cumsum(per_race)],
+        nonempty=np.flatnonzero(per_race > 0),
+        extra_rows=rows[order],
+        extra_indptr=np.r_[0, np.cumsum(np.bincount(sets, minlength=n_sets))],
+        to_race=sp.csr_matrix(
+            (np.ones(n_sets), (st.race, np.arange(n_sets))), shape=(n_races, n_sets)
+        ),
+    )
+
+
+def _scale_rows(matrix: sp.csr_matrix, by: np.ndarray) -> sp.csr_matrix:
+    out = matrix.copy()
+    out.data *= np.repeat(by, np.diff(out.indptr))
+    return out
+
+
+def _evaluate(theta, pb: _Problem):
+    """The log-likelihood, the score and the information at theta. Sums over stacked rows that
+    are linear in the design are taken on the input rows (a row's stacked weights added first);
+    the second term of the information is formed race by race (see `_Problem`)."""
+    st, D = pb.st, pb.D
+    n, n_races, n_sets = D.shape[0], pb.base_indptr.size - 1, len(st.starts)
+    v_all = D @ theta
+    v = v_all[st.rows]
     p, lse = _softmax(v, st)
     loglik = float(st.weight @ v - st.discount @ lse)
     dp = np.repeat(st.discount, st.sizes) * p
-    score = Ds.T @ (st.weight - dp)
-    first = (Ds.T @ Ds.multiply(dp[:, None])).toarray()
-    mean = agg @ Ds.multiply(p[:, None])  # each choice set's p-weighted design row
-    second = (mean.T @ mean.multiply(st.discount[:, None])).toarray()
+    score = D.T @ np.bincount(st.rows, weights=st.weight - dp, minlength=n)
+    first = (D.T @ _scale_rows(D, np.bincount(st.rows, weights=dp, minlength=n))).toarray()
+
+    top = np.zeros(n_races)
+    top[pb.nonempty] = np.maximum.reduceat(v_all[pb.base_rows], pb.base_indptr[pb.nonempty])
+    with np.errstate(over="ignore"):  # rows of races without a set are never read
+        q = np.exp(v_all - top[pb.row_race])
+    z = np.add.reduceat(q[st.rows], st.starts)
+    coef = st.discount / (z * z)
+    a = sp.csr_matrix((q[pb.base_rows], pb.base_rows, pb.base_indptr), shape=(n_races, n)) @ D
+    e = sp.csr_matrix((q[pb.extra_rows], pb.extra_rows, pb.extra_indptr), shape=(n_sets, n)) @ D
+    e_coef = _scale_rows(e, coef)
+    cross = (a.T @ (pb.to_race @ e_coef)).toarray()
+    second = (a.T @ _scale_rows(a, pb.to_race @ coef)).toarray() + cross + cross.T
+    second += (e.T @ e_coef).toarray()
     return loglik, np.asarray(score).ravel(), first - second
 
 
-def _newton(theta, Ds, agg, st, precision):
+def _solve(matrix: np.ndarray, rhs: np.ndarray) -> np.ndarray:
+    """matrix^-1 rhs for the penalised Hessian (symmetric positive definite when identified):
+    Cholesky, else LU; singular raises ValueError."""
+    try:
+        factor = scipy.linalg.cho_factor(matrix, check_finite=False)
+        return scipy.linalg.cho_solve(factor, rhs, check_finite=False)
+    except np.linalg.LinAlgError:
+        pass
+    try:
+        return np.linalg.solve(matrix, rhs)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError("the design is not identified: singular information") from exc
+
+
+def _newton(theta, pb: _Problem, precision, *, tol=STEP_TOL, at=None, steps=None):
+    """Newton's method from theta until a step's largest entry is below tol, or after `steps`
+    steps when given (no error then). `at` is `_evaluate` at theta when already known (it does
+    not depend on the precision). Returns (theta, loglik, info, the evaluation at theta)."""
+
     def objective(c: np.ndarray, loglik: float) -> float:
         return -loglik + 0.5 * float(precision @ (c * c))
 
-    loglik, score, info = _evaluate(theta, Ds, agg, st)
-    for _ in range(MAX_STEPS):
-        try:
-            step = np.linalg.solve(info + np.diag(precision), score - precision * theta)
-        except np.linalg.LinAlgError as exc:
-            raise ValueError("the design is not identified: singular information") from exc
+    loglik, score, info = _evaluate(theta, pb) if at is None else at
+    for _ in range(MAX_STEPS if steps is None else steps):
+        step = _solve(info + np.diag(precision), score - precision * theta)
         current = objective(theta, loglik)
         for _ in range(HALVINGS):
             trial = theta + step
-            trial_eval = _evaluate(trial, Ds, agg, st)
-            if objective(trial, trial_eval[0]) <= current or np.abs(step).max() < STEP_TOL:
+            trial_eval = _evaluate(trial, pb)
+            if objective(trial, trial_eval[0]) <= current or np.abs(step).max() < tol:
                 break
             step = step / 2.0
         theta = trial
         loglik, score, info = trial_eval
-        if np.abs(step).max() < STEP_TOL:
+        if np.abs(step).max() < tol:
             break
     else:
-        raise RuntimeError(f"the ability fit did not converge in {MAX_STEPS} Newton steps")
+        if steps is None:
+            raise RuntimeError(f"the ability fit did not converge in {MAX_STEPS} Newton steps")
     if not np.all(np.isfinite(theta)):
         raise RuntimeError("the ability fit stopped at non-finite coefficients")
-    return theta, loglik, info
+    return theta, loglik, info, (loglik, score, info)
 
 
-def _empirical_bayes(Ds, agg, st: _Stages, blocks: list[np.ndarray]):
+def _empirical_bayes(pb: _Problem, blocks: list[np.ndarray]):
     """The MAP at the prior variances that solve MacKay's fixed point, one per entity block:
     (theta, loglik, Sigma, tau2). The fixed point runs on z = ln tau2 with a per-block secant
     step on the residual ln(update) - z (the plain update when the secant has no valid slope), so
     it converges where the plain update crawls (a variance the data barely support); a block
-    whose update goes below TAU2_FLOOR stays at the floor, and a step is capped at EB_JUMP."""
-    theta = np.zeros(Ds.shape[1])
+    whose update goes below TAU2_FLOOR stays at the floor, and a step is capped at EB_JUMP.
+    Until the residual is within EB_TOL each update follows INNER_STEPS Newton steps; that MAP
+    is then solved to STEP_TOL at the same z and the residual re-checked there, so the returned
+    fit is a STEP_TOL MAP whose z meets the fixed point within EB_TOL."""
+    size = pb.D.shape[1]
+    theta = np.zeros(size)
     z = np.full(len(blocks), math.log(TAU2_START))
     floor = math.log(TAU2_FLOOR)
-    last = None
+    last, at, tight = None, None, not len(blocks)
     for _ in range(EB_MAX):
-        precision = np.zeros(Ds.shape[1])
+        precision = np.zeros(size)
         for cols, zz in zip(blocks, z, strict=True):
             precision[cols] = math.exp(-zz)
-        theta, loglik, info = _newton(theta, Ds, agg, st, precision)
+        tol, steps = (STEP_TOL, None) if tight else (LOOSE_TOL, INNER_STEPS)
+        theta, loglik, info, at = _newton(theta, pb, precision, tol=tol, at=at, steps=steps)
         cov = _inverse(info + np.diag(precision))
         update = np.empty(len(blocks))
         for b, cols in enumerate(blocks):
@@ -352,7 +458,10 @@ def _empirical_bayes(Ds, agg, st: _Stages, blocks: list[np.ndarray]):
             update[b] = max(math.log(ratio), floor) if ratio > 0 else floor
         r = update - z
         if not len(blocks) or np.abs(r).max() < EB_TOL:
-            return theta, loglik, cov, [math.exp(zz) for zz in z]
+            if tight:
+                return theta, loglik, cov, [math.exp(zz) for zz in z]
+            tight = True  # solve this MAP to STEP_TOL at the same z, then re-check
+            continue
         step = r.copy()
         if last is not None:
             dz, dr = z - last[0], r - last[1]
@@ -366,6 +475,12 @@ def _empirical_bayes(Ds, agg, st: _Stages, blocks: list[np.ndarray]):
 
 
 def _inverse(matrix: np.ndarray) -> np.ndarray:
+    """The inverse of the penalised Hessian: Cholesky (LAPACK potrf, potri), else LU."""
+    upper, info = scipy.linalg.lapack.dpotrf(matrix, lower=False, clean=False)
+    if info == 0:
+        inv, info = scipy.linalg.lapack.dpotri(upper, lower=False)
+        if info == 0:
+            return np.triu(inv) + np.triu(inv, 1).T
     try:
         return np.linalg.inv(matrix)
     except np.linalg.LinAlgError as exc:
