@@ -1,0 +1,118 @@
+# Pool depth and stake capacity from the final votes: N3 (ticket #432)
+
+Status: **FROZEN on 2026-11-27**, before any run. Family id: **`japan-pool-depth-v1`**, spec
+sha256 **`1545d788a9ac6997365900f48e1abc48177a24b9451d985f4d8b754b1857f34c`**. The spec is
+committed at `src/horsetrack/countries/japan/config/pool_depth.yaml`; `horsetrack japan
+pool-depth freeze` froze it, as loaded, with `Registry.freeze_family` in
+`$HORSETRACK_DATA_DIR/registry/japan.jsonl` (append-only: a freeze cannot be undone). Under the
+owner's reframe on #432 (2026-11-27), Claude pre-registers the spec and freezes it before the run,
+with no owner sign-off. `horsetrack japan pool-depth run` and `research.pool_depth.run_depth`,
+`run_coplacer` and `run_exacta_impact` refuse a spec that is not the one frozen for the family
+(`NotPreRegistered`); any change after the freeze is a new family, frozen again before it runs.
+
+## Question
+
+How much money sits on a combination, by pool x class group x odds band, and what stake can we
+put on it before our own money eats half of a 5, 10 or 20% edge? In particular: is betting big
+possible in maiden and newcomer pools? Per leaderboard option's pool x class x odds band, the
+capacity stake stands beside the flat stake (staking is flat, capped at 30,000 yen per race day,
+owner 2026-11-27). Nothing here tests whether an edge exists: the capacity is a property of the
+pool, given an edge. It also measures #350's question (the own impact of 100 yen on one exacta
+combination, by pool size) on history, and gives #349's pool totals (final and two minutes before
+the post).
+
+## Data and days
+
+- The jravan store under `processed_dir("jravan")`: `pool_votes` (each combination's final votes
+  and each pool's `__pool__` total and refunds), `final_odds` (the final price, for the odds band),
+  `races` (`race_class` for the class group, `status`), `dividends` (the paying Place and Wide
+  combinations, co-placer variant only) and the time-series day files
+  `odds_timeseries/<YYYY-MM-DD>.parquet` (the totals at t).
+- Race days from 2014-06-07 (D10: no price row before it) to the last race day in the store.
+  Development days only: every scan applies `core.eval.holdout.file_development_filter`, a
+  time-series day file of a holdout day is skipped by its name before it is opened, and
+  `LockedHoldout` is never opened.
+- Races whose `status` is `abandoned` give no row: every ticket on them is refunded.
+- Memory: the tables are streamed a batch at a time, a year at a time, with only the columns
+  needed.
+
+## Definitions
+
+- **W**, the money on a combination: its final votes x 100 (yen). A combination counts when the
+  final board prices it (non-null `odds`) and it has a votes row.
+- **V**, the pool: the `__pool__` row's (votes - refund_votes) x 100, the money that pays. The
+  store's `__pool__` votes include refunded votes and JRA pays (sales - refunds) x the payout rate.
+  The run reports, privately, how the gross and net totals compare with `final_odds` investment.
+- **Class group**: `research/pool_scan.CLASS_GROUPS` of `race_class` (newcomer, maiden,
+  conditions, open, graded).
+- **Odds band**: `pool_scan.odds_band` of the final odds on the pool's edges (the spec's
+  `odds_bands`); Place and Wide band on the low end of the final range.
+- **Capacity stake** (single-winner pools: WIN, QUINELLA, FORECAST, TRIO): the continuous stake s
+  (no breakage, no floor) that solves (1 + e)(V + s)W / (V(W + s)) = 1 + e(1 - share_lost):
+  s = (e - k)VW / ((1 + k)V - (1 + e)W), k = e(1 - share_lost). The ticket's form
+  kVW / ((1 + k)V - (1 + e)W) is the same solution at share_lost 1/2 only, the value frozen here
+  (`share_lost: 0.5`). Where the denominator is not positive the stake never eats that share of
+  the edge, and the capacity is unbounded (`inf`).
+- **Pool totals at t** (WIN, PLACE, QUINELLA, the pools of the 0B41/0B42 time series): the
+  investment of the latest time-series `__pool__` capture with minutes_to_post >= 2.0; the final
+  total beside it is the gross `__pool__` votes x 100, like the time series' investment.
+
+## Cells and what is reported
+
+- Edges e: 0.05, 0.10 and 0.20. Share lost: one half.
+- Quantiles: 0.10, 0.25, 0.50, 0.75 and 0.90 (numpy's linear interpolation; an unbounded
+  capacity sorts last).
+- Cell set 1, pool x class group x odds band (WIN, PLACE, QUINELLA, QUINELLA_PLACE, FORECAST,
+  TRIO): per cell, its combinations and races, the quantiles of W, of V (each race once) and of the
+  capacity at each edge, and the share of its combinations whose capacity reaches each flat stake
+  of 1,000, 10,000 and 30,000 yen. Newcomer and maiden rows are in every pool.
+- Cell set 2, pool x pool-size tertile x odds band: the tertiles of V per pool over the run's
+  races (low, mid, high).
+- Pool totals at t per pool x class group: the races, those with a total at t, and the quantiles
+  of the final total, the total at t and their ratio.
+
+## Place and Wide: two registered variants
+
+Place and Wide pay by the stake-back-share rule with co-placers, so the single-winner identity
+does not hold for them.
+
+1. **`depth-only`** (in the `depth` run): W and V quantiles, no capacity.
+2. **`co-placer`** (its own run): for each paying combination of each race, given the realised
+   co-placers (the race's paid Place or Wide combinations in `dividends`), JRA's rule pays per yen
+   d = 1 + (rV - sum W) / (P W_i), the sum over the P paying combinations and r the pool's base
+   payout rate (`config/jra.yaml`). Our stake s on combination i adds s to V, to W_i and to the
+   sum; the capacity solves (1 + e) d(s) / d(0) = 1 + k, which with c = (1 + k) / (1 + e) and
+   A = rV - sum W is s = (1 - c)(A + P W_i) / ((c d(0) - 1) P + 1 - r); at P = 1 it is the
+   single-winner identity. A combination with A <= 0 (the rule pays no more than the stake back)
+   has no capacity and is counted. The rule is checked against the paid dividends (broken to 10
+   yen, at least 110); the run is recorded **failed** when it reproduces fewer than 95% of them
+   (`min_rule_match: 0.95`). The private report also gives how often the rule of
+   `core.pricing.stake_back_share_dividend`, r(1 + (V - sum W) / (P W_i)), reproduces them. Boosted
+   takeout days are not adjusted.
+
+## #350's measure: the 100-yen exacta own impact
+
+For each priced FORECAST combination, |own_impact| of 100 yen (`research/exacta_impact.own_impact`,
+takeout 0.25, its odds (1 - t)V / W so that it sees the combination's final money W), grouped by V
+in `exacta_impact.POOL_BIN_EDGES`: per bin, the races, combinations, median, maximum and the
+quantiles above. It replaces #283's measure from the logged odds, which had no logged exacta day.
+
+## Records and reports
+
+- Three registry runs per invocation, each one RunRecord in the family (hypothesis `P432`, ticket
+  432, sources `('jravan',)`, fold scheme `development-days`), failures included: `depth`,
+  `co-placer` and `exacta-own-impact`. The same run again (same store, same commit) adds nothing.
+  Metrics: per cell the median capacity at e = 0.10 (Place and Wide in `depth`: the median W);
+  the co-placer run adds the two rules' match shares; the exacta run, per bin, the median absolute
+  impact with the maximum as its upper value.
+- Private reports through `core.eval.reports.write_report` under `$HORSETRACK_DATA_DIR/reports/`:
+  `pool-depth-japan-<hash12>.md`, `pool-depth-coplacer-japan-<hash12>.md` and
+  `exacta-impact-history-japan-<hash12>.md`.
+- Public: `docs/experiments/pool-depth-japan.md` (`render_public_report`), holding the identity and
+  worked arithmetic on invented numbers; every figure from the store is withheld (D21). The
+  committed registry summary is regenerated by `write_summary`.
+
+## Not in the cells
+
+TIERCE (too many combinations for exact quantiles in memory on this machine; a streaming exact
+quantile is a follow-up) and BRACKET_QUINELLA (needs the horse-to-bracket map).
