@@ -4,6 +4,10 @@ Status: **FROZEN** on 2026-11-28 at commit `66574dd`, before any scored read (it
 until then). Spec sha256 `8b2239a4f6cc5ed0d1a36a7abd08f344d6e7dbc264f359bd9ca0ef46a7dee32a`.
 First run: 2026-11-28 at the same commit; results in
 [docs/experiments/shadow-calibration-japan.md](../experiments/shadow-calibration-japan.md).
+Second run, the run of record: 2026-11-28 at `75e2a3d`, the same frozen spec, after review fixes
+to the outputs only (a settlement file with one line per shadow record beside the report, a
+growth row per study day, cluster counts as metrics, strict JSON); its figures equal the first
+run's.
 
 Family: `japan-shadow-calibration-v1`. The spec is
 `horsetrack.countries.japan.studies.shadow_run.build_spec()`, plain JSON;
