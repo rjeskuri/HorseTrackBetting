@@ -85,6 +85,23 @@ Review round 2 on PR #461:
   result, are a ValueError whatever a and b (how to blend them is #459's registered variant), as
   is a code that is not one of the pools above.
 
+Fable pricing review on #99 (owner, 2026-11-27); its blend contract supersedes "scale-invariant in
+both inputs" above:
+- `winning_combinations`: with fewer finishers than places paid, PLACE pays every finisher and
+  QUINELLA_PLACE every pair of finishers (none with one finisher); the other pools are unchanged
+  (TRIO and TIERCE need three finishers, QUINELLA and FORECAST two, WIN one). A non-null position
+  under 1 or not a whole number (0, -1, 1.5, inf) is a ValueError in every pool; None and NaN are a
+  runner that did not finish, and a whole float (2.0, from a column with NaN) is a position.
+- `statute_shares` and `dividend_share` refuse a dividend under 100 yen (the 70-yen special payout
+  when no ticket won is not a share of winning money); 100, the stake back, is still a share.
+- `dividend_shares` gives NaN to every row of a race-pool with a dividend under 100 and computes the
+  rest of the frame as it would without that race-pool; `dividend_floor_bound` still flags it.
+- `pool_blend`: null q_pool rows (a scratched runner's refunded combinations) are dropped before
+  both key checks, so a null on a combination of p_model is a missing pool price ("no pool price")
+  and a priced combination outside p_model is still a ValueError. p_model must sum to 1 within
+  1e-6, a ValueError naming #459 otherwise, whatever `pool`, a and b; only q_pool is
+  scale-invariant. With a=1, b=0 the blend is p_model.
+
 Expected values are derived independently: closed-form Harville, the stage weights written out
 here, JRA's published payout rates with the boost calendar's rules, a quadrature value of Henery's
 model, and hand-listed JRA dead-heat payouts. All data is synthetic and every RNG is seeded.
@@ -931,7 +948,8 @@ def _blend_inputs() -> tuple[pd.Series, pd.Series]:
     for combination, value in harville_closed_form(P5).items():
         c = key(*sorted(horses(combination)))
         trio[c] = trio.get(c, 0.0) + value
-    p_model = pd.Series(trio, dtype=float) * 2.5  # any positive scale
+    # p_model sums to 1, the blend's contract (Fable pricing review); only q_pool is scale-free.
+    p_model = pd.Series(trio, dtype=float)
     weights = np.linspace(1.0, 3.0, len(p_model)) ** 2
     q_pool = pd.Series(weights / weights.sum(), index=p_model.index[::-1], dtype=float)
     return p_model, q_pool
@@ -970,7 +988,10 @@ def _model_missing_a_runner(pool: str) -> tuple[pd.Series, pd.Series]:
     ordering = exotic().Ordering("harville")
     q_pool = pd.Series(ordering.joint_probs(P7, pool), dtype=float)
     p_model = ordering.joint_probs(P6_FAV4, pool, horses=MODEL_MISSING_4, field_at_sale=len(P7))
-    return pd.Series(p_model, dtype=float), q_pool
+    p_model = pd.Series(p_model, dtype=float)
+    # Scaled to sum to 1 (Place and Wide sum to the places paid), the blend's contract (Fable
+    # pricing review), so only the keys decide these cases.
+    return p_model / p_model.sum(), q_pool
 
 
 def _stray_board_label() -> tuple[pd.Series, pd.Series]:
@@ -1048,11 +1069,11 @@ def test_pool_blend_refuses_a_pool_that_pays_several_combinations(case):
     for a, b in BLEND_GRID:
         with pytest.raises(ValueError):
             exotic().pool_blend(p_model, q_pool, a=a, b=b, pool=pool)
-    # Without a pool, or with pool=None, the call is today's.
-    omitted = exotic().pool_blend(p_model, q_pool, a=0.5, b=0.5)
-    explicit = exotic().pool_blend(p_model, q_pool, a=0.5, b=0.5, pool=None)
-    assert list(explicit.index) == list(p_model.index)
-    np.testing.assert_allclose(explicit.to_numpy(dtype=float), omitted.to_numpy(dtype=float))
+    # Without a pool, or with pool=None, it is refused too: p_model sums to the places paid, not 1
+    # (Fable pricing review: the blend takes a p_model that sums to 1; Wide and Place are #459's).
+    for kwargs in ({}, {"pool": None}):
+        with pytest.raises(ValueError, match="#459"):
+            exotic().pool_blend(p_model, q_pool, a=0.5, b=0.5, **kwargs)
 
 
 # Not jra.yaml pool codes: its labels, a lower-case code, an empty string, a made-up code.
@@ -1481,3 +1502,331 @@ def test_dividend_floor_bound_needs_the_dividends_columns(column):
     frame = floor_frame()[DIVIDEND_COLUMNS].drop(columns=[column])
     with pytest.raises(ValueError):
         exotic().dividend_floor_bound(frame)
+
+
+# ---------------------------------------------------------------------------------------------
+# Fable pricing review (owner, 2026-11-27): B1-B4 and the blend's two contract holes
+# ---------------------------------------------------------------------------------------------
+
+
+def _did_not_finish(numbers, placed: dict[int, float], dnf=None) -> dict[int, float | None]:
+    """Every runner of `numbers`: those in `placed` at their positions, the others `dnf` (did not
+    finish)."""
+    return {h: placed.get(h, dnf) for h in numbers}
+
+
+NO_PAY = {TRIO: [], TRIFECTA: []}
+# B1. (finish, field at sale or None, the winners per pool): fewer finishers than places paid.
+# Place pays every finisher and Wide every pair of finishers (none with one finisher); the other
+# pools pay what they pay with enough finishers, or nothing. Hand-listed.
+FEW_FINISHERS = {
+    "five_run_two_finish": (
+        {1: 1, 2: 2, 3: None, 4: None, 5: None},
+        None,
+        {
+            WIN: ["1"],
+            PLACE: ["1", "2"],
+            QUINELLA: ["1,2"],
+            WIDE: ["1,2"],
+            EXACTA: ["1,2"],
+            **NO_PAY,
+        },
+    ),
+    "eight_run_two_finish": (
+        _did_not_finish(range(1, 9), {3: 1, 7: 2}),
+        None,
+        {
+            WIN: ["3"],
+            PLACE: ["3", "7"],
+            QUINELLA: ["3,7"],
+            WIDE: ["3,7"],
+            EXACTA: ["3,7"],
+            **NO_PAY,
+        },
+    ),
+    # Positions as floats with NaN, as a pandas column holds them; two-digit numbers sort by value.
+    "twelve_run_two_finish_floats": (
+        _did_not_finish(range(1, 13), {11: 1.0, 2: 2.0}, dnf=math.nan),
+        None,
+        {
+            WIN: ["11"],
+            PLACE: ["11", "2"],
+            QUINELLA: ["2,11"],
+            WIDE: ["2,11"],
+            EXACTA: ["11,2"],
+            **NO_PAY,
+        },
+    ),
+    "eight_run_one_finishes": (
+        _did_not_finish(range(1, 9), {5: 1}),
+        None,
+        {WIN: ["5"], PLACE: ["5"], QUINELLA: [], WIDE: [], EXACTA: [], **NO_PAY},
+    ),
+    # Six runners: Place pays two, and one finished.
+    "six_run_one_finishes": (
+        _did_not_finish(range(1, 7), {4: np.int64(1)}, dnf=math.nan),
+        None,
+        {WIN: ["4"], PLACE: ["4"], QUINELLA: [], WIDE: [], EXACTA: [], **NO_PAY},
+    ),
+    "eight_run_dead_heat_for_first_two_finish": (
+        _did_not_finish(range(1, 9), {2: 1, 6: 1}),
+        None,
+        {
+            WIN: ["2", "6"],
+            PLACE: ["2", "6"],
+            QUINELLA: ["2,6"],
+            WIDE: ["2,6"],
+            EXACTA: ["2,6", "6,2"],
+            **NO_PAY,
+        },
+    ),
+    # Horse 6 scratched after sales opened with eight: Place pays three places, two finished.
+    "late_scratch_two_finish": (
+        _did_not_finish((1, 2, 3, 4, 5, 7, 8), {8: 1, 1: 2}),
+        8,
+        {
+            WIN: ["8"],
+            PLACE: ["8", "1"],
+            QUINELLA: ["1,8"],
+            WIDE: ["1,8"],
+            EXACTA: ["8,1"],
+            **NO_PAY,
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(FEW_FINISHERS))
+def test_place_and_wide_pay_the_finishers_when_too_few_finish(case):
+    """B1: Place and Wide pay the combinations among the finishers; Trio and Trifecta with two
+    finishers, Wide, Quinella and Exacta with one, pay nothing."""
+    finish, at_sale, expected = FEW_FINISHERS[case]
+    assert set(expected) == set(ALL_POOLS)  # the case's premise: every pool is listed
+    for pool, winners in expected.items():
+        got = exotic().winning_combinations(finish, pool, field_at_sale=at_sale)
+        assert len(got) == len(set(got)), (pool, got)
+        assert sorted(got) == sorted(winners), pool
+
+
+# B2. Positions that are not a finish: under 1, or not a whole number, wherever they fall (in the
+# places paid or behind them). Five or more runners, so every pool is sold.
+BAD_POSITIONS = {
+    "zero": {1: 0, 2: 1, 3: 2, 4: 3, 5: 4},
+    "zero_as_numpy": {1: 1, 2: 2, 3: 3, 4: 4, 5: np.int64(0)},
+    "negative": {1: 1, 2: 2, 3: 3, 4: -1, 5: 5},
+    "negative_float": {1: 1, 2: 2, 3: 3, 4: 4, 5: -2.0, 6: 6},
+    "half_in_the_places": {1: 1, 2: 1.5, 3: 3, 4: 4, 5: 5},
+    "half_behind_the_places": {**_field({1: 1, 2: 2, 3: 3}, 9), 10: 8.5},
+    "infinite": {1: 1, 2: 2, 3: 3, 4: 4, 5: math.inf},
+}
+
+
+@pytest.mark.parametrize("case", list(BAD_POSITIONS))
+def test_winning_combinations_refuse_a_position_that_is_not_a_finish(case):
+    finish = BAD_POSITIONS[case]
+    for pool in ALL_POOLS:
+        with pytest.raises(ValueError):
+            exotic().winning_combinations(finish, pool)
+
+
+# B4. (dividends, payout rate): a dividend under 100 yen that the inversion takes today, since
+# (D + 5) / (100 R) > 1 on each: it is not a share of winning money (the 70-yen special payout
+# when no ticket won).
+SUB_100_DIVIDENDS = [
+    ([70], 0.725),
+    ([80], 0.725),
+    ([90], 0.80),
+    ([95], 0.85),
+    ([99], 0.75),
+    ([99.5], 0.80),
+    ([np.float64(85)], 0.775),
+    ([1270, 90], 0.75),
+    ([4580, 1270, 80], 0.725),
+    ([150, 99, 320], 0.775),
+]
+
+
+@pytest.mark.parametrize(
+    ("dividends", "rate"), SUB_100_DIVIDENDS, ids=lambda v: repr(v).replace(" ", "")
+)
+def test_statute_shares_refuse_a_dividend_under_100(dividends, rate):
+    with pytest.raises(ValueError):
+        exotic().statute_shares(dividends, rate)
+    if len(dividends) == 1:  # `dividend_share` is the P = 1 case and agrees
+        with pytest.raises(ValueError):
+            exotic().dividend_share(dividends[0], rate)
+    # 100 yen, the stake back, is still a share: the same race-pool with each dividend under 100
+    # raised to 100. The statute paid on the shares returned gives those dividends back.
+    at_100 = [max(float(d), 100.0) for d in dividends]
+    got = exotic().statute_shares(at_100, rate)
+    assert got.shape == (len(at_100),)
+    pool_total = 100_000_000
+    rebuilt = statute_dividends(
+        {str(i): x * pool_total for i, x in enumerate(got)}, pool_total, rate
+    )
+    np.testing.assert_allclose([rebuilt[str(i)] for i in range(len(got))], at_100, rtol=1e-10)
+    if len(at_100) == 1:
+        assert got[0] == pytest.approx(rate * 100 / 105, rel=1e-12)
+        assert exotic().dividend_share(100, rate) == pytest.approx(rate * 100 / 105, rel=1e-12)
+
+
+# B3. (race_id, pool, [(combination, dividend)]): race-pools with a dividend under 100. The 70-yen
+# special payout when no ticket won, one row, in a 75% pool (refused for the whole frame today)
+# and a 72.5% one (0.967 today); and a Wide race-pool with one pair at 70.
+SUB_100_GROUPS = [
+    ("jra:2026-09-21:NAK:6", EXACTA, [("5,2", 70)]),
+    ("jra:2025-10-19:TOK:12", TRIFECTA, [("8,3,1", 70)]),
+    ("jra:2026-10-11:TOK:5", WIDE, [("2,5", 70), ("2,9", 150), ("5,9", 320)]),
+]
+
+
+def test_dividend_shares_give_nan_to_a_race_pool_paying_under_100():
+    rows = []  # the dividends columns and the expected share (NaN for a race-pool under 100)
+    for race_id, pool, rate, label, money, total in DEAD_HEAT_GROUPS:
+        dividends = statute_dividends(money, total, rate)
+        rows += [(race_id, pool, c, dividends[c], label, w / total) for c, w in money.items()]
+    for race_id, pool, rate, label, c, dividend in SINGLE_WINNER_GROUPS:
+        rows.append((race_id, pool, c, dividend, label, rate * 100 / (dividend + 5)))
+    for race_id, pool, paid in SUB_100_GROUPS:
+        rows += [(race_id, pool, c, d, None, math.nan) for c, d in paid]
+    frame = pd.DataFrame(rows, columns=[*DIVIDEND_COLUMNS, "expected"])
+    frame.index = pd.Index([f"row{n:02d}" for n in range(len(frame))])
+    frame = frame.iloc[np.random.default_rng(70).permutation(len(frame))]
+    under = frame["expected"].isna()
+    assert under.sum() == sum(len(g[2]) for g in SUB_100_GROUPS)  # the fixture's own check
+
+    shares = exotic().dividend_shares(frame[DIVIDEND_COLUMNS])
+    assert isinstance(shares, pd.Series)
+    assert list(shares.index) == list(frame.index)
+    assert shares[under].isna().all(), shares[under]
+    # Every other race-pool is computed, at its own rate, recovering the money on it ...
+    np.testing.assert_allclose(
+        shares[~under].to_numpy(dtype=float), frame.loc[~under, "expected"], rtol=1e-10
+    )
+    # ... exactly as in a frame without the race-pools under 100.
+    alone = exotic().dividend_shares(frame.loc[~under, DIVIDEND_COLUMNS])
+    np.testing.assert_allclose(
+        shares[~under].to_numpy(dtype=float), alone.to_numpy(dtype=float), rtol=1e-14
+    )
+
+    # The floor flag still marks them: their lowest dividend is under the 110-yen minimum.
+    pools = config.load_source("japan", "jra").pools
+    assert {pools[p].min_dividend for p in frame["pool"]} == {110}
+    lowest = frame.groupby(["race_id", "pool"])["dividend"].transform("min")
+    flags = exotic().dividend_floor_bound(frame[DIVIDEND_COLUMNS])
+    assert list(flags.index) == list(frame.index)
+    assert flags.tolist() == (lowest <= 110).tolist()
+    assert flags[under].all()
+
+
+def _board_with_a_scratch(pool: str, null=math.nan) -> tuple[pd.Series, pd.Series, list[str]]:
+    """A 7-runner model (P7, horses 1-7) against BOARD_P8's 8-runner board after horse 8 was
+    scratched: every combination with horse 8 is a refund slot with a null price, and the other
+    prices are the 8-runner board's own, so the live ones do not sum to 1. The board is listed in
+    reverse, so it is aligned by label."""
+    ordering = exotic().Ordering("harville")
+    p_model = pd.Series(ordering.joint_probs(P7, pool), dtype=float)
+    board = pd.Series(ordering.joint_probs(BOARD_P8, pool), dtype=float)
+    refunded = [c for c in board.index if 8 in horses(c)]
+    if null is None:
+        board = board.astype(object)
+    board.loc[refunded] = null
+    return p_model, board.iloc[::-1], refunded
+
+
+@pytest.mark.parametrize("null", [math.nan, None], ids=["nan", "none"])
+@pytest.mark.parametrize("pool", SINGLE_WINNER_POOLS)
+def test_pool_blend_drops_a_scratched_runners_refund_slots(pool, null):
+    p_model, q_pool, refunded = _board_with_a_scratch(pool, null)
+    live = q_pool.drop(refunded).astype(float)
+    # The case's premise: the refund slots are the only extra labels, and the live prices are not
+    # scaled to 1.
+    assert len(refunded) and set(live.index) == set(p_model.index)
+    assert live.sum() < 0.99
+    p, q = p_model.to_numpy(), live.reindex(p_model.index).to_numpy()
+    for a, b in BLEND_GRID:
+        u = a * np.log(p) + b * np.log(q)
+        expected = np.exp(u - u.max()) / np.exp(u - u.max()).sum()
+        for kwargs in ({}, {"pool": pool}):
+            got = exotic().pool_blend(p_model, q_pool, a=a, b=b, **kwargs)
+            assert list(got.index) == list(p_model.index)
+            np.testing.assert_allclose(got.to_numpy(dtype=float), expected, rtol=1e-10, atol=1e-15)
+
+
+@pytest.mark.parametrize("pool", SINGLE_WINNER_POOLS)
+def test_pool_blend_still_needs_a_price_on_every_live_combination(pool):
+    p_model, q_pool, refunded = _board_with_a_scratch(pool)
+    # A null on a combination the model prices is a missing pool price, with or without the
+    # scratch's refund slots on the board.
+    for board in (q_pool, q_pool.drop(refunded)):
+        for live in (p_model.index[0], p_model.index[-1]):
+            holed = board.copy()
+            holed.loc[live] = math.nan
+            for a, b in BLEND_WEIGHTS:
+                with pytest.raises(ValueError, match="no pool price"):
+                    exotic().pool_blend(p_model, holed, a=a, b=b)
+    # A priced combination with the scratched runner is still one the model lacks.
+    for stray in (refunded[0], refunded[-1]):
+        priced = q_pool.copy()
+        priced.loc[stray] = 0.004
+        for a, b in BLEND_WEIGHTS:
+            with pytest.raises(ValueError):
+                exotic().pool_blend(p_model, priced, a=a, b=b)
+
+
+# (pool of p_model, runners, a multiplier on p_model, the `pool` argument): p_model sums to the
+# places paid (Wide 3, Place 3 or 2) or to the multiplier, never to 1 within 1e-6.
+OFF_SCALE_MODELS = {
+    "wide_8_pool_none": (WIDE, 8, 1.0, None),
+    "wide_8_as_quinella": (WIDE, 8, 1.0, QUINELLA),  # Wide's keys are Quinella's
+    "wide_7_pool_none": (WIDE, 7, 1.0, None),
+    "place_8_pool_none": (PLACE, 8, 1.0, None),
+    "place_7_as_win": (PLACE, 7, 1.0, WIN),  # Place's keys are Win's
+    "trio_times_2_5": (TRIO, 8, 2.5, None),
+    "trifecta_times_0_4": (TRIFECTA, 8, 0.4, TRIFECTA),
+    "quinella_over_by_1e-5": (QUINELLA, 8, 1 + 1e-5, QUINELLA),
+    "win_under_by_1e-5": (WIN, 8, 1 - 1e-5, None),
+}
+
+
+@pytest.mark.parametrize("case", list(OFF_SCALE_MODELS))
+def test_pool_blend_needs_a_model_that_sums_to_one(case):
+    pool, n, scale, pool_arg = OFF_SCALE_MODELS[case]
+    p_model, q_pool = _joint_blend_inputs(pool, n)
+    p_model = p_model * scale
+    total = p_model.sum()
+    assert abs(total - 1) > 5e-6  # the case's premise
+    for a, b in BLEND_GRID:
+        with pytest.raises(ValueError, match="#459"):
+            exotic().pool_blend(p_model, q_pool, a=a, b=b, pool=pool_arg)
+    # The same model scaled to 1, within the 1e-6 tolerance, blends as the log-linear pool.
+    q = q_pool.reindex(p_model.index).to_numpy()
+    for drift in (1 + 5e-7, 1 - 5e-7):
+        scaled = p_model / total * drift
+        u = 0.6 * np.log(scaled.to_numpy()) + 0.5 * np.log(q)
+        expected = np.exp(u - u.max()) / np.exp(u - u.max()).sum()
+        got = exotic().pool_blend(scaled, q_pool, a=0.6, b=0.5, pool=pool_arg)
+        assert list(got.index) == list(p_model.index)
+        np.testing.assert_allclose(got.to_numpy(dtype=float), expected, rtol=1e-10, atol=1e-15)
+
+
+@pytest.mark.parametrize("pool", SINGLE_WINNER_POOLS)
+def test_pool_blend_model_only_is_the_model_at_any_board_scale(pool):
+    """a=1, b=0 returns p_model; a q_pool at any scale blends as the board renormalised."""
+    p_model, q_pool = _joint_blend_inputs(pool, 8)
+    p = p_model.to_numpy()
+    for board_scale in (0.03, 1.0, 2.5, 40.0):
+        board = q_pool * board_scale
+        q = board.reindex(p_model.index).to_numpy()
+        q = q / q.sum()
+        for kwargs in ({}, {"pool": pool}):
+            as_model = exotic().pool_blend(p_model, board, a=1.0, b=0.0, **kwargs)
+            assert list(as_model.index) == list(p_model.index)
+            np.testing.assert_allclose(as_model.to_numpy(dtype=float), p, rtol=1e-12, atol=0)
+            for a, b in BLEND_GRID:
+                u = a * np.log(p) + b * np.log(q)
+                expected = np.exp(u - u.max()) / np.exp(u - u.max()).sum()
+                got = exotic().pool_blend(p_model, board, a=a, b=b, **kwargs)
+                np.testing.assert_allclose(
+                    got.to_numpy(dtype=float), expected, rtol=1e-10, atol=1e-15
+                )

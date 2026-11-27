@@ -80,6 +80,8 @@ HENERY_MAX_MOVE = 1.0
 HENERY_MAX_SPAN = 18.0
 HENERY_MAX_POINTS = int((HENERY_MAX_SPAN + 2 * HENERY_PAD) / HENERY_STEP) + 2
 
+BLEND_SUM_TOL = 1e-6  # |sum p_model - 1| that `pool_blend` allows
+
 
 # ---------------------------------------------------------------------------------------------
 # Dividend-implied shares
@@ -89,8 +91,8 @@ HENERY_MAX_POINTS = int((HENERY_MAX_SPAN + 2 * HENERY_PAD) / HENERY_STEP) + 2
 def dividend_share(dividend: float, payout_rate: float) -> float:
     """payout_rate * 100 / (dividend + 5): the pool's share on the one winning combination of a
     race-pool, paying `dividend` per 100 yen, mean breakage added back. ValueError for a dividend
-    that is not a positive number or a payout rate outside (0, 1]."""
-    d = _dividend(dividend)
+    that is not a number of at least 100 (see `statute_shares`) or a payout rate outside (0, 1]."""
+    d = _winning_dividend(dividend)
     r = _payout_rate(payout_rate)
     return r * UNIT_STAKE / (d + MEAN_BREAKAGE)
 
@@ -103,18 +105,15 @@ def statute_shares(dividends: Sequence[float], payout_rate: float) -> np.ndarray
     pool, L = S - sum W the money that lost). With r_c = (D_c + 5) / (100 R), that is
     W_c / L = 1 / (P (r_c - 1)), and S / L = 1 + K, K the sum of those: x_c = 1 / ((1 + K) P
     (r_c - 1)). P = 1 is `dividend_share`. ValueError for an empty sequence, a dividend that is
-    not a positive number, a payout rate outside (0, 1], or any r_c <= 1 (nobody lost).
+    not a number of at least 100, or a payout rate outside (0, 1]. A dividend under 100 yen (the
+    70-yen special payout when no ticket won) is not a share of winning money; from 100, the
+    stake back, r_c >= 1.05 / R > 1, so somebody lost.
     """
     r = _payout_rate(payout_rate)
-    d = np.array([_dividend(x) for x in dividends], dtype=float)
+    d = np.array([_winning_dividend(x) for x in dividends], dtype=float)
     if not len(d):
         raise ValueError("a race-pool pays at least one winning combination, got none")
     excess = (d + MEAN_BREAKAGE) / (UNIT_STAKE * r) - 1.0
-    if np.any(excess <= 0):
-        raise ValueError(
-            f"(D + 5) / 100 must exceed the payout rate {r} on every winning combination, "
-            f"or nobody lost: got dividends {d.tolist()!r}"
-        )
     if len(d) == 1:
         return np.array([r * UNIT_STAKE / (d[0] + MEAN_BREAKAGE)])  # `dividend_share`, exactly
     on_vs_lost = 1.0 / (len(d) * excess)  # W_c / L
@@ -132,6 +131,10 @@ def dividend_shares(
     too large. An optional `race_class_raw` column is passed on for the age-restricted boosts.
     A combination twice in one race-pool, or a race-pool with two conditions labels, is a
     ValueError. The Series is on the frame's index, in its order.
+
+    A race-pool with a dividend under 100 yen (the 70-yen special payout when no ticket won) holds
+    no share of winning money, so `statute_shares` refuses it: here every row of it is NaN, the
+    rest of the frame is computed as without it, and `dividend_floor_bound` flags it.
 
     A dividend at or under its pool's minimum (110 yen, Plus 10; 100 when the pool cannot fund it)
     is the floor, not the formula: its share here misstates the money on it and, with P > 1,
@@ -155,7 +158,11 @@ def dividend_shares(
         rate = takeout.race_takeout(
             race_id, pool, calendar=calendar, race_class_raw=label.pop()
         ).payout_rate
-        shares[rows] = statute_shares([values[i] for i in rows], rate)
+        paid = [_dividend(values[i]) for i in rows]
+        if min(paid) < UNIT_STAKE:
+            shares[rows] = np.nan
+            continue
+        shares[rows] = statute_shares(paid, rate)
     return pd.Series(shares, index=dividends.index, dtype=float, name="share")
 
 
@@ -194,6 +201,17 @@ def _dividend(value: object) -> float:
     d = _real(value, "dividend")
     if not d > 0:
         raise ValueError(f"a dividend must be positive, got {value!r}")
+    return d
+
+
+def _winning_dividend(value: object) -> float:
+    """A dividend that is a share of winning money: at least 100 yen per 100, the stake back."""
+    d = _dividend(value)
+    if d < UNIT_STAKE:
+        raise ValueError(
+            f"a dividend under {UNIT_STAKE:g} yen (the special payout when no ticket won) is not "
+            f"a share of winning money, got {value!r}"
+        )
     return d
 
 
@@ -263,6 +281,17 @@ def _horse_numbers(horses: Sequence[int] | None, n: int) -> list[int]:
     return [int(h) for h in numbers]
 
 
+def _position(value: object) -> int | None:
+    """A finishing position: None for a runner that did not finish (None or NaN). ValueError for
+    one that is not a whole number from 1."""
+    if pd.isna(value):
+        return None
+    x = _real(value, "a finishing position")
+    if x < 1 or not x.is_integer():
+        raise ValueError(f"a finishing position must be a whole number from 1, got {value!r}")
+    return int(x)
+
+
 def _key(horses: Sequence[int]) -> str:
     return ",".join(str(int(h)) for h in horses)
 
@@ -296,19 +325,23 @@ def winning_combinations(
     three, never the two horses that dead-heated for third. PLACE pays the first two or three by
     `field_at_sale`, the runners when sales opened (jra.yaml; None: the runners in `finish`), so
     a late scratch from eight to seven still pays three places; no other pool depends on it. A
-    pool not offered to the field, or a result with too few finishers, pays nothing. ValueError
-    for an unknown pool, or a `field_at_sale` smaller than the runners in `finish`.
+    pool not offered to the field pays nothing. With fewer finishers than its places, PLACE pays
+    every finisher and QUINELLA_PLACE every pair of finishers (none with one); the other pools pay
+    nothing (TRIO and TIERCE need three finishers, QUINELLA and FORECAST two). ValueError for an
+    unknown pool, a position that is not a whole number from 1 (a whole float, 2.0, is one), or a
+    `field_at_sale` smaller than the runners in `finish`.
     """
     _check_pool(pool)
+    positions = {int(h): _position(pos) for h, pos in finish.items()}
     places = _places_paid(pool, _field_size(field_at_sale, len(finish)))
     if places == 0:
         return []
-    placed = sorted(
-        (int(pos), int(h)) for h, pos in finish.items() if not pd.isna(pos) and pos <= places
-    )
+    placed = sorted((pos, h) for h, pos in positions.items() if pos is not None and pos <= places)
+    if len(placed) < places:
+        if pool not in (PLACE, WIDE):
+            return []
+        places = len(placed)  # every finisher places; Wide's pairs of them
     groups = [[h for _, h in g] for _, g in groupby(placed, key=lambda item: item[0])]
-    if sum(len(g) for g in groups) < places:
-        return []
     out: dict[str, None] = {}
     for tie_break in product(*(permutations(g) for g in groups)):
         top = [h for group in tie_break for h in group][:places]
@@ -692,16 +725,21 @@ def pool_blend(
     """exp(a ln p_model(c) + b ln q_pool(c)), normalised over one race's combinations.
 
     The log-linear pool of a pool that pays one combination per result (WIN, QUINELLA, FORECAST,
-    TRIO, TIERCE): scale-invariant in both inputs, and it sums to 1. `pool` names that pool; a
+    TRIO, TIERCE), and it sums to 1. p_model is that pool's probabilities and must sum to 1
+    within 1e-6 (BLEND_SUM_TOL); only q_pool is scale-invariant. `pool` names that pool; a
     single-winner code or None gives the same values. PLACE and QUINELLA_PLACE pay several
     combinations on every result, so their ticket chances sum to the places paid and this blend
-    would rescale them to 1: either is a ValueError (how to blend them is #459's registered
-    variant), as is a code not in POOLS. The keys are not checked against `pool`.
+    would rescale them to 1: either code is a ValueError, as is a p_model that does not sum to 1,
+    which also refuses them under None or a single-winner code with the same keys (how to blend
+    them is #459's registered variant). A code not in POOLS is a ValueError. The keys are not
+    checked against `pool`.
 
-    Both Series are indexed by combination string and cover the same combinations; q_pool is
+    Both Series are indexed by combination string. A null q_pool price (a scratched runner's
+    refunded combinations) is dropped first; then both cover the same combinations: q_pool is
     aligned to p_model by label and the result is on p_model's index, in its order. A combination
-    of p_model missing from q_pool (no full board), or of q_pool missing from p_model (a runner
-    the model lacks), is a ValueError, as is a probability that is not finite and positive.
+    of p_model with no price in q_pool (no full board, or a null on a live combination), or a
+    priced one of q_pool missing from p_model (a runner the model lacks), is a ValueError, as is
+    a probability that is not finite and positive.
     """
     a, b = _real(a, "a"), _real(b, "b")
     if pool is not None:
@@ -715,10 +753,12 @@ def pool_blend(
     for name, s in (("p_model", p_model), ("q_pool", q_pool)):
         if not s.index.is_unique:
             raise ValueError(f"{name} has a combination twice")
+    q_pool = q_pool[q_pool.notna()]  # a scratched runner's refund slots carry no price
     missing = p_model.index.difference(q_pool.index)
     if len(missing):
         raise ValueError(
-            f"{len(missing)} combination(s) have no pool price (no full board), e.g. {missing[0]!r}"
+            f"{len(missing)} combination(s) have no pool price (no full board, or a null price), "
+            f"e.g. {missing[0]!r}"
         )
     unpriced = q_pool.index.difference(p_model.index)
     if len(unpriced):
@@ -731,6 +771,12 @@ def pool_blend(
     for name, arr in (("p_model", p), ("q_pool", q)):
         if not np.all(np.isfinite(arr)) or np.any(arr <= 0):
             raise ValueError(f"every {name} probability must be finite and positive")
+    if abs(p.sum() - 1.0) > BLEND_SUM_TOL:
+        raise ValueError(
+            f"p_model sums to {p.sum():.9g}, not 1: the blend takes one pool's probabilities over "
+            "its combinations (Place and Wide sum to the places paid; how to blend them is #459's "
+            "registered variant)"
+        )
     u = a * np.log(p) + b * np.log(q)
     w = np.exp(u - u.max())
     return pd.Series(w / w.sum(), index=p_model.index, name="p_blend")
