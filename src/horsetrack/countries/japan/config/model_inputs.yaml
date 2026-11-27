@@ -64,11 +64,12 @@ inputs:
     layers: [C0]
     role: feature_at_t
     supplies:
-      - {source: jravan, table: records/RACE/JG, column: _record}
+      - {source: jravan, table: exclusions, column: entry_kind}
     tickets: [405]
     note: >-
-      JV-Data JG (horses excluded from a race's entries, e.g. by ballot), dumped but not mapped
-      into a table, so it has no availability rule.
+      JV-Data JG (horses excluded from a race's entries, e.g. by ballot), mapped into the jravan
+      exclusions table with its publication date (published_date); its availability rule is the
+      owner's question (#405), so until then the as-of views refuse it.
   result_published:
     layers: [C0, C2, C3]
     role: conditioner
