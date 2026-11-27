@@ -159,7 +159,10 @@ pass) so asks the holdout rule only about the days the file can hold, and a rang
 file returns no row. The price-era guard of `read_store_table` checks the requested start,
 before this narrowing. It then scans the same handle with `development_filter(country, start,
 end)`: the narrowed inclusive range minus the holdout days, built from the calendar and the
-committed `holdout.yaml`, never from the rows. Bounds and scan read one snapshot: a file
+committed `holdout.yaml`, never from the rows. (`read_store_table` builds that predicate with
+`file_development_filter` on the handle and scans a `ds.dataset` of the file's path served from
+the same handle, a one-file read-only filesystem, so its read is a dataset scan with the predicate
+as its filter.) Bounds and scan read one snapshot: a file
 atomically replaced at its path (`os.replace`, as a rebuild does) during the read is read as it
 was. No table or record batch the scan returns holds a holdout row. What is skipped on disk is
 narrower: Parquet prunes a row group

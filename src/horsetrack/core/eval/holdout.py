@@ -361,6 +361,30 @@ def _file_day_bounds(
     return (min(lows), max(highs)) if lows else None
 
 
+def file_development_filter(
+    handle: pa.NativeFile,
+    country: str,
+    *,
+    start: date = date.min,
+    end: date = date.max,
+    where: ds.Expression | None = None,
+    column: str = "race_date",
+) -> ds.Expression:
+    """The scan predicate of ``read_development`` for the Parquet file open on ``handle``:
+    ``development_filter`` over ``start..end`` narrowed to the file's own first and last day
+    (footer statistics, or one min/max scan of the row groups without them), and ``where``; a
+    range outside the file keeps no row. For a reader that scans the same snapshot by another
+    route (``models.v0.store``). Raises ``HoldoutConfigError`` when the country has no valid
+    holdout definition."""
+    bounds = _file_day_bounds(ds.ParquetFileFormat().make_fragment(handle), column, start, end)
+    if bounds is None:
+        _load_definition(DEFAULT_COUNTRIES_DIR, country)  # no definition: refuse, even for no days
+        keep = ds.scalar(False)
+    else:
+        keep = development_filter(country, *bounds, column=column)
+    return keep if where is None else keep & where
+
+
 def read_development(
     handle: pa.NativeFile,
     country: str,
@@ -379,16 +403,10 @@ def read_development(
     can hold; a range outside the file returns no row. Bounds and scan read the one open handle,
     so a file atomically replaced at its path meanwhile is read as it was. Raises
     ``HoldoutConfigError`` when the country has no valid holdout definition."""
-    columns = list(columns)
-    bounds = _file_day_bounds(ds.ParquetFileFormat().make_fragment(handle), column, start, end)
-    if bounds is None:
-        _load_definition(DEFAULT_COUNTRIES_DIR, country)  # no definition: refuse, even for no days
-        keep = ds.scalar(False)
-    else:
-        keep = development_filter(country, *bounds, column=column)
-    if where is not None:
-        keep = keep & where
-    return pq.read_table(handle, columns=columns, filters=keep)
+    keep = file_development_filter(
+        handle, country, start=start, end=end, where=where, column=column
+    )
+    return pq.read_table(handle, columns=list(columns), filters=keep)
 
 
 def _race_days(frame: pd.DataFrame, date_col: str) -> pd.Series:
