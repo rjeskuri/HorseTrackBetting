@@ -39,6 +39,7 @@ from horsetrack.countries.japan.research.exacta_impact import exacta_impact_comm
 from horsetrack.countries.japan.research.win5_backfill import win5_history_command
 from horsetrack.countries.japan.research.win5_study import win5_study_app
 from horsetrack.countries.japan.shadow.day import shadow_day_command
+from horsetrack.countries.japan.shadow.race_time_day import race_time_command
 from horsetrack.countries.japan.studies.nowcast import nowcast_study_command
 
 app = typer.Typer(no_args_is_help=True)
@@ -53,6 +54,7 @@ japan.command("systemd")(systemd_command)
 japan.command("pull-vm")(pull_vm_command)
 japan.command("board-serve")(board_serve_command)
 japan.command("shadow-day")(shadow_day_command)
+japan.command("race-time")(race_time_command)
 japan.command("win5-history")(win5_history_command)
 japan.add_typer(win5_study_app, name="win5-study")
 japan.command("fetch-going")(fetch_going_command)

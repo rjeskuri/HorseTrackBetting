@@ -2,29 +2,40 @@
 
 Contract pinned here (`horsetrack.countries.japan.shadow.race_time`; the coder follows it):
 
-- `record_race(race, *, model, results, model_version, card_version, now, replay=False) -> dict`:
-  one record for one card race.
+- `record_race(race, *, model, results, model_version, card_version, now, replay=False,
+  latest_post=None) -> dict`: one record for one card race.
   - `race`: a mapping with race_id, venue, post_utc (the scheduled post known at the cutoff, an
     aware UTC datetime, or None when the card has none) and the model's par keys (track, surface,
     distance, layout, rail, class_level).
-  - `model`: a fitted #305 `SpeedModel` (`models.speed`), never changed by the call (a copy
-    observes the results), so the same model serves any number of calls in any order.
+  - `model`: a fitted #305 `SpeedModel` (`models.speed`) holding no observations, never changed by
+    the call (a copy observes the results), so the same model serves any number of calls in any
+    order. A model that already holds observations (`observe` was called on it, e.g. with the
+    #305 study's post + 30 min proxy) is refused with ValueError: a residual it cached could carry
+    a result seen after the cutoff into same_day_s without being in results_used.
   - `results`: a DataFrame of the day's results seen so far: race_id, venue, post_utc, the par
     keys, top3_time_s and first_seen_utc (the first observed publication, #225; NaT when never
-    seen). Only results with first_seen_utc within the input cutoff feed the same-day variant,
-    whatever the clock says and whatever post_utc + 30 min says.
+    seen).
   - The input cutoff is post_utc - the primary decision minutes (`load_decision_grid().primary`,
     config/decision.yaml, D2: T-2).
-  - `now()` is read after the computation: completion_utc is that reading.
+  - `now()` is read twice: before the computation (input_snapshot_utc, when the inputs were taken)
+    and after it (completion_utc). Only results first seen at or before min(input cutoff, input
+    snapshot) feed the same-day variant, whatever the clock says afterwards and whatever
+    post_utc + 30 min says.
+  - `latest_post`: an optional callable read after the computation, giving the latest known post
+    (aware UTC); without it the latest post is the post at the cutoff.
   - Fields: race_id, venue, status ("ok" or "skipped"), reason (None when ok, a non-empty text
     when skipped, one per cause), model_version, card_version (as given), input_cutoff_utc,
-    post_utc_at_cutoff, completion_utc (ISO-8601 UTC text, null where there is no post),
-    par_s (the cell's par, seconds), same_day_s (par + the same-day variant's mean at the cutoff,
-    seconds; both null when skipped), results_used (a list of {"race_id", "first_seen_utc"}, the
-    results the variant could use) and mode:
-      "live"   completion_utc <= input cutoff (and before the post), in a live run;
-      "late"   after the cutoff but before the post, in a live run;
-      "replay" at or after the post, or in any run with replay=True (a retrospective calculation).
+    post_utc_at_cutoff (the post the inputs were taken for, kept for provenance), latest_post_utc
+    (the post read after the computation), input_snapshot_utc, completion_utc (ISO-8601 UTC text,
+    null where there is no post), par_s (the cell's par, seconds), same_day_s (par + the same-day
+    variant's mean at the cutoff, seconds; both null when skipped), results_used (a list of
+    {"race_id", "first_seen_utc", "top3_time_s"}: the results the variant used, only those the
+    model accepted, i.e. in a cell with a fitted par) and mode, judged against both the post at
+    the cutoff and the latest post:
+      "live"   completion_utc <= both cutoffs (each post - primary), in a live run;
+      "late"   after either cutoff but before both posts, in a live run;
+      "replay" at or after either post, or in any run with replay=True (a retrospective
+               calculation).
   - A race whose cell the fit never saw, or without a post time, gives a skipped record.
   - Every record is JSON-serialisable as is (timestamps are text).
 - `coverage(records, card) -> dict[str, dict[str, int]]`: per venue and "all", over every race of
@@ -35,9 +46,10 @@ Contract pinned here (`horsetrack.countries.japan.shadow.race_time`; the coder f
   the latest post), replay (forecast but not ready_by_post). A race counts once whatever its
   number of records. Records read back from JSON give the same counts.
 - `verify_replay(records, *, card, results, model, model_version, card_version) -> list[str]`:
-  the problems found recomputing each ok record from its recorded inputs (card row, results_used
-  against `results`, versions): an empty list when inputs and predictions match; a problem about a
-  race names its race_id.
+  the problems found recomputing each ok record from its recorded inputs (card row, the recorded
+  input snapshot, results_used against `results` by id, sighting and top3_time_s value, versions):
+  an empty list when inputs and predictions match; a problem about a race names its race_id. A
+  changed input value is a problem even when the forecast it gives is unchanged.
 
 Every race, fit and result is synthetic (a planted par per cell and variant per day); expected
 forecasts come from a separate copy of the #305 model fed only the eligible results, never from
@@ -76,6 +88,8 @@ FIELDS = {
     "card_version",
     "input_cutoff_utc",
     "post_utc_at_cutoff",
+    "latest_post_utc",
+    "input_snapshot_utc",
     "completion_utc",
     "par_s",
     "same_day_s",
@@ -259,7 +273,7 @@ def used_ids(record: dict) -> set[str]:
     return {u["race_id"] for u in record["results_used"]}
 
 
-def record(model, results, race_id, when, *, replay=False, race=None, mv=MV, cv=CV):
+def record(model, results, race_id, when, *, replay=False, race=None, mv=MV, cv=CV, **extra):
     return record_race(
         CARD[race_id] if race is None else race,
         model=model,
@@ -268,6 +282,7 @@ def record(model, results, race_id, when, *, replay=False, race=None, mv=MV, cv=
         card_version=cv,
         now=Clock(when),
         replay=replay,
+        **extra,
     )
 
 
@@ -298,6 +313,8 @@ def test_both_forecasts_in_seconds_at_the_primary_cutoff(model, results):
         assert (rec["model_version"], rec["card_version"]) == (mv, cv)
         assert utc(rec["input_cutoff_utc"]) == cutoff
         assert utc(rec["post_utc_at_cutoff"]) == race["post_utc"]
+        assert utc(rec["latest_post_utc"]) == race["post_utc"]  # no latest_post: the same post
+        assert utc(rec["input_snapshot_utc"]) == when
         assert utc(rec["completion_utc"]) == when
         assert rec["mode"] == "live"
         assert isinstance(rec["par_s"], float) and isinstance(rec["same_day_s"], float)
@@ -310,9 +327,12 @@ def test_both_forecasts_in_seconds_at_the_primary_cutoff(model, results):
         assert could <= used_ids(rec), race_id
         assert not used_ids(rec) & (later | {race_id}), race_id
         sightings = dict(zip(results["race_id"], results["first_seen_utc"], strict=True))
+        times = dict(zip(results["race_id"], results["top3_time_s"], strict=True))
         for used in rec["results_used"]:
             seen = utc(used["first_seen_utc"])
             assert seen == sightings[used["race_id"]] and seen <= cutoff, (race_id, used)
+            assert isinstance(used["top3_time_s"], float), (race_id, used)
+            assert used["top3_time_s"] == pytest.approx(times[used["race_id"]], abs=1e-12)
         if could:
             with_variant += 1
             assert abs(rec["same_day_s"] - rec["par_s"]) > 1e-3, race_id
@@ -455,6 +475,7 @@ def test_completion_is_measured_after_the_computation(
     done = utc(rec["completion_utc"])
     assert done == clock.at  # read after the last piece of work
     assert done >= start + timedelta(seconds=step_s)
+    assert utc(rec["input_snapshot_utc"]) == start  # read before the work
     if live:
         assert rec["mode"] == "live"
     else:
@@ -492,6 +513,99 @@ def test_a_result_first_seen_after_the_cutoff_does_not_move_the_forecast(
     assert moved not in used_ids(rec)
     assert rec["same_day_s"] == pytest.approx(without["same_day_s"], abs=1e-12)
     assert rec["par_s"] == pytest.approx(on_time["par_s"], abs=1e-12)
+
+
+def _proxy_rows(results: pd.DataFrame, race_id: str, days: int = 0) -> pd.DataFrame:
+    """One result as the #305 study gives it to `observe`: available at post + 30 min."""
+    rows = results[results["race_id"] == race_id].copy()
+    rows["race_utc"] = rows["post_utc"] + pd.Timedelta(days=days)
+    rows["race_id"] = rows["race_id"] + ("" if days == 0 else f"+{days}d")
+    rows["result_available_utc"] = rows["race_utc"] + pd.Timedelta(minutes=30)
+    return rows.drop(columns=["post_utc", "first_seen_utc"])
+
+
+@pytest.mark.parametrize("days", [0, 1], ids=["same day, post + 30 min proxy", "another day"])
+def test_a_model_that_already_holds_observations_is_refused(model, results, days):
+    """Review finding 3: a fitted model that already observed results (here TOK R3 by the post +
+    30 min proxy, while its real first sighting is after TOK R5's cutoff) is refused, so a cached
+    residual can never move same_day_s; the recorder and the verifier both refuse it."""
+    target, leaked = rid("TOK", 5), rid("TOK", 3)
+    cutoff = cutoff_of(target)
+    late = results.copy()
+    late.loc[late["race_id"] == leaked, "first_seen_utc"] = pd.Timestamp(
+        cutoff + timedelta(minutes=5)
+    )
+    pre = copy.deepcopy(model).observe(_proxy_rows(late, leaked, days))
+    assert pre.n_observed == 1
+    if days == 0:  # the cached residual would move the variant at the cutoff
+        assert pre.variant(DAY, "TOK", "turf", at_utc=cutoff)[0] != 0.0
+
+    when = cutoff - timedelta(seconds=30)
+    clean = record(model, late, target, when)
+    assert leaked not in used_ids(clean)
+    with pytest.raises(ValueError):
+        record(pre, late, target, when)
+    with pytest.raises(ValueError):
+        verify_replay(
+            [clean], card=card_frame(), results=late, model=pre, model_version=MV, card_version=CV
+        )
+
+
+@pytest.mark.parametrize(
+    ("snapshot_vs_cutoff_s", "included"),
+    [(-10, False), (-6, False), (-5, True), (-1, True), (0, True)],
+)
+def test_the_inputs_are_those_seen_by_the_snapshot_before_the_cutoff(
+    model, results, snapshot_vs_cutoff_s, included
+):
+    """Review finding 4: a computation that takes its inputs before the cutoff uses only results
+    first seen by then (TOK R3 first seen 5 s before TOK R5's cutoff); the record keeps that
+    snapshot, and replay verification rebuilds the same inputs and accepts it."""
+    target, early = rid("TOK", 5), rid("TOK", 3)
+    cutoff = cutoff_of(target)
+    source = results.copy()
+    source.loc[source["race_id"] == early, "first_seen_utc"] = pd.Timestamp(
+        cutoff - timedelta(seconds=5)
+    )
+    when = cutoff + timedelta(seconds=snapshot_vs_cutoff_s)
+    rec = record(model, source, target, when)
+    assert rec["mode"] == "live"
+    assert utc(rec["input_snapshot_utc"]) == when
+    assert (early in used_ids(rec)) is included
+    par, same_day = expected(model, CARD[target], source, min(cutoff, when))
+    assert rec["same_day_s"] == pytest.approx(same_day, abs=1e-9)
+    problems = verify_replay(
+        [rec], card=card_frame(), results=source, model=model, model_version=MV, card_version=CV
+    )
+    assert problems == []
+
+
+def test_only_results_the_model_accepted_are_listed_as_used(model, results):
+    """Review (low): a same-group result in a cell the fit never saw cannot feed the variant, so
+    it is not in results_used and leaves the forecast as it was."""
+    target, unseen = rid("TOK", 5), rid("TOK", 9)
+    post = at(DAY, 1, 20)
+    extra = {
+        "race_id": unseen,
+        "venue": "TOK",
+        "post_utc": post,
+        **keys_of(UNSEEN),
+        "top3_time_s": 109.0,
+        "first_seen_utc": post + timedelta(minutes=12),
+    }
+    source = pd.concat([results, pd.DataFrame([extra])], ignore_index=True)
+    for col in ("post_utc", "first_seen_utc"):
+        source[col] = pd.to_datetime(source[col], utc=True)
+    when = cutoff_of(target) - timedelta(seconds=30)
+    base = record(model, results, target, when)
+    rec = record(model, source, target, when)
+    assert unseen not in used_ids(rec)
+    assert used_ids(rec) == used_ids(base) and used_ids(base)
+    assert rec["same_day_s"] == pytest.approx(base["same_day_s"], abs=1e-12)
+    problems = verify_replay(
+        [rec], card=card_frame(), results=source, model=model, model_version=MV, card_version=CV
+    )
+    assert problems == []
 
 
 # --------------------------------------------------------------------------- coverage
@@ -591,6 +705,78 @@ def test_a_post_moved_before_the_computation_moves_the_cutoff(model, results, mo
     assert rec["mode"] == mode
 
 
+P_S = PRIMARY.total_seconds()
+
+
+@pytest.mark.parametrize("race_id", [rid("TOK", 3), rid("KYO", 5)])
+@pytest.mark.parametrize(
+    ("done_vs_cutoff_s", "latest_shift_s", "mode"),
+    [
+        (-30, 0, "live"),  # the post did not move
+        (-30, -25, "live"),  # moved earlier, completion still by the new cutoff
+        (-30, -60, "late"),  # past the new cutoff, before the new post
+        (-30, -(P_S + 30), "replay"),  # the new post is the completion instant
+        (-30, -(P_S + 60), "replay"),  # 12:00 -> 11:57 while computing, done 11:57:30
+        (-30, 300, "live"),  # moved later: the original cutoff was met
+        (30, 300, "late"),  # moved later, but done after the cutoff the inputs were taken for
+    ],
+)
+def test_the_mode_is_judged_against_the_latest_post_too(
+    model, results, race_id, done_vs_cutoff_s, latest_shift_s, mode
+):
+    """Review finding 2 (DoD 2): the latest post, read after the computation, can only make a
+    record less on time; the record keeps the post its inputs were taken for and the cutoff and
+    forecast of that post, and records the latest post beside it."""
+    race = CARD[race_id]
+    post = race["post_utc"]
+    latest = post + timedelta(seconds=latest_shift_s)
+    when = cutoff_of(race_id) + timedelta(seconds=done_vs_cutoff_s)
+    rec = record(model, results, race_id, when, latest_post=lambda: latest)
+    json.dumps(rec)
+    assert rec["mode"] == mode
+    assert utc(rec["post_utc_at_cutoff"]) == post
+    assert utc(rec["latest_post_utc"]) == latest
+    assert utc(rec["input_cutoff_utc"]) == post - PRIMARY
+    par, same_day = expected(model, race, results, cutoff_of(race_id))
+    assert rec["par_s"] == pytest.approx(par, abs=1e-9)
+    assert rec["same_day_s"] == pytest.approx(same_day, abs=1e-9)
+
+
+def test_a_post_moved_while_the_forecast_runs_is_read_after_it(model, results):
+    """Review finding 2: the post moves earlier while the computation runs (the feed changes once
+    the clock passes the start); the latest post is the one read after the computation, so the
+    record is not live although it was on time for the post read before it."""
+    race_id = rid("TOK", 3)
+    post = CARD[race_id]["post_utc"]
+    start = cutoff_of(race_id) - timedelta(seconds=60)
+    moved = start + PRIMARY - timedelta(seconds=30)  # its cutoff is 30 s before the start
+    slow = copy.deepcopy(model)
+    slow.__class__ = SlowModel
+    clock = Clock(start)
+
+    def feed() -> datetime:
+        return post if clock.at < start + timedelta(seconds=0.5) else moved
+
+    SlowModel.clock, SlowModel.step = clock, 1.0
+    try:
+        rec = record_race(
+            CARD[race_id],
+            model=slow,
+            results=results,
+            model_version=MV,
+            card_version=CV,
+            now=clock,
+            latest_post=feed,
+        )
+    finally:
+        SlowModel.clock, SlowModel.step = None, 0.0
+    done = utc(rec["completion_utc"])
+    assert done > start
+    assert utc(rec["latest_post_utc"]) == moved
+    assert utc(rec["post_utc_at_cutoff"]) == post
+    assert rec["mode"] == ("late" if done < moved else "replay")
+
+
 # --------------------------------------------------------------------------- replay
 
 
@@ -672,6 +858,25 @@ def _move_the_recorded_post(records, results):
     return rid("KYO", 5)
 
 
+def _move_the_snapshot_before_a_used_sighting(records, results):
+    rec = by_id(records)[rid("TOK", 5)]
+    assert rid("TOK", 3) in used_ids(rec)  # first seen 02:19
+    rec["input_snapshot_utc"] = at(DAY, 2, 18).isoformat()
+    return rid("TOK", 5)
+
+
+def _change_a_recorded_value(records, results):
+    rec = by_id(records)[rid("KYO", 6)]
+    rec["results_used"][0]["top3_time_s"] += 0.2
+    return rid("KYO", 6)
+
+
+def _correct_two_results_by_equal_and_opposite_amounts(records, results):
+    results.loc[results["race_id"] == rid("TOK", 1), "top3_time_s"] += 0.3
+    results.loc[results["race_id"] == rid("TOK", 3), "top3_time_s"] -= 0.3
+    return rid("TOK", 5)
+
+
 @pytest.mark.parametrize(
     "tamper",
     [
@@ -682,6 +887,9 @@ def _move_the_recorded_post(records, results):
         _add_a_late_result,
         _correct_a_result,
         _move_the_recorded_post,
+        _move_the_snapshot_before_a_used_sighting,
+        _change_a_recorded_value,
+        _correct_two_results_by_equal_and_opposite_amounts,
     ],
 )
 def test_replay_verification_finds_mismatched_inputs_and_predictions(model, results, tamper):
@@ -696,6 +904,26 @@ def test_replay_verification_finds_mismatched_inputs_and_predictions(model, resu
     )
     assert problems and all(isinstance(p, str) for p in problems)
     assert any(race_id in p for p in problems)
+
+
+def test_a_changed_input_value_fails_verification_even_with_an_unchanged_forecast(model, results):
+    """Review finding 5: two finish times corrected by equal and opposite amounts leave the normal
+    model's variant mean, hence the forecast, where it was; verification still reports the races
+    that used them, from the input values the records keep."""
+    records = replay_day(model, results)
+    source = results.copy()
+    _correct_two_results_by_equal_and_opposite_amounts(records, source)
+    corrected = {rid("TOK", 1), rid("TOK", 3)}
+    for target in (rid("TOK", 5), rid("TOK", 6)):
+        rec = by_id(records)[target]
+        assert corrected <= used_ids(rec)
+        again = record(model, source, target, REPLAY_AT, replay=True)
+        assert again["same_day_s"] == pytest.approx(rec["same_day_s"], abs=1e-9)  # blind to it
+    problems = verify_replay(
+        records, card=card_frame(), results=source, model=model, model_version=MV, card_version=CV
+    )
+    for target in (rid("TOK", 5), rid("TOK", 6)):
+        assert any(target in p for p in problems), (target, problems)
 
 
 @pytest.mark.parametrize("which", ["model_version", "card_version"])

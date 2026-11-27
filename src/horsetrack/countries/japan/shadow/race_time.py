@@ -3,23 +3,30 @@
 A research recorder for #305's race-time model (`models.speed`), independent of the V0 shadow
 loader. Nothing here is adopted (D16) and nothing reads an outcome of the race forecast.
 
-- `record_race(race, *, model, results, model_version, card_version, now, replay=False)`: one
-  JSON-ready record for one card race. The input cutoff is the post known at the cutoff less the
-  primary decision minutes (config/decision.yaml). A deep copy of the fitted model observes only
-  the day's results first seen (#225's first observed publication) at or before the cutoff, so the
-  caller's model never changes and a result seen later, or never, cannot move the forecast
-  whatever the clock reads. par_s is the cell's par, same_day_s the par plus the same-day
-  variant's mean at the cutoff. `now()` is read once the computation is done: completion_utc is
-  that reading. mode is "live" when completion_utc is at or before the cutoff, "late" when it is
-  after the cutoff but before the post, and "replay" at or after the post or whenever replay=True.
-  A race without a post or in a cell the fit never saw is "skipped", with its own reason.
+- `record_race(race, *, model, results, model_version, card_version, now, replay=False,
+  latest_post=None)`: one JSON-ready record for one card race. The input cutoff is the post known
+  at the cutoff less the primary decision minutes (config/decision.yaml). The model must hold no
+  observations (ValueError otherwise: a residual it cached could move same_day_s unlisted). `now()`
+  is read before the computation (input_snapshot_utc) and after it (completion_utc). A deep copy
+  of the model observes only the day's results first seen (#225's first observed publication) at
+  or before min(cutoff, snapshot) in a cell with a fitted par, so the caller's model never changes
+  and a result seen later, or never, cannot move the forecast whatever the clock reads; each is
+  listed in results_used with its sighting and top-3 time. par_s is the cell's par, same_day_s the
+  par plus the same-day variant's mean at the cutoff. `latest_post()` (default: the post at the
+  cutoff) is read after the computation: latest_post_utc. mode is "live" when completion_utc is at
+  or before both cutoffs (each post less the primary minutes), "replay" at or after either post or
+  whenever replay=True, else "late". The provenance fields (post_utc_at_cutoff, input_cutoff_utc)
+  stay those of the post the inputs were taken for. A race without a post or in a cell the fit
+  never saw is "skipped", with its own reason.
 - `coverage(records, card)`: per venue and "all", every race of the latest card in the
   denominator. A race counts once; readiness is judged against both the post recorded at the
   cutoff and the latest card's post, so a post moved earlier after the record cannot leave it on
   time.
 - `verify_replay(records, *, card, results, model, model_version, card_version)`: recomputes each
-  ok record from the card row, the source results and the versions; [] when everything matches,
-  else one problem per mismatch, each naming its race id.
+  ok record from the card row, its recorded input snapshot, the source results (id, sighting and
+  top-3 time of each result used) and the versions; [] when everything matches, else one problem
+  per mismatch, each naming its race id. A changed input value is a problem even when the forecast
+  it gives is unchanged.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from horsetrack.countries.japan.board.snapshot import load_decision_grid
@@ -74,30 +82,51 @@ def _primary() -> pd.Timedelta:
     return pd.Timedelta(minutes=load_decision_grid().primary)
 
 
-def _eligible(results: pd.DataFrame, race: Mapping, model: SpeedModel, cutoff: pd.Timestamp):
+def _has_par(model: SpeedModel, row: Mapping) -> bool:
+    try:
+        model.par(**{key: row[key] for key in model.spec.par_keys})
+    except KeyError:
+        return False
+    return True
+
+
+def _eligible(results: pd.DataFrame, race: Mapping, model: SpeedModel, as_of: pd.Timestamp):
     """The results the same-day variant may use: another race of the target's JST day and variant
-    group, timed, first seen at or before the cutoff; renamed for `SpeedModel.observe`."""
+    group, timed, in a cell with a fitted par, first seen at or before `as_of`; renamed for
+    `SpeedModel.observe`."""
     seen = pd.to_datetime(results["first_seen_utc"], utc=True)
     posts = pd.to_datetime(results["post_utc"], utc=True)
-    keep = seen.notna() & (seen <= cutoff) & posts.notna() & results["top3_time_s"].notna()
+    keep = seen.notna() & (seen <= as_of) & posts.notna() & results["top3_time_s"].notna()
     keep &= results["race_id"] != race["race_id"]
     day = _stamp(race["post_utc"]).tz_convert(JST).date()
     keep &= posts.dt.tz_convert(JST).dt.date == day
     for key in model.spec.variant_keys:
         keep &= results[key] == race[key]
     frame = results[keep].copy()
-    frame["race_utc"], frame["result_available_utc"] = posts[keep], seen[keep]
+    accepted = [_has_par(model, row) for row in frame.to_dict("records")]
+    frame = frame.loc[np.array(accepted, dtype=bool)]
+    frame["race_utc"], frame["result_available_utc"] = posts[frame.index], seen[frame.index]
     return frame.sort_values(["result_available_utc", "race_id"], kind="stable")
 
 
-def _mode(completion: pd.Timestamp, cutoff: pd.Timestamp | None, post, replay: bool) -> str | None:
+def _mode(completion: pd.Timestamp, posts: tuple, replay: bool) -> str | None:
+    """Judged against every post given (the post at the cutoff and the latest one)."""
     if replay:
         return REPLAY
-    if cutoff is None:
+    if posts[0] is None:
         return None  # no post: the timing cannot be judged
-    if completion >= post:
+    if completion >= min(posts):
         return REPLAY
-    return LIVE if completion <= cutoff else LATE
+    return LIVE if completion <= min(posts) - _primary() else LATE
+
+
+def _refuse_observed(model: SpeedModel) -> None:
+    if model.n_observed or model.n_unseen:
+        raise ValueError(
+            f"the model already holds {model.n_observed + model.n_unseen} observed result(s): a "
+            "residual it cached could move same_day_s without being in results_used; pass the "
+            "fitted model before any observe()"
+        )
 
 
 def record_race(
@@ -109,12 +138,17 @@ def record_race(
     card_version: str,
     now: Callable[[], datetime],
     replay: bool = False,
+    latest_post: Callable[[], datetime | None] | None = None,
 ) -> dict[str, Any]:
     """One record for one card race (see the module docstring)."""
+    _refuse_observed(model)
+    snapshot = _stamp(now())  # read before the work: when the inputs were taken
+    if snapshot is None:
+        raise ValueError("now() gave no time")
     post = _stamp(race.get("post_utc"))
     cutoff = None if post is None else post - _primary()
     par_s = same_day_s = reason = None
-    used: list[dict[str, str]] = []
+    used: list[dict[str, Any]] = []
     if post is None:
         reason = NO_POST
     else:
@@ -125,7 +159,7 @@ def record_race(
         except KeyError:
             reason = UNSEEN_CELL
         if reason is None:
-            frame = _eligible(results, race, model, cutoff)
+            frame = _eligible(results, race, model, min(cutoff, snapshot))
             try:
                 local.observe(frame)
             except ValueError as exc:
@@ -135,11 +169,16 @@ def record_race(
                 at = cutoff + pd.Timedelta(1, "ns")  # the variant counts times strictly before
                 same_day_s = float(local.expected_top3_time(target, at_utc=at))
                 used = [
-                    {"race_id": rid, "first_seen_utc": _iso(_stamp(seen))}
-                    for rid, seen in zip(
-                        frame["race_id"], frame["result_available_utc"], strict=True
+                    {"race_id": rid, "first_seen_utc": _iso(_stamp(seen)), "top3_time_s": float(t)}
+                    for rid, seen, t in zip(
+                        frame["race_id"],
+                        frame["result_available_utc"],
+                        frame["top3_time_s"],
+                        strict=True,
                     )
                 ]
+    latest = None if latest_post is None else _stamp(latest_post())  # read after the work
+    latest = post if latest is None else latest
     completion = _stamp(now())  # read after the work
     if completion is None:
         raise ValueError("now() gave no time")
@@ -152,11 +191,13 @@ def record_race(
         "card_version": card_version,
         "input_cutoff_utc": _iso(cutoff),
         "post_utc_at_cutoff": _iso(post),
+        "latest_post_utc": _iso(latest),
+        "input_snapshot_utc": _iso(snapshot),
         "completion_utc": _iso(completion),
         "par_s": par_s,
         "same_day_s": same_day_s,
         "results_used": used,
-        "mode": _mode(completion, cutoff, post, replay),
+        "mode": _mode(completion, (post, latest), replay),
     }
 
 
@@ -217,6 +258,7 @@ def verify_replay(
     card_version: str,
 ) -> list[str]:
     """The problems found recomputing each ok record from its recorded inputs; [] when none."""
+    _refuse_observed(model)
     rows = {r["race_id"]: r for r in card.to_dict("records")}
     problems: list[str] = []
     for rec in records:
@@ -229,13 +271,17 @@ def verify_replay(
         if race_id not in rows:
             problems.append(f"{race_id}: not on the card")
             continue
+        snapshot = _stamp(rec.get("input_snapshot_utc"))
+        if snapshot is None:
+            problems.append(f"{race_id}: no input snapshot recorded")
+            continue
         again = record_race(
             rows[race_id],
             model=model,
             results=results,
             model_version=model_version,
             card_version=card_version,
-            now=lambda: pd.Timestamp.now("UTC"),
+            now=lambda at=snapshot: at,  # the inputs as the recorded snapshot saw them
             replay=True,
         )
         if again["status"] != OK:
@@ -253,6 +299,14 @@ def verify_replay(
             )
         for rid, seen in sorted(source - recorded, key=repr):
             problems.append(f"{race_id}: results_used lacks {rid} first seen {_iso(seen)}")
+        values = {u["race_id"]: u["top3_time_s"] for u in again["results_used"]}
+        for u in rec["results_used"]:
+            want = values.get(u["race_id"])
+            if want is not None and not _close(u.get("top3_time_s"), want):
+                problems.append(
+                    f"{race_id}: results_used has {u['race_id']} at top3_time_s "
+                    f"{u.get('top3_time_s')}, the source has {want}"
+                )
         for name in ("par_s", "same_day_s"):
             if not _close(rec.get(name), again[name]):
                 problems.append(f"{race_id}: {name} {rec.get(name)} recomputes as {again[name]}")
