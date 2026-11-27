@@ -52,6 +52,7 @@ __all__ = [
     "RunRecord",
     "default_registry",
     "summary_dir",
+    "summary_stem",
     "write_summary",
 ]
 
@@ -224,7 +225,7 @@ def _problem(r: RunRecord) -> str | None:
     return None
 
 
-def _summary_stem(family_id: str) -> str | None:
+def summary_stem(family_id: str) -> str | None:
     """The stem of the family's summary file (each ``/`` of a legacy id mapped to ``--``), or
     None when that is not a safe file stem or is the index's in any case (macOS ignores case)."""
     stem = family_id.replace("/", "--")
@@ -235,7 +236,7 @@ def _summary_stem(family_id: str) -> str | None:
 
 def _unnameable(family_id: str) -> str | None:
     """Why a new family id cannot be its own summary file name, or None."""
-    if _summary_stem(family_id) != family_id:
+    if summary_stem(family_id) != family_id:
         return (
             f"family_id {family_id!r} cannot be a summary file name: start with an ASCII letter "
             f"or digit, then letters, digits, '.', '_' or '-', and not {_INDEX_STEM!r}"
@@ -343,7 +344,7 @@ class Registry:
                 raise RecordRefused(f"run {run_id} is already in the registry")
             name = record.family_id.casefold()
             for other in {r.family_id for r in chain.runs} - {record.family_id}:
-                if (_summary_stem(other) or "").casefold() == name:
+                if (summary_stem(other) or "").casefold() == name:
                     raise RecordRefused(
                         f"family {record.family_id!r} would share its summary file with {other!r}"
                     )
@@ -506,7 +507,7 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
     stems: dict[str, str] = {}
     taken: dict[str, str] = {}
     for family in families:
-        stem = _summary_stem(family)
+        stem = summary_stem(family)
         if stem is None:
             raise ValueError(f"family {family!r} cannot be a summary file name")
         if (other := taken.setdefault(stem.casefold(), family)) != family:
