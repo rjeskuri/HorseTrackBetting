@@ -3,12 +3,12 @@
 `quick_tunnel(port)` starts `cloudflared tunnel --url http://127.0.0.1:<port> --no-autoupdate`
 (cloudflared found on PATH), reads its output until the `https://<name>.trycloudflare.com` URL
 appears and then on until the first registered connection (a `Registered tunnel connection` line:
-the banner comes before the tunnel can serve), and only then yields that URL. The output is drained
-unread for as long as the child runs, so it never blocks on a full pipe and nothing it logs later
-reaches the terminal. When the block exits,
-normally or by an exception, KeyboardInterrupt included, the child is terminated and killed if it
-still runs `STOP_GRACE_S` later. A quick-tunnel URL is public: the server behind it gates every
-path with an access token (`server.make_server(token=...)`).
+the banner comes before the tunnel can serve), and only then, if cloudflared still runs, yields
+that URL. The output is drained unread for as long as the child runs, so it never blocks on a full
+pipe and nothing it logs later reaches the terminal. When the block exits, normally or by an
+exception, KeyboardInterrupt included, the child is terminated and killed if it still runs
+`STOP_GRACE_S` later. A quick-tunnel URL is public: the server behind it gates every path with an
+access token (`server.make_server(token=...)`).
 """
 
 from __future__ import annotations
@@ -105,8 +105,8 @@ def _stop(child: subprocess.Popen[bytes], output: _Output) -> None:
 def quick_tunnel(port: int, *, timeout_s: float = 30.0) -> Iterator[str]:
     """Run a cloudflared quick tunnel to http://127.0.0.1:`port` and yield its public URL once a
     connection registered. TunnelError when cloudflared is not on PATH, exits before printing a URL
-    or before a connection registered, or did not do both within `timeout_s`; no child is left
-    running in any case."""
+    or before a connection registered, has exited by the time the URL would be yielded, or did not
+    do both within `timeout_s`; no child is left running in any case."""
     exe = shutil.which("cloudflared")
     if exe is None:
         raise TunnelError(
@@ -124,6 +124,7 @@ def quick_tunnel(port: int, *, timeout_s: float = 30.0) -> Iterator[str]:
     output.start()
     try:
         ended = output.ready.wait(timeout_s)  # one wait: the URL and a registration both fit
+        reason = None
         if not output.registered or output.url is None:
             if output.url is None:
                 what, missed = "printing a tunnel URL", "printed no tunnel URL"
@@ -133,6 +134,9 @@ def quick_tunnel(port: int, *, timeout_s: float = 30.0) -> Iterator[str]:
                 reason = f"cloudflared exited before {what}"
             else:
                 reason = f"cloudflared {missed} within {timeout_s:g} s"
+        elif child.poll() is not None:  # registered, then gone before the handoff
+            reason = "cloudflared exited after a tunnel connection registered, before the handoff"
+        if reason is not None:
             last = " | ".join(output.tail)
             raise TunnelError(f"{reason}: {last}" if last else reason)
         yield output.url

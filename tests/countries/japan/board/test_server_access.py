@@ -54,11 +54,19 @@ The tunnel
   side` and the other lines of a failing connection are not a registration. It keeps draining the
   child's output afterwards, so cloudflared never blocks on a full pipe. `TunnelError` (exported by
   the module, its message naming cloudflared) when cloudflared is not on PATH, when the child exits
-  before printing a URL or before a connection registered, or when the URL and a registered
-  connection did not both come within `timeout_s`; in each case no child is left running. On exit,
-  normal or by an exception (KeyboardInterrupt included, which propagates), the child is terminated
-  and, if it is still running a few seconds later (at most 5), killed, so the exit takes under 10 s
-  even for a child that ignores SIGTERM.
+  before printing a URL or before a connection registered, when it registered a connection but has
+  exited by the time the URL would be yielded (before the handoff), or when the URL and a registered
+  connection did not both come within `timeout_s`; in each case no child is left running. An exit
+  after the handoff, inside the block, raises nothing: a warning naming cloudflared is logged (or
+  written to stderr) while the block runs on, and the block's exit is clean. On exit, normal or by
+  an exception (KeyboardInterrupt included, which propagates), the child is terminated and, if it
+  is still running a few seconds later (at most 5), killed, so the exit takes under 10 s even for a
+  child that ignores SIGTERM.
+- The exit-before-the-handoff tests make that window certain rather than a race through one seam:
+  `quick_tunnel` waits for its output with `threading.Event.wait` in the thread that entered it (as
+  it does today), and `held_wait`, patched over `threading.Event.wait`, returns from such a wait
+  only once the fake child has exited (a zombie counts: `Popen.poll` sees it) and the threads
+  started since have ended (its output read to EOF). The tests check that the seam fired.
 
 The command
 - `horsetrack japan board-serve --date D --tunnel [--port N] [--page P]` makes a token in memory,
@@ -69,17 +77,17 @@ The command
   empty, query only `t`; stdout or stderr). The token file then holds the token of that URL. The
   token appears nowhere else in its stdout or stderr, nor in any file under the data dir but the
   token file. On SIGINT or SIGTERM it stops within 15 s and the cloudflared child is gone. A start
-  that fails, the port taken, cloudflared missing from PATH, or cloudflared exiting before its URL
-  or before a connection registered, exits non-zero, prints no phone URL, leaves no cloudflared
-  running and leaves the token file as it was: an earlier one byte for byte, none when there was
-  none. Without cloudflared on PATH it names cloudflared on stderr. Without `--tunnel` nothing
-  changes: no token, no token file, no cloudflared started.
+  that fails, the port taken, cloudflared missing from PATH, or cloudflared exiting before its URL,
+  before a connection registered or after one but before the handoff, exits non-zero, prints no
+  phone URL, leaves no cloudflared running and leaves the token file as it was: an earlier one byte
+  for byte, none when there was none. Without cloudflared on PATH it names cloudflared on stderr.
+  Without `--tunnel` nothing changes: no token, no token file, no cloudflared started.
 
 No real cloudflared ever runs: a fake `cloudflared` (a sh wrapper exec-ing this interpreter on a
 small script) is the only one on a PATH of it and /usr/bin:/bin. It records its argv and pid, prints
 a realistic quick-tunnel banner and, by default, a registered connection on stderr, then sleeps;
-a test can make it print more later, pause, leave a marker file, or exit. Ports are 0, unused, or
-held by the test; no external network.
+a test can make it print more later, pause, leave a marker file, wait for one, or exit. Ports are
+0, unused, or held by the test; no external network.
 """
 
 from __future__ import annotations
@@ -754,6 +762,9 @@ for kind, arg in CONFIG["later"]:
         time.sleep(arg)
     elif kind == "mark":
         open(os.path.join(CONFIG["records"], str(pid) + "." + arg), "w").close()
+    elif kind == "await":
+        while not os.path.exists(os.path.join(CONFIG["records"], str(pid) + "." + arg)):
+            time.sleep(0.01)
 if CONFIG["flood"]:
     line = ("2026-11-28T01:02:03Z INF Registered tunnel connection connIndex=1 event=0 "
             "ip=198.41.200.13 location=nrt01 protocol=quic\\n")
@@ -790,6 +801,62 @@ def gone_within(pid: int, seconds: float) -> bool:
     return not alive(pid)
 
 
+def held_wait(records: str, hold_s: float = 5.0):
+    """A `threading.Event.wait` that makes cloudflared's exit between its registered connection and
+    the handoff certain instead of a race. Once a fake cloudflared started after this call has
+    written its run record under `records`, a wait in the thread that called this returns only after
+    that child has exited (a zombie counts, as `Popen.poll` sees it) and every thread started since
+    this call has ended (the child's output read to EOF), within `hold_s` in all, and leaves the
+    file `records/held`. Self-contained, so its source also runs in a board-serve process."""
+    import glob
+    import json
+    import os
+    import shutil
+    import subprocess
+    import threading
+    import time
+
+    real_wait = threading.Event.wait
+    owner = threading.current_thread()
+    before = set(threading.enumerate())
+    known = set(glob.glob(os.path.join(records, "*.json")))
+    ps = shutil.which("ps") or "/bin/ps"
+    state = {"until": None, "inside": False}
+
+    def exited(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        stat = subprocess.run([ps, "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+        return not stat.stdout.strip() or stat.stdout.strip().startswith("Z")
+
+    def wait(self, timeout=None):
+        flag = real_wait(self, timeout)
+        runs = set(glob.glob(os.path.join(records, "*.json"))) - known
+        if state["inside"] or threading.current_thread() is not owner or not runs:
+            return flag
+        state["inside"] = True
+        try:
+            if state["until"] is None:
+                state["until"] = time.monotonic() + hold_s
+            for run in runs:
+                with open(run, encoding="utf-8") as fh:
+                    pid = json.load(fh)["pid"]
+                while not exited(pid) and time.monotonic() < state["until"]:
+                    time.sleep(0.01)
+            for thread in set(threading.enumerate()) - before:
+                thread.join(max(0.0, state["until"] - time.monotonic()))
+            open(os.path.join(records, "held"), "w").close()
+        finally:
+            state["inside"] = False
+        return self.is_set()
+
+    return wait
+
+
 @dataclass
 class FakeCloudflared:
     bin_dir: Path
@@ -807,7 +874,8 @@ class FakeCloudflared:
         flood: int = 0,
     ) -> None:
         """`banner` on stderr at once, then the `later` steps in order: ("write", text),
-        ("sleep", seconds) or ("mark", name), a file `marked(pid, name)` sees; then `then`."""
+        ("sleep", seconds), ("mark", name), a file `marked(pid, name)` sees, or ("await", name),
+        until `mark(pid, name)`; then `then`."""
         config = {
             "records": str(self.records),
             "banner": banner,
@@ -848,6 +916,9 @@ class FakeCloudflared:
 
     def marked(self, pid: int, name: str) -> bool:
         return (self.records / f"{pid}.{name}").exists()
+
+    def mark(self, pid: int, name: str) -> None:
+        (self.records / f"{pid}.{name}").touch()
 
 
 @pytest.fixture
@@ -972,6 +1043,63 @@ def test_cloudflared_exiting_after_its_url_but_before_a_connection_is_a_tunnel_e
     assert gone_within(fake.the_run()["pid"], 5)
 
 
+# what cloudflared prints after a registered connection when the connection drops and it quits
+DROPPED = (
+    f'{STAMP} ERR Serve tunnel error error="connection with edge closed" connIndex=0 event=0 '
+    "ip=198.41.200.13\n"
+    f"{STAMP} INF Unregistered tunnel connection connIndex=0 event=0 ip=198.41.200.13\n"
+    f"{STAMP} INF Tunnel server stopped\n"
+)
+
+
+@pytest.mark.parametrize(
+    "after", [pytest.param("", id="at-once"), pytest.param(DROPPED, id="connection-dropped")]
+)
+def test_cloudflared_exiting_after_a_connection_is_an_error_only_before_the_handoff(
+    fake, monkeypatch, caplog, capfd, after
+):
+    board_server = server_module()
+    caplog.set_level(logging.WARNING)
+    stderr: list[str] = []
+
+    def warned() -> bool:
+        stderr.append(capfd.readouterr().err)
+        logged = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        return any("cloudflared" in text.lower() for text in [*logged, "".join(stderr)])
+
+    # after the handoff (the ruled behaviour, kept): the block runs on, a warning names
+    # cloudflared, and the block's exit raises nothing
+    name = random_name()
+    fake.install(banner(name, 18423), later=(("await", "quit"), ("write", after)), then="exit")
+    with board_server.quick_tunnel(18423, timeout_s=10) as url:
+        assert url == f"https://{name}.trycloudflare.com"
+        first = fake.the_run()["pid"]
+        fake.mark(first, "quit")
+        assert gone_within(first, 5), "the fake did not exit"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not warned():
+            time.sleep(0.05)
+        assert warned(), "cloudflared exited under a running server without a warning"
+
+    # before the handoff: the same exit, the window made certain by held_wait, is a TunnelError
+    fake.install(banner(random_name(), 18423) + after, then="exit")
+    started = time.monotonic()
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Event, "wait", held_wait(str(fake.records)))
+        with pytest.raises(board_server.TunnelError) as caught:
+            with board_server.quick_tunnel(18423, timeout_s=30):
+                pytest.fail(
+                    "cloudflared exited after its connection registered but before the handoff, "
+                    "yet the tunnel was entered"
+                )
+
+    assert (fake.records / "held").exists(), "the seam did not fire: no threading.Event.wait"
+    assert time.monotonic() - started < 15, "an exited child was waited on until the timeout"
+    assert "cloudflared" in str(caught.value).lower()
+    (second,) = {run["pid"] for run in fake.runs()} - {first}
+    assert gone_within(second, 5), "a child that exited before the handoff was left running"
+
+
 @pytest.mark.parametrize("after", AFTER_THE_URL)
 def test_no_registered_connection_within_the_timeout_is_a_tunnel_error(fake, after):
     board_server = server_module()
@@ -1022,13 +1150,26 @@ def test_cloudflared_missing_from_path_is_a_clear_error(tmp_path, monkeypatch):
 CLI = "from horsetrack.cli import app; app()"
 
 
+def held_cli(records: Path) -> str:
+    """`CLI`, with `held_wait` over `threading.Event.wait` in board-serve's main thread."""
+    return "\n".join(
+        [
+            "from __future__ import annotations",
+            "import threading",
+            inspect.getsource(held_wait),
+            f"threading.Event.wait = held_wait({str(records)!r})",
+            CLI,
+        ]
+    )
+
+
 class Command:
     """`horsetrack japan board-serve ...` as a child process, its output read as it comes."""
 
-    def __init__(self, args: list[str], *, cwd: Path):
+    def __init__(self, args: list[str], *, cwd: Path, code: str = CLI):
         process_env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         self.proc = subprocess.Popen(
-            [sys.executable, "-c", CLI, "japan", "board-serve", *args],
+            [sys.executable, "-c", code, "japan", "board-serve", *args],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1081,11 +1222,11 @@ class Command:
 
 
 @pytest.fixture
-def command(tmp_path) -> Iterator[Callable[[list[str]], Command]]:
+def command(tmp_path) -> Iterator[Callable[..., Command]]:
     started: list[Command] = []
 
-    def start(args: list[str]) -> Command:
-        cmd = Command(args, cwd=tmp_path)
+    def start(args: list[str], code: str = CLI) -> Command:
+        cmd = Command(args, cwd=tmp_path, code=code)
         started.append(cmd)
         return cmd
 
@@ -1174,7 +1315,13 @@ PHONE_URL = re.compile(r"trycloudflare\.com[^\s]*\?t=")
 
 @pytest.mark.parametrize(
     "failure",
-    ["port-taken", "no-cloudflared", "exits-before-url", "exits-before-a-connection"],
+    [
+        "port-taken",
+        "no-cloudflared",
+        "exits-before-url",
+        "exits-before-a-connection",
+        "exits-after-a-connection-before-the-handoff",
+    ],
 )
 def test_a_failed_start_leaves_the_token_file_as_it_was(
     fake, command, site, data_dir, tmp_path, monkeypatch, failure
@@ -1184,7 +1331,7 @@ def test_a_failed_start_leaves_the_token_file_as_it_was(
     prior = (fresh_token() + "\n").encode("ascii")  # what an earlier run, still serving, wrote
     path.write_bytes(prior)
     path.chmod(0o600)
-    port, holder = "0", None
+    port, holder, code = "0", None, CLI
     if failure == "port-taken":  # a second launch on a port the first one holds
         fake.install(banner(random_name()))
         holder = socket.socket()
@@ -1197,8 +1344,11 @@ def test_a_failed_start_leaves_the_token_file_as_it_was(
         monkeypatch.setenv("PATH", str(empty))
     elif failure == "exits-before-url":
         fake.install(OFFLINE, then="exit")
-    else:
+    elif failure == "exits-before-a-connection":
         fake.install(banner(random_name(), registered=False) + NOT_REGISTERED, then="exit")
+    else:  # registered, then gone before the handoff: held_wait makes the window certain
+        fake.install(banner(random_name()) + DROPPED, then="exit")
+        code = held_cli(fake.records)
     try:
         cmd = command(
             [
@@ -1209,15 +1359,16 @@ def test_a_failed_start_leaves_the_token_file_as_it_was(
                 "--page",
                 str(site / "board.html"),
                 "--tunnel",
-            ]
+            ],
+            code,
         )
-        code = cmd.finish(timeout=20)
+        exit_code = cmd.finish(timeout=20)
     finally:
         if holder is not None:
             holder.close()
 
-    assert code is not None, f"board-serve kept running after a failed start:\n{cmd.text()}"
-    assert code != 0, cmd.text()
+    assert exit_code is not None, f"board-serve kept running after a failed start:\n{cmd.text()}"
+    assert exit_code != 0, cmd.text()
     assert path.read_bytes() == prior, "a failed start replaced the token a running tunnel serves"
     assert sorted(p.name for p in path.parent.iterdir()) == ["access-token"]
     assert not PHONE_URL.search(cmd.text()), f"a phone URL for a tunnel that is down:\n{cmd.text()}"
@@ -1225,6 +1376,8 @@ def test_a_failed_start_leaves_the_token_file_as_it_was(
         assert fake.runs() == [], "cloudflared started for a server that never bound"
     for run in fake.runs():
         assert gone_within(run["pid"], 5), "a cloudflared child outlived the failed start"
+    if code != CLI:
+        assert (fake.records / "held").exists(), "the seam did not fire: no threading.Event.wait"
 
 
 def free_port() -> int:

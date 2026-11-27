@@ -149,18 +149,19 @@ Code: `src/horsetrack/countries/japan/board/server.py` (the gate, `write_access_
   on PATH (`brew install cloudflared`). It reads the `https://<name>.trycloudflare.com` URL from
   cloudflared's output (never `api.` or `login.trycloudflare.com`), then waits for the first
   `Registered tunnel connection` line (the banner comes before the tunnel can serve), and drains
-  the rest unread. cloudflared missing, exiting, or not printing both within 30 s stops board-serve
-  with an error naming it. The
-  child is terminated, and killed 5 s later if it still runs, whenever the server stops (Ctrl-C,
-  SIGTERM, an error), so no tunnel outlives it; if cloudflared dies first, a warning says so.
+  the rest unread. cloudflared missing, exiting before the URL is handed over (after a registered
+  connection included), or not printing both within 30 s stops board-serve with an error naming
+  it. The child is terminated, and killed 5 s later if it still runs, whenever the server stops
+  (Ctrl-C, SIGTERM, an error), so no tunnel outlives it; if cloudflared dies first, a warning says
+  so.
 - Token: a quick-tunnel URL is public, so every path needs an access token, a fresh
   `secrets.token_urlsafe(24)` per run, held in memory until the server is bound and the tunnel is
   up, then written to `$HORSETRACK_DATA_DIR/board/access-token` (mode 0600, never in the
   repository, a symlinked `board/` included). A start that fails (the port taken, cloudflared
-  missing or exiting before its URL or a connection) exits non-zero and leaves that file as it
-  was, so a tunnel still serving keeps its token there. It is printed once, in the phone URL line
-  `open on the phone: https://<name>.trycloudflare.com/shadow?t=<token>`; the request log blanks
-  query strings and the token.
+  missing or exiting before its URL, a connection or the handoff) exits non-zero and leaves that
+  file as it was, so a tunnel still serving keeps its token there. It is printed once, in the
+  phone URL line `open on the phone: https://<name>.trycloudflare.com/shadow?t=<token>`; the
+  request log blanks query strings and the token.
 - Cookie: a request with the right `?t=` is served and gets `Set-Cookie: board_access=<token>;
   Path=/; HttpOnly; SameSite=Strict`, with `Secure` when it came over https (`X-Forwarded-Proto:
   https`), so the page's relative fetches (`feed`, `shadow-feed`, `board.js`, `shadow.js`) carry
