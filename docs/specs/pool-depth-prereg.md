@@ -116,3 +116,10 @@ quantiles above. It replaces #283's measure from the logged odds, which had no l
 
 TIERCE (too many combinations for exact quantiles in memory on this machine; a streaming exact
 quantile is a follow-up) and BRACKET_QUINELLA (needs the horse-to-bracket map).
+
+## After the run (2026-11-27; not part of the frozen spec)
+
+The three runs are in `docs/experiments/pool-depth-japan.md`. The `co-placer` run was recorded
+**failed** by its rule check (the share the rule reproduced: withheld (D21)). A co-placer variant
+on another rule (for instance that of `core.pricing.stake_back_share_dividend`) is a new family,
+frozen before it runs.
