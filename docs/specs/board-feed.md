@@ -22,6 +22,7 @@ log is exactly the board over its tier-1 rows, and a day's trifecta boards are n
                                    rows: [{combination, odds, odds_hi, status,
                                            morning_odds, move_morning_pct,
                                            t20_odds, move_t20_pct,
+                                           t10_odds, t5_odds,
                                            t2_odds, move_t20_t2_pct}]}}}]}]}
 ```
 
@@ -62,11 +63,20 @@ that moment. `generated_utc` is `now()`.
 - T-2 reference (`t2_odds`, ticket #498): picked exactly as `t20_odds` is, at post - 2 min: the
   latest row captured at or before post - 2 min, when that row is priced; null while `now` is
   before post - 2 min, without a post time, and when the combination has no row by then.
+- T-10 and T-5 references (`t10_odds`, `t5_odds`, ticket #499): picked exactly as `t20_odds` is,
+  at post - 10 min and post - 5 min. The shadow page's odds ladder falls back to these four
+  references when a row has no shadow ladder, and, as the two feeds refresh apart, shows a
+  non-null reference as observed in place of a projected or null ladder point (an observed
+  ladder point stays), but only when the plain race's `post_utc` equals the shadow race's: on a
+  delayed post one feed may still carry the old post time, its checkpoints are for another
+  schedule, and the ladder shows as it is. The race header (post time and minutes to post)
+  shows the later of the two feeds' post times. `board-serve` rebuilds `/feed` when any of post - 20,
+  10, 5 or 2 min passes, so each reference fills at its cutoff without a log write.
 - Move: `current / reference - 1`, in percent rounded to one decimal, on `odds` (the low figure
   of a ranged pool such as PLACE or QUINELLA_PLACE). Null when either figure is missing.
 - T-20 -> T-2 move (`move_t20_t2_pct`): `t2_odds / t20_odds - 1`, rounded the same way; null
-  without both references. The shadow page shows it in its T-20→T-2 column; before the T-2
-  capture exists it is null and the page shows '-'.
+  without both references. The shadow page no longer shows it (#499 replaced its T-20→T-2 column
+  with the odds ladder); the field stays for the record.
 
 ## Scratches
 
@@ -101,9 +111,9 @@ cache=None) -> dict`
 {race_date, generated_utc,
  models: {win, ordering, nowcast} | null,
  races: [{race_id, venue, race_no, post_utc, minutes_to_post, tau_bucket_min, board_capture_utc,
-          pools: {WIN:            {"7":   {value_mean, value_q05, value_q95, flags}},
-                  PLACE:          {"7":   {value_at_low, value_at_high, flags}},
-                  QUINELLA_PLACE: {"3,7": {value_at_low, value_at_high, flags}}}}],
+          pools: {WIN:            {"7":   {value_mean, value_q05, value_q95, flags, ladder}},
+                  PLACE:          {"7":   {value_at_low, value_at_high, flags, ladder}},
+                  QUINELLA_PLACE: {"3,7": {value_at_low, value_at_high, flags, ladder}}}}],
  win5: {race_date, capture_utc, investment, carryover, pool_ev} | null}
 ```
 
@@ -135,13 +145,89 @@ cache=None) -> dict`
   board; the plain feed and board page stay free of it.
 - No key names a stake, a bet, Kelly, an amount or a wager.
 
+### The odds ladder
+
+`ladder` (ticket #499): the entry's odds at the checkpoints 20, 10, 5 and 2 minutes before the
+post and at the final, keyed `20`, `10`, `5`, `2`, `0` (text once JSON), each
+`{"odds": x, "observed": true}`, `{"odds": x, "observed": false}` or null. Display only: it feeds
+no value, flag, row order, shadow log record or `verify()`.
+
+- Observed, k > 0: once `now` is at or after post - k, the latest row of the combination captured
+  (`snapshot_utc`) at or before post - k among the rows available by `now`, the `t20_odds` rule of
+  the plain feed; null when that row is unpriced or there is none, and always without a post time.
+- Observed, the final (0): once the final board exists (`final_board` over the captures that show
+  a final price, available by `now`), that board's figure. Until then the final is projected.
+- Projected: a checkpoint still ahead, from O_now (the board's current figure) with the nowcast
+  the values use (`models.nowcast`, the loader pointer's fit; read, never refitted):
+  `ln O_k = ln O_now + mu(tau_now, b) - mu(k, b)`, `b = band_of(O_now, nowcast.bands)` for both
+  terms. `mu(pool, tau, b)` is the fitted cell's mean, the expected `ln O_final - ln O_tau`, on the
+  nowcast's grid; between neighbouring grid taus (T-20, T-10, an off-grid tau_now) it is linear in
+  tau, below the smallest grid tau linear toward `mu(0) = 0`, and beyond the largest (T-60) it is
+  that cell's. mu reads only the cells it needs (the exact grid cell, or the two bracketing tau);
+  a checkpoint whose projection needs a cell the fit lacks (for tau_now or for k) is null, the
+  others still project. `tau_now` is the minutes from the fetch of the row O_now comes from to
+  the post, 0 after the post: the row's availability (`fetched_utc`, else `snapshot_utc`;
+  `snapshot._available`), the row being the latest by availability (then log order) among those
+  available by `now`. The native logger stamps a capture before it fetches the odds pages, so a
+  row snapped at post - 12 and fetched at post - 11 projects from tau 11. With staggered captures
+  each pool projects from its own row's fetch, not from the race's newest capture of another
+  pool. The observed checkpoints keep the capture rule above (`snapshot_utc` at or before
+  post - k, among the rows available by `now`). The figure shown is `exp(ln O_k)`, the median odds under the nowcast's
+  log-normal drift (the mean would add `sigma^2 / 2`; the median is the forecast a reader can hold
+  half above and half below), floored at 1.0 and rounded to two decimals. It is a forecast of the
+  crowd's drift, not a value and not a signal.
+- Pools: the low figure throughout (Place and Wide). Projections exist for the nowcast's pools,
+  WIN, PLACE and QUINELLA_PLACE; a pool the nowcast has no cells for, a nowcast without cells
+  (a fake), no models or no post time gives null for every checkpoint ahead, the observed ones
+  staying.
+
 Recompute: `cache` is a mapping the caller keeps between builds (the server keeps one). A race's
 values are recomputed only when its board (`board_capture_utc` and its figures) or its bucket
 changed; flags read the clock on every build. The same mapping holds the log readers, so a build
-parses only the members appended since the last one; a clock that goes back reads the logs again.
+parses only the members appended since the last one; a clock that goes back, or a change of the
+day's post times, reads the logs again. The ladder is formed on every build (it follows the clock)
+from per-checkpoint references kept as the rows are read, so no capture history is held.
 
 Serving: `/shadow-feed` has the headers, gzip, ETag and 304 of `/feed`. It is rebuilt at most
 every `min_rebuild_s`, whether or not a log changed (buckets and the stale flag follow the clock),
 and its body and ETag change only when something other than `generated_utc` and
 `minutes_to_post` did, so the page's poll costs a 304 between captures; the page counts down to
 the post from `post_utc`. `board-serve` loads the models once at start with `load_shadow_models`.
+
+## Access
+
+Code: `src/horsetrack/countries/japan/board/server.py` (the gate, `write_access_token`) and
+`src/horsetrack/countries/japan/board/tunnel.py` (`quick_tunnel`), ticket #505.
+
+- Without `--tunnel`, `board-serve` is as above: bound to 127.0.0.1, no token, no cookie.
+- Tunnel: `board-serve --tunnel` serves on 127.0.0.1 only (another `--host` is refused) and starts
+  `cloudflared tunnel --url http://127.0.0.1:<port> --no-autoupdate` as a child, cloudflared found
+  on PATH (`brew install cloudflared`). It reads the `https://<name>.trycloudflare.com` URL from
+  cloudflared's output (never `api.` or `login.trycloudflare.com`), then waits for the first
+  `Registered tunnel connection` line (the banner comes before the tunnel can serve), and drains
+  the rest unread. cloudflared missing, exiting before the URL is handed over (after a registered
+  connection included), or not printing both within 30 s stops board-serve with an error naming
+  it. The child is terminated, and killed 5 s later if it still runs, whenever the server stops
+  (Ctrl-C, SIGTERM, an error), so no tunnel outlives it; if cloudflared dies first, a warning says
+  so.
+- Token: a quick-tunnel URL is public, so every path needs an access token, a fresh
+  `secrets.token_urlsafe(24)` per run, held in memory until the server is bound and the tunnel is
+  up, then written to `$HORSETRACK_DATA_DIR/board/access-token` (mode 0600, never in the
+  repository, a symlinked `board/` included). A start that fails (the port taken, cloudflared
+  missing or exiting before its URL, a connection or the handoff) exits non-zero and leaves that
+  file as it was, so a tunnel still serving keeps its token there. It is printed once, in the
+  phone URL line `open on the phone: https://<name>.trycloudflare.com/shadow?t=<token>`; the
+  request log blanks query strings and the token.
+- Cookie: a request with the right `?t=` is served and gets `Set-Cookie: board_access=<token>;
+  Path=/; HttpOnly; SameSite=Strict`, with `Secure` when it came over https (`X-Forwarded-Proto:
+  https`), so the page's relative fetches (`feed`, `shadow-feed`, `board.js`, `shadow.js`) carry
+  it. Either is compared with `hmac.compare_digest` on bytes.
+- 404: a missing or wrong token gets a 404 with an empty body, the same response as an unknown
+  path, and before any 503. The check holds for requests from 127.0.0.1 too, since the tunnel
+  connects from there.
+- Headers: every response, in both modes, carries Cache-Control no-store, X-Robots-Tag noindex
+  nofollow, Referrer-Policy no-referrer, X-Content-Type-Options nosniff and X-Frame-Options DENY.
+  The pages carry no data beyond the feeds above.
+
+Race day (#124): `horsetrack japan board-serve --date 2026-11-28 --from-vm htb-vm --tunnel`, then
+open the printed URL on the phone; `/shadow` without the token is a 404.
