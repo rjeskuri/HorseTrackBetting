@@ -8,7 +8,8 @@ JRDB-derived (D21): its records carry the source `jrdb`, the registry summary wi
 their values and the full report goes through `write_report`, outside the repository. HKTrack is
 read, never written or run: only the key and member columns of the file.
 
-The final Win price and outcomes come from this repository's JRA store (`read_store_table`:
+The final Win price and outcomes come from this repository's JRA store (`read_development` takes
+a `source`, #404, 'jravan' for the JRA-VAN copy; `run_study` reads the JRA one; `read_store_table`:
 column- and date-scoped, holdout days dropped, nothing before 2014-06-07; then `split_off`'s
 development rows; the holdout is never opened). q is the normalised final Win price. The D4
 baseline is the calibrated market (`models.v0.calibration`, a spline in ln q) fitted in-fold on
@@ -282,12 +283,18 @@ def build_spec(scheme: FoldScheme, bootstrap: dict, thresholds: list[float], dig
 # --------------------------------------------------------------------------- rows
 
 
-def read_development() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Development runners and races of the price era, column- and date-scoped."""
+def read_development(*, source: str = "jra") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Development runners and races of the price era, column- and date-scoped, from the store
+    copy `source` (`read_store_table`'s; 'jravan' reads the JRA-VAN copy)."""
     frames = []
     for name, columns in (("runners", RUNNER_COLUMNS), ("races", RACE_COLUMNS)):
         table = read_store_table(
-            name, columns=columns, start=PRICE_ERA_START, end=date.max, touches_price=True
+            name,
+            columns=columns,
+            start=PRICE_ERA_START,
+            end=date.max,
+            touches_price=True,
+            source=source,
         )
         development, _ = split_off(table.to_pandas(date_as_object=False), "race_date", COUNTRY)
         frames.append(development)

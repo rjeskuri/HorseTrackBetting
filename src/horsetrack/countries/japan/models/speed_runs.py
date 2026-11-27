@@ -23,7 +23,8 @@ module builds both from the store's races and runners only (no JRDB table, D21).
   the frame's columns minus the result; each style reads the horse's starts in other kept races
   published strictly before at_utc. A card after the off (at_utc > post_utc), for a race on a
   holdout day, a jump race or a race without a post time is refused (ValueError).
-- `read_inputs(*, start, end)`: the JRA store's races and runners with start <= race_date <= end
+- `read_inputs(*, start, end, source="jra")`: the store copy's races and runners (the JRA store
+  by default; `source="jravan"` the JRA-VAN copy, #404) with start <= race_date <= end
   through #114's scoped reader (`models.v0.store.read_store_table`): only the columns above (no
   price column), the date range pushed into the scan, holdout days never returned.
 
@@ -53,7 +54,7 @@ from horsetrack.countries.japan.studies.speed_run import (
 )
 
 COUNTRY = "japan"
-SOURCE = "jra"  # the store's JRA results (netkeiba); no JRDB, no JRA-VAN
+SOURCE = "jra"  # read_inputs' default: the store's JRA results (netkeiba); no JRDB
 STYLE_WINDOW = 5  # #129: the newest 5 starts with a first-corner position
 RACE_COLUMNS = (
     "race_id",
@@ -225,12 +226,15 @@ def build_card(races: pd.DataFrame, runners: pd.DataFrame, race_id: str, *, at_u
     return card.loc[:, list(CARD_COLUMNS)]
 
 
-def read_inputs(*, start: date, end: date) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """The JRA store's races (RACE_COLUMNS) and runners (RUNNER_COLUMNS) with start <= race_date
-    <= end, column- and date-scoped, holdout days never returned. No price column is read."""
+def read_inputs(
+    *, start: date, end: date, source: str = SOURCE
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The store copy `source`'s races (RACE_COLUMNS) and runners (RUNNER_COLUMNS) with start <=
+    race_date <= end, column- and date-scoped, holdout days never returned. No price column is
+    read. `source` defaults to the JRA store; 'jravan' reads the JRA-VAN copy."""
     races, runners = (
         read_store_table(
-            name, columns=columns, start=start, end=end, touches_price=False, source=SOURCE
+            name, columns=columns, start=start, end=end, touches_price=False, source=source
         ).to_pandas()
         for name, columns in (("races", RACE_COLUMNS), ("runners", RUNNER_COLUMNS))
     )

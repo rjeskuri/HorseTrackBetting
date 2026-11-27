@@ -25,7 +25,9 @@ mu_before, sigma_before and the member's logp; see `export_frame`). A rerun appe
 the family does not hold: one equal to a held record but for its git commit is the same run
 reproduced. The `meeting_clustered:` stage-2 record (D7's bound, which the frozen stage-2 weight
 rule reads) was added after the first run; the frozen spec is unchanged. The JRA store is
-netkeiba results: no JRDB, no JRA-VAN. Nothing is adopted (D16) and the holdout is never read.
+netkeiba results: no JRDB, no JRA-VAN; `read_results(source=...)` can read another store copy
+(#404: 'jravan', the JRA-VAN copy), but `run_study` reads the JRA one. Nothing is adopted (D16)
+and the holdout is never read.
 CLI: `python -m horsetrack.countries.japan.studies.rating --run [--out DIR]`.
 """
 
@@ -132,14 +134,16 @@ def build_spec(scheme, bootstrap: dict) -> dict:
     }
 
 
-def read_results() -> pd.DataFrame:
-    """The rating's input: every starter of a run race from RATING_FROM, no price column."""
+def read_results(*, source: str = "jra") -> pd.DataFrame:
+    """The rating's input: every starter of a run race from RATING_FROM, no price column, from
+    the store copy `source` (`read_store_table`'s; 'jravan' reads the JRA-VAN copy)."""
     runners = read_store_table(
         "runners",
         columns=["race_id", "horse_id", "finish_pos", "is_scratched"],
         start=RATING_FROM,
         end=date.max,
         touches_price=False,
+        source=source,
     ).to_pandas()
     races = read_store_table(
         "races",
@@ -147,6 +151,7 @@ def read_results() -> pd.DataFrame:
         start=RATING_FROM,
         end=date.max,
         touches_price=False,
+        source=source,
     ).to_pandas(date_as_object=False)
     races = races.loc[races["status"].eq("run")]
     start = pd.to_datetime(races["race_date"]).dt.tz_localize("Asia/Tokyo")

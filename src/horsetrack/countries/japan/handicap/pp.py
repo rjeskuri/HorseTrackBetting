@@ -9,10 +9,12 @@ result counts as published at (race_date + 1 day) 00:00 Asia/Tokyo, the end of i
 Every read goes through #114's scoped reader (`read_store_table`): named columns, a date range and
 a row filter pushed into the scan, holdout days dropped. History is scoped to the race's horses,
 never the whole table. Odds and popularity are read only inside D10's price era (2014-06-07 on);
-an older start keeps its line with those two null.
+an older start keeps its line with those two null. Both functions take `source` (#404), the store
+copy read: 'jra' by default, 'jravan' the JRA-VAN copy.
 
 `build_pp_table(date_from, date_to)` writes one Parquet file per race day under the data dir,
-`features/jra/pp_lines/<YYYY-MM-DD>.parquet`, building one day at a time.
+`features/<source>/pp_lines/<YYYY-MM-DD>.parquet` (`features/jra/...` by default), building one
+day at a time.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 
 from horsetrack.core.paths import data_dir
-from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
+from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, SOURCE, read_store_table
 
 JST = ZoneInfo("Asia/Tokyo")
 DEFAULT_N = 10
@@ -82,25 +84,39 @@ def last_published_day(as_of: datetime) -> date:
     return day if published_at(day) < as_of else day - timedelta(days=1)
 
 
-def pp_lines(race_id: str, *, as_of: datetime, n: int = DEFAULT_N) -> pl.DataFrame:
-    """The PP lines of every declared runner of `race_id` as of `as_of`, newest first."""
+def pp_lines(
+    race_id: str, *, as_of: datetime, n: int = DEFAULT_N, source: str = SOURCE
+) -> pl.DataFrame:
+    """The PP lines of every declared runner of `race_id` as of `as_of`, newest first, read from
+    the store copy `source`."""
     day = race_day_of(race_id)
     last_day = min(day - timedelta(days=1), last_published_day(as_of))
-    entries = _entries(day, where=ds.field("race_id") == race_id)
-    return _lines_for(entries, last_day=last_day, n=n)
+    entries = _entries(day, where=ds.field("race_id") == race_id, source=source)
+    return _lines_for(entries, last_day=last_day, n=n, source=source)
 
 
-def build_pp_table(date_from: date, date_to: date) -> dict[date, Path]:
+def build_pp_table(date_from: date, date_to: date, *, source: str = SOURCE) -> dict[date, Path]:
     """One Parquet file of `pp_lines` (default n, as of the race day) per non-holdout race day in
-    the inclusive range, written under the data dir one day at a time."""
+    the inclusive range of the store copy `source`, written under the data dir's
+    `features/<source>/pp_lines` one day at a time."""
     races = read_store_table(
-        "races", columns=["race_date"], start=date_from, end=date_to, touches_price=False
+        "races",
+        columns=["race_date"],
+        start=date_from,
+        end=date_to,
+        touches_price=False,
+        source=source,
     )
     days = sorted({d for d in races.column("race_date").to_pylist() if d is not None})
-    out_dir = data_dir() / "features" / "jra" / "pp_lines"
+    out_dir = data_dir() / "features" / source / "pp_lines"
     written: dict[date, Path] = {}
     for day in days:
-        frame = _lines_for(_entries(day), last_day=day - timedelta(days=1), n=DEFAULT_N)
+        frame = _lines_for(
+            _entries(day, source=source),
+            last_day=day - timedelta(days=1),
+            n=DEFAULT_N,
+            source=source,
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{day.isoformat()}.parquet"
         tmp = path.with_name(path.name + ".tmp")
@@ -119,16 +135,25 @@ def _read(
     *,
     where: ds.Expression | None = None,
     touches_price: bool = False,
+    source: str = SOURCE,
 ) -> pl.DataFrame:
     table = read_store_table(
-        name, columns=columns, start=start, end=end, touches_price=touches_price, where=where
+        name,
+        columns=columns,
+        start=start,
+        end=end,
+        touches_price=touches_price,
+        where=where,
+        source=source,
     )
     return pl.from_arrow(table)
 
 
-def _entries(day: date, *, where: ds.Expression | None = None) -> pl.DataFrame:
+def _entries(
+    day: date, *, where: ds.Expression | None = None, source: str = SOURCE
+) -> pl.DataFrame:
     """The day's declared runners (not scratched), optionally narrowed to one race."""
-    frame = _read("runners", [*ENTRY_KEYS, "is_scratched"], day, day, where=where)
+    frame = _read("runners", [*ENTRY_KEYS, "is_scratched"], day, day, where=where, source=source)
     return frame.filter(~pl.col("is_scratched").fill_null(False)).select(ENTRY_KEYS)
 
 
@@ -136,14 +161,16 @@ def _is_in(column: str, values: Sequence[str]) -> ds.Expression:
     return ds.field(column).isin(pa.array(list(values), pa.string()))
 
 
-def _lines_for(entries: pl.DataFrame, *, last_day: date, n: int) -> pl.DataFrame:
+def _lines_for(
+    entries: pl.DataFrame, *, last_day: date, n: int, source: str = SOURCE
+) -> pl.DataFrame:
     """The entries joined to their horses' starts on or before `last_day`, at most n each."""
     if n < 1:
         raise ValueError(f"n must be at least 1, got {n}")
     lines = _empty_lines()
     horse_ids = entries.get_column("horse_id").drop_nulls().unique().to_list()
     if horse_ids and last_day >= HISTORY_START:
-        lines = _history(horse_ids, last_day=last_day, n=n)
+        lines = _history(horse_ids, last_day=last_day, n=n, source=source)
     frame = (
         entries.join(lines, on="horse_id", how="left")
         .with_columns(
@@ -157,7 +184,7 @@ def _lines_for(entries: pl.DataFrame, *, last_day: date, n: int) -> pl.DataFrame
     return frame.sort(["race_id", "horse_no", "line_no"], nulls_last=True)
 
 
-def _history(horse_ids: list[str], *, last_day: date, n: int) -> pl.DataFrame:
+def _history(horse_ids: list[str], *, last_day: date, n: int, source: str = SOURCE) -> pl.DataFrame:
     """Each horse's newest n starts on or before `last_day`, with line_no and days_since_prev."""
     starts = (
         _read(
@@ -166,6 +193,7 @@ def _history(horse_ids: list[str], *, last_day: date, n: int) -> pl.DataFrame:
             HISTORY_START,
             last_day,
             where=_is_in("horse_id", horse_ids),
+            source=source,
         )
         .filter(~pl.col("is_scratched").fill_null(False))
         .sort(["horse_id", "race_date", "race_id"], descending=[False, True, True])
@@ -186,7 +214,12 @@ def _history(horse_ids: list[str], *, last_day: date, n: int) -> pl.DataFrame:
     in_races = _is_in("race_id", race_ids)
 
     races = _read(
-        "races", ["race_id", *RACE_COLUMNS, "finish_time_s"], first, last, where=in_races
+        "races",
+        ["race_id", *RACE_COLUMNS, "finish_time_s"],
+        first,
+        last,
+        where=in_races,
+        source=source,
     ).rename({"race_id": "pp_race_id", "finish_time_s": "winner_time_s"})
     ranks = (
         _read(
@@ -195,6 +228,7 @@ def _history(horse_ids: list[str], *, last_day: date, n: int) -> pl.DataFrame:
             first,
             last,
             where=in_races,
+            source=source,
         )  # fmt: skip
         .filter(~pl.col("is_scratched").fill_null(False) & pl.col("last_3f_s").is_not_null())
         .with_columns(pl.col("last_3f_s").rank("min").over("race_id").alias("last_3f_rank"))
@@ -212,6 +246,7 @@ def _history(horse_ids: list[str], *, last_day: date, n: int) -> pl.DataFrame:
             last,
             where=in_races & _is_in("horse_id", horse_ids),
             touches_price=True,
+            source=source,
         ).rename({"race_id": "pp_race_id"})
         starts = starts.join(prices, on=["pp_race_id", "horse_id"], how="left")
     else:

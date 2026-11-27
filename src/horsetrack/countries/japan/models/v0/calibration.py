@@ -337,9 +337,18 @@ def _development_frame(table: pa.Table) -> tuple[pd.DataFrame, dict, dict]:
     return frame, races_left_out, runners_dropped
 
 
-def run_fit(out_dir: Path | None = None, *, n_knots: int = 5, chunk_races: int = 2000) -> dict:
+def run_fit(
+    out_dir: Path | None = None,
+    *,
+    n_knots: int = 5,
+    chunk_races: int = 2000,
+    source: str = "jra",
+) -> dict:
     """Fit the live model on every development race from the price era, write out-of-fold
     predictions over Japan's fold scheme, and write the fit, the predictions and a manifest.
+
+    `source` names the store copy read (#404): 'jra' by default, 'jravan' the JRA-VAN copy; a
+    run on another copy than 'jra' names it in the manifest's `sources`.
 
     An `out_dir` that resolves inside the repository raises `paths.DataDirInsideRepo` before
     anything is read or written."""
@@ -353,6 +362,7 @@ def run_fit(out_dir: Path | None = None, *, n_knots: int = 5, chunk_races: int =
         start=PRICE_ERA_START,
         end=date.max,  # to the store's last date
         touches_price=True,
+        source=source,
     )
     frame, races_left_out, runners_dropped = _development_frame(table)
     del table
@@ -402,6 +412,8 @@ def run_fit(out_dir: Path | None = None, *, n_knots: int = 5, chunk_races: int =
         "oof_path": str(oof_path),
         "manifest_path": str(manifest_path),
     }
+    if source != "jra":  # the default manifest is unchanged
+        manifest["sources"] = [source]
     oof["race_id"] = oof["race_id"].astype(str)
     fit_path.write_text(model.to_json())
     pq.write_table(pa.Table.from_pandas(oof, preserve_index=False), oof_path)

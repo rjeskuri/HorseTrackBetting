@@ -344,13 +344,13 @@ def read_segments(path: Path = CONFIG_PATH) -> tuple[str, ...]:
 # --------------------------------------------------------------------------- the real-data run
 
 
-def _store_build() -> dict[str, str]:
-    """The JRA store's build identity for the registry, as `jra/runners@<built_utc>`."""
+def _store_build(source: str = "jra") -> dict[str, str]:
+    """The store copy's build identity for the registry, as `<source>/runners@<built_utc>`."""
     try:
-        build = json.loads((paths.processed_dir("jra") / "_build.json").read_text())
-        return {"runners": f"jra/runners@{build['built_utc']}"}
+        build = json.loads((paths.processed_dir(source) / "_build.json").read_text())
+        return {"runners": f"{source}/runners@{build['built_utc']}"}
     except (OSError, ValueError, KeyError):
-        return {"runners": "jra/runners"}
+        return {"runners": f"{source}/runners"}
 
 
 def _bootstrap_settings() -> dict:
@@ -413,7 +413,16 @@ def _score(frame: pd.DataFrame, oof: pd.DataFrame, folds: list[Fold], boot: dict
 
 
 def _record(
-    *, status: str, scheme, segments, ridge, n_knots, base, fit_id, score: dict | None
+    *,
+    status: str,
+    scheme,
+    segments,
+    ridge,
+    n_knots,
+    base,
+    fit_id,
+    score: dict | None,
+    source: str = "jra",
 ) -> RunRecord:
     metrics: tuple[FoldMetric, ...] = ()
     if score is not None:
@@ -447,8 +456,8 @@ def _record(
         variant=f"segments-{len(segments)}-ridge-{ridge:g}",
         ticket=TICKET,
         git_sha=_git_sha() or "unknown",
-        data_builds=_store_build(),
-        sources=("jra",),
+        data_builds=_store_build(source),
+        sources=(source,),
         fold_scheme=json.dumps({"country": COUNTRY, **dataclasses.asdict(scheme)}, sort_keys=True),
         components=components,
         params={
@@ -478,11 +487,20 @@ def _development_frame_with_race(table: pa.Table) -> tuple[pd.DataFrame, dict, d
 
 
 def run_fit(
-    base_path: Path, out_dir: Path | None = None, *, ridge: float = RIDGE, n_knots: int = 5
+    base_path: Path,
+    out_dir: Path | None = None,
+    *,
+    ridge: float = RIDGE,
+    n_knots: int = 5,
+    source: str = "jra",
 ) -> dict:
     """Fit the residual on every development race of the price era on top of the calibration in
     `base_path`, score it out of fold, and write the fit, the predictions, a manifest and the
     report under the data dir; the run (failed or scored) is appended to Japan's registry.
+
+    `source` names the store copy read (#404): 'jra' by default, 'jravan' the JRA-VAN copy. The
+    registry record, the report's `write_report` sources and (off 'jra') the manifest name it, so
+    a licensed copy's figures are withheld (`core.eval.reports.WITHHELD_SOURCES`).
 
     An `out_dir` that resolves inside the repository raises `paths.DataDirInsideRepo` before
     anything is read or written."""
@@ -495,7 +513,9 @@ def run_fit(
     scheme = load_country_scheme(COUNTRY)
     boot = _bootstrap_settings()
     registry = default_registry(COUNTRY)
-    run = dict(scheme=scheme, segments=segments, ridge=ridge, n_knots=n_knots, base=base)
+    run = dict(
+        scheme=scheme, segments=segments, ridge=ridge, n_knots=n_knots, base=base, source=source
+    )
 
     fit_id = ""
     try:
@@ -505,6 +525,7 @@ def run_fit(
             start=PRICE_ERA_START,
             end=date.max,  # to the store's last date
             touches_price=True,
+            source=source,
         )
         frame, races_left_out, runners_dropped = _development_frame_with_race(table)
         del table
@@ -550,12 +571,14 @@ def run_fit(
         "manifest_path": str(manifest_path),
         "report_path": str(report_path),
     }
+    if source != "jra":  # the default manifest is unchanged
+        manifest["sources"] = [source]
     oof["race_id"] = oof["race_id"].astype(str)
     fit_path.write_text(fit.to_json())
     pq.write_table(pa.Table.from_pandas(oof, preserve_index=False), oof_path)
     manifest_path.write_text(json.dumps(manifest, indent=2))
     report = {"fit_id": fit.fit_id, "base_fit_id": base.fit_id, "out_of_fold": score, **manifest}
-    write_report(report_path, json.dumps(report, indent=2) + "\n", sources=("jra",))
+    write_report(report_path, json.dumps(report, indent=2) + "\n", sources=(source,))
     manifest["run_id"] = registry.append(
         _record(status="scored", fit_id=fit.fit_id, score=score, **run)
     )
