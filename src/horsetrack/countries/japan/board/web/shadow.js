@@ -183,13 +183,19 @@
     state.venue = tab.getAttribute("data-venue");
     board.chooseVenue(state.feed, state.venue, Date.now());
     draw();
-    if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
+    board.toTop();
+  }
+
+  /* A strip link, a step link or back: draw the race the hash names, from its top. */
+  function onHashChange() {
+    draw();
+    board.toTop();
   }
 
   function start() {
     var root = document.getElementById("shadow");
     if (root) root.addEventListener("click", onClick);
-    window.addEventListener("hashchange", draw); // a strip link, a step link or back
+    window.addEventListener("hashchange", onHashChange);
     (function tick() {
       poll().then(function () { setTimeout(tick, POLL_MS); });
     })();

@@ -12,11 +12,34 @@ hash at load) and defines:
   the window; when no listener calls `preventDefault`, the default action of a link follows:
   `location.href = <its href>`. The fake elements answer `closest`, `matches`, `getAttribute`,
   `dataset` and `classList.contains` for simple selectors.
+- a vertical viewport: `scrollTo` / `scroll` / `scrollBy` (x, y or {top}), `scrollY`,
+  `pageYOffset` and the `scrollTop` of `document.documentElement` and `document.body` share one
+  offset; an element's `scrollIntoView(arg)` is noted through `noteIntoView(id, arg)`.
+  `resetViewport()` puts the reader `READ_Y` px down the page (deep in a race's tables) with no
+  note; `viewportState()` returns `{y, intoView: [{id, block}]}`. A harness calls
+  `resetViewport()` before each step and must not overwrite `scrollTo` after these fakes.
 """
 
 from __future__ import annotations
 
 import re
+
+READ_Y = 2400  # px down the page: the reader at the bottom of a race's tables
+
+
+def moved_to_race(viewport: dict) -> bool:
+    """The step moved the viewport to the race drawn: the page top, or a scrollIntoView that
+    aligns an element (a `block: 'nearest'` nudge, which leaves a visible element alone, does
+    not count)."""
+    aligned = [n for n in viewport["intoView"] if n["block"] != "nearest"]
+    return viewport["y"] == 0 or bool(aligned)
+
+
+def kept_in_place(viewport: dict) -> bool:
+    """The step left the reader where they were: no scroll away from READ_Y, no alignment."""
+    aligned = [n for n in viewport["intoView"] if n["block"] != "nearest"]
+    return viewport["y"] == READ_Y and not aligned
+
 
 BROWSER_FAKES = r"""
 if (input.now !== null && input.now !== undefined) {
@@ -65,6 +88,39 @@ global.history = {
   back() {}, forward() {}, go() {},
 };
 document.location = global.location;
+
+const viewport = { y: 0, intoView: [] };
+const setY = (v) => {
+  const n = Number(v);
+  viewport.y = Number.isFinite(n) ? Math.max(0, n) : 0;
+};
+const scrollTarget = (a, b, base) => {
+  if (a && typeof a === "object") return "top" in a ? base + Number(a.top) : null;
+  return b === undefined ? null : base + Number(b);
+};
+global.scrollTo = global.scroll = (a, b) => {
+  const y = scrollTarget(a, b, 0);
+  if (y !== null) setY(y);
+};
+global.scrollBy = (a, b) => {
+  const y = scrollTarget(a, b, viewport.y);
+  if (y !== null) setY(y);
+};
+for (const name of ["scrollY", "pageYOffset"]) {
+  Object.defineProperty(global, name, { get: () => viewport.y, set: setY, configurable: true });
+}
+for (const node of [document.documentElement, document.body]) {
+  Object.defineProperty(node, "scrollTop", {
+    get: () => viewport.y, set: setY, configurable: true,
+  });
+}
+function noteIntoView(id, arg) {
+  const block = arg && typeof arg === "object" ? arg.block || "start"
+    : arg === false ? "end" : "start";
+  viewport.intoView.push({ id: String(id || ""), block });
+}
+function resetViewport() { setY(/*READ_Y*/); viewport.intoView = []; }
+function viewportState() { return { y: viewport.y, intoView: viewport.intoView.slice() }; }
 
 function compoundMatches(e, c) {
   if (!e) return false;
@@ -139,7 +195,8 @@ function chainElements(chain) {
         for (let at = other; at; at = at.parentElement) if (at === this) return true;
         return false;
       },
-      addEventListener() {}, removeEventListener() {}, focus() {}, scrollIntoView() {},
+      addEventListener() {}, removeEventListener() {}, focus() {},
+      scrollIntoView(arg) { noteIntoView(this.id, arg); },
     };
     if ("href" in attrs) {
       const raw = attrs.href, i = raw.indexOf("#");
@@ -170,7 +227,7 @@ function clickChain(chain, rootId) {
     if (link) location.href = link.getAttribute("href");
   }
 }
-"""
+""".replace("/*READ_Y*/", str(READ_Y))
 
 
 def chain_of(node, root_id: str) -> list[dict]:

@@ -76,7 +76,15 @@ import pytest
 from bs4 import BeautifulSoup
 
 # isort: split
-from page_fakes import BROWSER_FAKES, chain_of, click_target, favourite_order, strip_links
+from page_fakes import (
+    BROWSER_FAKES,
+    chain_of,
+    click_target,
+    favourite_order,
+    kept_in_place,
+    moved_to_race,
+    strip_links,
+)
 
 REPO = Path(__file__).resolve().parents[3]
 WEB = REPO / "src" / "horsetrack" / "countries" / "japan" / "board" / "web"
@@ -125,7 +133,8 @@ function makeEl(id) {
     querySelector(sel) { return el("q:" + sel); }, querySelectorAll() { return []; },
     appendChild(c) { this.children.push(c); return c; }, append() {}, prepend() {},
     replaceChildren() { this.innerHTML = ""; }, closest() { return null; },
-    scrollIntoView() {}, focus() {}, matches() { return false; },
+    scrollIntoView(arg) { noteIntoView(this.id, arg); }, focus() {},
+    matches() { return false; },
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
   };
 }
@@ -148,7 +157,6 @@ global.setTimeout = (fn, delay) => { timers.push({ fn, delay: Number(delay), kee
   return timers.length; };
 global.clearInterval = () => {}; global.clearTimeout = () => {};
 global.requestAnimationFrame = (cb) => setImmediate(() => cb(Date.now()));
-global.scrollTo = () => {};
 let servers = input.servers || {};
 global.fetch = async (url, init = {}) => {
   const u = String(url && url.url ? url.url : url);
@@ -195,6 +203,7 @@ const settle = async () => { for (let i = 0; i < 30; i++) await tick(); };
   for (const step of input.steps) {
     if (step.servers) servers = step.servers;
     const before = requests.length;
+    resetViewport();
     if (step.call) {
       results.push({ result: mods[step.mod || "shadow"][step.call](...step.args) });
       continue;
@@ -211,7 +220,7 @@ const settle = async () => { for (let i = 0; i < 30; i++) await tick(); };
     }
     await settle();
     results.push({ shadow: el("shadow").innerHTML, hash: location.hash,
-      requests: requests.slice(before) });
+      requests: requests.slice(before), viewport: viewportState() });
   }
   fs.writeFileSync(OUT, JSON.stringify({ results, timers: timers.map((t) => t.delay) }));
 })().catch((e) => { console.error(e && e.stack ? e.stack : String(e)); process.exit(1); });
@@ -1076,6 +1085,43 @@ def test_the_hash_and_the_strip_pick_the_race_and_a_poll_keeps_it(tmp_path):
     got = [[b["data-race"] for b in race_blocks(soup(r["shadow"]))] for r in out["results"]]
     assert got == [[k10], [k10], [k3], [k3], [t1], [t1]], got  # loaded with KYO 10's hash
     assert out["results"][2]["hash"] == links[3]["href"], out["results"][2]["hash"]
+
+
+@needs_node
+def test_a_newly_selected_race_moves_the_viewport_and_a_poll_leaves_it(tmp_path):
+    # The reader is page_fakes.READ_Y px down before every step. Picking another race (strip
+    # link, back) brings it to the top of the viewport; a poll, new values or not, leaves it.
+    k3, k10, t1 = rid("KYO", 3), rid("KYO", 10), rid("TOK", 1)
+    first = soup(results([call("renderShadow", FEED, SHADOW, {"now": ms(NOW)})], tmp_path)[0])
+    links = strip_links(first, race_blocks(first))
+    to10 = links[10]["href"]
+    tok_tab = first.select_one('[data-venue="TOK"]')
+    newer = copy.deepcopy(SHADOW)
+    newer["races"][1]["pools"]["WIN"]["2"] = win(1.37, 1.29, 1.46, "tail")
+    plain = {"plain": {"feed": FEED, "etag": '"p1"'}}
+    one = {**plain, "shadow": {"feed": SHADOW, "etag": '"s1"'}}
+    two = {**plain, "shadow": {"feed": newer, "etag": '"s2"'}}
+    # (step, race drawn after it, the viewport moves to the race)
+    table = [
+        ({"fire": 5000}, k10, False),  # 304s
+        ({"fire": 5000, "servers": two}, k10, False),  # new values, same race
+        ({"click": chain_of(click_target(links[3]), "shadow")}, k3, True),  # 3R on the strip
+        ({"fire": 5000, "servers": one}, k3, False),
+        ({"hash": to10}, k10, True),  # back
+        ({"fire": 5000}, k10, False),
+        ({"click": chain_of(tok_tab, "shadow")}, t1, True),  # the TOK tab
+        ({"fire": 5000, "servers": two}, t1, False),
+    ]
+    out = run_js([step for step, _, _ in table], tmp_path, servers=one, browser=True, hash_=to10)
+    steps_out = out["results"][1:]  # results[0] is the page at load
+    got = [[b["data-race"] for b in race_blocks(soup(r["shadow"]))] for r in steps_out]
+    assert got == [[race] for _, race, _ in table], got
+    for i, ((step, race, moves), result) in enumerate(zip(table, steps_out, strict=True)):
+        where = (i, sorted(step)[0], race, result["viewport"])
+        if moves:
+            assert moved_to_race(result["viewport"]), ("left deep in the new race", where)
+        else:
+            assert kept_in_place(result["viewport"]), ("a poll moved the reader", where)
 
 
 def test_page_has_no_stake_words_or_amount_inputs(tmp_path):

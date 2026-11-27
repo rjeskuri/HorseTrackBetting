@@ -353,6 +353,12 @@
     strip.scrollLeft = Math.max(0, sel.offsetLeft - strip.clientWidth / 2 + sel.offsetWidth / 2);
   }
 
+  /* The viewport to the top of the page: a newly selected race starts there (the browser
+   * resolved its fragment before the race was drawn). A poll never moves the viewport. */
+  function toTop() {
+    if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
+  }
+
   function draw() {
     var board = document.getElementById("board");
     if (!board || !state.feed) return;
@@ -393,13 +399,19 @@
     state.venue = tab.getAttribute("data-venue");
     chooseVenue(state.feed, state.venue, Date.now());
     draw();
-    if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
+    toTop();
+  }
+
+  /* A strip link, a step link or back: draw the race the hash names, from its top. */
+  function onHashChange() {
+    draw();
+    toTop();
   }
 
   function start() {
     var board = document.getElementById("board");
     if (board) board.addEventListener("click", onClick);
-    window.addEventListener("hashchange", draw); // a strip link, a step link or back
+    window.addEventListener("hashchange", onHashChange);
     (function tick() {
       poll().then(function () { setTimeout(tick, POLL_MS); });
     })();
@@ -408,7 +420,7 @@
   var api = {
     formatMove: formatMove, moveClass: moveClass, isStale: isStale, renderBoard: renderBoard,
     poll: poll, esc: esc, num: num, selection: selection, chooseVenue: chooseVenue,
-    followSelected: followSelected,
+    followSelected: followSelected, toTop: toTop,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.HorseBoard = api;

@@ -74,6 +74,8 @@ from page_fakes import (
     click_target,
     combination_key,
     favourite_order,
+    kept_in_place,
+    moved_to_race,
     strip_links,
 )
 
@@ -122,7 +124,8 @@ function makeEl(id) {
     querySelector(sel) { return el("q:" + sel); }, querySelectorAll() { return []; },
     appendChild(c) { this.children.push(c); return c; }, append() {}, prepend() {},
     replaceChildren() { this.innerHTML = ""; }, closest() { return null; },
-    scrollIntoView() {}, focus() {}, matches() { return false; },
+    scrollIntoView(arg) { noteIntoView(this.id, arg); }, focus() {},
+    matches() { return false; },
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
   };
   return e;
@@ -144,7 +147,6 @@ global.setInterval = (fn, delay) => { timers.push(Number(delay)); return timers.
 global.setTimeout = (fn, delay) => { timers.push(Number(delay)); return timers.length; };
 global.clearInterval = () => {}; global.clearTimeout = () => {};
 global.requestAnimationFrame = (cb) => setImmediate(() => cb(Date.now()));
-global.scrollTo = () => {};
 let server = input.server || null;
 global.fetch = async (url, init = {}) => {
   const h = init.headers || {};
@@ -179,6 +181,7 @@ const settle = async () => { for (let i = 0; i < 5; i++) await tick(); };
       continue;
     }
     const before = requests.length;
+    resetViewport();
     if (step.poll) {
       if (step.server) server = step.server;
       await board.poll();
@@ -189,7 +192,7 @@ const settle = async () => { for (let i = 0; i < 5; i++) await tick(); };
     }
     await settle();
     results.push({ board: el("board").innerHTML, hash: location.hash,
-      requests: requests.slice(before) });
+      requests: requests.slice(before), viewport: viewportState() });
   }
   fs.writeFileSync(OUT, JSON.stringify({ results, timers, requests }));
 })().catch((e) => { console.error(e && e.stack ? e.stack : String(e)); process.exit(1); });
@@ -703,6 +706,45 @@ def test_the_hash_and_the_strip_pick_the_race_and_a_poll_keeps_it(feed, tmp_path
         if line["odds"] is not None:
             shown = text(cell(row_of(pool_block(kyo10_win, "WIN"), line["combination"]), "odds"))
             assert shown == f"{line['odds']:.1f}", line
+
+
+@needs_node
+def test_a_newly_selected_race_moves_the_viewport_and_a_poll_leaves_it(feed, tmp_path):
+    # The reader is page_fakes.READ_Y px down (the bottom of a race's tables) before every step.
+    # Picking another race (strip link, back) brings its race to the top of the viewport; a
+    # poll, with or without a new feed, leaves the viewport where the reader put it.
+    kyo3, kyo10, tok1 = rid("KYO", 3), rid("KYO", 10), rid("TOK", 1)
+    first = soup(results([call("renderBoard", feed, {"now": ms(NOW)})], tmp_path)[0])
+    links = strip_links(first, race_blocks(first))
+    to10 = links[10]["href"]
+    tok_tab = first.select_one('[data-venue="TOK"]')
+    newer = copy.deepcopy(feed)
+    for venue in newer["venues"]:
+        for race in venue["races"]:
+            for line in race["pools"]["WIN"]["rows"]:
+                if line["odds"] is not None:
+                    line["odds"] = round(line["odds"] + 0.2, 1)
+    a, b = {"feed": feed, "etag": '"a1"'}, {"feed": newer, "etag": '"b2"'}
+    # (step, race drawn after it, the viewport moves to the race)
+    table = [
+        ({"poll": True}, kyo10, False),  # 304
+        ({"poll": True, "server": b}, kyo10, False),  # a new feed, same race
+        ({"click": chain_of(click_target(links[3]), "board")}, kyo3, True),  # 3R on the strip
+        ({"poll": True, "server": a}, kyo3, False),
+        ({"hash": to10}, kyo10, True),  # back
+        ({"poll": True}, kyo10, False),
+        ({"click": chain_of(tok_tab, "board")}, tok1, True),  # the TOK tab
+        ({"poll": True, "server": b}, tok1, False),
+    ]
+    out = run_js([step for step, _, _ in table], tmp_path, server=a, hash_=to10)
+    got = [shown_races(soup(r["board"])) for r in out["results"]]
+    assert got == [[race] for _, race, _ in table], got
+    for i, ((step, race, moves), result) in enumerate(zip(table, out["results"], strict=True)):
+        where = (i, sorted(step)[0], race, result["viewport"])
+        if moves:
+            assert moved_to_race(result["viewport"]), ("left deep in the new race", where)
+        else:
+            assert kept_in_place(result["viewport"]), ("a poll moved the reader", where)
 
 
 @needs_node
