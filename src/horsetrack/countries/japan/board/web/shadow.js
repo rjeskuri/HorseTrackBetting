@@ -1,12 +1,14 @@
 /* The shadow page (#122): the live board (board.js, #42) plus each row's shadow value, the bucket
  * the value was read at, and the avoid flags (#117, candidate rules of #82, none adopted).
  *
- * renderShadow draws board.js's renderBoard with four extra cells per row: the move since T-2, the
- * value (WIN: mean with its 5-95% band; other pools: the value at the low and the high odds), the
- * bucket label and the flag chips. Rows come from the plain feed only and keep its order; the
- * shadow feed (#121) is joined on (race_id, pool, combination) and never sorts, highlights or
- * colours a row (a selection rule is the owner's, D19). Values are gross return per 1 yen at the
- * final price: information only, nothing here is a bet.
+ * renderShadow draws board.js's renderBoard with four extra cells per row: the T-20→T-2 move
+ * (`move_t20_t2_pct`, '-' until the T-2 capture exists), the value (WIN: mean with its 5-95% band;
+ * other pools: the value at the low and the high odds), the bucket label and the flag chips.
+ * Rows come from the plain feed only, one race per page, in board.js's order: favourite first by
+ * the crowd's current odds (#498, the owner's display choice). The shadow feed (#121) is joined on
+ * (race_id, pool, combination) and never sorts, highlights or colours a row by shadow value (a
+ * selection rule is the owner's, D19). The race follows the URL hash as on the board page.
+ * Values are gross return per 1 yen at the final price: information only, nothing here is a bet.
  * On a WIN5 day (#135) a line above the board, the element with data-win5, shows the shadow feed's
  * `win5`: the whole WIN5 pool's gross return per 1 yen with the carryover (two decimals), the
  * carryover and the tickets sold so far. No such element when `win5` is null.
@@ -90,11 +92,12 @@
       '<span class="mono">' + esc(yen(own(w, "investment"))) + "</span></p>";
   }
 
-  var HEAD = '<th scope="col" class="num">Since T-2</th>' +
+  var HEAD = '<th scope="col" class="num">T-20→T-2</th>' +
     '<th scope="col" class="num">Value</th><th scope="col">Read at</th>' +
     '<th scope="col">Flags</th>';
 
-  /* The HTML of the shadow page for one venue: the board plus value, bucket and flag cells. */
+  /* The HTML of the shadow page for one race of one venue: the board plus move, value, bucket
+   * and flag cells. */
   function renderShadow(feed, shadowFeed, opts) {
     opts = opts || {};
     var races = shadowRaces(shadowFeed);
@@ -103,16 +106,17 @@
       cells: function (raceId, code, line) {
         var race = has.call(races, String(raceId)) ? races[String(raceId)] : null;
         var entry = own(own(own(race, "pools"), code), String(line.combination));
-        var mv = board.moveClass(line.move_t2_pct);
-        return '<td data-col="move-t2" class="num mv' + (mv ? " " + mv : "") + '">' +
-          esc(board.formatMove(line.move_t2_pct)) + "</td>" +
+        var mv = board.moveClass(line.move_t20_t2_pct);
+        return '<td data-col="move-t20-t2" class="num mv' + (mv ? " " + mv : "") + '">' +
+          esc(board.formatMove(line.move_t20_t2_pct)) + "</td>" +
           '<td data-col="value" class="num val">' + esc(valueText(code, entry)) + "</td>" +
           '<td data-col="bucket" class="mono small">' + esc(race ? bucketText(race) : DASH) +
           "</td>" + '<td data-col="flags" class="flags">' + flagChips(entry) + "</td>";
       },
     };
     return win5Line(shadowFeed) +
-      board.renderBoard(feed, { now: opts.now, venue: opts.venue, columns: columns });
+      board.renderBoard(feed,
+        { now: opts.now, venue: opts.venue, race: opts.race, columns: columns });
   }
 
   /* ------------------------------------------------------------ the browser glue */
@@ -130,7 +134,11 @@
   function draw() {
     var root = document.getElementById("shadow");
     if (!root || !state.feed) return;
-    root.innerHTML = renderShadow(state.feed, state.shadow, { now: Date.now(), venue: state.venue });
+    var pick = board.selection(state.feed, state.venue);
+    state.venue = pick.venue;
+    root.innerHTML = renderShadow(state.feed, state.shadow,
+      { now: Date.now(), venue: pick.venue, race: pick.race });
+    board.followSelected("#shadow");
   }
 
   /* One GET with If-None-Match: resolves to the HTTP status (200 stores the body and its ETag). */
@@ -173,6 +181,7 @@
     var tab = target && target.closest ? target.closest("[data-venue]") : null;
     if (!tab) return;
     state.venue = tab.getAttribute("data-venue");
+    board.chooseVenue(state.feed, state.venue, Date.now());
     draw();
     if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
   }
@@ -180,6 +189,7 @@
   function start() {
     var root = document.getElementById("shadow");
     if (root) root.addEventListener("click", onClick);
+    window.addEventListener("hashchange", draw); // a strip link, a step link or back
     (function tick() {
       poll().then(function () { setTimeout(tick, POLL_MS); });
     })();
