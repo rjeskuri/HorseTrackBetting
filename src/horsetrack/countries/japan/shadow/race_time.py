@@ -4,10 +4,13 @@ A research recorder for #305's race-time model (`models.speed`), independent of 
 loader. Nothing here is adopted (D16) and nothing reads an outcome of the race forecast.
 
 - `record_race(race, *, model, results, model_version, card_version, now, replay=False,
-  latest_post=None)`: one JSON-ready record for one card race. The input cutoff is the post known
-  at the cutoff less the primary decision minutes (config/decision.yaml). The model must hold no
-  observations (ValueError otherwise: a residual it cached could move same_day_s unlisted). `now()`
-  is read before the computation (input_snapshot_utc) and after it (completion_utc). A deep copy
+  latest_post=None, inputs_utc=None)`: one JSON-ready record for one card race. The input cutoff
+  is the post known at the cutoff less the primary decision minutes (config/decision.yaml). The
+  model must hold no observations (ValueError otherwise: a residual it cached could move
+  same_day_s unlisted). `now()` is read before the computation and after it (completion_utc);
+  input_snapshot_utc is the first read, or `inputs_utc` (the instant the caller began reading
+  `results`) when that is earlier, so a sighting written after the inputs were read is never one
+  the snapshot saw. A deep copy
   of the model observes only the day's results first seen (#225's first observed publication) at
   or before min(cutoff, snapshot) in a cell with a fitted par, so the caller's model never changes
   and a result seen later, or never, cannot move the forecast whatever the clock reads; each is
@@ -24,12 +27,16 @@ loader. Nothing here is adopted (D16) and nothing reads an outcome of the race f
   denominator. A race counts once; readiness is judged against both the post recorded at the
   cutoff and the latest card's post, so a post moved earlier after the record cannot leave it on
   time.
-- `verify_replay(records, *, card, results, model, model_version, card_version)`: recomputes each
-  ok record from the card row, its recorded input snapshot, the source results (id, sighting and
-  top-3 time of each result used, the record's results_pending left out of the source) and the
-  versions; [] when everything matches, else one problem
-  per mismatch, each naming its race id. A changed input value is a problem even when the forecast
-  it gives is unchanged.
+- `verify_replay(records, *, card, results, model, model_version, card_version)`: [] when every
+  ok record matches, else one problem per mismatch, each naming its race id. `card` is the card
+  version's snapshot: the venue, post and model keys of every race, as the recorder had them.
+  The record's own inputs (its results_used, keyed by the card, and its input snapshot) must
+  recompute its par_s and same_day_s, and each result it used must be one the cutoff allowed.
+  `results` is the independent source of sightings and finish times, cross-checked both ways:
+  each result used or pending must be in it with the same first sighting (and, when used, the
+  same top-3 time), and each result it shows eligible by min(cutoff, snapshot), keyed by the card
+  where the card lists the race, must be used or pending. A changed input value is a problem even
+  when the forecast it gives is unchanged.
 """
 
 from __future__ import annotations
@@ -146,12 +153,15 @@ def record_race(
     now: Callable[[], datetime],
     replay: bool = False,
     latest_post: Callable[[], datetime | None] | None = None,
+    inputs_utc: datetime | None = None,
 ) -> dict[str, Any]:
     """One record for one card race (see the module docstring)."""
     _refuse_observed(model)
     snapshot = _stamp(now())  # read before the work: when the inputs were taken
     if snapshot is None:
         raise ValueError("now() gave no time")
+    read = _stamp(inputs_utc)
+    snapshot = snapshot if read is None else min(snapshot, read)
     post = _stamp(race.get("post_utc"))
     cutoff = None if post is None else post - _primary()
     par_s = same_day_s = reason = None
@@ -272,9 +282,17 @@ def verify_replay(
     model_version: str,
     card_version: str,
 ) -> list[str]:
-    """The problems found recomputing each ok record from its recorded inputs; [] when none."""
+    """The problems found checking each ok record against its recorded inputs and the source;
+    [] when none (see the module docstring)."""
     _refuse_observed(model)
+    keys = ["venue", "post_utc", *dict.fromkeys([*model.spec.par_keys, *model.spec.variant_keys])]
     rows = {r["race_id"]: r for r in card.to_dict("records")}
+    source = _keyed_by_card(results, rows, keys)
+    sightings: dict[Any, tuple[pd.Timestamp | None, Any]] = {}
+    for rid, seen, t in zip(
+        source["race_id"], source["first_seen_utc"], source["top3_time_s"], strict=True
+    ):
+        sightings.setdefault(rid, (_stamp(seen), t))
     problems: list[str] = []
     for rec in records:
         if rec.get("status") != OK:
@@ -290,11 +308,15 @@ def verify_replay(
         if snapshot is None:
             problems.append(f"{race_id}: no input snapshot recorded")
             continue
-        pending = {u["race_id"] for u in rec.get("results_pending") or ()}
+        used = list(rec.get("results_used") or ())
+        pending = list(rec.get("results_pending") or ())
+        # 1. the record's own inputs give its forecast, and the cutoff allowed each of them
+        inputs, unlisted = _recorded_inputs(used, rows, keys)
+        problems += [f"{race_id}: results_used has {rid}, not on the card" for rid in unlisted]
         again = record_race(
             rows[race_id],
             model=model,
-            results=results[~results["race_id"].isin(pending)],  # no time at the snapshot
+            results=inputs,
             model_version=model_version,
             card_version=card_version,
             now=lambda at=snapshot: at,  # the inputs as the recorded snapshot saw them
@@ -306,24 +328,85 @@ def verify_replay(
         for name in ("post_utc_at_cutoff", "input_cutoff_utc"):
             if not _same_time(rec.get(name), again[name]):
                 problems.append(f"{race_id}: {name} {rec.get(name)} is not {again[name]}")
-        recorded = {(u["race_id"], _stamp(u["first_seen_utc"])) for u in rec["results_used"]}
-        source = {(u["race_id"], _stamp(u["first_seen_utc"])) for u in again["results_used"]}
-        for rid, seen in sorted(recorded - source, key=repr):
-            problems.append(
-                f"{race_id}: results_used has {rid} first seen {_iso(seen)}, not in "
-                "the source within the cutoff"
-            )
-        for rid, seen in sorted(source - recorded, key=repr):
-            problems.append(f"{race_id}: results_used lacks {rid} first seen {_iso(seen)}")
-        values = {u["race_id"]: u["top3_time_s"] for u in again["results_used"]}
-        for u in rec["results_used"]:
-            want = values.get(u["race_id"])
-            if want is not None and not _close(u.get("top3_time_s"), want):
+        allowed = {(u["race_id"], _stamp(u["first_seen_utc"])) for u in again["results_used"]}
+        for u in used:
+            if u["race_id"] in unlisted:
+                continue
+            if (u["race_id"], _stamp(u.get("first_seen_utc"))) not in allowed:
                 problems.append(
-                    f"{race_id}: results_used has {u['race_id']} at top3_time_s "
-                    f"{u.get('top3_time_s')}, the source has {want}"
+                    f"{race_id}: results_used has {u['race_id']} first seen "
+                    f"{u.get('first_seen_utc')}, which the cutoff does not allow with a time"
                 )
         for name in ("par_s", "same_day_s"):
             if not _close(rec.get(name), again[name]):
                 problems.append(f"{race_id}: {name} {rec.get(name)} recomputes as {again[name]}")
+        # 2. the source agrees with every result listed, used or pending
+        for kind, entries in (("results_used", used), ("results_pending", pending)):
+            for u in entries:
+                rid, seen = u["race_id"], _stamp(u.get("first_seen_utc"))
+                if rid not in sightings:
+                    problems.append(f"{race_id}: {kind} has {rid}, not in the source")
+                    continue
+                truth, t = sightings[rid]
+                if seen != truth:
+                    problems.append(
+                        f"{race_id}: {kind} has {rid} first seen {_iso(seen)}, the source "
+                        f"{_iso(truth)}"
+                    )
+                if kind == "results_used" and not _close(u.get("top3_time_s"), _time(t)):
+                    problems.append(
+                        f"{race_id}: results_used has {rid} at top3_time_s "
+                        f"{u.get('top3_time_s')}, the source has {_time(t)}"
+                    )
+        # 3. every result the source shows eligible by the snapshot is listed
+        cutoff = _stamp(again["input_cutoff_utc"])
+        timed, waiting = _eligible(source, rows[race_id], model, min(cutoff, snapshot))
+        listed = {u["race_id"] for u in (*used, *pending)}
+        for rid, seen in zip(
+            [*timed["race_id"], *waiting["race_id"]],
+            [*timed["result_available_utc"], *waiting["result_available_utc"]],
+            strict=True,
+        ):
+            if rid not in listed:
+                problems.append(f"{race_id}: results_used lacks {rid} first seen {_iso(seen)}")
     return problems
+
+
+def _time(value: Any) -> float | None:
+    return None if value is None or pd.isna(value) else float(value)
+
+
+def _keyed_by_card(results: pd.DataFrame, rows: Mapping, keys: list[str]) -> pd.DataFrame:
+    """The source with each race's venue, post and model keys taken from the card where the card
+    lists it (what the recorder keyed it by), its own elsewhere; sightings and times its own."""
+    out = []
+    for row in results.to_dict("records"):
+        on = rows.get(row["race_id"])
+        out.append(row if on is None else {**row, **{k: on[k] for k in keys if k in on}})
+    frame = pd.DataFrame(out, columns=list(results.columns))
+    for col in ("post_utc", "first_seen_utc"):
+        frame[col] = pd.to_datetime(frame[col], utc=True)
+    return frame
+
+
+def _recorded_inputs(used: list, rows: Mapping, keys: list[str]) -> tuple[pd.DataFrame, set]:
+    """The record's results_used as a results frame keyed by the card, and the ids not on it."""
+    out, unlisted = [], set()
+    for u in used:
+        on = rows.get(u["race_id"])
+        if on is None:
+            unlisted.add(u["race_id"])
+            continue
+        out.append(
+            {
+                "race_id": u["race_id"],
+                **{k: on.get(k) for k in keys},
+                "top3_time_s": _time(u.get("top3_time_s")),
+                "first_seen_utc": _stamp(u.get("first_seen_utc")),
+            }
+        )
+    frame = pd.DataFrame(out, columns=["race_id", *keys, "top3_time_s", "first_seen_utc"])
+    frame["top3_time_s"] = frame["top3_time_s"].astype(float)
+    for col in ("post_utc", "first_seen_utc"):
+        frame[col] = pd.to_datetime(frame[col], utc=True)
+    return frame, unlisted

@@ -5,8 +5,12 @@
   recorded once through `race_time.record_race` and appended to the day's log as it is made. Post
   times come from each venue's `<VENUE>.races.json` sidecar, else the card's own post_utc, and
   first sightings (#225) from its `<VENUE>.results.json` sidecar in `jra_day_dir(race_date,
-  day_dir)`, re-read on every pass; `latest_post` re-reads the races sidecar after each
-  computation, with the same fallback. Prospective (replay=False): a
+  day_dir)`, re-read on every pass. Each pass reads the clock before it reads the card, store and
+  sidecars, and its records take that instant as their input snapshot (`inputs_utc`), so a
+  sighting logged after the read is never counted as seen by it. `latest_post` re-reads the races
+  sidecar after each computation and, for a race the sidecar lacks, the card (`races()`), so a
+  card post moved during the computation still moves the cutoff it is judged against.
+  Prospective (replay=False): a
   race with a post is recorded once the clock is LEAD before its input cutoff (post - primary),
   waiting with `sleep` (at most POLL_S at a time, so a moved post is seen); a race whose cutoff
   has passed is recorded at once; races without a post are recorded last, once no race with a
@@ -23,7 +27,10 @@
 - `load_day_races(race_date)`: every race of the upcoming cards
   (`processed/jra/upcoming/jra_<date>_<VENUE>/races.parquet`; venue from meeting_id, post_utc
   from post_time_local), then the store's races of the day no card lists; the model's keys
-  ("unknown" when missing), post_utc and the store's top-3 time (NaN until resulted).
+  ("unknown" when missing), post_utc and the store's top-3 time (NaN until resulted). The card
+  stays the schedule; a turf race without a rail (the card never has one) takes the latest
+  rail of its venue and day in the store's `track_condition` table published by its cutoff,
+  else the rail of the store's own row of the race, else stays "unknown".
 - D14: on a Japan holdout day `run_race_time_day`, `load_day_races`, `load_card_snapshots` and
   the command raise
   `HoldoutDayError` before any read (card, sidecar or store) and write no log.
@@ -50,7 +57,7 @@ import typer
 
 from horsetrack.core import paths
 from horsetrack.core.eval.holdout import is_holdout_day
-from horsetrack.core.store.tables import read_table
+from horsetrack.core.store.tables import read_table, table_path
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board.snapshot import jra_day_dir, load_decision_grid
 from horsetrack.countries.japan.models.speed import SpeedModel, SpeedSpec
@@ -124,6 +131,19 @@ def _card(frame: pd.DataFrame, folder: Path) -> pd.DataFrame:
     return card
 
 
+def _latest_post(race: dict, folder: Path, races: Callable[[], pd.DataFrame]) -> Any:
+    """The race's post read now: its sidecar's, else the re-read card's (None when neither)."""
+    side = odds_log.read_post_times(folder / f"{race['venue']}.races.json")
+    if _race_no(race["race_id"]) in side:
+        return side[_race_no(race["race_id"])]
+    frame = races()
+    if "post_utc" not in frame:
+        return None
+    posts = pd.to_datetime(frame.loc[frame["race_id"] == race["race_id"], "post_utc"], utc=True)
+    posts = posts.dropna()
+    return None if posts.empty else posts.iloc[0]
+
+
 def _card_inputs(card: pd.DataFrame) -> pd.DataFrame:
     """The card without its results: what the card version hashes and its snapshot keeps."""
     return card.drop(columns=["top3_time_s", "first_seen_utc"], errors="ignore")
@@ -181,6 +201,7 @@ def run_race_time_day(
     done: set[str] = set()
     saved: set[str] = set()
     while True:
+        read_at = pd.Timestamp(now()).tz_convert("UTC")  # before the card, store and sidecars
         card = _card(races(), folder)
         version = _card_version(race_date, card)
         todo = [r for r in card.to_dict("records") if r["race_id"] not in done]
@@ -190,7 +211,7 @@ def run_race_time_day(
         if replay or not timed:
             due = todo
         else:
-            clock = pd.Timestamp(now()).tz_convert("UTC")
+            clock = read_at
             wake = {r["race_id"]: r["post_utc"] - primary - LEAD for r in timed}
             due = sorted(
                 (r for r in timed if wake[r["race_id"]] <= clock), key=lambda r: r["post_utc"]
@@ -203,7 +224,6 @@ def run_race_time_day(
             _append(card_snapshots_path(race_date), {"card_version": version, "races": inputs})
             saved.add(version)
         for race in due:
-            sidecar, no = folder / f"{race['venue']}.races.json", _race_no(race["race_id"])
             rec = record_race(
                 race,
                 model=model,
@@ -212,8 +232,8 @@ def run_race_time_day(
                 card_version=version,
                 now=now,
                 replay=replay,
-                # a race the sidecar lacks keeps the post it had here: the card's (finding C)
-                latest_post=lambda s=sidecar, n=no: odds_log.read_post_times(s).get(n),
+                latest_post=lambda r=race: _latest_post(r, folder, races),
+                inputs_utc=read_at,  # a sighting written after the read was not among them
             )
             _append(path, rec)
             records.append(rec)
@@ -278,6 +298,46 @@ def _keyed(races: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _course_rails(race_date: date) -> pd.DataFrame:
+    """The day's turf rail publications in the store's track_condition table (#90): venue, rail
+    and available_utc, ordered by availability; empty when the table is not built."""
+    columns = ["venue", "race_date", "surface", "rail", "available_utc", "ingested_utc"]
+    if not table_path(SOURCE, "track_condition").exists():
+        return pd.DataFrame(columns=["venue", "rail", "available_utc"])
+    rows = read_table(SOURCE, "track_condition", columns=columns)
+    keep = (speed_run._race_days(rows["race_date"]) == race_date).to_numpy()
+    rows = rows.loc[keep & (rows["surface"] == "turf").to_numpy() & rows["rail"].notna().to_numpy()]
+    rows = rows.assign(available_utc=pd.to_datetime(rows["available_utc"], utc=True))
+    return rows.sort_values(["available_utc", "ingested_utc"], kind="mergesort")
+
+
+def _known_rails(out: pd.DataFrame, race_date: date, store: pd.DataFrame) -> list:
+    """Each row's rail: a turf race the card gives no rail takes the latest track_condition rail of
+    its venue published by its cutoff (post - primary), else the rail the store's own row of the
+    race has (from the going pages, `going.attach_rail_setting`), else stays unknown."""
+    primary = pd.Timedelta(minutes=load_decision_grid().primary)
+    course = _course_rails(race_date)
+    own = {
+        rid: rail
+        for rid, rail in zip(store["race_id"], store["rail_setting"], strict=True)
+        if rail is not None and pd.notna(rail)
+    }
+    rails = []
+    for row in out.to_dict("records"):
+        rail = row["rail"]
+        if rail == speed_run.UNKNOWN and row["surface"] == "turf":
+            post = pd.Timestamp(row["post_utc"]) if pd.notna(row["post_utc"]) else None
+            known = course.loc[(course["venue"] == row["venue"]).to_numpy()]
+            if post is not None:
+                known = known.loc[(known["available_utc"] <= post - primary).to_numpy()]
+            if post is not None and not known.empty:
+                rail = known["rail"].iloc[-1]
+            else:
+                rail = own.get(row["race_id"], rail)
+        rails.append(rail)
+    return rails
+
+
 def load_day_races(race_date: date) -> pd.DataFrame:
     """The day's races: every upcoming card race, then the store's races of the day no card lists;
     race_id, venue, the model's keys, post_utc and top3_time_s (NaN until resulted)."""
@@ -296,6 +356,7 @@ def load_day_races(race_date: date) -> pd.DataFrame:
     if not parts:
         raise LookupError(f"no {SOURCE} card or store race on {race_date.isoformat()}")
     out = pd.concat(parts, ignore_index=True).drop_duplicates("race_id", ignore_index=True)
+    out["rail"] = _known_rails(out, race_date, races)
     top3 = pd.Series(dtype=float)
     runners = read_table(SOURCE, "runners", columns=list(speed_run.RUNNER_COLUMNS))
     runners = runners.loc[runners["race_id"].isin(out["race_id"])]
