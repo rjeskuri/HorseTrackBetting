@@ -272,10 +272,11 @@ below. Nothing is adopted, and the holdout is not opened.
 - **Result, v4.** The measurement ran on the scored closing boards and validated boards read `joint` or
   `low_only`, so its record `place_rule_vs_votes` `8810ca538e68f8e4` is `scored` (`place_validated`), not failed.
   The private report therefore reads the Place rows with the rule's measurement rather than as a diagnostic, which
-  meets DoD (b). The exceptions are the Place rows of any board read `undetermined`, which stay a diagnostic. How
-  closely the rule reproduces the figures, the coverage and the errors per read and per P are in the private report
-  `$HORSETRACK_DATA_DIR/reports/nowcast-japan-3e07f46516e3.md` and are withheld here (D21). v3's Place rows stay
-  superseded.
+  meets DoD (b). The exceptions are the Place rows of any board read `undetermined`, which stay a diagnostic. Per
+  read and per P, the coverage, the share of validated boards whose printed figures the rule reproduces from the
+  votes, the share whose shares as scored fall within the tolerance above, and the errors are in the private report
+  `$HORSETRACK_DATA_DIR/reports/nowcast-japan-3e07f46516e3.md` and are withheld here (D21); this report does not
+  assert the tolerance on every board. v3's Place rows stay superseded.
 - **The v3 re-run.** Family `japan-c1-nowcast-final-shares-v3`, spec sha256
   `4cb84e2f74e25d5cc1de9ec471dd84912e0ec09b1c16cfba3d1dc07d387fad83`, frozen at the start of the run before any
   development row was read (the owner's 2026-11-27 reframe: Claude pre-registers and logs every variant). v3
@@ -327,5 +328,5 @@ below. Nothing is adopted, and the holdout is not opened.
 - **Open question.** Any boards the rule does not reproduce, the 2-place boards among them: final figures
   published from a different count of starters or votes than H1's are one candidate. The measurement reports P
   from the registered slots for that; it is not fixed here.
-- **Follow-ups**, proposed for the orchestrator: Wide's inversion measured against Wide money; any boards the Place
-  rule misses.
+- **Follow-ups**, proposed for the orchestrator: Wide's inversion measured against Wide money; the boards the Place
+  rule does not reproduce; the boards read `undetermined`.
