@@ -26,10 +26,19 @@ Contract pinned here (`horsetrack.countries.japan.models.speed_horse`, and #96's
   race all of whose runs were dropped (no finish time, or no publication: still pending) is not
   taken, fitted or observed: observed again once it has resulted, it counts, as if that were its
   first time. An observed run whose result is never published (null) is never available.
-- A run's baseline, fitted or observed, is read from the speed model as it stands when predict
-  needs it: a race-level result the speed model observes after a horse run was observed, published
-  before that run's off, reaches the run as if the speed model had observed it first, so the same
+- An observed run's baseline is read from the speed model as it stands when predict needs it: a
+  race-level result the speed model observes after a horse run was observed, published before
+  that run's off, reaches the run as if the speed model had observed it first, so the same
   results predict alike in batch and incremental replay. The global terms stay as fitted.
+- A HorseSpeed fit is valid only for the speed model state it was fitted against (the owner,
+  2026-11-27): the global terms were fitted on the fitted runs' baselines, so nothing re-reads
+  them. Fitting that `SpeedModel` object again (`SpeedModel.fit_generation`, moved by every fit and
+  by no observation, while `version` moves with both) makes predict, at any t, and observe a
+  ValueError naming the remedy ("fit HorseSpeed" again) until HorseSpeed is fitted again on it. So
+  does, for predict, a race-level result the speed model observes after the horse fit that changes
+  a fitted run's baseline (on its day and group, published strictly before its off). A result no
+  fitted run's baseline reads (a later day's, or one published at or after every fitted off of its
+  day and group) is no change: predict goes on exactly as before.
 - `predict(race_runners, *, at_utc) -> DataFrame`: race_runners is a card (race_id, race_utc,
   horse_id, style, early_pos_mean3, weight_kg, draw and the par keys; a missing one a ValueError;
   result columns are not needed and are ignored when present). One row per runner, in the card's
@@ -95,8 +104,9 @@ worlds, never from the code under test. Not pinned: the estimator of the global 
 scale, weight, pace x style, the prior), whether they read fit-day runs against the in-sample
 variant, how a fit run with a time and no publication is kept out of them, which fit refuses a
 timed speed-fit race with no publication (or whether predict does), whether observe takes runs
-published before the fit's latest publication, how a run's baseline is cached, how p_speed's scale
-is fitted, the bias score and its shrinkage. Every frame is synthetic; nothing reads a store.
+published before the fit's latest publication, how a run's baseline is cached, whether observe is
+refused after a result that changes a fitted run's baseline, how p_speed's scale is fitted, the
+bias score and its shrinkage. Every frame is synthetic; nothing reads a store.
 """
 
 # Ruff reads the module under test as third-party until it exists, then as first-party; the
@@ -1099,6 +1109,177 @@ def test_a_race_result_the_speed_model_observes_later_reaches_runs_observed_befo
     speed.observe(races[r4])
     assert td_state(model, times) == pytest.approx(td_state(horse(), times), abs=1e-9)
     assert global_terms(model) == terms
+
+
+# ---------------------------------------------------------------------------------------------
+# A HorseSpeed fit holds only for the speed model state it was fitted against (2026-11-27)
+# ---------------------------------------------------------------------------------------------
+
+# The refusal names its remedy: "refit HorseSpeed" or "fit HorseSpeed again" both match.
+STALE = "fit HorseSpeed"
+
+# Frames the shared speed model is fitted on again, in place: every par moves.
+REFIT_FRAMES = {
+    "slower_by_half_a_second": lambda r: r.assign(top3_time_s=r["top3_time_s"] + 0.5),
+    "first_six_days": lambda r: r[jst_day(r) <= FIT_DAYS[5]].reset_index(drop=True),
+}
+STALE_TIMES = (at(TD, 23, 0), at(NEXT, 1, 0), at(LATER, 0, 0))
+
+
+def of_day(frame, day):
+    return (jst_day(frame) == day).to_numpy()
+
+
+def stale_state(model, cards, times):
+    return np.concatenate([predicted(model, c, t).to_numpy() for t in times for c in cards])
+
+
+def test_the_speed_models_fit_generation_counts_its_fits_not_its_observations():
+    # version moves with every fit and every observation kept (the baselines' cache reads it);
+    # fit_generation moves with every fit alone, the same frame fitted again included, and never
+    # with an observation: an observation is never taken for a refit.
+    spec = SpeedSpec(par_keys=PAR_KEYS, variant_keys=VARIANT_KEYS, same_day_variant=True, t_df=None)
+    races = observed_races()
+    model = SpeedModel(spec)
+    frames = {"world": lambda r: r, **REFIT_FRAMES, "world_again": lambda r: r}
+    gen = version = None
+    for name, make in frames.items():
+        assert model.fit(make(fit_races())) is model
+        if gen is not None:
+            assert model.fit_generation > gen, name
+            assert model.version > version, name
+        gen, version = model.fit_generation, model.version
+        for day in H_DAYS[:3]:
+            assert model.observe(races[of_day(races, day)]) is model
+            assert model.version > version, (name, day)
+            assert model.fit_generation == gen, (name, day)
+            version = model.version
+
+
+def test_refitting_the_shared_speed_model_in_place_refuses_horse_speed_until_fitted_again(fitted):
+    # HorseSpeed's global terms were fitted on baselines read from the speed model's fit. The
+    # speed model observing a later day (TD) is no refit: predict goes on, exactly as before and as
+    # the fit against the speed model that had TD all along. Fitting that same SpeedModel object
+    # again, on another frame, leaves the horse fit stale whether or not the horse days are then
+    # observed again: predict at any t, and observe, are refused until HorseSpeed is fitted again
+    # on it, which is then the fit against a new speed model of that frame and those results.
+    races = observed_races()
+    td = of_day(races, TD)
+    speed = speed_on(fit_races(), races[~td])
+    model = HorseSpeed(drift_var_per_day=DRIFT, t_df=None).fit(early_runs(), speed)
+    cards = [card([twin("ref"), *fillers(), "syn-new-1"])]
+    before = stale_state(model, cards, STALE_TIMES)
+    assert speed.observe(races[td]) is speed  # a later day: no fitted run's baseline reads it
+    assert stale_state(model, cards, STALE_TIMES) == pytest.approx(before, abs=1e-9)
+    assert before == pytest.approx(stale_state(fitted(), cards, STALE_TIMES), abs=1e-9)
+    for name, make in REFIT_FRAMES.items():
+        frame = make(fit_races())
+        speed.fit(frame)
+        for again in (None, races):  # refitted alone, then with the horse days observed again
+            if again is not None:
+                speed.observe(again)
+            for t in STALE_TIMES:
+                with pytest.raises(ValueError, match=STALE):
+                    model.predict(cards[0], at_utc=t)
+            with pytest.raises(ValueError, match=STALE):
+                model.observe(td_runs())
+        fresh = HorseSpeed(drift_var_per_day=DRIFT, t_df=None).fit(
+            early_runs(), speed_on(frame, races)
+        )
+        assert model.fit(early_runs(), speed) is model
+        got = stale_state(model, cards, STALE_TIMES)
+        assert got == pytest.approx(stale_state(fresh, cards, STALE_TIMES), abs=1e-9), name
+        assert np.abs(got - before).max() > 1e-6, name  # the refit did move the predictions
+    # Fitted again, it observes again: TD's runs join, as with the new speed model's fit.
+    model.observe(td_runs())
+    fresh.observe(td_runs())
+    td_cards = [card(c, day=TD, post=R8_POST) for c in chunks(sorted(set(td_runs()["horse_id"])))]
+    t = (at(TD, 23, 0),)
+    assert stale_state(model, td_cards, t) == pytest.approx(
+        stale_state(fresh, td_cards, t), abs=1e-9
+    )
+
+
+# A fitted horse day's Tokyo turf, H_DAYS[5]: R1 (off 01:05, published 01:15), R2 (02:15, 02:25),
+# R3 (03:25, 03:35); the six twins ran R3. A fitted run's baseline is read as of its off, so R2's
+# reads R1, and R3's R1 and R2: R1 observed after the horse fit changes both, and a result of the
+# day published 1 us before R3's off changes R3's. One published at R3's off changes none.
+BACKFILL_DAY = H_DAYS[5]
+BACKFILL_R1 = race_id(BACKFILL_DAY, TOK, 1)
+BACKFILL_LAST_OFF = at(BACKFILL_DAY, 3, 25)
+
+
+def extra_result(tag, pub):
+    """One more race-level result on BACKFILL_DAY's Tokyo turf: 1600 m, off 02:50, 3.0 s slower
+    than the par, published at pub."""
+    frame = pd.DataFrame(
+        [
+            {
+                "race_id": f"syn-{BACKFILL_DAY:%Y%m%d}-TOK-{tag}",
+                "race_utc": at(BACKFILL_DAY, 2, 50),
+                "track": TOK[0],
+                "surface": TOK[1],
+                "distance": 1600,
+                "top3_time_s": PAR[(*TOK, 1600)] + 3.0,
+                "result_available_utc": pub,
+            }
+        ]
+    )
+    for col in ("race_utc", "result_available_utc"):
+        frame[col] = pd.to_datetime(frame[col], utc=True)
+    return frame[list(RACE_COLUMNS)]
+
+
+# The result the speed model observes after the horse fit, and what it withheld until then
+BACKFILLS = {
+    "the_days_first_race": BACKFILL_R1,
+    "published_just_before_a_fitted_off": None,
+}
+
+
+@pytest.mark.parametrize("kind", list(BACKFILLS))
+def test_a_result_observed_after_the_horse_fit_that_moves_a_fitted_baseline_refuses_predict(
+    fitted, kind
+):
+    # The speed model lacks TD's results and, for the first kind, BACKFILL_DAY's TOK R1 when
+    # HorseSpeed is fitted. It then observes TD's (a later day) and a result of BACKFILL_DAY's
+    # Tokyo turf published at R3's off: no fitted run's baseline reads either, and every prediction
+    # stays exactly as it was. Then the backfill, published before a fitted run's off on its day
+    # and group: that run's baseline moves under global terms fitted on the old one, so predict is
+    # refused at every t until HorseSpeed is fitted again. With R1 back, that fit is the batch one.
+    races = observed_races()
+    td = of_day(races, TD)
+    withheld = BACKFILLS[kind]
+    held = (races["race_id"] == withheld).to_numpy() if withheld else np.zeros(len(races), bool)
+    speed = speed_on(fit_races(), races[~(td | held)])
+    model = HorseSpeed(drift_var_per_day=DRIFT, t_df=None).fit(early_runs(), speed)
+    runs = early_runs()
+    on_day = runs[of_day(runs, BACKFILL_DAY) & (runs["track"] == TOK[0]).to_numpy()]
+    horses = list(dict.fromkeys([*sorted(set(on_day["horse_id"])), *fillers()]))
+    assert twin("ref") in horses and len(horses) >= 3 * FIELD
+    cards = [card(c) for c in chunks(horses, 20)]
+    times = (at(TD, 23, 0), at(NEXT, 1, 0))
+
+    def r3_variant():
+        return speed.variant(BACKFILL_DAY, *TOK, at_utc=BACKFILL_LAST_OFF)
+
+    before, v3 = stale_state(model, cards, times), r3_variant()
+    for later in (races[td], extra_result("at-r3-off", BACKFILL_LAST_OFF)):
+        speed.observe(later)
+        assert r3_variant() == v3  # the planted world: R3's baseline is as it was
+        assert stale_state(model, cards, times) == pytest.approx(before, abs=1e-9)
+    backfill = races[held] if withheld else extra_result("before-r3-off", BACKFILL_LAST_OFF - US)
+    speed.observe(backfill)
+    assert abs(r3_variant()[0] - v3[0]) > 1e-3  # the planted world: R3's baseline has moved
+    for c in cards:
+        for t in times:
+            with pytest.raises(ValueError, match=STALE):
+                model.predict(c, at_utc=t)
+    assert model.fit(early_runs(), speed) is model
+    got = stale_state(model, cards, times)
+    assert np.isfinite(got).all()
+    if withheld:
+        assert got == pytest.approx(stale_state(fitted(), cards, times), abs=1e-9)
 
 
 # ---------------------------------------------------------------------------------------------

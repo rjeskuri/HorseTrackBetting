@@ -12,11 +12,12 @@ relative speed and SD, and p_speed via Henery (normal) or PL strengths exp(-mu_i
   (`race_utc`, or its publication when that is earlier): the par plus the day variant from the
   day's results published strictly before then, so never the run's own race. V, the variant's
   posterior variance then, joins the run's error. It reads no result published after its own
-  run, so a run whose result is published before t brings nothing published at or after t. It is
-  read from the speed model as it stands when predict needs it, and read again once the speed
-  model has observed more (`SpeedModel.version`): a race-level result observed after the run,
-  published before its off, reaches it as if observed first, so batch and incremental replay
-  agree. The par is the speed model's own, fitted on its frame.
+  run, so a run whose result is published before t brings nothing published at or after t. An
+  observed run's is read from the speed model as it stands when predict needs it, and read again
+  once the speed model has observed more (`SpeedModel.version`): a race-level result observed
+  after the run, published before its off, reaches it as if observed first, so batch and
+  incremental replay agree. A fitted run's is the one the global terms were fitted on: one that
+  moves refuses predict (below). The par is the speed model's own, fitted on its frame.
 - A run on a (day, group) of the speed model's fit frame (a training-window day: #96 refuses to
   observe it, so its as-of variant is the prior) has a second baseline, the par plus the fit's
   in-sample variant of that (day, group) (`SpeedModel.in_sample_variant`), whose variance is V
@@ -69,6 +70,16 @@ The global terms read the retained fit runs and the speed model's fit reads its 
 speed model's `fit_cutoff` (whose pars, sigma and tau reach every baseline and every card); an
 untimed or skipped fit run moves nothing, and observations never move that bound. A speed model
 whose fit frame has a timed race never published leaves no such at_utc: fit refuses it.
+
+A fit is valid only for the speed model state it was fitted against (the owner on #97,
+2026-11-27): the global terms were fitted on the fitted runs' baselines, and nothing re-reads or
+re-calibrates them. Once that `SpeedModel` object is fitted again (`SpeedModel.fit_generation`),
+predict, at any at_utc, and observe raise ValueError until HorseSpeed is fitted again on it. Once
+the speed model observes a result that changes a fitted run's as-of baseline or its variance (one
+on its day and group published strictly before its off), predict raises ValueError, on every call,
+until HorseSpeed is fitted again; a result that leaves every fitted run's baseline bit-identical
+(a later day's, or one published at or after every fitted off of its day and group) changes
+nothing.
 
 `predict(race_runners, at_utc)`: theta_i is the filter over that horse's runs, fitted or observed,
 whose result was published strictly before at_utc (null: never), in off order, each against the
@@ -313,6 +324,7 @@ class HorseSpeed:
         self.drift_var_per_day = float(drift_var_per_day)
         self.t_df = None if t_df is None else float(t_df)
         self._speed: SpeedModel | None = None
+        self._speed_generation: int | None = None  # the speed model's fit_generation at the fit
         self._history: dict = {}
         self._race_ids: set = set()  # the races with a retained run, fitted or observed
         # the history's as-of baselines: each key's (day, group, par, instant), its baseline and
@@ -320,6 +332,9 @@ class HorseSpeed:
         self._args: list[tuple] = []
         self._base, self._base_var = np.zeros(0), np.zeros(0)
         self._base_version: int | None = None
+        # the fitted runs' as-of baselines and variances as the global terms read them: the
+        # table's first len(_fit_base) keys must still read so (see the module docstring)
+        self._fit_base, self._fit_var = np.zeros(0), np.zeros(0)
         # the latest publication (ns) the global terms or the speed model's fit read, or switch
         # instant of a fit run's in-sample baseline; predict needs an at_utc after it
         self._terms_cutoff: int | None = None
@@ -371,7 +386,7 @@ class HorseSpeed:
         # the fit reads every run as predict does after every publication (the module docstring)
         sigma, s0, coef, n_iter = self._fit_terms(steps, code, e_in, x, vv_in)
         # everything is fitted: keep it, the runs as the history
-        self._speed = speed
+        self._speed, self._speed_generation = speed, speed.fit_generation
         self.sigma, self.prior_sd, self.n_iter = sigma, s0, n_iter
         self.weight_ref, self.pace_ref = weight_ref, pace_ref
         self.weight_slope = float(coef[0])
@@ -389,17 +404,29 @@ class HorseSpeed:
         self._history, self._race_ids = {}, set()
         self._args, self._base, self._base_var = [], np.zeros(0), np.zeros(0)
         self._base_version = speed.version
+        self._fit_base, self._fit_var = r.base, r.var
         self.n_runs, self.n_observed = int(r.tau.size), 0
         self.n_unseen = self.n_unpublished = 0
         self._keep(r)
         return self
 
-    def observe(self, runs: pd.DataFrame) -> HorseSpeed:
-        """Add later runs to the horses' history only, against the frozen global terms; added to
-        earlier observations (see the module docstring)."""
+    def _current_speed(self) -> SpeedModel:
+        """The speed model, unless it was fitted again after the horse fit (see the module
+        docstring)."""
         speed = self._speed
         if speed is None:
             raise RuntimeError("the horse speed model is not fitted")
+        if speed.fit_generation != self._speed_generation:
+            raise ValueError(
+                "the speed model was refit after the horse fit: its pars, sigma and tau no longer "
+                "give the baselines the global terms were fitted on; refit HorseSpeed"
+            )
+        return speed
+
+    def observe(self, runs: pd.DataFrame) -> HorseSpeed:
+        """Add later runs to the horses' history only, against the frozen global terms; added to
+        earlier observations (see the module docstring)."""
+        speed = self._current_speed()
         r = self._read(runs, speed)
         again = self._race_ids.intersection(runs["race_id"].tolist())
         if again:
@@ -484,11 +511,23 @@ class HorseSpeed:
 
     def _as_of_now(self) -> tuple[np.ndarray, np.ndarray]:
         """The table's as-of baselines and their error scale^2 sigma^2 + V, read from the speed
-        model again when it has changed since they were read."""
+        model again when it has changed since they were read; a ValueError, on every call, once a
+        fitted run's no longer reads as the global terms read it (see the module docstring)."""
         speed = self._speed
         if self._base_version != speed.version:
             self._base, self._base_var = _as_of(speed, self._args)
             self._base_version = speed.version
+        n = len(self._fit_base)
+        moved = ~(
+            _nan_equal(self._base[:n], self._fit_base)
+            & _nan_equal(self._base_var[:n], self._fit_var)
+        )
+        if moved.any():
+            raise ValueError(
+                f"a result observed after the horse fit changes a fitted run's baseline "
+                f"({int(moved.sum())} of the fitted runs' {n} as-of baselines moved): fit "
+                "HorseSpeed again"
+            )
         return self._base, self.sigma**2 + self._base_var
 
     @staticmethod
@@ -575,9 +614,7 @@ class HorseSpeed:
     # -- predict --------------------------------------------------------------------------------
 
     def predict(self, race_runners: pd.DataFrame, *, at_utc: datetime) -> pd.DataFrame:
-        speed = self._speed
-        if speed is None:
-            raise RuntimeError("the horse speed model is not fitted")
+        speed = self._current_speed()
         at_ns = _instant_ns(at_utc, "at_utc")
         if at_ns <= self._terms_cutoff:
             raise ValueError(
@@ -669,6 +706,11 @@ def _par(speed: SpeedModel, race: dict) -> float | None:
         return speed.par(**{k: race[k] for k in speed.spec.par_keys})
     except KeyError:
         return None
+
+
+def _nan_equal(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Entry by entry, a == b with NaN equal to NaN."""
+    return (a == b) | (np.isnan(a) & np.isnan(b))
 
 
 def _as_of(speed: SpeedModel, args: list[tuple]) -> tuple[np.ndarray, np.ndarray]:

@@ -61,7 +61,9 @@ frame given to `fit`, every one of which the pars, sigma and tau read (an untime
 time and does not move it); None when one of them has none (never published: no instant is after
 every result the fit read). A caller that may use nothing published at or after t uses the fit
 only at a t strictly after it. `version` counts the fits and the observations kept, so a reader
-that caches what it read from the model (#97's baselines) knows when to read it again.
+that caches what it read from the model (#97's baselines) knows when to read it again;
+`fit_generation` counts the fits alone (no observation moves it), so a reader fitted on what the
+model was (#97's `HorseSpeed`) knows when it has been fitted again.
 
 `expected_top3_time(race, at_utc, pace_s=0.0)` is par(cell) + the variant's mean at t + pace_s,
 the race's pace term in seconds (#97): the caller computes it (#97's `speed_horse` passes its
@@ -202,6 +204,7 @@ class SpeedModel:
         self._observed_ids: set = set()
         self._cutoff: int | None = None  # fit_cutoff in ns (None: a timed race never published)
         self.version = 0  # bumped by every fit and every observation kept
+        self.fit_generation = 0  # bumped by every fit alone
         self.sigma: float | None = None  # the error's scale (its SD when t_df is None), s
         self.tau: float | None = None  # the default variant prior's SD (the random effect's), s
         self.n_races = 0
@@ -259,6 +262,7 @@ class SpeedModel:
         avail, known = _utc_ns(frame["result_available_utc"], "result_available_utc")
         self._cutoff = int(avail.max()) if known.all() else None
         self.version += 1
+        self.fit_generation += 1
         return self
 
     def _resulted_at(
