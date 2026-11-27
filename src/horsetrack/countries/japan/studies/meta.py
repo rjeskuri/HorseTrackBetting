@@ -635,6 +635,11 @@ def _clustered_encompassing(outcome: _Outcome, scored: Scored, spec: dict) -> tu
     return _d7("scored_rows_in_sample", "encompassing_coef", c, sm, scored.n_races, z), {}
 
 
+def season_years(first: date, last: date) -> float:
+    """The seasons from race day `first` to `last`, both counted, as D9's minimum is read."""
+    return ((last - first).days + 1) / 365.25
+
+
 def _level2_window(rows: pd.DataFrame, folds: list[Fold]) -> list[dict]:
     """Each scored fold's level-2 training rows (the member rows on or before train_end) against
     D9's 5-season minimum: a coverage count of the store and the member file, no outcome."""
@@ -643,7 +648,7 @@ def _level2_window(rows: pd.DataFrame, folds: list[Fold]) -> list[dict]:
         train = rows.iloc[fold.train_idx]
         dates = pd.to_datetime(train["race_date"])
         first, last = (None, None) if train.empty else (dates.min().date(), dates.max().date())
-        years = 0.0 if first is None else ((last - first).days + 1) / 365.25
+        years = 0.0 if first is None else season_years(first, last)
         out.append(
             {"fold": fold.test_start.isoformat(), "test to": fold.test_end.isoformat()}
             | {"train from": first, "train to": last, "train end": fold.train_end.isoformat()}
