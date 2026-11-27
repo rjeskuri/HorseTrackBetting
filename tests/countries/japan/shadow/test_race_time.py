@@ -1019,3 +1019,98 @@ def test_a_result_seen_without_its_finish_time_is_pending_and_a_rebuilt_source_s
         {"race_id": entry["race_id"], "first_seen_utc": entry["first_seen_utc"]}
     )
     assert any(target in p for p in verify_replay([moved], **kwargs))
+
+
+# --------------------------------------------------------------------------- round 3
+
+
+@pytest.mark.parametrize(
+    "contradict",
+    ["seen after the cutoff", "never seen", "not in the source"],
+)
+def test_a_pending_sighting_the_source_contradicts_is_reported(model, results, contradict):
+    """Round-3 finding 4: a live record lists TOK R3 as pending (seen by TOK R5's cutoff, no time
+    yet); a source that puts that sighting after the cutoff, never sees it, or lacks the race is
+    a problem naming TOK R5, while the same source with the sighting as recorded verifies."""
+    target, pending = rid("TOK", 5), rid("TOK", 3)
+    cutoff = cutoff_of(target)
+    at_snapshot = results.copy()
+    at_snapshot.loc[at_snapshot["race_id"] == pending, "top3_time_s"] = np.nan
+    rec = record(model, at_snapshot, target, cutoff - timedelta(seconds=30))
+    seen = results.loc[results["race_id"] == pending, "first_seen_utc"].iloc[0]
+    assert _pending(rec) == {(pending, seen)} and seen <= pd.Timestamp(cutoff)
+
+    kwargs = dict(card=card_frame(), model=model, model_version=MV, card_version=CV)
+    assert verify_replay([rec], results=results.copy(), **kwargs) == []
+
+    source = results.copy()
+    row = source["race_id"] == pending
+    if contradict == "seen after the cutoff":
+        source.loc[row, "first_seen_utc"] = pd.Timestamp(cutoff + timedelta(minutes=1))
+    elif contradict == "never seen":
+        source.loc[row, "first_seen_utc"] = pd.NaT
+    else:
+        source = source[~row].reset_index(drop=True)
+    problems = verify_replay([rec], results=source, **kwargs)
+    assert any(target in p for p in problems), problems
+
+
+def test_verification_keys_the_source_by_the_card_snapshot(model, results):
+    """Round-3 finding 3 (verify side): the recorder's card, and so its frame, had TOK R1 with no
+    rail, a cell without a par, so TOK R3's forecast could not use it. The store rebuilt later
+    gives TOK R1 rail B (a fitted cell); verified against the card snapshot the record was made
+    under, the record is clean, and only against a card with rail B is TOK R1 reported missing."""
+    target, early = rid("TOK", 3), rid("TOK", 1)
+    no_rail = {**CARD[early], "rail": "unknown"}
+    with pytest.raises(KeyError):
+        model.par(**{k: no_rail[k] for k in PAR_KEYS})
+    snapshot = card_frame([no_rail if r["race_id"] == early else r for r in CARD.values()])
+    frame = results.copy()
+    frame.loc[frame["race_id"] == early, "rail"] = "unknown"
+    rec = record(model, frame, target, cutoff_of(target) - timedelta(seconds=30))
+    assert rec["status"] == "ok" and early not in used_ids(rec)
+    assert results.loc[results["race_id"] == early, "first_seen_utc"].iloc[0] <= pd.Timestamp(
+        cutoff_of(target)
+    )
+
+    kwargs = dict(results=results, model=model, model_version=MV, card_version=CV)
+    assert verify_replay([rec], card=snapshot, **kwargs) == []
+    problems = verify_replay([rec], card=card_frame(), **kwargs)
+    assert any(target in p and early in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("inputs_vs_now_s", "snapshot_is", "seen_counts"),
+    [(-30, "inputs", False), (15, "now", True), (None, "now", True)],
+    ids=["inputs read before now", "inputs after now", "no inputs time"],
+)
+def test_the_input_snapshot_is_the_earlier_of_the_read_and_now(
+    model, results, inputs_vs_now_s, snapshot_is, seen_counts
+):
+    """Round-3 finding 1: `inputs_utc`, the instant the caller began reading the results, is the
+    input snapshot when it comes before `now()`, so TOK R3, first seen 15 s before `now()` but
+    after that read, does not feed TOK R5's forecast; a later or absent `inputs_utc` leaves the
+    snapshot at `now()`, and TOK R3 is used. Each record verifies against the same source."""
+    target, early = rid("TOK", 5), rid("TOK", 3)
+    cutoff = cutoff_of(target)
+    when = cutoff - timedelta(seconds=60)
+    source = results.copy()
+    source.loc[source["race_id"] == early, "first_seen_utc"] = pd.Timestamp(
+        when - timedelta(seconds=15)
+    )
+    extra = {}
+    if inputs_vs_now_s is not None:
+        extra["inputs_utc"] = when + timedelta(seconds=inputs_vs_now_s)
+    rec = record(model, source, target, when, **extra)
+    snapshot = extra["inputs_utc"] if snapshot_is == "inputs" else when
+    assert utc(rec["input_snapshot_utc"]) == snapshot
+    assert utc(rec["completion_utc"]) == when
+    assert rec["mode"] == "live"
+    assert (early in used_ids(rec)) is seen_counts
+    assert early not in {u["race_id"] for u in rec["results_pending"]}
+    _, same_day = expected(model, CARD[target], source, min(cutoff, snapshot))
+    assert rec["same_day_s"] == pytest.approx(same_day, abs=1e-9)
+    problems = verify_replay(
+        [rec], card=card_frame(), results=source, model=model, model_version=MV, card_version=CV
+    )
+    assert problems == []

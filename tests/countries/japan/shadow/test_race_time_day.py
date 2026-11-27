@@ -972,3 +972,249 @@ def test_the_race_time_command_refuses_a_holdout_day(model, monkeypatch):
         assert any(_says_holdout(line, HOLD_DAY) for line in text.splitlines()), text
     assert card_reads == [] and leaks == []
     assert not race_time_day.race_time_log_path(HOLD_DAY).exists()
+
+
+# --------------------------------------------------------------------------- round 3
+
+CT16B = ("TOK", "turf", 1600, "outer", "B", "C1")  # CT16 with its rail known
+RAIL_PAR = {**CARD_PAR, CT16B: 93.7}
+
+
+def write_table(name: str, rows: list[dict]) -> None:
+    """One store table, every declared column (null where not given)."""
+    columns = schemas.TABLES[name].columns
+    schema = pa.schema([(c, tables.ARROW_TYPES[kind]) for c, kind in columns.items()])
+    data = {c: [row.get(c) for row in rows] for c in columns}
+    path = tables.table_path("jra", name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pydict(data, schema=schema), path)
+
+
+def with_rail(venue: str, no: int, cell: tuple, post: datetime, rail: str):
+    race, runners = resulted(venue, no, cell, post)
+    race["rail_setting"] = rail
+    return race, runners
+
+
+def rails_of(frame: pd.DataFrame) -> dict[str, str]:
+    return dict(zip(frame["race_id"], frame["rail"], strict=True))
+
+
+def test_a_retained_card_takes_the_store_rail_of_a_turf_race(monkeypatch):
+    """Round-3 finding 3: with the upcoming card kept on disk (it has no rail), Tokyo R1's store
+    row (rail B, from its going page) gives the card row rail B, so a replay forecasts it from the
+    rail-B par, not the no-rail one; Tokyo R3 (no store row) keeps "unknown", and a dirt race
+    stays "unknown" whatever its store row says. The card snapshot keeps rail B."""
+    rail_model = SpeedModel(SPEC).fit(fit_frame(RAIL_PAR))
+    b_par, no_rail_par = (rail_model.par(**keys_of(c)) for c in (CT16B, CT16))
+    assert abs(b_par - no_rail_par) > 0.5
+    write_upcoming(DAY)
+    tok1, tok1_runners = with_rail("TOK", 1, CT16, at(1, 0), "B")
+    tok2, tok2_runners = with_rail("TOK", 2, CTD14, at(1, 35), "A")
+    other, other_rows = a_week_before()
+    write_store([tok1, tok2, other], tok1_runners + tok2_runners + other_rows)
+
+    got = rails_of(race_time_day.load_day_races(DAY))
+    assert got[rid("TOK", 1)] == "B"
+    for no_rail in (rid("TOK", 2), rid("TOK", 3), rid("TOK", 4), rid("KYO", 1), rid("KYO", 2)):
+        assert got[no_rail] == "unknown", no_rail
+
+    clock = FakeTime(datetime(2025, 2, 18, 0, 0, tzinfo=UTC))
+    replayed = race_time_day.run_race_time_day(
+        DAY,
+        model=rail_model,
+        model_version=MV,
+        races=lambda: race_time_day.load_day_races(DAY),
+        now=clock.now,
+        sleep=no_sleep,
+        replay=True,
+    )
+    recs = {r["race_id"]: r for r in replayed.records}
+    assert recs[rid("TOK", 1)]["status"] == "ok"
+    assert recs[rid("TOK", 1)]["par_s"] == pytest.approx(b_par, abs=1e-9)
+    assert recs[rid("TOK", 3)]["par_s"] == pytest.approx(no_rail_par, abs=1e-9)
+    dirt_par = rail_model.par(**keys_of(CTD14))
+    assert recs[rid("TOK", 2)]["par_s"] == pytest.approx(dirt_par, abs=1e-9)
+    snap = race_time_day.load_card_snapshots(DAY)[recs[rid("TOK", 1)]["card_version"]]
+    assert rails_of(snap)[rid("TOK", 1)] == "B"
+
+
+def test_a_turf_rail_is_the_track_condition_published_by_the_race_cutoff():
+    """Round-3 finding 3: a turf race takes the latest turf rail of its venue and day published by
+    its own cutoff (post - primary), ahead of its store row: rail C (00:30) for Tokyo R1 (cutoff
+    00:58), rail D (published at Tokyo R3's cutoff, 02:08) for Tokyo R3, not rail E (02:30); a
+    dirt publication, another day's rail and the other venue's races change nothing."""
+    write_upcoming(DAY)
+    tok1, tok1_runners = with_rail("TOK", 1, CT16, at(1, 0), "B")
+    other, other_rows = a_week_before()
+    write_store([tok1, other], tok1_runners + other_rows)
+    week_before = DAY - timedelta(days=7)
+    publications = [
+        ("TOK", DAY, "turf", "C", at(0, 30)),
+        ("TOK", DAY, "dirt", "Z", at(0, 40)),
+        ("TOK", DAY, "turf", "D", at(2, 10) - PRIMARY),
+        ("TOK", DAY, "turf", "E", at(2, 30)),
+        ("KYO", week_before, "turf", "A", at(0, 30, day=week_before)),
+    ]
+    write_table(
+        "track_condition",
+        [
+            {
+                "jurisdiction": "jra",
+                "venue": venue,
+                "race_date": day,
+                "surface": surface,
+                "going": "good",
+                "rail": rail,
+                "published_utc": when,
+                "available_utc": when,
+                "ingested_utc": when + timedelta(minutes=1),
+            }
+            for venue, day, surface, rail, when in publications
+        ],
+    )
+    assert at(0, 30) <= at(1, 0) - PRIMARY < at(2, 10) - PRIMARY < at(2, 30)
+
+    got = rails_of(race_time_day.load_day_races(DAY))
+    assert got[rid("TOK", 1)] == "C"
+    assert got[rid("TOK", 3)] == "D"
+    for race_id in (rid("TOK", 2), rid("TOK", 4), rid("KYO", 1), rid("KYO", 2), rid("KYO", 3)):
+        assert got[race_id] == "unknown", race_id
+
+
+class MovingCardModel(SpeedModel):
+    """The #305 model that runs `during()` (a class attribute, so the recorder's copy runs it too)
+    while it computes the forecast: the card refreshed mid-computation."""
+
+    during = None
+
+    def expected_top3_time(self, race, *, at_utc):
+        if type(self).during is not None:
+            type(self).during()
+        return super().expected_top3_time(race, at_utc=at_utc)
+
+
+@pytest.mark.parametrize(
+    ("moved_to", "mode", "ready_by_cutoff"),
+    [(None, "live", 1), (at(0, 58), "late", 0), (at(0, 57), "replay", 0)],
+    ids=["card unchanged", "post moved two minutes earlier", "post moved to the completion"],
+)
+def test_a_card_post_moved_during_the_computation_is_judged_at_completion(
+    model, moved_to, mode, ready_by_cutoff
+):
+    """Round-3 finding 2: no sidecar has Tokyo R1, so its post is the card's (01:00, cutoff
+    00:58). The card is refreshed while the 00:57 forecast computes; the completion check rereads
+    it: moved to 00:58 the record is late (revised cutoff 00:56), moved to 00:57 it is a replay,
+    unchanged it is live. The post the inputs were taken for stays 01:00."""
+    race_id = rid("TOK", 1)
+    card = {"post": at(1, 0)}
+
+    def races() -> pd.DataFrame:
+        frame = pd.DataFrame(
+            [
+                {
+                    "race_id": race_id,
+                    "venue": "TOK",
+                    **keys_of(T16),
+                    "top3_time_s": np.nan,
+                    "post_utc": card["post"],
+                }
+            ]
+        )
+        frame["post_utc"] = pd.to_datetime(frame["post_utc"], utc=True)
+        return frame
+
+    def refresh() -> None:
+        if moved_to is not None:
+            card["post"] = moved_to
+
+    moving = copy.deepcopy(model)
+    moving.__class__ = MovingCardModel
+    clock = FakeTime(at(0, 56, 50))
+    MovingCardModel.during = refresh
+    try:
+        got = race_time_day.run_race_time_day(
+            DAY, model=moving, model_version=MV, races=races, now=clock.now, sleep=clock.sleep
+        )
+    finally:
+        MovingCardModel.during = None
+    (rec,) = got.records
+    assert rec["status"] == "ok"
+    assert utc(rec["post_utc_at_cutoff"]) == at(1, 0)
+    assert utc(rec["input_cutoff_utc"]) == at(1, 0) - PRIMARY
+    assert utc(rec["completion_utc"]) == at(0, 57)
+    assert utc(rec["latest_post_utc"]) == (moved_to or at(1, 0))
+    assert rec["mode"] == mode
+    assert got.coverage["TOK"]["ready_by_cutoff"] == ready_by_cutoff
+    assert read_log() == json.loads(json.dumps(got.records))
+
+
+@pytest.mark.parametrize(
+    ("stamped_after_read_s", "counts"),
+    [(20, False), (-10, True)],
+    ids=["sighting logged after the read", "sighting logged before the read"],
+)
+def test_a_sighting_logged_after_the_runner_read_its_clock_is_not_an_input(
+    model, stamped_after_read_s, counts
+):
+    """Round-3 finding 1: the runner reads the clock (02:42:00) before the card; the card read
+    takes 20 s, during which the odds logger records Tokyo R1's result. A sighting stamped after
+    02:42:00 is not one Tokyo R4's forecast (cutoff 02:43) saw: input_snapshot_utc is 02:42:00,
+    not the 02:42:20 of the recorder's own clock, and Tokyo R1 is neither used nor pending. A
+    sighting stamped before the read is used. Both records verify against the source."""
+    early, target = rid("TOK", 1), rid("TOK", 4)
+    posts = {1: POSTS[early], 4: POSTS[target]}
+    odds_log.write_post_times(sidecar("TOK", ".races.json"), posts, at(0, 0))
+    read_at = at(2, 42)
+    seen = read_at + timedelta(seconds=stamped_after_read_s)
+    clock = FakeTime(read_at)
+    calls = []
+
+    def races() -> pd.DataFrame:
+        if not calls:  # the first read is slow, and the logger writes meanwhile
+            clock.at += timedelta(seconds=20)
+            odds_log.record_published(sidecar("TOK", ".results.json"), [1], seen)
+        calls.append(clock.at)
+        frame = store_races()
+        return frame[frame["race_id"].isin([early, target])].reset_index(drop=True)
+
+    got = race_time_day.run_race_time_day(
+        DAY, model=model, model_version=MV, races=races, now=clock.now, sleep=clock.sleep
+    )
+    recs = {r["race_id"]: r for r in got.records}
+    rec = recs[target]
+    assert rec["status"] == "ok" and rec["mode"] == "live"
+    assert utc(rec["input_snapshot_utc"]) == read_at
+    assert utc(rec["completion_utc"]) == read_at + timedelta(seconds=20)
+    assert ({u["race_id"] for u in rec["results_used"]} == {early}) is counts
+    assert early not in {u["race_id"] for u in rec["results_pending"]}
+
+    src = store_races()
+    src = src[src["race_id"].isin([early, target])].reset_index(drop=True)
+    src["post_utc"] = pd.to_datetime(src["race_id"].map(POSTS), utc=True)
+    src["first_seen_utc"] = pd.to_datetime(
+        [seen if r == early else None for r in src["race_id"]], utc=True
+    )
+    ref = copy.deepcopy(model)
+    if counts:
+        ref.observe(
+            src[src["race_id"] == early].rename(
+                columns={"post_utc": "race_utc", "first_seen_utc": "result_available_utc"}
+            )
+        )
+    target_row = {"race_id": target, "race_utc": POSTS[target], **keys_of(T16)}
+    want = ref.expected_top3_time(target_row, at_utc=read_at + timedelta(days=30))
+    assert rec["same_day_s"] == pytest.approx(want, abs=1e-9)
+    if counts:
+        assert abs(want - model.par(**keys_of(T16))) > 1e-6
+
+    snap = race_time_day.load_card_snapshots(DAY)[rec["card_version"]]
+    problems = verify_replay(
+        got.records,
+        card=snap,
+        results=src,
+        model=model,
+        model_version=MV,
+        card_version=rec["card_version"],
+    )
+    assert problems == []
