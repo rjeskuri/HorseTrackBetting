@@ -36,11 +36,19 @@ Contract pinned here (the coder follows it), module
   - A holdout-day record is read no further than its race date: one cut short (or overlong) after
     its date is only counted in `holdout_skipped`; the same record on a development day still
     raises `records.RecordLengthError` (its record number counting the file), as before.
+  - Every record's two-byte record type is checked before its race date is trusted: a record that
+    does not start with the layout's record type (a file of another type misfiled under `RA/` or
+    `SE/`) raises `records.RecordTypeError` whatever its day (holdout, development or none) and
+    width, one too short to hold the type included; `record` counts the file (holdout-day records
+    included) and `found` is what the record starts with (the bytes it holds when shorter than
+    two). The holdout check comes after it and the width check after that, so a correctly typed
+    holdout-day record of the wrong width is still only skipped.
 - `horsetrack japan jravan card-versions [--as-of YYYY-MM-DD]` (default: today) runs `census` and
   writes the report; a reports folder inside the repository is refused (non-zero exit). An export
   with no RA or no SE file under any `stored/<DATASPEC>/` fails the command (non-zero exit, a
   message naming the record type, no report calling it final-only); a cut-off development-day
-  record exits 1.
+  record exits 1, and so does a file of the other record type in a record type's folder, even one
+  whose every record is on a holdout day (a message naming the record type, no report on it).
 
 The builders keep the final version: `races.build_races` and `runners.build_runners` write the same
 `races`, `meetings` and `runners` from an export holding card and final versions as from the
@@ -723,6 +731,130 @@ def test_a_cut_off_record_on_a_holdout_day_is_skipped_on_its_date_alone(
 
 
 # ------------------------------------------------------------------------------------------------
+# A record of another type fails the census before its date is trusted, whatever its day or width
+
+FOREIGN = "UM"  # a record type that is neither RA nor SE
+
+
+def retyped(rec: bytes, found: str) -> bytes:
+    """`rec` with its two-byte record type replaced by `found`, every other byte kept."""
+    assert len(found) == 2 and found.isascii() and found not in TYPES, found
+    return found.encode("ascii") + rec[2:]
+
+
+def misfiled(record_type: str, when: str, race_no: int) -> bytes:
+    """A final-result record of the other record type (built with its own layout) on a holdout
+    day, a development day, or a day that does not exist."""
+    other = other_type(record_type)
+    if when == "undated":
+        return row(other, "7", year="2026", mmdd="0230", race_no=race_no, created=first_day(False))
+    return dated(other, "7", first_day(when == "holdout"), race_no)
+
+
+# (the misfiled record's day, the records of the record type before it in its file)
+MISFILED_CASES = [("holdout", 2), ("holdout", 0), ("development", 3), ("undated", 1)]
+
+
+@pytest.mark.parametrize(("when", "before"), MISFILED_CASES)
+@pytest.mark.parametrize("record_type", TYPES)
+def test_a_record_of_the_other_type_fails_the_census_whatever_its_day(
+    data: Path, record_type: str, when: str, before: int
+) -> None:
+    held_out, dev = first_day(True), first_day(False)
+    other = other_type(record_type)
+    raw = raw_of(data)
+    put(raw, "stored/RACE", other, "2026.jvd", holding_records(other, {"7"}, dev))
+    # an earlier file of the record type: its records are not in the later file's numbers
+    put(raw, "stored/RACE", record_type, "2025.jvd", [
+        dated(record_type, "7", date(2025, 3, 16), 1),
+        dated(record_type, "7", date(2025, 3, 16), 2),
+    ])  # fmt: skip
+    preamble = [
+        dated(record_type, "2", held_out, 11),  # holdout-day records count in the numbers too
+        dated(record_type, "7", dev, 11),
+        dated(record_type, "7", held_out, 11),
+    ][:before]
+    put(raw, "stored/RACE", record_type, "2026.jvd", [
+        *preamble,
+        misfiled(record_type, when, 12),
+        dated(record_type, "7", dev, 13),
+    ])  # fmt: skip
+
+    with pytest.raises(records.RecordTypeError) as caught:
+        card_versions.census(raw=raw, as_of=held_out + timedelta(days=30))
+    got = (caught.value.record_type, caught.value.record, caught.value.found)
+    assert got == (record_type, before + 1, other), (record_type, when)
+
+
+# A record not of the record type on a holdout day, its race date intact: the other type's record
+# cut after its date, midway or with a byte too many, or one of the layout's own width (or a byte
+# short) that starts with another record type
+SHAPES = ("other-at-the-date", "other-mid-record", "other-one-byte-long", "foreign",
+          "foreign-one-byte-short")  # fmt: skip
+
+
+def shaped(
+    record_type: str, layouts: dict[str, spec.RecordSpec], how: str, day: date, race_no: int
+) -> tuple[bytes, str]:
+    """The `how` record on `day`, and the record type it starts with."""
+    other = other_type(record_type)
+    if how.startswith("other-"):
+        rec = dated(other, "7", day, race_no)
+        return cut(rec, layouts[other], how.removeprefix("other-")), other
+    rec = retyped(dated(record_type, "7", day, race_no), FOREIGN)
+    if how == "foreign-one-byte-short":
+        rec = cut(rec, layouts[record_type], "one-byte-short")
+    return rec, FOREIGN
+
+
+@pytest.mark.parametrize("how", SHAPES)
+@pytest.mark.parametrize("record_type", TYPES)
+def test_a_record_of_another_type_on_a_holdout_day_is_not_skipped_whatever_its_width(
+    data: Path, layouts: dict[str, spec.RecordSpec], record_type: str, how: str
+) -> None:
+    held_out, dev = first_day(True), first_day(False)
+    other = other_type(record_type)
+    raw = raw_of(data)
+    put(raw, "stored/RACE", other, "2026.jvd", holding_records(other, {"7"}, dev))
+    bad, found = shaped(record_type, layouts, how, held_out, 12)
+    assert bad[:2] == found.encode("ascii")  # its first bytes intact
+    put(raw, "stored/RACE", record_type, "2026.jvd", [
+        dated(record_type, "7", dev, 11),
+        dated(record_type, "2", held_out, 11),
+        bad,
+        dated(record_type, "7", held_out, 13),
+    ])  # fmt: skip
+
+    with pytest.raises(records.RecordTypeError) as caught:
+        card_versions.census(raw=raw, as_of=held_out + timedelta(days=30))
+    got = (caught.value.record_type, caught.value.record, caught.value.found)
+    assert got == (record_type, 3, found), (record_type, how)
+
+
+@pytest.mark.parametrize("stub", ("type-initial", "digit"))
+@pytest.mark.parametrize("record_type", TYPES)
+def test_a_record_too_short_to_hold_its_type_is_a_record_type_error(
+    data: Path, record_type: str, stub: str
+) -> None:
+    held_out, dev = first_day(True), first_day(False)
+    other = other_type(record_type)
+    raw = raw_of(data)
+    put(raw, "stored/RACE", other, "2026.jvd", holding_records(other, {"7"}, dev))
+    held = record_type[0] if stub == "type-initial" else "7"  # the one byte the record holds
+    put(raw, "stored/RACE", record_type, "2026.jvd", [
+        dated(record_type, "2", held_out, 11),
+        dated(record_type, "7", dev, 11),
+        held.encode("ascii") + b"\r\n",
+        dated(record_type, "7", dev, 12),
+    ])  # fmt: skip
+
+    with pytest.raises(records.RecordTypeError) as caught:
+        card_versions.census(raw=raw, as_of=held_out + timedelta(days=30))
+    got = (caught.value.record_type, caught.value.record, caught.value.found)
+    assert got == (record_type, 3, held), (record_type, stub)
+
+
+# ------------------------------------------------------------------------------------------------
 # The final-result version still feeds races and runners
 
 
@@ -910,3 +1042,39 @@ def test_the_command_skips_a_cut_off_holdout_record_and_stops_at_a_development_o
     failed = invoke("--as-of", as_of)
     assert failed.exit_code == 1, failed.output
     assert isinstance(failed.exception, SystemExit), repr(failed.exception)
+
+
+@pytest.mark.parametrize("record_type", TYPES)
+def test_the_command_fails_on_a_file_of_the_other_type_in_a_record_types_folder(
+    data: Path, record_type: str
+) -> None:
+    """The other type's file copied into the record type's folder, its every record on a holdout
+    day: it passes for a file of the record type only until its records' type is read."""
+    held_out, dev = first_day(True), first_day(False)
+    other = other_type(record_type)
+    raw, as_of = raw_of(data), (held_out + timedelta(days=30)).isoformat()
+    target = data / "reports" / REPORT
+    put(raw, "stored/RACE", record_type, "2026.jvd", holding_records(record_type, {"7"}, dev))
+    put(raw, "stored/RACE", other, "2025.jvd", holding_records(other, {"7"}, date(2025, 3, 16)))
+    copied = put(raw, "stored/RACE", other, "2026.jvd", [
+        dated(other, "2", held_out, 11),
+        dated(other, "7", held_out, 11),
+    ])  # fmt: skip
+
+    ok = invoke("--as-of", as_of)
+    assert ok.exit_code == 0, ok.output
+    target.unlink()
+
+    # the record type's own files gone, a copy of the other type's holdout-day file in their place
+    folder = raw / "stored" / "RACE" / record_type
+    shutil.rmtree(folder)
+    folder.mkdir()
+    shutil.copy2(copied, folder / copied.name)
+    failed = invoke("--as-of", as_of)
+    assert failed.exit_code == 1, failed.output
+    assert isinstance(failed.exception, SystemExit), repr(failed.exception)  # reported, no crash
+    assert "Traceback" not in failed.output
+    assert names(record_type, failed.output), failed.output
+    if target.exists():  # a report may be written, never one with a figure on the record type
+        written = json.loads(target.read_text(encoding="utf-8"))["record_types"]
+        assert record_type not in written, written

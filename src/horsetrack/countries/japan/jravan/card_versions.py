@@ -14,9 +14,11 @@ only if the export holds a pre-race version. `census` counts what it holds; noth
   folder (the files directly in the folder; folders, then files, in sorted order), never
   `stored_shift/`, `_incoming/` or `probe/`, streamed by `records.iter_lines`. Per record it keeps
   only the layout's key items (as bytes), データ区分, データ作成年月日, the race date and 開催年.
-  Each record's race date is read first, from the bytes of 開催年 and 開催月日 alone: a record on
-  a holdout day (`is_holdout_day('japan', race_date)`, D14) is read no further, whatever its
-  width, and counted only in `holdout_skipped`. The others are then checked and decoded
+  Each record's two-byte record type is checked first, whatever its width or day
+  (`records.check_types`: a file of another type in the folder raises `RecordTypeError`). Its race
+  date is read next, from the bytes of 開催年 and 開催月日 alone: a record on a holdout day
+  (`is_holdout_day('japan', race_date)`, D14) is read no further, whatever its width, and counted
+  only in `holdout_skipped`. The others are then checked and decoded
   (`records.decode_lines`, a bad width raising `RecordLengthError` with the file's record number;
   a record too short to hold its date is one). A record without a valid race date cannot be
   cleared of being on a holdout day, so it is counted only in `undated`.
@@ -211,6 +213,7 @@ def _read(files: list[Path], layout: spec.RecordSpec) -> tuple[dict[str, np.ndar
     skipped = undated = 0
     for path in files:
         for first, lines in records.iter_lines(path, layout):
+            records.check_types(lines, layout, first)  # before any date is trusted
             days = _line_dates(lines, year, mmdd)  # the only bytes read before the holdout check
             dated = ~np.isnat(days)
             held = np.zeros(len(days), dtype=bool)

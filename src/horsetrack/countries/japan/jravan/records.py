@@ -12,7 +12,8 @@ must be `spec.length - 2` bytes (else `RecordLengthError`) and start with `spec.
 
 `iter_file` streams a file in chunks of whole records, so a multi-GB file decodes in bounded
 memory; `iter_lines` yields the same chunks undecoded, for `decode_lines` to decode a selection of
-them, and `leaf_bytes` gives a leaf's byte range, to read one item before any check. `text`,
+them, `check_types` checks their record type alone, and `leaf_bytes` gives a leaf's byte range, to
+read one item before the width check. `text`,
 `integer` and `scaled` convert each distinct value once and keep the input shape.
 """
 
@@ -61,7 +62,8 @@ class RecordLengthError(ValueError):
 
 
 class RecordTypeError(ValueError):
-    """A record of the layout's width that does not start with the layout's record type."""
+    """A record that does not start with the layout's record type (of the layout's width when
+    raised by `decode`, which checks the width first; of any width by `check_types`)."""
 
     def __init__(self, record_type: str, record: int, found: str) -> None:
         super().__init__(
@@ -197,6 +199,17 @@ def decode_lines(
     if numbers is not None and len(numbers) != len(lines):
         raise ValueError(f"{len(numbers)} record numbers for {len(lines)} lines")
     return _decode_lines(lines, spec, numbers=numbers)
+
+
+def check_types(lines: list[bytes], spec: RecordSpec, first: int = 1) -> None:
+    """Raise `RecordTypeError` for the first of `lines` (numbered from `first`) that does not start
+    with `spec.record_type`, whatever its width; `found` is what it starts with (all of it when
+    shorter than the type). `decode` checks the width first; this checks nothing else."""
+    prefix = spec.record_type.encode("ascii")
+    for i, line in enumerate(lines):
+        if not line.startswith(prefix):
+            found = line[: len(prefix)].decode("ascii", errors="replace")
+            raise RecordTypeError(spec.record_type, first + i, found)
 
 
 def iter_file(path: Path, spec: RecordSpec, *, chunk_records: int = 20_000) -> Iterator[Arrays]:
