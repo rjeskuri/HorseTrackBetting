@@ -45,8 +45,10 @@ Stages, each for every rule:
    lower bound above 0 and the fold-weighted coefficient on the rule's `direction` side (answer 6).
 2. Max statistic. #75's SPA and StepM over the rules whose claims were scored, on per-race losses
    (the benchmark's outside a rule's segment), in `cluster_unit` clusters ordered by race date,
-   with the family's frozen `max_stat`. When SPA or StepM raises, the stage carries the reason as
-   its "error" and finds no rule superior; the stages below are measured as ever.
+   with the family's frozen `max_stat`: `tested` lists those rules, and `untested` maps every
+   other rule to the reason StepM did not test it (its log-loss claim could not be scored); with
+   no claim scored, SPA and StepM are skipped. When SPA or StepM raises, the stage carries the
+   reason as its "error" and finds no rule superior; the stages below are measured as ever.
 3. Omega. #78's model on the rule's selected bets (answer 4) at the final Win odds, with odds-band
    fixed effects cut at the frozen `odds_band_cut_points` (answer 7). From one set of
    payout-weighted posterior draws of the bets' mean expected return per unit stake,
@@ -791,7 +793,18 @@ def run_study(
 
     # Stage 2: SPA ("does any rule beat the calibrated market") and StepM ("which ones").
     tested = list(losses)
-    max_stat = {"tested": tested, "superior": [], "settings": dict(spec.max_stat)}
+    untested = {
+        rid: "StepM did not test the rule: its log-loss claim could not be scored "
+        f"({log_loss[rid]['error']})"
+        for rid in rules
+        if rid not in losses
+    }
+    max_stat = {
+        "tested": tested,
+        "untested": untested,
+        "superior": [],
+        "settings": dict(spec.max_stat),
+    }
     if tested:
         common = {
             "clusters": races["cluster"],
@@ -910,7 +923,9 @@ def run_study(
         extra += _metric(EVALUATED, "roi_win_dividend", roi[rid]["roi"], roi[rid]["n_bets"])
         stages = {"log_loss": log_loss[rid], "omega": entry, "roi": roi[rid]}
         notes = {stage: e["error"] for stage, e in stages.items() if "error" in e}
-        if "error" in max_stat and rid in tested:
+        if rid in untested:
+            notes["max_stat"] = untested[rid]
+        elif "error" in max_stat and rid in tested:
             notes["max_stat"] = max_stat["error"]
         outcome.append(record(rule, metrics[rid] + extra, rid not in losses, notes))
     append(outcome, latest=True)

@@ -63,9 +63,12 @@ owner's answers of 2026-11-26 that still hold (benchmark, omega basis, one-sided
   string in that entry.
   - `stages` holds "log_loss", "max_stat", "omega" and "roi" in that order (others allowed).
     `log_loss[rule_id]`: `passed` (bool), `delta_ll` with its bootstrap bounds `lo` and `hi`.
-    `max_stat`: `tested` (every rule whose claim was scored) and `superior` (StepM's verdict).
-    When SPA or StepM raises, `max_stat` carries the reason as its `"error"`, finds no rule
-    superior, and every other stage is measured as before.
+    `max_stat`: `tested` (every rule whose claim was scored), `untested` (a dict mapping every
+    other configured rule to the non-empty reason StepM did not test it, a reason that names the
+    log-loss claim that could not be scored) and `superior` (StepM's verdict). When no claim is
+    scored, SPA and StepM are skipped and every rule is in `untested`. When SPA or StepM raises,
+    `max_stat` carries the reason as its `"error"`, finds no rule superior, and every other stage
+    is measured as before.
     `omega[rule_id]`: `n_bets`; `omega_selected`, the posterior mean of the selected bets'
     payout-weighted return multiplier, sum((1 - t_i) * omega_i) / sum(1 - t_i); `expected_return`,
     `{"mean", "low", "high", "level"}`: the posterior mean and central credible interval of the
@@ -89,10 +92,11 @@ owner's answers of 2026-11-26 that still hold (benchmark, omega basis, one-sided
     `expected_return` (lo = low, hi = high), `p_beats_takeout` and `roi_win_dividend`, and the
     predictive interval apart: `predictive_roi_100` (lo, hi its bounds, value a point between
     them) and `predictive_roi_100_level` (its level); no `stepm_superior` when StepM did not
-    run. Its `notes` (`RunRecord.notes`, run metadata outside the variant identity that
-    `family_size` counts) map each stage ('log_loss', 'max_stat', 'omega', 'roi') whose
-    measurement for the rule could not be made to the reason its report entry gives, and hold
-    nothing for a measurement made.
+    run or did not test the rule. Its `notes` (`RunRecord.notes`, run metadata outside the
+    variant identity that `family_size` counts) map each stage ('log_loss', 'max_stat', 'omega',
+    'roi') whose measurement for the rule could not be made to the reason its report entry gives
+    (for 'max_stat': the stage's `"error"` for a rule it tested, `untested[rule_id]` for a rule
+    it did not), and hold nothing for a measurement made.
   - The holdout passed in is never opened. A rerun whose frame cannot score a rule the registry
     holds scored is a ValueError naming it, before any record.
 - `sources` is validated before anything is scored or written: a bare str or bytes, a collection
@@ -1147,11 +1151,46 @@ def reason_run(tmp_path_factory, main_runners) -> Run:
     return run_frozen(root, "test-88-reasons", REASON_RULES, main_runners)
 
 
+LOG_LOSS_WORDS = re.compile(r"log[-_ ]?loss", re.IGNORECASE)
+
+
+def assert_untested_explained(run: Run, untested_ids: list[str]) -> None:
+    """Round 7 of PR #345 (selection.py:913): StepM leaves no rule out silently. The report's
+    `max_stat["untested"]` maps exactly the configured rules not in `tested` (here
+    `untested_ids`) to a non-empty reason naming the log-loss claim that could not be scored, and
+    no such rule is superior or a survivor. Read back from the file, each one's last record keeps
+    that reason, exactly, as its 'max_stat' note and carries no StepM verdict. When the stage ran,
+    a rule StepM tested carries its verdict and no 'max_stat' note."""
+    report, ids = run.report, [rule[0] for rule in run.rules]
+    max_stat, records = report.stages["max_stat"], reread(run)
+    assert isinstance(max_stat.get("untested"), dict), (run.spec.family_id, sorted(max_stat))
+    untested = max_stat["untested"]
+    assert set(untested) == set(untested_ids), (run.spec.family_id, untested)
+    assert set(max_stat["tested"]) == set(ids) - set(untested_ids), max_stat["tested"]
+    for rid in untested_ids:
+        assert explained(report.stages["log_loss"][rid]), rid  # premise: its claim is unscored
+        reason = untested[rid]
+        assert isinstance(reason, str) and reason.strip(), (rid, reason)
+        assert LOG_LOSS_WORDS.search(reason), (rid, reason)
+        assert rid not in max_stat["superior"] and rid not in report.survivors, rid
+        last = records[rid][-1]
+        assert notes_of(last).get("max_stat") == reason, (rid, notes_of(last))
+        assert "stepm_superior" not in {m.metric for m in last.metrics}, (rid, last.metrics)
+    if not explained(max_stat):
+        for rid in max_stat["tested"]:
+            last = records[rid][-1]
+            verdict = [m.value for m in last.metrics if m.metric == "stepm_superior"]
+            assert verdict == [float(rid in max_stat["superior"])], (rid, verdict)
+            assert "max_stat" not in notes_of(last), (rid, notes_of(last))
+
+
 def test_a_measurement_that_cannot_be_made_carries_its_reason(reason_run):
     """A rule that selects no bet keeps its log-loss result, and its omega and ROI entries carry
     the reason they could not be measured (no number, no metric). A rule whose claim cannot be
-    scored carries the log-loss reason and is not in StepM's family, yet its omega, expected
-    return, P(omega_s > 1/(1 - t)) and ROI are measured and recorded: nothing gates them."""
+    scored carries the log-loss reason and is not in StepM's family, and says so: the report's
+    max-statistic stage and its last record give the reason StepM did not test it, while the
+    rules StepM tested carry its verdict and no such reason. Its omega, expected return,
+    P(omega_s > 1/(1 - t)) and ROI are measured and recorded all the same: nothing gates them."""
     data, report = reason_run.data, reason_run.report
     ids = [rule[0] for rule in REASON_RULES]
     no_bet, no_claim = (next(r for r in REASON_RULES if r[0] == rid) for rid in ids[1:])
@@ -1178,6 +1217,9 @@ def test_a_measurement_that_cannot_be_made_carries_its_reason(reason_run):
 
     assert explained(report.stages["log_loss"][REASON_NO_CLAIM])
     assert REASON_NO_CLAIM not in report.stages["max_stat"]["tested"]
+    max_stat = report.stages["max_stat"]
+    assert not explained(max_stat) and max_stat["tested"], max_stat  # premise: StepM ran
+    assert_untested_explained(reason_run, [REASON_NO_CLAIM])
     entry, roi = report.stages["omega"][REASON_NO_CLAIM], report.stages["roi"][REASON_NO_CLAIM]
     assert entry["n_bets"] == roi["n_bets"] == len(rows), (entry, roi)
     assert finite(entry["omega_selected"]) and finite(entry["expected_return"]["mean"]), entry
@@ -1187,6 +1229,62 @@ def test_a_measurement_that_cannot_be_made_carries_its_reason(reason_run):
     assert set(RETURN_METRICS) <= set(metrics), sorted(metrics)
     assert metrics["roi_win_dividend"][0].value == pytest.approx(realised_roi(rows), rel=1e-9)
     assert report.rungs == dict.fromkeys(ids, "S0")
+
+
+UNSCORED_RULES = [
+    REASON_RULES[2],  # J2 varies within races: its 'beta' claim cannot be scored
+    ("P4-j3-beta", "beta", {"jockey": "J3"}, ["odds_t"], {"odds_t": [None, 3.0]}, "above"),
+    # No race is in segment Z: no fold scores the claim, and the rule selects no bet.
+    ("P6-seg-z", "beta", {"seg": "Z"}, ["odds_t"], {"odds_t": [None, 3.0]}, "above"),
+]
+
+
+@pytest.fixture(scope="module")
+def unscored_run(tmp_path_factory, main_runners) -> Run:
+    root = tmp_path_factory.mktemp("unscored")
+    return run_frozen(root, "test-88-unscored", UNSCORED_RULES, main_runners)
+
+
+def test_when_no_claim_is_scored_every_rule_carries_why_stepm_did_not_test_it(
+    reason_run, unscored_run
+):
+    """The owner's restart of 2026-11-28 (selection.py:913): when no rule's log-loss claim can be
+    scored, SPA and StepM have nothing to test and are skipped, yet no rule is left out silently:
+    every rule carries the reason in the report's `max_stat["untested"]` and in its last record's
+    'max_stat' note, with no StepM verdict. The study still completes with every other measurement
+    as before: omega, the expected return, P(omega_s > 1/(1 - t)) and the ROI on each rule's
+    selected bets, a rule's numbers those of the same rule in a family StepM ran on, and a rule
+    that selects no bet explained there as before."""
+    run, report = unscored_run, unscored_run.report
+    ids = [rule[0] for rule in UNSCORED_RULES]
+    for stage in ("log_loss", "omega", "roi"):
+        assert set(report.stages[stage]) == set(ids), (stage, sorted(report.stages[stage]))
+    max_stat = report.stages["max_stat"]
+    assert list(max_stat["tested"]) == [] and list(max_stat["superior"]) == [], max_stat
+    assert list(report.survivors) == []
+    assert_untested_explained(run, ids)
+
+    for rule in UNSCORED_RULES[:2]:
+        rid, rows = rule[0], bets_of(run.data, rule)
+        assert len(rows) > 50, rid  # premise
+        entry, roi = report.stages["omega"][rid], report.stages["roi"][rid]
+        assert entry["n_bets"] == roi["n_bets"] == len(rows), (rid, entry, roi)
+        assert finite(entry["omega_selected"]) and finite(entry["expected_return"]["mean"]), entry
+        assert 0.0 <= report.p_beats_takeout[rid] <= 1.0, rid
+        assert roi["roi"] == pytest.approx(realised_roi(rows), rel=1e-9, abs=1e-12), rid
+        metrics = last_metrics(run, rid)
+        assert set(RETURN_METRICS) <= set(metrics), (rid, sorted(metrics))
+    # The same rule, data and seed in reason_run, where StepM ran: the same measurements.
+    assert omega_numbers(report.stages["omega"][REASON_NO_CLAIM]) == pytest.approx(
+        omega_numbers(reason_run.report.stages["omega"][REASON_NO_CLAIM]), rel=1e-9
+    )
+    no_bet = UNSCORED_RULES[2]
+    assert bets_of(run.data, no_bet).empty  # premise
+    entry, roi = report.stages["omega"][no_bet[0]], report.stages["roi"][no_bet[0]]
+    assert explained(entry) and explained(roi), (entry, roi)
+    assert report.family_size == run.registry.family_size(run.spec.family_id) == len(ids)
+    assert report.rungs == dict.fromkeys(ids, "S0")
+    assert run.holdout.calls == []
 
 
 def reread(run: Run) -> dict[str, list[RunRecord]]:
@@ -1227,7 +1325,8 @@ def test_a_measurement_failure_is_persisted_in_the_registry(
     'max_stat', 'omega', 'roi'), the reason each of its measurements could not be made, exactly
     as the report's entry states it, and nothing for a measurement made: a selected winner with
     no dividend (the ROI), a rule that selects no bet (omega and the ROI), a claim that cannot be
-    scored (log loss), and a max-statistic stage that failed (every rule it tested). The
+    scored (log loss, and the max-statistic test, which did not test it: its `untested`
+    reason), and a max-statistic stage that failed (every rule it tested: its `"error"`). The
     family's size and each rule's variant identity are those of its first record."""
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
     rule = MAX_STAT_RULES[1]
@@ -1248,8 +1347,11 @@ def test_a_measurement_failure_is_persisted_in_the_registry(
             for stage in ("log_loss", "omega", "roi")
             if explained(stages[stage][rid])
         }
-        if explained(stages["max_stat"]) and rid in stages["max_stat"]["tested"]:
-            out["max_stat"] = stages["max_stat"]["error"]
+        max_stat = stages["max_stat"]
+        if rid in max_stat.get("untested", {}):
+            out["max_stat"] = max_stat["untested"][rid]
+        elif explained(max_stat) and rid in max_stat["tested"]:
+            out["max_stat"] = max_stat["error"]
         return out
 
     checked = []
@@ -1259,7 +1361,8 @@ def test_a_measurement_failure_is_persisted_in_the_registry(
             expected = expected_notes(run, each[0])
             assert notes_of(records[each[0]][-1]) == expected, (run.spec.family_id, each[0])
             checked += list(expected)
-    assert {"log_loss", "omega", "roi"} <= set(checked), checked  # premise: each stage failed once
+    # Premise: each stage failed once (max_stat: StepM did not test reason_run's unscored claim).
+    assert {"log_loss", "max_stat", "omega", "roi"} <= set(checked), checked
 
     completed = [run for run in max_stat_failures.values() if isinstance(run, Run)]
     assert len(completed) == len(max_stat_failures), (
