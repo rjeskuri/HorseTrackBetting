@@ -90,6 +90,10 @@ format 1 is read and continued, append-only; nothing is rewritten:
 - `read`, `staked_yen` and `check` count format-1 records exactly as stored. `record` appends a
   format-2 line chained onto the last line, whatever its format. A `holdout` label on any record
   carries forward (see Holdout days).
+- `read` returns a format-1 record as stored, so its combination may not be in the store's order
+  and a format-1 WIN5 bet carries a venue `race_id`. A reader that joins dividends (task 7, #454)
+  first puts a format-1 combination in the store's order (see Combinations) and keys a format-1
+  WIN5 bet by its day (`jra:<day>:WIN5`); the stored record itself is never changed.
 
 Limits: the chain has no secret, so an editor who strips a format-2 line's `sha256` and also
 rewrites its `written_utc` to before `FORMAT_2_SINCE` is not detected, the same limit as a full
