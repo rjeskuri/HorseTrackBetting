@@ -68,7 +68,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -782,26 +781,29 @@ def test_no_year_file_at_all_is_refused_and_the_table_is_kept(
 
 
 def test_an_out_folder_inside_the_repository_is_refused(
-    data: Path, monkeypatch: pytest.MonkeyPatch
+    data: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The real path guard against a stand-in checkout under tmp_path, so nothing here can write
+    to, or clean up in, the real one."""
     write_build_races(data)
-    repo = env.repo_root().resolve()
-    inside = repo / f".tmp-jravan-mining-{uuid.uuid4().hex[:8]}"
-    before = {p.name for p in repo.iterdir()}
+    repo = (tmp_path / "repo").resolve()
+    (repo / "docs").mkdir(parents=True)
+    (repo / "pyproject.toml").write_text("[project]\nname = 'stand-in'\n")
+    monkeypatch.setattr(env, "repo_root", lambda: repo)
+    inside = repo / "out"
+
+    def tree() -> set[Path]:
+        return set(repo.rglob("*"))
+
+    before = tree()
     monkeypatch.chdir(repo)
-    try:
-        # A folder in the checkout, the checkout itself as a relative path, and one through "..".
-        for out in (inside, Path("."), Path("docs") / ".."):
-            with pytest.raises(paths.DataDirInsideRepo):
-                mining.build_mining_predictions(out=out)
-            assert not inside.exists(), out
-            assert {p.name for p in repo.iterdir()} == before, out
-        assert not store_path(data).exists()
-    finally:
-        shutil.rmtree(inside, ignore_errors=True)
-        for p in repo.iterdir():
-            if p.name not in before and FILENAME in p.name:
-                p.unlink()
+    # A folder in the checkout, the checkout itself as a relative path, and one through "..".
+    for out in (inside, Path("."), Path("docs") / ".."):
+        with pytest.raises(paths.DataDirInsideRepo):
+            mining.build_mining_predictions(out=out)
+        assert not inside.exists(), out
+        assert tree() == before, out
+    assert not store_path(data).exists()
 
 
 # ------------------------------------------------------------------------------------------------
