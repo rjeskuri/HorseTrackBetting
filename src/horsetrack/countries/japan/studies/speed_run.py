@@ -1054,7 +1054,6 @@ def run_study(out_dir: Path | None = None) -> dict:
         # a rerun that differs only in the commit is already recorded
         if not any(dataclasses.replace(record, git_sha=r.git_sha) == r for r in existing):
             run_ids[variant.name] = registry.append(record)
-    write_summary(registry, summary_dir(COUNTRY))
     about = {
         "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
         "complete-timing family": f"`{TIMING_FAMILY_ID}`, spec sha256 `{timing_hash}`",
@@ -1068,6 +1067,8 @@ def run_study(out_dir: Path | None = None) -> dict:
         render_report(variants, tables, counts, about),
         sources=(SOURCE,),
     )
+    # last: another ticket's family id in the shared registry can make it raise (#344, #391)
+    write_summary(registry, summary_dir(COUNTRY))
     return {
         "family_id": FAMILY_ID,
         "spec_hash": spec_hash,
