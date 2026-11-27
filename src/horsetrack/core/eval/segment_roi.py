@@ -190,6 +190,7 @@ class SegmentROI:
         design: np.ndarray,
         cell: np.ndarray,
         codes: np.ndarray,
+        band: np.ndarray,
         odds: np.ndarray,
         takeout: np.ndarray,
         count: np.ndarray,
@@ -200,12 +201,14 @@ class SegmentROI:
     ):
         self._columns = columns
         self._levels = levels
+        self._band_levels = {name: i for i, name in enumerate(band_levels)}
         self._offsets = offsets
         self._mean = theta_mean
         self._draws = theta_draws
         self._design = design
         self._cell = cell
         self._codes = codes
+        self._band = band
         self._odds = odds
         self._takeout = takeout
         self._count = count  # the bets each row stands for (all 1 without count_col)
@@ -239,6 +242,38 @@ class SegmentROI:
         if not rows.any():
             raise ValueError(f"no bets in segment {segment}")
         return rows
+
+    def omega_draws(self, segment: dict[str, str], *, band: str | None = None) -> np.ndarray:
+        """Posterior draws of the segment's omega, its band effects included: per draw, the mean
+        over the segment's bets (a grouped row counts its bets) of each bet's omega. An empty
+        `segment` is every bet; `band` keeps only the bets of that odds band."""
+        rows = np.ones(len(self._cell), dtype=bool)
+        if segment:
+            rows &= self._rows(segment)
+        if band is not None:
+            if band not in self._band_levels:
+                raise KeyError(f"no odds band {band!r}")
+            rows &= self._band == self._band_levels[band]
+        if not rows.any():
+            raise ValueError(f"no bets in segment {segment} and band {band!r}")
+        cells, local = np.unique(self._cell[rows], return_inverse=True)
+        weight = np.bincount(local.ravel(), weights=self._count[rows])
+        weight /= weight.sum()
+        design = self._design[cells]
+        block = max(1, _BLOCK // len(cells))
+        return np.concatenate(
+            [
+                np.exp(self._draws[start : start + block] @ design.T) @ weight
+                for start in range(0, len(self._draws), block)
+            ]
+        )
+
+    def effect_draws(self, segment: dict[str, str]) -> np.ndarray:
+        """Posterior draws of exp(the sum of the named random effects): the segment effect alone,
+        no band effect, whose posterior mean on the ln scale is `posterior_mean`."""
+        codes = self._codes_of(segment)
+        index = [self._offsets[c] + code for c, code in codes.items()]
+        return np.exp(self._draws[:, index].sum(axis=1))
 
     def posterior_mean(self, segment: dict[str, str]) -> float:
         """Posterior mean of the sum of the named random effects (ln-omega scale)."""
@@ -444,6 +479,7 @@ def fit_segment_roi(
         design=design,
         cell=cell,
         codes=codes,
+        band=band,
         odds=odds,
         takeout=takeout,
         count=row_bets,

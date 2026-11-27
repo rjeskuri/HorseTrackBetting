@@ -51,6 +51,7 @@ __all__ = [
     "RegistryTampered",
     "RunRecord",
     "default_registry",
+    "run_id",
     "summary_dir",
     "write_summary",
 ]
@@ -300,6 +301,37 @@ class Registry:
     def append(self, record: RunRecord) -> str:
         """Add one run and return its id; ``RecordRefused`` (nothing written) when it breaks a
         rule or is already in the registry."""
+        run_id, data = self._checked(record)
+
+        def entry(chain: _Chain) -> dict:
+            if run_id in chain.run_ids:
+                raise RecordRefused(f"run {run_id} is already in the registry")
+            return {"kind": "run", "run_id": run_id, "record": data}
+
+        self._append(entry)
+        return run_id
+
+    def append_all(self, records: list[RunRecord]) -> list[str]:
+        """Add the runs in order under one lock and one read of the chain, and return their ids:
+        for a study with many variants, since ``append`` reads the whole chain each time. Each
+        record is checked as ``append`` checks one; when any breaks a rule, is already in the
+        registry or repeats an earlier one, ``RecordRefused`` is raised and none is written."""
+        checked = [self._checked(record) for record in records]
+
+        def entries(chain: _Chain) -> list[dict]:
+            seen = set(chain.run_ids)
+            for run_id, _ in checked:
+                if run_id in seen:
+                    raise RecordRefused(f"run {run_id} is already in the registry or repeated")
+                seen.add(run_id)
+            return [{"kind": "run", "run_id": run_id, "record": data} for run_id, data in checked]
+
+        if checked:
+            self._append(entries)
+        return [run_id for run_id, _ in checked]
+
+    def _checked(self, record: RunRecord) -> tuple[str, dict]:
+        """The record's id and data when it passes every rule that needs no chain."""
         if not isinstance(record, RunRecord):
             raise TypeError(f"append takes a RunRecord, got {type(record).__name__}")
         problem = _problem(record)
@@ -313,17 +345,8 @@ class Registry:
             raise RecordRefused(problem)
         if _licensed(record) and is_inside(self._path, env.repo_root()):
             raise LicensedOutputInRepo(f"the registry {self._path} is inside the repository")
-
         data = asdict(record)
-        run_id = _sha256(_canonical(data))
-
-        def entry(chain: _Chain) -> dict:
-            if run_id in chain.run_ids:
-                raise RecordRefused(f"run {run_id} is already in the registry")
-            return {"kind": "run", "run_id": run_id, "record": data}
-
-        self._append(entry)
-        return run_id
+        return _sha256(_canonical(data)), data
 
     def records(self, family_id: str | None = None) -> list[RunRecord]:
         """Every run in append order, or only the runs of ``family_id``."""
@@ -414,23 +437,34 @@ class Registry:
                 fcntl.flock(handle, fcntl.LOCK_SH)
             return _parse(handle.read())
 
-    def _append(self, make_entry: Callable[[_Chain], dict | None]) -> None:
+    def _append(self, make_entry: Callable[[_Chain], dict | list[dict] | None]) -> None:
         """Under an exclusive lock: verify the chain, then append ``make_entry``'s entry (when it
-        returns one) as one sealed line linked to the last."""
+        returns one), or each of its list of entries in order, as sealed lines, each linked to
+        the line before it."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, "a+b") as handle:
             if fcntl is not None:
                 fcntl.flock(handle, fcntl.LOCK_EX)
             handle.seek(0)
             chain = _parse(handle.read())
-            entry = make_entry(chain)
-            if entry is None:
+            made = make_entry(chain)
+            entries = [] if made is None else made if isinstance(made, list) else [made]
+            if not entries:
                 return
-            entry = {**entry, "prev": chain.head, "utc": datetime.now(timezone.utc).isoformat()}
-            line = _canonical({**entry, "seal": _sha256(_canonical(entry))})
-            handle.write(line.encode("ascii") + b"\n")
+            head, lines, utc = chain.head, [], datetime.now(timezone.utc).isoformat()
+            for entry in entries:
+                entry = {**entry, "prev": head, "utc": utc}
+                line = _canonical({**entry, "seal": _sha256(_canonical(entry))}).encode("ascii")
+                lines.append(line + b"\n")
+                head = _sha256(line)
+            handle.write(b"".join(lines))
             handle.flush()
             os.fsync(handle.fileno())
+
+
+def run_id(record: RunRecord) -> str:
+    """The id ``Registry.append`` gives ``record``: the sha256 hex of its canonical JSON."""
+    return _sha256(_canonical(asdict(record)))
 
 
 def default_registry(country: str) -> Registry:
