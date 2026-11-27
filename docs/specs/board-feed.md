@@ -198,18 +198,27 @@ reaches a value, a flag, the shadow log or `verify()`.
 - Scratches: a runner with a current SCR WIN or PLACE row is off the board, so it has no key and
   the others renormalise, as the shadow values do.
 - Places: JRA fixes the places Place and Wide pay, and whether each is sold, at the start of sales
-  (jra config `places_paid`), so a scratch after sales opened leaves them unchanged. The logger
-  opens with the day-before sales (#358), so the starters are the runners not SCR on the race's
-  earliest WIN capture in the logs the feed reads (not the board at t, which keeps only the
-  latest row per combination), plus any runner priced on the board (it was in the field when
-  sales opened). A runner priced there and scratched later counts; one already SCR there was
-  withdrawn before sales opened and does not. When the logger started late, a scratch between the
-  opening and its first capture is taken as before the opening. Before any WIN capture is read the
-  starters are the board's priced runners. 8 drawn and one out after the opening, Place pays three
-  places over the seven left; 8 drawn and one out before it, two; 5 drawn and one out after, Place
-  is still sold with two; 5 drawn and one out before, Place is not sold; 4 drawn and one out
-  after, Wide is still sold and Place is not. The ordered finishes are over the runners left. The
-  shadow values (`shadow_values()`, the shadow log) keep the board's priced runners (#566).
+  (jra config `places_paid`), so a scratch after sales opened leaves them unchanged. The starters
+  are read from the race's earliest WIN capture in the logs the feed reads (not the board at t,
+  which keeps only the latest row per combination), plus any runner priced on the board (it was
+  in the field when sales opened). The open the logger found (`DaySummary.sales_open_utc`, #358)
+  is not in the logs, so coverage is read off that capture's time:
+  - Covered: it is before logger.yaml's `day_before.probe_until` (Tokyo) on the day before the
+    race date, so the logger was running when the day-before sales opened. The runners not SCR
+    on it count: a runner priced there and scratched later counts; one already SCR there was
+    withdrawn before sales opened and does not.
+  - Not covered: it is at or after `probe_until` (a logger first run in the race date's 07:00
+    window, or late on the eve), or logger.yaml has no `probe_until`. Every runner the log shows
+    counts: those on that capture, SCR ones included, and the board's SCR runners, each scratch
+    taken as after the opening.
+
+  Before any WIN capture is read the starters are the board's priced runners. 8 drawn and one out
+  after the opening, Place pays three places over the seven left; 8 drawn and one out before it,
+  two; 5 drawn and one out after, Place is still sold with two; 5 drawn and one out before, Place
+  is not sold; 4 drawn and one out after, Wide is still sold and Place is not. A late start: 8
+  drawn, first logged at 07:00 on the race date with one SCR, 8 starters, so Place pays three
+  places over the seven left. The ordered finishes are over the runners left. The shadow values
+  (`shadow_values()`, the shadow log) keep the board's priced runners (#566).
 - The bracket draw: N is the largest horse number on the board, scratched runners included (the
   draw was made before the scratch). N <= 8: no bracket quinella. 9 to 16: brackets 1..16-N take
   one horse each and the rest two, in number order; 17: bracket 8 takes three; 18: brackets 7 and
