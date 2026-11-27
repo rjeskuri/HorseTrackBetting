@@ -36,6 +36,7 @@ holdout.yaml with hashlib; it never calls the code under test. The holdout is ne
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import time
 from collections import Counter
@@ -666,3 +667,191 @@ def test_read_inputs_reads_one_snapshot_of_a_table_rebuilt_mid_read(tmp_path, mo
         f"{sum((pairs & after).values())} rows of the rebuilt one, "
         f"{sum((pairs & before).values())} of the old, of {sum(pairs.values())}"
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# A stats-free race_date column is read a constant number of times (PR #427 review, round 3: a
+# binary search on row counts decoded it ~44 times for an open-ended read)
+# ---------------------------------------------------------------------------------------------
+
+
+class CountingFile(io.BytesIO):
+    """A Parquet file in memory that records the byte range of every read pyarrow makes of it
+    (through ``pa.PythonFile``)."""
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.data = data
+        self.reads: list[tuple[int, int]] = []
+
+    def read(self, size=-1):
+        at = self.tell()
+        out = super().read(size)
+        self.reads.append((at, at + len(out)))
+        return out
+
+    def readinto(self, buffer):
+        at = self.tell()
+        n = super().readinto(buffer)
+        self.reads.append((at, at + n))
+        return n
+
+
+def column_passes(counting: CountingFile, column: str) -> float:
+    """How many times over, on average, the data reads covered the bytes of ``column``'s chunks:
+    the bytes read inside those chunks over the chunks' size, from the file's own footer. A read
+    of at most the last 64 KiB is a footer read (pyarrow reads that much to find the footer,
+    which in a small file is all of it), not a scan, and is left out; a longer read is counted."""
+    end_of_file = len(counting.data)
+    reads = [(lo, hi) for lo, hi in counting.reads if hi < end_of_file or hi - lo > FOOTER_READ]
+    meta = pq.ParquetFile(io.BytesIO(counting.data)).metadata
+    chunks = []
+    for g in range(meta.num_row_groups):
+        group = meta.row_group(g)
+        chunk = next(
+            group.column(c)
+            for c in range(group.num_columns)
+            if group.column(c).path_in_schema == column
+        )
+        first = chunk.data_page_offset
+        if chunk.has_dictionary_page and chunk.dictionary_page_offset is not None:
+            first = min(first, chunk.dictionary_page_offset)
+        chunks.append((first, first + chunk.total_compressed_size))
+    total = sum(hi - lo for lo, hi in chunks)
+    covered = sum(
+        max(0, min(hi, r_hi) - max(lo, r_lo)) for lo, hi in chunks for r_lo, r_hi in reads
+    )
+    return covered / total
+
+
+# The bounds scan plus the final scan; a binary search on row counts makes one per step (~44 for
+# an open-ended read).
+MAX_DATE_PASSES = 2
+
+SCAN_SCHEMA = pa.schema(
+    [
+        ("race_id", pa.string()),
+        ("race_date", pa.date32()),
+        ("horse_no", pa.int32()),
+        ("note", pa.string()),
+    ]
+)
+FOOTER_READ = 64 * 1024  # pyarrow's speculative footer read
+
+
+def stats_free_file(n_groups: int, statistics: str) -> tuple[bytes, list[dict]]:
+    """Every day of DAYS (development and holdout days interleaved), shuffled into ``n_groups``
+    mixed row groups of equal size, written without race_date statistics and uncompressed, with
+    an unread ``note`` column that makes the file several times the footer read."""
+    rows = [
+        {
+            "race_id": f"jra:{day.isoformat()}:TOK:{r + 1:02d}",
+            "race_date": day,
+            "horse_no": h,
+            "note": hashlib.sha256(f"{day}:{r}:{h}".encode()).hexdigest() * 4,
+        }
+        for k, day in enumerate(DAYS)
+        for r in range(1 + k % 2)
+        for h in range(1, 13)
+    ]
+    rows = pd.DataFrame(rows).sample(frac=1.0, random_state=n_groups).to_dict("records")
+    size = len(rows) // n_groups
+    rows = rows[: size * n_groups]
+    assert {held(r["race_date"]) for r in rows} == {True, False}
+    sink = pa.BufferOutputStream()
+    pq.write_table(
+        pa.Table.from_pylist(rows, schema=SCAN_SCHEMA),
+        sink,
+        row_group_size=size,
+        write_statistics=statistics_for(statistics, SCAN_SCHEMA.names),
+        compression="none",
+    )
+    data = sink.getvalue().to_pybytes()
+    assert len(data) > 2 * FOOTER_READ
+    meta = pq.ParquetFile(io.BytesIO(data)).metadata
+    assert meta.num_row_groups == n_groups
+    assert not any(
+        meta.row_group(g).column(1).statistics is not None
+        and meta.row_group(g).column(1).statistics.has_min_max
+        for g in range(n_groups)
+    )
+    return data, rows
+
+
+@pytest.mark.parametrize("statistics", ["none", "no-race-date"])
+@pytest.mark.parametrize("n_groups", [16, 64])
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        pytest.param(date.min, date.max, id="date-min-to-date-max"),
+        pytest.param(date(1900, 1, 1), date.max, id="1900-to-date-max"),
+        pytest.param(date(2026, 11, 29), date.max, id="holdout-day-to-date-max"),
+    ],
+)
+def test_read_development_reads_a_stats_free_date_column_a_constant_number_of_times(
+    n_groups, statistics, start, end
+):
+    """For a file without race_date statistics, an open-ended read covers the race_date column
+    chunks at most about twice (the bounds, then the scan), however many row groups it has; the
+    result is still exactly the development rows in range."""
+    data, rows = stats_free_file(n_groups, statistics)
+    counting = CountingFile(data)
+
+    table = holdout_module.read_development(
+        pa.PythonFile(counting, mode="r"),
+        "japan",
+        columns=["race_id", "horse_no"],
+        start=start,
+        end=end,
+    )
+
+    want = Counter(
+        (r["race_id"], r["horse_no"])
+        for r in rows
+        if start <= r["race_date"] <= end and not held(r["race_date"])
+    )
+    assert table.column_names == ["race_id", "horse_no"]
+    assert Counter(zip(*table.to_pydict().values(), strict=True)) == want
+    passes = column_passes(counting, "race_date")
+    assert passes <= MAX_DATE_PASSES, (
+        f"the read covered the stats-free race_date column {passes:.1f} times over "
+        f"({n_groups} row groups); the bounds need one scan, not one per search step"
+    )
+
+
+def test_read_inputs_reads_each_stats_free_date_column_a_constant_number_of_times(
+    tmp_path, monkeypatch
+):
+    """The speed study's reader (``read_inputs``, through the store's one open handle per table)
+    on races and runners written without race_date statistics: each table's race_date column is
+    covered at most about twice, and no holdout row comes back."""
+    races, runners = write_speed_store(tmp_path, monkeypatch, DAYS, "no-race-date")
+    opened: dict[str, CountingFile] = {}
+    real_memory_map = pa.memory_map
+
+    def memory_map(path, *a, **kw):
+        if Path(path).suffix != ".parquet":
+            return real_memory_map(path, *a, **kw)
+        counting = CountingFile(Path(path).read_bytes())
+        opened[Path(path).stem] = counting
+        return pa.PythonFile(counting, mode="r")
+
+    monkeypatch.setattr(pa, "memory_map", memory_map)
+
+    got_races, got_runners = read_inputs()
+
+    assert Counter(got_races["race_id"]) == Counter(
+        r["race_id"] for r in races if not held(r["race_date"])
+    )
+    got_pairs = zip(got_runners["race_id"], got_runners["finish_pos"].astype(int), strict=True)
+    assert Counter(got_pairs) == Counter(
+        (r["race_id"], r["finish_pos"]) for r in runners if not held(r["race_date"])
+    )
+    assert set(opened) == {"races", "runners"}, (
+        f"read_inputs did not open each table through one handle: {sorted(opened)}"
+    )
+    for name, counting in opened.items():
+        passes = column_passes(counting, "race_date")
+        assert passes <= MAX_DATE_PASSES, (
+            f"{name}: the read covered the stats-free race_date column {passes:.1f} times over"
+        )
