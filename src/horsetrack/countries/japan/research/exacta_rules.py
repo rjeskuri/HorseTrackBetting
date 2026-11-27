@@ -20,8 +20,13 @@ the boards at t.
   yen minimum (D18). A floor-bound published dividend (100 yen, Plus-10 not funded; 110 yen,
   possibly a Plus-10 top-up) does not identify the winning investment: its impact-adjusted payout
   is unavailable (NaN), the published return is kept as ``payout_published``, and a member with
-  such a hit has no impact-adjusted ROI. A race without a decision time (no post time), without
-  boards at t, or whose log has no final FORECAST pool total, is not scored.
+  such a hit has no impact-adjusted ROI. A ticket naming a horse scratched after t (the store's
+  runners, else the final Win board) is refunded: it stays in stake, its stake comes back in both
+  payouts, and the own impact counts the live tickets only. A member staked in fewer than two
+  meetings keeps its ROI but has no bootstrap bounds (``bounds_reason``; the registry's
+  ``roi_bounds:unavailable:<reason>`` marker, #131's exacta_run rule). A race without a decision
+  time (no post time), without boards at t, or whose log has no final FORECAST pool total, is not
+  scored.
 - Shrinkage (spec section 7): ``core.eval.segment_roi`` on each member's own bets alone (one
   ticket held by several nested members is evidence once per fit), fixed effects the final-board
   exacta odds bands of ``EXACTA_ODDS_BANDS`` (< 10, 10-30, 30-100, >= 100) and one constant
@@ -217,19 +222,30 @@ def settle(
     pool: float,
     stake: float = STAKE,
     takeout: float = TAKEOUT,
+    scratched: Iterable[int] = (),
 ) -> dict:
     """One race of one member: n_bets, stake (yen), payout (yen) at the own-impact dividend (NaN on
     a hit at a floor-bound dividend, 0 on a miss), payout_published (yen at the published dividend,
-    the observed return) and impact_available (False when the dividend is floor-bound)."""
+    the observed return) and impact_available (False when the dividend is floor-bound). A ticket
+    naming a `scratched` horse (withdrawn after t) is refunded: it stays in stake, its stake comes
+    back in payout and payout_published (``refund``, yen), and it is not in the pool, so the own
+    impact counts the live tickets only. ``refunded`` is the set of refunded combinations."""
     selected = {tuple(c) for c in selected}
+    gone = set(scratched)
+    refunded = frozenset(c for c in selected if gone & set(c))
+    live = selected - refunded
     n = len(selected)
-    payout = published = 0.0
-    if n and tuple(winner) in selected:
-        paid = own_impact_dividend(dividend, pool=pool, n_bets=n, stake=stake, takeout=takeout)
-        payout = stake / 100 * paid
-        published = stake / 100 * float(dividend)
+    refund = float(stake * len(refunded))
+    payout = published = refund
+    if tuple(winner) in live:
+        paid = own_impact_dividend(
+            dividend, pool=pool, n_bets=len(live), stake=stake, takeout=takeout
+        )
+        payout += stake / 100 * paid
+        published += stake / 100 * float(dividend)
     return {"n_bets": n, "stake": stake * n, "payout": payout, "payout_published": published,
-            "impact_available": impact_identified(dividend)}  # fmt: skip
+            "impact_available": impact_identified(dividend), "refund": refund,
+            "refunded": refunded}  # fmt: skip
 
 
 def lower_tertile_by_day(races: Iterable[Mapping], *, key: str) -> dict[str, bool]:
@@ -382,12 +398,13 @@ def score_e2(
         scopes = race_scopes(win, race_no=race["race_no"], race_class=race["race_class"])
         ((winner, dividend, _),) = race["exacta"]
         winner = tuple(winner)
+        scratched = frozenset(race.get("scratched", ()))  # a ticket naming one is refunded
         impact_unavailable += not impact_identified(dividend)
         row = {"race_id": race["race_id"], "meeting_id": race["meeting_id"],
                "race_date": race["race_date"]}  # fmt: skip
         for category, cut, scope in MEMBERS:
             sel = chosen[(category, cut)] if scope in scopes else frozenset()
-            got = settle(sel, winner, dividend, pool=pool, takeout=1 - rate)
+            got = settle(sel, winner, dividend, pool=pool, takeout=1 - rate, scratched=scratched)
             name = variant(category, cut, scope)
             row[("n", name)], row[("stake", name)] = got["n_bets"], got["stake"]
             row[("payout", name)] = got["payout"]
@@ -395,12 +412,14 @@ def score_e2(
             for combo in sorted(sel):
                 odds = final_exacta.get(combo)
                 won = combo == winner
+                back = float(STAKE) if combo in got["refunded"] else 0.0  # a refunded ticket
                 bets.append({"category": category, "cut": cut, "scope": scope,
                              "race_id": race["race_id"], "meeting_id": race["meeting_id"],
                              "combination": combo, "odds": None if odds is None else float(odds),
                              "won": won, "stake": float(STAKE),
-                             "payout": got["payout"] if won else 0.0,
-                             "payout_published": got["payout_published"] if won else 0.0,
+                             "payout": got["payout"] - got["refund"] if won else back,
+                             "payout_published":
+                                 got["payout_published"] - got["refund"] if won else back,
                              })  # fmt: skip
         rows.append(row)
     frame = pd.DataFrame(rows)
@@ -420,7 +439,8 @@ def score_e2(
         own = [b for b in bets if (b["category"], b["cut"], b["scope"]) == (category, cut, scope)]
         m = {"category": category, "cut": cut, "scope": scope, "n_bets": 0, "n_races": 0,
              "n_meetings": 0, "stake": 0.0, "payout": 0.0, "payout_published": 0.0,
-             "roi": math.nan, "lo": math.nan, "hi": math.nan, "roi_published": math.nan,
+             "roi": math.nan, "lo": math.nan, "hi": math.nan, "bounds_reason": None,
+             "roi_published": math.nan,
              "shrinkage": _shrinkage(name, own, rates, seed)}  # fmt: skip
         if len(frame):
             sub = frame[frame[("stake", name)] > 0]
@@ -435,16 +455,23 @@ def score_e2(
             # only those races would bias the ROI toward losses
             if len(sub) and math.isfinite(m["payout"]):
                 args = (sub[("payout", name)], sub[("stake", name)], sub["meeting_id"])
-                kw = {"n_boot": n_boot, "seed": seed}
-                hi = study.rho_interval(*args, alternative="less", **kw)
-                lo = study.rho_interval(*args, alternative="greater", **kw)
-                m.update(roi=hi.rho, lo=lo.bound, hi=hi.bound)
+                if m["n_meetings"] < 2:
+                    # one meeting redrawn is the same meeting: no interval, never [x, x] (#131's
+                    # exacta_run rule)
+                    m.update(roi=study.rho(args[0], args[1]), bounds_reason=exacta_run.FEW_MEETINGS)
+                else:
+                    kw = {"n_boot": n_boot, "seed": seed}
+                    hi = study.rho_interval(*args, alternative="less", **kw)
+                    lo = study.rho_interval(*args, alternative="greater", **kw)
+                    m.update(roi=hi.rho, lo=lo.bound, hi=hi.bound)
         members.append(m)
         n = m["n_races"]
         shrink = m["shrinkage"]
         metrics = [FoldMetric("development", "n_bets", float(m["n_bets"]), None, None, n)]
         if m["stake"] > 0 and math.isfinite(m["roi"]):
-            metrics.append(FoldMetric("development", "roi", m["roi"], m["lo"], m["hi"], n))
+            metrics += exacta_run._metrics(
+                "development", [("roi", m["roi"], m["lo"], m["hi"], None)], n
+            )
         if m["stake"] > 0:
             metrics.append(FoldMetric("development", "roi_published", m["roi_published"], None,
                                       None, n))  # fmt: skip
@@ -815,13 +842,16 @@ def _load(minutes_before: int, holdout_day) -> tuple[list[dict], dict]:
             (combo, float(d["dividend"]), bool(d["is_refund"]))
         )
     starters: dict[str, int] = {}
+    scratched: dict[str, set[int]] = {}
     runners = base / "runners.parquet"
     runner_rows = []
     if runners.exists():
-        runner_rows = pq.read_table(runners, columns=["race_id", "is_scratched"],
+        runner_rows = pq.read_table(runners, columns=["race_id", "horse_no", "is_scratched"],
                                     filters=pc.field("race_id").isin(ids)).to_pylist()  # fmt: skip
         for r in runner_rows:
             starters[r["race_id"]] = starters.get(r["race_id"], 0) + (not r["is_scratched"])
+            if r["is_scratched"]:
+                scratched.setdefault(r["race_id"], set()).add(int(r["horse_no"]))
     out = []
     for m in sorted(meta, key=lambda m: m["race_id"]):
         rid = m["race_id"]
@@ -832,9 +862,13 @@ def _load(minutes_before: int, holdout_day) -> tuple[list[dict], dict]:
                 "exacta": paying.get(rid, [])}  # fmt: skip
         if rid in starters:
             race["n_starters"] = starters[rid]
+            race["scratched"] = sorted(scratched.get(rid, ()))
         else:  # no runner rows in the store: the runners priced on the final Win board
             race["n_starters"] = len(race["final_win_odds"])
             info["n_starters_from_final_board"] = info.get("n_starters_from_final_board", 0) + 1
+            # a horse on the board at t but off the final Win board was withdrawn after t
+            final = race["final_win_odds"]
+            race["scratched"] = sorted(set(race["win_odds_t"]) - set(final)) if final else []
         out.append(race)
     info["dropped"]["not_in_store"] = len(found) - len(out)
     meetings = sorted({r["meeting_id"] for r in out})
@@ -1001,6 +1035,11 @@ def _render(summary: dict) -> str:
                      f"{m['n_races']} | {m['n_meetings']} | {_num(m['roi'])} | {_num(m['lo'])} | "
                      f"{_num(m['hi'])} | {_num(m['roi_published'])} | {shrink['status']} | "
                      f"{_num(shrink.get('p_beats_takeout'))} |")  # fmt: skip
+    unbounded = [m for m in summary["members"] if m.get("bounds_reason")]
+    if unbounded:
+        lines += ["", "Members without bootstrap bounds (lo and hi unavailable):"]
+        lines += [f"- {variant(m['category'], m['cut'], m['scope'])}: {m['bounds_reason']}."
+                  for m in unbounded]  # fmt: skip
     max_test, spa = summary["max_test"], summary["spa"]
     lines += ["", "## Max test (SPA + StepM over the 16 members)", "",
               f"Status: {max_test['status']}."]  # fmt: skip

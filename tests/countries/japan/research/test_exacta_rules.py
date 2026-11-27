@@ -64,6 +64,7 @@ from __future__ import annotations  # noqa: I001
 import hashlib
 import json
 import math
+import re
 import shutil
 import statistics
 from collections import Counter
@@ -2254,11 +2255,12 @@ def test_the_markdown_report_renders_the_max_test_d_and_the_proxy(command, data_
 EXTRA_VENUES = ("KYO", "HSN", "NAK", "CKY", "KOK")
 
 
-def add_meetings(data: Path, venues=EXTRA_VENUES) -> None:
+def add_meetings(data: Path, venues=EXTRA_VENUES, *, fav_base: float = 3.2) -> None:
     """Five more meetings on the Tokyo day (other venues, so other meeting ids), three C1 races
     of six each, with boards at t and a final board with a pool total: with Tokyo, six meetings,
-    so the max test can run (its block of 5 meetings needs at least 5). Call after
-    ``build_logged_day``."""
+    so the max test can run (its block of 5 meetings needs at least 5). ``fav_base`` sets the
+    favourite's Win odds at t; at 1.4 every extra race stays below 3.0, out of the headline
+    scope. Call after ``build_logged_day``."""
     day_dir = log_dir(data, LOG_DAY)
     h6 = range(1, 7)
     races, dividends, runners = [], [], []
@@ -2268,7 +2270,7 @@ def add_meetings(data: Path, venues=EXTRA_VENUES) -> None:
         odds_log.write_post_times(day_dir / f"{venue}.races.json", post, SIDECAR_UPDATED)
         log = day_dir / f"{venue}.jsonl.gz"
         for no in (1, 2, 3):
-            win_t = {1: round(3.2 + 0.3 * v + 0.1 * no, 1), 2: 3.6, 3: 4.4, 4: 6.5, 5: 9.0,
+            win_t = {1: round(fav_base + 0.3 * v + 0.1 * no, 1), 2: 3.6, 3: 4.4, 4: 6.5, 5: 9.0,
                      6: 15.0}  # fmt: skip
             fc_t = ratio_board(win_t)
             win_f = {h: round(o * 1.03, 1) for h, o in win_t.items()}
@@ -2701,3 +2703,241 @@ def test_d_counts_a_final_board_with_a_floor_quote_as_unidentified_not_full(quot
         assert got[cat]["n_races"] == 4, cat
         assert got[cat]["mean"] == pytest.approx(statistics.mean(values), rel=1e-9), cat
         assert got[cat]["median"] == pytest.approx(statistics.median(values), rel=1e-9), cat
+
+
+# ---------------------------------------------------------------------------------------------
+# Owner restart 2026-11-28 04:22 JST: one-meeting bounds (:441) and late-scratch refunds (:390)
+# ---------------------------------------------------------------------------------------------
+
+
+def bounds_reason(member: dict) -> str | None:
+    """The member's reason its bootstrap bounds are unavailable: the one top-level string field
+    whose name says "reason" or "bounds" (e.g. ``bounds_reason``), or None when it has none."""
+    found = {k: v for k, v in member.items()
+             if isinstance(v, str) and v and ("reason" in k or "bounds" in k)}  # fmt: skip
+    assert len(found) <= 1, found
+    return next(iter(found.values()), None)
+
+
+def headline_in_one_meeting(races: list[dict]) -> list[dict]:
+    """Every race outside the first meeting gets a "popular" race card (race 12, C1), so the
+    headline members bet in one meeting while the "all" members bet in all six."""
+    first = races[0]["meeting_id"]
+    return [r if r["meeting_id"] == first else dict(r, race_no=12, race_class="C1")
+            for r in races]  # fmt: skip
+
+
+def one_meeting_run(races: list[dict]) -> list[dict]:
+    return [r for r in races if r["meeting_id"] == races[0]["meeting_id"]]
+
+
+BOUNDS_SCENARIOS = {"headline_in_one_meeting": headline_in_one_meeting,
+                    "one_meeting_run": one_meeting_run}  # fmt: skip
+BOUNDS_MARKER = "roi_bounds:unavailable:"  # #131's exacta_run marker for an unavailable interval
+
+
+@pytest.mark.parametrize("scenario", sorted(BOUNDS_SCENARIOS))
+def test_a_member_of_fewer_than_two_meetings_has_no_bootstrap_bounds_but_keeps_its_roi(
+    tmp_path, scenario
+):
+    """Owner restart (:441): a member that bets in fewer than two meetings keeps its ROI, but its
+    bootstrap bounds are unavailable (NaN or None) with a reason, never the degenerate [x, x] a
+    one-meeting redraw gives; per member, so in a six-meeting run a headline member of one
+    meeting has no bounds while an "all" member of six has them. In the registry its ``roi``
+    FoldMetric carries no bounds and the ``roi_bounds:unavailable:<reason>`` marker (#131's
+    exacta_run rule) is a result; no param carries the reason, so the family stays 16."""
+    races = BOUNDS_SCENARIOS[scenario](make_races(281, DAYS))
+    expected = expected_members(races)
+    few = {k for k, e in expected.items() if e["stake"] > 0 and e["n_meetings"] < 2}
+    many = {k for k, e in expected.items() if e["n_meetings"] >= 2}
+    assert few, "the fixture has a member betting in one meeting"
+    if scenario == "headline_in_one_meeting":
+        assert many and all(k[2] == "headline" for k in few)
+        assert all(expected[(c, k, "all")]["n_meetings"] == 6 for c in RULE_CATS for k in CUTS)
+    else:
+        assert not many
+    reg = new_registry(tmp_path)
+    result = er.score_e2(races, registry=reg, git_sha="abc1234", lambda2=LAMBDA2,
+                         data_builds=BUILDS, n_boot=200)  # fmt: skip
+    members = by_member(result)
+    records = {record_member(r): r for r in reg.records(RULE_ID)}
+    assert set(records) == set(expected)
+    for key, want in expected.items():
+        if want["stake"] == 0:
+            continue
+        got, metrics = members[key], metric_map(records[key])
+        roi = want["payout"] / want["stake"]
+        assert got["n_meetings"] == want["n_meetings"], key
+        assert got["roi"] == pytest.approx(roi, rel=1e-9), key  # the estimate stays
+        assert "roi" in metrics and metrics["roi"].value == pytest.approx(roi, rel=1e-9), key
+        markers = [name for name in metrics if name.startswith(BOUNDS_MARKER)]
+        if key in few:
+            assert unavailable(got["lo"]) and unavailable(got["hi"]), (key, got["lo"], got["hi"])
+            reason = bounds_reason(got)
+            assert reason and "meeting" in reason.lower(), (key, reason)
+            assert metrics["roi"].lo is None and metrics["roi"].hi is None, key
+            assert len(markers) == 1 and "meeting" in markers[0].lower(), (key, markers)
+        else:
+            assert math.isfinite(got["lo"]) and math.isfinite(got["hi"]), key
+            assert got["lo"] <= got["roi"] <= got["hi"], key
+            assert bounds_reason(got) is None, key
+            assert metrics["roi"].lo == pytest.approx(got["lo"]), key
+            assert metrics["roi"].hi == pytest.approx(got["hi"]), key
+            assert not markers, key
+    # the reason is a result, never a param: every member has the same param keys
+    param_keys = {tuple(sorted(r.params)) for r in records.values()}
+    assert len(param_keys) == 1, param_keys
+    for r in records.values():
+        assert not any("meeting" in str(v).lower() for v in r.params.values()), r.params
+    assert reg.family_size(RULE_ID) == 16
+
+
+NUMBER = re.compile(r"-?\d+(\.\d+)?")
+
+
+def member_rows(md: str) -> dict[tuple, dict[str, str]]:
+    """The members table of the Markdown report: (category, cut, scope) -> {header: cell}."""
+    lines = [line for line in md.splitlines() if line.startswith("|")]
+    header = next(
+        i
+        for i, line in enumerate(lines)
+        if {"lo", "hi", "scope"} <= {c.strip() for c in line.strip("|").split("|")}
+    )
+    names = [c.strip() for c in lines[header].strip("|").split("|")]
+    rows = {}
+    for line in lines[header + 2 :]:
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) != len(names) or cells[2] not in SCOPES:
+            break
+        row = dict(zip(names, cells, strict=True))
+        rows[(row["category"], float(row["cut"]), row["scope"])] = row
+    return rows
+
+
+def test_the_report_prints_no_bounds_for_a_one_meeting_member_and_says_why(command, data_dir):
+    """Owner restart (:441), the Markdown report: with Tokyo's headline races and five more
+    meetings outside the headline scope, a headline member that bet in Tokyo alone prints no
+    numeric lo or hi, and its reason is in the report; an "all" member over six meetings prints
+    both bounds."""
+    build_logged_day(data_dir)
+    add_meetings(data_dir, fav_base=1.4)
+    er.exacta_rules_command()
+    md = latest_report(".md").read_text(encoding="utf-8")
+    report = json.loads(latest_report(".json").read_text(encoding="utf-8"))
+    rows = member_rows(md)
+    assert len(rows) == 16
+    few = many = 0
+    for m in report["members"]:
+        key = (m["category"], float(m["cut"]), m["scope"])
+        row = rows[key]
+        if not m["stake"] or m["roi"] is None:
+            continue
+        if m["n_meetings"] < 2:
+            few += 1
+            assert m["lo"] is None and m["hi"] is None, key
+            assert not re.search(r"\d", row["lo"]) and not re.search(r"\d", row["hi"]), row
+            reason = bounds_reason(m)
+            assert reason and reason in md, (key, reason)
+        else:
+            many += 1
+            assert NUMBER.fullmatch(row["lo"]) and NUMBER.fullmatch(row["hi"]), row
+    assert few and many, (few, many)
+    assert all(m["n_meetings"] == 1 for m in report["members"]
+               if m["scope"] == "headline" and m["stake"])  # fmt: skip
+
+
+LATE_WIN_T = {1: 3.2, 2: 3.7, 3: 4.6, 4: 6.4, 5: 9.0, 6: 15.0, 7: 24.0}  # seven runners at t
+LATE_FC_T = ratio_board(LATE_WIN_T)
+LATE_POOL = 50_000.0  # a small final pool, so each 100 yen ticket moves the dividend
+LATE_RID = f"jra:{LOG_DAY.isoformat()}:TOK:01"
+
+
+def late_winner(scratched: int, mode: str) -> tuple[int, int]:
+    """'selected': a combination of the remaining horses the widest no_fav member buys at t;
+    'missed': one no member buys."""
+    sel = ref_select(LATE_WIN_T, LATE_FC_T, RATE, LAMBDA2)
+    if mode == "selected":
+        return sorted(c for c in sel[("no_fav", 0.9)] if scratched not in c)[0]
+    bought = set().union(*sel.values())
+    return sorted(c for c in LATE_FC_T if scratched not in c and c not in bought)[0]
+
+
+def build_late_scratch(data: Path, *, scratched: int, winner: tuple[int, int]) -> float:
+    """Tokyo race 1 (MAIDEN, post 01:00, t 00:58): seven runners on the boards at t (00:54);
+    `scratched` withdrawn at 00:59, after t, so six starters remain; the final board and the
+    store (runners.is_scratched) say so. The dividends table holds the paid exacta only
+    (is_refund False), as the results parser writes it. Returns the winning dividend."""
+    day_dir = log_dir(data, LOG_DAY)
+    day_dir.mkdir(parents=True)
+    post = {1: datetime(2026, 11, 21, 1, 0, tzinfo=UTC)}
+    odds_log.write_post_times(day_dir / "TOK.races.json", post, SIDECAR_UPDATED)
+    left = [h for h in LATE_WIN_T if h != scratched]
+    win_f = {h: round(LATE_WIN_T[h] * 0.95, 1) for h in left}
+    fc_f = forecast_board(left, 1.6)
+    log = day_dir / "TOK.jsonl.gz"
+    for rows in (
+        capture(LOG_DAY, "TOK", 1, at(LOG_DAY, 0, 54), LATE_WIN_T, LATE_FC_T, 40_000),
+        capture(LOG_DAY, "TOK", 1, at(LOG_DAY, 0, 59), win_f, fc_f, 45_000, scr=(scratched,)),
+        capture(LOG_DAY, "TOK", 1, at(LOG_DAY, 1, 1), win_f, fc_f, LATE_POOL, final=True,
+                scr=(scratched,)),
+    ):  # fmt: skip
+        odds_log.append_capture(log, rows)
+    dividend = 10.0 * math.floor(10 * fc_f[winner])
+    write_store(data, [store_race(LOG_DAY, "TOK", 1, "MAIDEN", field=7)],
+                [{"race_id": LATE_RID, "pool": "FORECAST",
+                  "combination": f"{winner[0]},{winner[1]}", "dividend": dividend,
+                  "is_refund": False}],
+                store_runners(LATE_RID, LATE_WIN_T, scratched=(scratched,)))  # fmt: skip
+    return dividend
+
+
+@pytest.mark.parametrize(("scratched", "mode"), [(7, "selected"), (3, "selected"),
+                                                 (1, "missed")])  # fmt: skip
+def test_a_late_scratch_inside_a_rules_combinations_is_refunded(
+    data_dir, tmp_path, scratched, mode
+):
+    """Owner restart (:390): a horse scratched after T-2 with at least five starters left. Every
+    combination a member bought at t that names it is refunded (its 100 yen stake comes back:
+    payout == stake for that ticket); the refunded tickets are not in the pool, so the own-impact
+    dividend of a hit counts only the member's live tickets. Stake keeps every ticket bought; ROI
+    is payout / stake. The dividends table records only the paid exacta, so the refund comes
+    from the scratch itself (the runners table and the final board), not a refund row."""
+    winner = late_winner(scratched, mode)
+    dividend = build_late_scratch(data_dir, scratched=scratched, winner=winner)
+    (race,) = er.load_logged_races()
+    assert race["win_odds_t"] == LATE_WIN_T and race["exacta_odds_t"] == LATE_FC_T
+    assert race["n_starters"] == 6 and race["pool_total"] == LATE_POOL
+    reg = new_registry(tmp_path / "reg")
+    result = er.score_e2([race], registry=reg, git_sha="abc1234", lambda2=LAMBDA2,
+                         data_builds=BUILDS, n_boot=50)  # fmt: skip
+    assert result["n_races"] == 1 and not any(result["excluded"].values())
+
+    rate = race["rate"]
+    sel = ref_select(LATE_WIN_T, LATE_FC_T, rate, LAMBDA2)
+    head = ref_headline(LATE_WIN_T, 1, "MAIDEN")
+    refunded_any = impact_differs = False
+    members = by_member(result)
+    for (cat, k, scope), got in members.items():
+        bought = sel[(cat, k)] if scope == "all" or head else set()
+        refunded = {c for c in bought if scratched in c}
+        live = bought - refunded
+        hit = winner in live
+        paid = ref_paid(dividend, LATE_POOL, len(live), t=1 - rate) if hit else 0.0
+        refunded_any |= bool(refunded)
+        if hit and refunded:
+            impact_differs |= paid != ref_paid(dividend, LATE_POOL, len(bought), t=1 - rate)
+        key = (cat, k, scope)
+        assert got["stake"] == pytest.approx(100.0 * len(bought)), key
+        assert got["payout"] == pytest.approx(100.0 * len(refunded) + paid, rel=1e-9), key
+        assert got["payout_published"] == pytest.approx(
+            100.0 * len(refunded) + (dividend if hit else 0.0)), key  # fmt: skip
+        if bought:
+            assert got["roi"] == pytest.approx(got["payout"] / got["stake"], rel=1e-9), key
+            want_roi = (100.0 * len(refunded) + paid) / (100.0 * len(bought))
+            assert got["roi"] == pytest.approx(want_roi, rel=1e-9), key
+        for b in result["bets"]:
+            if (b["category"], b["cut"], b["scope"]) == key and scratched in b["combination"]:
+                assert b["payout"] == pytest.approx(b["stake"]), (key, b["combination"])
+    assert refunded_any, "the fixture puts the scratched horse inside some rule's combinations"
+    if mode == "selected":
+        assert impact_differs, "the refunded tickets must visibly not feed the own impact"
