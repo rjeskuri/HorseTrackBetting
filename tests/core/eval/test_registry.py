@@ -37,7 +37,8 @@ Contract pinned here (the coder implements what these tests call):
   index ``README.md``; the family files hold the family, E id, variant, status and per-fold metric,
   value, CI and n of each run, and nothing else from the record. A run with a source in
   ``WITHHELD_SOURCES`` (in any spelling) shows ``withheld (licensed source)`` in place of its
-  values, or is refused at append.
+  values, or is refused at append. A family id with "/" (#131) is written to the stem made by
+  joining its segments with "--"; the "summary file names" section pins the rule.
 - ``default_registry(country)`` stores at ``data_dir()/registry/<country>.jsonl`` and creates the
   directory.
 
@@ -1146,6 +1147,179 @@ def test_a_licensed_source_in_another_spelling_is_still_withheld(tmp_path, sourc
     if appended:
         assert WITHHELD_LABEL in text
     assert [num for num in PUBLIC_NUMBERS if shows_number(text, num)] == PUBLIC_NUMBERS
+
+
+# --------------------------------------------------------------------------- summary file names
+#
+# Ticket #131 froze families such as ``japan/131-exacta-category-v2`` in the append-only Japan
+# registry. ``write_summary`` names a family's file as follows (pinned here so the docs can name
+# the files): split the id at "/", every segment must itself be a safe stem
+# (``[A-Za-z0-9][A-Za-z0-9._-]*``), and the segments are joined with "--". An id without "/"
+# keeps its exact file name. Two families with the same stem, a family whose stem is
+# ``README``, or an id with an unsafe segment raise ``ValueError`` before any file is written.
+
+SAFE_STEM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def write_families(tmp_path: Path, families: dict[str, float], name: str = "names") -> Path:
+    """Write the summary of a fresh registry holding one run per family (its value ``value``)
+    into a fresh directory, and return that directory."""
+    root = tmp_path / "registries" / name
+    root.mkdir(parents=True, exist_ok=True)
+    reg = Registry(root / "japan.jsonl", holdout_log=root / "holdout_log.jsonl")
+    for i, (family, value) in enumerate(families.items()):
+        reg.append(
+            make_record(
+                hypothesis_id=f"E{40 + i}",
+                family_id=family,
+                variant=f"var-{i}-x",
+                metrics=(fold("wf-1", "log_loss", value, None, None, 300 + i),),
+            )
+        )
+    out = tmp_path / "summaries" / name
+    out.mkdir(parents=True, exist_ok=True)
+    write_summary(reg, out)
+    return out
+
+
+def headings(path: Path) -> list[str]:
+    return [line for line in path.read_text(encoding="utf-8").splitlines() if line[:3] == "## "]
+
+
+SLASH_FAMILIES = [
+    ("japan/131-exacta-category-v2", "japan--131-exacta-category-v2", 0.4311),
+    ("japan/131-exacta-category-b1-v1", "japan--131-exacta-category-b1-v1", 0.5122),
+    ("japan/131-exacta-rule-v2", "japan--131-exacta-rule-v2", 0.6233),
+    ("hongkong/7", "hongkong--7", 0.7344),
+    ("a/b/c", "a--b--c", 0.8455),
+    ("Japan/E1.v2_x", "Japan--E1.v2_x", 0.9566),
+]
+
+
+@pytest.mark.parametrize(
+    ("family", "stem", "value"), SLASH_FAMILIES, ids=[s for _, s, _ in SLASH_FAMILIES]
+)
+def test_a_family_id_with_a_slash_writes_to_its_mapped_stem(tmp_path, family, stem, value):
+    out = write_families(tmp_path, {family: value})
+
+    assert sorted(p.name for p in out.iterdir()) == sorted([f"{stem}.md", "README.md"])
+    assert SAFE_STEM.fullmatch(stem)
+    assert headings(out / f"{stem}.md") == [f"## {family}"]
+    assert shows_number((out / f"{stem}.md").read_text(encoding="utf-8"), f"{value}")
+
+
+def test_the_index_lists_slash_families_under_their_id_and_links_the_mapped_file(tmp_path):
+    families = {family: value for family, _, value in SLASH_FAMILIES}
+    plain = {"FAM-alpha": 0.1177, "japan-v0-win-residual": 0.2288, "x--y": 0.3399}
+    stems = {family: stem for family, stem, _ in SLASH_FAMILIES} | {p: p for p in plain}
+    out = write_families(tmp_path, families | plain)
+
+    index = (out / "README.md").read_text(encoding="utf-8").splitlines()
+    entries = [line for line in index if line.startswith("- [")]
+    assert entries == [f"- [{f}]({stems[f]}.md)" for f in sorted(stems)]
+    on_disk = sorted(p.name for p in out.iterdir() if p.name != "README.md")
+    assert on_disk == sorted(f"{stem}.md" for stem in stems.values())
+    for family, value in (families | plain).items():
+        path = out / f"{stems[family]}.md"
+        assert headings(path) == [f"## {family}"]
+        assert shows_number(path.read_text(encoding="utf-8"), f"{value}"), family
+
+
+PLAIN_FAMILIES = [
+    "F1",
+    "FAM-alpha",
+    "japan-v0-win-residual",
+    "win5-carryover-v1",
+    "a.b_c-9",
+    "x--y",
+]
+
+
+@pytest.mark.parametrize("family", PLAIN_FAMILIES)
+def test_a_family_id_without_a_slash_keeps_its_exact_file_name(tmp_path, family):
+    alone = write_families(tmp_path, {family: 0.6421}, name="alone")
+    beside = write_families(
+        tmp_path, {family: 0.6421, "japan/131-exacta-logscore-v2": 0.1357}, name="beside"
+    )
+
+    assert sorted(p.name for p in alone.iterdir()) == sorted([f"{family}.md", "README.md"])
+    assert headings(alone / f"{family}.md") == [f"## {family}"]
+    # A slash family beside it changes neither its file name nor its bytes.
+    assert (beside / f"{family}.md").read_bytes() == (alone / f"{family}.md").read_bytes()
+
+
+SAFE_COMPANIONS = {"F-ok": 0.11, "ok/fine": 0.22}
+
+
+def assert_nothing_written(tmp_path: Path, bad: dict[str, float]) -> None:
+    """The safe companions write on their own (so the refusal is the bad ids' doing); with the
+    bad ids added, ``write_summary`` raises and leaves the directory as it was."""
+    control = write_families(tmp_path, SAFE_COMPANIONS, name="control")
+    assert sorted(p.name for p in control.iterdir()) == ["F-ok.md", "README.md", "ok--fine.md"]
+
+    families = SAFE_COMPANIONS | bad
+    root = tmp_path / "registries" / "refused"
+    root.mkdir(parents=True, exist_ok=True)
+    reg = Registry(root / "japan.jsonl", holdout_log=root / "holdout_log.jsonl")
+    for i, (family, value) in enumerate(families.items()):
+        reg.append(
+            make_record(
+                family_id=family,
+                variant=f"var-{i}-r",
+                metrics=(fold("wf-1", "log_loss", value, None, None, 200),),
+            )
+        )
+    out = tmp_path / "summaries" / "refused"
+    out.mkdir(parents=True)
+    (out / "README.md").write_text("sentinel index\n", encoding="utf-8")
+    (out / "keep.md").write_text("sentinel family\n", encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in out.iterdir()}
+
+    with pytest.raises(ValueError):
+        write_summary(reg, out)
+
+    assert {p.name: p.read_bytes() for p in out.iterdir()} == before
+
+
+# Each row: families refused together; the safe companions beside them are not written either.
+COLLIDING = [
+    pytest.param(["japan/131-x", "japan--131-x"], id="slash-vs-plain"),
+    pytest.param(["a--b/c", "a/b--c"], id="slash-vs-slash"),
+    pytest.param(["README"], id="readme"),
+]
+
+
+@pytest.mark.parametrize("bad", COLLIDING)
+def test_families_with_the_same_stem_or_the_index_stem_are_refused(tmp_path, bad):
+    assert_nothing_written(tmp_path, {f: 0.33 + i / 100 for i, f in enumerate(bad)})
+
+
+UNSAFE = [
+    "/japan",
+    "japan/",
+    "/",
+    "japan//x",
+    "japan/..",
+    "japan/../x",
+    "../x",
+    "japan/.",
+    "japan/.hidden",
+    "japan/-x",
+    "japan/a b",
+    "japan/x:y",
+    "japan\\x",
+    "japan/é",
+    "japan/x\ny",
+    "a b",
+    ".x",
+    "-x",
+    "..",
+]
+
+
+@pytest.mark.parametrize("bad", UNSAFE, ids=[repr(u) for u in UNSAFE])
+def test_a_family_id_unsafe_after_the_mapping_is_refused(tmp_path, bad):
+    assert_nothing_written(tmp_path, {bad: 0.33})
 
 
 # --------------------------------------------------------------------------- default registry

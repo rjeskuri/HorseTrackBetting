@@ -461,18 +461,34 @@ def _number(value: float | None) -> str:
     return "-" if value is None else f"{value:.6g}"
 
 
+def _family_stem(family: str) -> str:
+    """The summary file stem of ``family``: the id itself, or for an id with "/" (#131) its
+    segments joined with "--". Every segment must be a safe stem, and the id not the index's."""
+    segments = family.split("/")
+    if not all(_FAMILY_FILE.fullmatch(s) for s in segments) or family == _INDEX_STEM:
+        raise ValueError(f"family {family!r} cannot be a summary file name")
+    return "--".join(segments)
+
+
 def write_summary(registry: Registry, directory: Path | str) -> None:
     """Write the aggregate-only summary of ``registry`` into ``directory`` (normally
-    ``summary_dir(country)``): one ``<family_id>.md`` per family, holding per run its E id,
-    variant, status and per-fold metric, value, CI and n, and nothing else, and ``README.md``,
-    the index of the families. A licensed-source run shows only its identity and
-    ``withheld (licensed source)``. A family's file depends on that family's records alone."""
+    ``summary_dir(country)``): one ``<stem>.md`` per family, holding per run its E id, variant,
+    status and per-fold metric, value, CI and n, and nothing else, and ``README.md``, the index
+    listing each family under its id. The stem is the family id, or for an id with "/" its
+    segments joined with "--" (``japan/x-v2`` -> ``japan--x-v2.md``). An unsafe segment, the stem
+    ``README`` or two families with one stem raise ``ValueError`` before any file is written. A
+    licensed-source run shows only its identity and ``withheld (licensed source)``. A family's
+    file depends on that family's records alone."""
     families: dict[str, list[RunRecord]] = {}
     for record in registry.records():
         families.setdefault(record.family_id, []).append(record)
+    stems: dict[str, str] = {}
     for family in families:
-        if not _FAMILY_FILE.fullmatch(family) or family == _INDEX_STEM:
-            raise ValueError(f"family {family!r} cannot be a summary file name")
+        stem = _family_stem(family)
+        if stem in stems:
+            raise ValueError(f"families {stems[stem]!r} and {family!r} share the file {stem}.md")
+        stems[stem] = family
+    stem_of = {family: stem for stem, family in stems.items()}
 
     directory = Path(directory)
     for family, records in families.items():
@@ -495,7 +511,7 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
                 ci = "-" if m.lo is None and m.hi is None else f"[{_number(m.lo)}, {_number(m.hi)}]"
                 values = f"{_number(m.value)} | {ci} | {m.n}"
                 lines.append(f"{who} {_cell(m.fold)} | {_cell(m.metric)} | {values} |")
-        write_report(directory / f"{family}.md", "\n".join(lines) + "\n", sources=())
+        write_report(directory / f"{stem_of[family]}.md", "\n".join(lines) + "\n", sources=())
 
     index = [
         "# Experiment registry index",
@@ -504,5 +520,5 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
         "per family, each holding that family's runs.",
         "",
     ]
-    index += [f"- [{family}]({family}.md)" for family in sorted(families)]
+    index += [f"- [{family}]({stem_of[family]}.md)" for family in sorted(families)]
     write_report(directory / f"{_INDEX_STEM}.md", "\n".join(index) + "\n", sources=())
