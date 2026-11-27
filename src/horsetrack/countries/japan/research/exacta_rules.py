@@ -36,7 +36,12 @@ the boards at t.
 - The ordering fit is the artifact ``models/japan/v0/current.json`` names, recorded by its fit id
   and content hash in the odds_log build's refresh (provenance: a refit is another run, not a new
   variant); a fit whose out-of-fold training races reach the earliest scored race date is
-  refused. The manifest's relative out-of-fold path resolves against the working directory.
+  refused. The out-of-fold file is the one whose bytes are the manifest's ``oof.sha256``; a
+  relative path resolves against the data dir, then the model dir, never the working directory.
+- Variant identity: the command's ordering component is ``ORDERING_MODEL``; in a registry the
+  previous revision wrote (its ordering component was the fit id), a run carries the component
+  those records registered (``_registered_components``), so it is another run of the same 16
+  members and max test, never new variants.
 
 Development days only: a holdout day's race is dropped, and its log folder never opened, before
 anything else of it is read (D14); LockedHoldout is not opened. Public JRA data only.
@@ -851,24 +856,35 @@ def load_logged_races(*, minutes_before: int = MINUTES_BEFORE_POST) -> list[dict
 # --------------------------------------------------------------------------- the ordering fit
 
 
-def _oof_path(saved: str, model_dir: Path) -> Path:
-    """The out-of-fold file a manifest names. The fitter (``models.v0.ordering.run_fit``) opens
-    ``--oof`` relative to its working directory and saves the argument verbatim, so a relative
-    path resolves against the working directory; one not found there is tried in the model dir."""
-    oof = Path(saved)
-    if oof.is_absolute():
-        return oof
-    for base in (Path.cwd(), model_dir):
-        if (base / oof).exists():
-            return base / oof
-    raise FileNotFoundError(f"the ordering fit's out-of-fold file {saved} is in neither the "
-                            f"working directory nor the model dir")  # fmt: skip
+def _oof_path(oof: Mapping, model_dir: Path) -> Path:
+    """The out-of-fold file a manifest's ``oof`` entry names, verified by the ``sha256`` the
+    fitter (``models.v0.ordering.run_fit``) records beside the path. The fitter saves ``--oof``
+    verbatim, so a relative path is tried against the data dir (HORSETRACK_DATA_DIR), then the
+    model dir, never the working directory: a stale copy there cannot shadow the fitted file. A
+    candidate whose bytes are not the recorded sha256 is skipped; an absolute path is checked the
+    same way. Raises when no candidate exists or none matches."""
+    saved, expected = Path(str(oof["path"])), oof.get("sha256")
+    if not expected:
+        raise ValueError(f"the ordering fit's manifest records no sha256 for {saved}")
+    if saved.is_absolute():
+        candidates = [saved]
+    else:
+        candidates = [paths.data_dir() / saved, model_dir / saved]
+    existing = [c for c in candidates if c.is_file()]
+    for candidate in existing:
+        if hashlib.sha256(candidate.read_bytes()).hexdigest() == expected:
+            return candidate
+    where = ", ".join(str(c) for c in candidates)
+    if not existing:
+        raise FileNotFoundError(f"the ordering fit's out-of-fold file {saved} is not at {where}")
+    raise ValueError(f"no out-of-fold file at {where} has the manifest's sha256 {expected[:12]}")
 
 
 def _ordering_artifact() -> dict:
     """The ordering artifact ``current.json`` names, pinned by the sha256 of the bytes its lambda2
     is read from, and its training window: the race dates (``jra:<YYYY-MM-DD>:...``) of the
-    out-of-fold file its manifest names."""
+    out-of-fold file its manifest names, read only from a file whose bytes are the manifest's
+    ``oof.sha256`` (``_oof_path``)."""
     model_dir = paths.data_dir().joinpath(*MODEL_DIR)
     names = json.loads((model_dir / "current.json").read_text(encoding="utf-8"))
     path = model_dir / names["ordering"]
@@ -876,7 +892,7 @@ def _ordering_artifact() -> dict:
     fit = json.loads(raw)
     manifest_path = model_dir / f"manifest-ordering-{fit['fit_id']}.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    oof = _oof_path(manifest["oof"]["path"], model_dir)
+    oof = _oof_path(manifest["oof"], model_dir)
     race_ids = pc.unique(pq.read_table(oof, columns=["race_id"])["race_id"]).to_pylist()
     days = {date.fromisoformat(str(rid).split(":")[1]) for rid in race_ids}
     if not days:
@@ -912,6 +928,23 @@ def _data_builds(info: dict, ordering: Mapping | None = None) -> dict[str, str]:
         rows = consumed.get(name, _rows_digest([]))
         builds[f"jra_{name}"] = f"processed/jra/{name}.parquet@{rows}"
     return builds
+
+
+def _registered_components(registry) -> dict[str, str]:
+    """The ordering component the command's records carry in `registry`: ``ORDERING_MODEL``, or,
+    where the previous revision (8a58d47) ran the command first and wrote the fit id as the
+    component, the earliest such record's components. ``Registry.family_size`` compares
+    components verbatim, so reusing that label keeps a later run (a refit, more logged days) a run
+    of the registered variants rather than 16 new members and a new max test; the append-only
+    registry is never rewritten, and the fit actually used stays in data_builds' refresh."""
+    for r in registry.records():
+        if r.family_id not in (E2_RULE_ID, MAX_TEST_ID):
+            continue
+        ordering = r.components.get("ordering")
+        command_run = "+ordering-" in r.data_builds.get("odds_log", "")
+        if command_run and ordering is not None and ordering != ORDERING_MODEL:
+            return dict(r.components)
+    return {"ordering": ORDERING_MODEL}
 
 
 def _run_digest(data_builds: Mapping[str, str], components: Mapping[str, str]) -> str:
@@ -1022,8 +1055,8 @@ def exacta_rules_command() -> None:
         ordering = _ordering_artifact()
         data_builds = _data_builds(info, ordering)
         # the model, not the fit: the fit id and hash are provenance in data_builds (a refit is
-        # another run of the same 16 members)
-        components = {"ordering": ORDERING_MODEL}
+        # another run of the same 16 members); a pre-upgrade registry keeps its registered label
+        components = _registered_components(registry)
         result = score_e2(
             races, registry=registry, git_sha=sha, lambda2=ordering["lambda2"],
             data_builds=data_builds, components=components,

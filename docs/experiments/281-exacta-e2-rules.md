@@ -112,6 +112,20 @@ none.
 - **D needs identified shares.** A final board quoting any pair of the final field at 1.1 or less
   is no full board: it is counted in `incomplete_boards` and left out of every category.
 
+### Round-5 changes to the v4 contract (supersede round 4 where they differ)
+
+- **The out-of-fold file by data dir and sha.** A relative `oof.path` resolves against the data
+  dir (`HORSETRACK_DATA_DIR`), then the model dir, never the working directory, so a stale copy
+  under the same name in the cwd cannot set the training window. Each candidate's bytes must be
+  the manifest's `oof.sha256` (the fitter records it); a mismatch is skipped, an absolute path is
+  checked the same way, and when no candidate matches the run is refused (a failed record).
+- **Pre-upgrade records keep their variants.** The previous revision (`8a58d47`) wrote the fit id
+  as the ordering component. In a registry holding those records, the command reuses the earliest
+  one's components, so a refit or more logged days is another run of the same 16 members and the
+  max test reports family size 16. The registry is not rewritten and `core.eval` is unchanged;
+  the fit actually used is in the `odds_log` build's refresh and the report's `ordering_artifact`.
+  A fresh registry gets `ordering: discounted_harville` as in round 4.
+
 ## Run of 2026-11-27 (git `483f790`), v3, history
 
 - Inputs as in the run below: 2 development day folders, 2 odds logs, 0 `FORECAST` rows, 0

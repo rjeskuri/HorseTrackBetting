@@ -65,7 +65,7 @@ import shutil
 import statistics
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from itertools import permutations
 from pathlib import Path
@@ -1847,6 +1847,11 @@ MODEL_DIR = ("models", "japan", "v0")
 OOF_THROUGH = date(2026, 11, 14)  # the fit's last training race day: before every logged day
 
 
+def file_sha(path: Path) -> str:
+    """The sha256 the fitter's manifest records for its out-of-fold file (``oof.sha256``)."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _snapshot(folder: Path) -> dict[str, bytes]:
     return {p.name: p.read_bytes() for p in sorted(folder.glob("*")) if p.is_file()}
 
@@ -1872,7 +1877,8 @@ def write_fits(
         "win-winfit281.json": {"fit_id": "winfit281"},
         ordering: {"family": "discounted_harville", "fit_id": "ordfit281",
                    "lambdas": [LAMBDA2, 0.9], "n_races": n_races},
-        "manifest-ordering-ordfit281.json": {"fit_id": "ordfit281", "oof": {"path": str(oof)}},
+        "manifest-ordering-ordfit281.json": {"fit_id": "ordfit281",
+                                             "oof": {"path": str(oof), "sha256": file_sha(oof)}},
         "current.json": {"win": "win-winfit281.json", "ordering": ordering},
     }  # fmt: skip
     for name, body in files.items():
@@ -2279,7 +2285,8 @@ def write_refit(data: Path, *, fit_id: str, lambda2: float) -> Path:
     files = {
         artifact.name: {"family": "discounted_harville", "fit_id": fit_id,
                         "lambdas": [lambda2, 0.88], "n_races": 8},
-        f"manifest-ordering-{fit_id}.json": {"fit_id": fit_id, "oof": {"path": str(oof)}},
+        f"manifest-ordering-{fit_id}.json": {"fit_id": fit_id,
+                                             "oof": {"path": str(oof), "sha256": file_sha(oof)}},
         "current.json": {"win": "win-winfit281.json", "ordering": artifact.name},
     }  # fmt: skip
     for name, body in files.items():
@@ -2350,18 +2357,20 @@ def fit_ordering_from(workdir: Path, data: Path, *, through: date) -> str:
 
 @pytest.mark.parametrize("manifest_form", ["as_fitted", "legacy_relative"])
 @pytest.mark.parametrize("through, overlaps", [(OOF_THROUGH, False), (LOG_DAY, True)])
-def test_a_cwd_relative_oof_path_from_the_fitter_is_found(
+def test_a_relative_oof_path_from_the_fitter_resolves_against_the_data_dir(
     command, data_dir, tmp_path, monkeypatch, manifest_form, through, overlaps
 ):
-    """Finding :817: the fitter opens ``--oof`` relative to the working directory and saves the
-    argument verbatim. Scoring from the fitter's working directory finds that file (the oof is
-    not in the model dir), whether the manifest holds what the fitter now writes or the legacy
-    cwd-relative string, and the training window is read from it: a window reaching the scored
-    day still gives no scored ROI."""
-    workdir = tmp_path / "work"
-    workdir.mkdir()
-    monkeypatch.chdir(workdir)
-    fit_id = fit_ordering_from(workdir, data_dir, through=through)
+    """Findings :817 and :862: the fitter saves ``--oof`` verbatim; a relative path resolves
+    against the data dir (HORSETRACK_DATA_DIR), never the working directory. A fit made from the
+    data dir (the oof is not in the model dir) is found when scoring runs from any other working
+    directory, whether the manifest holds what the fitter writes or the legacy relative string,
+    and the training window is read from it: a window reaching the scored day still gives no
+    scored ROI."""
+    monkeypatch.chdir(data_dir)
+    fit_id = fit_ordering_from(data_dir, data_dir, through=through)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)  # scoring runs from a working directory without the oof
     model = data_dir.joinpath(*MODEL_DIR)
     manifest_path = model / f"manifest-ordering-{fit_id}.json"
     if manifest_form == "legacy_relative":
@@ -2386,6 +2395,182 @@ def test_a_cwd_relative_oof_path_from_the_fitter_is_found(
     assert any("roi" in metric_map(r) for r in members)
     assert all(names_fit(r, fit_id) or any(fit_id in str(v) for v in r.components.values())
                for r in members)  # fmt: skip
+
+
+# ---------------------------------------------------------------------------------------------
+# Round-5 fixes on 228b5b0: the oof file by data dir and sha (:862), pre-upgrade variants (:1026)
+# ---------------------------------------------------------------------------------------------
+
+
+def write_oof(path: Path, through: date) -> None:
+    """An out-of-fold file other than the fitter's (another venue, other horses: other bytes)
+    whose races run on four weekly days through `through`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    days = [through - timedelta(days=7 * k) for k in range(4)]
+    pd.DataFrame([{"race_id": f"jra:{d.isoformat()}:NAK:{no:02d}", "horse_no": h, "p_cal": 0.2}
+                  for d in days for no in (1, 2, 3) for h in range(1, 6)]).to_parquet(
+        path, index=False)  # fmt: skip
+
+
+def name_current(data: Path, fit_id: str) -> None:
+    model = data.joinpath(*MODEL_DIR)
+    current = json.loads((model / "current.json").read_text(encoding="utf-8"))
+    current["ordering"] = f"ordering-{fit_id}.json"
+    (model / "current.json").write_text(json.dumps(current), encoding="utf-8")
+
+
+def bases(data: Path, tmp_path: Path) -> dict[str, Path]:
+    """Where a relative oof path could sit: the data dir, the model dir, a working directory."""
+    return {"data_dir": data, "model_dir": data.joinpath(*MODEL_DIR), "cwd": tmp_path / "work"}
+
+
+def scored_rois(reg) -> list:
+    return [r for r in reg.records(RULE_ID) if r.status == "scored" and "roi" in metric_map(r)]
+
+
+def assert_trained_through(reg, through: date) -> None:
+    """The run used the oof file whose last race day is `through`: a window reaching the scored
+    day (LOG_DAY) is refused with no scored ROI; an earlier one scores all 16 members and the
+    report names `through` as the fit's training window."""
+    if through >= LOG_DAY:
+        assert not scored_rois(reg)
+        assert [r for r in reg.records() if r.status == "failed"]
+        return
+    members = reg.records(RULE_ID)
+    assert len(members) == 16 and {r.status for r in members} == {"scored"}
+    assert scored_rois(reg)
+    summary = json.loads(latest_report(".json").read_text(encoding="utf-8"))
+    assert summary["ordering_artifact"]["trained_through"] == through.isoformat()
+
+
+@pytest.mark.parametrize("fitted_from", ["data_dir", "model_dir"])
+@pytest.mark.parametrize("right, stale", [(LOG_DAY, OOF_THROUGH), (OOF_THROUGH, LOG_DAY)])
+def test_a_stale_oof_copy_in_the_working_directory_never_shadows_the_fitted_one(
+    command, data_dir, tmp_path, monkeypatch, fitted_from, right, stale
+):
+    """Finding :862 (high): the fitter ran from the data dir or the model dir with a relative
+    ``--oof``; scoring runs from a working directory holding another file under the same relative
+    name, with other race days. The fitted file (the one the manifest's sha256 names) sets the
+    training window: when it reaches the scored day the run is refused even though the cwd copy
+    ends earlier, and when it ends earlier the run scores even though the cwd copy overlaps."""
+    where = bases(data_dir, tmp_path)
+    monkeypatch.chdir(where[fitted_from])
+    fit_id = fit_ordering_from(where[fitted_from], data_dir, through=right)
+    name_current(data_dir, fit_id)
+    write_oof(where["cwd"] / "fits" / OOF_FILE, stale)
+    monkeypatch.chdir(where["cwd"])
+    build_logged_day(data_dir)
+    if right >= LOG_DAY:
+        run_command()
+    else:
+        er.exacta_rules_command()
+    assert_trained_through(command, right)
+
+
+@pytest.mark.parametrize("fitted_from, mismatched", [
+    ("model_dir", ("data_dir", "cwd")),  # the data dir's copy fails the sha: skipped
+    ("data_dir", ("model_dir", "cwd")),
+])  # fmt: skip
+def test_an_oof_candidate_whose_bytes_fail_the_manifest_sha_is_skipped(
+    command, data_dir, tmp_path, monkeypatch, fitted_from, mismatched
+):
+    """Finding :862: a candidate under the manifest's relative path whose bytes are not the
+    sha256 the fitter recorded is never used, wherever it sits; the candidate that matches is.
+    The mismatched copies reach the scored day, the fitted file ends earlier: the run scores
+    and its training window is the fitted file's."""
+    where = bases(data_dir, tmp_path)
+    where["cwd"].mkdir(parents=True)
+    monkeypatch.chdir(where[fitted_from])
+    fit_id = fit_ordering_from(where[fitted_from], data_dir, through=OOF_THROUGH)
+    name_current(data_dir, fit_id)
+    for name in mismatched:
+        write_oof(where[name] / "fits" / OOF_FILE, LOG_DAY)
+    monkeypatch.chdir(where["cwd"])
+    build_logged_day(data_dir)
+    er.exacta_rules_command()
+    assert_trained_through(command, OOF_THROUGH)
+
+
+def assert_refused(reg) -> None:
+    with pytest.raises(Exception):  # noqa: B017 - the refusal's type is the coder's choice
+        er.exacta_rules_command()
+    assert not [r for r in reg.records(RULE_ID) if r.status == "scored"]
+    assert [r for r in reg.records() if r.status == "failed"]  # the refused run is recorded
+
+
+def test_no_oof_candidate_matching_the_manifest_sha_refuses_the_run(
+    command, data_dir, tmp_path, monkeypatch
+):
+    """Finding :862: when no candidate under the data dir or the model dir has the bytes the
+    manifest's sha256 names, the artifact load refuses (the run is a failed record, nothing is
+    scored), even though every candidate ends before the scored day and the right bytes sit in
+    the working directory, which is never a candidate."""
+    where = bases(data_dir, tmp_path)
+    where["cwd"].mkdir(parents=True)
+    monkeypatch.chdir(where["cwd"])
+    fit_id = fit_ordering_from(where["cwd"], data_dir, through=OOF_THROUGH)  # right bytes: cwd
+    name_current(data_dir, fit_id)
+    for name in ("data_dir", "model_dir"):
+        write_oof(where[name] / "fits" / OOF_FILE, OOF_THROUGH)
+    build_logged_day(data_dir)
+    assert_refused(command)
+
+
+def test_an_absolute_oof_path_whose_bytes_changed_since_the_fit_refuses_the_run(command, data_dir):
+    """Finding :862: an absolute oof path is verified too: a file rewritten after the fit (other
+    race days, both before the scored day) no longer has the manifest's sha256, and the run is
+    refused rather than read for its dates."""
+    oof = data_dir.joinpath(*MODEL_DIR, OOF_FILE)
+    assert json.loads(data_dir.joinpath(*MODEL_DIR, "manifest-ordering-ordfit281.json")
+                      .read_text(encoding="utf-8"))["oof"]["path"] == str(oof)  # fmt: skip
+    write_oof(oof, OOF_THROUGH - timedelta(days=7))
+    build_logged_day(data_dir)
+    assert_refused(command)
+
+
+def downgrade(reg_path: Path, records: list, fit_id: str) -> Registry:
+    """The registry as 8a58d47 wrote it: the same runs under the dashed v4 ids, with the ordering
+    fit id as their ordering component (the revision before ORDERING_MODEL)."""
+    reg_path.unlink()
+    reg = default_registry("japan")
+    reg.freeze_family(RULE_ID, family_specs()[E2_ID])
+    for r in records:
+        if r.family_id in (RULE_ID, MAX_ID) and "ordering" in r.components:
+            r = replace(r, components={**r.components, "ordering": fit_id})
+        reg.append(r)
+    return reg
+
+
+@pytest.mark.parametrize("change", ["refit", "more_meetings"])
+def test_pre_upgrade_v4_records_keep_their_variant_identity(command, data_dir, change):
+    """Finding :1026 (medium): a registry holding the 16 members as the previous revision wrote
+    them (components.ordering = the fit id) gains runs, not variants, on the first run after the
+    upgrade: the family stays 16, the max test reports family size 16, and the max-test family
+    gains no variant."""
+    build_logged_day(data_dir)
+    add_meetings(data_dir)
+    er.exacta_rules_command()
+    reg_path = paths.data_dir() / "registry" / "japan.jsonl"
+    assert reg_path.exists()
+    reg = downgrade(reg_path, command.records(), "ordfit281")
+    assert {r.components["ordering"] for r in reg.records(RULE_ID)} == {"ordfit281"}
+    assert reg.family_size(RULE_ID) == 16
+    n_members, max_before = len(reg.records(RULE_ID)), reg.family_size(MAX_ID)
+    n_tests = len([r for r in reg.records(MAX_ID) if r.variant != "run"])
+    assert n_tests >= 1
+
+    if change == "refit":
+        write_refit(data_dir, fit_id="ordrefit9b", lambda2=0.87)
+    else:
+        add_meetings(data_dir, venues=("SAP", "FKS"))
+    er.exacta_rules_command()
+    members = reg.records(RULE_ID)
+    assert len(members) == n_members + 16  # the new run is recorded
+    assert reg.family_size(RULE_ID) == 16
+    assert len({r.variant for r in members}) == 16
+    tests = [r for r in reg.records(MAX_ID) if r.variant != "run"][n_tests:]
+    assert tests and all(scored_metric(r, "family_size") == 16 for r in tests)
+    assert reg.family_size(MAX_ID) == max_before
 
 
 def max_test_records(reg) -> tuple[list, list]:
