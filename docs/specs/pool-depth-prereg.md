@@ -123,3 +123,37 @@ The three runs are in `docs/experiments/pool-depth-japan.md`. The `co-placer` ru
 **failed** by its rule check (the share the rule reproduced: withheld (D21)). A co-placer variant
 on another rule (for instance that of `core.pricing.stake_back_share_dividend`) is a new family,
 frozen before it runs.
+
+## Co-placer v2: the co-placer variant re-registered (2026-11-27)
+
+Status: **FROZEN on 2026-11-27**, before its run. Family id: **`japan-pool-depth-coplacer-v2`**,
+spec sha256 **`82a471b219bfee2e65f53c5c12e2f66514757169d82184b6be45b35b2454e89a`**, committed at
+`src/horsetrack/countries/japan/config/pool_depth_coplacer_v2.yaml` and frozen with `horsetrack
+japan pool-depth freeze --spec pool_depth_coplacer_v2`.
+
+Why: `japan-pool-depth-v1`'s co-placer runs were recorded **failed** by their rule check, with
+every eligible paid combination present in the votes and final odds. The frozen rule is applied
+as registered; it is the rule that does not reproduce JRA's payouts. It returns the paying
+combinations' own money untaxed, while JRA takes the payout rate on the whole net pool, those
+stakes included. This registration was written after v1's private report, whose pre-registered
+diagnostic gives how often the rule below reproduces the payouts (withheld, D21); it changes the
+rule and nothing else.
+
+- Rule (`core-stake-back-share`): the rule of `core.pricing.stake_back_share_dividend`, the
+  stake-back-share rule as `config/jra.yaml` states it: per yen d = r(1 + B / (P W_i)), with
+  B = V - sum W the losers' money, broken to 10 yen and at least 110; V net of refunds, P the
+  race's paying combinations in `dividends`, r the pool's base payout rate (boosted days not
+  adjusted, as in v1).
+- Capacity: own stake s on combination i adds s to V and to sum W, so B stays and
+  d(s) = r(1 + B / (P(W_i + s))). (1 + e) d(s) / d(0) = 1 + k with c = (1 + k) / (1 + e) gives
+  s = (1 - c)(B + P W_i) / (P(c - 1) + c B / W_i), whatever r is; unbounded (`inf`) where the
+  denominator is not positive, none where W_i <= 0. At P = 1 it is the single-winner capacity
+  stake.
+- Everything else is v1's: the days, cells, edges, share lost, quantiles, odds bands, flat
+  stakes, and the gate (each pool's share of the eligible paid combinations the rule reproduces
+  >= `min_rule_match` 0.95, a paid combination without its votes or final price counting as not
+  reproduced; recorded **failed** below it).
+- One run, the co-placer variant alone (`horsetrack japan pool-depth run --spec
+  pool_depth_coplacer_v2`), one RunRecord in the family (hypothesis `P432`, ticket 432, sources
+  `('jravan',)`), failures included; its private report is
+  `pool-depth-coplacer-japan-<first 16 hex of its run id>.md` under `$HORSETRACK_DATA_DIR/reports/`.
