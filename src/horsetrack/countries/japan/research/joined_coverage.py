@@ -10,8 +10,9 @@ source, through the joins a model needs. `joined_coverage(schedule, sources)` is
   `horse_no`, `forecast`, NaN when the runner has none, and `won`, missing when no result), and
   optionally `horse_id`: the source's own key, on which its repeats are counted (a row whose
   `horse_no` is missing, not a scheduled starter, is then a source row that is not scheduled).
-- `study`: optionally `{name: StudyRaces}`, the races a study keeps for a source: a race outside
-  its store frame or not scored by it is not scored here either.
+- `study`: optionally `{name: StudyRaces}`, a study's own sets for a source (its store frame's
+  runner keys, the races its scored folds train on and test): the source's stages then come from
+  them, and only a race the study scores is scored here.
 
 Every scheduled race passes, per source, `STAGES` in order and drops at the first it fails, with
 one reason (`REASONS`): matched fails on `duplicate_key` (a key of the race occurs more than once
@@ -20,7 +21,11 @@ for a source with a `StudyRaces`, on `not_in_store_frame` (the study's store fra
 so the study forecasts none of it), else on `no_forecast` (a scheduled runner's forecast is
 missing); scored fails on `no_result` (a scheduled runner's `won` is missing, or no runner won; a
 dead heat is scored), else, with a `StudyRaces`, on `train_only` (the study only trains on the
-race: its scored folds test none of it). Counts split by era
+race: its scored folds test none of it) or `outside_folds` (its scored folds neither train on nor
+test the race), and a race the scored folds test is scored. With a `StudyRaces`, `unmatched` and
+`no_forecast` look only at the runners the study's store frame keeps, on the source's own
+(`race_id`, `horse_id`): a runner the store frame drops (an unpriced loser) drops no race, and a
+race the store frame drops is `not_in_store_frame` whatever the source holds. Counts split by era
 (`PRICE_ERA` from D10's `PRICE_ERA_START` on, `PRE_PRICE_ERA` before) and by card class. Key
 counts: source rows whose key repeats (every copy), scheduled keys with no source row, and source
 rows whose key is not scheduled.
@@ -37,8 +42,8 @@ runs may predate the store; otherwise `UNVERIFIED` (a maiden debut, or runs outs
 the schedule is the store's development starters of the price era (`studies.meta.read_development`),
 the sources the store's final Win price (`jra`) and the #87 member file (`MEMBER_SOURCE`,
 `studies.meta.read_members`), the latter under the #87 study's own rules (`member_study_races`:
-its `store_frame`, scored folds and level-2 population); the private report adds `first_starts`
-over every store run.
+its `store_frame`, and the training and test races of its scored folds remapped onto its level-2
+population); the private report adds `first_starts` over every store run.
 """
 
 from __future__ import annotations
@@ -73,6 +78,7 @@ REASONS = (  # in the order a race is tested: the first that fails is its reason
     "no_forecast",
     "no_result",
     "train_only",
+    "outside_folds",
 )
 PRICE_ERA = "price_era"
 PRE_PRICE_ERA = "pre_price_era"
@@ -93,16 +99,19 @@ _REACHED = {
     "no_forecast": 1,
     "no_result": 2,
     "train_only": 2,
+    "outside_folds": 2,
     None: 3,
 }
 _RACE_ID_DAY = re.compile(r"^[^:]*:(\d{4}-\d{2}-\d{2}):")  # `<source>:<YYYY-MM-DD>:...`
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class StudyRaces:
-    """The races of a study's store frame and the races it scores (a subset)."""
+    """A study's own sets for a source: the runner keys (`race_id`, `horse_id`) of its store
+    frame, and the races its scored folds train on and test (the races it scores)."""
 
-    in_store_frame: frozenset[str]
+    runners: pd.DataFrame
+    trained: frozenset[str]
     scored: frozenset[str]
 
 
@@ -255,10 +264,18 @@ def _source(
         "no_result": no_result,
         "not_in_store_frame": set(),
         "train_only": set(),
+        "outside_folds": set(),
     }
     if study is not None:
-        failing["not_in_store_frame"] = set(race_ids) - study.in_store_frame
-        failing["train_only"] = set(study.in_store_frame) - study.scored
+        _check_columns(rows, ["horse_id"], "a source with study rules")
+        kept = pd.MultiIndex.from_frame(study.runners[["race_id", "horse_id"]])
+        own = pd.MultiIndex.from_frame(rows[["race_id", "horse_id"]])
+        retained = rows.loc[own.isin(kept) & ~repeated]
+        failing["unmatched"] = set(study.runners.loc[~kept.isin(own), "race_id"])
+        failing["not_in_store_frame"] = set(race_ids) - set(study.runners["race_id"])
+        failing["no_forecast"] = set(retained.loc[retained["forecast"].isna(), "race_id"])
+        failing["train_only"] = set(study.trained) - study.scored
+        failing["outside_folds"] = set(race_ids) - study.trained - study.scored
     reason = pd.Series([None] * len(race_ids), index=race_ids, dtype=object)
     for why in reversed(REASONS):  # the first failing stage wins
         reason[reason.index.isin(list(failing[why]))] = why
@@ -279,8 +296,10 @@ _INTRO = (
     "`duplicate_key` (a runner key repeats in the source) or `unmatched` (a scheduled runner has "
     "no source row) at matched, `not_in_store_frame` (for a source a study reads: the study's "
     "store frame drops the race) or `no_forecast` (a runner has no forecast after the joins) at "
-    "forecastable, `no_result` (a runner has no result, or no runner won) or `train_only` (the "
-    "study only trains on the race) at scored. Eras split "
+    "forecastable, `no_result` (a runner has no result, or no runner won), `train_only` (the study "
+    "only trains on the race) or `outside_folds` (the study's scored folds neither train on nor "
+    "test the race) at scored; for a source a study reads, only the runners its store frame keeps "
+    "count at matched and forecastable. Eras split "
     f"at D10's price era start, {PRICE_ERA_START.isoformat()}. Built by "
     "`research.joined_coverage` (#418)."
 )
@@ -431,19 +450,25 @@ def store_sources(
 def member_study_races(
     runners: pd.DataFrame, races: pd.DataFrame, members: pd.DataFrame
 ) -> StudyRaces:
-    """The #87 study's races for the member file, by its own code: `studies.meta.store_frame`,
-    its scored folds (`study_folds`) and its level-2 population (`level2_population`), whose
-    scored folds' test races are the ones it scores. A (race_id, horse_id) the file repeats is
-    left out of the population here (its race drops as `duplicate_key` first)."""
+    """The #87 study's sets for the member file, by its own code: the runner keys of
+    `studies.meta.store_frame`, and the races in the training and test rows of its scored folds
+    (`study_folds`) remapped onto its level-2 population (`level2_population`); the test races are
+    the ones it scores. A (race_id, horse_id) the file repeats is left out of the population here
+    (its race drops as `duplicate_key` first)."""
     frame, _ = study.store_frame(runners, races)
     _, scored = study.study_folds(frame, load_country_scheme(COUNTRY))
     unique = members.loc[~members.duplicated(["race_id", "horse_id"], keep=False)]
     level2 = study.level2_population(frame, scored, unique, study.race_calendar())
-    tested = [np.asarray(f.test_idx, dtype=int) for f in level2.folds]
-    rows = np.unique(np.concatenate(tested)) if tested else np.array([], dtype=int)
+    race_of = level2.frame["race_id"].to_numpy()
+
+    def races_in(name: str) -> frozenset[str]:
+        idx = [np.asarray(getattr(f, name), dtype=int) for f in level2.folds]
+        return frozenset(race_of[np.unique(np.concatenate(idx))] if idx else ())
+
     return StudyRaces(
-        in_store_frame=frozenset(frame["race_id"]),
-        scored=frozenset(level2.frame["race_id"].iloc[rows]),
+        runners=frame[["race_id", "horse_id"]].reset_index(drop=True),
+        trained=races_in("train_idx"),
+        scored=races_in("test_idx"),
     )
 
 

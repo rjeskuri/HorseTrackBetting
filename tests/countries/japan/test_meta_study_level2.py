@@ -42,6 +42,7 @@ from meta_store_fakes import (
 )
 
 from horsetrack.core import paths
+from horsetrack.core.eval.folds import load_country_scheme
 from horsetrack.core.eval.registry import default_registry
 from horsetrack.countries.japan.models import meta as models_meta
 from horsetrack.countries.japan.models import stacking as st
@@ -204,3 +205,122 @@ def test_no_cutoff_from_either_refuses_before_any_fit(env: dict) -> None:
         meta.run_study(path, env["dir"] / "out")
     assert env["inputs"] == []
     assert registry_bytes() == b"", "a refused run wrote to the registry"
+
+
+# --------------------------------------------------------------------------- fix 1: cutoff types
+#
+# The owner's restart instructions (2026-11-27), fix 1: `member_predictions` raises `ValueError`
+# when the member file's own cutoff column (`train_end`, read as `member_train_end`) is numeric
+# (`train_end = 20231230` would otherwise read as nanoseconds after the epoch, January 1970); a
+# date, datetime or ISO-string cutoff is still read as that day.
+
+CUTOFF = pd.Timestamp("2023-12-20")
+SHORT_SPAN = date(2023, 1, 10)  # a few hundred member rows: enough for the direct calls
+
+
+def _file_with(env: dict, store, name: str, values) -> Path:
+    """A member file with its own `train_end` column of `values(n_rows)`."""
+    rows = member_rows(store, SHORT_SPAN)
+    rows["train_end"] = values(len(rows))
+    return write_members(env["dir"] / "members" / f"cutoff-{name}.parquet", rows)
+
+
+@pytest.mark.parametrize(
+    ("numeric", "accepted"),
+    [
+        (lambda n: np.full(n, 20231230, dtype=np.int64), lambda n: [CUTOFF.date()] * n),
+        (lambda n: np.full(n, 20231230.0), lambda n: ["2023-12-20"] * n),
+        (lambda n: np.full(n, 20231230, dtype=np.int32), lambda n: [CUTOFF.to_pydatetime()] * n),
+        (  # seconds since the epoch on 2023-12-20: numeric still
+            lambda n: np.full(n, int(CUTOFF.timestamp()), dtype=np.int64),
+            lambda n: pd.Series([CUTOFF] * n, dtype="datetime64[ns]"),
+        ),
+    ],
+    ids=["int_compact", "float_compact", "int32_compact", "int_epoch_seconds"],
+)
+def test_a_numeric_member_cutoff_is_refused_and_a_date_cutoff_is_read(
+    env: dict, numeric, accepted
+) -> None:
+    store = build_store()
+    write_store(store)
+    days = meta.race_calendar()
+    numeric_file = _file_with(env, store, "numeric", numeric)
+    with pytest.raises(ValueError):  # read_members may refuse it first: either is the refusal
+        meta.member_predictions(meta.read_members(numeric_file), days)
+
+    accepted_file = _file_with(env, store, "accepted", accepted)
+    out = meta.member_predictions(meta.read_members(accepted_file), days)
+    assert len(out) and (pd.to_datetime(out["member_train_end"]) == CUTOFF).all()
+
+
+def test_python_int_cutoffs_in_an_object_column_are_refused(env: dict) -> None:
+    store = build_store()
+    write_store(store)
+    rows = member_rows(store, SHORT_SPAN)
+    members = rows.assign(member_train_end=pd.Series([20231230] * len(rows), dtype=object).values)
+    with pytest.raises(ValueError):
+        meta.member_predictions(members, meta.race_calendar())
+
+
+def test_the_run_refuses_an_integer_train_end_before_anything_is_written(env: dict) -> None:
+    store = build_store()
+    write_store(store)
+    rows = member_rows(store, LONG_START)
+    # as compact dates, 20 December of the season before: valid cutoffs, were they read as dates
+    season = rows["fold_season"].str[:4].astype(int)
+    rows["train_end"] = ((season - 1) * 10000 + 1220).astype(np.int64).to_numpy()
+    path = write_members(env["dir"] / "members" / "int_train_end.parquet", rows)
+    with pytest.raises(ValueError):
+        meta.run_study(path, env["dir"] / "out")
+    assert env["inputs"] == [], "a meta-model was fitted before the refusal"
+    assert registry_bytes() == b"", "a refused run wrote to the registry"
+
+
+# --------------------------------------------------------------------------- fix 2: normalisation
+#
+# Fix 2: the checked join carries the file's original probability, and `member_frame` normalises
+# it exactly as main did before #418 (`p = col / col.groupby(race_id).transform("sum")`, then
+# `np.log`, over the store rows of the member span in store order): bit for bit, so a rerun of the
+# same file reproduces the registry's unrounded metrics. The expected values below reproduce
+# main's arithmetic on the same synthetic file, independently of the code under test.
+
+
+def main_normalisation(frame: pd.DataFrame, members: pd.DataFrame) -> pd.DataFrame:
+    """Main's `member_frame` (origin/main, before #418): one log-probability column per member,
+    index the store positions, races with a starter the file lacks dropped."""
+    first, last = members["race_date"].min(), members["race_date"].max()
+    span = frame.loc[(frame["race_date"] >= first) & (frame["race_date"] <= last)]
+    keyed = members.drop(columns=["race_date", "fold_season"])
+    joined = span.reset_index().merge(
+        keyed, on=["race_id", "horse_id"], how="left", validate="one_to_one", indicator=True
+    )
+    whole = joined["_merge"].eq("both").groupby(joined["race_id"]).transform("all")
+    out = joined.loc[whole].drop(columns="_merge").set_index("index").rename_axis(None)
+    for name, (col, _) in meta.MEMBERS.items():
+        p = out[col] / out[col].groupby(out["race_id"]).transform("sum")
+        out[name] = np.log(p.to_numpy())
+    return out
+
+
+@pytest.mark.parametrize(("start", "seed"), [(date(2023, 1, 10), 87), (LONG_START, 5)])
+def test_member_frame_normalises_the_files_probabilities_as_main_did(
+    env: dict, start: date, seed: int
+) -> None:
+    store = build_store()
+    write_store(store)
+    rows = member_rows(store, start, seed=seed)
+    path = write_members(env["dir"] / "members" / "norm.parquet", rows)
+    runners, races = meta.read_development()
+    frame, _ = meta.store_frame(runners, races)
+    _, scored = meta.study_folds(frame, load_country_scheme("japan"))
+    members = meta.read_members(path)
+    level2 = meta.check_level2(frame, scored, members, meta.race_calendar(), min_seasons=0)
+
+    out, _ = meta.member_frame(level2, frame, members)
+    expected = main_normalisation(frame, members)
+    assert len(out) > 0
+    assert set(out.index) == set(expected.index)
+    for name in meta.MEMBERS:
+        got = out[name].to_numpy()
+        want = expected[name].reindex(out.index).to_numpy()
+        assert np.array_equal(got, want), f"{name}: {int((got != want).sum())} values differ"

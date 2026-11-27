@@ -46,9 +46,10 @@ file's own `member_train_end` or `train_end` column when it has one, else the la
 store's development calendar (every race day of the races table, whatever its status or price)
 before its `fold_season` starts; with neither, `InvalidProvenance`. A scored fold under D9's 5
 seasons refuses (`IneligibleFold`) unless the run opts in with `allow_short_history`
-(`--allow-short-history`), the owner-approved replication above, and the family is already frozen
-with the spec this file builds (the approved #87 artifact); the report says when a run used it.
-Provenance is checked either way.
+(`--allow-short-history`), the owner-approved replication above, and the member file is the
+approved #87 artifact (its digest is `APPROVED_MEMBER_DIGEST`, in any registry, a fresh one
+included); the report says when a run used it. Provenance is checked either way, and scored folds
+that test no joined row at all refuse too (`IneligibleFold`).
 """
 
 from __future__ import annotations
@@ -73,7 +74,7 @@ from horsetrack.core import paths
 from horsetrack.core.config import load_source
 from horsetrack.core.eval.folds import Fold, FoldScheme, load_country_scheme, walk_forward
 from horsetrack.core.eval.holdout import _git_sha, split_off
-from horsetrack.core.eval.registry import RunRecord, _spec_hash, default_registry
+from horsetrack.core.eval.registry import RunRecord, default_registry
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.eval.scoring import gain, per_race_log_loss
 from horsetrack.core.pricing import clean_odds
@@ -111,6 +112,9 @@ D9_SIGNED = (  # D9 as signed (docs/problem-statement.md, decisions table)
 )
 D9_MIN_SEASONS = 5  # D9: "5 seasons minimum"
 MEMBER_FILE = "m-v1-20261115-6102e309.parquet"  # under HKTrack's outputs/oof/
+# the approved #87 artifact's sha256 (`file_digest`; docs/experiments/meta-japan.md): the only
+# member file `allow_short_history` waives D9 for, whatever the registry holds
+APPROVED_MEMBER_DIGEST = "b0c5a8298e0befe8643257459595ad6a2a4d27c8b3760ddfc7c76b2d5ec5ee6c"
 MEMBERS = {
     "form": (
         "p_fundamental_oof",
@@ -394,14 +398,35 @@ def race_calendar() -> pd.Series:
     return days["race_date"]
 
 
+def _own_cutoffs(values: pd.Series) -> np.ndarray:
+    """A member file's own cutoffs as datetime64: date, datetime or ISO-string values only."""
+    if pd.api.types.is_datetime64_any_dtype(values):
+        return pd.to_datetime(values).to_numpy()
+    given = values.dropna()
+    numeric = (
+        pd.api.types.is_numeric_dtype(values)
+        or not given.map(lambda v: isinstance(v, (str, date, np.datetime64))).all()
+    )
+    if numeric:
+        example = f", e.g. {given.iloc[0]!r}" if len(given) else ""
+        raise ValueError(
+            "the member file's own cutoff (member_train_end or train_end) holds non-date values"
+            f"{example}: give dates, datetimes or ISO strings, not numbers"
+        )
+    return pd.to_datetime(values, format="ISO8601").to_numpy()
+
+
 def member_predictions(members: pd.DataFrame, race_days: pd.Series) -> pd.DataFrame:
     """The member file as `models.stacking` predictions, one row per (race_id, horse_id, member):
     `logp` (ln of the file's probability; the guard checks only that it is there), `member_fold`
     (the row's `fold_season`) and `member_train_end`: the file's own when `members` has it, as
     given; else, level 1 being a season walk-forward trained on the seasons before `fold_season`,
-    the last of `race_days` before that season starts (not 31 December), NaT when none is."""
+    the last of `race_days` before that season starts (not 31 December), NaT when none is. The
+    file's own cutoff must be dates, datetimes or ISO strings: a numeric one (20231230, epoch
+    seconds) raises `ValueError`, as it would read as nanoseconds after the epoch. Each row also
+    carries `p`, the file's probability itself, which `member_frame` normalises."""
     if "member_train_end" in members.columns:
-        train_end = pd.to_datetime(members["member_train_end"]).to_numpy()
+        train_end = _own_cutoffs(members["member_train_end"])
     else:
         days = np.sort(pd.to_datetime(pd.Series(race_days)).dt.normalize().unique())
         season = members["fold_season"].str[:4].astype(int)
@@ -413,7 +438,9 @@ def member_predictions(members: pd.DataFrame, race_days: pd.Series) -> pd.DataFr
     )
     return pd.concat(
         [
-            keys.assign(member=name, logp=np.log(members[col].to_numpy()))
+            keys.assign(
+                member=name, p=members[col].to_numpy(), logp=np.log(members[col].to_numpy())
+            )
             for name, (col, _) in MEMBERS.items()
         ],
         ignore_index=True,
@@ -452,11 +479,15 @@ def check_level2(
 
 def member_frame(level2, frame: pd.DataFrame, members: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """The checked level-2 rows (`level2.frame`, store positions as index) with each member's
-    log-probability normalised over the race's starters, and the join's counts."""
+    log-probability normalised over the race's starters, and the join's counts. The file's own
+    probability (`p`, carried through the join) is normalised, as before #418, not exp(logp)."""
+    from horsetrack.countries.japan.models.stacking import ROW  # see level2_population
+
     meta = level2.frame.copy()
+    p = level2.provenance.pivot(index=ROW, columns="member", values="p").reindex(meta.index)
     for name in MEMBERS:
-        p = np.exp(meta[name])
-        meta[name] = np.log((p / p.groupby(meta["race_id"]).transform("sum")).to_numpy())
+        col = p[name]
+        meta[name] = np.log((col / col.groupby(meta["race_id"]).transform("sum")).to_numpy())
     first, last = members["race_date"].min(), members["race_date"].max()
     span = frame.loc[(frame["race_date"] >= first) & (frame["race_date"] <= last)]
     keys = ["race_id", "horse_id"]
@@ -1121,12 +1152,13 @@ def run_study(
 
     Raises `paths.DataDirInsideRepo` for an `out_dir` or a member file inside the repository,
     `FamilyAlreadyFrozen` when the family is frozen with another spec (another member file), and,
-    before any fit, `models.stacking`'s `InvalidProvenance`, or its `IneligibleFold` when a scored
-    fold's level-2 window is under D9's seasons, unless `allow_short_history` and the family is
-    already frozen with this file's spec. The opt-in is the owner-approved replication (#87, answer
-    (b), 2026-11-25) of that approved file; it leaves the frozen spec and the registry records as
-    they are, and the report and the result say the run used it. Every refusal comes before the
-    registry is written."""
+    before any fit, `ValueError` for a numeric cutoff in the file, `models.stacking`'s
+    `InvalidProvenance`, or its `IneligibleFold` when a scored fold's level-2 window is under D9's
+    seasons, unless `allow_short_history` and the file's digest is `APPROVED_MEMBER_DIGEST`, or
+    when the scored folds test no joined row. The opt-in is the owner-approved replication (#87,
+    answer (b), 2026-11-25) of that approved file; it leaves the frozen spec and the registry
+    records as they are, and the report and the result say the run used it. Every refusal comes
+    before the registry is written."""
     members_path = paths.outside_repo(Path(members_path), what="members")
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     digest = file_digest(members_path)
@@ -1135,8 +1167,8 @@ def run_study(
     spec = build_spec(scheme, boot, overlay_thresholds(), digest)
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
-    # the waiver holds only for the approved artifact: the file the family is already frozen with
-    waived = allow_short_history and registry.frozen_spec_hash(FAMILY_ID) == _spec_hash(spec)
+    # the waiver holds only for the approved artifact, by its digest, whatever the registry holds
+    waived = allow_short_history and digest == APPROVED_MEMBER_DIGEST
 
     builds = store_builds()
     member_build = f"HKTrack:outputs/oof/{MEMBER_FILE}@{digest[:16]}"
@@ -1155,9 +1187,14 @@ def run_study(
         if not allow_short_history:
             raise
         raise IneligibleFold(
-            f"{exc}; --allow-short-history waives D9 only for the member file the family "
-            f"{FAMILY_ID!r} is already frozen with (the approved #87 artifact), not this one"
+            f"{exc}; --allow-short-history waives D9 only for the approved #87 member file "
+            f"(sha256 {APPROVED_MEMBER_DIGEST[:16]}...), not this one ({digest[:16]}...)"
         ) from exc
+    if not sum(len(f.test_idx) for f in level2.folds):
+        raise IneligibleFold(
+            f"the {len(level2.folds)} scored folds test no joined level-2 row: no race from "
+            f"{SCORED_FROM.isoformat()} has every member's prediction for every starter"
+        )
     spec_hash = registry.freeze_family(FAMILY_ID, spec)  # after the checks, before any fit
     frame["p_cal"] = baseline_oof(frame, baseline)
     meta, member_counts = member_frame(level2, frame, members)

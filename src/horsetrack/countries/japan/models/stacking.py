@@ -15,7 +15,9 @@ own way (the #87 study, `studies.meta`).
   (`race_id`, `horse_id`, `race_date`, ...) on a unique index; `folds` are `core.eval.folds.Fold`s
   as positions into it. `predictions` is long, one row per (race_id, horse_id, member) with
   `logp`, `member_fold` (the member fold it is out of) and `member_train_end` (the last day the
-  member model trained on). A race is kept only when every row of it has every member's `logp`.
+  member model trained on), and optionally `p`, the probability itself, which the provenance
+  carries beside the row's key for a caller that normalises the file's own values. A race is kept
+  only when every row of it has every member's `logp`.
 - `fold_windows(level2)`: per fold, the first and last race day of its joined training rows, the
   seasons between them as `studies.meta` counts D9's, the training races and whether D9 is met.
 """
@@ -37,6 +39,7 @@ from horsetrack.countries.japan.studies.meta import D9_MIN_SEASONS, season_years
 KEY = ["race_id", "horse_id"]
 PROVENANCE = ("member_fold", "member_train_end")
 ROW = "row"  # the provenance column holding the frame's index label
+CARRIED = ("p",)  # prediction columns the provenance carries when given
 
 
 class IneligibleFold(ValueError):
@@ -50,7 +53,7 @@ class InvalidProvenance(ValueError):
 @dataclass(frozen=True, eq=False)
 class Level2:
     """The joined level-2 rows (one `logp` column per member), the folds as positions into them,
-    and one provenance row per kept (row, member)."""
+    and one provenance row per kept (row, member), with the prediction's `p` when it had one."""
 
     frame: pd.DataFrame
     folds: list[Fold]
@@ -121,8 +124,9 @@ def join_members(
         for f in folds
     ]
     rows = level2[KEY].assign(**{ROW: level2.index})
-    provenance = rows.merge(preds[[*KEY, "member", *PROVENANCE]], on=KEY, how="inner")
-    provenance = provenance[[ROW, *KEY, "member", *PROVENANCE]].reset_index(drop=True)
+    carried = [c for c in CARRIED if c in preds.columns]
+    provenance = rows.merge(preds[[*KEY, "member", *PROVENANCE, *carried]], on=KEY, how="inner")
+    provenance = provenance[[ROW, *KEY, "member", *PROVENANCE, *carried]].reset_index(drop=True)
     return Level2(frame=level2, folds=remapped, provenance=provenance, members=members)
 
 

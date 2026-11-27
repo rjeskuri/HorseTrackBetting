@@ -27,7 +27,14 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from meta_store_fakes import Store, build_store, member_rows, write_members, write_store
+from meta_store_fakes import (
+    Store,
+    add_race_day,
+    build_store,
+    member_rows,
+    write_members,
+    write_store,
+)
 from typer.testing import CliRunner
 
 from horsetrack.cli import app
@@ -124,4 +131,133 @@ def test_scratched_member_rows_do_not_drop_their_race_but_a_repeated_key_does(en
     assert cov.unmatched_source(s) == 2  # the scratched horses' rows: not starters
     assert cov.races(s, "scored") == len(scored) - 1  # the scratched horses' race is scored
     assert cov.drops(s, "train_only") == len(seed)
+    every_race_once(cov, s)
+
+
+# ------------------------------------------------------------------------------------------------
+# The owner's restart instructions (2026-11-27), fix 5: the member source's stages come from the
+# study's own sets. The scheduled denominator is the full schedule; `not_in_store_frame` is a race
+# `studies.meta.store_frame` drops; `unmatched` and `no_forecast` look only at the runner keys
+# `store_frame` keeps; `train_only` is a race in the remapped training indices of the scored folds;
+# `outside_folds` (new) a race in neither their training nor their test indices; `scored` a race in
+# their test indices.
+
+
+def reasons(cov: jc.JoinedCoverage, source: str) -> dict[str, str | None]:
+    """Per scheduled race, the reason it drops for `source` (None: scored)."""
+    frame = cov.races_frame
+    column = frame[f"reason:{source}"]
+    return {r: None if pd.isna(x) else x for r, x in zip(frame["race_id"], column, strict=True)}
+
+
+def with_odds(store: Store, picked, value: float = float("nan")) -> Store:
+    runners = store.runners.copy()
+    runners.loc[picked(runners), "win_odds"] = value
+    return Store(runners=runners, races=store.races)
+
+
+def first_loser(store: Store, race: str) -> int:
+    rows = store.runners
+    return int(rows.index[rows["race_id"].eq(race) & rows["finish_pos"].ne(1)][0])
+
+
+def test_a_race_the_store_frame_drops_is_not_in_store_frame_whatever_its_member_rows(
+    env: dict,
+) -> None:
+    store = build_store()
+    before, seed, scored = races_by_span(store)
+    full_scored, gap_scored, pre_member, full_seed = scored[2], scored[6], before[-3], seed[5]
+    unpriced = [full_scored, gap_scored, pre_member, full_seed]  # their winner has no Win price
+    store = with_odds(store, lambda r: r["race_id"].isin(unpriced) & r["finish_pos"].eq(1))
+    runners = store.runners
+    winner = runners.loc[runners["race_id"].eq(gap_scored) & runners["finish_pos"].eq(1)]
+    gap = frozenset({(gap_scored, winner["horse_id"].iloc[0])})  # the file lacks that winner
+
+    cov = run(env, store, member_rows(store, MEMBER_START, drop=gap))
+    s = jc.MEMBER_SOURCE
+    why = reasons(cov, s)
+    for race in unpriced:
+        assert why[race] == "not_in_store_frame", (race, why[race])
+    assert cov.races(s, "scheduled") == len(store.races)
+    assert cov.drops(s, "not_in_store_frame") == len(unpriced)
+    assert cov.drops(s, "unmatched") == len(before) - 1
+    assert cov.races(s, "scored") == len(scored) - 2
+    assert cov.drops(s, "train_only") == len(seed) - 1
+    every_race_once(cov, s)
+
+
+@pytest.mark.parametrize("gap", ["no_member_row", "null_member_forecast"])
+def test_an_unpriced_loser_without_a_member_forecast_does_not_drop_its_race(
+    env: dict, gap: str
+) -> None:
+    store = build_store()
+    before, seed, scored = races_by_span(store)
+    scored_race, seed_race = scored[4], seed[7]
+    losers = [first_loser(store, scored_race), first_loser(store, seed_race)]
+    store = with_odds(store, lambda r: r.index.isin(losers))  # store_frame drops these runners
+    keys = {(store.runners.at[i, "race_id"], store.runners.at[i, "horse_id"]) for i in losers}
+    if gap == "no_member_row":
+        members = member_rows(store, MEMBER_START, drop=frozenset(keys))
+    else:
+        members = member_rows(store, MEMBER_START)
+        hit = [(r, h) in keys for r, h in zip(members["race_id"], members["horse_id"], strict=True)]
+        members.loc[hit, "p_lgbm_no_jrdb_oof"] = float("nan")
+
+    cov = run(env, store, members)
+    s = jc.MEMBER_SOURCE
+    why = reasons(cov, s)
+    assert why[scored_race] is None, why[scored_race]  # matched, forecastable and scored
+    assert why[seed_race] == "train_only", why[seed_race]
+    assert cov.races(s, "scheduled") == len(store.races)
+    assert cov.drops(s, "unmatched") == len(before)
+    assert cov.drops(s, "no_forecast") == 0
+    assert cov.races(s, "scored") == len(scored)
+    assert cov.drops(s, "train_only") == len(seed)
+    every_race_once(cov, s)
+
+
+def q1_store() -> Store:
+    """The fixture store cut at 2024-03-31, plus a priced 2023-12-30 race day and a priced
+    2024-01-05 one: the only scored fold, 2024-Q1, tests from 2024-01-05 and trains to 2023-12-29
+    (the 1-week embargo), so the 2023-12-30 races are in neither its training nor its test rows,
+    and no later fold trains on them."""
+    store = build_store()
+    keep = pd.to_datetime(store.races["race_date"]) <= pd.Timestamp("2024-03-31")
+    ids = set(store.races.loc[keep, "race_id"])
+    store = Store(
+        runners=store.runners.loc[store.runners["race_id"].isin(ids)].reset_index(drop=True),
+        races=store.races.loc[keep].reset_index(drop=True),
+    )
+    return add_race_day(add_race_day(store, date(2023, 12, 30)), date(2024, 1, 5))
+
+
+def test_a_race_between_the_training_cutoff_and_the_test_start_is_outside_folds(env: dict) -> None:
+    assert "outside_folds" in jc.REASONS
+    store = q1_store()
+    days = pd.to_datetime(store.races["race_date"])
+    ids = store.races["race_id"]
+    before = set(ids[days < pd.Timestamp(MEMBER_START)])
+    gap = set(ids[days == pd.Timestamp("2023-12-30")])
+    seed = set(ids[(days >= pd.Timestamp(MEMBER_START)) & (days < pd.Timestamp(SCORED_FROM))]) - gap
+    scored = set(ids[days >= pd.Timestamp(SCORED_FROM)])
+    assert len(gap) == 2 and seed and len(scored) > 2
+    members = member_rows(store, MEMBER_START)  # every runner from 2023-01-10, the gap day's too
+    season = members["fold_season"].str[:4].astype(int)
+    members["train_end"] = pd.to_datetime((season - 1).astype(str) + "-12-20")  # out of sample
+
+    cov = run(env, store, members)
+    s = jc.MEMBER_SOURCE
+    why = reasons(cov, s)
+    expected = {
+        **{r: "unmatched" for r in before},
+        **{r: "train_only" for r in seed},  # the seed season: in 2024-Q1's training rows
+        **{r: "outside_folds" for r in gap},
+        **{r: None for r in scored},
+    }
+    assert set(why) == set(expected)
+    wrong = {r: (why[r], want) for r, want in expected.items() if why[r] != want}
+    assert not wrong, dict(list(wrong.items())[:6])
+    assert cov.races(s, "scheduled") == len(store.races)
+    assert cov.drops(s, "outside_folds") == len(gap)
+    assert cov.races(s, "scored") == len(scored)
     every_race_once(cov, s)
