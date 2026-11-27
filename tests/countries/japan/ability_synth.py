@@ -35,8 +35,10 @@ def centre_within_race(X: np.ndarray, codes: np.ndarray) -> np.ndarray:
 
 
 def rank_desc(score: np.ndarray, codes: np.ndarray) -> np.ndarray:
-    """1 for the highest score of each race, 2 for the next, ...; no ties."""
-    return pd.Series(score).groupby(codes).rank(ascending=False, method="first").to_numpy()
+    """1 for the highest score of each race, 2 for the next, ...; no ties. A writable copy:
+    under pandas 3 (copy-on-write) `to_numpy()` is a read-only view, and `move_to_place` writes."""
+    ranks = pd.Series(score).groupby(codes).rank(ascending=False, method="first")
+    return ranks.to_numpy(copy=True)
 
 
 def pl_positions(rng: np.random.Generator, u: np.ndarray, codes: np.ndarray) -> np.ndarray:
