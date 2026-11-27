@@ -52,6 +52,12 @@ Grouped input (#429). With ``count_col`` a row stands for ``count`` identical be
 odds and takeout) of which ``won`` won, ``0 <= won <= count``. The likelihood is a sum over bets
 and already aggregates them by cell and implied probability, so a grouped row fits exactly as its
 bets one row each; ``p_beats_takeout`` and ``predictive_roi`` weigh each row by its count.
+
+Settled wins (#430). With ``fractional_won`` (grouped input only) ``won`` may be any real from 0 to
+``count``: each hit counts for the dividend that settled it over its board odds, below 1 when a
+dead heat splits the pool, so that ``omega * (1 - t)`` stays the expected return per unit stake at
+the dividend that pays. The likelihood is then the Bernoulli kernel with fractional successes (a
+quasi-likelihood); with whole wins it is the Bernoulli likelihood above, unchanged.
 """
 
 from __future__ import annotations
@@ -329,7 +335,9 @@ class SegmentROI:
         return Interval(float(low), float(high), INTERVAL_LEVEL)
 
 
-def _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws, count_col) -> None:
+def _validate(
+    bets, segment_cols, odds_band_col, takeout_col, seed, draws, count_col, fractional_won=False
+) -> None:
     if not isinstance(bets, pd.DataFrame) or bets.empty:
         raise ValueError("bets must be a non-empty DataFrame")
     if not segment_cols or len(set(segment_cols)) != len(segment_cols):
@@ -359,6 +367,8 @@ def _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws, count
     if not ((1 - takeout) / odds < P_MAX).all():
         raise ValueError(f"(1 - {takeout_col}) / odds must be below 1 (odds 1 needs a takeout)")
     if count_col is None:
+        if fractional_won:
+            raise ValueError("fractional_won needs count_col (grouped input)")
         if not bets["won"].isin([0, 1]).all():
             raise ValueError("won must be 0 or 1")
         return
@@ -366,8 +376,10 @@ def _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws, count
     won = pd.to_numeric(bets["won"], errors="coerce").to_numpy(dtype=float)
     if not (np.isfinite(count) & (count == np.round(count)) & (count >= 1)).all():
         raise ValueError(f"{count_col} must be a positive integer")
-    if not (np.isfinite(won) & (won == np.round(won)) & (won >= 0) & (won <= count)).all():
-        raise ValueError(f"won must be an integer from 0 to {count_col}")
+    whole = np.ones(len(won), dtype=bool) if fractional_won else won == np.round(won)
+    if not (np.isfinite(won) & whole & (won >= 0) & (won <= count)).all():
+        kind = "a number" if fractional_won else "an integer"
+        raise ValueError(f"won must be {kind} from 0 to {count_col}")
 
 
 def fit_segment_roi(
@@ -379,14 +391,18 @@ def fit_segment_roi(
     seed: int,
     draws: int,
     count_col: str | None = None,
+    fractional_won: bool = False,
 ) -> SegmentROI:
     """Fit the hierarchical omega model (module docstring) to one row per bet, or with
-    `count_col` to rows of `count` identical bets of which `won` won."""
+    `count_col` to rows of `count` identical bets of which `won` won; with `fractional_won`,
+    `won` is their settled wins (module docstring, 'Settled wins')."""
     segment_cols = list(segment_cols)
-    _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws, count_col)
+    _validate(
+        bets, segment_cols, odds_band_col, takeout_col, seed, draws, count_col, fractional_won
+    )
     odds = bets["odds"].to_numpy(dtype=float)
     takeout = bets[takeout_col].to_numpy(dtype=float)
-    won = bets["won"].to_numpy(dtype=int)
+    won = bets["won"].to_numpy(dtype=float if fractional_won else int)
     row_bets = np.ones(len(bets), dtype=int) if count_col is None else bets[count_col].to_numpy(int)
     band, band_levels = pd.factorize(bets[odds_band_col].astype(str), sort=True)
     codes, levels = [], []

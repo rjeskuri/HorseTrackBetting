@@ -14,9 +14,20 @@ lists every cell, ranked." The frozen spec quotes these lines under `authority`.
 alternative that runs is a counted variant. The spec was frozen in the japan registry
 (`default_registry('japan').freeze_family`) before the run read any store row.
 
-- Family `japan-n1-pool-scan-v4`, spec sha256
-  `a166d99f7320b9596ffc31d1db4d1efdd33e0a3c84a2aad0a16c98a92139a91c`.
-- **It supersedes v3**, family `japan-n1-pool-scan-v3`, spec sha256
+- Family `japan-n1-pool-scan-v5`, spec sha256
+  `43b7ad67f504f923ac079b38be4e740f4e3771934b94f55a38a3d856fa9fc6b8`.
+- **It supersedes v4**, family `japan-n1-pool-scan-v4`, spec sha256
+  `a166d99f7320b9596ffc31d1db4d1efdd33e0a3c84a2aad0a16c98a92139a91c`, frozen and run on
+  2026-11-27 (UTC). The fifth review of PR #496 found two defects in v4:
+  - it skipped whole every `final_odds` row group whose race_date range spans a holdout day. The
+    jravan builders write one such row group per year, so once an export holds a holdout day a
+    rerun would leave that year's development races unscored. v5 reads every row group through
+    the scan's day filter, under the owner's D14 boundary (`store_reader_guarantee`);
+  - its one-winner #78 fits (Win, Quinella, Exacta, Trio) took whether each combination paid and
+    its board odds, dropping the settled dividend, so a dead heat paid below the board odds was
+    credited at the quoted price and could move a cell up the ranking. Raw rho was already
+    settled. v5 fits settled wins (`shrinkage`, `settlement`).
+- **It also supersedes v3**, family `japan-n1-pool-scan-v3`, spec sha256
   `785a45700efca6286c8cd85c4f5b0cd17409b4f5cbcde1abb27368a6f19a356c`, frozen and run on
   2026-11-27. The third review of PR #496 found one defect in v3, the zero-hit cell rule: a
   Place or Wide cell with an expected return and no hit, in an odds band that pays in other
@@ -44,10 +55,11 @@ alternative that runs is a counted variant. The spec was frozen in the japan reg
   - it checked SPA's columns against every cell any earlier run had scored;
   - it gave no Place or Wide reading for a cell whose odds band returned nothing.
 
-  v2 fixed v1's defects, v3 fixed v2's and v4 fixes v3's (see `supersedes` in the spec). The
-  records of v1, v2 and v3 stay in the registry, superseded, and nothing is deleted. Their
+  v2 fixed v1's defects, v3 fixed v2's, v4 fixed v3's and v5 fixes v4's (see `supersedes` in the
+  spec). The records of v1 to v4 stay in the registry, superseded, and nothing is deleted. Their
   variants count toward variants searched. This file quoted v1's spec in full up to commit
-  `39227d5`, v2's up to commit `5977dae` and v3's up to commit `c564dee`.
+  `39227d5`, v2's up to commit `5977dae`, v3's up to commit `c564dee` and v4's up to commit
+  `6db0619`.
 - The source of truth is `prereg_spec()` in
   `src/horsetrack/countries/japan/research/pool_scan_run.py`, quoted in full below. `run_scan`
   refuses to read the store unless the registry holds exactly that spec frozen for the family, so
@@ -87,7 +99,10 @@ alternative that runs is a counted variant. The spec was frozen in the japan reg
 - **Shrinkage.** For the one-winner pools, #78's hierarchical omega: odds-band fixed effects for
   the favourite-longshot bias, and crossed random effects for the six segments and the six class
   interactions. A cell's omega weighs each bet by its payout rate, so omega times the cell's mean
-  payout rate is its mean expected return, even where boosted and ordinary races mix.
+  payout rate is its mean expected return, even where boosted and ordinary races mix. The fit
+  takes settled wins: a paid combination counts for its dividend over its board odds, so a dead
+  heat that splits the pool counts below 1 and the expected return is the one at the dividend
+  that pays (v5).
 - **Place and Wide.** Their dividend is not their odds, so two shrinkages run:
   - The ranking's: a normal empirical-Bayes shrink of the realised return over each odds band's
     baseline, which carries its posterior. A band that paid is a gamma with the band's flat rho
@@ -106,9 +121,9 @@ alternative that runs is a counted variant. The spec was frozen in the japan reg
 
   That makes one registry record per pool, shrinkage, reading and span: 24 variants, plus 8 for
   Place's and Wide's `roi78`, 32 in all. The family size and variants searched are reported
-  apart on every row: variants searched is this family's size plus v1's, v2's and v3's.
+  apart on every row: variants searched is this family's size plus v1's to v4's.
 - **SPA and StepM.** These run per pool over the pool's cell rules (family
-  `japan-n1-pool-scan-v4-cells-<pool>`, one record per cell per run), with these settings:
+  `japan-n1-pool-scan-v5-cells-<pool>`, one record per cell per run), with these settings:
   - no bet is the benchmark;
   - meetings are the clusters;
   - block size 12, 1,000 bootstrap draws, and StepM at 5%.
@@ -132,25 +147,20 @@ alternative that runs is a counted variant. The spec was frozen in the japan reg
   - its paying dividend names a combination that is not on the priced, non-refunded board: the
     board lacks it, prints it without a price (`0000`) or cancelled (`****`), or does not have
     that combination at all. It is counted the same way and never fails the pool.
-- **What the scan never decodes (D14).** No row group of `final_odds` whose race_date range spans
-  a holdout day is decoded. The scan reads each row group's range from the footer statistics,
-  without reading a page. It then reads prices only on the day windows no such row group touches,
-  each window through `read_store_table`, whose Parquet scan prunes by the same statistics every
-  row group outside the window. Each skipped row group is counted, and its development days are
-  not scored. The jravan builders write one row group per year, so until #502 rebuilds the store
-  with day-isolated row groups, a year whose row group spans a holdout day is skipped whole.
-  `races`, which holds no price or result, is read on the same windows, and `dividends` is
-  filtered in its scan to the windows' development race ids. Their row groups are filtered, not
-  skipped: they do not follow the price windows (`races` is one row group, `dividends` is split
-  by row count), so skipping one would drop every window it meets. One that spans a holdout day
-  would therefore still be decoded, with its holdout rows dropped inside the scan. The private
-  report counts such row groups per table until #502 isolates them too. That meets the D14
-  boundary the owner set for study tickets (2026-11-27, on #82): a development read meets D14
-  when no holdout value reaches Python, a pyarrow dataset filter dropping holdout days or
-  holdout race ids inside the scan. Arrow decoding, in C++ before the filter, the column chunks
-  of a row group that mixes development and holdout days is accepted, and isolating holdout days
-  at the file or row-group level is #502's scope. Skipping `final_odds`'s spanning row groups
-  goes beyond that boundary.
+- **How the scan keeps holdout days out (D14).** `final_odds` and `races` are read one year at a
+  time through `read_store_table`, whose dataset filter drops holdout days inside the Parquet
+  scan, and `dividends` is filtered in its scan to the development race ids. A row group that
+  mixes development and holdout days, or whose race_date range spans a holdout day (the jravan
+  builders' annual `final_odds` row group, once an export holds a holdout day), is decoded in the
+  scan, and its development days are scored in every pool. A row group of a single holdout day
+  (#502's layout) is pruned by its footer statistics and never decoded. That is the D14 boundary
+  the owner set for study tickets (2026-11-27, on #82): a development read meets D14 when no
+  holdout value reaches Python, a pyarrow dataset filter dropping holdout days or holdout race
+  ids inside the scan. Arrow decoding, in C++ before the filter, the column chunks of a row group
+  that mixes development and holdout days is accepted, and isolating holdout days at the file or
+  row-group level is #502's scope. The private report counts, per table, the row groups that
+  span a holdout day until #502 isolates them. v4 skipped `final_odds`'s spanning row groups
+  whole, which went beyond the boundary and would have dropped a year's development races.
 - **What a result means.** The odds band, the favourite strength and the pool size are read from
   the final board, which is look-ahead for selection (#88). A cell is a calibration target at the
   final price and a candidate for a decision-time rule. It is not a betting rule.
@@ -159,7 +169,7 @@ alternative that runs is a counted variant. The spec was frozen in the japan reg
 
 ```json
 {
-  "family_id": "japan-n1-pool-scan-v4",
+  "family_id": "japan-n1-pool-scan-v5",
   "ticket": 430,
   "hypothesis_id": "E8",
   "study": "pool-scan",
@@ -171,9 +181,9 @@ alternative that runs is a counted variant. The spec was frozen in the japan reg
     "ranking_not_a_kill_rule": "Request: \"It names the cells a model should be aimed at, or closes them.\" -> \"It ranks every cell by expected return per 100 yen at the final price (takeout included, CI beside it). None is closed, and models aim at the top-ranked cells first.\" | Context: \"Kill rule (plan review, section 6...)\" -> removed. | Definition of done: \"the candidate-cell file lists every cell the kill rule leaves open, and is empty when none is open\" -> \"the file lists every cell, ranked.\"",
     "items_for_the_spec": "Context: \"Items for the spec, the owner's to decide\" -> \"Claude decides and registers them; each alternative is a counted variant.\""
   },
-  "supersedes": [{"family_id": "japan-n1-pool-scan", "spec_sha256": "74da5fd2789d242fef9da1fbc9ecb7335c5ccfd5869ed8498c64e319d34bddd9", "why": "v1. Review of PR #496 found that it scored a sold board with no dividend row as if every ticket lost, took a cell's expected return as its mean omega times its mean payout rate (wrong when ordinary and boosted rates mix), checked SPA's columns against every cell any earlier run scored, and gave no Place or Wide reading for a cell whose odds band returned nothing; v2 fixed each"}, {"family_id": "japan-n1-pool-scan-v2", "spec_sha256": "ac3050eb8d4191f4bf9c2bfb0a4978e69438544129d209dffe9f789e33359fb6", "why": "v2. The second review of PR #496 found that it scored a race whose paying dividend named a combination off the priced, non-refunded board as if every ticket lost ('exclusions'), read a Place or Wide band that paid nothing as a known zero with no uncertainty ('shrinkage', 'band_baseline'), reported variants searched as the family size ('variants'), decoded final_odds row groups that span a holdout day before filtering them ('store_reader_guarantee'), crossed class with three dimensions only ('cells') and gave Place and Wide no #78 fit ('shrinkage'); v3 fixed each"}, {"family_id": "japan-n1-pool-scan-v3", "spec_sha256": "785a45700efca6286c8cd85c4f5b0cd17409b4f5cbcde1abb27368a6f19a356c", "why": "v3. The third review of PR #496 found the zero-hit cell rule wrong: a Place or Wide cell with an expected return under the point baselines and no hit (effect 0, in a band that pays in other cells) has a meeting-bootstrap se of 0, every resample returning nothing, so with a positive family tau^2 its shrink weight was 1 and its omega and upper bound exactly 0, a certain total loss the data cannot show; v4 gives such a cell the Jeffreys zero-hit se ('shrinkage', 'zero_hit_cell'), and changes nothing for a cell that paid"}],
-  "superseded_records": "v1's, v2's and v3's records stay in the registry, superseded: nothing is deleted, and their variants count toward variants searched ('variants')",
-  "hypothesis": "E8: in some pre-registered cell of a JRA pool's final board the hierarchical omega (realised wins over takeout-adjusted implied probability; for Place and Wide the realised return over the payout rate) differs from 1 once the favourite-longshot bias is taken out as odds-band fixed effects, and some cell's expected return per unit staked at the final price reaches break-even (omega at or above 1/payout rate)",
+  "supersedes": [{"family_id": "japan-n1-pool-scan", "spec_sha256": "74da5fd2789d242fef9da1fbc9ecb7335c5ccfd5869ed8498c64e319d34bddd9", "why": "v1. Review of PR #496 found that it scored a sold board with no dividend row as if every ticket lost, took a cell's expected return as its mean omega times its mean payout rate (wrong when ordinary and boosted rates mix), checked SPA's columns against every cell any earlier run scored, and gave no Place or Wide reading for a cell whose odds band returned nothing; v2 fixed each"}, {"family_id": "japan-n1-pool-scan-v2", "spec_sha256": "ac3050eb8d4191f4bf9c2bfb0a4978e69438544129d209dffe9f789e33359fb6", "why": "v2. The second review of PR #496 found that it scored a race whose paying dividend named a combination off the priced, non-refunded board as if every ticket lost ('exclusions'), read a Place or Wide band that paid nothing as a known zero with no uncertainty ('shrinkage', 'band_baseline'), reported variants searched as the family size ('variants'), decoded final_odds row groups that span a holdout day before filtering them ('store_reader_guarantee'), crossed class with three dimensions only ('cells') and gave Place and Wide no #78 fit ('shrinkage'); v3 fixed each"}, {"family_id": "japan-n1-pool-scan-v3", "spec_sha256": "785a45700efca6286c8cd85c4f5b0cd17409b4f5cbcde1abb27368a6f19a356c", "why": "v3. The third review of PR #496 found the zero-hit cell rule wrong: a Place or Wide cell with an expected return under the point baselines and no hit (effect 0, in a band that pays in other cells) has a meeting-bootstrap se of 0, every resample returning nothing, so with a positive family tau^2 its shrink weight was 1 and its omega and upper bound exactly 0, a certain total loss the data cannot show; v4 gives such a cell the Jeffreys zero-hit se ('shrinkage', 'zero_hit_cell'), and changes nothing for a cell that paid"}, {"family_id": "japan-n1-pool-scan-v4", "spec_sha256": "a166d99f7320b9596ffc31d1db4d1efdd33e0a3c84a2aad0a16c98a92139a91c", "why": "v4. The fifth review of PR #496 found that it skipped whole every final_odds row group that spans a holdout day, so once an export holds a holdout day the year's development races of its annual row group go unscored; v5 reads such a group through the scan's day filter under the owner's D14 boundary ('store_reader_guarantee'). It also found that the one-winner pools' #78 fits credited a dead heat at the board price, the fit taking a paid flag and the board odds and dropping the settled dividend, so a dead heat paid below the board odds could move a cell up the ranking (raw rho was already settled); v5 fits settled wins ('shrinkage', 'settlement')"}],
+  "superseded_records": "v1's to v4's records stay in the registry, superseded: nothing is deleted, and their variants count toward variants searched ('variants')",
+  "hypothesis": "E8: in some pre-registered cell of a JRA pool's final board the hierarchical omega (realised settled wins over takeout-adjusted implied probability, 'settlement'; for Place and Wide the realised return over the payout rate) differs from 1 once the favourite-longshot bias is taken out as odds-band fixed effects, and some cell's expected return per unit staked at the final price reaches break-even (omega at or above 1/payout rate)",
   "null": "every cell is priced like its pool: omega 1, flat rho 1, expected return the payout rate, below break-even. The null is the starting point.",
   "pools": {
     "WIN": "Win",
@@ -191,14 +201,14 @@ alternative that runs is a counted variant. The spec was frozen in the japan reg
       "from-2024-01-01": "2024-01-01 onward, reported apart: untouched by the earlier pattern search (problem statement 5.1)"
     }
   },
-  "store": "processed/jravan, one calendar year at a time: final_odds (the six pools and their __pool__ rows) and races through models.v0.store.read_store_table(source='jravan'), one read per price window of the year ('store_reader_guarantee'); dividends filtered inside its scan to the development race ids those windows read",
+  "store": "processed/jravan, one calendar year at a time: final_odds (the six pools and their __pool__ rows) and races through models.v0.store.read_store_table(source='jravan') on the year's days of the run's range ('store_reader_guarantee'); dividends filtered inside its scan to the development race ids that read returns",
   "store_reader_guarantee": {
-    "final_odds": "no row group of final_odds whose race_date [min, max] (its footer statistics, read without decoding a page) spans a holdout day (is_holdout_day, D14) is decoded. The scan reads prices only on the price windows: the days of the run's range that no such row group's [min, max] covers, each window one read_store_table call, whose Parquet scan prunes by the same statistics every row group outside the window and drops holdout days in its filter. Each spanning row group that meets the range is skipped and counted ('row group spans a holdout day (#502)'); its development days, and those of any other row group inside its range, are not scored. A row group without race_date statistics stops the run before any page is read",
-    "per_year_groups": "the jravan builders write one final_odds row group per year, so until #502 rebuilds the store with day-isolated row groups a year whose row group spans a holdout day is skipped whole",
-    "races_and_dividends": "races (no price or result: class, field size, surface, status) is read on the same windows through read_store_table and dividends (the results) filtered in its scan to the windows' development race ids: their row groups are filtered, not skipped ('alternatives_not_run'), so one that meets a window and spans a holdout day (races by race_date; dividends by the day each race id jra:<YYYY-MM-DD>:<VENUE>:<NN> encodes; or one without statistics) is decoded and its holdout rows dropped inside the scan; the private report counts such row groups per table until #502 isolates them too",
-    "d14_boundary": "the owner's decision (2026-11-27, on #82, for study tickets; #430's definition of done quotes it): a development read meets D14 when no holdout value reaches Python, a pyarrow dataset filter dropping holdout days or holdout race ids inside the scan; Arrow decoding, in C++ before the filter, the column chunks of a row group that mixes development and holdout days is accepted, and isolating holdout days at the file or row-group level is #502's scope. The races and dividends reads meet this boundary; skipping final_odds's spanning row groups goes beyond it"
+    "final_odds_and_races": "each read is one read_store_table call over the year's days of the run's range, whose dataset filter keeps development days only (core.eval.holdout.development_filter: holdout days, is_holdout_day, D14, are dropped inside the Parquet scan, so no holdout value reaches Python). A row group that mixes development and holdout days, or whose race_date [min, max] spans a holdout day (the jravan builders' annual final_odds row group once an export holds a holdout day), is decoded in the scan and its development days are scored in every pool; a row group of a single holdout day (#502's layout) is pruned by its footer statistics and never decoded",
+    "dividends": "dividends (the results; no race_date) is filtered in its scan to the development race ids the races read returns, so its holdout rows are dropped inside the scan too",
+    "counted": "the private report counts, per table, the row groups that meet the range and whose [min, max] spans a holdout day (final_odds and races by race_date; dividends by the day each race id jra:<YYYY-MM-DD>:<VENUE>:<NN> encodes; or one without statistics): read through the scan's filter until #502 isolates holdout days at the row-group level",
+    "d14_boundary": "the owner's decision (2026-11-27, on #82, for study tickets; #430's definition of done quotes it): a development read meets D14 when no holdout value reaches Python, a pyarrow dataset filter dropping holdout days or holdout race ids inside the scan; Arrow decoding, in C++ before the filter, the column chunks of a row group that mixes development and holdout days is accepted, and isolating holdout days at the file or row-group level is #502's scope. Every read of the scan meets this boundary"
   },
-  "exclusions": ["a holdout day (D14) and any day before 2014-06-07 (D10)", "a race whose status is not 'run'", "a jump race (surface 'jump'): flat races only (owner, 2026-11-27)", "a race whose surface is not turf or dirt, whose class is not in pool_scan.CLASS_GROUPS, whose field size is not 1-18 or whose venue is not a JRA venue", "a race with no priced WIN combination (no favourite strength)", "a race and pool whose payout may be withheld (takeout.race_takeout boost_may_be_withheld, a premium boost; as in #131)", "a race and pool an age-restricted boost entry matches: the jravan conditions code cannot show the age restriction, so race_takeout(..., race_class_raw=None) raises RaceConditionsNeeded and the rate is unknown", "a race and pool with no __pool__ total (pool not sold)", "a race and pool sold on the final board with no paying dividends row: not established or a special payout (the jravan dividends builder writes no row for either, jravan/dividends.py) or not yet delivered; it is excluded and counted, never scored as if every ticket lost", "a race and pool whose paying (non-refund) dividends row names a combination that is not on the pool's priced, non-refunded final board (absent, printed without a price as 0000 or cancelled as ****, refunded, or not a combination of the board): unsettled, excluded and counted, never scored as if every ticket lost and never a data error of the pool", "the development days of a final_odds row group whose race_date range spans a holdout day, and of any other row group inside that range ('store_reader_guarantee')", "a refunded combination is staked nowhere (pool_scan.combination_returns)"],
+  "exclusions": ["a holdout day (D14) and any day before 2014-06-07 (D10)", "a race whose status is not 'run'", "a jump race (surface 'jump'): flat races only (owner, 2026-11-27)", "a race whose surface is not turf or dirt, whose class is not in pool_scan.CLASS_GROUPS, whose field size is not 1-18 or whose venue is not a JRA venue", "a race with no priced WIN combination (no favourite strength)", "a race and pool whose payout may be withheld (takeout.race_takeout boost_may_be_withheld, a premium boost; as in #131)", "a race and pool an age-restricted boost entry matches: the jravan conditions code cannot show the age restriction, so race_takeout(..., race_class_raw=None) raises RaceConditionsNeeded and the rate is unknown", "a race and pool with no __pool__ total (pool not sold)", "a race and pool sold on the final board with no paying dividends row: not established or a special payout (the jravan dividends builder writes no row for either, jravan/dividends.py) or not yet delivered; it is excluded and counted, never scored as if every ticket lost", "a race and pool whose paying (non-refund) dividends row names a combination that is not on the pool's priced, non-refunded final board (absent, printed without a price as 0000 or cancelled as ****, refunded, or not a combination of the board): unsettled, excluded and counted, never scored as if every ticket lost and never a data error of the pool", "a refunded combination is staked nowhere (pool_scan.combination_returns)"],
   "bet": "flat box: one unit on every priced combination of the pool's final board in the cell; a combination returns its dividend / 100 when it paid, else 0",
   "metric": {
     "flat_rho": "sum(return) / sum(payout rate) over the cell's staked combinations: 1 is priced like the pool; break-even is 1 / payout rate",
@@ -245,7 +255,8 @@ alternative that runs is a counted variant. The spec was frozen in the japan reg
       "interactions": "class_x_<other> is the level '<class group>|<level>'; a cross cell's query names class, its other level and the interaction",
       "draws": 1000,
       "seed": "numpy SeedSequence([run seed, pool index, span index]).generate_state(1)",
-      "grouped_bets": "pool_scan.grouped_bets by race, then per (segment levels, band, takeout, odds group): odds below 10 exact, from 10 on a log grid of ratio 1.1 (group k holds [10 x 1.1^k, 10 x 1.1^(k+1))); a group's odds are its harmonic mean, so its mean implied probability is exact (only losers' terms see the grid)"
+      "grouped_bets": "pool_scan.grouped_bets by race, then per (segment levels, band, takeout, odds group): odds below 10 exact, from 10 on a log grid of ratio 1.1 (group k holds [10 x 1.1^k, 10 x 1.1^(k+1))); a group's odds are its harmonic mean, so its mean implied probability is exact (only losers' terms see the grid)",
+      "settlement": "WIN, QUINELLA, FORECAST and TRIO fit settled wins (fit_segment_roi(..., fractional_won=True)): a paid combination counts for its dividend / 100 over its board odds, at most 1, so a dead heat that splits the pool counts below 1 and a hit paid at its board odds counts 1. Then p = omega x rate / odds is the expected settled return per unit of board odds and omega x rate the expected return per unit at the dividend that pays, in omega_full and segment_effect alike, as raw rho is; the likelihood is #78's Bernoulli kernel with fractional successes, the same as before wherever every hit paid its board odds. Place and Wide's roi78 keeps whether each combination paid (its price carries the return, 'roi78')"
     },
     "PLACE, QUINELLA_PLACE": {
       "decided_by": "Claude, under 'authority' (the ticket's Context lists the shrinkage for Place and Wide among the items for the spec)",
@@ -270,7 +281,7 @@ alternative that runs is a counted variant. The spec was frozen in the japan reg
     "roi78": "for Place and Wide, both readings again from #78's fit on the representative price ('shrinkage', 'roi78'), recorded as their own variants"
   },
   "bounds": "omega is the posterior mean (of the draws, held within the bounds); one-sided 95% bounds each: omega_lo the 5% and omega_hi the 95% posterior quantile (of the draws; a normal reading, the empirical-Bayes segment_effect and 'all', omega -/+ 1.6449 sd); P(omega > 1/rate) is the posterior probability that omega x payout_rate exceeds 1 (the share of draws, or the normal tail): for omega_full, that the cell's mean expected return per unit exceeds 1",
-  "ranking": "every cell of every pool, full span, omega_full: shrunk_edge = omega x payout_rate - 1 (expected return per unit at the final price, takeout included, minus 1), descending; cells without one last; ties in pool and spec order. Every cell is ranked and none is closed: no kill rule ('authority')",
+  "ranking": "every cell of every pool, full span, omega_full: shrunk_edge = omega x payout_rate - 1 (expected return per unit at the final price, takeout included, minus 1), descending; cells without one last; ties in pool and spec order. Every cell is ranked and none is closed: no kill rule ('authority'). The private report's ranking and pool tables give, beside omega and its bounds, the expected return per 100 yen staked, 100 x omega x payout_rate, and its bounds, 100 x omega_lo x payout_rate and 100 x omega_hi x payout_rate",
   "bootstrap": {
     "unit": "meeting (races.meeting_id), D7",
     "n_boot": 1000,
@@ -292,7 +303,7 @@ alternative that runs is a counted variant. The spec was frozen in the japan reg
   "variants": {
     "family": "one record per pool, shrinkage, reading and span: '<pool>/<reading>/<span>' (6 x 2 x 2) and, for Place and Wide, '<pool>/roi78-<reading>/<span>' (2 x 2 x 2), 32 in all; scored when that shrinkage fitted on the span, failed otherwise; its metrics are every cell's omega with bounds, P(omega > 1/rate), flat rho and mean return",
     "family_size": "registry.family_size(family_id) after the run, on every row and in the result",
-    "variants_searched": "family_size + registry.family_size(f) for each superseded family f (v1, v2, v3) after the run, on every row and in the result, reported apart from family_size: their variants ran on the same days and count too; each SPA family's size and its variants searched (the same sum over its v1, v2 and v3 SPA families) are reported beside its SPA p",
+    "variants_searched": "family_size + registry.family_size(f) for each superseded family f (v1 to v4) after the run, on every row and in the result, reported apart from family_size: their variants ran on the same days and count too; each SPA family's size and its variants searched (the same sum over its v1 to v4 SPA families) are reported beside its SPA p",
     "failures": "a pool with a data error in any year (pool_scan refuses a malformed board or dividend row) is failed on both spans, its cell rules too; a shrinkage that does not fit fails that pool and span; the private report gives each reason"
   },
   "alternatives_not_run": {
@@ -302,7 +313,10 @@ alternative that runs is a counted variant. The spec was frozen in the japan reg
     "bootstrap_se_for_a_zero_hit_cell": "v3's meeting-bootstrap se of 0 for a Place or Wide cell with no hit in bands that pay: a few losing bets would read as a certain total loss ('zero_hit_cell')",
     "zero_hit_se_in_tau2": "the zero-hit se in the family's tau^2 as well: it is a model sd after zero hits, not the bootstrap sampling sd the moment estimate subtracts, and it is largest for the sparsest cells, so a few sparse zero-hit cells could drive a family's tau^2 to 0 and move every cell of the family, those that paid included, to the prior with no spread",
     "zero_hit_cell_unshrunk": "a zero-hit cell's effect as its Jeffreys posterior alone, unshrunk: its mean, half of mean_odds / D, grows as the cell gets sparser, so a sparse cell with no hit could rank above cells that paid, its family's information unused",
-    "skipping_races_and_dividends_row_groups": "skipping a races or dividends row group that spans a holdout day as final_odds's are skipped: their row groups do not follow the price windows (the jravan builders write races in one row group and dividends in row groups by row count), so a skipped one would drop the development days of every window it meets; they hold no price, and are filtered and counted instead until #502 ('store_reader_guarantee')",
+    "skipping_spanning_row_groups": "v4's skip, unread, of every final_odds row group whose [min, max] spans a holdout day: the jravan builders write one final_odds row group per year, so it would drop a year's development races once an export holds a holdout day of that year, beyond what the owner's D14 boundary asks; skipping races or dividends row groups likewise would drop the development days of every year they meet. Every table is read through the scan's day filter and counted instead, until #502 ('store_reader_guarantee')",
+    "board_price_hits": "v4's one-winner fits on whether each combination paid at its board odds: a dead heat that splits the pool pays below them, so the fit credited it at the quoted price and could move a cell up the ranking ('settlement')",
+    "settlement_factor_per_band": "a settlement factor per odds band: a dead heat's shortfall would spread over every cell of its band, crediting the cell it fell in and debiting the others; settled wins keep it in its own bets",
+    "settlement_factor_per_cell": "the raw ratio of a cell's settled to board-price returns times its shrunk omega: an unshrunk factor on a shrunk reading that leaves segment_effect unsettled; settled wins carry the settlement through #78's fit",
     "kill_rule": "closing a pool with no open cell: removed by the owner's reframe ('authority'); every cell is ranked",
     "exact_odds_in_the_fit": "exact odds for every price: a Trio board's long tail makes too many grouped rows for the 16 GB limit; the 1.1 log grid at the harmonic-mean price keeps each group's mean implied probability exact",
     "pool_size_basis": "a fixed yen basis for the pool-size tertiles: pool totals move with sales from year to year, so a fixed basis could sort the cells by year",
@@ -319,7 +333,7 @@ alternative that runs is a counted variant. The spec was frozen in the japan reg
     "private_report": "$HORSETRACK_DATA_DIR/reports/pool-scan-japan-<spec hash>.md",
     "candidate_cells": "$HORSETRACK_DATA_DIR/reports/candidate-cells/pool-scan.json, every cell in rank order in the candidate-cell schema plus omega, omega_lo, omega_hi, family_size and variants_searched",
     "public": "docs/experiments/pool-scan-japan.md: the run, no figure (D21)",
-    "registry_summary": "docs/experiments/registry/japan/, by write_summary: each record's E id and variant, its status and values withheld (licensed source)"
+    "registry_summary": "docs/experiments/registry/japan/, by write_summary: each record's E id and variant, its status and values withheld (licensed source); the run writes only this family's and its SPA families' pages and merges their links into the committed index (write_committed_summary), every other page and index line kept"
   },
   "selection_hygiene": "odds band, favourite strength and pool size are read from the final board: look-ahead for selection (#88). A cell is a calibration target at the final price and a candidate for a decision-time rule, never a betting rule",
   "decisions": {
@@ -392,15 +406,20 @@ read. Only the alternatives that run count as variants. The spec lists the other
 - **A dividend off the priced board.** A race and pool whose paying dividend names a combination
   the priced, non-refunded board does not hold is unsettled: it is excluded and counted, never
   scored as if every ticket lost and never a data error of the pool.
-- **Row groups that span a holdout day.** `final_odds` row groups are skipped whole, by their
-  footer statistics, so none is decoded. `races` and `dividends` are filtered and counted instead
-  (see above).
+- **Row groups that span a holdout day (v5).** Every table is read through the scan's day filter
+  and its spanning row groups counted (see above). Not run: v4's skip of `final_odds`'s spanning
+  row groups, which with one row group per year would drop a year's development races.
+- **Dead heats in the one-winner fits (v5).** The fit takes settled wins: each paid combination
+  counts for its dividend / 100 over its board odds, at most 1. Not run: v4's board-price hits (a
+  dead heat credited at the quoted price); a settlement factor per odds band (it would spread a
+  dead heat's shortfall over every cell of its band); a raw per-cell factor on the shrunk omega
+  (unshrunk, and it would leave the segment effect unsettled).
 - **Ranking, not a kill rule.** Every cell is ranked by its shrunk expected return. The owner's
   reframe removed the kill rule and the open/closed verdict.
 - **Odds in the fit.** Exact below 10, and a 1.1 log grid from 10 at the harmonic-mean price.
   Exact odds everywhere were not run, because the long tail of a Trio board makes too many
   grouped rows for the 16 GB limit.
 - **Family size and variants searched.** Reported apart. The family size is this family's
-  registry size. Variants searched is that plus the sizes of v1, v2 and v3, the families it
-  supersedes, whose variants ran on the same days before v4 was frozen. The same holds for each
+  registry size. Variants searched is that plus the sizes of v1 to v4, the families it
+  supersedes, whose variants ran on the same days before v5 was frozen. The same holds for each
   SPA family.

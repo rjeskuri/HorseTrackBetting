@@ -9,22 +9,23 @@ the registry before the run, and `run_scan` reads no store row unless the regist
 that spec for `FAMILY_ID`.
 
 `run_scan`, in order: the family check; the output directory (never inside the repository); the
-store, one year at a time from 2014-06-07, development days only. Prices are read only on the day
-windows that no holdout-spanning row group of `final_odds` touches (footer statistics; each skipped
-group is counted under ROW_GROUP_REASON, #502), each window through `models.v0.store.
-read_store_table`, which drops holdout days and refuses an earlier price read; `races` is read on
-the same windows and `dividends` filtered by the windows' development race ids. A race and pool
-with no paying dividends row, or one paying a combination off the priced board, is unsettled and
-left out. Then #429's race sums and grouped bets per pool (`research.pool_scan`); per pool and span
-the shrinkage (#78's `fit_segment_roi` for the single-winner pools, its omega weighted by payout
-rate; for Place and Wide an empirical-Bayes shrink of the realised return over band baselines that
-carry their posterior, which ranks them, and #78's fit on a representative price, a variant beside
-it) and both omega readings; one registry record per pool, shrinkage, reading and span in
+store, one year at a time from 2014-06-07, development days only. `final_odds` and `races` are
+read through `models.v0.store.read_store_table`, whose day filter drops holdout days inside the
+scan (a row group mixing development and holdout days keeps its development days; one of a single
+holdout day is pruned by its statistics) and which refuses an earlier price read; `dividends` is
+filtered in its scan by the development race ids. A race and pool with no paying dividends row, or
+one paying a combination off the priced board, is unsettled and left out. Then #429's race sums
+and grouped bets per pool (`research.pool_scan`); per pool and span the shrinkage (#78's
+`fit_segment_roi` for the single-winner pools on settled wins, its omega weighted by payout rate;
+for Place and Wide an empirical-Bayes shrink of the realised return over band baselines that carry
+their posterior, which ranks them, and #78's fit on a representative price, a variant beside it)
+and both omega readings; one registry record per pool, shrinkage, reading and span in
 `FAMILY_ID`, failures included, and one per cell rule in the pool's SPA family (`spa_family`); SPA
 and StepM per pool over this scan's cell records, beside the ranking; the private report and the
-candidate-cell file through `write_report`; for the default registry, `write_summary`. `FAMILY_ID`
-is v4: v1, v2 and v3 (`SUPERSEDED_FAMILIES`) stay in the registry, superseded, and their variants
-count toward `variants_searched`, reported apart from the family size.
+candidate-cell file through `write_report`; for the default registry, N1's pages of the committed
+summary (`write_committed_summary`). `FAMILY_ID` is v5: v1 to v4 (`SUPERSEDED_FAMILIES`) stay in
+the registry, superseded, and their variants count toward `variants_searched`, reported apart from
+the family size.
 
 D21: every figure comes from the jravan store, so both outputs go under the data directory and
 `render_public_report` names the run without a figure. Selection hygiene (#88): odds bands,
@@ -36,7 +37,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
+import tempfile
 from collections import Counter
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -65,6 +68,7 @@ from horsetrack.core.eval.registry import (
     default_registry,
     run_id,
     summary_dir,
+    summary_stem,
     write_summary,
 )
 from horsetrack.core.eval.reports import LicensedOutputInRepo, is_inside, write_report
@@ -83,19 +87,24 @@ TICKET = 430
 HYPOTHESIS_ID = "E8"
 SOURCE = "jravan"
 STUDY = "pool-scan"
-FAMILY_ID = "japan-n1-pool-scan-v4"
-# v1, v2 and v3, each frozen and run on 2026-11-27 and superseded after review (prereg_spec
+FAMILY_ID = "japan-n1-pool-scan-v5"
+# v1 to v4, each frozen and run on 2026-11-27 (UTC) and superseded after review (prereg_spec
 # 'supersedes'); their records stay in the registry and their variants count toward variants
 # searched.
-SUPERSEDED_FAMILIES = ("japan-n1-pool-scan", "japan-n1-pool-scan-v2", "japan-n1-pool-scan-v3")
+SUPERSEDED_FAMILIES = (
+    "japan-n1-pool-scan",
+    "japan-n1-pool-scan-v2",
+    "japan-n1-pool-scan-v3",
+    "japan-n1-pool-scan-v4",
+)
 SUPERSEDED_SPECS = {
     "japan-n1-pool-scan": "74da5fd2789d242fef9da1fbc9ecb7335c5ccfd5869ed8498c64e319d34bddd9",
     "japan-n1-pool-scan-v2": "ac3050eb8d4191f4bf9c2bfb0a4978e69438544129d209dffe9f789e33359fb6",
     "japan-n1-pool-scan-v3": "785a45700efca6286c8cd85c4f5b0cd17409b4f5cbcde1abb27368a6f19a356c",
+    "japan-n1-pool-scan-v4": "a166d99f7320b9596ffc31d1db4d1efdd33e0a3c84a2aad0a16c98a92139a91c",
 }
 UNSETTLED_REASON = "unsettled: no paying dividends row"
 OFF_BOARD_REASON = "unsettled: dividend not on the priced board"
-ROW_GROUP_REASON = "row group spans a holdout day (#502)"
 ROI78 = "roi78"  # the variant name and reading prefix of #78's fit on Place and Wide
 FOLLOW_UPS = {
     501: "Trifecta and bracket quinella on the same scan (proposed)",
@@ -267,11 +276,25 @@ def prereg_spec() -> dict[str, Any]:
                 "data cannot show; v4 gives such a cell the Jeffreys zero-hit se ('shrinkage', "
                 "'zero_hit_cell'), and changes nothing for a cell that paid",
             },
+            {
+                "family_id": SUPERSEDED_FAMILIES[3],
+                "spec_sha256": SUPERSEDED_SPECS[SUPERSEDED_FAMILIES[3]],
+                "why": "v4. The fifth review of PR #496 found that it skipped whole every "
+                "final_odds row group that spans a holdout day, so once an export holds a holdout "
+                "day the year's development races of its annual row group go unscored; v5 reads "
+                "such a group through the scan's day filter under the owner's D14 boundary "
+                "('store_reader_guarantee'). It also found that the one-winner pools' #78 fits "
+                "credited a dead heat at the board price, the fit taking a paid flag and the board "
+                "odds and dropping the settled dividend, so a dead heat paid below the board odds "
+                "could move a cell up the ranking (raw rho was already settled); v5 fits settled "
+                "wins ('shrinkage', 'settlement')",
+            },
         ],
-        "superseded_records": "v1's, v2's and v3's records stay in the registry, superseded: "
-        "nothing is deleted, and their variants count toward variants searched ('variants')",
+        "superseded_records": "v1's to v4's records stay in the registry, superseded: nothing "
+        "is deleted, and their variants count toward variants searched ('variants')",
         "hypothesis": "E8: in some pre-registered cell of a JRA pool's final board the "
-        "hierarchical omega (realised wins over takeout-adjusted implied probability; for Place "
+        "hierarchical omega (realised settled wins over takeout-adjusted implied probability, "
+        "'settlement'; for Place "
         "and Wide the realised return over the payout rate) differs from 1 once the "
         "favourite-longshot bias is taken out as odds-band fixed effects, and some cell's "
         "expected return per unit staked at the final price reaches break-even (omega at or "
@@ -299,36 +322,33 @@ def prereg_spec() -> dict[str, Any]:
         },
         "store": "processed/jravan, one calendar year at a time: final_odds (the six pools and "
         "their __pool__ rows) and races through models.v0.store.read_store_table(source="
-        "'jravan'), one read per price window of the year ('store_reader_guarantee'); dividends "
-        "filtered inside its scan to the development race ids those windows read",
+        "'jravan') on the year's days of the run's range ('store_reader_guarantee'); dividends "
+        "filtered inside its scan to the development race ids that read returns",
         "store_reader_guarantee": {
-            "final_odds": "no row group of final_odds whose race_date [min, max] (its footer "
-            "statistics, read without decoding a page) spans a holdout day (is_holdout_day, D14) "
-            "is decoded. The scan reads prices only on the price windows: the days of the run's "
-            "range that no such row group's [min, max] covers, each window one read_store_table "
-            "call, whose Parquet scan prunes by the same statistics every row group outside the "
-            "window and drops holdout days in its filter. Each spanning row group that meets the "
-            f"range is skipped and counted ('{ROW_GROUP_REASON}'); its development days, and "
-            "those of any other row group inside its range, are not scored. A row group without "
-            "race_date statistics stops the run before any page is read",
-            "per_year_groups": "the jravan builders write one final_odds row group per year, so "
-            "until #502 rebuilds the store with day-isolated row groups a year whose row group "
-            "spans a holdout day is skipped whole",
-            "races_and_dividends": "races (no price or result: class, field size, surface, "
-            "status) is read on the same windows through read_store_table and dividends (the "
-            "results) filtered in its scan to the windows' development race ids: their row "
-            "groups are filtered, not skipped ('alternatives_not_run'), so one that meets a "
-            "window and spans a holdout day (races by race_date; dividends by the day each race "
-            "id jra:<YYYY-MM-DD>:<VENUE>:<NN> encodes; or one without statistics) is decoded and "
-            "its holdout rows dropped inside the scan; the private report counts such row groups "
-            "per table until #502 isolates them too",
+            "final_odds_and_races": "each read is one read_store_table call over the year's days "
+            "of the run's range, whose dataset filter keeps development days only "
+            "(core.eval.holdout.development_filter: holdout days, is_holdout_day, D14, are "
+            "dropped inside the Parquet scan, so no holdout value reaches Python). A row group "
+            "that mixes development and holdout days, or whose race_date [min, max] spans a "
+            "holdout day (the jravan builders' annual final_odds row group once an export holds "
+            "a holdout day), is decoded in the scan and its development days are scored in "
+            "every pool; a row group of a single holdout day (#502's layout) is pruned by its "
+            "footer statistics and never decoded",
+            "dividends": "dividends (the results; no race_date) is filtered in its scan to the "
+            "development race ids the races read returns, so its holdout rows are dropped inside "
+            "the scan too",
+            "counted": "the private report counts, per table, the row groups that meet the range "
+            "and whose [min, max] spans a holdout day (final_odds and races by race_date; "
+            "dividends by the day each race id jra:<YYYY-MM-DD>:<VENUE>:<NN> encodes; or one "
+            "without statistics): read through the scan's filter until #502 isolates holdout "
+            "days at the row-group level",
             "d14_boundary": "the owner's decision (2026-11-27, on #82, for study tickets; #430's "
             "definition of done quotes it): a development read meets D14 when no holdout value "
             "reaches Python, a pyarrow dataset filter dropping holdout days or holdout race ids "
             "inside the scan; Arrow decoding, in C++ before the filter, the column chunks of a "
             "row group that mixes development and holdout days is accepted, and isolating holdout "
-            "days at the file or row-group level is #502's scope. The races and dividends reads "
-            "meet this boundary; skipping final_odds's spanning row groups goes beyond it",
+            "days at the file or row-group level is #502's scope. Every read of the scan meets "
+            "this boundary",
         },
         "exclusions": [
             "a holdout day (D14) and any day before 2014-06-07 (D10)",
@@ -353,8 +373,6 @@ def prereg_spec() -> dict[str, Any]:
             "price as 0000 or cancelled as ****, refunded, or not a combination of the board): "
             "unsettled, excluded and counted, never scored as if every ticket lost and never a "
             "data error of the pool",
-            "the development days of a final_odds row group whose race_date range spans a "
-            "holdout day, and of any other row group inside that range ('store_reader_guarantee')",
             "a refunded combination is staked nowhere (pool_scan.combination_returns)",
         ],
         "bet": "flat box: one unit on every priced combination of the pool's final board in the "
@@ -417,6 +435,16 @@ def prereg_spec() -> dict[str, Any]:
                 "takeout, odds group): odds below 10 exact, from 10 on a log grid of ratio 1.1 "
                 "(group k holds [10 x 1.1^k, 10 x 1.1^(k+1))); a group's odds are its harmonic "
                 "mean, so its mean implied probability is exact (only losers' terms see the grid)",
+                "settlement": "WIN, QUINELLA, FORECAST and TRIO fit settled wins "
+                "(fit_segment_roi(..., fractional_won=True)): a paid combination counts for its "
+                "dividend / 100 over its board odds, at most 1, so a dead heat that splits the "
+                "pool counts below 1 and a hit paid at its board odds counts 1. Then p = omega x "
+                "rate / odds is the expected settled return per unit of board odds and omega x "
+                "rate the expected return per unit at the dividend that pays, in omega_full and "
+                "segment_effect alike, as raw rho is; the likelihood is #78's Bernoulli kernel "
+                "with fractional successes, the same as before wherever every hit paid its board "
+                "odds. Place and Wide's roi78 keeps whether each combination paid (its price "
+                "carries the return, 'roi78')",
             },
             "PLACE, QUINELLA_PLACE": {
                 "decided_by": "Claude, under 'authority' (the ticket's Context lists the "
@@ -513,7 +541,10 @@ def prereg_spec() -> dict[str, Any]:
         "ranking": "every cell of every pool, full span, omega_full: shrunk_edge = omega x "
         "payout_rate - 1 (expected return per unit at the final price, takeout included, minus 1), "
         "descending; cells without one last; ties in pool and spec order. Every cell is ranked "
-        "and none is closed: no kill rule ('authority')",
+        "and none is closed: no kill rule ('authority'). The private report's ranking and pool "
+        "tables give, beside omega and its bounds, the expected return per 100 yen staked, 100 "
+        "x omega x payout_rate, and its bounds, 100 x omega_lo x payout_rate and 100 x omega_hi "
+        "x payout_rate",
         "bootstrap": {
             "unit": "meeting (races.meeting_id), D7",
             "n_boot": N_BOOT,
@@ -545,9 +576,9 @@ def prereg_spec() -> dict[str, Any]:
             "family_size": "registry.family_size(family_id) after the run, on every row and in "
             "the result",
             "variants_searched": "family_size + registry.family_size(f) for each superseded "
-            "family f (v1, v2, v3) after the run, on every row and in the result, reported apart "
+            "family f (v1 to v4) after the run, on every row and in the result, reported apart "
             "from family_size: their variants ran on the same days and count too; each SPA "
-            "family's size and its variants searched (the same sum over its v1, v2 and v3 SPA "
+            "family's size and its variants searched (the same sum over its v1 to v4 SPA "
             "families) are reported beside its SPA p",
             "failures": "a pool with a data error in any year (pool_scan refuses a malformed board "
             "or dividend row) is failed on both spans, its cell rules too; a shrinkage that does "
@@ -581,12 +612,22 @@ def prereg_spec() -> dict[str, Any]:
             "unshrunk: its mean, half of mean_odds / D, grows as the cell gets sparser, so a "
             "sparse cell with no hit could rank above cells that paid, its family's information "
             "unused",
-            "skipping_races_and_dividends_row_groups": "skipping a races or dividends row group "
-            "that spans a holdout day as final_odds's are skipped: their row groups do not follow "
-            "the price windows (the jravan builders write races in one row group and dividends in "
-            "row groups by row count), so a skipped one would drop the development days of every "
-            "window it meets; they hold no price, and are filtered and counted instead until #502 "
-            "('store_reader_guarantee')",
+            "skipping_spanning_row_groups": "v4's skip, unread, of every final_odds row group "
+            "whose [min, max] spans a holdout day: the jravan builders write one final_odds row "
+            "group per year, so it would drop a year's development races once an export holds a "
+            "holdout day of that year, beyond what the owner's D14 boundary asks; skipping races "
+            "or dividends row groups likewise would drop the development days of every year they "
+            "meet. Every table is read through the scan's day filter and counted instead, until "
+            "#502 ('store_reader_guarantee')",
+            "board_price_hits": "v4's one-winner fits on whether each combination paid at its "
+            "board odds: a dead heat that splits the pool pays below them, so the fit credited "
+            "it at the quoted price and could move a cell up the ranking ('settlement')",
+            "settlement_factor_per_band": "a settlement factor per odds band: a dead heat's "
+            "shortfall would spread over every cell of its band, crediting the cell it fell in "
+            "and debiting the others; settled wins keep it in its own bets",
+            "settlement_factor_per_cell": "the raw ratio of a cell's settled to board-price "
+            "returns times its shrunk omega: an unshrunk factor on a shrunk reading that leaves "
+            "segment_effect unsettled; settled wins carry the settlement through #78's fit",
             "kill_rule": "closing a pool with no open cell: removed by the owner's reframe "
             "('authority'); every cell is ranked",
             "exact_odds_in_the_fit": "exact odds for every price: a Trio board's long tail makes "
@@ -606,7 +647,9 @@ def prereg_spec() -> dict[str, Any]:
             "family_size and variants_searched",
             "public": "docs/experiments/pool-scan-japan.md: the run, no figure (D21)",
             "registry_summary": "docs/experiments/registry/japan/, by write_summary: each record's "
-            "E id and variant, its status and values withheld (licensed source)",
+            "E id and variant, its status and values withheld (licensed source); the run writes "
+            "only this family's and its SPA families' pages and merges their links into the "
+            "committed index (write_committed_summary), every other page and index line kept",
         },
         "selection_hygiene": "odds band, favourite strength and pool size are read from the final "
         "board: look-ahead for selection (#88). A cell is a calibration target at the final "
@@ -684,8 +727,28 @@ def _regroup(frame: pd.DataFrame) -> pd.DataFrame:
     ].sum()
 
 
+def _settled_wins(rows: pd.DataFrame, bets: pd.DataFrame) -> np.ndarray:
+    """Per grouped bet of `bets` (one race and odds), its settled wins from `rows`, the pool's
+    `combination_returns`: a paid combination counts for its dividend over its board odds, at
+    most 1, so a dead heat that splits the pool counts below 1 (prereg_spec 'shrinkage',
+    'settlement')."""
+    out = np.zeros(len(bets))
+    hit = bets["won"].to_numpy() > 0  # only a grouped bet with a paid combination settles any
+    if not hit.any():
+        return out
+    paid = rows.loc[rows["won"].to_numpy(dtype=bool) & ~rows["refunded"].to_numpy(dtype=bool)]
+    odds = paid["odds"].to_numpy(dtype=float)
+    share = np.minimum(paid["ret"].to_numpy(dtype=float) / odds, 1.0)
+    settled = pd.Series(share).groupby([paid["race_id"].to_numpy(), odds]).sum()
+    keys = [bets["race_id"].to_numpy()[hit], bets["odds"].to_numpy(dtype=float)[hit]]
+    out[hit] = settled.reindex(pd.MultiIndex.from_arrays(keys)).to_numpy(dtype=float)
+    return out
+
+
 def _binned(pool: str, bets: pd.DataFrame, levels: pd.DataFrame) -> pd.DataFrame:
-    """Grouped bets by race -> by (segment levels, band, takeout, odds group) for the fit."""
+    """Grouped bets by race -> by (segment levels, band, takeout, odds group) for the fit; the
+    one-winner pools' wins are their settled wins (`_settled_wins`), Place's and Wide's whether
+    each combination paid."""
     odds = bets["odds"].to_numpy(dtype=float)
     big = odds >= ODDS_EXACT_BELOW
     with np.errstate(divide="ignore"):
@@ -697,7 +760,7 @@ def _binned(pool: str, bets: pd.DataFrame, levels: pd.DataFrame) -> pd.DataFrame
         group=np.where(big, k, -1).astype(int),
         exact=np.where(big, 0.0, odds),
         count=bets["count"].to_numpy(dtype=int),
-        won=bets["won"].to_numpy(dtype=int),
+        won=bets["won" if pool in EB_POOLS else "settled"].to_numpy(dtype=float),
         inv=bets["count"].to_numpy(dtype=float) / odds,
     )
     categories = {**LEVELS, "band": band_labels(pool)}
@@ -795,6 +858,8 @@ def _score_pool(
         edges_ = BAND_EDGES[pool]
         sums = pool_scan.race_returns(part, payout_rate=rate, band_edges=edges_)
         bets = pool_scan.grouped_bets(part, by=["race_id"], payout_rate=rate, band_edges=edges_)
+        if pool not in EB_POOLS and len(bets):
+            bets["settled"] = _settled_wins(part, bets)
         odds = bets.assign(
             odds_sum=bets["odds"] * bets["count"], hit_odds=bets["odds"] * bets["won"]
         )
@@ -844,45 +909,16 @@ def _spans_holdout(first: date, last: date) -> bool:
     return any(holdout.is_holdout_day(COUNTRY, day) for day in days)
 
 
-def _price_windows(start: date, end: date, store: _Store) -> list[tuple[date, date]]:
-    """The day windows of start..end on which the scan reads prices (prereg_spec 'store'): every
-    day that no `final_odds` row group spanning a holdout day covers. A read of a window prunes, by
-    the same statistics, every row group outside it, so no spanning group is decoded; each one in
-    start..end is counted under ROW_GROUP_REASON. A row group without race_date statistics cannot
-    be shown clear of the holdout: ValueError, before any page is read."""
-    skipped = []
-    for days in _row_group_days("final_odds", "race_date"):
-        if days is None:
-            raise ValueError(
-                "final_odds has a row group without race_date statistics: it cannot be shown "
-                "clear of the holdout (D14), so nothing is read"
-            )
-        if days[1] >= start and days[0] <= end and _spans_holdout(*days):
-            skipped.append(days)
-    if skipped:
-        store.excluded[ROW_GROUP_REASON] += len(skipped)
-    windows, day = [], start
-    for first, last in sorted(skipped):
-        if first > day:
-            windows.append((day, first - timedelta(days=1)))
-        day = max(day, last + timedelta(days=1))
-    if day <= end:
-        windows.append((day, end))
-    return windows
-
-
-def _spanning_decoded(windows: list[tuple[date, date]]) -> dict[str, int]:
-    """Per table read by filter rather than by window (`races`, `dividends`), its row groups that
-    meet a window and span a holdout day (or whose statistics cannot say): their holdout rows are
-    decoded and dropped inside the scan until #502 isolates row groups by day."""
+def _spanning_decoded(start: date, end: date) -> dict[str, int]:
+    """Per table, its row groups that meet start..end and whose [min, max] spans a holdout day
+    (or whose statistics cannot say): read through the scan's day filter (`final_odds` and `races`
+    by race_date, `dividends` by the development race ids), their holdout rows dropped inside the
+    scan, under the owner's D14 boundary, until #502 isolates row groups by day."""
     out = {}
-    for name, column in (("races", "race_date"), ("dividends", "race_id")):
+    tables = (("final_odds", "race_date"), ("races", "race_date"), ("dividends", "race_id"))
+    for name, column in tables:
         out[name] = sum(
-            days is None
-            or (
-                any(days[0] <= b and days[1] >= a for a, b in windows)
-                and _spans_holdout(days[0], days[1])
-            )
+            days is None or (days[0] <= end and days[1] >= start and _spans_holdout(*days))
             for days in _row_group_days(name, column)
         )
     return out
@@ -905,7 +941,7 @@ def _read_windows(name: str, columns: list[str], windows, *, touches_price: bool
 
 
 def _read_year(windows: list[tuple[date, date]], store: _Store, calendar: BoostCalendar) -> None:
-    """One calendar year's price windows: races, the WIN board and every pool's total, the
+    """One calendar year's days of the range: races, the WIN board and every pool's total, the
     dividends, then each pool's board, read, scored and dropped one pool at a time so that only
     one pool's rows are in memory (the same rows as one read of all six)."""
     races = _read_windows("races", RACE_COLUMNS, windows, touches_price=False).to_pandas()
@@ -972,16 +1008,16 @@ def _system_memory_pool():
 
 
 def _read_store(start: date, end: date, log: Callable[[str], None]) -> _Store:
+    """Each calendar year of start..end, read through `read_store_table`'s day filter: a row
+    group that mixes development and holdout days is decoded in the scan and keeps only its
+    development days, one of a single holdout day is pruned by its statistics (prereg_spec
+    'store_reader_guarantee')."""
     store, calendar = _Store(), shipped_boosts()
-    windows = _price_windows(start, end, store)
-    store.spanning = _spanning_decoded(windows)
+    store.spanning = _spanning_decoded(start, end)
     for year in range(start.year, end.year + 1):
-        first, last = date(year, 1, 1), date(year, 12, 31)
-        mine = [(max(a, first), min(b, last)) for a, b in windows if a <= last and b >= first]
-        if not mine:
-            continue
+        window = (max(start, date(year, 1, 1)), min(end, date(year, 12, 31)))
         log(f"reading {year}")
-        _read_year(mine, store, calendar)
+        _read_year([window], store, calendar)
         pa.default_memory_pool().release_unused()  # one year's board at a time
     return store
 
@@ -1236,7 +1272,7 @@ def _fit_bets(frame: pd.DataFrame, scale: dict[str, float] | None = None) -> pd.
     out["odds"] = odds
     out["takeout"] = frame["takeout"].to_numpy(dtype=float)
     out["count"] = frame["count"].to_numpy(dtype=int)
-    out["won"] = frame["won"].to_numpy(dtype=int)
+    out["won"] = frame["won"].to_numpy(dtype=float)
     return out[[*FIT_COLUMNS, "band", "odds", "takeout", "count", "won"]]
 
 
@@ -1244,7 +1280,8 @@ def _fit_readings(pool: str, span: _Span, bets: pd.DataFrame, seed: int, prefix:
     """#78's hierarchical fit of one pool and span, and both readings of every cell (under
     `prefix` + the reading's name). omega_full weighs each bet by its payout rate, so omega x the
     cell's mean rate is its mean expected return per unit even where boosted and ordinary rates
-    mix. Returns the fit's tau summary."""
+    mix; the one-winner pools' wins are settled (`_binned`), so it is the return at the dividend
+    that pays. Returns the fit's tau summary."""
     fit = fit_segment_roi(
         bets,
         segment_cols=list(FIT_COLUMNS),
@@ -1253,6 +1290,7 @@ def _fit_readings(pool: str, span: _Span, bets: pd.DataFrame, seed: int, prefix:
         seed=seed,
         draws=N_DRAWS,
         count_col="count",
+        fractional_won=True,
     )
     for cell, c in span.cells.items():
         if not c["n_bets"]:
@@ -1469,7 +1507,7 @@ class ScanResult:
     excluded: dict[str, int]
     pool_excluded: dict[str, dict[str, int]]
     fit_info: dict[str, dict]
-    spanning: dict[str, int] = field(default_factory=dict)  # races/dividends, _spanning_decoded
+    spanning: dict[str, int] = field(default_factory=dict)  # per table, _spanning_decoded
     summary_error: str | None = None  # why write_summary could not regenerate the summary
 
 
@@ -1515,6 +1553,50 @@ def _display(path: Path) -> str:
         return str(path.resolve().relative_to(paths.data_dir()))
     except (paths.DataDirNotSet, paths.DataDirInsideRepo, ValueError):
         return path.name
+
+
+class _Families:
+    """The registry restricted to some families, for `write_summary` (as in cross_pool_run)."""
+
+    def __init__(self, registry: Registry, families: set[str]) -> None:
+        self._registry, self._families = registry, families
+
+    def records(self, family_id: str | None = None) -> list[RunRecord]:
+        return [r for r in self._registry.records(family_id) if r.family_id in self._families]
+
+
+_INDEX_LINE = re.compile(r"- \[([^\]]+)\]\(([^)]+)\.md\)")
+
+
+def _index_family(line: str) -> str | None:
+    """The family a line of write_summary's index lists (its label, whose summary file the line
+    links: a legacy '/' id links its '--' file), or None for any other line."""
+    match = _INDEX_LINE.fullmatch(line)
+    return match[1] if match and summary_stem(match[1]) == match[2] else None
+
+
+def write_committed_summary(registry: Registry) -> None:
+    """N1's pages of the committed registry summary: `write_summary` over `FAMILY_ID` and each
+    pool's SPA family of `registry`, and the committed index with their lines added, ordered by
+    family id. Every family the index lists stays and no other family's page is written, so a
+    fresh local registry drops nothing and no other ticket's uncommitted family enters
+    (`studies.cross_pool_run.write_committed_summary`)."""
+    directory = summary_dir(COUNTRY)
+    mine = _Families(registry, {FAMILY_ID, *(spa_family(pool) for pool in POOLS)})
+    if not mine.records():
+        return
+    with tempfile.TemporaryDirectory() as scratch:
+        write_summary(mine, scratch)
+        for path in sorted(Path(scratch).glob("*.md")):
+            if path.stem != "README":
+                write_report(directory / path.name, path.read_text("utf-8"), sources=())
+        fresh = Path(scratch, "README.md").read_text("utf-8").splitlines()
+    index = directory / "README.md"
+    committed = index.read_text("utf-8").splitlines() if index.exists() else []
+    entries = {family: line for line in committed + fresh if (family := _index_family(line))}
+    head = [line for line in fresh if not _index_family(line)]
+    lines = [*head, *(entries[family] for family in sorted(entries))]
+    write_report(index, "\n".join(lines) + "\n", sources=())
 
 
 def run_scan(
@@ -1665,8 +1747,8 @@ def run_scan(
     write_report(candidates, text, sources=(SOURCE,))
     if own:
         try:
-            write_summary(registry, summary_dir(COUNTRY))
-        except ValueError as exc:  # e.g. another family's id is no file name; the run stands
+            write_committed_summary(registry)
+        except ValueError as exc:  # e.g. a family's id is no file name; the run stands
             result.summary_error = str(exc)
     return result
 
@@ -1689,6 +1771,14 @@ def _bounds(r: dict | None) -> list[str]:
     return [_num(r["omega"]), _num(r["lo"]), _num(r["hi"]), _num(r["p"], 3)]
 
 
+def _yen(r: dict | None, rate: float | None) -> list[str]:
+    """The expected return per 100 yen staked and its one-sided bounds: 100 x omega x rate, and
+    the same of each bound."""
+    if r is None or rate is None:
+        return ["-", "-", "-"]
+    return [_num(100 * r[key] * rate, 2) for key in ("omega", "lo", "hi")]
+
+
 def render_private_report(result: ScanResult, pools: dict[str, dict[str, _Span]]) -> str:
     """The full report, every figure included: for the data directory only (D21)."""
     superseded = ", ".join(f"`{f}`" for f in SUPERSEDED_FAMILIES)
@@ -1702,8 +1792,9 @@ def render_private_report(result: ScanResult, pools: dict[str, dict[str, _Span]]
         f"- written {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "- selection hygiene: bands, favourite and pool size come from the final board (#88); "
         "a cell is a calibration target at the final price, not a betting rule",
-        "- row groups of races and dividends that meet a price window and span a holdout day "
-        f"(decoded and filtered, #502): {result.spanning}",
+        "- row groups of final_odds, races and dividends that meet the range and span a holdout "
+        "day (read through the scan's day filter, holdout rows dropped inside the scan; a group "
+        f"of a single holdout day is pruned by its statistics; #502): {result.spanning}",
         "",
         "## Races left out",
         "",
@@ -1717,11 +1808,14 @@ def render_private_report(result: ScanResult, pools: dict[str, dict[str, _Span]]
         "## Ranking: every cell, full span, omega_full",
         "",
         "edge = omega x payout rate - 1, the shrunk expected return per unit at the final price "
-        "minus 1; lo and hi are one-sided 95% bounds of omega; break-even is omega = 1 / rate.",
+        "minus 1; lo and hi are one-sided 95% bounds of omega; break-even is omega = 1 / rate. "
+        "yen/100 is the expected return per 100 yen staked, 100 x omega x rate, with its bounds "
+        "100 x lo x rate and 100 x hi x rate; break-even is 100.",
         "",
     ]
     header = ["rank", "pool", "cell", "n", "days", "meetings", "rate", "rho", "mean return"]
-    header += ["se", "mean odds", "omega", "lo", "hi", "P(>1/rate)", "edge"]
+    header += ["se", "mean odds", "omega", "lo", "hi", "P(>1/rate)", "yen/100", "lo", "hi"]
+    header += ["edge"]
     ranked = []
     for k, r in enumerate(result.rows, start=1):
         c = pools[r["pool"]][MAIN_SPAN].cells[r["cell_id"]]
@@ -1730,6 +1824,7 @@ def render_private_report(result: ScanResult, pools: dict[str, dict[str, _Span]]
             + [str(r["n_meetings"]), _num(r["payout_rate"]), _num(c.get("flat_rho"))]
             + [_num(r["mean_return"]), _num(r["se_mean_return"]), _num(r["mean_odds"], 2)]
             + _bounds(c.get("omega_full"))
+            + _yen(c.get("omega_full"), c.get("payout_rate"))
             + [_num(r["shrunk_edge"])]
         )
     lines += [*_table(header, ranked), ""]
@@ -1767,7 +1862,7 @@ def render_private_report(result: ScanResult, pools: dict[str, dict[str, _Span]]
             lines.append(f"- StepM survivors at {STEPM_LEVEL}: {snoop['stepm'] or 'none'}")
         rank = {r["cell_id"]: k for k, r in enumerate(result.rows, 1) if r["pool"] == pool}
         header = ["rank", "cell", "n", "meetings", "rho", "mean return", "omega", "lo", "hi"]
-        header += ["P(>1/rate)", "effect", "lo", "hi", "P(>1/rate)"]
+        header += ["P(>1/rate)", "yen/100", "lo", "hi", "effect", "lo", "hi", "P(>1/rate)"]
         if eb:
             header += [f"{ROI78} omega", "lo", "hi", "P(>1/rate)", f"{ROI78} effect"]
         header += ["2024+ n", "2024+ rho", "2024+ omega", "lo", "hi", "2024+ effect"]
@@ -1777,7 +1872,8 @@ def render_private_report(result: ScanResult, pools: dict[str, dict[str, _Span]]
             effect = (r.get("segment_effect") or {}).get("omega")
             row = [str(rank[cell]), cell, str(c["n_bets"]), str(c["n_meetings"])]
             row += [_num(c.get("flat_rho")), _num(c.get("mean_return"))]
-            row += _bounds(c.get("omega_full")) + _bounds(c.get("segment_effect"))
+            row += _bounds(c.get("omega_full")) + _yen(c.get("omega_full"), c.get("payout_rate"))
+            row += _bounds(c.get("segment_effect"))
             if eb:
                 alt = (c.get(f"{ROI78}_segment_effect") or {}).get("omega")
                 row += _bounds(c.get(f"{ROI78}_omega_full")) + [_num(alt)]
@@ -1800,7 +1896,7 @@ def _digest(ids: list[str]) -> str:
 def render_public_report(result: ScanResult) -> str:
     """The public report: what ran and where its figures are, with no figure (D21)."""
     withheld = "withheld (D21)"
-    v1, v2, v3 = SUPERSEDED_FAMILIES
+    v1, v2, v3, v4 = SUPERSEDED_FAMILIES
     lines = [
         f"# Experiment report: N1, the final-board segment scan of six pools (Japan, #{TICKET})",
         "",
@@ -1818,9 +1914,15 @@ def render_public_report(result: ScanResult) -> str:
         "per 100 yen at the final price (takeout included, CI beside it). None is closed, and "
         'models aim at the top-ranked cells first."). The frozen spec quotes it in full '
         "(`authority`).",
-        f"- It supersedes v3, `{v3}` (spec sha256 `{SUPERSEDED_SPECS[v3]}`), v2, `{v2}` (spec "
-        f"sha256 `{SUPERSEDED_SPECS[v2]}`), and v1, `{v1}` (spec sha256 "
-        f"`{SUPERSEDED_SPECS[v1]}`), all frozen and run on 2026-11-27 (UTC). The third review "
+        f"- It supersedes v4, `{v4}` (spec sha256 `{SUPERSEDED_SPECS[v4]}`), v3, `{v3}` (spec "
+        f"sha256 `{SUPERSEDED_SPECS[v3]}`), v2, `{v2}` (spec sha256 `{SUPERSEDED_SPECS[v2]}`), "
+        f"and v1, `{v1}` (spec sha256 `{SUPERSEDED_SPECS[v1]}`), all frozen and run on "
+        "2026-11-27 (UTC). The fifth review of PR #496 found that v4 skipped whole every price "
+        "row group that spans a holdout day, so once an export holds a holdout day a year's "
+        "development races in its annual row group would go unscored, and that its one-winner "
+        "#78 fits credited a dead heat at the board price, dropping the settled dividend (raw "
+        "rho was already settled). v5 reads such row groups through the scan's day filter and "
+        "fits settled wins. The third review "
         "of PR #496 found that v3 read a Place or Wide cell with no hit, in an odds band that "
         "pays in other cells, as a certain total loss: its meeting-bootstrap se is 0, so its "
         "shrink weight was 1 and its omega and upper bound exactly 0. v4 gives such a cell the "
@@ -1834,26 +1936,22 @@ def render_public_report(result: ScanResult) -> str:
         f"- Requested range: development days from {result.start} to {result.end} (the run's "
         "arguments, not the store's measured span); holdout days are never read and "
         "`LockedHoldout` is never opened.",
-        "- The price rows (D14, #502): from the footer statistics of `final_odds`, a row group "
-        "whose race_date range spans a holdout day is never decoded. Prices are read only on the "
-        "day windows no such row group touches, each through `read_store_table`, whose scan "
-        "prunes by the same statistics every row group outside the window and drops holdout "
-        "days. The jravan builders write one row group per year, so until #502 isolates row "
-        "groups by day a year whose row group spans a holdout day is skipped whole, its "
-        "development days unscored; the private report counts the row groups skipped. `races` "
-        "(no price or result) is read on the same windows and `dividends` filtered in its scan "
-        "to the windows' development race ids: their row groups are filtered, not skipped, so "
-        "one spanning a holdout day would still be decoded, its holdout rows dropped inside the "
-        "scan, until #502 isolates them too; the private report counts them. That meets the "
+        "- The store reads (D14, #502): `final_odds` and `races` are read one year at a time "
+        "through `read_store_table`, whose dataset filter drops holdout days inside the Parquet "
+        "scan, and `dividends` is filtered in its scan to the development race ids. A row group "
+        "that mixes development and holdout days (the jravan builders' annual row group once an "
+        "export holds a holdout day) is decoded in the scan and its development days are "
+        "scored; a row group of a single holdout day is pruned by its statistics. That is the "
         "owner's D14 boundary for study tickets (2026-11-27, on #82): a development read meets "
         "D14 when no holdout value reaches Python, and Arrow decoding a mixed row group in C++ "
         "before the filter is accepted; isolating holdout days at the file or row-group level is "
-        "#502's scope (`store_reader_guarantee`, `d14_boundary`).",
+        "#502's scope, and the private report counts, per table, the row groups that span a "
+        "holdout day until then (`store_reader_guarantee`, `d14_boundary`).",
         f"- Seed {result.seed}; code at `{result.git_sha[:12]}`; command `uv run horsetrack japan "
         f"pool-scan run --from {result.start} --to {result.end} --seed {result.seed}`.",
         f"- Family size {result.family_size} (this family's distinct variants in the registry); "
-        f"variants searched {result.variants_searched} (that plus v1's, v2's and v3's, whose "
-        "variants ran on the same days). Both are on every row.",
+        f"variants searched {result.variants_searched} (that plus v1's to v4's, whose variants "
+        "ran on the same days). Both are on every row.",
         f"- Private report: `$HORSETRACK_DATA_DIR/{result.report_name}`; candidate cells: "
         f"`$HORSETRACK_DATA_DIR/{result.candidates_name}`; both written through `write_report` "
         "with the source `jravan`.",
@@ -1888,19 +1986,20 @@ def render_public_report(result: ScanResult) -> str:
         "effect alone) on two spans (from 2014-06-07; from 2024-01-01, reported apart). The "
         "cells are `all`, each odds band, each level of class, field size, favourite strength, "
         "pool size, surface and venue, and class crossed with each of the other six. The "
-        "shrinkage is #78's hierarchical fit for the one-winner pools, its omega weighted by "
-        "payout rate. For Place and Wide it is an empirical-Bayes shrink of the realised return "
-        "over odds-band baselines that carry their posterior (a band that paid nothing keeps a "
-        "Jeffreys posterior, not a known zero, and a cell with no hit in bands that pay keeps "
-        "the Jeffreys zero-hit se in its shrink), which ranks them; beside it, as variants of "
-        f"their own (`{ROI78}`), #78's fit on a representative price: each combination's "
-        "low-end odds times its band's realised return per unit of low-end odds when it pays, the "
-        "outcome being whether it paid. Every cell of every pool is ranked by its shrunk expected "
-        f"return (the owner's reframe: none is closed); the ranks, the omegas and their bounds are "
-        f"{withheld}. Which variants failed, and their figures, are {withheld}: the private "
-        "report gives each reason, and the registry summary shows no status of a licensed-source "
-        f"run. v1's, v2's and v3's variants, superseded, are records of `{v1}`, `{v2}` and "
-        f"`{v3}` and count toward variants searched.",
+        "shrinkage is #78's hierarchical fit for the one-winner pools, on settled wins (a dead "
+        "heat that splits the pool counts for its dividend over its board odds), its omega "
+        "weighted by payout rate. For Place and Wide it is an empirical-Bayes shrink of the "
+        "realised return over odds-band baselines that carry their posterior (a band that paid "
+        "nothing keeps a Jeffreys posterior, not a known zero, and a cell with no hit in bands "
+        "that pay keeps the Jeffreys zero-hit se in its shrink), which ranks them; beside it, as "
+        f"variants of their own (`{ROI78}`), #78's fit on a representative price: each "
+        "combination's low-end odds times its band's realised return per unit of low-end odds "
+        "when it pays, the outcome being whether it paid. Every cell of every pool is ranked by "
+        "its shrunk expected return (the owner's reframe: none is closed); the ranks, the omegas "
+        f"and their bounds are {withheld}. Which variants failed, and their figures, are "
+        f"{withheld}: the private report gives each reason, and the registry summary shows no "
+        "status of a licensed-source run. v1's to v4's variants, superseded, are records of "
+        f"`{v1}`, `{v2}`, `{v3}` and `{v4}` and count toward variants searched.",
         "",
         "## Alternatives rejected and why",
         "",
@@ -1910,6 +2009,13 @@ def render_public_report(result: ScanResult) -> str:
         "nothing. The cross cells are Claude's to register (the owner's reframe, 2026-11-27, on "
         "#430): the cells cross class, the owner's axis (maidens and debuts against the big "
         "graded races), with each other dimension: 150 of each pool's 186 cells.",
+        "- v4's skip of every price row group that spans a holdout day: with one row group per "
+        "year it would drop a year's development races once an export holds a holdout day, "
+        "beyond what the owner's D14 boundary asks. v4's board-price hits in the one-winner "
+        "fits: a dead heat paid below the board odds was credited at the quoted price. A "
+        "settlement factor per odds band would spread a dead heat's shortfall over its band's "
+        "other cells, and a raw per-cell factor on the shrunk omega would leave the segment "
+        "effect unsettled; settled wins carry the settlement through the fit.",
         "- v3's bootstrap se of 0 for a Place or Wide cell with no hit in bands that pay: a few "
         "losing bets would read as a certain total loss. The zero-hit se in the family's tau^2 "
         "as well: it is a model sd after zero hits, largest for the sparsest cells, so a few of "
