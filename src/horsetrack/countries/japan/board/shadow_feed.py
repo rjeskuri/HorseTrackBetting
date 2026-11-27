@@ -19,9 +19,12 @@ Rules (docs/specs/board-feed.md, "The shadow feed"):
   other pool is `model_probabilities(p, models.ordering, brackets=..., starters=...)`, brackets by
   JRA's draw of the largest horse number on the board (scratched included). Scratched runners are
   off the board, so they have no key and the rest renormalise; the places Place and Wide pay are
-  those of the start of sales, `starters` the board's priced runners plus its scratched ones (the
-  logs do not say when sales opened, so a scratch is taken as after). Without an ordering fit only
-  WIN; without models None. Display only: it never reaches a value, a flag or the shadow log.
+  those of the start of sales, `starters` the runners not SCR on the race's earliest WIN capture
+  in the logs read (the logger opens with the day-before sales, #358), plus any runner priced on
+  the board. A runner priced there and scratched later counts; one already SCR there does not:
+  when the logger started late, a scratch before its first capture is taken as before the
+  opening. Without an ordering fit only WIN; without models None. Display only: it never reaches
+  a value, a flag or the shadow log.
 - `cache`: a mapping the caller keeps between builds. A race's values are recomputed only when its
   board (capture time and figures) or its bucket changed, its p_model only when its board did;
   flags read the clock on every build. The log readers live in the same mapping, so a rebuild
@@ -90,8 +93,10 @@ class _DayRows:
     """The rows a board as of now needs, per race: the latest row per board key available by the
     last now, plus every row available after it (a replay's later captures). For the odds ladder
     (#499) it also keeps, of the rows available by now, the latest captured at or before each
-    checkpoint post - k per board key and the rows of the captures showing a final price. A clock
-    that goes back, or a change of post times, reads the logs again from the start."""
+    checkpoint post - k per board key and the rows of the captures showing a final price. For the
+    places paid (#506) it keeps, per race, the runners not SCR on its earliest WIN capture
+    available by now (the field at the opening of sales). A clock that goes back, or a change of
+    post times, reads the logs again from the start."""
 
     def __init__(self, race_date: date, day_dir: Path | None = None) -> None:
         self.race_date, self.day_dir = race_date, day_dir
@@ -109,6 +114,8 @@ class _DayRows:
         self.refs: dict[str, dict[int, dict[tuple, tuple[datetime, int, dict]]]] = {}
         self.final_snaps: dict[str, set[datetime]] = {}  # captures holding a final row
         self.finals: dict[str, list[dict[str, Any]]] = {}  # their rows, once available
+        # race_id -> (its earliest WIN capture, the runners not SCR on it)
+        self.opening: dict[str, tuple[datetime, set[int]]] = {}
 
     def _offer(self, race_id: str, entry: Entry) -> None:
         slot = self.latest.setdefault(race_id, {})
@@ -117,6 +124,27 @@ class _DayRows:
         if current is None or entry[:2] >= current[:2]:
             slot[key] = entry
         self._note(race_id, key, entry)
+        self._open(race_id, key, entry[2])
+
+    def _open(self, race_id: str, key: tuple, row: dict[str, Any]) -> None:
+        """The field at the opening: a WIN price row on the race's earliest capture so far."""
+        if key[0] != WIN or key[1] == odds_log.POOL_TOTAL:
+            return
+        snap = odds_log._instant(row.get("snapshot_utc"))
+        if snap is None:
+            return
+        current = self.opening.get(race_id)
+        if current is None or snap < current[0]:
+            current = self.opening[race_id] = (snap, set())
+        elif snap > current[0]:
+            return
+        if row.get("status_raw") != snapshot.SCRATCHED:
+            current[1].add(key[1])
+
+    def field_at_opening(self, race_id: str) -> set[int]:
+        """The runners not SCR on the race's earliest WIN capture; empty before one is read."""
+        found = self.opening.get(race_id)
+        return set() if found is None else set(found[1])
 
     def _note(self, race_id: str, key: tuple, entry: Entry) -> None:
         """The ladder's bookkeeping for a row now available."""
@@ -258,15 +286,19 @@ def _brackets(drawn: int) -> dict[int, int] | None:
 
 
 def _p_model(
-    board: RaceBoard, models: ShadowModels, cache: MutableMapping | None
+    board: RaceBoard,
+    models: ShadowModels,
+    cache: MutableMapping | None,
+    opening: set[int],
 ) -> dict[str, dict[str, float]] | None:
     """The board's p_model (docs/specs/board-feed.md), from the cache while the board is the one
-    last computed for the race; None when it cannot be formed."""
+    last computed for the race; None when it cannot be formed. `opening`: the runners not SCR on
+    the race's earliest WIN capture (`_DayRows.field_at_opening`)."""
     runners = sorted(board.win)
     if not runners:
         return None
     fielded = set(board.win) | set(board.place) | set(board.scratched)
-    starters = len(fielded)  # at the start of sales: a scratch is taken as after it
+    starters = len(opening | set(board.win))  # a runner priced now was in the field at the opening
     drawn = max(fielded | {h for pair in board.wide for h in pair})  # drawn before any scratch
     key = (
         board.race_id,
@@ -497,7 +529,9 @@ def build_shadow(
                     "pools": _pools(
                         board, flags, values, _ladders(board, day_rows, post, now_utc, models)
                     ),
-                    "p_model": None if models is None else _p_model(board, models, cache),
+                    "p_model": None
+                    if models is None
+                    else _p_model(board, models, cache, day_rows.field_at_opening(race_id)),
                 }
             )
     return {
