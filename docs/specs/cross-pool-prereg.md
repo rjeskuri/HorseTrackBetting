@@ -1,6 +1,7 @@
 # The T-2 cross-pool signal study, E25 (ticket #435, N4)
 
-Status: **PRE-REGISTERED.** Claude pre-registers this spec, with no owner sign-off, on the owner's
+Status: **PRE-REGISTERED, FROZEN AND RUN** (frozen and run on 2026-11-27; see "Freeze and run"
+below). Claude pre-registers this spec, with no owner sign-off, on the owner's
 decision in the comment on #435 headed "Reframe, owner 2026-11-27" (posted 2026-11-27). That
 comment replaces Outline 2, "Stop with needs-input for the owner's sign-off, then freeze the
 family.", with "Freeze the family in the registry. No sign-off stop."; replaces the definition of
@@ -35,12 +36,35 @@ scheme in each record). A trial never freezes or writes `japan-cross-pool-t2-v1`
 report and cell file carry "trial" in their names, so they never overwrite the family's, and the
 CLI writes no public page for it.
 
-Real-store smoke and trial runs before the freeze checked only that the pipeline completes and
-its memory; their records are in the trial family. No output figure of theirs was read to shape
-this spec: the changes after them (the pair variant, per-pool settlement, the retrospective
-label, the `top1` tie rule, the required `--to`, pool availability as a metric, the pair model's
-complete-outcome rule, failed records from the store's discovery on) came from the review
-findings on PR #493.
+The earlier real-store smoke runs before the freeze checked only that the pipeline completes and
+its memory. They used a temporary registry, since deleted, so they have no registry record. Their
+recorded stand-in is the registered trial of 2026-11-27: `python -m
+horsetrack.countries.japan.studies.cross_pool_run --trial --from 2016-01-01 --to 2019-12-31
+--seed 435`, run at commit `2d2d2af` into the real japan registry before the freeze, which
+appended five scored records, one per variant, to `japan-cross-pool-t2-trial`. No output figure
+of the smoke runs was read to shape this spec: the changes after them (the pair variant, per-pool
+settlement, the retrospective label, the `top1` tie rule, the required `--to`, pool availability
+as a metric, the pair model's complete-outcome rule, failed records from the store's discovery
+on) came from the review findings on PR #493. The study's code (`studies/cross_pool_run.py` and
+`studies/cross_pool.py`) is the same at the trial's commit and the freeze's; the merge of main
+between them brought `write_summary`'s handling of #131's legacy `japan/131-...` family ids
+(#525): the trial's records were appended, and only its summary step stopped on those ids.
+
+## Freeze and run
+
+- Freeze, 2026-11-27, at commit `f51d0a7` on branch `t/435-pre-register-and-run-the-t-2-c` (the
+  squash merge carries another hash): `python -m horsetrack.countries.japan.studies.cross_pool_run
+  --freeze --from 2014-06-07 --to 2026-11-27 --seed 435`, family `japan-cross-pool-t2-v1`, spec
+  sha256 `626789a2580faf32784bdf721854c69d86a303d5f1dbe7a18a247732bd736ecb`, frozen with
+  `Registry.freeze_family` in the japan registry before any scored read.
+- Run, 2026-11-27, at the same commit: `--run --from 2014-06-07 --to 2026-11-27 --seed 435`, one
+  record per variant, run ids `20c06f8d88e93f03`, `a9cbcccec8478b9d`, `02ca41fcca919287`,
+  `ee3c7ab9739e07c0` and `75062ba19ae9e53f`; no variant failed. Its private report is
+  `$HORSETRACK_DATA_DIR/reports/cross-pool-japan-626789a2580f.md`, its cells
+  `$HORSETRACK_DATA_DIR/reports/candidate-cells/cross-pool.json`, and its public page
+  `docs/experiments/cross-pool-japan.md`. Every figure is withheld (D21).
+- A change to anything in this spec is a new family id, frozen before it is scored:
+  `freeze_family` refuses another spec under `japan-cross-pool-t2-v1` (`FamilyAlreadyFrozen`).
 
 ## Hypothesis and null
 
