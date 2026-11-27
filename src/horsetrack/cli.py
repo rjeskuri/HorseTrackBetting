@@ -48,10 +48,12 @@ from horsetrack.countries.japan.research.coverage import coverage_command
 from horsetrack.countries.japan.research.exacta_impact import exacta_impact_command
 from horsetrack.countries.japan.research.pool_depth import pool_depth_app
 from horsetrack.countries.japan.research.pool_scan_run import pool_scan_app
+from horsetrack.countries.japan.research.spread_scan import spread_scan_app
 from horsetrack.countries.japan.research.win5_backfill import win5_history_command
 from horsetrack.countries.japan.research.win5_study import win5_study_app
 from horsetrack.countries.japan.shadow.day import shadow_day_command
 from horsetrack.countries.japan.studies.ability import ability_study_command
+from horsetrack.countries.japan.studies.debut_members import debut_members_command
 from horsetrack.countries.japan.studies.nowcast import nowcast_study_command
 
 app = typer.Typer(no_args_is_help=True)
@@ -75,8 +77,10 @@ japan.add_typer(pool_depth_app, name="pool-depth")
 japan.command("nowcast-study")(nowcast_study_command)
 japan.command("nowcast-fit")(nowcast_fit_command)
 japan.command("ability-study")(ability_study_command)
+japan.command("debut-members")(debut_members_command)
 japan.command("coverage")(coverage_command)
 japan.add_typer(pool_scan_app, name="pool-scan")
+japan.add_typer(spread_scan_app, name="spread-scan")
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
 japan.add_typer(jrdb, name="jrdb")
 jrdb.command("build")(jrdb_build_command)
