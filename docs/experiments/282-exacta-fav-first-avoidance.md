@@ -1,6 +1,6 @@
 # Experiment report: fav_first exacta loss avoidance, family L (#282)
 
-Family `japan/282-exacta-fav-first-avoidance-v1` (D18's loss-avoidance rule; spec
+Family `japan/282-exacta-fav-first-avoidance-v1`, superseded by v2 (last section) (D18's loss-avoidance rule; spec
 [docs/specs/exacta-overload-prereg.md](../specs/exacta-overload-prereg.md), family L). The owner
 approved the family as drafted on #282 on 2026-11-26 and reframed it on 2026-11-27 (every cut is a
 ranked row, both the kept and the skipped set are reported, no 100-meeting gate). Frozen in the
@@ -93,3 +93,54 @@ width, and says nothing about other cuts.
   are never read), then regenerate the registry summary.
 - The loader's logged-board reader duplicates E2's (#281, `exacta_rules.py`); merge them once both
   have landed.
+
+## v2: the race-card headline cut (2026-11-28)
+
+Family `japan-282-exacta-fav-first-avoidance-v2`, frozen 2026-11-28 with hash
+`9309ef5eb7b105e125b2c9d6513a5badab83b122a629b0d8cfe30b2e3919c89a`, before its run. It supersedes
+`japan/282-exacta-fav-first-avoidance-v1` (hash `8ae769a7...0434f`, above), which stays in the
+registry as history: frozen 2026-11-27 and scored once on 0 logged exacta meetings, so its 8
+records are n = 0 and nothing else is lost. Records:
+[registry/japan/japan-282-exacta-fav-first-avoidance-v2.md](registry/japan/japan-282-exacta-fav-first-avoidance-v2.md)
+(v1's stay in the file linked at the top). The spec carries the decision (section 5, family L);
+the project's governance lets a study's choices be pre-registered in the frozen spec and variants
+be added and counted without sign-off.
+
+**Why v2.** v1's headline cell took "less popular" from the lower tertile of each logged day's
+exacta pool totals at T−2. A whole-day tertile ranks an early race by later races' totals, which
+is look-ahead for a decision at T−2; #131's review found the same in E2's rule-v3 and E2 moved to
+the race card in rule-v4 and v5. Main's registry also refuses a `/` in a new family id. v2 changes
+the headline cut and the id, and nothing else: the 4 cuts, 2 scopes, comparator, metric, bootstrap
+(meeting clusters, 95% one-sided, max-statistic over the 8 members, seed 282), λ2 and exclusions
+are v1's.
+
+**The v2 headline.** The T−2 favourite's Win odds ≥ 3.0 and a less popular race by the race card:
+`race_no` 1–4, or a DEBUT or MAIDEN race (`race_class` from the store's races table, as #131's
+E2). Race number and class are known before the day and the favourite's odds are from the T−2
+board, so no pool total enters a selection. A race with no class in the store counts as less
+popular by its race number alone. The lower tertile of pool totals is reported, per run, as the
+proxy's agreement diagnostic only (`less_popular_agreement`); a race with no logged pool total is
+scored all the same.
+
+**Result.** Run 2026-11-28 at git `ee33fb4`, all 8 members, on the logged development days:
+
+| Cut k | Scope | Races | Meetings | Kept: per ¥ (diff, 95% one-sided) | Skipped: per ¥ (diff, 95% one-sided) |
+| --- | --- | --- | --- | --- | --- |
+| 1.1, 1.2, 1.3, 1.5 | all | 0 | 0 | - | - |
+| 1.1, 1.2, 1.3, 1.5 | headline | 0 | 0 | - | - |
+
+**Logged development meetings with `FORECAST` (exacta) boards: 0.** The run read 2 development
+day folders (2026-11-21 and 2026-11-22, Kyoto), 0 holdout folders (`is_holdout_day` is asked per
+day before a folder is opened; `LockedHoldout` not opened). Both days predate #130's exacta
+logging, so n = 0 races and 0 meetings, nothing excluded, and the agreement diagnostic has no
+race (0 with a pool total). Each member is a registry record (status `scored`, metric `n_races` =
+0, no difference metric): the data-pending result, as v1's. 9 records were appended for v2, the
+freeze and the 8 members; none failed. Nothing is measured, so the ledger has no measured row for
+family L.
+
+**What this rules out.** Nothing, as for v1. The null stays the starting point.
+
+**Follow-ups.** Re-run `score` once development days with #130 `FORECAST` boards are logged
+(race days from 2026-11-28 on can be holdout days and are never read); a rerun on the same
+inputs appends nothing, a rerun on more meetings re-scores the same 8 variants. Regenerate the
+registry summary after each run.
