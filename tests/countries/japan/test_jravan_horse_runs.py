@@ -40,6 +40,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.dataset as pads
 import pyarrow.parquet as pq
 import pytest
 from typer.testing import CliRunner
@@ -49,6 +50,7 @@ from horsetrack.core import paths
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.store import schemas
 from horsetrack.core.store.build import arrow_schema
+from horsetrack.countries.japan.models.v0 import store as v0_store
 from horsetrack.countries.japan.models.v0.store import (
     PRICE_ERA_START,
     PreReformPriceError,
@@ -372,6 +374,85 @@ def test_holdout_days_are_never_read(data: Path) -> None:
     assert HOLDOUT_ONLY_HORSE not in set(got.column("horse_id").to_pylist())
     # development days after the holdout start are runs like any other
     assert set(LATE_DEV_DAYS) <= days, sorted(days)
+
+
+class _Recorder:
+    """`pyarrow.dataset` for the store module, recording every table its datasets' scans return."""
+
+    SCANS = ("to_table", "to_batches", "head", "take")
+
+    def __init__(self) -> None:
+        self.scans: list[tuple[str, pa.Table]] = []
+
+    def __getattr__(self, attr: str):
+        return getattr(pads, attr)
+
+    def _wrap(self, name: str, target):
+        recorder = self
+
+        class Proxy:
+            def __getattr__(self, attr: str):
+                value = getattr(target, attr)
+                if attr in recorder.SCANS:
+                    return recorder._scan(name, value)
+                if attr == "scanner":
+                    return lambda *a, **k: recorder._wrap(name, value(*a, **k))
+                return value
+
+        return Proxy()
+
+    def _scan(self, name: str, method):
+        def scan(*a, **k):
+            out = method(*a, **k)
+            if isinstance(out, pa.Table):
+                self.scans.append((name, out))
+                return out
+            batches = list(out)
+            self.scans.append((name, pa.Table.from_batches(batches) if batches else pa.table({})))
+            return iter(batches)
+
+        return scan
+
+    def dataset(self, source, *a, **k):
+        return self._wrap(Path(source).stem, pads.dataset(source, *a, **k))
+
+
+def test_no_holdout_row_leaves_the_parquet_scan(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every scan the builder's reads run (the year discovery, the runners on both sides of D10,
+    the races) returns no holdout-day row: the holdout days are excluded in the scan predicate,
+    not dropped after the rows are loaded."""
+    rows = fixture_rows()
+    held_ids = {r["race_id"] for r in rows["races"] if r["race_date"] in HELD_DAYS}
+    write_store(data, rows)
+    recorder = _Recorder()
+    monkeypatch.setattr(v0_store, "ds", recorder)
+    hr.build_horse_runs()
+    assert output(data).is_file()
+
+    names = {name for name, _ in recorder.scans}
+    assert {"races", "runners"} <= names, sorted(names)
+    leaks = []
+    for name, table in recorder.scans:
+        cols = set(table.column_names)
+        days = set(table.column("race_date").to_pylist()) if "race_date" in cols else set()
+        ids = set(table.column("race_id").to_pylist()) if "race_id" in cols else set()
+        horses = set(table.column("horse_id").to_pylist()) if "horse_id" in cols else set()
+        if days & set(HELD_DAYS) or ids & held_ids or HOLDOUT_ONLY_HORSE in horses:
+            leaks.append((name, sorted(cols), sorted(days & set(HELD_DAYS))))
+    assert not leaks, leaks
+    # the scans reached the holdout's year: its development days came through them
+    for table in ("races", "runners"):
+        seen = set()
+        for name, t in recorder.scans:
+            if name == table and "race_date" in t.column_names:
+                seen |= set(t.column("race_date").to_pylist())
+        assert set(LATE_DEV_DAYS) <= seen, (table, sorted(seen))
+    # a runners scan with the price (the era side of D10) and one without it (before the era)
+    runner_cols = [set(t.column_names) for name, t in recorder.scans if name == "runners"]
+    assert any("win_odds" in c for c in runner_cols), runner_cols
+    assert any("win_odds" not in c and "horse_id" in c for c in runner_cols), runner_cols
 
 
 # ------------------------------------------------------------------------------------------------
