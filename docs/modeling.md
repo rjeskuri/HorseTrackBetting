@@ -24,7 +24,7 @@ How to read the diagrams:
 - Nothing here is adopted. Every model and rule stays in shadow until the owner adopts it through
   diagram 5, and no code places a bet.
 
-Status as of 2026-11-25. When a ticket in a diagram lands, move its box from planned to built and
+Status as of 2026-11-27. When a ticket in a diagram lands, move its box from planned to built and
 name its module.
 
 ## 1. The decision in one picture
@@ -73,7 +73,8 @@ flowchart TB
         NC1["Structural nowcast φ_t × s_late, scored for Win (Place diagnostic)<br/>#85 japan/models/nowcast.py; board quality by horizon #86<br/>built, not adopted"]
     end
     subgraph L2["C2: per-horse ability and interactions"]
-        ABIL["Dynamic rating #91, Plackett-Luce ability #92,<br/>jockey, trainer and track #93,<br/>competition #94, lineage #95<br/>planned"]
+        ABIL["Dynamic rating #91 japan/models/rating.py;<br/>top-3 Plackett-Luce ability, pooled jockey, trainer, sire<br/>#92 japan/models/ability.py<br/>built, not adopted"]
+        INTR["Interactions: jockey, trainer and track #93,<br/>competition #94, lineage #95<br/>planned"]
     end
     subgraph L3["C3: speed and par"]
         SPEED["Par and expected top-3 time #96,<br/>horse relative speed p_speed #97<br/>planned"]
@@ -95,6 +96,7 @@ flowchart TB
     BOARD --> NC0
     NC0 -.->|"replaced by"| NC1
     ASOF -.-> ABIL
+    INTR -.-> ABIL
     ASOF -.-> SPEED
     CAL --> RES
     CAL --> ORD
@@ -114,8 +116,8 @@ flowchart TB
     classDef built fill:#dcfce7,stroke:#15803d,color:#052e16
     classDef planned fill:#f3f4f6,stroke:#6b7280,stroke-dasharray: 5 5,color:#111827
     class NC0,CAL,RES,ORD,SV v0
-    class ASOF,BOARD,SLOG,NC1 built
-    class ABIL,SPEED,META,EXO,STAKE planned
+    class ASOF,BOARD,SLOG,NC1,ABIL built
+    class INTR,SPEED,META,EXO,STAKE planned
 ```
 
 The work is split into seven layers, and each is tested both on its own and for what it adds
@@ -135,9 +137,9 @@ flowchart LR
     WRK["Workout features, JRDB, private only<br/>#137 japan/handicap/workouts.py"]
     GOING["Going: cushion, moisture, rail setting<br/>#136 japan/jra/going.py<br/>store ingest #90, features #230: planned"]
     BIAS["Within-day track bias<br/>#138, #224 japan/handicap/track_bias.py"]
-    RAT["Dynamic rating #91<br/>planned"]
+    RAT["Dynamic rating #91<br/>japan/models/rating.py"]
     INT["Interactions: jockey, trainer, track #93,<br/>competition #94, lineage #95<br/>planned"]
-    PL["Plackett-Luce ability on the top 3 #92<br/>planned"]
+    PL["Plackett-Luce ability on the top 3, pooled jockey,<br/>trainer and sire #92 japan/models/ability.py"]
     PAR["Par and expected top-3 time #96<br/>planned"]
     PSPD["Horse relative speed, p_speed #97<br/>planned"]
     MKT["Calibrated-market baseline (D4)<br/>#114 japan/models/v0/calibration.py"]
@@ -148,7 +150,7 @@ flowchart LR
     GOING -.->|"rail setting #253"| BIAS
     GOING -.->|"variant prior"| PAR
     PAR -.-> PSPD
-    RAT -.-> PL
+    RAT --> PL
     INT -.-> PL
     MKT -.->|"offset"| META
     HCP -.-> META
@@ -160,8 +162,10 @@ flowchart LR
 
 The meta-model is where everything known about the horses meets the market's own view, the final
 price. Each box on the left is a member or a set of features, and an arrow means its output is an
-input of the box it points to; today only the past-performance lines feeding the handicap factors
-run in code, and every other flow is planned. The meta-model starts from the calibrated market and
+input of the box it points to; today the past-performance lines feeding the handicap factors and
+the dynamic rating feeding the Plackett-Luce ability (#92's study) run in code, and every other
+flow is planned. The ability model's sire comes from the JRA-VAN pedigree, so its results are
+withheld (D21). The meta-model starts from the calibrated market and
 gives a member weight only when it improves on the final price, so a member that adds nothing ends
 up with no weight. Members built on the licensed JRDB data, such as the workout features, run only
 in private models on the owner's machine and never publish a figure (D21).
