@@ -4,7 +4,11 @@ A row is one option the project has measured or will measure (a rule, a comparat
 model, a member) in a pool and a segment: its expected return per ¥100 staked at the final price,
 the CI beside it (each bound one-sided at ``ci_level``, D7 style) and the number of variants its
 family searched. Nothing is dropped: an option with no measured return (a failed or pending run)
-is a row too, and ranks after every measured row, unranked.
+is a row too, and ranks after every measured row, unranked. A descriptive row (``descriptive``,
+#451) is a measurement that is not a return per ¥100 staked on a ticket, such as WIN5's pool-level
+day value: it takes no part in its pool's shrinkage and gets no rank, and the Markdown texts show
+it with its value and bounds in its own section, "Descriptive, not ranked", after the ranked
+table and never in it.
 
 Shrinkage (``shrink``). Within each pool, over the k rows with a return ``x_i`` and a standard
 error ``se_i`` (given, or recovered from the one-sided bounds by ``LeaderboardRow.se``),
@@ -19,7 +23,7 @@ C is evaluated as 2 sum_{i<j} w_i w_j / sum(w) and Q around the pool's most prec
 quantities, free of the cancellation that zeroes C as written when one se is far below the rest.
 
 A pool of one keeps its raw return. A row without a pool or a positive se gets no shrunk value
-and ranks on its raw return.
+and ranks on its raw return. A descriptive row gets no shrunk value and is left out of its pool.
 
 Rows of one pool overlap: a segment's bets are also bets of the pool's 'all' row, and the variants
 of a family share races. DerSimonian-Laird assumes independent estimates, so here tau^2 is a
@@ -124,6 +128,7 @@ class LeaderboardRow:
     shrunk_per_100: float | None = None
     licensed: bool = False
     note: str | None = None
+    descriptive: bool = False
 
     def __post_init__(self) -> None:
         problem = self._problem()
@@ -174,6 +179,8 @@ class LeaderboardRow:
             return f"licensed must be a bool, got {self.licensed!r}"
         if self.note is not None and not isinstance(self.note, str):
             return "note must be a string or None"
+        if not isinstance(self.descriptive, bool):
+            return f"descriptive must be a bool, got {self.descriptive!r}"
         return None
 
     @property
@@ -238,13 +245,15 @@ def _dersimonian_laird(xs: list[float], variances: list[float]) -> list[float]:
 
 def shrink(rows: Iterable[LeaderboardRow]) -> list[LeaderboardRow]:
     """Copies of ``rows``, in order, with ``shrunk_per_100`` set per pool (any incoming value is
-    ignored); rows without a return, a pool or a positive se get None."""
+    ignored); descriptive rows, and rows without a return, a pool or a positive se, get None and
+    are left out of their pool's estimate."""
     rows = list(rows)
     pools: dict[str, list[int]] = {}
     variances: dict[int, float] = {}
     for i, row in enumerate(rows):
         se = row.se()
-        if row.measured and row.pool is not None and se is not None and se > 0:
+        rankable = row.measured and not row.descriptive and row.pool is not None
+        if rankable and se is not None and se > 0:
             pools.setdefault(row.pool, []).append(i)
             variances[i] = se * se
     shrunk: list[float | None] = [None] * len(rows)
@@ -270,7 +279,8 @@ def _refuse_duplicates(rows: list[LeaderboardRow]) -> None:
 
 def rank(rows: Iterable[LeaderboardRow]) -> list[RankedRow]:
     """Measured rows by their shrunk value (else raw) descending, ties by raw return descending
-    then option id, ranked 1..k; then unmeasured rows, unranked, by family id then option id.
+    then option id, ranked 1..k; then measured descriptive rows, unranked, by family id then
+    option id; then unmeasured rows (descriptive or not), unranked, by family id then option id.
     The shrunk value on each row is used as it is: ``rank`` does not shrink."""
     rows = list(rows)
     _refuse_duplicates(rows)
@@ -279,12 +289,14 @@ def rank(rows: Iterable[LeaderboardRow]) -> list[RankedRow]:
         value = row.shrunk_per_100 if row.shrunk_per_100 is not None else row.return_per_100
         return (-value, -row.return_per_100, row.option_id)
 
-    measured = sorted((r for r in rows if r.measured), key=key)
-    unmeasured = sorted(
-        (r for r in rows if not r.measured), key=lambda r: (r.family_id, r.option_id)
-    )
-    return [RankedRow(i, r) for i, r in enumerate(measured, start=1)] + [
-        RankedRow(None, r) for r in unmeasured
+    def by_family(row: LeaderboardRow) -> tuple[str, str]:
+        return (row.family_id, row.option_id)
+
+    ranked = sorted((r for r in rows if r.measured and not r.descriptive), key=key)
+    descriptive = sorted((r for r in rows if r.measured and r.descriptive), key=by_family)
+    unmeasured = sorted((r for r in rows if not r.measured), key=by_family)
+    return [RankedRow(i, r) for i, r in enumerate(ranked, start=1)] + [
+        RankedRow(None, r) for r in (*descriptive, *unmeasured)
     ]
 
 
@@ -342,7 +354,7 @@ _COLUMNS = (
     "Pool",
     "Segment",
     "Selection",
-    "Return per ¥100",
+    "Return per ¥100 staked",
     "CI",
     "Shrunk",
     "n",
@@ -350,6 +362,23 @@ _COLUMNS = (
     "Sources",
 )
 _ALIGN = ("---:", "---", "---", "---", "---", "---", "---:", "---", "---:", "---:", "---:", "---")
+# The descriptive section's table: no Shrunk column (a descriptive row is never shrunk), and a
+# Rank column that always shows ``_NONE``, so each row reads as unranked.
+_DESCRIPTIVE_HEADING = "## Descriptive, not ranked"
+_DESCRIPTIVE_COLUMNS = (
+    "Rank",
+    "Option",
+    "Kind",
+    "Pool",
+    "Segment",
+    "Selection",
+    "Pool value per ¥100 (descriptive)",
+    "CI",
+    "n",
+    "Variants searched",
+    "Sources",
+)
+_DESCRIPTIVE_ALIGN = _ALIGN[:8] + _ALIGN[9:]  # _ALIGN without Shrunk's
 
 
 def _table_line(cells: Iterable[str]) -> str:
@@ -358,7 +387,11 @@ def _table_line(cells: Iterable[str]) -> str:
 
 def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool) -> str:
     """The leaderboard as Markdown: shrunk and ranked over every row, or, when ``public``, over
-    the public view alone, with the withheld rows listed by option id and family only."""
+    the public view alone, with the withheld rows listed by option id and family only.
+
+    The ranked table holds the rows that are not descriptive (ranked, then unmeasured); the
+    descriptive rows follow in their own section, unranked, in ``rank``'s order (measured by
+    family id then option id, then unmeasured); the public withheld list comes last."""
     rows = list(rows)
     _refuse_duplicates(rows)
     shown = public_view(rows) if public else shrink(rows)
@@ -369,8 +402,11 @@ def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool)
         "",
         "Rows rank by expected return per ¥100 staked at the final price, shrunk toward their "
         "pool's own mean (DerSimonian-Laird) or raw where a row has no standard error, highest "
-        "first; rows with no measured return follow, unranked. Each CI bound is one-sided at the "
-        "level shown.",
+        "first; rows with no measured return come last, unranked. Descriptive rows (a "
+        "measurement that is not a return per ¥100 staked on a ticket, such as a pool-level "
+        "value) are not ranked: they are left out of the shrinkage and shown with their value "
+        "and bounds in their own section after the ranked table. Each CI bound is one-sided at "
+        "the level shown.",
         "",
         # Over every row, withheld ones included, public or not, by the ticket's decision (#449,
         # Context): a public-only total would understate the search. No other figure of a
@@ -387,9 +423,12 @@ def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool)
             "over the public rows alone.",
             "",
         ]
+    ordered = rank(shown)
     lines += [_table_line(_COLUMNS), _table_line(_ALIGN)]
-    for ranked in rank(shown):
+    for ranked in ordered:
         row = ranked.row
+        if row.descriptive:
+            continue
         lines.append(
             _table_line(
                 (
@@ -408,6 +447,28 @@ def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool)
                 )
             )
         )
+    descriptive = [ranked.row for ranked in ordered if ranked.row.descriptive]
+    if descriptive:
+        lines += ["", _DESCRIPTIVE_HEADING, ""]
+        lines += [_table_line(_DESCRIPTIVE_COLUMNS), _table_line(_DESCRIPTIVE_ALIGN)]
+        for row in descriptive:
+            lines.append(
+                _table_line(
+                    (
+                        _NONE,
+                        _cell(row.option_id),
+                        row.kind,
+                        _cell(row.pool or ""),
+                        _cell(row.segment),
+                        row.selection,
+                        _figure(row.return_per_100),
+                        _ci(row),
+                        _n(row),
+                        str(row.variants_searched),
+                        _cell(", ".join(row.sources)),
+                    )
+                )
+            )
     if public:
         withheld = sorted((r for r in rows if r.withheld), key=lambda r: (r.family_id, r.option_id))
         lines += ["", "## Withheld (D21)", ""]
