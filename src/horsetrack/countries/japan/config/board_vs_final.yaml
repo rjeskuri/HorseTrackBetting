@@ -1,0 +1,24 @@
+# Board-fitted against final-fitted terms on the JRDB fixed-time board (ticket #103, E2 and E45),
+# read by `countries/japan/studies/board_vs_final.py`. The owner's amendment on #103 (2026-11-27):
+# the release-time rule and the cluster unit are read from config, or registered as counted
+# variants, with no needs-input stop. Every value here goes into the family's spec, frozen in the
+# japan registry before any scored read; an edit after the freeze is another spec, which the run
+# refuses (a changed study is a new family_id).
+#
+# board: the release-time rule of JRDB's TYB board (`jrdb_board`'s `rules`).
+#   release_lag_min: minutes from TYB's odds time (`tyb_odds_time`, HHMM on the JST clock of the
+#                    race date) to the board's release. An assumption, not a measured fact: the
+#                    store keeps no JRDB release log, so the board counts as known only this long
+#                    after the clock it was taken at. A board released after its race's off is not
+#                    used.
+#   tz:              the zone of the odds-time clock.
+# cluster_unit: the bootstrap's resampling unit (D7's meeting, venue x day; the `meeting_id`
+#   column).
+# bootstrap_seed: the bootstrap's seed (reproducibility only; scoring.yaml sets the level and the
+#   replicates).
+family_id: japan-board-vs-final-e2-e45-v1
+board:
+  release_lag_min: 10
+  tz: Asia/Tokyo
+cluster_unit: meeting
+bootstrap_seed: 103
