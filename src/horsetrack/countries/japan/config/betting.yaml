@@ -1,0 +1,6 @@
+# The race-day limits the manual bet log checks and flags (countries/japan/bets/log.py, #453).
+# Owner's answer on #453 (2026-11-27): at most 30,000 yen staked per race day, a flat 1,000 yen per bet.
+# A bet past the cap or off the flat stake is still recorded, and flagged. Changing either value is an
+# owner decision, not a code change.
+day_cap_yen: 30000
+flat_stake_yen: 1000
