@@ -1,25 +1,34 @@
 """E25: the T-2 cross-pool signal at the final Win price, settled in Win, Quinella, Exacta (#435).
 
 N4 of epic #73, family `japan-cross-pool-t2-v1`, pre-registered in `docs/specs/cross-pool-prereg.md`
-(Claude pre-registers under the owner's reframe of 2026-11-27: no sign-off stop; `--freeze` writes
-the spec to the registry before any scored read). Hypothesis E25: at t = post - 2 min (D2's
-primary), the Quinella pool's top-2 support against the Win-implied (Harville) top-2 support,
-x_cross (#434, `studies.cross_pool`), adds to the final Win price: u = offset + beta . x with
-beta != 0 and a walk-forward winner log-loss gain over the offset. Null: beta = 0, gain 0.
+(Claude pre-registers under the owner's comment "Reframe, owner 2026-11-27" on #435: "Freeze the
+family in the registry. No sign-off stop."; `--freeze` writes the spec to the registry before any
+scored read). Hypothesis E25: at t = post - 2 min (D2's primary), the Quinella pool's support at t
+against the Win-implied (Harville) support adds to the final price. Null: beta = 0, gain 0.
 
-Variants (the family, size 4): feature set `x_cross` or `x_cross+fav` (x_cross and fav_x_cross =
-is_fav . x_cross, the T-2 favourite's support across pools) times offset `normalised` (ln of
-normalised 1/final Win odds) or `calibrated` (D4's natural cubic spline in ln q,
-`models.v0.calibration.fit_win_calibration`, refitted on each fold's training rows). Each is
-fitted per D9 fold on that fold's training rows only (`fit_fold`, the unpenalised conditional logit
-of `models.condlogit`, clustered on the meeting) and scored on its test races: ΔLL = ll_offset -
-ll_model per race (winner log loss, a dead heat's winners averaged), D7's one-sided meeting
+Variants (the family, size 5). Four Win variants: feature set `x_cross` or `x_cross+fav` (x_cross,
+the runner's Quinella top-2 support over its Harville top-2 support, #434, and fav_x_cross =
+is_fav . x_cross) times offset `normalised` (ln of normalised 1/final Win odds) or `calibrated`
+(D4's natural cubic spline in ln q, `models.v0.calibration.fit_win_calibration`, refitted on each
+fold's training rows). One pair variant, `pair:quinella`: per starter pair of a race with a
+complete T-2 Quinella board, log_ratio = ln(q_pair_t / h_pair_t) (#434 `pair_features`) over the
+offset ln of normalised 1/final Quinella odds, the winners the pairs the final QUINELLA dividends
+pay. Each is fitted per D9 fold on that fold's training rows only (`fit_fold`, the unpenalised
+conditional logit of `models.condlogit`, clustered on the meeting) and scored on its test races:
+ΔLL = ll_offset - ll_model per race (a dead heat's winners averaged), D7's one-sided meeting
 bootstrap, overall and by class group; coefficients per fold and pooled over the scored rows with
-the meeting-clustered sandwich se. Settlement: each variant and each offset alone (beta = 0) bets
-WIN, QUINELLA and FORECAST (Exacta) at the final dividend (`settle`), pair probabilities by
-Harville from the Win probabilities, claim = p x final odds; selections `value` (claim > 1) and
-`top1` (the race's largest claim); N5 (`core.eval.tail.tail_curve`) over every priced combination.
-Every settled selection and N5 band is a candidate cell (#430's schema), ranked by mean return.
+the meeting-clustered sandwich se.
+
+Settlement, a retrospective diagnostic at the closing (final) prices, not a decision-time rule:
+each scorer bets at the final dividend (`settle`), claim = p x final odds; the Win variants and
+their offsets alone (beta = 0, `offset:normalised`, `offset:calibrated`) in WIN, QUINELLA and
+FORECAST (Exacta), pair probabilities by Harville from the Win probabilities; the pair variant and
+its offset alone (`offset:quinella`) in QUINELLA. Selections `value` (claim > 1) and `top1` (the
+race's largest claim, claims within a relative 1e-9 tied, a tie to the lowest final odds, then the
+lowest combination text); N5 (`core.eval.tail.tail_curve`) over every priced combination. Every
+settled selection and N5 band is a candidate cell (#430's schema, `study` STUDY), ranked by mean
+return. A (scorer, pool) with nothing to settle, or whose settlement raises, is unavailable: named
+in the result, the private report and the record's params; the fits and other pools are kept.
 
 Order (`run_cross_pool`): refuse a span before 2014-06-07 (D10) and an unfrozen family (the
 registry's frozen hash must equal `build_spec`'s) before any store file is opened; list the
@@ -27,16 +36,19 @@ registry's frozen hash must equal `build_spec`'s) before any store file is opene
 stat'd); read the rest one at a time; join the jravan `races`, `runners`, `final_odds` and
 `dividends`; fold, fit, score, settle; append one registry record per variant (failures included:
 a variant whose fit or scoring raises is a failed record and the others still run); write the
-private report and the cell file through `write_report`. The CLI (`--freeze`, `--run`) then
-regenerates the registry summary and `docs/experiments/cross-pool-japan.md`, whose figures are all
-withheld (D21). Measurement only: nothing is adopted.
+private report and the cell file through `write_report`. A trial (`trial=True`, `--trial`) runs
+the same code on the `TRIAL_SCHEME` folds without a freeze: its records go to `TRIAL_FAMILY_ID`
+(params `trial`), its files carry "trial", and `FAMILY_ID` is never frozen or written. The CLI
+then regenerates the registry summary and, after `--run`, `docs/experiments/cross-pool-japan.md`,
+whose figures are all withheld (D21). Measurement only: nothing is adopted.
 
 Memory: one day file at a time (WIN and QUINELLA rows at or before t only, the columns the board
 needs); `final_odds` one pool and year at a time, its year row group picked by the race_date
 statistics and decoded in batches filtered by pool and development race id (a whole-row-group scan
 of a year holds every pool, Trifecta included); settlement holds one pool's combinations as flat
 numeric arrays and one scorer's claims at a time; the per-runner Win probabilities are a dense
-(race, horse number) array per scorer.
+(race, horse number) array per scorer. The pair rows keep only what the fit and settlement need
+(int16 legs, the race's labels shared), and their folds are race-level, expanded one at a time.
 """
 
 from __future__ import annotations
@@ -67,7 +79,7 @@ import pyarrow.parquet as pq
 from horsetrack.core import env, paths
 from horsetrack.core.config import load_country_yaml, load_source
 from horsetrack.core.eval.bootstrap import paired_bootstrap
-from horsetrack.core.eval.folds import Fold, load_country_scheme, walk_forward
+from horsetrack.core.eval.folds import Fold, FoldScheme, load_country_scheme, walk_forward
 from horsetrack.core.eval.holdout import _git_sha, is_holdout_day
 from horsetrack.core.eval.registry import (
     FoldMetric,
@@ -88,22 +100,47 @@ from horsetrack.countries.japan.models.v0.store import (
     read_store_table,
 )
 from horsetrack.countries.japan.research.pool_scan import CLASS_GROUPS, POOL_ROW
-from horsetrack.countries.japan.studies.cross_pool import QUINELLA, WIN, boards_at, cross_features
+from horsetrack.countries.japan.studies.cross_pool import (
+    QUINELLA,
+    WIN,
+    boards_at,
+    cross_features,
+    pair_features,
+)
 
 COUNTRY = "japan"
 TICKET = 435
 SOURCE = "jravan"
 FAMILY_ID = "japan-cross-pool-t2-v1"
+TRIAL_FAMILY_ID = "japan-cross-pool-t2-trial"  # trial runs' records; never FAMILY_ID's
 HYPOTHESIS = "E25"
-STUDY = "cross-pool"
+STUDY = "cross-pool/final-price-diagnostic"  # settlement, N5 and cells use the closing prices
 MINUTES_BEFORE = load_country_yaml(COUNTRY, "decision")["primary_min"]  # D2's primary, T-2
 SPAN_START = PRICE_ERA_START  # D10
 POOLS = ("WIN", "QUINELLA", "FORECAST")  # FORECAST is the store's name for Exacta
 FEATURES = {"x_cross": ("x_cross",), "x_cross+fav": ("x_cross", "fav_x_cross")}
 OFFSETS = ("normalised", "calibrated")
-VARIANTS = tuple(f"{features}:{offset}" for features in FEATURES for offset in OFFSETS)
-BASELINES = tuple(f"offset:{offset}" for offset in OFFSETS)  # each offset alone, beta = 0
+WIN_VARIANTS = tuple(f"{features}:{offset}" for features in FEATURES for offset in OFFSETS)
+PAIR_VARIANT = "pair:quinella"  # the T-2 pair price against the Win-implied pair
+PAIR_FEATURES = ("log_ratio",)
+VARIANTS = (*WIN_VARIANTS, PAIR_VARIANT)
+WIN_BASELINES = tuple(f"offset:{offset}" for offset in OFFSETS)  # each offset alone, beta = 0
+PAIR_BASELINE = "offset:quinella"
+BASELINES = (*WIN_BASELINES, PAIR_BASELINE)
+COEF_COLUMNS = {"x_cross": "coef_x_cross", "fav_x_cross": "coef_fav_x_cross"}
+PAIR_COEF_COLUMNS = {"log_ratio": "coef_log_ratio"}
 SELECTIONS = ("value", "top1")
+TOP1_TIE = 1e-9  # claims within this relative gap of a race's largest tie for top1
+# A trial's folds: D9's shape with 4 training quarters, so a few years of days score.
+TRIAL_SCHEME = FoldScheme(
+    unit="quarter",
+    test_length=1,
+    step=1,
+    min_train=4,
+    window="expanding",
+    embargo_days=7,
+    anchor_month=1,
+)
 N5_QUANTILES = (0.5, 0.75, 0.9, 0.95, 0.99)
 N_KNOTS = 5  # fit_win_calibration's default, D4's live model
 LAMBDA2 = 1.0  # plain Harville
@@ -138,7 +175,15 @@ def day_rows(day: pd.DataFrame, *, minutes_before: float = MINUTES_BEFORE) -> pd
     """One odds_timeseries day -> one row per Win starter at t: `race_id, horse_no, p_win_t,
     x_cross, is_fav, fav_x_cross` from the boards at t (#434), and `quinella_board`, whether the
     race's Quinella board at t prices any starter pair."""
-    parts = []
+    return _day_tables(day, minutes_before)[0]
+
+
+def _day_tables(day: pd.DataFrame, minutes_before: float):
+    """One day's Win rows (`day_rows`), its pair rows (`race_id, a, b, log_ratio`, one per T-2
+    starter pair of a race whose Quinella board at t prices every one, #434 `pair_features`) and
+    the counts of the races the pair rows leave out."""
+    parts, pair_ids, pair_legs, pair_ratio = [], [], [], []
+    counts = dict.fromkeys(PAIR_DAY_COUNTS, 0)
     for race_id, boards in boards_at(day, minutes_before=minutes_before).items():
         if not boards.win:
             continue
@@ -158,7 +203,44 @@ def day_rows(day: pd.DataFrame, *, minutes_before: float = MINUTES_BEFORE) -> pd
                 }
             )
         )
-    return pd.concat(parts, ignore_index=True) if parts else _no_rows()
+        pairs = pair_features(boards, lambda2=LAMBDA2, zero_vote=ZERO_VOTE)
+        ratio = pairs["log_ratio"].to_numpy(dtype=float)
+        if len(ratio) < 2:
+            counts["pair_excluded_fewer_than_2_pairs"] += 1
+        elif not np.isfinite(ratio).all():
+            counts["pair_excluded_incomplete_t2_quinella_board"] += 1
+        else:
+            pair_ids.append(race_id)
+            pair_legs.append(np.array(pairs["pair"].tolist(), dtype=np.int16).reshape(-1, 2))
+            pair_ratio.append(ratio)
+    win = pd.concat(parts, ignore_index=True) if parts else _no_rows()
+    if not pair_ids:
+        return win, _no_pairs(), counts
+    legs = np.concatenate(pair_legs)
+    sizes = [len(r) for r in pair_ratio]
+    pairs = pd.DataFrame(
+        {
+            "race_id": np.repeat(np.array(pair_ids, dtype=object), sizes),
+            "a": legs[:, 0],
+            "b": legs[:, 1],
+            "log_ratio": np.concatenate(pair_ratio),
+        }
+    )
+    return win, pairs, counts
+
+
+PAIR_DAY_COUNTS = ("pair_excluded_fewer_than_2_pairs", "pair_excluded_incomplete_t2_quinella_board")
+
+
+def _no_pairs() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "race_id": pd.Series(dtype=object),
+            "a": pd.Series(dtype=np.int16),
+            "b": pd.Series(dtype=np.int16),
+            "log_ratio": pd.Series(dtype=float),
+        }
+    )
 
 
 def _no_rows() -> pd.DataFrame:
@@ -178,11 +260,25 @@ def fit_fold(train: pd.DataFrame, *, features: Sequence[str]) -> CLFit:
     )
 
 
-def _market_q(rows: pd.DataFrame) -> np.ndarray:
+def _features_of(variant: str) -> tuple[str, ...]:
+    return PAIR_FEATURES if variant == PAIR_VARIANT else FEATURES[variant.split(":")[0]]
+
+
+def _baseline_of(variant: str) -> str:
+    """The offset alone (beta = 0) under the variant."""
+    return PAIR_BASELINE if variant == PAIR_VARIANT else f"offset:{variant.split(':')[1]}"
+
+
+def _market_q(rows: pd.DataFrame, column: str = "win_odds") -> np.ndarray:
     """1/odds normalised over each race's rows."""
-    inv = 1.0 / rows["win_odds"].to_numpy(dtype=float)
+    inv = 1.0 / rows[column].to_numpy(dtype=float)
     codes = pd.factorize(rows["race_id"].to_numpy(dtype=object))[0]
     return inv / np.bincount(codes, weights=inv)[codes]
+
+
+def _take(rows: pd.DataFrame, pos: np.ndarray, columns: Sequence[str]) -> pd.DataFrame:
+    """`rows.iloc[pos][columns]` without copying the other rows or columns first."""
+    return pd.DataFrame({c: rows[c].to_numpy()[pos] for c in columns})
 
 
 def _offsets(name: str, rows: pd.DataFrame, q: np.ndarray, fold: Fold):
@@ -215,7 +311,7 @@ class _Walk:
 
 
 def _walk(rows: pd.DataFrame, folds: Sequence[Fold], *, strict: bool) -> _Walk:
-    """Every variant and offset baseline on every fold. `strict` raises a variant's error;
+    """Every Win variant and offset baseline on every fold. `strict` raises a variant's error;
     otherwise the variant fails alone and the others go on."""
     walk = _Walk()
     q = _market_q(rows) if len(rows) else np.zeros(0)
@@ -226,7 +322,7 @@ def _walk(rows: pd.DataFrame, folds: Sequence[Fold], *, strict: bool) -> _Walk:
             continue
         test_race = race[fold.test_idx]
         for offset in OFFSETS:
-            mine = [v for v in VARIANTS if v.endswith(f":{offset}")]
+            mine = [v for v in WIN_VARIANTS if v.endswith(f":{offset}")]
             baseline = f"offset:{offset}"
             if all(s in walk.errors for s in (*mine, baseline)):
                 continue
@@ -265,6 +361,41 @@ def _walk(rows: pd.DataFrame, folds: Sequence[Fold], *, strict: bool) -> _Walk:
     return walk
 
 
+def _pair_walk(pairs: pd.DataFrame, folds: Sequence[Fold], *, strict: bool) -> _Walk:
+    """The pair variant and its offset alone on every fold: the offset ln of the normalised
+    1/final Quinella odds over the race's pairs, beta fitted on the fold's training rows only."""
+    walk = _Walk()
+    if not len(pairs):
+        return walk
+    ln_q = np.log(_market_q(pairs, "quinella_odds"))
+    race = pairs["race_id"].to_numpy(dtype=object)
+    X = pairs[list(PAIR_FEATURES)].to_numpy(dtype=float)
+    columns = ["race_id", "won", "meeting_id", *PAIR_FEATURES]
+    for k, fold in enumerate(folds):
+        test_idx = fold.test_idx
+        if len(test_idx) == 0:
+            continue
+        p_offset = race_probs(ln_q[test_idx], None, (), race[test_idx])
+        frame = pd.DataFrame({"fold": k, "pos": test_idx, "p_offset": p_offset})
+        walk.probs.setdefault(PAIR_BASELINE, []).append(frame.assign(p_model=p_offset))
+        if PAIR_VARIANT in walk.errors:
+            continue
+        try:
+            train_idx = fold.train_idx
+            train = _take(pairs, train_idx, columns).assign(offset=ln_q[train_idx])
+            fit = fit_fold(train, features=PAIR_FEATURES)
+            del train
+            p_model = race_probs(ln_q[test_idx], X[test_idx], fit.coef, race[test_idx])
+        except Exception as exc:
+            if strict:
+                raise
+            walk.fail(PAIR_VARIANT, f"fold {k}: {exc!r}")
+            continue
+        walk.probs.setdefault(PAIR_VARIANT, []).append(frame.assign(p_model=p_model))
+        walk.fits.setdefault(PAIR_VARIANT, []).append((k, fit))
+    return walk
+
+
 def _predictions(rows: pd.DataFrame, walk: _Walk, scorers: Sequence[str]) -> pd.DataFrame:
     race = rows["race_id"].to_numpy(dtype=object)
     horse = rows["horse_no"].to_numpy()
@@ -287,17 +418,21 @@ def _predictions(rows: pd.DataFrame, walk: _Walk, scorers: Sequence[str]) -> pd.
 
 
 SCORE_COLUMNS = ["variant", "fold", "race_id", "race_date", "meeting_id", "class_group"]
-SCORE_COLUMNS += ["ll_offset", "ll_model", "delta_ll", "coef_x_cross", "coef_fav_x_cross"]
+SCORE_COLUMNS += ["ll_offset", "ll_model", "delta_ll"]
 
 
-def _scores(rows: pd.DataFrame, walk: _Walk) -> pd.DataFrame:
-    """One row per (variant, scored race with a winner)."""
+def _scores(
+    rows: pd.DataFrame, walk: _Walk, variants: Sequence[str] = WIN_VARIANTS, coef_columns=None
+) -> pd.DataFrame:
+    """One row per (variant, scored race with a winner), with the fold's coefficients under
+    `coef_columns` (feature -> column; NaN where the variant lacks the feature)."""
+    coef_columns = COEF_COLUMNS if coef_columns is None else coef_columns
     won = rows["won"].to_numpy(dtype=bool)
     race = rows["race_id"].to_numpy(dtype=object)
     meta = rows.drop_duplicates("race_id").set_index("race_id")
     parts = []
-    for variant in VARIANTS:
-        cols = FEATURES[variant.split(":")[0]]
+    for variant in variants:
+        cols = _features_of(variant)
         coefs = {k: dict(zip(cols, fit.coef, strict=True)) for k, fit in walk.fits.get(variant, [])}
         for frame in walk.probs.get(variant, []):
             pos = frame["pos"].to_numpy()
@@ -329,25 +464,35 @@ def _scores(rows: pd.DataFrame, walk: _Walk) -> pd.DataFrame:
                         "ll_offset": ll["ll_offset"].to_numpy(),
                         "ll_model": ll["ll_model"].to_numpy(),
                         "delta_ll": (ll["ll_offset"] - ll["ll_model"]).to_numpy(),
-                        "coef_x_cross": coefs[k].get("x_cross", np.nan),
-                        "coef_fav_x_cross": coefs[k].get("fav_x_cross", np.nan),
                     }
+                    | {out: coefs[k].get(c, np.nan) for c, out in coef_columns.items()}
                 )
             )
-    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=SCORE_COLUMNS)
+    columns = [*SCORE_COLUMNS, *coef_columns.values()]
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
 
 
 def predict_folds(rows: pd.DataFrame, folds: Sequence[Fold]) -> pd.DataFrame:
-    """One row per (variant, test-fold runner): `variant, fold, race_id, horse_no, p_offset,
-    p_model`, out of fold (see the module doc)."""
-    return _predictions(rows, _walk(rows, folds, strict=True), VARIANTS)
+    """One row per (Win variant, test-fold runner): `variant, fold, race_id, horse_no,
+    p_offset, p_model`, out of fold (see the module doc)."""
+    return _predictions(rows, _walk(rows, folds, strict=True), WIN_VARIANTS)
 
 
 def score_folds(rows: pd.DataFrame, folds: Sequence[Fold]) -> pd.DataFrame:
-    """One row per (variant, scored race with a winner): `variant, fold, race_id, race_date,
+    """One row per (Win variant, scored race with a winner): `variant, fold, race_id, race_date,
     meeting_id, class_group, ll_offset, ll_model, delta_ll` and the fold's `coef_x_cross`,
     `coef_fav_x_cross` (NaN where the variant lacks the feature)."""
     return _scores(rows, _walk(rows, folds, strict=True))
+
+
+def score_pair_folds(pairs: pd.DataFrame, folds: Sequence[Fold]) -> pd.DataFrame:
+    """The pair variant per (fold, scored race with a paid pair): `variant, fold, race_id,
+    race_date, meeting_id, class_group, ll_offset, ll_model, delta_ll, coef_log_ratio`. `pairs`:
+    one row per starter pair, `race_id, race_date, meeting_id, class_group, combination, won` (a
+    pair the final QUINELLA dividends pay; a dead heat's paid pairs co-winners), `quinella_odds`
+    (final) and `log_ratio` (at t); `folds`: positions into `pairs`."""
+    walk = _pair_walk(pairs, folds, strict=True)
+    return _scores(pairs, walk, (PAIR_VARIANT,), PAIR_COEF_COLUMNS)
 
 
 # --------------------------------------------------------------------------- settlement
@@ -407,8 +552,9 @@ class _Races:
 
 
 def _scored_races(rows: pd.DataFrame, folds: Sequence[Fold]) -> _Races:
-    pos = np.concatenate([f.test_idx for f in folds] or [np.zeros(0, dtype=int)])
-    meta = rows.iloc[np.sort(pos)].drop_duplicates("race_id")
+    pos = np.sort(np.concatenate([f.test_idx for f in folds] or [np.zeros(0, dtype=int)]))
+    race = rows["race_id"].to_numpy(dtype=object)[pos]
+    meta = rows.iloc[pos[~pd.Series(race).duplicated().to_numpy()]]
     group = meta["class_group"].map({g: i for i, g in enumerate(GROUPS)})
     return _Races(
         index=pd.Index(meta["race_id"].to_numpy(dtype=object)),
@@ -558,11 +704,11 @@ def _num(value) -> float | None:
     return float(value) if value is not None and math.isfinite(float(value)) else None
 
 
-def _cell(cell_id: str, pool: str, group: str, odds_band: str | None, rate: float, s: dict):
+def _cell(cell_id, pool, group, odds_band, rate, s, family):
     """A candidate cell in #430's schema; an empty cell has no return."""
     return {
         "study": STUDY,
-        "family_id": FAMILY_ID,
+        "family_id": family,
         "cell_id": cell_id,
         "pool": pool,
         "class_group": None if group == ALL else group,
@@ -583,22 +729,50 @@ def _segments(bets: dict, groups: np.ndarray) -> dict[str, np.ndarray]:
     return {ALL: every, **{g: every[groups == i] for i, g in enumerate(GROUPS)}}
 
 
-def _settle_scorer(scorer, pool, bets, races, rate, boot):
+def _text_rank(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Each combination's rank in the text order of its combination ("7", "3,7"; b < 0: Win)."""
+    key = a.astype(np.int64) * 65536 + (b.astype(np.int64) + 1)
+    codes, keys = pd.factorize(key)
+    head, tail = keys // 65536, keys % 65536 - 1
+    text = [f"{h}" if t < 0 else f"{h},{t}" for h, t in zip(head, tail, strict=True)]
+    text = np.array(text, dtype=object)
+    rank = np.empty(len(keys), dtype=np.int32)
+    rank[np.argsort(text, kind="stable")] = np.arange(len(keys), dtype=np.int32)
+    return rank[codes]
+
+
+def _top1(code: np.ndarray, claim: np.ndarray, odds: np.ndarray, rank: np.ndarray) -> np.ndarray:
+    """Per race the combination with the largest claim. Claims within a relative TOP1_TIE of the
+    race's largest tie (under an offset alone every Win claim is 1 / sum 1/O); a tie goes to the
+    lowest final odds, then the lowest combination text."""
+    chosen = np.zeros(len(code), dtype=bool)
+    if not len(code):
+        return chosen
+    best = np.full(int(code.max()) + 1, -np.inf)
+    np.maximum.at(best, code, claim)
+    top = best[code]
+    tied = claim >= top - TOP1_TIE * np.abs(top)
+    order = np.lexsort((rank, odds, ~tied, code))
+    chosen[order[np.r_[True, code[order][1:] != code[order][:-1]]]] = True
+    return chosen
+
+
+def _settle_scorer(scorer, pool, bets, races, rate, boot, family):
     """One scorer in one pool: its selections' and N5 bands' tables and cells."""
     groups = races.group[bets["code"]]
     segments = _segments(bets, groups)
     table, cells = [], []
-    order = np.lexsort((-bets["claim"], bets["code"]))
-    first = order[np.r_[True, bets["code"][order][1:] != bets["code"][order][:-1]]]
-    del order
-    chosen = {"value": bets["claim"] > 1.0, "top1": np.zeros(len(bets["code"]), dtype=bool)}
-    chosen["top1"][first] = True
+    chosen = {
+        "value": bets["claim"] > 1.0,
+        "top1": _top1(bets["code"], bets["claim"], bets["odds"], bets["rank"]),
+    }
     for selection in SELECTIONS:
         for group, idx in segments.items():
             s = _stats(idx[chosen[selection][idx]], bets, races, boot)
             label = {"variant": scorer, "pool": pool, "selection": selection, "class_group": group}
             table.append(label | s)
-            cells.append(_cell(f"{scorer}/{pool}/{selection}/{group}", pool, group, None, rate, s))
+            cell_id = f"{scorer}/{pool}/{selection}/{group}"
+            cells.append(_cell(cell_id, pool, group, None, rate, s, family))
     frame = pd.DataFrame(
         {
             "claim": bets["claim"],
@@ -637,9 +811,8 @@ def _settle_scorer(scorer, pool, bets, races, rate, boot):
                 "mean_odds": bets["odds"][member].mean() if len(member) else np.nan,
             }
             band = f"claim q{row.q_lo:g}-{row.q_hi:g}"
-            cells.append(
-                _cell(f"{scorer}/{pool}/n5/{segment}/{band}", pool, segment, band, rate, s)
-            )
+            cell_id = f"{scorer}/{pool}/n5/{segment}/{band}"
+            cells.append(_cell(cell_id, pool, segment, band, rate, s, family))
     tail.insert(0, "pool", pool)
     tail.insert(0, "variant", scorer)
     return table, tail, cells
@@ -650,49 +823,101 @@ def _payout_rate(pool: str) -> float:
     return round(1.0 - load_source(COUNTRY, "jra").pools[pool].takeout_on(SPAN_START), 6)
 
 
-def _settle_all(rows, folds, walk, date_from, date_to, boot, counts, log):
-    """Settle every scorer that did not fail, pool by pool."""
-    races = _scored_races(rows, folds)
-    scorers = [s for s in (*VARIANTS, *BASELINES) if s in walk.probs]
-    tables, tails, cells = [], [], []
-    if not scorers or not len(races.index):
-        return tables, tails, cells
-    paid = pq.read_table(
+def _dividends(race_ids: Sequence[str], pools: Sequence[str]) -> pd.DataFrame:
+    """The final dividends of `pools` in `race_ids` (development races)."""
+    return pq.read_table(
         paths.processed_dir(SOURCE) / "dividends.parquet",
         columns=["race_id", "pool", "combination", "dividend"],
-        filters=[("pool", "in", list(POOLS)), ("race_id", "in", races.index.tolist())],
+        filters=[("pool", "in", list(pools)), ("race_id", "in", list(race_ids))],
     ).to_pandas()
+
+
+@dataclass
+class _Settled:
+    """The settlement's tables, N5 curves and cells, and the unavailable (pool, scorer)s."""
+
+    tables: list[dict] = field(default_factory=list)
+    tails: list[pd.DataFrame] = field(default_factory=list)
+    cells: list[dict] = field(default_factory=list)
+    unavailable: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def settle(self, scorer, pool, bets, races, boot, family) -> None:
+        """One scorer in one pool; nothing to settle, or an error, leaves it unavailable."""
+        try:
+            if not len(bets["code"]):
+                raise ValueError(f"no priced {pool} combination with every leg a scored starter")
+            table, tail, cells = _settle_scorer(
+                scorer, pool, bets, races, _payout_rate(pool), boot, family
+            )
+        except Exception as exc:
+            self.unavailable.setdefault(pool, {})[scorer] = f"unavailable: {exc}"
+            return
+        self.tables += table
+        self.tails.append(tail)
+        self.cells += cells
+
+
+def _settle_win(rows, folds, walk, date_from, date_to, boot, counts, log, family, out: _Settled):
+    """Settle every Win scorer that did not fail, pool by pool; a (scorer, pool) with nothing to
+    settle, or whose settlement raises, is unavailable and the rest go on."""
+    races = _scored_races(rows, folds)
+    scorers = [s for s in (*WIN_VARIANTS, *WIN_BASELINES) if s in walk.probs]
+    if not scorers or not len(races.index):
+        return
+    paid = _dividends(races.index.tolist(), POOLS)
     for pool in POOLS:
-        bets = _pool_bets(pool, races, paid, date_from, date_to, counts)
-        rate = _payout_rate(pool)
+        try:
+            bets = _pool_bets(pool, races, paid, date_from, date_to, counts)
+            if not len(bets["code"]):
+                raise ValueError(f"no priced {pool} combination in the scored races")
+            bets["rank"] = _text_rank(bets["a"], bets["b"])
+        except Exception as exc:  # e.g. a store without the pool
+            for scorer in scorers:
+                out.unavailable.setdefault(pool, {})[scorer] = f"unavailable: {exc}"
+            continue
         log(f"  {pool}: settling {len(scorers)} scorers (peak {_peak_gb():.2f} GB)")
         for scorer in scorers:
-            if scorer in walk.errors:
-                continue
             try:
                 P = _prob_matrix(rows, races, walk.probs[scorer])
                 p = _pair_probs(pool, P, bets["code"], bets["a"], bets["b"])
                 del P
-                ok = np.isfinite(p)
-                counts[f"{pool.lower()}_combinations_with_an_unmodelled_leg"] = int((~ok).sum())
-                claim = p * bets["odds"]
-                del p
-                if ok.all():  # the usual case: no copy of the pool's arrays
-                    mine = {**bets, "claim": claim}
-                else:
-                    mine = {k: v[ok] for k, v in bets.items()} | {"claim": claim[ok]}
-                del claim
-                if not len(mine["code"]):
-                    raise ValueError(f"no priced {pool} combination to settle")
-                table, tail, got = _settle_scorer(scorer, pool, mine, races, rate, boot)
             except Exception as exc:
-                walk.fail(scorer, f"settlement {pool}: {exc!r}")
+                out.unavailable.setdefault(pool, {})[scorer] = f"unavailable: {exc!r}"
                 continue
-            tables += table
-            tails.append(tail)
-            cells += got
+            ok = np.isfinite(p)
+            counts[f"{pool.lower()}_combinations_with_an_unmodelled_leg"] = int((~ok).sum())
+            claim = p * bets["odds"]
+            del p
+            if ok.all():  # the usual case: no copy of the pool's arrays
+                mine = {**bets, "claim": claim}
+            else:
+                mine = {k: v[ok] for k, v in bets.items()} | {"claim": claim[ok]}
+            del claim
+            out.settle(scorer, pool, mine, races, boot, family)
         del bets
-    return tables, tails, cells
+
+
+def _settle_pairs(pairs, folds, walk, boot, log, family, out: _Settled) -> None:
+    """Settle the pair variant and its offset alone in QUINELLA over the test-fold pair rows."""
+    scorers = [s for s in (PAIR_VARIANT, PAIR_BASELINE) if s in walk.probs]
+    if not scorers:
+        return
+    races = _scored_races(pairs, folds)
+    race = pairs["race_id"].to_numpy(dtype=object)
+    log(f"  {QUINELLA} pairs: settling {len(scorers)} scorers (peak {_peak_gb():.2f} GB)")
+    for scorer in scorers:
+        pos = np.concatenate([f["pos"].to_numpy() for f in walk.probs[scorer]])
+        p = np.concatenate([f["p_model"].to_numpy() for f in walk.probs[scorer]])
+        bets = {
+            "code": races.index.get_indexer(race[pos]).astype(np.int32),
+            "a": pairs["a"].to_numpy()[pos],
+            "b": pairs["b"].to_numpy()[pos],
+            "odds": pairs["quinella_odds"].to_numpy(dtype=float)[pos],
+            "ret": pairs["ret"].to_numpy(dtype=float)[pos],
+        }
+        bets |= {"claim": p * bets["odds"], "rank": _text_rank(bets["a"], bets["b"])}
+        del pos, p
+        out.settle(scorer, QUINELLA, bets, races, boot, family)
 
 
 # --------------------------------------------------------------------------- the spec
@@ -720,23 +945,39 @@ def _check_span(date_from: date, date_to: date) -> None:
         raise ValueError(f"the span ends ({date_to}) before it starts ({date_from})")
 
 
-def build_spec(*, date_from: date, date_to: date, seed: int) -> dict:
-    """The family's pre-registered spec (docs/specs/cross-pool-prereg.md), plain JSON."""
+def _spec(*, date_from: date, date_to: date, seed: int, family_id: str, scheme: FoldScheme) -> dict:
     _check_span(date_from, date_to)
-    scheme = load_country_scheme(COUNTRY)
     return {
-        "family_id": FAMILY_ID,
+        "family_id": family_id,
         "ticket": TICKET,
-        "status": "pre-registered by Claude under the owner's reframe of 2026-11-27 (#435): no "
-        "sign-off stop; frozen in the registry (--freeze) before any scored read",
-        "hypothesis": {
-            HYPOTHESIS: "at t, the Quinella pool's top-2 support against the Win-implied "
-            "(Harville) top-2 support, x_cross, adds to the final Win price: beta != 0 in u = "
-            "offset + beta . x, and walk-forward ΔLL > 0 against the offset",
+        "status": "pre-registered by Claude under the owner's comment on #435 headed 'Reframe, "
+        "owner 2026-11-27' (see decisions); frozen in the registry (--freeze) before any scored "
+        "read; no owner sign-off",
+        "decisions": {
+            "sign_off": "The owner's comment on #435 headed 'Reframe, owner 2026-11-27' "
+            "(2026-11-27) replaces Outline 2, 'Stop with needs-input for the owner's sign-off, "
+            "then freeze the family.', with 'Freeze the family in the registry. No sign-off "
+            "stop.'; the definition of done with 'the freeze comes before every scored record.'; "
+            "and the rule 'a spec the owner approves before the run: a needs-input step' with "
+            "'Claude pre-registers the spec and freezes it before the run. No owner sign-off.' "
+            "The freeze is the gate: no owner sign-off and no code gate",
+            "offsets": "the same comment: 'Both offsets are registered variants, and each is "
+            "ranked.'",
+            "cells": "the same comment: 'every settled selection and N5 band, ranked, in task "
+            "2's schema'",
+            "pair_model": "the ticket's 'the pair price against the Win-implied pair' is the "
+            f"fifth variant, {PAIR_VARIANT} (review of PR #493, before any freeze)",
         },
-        "null": "beta = 0 and ΔLL = 0: the final Win price already holds the cross-pool signal "
-        "(the starting point)",
-        "target": "the race's winner (Win pool) at the final Win odds",
+        "hypothesis": {
+            HYPOTHESIS: "at t, the Quinella pool's support against the Win-implied (Harville) "
+            "support adds to the final price: beta != 0 in u = offset + beta . x and "
+            "walk-forward ΔLL > 0 against the offset, per runner (x_cross, the top-2 support, "
+            "over the final Win price) and per pair (log_ratio, over the final Quinella price)",
+        },
+        "null": "beta = 0 and ΔLL = 0: the final price already holds the cross-pool signal (the "
+        "starting point)",
+        "target": "the race's winner (Win pool) at the final Win odds; for the pair variant the "
+        "pair(s) the final QUINELLA dividends pay, at the final Quinella odds",
         "decision_time": {
             "minutes_before_post": MINUTES_BEFORE,
             "rule": "D2's primary (config/decision.yaml primary_min); the boards are the latest "
@@ -748,20 +989,37 @@ def build_spec(*, date_from: date, date_to: date, seed: int) -> dict:
             "its plain-Harville top-2 support from the Win shares at t (#434 cross_features)",
             "fav_x_cross": "is_fav . x_cross, is_fav the T-2 Win favourite (the lowest horse "
             "number on a tie)",
+            "log_ratio": "ln(q_pair_t / h_pair_t) per T-2 starter pair: its normalised Quinella "
+            "share at t over its plain-Harville probability from the Win shares at t (#434 "
+            "pair_features)",
             "lambda2": LAMBDA2,
             "zero_vote": f"{ZERO_VOTE}: a zero-vote Quinella quote reads as missing (#434)",
         },
-        "feature_sets": {name: list(cols) for name, cols in FEATURES.items()},
+        "feature_sets": {name: list(cols) for name, cols in FEATURES.items()}
+        | {"pair": list(PAIR_FEATURES)},
         "offsets": {
             "normalised": "ln q, q = (1/O) / sum (1/O) over the race's priced starters, O the "
             "final Win odds (final_odds WIN)",
             "calibrated": "ln of D4's calibrated market: models.v0.calibration."
             f"fit_win_calibration ({N_KNOTS} knots, natural cubic spline in ln q) fitted on "
             "each fold's training rows and applied to its training and test rows",
-            "ranking": "both offsets are registered variants and each is ranked",
+            "quinella": "ln q_pair, q_pair = (1/O) / sum (1/O) over the race's T-2 starter "
+            "pairs, O the final Quinella odds (final_odds QUINELLA)",
+            "ranking": "both Win offsets are registered variants and each is ranked",
         },
         "variants": list(VARIANTS),
         "family_size": len(VARIANTS),
+        "pair_model": {
+            "variant": PAIR_VARIANT,
+            "choice_set": "the T-2 starter pairs (pairs of the Win starters at t) of a race whose "
+            "Quinella board at t prices every one (#434 pair_features, every log_ratio finite)",
+            "outcome": "the pair(s) the final QUINELLA dividends pay; a dead heat's paid pairs "
+            "are co-winners at 1/k",
+            "offset": "quinella",
+            "feature": list(PAIR_FEATURES),
+            "folds": "walk_forward over the pair rows' race dates with the same scheme",
+            "settlement": "QUINELLA only, claim = p_pair x the final Quinella odds",
+        },
         "fit": "conditional logit u = offset + X @ beta within race, unpenalised MLE "
         "(models.condlogit.fit_conditional_logit), a dead heat's winners at 1/k, a race with no "
         "winner dropped; se_cluster the meeting sandwich; 95% two-sided Wald interval",
@@ -789,6 +1047,10 @@ def build_spec(*, date_from: date, date_to: date, seed: int) -> dict:
             "renormalised",
             "an unmapped race class counts in 'all' only",
             "a race whose pool has no dividend row is left out of that pool's settlement",
+            "pair variant: a race with fewer than 2 T-2 starter pairs; a race whose Quinella "
+            "board at t misses a starter pair (a NaN log_ratio); a race with no row in races; a "
+            "race with no QUINELLA dividend row; a race in which a starter pair has no final "
+            "Quinella price; a race none of whose starter pairs is paid",
             "every exclusion is counted in the private report",
         ],
         "metric": {
@@ -802,23 +1064,39 @@ def build_spec(*, date_from: date, date_to: date, seed: int) -> dict:
         },
         "bootstrap": _bootstrap(seed),
         "settlement": {
-            "pools": list(POOLS),
-            "scorers": [*VARIANTS, *BASELINES],
-            "baselines": "each offset alone (beta = 0)",
+            "reading": "a retrospective diagnostic at the closing (final) prices, not a "
+            "decision-time (T-2) rule: the claim uses the final price in the offset and as the "
+            "odds, so a selection is not a bet that could be placed at t",
+            "scorers": {pool: [*WIN_VARIANTS, *WIN_BASELINES] for pool in POOLS}
+            | {QUINELLA: [*WIN_VARIANTS, *WIN_BASELINES, PAIR_VARIANT, PAIR_BASELINE]},
+            "baselines": {
+                "names": list(BASELINES),
+                "rule": "each offset alone (beta = 0): offset:normalised and offset:calibrated "
+                f"under the Win variants, {PAIR_BASELINE} under {PAIR_VARIANT}; settled, in N5 "
+                "and in the cells, with no registry record of their own: their returns are "
+                "offset_return[<pool>:<selection>] metrics on the records of the variants with "
+                "the same offset",
+            },
             "probabilities": "Win p from the scorer; Quinella P({a, b}) = p_a p_b / (1 - p_a) + "
             "p_b p_a / (1 - p_b); FORECAST (Exacta) P(a, b) = p_a p_b / (1 - p_a) (Harville, "
-            "lambda2 = 1)",
+            "lambda2 = 1); the pair variant's own pair probabilities",
             "claim": "p x the pool's final odds (final_odds), over every priced combination "
             "both of whose legs are scored starters",
             "selections": {
                 "value": "every priced combination with claim > 1",
-                "top1": "per race the combination with the largest claim",
+                "top1": "per race the combination with the largest claim; claims within a "
+                f"relative {TOP1_TIE:g} of the largest tie, and a tie goes to the lowest final "
+                "odds, then the lowest combination text",
             },
             "return": "dividend / 100 at the final dividend (dividends), else 0; a dead heat's "
             "paid combinations all pay; never the board's odds",
             "bounds": "D7 meeting bootstrap, one-sided 95%; se_mean_return = (upper - lower) / "
             "(2 z_level)",
             "segments": ["all", *GROUPS],
+            "unavailable": "a (scorer, pool) with no priced combination to settle, or whose "
+            "settlement raises, is unavailable: counted and named in the result, the private "
+            "report and the records' params (settlement_unavailable); the fits, gains and the "
+            "other pools are kept and the record stays scored",
         },
         "n5": {
             "function": "core.eval.tail.tail_curve",
@@ -829,6 +1107,7 @@ def build_spec(*, date_from: date, date_to: date, seed: int) -> dict:
         },
         "candidate_cells": {
             "file": "reports/candidate-cells/cross-pool.json under the data dir",
+            "study": STUDY,
             "schema": [
                 "study",
                 "family_id",
@@ -848,13 +1127,40 @@ def build_spec(*, date_from: date, date_to: date, seed: int) -> dict:
             "cells": "every settled selection (scorer x pool x selection x segment) and every "
             "N5 band (scorer x pool x segment x band); class_group null for 'all'; odds_band null "
             "for a selection, the claim-quantile band for an N5 band; shrunk_edge null; "
-            "payout_rate the pool's base rate (jra.yaml)",
+            "payout_rate the pool's base rate (jra.yaml); study marks a retrospective "
+            "diagnostic at the closing prices",
             "ranking": "mean_return descending, an empty cell last",
+        },
+        "trials": {
+            "family_id": TRIAL_FAMILY_ID,
+            "rule": "a trial (--trial) runs the same code without a freeze, on a short fold "
+            "scheme, and appends one record per variant (params trial) to the trial family; it "
+            "never freezes or writes this family, and its files are named as a trial's",
         },
         "adoption": "none: a measurement",
         "sources": [SOURCE],
         "seed": int(seed),
     }
+
+
+def build_spec(*, date_from: date, date_to: date, seed: int) -> dict:
+    """The family's pre-registered spec (docs/specs/cross-pool-prereg.md), plain JSON."""
+    scheme = load_country_scheme(COUNTRY)
+    return _spec(
+        date_from=date_from, date_to=date_to, seed=seed, family_id=FAMILY_ID, scheme=scheme
+    )
+
+
+def _trial_spec(*, date_from: date, date_to: date, seed: int) -> dict:
+    """A trial's spec: the family's on the trial folds, under the trial family's id."""
+    spec = _spec(
+        date_from=date_from,
+        date_to=date_to,
+        seed=seed,
+        family_id=TRIAL_FAMILY_ID,
+        scheme=TRIAL_SCHEME,
+    )
+    return spec | {"trial": f"a trial of {FAMILY_ID}: not frozen, never written to {FAMILY_ID}"}
 
 
 def freeze_spec(
@@ -927,25 +1233,32 @@ def _builds(files: list[tuple[date, Path]]) -> dict[str, str]:
     return builds
 
 
-def _features(files, log) -> tuple[pd.DataFrame, float]:
-    parts, seconds, started = [], 0.0, time.monotonic()
+def _features(files, log) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int], float]:
+    """The Win rows and the pair rows of every day file, and the pair rows' day-level counts."""
+    parts, pair_parts, seconds, started = [], [], 0.0, time.monotonic()
+    counts = dict.fromkeys(PAIR_DAY_COUNTS, 0)
     for i, (day, path) in enumerate(files):
         tick = time.monotonic()
-        frame = day_rows(_read_day(path))
+        frame, pairs, got = _day_tables(_read_day(path), MINUTES_BEFORE)
         seconds += time.monotonic() - tick
         if len(frame):
             parts.append(frame.assign(file_day=day))
+        if len(pairs):
+            pair_parts.append(pairs)
+        counts = {k: counts[k] + got[k] for k in counts}
         if (i + 1) % 100 == 0 or i + 1 == len(files):
             log(
                 f"  {i + 1}/{len(files)} days read ({time.monotonic() - started:.0f} s, "
                 f"peak {_peak_gb():.2f} GB)"
             )
     feats = pd.concat(parts, ignore_index=True) if parts else _no_rows().assign(file_day=None)
-    return feats, seconds / max(len(files), 1)
+    pairs = pd.concat(pair_parts, ignore_index=True) if pair_parts else _no_pairs()
+    return feats, pairs, counts, seconds / max(len(files), 1)
 
 
-def _study_rows(feats: pd.DataFrame, date_from: date, date_to: date) -> tuple[pd.DataFrame, dict]:
-    """The study rows (one per priced final starter of every kept race) and the counts."""
+def _study_rows(feats: pd.DataFrame, date_from: date, date_to: date):
+    """The study rows (one per priced final starter of every kept race), the counts, and the
+    labels (`race_id, race_date, meeting_id, class_group`) of every race with a T-2 Win board."""
     counts: dict[str, int] = {"races_with_a_t2_win_board": int(feats["race_id"].nunique())}
     ids = sorted(set(feats["race_id"]))
     where = ds.field("race_id").isin(ids) if ids else ds.scalar(False)
@@ -1040,7 +1353,129 @@ def _study_rows(feats: pd.DataFrame, date_from: date, date_to: date) -> tuple[pd
     counts["races_unmapped_class"] = int(
         rows.drop_duplicates("race_id")["class_group"].isna().sum()
     )
-    return rows, counts
+    return rows, counts, races[["race_id", "race_date", "meeting_id", "class_group"]]
+
+
+def _pair_rows(feats, races, date_from, date_to, counts) -> pd.DataFrame:
+    """The pair variant's rows: one per T-2 starter pair (`feats`, the day files' pair rows) of
+    every kept race, `race_id, race_date, meeting_id, class_group, a, b, won` (the final QUINELLA
+    dividends pay it), `quinella_odds` (final), `log_ratio` and `ret` (`settle`'s return), grouped
+    by race in race-date order; each race left out is counted."""
+    race = feats["race_id"].to_numpy(dtype=object)
+    code, ids = pd.factorize(race)
+    ids = np.asarray(ids, dtype=object)
+    where_race = pd.Index(ids)
+    meta = races.drop_duplicates("race_id").set_index("race_id").reindex(ids)
+    keep = meta["meeting_id"].notna().to_numpy()
+    counts["pair_excluded_no_race_row"] = int((~keep).sum())
+    a, b = feats["a"].to_numpy(dtype=np.int64), feats["b"].to_numpy(dtype=np.int64)
+    key = code.astype(np.int64) * 65536 + a * 256 + b
+    empty = pd.DataFrame(columns=["race_id", "pool", "combination", "dividend"])
+    paid = _dividends(ids[keep].tolist(), [QUINELLA]) if keep.any() else empty
+    paid_code = where_race.get_indexer(paid["race_id"].to_numpy(dtype=object))
+    with_dividend = np.zeros(len(ids), dtype=bool)
+    with_dividend[paid_code[paid_code >= 0]] = True
+    counts["pair_excluded_no_quinella_dividend"] = int((keep & ~with_dividend).sum())
+    keep &= with_dividend
+    legs = paid["combination"].astype(str).str.split(",", n=1, expand=True).reindex(columns=[0, 1])
+    pa_ = pd.to_numeric(legs[0], errors="coerce").to_numpy(dtype=float)
+    pb_ = pd.to_numeric(legs[1], errors="coerce").to_numpy(dtype=float)
+    ok = (paid_code >= 0) & np.isfinite(pa_) & np.isfinite(pb_)
+    lo, hi = np.minimum(pa_[ok], pb_[ok]).astype(np.int64), np.maximum(pa_[ok], pb_[ok])
+    won = np.isin(key, paid_code[ok].astype(np.int64) * 65536 + lo * 256 + hi.astype(np.int64))
+
+    years = np.array([d.year if keep[i] else 0 for i, d in enumerate(meta["race_date"])])
+    final_key, final_odds, final_ret = [np.zeros(0, dtype=np.int64)], [np.zeros(0)], [np.zeros(0)]
+    for year in sorted(set(years[keep].tolist())):
+        start, end = max(date_from, date(year, 1, 1)), min(date_to, date(year, 12, 31))
+        table = _final_odds(QUINELLA, start, end, ids[keep & (years == year)].tolist())
+        split = pc.split_pattern(table["combination"], ",")
+        fa = pc.cast(pc.list_element(split, 0), pa.int64()).to_numpy()
+        fb = pc.cast(pc.list_element(split, 1), pa.int64()).to_numpy()
+        frame = table.select(["race_id", "combination"]).to_pandas()
+        fcode = where_race.get_indexer(frame["race_id"].to_numpy(dtype=object)).astype(np.int64)
+        final_key.append(fcode * 65536 + np.minimum(fa, fb) * 256 + np.maximum(fa, fb))
+        final_odds.append(table["odds"].to_numpy())
+        final_ret.append(settle(frame, paid, pool=QUINELLA).to_numpy())
+        del table, frame, split
+    final_key = np.concatenate(final_key)
+    first = ~pd.Index(final_key).duplicated()
+    at = pd.Index(final_key[first]).get_indexer(key)
+    unpriced = np.bincount(code, weights=at < 0, minlength=len(ids)) > 0
+    counts["pair_excluded_unpriced_final_pair"] = int((keep & unpriced).sum())
+    keep &= ~unpriced
+    paid_starter = np.bincount(code, weights=won, minlength=len(ids)) > 0
+    counts["pair_excluded_no_paid_starter_pair"] = int((keep & ~paid_starter).sum())
+    keep &= paid_starter
+
+    order = pd.DataFrame({"day": meta["race_date"].to_numpy(dtype=object), "race": ids})
+    rank = np.empty(len(ids), dtype=np.int64)
+    rank[order[keep].sort_values(["day", "race"], kind="mergesort").index] = np.arange(keep.sum())
+    sel = np.flatnonzero(keep[code])
+    sel = sel[np.argsort(rank[code[sel]], kind="stable")]
+    c, at = code[sel], at[sel]
+    pairs = pd.DataFrame(
+        {
+            "race_id": race[sel],
+            "race_date": meta["race_date"].to_numpy(dtype=object)[c],
+            "meeting_id": meta["meeting_id"].to_numpy(dtype=object)[c],
+            "class_group": meta["class_group"].to_numpy(dtype=object)[c],
+            "a": feats["a"].to_numpy()[sel],
+            "b": feats["b"].to_numpy()[sel],
+            "won": won[sel],
+            "quinella_odds": np.concatenate(final_odds)[first][at],
+            "log_ratio": feats["log_ratio"].to_numpy(dtype=float)[sel],
+            "ret": np.concatenate(final_ret)[first][at],
+        }
+    )
+    counts["pair_races"] = int(keep.sum())
+    counts["pair_rows"] = len(pairs)
+    return pairs
+
+
+@dataclass(frozen=True, eq=False)
+class _RaceFold:
+    """A walk-forward fold over races read as row positions (the rows grouped by race, each race
+    rows bounds[r]:bounds[r + 1]), made on access so every fold's positions are never held."""
+
+    fold: Fold
+    bounds: np.ndarray
+
+    def _rows(self, races: np.ndarray) -> np.ndarray:
+        if not len(races):
+            return np.zeros(0, dtype=np.int64)
+        lo, hi = self.bounds[races], self.bounds[races + 1]
+        if (lo[1:] == hi[:-1]).all():  # contiguous: the usual case, rows in race-date order
+            return np.arange(lo[0], hi[-1], dtype=np.int64)
+        sizes = hi - lo
+        return np.repeat(lo - np.r_[0, np.cumsum(sizes)[:-1]], sizes) + np.arange(sizes.sum())
+
+    @property
+    def train_idx(self) -> np.ndarray:
+        return self._rows(self.fold.train_idx)
+
+    @property
+    def test_idx(self) -> np.ndarray:
+        return self._rows(self.fold.test_idx)
+
+    @property
+    def train_end(self) -> date:
+        return self.fold.train_end
+
+    @property
+    def test_start(self) -> date:
+        return self.fold.test_start
+
+
+def _pair_folds(pairs: pd.DataFrame, scheme: FoldScheme) -> list[_RaceFold]:
+    """`walk_forward` over the pair rows' race dates, taken one date per race."""
+    race = pairs["race_id"].to_numpy(dtype=object)
+    if not len(race):
+        return []
+    starts = np.flatnonzero(np.r_[True, race[1:] != race[:-1]])
+    bounds = np.r_[starts, len(race)]
+    dates = pd.Series(pairs["race_date"].to_numpy(dtype=object)[starts])
+    return [_RaceFold(f, bounds) for f in walk_forward(dates, scheme=scheme)]
 
 
 # --------------------------------------------------------------------------- the result
@@ -1064,10 +1499,12 @@ class CrossPoolResult:
     date_from: date | None = None
     date_to: date | None = None
     seed: int | None = None
+    # pool -> {scorer: why}: the (scorer, pool)s with nothing settled; the rest are kept
+    unavailable_pools: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def _coef_rows(variant: str, label: str, fit: CLFit, **extra) -> list[dict]:
-    cols = FEATURES[variant.split(":")[0]]
+    cols = _features_of(variant)
     se = fit.se_cluster if fit.se_cluster is not None else np.full(len(cols), np.nan)
     return [
         {"variant": variant, "feature": name, "fold": label, **extra}
@@ -1101,14 +1538,14 @@ def _gain(part: pd.DataFrame, boot: dict) -> dict:
     )
 
 
-def _fits(rows, folds, walk, scores, boot):
+def _fits(rows, folds, walk, scores, boot, variants):
     """Per variant: the coefficients (per fold and pooled) and the gains by class group."""
     coefficients, gains = [], []
-    for variant in VARIANTS:
+    for variant in variants:
         if variant in walk.errors:
             continue
         try:
-            cols = list(FEATURES[variant.split(":")[0]])
+            cols = list(_features_of(variant))
             table = []
             for k, fit in walk.fits[variant]:
                 table += _coef_rows(
@@ -1116,8 +1553,10 @@ def _fits(rows, folds, walk, scores, boot):
                 )
             pos = np.concatenate([f["pos"].to_numpy() for f in walk.probs[variant]])
             p_offset = np.concatenate([f["p_offset"].to_numpy() for f in walk.probs[variant]])
-            scored = rows.iloc[pos][["race_id", "won", "meeting_id", *cols]]
+            scored = _take(rows, pos, ["race_id", "won", "meeting_id", *cols])
+            del pos
             pooled = fit_fold(scored.assign(offset=np.log(p_offset)), features=cols)
+            del scored
             table += _coef_rows(variant, "pooled", pooled, train_end=None)
             mine = scores[scores["variant"] == variant]
             got = []
@@ -1161,7 +1600,7 @@ def _variant_metrics(variant, coefficients, gains, scores, settlement) -> tuple[
     mine = scores[scores["variant"] == variant]
     for k, part in mine.groupby("fold", sort=True):
         out.append(_metric(f"fold:{k}", "delta_ll", part["delta_ll"].mean(), len(part)))
-    baseline = f"offset:{variant.split(':')[1]}"
+    baseline = _baseline_of(variant)
     whole = settlement[settlement["class_group"] == ALL] if len(settlement) else settlement
     for scorer, prefix in ((variant, "return"), (baseline, "offset_return")):
         for row in whole[whole["variant"] == scorer].itertuples(index=False) if len(whole) else []:
@@ -1178,11 +1617,34 @@ def _variant_metrics(variant, coefficients, gains, scores, settlement) -> tuple[
     return tuple(m for m in out if m is not None)
 
 
-def _record(variant, spec, spec_hash, git_sha, builds, metrics, failed) -> RunRecord:
-    features, offset = variant.split(":")
+def _record(variant, spec, spec_hash, git_sha, builds, metrics, failed, unavailable=None):
+    """The variant's registry record; `unavailable` (pool -> {scorer: why}) names in params the
+    pools its own or its offset's settlement could not settle."""
+    offset = variant.split(":")[1]
+    origin = "pair_features" if variant == PAIR_VARIANT else "cross_features"
+    params = {
+        "minutes_before": MINUTES_BEFORE,
+        "lambda2": LAMBDA2,
+        "zero_vote": ZERO_VOTE,
+        "date_from": spec["span"]["date_from"],
+        "date_to": spec["span"]["date_to"],
+        "seed": spec["seed"],
+        "spec_hash": spec_hash,
+    }
+    if spec["family_id"] == TRIAL_FAMILY_ID:
+        params["trial"] = True
+    mine = (variant, _baseline_of(variant))
+    missing = [
+        f"{scorer}/{pool}"
+        for pool, scorers in sorted((unavailable or {}).items())
+        for scorer in sorted(scorers)
+        if scorer in mine
+    ]
+    if missing:
+        params["settlement_unavailable"] = missing
     return RunRecord(
         hypothesis_id=HYPOTHESIS,
-        family_id=FAMILY_ID,
+        family_id=spec["family_id"],
         variant=variant,
         ticket=TICKET,
         git_sha=git_sha,
@@ -1190,28 +1652,45 @@ def _record(variant, spec, spec_hash, git_sha, builds, metrics, failed) -> RunRe
         sources=(SOURCE,),
         fold_scheme="walk_forward:" + json.dumps(spec["folds"]["scheme"], sort_keys=True),
         components={
-            "features": ",".join(FEATURES[features]),
+            "features": ",".join(_features_of(variant)),
             "offset": offset,
             "fit": "models.condlogit.fit_conditional_logit",
-            "features_from": "studies.cross_pool.cross_features at t",
+            "features_from": f"studies.cross_pool.{origin} at t",
         },
-        params={
-            "minutes_before": MINUTES_BEFORE,
-            "lambda2": LAMBDA2,
-            "zero_vote": ZERO_VOTE,
-            "date_from": spec["span"]["date_from"],
-            "date_to": spec["span"]["date_to"],
-            "seed": spec["seed"],
-            "spec_hash": spec_hash,
-        },
+        params=params,
         metrics=metrics,
         status="failed" if failed else "scored",
     )
 
 
 def _append(registry: Registry, records: list[RunRecord]) -> list[str]:
-    existing = registry.records(FAMILY_ID)
+    existing = registry.records(records[0].family_id) if records else []
     return [registry.append(r) for r in records if r not in existing]
+
+
+def _not_frozen(registry: Registry, frozen: str | None, spec_hash: str) -> FamilyNotFrozen:
+    """The refusal, naming the frozen spec's --from, --to and --seed when another is frozen."""
+    if frozen is None:
+        return FamilyNotFrozen(
+            f"family {FAMILY_ID!r} is not frozen: run --freeze with this run's --from, --to and "
+            f"--seed first (spec {spec_hash[:12]})"
+        )
+    named = ""
+    try:  # the freeze line holds the spec; the registry's own read has verified the chain
+        for line in registry.path.read_text(encoding="ascii").splitlines():
+            entry = json.loads(line)
+            if entry.get("kind") == "freeze" and entry.get("spec_hash") == frozen:
+                spec = entry["spec"]
+                span = spec["span"]
+                named = f": --from {span['date_from']} --to {span['date_to']} --seed {spec['seed']}"
+                break
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return FamilyNotFrozen(
+        f"family {FAMILY_ID!r} is frozen with another spec ({frozen[:12]}{named}), not this run's "
+        f"({spec_hash[:12]}): run with the frozen --from, --to and --seed (a second --freeze "
+        "raises FamilyAlreadyFrozen)"
+    )
 
 
 def run_cross_pool(
@@ -1222,22 +1701,24 @@ def run_cross_pool(
     seed: int,
     registry: Registry | None = None,
     log: Callable[[str], None] | None = None,
+    trial: bool = False,
 ) -> CrossPoolResult:
-    """Run the frozen family on the development days of the span (see the module doc).
+    """Run the frozen family on the development days of the span (see the module doc); with
+    `trial`, a trial: no freeze needed, the `TRIAL_SCHEME` folds, records in `TRIAL_FAMILY_ID`.
 
     Raises `PreReformPriceError` for a span before 2014-06-07, `FamilyNotFrozen` unless the
-    registry froze this spec, and `paths.DataDirInsideRepo` for an `out_dir` inside the
-    repository, each before any store file is opened."""
+    registry froze this spec (not for a trial), and `paths.DataDirInsideRepo` for an `out_dir`
+    inside the repository, each before any store file is opened."""
     log = log or (lambda message: None)
     _check_span(date_from, date_to)
     registry = default_registry(COUNTRY) if registry is None else registry
-    spec = build_spec(date_from=date_from, date_to=date_to, seed=seed)
+    span = {"date_from": date_from, "date_to": date_to, "seed": seed}
+    spec = _trial_spec(**span) if trial else build_spec(**span)
+    family = spec["family_id"]
     spec_hash = _spec_hash(spec)
-    if registry.frozen_spec_hash(FAMILY_ID) != spec_hash:
-        raise FamilyNotFrozen(
-            f"family {FAMILY_ID!r} is not frozen with this spec ({spec_hash[:12]}): run --freeze "
-            "with the same --from, --to and --seed first"
-        )
+    if not trial and (frozen := registry.frozen_spec_hash(FAMILY_ID)) != spec_hash:
+        raise _not_frozen(registry, frozen, spec_hash)
+    scheme = FoldScheme(**spec["folds"]["scheme"])
     paths.outside_repo(Path(out_dir), what="out")
     out_dir = Path(out_dir)
     started = time.monotonic()
@@ -1245,39 +1726,65 @@ def run_cross_pool(
     boot = spec["bootstrap"]
     files, held = _day_files(date_from, date_to)
     builds = _builds(files)
+    settled = _Settled()
     try:
         log(f"reading {len(files)} development day files")
-        feats, per_day = _features(files, log)
-        rows, counts = _study_rows(feats, date_from, date_to)
+        feats, pair_feats, pair_counts, per_day = _features(files, log)
+        rows, counts, races = _study_rows(feats, date_from, date_to)
         del feats
         counts = {"development_day_files": len(files), "holdout_day_files_skipped": held} | counts
-        folds = walk_forward(rows["race_date"], scheme=load_country_scheme(COUNTRY))
-        counts["folds"] = len(folds)
-        log(f"fitting {len(folds)} folds (peak {_peak_gb():.2f} GB)")
+        counts |= pair_counts
+        pairs = _pair_rows(pair_feats, races, date_from, date_to, counts)
+        del pair_feats, races
+        folds = walk_forward(rows["race_date"], scheme=scheme)
+        pair_folds = _pair_folds(pairs, scheme)
+        counts |= {"folds": len(folds), "pair_folds": len(pair_folds)}
+        log(f"fitting {len(folds)} folds, {len(pair_folds)} pair folds (peak {_peak_gb():.2f} GB)")
         walk = _walk(rows, folds, strict=False)
-        if not folds:
-            for scorer in (*VARIANTS, *BASELINES):
-                walk.fail(scorer, "the fold scheme gives no walk-forward fold on these dates")
+        pair_walk = _pair_walk(pairs, pair_folds, strict=False)
+        why = "the fold scheme gives no walk-forward fold on these dates"
+        for scorer in (*WIN_VARIANTS, *WIN_BASELINES) if not folds else ():
+            walk.fail(scorer, why)
+        for scorer in (PAIR_VARIANT, PAIR_BASELINE) if not pair_folds else ():
+            pair_walk.fail(scorer, why)
         scores = _scores(rows, walk)
-        coefficients, gains = _fits(rows, folds, walk, scores, boot)
+        pair_scores = _scores(pairs, pair_walk, (PAIR_VARIANT,), PAIR_COEF_COLUMNS)
+        coefficients, gains = _fits(rows, folds, walk, scores, boot, WIN_VARIANTS)
+        pair_coefficients, pair_gains = _fits(
+            pairs, pair_folds, pair_walk, pair_scores, boot, (PAIR_VARIANT,)
+        )
         log(f"settling (peak {_peak_gb():.2f} GB)")
-        tables, tails, cells = _settle_all(rows, folds, walk, date_from, date_to, boot, counts, log)
+        _settle_win(rows, folds, walk, date_from, date_to, boot, counts, log, family, settled)
+        _settle_pairs(pairs, pair_folds, pair_walk, boot, log, family, settled)
     except Exception:  # the run is a record too: every variant failed
         _append(
             registry, [_record(v, spec, spec_hash, git_sha, builds, (), True) for v in VARIANTS]
         )
         raise
-    failed = [v for v in VARIANTS if v in walk.errors]
+    errors = {**walk.errors, **pair_walk.errors}
+    failed = [v for v in VARIANTS if v in errors]
+    unavailable = {
+        pool: {s: why for s, why in by.items() if s not in errors}
+        for pool, by in settled.unavailable.items()
+    }
+    unavailable = {pool: by for pool, by in unavailable.items() if by}
+    for pool, by in unavailable.items():
+        counts[f"settlement_unavailable_{pool.lower()}"] = len(by)
 
     def keep(frame: pd.DataFrame) -> pd.DataFrame:
-        return frame[~frame["variant"].isin(walk.errors)] if len(frame) else frame
+        return frame[~frame["variant"].isin(errors)] if len(frame) else frame
 
-    coefficients, gains = keep(coefficients), keep(gains)
-    settlement = keep(pd.DataFrame(tables))
-    tail = keep(pd.concat(tails, ignore_index=True) if tails else pd.DataFrame())
-    cells = [c for c in cells if c["cell_id"].split("/")[0] not in walk.errors]
+    def joined(*frames: pd.DataFrame) -> pd.DataFrame:
+        frames = [f for f in frames if len(f)]
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    coefficients = keep(joined(coefficients, pair_coefficients))
+    gains = keep(joined(gains, pair_gains))
+    settlement = keep(pd.DataFrame(settled.tables))
+    tail = keep(joined(*settled.tails))
+    cells = [c for c in settled.cells if c["cell_id"].split("/")[0] not in errors]
     cells.sort(key=lambda c: (c["mean_return"] is None, -(c["mean_return"] or 0.0)))
-    scores = scores[~scores["variant"].isin(walk.errors)]
+    scores = keep(joined(scores, pair_scores))
     records = [
         _record(
             v,
@@ -1287,16 +1794,19 @@ def run_cross_pool(
             builds,
             () if v in failed else _variant_metrics(v, coefficients, gains, scores, settlement),
             v in failed,
+            unavailable,
         )
         for v in VARIANTS
     ]
     run_ids = _append(registry, records)
-    report_path = out_dir / f"cross-pool-japan-{spec_hash[:12]}.md"
-    cells_path = out_dir / "candidate-cells" / "cross-pool.json"
+    stem = f"cross-pool-japan-{spec_hash[:12]}" + ("-trial" if trial else "")
+    report_path = out_dir / f"{stem}.md"
+    cells_name = "cross-pool-trial.json" if trial else "cross-pool.json"
+    cells_path = out_dir / "candidate-cells" / cells_name
     result = CrossPoolResult(
-        family_id=FAMILY_ID,
+        family_id=family,
         spec_hash=spec_hash,
-        family_size=registry.family_size(FAMILY_ID),
+        family_size=registry.family_size(family),
         coefficients=coefficients.reset_index(drop=True),
         gains=gains.reset_index(drop=True),
         settlement=settlement.reset_index(drop=True),
@@ -1310,9 +1820,12 @@ def run_cross_pool(
         date_from=date_from,
         date_to=date_to,
         seed=seed,
+        unavailable_pools=unavailable,
     )
     about = {
-        "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`, family size {result.family_size}",
+        "family": f"`{family}`, spec sha256 `{spec_hash}`, family size {result.family_size}",
+        "trial": f"yes: not frozen, never written to `{FAMILY_ID}`" if trial else "no",
+        "fold scheme": json.dumps(spec["folds"]["scheme"], sort_keys=True),
         "git": git_sha,
         "store": ", ".join(builds.values()),
         "span": f"{date_from.isoformat()} to {date_to.isoformat()} (development days)",
@@ -1321,7 +1834,7 @@ def run_cross_pool(
         "peak RSS": f"{_peak_gb():.2f} GB",
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    write_report(report_path, render_report(result, walk.errors, about), sources=(SOURCE,))
+    write_report(report_path, render_report(result, errors, about), sources=(SOURCE,))
     text = json.dumps(cells, indent=1, allow_nan=False, ensure_ascii=False) + "\n"
     write_report(cells_path, text, sources=(SOURCE,))
     log(f"done: {report_path}")
@@ -1350,6 +1863,14 @@ def _table(frame: pd.DataFrame | list[dict]) -> str:
     return "\n".join(lines)
 
 
+DIAGNOSTIC_NOTE = (
+    "Settlement, the N5 curves and the candidate cells are a retrospective diagnostic at the "
+    "closing (final) prices, not decision-time (T-2) rules: each claim uses the final price "
+    "twice, in the offset and as the odds, so a late price move can put a combination in or out "
+    "of a selection after t, and no selection is a bet that could be placed at t."
+)
+
+
 def render_report(result: CrossPoolResult, errors: dict[str, str], about: dict) -> str:
     """The private report: aggregate tables only, never a runner or race row."""
     variants = [
@@ -1358,12 +1879,22 @@ def render_report(result: CrossPoolResult, errors: dict[str, str], about: dict) 
         for v in VARIANTS
     ]
     baselines = [{"baseline": b, "error": errors.get(b, "")} for b in BASELINES]
+    unavailable = [
+        f"- {pool}: unavailable for {scorer}: {why}"
+        for pool, by in result.unavailable_pools.items()
+        for scorer, why in by.items()
+    ]
     lines = [
-        f"# E25: the T-2 cross-pool signal at the final Win price ({COUNTRY}, #{TICKET})",
+        f"# E25: the T-2 cross-pool signal at the final price ({COUNTRY}, #{TICKET})",
         "",
         *(f"- {key}: {value}" for key, value in about.items()),
         "- development days only: holdout day files are never opened; the holdout is not opened",
         "- adoption: none (a measurement); every figure here is withheld from the repo (D21)",
+        f"- {DIAGNOSTIC_NOTE}",
+        "",
+        "## Settlement pools unavailable (the fits and the other pools are kept)",
+        "",
+        *(unavailable or ["- none"]),
         "",
         "## Variants (one registry record each)",
         "",
@@ -1383,7 +1914,7 @@ def render_report(result: CrossPoolResult, errors: dict[str, str], about: dict) 
         "",
         _table(result.gains),
         "",
-        "## Settlement at the final dividend (return per unit stake)",
+        "## Settlement at the final dividend (return per unit stake; a retrospective diagnostic)",
         "",
         _table(result.settlement),
         "",
@@ -1423,18 +1954,20 @@ def render_public_report(result: CrossPoolResult) -> str:
         span = f" --from {result.date_from.isoformat()} --to {result.date_to.isoformat()}"
     seed = "" if result.seed is None else f" --seed {result.seed}"
     rows = [
-        f"| `{v}` | {', '.join(FEATURES[v.split(':')[0]])} | {v.split(':')[1]} | "
+        f"| `{v}` | {', '.join(_features_of(v))} | {v.split(':')[1]} | "
         f"{'failed' if v in failed else 'scored'} | {withheld} | {withheld} |"
         for v in VARIANTS
     ]
+    pools_of = {s: POOLS for s in (*WIN_VARIANTS, *WIN_BASELINES)}
+    pools_of |= {s: (QUINELLA,) for s in (PAIR_VARIANT, PAIR_BASELINE)}
     settled = [
         f"| `{s}` | {pool} | {sel} | {withheld} |"
-        for s in (*VARIANTS, *BASELINES)
-        for pool in POOLS
+        for s, pools in pools_of.items()
+        for pool in pools
         for sel in SELECTIONS
     ]
     lines = [
-        f"# Experiment report: E25, the T-2 cross-pool signal at the final Win price (Japan, "
+        f"# Experiment report: E25, the T-2 cross-pool signal at the final price (Japan, "
         f"#{TICKET})",
         "",
         f"Ticket #{TICKET} (epic #73, N4). **Nothing is adopted.** **Every figure is withheld "
@@ -1457,10 +1990,13 @@ def render_public_report(result: CrossPoolResult) -> str:
         "",
         "## Hypothesis",
         "",
-        "E25: at t = post - 2 min (D2's primary), the Quinella pool's top-2 support against the "
-        "Win-implied (Harville) top-2 support, x_cross, adds to the final Win price: beta != 0 "
-        "in u = offset + beta . x, and the walk-forward winner log-loss gain over the offset is "
-        "positive. **Null:** beta = 0 and no gain, the starting point.",
+        "E25: at t = post - 2 min (D2's primary), the Quinella pool's support against the "
+        "Win-implied (Harville) support adds to the final price: beta != 0 in u = offset + "
+        "beta . x, and the walk-forward winner log-loss gain over the offset is positive. Per "
+        "runner, x_cross (the top-2 support) over the final Win price; per pair "
+        f"(`{PAIR_VARIANT}`), log_ratio (the pair price at t against the Win-implied pair) over "
+        "the final Quinella price, the winners the pairs the QUINELLA dividends pay. **Null:** "
+        "beta = 0 and no gain, the starting point.",
         "",
         "## Variants tried",
         "",
@@ -1472,16 +2008,23 @@ def render_public_report(result: CrossPoolResult) -> str:
         "",
         "## Settlement at the final dividend",
         "",
-        "Each variant and each offset alone (beta = 0) is settled in WIN, QUINELLA and FORECAST "
-        "(Exacta); `value` bets every priced combination with claim p x O > 1, `top1` the "
-        "race's largest claim.",
+        "Each Win variant and its offset alone (beta = 0: `offset:normalised`, "
+        "`offset:calibrated`) is settled in WIN, QUINELLA and FORECAST (Exacta); the pair "
+        f"variant and its offset alone (`{PAIR_BASELINE}`) in QUINELLA. `value` bets every "
+        "priced combination with claim p x O > 1, `top1` the race's largest claim (equal claims "
+        "to the lowest final odds, then the lowest combination text). The offsets alone have no "
+        "registry record: their returns ride as `offset_return[...]` metrics on the records of "
+        "the variants with the same offset.",
+        "",
+        DIAGNOSTIC_NOTE,
         "",
         "| Scorer | Pool | Selection | Return per unit stake (bounds) |",
         "| --- | --- | --- | --- |",
         *settled,
         "",
         f"N5 tail-return curves per scorer and pool, by class group: {withheld}. The ranked "
-        f"candidate cells: {withheld}. Counts and exclusions: {withheld}.",
+        f"candidate cells (`study` `{STUDY}`): {withheld}. Counts, exclusions and any "
+        f"settlement pool left unavailable: {withheld}.",
         "",
         "## What the result rules out",
         "",
@@ -1501,6 +2044,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--freeze", action="store_true", help="freeze the spec (before the run)")
     mode.add_argument("--run", action="store_true", help="run the frozen family")
+    mode.add_argument(
+        "--trial",
+        action="store_true",
+        help=f"a trial: records in {TRIAL_FAMILY_ID}, no freeze, the trial folds, files -trial",
+    )
     parser.add_argument(
         "--from",
         dest="date_from",
@@ -1509,14 +2057,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="first day (default 2014-06-07)",
     )
     parser.add_argument(
-        "--to", dest="date_to", type=date.fromisoformat, default=None, help="last day (today)"
+        "--to",
+        dest="date_to",
+        type=date.fromisoformat,
+        required=True,
+        help="last day (required: the spec freezes it, so --freeze and --run take the same)",
     )
     parser.add_argument("--out", type=Path, default=None, help="report directory, outside the repo")
     parser.add_argument("--seed", type=int, default=TICKET, help=f"bootstrap seed ({TICKET})")
     args = parser.parse_args(argv)
-    date_to = date.today() if args.date_to is None else args.date_to
     registry = default_registry(COUNTRY)
-    span = {"date_from": args.date_from, "date_to": date_to, "seed": args.seed}
+    span = {"date_from": args.date_from, "date_to": args.date_to, "seed": args.seed}
     if args.freeze:
         spec_hash = freeze_spec(**span, registry=registry)
         print(json.dumps({"family_id": FAMILY_ID, "spec_hash": spec_hash}, indent=2))
@@ -1527,10 +2078,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         out_dir=out_dir,
         registry=registry,
         log=lambda message: print(message, file=sys.stderr),
+        trial=args.trial,
     )
     write_summary(registry, summary_dir(COUNTRY))
-    public = env.repo_root() / "docs" / "experiments" / "cross-pool-japan.md"
-    write_report(public, render_public_report(result), sources=())
+    public = None
+    if not args.trial:  # the family's page; a trial's records are in the registry summary
+        public = env.repo_root() / "docs" / "experiments" / "cross-pool-japan.md"
+        write_report(public, render_public_report(result), sources=())
     print(
         json.dumps(
             {
@@ -1540,7 +2094,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "cells_path": str(result.cells_path),
                 "run_ids": [r[:16] for r in result.run_ids],
                 "failed_variants": result.failed_variants,
-                "public_report": str(public),
+                "unavailable_pools": sorted(result.unavailable_pools),
+                "public_report": None if public is None else str(public),
             },
             indent=2,
         )
