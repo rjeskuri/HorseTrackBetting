@@ -961,3 +961,20 @@ Each is proposed under epic #72, `status:proposed`; the orchestrator files them.
 - #275: D4's spline on the same folds and tail table (already filed).
 - #276: meeting-clustered CIs for the slopes (already filed).
 - #320: a paired comparison of the tail β and the spline on one store build (already filed).
+
+## On the leaderboard (2026-11-27)
+
+Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
+adoption verdicts. Nothing is adopted or rejected: every option, model and member will be a row on the planned
+`horsetrack japan leaderboard` (#452; this revision does not have the command yet), ranked by its shrunk return per
+¥100 at the final price, and a row with no measured return will be listed after the ranking, never dropped. Where
+this report says "not adopted", "rules out" or "rejected", read a measured position. This section reopens and
+re-runs nothing.
+
+- Registry families, one per section above: `japan-crowd-calibration-final-win` (#77), `japan-tail-beta-final-win`
+  (#285), `japan-calibrated-market-final-win` (#275), `japan-entropy-gradient-tail-conditioned` (#277) and
+  `japan-tail-hinge-final-win` (#294).
+- Each measures the calibration of the final Win price, not a return, so, as task 4 (#451, planned) specifies, each
+  will be listed as a model with no return yet.
+- Each section's "Nothing is adopted" and "What this rules out" now read as measured positions on that calibration.
+  The choice of baseline de-vig is unchanged by this section.
