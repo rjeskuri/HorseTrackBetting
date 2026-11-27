@@ -51,6 +51,7 @@ __all__ = [
     "RegistryTampered",
     "RunRecord",
     "default_registry",
+    "is_licensed_record",
     "summary_dir",
     "summary_stem",
     "write_summary",
@@ -156,6 +157,12 @@ def _licensed(record: RunRecord) -> bool:
     components = record.components if isinstance(record.components, dict) else {}
     named = [*builds, *components, *components.values()]
     return is_withheld(record.sources) or is_withheld(tuple(str(name) for name in named))
+
+
+def is_licensed_record(record: RunRecord) -> bool:
+    """Whether ``write_summary`` withholds the run's values: what ``_licensed`` returns, so other
+    readers (the leaderboard, #450) withhold exactly the runs the summary withholds."""
+    return _licensed(record)
 
 
 # --------------------------------------------------------------------------- validation
