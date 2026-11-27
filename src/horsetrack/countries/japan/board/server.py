@@ -7,8 +7,8 @@ docs/specs/board-feed.md) with an ETag, so the page's poll costs a 304 when noth
 `/shadow` and `/shadow.js` (`shadow.html` and `shadow.js` beside `page_path`, ticket #122) and
 `/shadow-feed` (`build_shadow` of the day, with the same ETag, gzip and throttle as /feed).
 Anything else is 404: no listings, no other files. Every response carries
-Cache-Control no-store, X-Robots-Tag noindex nofollow, Referrer-Policy no-referrer and
-X-Content-Type-Options nosniff.
+Cache-Control no-store, X-Robots-Tag noindex nofollow, Referrer-Policy no-referrer,
+X-Content-Type-Options nosniff and X-Frame-Options DENY.
 
 The feed is rebuilt at most every `min_rebuild_s`, and only when a file of the day folder (an odds
 log or a post-time sidecar) appeared, went away, or changed size or mtime, or when a race's
@@ -21,22 +21,42 @@ whether or not a file changed (its buckets and stale flags follow the clock), an
 ETag change only when something other than `generated_utc` and `minutes_to_post` did. The default
 bind is 127.0.0.1; the board has no login.
 
+With `--tunnel` (ticket #505) the server is exposed to a phone through a cloudflared quick tunnel
+(`tunnel.quick_tunnel`), whose URL is public, so every path needs an access token: a fresh one per
+run, held in memory until the server is bound and the tunnel up, then kept in
+$HORSETRACK_DATA_DIR/board/access-token (`write_access_token`, mode 0600; a start that fails leaves
+the file as it was), given as `?t=<token>` on first load, after which an HttpOnly, SameSite=Strict
+cookie (Secure behind https) carries it on the page's fetches. Missing or wrong, it is the empty
+404 of an unknown path; the check holds for 127.0.0.1 too, since the tunnel connects from there.
+The phone URL is printed once and the token appears nowhere else. Without `--tunnel` nothing
+changes. docs/specs/board-feed.md.
+
     horsetrack japan board-serve --date 2026-11-29 [--port 8765] [--host 127.0.0.1] [--page P]
+        [--from-vm ALIAS] [--tunnel]
 """
 
 from __future__ import annotations
 
 import gzip
 import hashlib
+import hmac
 import json
 import logging
+import os
+import re
+import secrets
+import signal
 import sys
+import tempfile
 import threading
 import time
+from contextlib import ExitStack
 from datetime import date, datetime
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl
 
 import typer
 
@@ -46,6 +66,8 @@ from horsetrack.countries.japan.board.feed import build_board
 from horsetrack.countries.japan.board.flags import FlagRules, load_flag_rules
 from horsetrack.countries.japan.board.shadow_feed import build_shadow
 from horsetrack.countries.japan.board.snapshot import jra_day_dir
+from horsetrack.countries.japan.board.tunnel import TunnelError, quick_tunnel
+from horsetrack.countries.japan.board.tunnel import parse_tunnel_url as parse_tunnel_url
 from horsetrack.countries.japan.logger.pull_vm import vm_day_dir
 from horsetrack.countries.japan.models.v0.loader import load_shadow_models
 from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels
@@ -60,7 +82,11 @@ HEADERS = {
     "X-Robots-Tag": "noindex, nofollow",
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
 }
+COOKIE_NAME = "board_access"
+_TOKEN_CHARS = re.compile(r"[A-Za-z0-9_-]+")  # secrets.token_urlsafe's alphabet
+_QUERY = re.compile(r"\?[^\s\"']*")
 
 Fingerprint = tuple[tuple[str, int, int], ...]
 
@@ -189,14 +215,68 @@ def _etag_matches(header: str | None, etag: str) -> bool:
     return etag in asked or "*" in asked
 
 
+def _fresh_token() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def write_access_token(token: str | None = None) -> str:
+    """`token` (URL-safe characters), or a fresh one when None, written alone to
+    $HORSETRACK_DATA_DIR/board/access-token with mode 0600 (replacing the last run's) and
+    returned. The `board/` folder is resolved, a symlink followed, and DataDirInsideRepo raised
+    before any file is created when it lies in the repository."""
+    if token is None:
+        token = _fresh_token()
+    elif not _TOKEN_CHARS.fullmatch(token):
+        raise ValueError("token: a non-empty string of [A-Za-z0-9_-], or None for a fresh one")
+    folder = paths.outside_repo(paths.data_dir() / "board", what=f"{paths.DATA_DIR_VAR}/board")
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "access-token"
+    fd, tmp = tempfile.mkstemp(prefix=".access-token.", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as fh:
+            os.fchmod(fh.fileno(), 0o600)
+            fh.write(token + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return token
+
+
+def _is_token(candidate: str, secret: bytes) -> bool:
+    # bytes, so a non-ASCII candidate compares (False) instead of raising
+    return hmac.compare_digest(candidate.encode("utf-8", "replace"), secret)
+
+
+def _cookie_values(headers: Message, name: str) -> list[str]:
+    """The values of every cookie called `name` in the request's Cookie headers."""
+    values = []
+    for header in headers.get_all("Cookie") or []:
+        for pair in header.split(";"):
+            key, sep, value = pair.strip().partition("=")
+            if sep and key == name:
+                values.append(value)
+    return values
+
+
+def _redact(text: str, token: str | None) -> str:
+    """`text` with every query string and the token blanked, for the request log."""
+    text = _QUERY.sub("?[redacted]", text)
+    return text if token is None else text.replace(token, "[redacted]")
+
+
 def _make_handler(
-    page_path: Path, feed: Feed, shadow_feed: ShadowFeed
+    page_path: Path, feed: Feed, shadow_feed: ShadowFeed, token: str | None = None
 ) -> type[BaseHTTPRequestHandler]:
     pages = {"/": page_path, "/shadow": page_path.with_name("shadow.html")}
     scripts = {"/board.js": "board.js", "/shadow.js": "shadow.js"}
     feeds = {"/feed": feed, "/shadow-feed": shadow_feed}
+    known = {*pages, *scripts, *feeds}
+    secret = None if token is None else token.encode("ascii")
 
     class Handler(BaseHTTPRequestHandler):
+        grant: str | None = None  # the Set-Cookie of a request let in by its ?t=
+
         def _send(
             self,
             status: int,
@@ -205,7 +285,10 @@ def _make_handler(
             extra: dict | None = None,
         ) -> None:
             self.send_response(status)
-            for key, value in {**HEADERS, **(extra or {})}.items():
+            headers = {**HEADERS, **(extra or {})}
+            if self.grant is not None and status != 404:
+                headers["Set-Cookie"] = self.grant
+            for key, value in headers.items():
                 self.send_header(key, value)
             if ctype:
                 self.send_header("Content-Type", ctype)
@@ -214,11 +297,35 @@ def _make_handler(
             if body and self.command != "HEAD":
                 self.wfile.write(body)
 
+        def _not_found(self) -> None:
+            if secret is None:
+                return self._send(404, b"not found\n", "text/plain; charset=utf-8")
+            return self._send(404)  # empty: a missing token and a missing page look the same
+
         def _wants_gzip(self) -> bool:
             return "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
 
+        def _admit(self, path: str, query: str) -> bool:
+            """With a token: whether the request's ?t= or cookie holds it and `path` exists;
+            a right ?t= also grants the cookie."""
+            self.grant = None
+            if secret is None:
+                return True
+            asked = [v for k, v in parse_qsl(query, keep_blank_values=True) if k == "t"]
+            by_query = any(_is_token(v, secret) for v in asked)
+            cookies = _cookie_values(self.headers, COOKIE_NAME)
+            if not (by_query or any(_is_token(v, secret) for v in cookies)) or path not in known:
+                return False
+            if by_query:
+                proto = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0]
+                secure = "; Secure" if proto.strip().lower() == "https" else ""
+                self.grant = f"{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict{secure}"
+            return True
+
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
-            path = self.path.split("?", 1)[0]
+            path, _, query = self.path.partition("?")
+            if not self._admit(path, query):
+                return self._not_found()
             if path in pages:
                 try:
                     html = pages[path].read_bytes()
@@ -229,7 +336,7 @@ def _make_handler(
                 try:
                     script = page_path.with_name(scripts[path]).read_bytes()
                 except OSError:
-                    return self._send(404, b"not found\n", "text/plain; charset=utf-8")
+                    return self._not_found()
                 return self._send(200, script, "text/javascript; charset=utf-8")
             if path in feeds:
                 gzipped = self._wants_gzip()
@@ -242,12 +349,13 @@ def _make_handler(
                 if gzipped:
                     extra["Content-Encoding"] = "gzip"
                 return self._send(200, body, "application/json; charset=utf-8", extra)
-            return self._send(404, b"not found\n", "text/plain; charset=utf-8")
+            return self._not_found()
 
         do_HEAD = do_GET  # noqa: N815 (http.server API)
 
         def log_message(self, format: str, *args) -> None:  # noqa: A002 (http.server API)
-            sys.stderr.write(f"{self.log_date_time_string()} {format % args}\n")
+            line = _redact(format % args, token)
+            sys.stderr.write(f"{self.log_date_time_string()} {line}\n")
 
     return Handler
 
@@ -262,14 +370,20 @@ def make_server(
     models: ShadowModels | None = None,
     flag_rules: FlagRules | None = None,
     day_dir: Path | None = None,
+    token: str | None = None,
 ) -> ThreadingHTTPServer:
     """A server for the board of `race_date`, bound to (host, port) but not yet serving. Without
     `models` the shadow feed's values are null; `flag_rules` defaults to the shipped rules. Both
-    feeds read the odds logs from `day_dir` when given (a pulled VM folder), else the Mac's own."""
+    feeds read the odds logs from `day_dir` when given (a pulled VM folder), else the Mac's own.
+    With `token` (URL-safe characters) every path needs it, as `?t=` or the cookie that sets;
+    anything else is an empty 404."""
+    if token is not None and not _TOKEN_CHARS.fullmatch(token):
+        raise ValueError("token: a non-empty string of [A-Za-z0-9_-], or None for no token")
     feed = Feed(race_date, min_rebuild_s, day_dir)
     rules = load_flag_rules() if flag_rules is None else flag_rules
     shadow_feed = ShadowFeed(race_date, min_rebuild_s, models, rules, day_dir)
-    server = ThreadingHTTPServer((host, port), _make_handler(Path(page_path), feed, shadow_feed))
+    handler = _make_handler(Path(page_path), feed, shadow_feed, token)
+    server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
     return server
 
@@ -289,6 +403,13 @@ def board_serve_command(
         help="Read the day's odds logs pulled from this VM (ssh alias; `pull-vm --every`) from "
         "$HORSETRACK_DATA_DIR/vm/<alias>/ instead of the Mac's own odds_snapshots/.",
     ),
+    tunnel: bool = typer.Option(
+        False,
+        "--tunnel",
+        help="Expose the pages to a phone through a cloudflared quick tunnel (cloudflared on "
+        "PATH). Every path then needs a fresh access token, kept in "
+        "$HORSETRACK_DATA_DIR/board/access-token; the phone URL holding it is printed once.",
+    ),
 ) -> None:
     """Serve the board page at / and the day's live feed at /feed, and the shadow page at /shadow
     and its feed at /shadow-feed."""
@@ -307,6 +428,8 @@ def board_serve_command(
             day_dir = vm_day_dir(from_vm, day)
         except ValueError as exc:
             raise typer.BadParameter(str(exc), param_hint="--from-vm") from exc
+    if tunnel and host != LOCALHOST:  # the tunnel connects to 127.0.0.1
+        raise typer.BadParameter(f"--tunnel serves on {LOCALHOST} only", param_hint="--host")
     if host != LOCALHOST:
         typer.echo(
             f"warning: binding {host}, not {LOCALHOST}: the board is reachable from other "
@@ -322,15 +445,47 @@ def board_serve_command(
         typer.echo(f"error: shadow models: {' '.join(str(exc).split())[:300]}", err=True)
         raise typer.Exit(1) from exc
     fits = ",".join(f"{k}={v}" for k, v in models.ids.items()) if models else "none (values null)"
-    server = make_server(
-        day, host=host, port=port, page_path=page_path, models=models, day_dir=day_dir
-    )
+    # in memory until the tunnel is up: a start that fails keeps the running one's token file
+    token = _fresh_token() if tunnel else None
+    try:
+        server = make_server(
+            day,
+            host=host,
+            port=port,
+            page_path=page_path,
+            models=models,
+            day_dir=day_dir,
+            token=token,
+        )
+    except OSError as exc:  # the port is taken, most often by an earlier board-serve
+        typer.echo(f"error: cannot listen on {host}:{port}: {exc}", err=True)
+        raise typer.Exit(1) from exc
     bound_host, bound_port = server.server_address[:2]
     typer.echo(f"serving the board of {day} on http://{bound_host}:{bound_port}/")
     typer.echo(f"shadow page on http://{bound_host}:{bound_port}/shadow, models={fits}")
     try:
-        server.serve_forever()
+        with ExitStack() as stack:
+            if tunnel:
+                # SIGTERM (and SIGINT, even if inherited as ignored) stops like Ctrl-C, so the
+                # tunnel below is closed; the old handlers come back on the way out
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    stack.callback(signal.signal, sig, signal.signal(sig, _interrupt))
+                url = stack.enter_context(quick_tunnel(bound_port))
+                try:
+                    write_access_token(token)
+                except (OSError, paths.DataDirInsideRepo) as exc:
+                    typer.echo(f"error: access token: {exc}", err=True)
+                    raise typer.Exit(1) from exc
+                typer.echo(f"open on the phone: {url}/shadow?t={token}")
+            server.serve_forever()
     except KeyboardInterrupt:
         pass
+    except TunnelError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
     finally:
         server.server_close()
+
+
+def _interrupt(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt
