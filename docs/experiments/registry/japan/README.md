@@ -14,6 +14,7 @@ per family, each holding that family's runs.
 - [japan-calibrated-market-final-win](japan-calibrated-market-final-win.md)
 - [japan-coplacer-place-e15](japan-coplacer-place-e15.md)
 - [japan-crowd-calibration-final-win](japan-crowd-calibration-final-win.md)
+- [japan-debut-maiden-members-v1](japan-debut-maiden-members-v1.md)
 - [japan-entropy-gradient-tail-conditioned](japan-entropy-gradient-tail-conditioned.md)
 - [japan-family-l-exotic-pool-choice](japan-family-l-exotic-pool-choice.md)
 - [japan-same-day-bias-final-win](japan-same-day-bias-final-win.md)
