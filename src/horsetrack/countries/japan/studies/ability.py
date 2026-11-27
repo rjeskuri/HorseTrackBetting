@@ -1153,21 +1153,34 @@ def artifact_stem(spec_hash: str, builds: dict, trial: bool) -> str:
     return f"ability-{COUNTRY}-{spec_hash[:12]}-{digest[:12]}" + ("-trial" if trial else "")
 
 
-def _record(variant: Variant, git_sha: str, builds: dict, spec_hash: str, trial: bool) -> RunRecord:
+def _record(
+    variant: Variant,
+    git_sha: str,
+    builds: dict,
+    spec_hash: str,
+    trial: bool,
+    *,
+    artifacts: bool = True,
+) -> RunRecord:
+    """The variant's registry record; `artifacts=False` for a run that aborted before writing
+    its report and export, whose record names no files (a retry must not point to an earlier
+    run's)."""
     params = dict(variant.params) | {"spec_sha256": spec_hash}
     if trial:
         params["trial"] = True
     if variant.error:
         params["error"] = variant.error
-    # the run's artifacts after the '@': a data refresh is another run of the variant (#74)
-    artifacts = f"reports+features/{COUNTRY}@{artifact_stem(spec_hash, builds, trial)}"
+    data_builds = dict(builds)
+    if artifacts:  # the run's files after the '@': a data refresh is another run (#74)
+        stem = artifact_stem(spec_hash, builds, trial)
+        data_builds[ARTIFACTS] = f"reports+features/{COUNTRY}@{stem}"
     return RunRecord(
         hypothesis_id=variant.hypothesis_id,
         family_id=TRIAL_FAMILY_ID if trial else FAMILY_ID,
         variant=variant.name,
         ticket=TICKET,
         git_sha=git_sha,
-        data_builds={**builds, ARTIFACTS: artifacts},
+        data_builds=data_builds,
         sources=SOURCES,
         fold_scheme=variant.fold_scheme,
         components=variant.components,
@@ -1247,7 +1260,7 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
     family = TRIAL_FAMILY_ID if trial else FAMILY_ID
     git_sha = _git_sha()
     builds = {**store_builds(), **pedigree_build()}
-    stem = artifact_stem(spec_hash, builds, trial)  # named in every record of this run
+    stem = artifact_stem(spec_hash, builds, trial)  # named in every record of a completed run
     started = time.monotonic()
     try:
         inputs = load_inputs(log=log)
@@ -1263,7 +1276,7 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
                 {},
                 error=f"{type(exc).__name__}: {exc}",
             )
-            registry.append(_record(failed, git_sha, builds, spec_hash, trial))
+            registry.append(_record(failed, git_sha, builds, spec_hash, trial, artifacts=False))
         write_committed_summary(registry)
         raise
     log(f"computed ({_progress(started)})")

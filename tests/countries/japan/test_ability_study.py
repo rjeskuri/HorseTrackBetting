@@ -28,6 +28,12 @@ Contract pinned here (the coder implements what these tests call, in `studies/ab
   in the record, and two records that differ only by a refresh of a build are two runs of one
   variant (`Registry.family_size`, #74's rule). `run_study` names the report, its JSON and the
   export by that stem, so a rerun on refreshed data leaves the earlier files as they were.
+- Aborted runs (round 2). When `run_study` aborts because `load_inputs` or `compute_study`
+  raises, it writes no report, JSON or export, appends one failed record per `PLANNED` variant
+  whose `data_builds` are the run's store and pedigree builds without `ARTIFACTS` (no record names
+  an artifact stem: a fresh build has no files, and a retry on the same build must not point to an
+  earlier run's), and the original exception surfaces. A completed run's records, a variant that
+  failed inside it included, still name its stem.
 
 Every frame is synthetic and every RNG seeded. Expected values come from first principles (a
 Newton fit of the power of q, hand-counted rates), from #129's own `_connection_rates` on a fake
@@ -647,3 +653,153 @@ def test_a_rerun_on_refreshed_data_keeps_the_earlier_artifacts(tmp_path, monkeyp
     assert len(records) == n_first + 1
     assert all(stem in canonical(r) and stem2 not in canonical(r) for r in records[:n_first])
     assert all(stem2 in canonical(r) for r in records[n_first:])
+
+
+# --------------------------------------------------------------------------- aborted runs
+
+
+class Boom(RuntimeError):
+    """The failure a stubbed stage raises."""
+
+
+STAGES = ("load_inputs", "compute_study")
+RUNNERS_BYTES = b"synthetic runners, one build"
+FAILED_INSIDE = ("E34", "by_class")  # the variant that fails inside a completed run
+
+
+def expected_builds() -> dict[str, str]:
+    """The fake store's builds from first principles: each file's path and the first 16 hex of
+    the sha256 of its bytes (see `fake_store`)."""
+
+    def sha(content: bytes) -> str:
+        return hashlib.sha256(content).hexdigest()[:16]
+
+    return {
+        "jra_runners": f"processed/jra/runners.parquet@{sha(RUNNERS_BYTES)}",
+        "jra_races": f"processed/jra/races.parquet@{sha(b'synthetic races')}",
+        "jravan_horse_pedigree": f"processed/jravan/horse_pedigree.parquet@"
+        f"{sha(b'synthetic pedigree')}",
+    }
+
+
+def completing_compute(inputs, spec, scheme, log=print):
+    """A completed study: one scored variant and one that failed inside the run."""
+    study = Study(counts={"level1_races": 12})
+    study.variants.append(
+        Variant(
+            "E33",
+            "selection:inner_fold",
+            "walk_forward:synthetic",
+            {"study": "studies/ability.py"},
+            {"thin_starts": 30},
+            metrics=(FoldMetric("all_folds", "delta_ll", 0.02, None, None, 9),),
+        )
+    )
+    study.variants.append(
+        Variant(
+            *FAILED_INSIDE,
+            "walk_forward:synthetic",
+            {"study": "studies/ability.py"},
+            {"thin_starts": 30},
+            error="ValueError: no thin races in a scored fold",
+        )
+    )
+    return study, pd.DataFrame({"race_id": ["r1", "r1"], "u": [0.3, -0.3]})
+
+
+def abort_at(monkeypatch, stage: str, boom: Boom) -> None:
+    def raise_boom(*args, **kwargs):
+        raise boom
+
+    if stage == "load_inputs":
+        monkeypatch.setattr(ability, "load_inputs", raise_boom)
+    else:
+        monkeypatch.setattr(ability, "load_inputs", lambda log=print: None)
+        monkeypatch.setattr(ability, "compute_study", raise_boom)
+
+
+def stub_run(monkeypatch) -> None:
+    monkeypatch.setattr(ability, "load_inputs", lambda log=print: None)
+    monkeypatch.setattr(ability, "compute_study", completing_compute)
+    monkeypatch.setattr(ability, "write_committed_summary", lambda registry: None)
+
+
+def assert_aborted_records(records: list[RunRecord], message: str, trial: bool) -> None:
+    """One failed record per planned variant, the run's builds without an artifact field."""
+    assert sorted((r.hypothesis_id, r.variant) for r in records) == sorted(ability.PLANNED)
+    builds = expected_builds()
+    for r in records:
+        assert r.status == "failed", r.variant
+        assert message in r.params.get("error", ""), r.variant
+        assert ability.ARTIFACTS not in r.data_builds, (
+            f"{r.variant}: an aborted run produced no artifacts, yet its record names "
+            f"{r.data_builds.get(ability.ARTIFACTS)!r}"
+        )
+        assert "ability_artifacts" not in r.data_builds, r.variant
+        assert r.data_builds == builds, f"{r.variant}: the other data builds stay"
+        stem = ability.artifact_stem(r.params["spec_sha256"], builds, trial)
+        assert stem not in canonical(r), f"{r.variant} names the artifact stem {stem}"
+
+
+@pytest.mark.parametrize("trial", [False, True], ids=["frozen", "trial"])
+@pytest.mark.parametrize("stage", STAGES)
+def test_an_aborted_run_records_its_planned_variants_failed_without_artifacts(
+    tmp_path, monkeypatch, stage, trial
+):
+    data, out = tmp_path / "data", tmp_path / "reports"
+    stub_run(monkeypatch)
+    message = f"{stage} broke on a {'trial' if trial else 'frozen'} run"
+    boom = Boom(message)
+    abort_at(monkeypatch, stage, boom)
+    fake_store(data, RUNNERS_BYTES)
+
+    with pytest.raises(Boom) as raised:
+        ability.run_study(trial=trial, out_dir=out, log=lambda message: None)
+
+    assert raised.value is boom, "the original exception surfaces"
+    assert files_under(out, data / "features") == {}, "an aborted run writes no report or export"
+    registry = Registry(data / "registry" / "japan.jsonl", holdout_log=tmp_path / "no.jsonl")
+    family = ability.TRIAL_FAMILY_ID if trial else ability.FAMILY_ID
+    other = ability.FAMILY_ID if trial else ability.TRIAL_FAMILY_ID
+    assert registry.records(other) == []
+    assert_aborted_records(registry.records(family), message, trial)
+
+
+@pytest.mark.parametrize("stage", STAGES)
+def test_a_retry_that_aborts_on_the_same_build_names_none_of_the_earlier_files(
+    tmp_path, monkeypatch, stage
+):
+    data, out = tmp_path / "data", tmp_path / "reports"
+    stub_run(monkeypatch)
+    fake_store(data, RUNNERS_BYTES)
+    quiet = lambda message: None  # noqa: E731
+
+    first = ability.run_study(out_dir=out, log=quiet)
+
+    stem = first["artifact_stem"]
+    registry = Registry(Path(first["registry_path"]), holdout_log=tmp_path / "no.jsonl")
+    done = registry.records(ability.FAMILY_ID)
+    assert {(r.variant, r.status) for r in done} == {
+        ("selection:inner_fold", "scored"),
+        (FAILED_INSIDE[1], "failed"),
+    }
+    for r in done:  # a completed run's records, its failed variant included, name its files
+        assert ability.ARTIFACTS in r.data_builds, r.variant
+        assert stem in r.data_builds[ability.ARTIFACTS], r.variant
+    assert FAILED_INSIDE[1] in Path(first["report_path"]).read_text("utf-8")
+    kept = files_under(out, data / "features")
+    assert len(kept) == 3, "the report, its JSON and the export"
+
+    message = f"{stage} broke on a retry"
+    boom = Boom(message)
+    abort_at(monkeypatch, stage, boom)
+    with pytest.raises(Boom) as raised:
+        ability.run_study(out_dir=out, log=quiet)
+
+    assert raised.value is boom, "the original exception surfaces"
+    assert files_under(out, data / "features") == kept, "the retry wrote or changed a file"
+    records = registry.records(ability.FAMILY_ID)
+    assert [canonical(r) for r in records[: len(done)]] == [canonical(r) for r in done]
+    retry = records[len(done) :]
+    assert all(stem not in canonical(r) for r in retry), "a failed retry names the earlier files"
+    assert_aborted_records(retry, message, False)
