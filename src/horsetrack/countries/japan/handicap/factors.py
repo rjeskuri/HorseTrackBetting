@@ -3,15 +3,18 @@
 `handicap_factors(race_id, as_of=..., train_end=None)` gives one row per declared runner of a race:
 the factors a handicapper weighs, built from #128's PP lines (newest 10 starts before the cut) and
 today's card. The cut is the last race day before the race whose result is published before
-`as_of` (#128's ruling). The in-fold pieces, the class par behind the speed figure and the draw
+`as_of` (#128's ruling). The in-fold pieces, #96's speed model behind the speed figure and the draw
 bias, are fitted on the non-holdout race days on or before `train_end` (default: the cut). Every
 read goes through #114's scoped reader, so a holdout day is never read. Every value column has a
 Boolean `<column>_missing` companion; nothing is imputed.
 
 Factor families, one function each (the rulings are pinned in tests/countries/japan/handicap/):
 
-1. `_speed`: figure = class par - finish time, par = median winner time at the same (venue,
-   surface, distance, class) on the in-fold days; best, last, mean of the newest 3, count.
+1. `_speed`: figure = #96's expected top-3 time of the start's race - finish time (#219, replacing
+   #129's interim class par); best, last, mean of the newest 3, count. The model is #96's
+   `SpeedModel` (par per six-key cell, day variant), fitted on the in-fold days of
+   `speed_run.build_race_table`; days after `train_end` up to the cut are observed, and a start's
+   variant is read 2 minutes before its race's post (D2), so no later race and not its own counts.
 2. `_pace`: late figure = the race's median last 600 m - own; early position and late gain from
    the corner positions; means over the newest 3 starts that have each.
 3. `_style`: front / stalker / midpack / closer from the first corner, the most frequent over the
@@ -63,7 +66,9 @@ from horsetrack.countries.japan.handicap.pp import (
     last_published_day,
     race_day_of,
 )
+from horsetrack.countries.japan.models.speed import SpeedModel, SpeedSpec
 from horsetrack.countries.japan.models.v0.calibration import _group_softmax, _nll, _segments
+from horsetrack.countries.japan.studies import speed_run
 
 COUNTRY = "japan"
 STYLES = ("front", "stalker", "midpack", "closer")  # 逃げ / 先行 / 差し / 追込
@@ -79,6 +84,10 @@ FIT_PRIOR = 2
 DRAW_PRIOR = 2
 FIT_DIMS = ("dist", "surface", "going", "venue", "course")
 WHO = ("jockey", "trainer")
+
+# #96's model as #305's study fits it: six-key par, (track, surface) day variant, Student-t error
+SPEED_SPEC = SpeedSpec(speed_run.PAR_KEYS, speed_run.VARIANT_KEYS, same_day_variant=True, t_df=5.0)
+SPEED_ESTIMAND = "mean_placed_1_3"
 
 CARD_RACE = ("venue", "surface", "distance_m", "course_config", "going", "race_class")
 CARD_RUNNER = ("horse_no", "horse_id", "draw", "actual_wt_kg", "horse_wt_change_kg",
@@ -139,8 +148,16 @@ def handicap_factors(
     return _factors_for(day, [race_id], cut=cut, train_end=train_end)
 
 
-def _factors_for(day: date, race_ids: Sequence[str], *, cut: date, train_end: date) -> pl.DataFrame:
-    """The factors of the named races of one race day: history to `cut`, fits to `train_end`."""
+def _factors_for(
+    day: date,
+    race_ids: Sequence[str],
+    *,
+    cut: date,
+    train_end: date,
+    race_table: pd.DataFrame | None = None,
+) -> pl.DataFrame:
+    """The factors of the named races of one race day: history to `cut`, fits to `train_end`.
+    `race_table` is #96's race table holding every race to `cut` (read when not given)."""
     in_races = _is_in("race_id", race_ids)
     card = _read("races", ["race_id", *CARD_RACE], day, day, where=in_races)
     entries = (
@@ -158,7 +175,9 @@ def _factors_for(day: date, race_ids: Sequence[str], *, cut: date, train_end: da
     )
     lines = _lines_for(entries.select("race_id", "horse_no", "horse_id"), last_day=cut, n=DEFAULT_N)
     lines = lines.filter(pl.col("line_no").is_not_null())
-    lines = _speed_figures(lines, train_end=train_end)
+    if race_table is None:
+        race_table = _race_table(cut)
+    lines = _speed_figures(lines, race_table, cut=cut, train_end=train_end)
     lines = _race_late(lines).join(
         entries.select(
             "race_id", "horse_no", "class_today", "t_dist", "t_going",
@@ -205,17 +224,59 @@ def _going_band(g: pl.Expr) -> pl.Expr:
     )
 
 
-def _speed_figures(lines: pl.DataFrame, *, train_end: date) -> pl.DataFrame:
-    """Each start's figure, `fig` = class par - finish time, the par from in-fold days."""
-    key = ["venue", "surface", "distance_m", "race_class"]
-    par = (
-        _read("races", [*key, "finish_time_s"], HISTORY_START, train_end)
-        .drop_nulls()
-        .group_by(key)
-        .agg(pl.col("finish_time_s").median().alias("par"))
+def _race_table(cut: date) -> pd.DataFrame:
+    """#96's race table over every race to `cut`: the store's races and runners through the scoped
+    reader (holdout days dropped), no JRDB table (D21)."""
+    races = _read("races", list(speed_run.RACE_COLUMNS), HISTORY_START, cut).to_pandas()
+    runners = _read("runners", list(speed_run.RUNNER_COLUMNS), HISTORY_START, cut).to_pandas()
+    table = speed_run.build_race_table(races, runners, estimand=SPEED_ESTIMAND)[0]
+    # A fit with a cell or a day alone in its group is not identified and ends where the row order
+    # takes it, so the order is fixed here: the figure must not depend on how the store is laid out.
+    return table.sort_values(["race_date", "race_id"], kind="stable", ignore_index=True)
+
+
+def _speed_model(race_table: pd.DataFrame, *, cut: date, train_end: date) -> SpeedModel | None:
+    """#96's model fitted on the races to `train_end`, having observed the results of the days
+    after it to `cut`; None when no race is in the fold."""
+    days = race_table["race_date"]
+    fit = race_table[days <= train_end]
+    if fit.empty:
+        return None
+    model = SpeedModel(SPEED_SPEC).fit(fit)
+    later = race_table[(days > train_end) & (days <= cut)]
+    return model.observe(later) if len(later) else model
+
+
+def _expected_times(
+    race_ids: Sequence[str], race_table: pd.DataFrame, *, cut: date, train_end: date
+) -> pl.DataFrame:
+    """#96's expected top-3 time of each named race at its own decision time (D2's primary, the
+    post time less `speed_run.decision_min()`); no row for a race outside the table or in a cell
+    the fit never saw."""
+    rows = []
+    race_table = race_table[race_table["race_date"] <= cut]
+    model = _speed_model(race_table, cut=cut, train_end=train_end) if len(race_ids) else None
+    if model is not None:
+        lead = pd.Timedelta(minutes=speed_run.decision_min())
+        for race in race_table[race_table["race_id"].isin(race_ids)].to_dict("records"):
+            try:
+                expected = model.expected_top3_time(race, at_utc=race["post_utc"] - lead)
+            except KeyError:  # no par: the cell is not in the fold
+                continue
+            rows.append((race["race_id"], expected))
+    return pl.DataFrame(
+        rows, schema={"pp_race_id": pl.String, "expected": pl.Float64}, orient="row"
     )
-    return lines.join(par, on=key, how="left").with_columns(
-        (pl.col("par") - pl.col("finish_time_s")).alias("fig")
+
+
+def _speed_figures(
+    lines: pl.DataFrame, race_table: pd.DataFrame, *, cut: date, train_end: date
+) -> pl.DataFrame:
+    """Each start's figure, `fig` = #96's expected top-3 time of its race - finish time."""
+    race_ids = lines.get_column("pp_race_id").unique().to_list()
+    expected = _expected_times(race_ids, race_table, cut=cut, train_end=train_end)
+    return lines.join(expected, on="pp_race_id", how="left").with_columns(
+        (pl.col("expected") - pl.col("finish_time_s")).alias("fig")
     )
 
 
@@ -684,21 +745,27 @@ def _write(frame: pl.DataFrame, path: Path) -> None:
 
 
 def build_handicap_table(
-    date_from: date, date_to: date, *, scheme: FoldScheme | None = None
+    date_from: date,
+    date_to: date,
+    *,
+    scheme: FoldScheme | None = None,
+    out_dir: Path | None = None,
 ) -> dict[date, Path]:
     """One Parquet file of handicap factors plus the out-of-fold `handicap_score` per non-holdout
-    race day in the inclusive range, factors built one day at a time as of the race day."""
+    race day in the inclusive range, factors built one day at a time as of the race day, written
+    under `out_dir` (default `handicap_dir()`)."""
     races = _read("races", ["race_id", "race_date"], date_from, date_to)
     by_day = races.group_by("race_date").agg(pl.col("race_id").sort())
-    out_dir = handicap_dir()
+    out_dir = handicap_dir() if out_dir is None else out_dir
+    race_table = _race_table(date_to)  # #96's table once; each day reads the races up to its cut
     written: dict[date, Path] = {}
     for day, race_ids in sorted(by_day.iter_rows()):
         if is_holdout_day(COUNTRY, day):
             continue
         cut = day - timedelta(days=1)
-        frame = _factors_for(day, race_ids, cut=cut, train_end=cut).with_columns(
-            pl.lit(None, pl.Float64).alias("handicap_score")
-        )
+        frame = _factors_for(
+            day, race_ids, cut=cut, train_end=cut, race_table=race_table
+        ).with_columns(pl.lit(None, pl.Float64).alias("handicap_score"))
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{day.isoformat()}.parquet"
         _write(frame, path)
