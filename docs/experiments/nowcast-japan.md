@@ -368,3 +368,20 @@ below. Nothing is adopted, and the holdout is not opened.
   from the registered slots for that; it is not fixed here.
 - **Follow-ups**, proposed for the orchestrator: Wide's inversion measured against Wide money; the boards the Place
   rule does not reproduce; the boards read `undetermined`.
+## On the leaderboard (2026-11-27)
+
+Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
+adoption verdicts. Nothing is adopted or rejected: every option, model and member will be a row on the planned
+`horsetrack japan leaderboard` (#452; this revision does not have the command yet), ranked by its shrunk return per
+¥100 at the final price, and a row with no measured return will be listed after the ranking, never dropped. Where
+this report says "not adopted", "rules out" or "rejected", read a measured position. This section reopens and
+re-runs nothing.
+
+- Registry families: `japan-c1-nowcast-final-shares-v2` (the result of record), `japan-c1-nowcast-final-shares` (v1,
+  superseded; its records stay on the record and will be on the board as superseded, not deleted) and
+  `japan-c1-nowcast-final-shares-trial` (the trial run recorded after the fact).
+- `japan-c1-nowcast-final-shares-v2-trial`, named above for later trials, holds no record (no v2 trial has run) and
+  has no file in the committed registry summary, so it will have no row.
+- As task 4 (#451, planned) specifies, the three families will be listed as models with no return yet. Every record
+  is withheld (D21): the public leaderboard will show their ids only, with no figure.
+- "Nothing is adopted" above now reads as a measured position, not a verdict. Place stays a diagnostic, as above.

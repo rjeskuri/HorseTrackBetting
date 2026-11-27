@@ -71,6 +71,14 @@ The model: `Nowcast`, `Draws`
   in `view.pools[pool].combinations` order, each row summing to 1 with entries >= 0. `v_final` is
   (n,), positive, and never below V_t (phi <= 1). The spread of the shares scales with 1 - phi, and
   at phi = 1 every draw is the board. The same seed gives the same draws.
+- `model.draws_from_shocks(view, *, pool, shocks) -> Draws` (#100) is the same model from shocks
+  the caller gives, so the decision layer draws WIN, PLACE and Wide from one set and keeps their
+  covariance. `shocks` maps a horse number (int) to its (n,) column of standard normal shocks; a
+  WIN or PLACE combination "h" takes shocks[h] as its eps, a Wide pair "a,b"
+  (shocks[a] + shocks[b]) / sqrt 2 (as `ShadowNowcast`). n is the columns' length; runners the
+  board does not price are ignored. Given the columns of `default_rng(seed).standard_normal((n,
+  k))` in the board's order it is `draws(view, pool=, n=, seed=)`. ValueError for a runner of the
+  board missing from `shocks`, or columns of unequal lengths.
 - `model.phi(view, *, pool) -> float` is the phi_t = V_t / V_final the draws use. Without a pool
   total on the board, it comes from the time-to-post profile fitted on the days that print totals.
 - `model.random_walk(view, *, pool, n, seed) -> Draws` is the q_final = q_t baseline with its
@@ -535,6 +543,149 @@ def test_draws_are_reproducible_for_a_seed(fitted, scored_frame):
         np.testing.assert_array_equal(a.shares, b.shares)
         np.testing.assert_array_equal(a.v_final, b.v_final)
         assert not np.array_equal(a.shares, c.shares)
+
+
+# ---------------------------------------------------------------- draws from shared shocks (#100)
+
+SHOCK_HORSES = (1, 2, 3, 5, 6, 7)  # six runners, horse 4 scratched
+SHOCK_PAIRS = tuple((a, b) for i, a in enumerate(SHOCK_HORSES) for b in SHOCK_HORSES[i + 1 :])
+
+
+def shock_view(*, tau: float = 5.0) -> RaceView:
+    """A WIN, PLACE and Wide board of six runners, each with a pool total."""
+    win = np.array([0.30, 0.22, 0.16, 0.13, 0.11, 0.08])
+    place = np.array([0.24, 0.21, 0.17, 0.15, 0.13, 0.10])
+    strength = dict(zip(SHOCK_HORSES, place, strict=True))
+    wide = np.array([strength[a] * strength[b] for a, b in SHOCK_PAIRS])
+
+    def board(combinations, shares, total):
+        return PoolBoard(tuple(combinations), shares / shares.sum(), total, None, None)
+
+    pools = {
+        WIN: board((str(h) for h in SHOCK_HORSES), win, 3e7),
+        PLACE: board((str(h) for h in SHOCK_HORSES), place, 1.2e7),
+        WIDE: board((f"{a},{b}" for a, b in SHOCK_PAIRS), wide, 9e6),
+    }
+    return RaceView(race_id_of(TEST_DAYS[0], 4), VENUE, 4, None, float(tau), pools)
+
+
+def runner_shocks(n: int, seed: int, horses=SHOCK_HORSES) -> dict[int, np.ndarray]:
+    matrix = np.random.default_rng(seed).standard_normal((n, len(horses)))
+    return {h: matrix[:, j].copy() for j, h in enumerate(horses)}
+
+
+def shock_eps(combinations: Sequence[str], shocks) -> np.ndarray:
+    """eps per combination: a runner's own shock, a Wide pair's (eps_a + eps_b) / sqrt 2."""
+    columns = []
+    for c in combinations:
+        horses = [int(h) for h in c.split(",")]
+        columns.append(
+            sum(np.asarray(shocks[h], dtype=float) for h in horses) / math.sqrt(len(horses))
+        )
+    return np.column_stack(columns)
+
+
+def test_draws_from_shocks_take_each_runners_shock(fitted, scored_frame):
+    """The known nowcast from given shocks: s_final = phi s_t + (1 - phi) softmax(ln s_t + sigma
+    eps), eps a runner's shock (WIN, PLACE) or (eps_a + eps_b) / sqrt 2 (Wide), V_final = V_t / phi,
+    one draw per shock; a runner the board does not price is ignored. Then, for the fitted
+    nowcast and the known one, the shocks `draws` would draw give `draws` itself."""
+    view = shock_view()
+    for phi, sigma, n in ((0.6, 0.5, 300), (0.25, 1.1, 40), (1.0, 0.7, 5)):
+        model = Nowcast.from_params(phi=phi, sigma=sigma)
+        shocks = runner_shocks(n, seed=int(100 * phi + n))
+        extra = {**shocks, 4: np.full(n, 9.0), 11: np.full(n, -9.0)}  # not on any board
+        for pool in (WIN, PLACE, WIDE):
+            board = view.pools[pool]
+            s = np.asarray(board.shares, dtype=float)
+            eps = shock_eps(board.combinations, shocks)
+            want = phi * s + (1.0 - phi) * softmax(np.log(s) + sigma * eps)
+            got = model.draws_from_shocks(view, pool=pool, shocks=shocks)
+            assert isinstance(got, Draws)
+            assert_share_draws(got, n, len(board.combinations))
+            np.testing.assert_allclose(got.shares, want, rtol=1e-12, atol=1e-15, err_msg=pool)
+            np.testing.assert_allclose(got.v_final, np.full(n, board.total / phi), rtol=1e-12)
+            ignored = model.draws_from_shocks(view, pool=pool, shocks=extra)
+            np.testing.assert_allclose(ignored.shares, got.shares, rtol=1e-12, atol=1e-15)
+        # The tolerance tells (eps_a + eps_b) / sqrt 2 from their sum and their mean.
+        pair = model.draws_from_shocks(view, pool=WIDE, shocks=shocks).shares
+        for scale in (1.0, 0.5):
+            wrong = {h: scale * math.sqrt(2) * x for h, x in shocks.items()}
+            s = np.asarray(view.pools[WIDE].shares, dtype=float)
+            alt = phi * s + (1 - phi) * softmax(
+                np.log(s) + sigma * shock_eps(view.pools[WIDE].combinations, wrong)
+            )
+            assert phi == 1.0 or not np.allclose(pair, alt, rtol=1e-6, atol=1e-9)
+
+    known = Nowcast.from_params(phi=0.7, sigma=0.4)
+    fitted_view = race_view(scored_frame, race_id_of(TEST_DAYS[0], 1), tau_min=5)
+    for model, at in ((fitted, fitted_view), (known, view)):
+        for pool, seed in ((WIN, 17), (PLACE, 18)):
+            combinations = at.pools[pool].combinations
+            n = 64
+            eps = np.random.default_rng(seed).standard_normal((n, len(combinations)))
+            shocks = {int(c): eps[:, j].copy() for j, c in enumerate(combinations)}
+            want = model.draws(at, pool=pool, n=n, seed=seed)
+            got = model.draws_from_shocks(at, pool=pool, shocks=shocks)
+            np.testing.assert_allclose(got.shares, want.shares, rtol=1e-12, atol=1e-15)
+            np.testing.assert_allclose(got.v_final, want.v_final, rtol=1e-12)
+
+
+def test_draws_from_shocks_couple_the_pools_runner_by_runner():
+    """One set of shocks for every pool: a runner's WIN and PLACE draws move together, and a Wide
+    pair's with each of its runners' WIN draws; `draws` with a seed per pool couples nothing."""
+    view = shock_view(tau=10.0)
+    model = Nowcast.from_params(phi=0.5, sigma=0.8)
+    n = 2000
+    shocks = runner_shocks(n, seed=85)
+    win, place, wide = (
+        model.draws_from_shocks(view, pool=pool, shocks=shocks).shares
+        for pool in (WIN, PLACE, WIDE)
+    )
+    alone = model.draws(view, pool=PLACE, n=n, seed=86).shares
+
+    def corr(x, y) -> float:
+        return float(np.corrcoef(x, y)[0, 1])
+
+    for j in range(len(SHOCK_HORSES)):
+        assert corr(win[:, j], place[:, j]) > 0.8, j
+        assert abs(corr(win[:, j], alone[:, j])) < 0.15, j
+    for col, (a, b) in enumerate(SHOCK_PAIRS):
+        for h in (a, b):
+            assert corr(wide[:, col], win[:, SHOCK_HORSES.index(h)]) > 0.3, (a, b, h)
+
+
+def _ragged():
+    shocks = runner_shocks(30, seed=3)
+    shocks[3] = shocks[3][:29]
+    return shocks
+
+
+def _without(horse):
+    def make():
+        shocks = runner_shocks(30, seed=4)
+        del shocks[horse]
+        return shocks
+
+    return make
+
+
+@pytest.mark.parametrize(
+    "pool, make",
+    [
+        pytest.param(WIN, _without(7), id="win-runner-missing"),
+        pytest.param(PLACE, _without(1), id="place-runner-missing"),
+        pytest.param(WIDE, _without(6), id="wide-runner-missing"),  # every pair with 6
+        pytest.param(WIN, _ragged, id="win-ragged"),
+        pytest.param(PLACE, _ragged, id="place-ragged"),
+        pytest.param(WIDE, _ragged, id="wide-ragged"),
+    ],
+)
+def test_draws_from_shocks_refuse_a_missing_runner_or_ragged_shocks(pool, make):
+    view = shock_view()
+    model = Nowcast.from_params(phi=0.6, sigma=0.5)
+    with pytest.raises(ValueError):
+        model.draws_from_shocks(view, pool=pool, shocks=make())
 
 
 def test_pit_is_uniform_on_synthetic_data():
