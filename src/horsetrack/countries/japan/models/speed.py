@@ -56,6 +56,13 @@ races with a top-3 time alone; an untimed race only holds the instant back. None
 group) with no timed race in the fit frame, and with `same_day_variant=False`. Nothing else reads
 it: `variant` and `expected_top3_time` are as before.
 
+`fit_cutoff` (#97) is the latest `result_available_utc` among the races with a top-3 time in the
+frame given to `fit`, every one of which the pars, sigma and tau read (an untimed race brings no
+time and does not move it); None when one of them has none (never published: no instant is after
+every result the fit read). A caller that may use nothing published at or after t uses the fit
+only at a t strictly after it. `version` counts the fits and the observations kept, so a reader
+that caches what it read from the model (#97's baselines) knows when to read it again.
+
 `expected_top3_time(race, at_utc, pace_s=0.0)` is par(cell) + the variant's mean at t + pace_s,
 the race's pace term in seconds (#97): the caller computes it (#97's `speed_horse` passes its
 fitted race-level pace term), and a pace_s that is not a finite number is a ValueError.
@@ -193,6 +200,8 @@ class SpeedModel:
         # observed (day, *group) -> (result times, residuals from par), in result-time order
         self._days: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
         self._observed_ids: set = set()
+        self._cutoff: int | None = None  # fit_cutoff in ns (None: a timed race never published)
+        self.version = 0  # bumped by every fit and every observation kept
         self.sigma: float | None = None  # the error's scale (its SD when t_df is None), s
         self.tau: float | None = None  # the default variant prior's SD (the random effect's), s
         self.n_races = 0
@@ -247,6 +256,9 @@ class SpeedModel:
         }
         self._days, self._observed_ids = {}, set()
         self.n_observed = self.n_unseen = 0
+        avail, known = _utc_ns(frame["result_available_utc"], "result_available_utc")
+        self._cutoff = int(avail.max()) if known.all() else None
+        self.version += 1
         return self
 
     def _resulted_at(
@@ -307,6 +319,7 @@ class SpeedModel:
         self._observed_ids.update(ids)
         self.n_observed += sum(seen)
         self.n_unseen += len(seen) - sum(seen)
+        self.version += 1
         return self
 
     def _solve(self, y, cell, group, n_cells, n_groups):
@@ -345,6 +358,13 @@ class SpeedModel:
         if self._par is None:
             raise RuntimeError("the speed model is not fitted")
         return self._par
+
+    @property
+    def fit_cutoff(self) -> pd.Timestamp | None:
+        """The latest publication among the fit frame's timed races, None if one was never
+        published (see the module docstring)."""
+        self._fitted()
+        return None if self._cutoff is None else pd.Timestamp(self._cutoff, tz="UTC")
 
     def _prior_for(self, race_date: date, group: tuple) -> tuple[float, float]:
         if self._prior is None:

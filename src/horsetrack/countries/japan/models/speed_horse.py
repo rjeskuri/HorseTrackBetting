@@ -11,9 +11,12 @@ relative speed and SD, and p_speed via Henery (normal) or PL strengths exp(-mu_i
 - Baseline. A run's baseline is #96's expected top-3 time of its race as of the run's off
   (`race_utc`, or its publication when that is earlier): the par plus the day variant from the
   day's results published strictly before then, so never the run's own race. V, the variant's
-  posterior variance then, joins the run's error. This baseline is fixed: it reads no result
-  published after its own run, so a run whose result is published before t brings nothing
-  published at or after t. The par is the speed model's own, fitted on its frame.
+  posterior variance then, joins the run's error. It reads no result published after its own
+  run, so a run whose result is published before t brings nothing published at or after t. It is
+  read from the speed model as it stands when predict needs it, and read again once the speed
+  model has observed more (`SpeedModel.version`): a race-level result observed after the run,
+  published before its off, reaches it as if observed first, so batch and incremental replay
+  agree. The par is the speed model's own, fitted on its frame.
 - A run on a (day, group) of the speed model's fit frame (a training-window day: #96 refuses to
   observe it, so its as-of variant is the prior) has a second baseline, the par plus the fit's
   in-sample variant of that (day, group) (`SpeedModel.in_sample_variant`), whose variance is V
@@ -45,23 +48,27 @@ linear in the data, so (w, b, m0) are the generalised least squares of each colu
 and (sigma, s0) maximise that profile (Nelder-Mead on their logs, each at least SCALE_FLOOR).
 Under the t error the weights are then recomputed by the forward filter at the new terms, until
 the terms settle. The fit reads each run as `predict` does at a t after every publication: a
-fit-day run against its in-sample baseline when its (day, group) is ever fully resulted. It keeps
-the runs as the horses' history and clears earlier observations. A run without a finish time is
-no observation; one with a time and no publication (never resulted) is dropped, from the terms and
-the history alike, and counted in `n_unpublished`; one whose cell has no par is skipped and
-counted in `n_unseen`.
+fit-day run against its in-sample baseline when its (day, group) is ever fully resulted, any other
+against its as-of baseline as the speed model stands at the fit. It keeps the runs as the horses'
+history and clears earlier observations. A run without a finish time is no observation; one with
+a time and no publication (never resulted) is dropped, from the terms and the history alike, and
+counted in `n_unpublished`; one whose cell has no par is skipped and counted in `n_unseen`. The
+rest are the retained runs.
 
 `observe(runs)` (fit's columns) adds later runs to the horses' history only, each residual taken
 against the frozen global terms (w_ref and pace_ref included: nothing is re-centred on the
 observed frame) on the baselines a fit run has; the global terms never change, as #96's
-fit/observe split. A race id already fitted or observed is refused, the whole frame is checked
-before anything is kept, observations add up over calls, and fitting again clears them.
+fit/observe split. A race with a retained run, fitted or observed, is taken: a frame with a row of
+it is refused. A race all of whose runs were dropped or skipped is not: observed again once
+resulted, it counts as if for the first time. The whole frame is checked before anything is kept,
+observations add up over calls, and fitting again clears them.
 
-The global terms read every fit run, so `predict` refuses an at_utc at or before the later of the
-latest `result_available_utc` over every row of the fit frame (timed or not: a missing finish time
-is a result too) and the latest instant after which a fit run's in-sample baseline is used;
-observations never move that bound. The speed model's par, fitted on #96's own frame, is outside
-it.
+The global terms read the retained fit runs and the speed model's fit reads its own frame, so
+`predict` refuses an at_utc at or before the latest of the retained fit runs'
+`result_available_utc`, the instants after which their in-sample baselines are used, and the
+speed model's `fit_cutoff` (whose pars, sigma and tau reach every baseline and every card); an
+untimed or skipped fit run moves nothing, and observations never move that bound. A speed model
+whose fit frame has a timed race never published leaves no such at_utc: fit refuses it.
 
 `predict(race_runners, at_utc)`: theta_i is the filter over that horse's runs, fitted or observed,
 whose result was published strictly before at_utc (null: never), in off order, each against the
@@ -236,24 +243,27 @@ def _forward(steps: _Steps, u, s, q: float, p0: float, df: float | None):
 
 @dataclass(frozen=True)
 class _History:
-    """One horse's usable runs in off order: off and publication (ns), residual u from the fitted
-    global terms and error scale^2 sigma^2 + V against the as-of baseline, the same against the
-    in-sample baseline, and the instant (ns) after which that one is used (NEVER: not at all)."""
+    """One horse's usable runs in off order: off and publication (ns), y (the finish time less the
+    fitted global terms) and its as-of baseline's key in the model's table, the residual u and
+    error scale^2 sigma^2 + V against the in-sample baseline, and the instant (ns) after which
+    that one is used (NEVER: not at all)."""
 
     tau: np.ndarray
     pub: np.ndarray
-    u: np.ndarray
-    s: np.ndarray
+    y: np.ndarray
+    key: np.ndarray
     u_in: np.ndarray
     s_in: np.ndarray
     switch: np.ndarray
 
-    def at(self, at_ns: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """(off, u, s) of the runs published strictly before at_ns, each on its baseline then."""
+    def at(self, at_ns: int, base: np.ndarray, s_base: np.ndarray):
+        """(off, u, s) of the runs published strictly before at_ns, each on its baseline then;
+        base and s_base are the table's as-of baselines and their error scale^2."""
         avail = self.pub < at_ns
         later = self.switch[avail] < at_ns
-        u = np.where(later, self.u_in[avail], self.u[avail])
-        s = np.where(later, self.s_in[avail], self.s[avail])
+        key = self.key[avail]
+        u = np.where(later, self.u_in[avail], self.y[avail] - base[key])
+        s = np.where(later, self.s_in[avail], s_base[key])
         return self.tau[avail], u, s
 
     def joined(self, other: _History) -> _History:
@@ -265,22 +275,27 @@ class _History:
 
 @dataclass(frozen=True)
 class _Runs:
-    """A runs frame read against the speed model: its runs with a finish time, a publication and a
-    par (frame order), each with its two baselines' errors e = time - baseline and variances."""
+    """A runs frame read against the speed model: its retained runs (a finish time, a publication
+    and a par; frame order), each with its as-of baseline's key in `args` (one per (race, as-of
+    instant): its day, group, par and instant; `base` and `var`, the baseline and the variant's
+    variance, are the speed model's now), and its in-sample baseline, variance and switch (NaN,
+    NaN and NEVER: none)."""
 
     horse: np.ndarray
     tau: np.ndarray
     pub: np.ndarray
-    e: np.ndarray
-    vv: np.ndarray
-    e_in: np.ndarray
+    time: np.ndarray
+    key: np.ndarray
+    base_in: np.ndarray
     vv_in: np.ndarray
     switch: np.ndarray
     style: np.ndarray
     weight: np.ndarray
     pace: np.ndarray  # the race's field pace, uncentred (NaN: none)
-    race_ids: frozenset  # every race id of the frame
-    latest_pub: int  # the latest known publication over every row of the frame (ns; -1: none)
+    args: list
+    base: np.ndarray
+    var: np.ndarray
+    race_ids: frozenset  # the races with a retained run
     n_unseen: int  # runs with a time and a publication whose cell has no par
     n_unpublished: int  # runs with a time and no publication
 
@@ -299,8 +314,14 @@ class HorseSpeed:
         self.t_df = None if t_df is None else float(t_df)
         self._speed: SpeedModel | None = None
         self._history: dict = {}
-        self._race_ids: set = set()  # every race id fitted or observed
-        # the latest publication (ns) the global terms read; predict needs an at_utc after it
+        self._race_ids: set = set()  # the races with a retained run, fitted or observed
+        # the history's as-of baselines: each key's (day, group, par, instant), its baseline and
+        # the variant's variance, read from the speed model at its version _base_version
+        self._args: list[tuple] = []
+        self._base, self._base_var = np.zeros(0), np.zeros(0)
+        self._base_version: int | None = None
+        # the latest publication (ns) the global terms or the speed model's fit read, or switch
+        # instant of a fit run's in-sample baseline; predict needs an at_utc after it
         self._terms_cutoff: int | None = None
         self.sigma: float | None = None  # the error's scale (its SD under the normal), s
         self.prior_mean: float | None = None  # m0: theta at a first run, s behind the baseline
@@ -328,10 +349,18 @@ class HorseSpeed:
         r = self._read(runs, speed)
         if r.tau.size == 0:
             raise ValueError("no run has a finish time, a publication and a par to fit on")
+        speed_cutoff = speed.fit_cutoff
+        if speed_cutoff is None:
+            raise ValueError(
+                "a race with a top-3 time in the speed model's fit frame was never published: "
+                "its time reaches every par, so no at_utc is after every result read"
+            )
         code, horses = pd.factorize(r.horse)
         order = np.lexsort((r.tau, code))
         code, tau = code[order], r.tau[order]
-        e_in, vv_in = r.e_in[order], r.vv_in[order]
+        in_sample = r.switch != NEVER
+        e_in = (r.time - np.where(in_sample, r.base_in, r.base[r.key]))[order]
+        vv_in = np.where(in_sample, r.vv_in, r.var[r.key])[order]
         style, weight, pace = r.style[order], r.weight[order], r.pace[order]
         known_pace = ~np.isnan(pace)
         pace_ref = float(pace[known_pace].mean()) if known_pace.any() else 0.0
@@ -351,9 +380,15 @@ class HorseSpeed:
         counts = np.array([np.sum(style == s) for s in STYLES], dtype=float)
         self.pace_race = float(counts @ b / counts.sum()) if counts.sum() else 0.0
         self.prior_mean = float(coef[-1])
-        switched = r.switch[r.switch != NEVER]
-        self._terms_cutoff = max(r.latest_pub, int(switched.max()) if switched.size else -1)
+        switched = r.switch[in_sample]
+        self._terms_cutoff = max(
+            int(r.pub.max()),
+            int(switched.max()) if switched.size else -1,
+            _instant_ns(speed_cutoff, "fit_cutoff"),
+        )
         self._history, self._race_ids = {}, set()
+        self._args, self._base, self._base_var = [], np.zeros(0), np.zeros(0)
+        self._base_version = speed.version
         self.n_runs, self.n_observed = int(r.tau.size), 0
         self.n_unseen = self.n_unpublished = 0
         self._keep(r)
@@ -366,10 +401,11 @@ class HorseSpeed:
         if speed is None:
             raise RuntimeError("the horse speed model is not fitted")
         r = self._read(runs, speed)
-        again = self._race_ids & r.race_ids
+        again = self._race_ids.intersection(runs["race_id"].tolist())
         if again:
             raise ValueError(
-                f"{len(again)} race(s) already fitted or observed, e.g. {sorted(again)[0]!r}"
+                f"{len(again)} race(s) already fitted or observed with a run kept, "
+                f"e.g. {sorted(again)[0]!r}"
             )
         # everything is checked: keep it
         self.n_observed += int(r.tau.size)
@@ -398,34 +434,38 @@ class HorseSpeed:
 
         kept = timed & known  # a result never published is never available: dropped
         as_of = np.minimum(tau_all, pub_all)
-        base, vvar, base_in, vvar_in, switch = self._baselines(runs, speed, keys, as_of, kept)
-        seen = kept & ~np.isnan(base)
-        use = np.flatnonzero(seen)
+        key, args, base_in, vvar_in, switch = self._baselines(runs, speed, keys, as_of, kept)
+        use = np.flatnonzero(key >= 0)
+        base, var = _as_of(speed, args)
         return _Runs(
             horse=runs["horse_id"].to_numpy(object)[use],
             tau=tau_all[use],
             pub=pub_all[use],
-            e=time[use] - base[use],
-            vv=vvar[use],
-            e_in=time[use] - base_in[use],
+            time=time[use],
+            key=key[use],
+            base_in=base_in[use],
             vv_in=vvar_in[use],
             switch=switch[use],
             style=style_all[use],
             weight=weight_all[use],
             pace=pace_all[use],
-            race_ids=frozenset(runs["race_id"].tolist()),
-            latest_pub=int(pub_all[known].max()) if known.any() else -1,
-            n_unseen=int(np.sum(kept & ~seen)),
+            args=args,
+            base=base,
+            var=var,
+            race_ids=frozenset(runs["race_id"].to_numpy(object)[use].tolist()),
+            n_unseen=int(np.sum(kept)) - use.size,
             n_unpublished=int(np.sum(timed & ~known)),
         )
 
     def _keep(self, r: _Runs) -> None:
-        """Add r's runs to the horses' history, each residual against the global terms."""
+        """Add r's runs to the horses' history, each residual against the global terms, and their
+        as-of baselines to the table."""
         slopes = np.r_[self.weight_slope, [self.pace_slopes[s] for s in STYLES]]
         x = self._design(r.weight - self.weight_ref, r.style, _centred(r.pace, self.pace_ref))
         fitted = x @ slopes + self.prior_mean
-        s, s_in = self.sigma**2 + r.vv, self.sigma**2 + r.vv_in
-        cols = (r.tau, r.pub, r.e - fitted, s, r.e_in - fitted, s_in, r.switch)
+        key = r.key + len(self._args)
+        u_in, s_in = r.time - r.base_in - fitted, self.sigma**2 + r.vv_in
+        cols = (r.tau, r.pub, r.time - fitted, key, u_in, s_in, r.switch)
         code, horses = pd.factorize(r.horse)
         order = np.lexsort((r.tau, code))
         code, cols = code[order], tuple(a[order] for a in cols)
@@ -436,37 +476,56 @@ class HorseSpeed:
             new = _History(*(a[lo:hi] for a in cols))
             merged[h] = new if h not in self._history else self._history[h].joined(new)
         self._history.update(merged)
+        self._args.extend(r.args)
+        self._base, self._base_var = np.r_[self._base, r.base], np.r_[self._base_var, r.var]
         self._race_ids |= r.race_ids
         self.n_unseen += r.n_unseen
         self.n_unpublished += r.n_unpublished
 
+    def _as_of_now(self) -> tuple[np.ndarray, np.ndarray]:
+        """The table's as-of baselines and their error scale^2 sigma^2 + V, read from the speed
+        model again when it has changed since they were read."""
+        speed = self._speed
+        if self._base_version != speed.version:
+            self._base, self._base_var = _as_of(speed, self._args)
+            self._base_version = speed.version
+        return self._base, self.sigma**2 + self._base_var
+
     @staticmethod
     def _baselines(runs, speed, keys, as_of, rows):
-        """Each `rows` run's expected top-3 time as of `as_of` and the variant's variance then;
-        the same against the in-sample variant of its (day, group) and the instant (ns) that
-        becomes usable after (NEVER, and the as-of values, off the fit frame's days or when one of
-        its races was never published). NaN where the run's cell has no par, or off `rows`."""
+        """Each `rows` run's as-of baseline key into the returned args, one per (race, as_of)
+        with its (day, group, par, instant) (-1 off `rows` or where the cell has no par); and its
+        in-sample baseline (par + the fit's in-sample variant of its (day, group)), that
+        variance, and the instant (ns) after which it is used (NaN, NaN and NEVER off the fit
+        frame's days or when one of the day's races was never published)."""
         n = len(runs)
-        base, vvar = np.full(n, np.nan), np.full(n, np.nan)
+        key = np.full(n, -1, dtype=np.int64)
         base_in, vvar_in = np.full(n, np.nan), np.full(n, np.nan)
         switch = np.full(n, NEVER, dtype=np.int64)
         values = {k: runs[k].tolist() for k in (*keys, "race_utc")}
         race_ids = runs["race_id"].tolist()
-        cache: dict[tuple, tuple[float, float]] = {}
-        in_cache: dict = {}
+        index: dict[tuple, int] = {}
+        args: list[tuple] = []
+        races: dict = {}
         for i in np.flatnonzero(rows):
-            key = (race_ids[i], int(as_of[i]))
-            race = None
-            if key not in cache:
+            rid = race_ids[i]
+            if rid not in races:
                 race = {k: values[k][i] for k in values}
-                cache[key] = _baseline(speed, race, int(as_of[i]))
-            base[i], vvar[i] = cache[key]
-            if race_ids[i] not in in_cache:
-                race = race or {k: values[k][i] for k in values}
-                in_cache[race_ids[i]] = _in_sample(speed, race)
-            got = in_cache[race_ids[i]]
-            base_in[i], vvar_in[i], switch[i] = (base[i], vvar[i], NEVER) if got is None else got
-        return base, vvar, base_in, vvar_in, switch
+                par = _par(speed, race)
+                races[rid] = (race, par, None if par is None else _in_sample(speed, race, par))
+            race, par, got = races[rid]
+            if par is None:
+                continue
+            k = (rid, int(as_of[i]))
+            if k not in index:
+                index[k] = len(args)
+                group = tuple(race[g] for g in speed.spec.variant_keys)
+                at = pd.Timestamp(int(as_of[i]), tz="UTC")
+                args.append((_jst_date(race["race_utc"]), group, par, at))
+            key[i] = index[k]
+            if got is not None:
+                base_in[i], vvar_in[i], switch[i] = got
+        return key, args, base_in, vvar_in, switch
 
     @staticmethod
     def _design(weight: np.ndarray, style: np.ndarray, pace: np.ndarray) -> np.ndarray:
@@ -524,7 +583,8 @@ class HorseSpeed:
             raise ValueError(
                 f"at_utc {pd.Timestamp(at_ns, tz='UTC')} is not after "
                 f"{pd.Timestamp(self._terms_cutoff, tz='UTC')}, the latest result the global "
-                "terms were fitted on: they would carry a result published at or after at_utc"
+                "terms or the speed model's fit read: they would carry a result published at or "
+                "after at_utc"
             )
         keys = self._race_keys(speed)
         card = race_runners
@@ -555,7 +615,7 @@ class HorseSpeed:
 
         horse_ids = card["horse_id"].tolist()
         index = {h: i for i, h in enumerate(dict.fromkeys(horse_ids))}
-        mean, var, last = self._theta(list(index), at_ns)
+        mean, var, last = self._theta(list(index), at_ns, *self._as_of_now())
         k = np.array([index[h] for h in horse_ids], dtype=np.int64)
         ran = last[k] >= 0
         gap = np.where(ran, np.maximum(race_ns - last[k], 0) / NS_PER_DAY, 0.0)
@@ -576,7 +636,7 @@ class HorseSpeed:
             sd = np.sqrt(var_i + k * (self.sigma**2 + vcard))
         return pd.DataFrame({"horse_id": horse_ids, "mu_s": mu, "sd_s": sd})
 
-    def _theta(self, horses: list, at_ns: int):
+    def _theta(self, horses: list, at_ns: int, base: np.ndarray, s_base: np.ndarray):
         """Each horse's filtered theta~ (mean, variance) after its runs published before at_ns,
         and its last such off in ns (-1 with none: then the prior)."""
         parts = []
@@ -584,7 +644,7 @@ class HorseSpeed:
             hist = self._history.get(h)
             if hist is None:
                 continue
-            tau, u, s = hist.at(at_ns)
+            tau, u, s = hist.at(at_ns, base, s_base)
             if tau.size:
                 parts.append((k, tau, u, s))
         mean = np.zeros(len(horses))
@@ -603,29 +663,31 @@ class HorseSpeed:
         return mean, var, last
 
 
-def _baseline(speed: SpeedModel, race: dict, at_ns: int) -> tuple[float, float]:
-    """(expected top-3 time, the variant's variance) of the race as of at_ns; NaN, NaN when its
-    cell has no par."""
-    at = pd.Timestamp(at_ns, tz="UTC")
+def _par(speed: SpeedModel, race: dict) -> float | None:
+    """The race's par; None when its cell has none."""
     try:
-        mean = speed.expected_top3_time(race, at_utc=at)
+        return speed.par(**{k: race[k] for k in speed.spec.par_keys})
     except KeyError:
-        return math.nan, math.nan
-    group = tuple(race[k] for k in speed.spec.variant_keys)
-    _, sd = speed.variant(_jst_date(race["race_utc"]), *group, at_utc=at)
-    return mean, sd * sd
+        return None
 
 
-def _in_sample(speed: SpeedModel, race: dict) -> tuple[float, float, int] | None:
+def _as_of(speed: SpeedModel, args: list[tuple]) -> tuple[np.ndarray, np.ndarray]:
+    """Each (day, group, par, instant) key's as-of baseline, the par plus the variant's mean at
+    the instant (#96's expected top-3 time then), and that variant's variance, from the speed
+    model as it stands."""
+    base, var = np.empty(len(args)), np.empty(len(args))
+    for k, (day, group, par, at) in enumerate(args):
+        mean, sd = speed.variant(day, *group, at_utc=at)
+        base[k], var[k] = par + mean, sd * sd
+    return base, var
+
+
+def _in_sample(speed: SpeedModel, race: dict, par: float) -> tuple[float, float, int] | None:
     """(par + the fit's in-sample variant, its variance, the instant in ns after which it is
     usable) of a race on a fit (day, group) that is ever fully resulted; None otherwise."""
     group = tuple(race[k] for k in speed.spec.variant_keys)
     got = speed.in_sample_variant(_jst_date(race["race_utc"]), *group)
     if got is None or got[2] is None:
-        return None
-    try:
-        par = speed.par(**{k: race[k] for k in speed.spec.par_keys})
-    except KeyError:
         return None
     mean, sd, resulted = got
     return par + mean, sd * sd, int(resulted.as_unit("ns").value)
