@@ -91,7 +91,11 @@ and the changed pre-registration is a new family, v5, frozen before any read:
   other column of a holdout day reaches Python; what it returns for development days is unchanged for every caller.
   The votes reader decoded each selected row group's batches into Python before filtering to the wanted races; it now
   filters inside the dataset scan. The tests trace the read itself (no Python frame of the package or of pyarrow ever
-  holds a holdout value), not only its output.
+  holds a holdout value), not only its output. In fix round 5 the merge with main replaced this branch's
+  `read_store_table` change with main's #415 (`core.eval.holdout.file_development_filter` over one memory-mapped
+  snapshot), the same reader-side boundary, which the owner accepted for #82 on 2026-11-27: a development read meets
+  D14 when no holdout value reaches Python. Arrow still decodes a row group that mixes development and holdout days
+  before its filter drops the holdout rows; row-group isolation is #502.
 - **D. A votes file that cannot be opened.** A `pool_votes.parquet` that exists but cannot be read for its digest
   aborted the run after the freeze. The votes' data build now records the failure, scoring goes on, the realised
   counts stand and the prediction is unavailable. After fix round 5 the probe of the file sits under the same handler
