@@ -106,17 +106,19 @@
 
   /* The five checkpoints of a row, each {odds, observed} or null. /feed is the schedule
    * authority: the shadow entry's ladder is used only when the shadow race has /feed's post time
-   * (`sameSchedule`); otherwise its checkpoints are for another schedule and are ignored. With a
-   * ladder of the same schedule an observed ladder point stays, else the plain row's reference
-   * replaces a projected or null point (the feeds refresh apart). Without one, the plain row's
-   * references as observed and null ahead (the final always). */
+   * (`sameSchedule`); otherwise its timed checkpoints and a projected Final are for another
+   * schedule and are ignored, but an observed Final is the price that paid and always stays.
+   * With a ladder of the same schedule an observed ladder point stays, else the plain row's
+   * reference replaces a projected or null point (the feeds refresh apart). Without one, the
+   * plain row's references as observed and null ahead (the final unless observed). */
   function ladderOf(entry, line, sameSchedule) {
-    var ladder = sameSchedule ? own(entry, "ladder") : null;
+    var ladder = own(entry, "ladder");
     var hasLadder = ladder && typeof ladder === "object";
     return LADDER.map(function (c) {
       var point = hasLadder ? own(ladder, c[1]) : null;
       if (!point || typeof point !== "object" || num(own(point, "odds")) === null) point = null;
       else point = { odds: num(point.odds), observed: point.observed === true };
+      if (point !== null && !sameSchedule && !(c[1] === "0" && point.observed)) point = null;
       if (point !== null && point.observed) return point;
       var ref = c[2] === null ? null : num(own(line, c[2]));
       return ref !== null ? { odds: ref, observed: true } : point;
@@ -148,7 +150,8 @@
     '<th scope="col" class="num">Value</th><th scope="col">Read at</th>' +
     '<th scope="col">Flags</th>';
 
-  /* race_id -> whether the shadow race has the plain feed's post time (the same instant). */
+  /* race_id -> whether the shadow race has the plain feed's post time (the same instant, or a
+   * null post time on both feeds: the same unknown schedule). */
   function sameSchedules(feed, races) {
     var same = {};
     var venues = feed && Array.isArray(feed.venues) ? feed.venues : [];
@@ -156,6 +159,10 @@
       (v && Array.isArray(v.races) ? v.races : []).forEach(function (r) {
         var id = r ? String(r.race_id) : null;
         if (id === null || !has.call(races, id)) return;
+        if (r.post_utc == null && races[id].post_utc == null) {
+          same[id] = true;
+          return;
+        }
         var plainMs = board.instantMs(r.post_utc);
         same[id] = plainMs !== null && plainMs === board.instantMs(races[id].post_utc);
       });

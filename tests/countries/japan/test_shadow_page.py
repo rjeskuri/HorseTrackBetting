@@ -1589,6 +1589,155 @@ def test_a_delayed_post_merges_only_references_of_the_same_schedule(tmp_path):
     assert header_reverts >= 3, header_reverts  # the later-post rule would show another header
 
 
+def schedule_feeds(no, table, plain_post, shadow_post, last) -> tuple[dict, dict]:
+    """TOK `no` on both feeds from a {pool: {combo: (plain row, ladder or None)}} table; either
+    post may be None (a log with no stored post time)."""
+    plain = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW),
+        "venues": [{"venue": "TOK", "races": [
+            race("TOK", no, plain_post, last, {
+                code: pool(*(r for r, _ in rows.values())) for code, rows in table.items()
+            })
+        ]}],
+    }  # fmt: skip
+    pools = {
+        code: {
+            combo: {**(win(0.9, 0.8, 1.0) if code == "WIN" else rng(0.6, 0.8)),
+                    "ladder": dict(zip(LADDER_KEYS, ladder, strict=True))}
+            for combo, (_, ladder) in rows.items()
+            if ladder is not None
+        }
+        for code, rows in table.items()
+    }  # fmt: skip
+    shadow_r = shadow_race("TOK", no, shadow_post or last, 0, {c: p for c, p in pools.items() if p})
+    if shadow_post is None:
+        shadow_r.update(post_utc=None, minutes_to_post=None)
+    shadow = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW),
+        "models": {"nowcast": "now-c3"},
+        "races": [shadow_r],
+    }
+    return plain, shadow
+
+
+def across_schedules(plain_row: dict, ladder) -> list[dict | None]:
+    """A ladder of another schedule: the plain row's observed references for the timed
+    checkpoints, and the ladder's Final only when it is observed (a projection is for the other
+    schedule)."""
+    out = expected_ladder(plain_row, None)
+    final = None if ladder is None else ladder[-1]
+    out[-1] = final if final is not None and final["observed"] else None
+    return out
+
+
+@needs_node
+def test_a_completed_race_without_a_post_time_shows_its_logged_ladder(tmp_path):
+    """A completed race whose log has final odds but no stored post time: both feeds carry a null
+    post_utc, which is the same (unknown) schedule (owner, 2026-11-27). The /shadow-feed ladder is
+    used: its observed checkpoints and its observed Final are shown, not '-'. The plain rows carry
+    no references (no post time to take them at); a Quinella row without a ladder shows '-'."""
+    nothing = (None, None, None, None)
+    table = {
+        "WIN": {
+            "1": (ref_line("1", 2.1, *nothing),
+                  (seen(2.8), seen(2.5), seen(2.3), seen(2.26), seen(2.1))),
+            "2": (ref_line("2", 6.4, *nothing),
+                  (seen(4.6), seen(4.9), seen(5.6), seen(5.9), seen(6.4))),
+            "3": (ref_line("3", 8.2, *nothing),
+                  (None, None, None, None, seen(8.2))),  # logged only at the off
+            "4": (ref_line("4", 37.5, *nothing),
+                  (None, seen(28.7), seen(33.1), None, seen(37.5))),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.1, *nothing, hi=1.5),
+                  (seen(1.4), seen(1.3), seen(1.24), seen(1.22), seen(1.1))),
+            "2": (ref_line("2", 2.3, *nothing, hi=3.1),
+                  (seen(1.7), seen(1.8), None, seen(2.04), seen(2.3))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.1, *nothing, hi=4.0),
+                    (seen(3.7), seen(3.4), seen(3.2), seen(3.27), seen(3.1))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, *nothing), None),
+        },
+    }  # fmt: skip
+    plain, shadow = schedule_feeds(12, table, None, None, jst(9, 40))
+    assert plain["venues"][0]["races"][0]["post_utc"] is None
+    assert shadow["races"][0]["post_utc"] is None
+    (page,) = (soup(h) for h in results(
+        [call("renderShadow", plain, shadow, {"now": ms(NOW), "venue": "TOK",
+                                              "race": rid("TOK", 12)})], tmp_path))  # fmt: skip
+    block = race_block(page, rid("TOK", 12))
+    finals = shown = 0
+    for code, rows in table.items():
+        for combo, (plain_row, ladder) in rows.items():
+            want = expected_ladder(plain_row, None) if ladder is None else list(ladder)
+            check_ladder_row(row_of(pool_block(block, code), combo), want, (code, combo))
+            finals += want[-1] is not None
+            shown += sum(w is not None for w in want)
+    assert finals == 7 and shown >= 25, (finals, shown)  # '-' everywhere would fail every row
+
+
+@needs_node
+def test_an_observed_final_is_kept_on_another_schedule(tmp_path):
+    """An observed Final ('0' with observed: true) in the /shadow-feed ladder is the price that
+    paid: it is shown whatever the schedules (owner, 2026-11-27), on a delay and when only one feed
+    has a post time. A projected Final from a ladder of another schedule is still '-', and the
+    timed checkpoints follow the existing rule: the plain row's observed references only."""
+    old, new = jst(9, 40), jst(9, 50)  # /feed has the delay to NEW, the ladder is for OLD
+    table = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.5, 2.4, 2.3, None),
+                  (seen(2.8), seen(2.5), seen(2.3), seen(2.26), seen(2.19))),
+            "2": (ref_line("2", 5.8, 4.9, None, 5.5, 5.7),
+                  (seen(4.6), seen(4.9), seen(5.6), seen(5.9), seen(6.05))),
+            "3": (ref_line("3", 8.6, None, None, None, None),
+                  (seen(9.3), None, seen(8.8), seen(8.7), ahead(8.4))),  # projected Final
+            "4": (ref_line("4", 31.0, 28.7, 30.0, None, None),
+                  (None, seen(28.7), seen(33.1), seen(35.2), None)),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.3, None, None, None, hi=1.6),
+                  (seen(1.4), seen(1.3), seen(1.24), seen(1.22), seen(1.17))),
+            "2": (ref_line("2", 1.9, 1.8, 1.9, None, None, hi=2.6),
+                  (seen(1.7), ahead(1.85), ahead(1.9), ahead(1.95), ahead(2.0))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.4, None, None, None, hi=4.1),
+                    (seen(3.7), seen(3.4), seen(3.2), seen(3.27), seen(3.42))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, 7.9, None, None, None), None),
+        },
+    }  # fmt: skip
+    # (name, race no, plain post, shadow post)
+    cases = [
+        ("a delay on /feed", 10, new, old),
+        ("/feed has a post time, the log none", 11, new, None),
+        ("the log has a post time, /feed none", 12, None, old),
+    ]
+    steps = []
+    for _, no, plain_post, shadow_post in cases:
+        plain, shadow = schedule_feeds(no, table, plain_post, shadow_post, jst(9, 59))
+        steps.append(call("renderShadow", plain, shadow,
+                          {"now": ms(NOW), "venue": "TOK", "race": rid("TOK", no)}))  # fmt: skip
+    pages = [soup(h) for h in results(steps, tmp_path)]
+    for (name, no, _, _), page in zip(cases, pages, strict=True):
+        block = race_block(page, rid("TOK", no))
+        kept = dropped = 0
+        for code, rows in table.items():
+            for combo, (plain_row, ladder) in rows.items():
+                want = across_schedules(plain_row, ladder)
+                check_ladder_row(row_of(pool_block(block, code), combo), want, (name, code, combo))
+                if ladder is not None and ladder[-1] is not None:
+                    kept += ladder[-1]["observed"]
+                    dropped += not ladder[-1]["observed"]
+        assert kept == 4 and dropped == 2, (name, kept, dropped)
+
+
 def _write_logged_day(captures: dict[datetime, dict[str, float]], post: datetime) -> None:
     """One TOK race (5R) of synthetic WIN captures, and its post time, under the data dir."""
     from horsetrack.core import paths
