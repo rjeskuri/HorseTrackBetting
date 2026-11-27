@@ -969,3 +969,277 @@ def test_no_v0_wide_source_is_refused_and_writes_nothing(make, data_dir, monkeyp
     assert result.exit_code not in (0, None), command_output(result)
     assert snapshot_models(data_dir) == before
     assert default_registry(COUNTRY).records() == []
+
+
+# ---------------------------------------------------------------- review fixes, round 2 (PR #507)
+
+
+LOGGED_MEETINGS = ((date(2026, 11, 7), "TOK"), (date(2026, 11, 8), "KYO"))  # the logged fit's days
+
+
+def logged_examples(race_date: date, venue: str) -> pd.DataFrame:
+    """A logged meeting's examples as `nowcast.training_examples` returns them: WIN, PLACE and
+    Wide pairs at every grid tau over five bands. The logged WIN and PLACE drifts are far from the
+    JRA-VAN fixtures', so a logged WIN or PLACE cell leaking into the merge shows."""
+    from horsetrack.countries.japan.models.v0 import nowcast as v0nowcast
+
+    grid = load_decision_grid()
+    day = race_date.isoformat()
+    shift = race_date.toordinal() % 3
+    records = []
+    for tau in grid.minutes:
+        for k, odds in enumerate((1.8, 3.2, 6.5, 14.0, 40.0)):
+            for pool, drift in ((WIN, 0.25), (PLACE, -0.2), (WIDE, 0.05)):
+                y = drift * (1 + 0.1 * k) - 0.002 * tau + 0.01 * shift
+                combination = f"{k + 1},{k + 2}" if pool == WIDE else str(k + 1)
+                records.append((f"jra:{day}:{venue}:01", day, pool, combination, int(tau), odds,
+                                round(odds * math.exp(y), 6), 5.0))  # fmt: skip
+    examples = pd.DataFrame.from_records(records, columns=v0nowcast.COLUMNS)
+    examples.attrs["dropped"] = dict.fromkeys(grid.minutes, 0)
+    examples.attrs["skipped"] = {"no_final_board": 0, "no_board": dict.fromkeys(grid.minutes, 0)}
+    return examples
+
+
+def write_deployed_fits(data_dir: Path, monkeypatch) -> NowcastV0:
+    """The deployment shape: the logged-days fit written by the real logged fitter
+    (`nowcast.run_fit`, so its own `manifest-nowcast-<fit_id>.json` sits beside it, with neither
+    `wide_fit_file` nor `wide_fit_id`), and current.json naming it next to the win and ordering
+    fits. Its logged reads are replaced by `logged_examples`. Returns the logged fit as
+    `NowcastV0.fit` gives it on those examples, derived here."""
+    from horsetrack.countries.japan.models.v0 import nowcast as v0nowcast
+
+    names = write_current_fits(data_dir)
+    folder = models_dir(data_dir)
+    (folder / names["nowcast"]).unlink()
+    monkeypatch.setattr(
+        v0nowcast,
+        "training_examples",
+        lambda race_date, venue, **kw: logged_examples(race_date, venue),
+    )
+    written = v0nowcast.run_fit(list(LOGGED_MEETINGS), out_dir=folder)
+    cfg = v0_config()
+    want = NowcastV0.fit(
+        pd.concat([logged_examples(d, v) for d, v in LOGGED_MEETINGS], ignore_index=True),
+        bands=cfg["bands"],
+        grid=load_decision_grid(),
+        prior_n=cfg["prior_n"],
+    )
+    assert written["fit_id"] == want.fit_id
+    assert Path(written["fit_path"]) == folder / f"nowcast-{want.fit_id}.json"
+    logged_manifest = json.loads((folder / f"manifest-nowcast-{want.fit_id}.json").read_text())
+    assert logged_manifest["fit_id"] == want.fit_id  # the logged fitter's manifest is there
+    (folder / "current.json").write_text(
+        json.dumps({**names, "nowcast": f"nowcast-{want.fit_id}.json"}), encoding="utf-8"
+    )
+    return want
+
+
+def assert_wide_is(model: NowcastV0, want: NowcastV0) -> None:
+    """`model`'s QUINELLA_PLACE cells and sigma0 are `want`'s."""
+    wide = {k: c for k, c in model.cells.items() if k[0] == WIDE}
+    expected = {k: c for k, c in want.cells.items() if k[0] == WIDE}
+    assert expected and set(wide) == set(expected)
+    for key, cell in expected.items():
+        assert wide[key].n == cell.n, key
+        assert wide[key].mu == pytest.approx(cell.mu, rel=1e-12, abs=1e-15), key
+        assert wide[key].sigma == pytest.approx(cell.sigma, rel=1e-12), key
+    for tau in load_decision_grid().minutes:
+        assert model.sigma0[(WIDE, tau)] == pytest.approx(want.sigma0[(WIDE, tau)], rel=1e-12)
+
+
+def registry_runs() -> dict[str, dict]:
+    """run_id -> record of every run line of the japan registry file."""
+    out = {}
+    for line in default_registry(COUNTRY).path.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line)
+        if entry.get("kind") == "run":
+            out[entry["run_id"]] = entry["record"]
+    return out
+
+
+def test_the_deployed_logged_fit_with_its_own_manifest_is_the_wide_source(
+    data_dir, monkeypatch, tmp_path
+):
+    """Round 2, high: on a normal deployment the pointed logged fit has the manifest `run_fit`
+    writes. `nowcast-fit --from-store` must take it as the Wide source (a history fit's manifest is
+    told apart by its schema, not by being there): it succeeds, wide_fit_id is the logged fit's
+    id, the Wide cells and sigma0 are the logged fit's, the WIN and PLACE cells the history's,
+    previous_nowcast is the logged fit's file, and the logged fit and its manifest are untouched."""
+    from horsetrack.cli import app
+
+    variant = VARIANTS["four-days"]
+    write_store(data_dir, variant)
+    want = write_deployed_fits(data_dir, monkeypatch)
+    folder = models_dir(data_dir)
+    pointer = folder / "current.json"
+    logged_file = (folder / f"nowcast-{want.fit_id}.json").resolve()
+    logged = {
+        p: p.read_bytes() for p in (logged_file, folder / f"manifest-nowcast-{want.fit_id}.json")
+    }
+    store_module(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(app, ["japan", "nowcast-fit", "--from-store"])
+
+    assert result.exit_code == 0, command_output(result)
+    merged = pointed_fit(data_dir)
+    assert merged != logged_file
+    model = NowcastV0.from_json(merged.read_text())
+    assert model.fit_id != want.fit_id and model.fit_id in result.output
+    manifest = stored_manifest(data_dir, model.fit_id)
+    assert manifest["wide_fit_id"] == want.fit_id
+    assert resolve(pointer, manifest["previous_nowcast"]).resolve() == logged_file
+    assert_wide_is(model, want)
+    assert_history_cells(model, fit_reference(data_dir, variant["days"]))
+    for path, content in logged.items():
+        assert path.read_bytes() == content, path
+    records = scored(default_registry(COUNTRY).records(), model.fit_id)
+    assert len(records) == 1 and records[0].params["wide_fit_id"] == want.fit_id
+
+
+def test_reruns_on_the_deployed_logged_fit_keep_its_wide_source_and_rollback_target(
+    data_dir, monkeypatch, tmp_path
+):
+    """Round 2, medium (re-raised): in the deployment shape (the logged fit with its run_fit
+    manifest) a first run, an identical rerun and a refit on a changed store all name the logged
+    fit as wide_fit_id and keep its Wide cells; the identical rerun keeps previous_nowcast = the
+    logged fit's file and appends no second success record; the refit rolls back to the first
+    merged fit."""
+    variant = VARIANTS["two-days"]
+    write_store(data_dir, variant)
+    want = write_deployed_fits(data_dir, monkeypatch)
+    pointer = models_dir(data_dir) / "current.json"
+    logged_file = (models_dir(data_dir) / f"nowcast-{want.fit_id}.json").resolve()
+    module = store_module(monkeypatch, tmp_path)
+
+    first = module.fit_from_store()
+    merged = first["fit_id"]
+    second = module.fit_from_store()
+
+    assert second["fit_id"] == merged
+    for manifest in (first, second, stored_manifest(data_dir, merged)):
+        assert manifest["wide_fit_id"] == want.fit_id
+        assert resolve(pointer, manifest["previous_nowcast"]).resolve() == logged_file
+    assert pointed_fit(data_dir) == Path(first["fit_path"]).resolve()
+    assert_wide_is(NowcastV0.from_json(Path(first["fit_path"]).read_text()), want)
+    assert len(scored(default_registry(COUNTRY).records(), merged)) == 1
+
+    day, venue = EXTRA_DAY
+    assert not is_holdout_day(COUNTRY, day)
+    write_parquet(
+        jravan_dir(data_dir) / f"{day.isoformat()}.parquet",
+        day_rows(day, venue, scale=variant["scale"], scratch=False),
+    )
+    third = module.fit_from_store()
+
+    refit = third["fit_id"]
+    assert refit not in (merged, want.fit_id)
+    for manifest in (third, stored_manifest(data_dir, refit)):
+        assert manifest["wide_fit_id"] == want.fit_id
+        prev = resolve(pointer, manifest["previous_nowcast"]).resolve()
+        assert prev == Path(first["fit_path"]).resolve()
+    assert pointed_fit(data_dir) == Path(third["fit_path"]).resolve()
+    model = NowcastV0.from_json(Path(third["fit_path"]).read_text())
+    assert_wide_is(model, want)
+    assert_history_cells(model, fit_reference(data_dir, [*variant["days"], day]))
+    records = scored(default_registry(COUNTRY).records(), refit)
+    assert len(records) == 1 and records[0].params["wide_fit_id"] == want.fit_id
+
+
+def test_a_new_data_build_with_the_same_fit_gets_its_own_record(data_dir, monkeypatch, tmp_path):
+    """Round 2, medium: quinella rows added to a development file change its digest (data_builds)
+    but no WIN/PLACE pair, so the fit_id is unchanged. The rerun raises nothing, and the manifest's
+    data_builds are those of the registry record its run_id names. Ruling: a new data build is a
+    new run: one success record per (fit_id, data build), so the rerun appends one record for the
+    new build and the manifest names it; a further unchanged rerun appends none. The first run's
+    Wide source and rollback target are kept (the fit is the one the pointer already names)."""
+    variant = VARIANTS["four-days"]
+    write_store(data_dir, variant)
+    names = write_current_fits(data_dir)
+    pointer = models_dir(data_dir) / "current.json"
+    logged_file = resolve(pointer, names["nowcast"]).resolve()
+    module = store_module(monkeypatch, tmp_path)
+
+    first = module.fit_from_store()
+    fit_id = first["fit_id"]
+
+    day = min(variant["days"])
+    rows = day_rows(day, variant["days"][day], scale=variant["scale"],
+                    scratch=day == variant["scratch_day"])  # fmt: skip
+    extra = [{**r, "combination": "1,3", "odds": 12.5} for r in rows if r["pool"] == "QUINELLA"]
+    assert extra
+    write_parquet(jravan_dir(data_dir) / f"{day.isoformat()}.parquet", rows + extra)
+    assert_pairs_equal(study_pairs(data_dir, variant), expected_pairs(variant))  # pairs unchanged
+
+    second = module.fit_from_store()
+
+    assert second["fit_id"] == fit_id
+    assert second["data_builds"] != first["data_builds"]
+    runs = registry_runs()
+    for manifest in (first, second, stored_manifest(data_dir, fit_id)):
+        record = runs[manifest["run_id"]]
+        assert record["status"] != "failed"
+        assert record["params"]["fit_id"] == fit_id
+        assert record["data_builds"] == manifest["data_builds"]
+    assert stored_manifest(data_dir, fit_id)["data_builds"] == second["data_builds"]
+    assert second["run_id"] != first["run_id"]
+    assert len(scored(default_registry(COUNTRY).records(), fit_id)) == 2
+    for manifest in (second, stored_manifest(data_dir, fit_id)):
+        assert manifest["wide_fit_id"] == OLD_ID
+        assert resolve(pointer, manifest["previous_nowcast"]).resolve() == logged_file
+
+    third = module.fit_from_store()
+
+    assert third["run_id"] == second["run_id"]
+    assert third["data_builds"] == second["data_builds"]
+    assert len(scored(default_registry(COUNTRY).records(), fit_id)) == 2
+
+
+def test_an_unreadable_development_file_records_one_failed_run(data_dir, monkeypatch, tmp_path):
+    """Round 2, low: when opening one development file raises PermissionError (on any open or
+    parquet read of it), the command fails, exactly one "failed" record naming the error is
+    appended, and the models folder is unchanged."""
+    import builtins
+    import io
+
+    from horsetrack.cli import app
+
+    variant = VARIANTS["four-days"]
+    write_store(data_dir, variant)
+    write_current_fits(data_dir)
+    bad = f"{sorted(variant['days'])[1].isoformat()}.parquet"
+    before = snapshot_models(data_dir)
+    store_module(monkeypatch, tmp_path)
+
+    def refuse(owner, attr, *, method: bool) -> None:
+        real = getattr(owner, attr)
+
+        def check(source) -> None:
+            if str(source).endswith(bad):
+                raise PermissionError(13, "Permission denied", str(source))
+
+        if method:
+
+            def spy(self, *args, _real=real, **kwargs):
+                check(self)
+                return _real(self, *args, **kwargs)
+        else:
+
+            def spy(source, *args, _real=real, **kwargs):
+                check(source)
+                return _real(source, *args, **kwargs)
+
+        monkeypatch.setattr(owner, attr, spy)
+
+    for attr in ("open", "read_bytes"):
+        refuse(Path, attr, method=True)
+    for owner, attr in ((builtins, "open"), (io, "open"), (pq, "read_table"), (pq, "ParquetFile"),
+                        (pq, "ParquetDataset"), (ds, "dataset"), (pd, "read_parquet")):  # fmt: skip
+        refuse(owner, attr, method=False)
+
+    result = CliRunner().invoke(app, ["japan", "nowcast-fit", "--from-store"])
+
+    assert result.exit_code not in (0, None), command_output(result)
+    records = default_registry(COUNTRY).records()
+    assert [r.status for r in records] == ["failed"], records
+    assert "PermissionError" in json.dumps(records[0].params), records[0].params
+    assert snapshot_models(data_dir) == before

@@ -14,8 +14,10 @@ shipped decision grid; a day with no WIN or PLACE pair (a quinella-only file) is
 fit's days, and a pool with no pair at some grid tau (a partial backfill) refuses the fit. The
 JRA-VAN series has no Wide pool, so the QUINELLA_PLACE cells and sigma0 are copied unchanged from
 our logged-days nowcast fit: the one `current.json` names or, when it names a fit of this command,
-the logged fit that fit's manifest names. Without such a v0 fit the command refuses and writes
-nothing. The merged fit's id is the sha256 of its JSON, as `NowcastV0.fit` names a fit.
+the logged fit that fit's manifest names. A fit of this command is told apart by its manifest's
+schema (`pool_sources`, `wide_fit_file`), not by having one: the logged fitter (`run_fit`) writes a
+manifest too. Without such a v0 fit the command refuses and writes nothing. The merged fit's id
+is the sha256 of its JSON, as `NowcastV0.fit` names a fit.
 
 Provenance: the data build is a digest of the selected development day files (name, size,
 content), so it does not depend on where HORSETRACK_DATA_DIR is and never reads a holdout file or
@@ -24,10 +26,12 @@ the races table.
 Outputs (JRA-VAN-derived, D21, through `write_report`, which refuses the repository):
 `$HORSETRACK_DATA_DIR/models/japan/v0/nowcast-<fit_id>.json` and `manifest-nowcast-<fit_id>.json`;
 then `current.json`'s "nowcast" entry names the new file (every other entry and the old fit file
-kept). One registry record per fit (family `japan-v0-nowcast-drift`), a failed fit too, and one
-success record per fit_id: publication is idempotent, so an unchanged rerun, or a retry after a
-crash between the record and the pointer, completes the writes without a second record and keeps
-the first run's Wide source and rollback target (`previous_nowcast`).
+kept). One registry record per fit (family `japan-v0-nowcast-drift`), a failed fit too (an
+unreadable day file included), and one success record per (fit_id, data build): a new data build
+that leaves the fit unchanged appends a record of its own, which the manifest then names, while an
+unchanged rerun, or a retry after a crash between the record and the pointer, completes the writes
+without a second record. A rerun of the fit the pointer already names keeps the first run's Wide
+source and rollback target (`previous_nowcast`).
 """
 
 from __future__ import annotations
@@ -155,6 +159,13 @@ def _manifest_path(folder: Path, fit_id: str) -> Path:
     return folder / f"manifest-nowcast-{fit_id}.json"
 
 
+def _is_history_manifest(manifest: object) -> bool:
+    """Whether a manifest is one this command writes; the logged fitter's has neither key."""
+    return isinstance(manifest, dict) and (
+        "pool_sources" in manifest or "wide_fit_file" in manifest
+    )
+
+
 def _load_v0(folder: Path, name: str, what: str) -> NowcastV0:
     path = Path(name) if Path(name).is_absolute() else folder / name
     try:
@@ -168,8 +179,8 @@ def _load_v0(folder: Path, name: str, what: str) -> NowcastV0:
 
 def _wide_from_current(pointer: Path) -> WideSource:
     """The pointer's names and the logged v0 fit to take Wide from: the fit the pointer names or,
-    when that fit is one of ours (it has a manifest), the logged fit its manifest names. The
-    logged fit must hold Wide cells."""
+    when that fit is one of ours (its manifest has this command's schema), the logged fit its
+    manifest names. The logged fit must hold Wide cells."""
     try:
         names = json.loads(pointer.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -182,8 +193,11 @@ def _wide_from_current(pointer: Path) -> WideSource:
     pointed = _load_v0(folder, name, "current nowcast fit")
     manifest_path = _manifest_path(folder, pointed.fit_id)
     manifest = None
-    if manifest_path.is_file():  # a fit of this command: its manifest names the logged fit
+    if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not _is_history_manifest(manifest):
+            manifest = None  # the logged fitter's own manifest: the pointed fit is the logged fit
+    if manifest is not None:  # a fit of this command: its manifest names the logged fit
         wide_name, wide_id = manifest.get("wide_fit_file"), manifest.get("wide_fit_id")
         if not wide_name or not wide_id:
             raise NoWideSource(f"{manifest_path} names no logged fit to take Wide from")
@@ -238,10 +252,15 @@ def _record(*, status: str, params: dict, builds: dict, git_sha: str, wide_fit_i
     )
 
 
-def _success_run_id(registry: Registry, fit_id: str) -> str | None:
-    """The run id of `fit_id`'s success record when the registry holds one already."""
+def _success_run_id(registry: Registry, fit_id: str, builds: dict) -> str | None:
+    """The run id of `fit_id`'s success record on the data build `builds`, when the registry
+    holds one already."""
     for record in registry.records(FAMILY_ID):
-        if record.status != "failed" and record.params.get("fit_id") == fit_id:
+        if (
+            record.status != "failed"
+            and record.params.get("fit_id") == fit_id
+            and record.data_builds == builds
+        ):
             return _sha256(_canonical(asdict(record)))  # as Registry.append names a run
     return None
 
@@ -266,7 +285,8 @@ def fit_from_store() -> dict:
     prior_n = float(cfg["prior_n"])
     grid = load_decision_grid()
     files, held = development_files()
-    builds = data_builds(files)
+    # until the files are hashed, inside the try below, so an unreadable one is a failed run
+    builds = {"jravan_odds_timeseries": f"unhashed ({len(files)} development days)"}
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
     params = {
@@ -282,6 +302,7 @@ def fit_from_store() -> dict:
     }
 
     try:
+        builds = data_builds(files)
         examples = store_examples(files)
         examples = examples[examples["pool"].isin(HISTORY_POOLS)]
         missing = _missing_horizons(examples, grid)
@@ -316,7 +337,7 @@ def fit_from_store() -> dict:
     else:
         previous, created = source.names.get("nowcast"), None
     write_report(fit_path, model.to_json(), sources=(SOURCE,))
-    run_id = _success_run_id(registry, model.fit_id)
+    run_id = _success_run_id(registry, model.fit_id, builds)
     if run_id is None:
         run_id = registry.append(
             _record(
