@@ -28,7 +28,7 @@ store alone, and their figures are below.
   `tests/countries/japan/test_condlogit.py` and `test_meta.py`), and `countries/japan/studies/meta.py` (the run).
   The meeting-clustered bounds, the report's rule and rules-out sections and the level-2 window table were added at
   `647879c`, after the outcomes were read (review findings on PR #308; see Hypothesis). To reproduce, run
-  `uv run python -m horsetrack.countries.japan.studies.meta --run --members ~/Projects/HKTrack/outputs/oof/m-v1-20261115-6102e309.parquet`.
+  `uv run python -m horsetrack.countries.japan.studies.meta --run --members ~/Projects/HKTrack/outputs/oof/m-v1-20261115-6102e309.parquet --allow-short-history`.
 - Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`. Members:
   `HKTrack:outputs/oof/m-v1-20261115-6102e309.parquet@b0c5a8298e0befe8`, read by column (keys and the three member
   columns only). HKTrack was read, never written or run.

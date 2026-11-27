@@ -12,6 +12,9 @@ Each runner is a horse's only start, so its first observed start is that race.
 The member file (`studies.meta.MEMBER_KEYS` and the three member columns of `studies.meta.MEMBERS`)
 holds every runner from `start` on, its `fold_season` the race's calendar year (a season
 walk-forward: trained on the seasons before), less the runners in `drop`.
+
+`add_race_day` adds a day of races (round 2: a late-December day the priced frame drops, an early
+January day that pulls walk-forward's first 2024 train_end before 31 December).
 """
 
 from __future__ import annotations
@@ -164,3 +167,39 @@ def write_members(path: Path, members: pd.DataFrame) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pandas(members, preserve_index=False), path)
     return path
+
+
+def add_race_day(store: Store, day: date, *, status: str = "run", priced: bool = True) -> Store:
+    """The store with `RACES_PER_DAY` more races on `day`, six runners each with horse ids of their
+    own and the favourite (the first runner) winning. `status` is the races' status (a race not
+    `run` has no finishing positions); `priced=False` leaves every Win price missing."""
+    runner_rows, race_rows = [], []
+    for n in range(1, RACES_PER_DAY + 1):
+        rid = race_id(day, n)
+        race_rows.append(
+            {
+                "race_id": rid,
+                "race_date": day,
+                "meeting_id": f"{day.isoformat()}:{VENUE}",
+                "status": status,
+                "race_class": "C1",
+            }
+        )
+        for i in range(RUNNERS):
+            runner_rows.append(
+                {
+                    "race_id": rid,
+                    "race_date": day,
+                    "horse_id": f"x{day:%Y%m%d}{n}{i}",
+                    "horse_no": i + 1,
+                    "win_odds": float(ODDS[i]) if priced else float("nan"),
+                    "finish_pos": i + 1 if status == "run" else pd.NA,
+                    "is_scratched": False,
+                }
+            )
+    added = pd.DataFrame(runner_rows)
+    added["finish_pos"] = added["finish_pos"].astype("Int64")
+    return Store(
+        runners=pd.concat([store.runners, added], ignore_index=True),
+        races=pd.concat([store.races, pd.DataFrame(race_rows)], ignore_index=True),
+    )

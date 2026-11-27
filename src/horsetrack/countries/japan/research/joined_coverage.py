@@ -7,13 +7,20 @@ source, through the joins a model needs. `joined_coverage(schedule, sources)` is
   A race on a holdout day (`is_holdout_day("japan", d)`, D14) is in no count, and neither is a
   source row of it, nor one whose race id names a holdout day: this is a development report.
 - `sources`: `{name: frame}`, one row per runner the source holds after the joins (`race_id`,
-  `horse_no`, `forecast`, NaN when the runner has none, and `won`, missing when no result).
+  `horse_no`, `forecast`, NaN when the runner has none, and `won`, missing when no result), and
+  optionally `horse_id`: the source's own key, on which its repeats are counted (a row whose
+  `horse_no` is missing, not a scheduled starter, is then a source row that is not scheduled).
+- `study`: optionally `{name: StudyRaces}`, the races a study keeps for a source: a race outside
+  its store frame or not scored by it is not scored here either.
 
 Every scheduled race passes, per source, `STAGES` in order and drops at the first it fails, with
 one reason (`REASONS`): matched fails on `duplicate_key` (a key of the race occurs more than once
-in the source), else on `unmatched` (a scheduled runner has no source row); forecastable fails on
-`no_forecast` (a scheduled runner's forecast is missing); scored fails on `no_result` (a scheduled
-runner's `won` is missing, or no runner won; a dead heat is scored). Counts split by era
+in the source), else on `unmatched` (a scheduled runner has no source row); forecastable fails,
+for a source with a `StudyRaces`, on `not_in_store_frame` (the study's store frame drops the race,
+so the study forecasts none of it), else on `no_forecast` (a scheduled runner's forecast is
+missing); scored fails on `no_result` (a scheduled runner's `won` is missing, or no runner won; a
+dead heat is scored), else, with a `StudyRaces`, on `train_only` (the study only trains on the
+race: its scored folds test none of it). Counts split by era
 (`PRICE_ERA` from D10's `PRICE_ERA_START` on, `PRE_PRICE_ERA` before) and by card class. Key
 counts: source rows whose key repeats (every copy), scheduled keys with no source row, and source
 rows whose key is not scheduled.
@@ -29,7 +36,9 @@ runs may predate the store; otherwise `UNVERIFIED` (a maiden debut, or runs outs
 `horsetrack japan joined-coverage --members PATH` (`joined_coverage_command`) runs it on the store:
 the schedule is the store's development starters of the price era (`studies.meta.read_development`),
 the sources the store's final Win price (`jra`) and the #87 member file (`MEMBER_SOURCE`,
-`studies.meta.read_members`); the private report adds `first_starts` over every store run.
+`studies.meta.read_members`), the latter under the #87 study's own rules (`member_study_races`:
+its `store_frame`, scored folds and level-2 population); the private report adds `first_starts`
+over every store run.
 """
 
 from __future__ import annotations
@@ -46,6 +55,7 @@ import pandas as pd
 import typer
 
 from horsetrack.core import paths
+from horsetrack.core.eval.folds import load_country_scheme
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.reports import LicensedOutputInRepo, is_withheld, write_report
 from horsetrack.core.pricing import clean_odds
@@ -56,7 +66,14 @@ from horsetrack.countries.japan.studies import meta as study
 COUNTRY = "japan"
 REPORT_NAME = "joined-coverage.md"
 STAGES = ("scheduled", "matched", "forecastable", "scored")
-REASONS = ("duplicate_key", "unmatched", "no_forecast", "no_result")
+REASONS = (  # in the order a race is tested: the first that fails is its reason
+    "duplicate_key",
+    "unmatched",
+    "not_in_store_frame",
+    "no_forecast",
+    "no_result",
+    "train_only",
+)
 PRICE_ERA = "price_era"
 PRE_PRICE_ERA = "pre_price_era"
 ERAS = (PRE_PRICE_ERA, PRICE_ERA)
@@ -69,8 +86,24 @@ HISTORY_LABELS = (VERIFIED_DEBUT, STORE_START, UNVERIFIED)
 MEMBER_SOURCE = "hktrack_members_jrdb"  # the #87 member file: JRDB-derived, so withheld (D21)
 
 # the last stage a race reaches when it drops for a reason; a race that drops for none is scored
-_REACHED = {"duplicate_key": 0, "unmatched": 0, "no_forecast": 1, "no_result": 2, None: 3}
+_REACHED = {
+    "duplicate_key": 0,
+    "unmatched": 0,
+    "not_in_store_frame": 1,
+    "no_forecast": 1,
+    "no_result": 2,
+    "train_only": 2,
+    None: 3,
+}
 _RACE_ID_DAY = re.compile(r"^[^:]*:(\d{4}-\d{2}-\d{2}):")  # `<source>:<YYYY-MM-DD>:...`
+
+
+@dataclass(frozen=True)
+class StudyRaces:
+    """The races of a study's store frame and the races it scores (a subset)."""
+
+    in_store_frame: frozenset[str]
+    scored: frozenset[str]
 
 
 @dataclass(frozen=True, eq=False)
@@ -156,8 +189,14 @@ def _holdout_id(race_id: object) -> bool:
     return is_holdout_day(COUNTRY, day)
 
 
-def joined_coverage(schedule: pd.DataFrame, sources: Mapping[str, pd.DataFrame]) -> JoinedCoverage:
+def joined_coverage(
+    schedule: pd.DataFrame,
+    sources: Mapping[str, pd.DataFrame],
+    *,
+    study: Mapping[str, StudyRaces] | None = None,
+) -> JoinedCoverage:
     """Each source's races through `STAGES` and its key counts (see the module doc)."""
+    study = study or {}
     _check_columns(schedule, ["race_id", "horse_no", "race_date", "race_class"], "the schedule")
     days = pd.to_datetime(schedule["race_date"])
     if days.isna().any():
@@ -182,7 +221,7 @@ def joined_coverage(schedule: pd.DataFrame, sources: Mapping[str, pd.DataFrame])
         _check_columns(rows, ["race_id", "horse_no", "forecast", "won"], f"source {name!r}")
         named = {r for r in rows["race_id"].unique() if _holdout_id(r)}
         rows = rows.loc[~rows["race_id"].isin(holdout_ids | named)]
-        reason, counts = _source(scheduled, scheduled_keys, races.index, rows)
+        reason, counts = _source(scheduled, scheduled_keys, races.index, rows, study.get(name))
         frame[f"reason:{name}"] = reason
         keys[name] = counts
     return JoinedCoverage(races_frame=frame.reset_index(), keys=keys)
@@ -193,10 +232,12 @@ def _source(
     scheduled_keys: pd.MultiIndex,
     race_ids: pd.Index,
     rows: pd.DataFrame,
+    study: StudyRaces | None,
 ) -> tuple[pd.Series, dict[str, int]]:
     """Per scheduled race the reason it drops in `rows` (None: scored), and the key counts."""
     row_keys = _keys(rows)
-    repeated = rows.duplicated(KEY, keep=False).to_numpy()
+    own_key = ["race_id", "horse_id"] if "horse_id" in rows.columns else KEY
+    repeated = rows.duplicated(own_key, keep=False).to_numpy()
     in_schedule = row_keys.isin(scheduled_keys)
     missing = ~scheduled_keys.isin(row_keys)
 
@@ -212,7 +253,12 @@ def _source(
         "unmatched": set(scheduled.loc[missing, "race_id"]),
         "no_forecast": no_forecast,
         "no_result": no_result,
+        "not_in_store_frame": set(),
+        "train_only": set(),
     }
+    if study is not None:
+        failing["not_in_store_frame"] = set(race_ids) - study.in_store_frame
+        failing["train_only"] = set(study.in_store_frame) - study.scored
     reason = pd.Series([None] * len(race_ids), index=race_ids, dtype=object)
     for why in reversed(REASONS):  # the first failing stage wins
         reason[reason.index.isin(list(failing[why]))] = why
@@ -231,8 +277,10 @@ _INTRO = (
     "Each scheduled development race (holdout days, D14, are in no count) passes, per source, the "
     "stages scheduled, matched, forecastable and scored, and drops at the first it fails: "
     "`duplicate_key` (a runner key repeats in the source) or `unmatched` (a scheduled runner has "
-    "no source row) at matched, `no_forecast` (a runner has no forecast after the joins) at "
-    "forecastable, `no_result` (a runner has no result, or no runner won) at scored. Eras split "
+    "no source row) at matched, `not_in_store_frame` (for a source a study reads: the study's "
+    "store frame drops the race) or `no_forecast` (a runner has no forecast after the joins) at "
+    "forecastable, `no_result` (a runner has no result, or no runner won) or `train_only` (the "
+    "study only trains on the race) at scored. Eras split "
     f"at D10's price era start, {PRICE_ERA_START.isoformat()}. Built by "
     "`research.joined_coverage` (#418)."
 )
@@ -356,9 +404,10 @@ def store_sources(
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     """The schedule, the store's starters (scratched runners left out), and two sources on it:
     `jra`, the final Win price as the forecast, and `MEMBER_SOURCE`, the #87 member file keyed to
-    the store's horse numbers (its forecast missing when any member's is; a member row that is
-    not a store starter keeps no horse number). `won` is the store's: missing for a race not run,
-    otherwise whether the runner finished first."""
+    the store's horse numbers and keyed on the file's own (race_id, horse_id) (its forecast
+    missing when any member's is; a member row that is not a store starter keeps no horse number).
+    `won` is the store's: missing for a race not run, otherwise whether the runner finished
+    first."""
     scratched = runners["is_scratched"].eq(True).to_numpy(dtype=bool, na_value=False)
     starters = runners.loc[~scratched].merge(
         races[["race_id", "race_class", "status"]], on="race_id", how="left"
@@ -376,7 +425,26 @@ def store_sources(
         .assign(forecast=members[member_cols].mean(axis=1, skipna=False).to_numpy())
         .merge(numbers, on=["race_id", "horse_id"], how="left", validate="many_to_one")
     )
-    return schedule, {"jra": store, MEMBER_SOURCE: member[[*KEY, "forecast", "won"]]}
+    return schedule, {"jra": store, MEMBER_SOURCE: member[[*KEY, "horse_id", "forecast", "won"]]}
+
+
+def member_study_races(
+    runners: pd.DataFrame, races: pd.DataFrame, members: pd.DataFrame
+) -> StudyRaces:
+    """The #87 study's races for the member file, by its own code: `studies.meta.store_frame`,
+    its scored folds (`study_folds`) and its level-2 population (`level2_population`), whose
+    scored folds' test races are the ones it scores. A (race_id, horse_id) the file repeats is
+    left out of the population here (its race drops as `duplicate_key` first)."""
+    frame, _ = study.store_frame(runners, races)
+    _, scored = study.study_folds(frame, load_country_scheme(COUNTRY))
+    unique = members.loc[~members.duplicated(["race_id", "horse_id"], keep=False)]
+    level2 = study.level2_population(frame, scored, unique, study.race_calendar())
+    tested = [np.asarray(f.test_idx, dtype=int) for f in level2.folds]
+    rows = np.unique(np.concatenate(tested)) if tested else np.array([], dtype=int)
+    return StudyRaces(
+        in_store_frame=frozenset(frame["race_id"]),
+        scored=frozenset(level2.frame["race_id"].iloc[rows]),
+    )
 
 
 def read_runs() -> pd.DataFrame:
@@ -407,8 +475,10 @@ def joined_coverage_command(
         runners, races = study.read_development(
             [*study.RUNNER_COLUMNS, "horse_no"], [*study.RACE_COLUMNS, "race_class"]
         )
-        schedule, sources = store_sources(runners, races, study.read_members(members))
-        cov = joined_coverage(schedule, sources)
+        member_rows = study.read_members(members)
+        schedule, sources = store_sources(runners, races, member_rows)
+        rules = {MEMBER_SOURCE: member_study_races(runners, races, member_rows)}
+        cov = joined_coverage(schedule, sources, study=rules)
         write_private_report(cov, history=first_starts(read_runs()))
     except (paths.DataDirNotSet, LicensedOutputInRepo, ValueError, KeyError, OSError) as exc:
         typer.echo(f"ERROR joined-coverage failed: {type(exc).__name__}: {exc}", err=True)
