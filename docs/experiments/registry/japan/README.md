@@ -17,6 +17,7 @@ per family, each holding that family's runs.
 - [japan-family-l-floor-tail-favourite](japan-family-l-floor-tail-favourite.md)
 - [japan-family-l-floor-tail-favourite-v2](japan-family-l-floor-tail-favourite-v2.md)
 - [japan-family-l-floor-tail-favourite-v3](japan-family-l-floor-tail-favourite-v3.md)
+- [japan-family-l-floor-tail-favourite-v4](japan-family-l-floor-tail-favourite-v4.md)
 - [japan-same-day-bias-final-win](japan-same-day-bias-final-win.md)
 - [japan-speed-top3-c3](japan-speed-top3-c3.md)
 - [japan-tail-beta-final-win](japan-tail-beta-final-win.md)

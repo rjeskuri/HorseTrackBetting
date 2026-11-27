@@ -30,39 +30,39 @@ built on a licensed source shows no values here.
 | E9 | ceiling:calibrated_market | scored | all_folds | q_mass_above[0.405465] | 0 | [0, 0] | 10047 |
 | E9 | ceiling:calibrated_market | scored | all_folds | q_mass_above[0.693147] | 0 | [0, 0] | 10047 |
 | E9 | ceiling:calibrated_market | scored | all_folds | rms_ln_pi_over_q | 0.0582411 | [0.0577251, 0.0587395] | 10047 |
-| E40 | member_alone:form | scored | withheld (licensed source) | | | | |
-| E40 | stage2:q:form | scored | withheld (licensed source) | | | | |
-| E9 | ceiling:stage2:q:form | scored | withheld (licensed source) | | | | |
-| E40 | offset:q:form | scored | withheld (licensed source) | | | | |
-| E9 | ceiling:offset:q:form | scored | withheld (licensed source) | | | | |
-| E40 | offset:cal:form | scored | withheld (licensed source) | | | | |
-| E9 | ceiling:offset:cal:form | scored | withheld (licensed source) | | | | |
-| E40 | encompassing:form | scored | withheld (licensed source) | | | | |
-| E40 | member_alone:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | stage2:q:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
-| E9 | ceiling:stage2:q:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | offset:q:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
-| E9 | ceiling:offset:q:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | offset:cal:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
-| E9 | ceiling:offset:cal:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | encompassing:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | member_alone:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | stage2:q:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
-| E9 | ceiling:stage2:q:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | offset:q:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
-| E9 | ceiling:offset:q:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | offset:cal:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
-| E9 | ceiling:offset:cal:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | encompassing:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | meeting_clustered:stage2:q:form | scored | withheld (licensed source) | | | | |
-| E40 | meeting_clustered:offset:q:form | scored | withheld (licensed source) | | | | |
-| E40 | meeting_clustered:offset:cal:form | scored | withheld (licensed source) | | | | |
-| E40 | meeting_clustered:encompassing:form | scored | withheld (licensed source) | | | | |
-| E40 | meeting_clustered:stage2:q:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | meeting_clustered:offset:q:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | meeting_clustered:offset:cal:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | meeting_clustered:encompassing:lgbm_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | meeting_clustered:stage2:q:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | meeting_clustered:offset:q:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | meeting_clustered:offset:cal:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
-| E40 | meeting_clustered:encompassing:clogit_no_jrdb | scored | withheld (licensed source) | | | | |
+| E40 | member_alone:form | withheld (licensed source) | | | | | |
+| E40 | stage2:q:form | withheld (licensed source) | | | | | |
+| E9 | ceiling:stage2:q:form | withheld (licensed source) | | | | | |
+| E40 | offset:q:form | withheld (licensed source) | | | | | |
+| E9 | ceiling:offset:q:form | withheld (licensed source) | | | | | |
+| E40 | offset:cal:form | withheld (licensed source) | | | | | |
+| E9 | ceiling:offset:cal:form | withheld (licensed source) | | | | | |
+| E40 | encompassing:form | withheld (licensed source) | | | | | |
+| E40 | member_alone:lgbm_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | stage2:q:lgbm_no_jrdb | withheld (licensed source) | | | | | |
+| E9 | ceiling:stage2:q:lgbm_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | offset:q:lgbm_no_jrdb | withheld (licensed source) | | | | | |
+| E9 | ceiling:offset:q:lgbm_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | offset:cal:lgbm_no_jrdb | withheld (licensed source) | | | | | |
+| E9 | ceiling:offset:cal:lgbm_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | encompassing:lgbm_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | member_alone:clogit_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | stage2:q:clogit_no_jrdb | withheld (licensed source) | | | | | |
+| E9 | ceiling:stage2:q:clogit_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | offset:q:clogit_no_jrdb | withheld (licensed source) | | | | | |
+| E9 | ceiling:offset:q:clogit_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | offset:cal:clogit_no_jrdb | withheld (licensed source) | | | | | |
+| E9 | ceiling:offset:cal:clogit_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | encompassing:clogit_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | meeting_clustered:stage2:q:form | withheld (licensed source) | | | | | |
+| E40 | meeting_clustered:offset:q:form | withheld (licensed source) | | | | | |
+| E40 | meeting_clustered:offset:cal:form | withheld (licensed source) | | | | | |
+| E40 | meeting_clustered:encompassing:form | withheld (licensed source) | | | | | |
+| E40 | meeting_clustered:stage2:q:lgbm_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | meeting_clustered:offset:q:lgbm_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | meeting_clustered:offset:cal:lgbm_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | meeting_clustered:encompassing:lgbm_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | meeting_clustered:stage2:q:clogit_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | meeting_clustered:offset:q:clogit_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | meeting_clustered:offset:cal:clogit_no_jrdb | withheld (licensed source) | | | | | |
+| E40 | meeting_clustered:encompassing:clogit_no_jrdb | withheld (licensed source) | | | | | |

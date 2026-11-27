@@ -10,15 +10,16 @@ final Win odds and dividends), our own logged boards and the shipped boost calen
 reconstruction check read the JRA-VAN H1 votes; their figures and their result are withheld (D21) and are in a private
 report only. There is no race or runner row here.
 
-- Registry family `japan-family-l-floor-tail-favourite-v3`, spec sha256
-  `c726de4222a43527accae9c051a4fa637e33b697ce0a44e0e994cebd2c7f70e2`. `run_study` froze the spec before it read any
+- Registry family `japan-family-l-floor-tail-favourite-v4`, spec sha256
+  `1e8f6cc0d7d7f3a7a6887c6eade09a0cbe61bc2d9ebe07b138522cb7f48e6ffb`. `run_study` froze the spec before it read any
   row; the freeze line is the record of the owner's inputs (there is no sign-off key). The spec holds the rules, the
   tail odds and ranks, the entropy cut points, the comparators, the selections, the decision time (T-2) and its
-  post-time source, who counts as a runner at t and how a scratch is settled, L2's no-bet race, the board fields, the
-  bootstrap, the Place-votes reading, the reconstruction check and its tolerance, and the 50 variant names
-  (`family_size` 50). Its `supersedes` entry names the two earlier families of this ticket and why each was replaced
-  (below).
-- Code at `6b75cac` (`countries/japan/studies/avoidance_price.py`, built on #81's `studies/avoidance.py`). Owner
+  post-time source, who counts as a runner at t (a scratch at t included) and how a later scratch is settled, L2's
+  no-bet race, the board fields, the bootstrap, the Place-votes reading, the Place rule and its premium, the
+  reconstruction check and its tolerance, what an unavailable prediction records, and the 50 variant names
+  (`family_size` 50). Its `supersedes` entry names the three earlier families of this ticket and why each was
+  replaced (below).
+- Code at `acc0e2b` (`countries/japan/studies/avoidance_price.py`, built on #81's `studies/avoidance.py`). Owner
   inputs are in `countries/japan/config/avoidance_price.yaml`. To reproduce, run
   `uv run python -m horsetrack.countries.japan.studies.avoidance_price --run`. The family is frozen, so a rerun with
   this spec adds runs of the same variants. Another spec is refused (`FamilyAlreadyFrozen`).
@@ -26,24 +27,28 @@ report only. There is no race or runner row here.
   `processed/jra/dividends.parquet@b3d635352bb007df`, `processed/jra/odds_timeseries (2 days)@7bd8e900bd0a1e6e`
   (the same builds as #81's run). Post times: every one of the 24 logged races took t from
   `board.snapshot.post_times_for`, which found no `<VENUE>.races.json` sidecar for either day and read HKTrack's
-  stored card (`processed/jra/upcoming/jra_<day>_KYO/races.parquet`); the at-t records carry that source as
-  `jra_post_times`. The JRA-VAN build read by the 100-vs-110 check is named in the private report.
-- The full report is under the data directory, at `reports/floor-tail-favourite-japan-c726de4222a4.md`, with
-  `-dropped.csv` beside it. The 100-vs-110 check is in `reports/floor-tail-favourite-japan-c726de4222a4-plus10-jravan.md`
+  stored card (`processed/jra/upcoming/jra_<day>_KYO/races.parquet`); no logged race lacks a post time. The at-t
+  records carry that input as one build, `jra_post_times` = `board.snapshot.post_times_for (the <VENUE>.races.json
+  sidecar, else the card)@af0475f243f53b16`, the part after `@` a digest of the race -> scheduled post mapping; the
+  coverage counts are in the full report. The JRA-VAN build read by the 100-vs-110 check is named in the private
+  report.
+- The full report is under the data directory, at `reports/floor-tail-favourite-japan-1e8f6cc0d7d7.md`, with
+  `-dropped.csv` beside it. The 100-vs-110 check is in `reports/floor-tail-favourite-japan-1e8f6cc0d7d7-plus10-jravan.md`
   and its `.csv` (private, JRA-VAN-derived). Every record is in
-  `docs/experiments/registry/japan/japan-family-l-floor-tail-favourite-v3.md`; the two 100-vs-110 records show no
-  values there (licensed source).
-- One run, 2026-11-27: 124 s, 1.43 GB peak resident memory.
+  `docs/experiments/registry/japan/japan-family-l-floor-tail-favourite-v4.md`; the two 100-vs-110 records show
+  neither their status nor any value there (licensed source).
+- One run, 2026-11-27: 156 s, 1.09 GB peak resident memory.
 
 ## Runs of this ticket
 
-Every run is in the registry; the two earlier families keep their records and are superseded, not deleted. Their
-final-price rows are the same as v3's to the last digit (the changes below touch only the board at t and the
-100-vs-110 check).
+Every run is in the registry; the three earlier families keep their records and are superseded, not deleted. Their
+final-price rows are the same as v4's to the last digit (the changes below touch only the board at t and the
+100-vs-110 check), and v3's board-at-t rows are the same as v4's.
 
 | Family | Spec sha256 | Git | Records | Status |
 | --- | --- | --- | ---: | --- |
-| `japan-family-l-floor-tail-favourite-v3` | `c726de4222a4...` | `6b75cac` | 50 | Current. The 48 paired comparisons (23 at the final price, 25 at t) are scored; the two 100-vs-110 records are withheld (D21). |
+| `japan-family-l-floor-tail-favourite-v4` | `1e8f6cc0d7d7...` | `acc0e2b` | 50 | Current. The 48 paired comparisons (23 at the final price, 25 at t) are scored; the two 100-vs-110 records are withheld (D21). |
+| `japan-family-l-floor-tail-favourite-v3` | `c726de4222a4...` | `6b75cac` | 50 | Superseded by the second review (below): its 100-vs-110 check rebuilt Place dividends with an equal split of the profit, not JRA's published rule. |
 | `japan-family-l-floor-tail-favourite-v2` | `d987d60b9b3b...` | `2321118` | 50 | Superseded: at t it counted a horse scratched before t as a runner (below). |
 | `japan-family-l-floor-tail-favourite` | `a3bfd6a65fa8...` | `88c40aa` | 50 | Superseded by the review of 2026-11-27 (below). 24 scored at the final price; all 26 board-at-t variants data pending (no post time on the logged days). |
 
@@ -52,8 +57,46 @@ freeze line, which that family's run reused.
 
 ## What changed in this round and why
 
-The review of the first run (2026-11-27) found six defects. Each is now pinned by a test in
-`tests/countries/japan/test_avoidance_price.py`, and the changed pre-registration is a new family, frozen before any
+The review of v3 (2026-11-27, round 2) found one defect in the 100-vs-110 check's Place rule and five smaller ones.
+Each is now pinned by a test in `tests/countries/japan/test_avoidance_price.py` or
+`tests/core/eval/test_registry.py`, and the changed pre-registration is a new family, v4, frozen before any read:
+
+1. **The Place rule.** v1 to v3 rebuilt each placed horse's Place dividend by an equal-split rule: the net pool first
+   returned the placed horses' stakes and the profit left was split equally over them. That is not how JRA pays
+   Place. It is replaced by JRA's published stake-back-share rule (払戻金の計算方法,
+   `core.pricing.stake_back_share_dividend`): each placed horse's payout pool is its own tickets plus an equal share
+   of the tickets on the horses that did not place, times the Place rate without any premium (0.80), shared over its
+   own tickets, rounded down to 10 yen and never under 100. Plus-10 is then tested on that base payout alone. On a
+   premium or ultra-premium PLACE pool (the boost calendar), 5% of sales is added after Plus-10, split equally over
+   the placed horses and paid per ticket, rounded down to 10 yen; v1 to v3 instead rebuilt such a race at its boosted
+   rate.
+   The premium is taken as paid; JRA may withhold it, and a race where it did would fail the reconstruction check.
+   The prediction, the reconstruction check and the cross-tab stay JRA-VAN-derived and private (D21).
+2. **A prediction that cannot be made.** When floor-bound placed favourites exist but none of their races can be
+   rebuilt (the votes missing or unreadable), the record keeps the realised counts from the jra store and holds no
+   reconstruction check and no predicted cell: the prediction is unavailable, not a scored zero. A covered selection
+   with no eligible favourite is still a scored zero, every cell 0.
+3. **A scratch at t.** A runner whose latest WIN or PLACE row at t is SCR now has no price in any pool at t, Wide
+   pairs included, even when an older row of the other pool still prices it (`docs/specs/board-at-t.md`, the board
+   module's rule). v3 let such a runner stay eligible for L2's Place and Wide tickets and dropped its race from L3's
+   rank rule. The board-at-t rows are unchanged from v3's, so the rule changed no logged race.
+4. **A failed check's rows.** When the reconstruction check fails, each rebuilt row of the private 100-vs-110 CSV has
+   its prediction cleared and is labelled rejected; its realised dividend stays.
+5. **The post-time build.** The at-t records carried the scheduled-post coverage count inside the build's name, so a
+   backfilled post time would have counted every at-t variant again in the family size. They now carry one build
+   whose identity names the source and whose refresh value is a digest of the race -> scheduled post mapping; the
+   coverage counts are in the full report.
+6. **The registry summary.** `core.eval.registry.write_summary` showed the status of a licensed-source run, and a
+   status can tell the result of a withheld check. A licensed-source run now shows only its E id, its variant and
+   `withheld (licensed source)`. The summaries of every licensed-source family were regenerated with it: v1 to v3 of
+   this family, the three c1 nowcast families and the c4 meta family; no other line changed.
+
+Every figure from the jra store in v4, at the final price and at t, equals v3's to the last digit.
+
+### Round 1 (v1 to v2 and v3)
+
+The review of the first run (2026-11-27) found six defects. Each is pinned by a test in
+`tests/countries/japan/test_avoidance_price.py`, and the changed pre-registration was a new family, frozen before any
 read:
 
 1. **t on the logged days.** The logged captures carry no `post_utc`, so the first run had no board at t. When a
@@ -116,7 +159,7 @@ rule returning more per unit staked than its comparator on the same races.
 
 ## Variants tried
 
-The family has 50 variants (`Registry.family_size`) and 50 records, all from one run at git `6b75cac`: the 48 paired
+The family has 50 variants (`Registry.family_size`) and 50 records, all from one run at git `acc0e2b`: the 48 paired
 comparisons, all scored (23 at the final price, 25 at t), and the two 100-vs-110 records (one per selection), which
 are withheld (D21).
 
@@ -294,13 +337,13 @@ own logged boards alone:
 At t a floor price on the board need not end at the floor: one of the nine paid above 110.
 
 The prediction of each of these dividends (100 or 110) from its race's settled PLACE pool reads the JRA-VAN H1 votes
-(the jravan `pool_votes` table, #368): sales from the pool row net of refunds, the race's Place payout rate from the
-boost calendar, the placed horses from the jra dividends, and the frozen Place rule (the net pool first returns the
-placed stakes, the profit is split equally over the placed horses and rounded down to 10 yen a ticket, then
-`predicted_floor_dividend`). Before the predicted x realised table, the frozen reconstruction check compares every
-placed horse's rebuilt Place dividend with the realised one (tolerance 10 yen per 100). The reconstruction check and
-the cross-tab are in the private report (withheld, D21):
-`floor-tail-favourite-japan-c726de4222a4-plus10-jravan.md` under the data directory.
+(the jravan `pool_votes` table, #368): sales from the pool row net of refunds, the placed horses from the jra
+dividends, and the frozen Place rule, JRA's published stake-back share (`core.pricing.stake_back_share_dividend` at the
+base Place rate, 0.80), then `predicted_floor_dividend` on the base payout, then the 5% premium on a PLACE pool the
+boost calendar marks premium or ultra premium. Before the predicted x realised table, the frozen reconstruction check
+compares every placed horse's rebuilt Place dividend with the realised one (tolerance 10 yen per 100). The
+reconstruction check, the cross-tab and the two records' status are in the private report (withheld, D21):
+`floor-tail-favourite-japan-1e8f6cc0d7d7-plus10-jravan.md` under the data directory.
 
 ## Alternatives rejected and why
 
@@ -321,8 +364,16 @@ the cross-tab are in the private report (withheld, D21):
 - **Reading the Place votes through `read_label`.** The view reads a label-only table whole; `pool_votes` is about
   1.2 GB. The reader prunes row groups by race_id statistics and reads five columns in 1M-row batches, PLACE rows of
   the wanted development races only.
-- **Rebuilding the dividend of a race at a rate other than its own.** The Place payout rate comes from
-  `takeout.race_takeout`, so the boosted races' 85% (ultra premium) is used where the calendar has it.
+- **The equal split of the Place profit (v1 to v3).** It is not JRA's published Place rule. JRA pays each placed
+  horse (its own stakes plus an equal share of the losing stakes) times the payout rate, shared over its own tickets
+  (the stake-back share). `core.pricing.stake_back_share_dividend` already implements it, so the study reuses it
+  rather than a second copy.
+- **Rebuilding a premium race at its boosted rate (v1 to v3).** The premium is 5% of sales split equally over the
+  placed horses and paid after Plus-10, not a higher rate inside the stake-back share, so the base rate stays 0.80
+  and `takeout.race_takeout`'s boost only says whether the premium is added. Plus-10 is tested on the base payout
+  alone.
+- **A scored zero when the votes cannot be read (v2, v3).** Eligible favourites with no prediction are not zero
+  favourites; the record now holds no check and no predicted cell, and the realised counts stand.
 - **`drop_race` for tied Win prices and no L7 boxes.** The owner chose `lower_horse_no` and `top3_box`.
 - **A family-wise correction over the 50 variants.** The reframe ranks options; the leaderboard (#449) shrinks within
   each pool. The bounds here are per variant, and the family size is on every record.
@@ -365,11 +416,12 @@ Filed under epic #72 as `status:proposed`:
 - #464: L2, L3 and L7 at t on history from the jravan `odds_timeseries` (WIN and PLACE boards), labelled
   JRA-VAN-derived and withheld; check the overlap with #404 first.
 - #465: the Place payout rule for the 100-vs-110 check, built to reproduce JRA's Place dividends from the H1 votes,
-  then the check re-run as a new family. The figures stay private (D21).
+  then the check re-run as a new family. This round covers its scope (v4, JRA's stake-back share); the figures stay
+  private (D21).
 - #466: L7's skipped and kept favourites as their own leaderboard rows per ¥100 actually staked, after #449, so
   stake-back does not lift them.
 - #352: the post-time sidecar backfill. This study now takes the scheduled post from `post_times_for`, but #81's board
   at t still reads the captures' `post_utc` only.
 - #344: `write_summary` refuses a family id with a '/', which other tickets' families in the registry hold, so this
-  summary was written over the families already indexed plus this ticket's two new ones.
+  summary was written over the families already indexed plus v4.
 - This frozen family re-run as more days are logged, so its board-at-t rows rest on more than two meetings.

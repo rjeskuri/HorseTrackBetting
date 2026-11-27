@@ -17,8 +17,8 @@ built on a licensed source shows no values here.
 | L2 | L2:WIN:board_at_t | failed | - | - | - | - | - |
 | L2 | L2:PLACE:board_at_t | failed | - | - | - | - | - |
 | L2 | L2:QUINELLA_PLACE:board_at_t | failed | - | - | - | - | - |
-| L2 | L2:plus10_100_vs_110:final_look_ahead | scored | withheld (licensed source) | | | | |
-| L2 | L2:plus10_100_vs_110:board_at_t | failed | withheld (licensed source) | | | | |
+| L2 | L2:plus10_100_vs_110:final_look_ahead | withheld (licensed source) | | | | | |
+| L2 | L2:plus10_100_vs_110:board_at_t | withheld (licensed source) | | | | | |
 | L3 | L3:WIN:above_51:final_look_ahead | scored | development | paired_return_difference | 0.0693892 | [0.0586358, 0.08002] | 43130 |
 | L3 | L3:WIN:above_51:final_look_ahead | scored | development | rule_mean_return | 0.794076 | [0.787722, 0.800451] | 43130 |
 | L3 | L3:WIN:above_51:final_look_ahead | scored | development | comparator_mean_return | 0.724687 | [0.71402, 0.735539] | 43130 |
