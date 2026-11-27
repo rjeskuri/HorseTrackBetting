@@ -17,6 +17,11 @@ discounted Harville exacta of the T-2 Win board with #115's full-development lam
 code is reused, not copied. There is no meeting gate: every run scores the logged development
 meetings it finds, with n and the interval; none gives n = 0 records (data pending).
 
+Family v2 (2026-11-28; v1, ``japan/282-exacta-fav-first-avoidance-v1``, was frozen and scored only
+with n = 0): the headline's "less popular" is the race card's (race_no 1-4 or a DEBUT / MAIDEN race,
+as #131's E2), not the day's lower tertile of pool totals, which later races set. The tertile is
+only a reported agreement diagnostic; no pool total enters a selection.
+
 D14: a holdout day's race is dropped (and its log folder never opened) before anything else of it
 is read; ``LockedHoldout`` is never opened. Public JRA data only (sources: jra).
 """
@@ -59,7 +64,12 @@ from horsetrack.countries.japan.research.exacta_consistency import (
 COUNTRY = "japan"
 SOURCES = ("jra",)
 TICKET = 282
-FAMILY_ID = "japan/282-exacta-fav-first-avoidance-v1"
+FAMILY_ID = "japan-282-exacta-fav-first-avoidance-v2"
+V1_ID = "japan/282-exacta-fav-first-avoidance-v1"
+V1_HASH = "8ae769a7a9767f962d100d959b6567f09b8f8e154c282978d19fa018ece0434f"
+FAV_ODDS_MIN = 3.0
+EARLY_RACE_MAX = 4
+LESS_POPULAR_CLASSES = ("DEBUT", "MAIDEN")
 CUTS = (1.1, 1.2, 1.3, 1.5)
 SCOPES = ("all", "headline")
 SETS = ("kept", "skipped")
@@ -137,16 +147,34 @@ def select(win_board, exacta_board, *, rate: float, cut: float, lambda2: float =
     return Selection(favourite(win_board), ratios, kept, skipped)
 
 
-def less_popular_races(rows: Iterable[tuple[str, date, float]]) -> set[str]:
-    """Race ids in the lower tertile of the exacta pool total within their day: the ceil(n / 3)
-    smallest of the day's n races (spec section 6, #130 days)."""
-    by_day: dict[date, list[tuple[float, str]]] = {}
-    for race_id, day, total in rows:
-        by_day.setdefault(day, []).append((float(total), race_id))
-    out: set[str] = set()
-    for races in by_day.values():
-        out |= {race_id for _, race_id in sorted(races)[: math.ceil(len(races) / 3)]}
-    return out
+def is_headline(win_board: Mapping[int, float], race_no: int, race_class) -> bool:
+    """The headline scope: the T-2 favourite's Win odds at or above 3.0 and a less popular race by
+    the race card (race_no 1-4, or a DEBUT / MAIDEN race; E1's popularity segment). Every input is
+    known at T-2; no pool total enters. A race with no class on the card is early or not by its
+    number alone."""
+    less_popular = int(race_no) <= EARLY_RACE_MAX or race_class in LESS_POPULAR_CLASSES
+    return win_board[favourite(win_board)] >= FAV_ODDS_MIN and less_popular
+
+
+def less_popular_agreement(races: Iterable[Mapping]) -> dict:
+    """The spec's reported diagnostic, never a selection: how the race-card proxy agrees with the
+    lower tertile (the ceil(n / 3) smallest of a day's n races) of the exacta pool total within
+    each logged day, over the races that logged a total."""
+    by_day: dict[date, list[Mapping]] = {}
+    for race in races:
+        if race.get("pool_total") is not None:
+            by_day.setdefault(race["race_date"], []).append(race)
+    counts = {"races": 0, "proxy_less": 0, "tertile_less": 0, "both": 0}
+    for day_races in by_day.values():
+        low = {r["race_id"] for r in sorted(day_races, key=lambda r: r["pool_total"])
+               [: math.ceil(len(day_races) / 3)]}  # fmt: skip
+        for r in day_races:
+            proxy = r["race_no"] <= EARLY_RACE_MAX or r.get("race_class") in LESS_POPULAR_CLASSES
+            counts["races"] += 1
+            counts["proxy_less"] += proxy
+            counts["tertile_less"] += r["race_id"] in low
+            counts["both"] += proxy and r["race_id"] in low
+    return counts
 
 
 # --------------------------------------------------------------------------- per race
@@ -187,7 +215,7 @@ def score_races(
             continue
         (winner, dividend, _) = exacta[0]
         winner = _combo(winner)
-        headline = win[favourite(win)] >= 3.0 and bool(race["less_popular"])
+        headline = is_headline(win, race["race_no"], race.get("race_class"))
         for cut in CUTS:
             kept, skipped = split_by_cut(ratios, cut)
             paid = float(dividend) if winner in ratios else 0.0
@@ -328,13 +356,42 @@ def family_specs() -> dict[str, dict]:
             "the fav_first combinations are those of the T-2 exacta board led by it",
             "members": members,
             "cuts": list(CUTS),
-            "scopes": list(SCOPES),
-            "scope_definitions": {
+            "scopes": {
                 "all": "every scored race",
-                "headline": "favourite's Win odds at T-2 >= 3.0 and less popular: the lower "
-                "tertile, ceil(n / 3) of the day's n logged races, of the exacta pool total at "
-                "T-2 within the logged day (spec section 6)",
+                "headline": {
+                    "rule": "favourite's Win odds at T-2 >= 3.0 and less popular; less popular = "
+                    "race_no 1-4 or a DEBUT/MAIDEN race, from the race card (E1's popularity "
+                    "segment, as #131's E2)",
+                    "fav_odds_min": FAV_ODDS_MIN,
+                    "less_popular": {
+                        "race_no_max": EARLY_RACE_MAX,
+                        "race_classes": list(LESS_POPULAR_CLASSES),
+                    },
+                    "information_cutoff": {
+                        "race_no": "race card",
+                        "race_class": "race card",
+                        "fav_win_odds": "T-2",
+                    },
+                },
             },
+            "diagnostics": {
+                "less_popular_agreement": "the lower tertile of exacta pool totals within each "
+                "logged day (the odds log's investment row), reported as its agreement with the "
+                "race-card proxy, not a selection variable: a whole-day tertile uses later "
+                "races' totals",
+            },
+            "supersedes": {
+                "family_id": V1_ID,
+                "spec_hash": V1_HASH,
+                "status": "frozen 2026-11-27 and scored once on 0 logged exacta meetings "
+                "(n = 0); history, not executed again",
+            },
+            "revision": 'v2 (2026-11-28, #282): v1 took the headline\'s "less popular" from the '
+            "lower tertile of each logged day's pool totals, which later races set (look-ahead, "
+            'as #131\'s review found for its rule-v3), and its id held a "/", which the '
+            'registry now refuses. v2 takes "less popular" from the race card (race_no 1-4 or '
+            "DEBUT/MAIDEN, #131's E2 rule-v4), reports the tertile as an agreement diagnostic "
+            "only, and changes nothing else",
             "family_size": len(members),
             "stake_yen": STAKE,
             "exacta_takeout": 0.25,
@@ -462,7 +519,8 @@ def _race_no(race_id) -> int | None:
 
 def _boards_at(win_rows: list[dict], held: dict, race_id: str, at_utc, post) -> tuple[str, dict]:
     """The race's boards at ``at_utc``: ``("", boards)`` or (why not, {}). ``held`` maps each
-    FORECAST combination (and the pool total) to its latest row available by ``at_utc``."""
+    FORECAST combination (and the pool total) to its latest row available by ``at_utc``. The
+    pool total, when logged, is carried for the agreement diagnostic; a race without one is kept."""
     board = snapshot.board_at(win_rows, race_id, at_utc, post_utc=post)
     if board is None or not board.win:
         return "no_win_board_at_t", {}
@@ -478,10 +536,10 @@ def _boards_at(win_rows: list[dict], held: dict, race_id: str, at_utc, post) -> 
             priced[combo] = float(row["odds"])
     if not priced:
         return "no_exacta_board_at_t", {}
-    if odds_log.POOL_TOTAL not in held:
-        return "no_pool_total_at_t", {}
-    return "", {"win_board_t2": dict(board.win), "exacta_board_t2": priced,
-                "pool_total": float(held[odds_log.POOL_TOTAL]["investment"])}  # fmt: skip
+    got = {"win_board_t2": dict(board.win), "exacta_board_t2": priced}
+    if odds_log.POOL_TOTAL in held:  # for the agreement diagnostic only, never a selection input
+        got["pool_total"] = float(held[odds_log.POOL_TOTAL]["investment"])
+    return "", got
 
 
 def _logged_boards(minutes_before: int, holdout_day) -> tuple[dict[str, dict], dict]:
@@ -553,7 +611,7 @@ def load_logged_races(
         base, ids = paths.processed_dir("jra"), sorted(found)
         meta_rows = pq.read_table(
             base / "races.parquet",
-            columns=["race_id", "meeting_id", "race_no", "race_class_raw"],
+            columns=["race_id", "meeting_id", "race_no", "race_class", "race_class_raw"],
             filters=pc.field("race_id").isin(ids),
         ).to_pandas()
         dividends = pq.read_table(
@@ -569,12 +627,11 @@ def load_logged_races(
         for m in meta_rows.sort_values("race_id").itertuples(index=False):
             t = takeout.race_takeout(m.race_id, FORECAST, race_class_raw=m.race_class_raw)
             races.append({"race_id": m.race_id, "meeting_id": m.meeting_id,
-                          "race_no": int(m.race_no), "rate": t.payout_rate,
+                          "race_no": int(m.race_no),
+                          "race_class": None if pd.isna(m.race_class) else m.race_class,
+                          "rate": t.payout_rate,
                           "boost_may_be_withheld": t.boost_may_be_withheld,
                           **found[m.race_id], "exacta": paying.get(m.race_id, [])})  # fmt: skip
-        popular = less_popular_races((r["race_id"], r["race_date"], r["pool_total"]) for r in races)
-        for r in races:
-            r["less_popular"] = r["race_id"] in popular
         builds["jra_races"] = f"processed/jra/races.parquet@{exacta_run._fingerprint(meta_rows)}"
         builds["jra_dividends"] = (
             f"processed/jra/dividends.parquet@{exacta_run._fingerprint(dividends)}"
@@ -635,6 +692,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ))  # fmt: skip
             raise
         table, run_meta = out["members"], out["meta"]
+        run_meta["less_popular_agreement"] = less_popular_agreement(races)
         folder = paths.reports_dir() / COUNTRY / "282-exacta-loss-avoidance"
         write_report(folder / f"l-{sha[:12]}.md", _render(table, run_meta, sha), sources=SOURCES)
         write_report(

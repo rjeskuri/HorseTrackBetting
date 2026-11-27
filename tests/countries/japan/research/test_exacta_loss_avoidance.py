@@ -8,7 +8,14 @@ API pinned here (module ``horsetrack.countries.japan.research.exacta_loss_avoida
 ``la``; not yet written; ``exacta_study`` and ``exacta_consistency`` are reused, not copied, and
 ``exacta_study.family_specs()`` keeps its five #131 families):
 
-Constants: ``FAMILY_ID = "japan/282-exacta-fav-first-avoidance-v1"``, ``CUTS = (1.1, 1.2, 1.3,
+Family v2 (re-frozen under the project's governance: a study's choices are pre-registered in the
+frozen spec and later variants are added and counted without sign-off). v1 (``japan/282-exacta-
+fav-first-avoidance-v1``, hash 8ae769a7...) took the headline's "less popular" from the lower
+tertile of each day's exacta pool totals, which later races set: look-ahead, as #131's review found
+for rule-v3. Main's registry also refuses "/" in a new family id. v2 takes "less popular" from the
+race card, as #131's E2 (rule-v4/v5) does, and changes nothing else.
+
+Constants: ``FAMILY_ID = "japan-282-exacta-fav-first-avoidance-v2"``, ``CUTS = (1.1, 1.2, 1.3,
 1.5)``, ``SCOPES = ("all", "headline")``.
 
 Selection (pure; a board maps horse -> decimal Win odds, an exacta board maps (first, second) ->
@@ -25,20 +32,21 @@ decimal odds, so ``odds * 100`` is the dividend per 100 yen):
   not identified) is kept: the rule only skips on evidence that the pool overloads c.
 - ``select(win_board, exacta_board, *, rate, cut, lambda2=1.0)`` -> object with ``.favourite``,
   ``.ratios``, ``.kept``, ``.skipped`` (the two above on those ratios).
-- ``less_popular_races(rows)``: ``rows`` are ``(race_id, race_date, exacta_pool_total)`` of the
-  logged races; returns the set of race ids in the lower tertile of the pool total within their
-  day (the ``ceil(n / 3)`` smallest of the day's ``n`` races; spec section 6, #130 days).
+- There is no pool-total selection: no pool total decides a race's scope.
 
 Scoring:
 
-- A race is a mapping with race_id, race_date, meeting_id, race_no, ``win_board_t2``,
-  ``exacta_board_t2``, ``less_popular`` (bool), ``rate`` (the exacta payout rate), ``exacta`` (the
-  final rows ``(combination, dividend, is_refund)``, as in #131) and ``boost_may_be_withheld``. It
-  may carry final-board keys (e.g. ``win_odds_final``), which selection never reads.
+- A race is a mapping with race_id, race_date, meeting_id, race_no, ``race_class`` (the store
+  code: DEBUT, MAIDEN, C1, C2, C3, OP, ...; from the race card), ``win_board_t2``,
+  ``exacta_board_t2``, ``rate`` (the exacta payout rate), ``exacta`` (the final rows
+  ``(combination, dividend, is_refund)``, as in #131) and ``boost_may_be_withheld``. It has no
+  ``less_popular`` flag and needs no pool total. It may carry final-board keys (e.g.
+  ``win_odds_final``) or a pool total (``pool_total``), which scoring never reads.
 - ``score_races(races, *, holdout_day, lambda2=1.0) -> DataFrame``: one row per scored race and
   cut: race_id, meeting_id, race_date, cut, ``headline`` (T-2 favourite odds >= 3.0 and
-  ``less_popular``), ``n_all`` (fav_first combinations on the T-2 exacta board, the comparator's
-  tickets, 100 yen each), ``n_kept``, ``n_skipped``, ``ret_all``, ``ret_kept``, ``ret_skipped``
+  less popular by the race card: ``race_no <= 4`` or ``race_class`` in DEBUT, MAIDEN), ``n_all``
+  (fav_first combinations on the T-2 exacta board, the comparator's tickets, 100 yen each),
+  ``n_kept``, ``n_skipped``, ``ret_all``, ``ret_kept``, ``ret_skipped``
   (yen: the final dividend when the winning exacta is in the set and not refunded, else 0).
   Holdout days are dropped before anything else of the race is read; excluded races (#131's
   ``exclusion_reason``) are dropped. ``frame.attrs["excluded"]`` counts the drops by reason
@@ -63,12 +71,16 @@ Scoring:
 - ``family_specs() -> {FAMILY_ID: spec}`` (plain JSON, a fresh copy per call), ``freeze(registry)
   -> {FAMILY_ID: hash}`` and ``main(["freeze"])`` (``default_registry("japan")``). Spec keys:
   ticket (282), category ("fav_first"), selection_time ("T-2"), members ([{"cut", "scope"}] x 8),
-  cuts, scopes, family_size (8), stake_yen (100), exacta_takeout (0.25), lambda2
-  ("full_development", as E2), sources (["jra"]), cluster ("meeting"), n_boot (10000), level
-  (0.95), rule (text naming q_c, p_c and T-2), comparator (text naming fav_first and 100 yen),
-  primary_metric (text naming the kept set and final dividends) and report_sets (["kept",
-  "skipped"]); no ``min_meetings`` gate. ``score`` reads ``family_specs`` at call time, so a
-  spec that drifts from the frozen one is refused.
+  cuts, ``scopes`` ({"all": ..., "headline": {"fav_odds_min": 3.0, "less_popular": {"race_no_max":
+  4, "race_classes": ["DEBUT", "MAIDEN"]}, "information_cutoff": {"race_no": "race card",
+  "race_class": "race card", "fav_win_odds": "T-2"}}}, as E2's), ``diagnostics`` ({"less_popular_
+  agreement": str naming the logged-day pool-total tertile, a reported diagnostic only}),
+  ``supersedes`` (names v1's id and hash), ``revision`` (str), family_size (8), stake_yen (100),
+  exacta_takeout (0.25), lambda2 ("full_development", as E2), sources (["jra"]), cluster
+  ("meeting"), n_boot (10000), level (0.95), rule (text naming q_c, p_c and T-2), comparator
+  (text naming fav_first and 100 yen), primary_metric (text naming the kept set and final
+  dividends) and report_sets (["kept", "skipped"]); no ``min_meetings`` gate. ``score`` reads
+  ``family_specs`` at call time, so a spec that drifts from the frozen one is refused.
 """
 
 from __future__ import annotations  # noqa: I001
@@ -271,27 +283,127 @@ def test_the_rule_skips_strictly_above_the_cut_and_keeps_a_ratio_equal_to_it():
 
 
 # ---------------------------------------------------------------------------------------------
-# 2. The less-popular proxy on logged days
+# 2. The headline scope (v2): T-2 favourite odds >= 3.0 and less popular by the race card
 # ---------------------------------------------------------------------------------------------
+# These need make_race and the references of section 4, defined below; the tests run after import.
+
+HEADLINE_CASES = [  # (race_no, race_class, T-2 favourite odds, in the headline cell)
+    (2, "C2", 3.5, True),  # an early race, whatever the day's pool sizes
+    (1, "OP", 3.0, True),  # exactly 3.0 is in
+    (4, "C3", 5.5, True),  # race_no 4 is the last early race
+    (5, "C3", 5.5, False),  # race_no 5 is not
+    (8, "C2", 3.5, False),  # a late non-maiden race
+    (9, "MAIDEN", 4.0, True),  # a late MAIDEN race is in
+    (12, "DEBUT", 3.2, True),  # a late DEBUT race is in
+    (10, "C1", 6.0, False),
+    (7, "G1", 9.0, False),
+    (2, "C2", 2.9, False),  # favourite odds below 3.0 are out, early race or not
+    (1, "MAIDEN", 2.99, False),
+    (9, "MAIDEN", 1.8, False),
+    (3, "DEBUT", 2.0, False),
+]
 
 
-def test_less_popular_is_the_lower_tertile_of_the_pool_total_within_each_day():
-    rng = np.random.default_rng(3)
-    rows, expected = [], set()
-    for day, n in ((date(2025, 5, 3), 12), (date(2025, 5, 4), 9), (date(2025, 5, 10), 7)):
-        totals = rng.permutation(np.arange(1, n + 1) * 1_000_000 + rng.integers(0, 999, n))
-        ids = [f"{day.isoformat()}:{k:02d}" for k in range(n)]
-        rows += [(rid, day, float(t)) for rid, t in zip(ids, totals, strict=True)]
-        order = np.argsort(totals)
-        expected |= {ids[i] for i in order[: math.ceil(n / 3)]}
-    assert la.less_popular_races(rows) == expected
-    # a tertile within the day, not across days: day two's smallest pools are not all flagged
-    assert len(expected) == 4 + 3 + 3
+class PoolGuardedRace(dict):
+    """A race that fails the test when any pool-total field is read."""
+
+    def _check(self, key):
+        if "pool" in str(key) or "total" in str(key):
+            raise AssertionError(f"a pool total {key!r} was read")
+
+    def __getitem__(self, key):
+        self._check(key)
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        self._check(key)
+        return super().get(key, default)
+
+
+def _headline_flags(races) -> dict[str, bool]:
+    rows = la.score_races(races, holdout_day=lambda country, day: False)
+    return rows.drop_duplicates("race_id").set_index("race_id")["headline"].to_dict()
+
+
+def _headline_day(pool_pattern: str) -> list[dict]:
+    """One day of races, one per HEADLINE_CASES row, with the day's pool totals laid out in
+    ``pool_pattern``: absent, ascending with the race number, descending, or the early races
+    smallest and the late ones largest (v1's tertile would have called early = less popular)."""
+    rng = np.random.default_rng(31)
+    races = []
+    for k, (race_no, race_class, fav_odds, _) in enumerate(HEADLINE_CASES):
+        race = make_race(rng, f"h{k:02d}", D1, "m1", race_no, n=8, fav_odds=fav_odds,
+                         race_class=race_class)  # fmt: skip
+        n = len(HEADLINE_CASES)
+        total = {"ascending": 1e6 * (k + 1), "descending": 1e6 * (n - k),
+                 "early_smallest": 1e6 * (1 + race_no)}.get(pool_pattern)  # fmt: skip
+        if pool_pattern == "guarded":
+            race = PoolGuardedRace({**race, "pool_total": 5e6, "exacta_pool_total_t2": 5e6})
+        elif total is not None:
+            race["pool_total"] = total
+        races.append(race)
+    return races
+
+
+@pytest.mark.parametrize(
+    "pattern", ["absent", "ascending", "descending", "early_smallest", "guarded"]
+)
+def test_the_headline_cell_is_the_race_card_proxy_and_t2_favourite_odds_whatever_the_pools(pattern):
+    flags = _headline_flags(_headline_day(pattern))
+    expected = {f"h{k:02d}": want for k, (*_, want) in enumerate(HEADLINE_CASES)}
+    assert flags == expected
+    assert 0 < sum(expected.values()) < len(expected)  # both outcomes are exercised
+
+
+def test_the_headline_ticket_cases_hold_against_the_days_largest_and_smallest_pools():
+    rng = np.random.default_rng(5)
+    early_big = make_race(rng, "big", D1, "m1", 2, n=8, fav_odds=3.5, race_class="C2")
+    late_small = make_race(rng, "small", D1, "m1", 8, n=8, fav_odds=3.5, race_class="C2")
+    late_maiden = make_race(rng, "maiden", D1, "m1", 9, n=8, fav_odds=3.5, race_class="MAIDEN")
+    low_fav = make_race(rng, "lowfav", D1, "m1", 2, n=8, fav_odds=2.9, race_class="C2")
+    for race, total in ((early_big, 9e9), (late_small, 1e3), (late_maiden, 5e6), (low_fav, 6e6)):
+        race["pool_total"] = total  # the day's largest, its smallest, two in between
+    assert _headline_flags([early_big, late_small, late_maiden, low_fav]) == {
+        "big": True, "small": False, "maiden": True, "lowfav": False,
+    }  # fmt: skip
+
+
+def test_a_stray_less_popular_flag_does_not_decide_the_scope():
+    rng = np.random.default_rng(6)
+    late = make_race(rng, "late", D1, "m1", 8, n=8, fav_odds=3.5, race_class="C2")
+    early = make_race(rng, "early", D1, "m1", 2, n=8, fav_odds=3.5, race_class="C2")
+    late["less_popular"], early["less_popular"] = True, False  # v1's input, now not read
+    assert _headline_flags([late, early]) == {"late": False, "early": True}
+
+
+def test_the_headline_favourite_odds_are_the_t2_board_not_the_final_board():
+    rng = np.random.default_rng(7)
+    rises = make_race(rng, "rises", D1, "m1", 2, n=8, fav_odds=3.4, race_class="C2")
+    falls = make_race(rng, "falls", D1, "m1", 2, n=8, fav_odds=2.8, race_class="C2")
+    rises["win_odds_final"] = {h: 2.1 + h / 10 for h in rises["win_board_t2"]}  # final fav < 3.0
+    falls["win_odds_final"] = {h: 5.0 + h / 10 for h in falls["win_board_t2"]}  # final fav > 3.0
+    assert _headline_flags([rises, falls]) == {"rises": True, "falls": False}
 
 
 # ---------------------------------------------------------------------------------------------
 # 3. The family spec and its freeze
 # ---------------------------------------------------------------------------------------------
+
+V1_ID = "japan/282-exacta-fav-first-avoidance-v1"
+V1_HASH = "8ae769a7a9767f962d100d959b6567f09b8f8e154c282978d19fa018ece0434f"
+POOL_WORDS = ("tertile", "pool", "investment")
+
+
+def _strings(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+    elif isinstance(value, str):
+        yield value
 
 
 def _registry(tmp_path: Path) -> Registry:
@@ -306,14 +418,15 @@ def _spec_hash(spec) -> str:
 
 def test_the_family_is_8_members_with_the_approved_cuts_scopes_comparator_and_metric():
     specs = la.family_specs()
-    assert list(specs) == [la.FAMILY_ID] == ["japan/282-exacta-fav-first-avoidance-v1"]
+    assert list(specs) == [la.FAMILY_ID] == ["japan-282-exacta-fav-first-avoidance-v2"]
+    assert "/" not in la.FAMILY_ID  # main's registry refuses a "/" in a new family id
     spec = specs[la.FAMILY_ID]
     assert la.CUTS == CUTS and la.SCOPES == SCOPES
     members = {(m["cut"], m["scope"]) for m in spec["members"]}
     assert len(spec["members"]) == 8 == spec["family_size"]
     assert members == {(k, s) for k in CUTS for s in SCOPES}
     assert sorted(spec["cuts"]) == list(CUTS)
-    assert sorted(spec["scopes"]) == sorted(SCOPES)
+    assert sorted(spec["scopes"]) == sorted(SCOPES)  # the keys, whether a list or E2's dict
     assert spec["ticket"] == 282
     assert spec["category"] == "fav_first"
     assert spec["selection_time"] == "T-2"
@@ -331,6 +444,45 @@ def test_the_family_is_8_members_with_the_approved_cuts_scopes_comparator_and_me
     # the owner's reframe: both sets are reported, and no meeting gate is in the spec
     assert sorted(spec["report_sets"]) == ["kept", "skipped"]
     assert spec.get("min_meetings") in (None, 0)
+
+
+def test_the_headline_scope_is_the_race_card_proxy_with_no_pool_total_in_the_selection():
+    spec = la.family_specs()[la.FAMILY_ID]
+    headline = spec["scopes"]["headline"]
+    assert isinstance(headline, dict), headline
+    assert headline["fav_odds_min"] == 3.0
+    assert headline["less_popular"]["race_no_max"] == 4
+    assert sorted(headline["less_popular"]["race_classes"]) == ["DEBUT", "MAIDEN"]
+    # every input is known by the decision time: the race card, the favourite's odds at T-2
+    assert headline["information_cutoff"] == {
+        "race_no": "race card",
+        "race_class": "race card",
+        "fav_win_odds": "T-2",
+    }
+    for text in _strings(headline):
+        assert not any(w in text.lower() for w in POOL_WORDS), text
+    for key in ("scopes", "rule", "favourite", "category", "members", "selection_time"):
+        for text in _strings(spec[key]):
+            assert "tertile" not in text.lower(), (key, text)
+    # the tertile stays only as a reported agreement diagnostic of the proxy
+    agreement = spec["diagnostics"]["less_popular_agreement"]
+    assert isinstance(agreement, str) and "tertile" in agreement.lower()
+    assert "scope_definitions" not in spec or not any(
+        "tertile" in s.lower() for s in _strings(spec["scope_definitions"])
+    )
+    # the "all" scope is every scored race
+    assert spec["scopes"]["all"]
+
+
+def test_family_v2_supersedes_v1_by_id_and_hash_and_says_why():
+    spec = la.family_specs()[la.FAMILY_ID]
+    named = json.dumps(spec["supersedes"])
+    assert V1_ID in named and V1_HASH in named
+    assert la.FAMILY_ID != V1_ID
+    assert isinstance(spec["revision"], str) and spec["revision"].strip()
+    # nothing else of the design moved: the v1 cuts, members, comparator and bootstrap are v2's
+    assert spec["cuts"] == list(CUTS) and spec["family_size"] == 8
+    assert spec["stake_yen"] == 100 and spec["n_boot"] == 10000 and spec["seed"] == 282
 
 
 def test_the_spec_is_plain_json_a_fresh_copy_and_freezes_under_one_hash(tmp_path):
@@ -369,7 +521,7 @@ D1, D2, D3 = date(2025, 5, 3), date(2025, 5, 4), date(2025, 5, 10)
 TARGETS = (0.95, 1.05, 1.15, 1.25, 1.35, 1.45, 1.6, 1.9)  # each >= 0.05 from every cut
 
 
-def make_race(rng, race_id, day, meeting, race_no, *, n, fav_odds, less_popular, lambda2=1.0,
+def make_race(rng, race_id, day, meeting, race_no, *, n, fav_odds, race_class="C2", lambda2=1.0,
               rate=0.75, hit="random"):  # fmt: skip
     """One synthetic logged race: a T-2 Win board with its favourite at ``fav_odds``, a full T-2
     exacta board priced from a target r per combination, a different final favourite (a decoy)
@@ -405,7 +557,7 @@ def make_race(rng, race_id, day, meeting, race_no, *, n, fav_odds, less_popular,
     dividend = float(10 * int(rng.integers(13, 900)))
     return {
         "race_id": race_id, "race_date": day, "meeting_id": meeting, "race_no": race_no,
-        "win_board_t2": win, "exacta_board_t2": board, "less_popular": less_popular,
+        "race_class": race_class, "win_board_t2": win, "exacta_board_t2": board,
         "rate": rate, "boost_may_be_withheld": False,
         "exacta": [(f"{winner[0]},{winner[1]}", dividend, False)],
         "win_odds_final": final,
@@ -417,13 +569,18 @@ def _winner(race) -> tuple[int, int]:
     return int(a), int(b)
 
 
+def ref_headline(win, race_no, race_class) -> bool:
+    """Spec: T-2 favourite odds >= 3.0 and less popular = race_no 1-4 or a DEBUT/MAIDEN race."""
+    return win[ref_fav(win)] >= 3.0 and (race_no <= 4 or race_class in ("DEBUT", "MAIDEN"))
+
+
 def ref_rows(races, lambda2=1.0) -> pd.DataFrame:
     out = []
     for race in races:
         win, rate = race["win_board_t2"], race["rate"]
         ratios = ref_ratios(win, race["exacta_board_t2"], rate, lambda2)
         winner, dividend, refund = _winner(race), race["exacta"][0][1], race["exacta"][0][2]
-        headline = win[ref_fav(win)] >= 3.0 and race["less_popular"]
+        headline = ref_headline(win, race["race_no"], race["race_class"])
         for cut in CUTS:
             kept, skipped = ref_split(ratios, cut)
             paid = dividend if not refund else 0.0
@@ -457,19 +614,13 @@ def _fixed_races() -> list[dict]:
     """Race 1: fav_first wins, a high-r combo; race 2: another category wins; race 3: headline."""
     rng = np.random.default_rng(282)
     return [
+        make_race(rng, "a1", D1, "m1", 2, n=7, fav_odds=3.4, race_class="C2", hit="fav_first_low"),
+        make_race(rng, "a2", D1, "m1", 9, n=9, fav_odds=2.2, race_class="C2", hit="other"),
         make_race(
-            rng, "a1", D1, "m1", 2, n=7, fav_odds=3.4, less_popular=True, hit="fav_first_low"
+            rng, "a3", D2, "m2", 3, n=11, fav_odds=3.0, race_class="C2", hit="fav_first_high"
         ),
-        make_race(rng, "a2", D1, "m1", 9, n=9, fav_odds=2.2, less_popular=False, hit="other"),
-        make_race(
-            rng, "a3", D2, "m2", 3, n=11, fav_odds=3.0, less_popular=True, hit="fav_first_high"
-        ),
-        make_race(
-            rng, "a4", D2, "m2", 4, n=8, fav_odds=2.9, less_popular=True, hit="fav_first_mid"
-        ),
-        make_race(
-            rng, "a5", D3, "m3", 8, n=6, fav_odds=5.5, less_popular=False, hit="fav_first_low"
-        ),
+        make_race(rng, "a4", D2, "m2", 4, n=8, fav_odds=2.9, race_class="C2", hit="fav_first_mid"),
+        make_race(rng, "a5", D3, "m3", 8, n=6, fav_odds=5.5, race_class="C2", hit="fav_first_low"),
     ]
 
 
@@ -498,7 +649,7 @@ def test_the_headline_scope_is_t2_favourite_odds_of_3_or_more_and_less_popular()
     races = _fixed_races()
     rows = la.score_races(races, holdout_day=lambda country, day: False)
     flags = rows.drop_duplicates("race_id").set_index("race_id")["headline"].to_dict()
-    # a1: 3.4 and less popular; a2: 2.2; a3: exactly 3.0 and less popular; a4: 2.9; a5: not less
+    # a1: 3.4, race 2; a2: 2.2; a3: exactly 3.0, race 3; a4: 2.9; a5: 5.5 but race 8, not maiden
     assert flags == {"a1": True, "a2": False, "a3": True, "a4": False, "a5": False}
 
 
@@ -521,7 +672,7 @@ def test_the_comparator_buys_every_fav_first_combination_of_the_t2_board_at_100_
 
 def test_a_winner_that_is_not_fav_first_at_t2_is_not_a_fav_first_return_even_if_it_is_at_the_end():
     rng = np.random.default_rng(11)
-    race = make_race(rng, "d1", D1, "m1", 5, n=8, fav_odds=2.5, less_popular=False, hit="other")
+    race = make_race(rng, "d1", D1, "m1", 5, n=8, fav_odds=2.5, race_class="C2", hit="other")
     final_fav = ref_fav(race["win_odds_final"])
     t2_fav = ref_fav(race["win_board_t2"])
     assert final_fav != t2_fav
@@ -534,16 +685,16 @@ def test_a_winner_that_is_not_fav_first_at_t2_is_not_a_fav_first_return_even_if_
 
 def test_a_refund_a_dead_heat_a_boost_and_a_short_field_are_excluded_not_scored():
     rng = np.random.default_rng(5)
-    good = make_race(rng, "g", D1, "m1", 2, n=7, fav_odds=3.1, less_popular=True, hit="fav_first")
+    good = make_race(rng, "g", D1, "m1", 2, n=7, fav_odds=3.1, race_class="C2", hit="fav_first")
     bad = {}
-    bad["refund"] = make_race(rng, "x1", D1, "m1", 3, n=7, fav_odds=3.1, less_popular=True)
+    bad["refund"] = make_race(rng, "x1", D1, "m1", 3, n=7, fav_odds=3.1, race_class="C2")
     bad["refund"]["exacta"] = [(bad["refund"]["exacta"][0][0], 100.0, True)]
-    bad["dead_heat"] = make_race(rng, "x2", D1, "m1", 4, n=7, fav_odds=3.1, less_popular=True)
+    bad["dead_heat"] = make_race(rng, "x2", D1, "m1", 4, n=7, fav_odds=3.1, race_class="C2")
     bad["dead_heat"]["exacta"] = [("1,2", 900.0, False), ("2,1", 1300.0, False)]
     bad["boost_may_be_withheld"] = make_race(rng, "x3", D1, "m1", 5, n=7, fav_odds=3.1,
-                                             less_popular=True)  # fmt: skip
+                                             race_class="C2")  # fmt: skip
     bad["boost_may_be_withheld"]["boost_may_be_withheld"] = True
-    small = make_race(rng, "x4", D1, "m1", 6, n=7, fav_odds=3.1, less_popular=True)
+    small = make_race(rng, "x4", D1, "m1", 6, n=7, fav_odds=3.1, race_class="C2")
     small["win_board_t2"] = {1: 2.0, 2: 3.0, 3: 5.0, 4: 9.0}
     small["exacta_board_t2"] = board_from(small["win_board_t2"], {(1, 2): 1.1, (1, 3): 1.2})
     bad["under_5_starters"] = small
@@ -589,7 +740,7 @@ def _guarded(race) -> GuardedRace:
 def test_holdout_days_are_dropped_before_any_board_or_dividend_is_read():
     races = _fixed_races()
     held = _guarded({**make_race(np.random.default_rng(1), "h1", D2, "m2", 3, n=7, fav_odds=3.5,
-                                 less_popular=True), "race_date": D2})  # fmt: skip
+                                 race_class="C2"), "race_date": D2})  # fmt: skip
     seen = []
 
     def holdout_day(country, day):
@@ -610,11 +761,11 @@ def test_the_committed_holdout_days_are_never_scored_by_default():
     assert all(is_holdout_day("japan", d) for d in held_days)  # the committed A2 definition
     rng = np.random.default_rng(9)
     races = [
-        make_race(rng, f"d{k}", day, f"m{k}", 2, n=7, fav_odds=3.3, less_popular=True)
+        make_race(rng, f"d{k}", day, f"m{k}", 2, n=7, fav_odds=3.3, race_class="C2")
         for k, day in enumerate(dev_days)
     ]
     held = [
-        _guarded(make_race(rng, f"h{k}", day, f"hm{k}", 2, n=7, fav_odds=3.3, less_popular=True))
+        _guarded(make_race(rng, f"h{k}", day, f"hm{k}", 2, n=7, fav_odds=3.3, race_class="C2"))
         for k, day in enumerate(held_days)
     ]
     rows = la.score_races([*races, *held], holdout_day=is_holdout_day)
@@ -778,9 +929,11 @@ def _season(n_days=4, venues=("TOK", "HSN"), per=4, seed=2026, lambda2=1.0):
             for k in range(per):
                 races.append(make_race(
                     rng, f"jra:{day.isoformat()}:{venue}:{k + 1:02d}", day,
-                    f"jra:{day.isoformat()}:{venue}", k + 1, n=int(rng.integers(6, 12)),
+                    f"jra:{day.isoformat()}:{venue}", int(rng.integers(1, 13)),
+                    n=int(rng.integers(6, 12)),
                     fav_odds=float(rng.choice([1.8, 2.6, 3.1, 4.4, 7.2])),
-                    less_popular=bool(rng.random() < 0.5), lambda2=lambda2,
+                    race_class=str(rng.choice(["C1", "C2", "OP", "MAIDEN", "DEBUT"])),
+                    lambda2=lambda2,
                 ))  # fmt: skip
     return races
 
@@ -824,6 +977,8 @@ def test_a_frozen_family_scores_the_8_members_against_the_reference(tmp_path):
     races = _season(n_days=4)
     reg, result = _scored(tmp_path, races)
     table = result["members"]
+    flags = ref_rows(races).drop_duplicates("race_id")["headline"]
+    assert 0 < flags.sum() < len(flags)  # the season has races in and out of the headline cell
     ref = ref_members(ref_rows(races))
     assert len(table) == 16
     for r in table.to_dict("records"):
@@ -896,7 +1051,7 @@ def test_the_run_takes_the_ordering_lambda2_of_the_fit_and_scores_holdout_free(t
     lam = 0.8
     races = _season(n_days=3, lambda2=lam, seed=77)
     held = _guarded(make_race(np.random.default_rng(8), "h", date(2026, 11, 29), "hm", 3, n=7,
-                              fav_odds=3.4, less_popular=True))  # fmt: skip
+                              fav_odds=3.4, race_class="C2"))  # fmt: skip
     reg = _registry(tmp_path)
     la.freeze(reg)
     result = la.score(reg, [*copy.deepcopy(races), held], _meta(lam), SHA,
