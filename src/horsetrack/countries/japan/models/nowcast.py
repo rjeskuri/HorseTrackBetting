@@ -447,6 +447,7 @@ class PoolBoard:
     board_min: float | None = None  # minutes from the board's oldest row to the post
     odds: np.ndarray | None = None  # the low figure at t
     odds_hi: np.ndarray | None = None
+    starters: int | None = None  # PLACE: the field at sale P is read from; None: the priced ones
 
 
 @dataclass(frozen=True, eq=False)
@@ -615,6 +616,7 @@ def _pool_board(series: _Series, post: int, tau_min: float) -> tuple[PoolBoard, 
         board_min=(post - state.capture) / _US_PER_MIN,
         odds=state.lo,
         odds_hi=state.hi,
+        starters=_starters(series, state),
     )
     return board, rule_sum
 
@@ -753,6 +755,7 @@ class Cases:
     rule_sum: np.ndarray  # the stake-back money's total at t (NaN when the rule was not used)
     scratched: np.ndarray  # board combinations off the final board (> 0: renormalised, #69)
     reader: np.ndarray  # the final board's Place read (`place_shares`), None off the Place rule
+    starters: np.ndarray  # PLACE: the field at sale P is read from at t (`PoolBoard`), else None
     combination: np.ndarray  # runner rows from here
     s_t: np.ndarray
     lag5: np.ndarray
@@ -764,7 +767,7 @@ class Cases:
 
     CASE = (
         "race_id", "day", "venue", "race_no", "grade", "pool", "tau", "k", "total_t", "total_f",
-        "board_min", "rule_sum", "scratched", "reader",
+        "board_min", "rule_sum", "scratched", "reader", "starters",
     )  # fmt: skip
     ROW = ("combination", "s_t", "lag5", "lag15", "s_f", "odds_t", "odds_hi_t", "odds_f")
 
@@ -778,7 +781,7 @@ class Cases:
     @classmethod
     def build(cls, case_rows: list[dict], runner_rows: list[dict]) -> Cases:
         """From one dict per case (CASE fields) and one dict of row arrays per case (ROW fields)."""
-        obj = {"race_id", "day", "venue", "grade", "pool", "reader", "combination"}
+        obj = {"race_id", "day", "venue", "grade", "pool", "reader", "starters", "combination"}
 
         def column(name, values):
             if name in obj:
@@ -842,6 +845,7 @@ class Cases:
             board_min=float(self.board_min[i]),
             odds=self.odds_t[r],
             odds_hi=self.odds_hi_t[r],
+            starters=None if self.starters[i] is None else int(self.starters[i]),
         )
 
     def view(self, i: int) -> RaceView:
@@ -967,6 +971,7 @@ def extract(
                         "rule_sum": rule_sum,
                         "scratched": scratched,
                         "reader": f_reader,
+                        "starters": board.starters,
                     }
                 )
                 k = len(board.combinations)

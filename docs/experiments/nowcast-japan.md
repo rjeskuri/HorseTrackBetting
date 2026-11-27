@@ -216,7 +216,7 @@ None by this PR. Proposed, for the orchestrator to file under epic #73 as `statu
   5-6 minute paths those horizons mostly see an older board.
 - Pre-registered model variants: σ by odds band (where #116's drift has its cells), and a random V_final.
 
-## #410: Place shares by JRA's rule (families v3, v4 and v5)
+## #410: Place shares by JRA's rule (families v3 to v6)
 
 Ticket #410 (epic #73). **Every figure is withheld (D21)**: the measurement and the re-run read JRA-VAN data. This
 section states no count, rate, share, bound or quantifier derived from them; they are in the private reports named
@@ -301,6 +301,11 @@ below. Nothing is adopted, and the holdout is not opened.
   never priced does not), never fewer than the runners priced on the board read. `place_shares` and `pool_shares`
   take it as `starters`. v5's records were measured before this change; no run under the new rule is made here.
   `ShadowNowcast`'s draws still take P from the board's priced runners.
+- **Family v6 (#410 round 8).** #116's drift baseline (`drift_forecaster`) reads its Place odds draws into shares
+  with the same P, carried on each board at t (`PoolBoard.starters`, `Cases.starters`); before, a race that lost a
+  runner after sales opened had its drift draws read with the priced runners' P, and a 5 -> 4 race had none. The
+  spec changed after v5 was frozen, so the changed spec is family `japan-c1-nowcast-final-shares-v6`, superseding
+  v5; v5's freeze and records stay in the registry as history. No v6 run is made here.
 - **The v3 re-run.** Family `japan-c1-nowcast-final-shares-v3`, spec sha256
   `4cb84e2f74e25d5cc1de9ec471dd84912e0ec09b1c16cfba3d1dc07d387fad83`, frozen at the start of the run before any
   development row was read (the owner's 2026-11-27 reframe: Claude pre-registers and logs every variant). v3

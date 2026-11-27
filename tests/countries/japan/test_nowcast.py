@@ -149,7 +149,13 @@ from horsetrack.core.eval.folds import FoldScheme, walk_forward
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.registry import default_registry
 from horsetrack.core.pricing import stake_back_share_dividend
-from horsetrack.countries.japan.board.snapshot import PLACE, WIDE, WIN, RaceBoard
+from horsetrack.countries.japan.board.snapshot import (
+    PLACE,
+    WIDE,
+    WIN,
+    RaceBoard,
+    load_decision_grid,
+)
 from horsetrack.countries.japan.jravan.votes import POOL_VOTES_SCHEMA
 from horsetrack.countries.japan.logger.compact import SCHEMA
 from horsetrack.countries.japan.models.nowcast import (
@@ -169,6 +175,7 @@ from horsetrack.countries.japan.models.nowcast import (
     race_view,
     score_cases,
 )
+from horsetrack.countries.japan.models.v0.nowcast import DriftCell, NowcastV0
 from horsetrack.countries.japan.studies import nowcast as study
 
 UTC = timezone.utc
@@ -2607,12 +2614,12 @@ AT_SALE_RACES = {  # race number: (field at sale, money by minute, the runner ne
 }  # fmt: skip
 
 
-def at_sale_rows(day: date) -> list[dict]:
-    """The WIN and PLACE rows of `AT_SALE_RACES`: each board's PLACE figures as JRA prints them
-    from its money under the places of the race's field at sale; a runner off a board (scratched,
-    or never priced) has rows with no price, as the store writes a scratch."""
+def at_sale_rows(day: date, races: dict | None = None) -> list[dict]:
+    """The WIN and PLACE rows of `races` (default `AT_SALE_RACES`): each board's PLACE figures as
+    JRA prints them from its money under the places of the race's field at sale; a runner off a
+    board (scratched, or never priced) has rows with no price, as the store writes a scratch."""
     rows = []
-    for race_no, (at_sale, boards, never) in AT_SALE_RACES.items():
+    for race_no, (at_sale, boards, never) in (AT_SALE_RACES if races is None else races).items():
         race_id, post = race_id_of(day, race_no), post_of(day, race_no)
         places = PLACE_POOL.places_for(at_sale)
         for minutes, money in boards.items():
@@ -2682,3 +2689,215 @@ def test_board_reads_take_the_places_from_the_field_at_sale():
     for got in (p3, p2):  # every board reproduced from its votes at its P, and read within
         assert got["share_reproduced"] == pytest.approx(1.0), got
         assert got["share_within_tolerance"] == pytest.approx(1.0), got
+
+
+# ---------------------------------------------------------------- round 8 (owner's 07:20 restart)
+#
+# 1. v5's spec changed after the family was frozen (P from the field at sale, df394e8), so the
+#    changed spec is frozen as a new family, japan-c1-nowcast-final-shares-v6, superseding v5;
+#    v5's freeze and records stay in the registry as history (#218's v3 rule).
+# 2. The drift baseline reads its Place odds draws into shares with P from the field at the start
+#    of sales, as the board reads do: after an 8 -> 7 scratch with three places, after a 5 -> 4
+#    scratch with two (four priced runners alone are not a Place field: no shares at all).
+
+V4_FAMILY = "japan-c1-nowcast-final-shares-v4"
+V5_FAMILY = "japan-c1-nowcast-final-shares-v5"
+V6_FAMILY = "japan-c1-nowcast-final-shares-v6"
+
+
+def _study_spec() -> dict:
+    """`build_spec` on the inputs `run_study` passes it."""
+    scoring = config.load_country_yaml(COUNTRY, "scoring")["bootstrap"]
+    bootstrap = {
+        "n_boot": int(scoring["n_boot"]),
+        "level": float(scoring["level"]),
+        "seed": study.SEED,
+    }
+    return study.build_spec(
+        load_decision_grid(),
+        study.load_country_scheme(COUNTRY),
+        bootstrap,
+        config.load_country_yaml(COUNTRY, "nowcast_v0"),
+    )
+
+
+def test_the_changed_spec_is_family_v6_superseding_v5():
+    """Round 8, finding 1: the study's family is v6 (its trials v6-trial), superseding v5, and the
+    spec it freezes says so: its family id is v6 and its `supersedes` names v5 first, says why
+    (the spec changed under the frozen family: P from the field at the start of sales) and keeps
+    the earlier chain (v4, v3)."""
+    assert study.FAMILY_ID == V6_FAMILY
+    assert study.TRIAL_FAMILY_ID == f"{V6_FAMILY}-trial"
+    assert study.SUPERSEDES == V5_FAMILY
+    spec = _study_spec()
+    assert spec["family_id"] == V6_FAMILY
+    supersedes = spec["supersedes"]
+    assert supersedes.startswith(f"{V5_FAMILY}:"), supersedes[:120]
+    assert re.search(r"field at (the start of )?sales?", supersedes, re.IGNORECASE), supersedes
+    assert re.search(r"frozen", supersedes, re.IGNORECASE), supersedes
+    assert "v4" in supersedes and "v3" in supersedes, supersedes  # the earlier chain is kept
+
+
+def _freeze_lines(path: Path) -> list[dict]:
+    lines = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [entry for entry in lines if entry.get("kind") == "freeze"]
+
+
+def test_a_run_freezes_v6_and_keeps_the_frozen_v5_as_history(data_dir, tmp_path, monkeypatch):
+    """Round 8, finding 1, on the run path: a registry that froze v5 with its earlier spec (any
+    spec other than today's) no longer stops `run_study` with FamilyAlreadyFrozen. The run freezes
+    today's spec as v6 before it scores, every record it appends is v6's under that spec, and
+    v5's freeze stays as it was: the registry only grows, its chain verifies, v5's hash is the
+    one frozen, and no record joins v5."""
+    write_jravan_store(data_dir, TRAIN_DAYS + TEST_DAYS[:1])
+    monkeypatch.setattr(study, "load_country_scheme", lambda country: FOLD_SCHEME)
+    summary = tmp_path / "summary"  # the run regenerates the registry summary: not the repo's
+    monkeypatch.setattr(study, "summary_dir", lambda country: summary)
+    monkeypatch.setattr("horsetrack.core.eval.registry.summary_dir", lambda country: summary)
+    registry = default_registry(COUNTRY)
+    v5_spec = {
+        "family_id": V5_FAMILY,
+        "supersedes": V4_FAMILY,
+        "place_places": "P from the runners priced on the board (as frozen before df394e8)",
+    }
+    v5_hash = registry.freeze_family(V5_FAMILY, v5_spec)
+    before = registry.path.read_bytes()
+
+    study.run_study(
+        trial=False, test_days_per_fold=1, n_draws=30, out_dir=tmp_path / "out", log=lambda *a: None
+    )
+
+    after = registry.path.read_bytes()
+    assert after.startswith(before) and len(after) > len(before)  # appended, nothing rewritten
+    registry.verify()
+    assert registry.frozen_spec_hash(V5_FAMILY) == v5_hash
+    v6_hash = registry.frozen_spec_hash(V6_FAMILY)
+    assert v6_hash is not None and v6_hash != v5_hash
+    freezes = {entry["family_id"]: entry for entry in _freeze_lines(registry.path)}
+    assert freezes[V5_FAMILY]["spec"] == v5_spec
+    v6_spec = freezes[V6_FAMILY]["spec"]
+    assert v6_spec["family_id"] == V6_FAMILY
+    assert v6_spec["supersedes"].startswith(f"{V5_FAMILY}:")
+    records = registry.records()
+    assert records, "the run appended no registry record"
+    assert {r.family_id for r in records} == {V6_FAMILY}, {r.family_id for r in records}
+    assert {r.params.get("spec_sha256") for r in records} == {v6_hash}
+    assert registry.records(V5_FAMILY) == []
+
+
+# The races of the drift tests, all on one day: `AT_SALE_RACES` (race 1: 8 at sale, 7 priced from
+# minute 20, three places; races 2 and 3: 7 at sale, two places) and race 4, 5 at sale and 4
+# priced from minute 20 (two places; four runners alone are not a Place field).
+FIVE_AT_SALE = _yen([3600, 1500, 1100, 800, 700])
+FOUR_AT_T = _yen([4000, 1600, 1200, 900])
+FOUR_FINAL = _yen([3800, 1700, 1300, 1000])
+DRIFT_RACES = {
+    **AT_SALE_RACES,
+    4: (5, {SALE_OPENING_MIN: FIVE_AT_SALE, SCRATCH_MIN: FOUR_AT_T, 5: FOUR_AT_T,
+            FINAL_MIN: FOUR_FINAL}, None),
+}  # fmt: skip
+
+
+def still_drift(mu: float) -> NowcastV0:
+    """#116's drift with no spread: every Place odds draw is the figure at t times exp(mu), so a
+    draw is known without the model's noise; WIN has no drift either."""
+    grid = load_decision_grid()
+    return NowcastV0(
+        bands=(),
+        grid=grid,
+        prior_n=0.0,
+        days=(),
+        sigma0={(pool, int(t)): 0.0 for pool in (WIN, PLACE) for t in grid.minutes},
+        cells={(PLACE, int(t), 0): DriftCell(PLACE, int(t), 0, 1, mu, 0.0) for t in grid.minutes},
+    )
+
+
+def jra_printed(figures: np.ndarray) -> np.ndarray:
+    """Place figures as JRA prints them: down to the 10-yen step, at least the minimum dividend
+    (config/jra.yaml), per 100 yen."""
+    step = float(PLACE_POOL.dividend_step) / PLACE_UNIT
+    floor = float(PLACE_POOL.min_dividend) / PLACE_UNIT
+    return np.maximum(np.floor(np.asarray(figures, dtype=float) / step + 1e-9) * step, floor)
+
+
+def drift_cases():
+    """The study's cases of `DRIFT_RACES` at `AT_SALE_TAUS`, as `run_study` scores them (built,
+    concatenated and selected by day), with each Place case's race number."""
+    day = TEST_DAYS[0]
+    cases, _, _ = extract(to_frame(at_sale_rows(day, DRIFT_RACES)), taus=AT_SALE_TAUS)
+    cases = type(cases).concat([cases]).select_days([day.isoformat()])
+    place = [i for i in range(len(cases)) if cases.pool[i] == PLACE]
+    assert len(place) == len(DRIFT_RACES) * len(AT_SALE_TAUS)
+    return cases, {i: int(str(cases.race_id[i]).rsplit(":", 1)[1]) for i in place}
+
+
+def test_the_drift_baseline_reads_place_draws_with_the_field_at_sale():
+    """Round 8, finding 2: `drift_forecaster` reads its Place odds draws into shares with P from
+    the field at the start of sales. With no drift its draws are the board at t, and read with
+    that P they recover the money the board was printed from: after 8 -> 7 with three places
+    (P = 2 from the seven priced misreads them), after 5 -> 4 with two (the four priced alone are
+    no Place field), and, as before, where nothing was scratched by t. With a drift, each draw is
+    the read at the field-at-sale P of the figures it prints, never the priced runners' P where
+    the two differ."""
+    cases, races = drift_cases()
+    mu = 0.12
+    for i, race_no in races.items():
+        at_sale, boards, _ = DRIFT_RACES[race_no]
+        tau = float(cases.tau[i])
+        money = boards[SALE_OPENING_MIN] if tau > SCRATCH_MIN else boards[5]
+        view = cases.view(i)
+        lo, hi = cases.odds_t[cases.rows(i)], cases.odds_hi_t[cases.rows(i)]
+        assert len(lo) == len(money), (race_no, tau)
+        label = f"race {race_no} at tau {tau:g}: {at_sale} at sale, {len(money)} priced"
+
+        flat = study.drift_forecaster(still_drift(0.0))(view, pool=PLACE, n=4, seed=7).shares
+        assert flat is not None, label
+        flat = np.asarray(flat, dtype=float)
+        assert flat.shape == (4, len(money)), label
+        for draw in flat:
+            assert_recovers(draw, money)
+
+        drifted = study.drift_forecaster(still_drift(mu))(view, pool=PLACE, n=3, seed=7).shares
+        lo_d = np.maximum(lo * math.exp(mu), 1.0)
+        hi_d = np.maximum(hi * math.exp(mu), lo_d)
+        want, _, _ = place_shares(jra_printed(lo_d), jra_printed(hi_d), starters=at_sale)
+        assert want is not None, label
+        np.testing.assert_allclose(
+            np.asarray(drifted, dtype=float), np.tile(want, (3, 1)), rtol=1e-9, atol=1e-12,
+            err_msg=label,
+        )  # fmt: skip
+
+        priced, _, _ = place_shares(jra_printed(lo_d), jra_printed(hi_d))
+        if PLACE_POOL.places_for(len(money)) == PLACE_POOL.places_for(at_sale):
+            np.testing.assert_allclose(want, priced, rtol=1e-12, atol=0.0, err_msg=label)
+        elif priced is not None:  # precondition: P shows in the read (the 8 -> 7 case)
+            assert np.abs(np.asarray(priced) - want).max() > 0.01, label
+
+
+def test_the_study_scores_the_drift_baseline_after_a_scratch_below_a_place_field():
+    """Round 8, finding 2, through the study's scoring path (`score_cases` on the cases
+    `run_study` scores, with `drift_forecaster` as `drift_v0`): a 5 -> 4 scratch no longer aborts
+    the scoring, and every Place case, scratched or not, is scored with finite values equal to
+    those of a reference that reads the same board at t with the field-at-sale P from the
+    fixture."""
+    cases, races = drift_cases()
+
+    def reference(view, *, pool, n, seed):
+        race_no = int(view.race_id.rsplit(":", 1)[1])
+        board = view.pools[pool]
+        shares, _, _ = place_shares(board.odds, board.odds_hi, starters=DRIFT_RACES[race_no][0])
+        return Draws(shares=np.tile(shares, (n, 1)), v_final=np.full(n, np.nan))
+
+    place = cases.select(cases.pool == PLACE)
+    forecasters = {"drift_v0": study.drift_forecaster(still_drift(0.0)), "reference": reference}
+    table, pit_rows = score_cases(forecasters, place, n=20, seed=3, keep_pit=True)
+    assert len(table) == 2 * len(races)
+    assert np.isfinite(table[["log_score", "crps", "kl"]].to_numpy(float)).all(), table
+    scores = table.set_index(["race_id", "tau_min", "forecaster"])[["log_score", "crps", "kl"]]
+    drift = scores.xs("drift_v0", level="forecaster").sort_index()
+    ref = scores.xs("reference", level="forecaster").sort_index()
+    assert drift.index.equals(ref.index)
+    np.testing.assert_allclose(drift.to_numpy(float), ref.to_numpy(float), rtol=1e-9, atol=1e-12)
+    four = race_id_of(TEST_DAYS[0], 4)
+    assert {float(t) for r, t in drift.index if r == four} == set(AT_SALE_TAUS)
+    assert np.isfinite(pit_rows["pit"].to_numpy(float)).all()

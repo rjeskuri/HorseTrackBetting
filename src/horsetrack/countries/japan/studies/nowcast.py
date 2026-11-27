@@ -38,7 +38,10 @@ others (`undetermined` always) are reported apart (`gains_undetermined`, `gains_
 registry record per comparison (E19) and one for the Place rule (#410), failures included (a
 measurement that stands no read is a failed, unvalidated one, and the report then calls the Place
 rows a diagnostic), then `write_summary` regenerates the committed summary. Family
-`japan-c1-nowcast-final-shares-v5` supersedes v4, whose Place verdict took coverage for agreement,
+`japan-c1-nowcast-final-shares-v6` supersedes v5, whose spec changed after it was frozen (Place's
+P read from the field at the start of sales on the board reads and the drift baseline; v5's freeze
+and records stay in the registry as history); v5 superseded v4, whose Place verdict took coverage
+for agreement,
 measured every extracted Place race rather than the scored ones and pooled the undetermined
 boards' cases into the Place gains; v4 superseded v3, whose Place measurement validated the
 `final_odds` boards rather than the scored closing boards, took non-final votes as final and
@@ -91,9 +94,9 @@ COUNTRY = "japan"
 TICKET = 85
 SOURCE = "jravan"
 HYPOTHESIS = "E19"
-FAMILY_ID = "japan-c1-nowcast-final-shares-v5"
+FAMILY_ID = "japan-c1-nowcast-final-shares-v6"
 TRIAL_FAMILY_ID = f"{FAMILY_ID}-trial"  # trial runs' records; a trial never freezes FAMILY_ID
-SUPERSEDES = "japan-c1-nowcast-final-shares-v4"
+SUPERSEDES = "japan-c1-nowcast-final-shares-v5"
 PLACE_TICKET = 410
 PLACE_VARIANT = "place_rule_vs_votes"  # the Place rule measured against the final votes (#410)
 POOL_VOTES = "pool_votes"
@@ -450,7 +453,11 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
     """The family's design, frozen before any development row is read."""
     return {
         "family_id": FAMILY_ID,
-        "supersedes": f"{SUPERSEDES}: its Place verdict counted a read as validated when its "
+        "supersedes": f"{SUPERSEDES}: its spec changed after the family was frozen (#410 round "
+        "7): Place's P is read from the field at the start of sales (the runners priced on the "
+        "race's earliest PLACE board), not from the runners still priced after a scratch, on the "
+        "board reads and on #116's drift baseline; v5 superseded v4, whose Place verdict "
+        "counted a read as validated when its "
         "boards had final votes (coverage) whatever its agreement with them, measured every "
         "extracted Place race rather than the cases the folds scored, and pooled the "
         "undetermined boards' Place cases into the Place gains (#410's re-check); v4 superseded "
@@ -582,7 +589,7 @@ def drift_examples(cases: nc.Cases, days: list[str]) -> pd.DataFrame:
 def drift_forecaster(model: NowcastV0):
     """#116's drift as a share forecaster: its odds draws, read back into shares by the pool's
     share rule (WIN 1/O; PLACE its low and high draws printed as JRA prints them, then read by
-    the Place rule as a board is)."""
+    the Place rule as a board is, P from the board's field at sale)."""
 
     def forecast(view: nc.RaceView, *, pool: str, n: int, seed: int) -> nc.Draws:
         board = view.pools[pool]
@@ -603,7 +610,7 @@ def drift_forecaster(model: NowcastV0):
         odds, odds_hi = drawn.odds, drawn.odds_hi
         if pool == nc.PLACE:  # read as the boards are: printed figures by the Place rule
             odds, odds_hi = nc.printed_figures(pool, odds), nc.printed_figures(pool, odds_hi)
-        shares, _ = nc.pool_shares(pool, odds, odds_hi=odds_hi)
+        shares, _ = nc.pool_shares(pool, odds, odds_hi=odds_hi, starters=board.starters)
         return nc.Draws(shares=shares, v_final=np.full(n, np.nan))
 
     return forecast
