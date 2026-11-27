@@ -1,4 +1,5 @@
-"""JV-Data RA (race detail) records -> the jravan store's races and meetings (ticket #364).
+"""JV-Data RA (race detail) records -> the jravan store's races and meetings (ticket #364), and
+the weather per race (ticket #402).
 
 Contract pinned here (the coder follows it), module `horsetrack.countries.japan.jravan.races`:
 - `races_from_records(cols) -> DataFrame`: one `races` row per record of `cols` (as
@@ -14,6 +15,21 @@ Contract pinned here (the coder follows it), module `horsetrack.countries.japan.
   in `TABLES` column order, `tables.ARROW_TYPES` and sort keys, through `records.write_parquet`.
 - `horsetrack japan jravan races`: `build_races()` with the defaults, the report written by
   `records.write_build_report` (`<reports dir>/jravan-races.json`).
+
+The weather (#402; orchestrator rulings, reversible):
+- The jra store's schema is unchanged: `schemas.TABLES['races']` gets no weather column. The
+  weather is a JRA-VAN-only table `race_weather` (like `final_odds` and `pool_votes`, not in
+  `schemas.TABLES`), columns in order `race_id`, `weather`, `weather_raw`, all strings (the last
+  two nullable): one row per race `races_from_records` writes, same races, same order.
+- `weather_from_records(cols) -> DataFrame`: the `race_weather` rows for the RA records
+  `races_from_records` takes. `build_races` also writes `<out>/race_weather.parquet`, sorted by
+  `race_id`, for the races it writes to `races.parquet`; the same inputs give the same bytes.
+- Item 天候コード (the constant `WEATHER`); its values (the constant `WEATHERS`, from the 2011
+  code table): `1` FINE, `2` CLOUDY, `3` RAIN, `4` LIGHT RAIN, `5` SNOW, `6` LIGHT SNOW.
+  `weather_raw` is the code as printed (trimmed); a blank or all-zero code is unset, both null. A
+  code outside the table: `weather` null, `weather_raw` kept, counted in the report's
+  `unmapped['weather']` on races that were run only. Whether an unset code on a run race is
+  counted is not pinned here.
 
 Each column and the RA item (the `records.decode` key) it comes from, as named in the JV-Data
 workbook on the owner's Mac:
@@ -56,8 +72,8 @@ Code values pinned (named constants in `races.py`):
 The report: `by_year[<year>]` holds `records` (every record read), `versions_dropped` (records
 superseded by a later version of their race), `deletions` (races whose kept version is a deletion),
 `races_written`, `non_jra_nar` and `non_jra_overseas` (by `keys.jurisdiction`); `unmapped` is
-store column (`race_class`, `weight_type`, `surface`, `going`) -> code -> count, over the races
-written only. Counts and codes only.
+store column (`race_class`, `weight_type`, `surface`, `going`; `weather` for `race_weather`) ->
+code -> count, over the races written only. Counts and codes only.
 
 The RA section built here (`jravan_workbook`) uses those item names with invented positions,
 widths, repeats and order, and every value is made up (D21: the workbook and the export are
@@ -74,6 +90,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from typer.testing import CliRunner
@@ -126,6 +143,7 @@ LAYOUT: tuple[tuple[str, int, int, bool], ...] = (
     ("本賞金", 9, 3, False),
     ("発走時刻", 4, 1, False),
     ("出走頭数", 3, 1, False),
+    ("天候コード", 2, 1, False),
     ("芝馬場状態コード", 2, 1, False),
     ("ダート馬場状態コード", 2, 1, False),
     ("ラップタイム", 4, 6, False),
@@ -152,6 +170,7 @@ ALIASES = {
     "prize": "本賞金",
     "post": "発走時刻",
     "field": "出走頭数",
+    "weather": "天候コード",
     "turf": "芝馬場状態コード",
     "dirt": "ダート馬場状態コード",
     "laps": "ラップタイム",
@@ -175,6 +194,7 @@ DEFAULTS: dict[str, Any] = {
     "prize": (18000, 7200, 4500),
     "post": "1540",
     "field": 16,
+    "weather": "1",
     "turf": "1",
     "dirt": "0",
     "laps": (12.3, 11.0, 11.5),
@@ -823,6 +843,159 @@ def test_two_builds_write_identical_bytes(data: Path) -> None:
     assert parsed["by_year"]["2024"]["races_written"] == 3
     assert parsed["by_year"]["2025"]["races_written"] == 3
     assert "架空記念" not in text and "架空記念" not in result.output  # counts only
+
+
+# ------------------------------------------------------------------------------------------------
+# The weather (#402): a jravan-only race_weather table, the jra store's races unchanged
+
+
+WEATHER_COLUMNS = ["race_id", "weather", "weather_raw"]
+# the jra store's races columns before #402, written out: the weather must not join them
+RACES_COLUMNS = [
+    "jurisdiction", "race_id", "meeting_id", "race_date", "venue", "race_no", "season",
+    "race_index", "race_name", "race_class", "rating_hi", "rating_lo", "distance_m", "surface",
+    "course_config", "going", "prize", "post_time_local", "field_size", "finish_time_s",
+    "split_times_s", "status", "weight_type", "race_class_raw", "going_raw", "source_race_key",
+    "rail_setting", "result_published_utc", "result_unpublished_utc",
+]  # fmt: skip
+WEATHER_CASES = [  # (weather code as printed, track, data kubun) -> (weather, weather_raw)
+    (("1", "11", "7"), ("FINE", "1")),
+    (("2", "24", "7"), ("CLOUDY", "2")),
+    (("3", "54", "7"), ("RAIN", "3")),
+    (("4", "17", "7"), ("LIGHT RAIN", "4")),
+    (("5", "23", "7"), ("SNOW", "5")),
+    (("6", "11", "9"), ("LIGHT SNOW", "6")),  # an abandoned race keeps its weather
+    (("3", "18", "7"), ("RAIN", "3")),
+    (("1", "52", "9"), ("FINE", "1")),
+    ((None, "11", "7"), (None, None)),  # blank: unset
+    (("0", "24", "7"), (None, None)),  # all zero: unset
+    (("00", "11", "7"), (None, None)),
+    (("7", "11", "7"), (None, "7")),  # outside the table: raw kept
+    (("9", "24", "7"), (None, "9")),
+    (("A", "52", "7"), (None, "A")),
+    (("15", "17", "7"), (None, "15")),
+]
+
+
+def test_the_weather_code_is_mapped(ra_spec: spec.RecordSpec) -> None:
+    recs = [
+        ra(race=race_no(i), weather=w, track=t, kubun=k)
+        for i, ((w, t, k), _) in enumerate(WEATHER_CASES)
+    ]
+    cols = records.decode(b"".join(reversed(recs)), ra_spec)  # written in reverse on purpose
+    weather = races.weather_from_records(cols)
+    assert list(weather.columns) == WEATHER_COLUMNS
+    race_rows = races.races_from_records(cols)
+    # one row per race the races mapping writes, same races in the same order
+    assert weather["race_id"].tolist() == race_rows["race_id"].tolist()
+    assert len(weather) == len(WEATHER_CASES)
+    # the jra store's races keep their columns: no weather there
+    assert list(race_rows.columns) == RACES_COLUMNS
+
+    rows = by_id(weather)
+    for i, (given, expected) in enumerate(WEATHER_CASES):
+        row = rows[rid(i)]
+        assert (row["weather"], row["weather_raw"]) == expected, given
+
+
+def weather_rows(path: Path) -> dict[str, tuple[Any, Any]]:
+    got = pq.read_table(path).to_pylist()
+    return {r["race_id"]: (r["weather"], r["weather_raw"]) for r in got}
+
+
+def assert_weather_schema(path: Path) -> None:
+    schema = pq.read_schema(path)
+    assert schema.names == WEATHER_COLUMNS, schema.names
+    for column in WEATHER_COLUMNS:
+        assert schema.field(column).type == pa.string(), (column, schema.field(column).type)
+
+
+def test_build_writes_race_weather_for_the_races_written(data: Path) -> None:
+    other = dict(track="00", cond="000", weight="0", grade="", turf="0", dirt="0", laps=(),
+                 course="")  # fmt: skip
+    write_year(
+        data,
+        2024,
+        [
+            ra(year="2024", mmdd="1201", venue="06", kai="05", nichi="02", race="01",
+               created="20241203", weather="5", track="24", turf="0", dirt="2", course=""),
+            ra(year="2024", mmdd="1130", venue="08", kai="05", nichi="01", race="11",
+               created="20241202", weather="3"),
+        ],
+    )  # fmt: skip
+    write_year(
+        data,
+        2025,
+        [
+            ra(race="01", created="20250530", kubun="2", weather="2"),  # superseded
+            ra(race="08", weather="00"),
+            ra(race="02", weather="7"),
+            ra(race="06", created="20250501", kubun="7", weather="6"),  # then deleted
+            ra(race="04", weather="8", kubun="9"),  # abandoned: an unknown code, not counted
+            ra(race="03", weather="7", track="24", turf="0", dirt="1", course=""),
+            ra(race="01", created="20250602", kubun="7", weather="4"),
+            ra(race="05", weather=None),
+            ra(venue="30", kai="01", nichi="01", race="01", kubun="A", weather="9", **other),
+            ra(race="06", created="20250603", kubun="0", weather="6"),
+            ra(race="07", weather="6"),
+        ],
+    )
+    report = races.build_races()
+
+    tok = "jra:2025-06-01:TOK:"
+    expected = {
+        "jra:2024-11-30:KYO:11": ("RAIN", "3"),
+        "jra:2024-12-01:NAK:01": ("SNOW", "5"),
+        tok + "01": ("LIGHT RAIN", "4"),
+        tok + "02": (None, "7"),
+        tok + "03": (None, "7"),
+        tok + "04": (None, "8"),
+        tok + "05": (None, None),
+        tok + "07": ("LIGHT SNOW", "6"),
+        tok + "08": (None, None),
+    }
+    path = data / "processed" / "jravan" / "race_weather.parquet"
+    assert path.is_file()
+    assert_weather_schema(path)
+    ids = pq.read_table(path)["race_id"].to_pylist()
+    assert ids == sorted(expected)  # sorted by race_id, one row per race written
+    assert weather_rows(path) == expected
+
+    # the races written are the same races, and the jra store's races keep their columns
+    assert_store_types(tables.table_path(SOURCE, "races"), "races")
+    assert list(schemas.TABLES["races"].columns) == RACES_COLUMNS
+    assert tables.read_table(SOURCE, "races")["race_id"].tolist() == ids
+    assert report.by_year[2025]["races_written"] == 7
+
+    # unknown codes are counted under `weather`, on run races only; the rest stay mapped
+    assert "weather" in report.unmapped
+    counted = {code: n for code, n in report.unmapped["weather"].items() if code.strip("0")}
+    assert counted == {"7": 2}
+    assert nonempty({k: v for k, v in report.unmapped.items() if k != "weather"}) == {}
+
+    # `out` and `years` apply; the same inputs give the same bytes
+    again = data / "again"
+    races.build_races(out=again)
+    assert (again / "race_weather.parquet").read_bytes() == path.read_bytes()
+    only = data / "only"
+    races.build_races(years=[2024], out=only)
+    assert weather_rows(only / "race_weather.parquet") == {
+        k: v for k, v in expected.items() if k.startswith("jra:2024")
+    }
+
+    # a year whose weather is all unset still writes string columns
+    write_year(
+        data,
+        2023,
+        [ra(year="2023", race="01", weather=None), ra(year="2023", race="02", weather="0")],
+    )
+    unset = data / "unset"
+    races.build_races(years=[2023], out=unset)
+    assert_weather_schema(unset / "race_weather.parquet")
+    assert weather_rows(unset / "race_weather.parquet") == {
+        "jra:2023-06-01:TOK:01": (None, None),
+        "jra:2023-06-01:TOK:02": (None, None),
+    }
 
 
 # ------------------------------------------------------------------------------------------------

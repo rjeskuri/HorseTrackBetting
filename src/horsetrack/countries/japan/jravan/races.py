@@ -1,14 +1,18 @@
-"""JV-Data RA (race detail) records -> the jravan store's `races` and `meetings` (#364).
+"""JV-Data RA (race detail) records -> the jravan store's `races` and `meetings` (#364), and the
+JRA-VAN-only `race_weather` (#402).
 
 `races_from_records` maps `records.decode`d RA arrays to `races` rows in the vocabulary the jra
 store writes (`countries/japan/jra/netkeiba/parse_results.py`); `meetings_from_races` derives the
 meetings. `build_races` reads `raw/jravan/stored/RACE/RA/<YYYY>.jvd` one year at a time, keeps one
 version per race (`records.latest_versions` on the layout's key items) and the JRA venues (01-10),
 and writes `processed/jravan/races.parquet` and `meetings.parquet` in the store's column order,
-types and sort keys. The code values each mapping uses are the constants below (the code-table
-text stays in the licensed workbook); a code a mapping lacks becomes null and is counted per code
-in the report. A blank or all-zero code is JV-Data's "unset": a null value (its `*_raw` column
-too), counted as unmapped only on a race that was run. See docs/specs/jravan.md.
+types and sort keys. `weather_from_records` maps the same records to `race_weather` rows (race_id,
+weather, weather_raw; not a store table, so `races` keeps the jra store's columns), which the build
+writes to `processed/jravan/race_weather.parquet`, sorted by race_id. The code values each mapping
+uses are the constants below (the code-table text stays in the licensed workbook); a code a
+mapping lacks becomes null and is counted per code in the report (the weather on run races only).
+A blank or all-zero code is JV-Data's "unset": a null value (its `*_raw` column too), counted as
+unmapped only on a race that was run. See docs/specs/jravan.md.
 """
 
 from __future__ import annotations
@@ -53,9 +57,11 @@ FIELD_SIZE = "出走頭数"
 TURF_GOING = "芝馬場状態コード"
 DIRT_GOING = "ダート馬場状態コード"
 LAPS = "ラップタイム"  # tenths of a second per lap
+WEATHER = "天候コード"
 ITEMS = (
     KUBUN, CREATED, YEAR, MMDD, VENUE, KAI, NICHI, RACE_NO, RACE_NAME, GRADE, WEIGHT_TYPE,
     CONDITION, DISTANCE, TRACK, COURSE, PRIZE, POST_TIME, FIELD_SIZE, TURF_GOING, DIRT_GOING, LAPS,
+    WEATHER,
 )  # fmt: skip
 
 KUBUN_DELETED = "0"
@@ -70,6 +76,9 @@ OPEN_CLASS = "OP"
 GRADES = {"A": "G1", "F": "G1", "B": "G2", "G": "G2", "C": "G3", "H": "G3", "L": "L"}
 WEIGHT_TYPES = {"1": "handicap", "2": "allowance", "3": "age", "4": "set"}
 GOINGS = {"1": "GOOD", "2": "GOOD TO YIELDING", "3": "SOFT", "4": "HEAVY"}
+WEATHERS = {
+    "1": "FINE", "2": "CLOUDY", "3": "RAIN", "4": "LIGHT RAIN", "5": "SNOW", "6": "LIGHT SNOW",
+}  # fmt: skip
 TURF, DIRT, JUMP = "turf", "dirt", "jump"
 SURFACES = {
     **{str(code): TURF for code in range(10, 23)},
@@ -80,8 +89,12 @@ INNER_TRACKS = frozenset({"15", "21", "25", "58"})  # the inner course only
 OUTER_TRACKS = frozenset({"12", "16", "18", "22", "26", "55", "59"})  # the outer course only
 RAIL_SETTINGS = frozenset({"A", "B", "C", "D"})
 
-# store columns whose unmapped codes the report counts
-UNMAPPED_COLUMNS = ("race_class", "weight_type", "surface", "going")
+# columns whose unmapped codes the report counts (`weather` is race_weather's)
+UNMAPPED_COLUMNS = ("race_class", "weight_type", "surface", "going", "weather")
+WEATHER_TABLE = "race_weather"  # jravan-only: not in `schemas.TABLES`
+WEATHER_SCHEMA = pa.schema(
+    [("race_id", pa.string()), ("weather", pa.string()), ("weather_raw", pa.string())]
+)
 YEAR_COUNTS = (
     "records", "versions_dropped", "deletions", "races_written", "non_jra_nar",
     "non_jra_overseas", "non_jra_unknown", "unmapped",
@@ -112,8 +125,10 @@ def _integers(raw: np.ndarray) -> list[int | None]:
     return [None if np.isnan(v) else int(v) for v in records.integer(raw)]
 
 
-def _map(cols: Mapping[str, np.ndarray]) -> tuple[pd.DataFrame, dict[str, collections.Counter]]:
-    """The `races` rows of `cols` and, per store column, the unmapped codes."""
+def _map(
+    cols: Mapping[str, np.ndarray],
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, collections.Counter]]:
+    """The `races` and `race_weather` rows of `cols` and, per column, the unmapped codes."""
     text = {name: records.text(cols[name]) for name in ITEMS if name not in (PRIZE, LAPS)}
     n = len(text[YEAR])
     unmapped = {column: collections.Counter() for column in UNMAPPED_COLUMNS}
@@ -127,6 +142,7 @@ def _map(cols: Mapping[str, np.ndarray]) -> tuple[pd.DataFrame, dict[str, collec
     if prize.ndim > 1:
         prize = prize[:, 0]
     rows: dict[str, list] = {column: [] for column in TABLES["races"].columns}
+    weather_rows: dict[str, list] = {column: [] for column in WEATHER_SCHEMA.names}
     for i in range(n):
         run = text[KUBUN][i] != KUBUN_ABANDONED
 
@@ -154,6 +170,13 @@ def _map(cols: Mapping[str, np.ndarray]) -> tuple[pd.DataFrame, dict[str, collec
         going = GOINGS.get(going_raw or "")
         if going is None and surface is not None:  # no surface: no going to read
             count("going", going_code)
+        weather_raw = None if _unset(text[WEATHER][i]) else text[WEATHER][i]
+        weather = WEATHERS.get(weather_raw or "")
+        if weather is None and run:  # an abandoned race's weather code is not counted
+            count("weather", text[WEATHER][i])
+        weather_rows["race_id"].append(race_ids[i])
+        weather_rows["weather"].append(weather)
+        weather_rows["weather_raw"].append(weather_raw)
         course = text[COURSE][i]
         day = race_dates[i]
         rows["jurisdiction"].append(JURISDICTION)
@@ -191,13 +214,24 @@ def _map(cols: Mapping[str, np.ndarray]) -> tuple[pd.DataFrame, dict[str, collec
     rows["distance_m"] = _integers(cols[DISTANCE])
     rows["field_size"] = _integers(cols[FIELD_SIZE])
     rows["split_times_s"] = _laps(cols[LAPS])
-    return pd.DataFrame(rows, columns=list(TABLES["races"].columns)), unmapped
+    return (
+        pd.DataFrame(rows, columns=list(TABLES["races"].columns)),
+        pd.DataFrame(weather_rows, columns=WEATHER_SCHEMA.names),
+        unmapped,
+    )
 
 
 def races_from_records(cols: Mapping[str, np.ndarray]) -> pd.DataFrame:
     """One `races` row per RA record of `cols` (JRA venues, one version per race), with the
     columns of `schemas.TABLES['races']` in order."""
     return _map(cols)[0]
+
+
+def weather_from_records(cols: Mapping[str, np.ndarray]) -> pd.DataFrame:
+    """One `race_weather` row (race_id, weather, weather_raw) per race `races_from_records`
+    writes for `cols`, in the same order: `weather` from `WEATHERS`, null for a code outside it;
+    `weather_raw` the code as printed; both null for a blank or all-zero code."""
+    return _map(cols)[1]
 
 
 def meetings_from_races(races: pd.DataFrame) -> pd.DataFrame:
@@ -246,15 +280,16 @@ def _year_files(folder: Path, years: list[int] | None) -> dict[int, Path]:
 def build_races(
     *, years: list[int] | None = None, raw: Path | None = None, out: Path | None = None
 ) -> records.BuildReport:
-    """Build `races.parquet` and `meetings.parquet` from the RA files of `years` (default: every
-    year file), one year at a time; the report holds counts and codes only."""
+    """Build `races.parquet`, `meetings.parquet` and `race_weather.parquet` from the RA files of
+    `years` (default: every year file), one year at a time; the report holds counts and codes
+    only."""
     raw = Path(raw) if raw is not None else paths.raw_dir(SOURCE)
     out = Path(out) if out is not None else paths.processed_dir(SOURCE)
     layout = spec.record_spec("RA")
     key = [item.name for item in layout.items if item.is_key]
     by_year: dict[int, dict[str, int]] = {}
     unmapped = {column: collections.Counter() for column in UNMAPPED_COLUMNS}
-    frames = []
+    frames, weather_frames = [], []
     for year, path in _year_files(raw / "stored" / "RACE" / "RA", years).items():
         cols = _read_year(path, layout)
         counts = dict.fromkeys(YEAR_COUNTS, 0)
@@ -273,13 +308,15 @@ def build_races(
         counts["non_jra_unknown"] = where[None]
         rows = np.flatnonzero(index.index.isin(kept.index))
         jra = rows[[keys.jurisdiction(v) == "jra" for v in index[VENUE].to_numpy()[rows]]]
-        frame, codes = _map({name: array[jra] for name, array in cols.items()})
-        frame = frame[frame["race_id"].notna()]
+        frame, weather, codes = _map({name: array[jra] for name, array in cols.items()})
+        written = frame["race_id"].notna()
+        frame = frame[written]
         counts["races_written"] = len(frame)
         counts["unmapped"] = sum(sum(c.values()) for c in codes.values())
         for column, counter in codes.items():
             unmapped[column].update(counter)
         frames.append(frame)
+        weather_frames.append(weather[written])
     races = (
         pd.concat(frames, ignore_index=True)
         if frames
@@ -290,6 +327,14 @@ def build_races(
         raise ValueError(f"{int(duplicated.sum())} RA races share a race_id with another race")
     _write(_sorted(races, "races"), "races", out)
     _write(_sorted(meetings_from_races(races), "meetings"), "meetings", out)
+    weather = (
+        pd.concat(weather_frames, ignore_index=True)
+        if weather_frames
+        else pd.DataFrame({c: [] for c in WEATHER_SCHEMA.names})
+    )
+    weather = weather.sort_values("race_id", kind="stable").reset_index(drop=True)
+    arrow = pa.Table.from_pandas(weather, schema=WEATHER_SCHEMA, preserve_index=False)
+    records.write_parquet(arrow.replace_schema_metadata(None), out / f"{WEATHER_TABLE}.parquet")
     totals = {k: sum(c[k] for c in by_year.values()) for k in YEAR_COUNTS}
     return records.BuildReport(
         name="races",
@@ -305,8 +350,8 @@ def races_command(
         list[int] | None, typer.Option("--year", help="Only this year (repeatable).")
     ] = None,
 ) -> None:
-    """Build the jravan store's races and meetings from the JV-Data RA records; the report
-    (counts and codes only) goes to <reports dir>/jravan-races.json."""
+    """Build the jravan store's races and meetings, and race_weather, from the JV-Data RA
+    records; the report (counts and codes only) goes to <reports dir>/jravan-races.json."""
     report = build_races(years=year or None)
     target = records.write_build_report(report)
     c = report.counts
