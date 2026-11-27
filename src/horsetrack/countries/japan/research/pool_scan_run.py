@@ -558,6 +558,7 @@ def _read_store(start: date, end: date, log: Callable[[str], None]) -> _Store:
     for year in range(start.year, end.year + 1):
         log(f"reading {year}")
         _read_year(max(start, date(year, 1, 1)), min(end, date(year, 12, 31)), store, calendar)
+        pa.default_memory_pool().release_unused()  # one year's board at a time
     return store
 
 
@@ -710,10 +711,15 @@ def _eb_readings(span: _Span) -> None:
 
 
 def _fit_bets(frame: pd.DataFrame) -> pd.DataFrame:
-    """The fit's input: segment and interaction levels, band, harmonic-mean odds, counts."""
-    out = pd.DataFrame({name: frame[name].astype(str) for name in [*SEGMENTS, "band"]})
+    """The fit's input: segment and interaction levels (categoricals, no per-row strings), band,
+    harmonic-mean odds, counts."""
+    out = pd.DataFrame({name: frame[name] for name in [*SEGMENTS, "band"]})
+    group = out["class"].cat
     for other in CROSSED:
-        out[f"class_x_{other}"] = out["class"] + "|" + out[other]
+        levels = out[other].cat.categories
+        codes = group.codes.to_numpy(dtype=np.int64) * len(levels) + out[other].cat.codes
+        names = [f"{g}|{level}" for g in group.categories for level in levels]
+        out[f"class_x_{other}"] = pd.Categorical.from_codes(codes, categories=names)
     out["odds"] = frame["count"].to_numpy(dtype=float) / frame["inv"].to_numpy(dtype=float)
     out["takeout"] = frame["takeout"].to_numpy(dtype=float)
     out["count"] = frame["count"].to_numpy(dtype=int)
@@ -759,7 +765,7 @@ def _scan_pool(pool: str, store: _Store, races: pd.DataFrame, seed: int) -> dict
                 _eb_readings(span)
             else:
                 fit_seed = int(seq.generate_state(1)[0])
-                _fit_readings(pool, span, _fit_bets(store.bets[pool, name]), fit_seed)
+                _fit_readings(pool, span, _fit_bets(store.bets.pop((pool, name))), fit_seed)
         except Exception as exc:  # every failure is a failed record, and the scan goes on
             span.note = f"{type(exc).__name__}: {exc}"
     return out
@@ -901,6 +907,7 @@ class ScanResult:
     excluded: dict[str, int]
     pool_excluded: dict[str, dict[str, int]]
     fit_info: dict[str, dict]
+    summary_error: str | None = None  # why write_summary could not regenerate the summary
 
 
 def _row(pool: str, cell: str, c: dict, base_rate: float, size: int) -> dict[str, Any]:
@@ -1071,7 +1078,10 @@ def run_scan(
     text = json.dumps(rows, indent=1, allow_nan=False) + "\n"
     write_report(candidates, text, sources=(SOURCE,))
     if own:
-        write_summary(registry, summary_dir(COUNTRY))
+        try:
+            write_summary(registry, summary_dir(COUNTRY))
+        except ValueError as exc:  # e.g. another family's id is no file name; the run stands
+            result.summary_error = str(exc)
     return result
 
 
@@ -1310,5 +1320,6 @@ def run_command(
         "report": result.report_name,
         "candidates": result.candidates_name,
         "run_ids": [i for _, i in result.run_ids],
+        "summary_error": result.summary_error,
     }
     typer.echo(json.dumps(summary, indent=2))
