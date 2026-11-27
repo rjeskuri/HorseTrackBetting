@@ -2,10 +2,13 @@
 
 Contract pinned here (the coder implements what these tests call):
 
-- ``write_summary(registry, directory)`` writes one file per family, ``<family_id>.md``, holding
+- ``write_summary(registry, directory)`` writes one file per family, ``<stem>.md``, holding
   the writer's title and "do not edit by hand" preamble and exactly one ``## <family_id>`` table
-  section, plus ``README.md``, the index: one ``- [<family>](<family>.md)`` list line per family
+  section, plus ``README.md``, the index: one ``- [<family_id>](<stem>.md)`` list line per family
   file, in family-id order. A family's file does not change when another family is added.
+  The stem is the family id itself, or for an id with "/" (#131) its segments joined with "--"
+  (``japan/x-v2`` -> ``japan--x-v2.md``). "--" alone cannot tell ``a--b`` from ``a/b``, so the
+  directory check reads each file's id from its index entry, never from its stem.
 - ``summary_dir(country)`` is ``<repo>/docs/experiments/registry/<country>``.
 - ``.gitattributes`` marks ``docs/ledger.md``, ``docs/experiments/registry/**`` and the study
   reports ``docs/experiments/*.md`` with ``merge=union``, so two branches that each append to
@@ -83,37 +86,59 @@ def family_files(directory: Path) -> dict[str, Path]:
     return {p.stem: p for p in directory.glob("*.md") if p.name != "README.md"}
 
 
-def index_links(directory: Path) -> list[str]:
-    """Family names the index links, in the order of its list lines."""
+def mapped_stem(family: str) -> str:
+    """The file stem the #131 ruling gives a family id: its "/" segments joined with "--"."""
+    return "--".join(family.split("/"))
+
+
+def index_entries(directory: Path) -> list[tuple[str, str]]:
+    """(family id, linked stem) of each index list line, in order."""
     text = (directory / "README.md").read_text(encoding="utf-8")
-    links = []
+    entries = []
     for line in text.splitlines():
         if line.lstrip().startswith(("-", "*")):
-            match = re.search(r"\]\(([^)]+)\)", line)
+            match = re.search(r"\[([^\]]+)\]\(([^)]+)\)", line)
             assert match, f"index list line without a link: {line!r}"
-            assert match.group(1).endswith(".md"), line
-            links.append(match.group(1)[: -len(".md")])
-    return links
+            assert match.group(2).endswith(".md"), line
+            entries.append((match.group(1), match.group(2)[: -len(".md")]))
+    return entries
+
+
+def index_links(directory: Path) -> list[str]:
+    """File stems the index links, in the order of its list lines."""
+    return [stem for _, stem in index_entries(directory)]
 
 
 def registry_dir_problems(directory: Path) -> list[str]:
-    """What is wrong with a registry directory: the index/file set check and the file shape."""
+    """What is wrong with a registry directory: each index entry against the mapping and the
+    files, each file against its entry, and the file shape. One problem per drift."""
     problems = []
     files = family_files(directory)
-    links = index_links(directory)
+    entries = index_entries(directory)
+    ids = [family for family, _ in entries]
+    links = [stem for _, stem in entries]
+    if len(ids) != len(set(ids)):
+        problems.append(f"index lists a family twice: {ids}")
     if len(links) != len(set(links)):
-        problems.append(f"index links a family twice: {links}")
-    if set(links) != set(files):
-        problems.append(f"index links {sorted(set(links))} but files are {sorted(files)}")
-    for stem, path in files.items():
+        problems.append(f"index links a file twice: {links}")
+    family_of = {}
+    for family, stem in entries:
+        family_of[stem] = family
+        if stem != mapped_stem(family):
+            problems.append(f"index entry {family} links {stem}.md, not {mapped_stem(family)}.md")
+        elif stem not in files:
+            problems.append(f"index entry {family} links {stem}.md, which does not exist")
+    for stem, path in sorted(files.items()):
         lines = path.read_text(encoding="utf-8").splitlines()
         if not lines or lines[0] != PREAMBLE_TITLE:
             problems.append(f"{path.name} does not start with the writer's title")
         if not any("do not edit by hand" in line for line in lines[:8]):
             problems.append(f"{path.name} lacks the do-not-edit preamble")
         sections = [line for line in lines if line.startswith("## ")]
-        if sections != [f"## {stem}"]:
-            problems.append(f"{path.name} sections are {sections}")
+        if stem not in family_of:
+            problems.append(f"{path.name} has no index entry")
+        elif sections != [f"## {family_of[stem]}"]:
+            problems.append(f"{path.name} sections are {sections}, its entry is {family_of[stem]}")
     return problems
 
 
@@ -286,6 +311,103 @@ def test_summary_dir_is_the_country_folder_under_docs_experiments_registry():
 
     for country in ("japan", "hongkong"):
         assert summary_dir(country) == REPO_ROOT / "docs" / "experiments" / "registry" / country
+
+
+# --------------------------------------------------------------------------- the directory check
+
+INDEX_HEAD = "# Experiment registry index\n\nWritten by the writer; do not edit by hand.\n\n"
+# (family id, file stem) of a clean mapped layout: plain ids keep their name, "/" ids map.
+CLEAN_LAYOUT = [
+    ("fam-plain", "fam-plain"),
+    ("japan/x-v2", "japan--x-v2"),
+    ("japan/x-v2/max-test", "japan--x-v2--max-test"),
+]
+
+
+def family_text(heading: str) -> str:
+    return (
+        f"{PREAMBLE_TITLE}\n\nWritten by the writer; do not edit by hand.\n\n## {heading}\n\n"
+        "| E id | Variant |\n| --- | --- |\n| E1 | v1 |\n"
+    )
+
+
+def lay_out(directory: Path, entries: list[tuple[str, str]], files: dict[str, str]) -> Path:
+    """A registry directory: README entries ``(id, link stem)`` and ``{stem: heading}`` files."""
+    directory.mkdir(parents=True)
+    lines = "".join(f"- [{family}]({stem}.md)\n" for family, stem in entries)
+    (directory / "README.md").write_text(INDEX_HEAD + lines, encoding="utf-8")
+    for stem, heading in files.items():
+        (directory / f"{stem}.md").write_text(family_text(heading), encoding="utf-8")
+    return directory
+
+
+def clean_files() -> dict[str, str]:
+    return {stem: family for family, stem in CLEAN_LAYOUT}
+
+
+def test_the_directory_check_accepts_slash_families_laid_out_by_the_mapping(tmp_path):
+    clean = lay_out(tmp_path / "hand", CLEAN_LAYOUT, clean_files())
+    assert registry_dir_problems(clean) == []
+
+    # the real writer's layout of the same ids passes too
+    written = tmp_path / "written"
+    families = [family for family, _ in CLEAN_LAYOUT]
+    render(
+        tmp_path,
+        "slash",
+        [run_record(f, f"v{i}", 0.1 * i) for i, f in enumerate(families)],
+        written,
+    )
+    assert set(family_files(written)) == {stem for _, stem in CLEAN_LAYOUT}
+    assert registry_dir_problems(written) == []
+
+
+DRIFT = {
+    # the heading is the stem, not the id its entry names ("--" read back as itself)
+    "heading-is-the-stem": (
+        CLEAN_LAYOUT,
+        {**clean_files(), "japan--x-v2": "japan--x-v2"},
+        "japan--x-v2.md",
+    ),
+    "heading-names-another-id": (
+        CLEAN_LAYOUT,
+        {**clean_files(), "japan--x-v2": "japan/other-v2"},
+        "japan--x-v2.md",
+    ),
+    # an entry "a--b" whose file holds "a/b": same stem, different id
+    "plain-entry-slash-heading": (
+        [("a--b", "a--b")],
+        {"a--b": "a/b"},
+        "a--b.md",
+    ),
+    "file-without-entry": (
+        CLEAN_LAYOUT,
+        {**clean_files(), "japan--orphan": "japan/orphan"},
+        "japan--orphan.md",
+    ),
+    "entry-without-file": (
+        CLEAN_LAYOUT + [("japan/gone", "japan--gone")],
+        clean_files(),
+        "japan/gone",
+    ),
+    # the entry links a file that exists and holds its id, but not at the mapped stem
+    "entry-links-an-unmapped-stem": (
+        [*CLEAN_LAYOUT[:1], ("japan/x-v2", "japan-x-v2"), *CLEAN_LAYOUT[2:]],
+        {
+            **{k: v for k, v in clean_files().items() if k != "japan--x-v2"},
+            "japan-x-v2": "japan/x-v2",
+        },
+        "japan-x-v2.md",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(DRIFT))
+def test_the_directory_check_reports_each_drift_once(tmp_path, case):
+    entries, files, names = DRIFT[case]
+    problems = registry_dir_problems(lay_out(tmp_path / case, entries, files))
+    assert len(problems) == 1, problems
+    assert names in problems[0], problems
 
 
 # --------------------------------------------------------------------------- the merge
