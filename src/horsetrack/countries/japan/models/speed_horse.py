@@ -13,14 +13,14 @@ relative speed and SD, and p_speed via Henery (normal) or PL strengths exp(-mu_i
   day's results published strictly before then, so never the run's own race. V, the variant's
   posterior variance then, joins the run's error. This baseline is fixed: it reads no result
   published after its own run, so a run whose result is published before t brings nothing
-  published at or after t, and an observed result published after every run of the frame reaches
-  no fitted term. The par is the speed model's own, fitted on its frame.
+  published at or after t. The par is the speed model's own, fitted on its frame.
 - A run on a (day, group) of the speed model's fit frame (a training-window day: #96 refuses to
   observe it, so its as-of variant is the prior) has a second baseline, the par plus the fit's
   in-sample variant of that (day, group) (`SpeedModel.in_sample_variant`), whose variance is V
-  there (the owner on #97, 2026-11-26, Q3 (b)). It is used at t only when every fit race of that
-  (day, group) had its result published strictly before t (a null publication: never); until then
-  the as-of baseline stands, so nothing published at or after t reaches theta at t through it.
+  there (the owner on #97, 2026-11-26, Q3 (b)). It is used at t only when every race of that
+  (day, group) in the speed model's fit frame, with a top-3 time or without, had its result
+  published strictly before t (a null publication: never); until then the as-of baseline stands,
+  so nothing published at or after t reaches theta at t through it.
 - theta_i is a random walk: its variance grows by `drift_var_per_day` (s^2) per day elapsed
   between offs, from N(m0, s0^2), the population prior, at the horse's first run.
 - pace_r is the field's mean early position from earlier races (the owner on #97, 2026-11-26,
@@ -38,28 +38,45 @@ found by reweighting from the prior mean, the run weighing (t_df + 1) / (t_df + 
 residual from the mode and S = sigma^2 + V, and the updated variance is that of the reweighted
 normal update (as #96's variant).
 
-`fit(runs, speed)` fits the global terms (sigma, s0, m0, w, b) on the whole runs frame, not as of
-t, by maximum likelihood over the filter's one-step prediction errors (exact under the normal
-error): given (sigma, s0) and the runs' weights the filter is linear in the data, so (w, b, m0) are
-the generalised least squares of each column's innovations, and (sigma, s0) maximise that profile
-(Nelder-Mead on their logs, each at least SCALE_FLOOR). Under the t error the weights are then
-recomputed by the forward filter at the new terms, until the terms settle. The fit reads each run
-as `predict` does at a t after every publication: a fit-day run against its in-sample baseline
-when its (day, group) is ever fully resulted. A run without a finish time is no observation, and
-one whose cell has no par is skipped and counted in `n_unseen`.
+`fit(runs, speed)` fits the global terms (sigma, s0, m0, w, b, with w_ref, pace_ref and gamma) on
+the whole runs frame, not as of t, by maximum likelihood over the filter's one-step prediction
+errors (exact under the normal error): given (sigma, s0) and the runs' weights the filter is
+linear in the data, so (w, b, m0) are the generalised least squares of each column's innovations,
+and (sigma, s0) maximise that profile (Nelder-Mead on their logs, each at least SCALE_FLOOR).
+Under the t error the weights are then recomputed by the forward filter at the new terms, until
+the terms settle. The fit reads each run as `predict` does at a t after every publication: a
+fit-day run against its in-sample baseline when its (day, group) is ever fully resulted. It keeps
+the runs as the horses' history and clears earlier observations. A run without a finish time is
+no observation; one with a time and no publication (never resulted) is dropped, from the terms and
+the history alike, and counted in `n_unpublished`; one whose cell has no par is skipped and
+counted in `n_unseen`.
 
-`predict(race_runners, at_utc)`: theta_i is the filter over that horse's runs whose result was
-published strictly before at_utc (null: never), in off order, each against the baseline it has at
-at_utc, then drifted to the card's off (no drift before a first run, none backwards); a horse with
-no such run has the population prior.
+`observe(runs)` (fit's columns) adds later runs to the horses' history only, each residual taken
+against the frozen global terms (w_ref and pace_ref included: nothing is re-centred on the
+observed frame) on the baselines a fit run has; the global terms never change, as #96's
+fit/observe split. A race id already fitted or observed is refused, the whole frame is checked
+before anything is kept, observations add up over calls, and fitting again clears them.
+
+The global terms read every fit run, so `predict` refuses an at_utc at or before the later of the
+latest `result_available_utc` over every row of the fit frame (timed or not: a missing finish time
+is a result too) and the latest instant after which a fit run's in-sample baseline is used;
+observations never move that bound. The speed model's par, fitted on #96's own frame, is outside
+it.
+
+`predict(race_runners, at_utc)`: theta_i is the filter over that horse's runs, fitted or observed,
+whose result was published strictly before at_utc (null: never), in off order, each against the
+baseline it has at at_utc, then drifted to the card's off (no drift before a first run, none
+backwards); a horse with no such run has the population prior.
 gamma, the fit runs' style-weighted mean of b, is the race-level pace term: the card's expected
 top-3 time is #96's at at_utc with pace_s = gamma * pace_r, and
 
     mu_s = that time + m0 + theta~_i + (b[style] - gamma) * pace_r + w * (weight - w_ref)
-    sd_s = sqrt(Var theta_i + sigma^2 + V_card)
+    sd_s = sqrt(Var theta_i + k * (sigma^2 + V_card))
 
-V_card the card's variant variance at at_utc and sigma the error's scale (its SD under the
-normal). Result columns on the card are ignored.
+the runner's predictive SD, V_card the card's variant variance at at_utc and sigma the error's
+scale: k = 1 under the normal, t_df / (t_df - 2) under the Student-t with t_df > 2 (its variance
+per scale^2), and sd_s is +inf when t_df <= 2 (that t has no finite variance; mu_s stays finite).
+Result columns on the card are ignored.
 
 `p_speed(mu, scale, method)`: one race. 'pl' is softmax(-mu / scale); its scale is for the caller
 to fit, as the conditional logit (#87's `fit_conditional_logit`) of the winner on -mu, whose
@@ -239,9 +256,37 @@ class _History:
         s = np.where(later, self.s_in[avail], self.s[avail])
         return self.tau[avail], u, s
 
+    def joined(self, other: _History) -> _History:
+        """Both histories' runs, in off order."""
+        cols = [np.r_[getattr(self, f), getattr(other, f)] for f in self.__dataclass_fields__]
+        order = np.argsort(cols[0], kind="stable")
+        return _History(*(c[order] for c in cols))
+
+
+@dataclass(frozen=True)
+class _Runs:
+    """A runs frame read against the speed model: its runs with a finish time, a publication and a
+    par (frame order), each with its two baselines' errors e = time - baseline and variances."""
+
+    horse: np.ndarray
+    tau: np.ndarray
+    pub: np.ndarray
+    e: np.ndarray
+    vv: np.ndarray
+    e_in: np.ndarray
+    vv_in: np.ndarray
+    switch: np.ndarray
+    style: np.ndarray
+    weight: np.ndarray
+    pace: np.ndarray  # the race's field pace, uncentred (NaN: none)
+    race_ids: frozenset  # every race id of the frame
+    latest_pub: int  # the latest known publication over every row of the frame (ns; -1: none)
+    n_unseen: int  # runs with a time and a publication whose cell has no par
+    n_unpublished: int  # runs with a time and no publication
+
 
 class HorseSpeed:
-    """theta_i(t) against #96's baseline, pace x style, weight carried; `fit` returns the model."""
+    """theta_i(t) against #96's baseline, pace x style, weight; `fit` and `observe` return it."""
 
     def __init__(self, *, drift_var_per_day: float, t_df: float | None) -> None:
         if not _number(drift_var_per_day) or drift_var_per_day < 0:
@@ -254,6 +299,9 @@ class HorseSpeed:
         self.t_df = None if t_df is None else float(t_df)
         self._speed: SpeedModel | None = None
         self._history: dict = {}
+        self._race_ids: set = set()  # every race id fitted or observed
+        # the latest publication (ns) the global terms read; predict needs an at_utc after it
+        self._terms_cutoff: int | None = None
         self.sigma: float | None = None  # the error's scale (its SD under the normal), s
         self.prior_mean: float | None = None  # m0: theta at a first run, s behind the baseline
         self.prior_sd: float | None = None  # s0
@@ -262,8 +310,10 @@ class HorseSpeed:
         self.pace_slopes: dict[str, float] = {}  # b per style, s per unit of pace_r
         self.pace_race: float | None = None  # gamma
         self.pace_ref: float | None = None  # the fit runs' mean field early position
-        self.n_runs = 0
-        self.n_unseen = 0
+        self.n_runs = 0  # the runs the global terms were fitted on
+        self.n_observed = 0  # observed runs kept in the history
+        self.n_unseen = 0  # runs, fitted or observed, with a time and no par: skipped
+        self.n_unpublished = 0  # runs, fitted or observed, with a time and no publication: dropped
         self.n_iter = 0
 
     # -- fit ------------------------------------------------------------------------------------
@@ -273,13 +323,68 @@ class HorseSpeed:
         return tuple(dict.fromkeys((*speed.spec.par_keys, *speed.spec.variant_keys)))
 
     def fit(self, runs: pd.DataFrame, speed: SpeedModel) -> HorseSpeed:
+        """Fit the global terms on runs and keep them as the horses' history; earlier
+        observations are cleared (see the module docstring)."""
+        r = self._read(runs, speed)
+        if r.tau.size == 0:
+            raise ValueError("no run has a finish time, a publication and a par to fit on")
+        code, horses = pd.factorize(r.horse)
+        order = np.lexsort((r.tau, code))
+        code, tau = code[order], r.tau[order]
+        e_in, vv_in = r.e_in[order], r.vv_in[order]
+        style, weight, pace = r.style[order], r.weight[order], r.pace[order]
+        known_pace = ~np.isnan(pace)
+        pace_ref = float(pace[known_pace].mean()) if known_pace.any() else 0.0
+        weight_ref = float(weight.mean())
+        x = self._design(weight - weight_ref, style, _centred(pace, pace_ref))
+        steps = _steps(code, tau, len(horses))
+
+        # the fit reads every run as predict does after every publication (the module docstring)
+        sigma, s0, coef, n_iter = self._fit_terms(steps, code, e_in, x, vv_in)
+        # everything is fitted: keep it, the runs as the history
+        self._speed = speed
+        self.sigma, self.prior_sd, self.n_iter = sigma, s0, n_iter
+        self.weight_ref, self.pace_ref = weight_ref, pace_ref
+        self.weight_slope = float(coef[0])
+        b = coef[1 : 1 + len(STYLES)]
+        self.pace_slopes = {s: float(v) for s, v in zip(STYLES, b, strict=True)}
+        counts = np.array([np.sum(style == s) for s in STYLES], dtype=float)
+        self.pace_race = float(counts @ b / counts.sum()) if counts.sum() else 0.0
+        self.prior_mean = float(coef[-1])
+        switched = r.switch[r.switch != NEVER]
+        self._terms_cutoff = max(r.latest_pub, int(switched.max()) if switched.size else -1)
+        self._history, self._race_ids = {}, set()
+        self.n_runs, self.n_observed = int(r.tau.size), 0
+        self.n_unseen = self.n_unpublished = 0
+        self._keep(r)
+        return self
+
+    def observe(self, runs: pd.DataFrame) -> HorseSpeed:
+        """Add later runs to the horses' history only, against the frozen global terms; added to
+        earlier observations (see the module docstring)."""
+        speed = self._speed
+        if speed is None:
+            raise RuntimeError("the horse speed model is not fitted")
+        r = self._read(runs, speed)
+        again = self._race_ids & r.race_ids
+        if again:
+            raise ValueError(
+                f"{len(again)} race(s) already fitted or observed, e.g. {sorted(again)[0]!r}"
+            )
+        # everything is checked: keep it
+        self.n_observed += int(r.tau.size)
+        self._keep(r)
+        return self
+
+    def _read(self, runs: pd.DataFrame, speed: SpeedModel) -> _Runs:
+        """Check a runs frame and read its usable runs against the speed model."""
         keys = self._race_keys(speed)
         _check_frame(runs, (*RUN_COLUMNS, *keys), "runs")
         nulls = [k for k in ("race_id", "race_utc", "horse_id", *keys) if runs[k].isna().any()]
         if nulls:
             raise ValueError(f"runs has null value(s) in {', '.join(nulls)}")
         tau_all, _ = _utc_ns(runs["race_utc"], "race_utc")
-        pub_all, known_all = _utc_ns(runs["result_available_utc"], "result_available_utc")
+        pub_all, known = _utc_ns(runs["result_available_utc"], "result_available_utc")
         style_all = _check_styles(runs["style"], "runs")
         pace_all = _field_pace(runs, "runs")  # over all the race's rows
 
@@ -291,60 +396,56 @@ class HorseSpeed:
         if not np.isfinite(weight_all[timed]).all():
             raise ValueError("weight_kg has a missing or non-finite value on a run with a time")
 
-        as_of = np.where(known_all, np.minimum(tau_all, pub_all), tau_all)
-        base, vvar, base_in, vvar_in, switch = self._baselines(runs, speed, keys, as_of, timed)
-        seen = ~np.isnan(base)
-        use = np.flatnonzero(timed & seen)
-        if use.size == 0:
-            raise ValueError("no run has a finish time and a par to fit on")
+        kept = timed & known  # a result never published is never available: dropped
+        as_of = np.minimum(tau_all, pub_all)
+        base, vvar, base_in, vvar_in, switch = self._baselines(runs, speed, keys, as_of, kept)
+        seen = kept & ~np.isnan(base)
+        use = np.flatnonzero(seen)
+        return _Runs(
+            horse=runs["horse_id"].to_numpy(object)[use],
+            tau=tau_all[use],
+            pub=pub_all[use],
+            e=time[use] - base[use],
+            vv=vvar[use],
+            e_in=time[use] - base_in[use],
+            vv_in=vvar_in[use],
+            switch=switch[use],
+            style=style_all[use],
+            weight=weight_all[use],
+            pace=pace_all[use],
+            race_ids=frozenset(runs["race_id"].tolist()),
+            latest_pub=int(pub_all[known].max()) if known.any() else -1,
+            n_unseen=int(np.sum(kept & ~seen)),
+            n_unpublished=int(np.sum(timed & ~known)),
+        )
 
-        horse_ids = runs["horse_id"].to_numpy(object)[use]
-        code, horses = pd.factorize(horse_ids)
-        tau = tau_all[use]
-        order = np.lexsort((tau, code))
-        use, code, tau = use[order], code[order], tau[order]
-        e, e_in = time[use] - base[use], time[use] - base_in[use]
-        vv, vv_in = vvar[use], vvar_in[use]
-        style, weight = style_all[use], weight_all[use]
-        pace = pace_all[use]
-        known_pace = ~np.isnan(pace)
-        pace_ref = float(pace[known_pace].mean()) if known_pace.any() else 0.0
-        weight_ref = float(weight.mean())
-        x = self._design(weight - weight_ref, style, _centred(pace, pace_ref))
-        steps = _steps(code, tau, len(horses))
-
-        # the fit reads every run as predict does after every publication (the module docstring)
-        sigma, s0, coef, n_iter = self._fit_terms(steps, code, e_in, x, vv_in)
-        # everything is fitted: keep it
-        self._speed = speed
-        self.sigma, self.prior_sd, self.n_iter = sigma, s0, n_iter
-        self.weight_ref, self.pace_ref = weight_ref, pace_ref
-        self.weight_slope = float(coef[0])
-        b = coef[1 : 1 + len(STYLES)]
-        self.pace_slopes = {s: float(v) for s, v in zip(STYLES, b, strict=True)}
-        counts = np.array([np.sum(style == s) for s in STYLES], dtype=float)
-        self.pace_race = float(counts @ b / counts.sum()) if counts.sum() else 0.0
-        self.prior_mean = float(coef[-1])
-        self.n_runs, self.n_unseen = int(use.size), int(np.sum(timed & ~seen))
-
-        fitted = x @ coef[:-1] + self.prior_mean
-        u, u_in = e - fitted, e_in - fitted
-        s, s_in = sigma**2 + vv, sigma**2 + vv_in
-        pub = np.where(known_all[use], pub_all[use], NEVER)
-        sw = switch[use]
-        bounds = np.r_[0, np.flatnonzero(np.diff(code)) + 1, len(code)]
-        self._history = {
-            horses[code[lo]]: _History(*(a[lo:hi] for a in (tau, pub, u, s, u_in, s_in, sw)))
-            for lo, hi in zip(bounds[:-1], bounds[1:], strict=True)
-        }
-        return self
+    def _keep(self, r: _Runs) -> None:
+        """Add r's runs to the horses' history, each residual against the global terms."""
+        slopes = np.r_[self.weight_slope, [self.pace_slopes[s] for s in STYLES]]
+        x = self._design(r.weight - self.weight_ref, r.style, _centred(r.pace, self.pace_ref))
+        fitted = x @ slopes + self.prior_mean
+        s, s_in = self.sigma**2 + r.vv, self.sigma**2 + r.vv_in
+        cols = (r.tau, r.pub, r.e - fitted, s, r.e_in - fitted, s_in, r.switch)
+        code, horses = pd.factorize(r.horse)
+        order = np.lexsort((r.tau, code))
+        code, cols = code[order], tuple(a[order] for a in cols)
+        bounds = np.r_[0, np.flatnonzero(np.diff(code)) + 1, len(code)] if len(code) else [0]
+        merged = {}
+        for lo, hi in zip(bounds[:-1], bounds[1:], strict=True):
+            h = horses[code[lo]]
+            new = _History(*(a[lo:hi] for a in cols))
+            merged[h] = new if h not in self._history else self._history[h].joined(new)
+        self._history.update(merged)
+        self._race_ids |= r.race_ids
+        self.n_unseen += r.n_unseen
+        self.n_unpublished += r.n_unpublished
 
     @staticmethod
-    def _baselines(runs, speed, keys, as_of, timed):
-        """Each timed run's expected top-3 time as of `as_of` and the variant's variance then; the
-        same against the in-sample variant of its (day, group) and the instant (ns) that becomes
-        usable after (NEVER, and the as-of values, off the fit frame's days or when one of its
-        races was never published). NaN where the run's cell has no par."""
+    def _baselines(runs, speed, keys, as_of, rows):
+        """Each `rows` run's expected top-3 time as of `as_of` and the variant's variance then;
+        the same against the in-sample variant of its (day, group) and the instant (ns) that
+        becomes usable after (NEVER, and the as-of values, off the fit frame's days or when one of
+        its races was never published). NaN where the run's cell has no par, or off `rows`."""
         n = len(runs)
         base, vvar = np.full(n, np.nan), np.full(n, np.nan)
         base_in, vvar_in = np.full(n, np.nan), np.full(n, np.nan)
@@ -353,7 +454,7 @@ class HorseSpeed:
         race_ids = runs["race_id"].tolist()
         cache: dict[tuple, tuple[float, float]] = {}
         in_cache: dict = {}
-        for i in np.flatnonzero(timed):
+        for i in np.flatnonzero(rows):
             key = (race_ids[i], int(as_of[i]))
             race = None
             if key not in cache:
@@ -419,6 +520,12 @@ class HorseSpeed:
         if speed is None:
             raise RuntimeError("the horse speed model is not fitted")
         at_ns = _instant_ns(at_utc, "at_utc")
+        if at_ns <= self._terms_cutoff:
+            raise ValueError(
+                f"at_utc {pd.Timestamp(at_ns, tz='UTC')} is not after "
+                f"{pd.Timestamp(self._terms_cutoff, tz='UTC')}, the latest result the global "
+                "terms were fitted on: they would carry a result published at or after at_utc"
+            )
         keys = self._race_keys(speed)
         card = race_runners
         _check_frame(card, (*CARD_COLUMNS, *keys), "race_runners")
@@ -461,7 +568,12 @@ class HorseSpeed:
             + (slope - self.pace_race) * pace
             + self.weight_slope * (weight - self.weight_ref)
         )
-        sd = np.sqrt(var_i + self.sigma**2 + vcard)
+        df = self.t_df
+        if df is not None and df <= 2.0:  # the t has no finite variance
+            sd = np.full(n, math.inf)
+        else:
+            k = 1.0 if df is None else df / (df - 2.0)  # the error's variance per scale^2
+            sd = np.sqrt(var_i + k * (self.sigma**2 + vcard))
         return pd.DataFrame({"horse_id": horse_ids, "mu_s": mu, "sd_s": sd})
 
     def _theta(self, horses: list, at_ns: int):

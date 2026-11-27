@@ -49,10 +49,12 @@ SD is that of the reweighted normal posterior.
 `in_sample_variant(day, *group)` (#97, the owner's Q3 (b)) is for runs on the fit frame's own days,
 whose `variant` is the prior: the fit's own posterior (mean, SD) of that (day, group)'s v at
 convergence (its N(0, tau^2) prior, the fitted pars and, under the t, the races' weights), with the
-latest `result_available_utc` of that (day, group)'s fit races (None when one has none: never fully
-resulted), so the caller uses it only at a t strictly after that. None for a (day, group) the fit
-frame did not have, and with `same_day_variant=False`. Nothing else reads it: `variant` and
-`expected_top3_time` are as before.
+instant that (day, group) is fully resulted: the latest `result_available_utc` over every race of
+it in the frame given to `fit`, with a top-3 time or without (None when one has none: never fully
+resulted), so the caller uses it only at a t strictly after that. The mean and SD come from the
+races with a top-3 time alone; an untimed race only holds the instant back. None for a (day,
+group) with no timed race in the fit frame, and with `same_day_variant=False`. Nothing else reads
+it: `variant` and `expected_top3_time` are as before.
 
 `expected_top3_time(race, at_utc, pace_s=0.0)` is par(cell) + the variant's mean at t + pace_s,
 the race's pace term in seconds (#97): the caller computes it (#97's `speed_horse` passes its
@@ -234,10 +236,7 @@ class SpeedModel:
         group, groups = _codes(group_keys)
 
         par, sigma2, tau2, n_iter, v, v_sd = self._solve(y, cell, group, len(cells), len(groups))
-        avail, known = _utc_ns(frame["result_available_utc"], "result_available_utc")
-        last = np.full(len(groups), np.iinfo(np.int64).min)
-        np.maximum.at(last, group, avail)
-        never = np.bincount(group, ~known, len(groups)) > 0
+        last, never = self._resulted_at(races, groups)
         self._par = {c: float(p) for c, p in zip(cells, par, strict=True)}
         self.sigma, self.tau = math.sqrt(sigma2), math.sqrt(tau2)
         self.n_races, self.n_iter = len(y), n_iter
@@ -249,6 +248,26 @@ class SpeedModel:
         self._days, self._observed_ids = {}, set()
         self.n_observed = self.n_unseen = 0
         return self
+
+    def _resulted_at(
+        self, races: pd.DataFrame, groups: list[tuple]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Per fit (day, *group): the latest result_available_utc (ns) over every race of it in
+        races, with a top-3 time or without, and whether one of them has none (never resulted).
+        A race without a race_utc or a variant key has no (day, group) and is left out."""
+        keys = self.spec.variant_keys
+        placed = races[races[["race_utc", *keys]].notna().all(axis=1)]
+        _utc_ns(placed["race_utc"], "race_utc")
+        avail, known = _utc_ns(placed["result_available_utc"], "result_available_utc")
+        days = pd.to_datetime(placed["race_utc"]).dt.tz_convert(JST).dt.date.tolist()
+        index = {g: k for k, g in enumerate(groups)}
+        rows = zip(days, *(placed[k].tolist() for k in keys), strict=True)
+        code = np.fromiter((index.get(g, -1) for g in rows), np.int64, len(placed))
+        hit = code >= 0
+        last = np.full(len(groups), np.iinfo(np.int64).min)
+        np.maximum.at(last, code[hit], avail[hit])
+        never = np.bincount(code[hit], ~known[hit], len(groups)) > 0
+        return last, never
 
     def observe(self, results: pd.DataFrame) -> SpeedModel:
         """Keep the residuals from the fitted par of races on days to be predicted (see the module

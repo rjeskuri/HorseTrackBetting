@@ -13,27 +13,47 @@ Contract pinned here (`horsetrack.countries.japan.models.speed_horse`, and #96's
   back: the caller's, read from earlier races; null when there is none), weight_kg, draw,
   result_available_utc (#96's name: when the result was published, null if never) and the race's
   columns of `speed.spec.par_keys`; both times tz-aware UTC (else ValueError), a missing column a
-  ValueError.
+  ValueError. fit estimates the global terms (the error scale `sigma`, the population prior
+  `prior_mean` and `prior_sd`, the weight slope `weight_slope` about `weight_ref`, the pace slopes
+  `pace_slopes` and `pace_race` about `pace_ref`) on these runs and keeps the runs as the horses'
+  history. Fitting again starts afresh: earlier observations are gone.
+- `observe(runs) -> HorseSpeed` (the returned object is the one used): runs after the fit, with
+  fit's columns, join the horses' history only, each taken against the frozen global terms on the
+  baseline a fit run would have (as of its off; the in-sample one below); the global terms never
+  change, and observing in one call or in several is the same. A race id already fitted or
+  observed is a ValueError, and the whole frame is checked first: a refused frame leaves the model
+  as it was. An observed run whose result is never published (null) is never available.
 - `predict(race_runners, *, at_utc) -> DataFrame`: race_runners is a card (race_id, race_utc,
   horse_id, style, early_pos_mean3, weight_kg, draw and the par keys; a missing one a ValueError;
   result columns are not needed and are ignored when present). One row per runner, in the card's
   order, with horse_id, mu_s (the runner's expected finish time, s: the card's expected top-3 time
   at at_utc plus the runner's terms) and sd_s. As of at_utc (tz-aware, else ValueError): theta_i
-  moves only with that horse's runs whose result_available_utc is strictly before at_utc (null:
-  never), and no result published at or after at_utc reaches it through a run's baseline either:
-  a race result the speed model saw after t (and after every run of the frame) leaves every mu_s
-  and sd_s at t exactly as they were. The global terms are fitted on the whole runs frame; they
-  are not held as of t. A horse with no run gets the prior, centred on the population. Before
-  fit: RuntimeError.
+  moves only with that horse's runs, fitted or observed, whose result_available_utc is strictly
+  before at_utc (null: never), and no result published at or after at_utc reaches it through a
+  run's baseline either: changing a result published at or after t, observed or seen by the speed
+  model, leaves every mu_s and sd_s at t exactly as they were. Nor does one reach the global
+  terms: an at_utc at or before the latest result_available_utc of the runs they were fitted on is
+  a ValueError, whatever was observed since; a fit run with a time and no publication is either
+  refused at fit (ValueError) or reaches no term and no prediction (which one is not pinned). A
+  horse with no run gets the prior, centred on the population. Before fit: RuntimeError.
+- sd_s is the runner's predictive SD: sqrt(Var theta_i + sigma^2 + V_card) under the normal error,
+  sqrt(Var theta_i + t_df / (t_df - 2) * (sigma^2 + V_card)) under the Student-t with t_df > 2,
+  and +inf when t_df <= 2 (that t has no finite variance; mu_s stays finite). V_card is the
+  variance of the card's day variant at at_utc (`SpeedModel.variant`); a horse with no run has
+  Var theta_i = prior_sd^2 (no drift), and a horse's Var theta_i is the same on two cards off at
+  the same instant.
 - The pace term (the owner, 2026-11-26, Q2 (c)): pace_r of a race is the mean of its rows'
   non-null early_pos_mean3, centred at the fit runs' mean; a runner's style chooses its slope on
   it. Two cards with the same early positions and other styles have the same pace_r; a null is
   skipped, not read as a value; a race with no early position at all has no pace term (finite,
   its unseen front runner and closer level).
-- Runs on the speed model's fit days (the owner, 2026-11-26, Q3 (b)): a run on a (day, group) of
-  the speed model's fit frame is taken against the fit's in-sample variant of that (day, group)
-  only at a t after every race of it in the fit frame had its result published strictly before t
-  (a null publication: never); until then it is on the prior path, as before.
+- Runs on the speed model's fit days (the owner, 2026-11-26, Q3 (b)), fitted or observed: a run on
+  a (day, group) of the speed model's fit frame is taken against the fit's in-sample variant of
+  that (day, group) only at a t after every race of it in the frame given to `SpeedModel.fit`,
+  with a top-3 time or without one, had its result published strictly before t (a null
+  publication on any of them: never); until then it is on the prior path, as before.
+  `SpeedModel.in_sample_variant`'s third element is that instant (None: never); its mean and SD
+  come from the timed races alone, as if the untimed rows were not there.
 - `p_speed(mu, *, scale, method='pl') -> ndarray`, one race, in mu's order: 'pl' is
   softmax(-mu / scale); 'henery' is P(runner i's time is the smallest) for independent
   N(mu_i, scale^2) times. ValueError for an unknown method, a scale that is not positive, a mu
@@ -49,14 +69,16 @@ Contract pinned here (`horsetrack.countries.japan.models.speed_horse`, and #96's
   ValueError. Without pace_s it is #96's value.
 
 The world: 12 days of races fit the speed model's pars; 16 days after them carry the horse runs,
-their race-level results observed by the speed model. The last of them, TD, is the day the as-of
-checks sweep. Runs are planted as par + day variant + theta_i + 0.15 s/kg * (weight - 56) + noise,
-with no pace or style effect. A second world (below) plants a pace effect by the field's mean
-early position and puts horse runs on a fit day. Expected values come from the planted worlds,
-never from the code under test. Not pinned: the estimator of the global terms (error scale,
-weight, pace x style, the prior), whether they read fit-day runs against the in-sample variant,
-how p_speed's scale is fitted, the bias score and its shrinkage. Every frame is synthetic; nothing
-reads a store.
+their race-level results observed by the speed model. HorseSpeed's global terms are fitted on the
+runs of the first 15; the runs of the last, TD, the day the as-of checks sweep, are observed. Runs
+are planted as par + day variant + theta_i + 0.15 s/kg * (weight - 56) + noise, with no pace or
+style effect. A second world (below) plants a pace effect by the field's mean early position and
+puts observed horse runs on a fit day of the speed model. Expected values come from the planted
+worlds, never from the code under test. Not pinned: the estimator of the global terms (error
+scale, weight, pace x style, the prior), whether they read fit-day runs against the in-sample
+variant, how a fit run with a time and no publication is kept out of them, whether observe takes
+runs published before the fit's latest publication, how p_speed's scale is fitted, the bias score
+and its shrinkage. Every frame is synthetic; nothing reads a store.
 """
 
 # Ruff reads the module under test as third-party until it exists, then as first-party; the
@@ -175,6 +197,10 @@ def race_id(day, group, i):
 
 R6_ID, R7_ID = race_id(TD, TOK, 6), race_id(TD, TOK, 7)
 TWIN_PUBLISHED = {"a": at(TD, 1, 15), "n": None, "d": at(TD, 3, 5), "r": at(TD, 4, 10)}
+# The latest publication among the runs before TD, the global terms' frame: KYO's R3 (off 03:30)
+# on the day before TD.
+FIT_CUTOFF = at(H_DAYS[-2], 3, 40)
+US = timedelta(microseconds=1)
 
 
 def schedule(day):
@@ -270,6 +296,22 @@ def horse_runs():
     return runs[runs["in_runs"]][list(RUN_COLUMNS)].reset_index(drop=True)
 
 
+def jst_day(frame):
+    return frame["race_utc"].dt.tz_convert("Asia/Tokyo").dt.date
+
+
+def early_runs():
+    """The horse runs before TD: the frame HorseSpeed's global terms are fitted on."""
+    runs = horse_runs()
+    return runs[jst_day(runs) < TD].reset_index(drop=True)
+
+
+def td_runs():
+    """TD's horse runs: observed after the fit."""
+    runs = horse_runs()
+    return runs[jst_day(runs) == TD].reset_index(drop=True)
+
+
 def all_runs():
     return _world()[0]
 
@@ -333,9 +375,21 @@ def fillers():
     return tuple(h for h in regulars() if h not in on_td and counts[h] >= 4)[:7]
 
 
-def card(horses, *, day=NEXT, post=(2, 0), group=TOK, distance=1600, rid=None, weight=None):
-    """A card before the off: no result columns."""
-    weight = weight or {}
+def card(
+    horses,
+    *,
+    day=NEXT,
+    post=(2, 0),
+    group=TOK,
+    distance=1600,
+    rid=None,
+    weight=None,
+    style=None,
+    early=None,
+):
+    """A card before the off: no result columns. weight, style and early map a horse to its
+    weight_kg, style and early_pos_mean3 when they are not the world's."""
+    weight, style, early = weight or {}, style or {}, early or {}
     rows = [
         {
             "race_id": rid or f"syn-card-{day:%Y%m%d}-{group[0]}-{post[0]:02d}{post[1]:02d}",
@@ -344,8 +398,8 @@ def card(horses, *, day=NEXT, post=(2, 0), group=TOK, distance=1600, rid=None, w
             "surface": group[1],
             "distance": distance,
             "horse_id": h,
-            "style": style_of(h),
-            "early_pos_mean3": early_of(h),
+            "style": style.get(h, style_of(h)),
+            "early_pos_mean3": early.get(h, early_of(h)),
             "weight_kg": weight.get(h, REF_KG),
             "draw": n,
         }
@@ -371,20 +425,52 @@ def chunks(items, n=12):
     return [items[i : i + n] for i in range(0, len(items), n)]
 
 
+def fit_on(runs, *, t_df=None, drift=DRIFT, r7_slower=0.0):
+    """A new HorseSpeed fitted on runs; r7_slower > 0 fits it against the speed model that saw TD's
+    R7 that much slower."""
+    return HorseSpeed(drift_var_per_day=drift, t_df=t_df).fit(runs, speed_model(r7_slower))
+
+
 @pytest.fixture(scope="module")
-def horse():
-    """HorseSpeed fitted on the horse runs, each once per module: horse(t_df=, drift=, r7_slower=);
-    r7_slower > 0 fits it against the speed model that saw TD's R7 that much slower."""
+def fitted():
+    """HorseSpeed fitted on the runs before TD, nothing observed, each once per module:
+    fitted(t_df=, drift=, r7_slower=)."""
     cache = {}
 
     def _fit(*, t_df=None, drift=DRIFT, r7_slower=0.0):
         key = (t_df, drift, r7_slower)
         if key not in cache:
-            model = HorseSpeed(drift_var_per_day=drift, t_df=t_df)
-            cache[key] = model.fit(horse_runs(), speed_model(r7_slower))
+            cache[key] = fit_on(early_runs(), t_df=t_df, drift=drift, r7_slower=r7_slower)
         return cache[key]
 
     return _fit
+
+
+@pytest.fixture(scope="module")
+def horse():
+    """A model of its own fitted as `fitted`, then TD's runs observed: horse(t_df=, drift=,
+    r7_slower=)."""
+    cache = {}
+
+    def _fit(*, t_df=None, drift=DRIFT, r7_slower=0.0):
+        key = (t_df, drift, r7_slower)
+        if key not in cache:
+            model = fit_on(early_runs(), t_df=t_df, drift=drift, r7_slower=r7_slower)
+            cache[key] = model.observe(td_runs())
+        return cache[key]
+
+    return _fit
+
+
+GLOBAL_TERMS = ("sigma", "prior_mean", "prior_sd", "weight_slope", "weight_ref")
+GLOBAL_TERMS += ("pace_race", "pace_ref")
+
+
+def global_terms(model):
+    """The fitted global terms, flat."""
+    out = {name: float(getattr(model, name)) for name in GLOBAL_TERMS}
+    out.update({f"pace_slopes[{s}]": float(model.pace_slopes[s]) for s in STYLES})
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -411,17 +497,17 @@ def test_predict_recovers_the_planted_horse_speeds(horse, t_df):
     assert np.isfinite(sd).all() and (sd > 0).all()
 
 
-def test_weight_carried_moves_mu_at_the_planted_rate(horse):
-    model, horses, t = horse(), list(fillers()), at(TD, 23, 0)
+def test_weight_carried_moves_mu_at_the_planted_rate(fitted):
+    model, horses, t = fitted(), list(fillers()), at(TD, 23, 0)
     for h in horses[:3]:
         light = predicted(model, card(horses, weight={h: 54.0}), t).loc[h, "mu_s"]
         heavy = predicted(model, card(horses, weight={h: 58.0}), t).loc[h, "mu_s"]
         assert heavy - light == pytest.approx(4 * W_PER_KG, abs=0.25), h
 
 
-def test_theta_is_a_random_walk_in_the_drift(horse):
+def test_theta_is_a_random_walk_in_the_drift(fitted):
     t = at(TD, 23, 0)
-    still, base, loose = horse(drift=0.0), horse(), horse(drift=0.5)
+    still, base, loose = fitted(drift=0.0), fitted(), fitted(drift=0.5)
     # The shifter ran 1.5 s slow four times, then 1.5 s quick four times: a still walk weighs every
     # run alike (about its average), a loose one follows the recent runs (more than halfway to
     # the quick level).
@@ -442,10 +528,10 @@ def test_theta_is_a_random_walk_in_the_drift(horse):
             assert far["sd_s"].to_numpy() == pytest.approx(near["sd_s"].to_numpy(), abs=1e-9)
 
 
-def test_an_unseen_horse_gets_the_population_prior(horse):
+def test_an_unseen_horse_gets_the_population_prior(fitted):
     new = ["syn-new-1", "syn-new-2"]
     t = at(TD, 23, 0)
-    for model in (horse(), horse(t_df=5.0)):
+    for model in (fitted(), fitted(t_df=5.0)):
         out = predicted(model, card([*new, *fillers()]), t)
         assert out.loc[new[0]].to_numpy() == pytest.approx(out.loc[new[1]].to_numpy(), abs=1e-9)
         assert np.isfinite(out.loc[new[0]].to_numpy()).all()
@@ -477,9 +563,9 @@ TWIN_SWEEP = (
 
 @pytest.mark.parametrize("t_df", [None, 5.0], ids=["normal", "student_t5"])
 def test_relative_speed_uses_no_later_race(horse, t_df):
-    # The twins share every run before TD. Until a twin's TD result is published strictly before t
-    # it is predicted exactly as ref; after, its quicker run has moved it ahead of ref. n's result
-    # is never published, so n is ref all day.
+    # The twins share every run before TD, the fit's. Until a twin's TD result, observed, is
+    # published strictly before t it is predicted exactly as ref; after, its quicker run has moved
+    # it ahead of ref. n's result is never published, so n is ref all day.
     model = horse(t_df=t_df)
     for when in TWIN_SWEEP:
         t = at(TD, *when)
@@ -491,9 +577,9 @@ def test_relative_speed_uses_no_later_race(horse, t_df):
                 assert got["mu_s"] < ref["mu_s"] - 0.05, (x, when)
             else:
                 assert got.to_numpy() == pytest.approx(ref.to_numpy(), abs=1e-9), (x, when)
-    # R6 itself, before its result: r's own run in it (in the runs frame, published 04:10) does
-    # not count, and the card's result columns, when attached, are ignored.
-    runs = horse_runs()
+    # R6 itself, before its result: r's own run in it (observed, published 04:10) does not count,
+    # and the card's result columns, when attached, are ignored.
+    runs = td_runs()
     r6 = runs[runs["race_id"] == R6_ID].reset_index(drop=True)
     assert twin("r") in set(r6["horse_id"])
     as_ref = r6.replace({"horse_id": {twin("r"): twin("ref")}})
@@ -510,13 +596,11 @@ def test_relative_speed_uses_no_later_race(horse, t_df):
 
 def test_a_result_published_at_or_after_t_never_moves_the_prediction(horse):
     # Two speed models that differ only in TD's R7 (published 04:45, its runners not in the runs
-    # frame), 5 s slower in the second; the same runs. Every horse that ran on TD, on the TD card
-    # after R7: identical at t up to 04:45 (an earlier run's baseline never reads R7), the card's
-    # own variant moved once R7 is in.
+    # frame), 5 s slower in the second; the same runs, fitted and observed. Every horse that ran on
+    # TD, on the TD card after R7: identical at t up to 04:45 (an earlier run's baseline never
+    # reads R7), the card's own variant moved once R7 is in.
     base, slow = horse(), horse(r7_slower=R7_SLOWER)
-    runs = horse_runs()
-    jst_day = runs["race_utc"].dt.tz_convert("Asia/Tokyo").dt.date
-    ran_td = sorted(set(runs[jst_day == TD]["horse_id"]))
+    ran_td = sorted(set(td_runs()["horse_id"]))
     assert len(ran_td) > 50 and twin("a") in ran_td
     cards = [card(c, day=TD, post=R8_POST) for c in chunks(ran_td)]
     for when in ((4, 30), (4, 45)):
@@ -547,6 +631,217 @@ def test_student_t_downweights_eased_runners(horse):
     assert -0.02 < eased_t < 0.3 * eased_n
     assert sharp_n < -0.1 and sharp_t < -0.05
     assert sharp_t / sharp_n > eased_t / eased_n + 0.15
+
+
+# ---------------------------------------------------------------------------------------------
+# Fit and observe: no result published at or after t reaches the global terms
+# ---------------------------------------------------------------------------------------------
+
+
+def test_predict_refuses_a_t_at_or_before_the_fit_runs_latest_publication(fitted, horse):
+    # The global terms read every fit run, so a t at or before the latest publication among them
+    # would let a result published at or after t in: refused. The bound is that publication (not
+    # the latest off, nor the last day's), it moves with the fit frame, and it is the fit's alone:
+    # TD's runs observed since leave it where it was.
+    runs = early_runs()
+    eight = runs[jst_day(runs) <= H_DAYS[7]].reset_index(drop=True)
+    late = runs.copy()
+    late_at = at(H_DAYS[-2], 9, 0)
+    late.loc[late["race_id"] == race_id(H_DAYS[4], TOK, 2), "result_available_utc"] = late_at
+    cases = (
+        ("fitted", fitted, runs, FIT_CUTOFF),
+        ("eight days", lambda: fit_on(eight), eight, at(H_DAYS[7], 3, 40)),
+        ("a late result", lambda: fit_on(late), late, late_at),
+        ("TD observed", horse, runs, FIT_CUTOFF),
+    )
+    frame = card(list(fillers()))
+    for name, make, fit_runs, cutoff in cases:
+        model = make()
+        assert fit_runs["result_available_utc"].max() == cutoff, name  # the planted bound
+        last_off = fit_runs["race_utc"].max()
+        assert last_off < cutoff, name
+        first_day = at(fit_runs["race_utc"].min().date(), 0, 0)
+        for t in (first_day, last_off + US, cutoff - US, cutoff):
+            with pytest.raises(ValueError):
+                model.predict(frame, at_utc=t)
+        out = predicted(model, frame, cutoff + US)
+        assert np.isfinite(out.to_numpy()).all(), name
+
+
+def quicker(runs, mask):
+    """runs with the masked rows' finish times 1.5 to 2.0 s quicker (by draw)."""
+    out = runs.copy()
+    out.loc[mask, "finish_time_s"] -= 1.5 + 0.25 * (out.loc[mask, "draw"] % 3)
+    return out
+
+
+# TD publications (hh, mm): TOK R1, KYO R1, TOK R4, TOK R3 (held), TOK R6
+OBSERVED_SWEEP = ((1, 15), (1, 20), (3, 0), (3, 5), (4, 10))
+
+
+@pytest.mark.parametrize("t_df", [None, 5.0], ids=["normal", "student_t5"])
+def test_an_observed_result_counts_only_once_published_before_t(horse, t_df):
+    # A second model, fitted alike, observes TD's runs with every result published at or after t
+    # (or never) quicker. At t every runner of TD, the fillers and a horse never seen predict
+    # exactly as with the true results; a microsecond later the runners of the races published at
+    # exactly t have moved, and nobody else.
+    base = horse(t_df=t_df)
+    obs = td_runs()
+    pub = obs["result_available_utc"]
+    horses = [*sorted(set(obs["horse_id"])), *fillers(), "syn-new-1"]
+    cards = [card(c, day=TD, post=R8_POST) for c in chunks(horses, 20)]
+
+    def read(model, t):
+        return pd.concat([predicted(model, c, t) for c in cards])
+
+    for when in OBSERVED_SWEEP:
+        t = at(TD, *when)
+        changed = fit_on(early_runs(), t_df=t_df).observe(quicker(obs, pub.isna() | (pub >= t)))
+        assert read(changed, t).to_numpy() == pytest.approx(read(base, t).to_numpy(), abs=1e-9)
+        a, b = read(base, t + US), read(changed, t + US)
+        now_in = sorted(set(obs.loc[pub == t, "horse_id"]))
+        assert len(now_in) >= FIELD, when
+        rest = [h for h in a.index if h not in now_in]
+        assert b.loc[rest].to_numpy() == pytest.approx(a.loc[rest].to_numpy(), abs=1e-9), when
+        step = b.loc[now_in, "mu_s"] - a.loc[now_in, "mu_s"]
+        assert (step.abs() > 1e-6).all(), when
+        if t_df is None:  # the normal filter is linear: a quicker result, a quicker horse
+            assert (step < -0.05).all(), when
+
+
+def test_observe_refuses_a_race_already_fitted_or_observed(fitted, horse):
+    obs = td_runs()
+    tok, kyo = (obs[obs["track"] == g[0]].reset_index(drop=True) for g in (TOK, KYO))
+    horses = [*sorted(set(obs["horse_id"])), *fillers()]
+    cards = [card(c, day=TD, post=R8_POST) for c in chunks(horses, 20)]
+    times = (at(TD, 1, 30), at(TD, 3, 50), at(TD, 23, 0))  # KYO's results are all in at 03:40
+
+    def state(model):
+        return np.concatenate([predicted(model, c, t).to_numpy() for t in times for c in cards])
+
+    model = fit_on(early_runs()).observe(tok)
+    kept = state(model)
+    r1 = tok[tok["race_id"] == race_id(TD, TOK, 1)]
+    runs = early_runs()
+    fit_race = runs[runs["race_id"] == race_id(H_DAYS[-2], KYO, 2)]
+    assert len(r1) >= FIELD and len(fit_race) >= FIELD
+    moved_fit_race = fit_race.assign(finish_time_s=fit_race["finish_time_s"] - 2.0)
+    # KYO's runs, new, with a race already observed or one of the fit frame: refused whole, so
+    # KYO's runs are not kept either.
+    for again in (r1, fit_race, moved_fit_race):
+        with pytest.raises(ValueError):
+            model.observe(pd.concat([kyo, again], ignore_index=True))
+        assert state(model) == pytest.approx(kept, abs=1e-12)
+    # Observations add up: TOK's runs, then KYO's, are TD's runs observed at once.
+    model = model.observe(kyo)
+    assert state(model) == pytest.approx(state(horse()), abs=1e-9)
+    with pytest.raises(ValueError):
+        model.observe(kyo)
+    # Fitting again clears them: the model is the one fitted alone, and TD's runs observe again.
+    model = model.fit(early_runs(), speed_model())
+    assert state(model) == pytest.approx(state(fitted()), abs=1e-9)
+    model = model.observe(obs)
+    assert state(model) == pytest.approx(state(horse()), abs=1e-9)
+
+
+@pytest.mark.parametrize("t_df", [None, 5.0], ids=["normal", "student_t5"])
+def test_observe_never_changes_the_global_terms(fitted, t_df):
+    # TD's runs observed 4 s slower, every one at 60 kg and early_pos_mean3 0.9: had observe
+    # refitted a term or re-centred the weight or the pace on its own frame, a term, or a new
+    # horse's prediction, would move.
+    model = fit_on(early_runs(), t_df=t_df)
+    before = global_terms(model)
+    odd = td_runs()
+    odd = odd.assign(finish_time_s=odd["finish_time_s"] + 4.0, weight_kg=60.0, early_pos_mean3=0.9)
+    model = model.observe(odd)
+    assert global_terms(model) == before
+    alone = fitted(t_df=t_df)
+    new = ["syn-new-f", "syn-new-s", "syn-new-m", "syn-new-c"]
+    styles = dict(zip(new, STYLES, strict=True))
+    for level, kg, day in ((0.2, 54.0, NEXT), (0.8, 58.0, TD)):
+        c = card(
+            new,
+            day=day,
+            post=R8_POST,
+            style=styles,
+            early=dict.fromkeys(new, level),
+            weight={new[0]: kg, new[3]: 112.0 - kg},
+        )
+        for t in (at(TD, 23, 0), at(NEXT, 1, 0)):
+            got, want = predicted(model, c, t), predicted(alone, c, t)
+            assert got.to_numpy() == pytest.approx(want.to_numpy(), abs=1e-9), (level, t)
+    # observe did keep the runs: a horse of TD's R1 has moved
+    t, c = at(TD, 23, 0), card([twin("a"), *fillers()])
+    moved = predicted(model, c, t)["mu_s"] - predicted(alone, c, t)["mu_s"]
+    assert abs(moved[twin("a")]) > 0.01
+
+
+def test_a_fit_run_never_published_reaches_no_prediction():
+    # A race of the fit frame whose result is never published. Either fit refuses the frame, or
+    # the race reaches no global term (nor, never published, any theta): its times changed, every
+    # term and every prediction after the frame's other results is as it was.
+    runs = early_runs()
+    hit = runs["race_id"] == race_id(H_DAYS[6], TOK, 2)
+    assert hit.sum() >= FIELD
+    unpublished = runs.copy()
+    unpublished.loc[hit, "result_available_utc"] = pd.NaT
+    moved = unpublished.copy()
+    moved.loc[hit, "finish_time_s"] += 3.0
+    fits = []
+    for frame in (unpublished, moved):
+        try:
+            fits.append(fit_on(frame))
+        except ValueError:
+            fits.append(None)
+    if fits[0] is None or fits[1] is None:
+        assert fits[0] is None and fits[1] is None  # refused at fit, whatever the times
+        return
+    a, b = fits
+    assert global_terms(b) == pytest.approx(global_terms(a), abs=1e-9)
+    horses = [*sorted(set(runs.loc[hit, "horse_id"])), *fillers()]
+    t = FIT_CUTOFF + US  # the latest publication among the published runs
+    for c in (card(horses), card(horses, day=TD, post=R8_POST)):
+        assert predicted(b, c, t).to_numpy() == pytest.approx(
+            predicted(a, c, t).to_numpy(), abs=1e-9
+        )
+
+
+# ---------------------------------------------------------------------------------------------
+# sd_s: the runner's predictive SD
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("t_df", [None, 2.5, 5.0, 30.0], ids=["normal", "t2.5", "t5", "t30"])
+def test_sd_s_is_the_runners_predictive_sd(fitted, t_df):
+    # The run error's variance is sigma^2 + V_card under the normal and t_df / (t_df - 2) times it
+    # under the t. Two cards off at the same instant (TD 05:10), so a horse's theta is as uncertain
+    # on both: KYO's read at 01:00, before any KYO result of the day (its variant is the prior),
+    # TOK's at 23:00, after the day's TOK results.
+    model, speed = fitted(t_df=t_df), speed_model()
+    k = 1.0 if t_df is None else t_df / (t_df - 2.0)
+    new, seen = ["syn-new-1", "syn-new-2"], list(fillers())
+    var, v_card = {}, {}
+    for group, t in ((KYO, at(TD, 1, 0)), (TOK, at(TD, 23, 0))):
+        out = predicted(model, card([*seen, *new], day=TD, post=R8_POST, group=group), t)
+        v_card[group] = speed.variant(TD, *group, at_utc=t)[1] ** 2
+        var[group] = out["sd_s"] ** 2
+        want = model.prior_sd**2 + k * (model.sigma**2 + v_card[group])
+        assert var[group][new].to_numpy() == pytest.approx([want, want], rel=1e-9), group
+    assert v_card[KYO] > v_card[TOK] + 0.05  # the day's TOK results narrowed TOK's variant
+    gap = (var[KYO] - var[TOK])[seen].to_numpy()
+    assert gap == pytest.approx(np.full(len(seen), k * (v_card[KYO] - v_card[TOK])), rel=1e-9)
+    theta_var = var[TOK][seen] - k * (model.sigma**2 + v_card[TOK])
+    assert (theta_var > 0).all() and (theta_var < model.prior_sd**2).all()
+
+
+@pytest.mark.parametrize("t_df", [2.0, 1.5])
+def test_sd_s_is_infinite_when_the_t_error_has_no_variance(fitted, t_df):
+    model = fitted(t_df=t_df)
+    horses = [*fillers(), "syn-new-1"]
+    for c in (card(horses), card(horses, day=TD, post=R8_POST)):
+        out = predicted(model, c, at(TD, 23, 0))
+        assert np.isfinite(out["mu_s"].to_numpy()).all()
+        assert np.isposinf(out["sd_s"].to_numpy()).all()
 
 
 def pl_reference(mu, s):
@@ -849,10 +1144,13 @@ def test_expected_top3_time_adds_the_pace_term():
 # (#129's early_pos_mean3, Q2 (c)), and a fit day's in-sample variant is used only once that
 # (day, group) is fully resulted before t (Q3 (b)).
 #
-# One par per (surface, distance), shared by both tracks, the variant per (track, surface): a TOK
+# One par per (surface, distance), shared by every track, the variant per (track, surface): a TOK
 # and a KYO race of the same distance share a par but not a variant. The speed model's top-3 times
-# are planted directly, par + variant + N(0, 0.15^2), apart from the runners. 8 fit days, then 12
-# horse days whose race-level results the speed model observes.
+# are planted directly, par + variant + N(0, 0.15^2), apart from the runners. 7 fit days, then 12
+# horse days whose race-level results the speed model observes, then GOING_DAY, the speed model's
+# last fit day. HorseSpeed's global terms are fitted on the horse days' runs; GOING_DAY's runs are
+# observed. (The world is drawn with GOING_DAY in the eighth place, so its random draws are those
+# of the draft that had GOING_DAY before the horse days.)
 #
 # Regulars (horse days only): theta ~ N(0.8, 1.2^2), style drawn afresh each run and apart from the
 # early positions, so the field's front-runner share carries no pace. A race's runners have
@@ -862,16 +1160,22 @@ def test_expected_top3_time_adds_the_pace_term():
 #     + noise.
 # One race (DEBUT) has no early position at all (planted pace effect 0).
 #
-# GOING_DAY, the last fit day, is planted 2.0 s slow at both tracks. Three sets of five special
-# horses, the same five thetas and styles, 56 kg, early_pos_mean3 0.5 in a field of their own (so
-# the same pace in every special race), one noise-free run each:
+# GOING_DAY is planted 2.0 s slow at every track. Five sets of five special horses, the same five
+# thetas and styles, 56 kg, early_pos_mean3 0.5 in a field of their own (so the same pace in every
+# special race), one noise-free run each:
 # - F_j in GOING_DAY's TOK R1 (01:05, published 01:15): par + 2.0 + theta_j. TOK's R3 is in at
 #   02:25 and its R2 held until 03:00: the TOK group's three races are all resulted at 03:00.
 # - G_j in GOING_DAY's KYO R1, at the same off and publication: par + 2.0 + theta_j. KYO's R3 is
 #   never published, so the KYO group is never fully resulted.
+# - P_j in GOING_DAY's NAK R1, at the same off and publication: par + 2.0 + theta_j. NAK's R1 and
+#   R2 have top-3 times, both in by 01:50; its R3 has none in the speed model's frame and is
+#   published at 04:00, so the NAK group is fully resulted at 04:00, not at 01:50.
+# - U_j in GOING_DAY's HAN R1, as P_j, but HAN's R3, untimed, is never published: never fully
+#   resulted.
 # - O_j in O_DAY's TOK R4 (05:00), a horse day planted at exactly 0: par + theta_j. Its baseline
 #   reads the day's three TOK results before it, as F's in-sample variant reads GOING_DAY's three:
 #   the same evidence on the variant, without the going.
+# NAK's and HAN's timed races are planted at exactly par + 2.0, from no random draw.
 W2_PAR_KEYS = ("surface", "distance")
 W2_PAR = {("turf", 1600): 96.0, ("turf", 2000): 120.5}
 W2_SEED = 9704
@@ -881,21 +1185,34 @@ W2_V_SD = 0.3
 W2_RACE_SD = 0.15
 PACE_SLOPE = {"front": -3.0, "stalker": -1.0, "midpack": 1.0, "closer": 3.0}  # s per unit
 PACE_MID = 0.5
-W2_FIT_DAYS = tuple(date(2025, 6, 7) + timedelta(days=k) for k in range(8))
-W2_H_DAYS = tuple(W2_FIT_DAYS[-1] + timedelta(days=1 + k) for k in range(12))
-GOING_DAY = W2_FIT_DAYS[-1]
+W2_PRE_DAYS = tuple(date(2025, 6, 7) + timedelta(days=k) for k in range(7))
+W2_H_DAYS = tuple(date(2025, 6, 15) + timedelta(days=k) for k in range(12))
+GOING_DAY = W2_H_DAYS[-1] + timedelta(days=1)  # the speed model's last fit day
+W2_FIT_DAYS = (*W2_PRE_DAYS, GOING_DAY)
+W2_DRAW_ORDER = (*W2_PRE_DAYS, GOING_DAY, *W2_H_DAYS)
 GOING = 2.0
 O_DAY = W2_H_DAYS[0]
 DEBUT = (W2_H_DAYS[1], TOK, 1)
-W2_CARD_DAY = W2_H_DAYS[-1] + timedelta(days=2)  # in no frame: its variant is the prior
+W2_CARD_DAY = GOING_DAY + timedelta(days=1)  # in no frame: its variant is the prior
+NAK, HAN = ("NAK", "turf"), ("HAN", "turf")
+QUIET = (NAK, HAN)  # planted exactly, from no random draw
 # GOING_DAY, R1..R3 at each track: (post, distance, publication or None)
 GOING_TOK = (((1, 5), 1600, (1, 15)), ((1, 40), 2000, (3, 0)), ((2, 15), 1600, (2, 25)))
 GOING_KYO = (((1, 5), 1600, (1, 15)), ((1, 40), 2000, (1, 50)), ((2, 15), 1600, None))
+GOING_NAK = (((1, 5), 1600, (1, 15)), ((1, 40), 2000, (1, 50)), ((2, 15), 1600, (4, 0)))
+GOING_HAN = (((1, 5), 1600, (1, 15)), ((1, 40), 2000, (1, 50)), ((2, 15), 1600, None))
+UNTIMED = {(NAK, 3), (HAN, 3)}  # no top-3 time in the speed model's frame
 O_RACE = ((5, 0), 1600, (5, 10))  # after O_DAY's TOK R1..R3 are in (03:35)
 SP_THETA = tuple(THETA_MEAN + d for d in (-0.4, -0.2, 0.0, 0.2, 0.4))
 SP_STYLE = ("front", "stalker", "midpack", "closer", "midpack")
 SP_EARLY = 0.5
-SP_RACES = {"F": (GOING_DAY, TOK, 1), "G": (GOING_DAY, KYO, 1), "O": (O_DAY, TOK, 4)}
+SP_RACES = {
+    "F": (GOING_DAY, TOK, 1),
+    "G": (GOING_DAY, KYO, 1),
+    "P": (GOING_DAY, NAK, 1),
+    "U": (GOING_DAY, HAN, 1),
+    "O": (O_DAY, TOK, 4),
+}
 
 
 def sp(kind, j):
@@ -909,9 +1226,10 @@ def w2_race_id(day, group, i):
 def w2_schedule(day):
     """(group, race number, post, distance, publication) of a second-world day's races."""
     if day == GOING_DAY:
+        plans = ((TOK, GOING_TOK), (KYO, GOING_KYO), (NAK, GOING_NAK), (HAN, GOING_HAN))
         return [
             (group, i, at(day, *post), dist, None if pub is None else at(day, *pub))
-            for group, plan in ((TOK, GOING_TOK), (KYO, GOING_KYO))
+            for group, plan in plans
             for i, (post, dist, pub) in enumerate(plan, start=1)
         ]
     out = schedule(day)
@@ -925,9 +1243,10 @@ def w2_schedule(day):
 def _world2():
     rng = np.random.default_rng(W2_SEED)
     theta = rng.normal(THETA_MEAN, W2_THETA_SD, W2_N_REG)
-    days = W2_FIT_DAYS + W2_H_DAYS
+    days = W2_DRAW_ORDER
     variant = {(d, g): rng.normal(0.0, W2_V_SD) for d in days for g in DAILY}
-    variant[(GOING_DAY, TOK)] = variant[(GOING_DAY, KYO)] = GOING
+    for group in (TOK, KYO, *QUIET):
+        variant[(GOING_DAY, group)] = GOING
     variant[(O_DAY, TOK)] = 0.0
     runs, races = [], []
     for day in days:
@@ -944,7 +1263,10 @@ def _world2():
                 "distance": distance,
                 "result_available_utc": pub,
             }
-            top3 = base + rng.normal(0.0, W2_RACE_SD)
+            if group in QUIET:
+                top3 = math.nan if (group, i) in UNTIMED else base
+            else:
+                top3 = base + rng.normal(0.0, W2_RACE_SD)
             races.append({**common, "top3_time_s": top3, "fit": day in W2_FIT_DAYS})
             field = []  # (horse_id, style, early_pos_mean3, weight, time)
             if day in W2_H_DAYS and (day, group, i) not in SP_RACES.values():
@@ -997,6 +1319,18 @@ def w2_runs():
     return _world2()[0].copy()
 
 
+def w2_fit_runs():
+    """The horse days' runs: the frame HorseSpeed's global terms are fitted on."""
+    runs = w2_runs()
+    return runs[jst_day(runs) != GOING_DAY].reset_index(drop=True)
+
+
+def w2_going_runs():
+    """GOING_DAY's runs (F, G, P and U): observed after the fit."""
+    runs = w2_runs()
+    return runs[jst_day(runs) == GOING_DAY].reset_index(drop=True)
+
+
 @lru_cache(maxsize=1)
 def w2_speed_model():
     spec = SpeedSpec(
@@ -1008,8 +1342,16 @@ def w2_speed_model():
 
 
 @pytest.fixture(scope="module")
+def w2_fitted():
+    """HorseSpeed fitted on the horse days' runs, nothing observed."""
+    return HorseSpeed(drift_var_per_day=DRIFT, t_df=None).fit(w2_fit_runs(), w2_speed_model())
+
+
+@pytest.fixture(scope="module")
 def w2_horse():
-    return HorseSpeed(drift_var_per_day=DRIFT, t_df=None).fit(w2_runs(), w2_speed_model())
+    """A model of its own fitted as w2_fitted, then GOING_DAY's runs observed."""
+    model = HorseSpeed(drift_var_per_day=DRIFT, t_df=None).fit(w2_fit_runs(), w2_speed_model())
+    return model.observe(w2_going_runs())
 
 
 @lru_cache(maxsize=1)
@@ -1021,7 +1363,7 @@ def w2_regulars():
 def w2_pace_ref():
     """The fit runs' mean pace, from the planted frame: each run's race's mean non-null
     early_pos_mean3, averaged over the runs (a race with none has no pace and is left out)."""
-    runs = w2_runs()
+    runs = w2_fit_runs()
     pace = runs.groupby("race_id")["early_pos_mean3"].transform("mean")
     return float(pace.dropna().mean())
 
@@ -1054,7 +1396,7 @@ W2_T = at(W2_CARD_DAY, 0, 0)  # after every race of both frames
 CARD_STYLES = ("front", "front", "stalker", "stalker", "midpack", "midpack", "closer", "closer")
 
 
-def test_pace_is_the_fields_mean_early_position(w2_horse):
+def test_pace_is_the_fields_mean_early_position(w2_fitted):
     # The same eight runners and styles, every early_pos_mean3 at 0.3 and then at 0.7: each runner
     # moves by its style's planted slope times 0.4. The styles do not change, so a pace read off
     # them (the front-runner share) would move nobody.
@@ -1063,7 +1405,7 @@ def test_pace_is_the_fields_mean_early_position(w2_horse):
 
     def mu(level):
         rows = [(h, s, level) for h, s in zip(horses, CARD_STYLES, strict=True)]
-        return predicted(w2_horse, w2_card(rows), W2_T)["mu_s"]
+        return predicted(w2_fitted, w2_card(rows), W2_T)["mu_s"]
 
     moved = mu(0.7) - mu(0.3)
     for h, style in zip(horses, CARD_STYLES, strict=True):
@@ -1079,18 +1421,18 @@ def test_pace_is_the_fields_mean_early_position(w2_horse):
     spread = PACE_SLOPE["closer"] - PACE_SLOPE["front"]
     for level in (ref - 0.25, ref, ref + 0.25):
         rows = [("syn-w2-new-f", "front", level), ("syn-w2-new-c", "closer", level)]
-        out = predicted(w2_horse, w2_card(rows), W2_T)["mu_s"]
+        out = predicted(w2_fitted, w2_card(rows), W2_T)["mu_s"]
         gap = out["syn-w2-new-c"] - out["syn-w2-new-f"]
         tol = 0.1 + 1.2 * abs(level - ref)
         assert gap == pytest.approx(spread * (level - ref), abs=tol), level
 
 
-def test_pace_reads_the_early_positions_not_the_styles(w2_horse):
+def test_pace_reads_the_early_positions_not_the_styles(w2_fitted):
     horses = list(w2_regulars()[8:16])
     rows_of = lambda styles, early: list(zip(horses, styles, early, strict=True))  # noqa: E731
 
     def out(rows):
-        return predicted(w2_horse, w2_card(rows), W2_T)
+        return predicted(w2_fitted, w2_card(rows), W2_T)
 
     # The same early positions, the other seven all closers or all front runners: the field's
     # mean early position, the race's pace, is the same, so the front runner is the same.
@@ -1180,6 +1522,99 @@ def test_a_fit_days_in_sample_variant_takes_its_going_out(w2_horse):
     assert f_mu[0] < f_mu[2] < f_mu[4]
 
 
+# (hh, mm, ss, us) on GOING_DAY, and whether NAK's races of the day, the untimed R3 with them, are
+# all resulted before it
+UNTIMED_SWEEP = (
+    ((1, 15, 0, 1), False),  # P's, U's and G's runs are in
+    ((1, 50), False),
+    ((1, 50, 0, 1), False),  # NAK's and HAN's timed races are all in; their R3 is not
+    ((2, 30), False),
+    ((3, 0, 0, 1), False),  # TOK is fully resulted (F has its in-sample variant)
+    ((4, 0), False),  # NAK's R3 published at exactly t
+    ((4, 0, 0, 1), True),
+    ((23, 0), True),
+)
+
+
+def test_a_fit_days_untimed_race_holds_back_its_in_sample_variant(w2_horse):
+    # P (NAK) and U (HAN) are G's twins until NAK's untimed R3 is published, after its timed races:
+    # its result counts in the day's completion though it brings no top-3 time, so P stays on the
+    # prior path until 04:00. HAN's R3 is never published: U is G's twin all day.
+    frame = special_card("FGPU")
+    for when, done in UNTIMED_SWEEP:
+        out = predicted(w2_horse, frame, at(GOING_DAY, *when))
+        for j in range(len(SP_THETA)):
+            p, u, g = (out.loc[sp(k, j)] for k in "PUG")
+            assert u.to_numpy() == pytest.approx(g.to_numpy(), abs=1e-9), (when, j)
+            if done:
+                assert p["mu_s"] < g["mu_s"] - 0.6, (when, j)
+            else:
+                assert p.to_numpy() == pytest.approx(g.to_numpy(), abs=1e-9), (when, j)
+
+
+# A fit day of six groups, each a track's turf 1600 m races on COMPLETION_DAY, beside the flat
+# TOK frame above (one par, turf 1600 m, shared by every track): each race's (publication (hh, mm)
+# or None, whether it has a top-3 time), and the instant (hh, mm) the (day, group) is fully
+# resulted at (None: never).
+COMPLETION_DAY = date(2025, 4, 5)
+COMPLETION_POSTS = ((1, 5), (1, 40), (2, 15))
+COMPLETION_CASES = (
+    ("TOK", (((1, 15), True), ((1, 50), True), ((4, 0), False)), (4, 0)),  # untimed, in last
+    ("KYO", (((1, 15), True), ((1, 50), True), (None, False)), None),  # untimed, never in
+    ("NAK", (((1, 15), True), ((1, 30), False), ((2, 25), True)), (2, 25)),  # untimed, in earlier
+    ("HAN", (((1, 15), True), ((1, 50), True), ((2, 25), True)), (2, 25)),  # every race timed
+    ("SAP", (((1, 15), True), (None, True)), None),  # a timed race never in
+    ("CHU", (((5, 0), False), ((1, 50), True)), (5, 0)),  # the first race untimed, in last
+)
+COMPLETION_GOING = {"TOK": 0.6, "KYO": -0.4, "NAK": 0.3, "HAN": 0.8, "SAP": -0.2, "CHU": 0.5}
+
+
+def completion_races():
+    rows = []
+    for track, plan, _ in COMPLETION_CASES:
+        for i, (pub, timed) in enumerate(plan, start=1):
+            rows.append(
+                {
+                    "race_id": f"syn-done-{track}-{i:02d}",
+                    "race_utc": at(COMPLETION_DAY, *COMPLETION_POSTS[i - 1]),
+                    "track": track,
+                    "surface": "turf",
+                    "distance": 1600,
+                    "top3_time_s": 96.0 + COMPLETION_GOING[track] + 0.1 * i if timed else math.nan,
+                    "result_available_utc": None if pub is None else at(COMPLETION_DAY, *pub),
+                }
+            )
+    probe = pd.DataFrame(rows)
+    for col in ("race_utc", "result_available_utc"):
+        probe[col] = pd.to_datetime(probe[col], utc=True)
+    return pd.concat([flat_races(), probe], ignore_index=True)
+
+
+@pytest.mark.parametrize("t_df", [None, 5.0], ids=["normal", "student_t5"])
+def test_a_fit_day_is_fully_resulted_once_its_untimed_races_are_too(t_df):
+    # SpeedModel.fit on the frame with the untimed rows and without them: the same pars, scales
+    # and in-sample variants (estimated from the timed races alone), but the instant a (day,
+    # group) is fully resulted is the latest publication over all its races, timed or not.
+    spec = SpeedSpec(
+        par_keys=W2_PAR_KEYS, variant_keys=VARIANT_KEYS, same_day_variant=True, t_df=t_df
+    )
+    races = completion_races()
+    model = SpeedModel(spec).fit(races)
+    timed = SpeedModel(spec).fit(races[races["top3_time_s"].notna()].reset_index(drop=True))
+    cell = {"surface": "turf", "distance": 1600}
+    assert model.par(**cell) == pytest.approx(timed.par(**cell), abs=1e-12)
+    assert (model.sigma, model.tau) == pytest.approx((timed.sigma, timed.tau), abs=1e-12)
+    for track, _, done in COMPLETION_CASES:
+        got = model.in_sample_variant(COMPLETION_DAY, track, "turf")
+        ref = timed.in_sample_variant(COMPLETION_DAY, track, "turf")
+        assert got is not None and ref is not None, track
+        assert got[:2] == pytest.approx(ref[:2], abs=1e-12), track
+        if done is None:
+            assert got[2] is None, track
+        else:
+            assert got[2] == pd.Timestamp(at(COMPLETION_DAY, *done)), track
+
+
 # ---------------------------------------------------------------------------------------------
 # Refusals
 # ---------------------------------------------------------------------------------------------
@@ -1204,7 +1639,7 @@ BAD_INPUTS = (
 
 
 @pytest.mark.parametrize("case", BAD_INPUTS)
-def test_bad_inputs_are_refused(horse, case):
+def test_bad_inputs_are_refused(fitted, case):
     mu = np.array([95.0, 96.0])
     calls = {
         "negative_drift": (ValueError, lambda: HorseSpeed(drift_var_per_day=-0.01, t_df=None)),
@@ -1219,31 +1654,31 @@ def test_bad_inputs_are_refused(horse, case):
         "runs_missing_a_column": (
             ValueError,
             lambda: HorseSpeed(drift_var_per_day=DRIFT, t_df=None).fit(
-                horse_runs().drop(columns="result_available_utc"), speed_model()
+                early_runs().drop(columns="result_available_utc"), speed_model()
             ),
         ),
         "runs_missing_early_pos_mean3": (
             ValueError,
             lambda: HorseSpeed(drift_var_per_day=DRIFT, t_df=None).fit(
-                horse_runs().drop(columns="early_pos_mean3"), speed_model()
+                early_runs().drop(columns="early_pos_mean3"), speed_model()
             ),
         ),
         "card_missing_early_pos_mean3": (
             ValueError,
-            lambda: horse().predict(
+            lambda: fitted().predict(
                 card(list(fillers())).drop(columns="early_pos_mean3"), at_utc=at(TD, 23, 0)
             ),
         ),
         "runs_naive_race_utc": (
             ValueError,
             lambda: HorseSpeed(drift_var_per_day=DRIFT, t_df=None).fit(
-                horse_runs().assign(race_utc=lambda f: f["race_utc"].dt.tz_localize(None)),
+                early_runs().assign(race_utc=lambda f: f["race_utc"].dt.tz_localize(None)),
                 speed_model(),
             ),
         ),
         "predict_naive_at_utc": (
             ValueError,
-            lambda: horse().predict(card(list(fillers())), at_utc=NAIVE),
+            lambda: fitted().predict(card(list(fillers())), at_utc=NAIVE),
         ),
         "p_speed_unknown_method": (ValueError, lambda: p_speed(mu, scale=1.0, method="bogus")),
         "p_speed_zero_scale": (ValueError, lambda: p_speed(mu, scale=0.0)),
