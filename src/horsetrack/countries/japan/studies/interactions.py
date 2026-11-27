@@ -44,8 +44,9 @@ Win return per unit stake of every scored runner banded by its stage-2 claim p x
 (`core.eval.tail.tail_curve`, D7's meeting bounds), the top band a leaderboard row. A runner is
 settled at the store's recorded Win dividend for its race and horse number (`win_paid`): a JRA
 dead heat pays each winner its own dividend, and a dividend paid before a later disqualification
-stands. A scored race with no WIN row at all is unsettled (an interrupted store refresh), never
-a race every starter lost: the launch fails and records every planned variant as failed.
+stands. A race with no WIN row at all is unsettled (an interrupted store refresh), never a race
+every starter lost: its starters' return is NaN, read only on the scored rows, so a scored one
+fails each tail variant (a failed record) and one that only trains is never read.
 
 Every variant, failures included, is a registry record; the JRA store is netkeiba results (no
 JRDB, no JRA-VAN), so the records carry the source `jra` and their figures are public. Holdout
@@ -797,8 +798,10 @@ def win_paid(
     row for its horse number pays dividend / unit (a refund row, the stake); no row pays 0.
 
     A race with no WIN row at all is unsettled, not a race every starter lost (the store
-    publishes runners before dividends, so an interrupted refresh leaves such races): it raises,
-    and the launch records every planned variant as failed."""
+    publishes runners before dividends, so an interrupted refresh leaves such races): each of its
+    starters pays NaN, never 0, and `races_without_a_win_dividend` counts them. Only a scored
+    row's return is read (`_tail`, which fails on a NaN), so an unsettled race that only trains
+    stops nothing."""
     keyed = price[["race_id", "horse_id"]].astype(object)
     numbers = numbers.astype({"race_id": object, "horse_id": object})
     rows = keyed.merge(numbers, on=["race_id", "horse_id"], how="left", validate="one_to_one")
@@ -819,22 +822,18 @@ def win_paid(
         raise ValueError("a WIN dividend row is not one horse number with a finite dividend")
     races = pd.Series(price["race_id"].astype(object).unique())
     unsettled = races.loc[~races.isin(set(paying["race_id"]))]
-    if len(unsettled):
-        raise ValueError(
-            f"{len(unsettled)} priced races have no WIN dividend row (unsettled, e.g. "
-            f"{', '.join(map(str, unsettled.head(3)))}): refresh the store's dividends"
-        )
     joined = pd.DataFrame({"race_id": rows["race_id"], "horse_no": horse_no}).merge(
         paying, on=["race_id", "horse_no"], how="left", validate="many_to_one"
     )
-    paid = joined["pays"].fillna(0.0).to_numpy(dtype=float)
+    settled = ~joined["race_id"].isin(set(unsettled)).to_numpy(dtype=bool)
+    paid = np.where(settled, joined["pays"].fillna(0.0).to_numpy(dtype=float), np.nan)
     won = price["won"].to_numpy(dtype=bool)
     counts = {
         "win_dividend_rows": len(paying),
         "win_dividend_rows_without_a_priced_starter": int(
             len(paying) - joined["pays"].notna().sum()
         ),
-        "races_without_a_win_dividend": len(unsettled),  # 0: an unsettled race raises
+        "races_without_a_win_dividend": len(unsettled),  # its starters pay NaN
         "paid_starters": int((paid > 0).sum()),
         "paid_starters_not_placed_first": int(((paid > 0) & ~won).sum()),
         "first_placed_starters_without_a_dividend": int((won & (paid == 0)).sum()),
@@ -845,7 +844,8 @@ def win_paid(
 
 def _settled_otherwise(frame: pd.DataFrame, paid) -> int:
     """How many of the frame's starters `paid` settles otherwise than v1's rule did (a placed
-    first at its final odds over the race's number of them, others 0)."""
+    first at its final odds over the race's number of them, others 0); an unsettled starter
+    (NaN) is not counted."""
     won = frame["won"].to_numpy(dtype=bool)
     m = frame.groupby("race_id")["won"].transform("sum").to_numpy(dtype=float)
     v1 = np.where(won, frame["win_odds"].to_numpy(dtype=float) / np.maximum(m, 1.0), 0.0)
@@ -879,12 +879,21 @@ def member_frame(price: pd.DataFrame, level1: pd.DataFrame, u: dict, first) -> t
 
 
 def _tail(p: pd.Series, scored: Scored, spec: dict, name: str) -> tuple[list, dict]:
+    """The tail curve over the scored rows, each settled at its recorded dividend (`win_paid`);
+    a scored race with no WIN row (NaN paid) raises, so the variant is a failed record."""
     rows = scored.rows
+    ret = rows["paid"].to_numpy(dtype=float)
+    if np.isnan(ret).any():
+        races = rows.loc[np.isnan(ret), "race_id"].drop_duplicates()
+        raise ValueError(
+            f"{len(races)} scored races have no WIN dividend row (unsettled, e.g. "
+            f"{', '.join(map(str, races.head(3)))}): refresh the store's dividends"
+        )
     odds = rows["win_odds"].to_numpy(dtype=float)
     bets = pd.DataFrame(
         {
             "claim": p.reindex(rows.index).to_numpy() * odds,
-            "ret": rows["paid"].to_numpy(dtype=float),  # at the recorded dividend (win_paid)
+            "ret": ret,  # at the recorded dividend (win_paid)
             "meeting_id": rows["meeting_id"].to_numpy(),
         }
     )
@@ -1140,7 +1149,8 @@ def compute_study(
     scored = Scored.of(rows, rfolds)
     study.counts |= {"scored_folds": len(rfolds), "scored_races": scored.n_races}
     sr = scored.rows
-    study.counts |= {
+    study.counts |= {  # an unsettled scored race (NaN paid) fails each tail variant (_tail)
+        "scored_races_without_a_win_dividend": int(sr.loc[sr["paid"].isna(), "race_id"].nunique()),
         "scored_paid_starters_not_placed_first": int((sr["paid"].gt(0) & ~sr["won"]).sum()),
         "scored_starters_paid_otherwise_than_odds_over_winners": _settled_otherwise(sr, sr["paid"]),
     }
