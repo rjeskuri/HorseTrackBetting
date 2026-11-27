@@ -22,7 +22,12 @@ Contract pinned here (the coder implements what these tests call):
   before any `fit` when a fold's joined training window is under `min_seasons` (`IneligibleFold`,
   naming the fold's test start) or when a member prediction of a row a fold uses (train or test)
   comes from a member model trained on that row, `member_train_end >= race_date`, or has no
-  provenance (`InvalidProvenance`). Otherwise `models.meta.oof_predictions` over `Level2.folds`.
+  provenance (`InvalidProvenance`): a null `member_fold` or `member_train_end`, or a `member_fold`
+  that is empty or only whitespace. A row in a fold's test window is held to that fold's
+  (embargo-adjusted) `train_end` as well: its member must have trained no later than it,
+  `member_train_end <= fold.train_end`, or a member refitted inside the window would score it
+  (review finding 1, round 1); a training row keeps the per-row rule alone. Otherwise
+  `models.meta.oof_predictions` over `Level2.folds`.
   A missing provenance column is `InvalidProvenance` (from `join_members` or `stacked_oof`); a
   duplicated (race_id, horse_id, member) prediction is a `ValueError`. Both errors are
   `ValueError`s. `D9_MIN_SEASONS` is `studies.meta.D9_MIN_SEASONS` (5).
@@ -80,9 +85,20 @@ FOLDS = [
 ]
 
 
+def season_ends(frame: pd.DataFrame = FRAME) -> dict[int, pd.Timestamp]:
+    """Per season (calendar year) after the first, the last race day of the season before it."""
+    days = frame["race_date"].drop_duplicates()
+    first = days.dt.year.min()
+    return {int(y): days.loc[days.dt.year < y].max() for y in days.dt.year.unique() if y > first}
+
+
+SEASON_ENDS = season_ends()
+
+
 def predictions(starts: dict[str, date], frame: pd.DataFrame = FRAME) -> pd.DataFrame:
     """Each member's season walk-forward predictions from its start day on: out of the race's
-    season, trained to the end of the season before."""
+    season, trained through the last race day of the season before (so a scored row's member
+    trained no later than its fold's embargo-adjusted train_end)."""
     parts = []
     for m, (member, start) in enumerate(starts.items()):
         rows = frame.loc[frame["race_date"] >= pd.Timestamp(start)]
@@ -95,9 +111,7 @@ def predictions(starts: dict[str, date], frame: pd.DataFrame = FRAME) -> pd.Data
                     "member": member,
                     "logp": -1.0 - m - 1e-4 * np.arange(len(rows)),
                     "member_fold": years.astype(str).to_numpy(),
-                    "member_train_end": pd.to_datetime(
-                        [f"{y - 1}-12-31" for y in years]
-                    ).to_numpy(),
+                    "member_train_end": pd.to_datetime([SEASON_ENDS[y] for y in years]).to_numpy(),
                 }
             )
         )
@@ -129,6 +143,17 @@ def test_the_fixture_has_two_scored_folds_and_d9_is_five_seasons() -> None:
     assert [f.test_start for f in FOLDS] == [date(2024, 1, 1), date(2024, 4, 1)]
     # the store alone trains every scored fold on more than ten seasons
     assert all(FRAME.iloc[f.train_idx]["race_date"].min().year == 2012 for f in FOLDS)
+    # the embargo puts 2024-Q1's train_end before the season's end: a member trained through
+    # Dec 31 would be past it
+    assert FOLDS[0].train_end < date(2023, 12, 31)
+    # the fixture's members meet the fold rule: each scored row's member trained no later than
+    # its fold's train_end
+    preds = predictions({"a": date(2016, 1, 1), "b": date(2016, 1, 1)})
+    by_key = preds.set_index(["race_id", "horse_id"])["member_train_end"]
+    for fold in FOLDS:
+        test = FRAME.iloc[fold.test_idx]
+        ends = pd.to_datetime(by_key.loc[list(zip(test["race_id"], test["horse_id"], strict=True))])
+        assert (ends <= pd.Timestamp(fold.train_end)).all()
 
 
 # ------------------------------------------------------------------------------------------------
@@ -177,7 +202,7 @@ def test_a_valid_join_records_provenance_and_reports_the_eligible_window() -> No
     assert sorted(got["member"]) == MEMBERS
     assert set(got["member_fold"].astype(str)) == {str(row["race_date"].year)}
     assert {pd.Timestamp(t).date() for t in got["member_train_end"]} == {
-        date(row["race_date"].year - 1, 12, 31)
+        SEASON_ENDS[row["race_date"].year].date()
     }
 
     windows = st.fold_windows(level2)
@@ -282,7 +307,9 @@ def _row_on(day: pd.Timestamp) -> pd.Series:
         ("test", 0, False),  # a scored row's member prediction is in-sample
         ("test", 200, False),
         ("train", -1, True),  # trained to the day before: out of sample
-        ("test", -1, True),
+        # a scored row's member trained to the day before is past its fold's train_end: a
+        # member refitted inside 2024-Q1 scores it (round 1, finding 1)
+        ("test", -1, False),
     ],
 )
 def test_a_member_prediction_trained_on_its_row_refuses_before_any_fit(
@@ -309,6 +336,80 @@ def test_a_member_prediction_trained_on_its_row_refuses_before_any_fit(
         st.stacked_oof(level2, spy.fit, spy.predict)
     assert spy.trained == [], "the fit ran before the refusal"
     assert isinstance(info.value, ValueError)
+
+
+def _set_train_end(preds: pd.DataFrame, row: pd.Series, member: str, end: pd.Timestamp) -> None:
+    hit = (
+        (preds["member"] == member)
+        & (preds["race_id"] == row["race_id"])
+        & (preds["horse_id"] == row["horse_id"])
+    )
+    assert hit.sum() == 1
+    preds.loc[hit, "member_train_end"] = end
+
+
+Q1_END = pd.Timestamp(FOLDS[0].train_end)
+Q2_END = pd.Timestamp(FOLDS[1].train_end)
+
+
+@pytest.mark.parametrize(
+    ("scored_from", "member", "train_end", "valid"),
+    [
+        # the review's case: a member refitted through January scores a February row of 2024-Q1
+        (pd.Timestamp(2024, 2, 1), "b", pd.Timestamp(2024, 1, 31), False),
+        (pd.Timestamp(2024, 2, 1), "a", pd.Timestamp(2024, 1, 10), False),
+        # at the fold's train_end: valid; a day past it: refused
+        (pd.Timestamp(2024, 2, 1), "b", Q1_END, True),
+        (pd.Timestamp(2024, 2, 1), "b", Q1_END + pd.Timedelta(days=1), False),
+        (pd.Timestamp(2024, 1, 1), "a", Q1_END + pd.Timedelta(days=1), False),
+        # each scored row is held to its own fold's train_end, not the first fold's
+        (pd.Timestamp(2024, 5, 1), "a", Q2_END, True),
+        (pd.Timestamp(2024, 5, 1), "a", Q1_END + pd.Timedelta(days=30), True),
+        (pd.Timestamp(2024, 5, 1), "a", Q2_END + pd.Timedelta(days=1), False),
+        (pd.Timestamp(2024, 5, 1), "b", pd.Timestamp(2024, 4, 15), False),
+    ],
+)
+def test_a_scored_rows_member_must_train_no_later_than_its_folds_train_end(
+    scored_from: pd.Timestamp, member: str, train_end: pd.Timestamp, valid: bool
+) -> None:
+    starts = {"a": date(2016, 1, 1), "b": date(2016, 1, 1)}
+    preds = predictions(starts)
+    row = _row_on(scored_from)
+    # the row is scored by exactly one fold, and every case is before its race day: the per-row
+    # rule alone would accept them all
+    position = FRAME.index.get_loc(row.name)
+    scoring = [f for f in FOLDS if position in set(f.test_idx)]
+    assert len(scoring) == 1
+    assert train_end < row["race_date"]
+    _set_train_end(preds, row, member, train_end)
+    level2 = st.join_members(FRAME, FOLDS, preds, members=MEMBERS)
+    spy = FitSpy()
+    if valid:
+        oof, _ = st.stacked_oof(level2, spy.fit, spy.predict)
+        assert spy.trained and oof.notna().any()
+        return
+    with pytest.raises(st.InvalidProvenance):
+        st.stacked_oof(level2, spy.fit, spy.predict)
+    assert spy.trained == [], "the fit ran before the refusal"
+
+
+@pytest.mark.parametrize("value", ["", " ", "   ", "\t", " \n "])
+@pytest.mark.parametrize("when", [pd.Timestamp(2021, 8, 1), pd.Timestamp(2024, 3, 1)])
+def test_an_empty_member_fold_on_a_used_row_refuses(value: str, when: pd.Timestamp) -> None:
+    preds = predictions({"a": date(2016, 1, 1), "b": date(2016, 1, 1)})
+    row = _row_on(when)
+    hit = (
+        (preds["member"] == "b")
+        & (preds["race_id"] == row["race_id"])
+        & (preds["horse_id"] == row["horse_id"])
+    )
+    assert hit.sum() == 1
+    preds.loc[hit, "member_fold"] = value
+    spy = FitSpy()
+    with pytest.raises(st.InvalidProvenance):
+        level2 = st.join_members(FRAME, FOLDS, preds, members=MEMBERS)
+        st.stacked_oof(level2, spy.fit, spy.predict)
+    assert spy.trained == [], "the fit ran before the refusal"
 
 
 @pytest.mark.parametrize("column", ["member_fold", "member_train_end"])

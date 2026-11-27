@@ -22,7 +22,8 @@ race of the scored folds, from the store alone.
 
 Order: freeze the family's spec in the run registry (before any outcome is read), read the store
 and the members, score, append one registry record per variant (failures included) and write the
-report. CLI: `python -m horsetrack.countries.japan.studies.meta --run --members PATH [--out DIR]`.
+report. CLI: `python -m horsetrack.countries.japan.studies.meta --run --members PATH [--out DIR]
+[--allow-short-history]`.
 
 Added after the outcomes were read (review findings on PR #308), outside the frozen spec, which
 is unchanged: the meeting-clustered coefficient bounds (D7's unit and level, 95% one-sided; the
@@ -34,6 +35,12 @@ below the 5-season minimum; level 1 refit once a season, not quarterly): it supp
 claim, and the D9-compliant run comes with #91's and #98's members. A rerun appends only records
 the family does not already hold: a record equal to one in the registry but for its git commit is
 the same run reproduced and is not appended.
+
+Since #418 the level-2 path goes through `models.stacking`'s guard before any fit: the member file's
+predictions are joined to the store (`join_members`, provenance from `fold_season`) and checked
+(`check_level2`). A scored fold under D9's 5 seasons refuses (`IneligibleFold`) unless the run opts
+in with `allow_short_history` (`--allow-short-history`), the owner-approved replication above; the
+report says when a run used it. Provenance is checked either way.
 """
 
 from __future__ import annotations
@@ -282,10 +289,12 @@ def build_spec(scheme: FoldScheme, bootstrap: dict, thresholds: list[float], dig
 # --------------------------------------------------------------------------- rows
 
 
-def read_development() -> tuple[pd.DataFrame, pd.DataFrame]:
+def read_development(
+    runner_columns: Sequence[str] = RUNNER_COLUMNS, race_columns: Sequence[str] = RACE_COLUMNS
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Development runners and races of the price era, column- and date-scoped."""
     frames = []
-    for name, columns in (("runners", RUNNER_COLUMNS), ("races", RACE_COLUMNS)):
+    for name, columns in (("runners", runner_columns), ("races", race_columns)):
         table = read_store_table(
             name, columns=columns, start=PRICE_ERA_START, end=date.max, touches_price=True
         )
@@ -348,6 +357,43 @@ def read_members(path: Path) -> pd.DataFrame:
     if not (season == pd.to_datetime(members["race_date"]).dt.year).all():
         raise ValueError("a member row's fold_season is not its race's calendar year")
     return members
+
+
+def member_predictions(members: pd.DataFrame, race_days: pd.Series) -> pd.DataFrame:
+    """The member file as `models.stacking` predictions, one row per (race_id, horse_id, member):
+    `logp` (ln of the file's probability; the guard checks only that it is there), `member_fold`
+    (the row's `fold_season`) and `member_train_end`. Level 1 is a season walk-forward, trained on
+    the seasons before `fold_season`, so its last training day is taken as the last of
+    `race_days` before that season starts (not 31 December), NaT when none is."""
+    days = np.sort(pd.to_datetime(pd.Series(race_days)).dt.normalize().unique())
+    season = members["fold_season"].str[:4].astype(int)
+    starts = pd.to_datetime(season.astype(str) + "-01-01").to_numpy()
+    before = np.searchsorted(days, starts, side="left") - 1
+    train_end = np.where(before >= 0, days[np.maximum(before, 0)], np.datetime64("NaT"))
+    keys = members[["race_id", "horse_id"]].assign(
+        member_fold=members["fold_season"].to_numpy(), member_train_end=train_end
+    )
+    return pd.concat(
+        [
+            keys.assign(member=name, logp=np.log(members[col].to_numpy()))
+            for name, (col, _) in MEMBERS.items()
+        ],
+        ignore_index=True,
+    )
+
+
+def check_level2(
+    frame: pd.DataFrame, folds: list[Fold], members: pd.DataFrame, *, allow_short_history: bool
+) -> None:
+    """`models.stacking`'s guard on the member rows of `folds`, before any fit: invalid
+    provenance refuses (`InvalidProvenance`), and so does a joined training window under D9's
+    seasons (`IneligibleFold`) unless `allow_short_history`."""
+    # imported here: models.stacking imports D9_MIN_SEASONS and season_years from this module
+    from horsetrack.countries.japan.models import stacking
+
+    predictions = member_predictions(members, frame["race_date"])
+    level2 = stacking.join_members(frame, folds, predictions, members=list(MEMBERS))
+    stacking.check_level2(level2, min_seasons=0 if allow_short_history else D9_MIN_SEASONS)
 
 
 def member_frame(frame: pd.DataFrame, members: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -1000,11 +1046,17 @@ def _record(variant: MetaVariant, git_sha: str, builds: dict[str, str], member_b
     )
 
 
-def run_study(members_path: Path, out_dir: Path | None = None) -> dict:
+def run_study(
+    members_path: Path, out_dir: Path | None = None, *, allow_short_history: bool = False
+) -> dict:
     """Run the pre-registered family on Japan's development data and write its private report.
 
-    Raises `paths.DataDirInsideRepo` for an `out_dir` or a member file inside the repository and
-    `FamilyAlreadyFrozen` when the family is frozen with another spec (another member file)."""
+    Raises `paths.DataDirInsideRepo` for an `out_dir` or a member file inside the repository,
+    `FamilyAlreadyFrozen` when the family is frozen with another spec (another member file), and,
+    before any fit, `models.stacking`'s `InvalidProvenance`, or its `IneligibleFold` when a scored
+    fold's level-2 window is under D9's seasons and `allow_short_history` is False. The opt-in is
+    the owner-approved replication (#87, answer (b), 2026-11-25); it leaves the frozen spec and
+    the registry records as they are, and the report and the result say the run used it."""
     members_path = paths.outside_repo(Path(members_path), what="members")
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     digest = file_digest(members_path)
@@ -1023,8 +1075,11 @@ def run_study(members_path: Path, out_dir: Path | None = None) -> dict:
     folds = walk_forward(frame["race_date"], scheme=scheme)
     baseline = [f for f in folds if f.test_start >= BASELINE_FROM]
     scored = [f for f in folds if f.test_start >= SCORED_FROM]
+    members = read_members(members_path)
+    check_level2(frame, scored, members, allow_short_history=allow_short_history)
     frame["p_cal"] = baseline_oof(frame, baseline)
-    meta, member_counts = member_frame(frame, read_members(members_path))
+    meta, member_counts = member_frame(frame, members)
+    del members
     study = compute_study(frame, meta, scored, spec)
     study.counts = {**counts, **member_counts, "scored_folds": len(scored), **study.counts}
     del frame, meta
@@ -1047,6 +1102,14 @@ def run_study(members_path: Path, out_dir: Path | None = None) -> dict:
         "members": member_build,
         "records": f"{len(appended)} appended by this run; {len(record_ids) - len(appended)} "
         "already in the registry (the same run reproduced, not appended again)",
+        "level-2 guard": "`models.stacking.check_level2` passed before any fit; "
+        + (
+            "D9's 5-season minimum waived: this run used the opt-in --allow-short-history "
+            "(allow_short_history=True), the owner-approved replication, a documented failure to "
+            "meet D9 (#87, answer (b), 2026-11-25)"
+            if allow_short_history
+            else f"every scored fold meets D9's {D9_MIN_SEASONS}-season minimum at level 2"
+        ),
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     report = write_report(
@@ -1064,6 +1127,7 @@ def run_study(members_path: Path, out_dir: Path | None = None) -> dict:
         "records_already_present": len(record_ids) - len(appended),
         "record_ids": {name: run_id[:16] for name, run_id in record_ids.items()},
         "failed_variants": [v.name for v in study.variants if v.error],
+        "allow_short_history": allow_short_history,
     }
 
 
@@ -1074,8 +1138,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--members", type=Path, required=True, help=f"the member file ({MEMBER_FILE})"
     )
     parser.add_argument("--out", type=Path, default=None, help="report directory, outside the repo")
+    parser.add_argument(
+        "--allow-short-history",
+        action="store_true",
+        help="run although a scored fold's level-2 window is under D9's 5 seasons: the "
+        "owner-approved replication (#87, answer (b)), a documented failure to meet D9",
+    )
     args = parser.parse_args(argv)
-    print(json.dumps(run_study(args.members, args.out), indent=2))
+    result = run_study(args.members, args.out, allow_short_history=args.allow_short_history)
+    print(json.dumps(result, indent=2))
     return 0
 
 

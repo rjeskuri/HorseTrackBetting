@@ -6,7 +6,10 @@ joins can shorten a fold's training window below D9's minimum even when the stor
 provenance; `stacked_oof` refuses, before any fit, a fold whose joined training window is under
 `D9_MIN_SEASONS` (`IneligibleFold`) or a used row whose member prediction comes from a model
 trained on it or carries no provenance (`InvalidProvenance`), then delegates to
-`models.meta.oof_predictions`.
+`models.meta.oof_predictions`. A row a fold scores is held to that fold's `train_end` as well: its
+member must have trained no later than the fold's own training data, or a member refitted inside
+the test window would score it. `check_level2` runs the checks alone, for a caller that fits its
+own way (the #87 study, `studies.meta`).
 
 - `join_members(frame, folds, predictions, *, members)`: `frame` is the store's level-2 rows
   (`race_id`, `horse_id`, `race_date`, ...) on a unique index; `folds` are `core.eval.folds.Fold`s
@@ -153,7 +156,8 @@ def fold_windows(level2: Level2, *, min_seasons: float = D9_MIN_SEASONS) -> list
 
 def _check_provenance(level2: Level2) -> None:
     """Every member prediction of a row a fold uses has provenance and was made by a model
-    trained only on days before the row's race day."""
+    trained only on days before the row's race day; a row a fold scores, by a model trained no
+    later than that fold's train_end."""
     _require(level2.provenance, [ROW, "member", *PROVENANCE], "the provenance", InvalidProvenance)
     used = np.unique(
         np.concatenate(
@@ -170,7 +174,8 @@ def _check_provenance(level2: Level2) -> None:
         )
     race_day = pd.to_datetime(level2.frame.loc[prov[ROW], "race_date"]).dt.normalize().to_numpy()
     trained_to = pd.to_datetime(prov["member_train_end"]).dt.normalize().to_numpy()
-    no_fold = prov["member_fold"].isna().to_numpy()
+    fold_name = prov["member_fold"]
+    no_fold = (fold_name.isna() | fold_name.astype(str).str.strip().eq("")).to_numpy()
     no_end = pd.isna(trained_to)
     in_sample = ~no_end & (trained_to >= race_day)
     if no_fold.any() or no_end.any():
@@ -185,18 +190,24 @@ def _check_provenance(level2: Level2) -> None:
             f"row, e.g. member {bad['member']!r} on {bad['race_id']} {bad['horse_id']} "
             f"(trained to {pd.Timestamp(bad['member_train_end']).date()})"
         )
+    rows = prov[ROW].to_numpy()
+    for fold in level2.folds:
+        scored = np.isin(rows, level2.frame.index[np.asarray(fold.test_idx, dtype=int)])
+        late = scored & (trained_to > np.datetime64(fold.train_end, "ns"))
+        if late.any():
+            bad = prov.loc[late].iloc[0]
+            raise InvalidProvenance(
+                f"{int(late.sum())} member predictions scored by fold "
+                f"{fold.test_start.isoformat()} come from a model trained past its train_end "
+                f"{fold.train_end.isoformat()}, e.g. member {bad['member']!r} on "
+                f"{bad['race_id']} {bad['horse_id']} "
+                f"(trained to {pd.Timestamp(bad['member_train_end']).date()})"
+            )
 
 
-def stacked_oof(
-    level2: Level2,
-    fit: Callable[[pd.DataFrame], Any],
-    predict: Callable[[Any, pd.DataFrame], Any],
-    *,
-    min_seasons: float = D9_MIN_SEASONS,
-) -> tuple[pd.Series, list[FoldWindow]]:
-    """`models.meta.oof_predictions` over `level2.folds`, after every fold is checked: invalid
-    member provenance (`InvalidProvenance`) or a joined training window under `min_seasons`
-    (`IneligibleFold`) refuses before any fit."""
+def check_level2(level2: Level2, *, min_seasons: float = D9_MIN_SEASONS) -> list[FoldWindow]:
+    """`stacked_oof`'s checks without the fit: invalid member provenance (`InvalidProvenance`),
+    then a joined training window under `min_seasons` (`IneligibleFold`). Returns the windows."""
     _check_provenance(level2)
     windows = fold_windows(level2, min_seasons=min_seasons)
     short = [w for w in windows if not w.eligible]
@@ -210,4 +221,18 @@ def stacked_oof(
             f"{len(short)} of {len(windows)} folds train on fewer than {min_seasons} seasons "
             f"after the member joins (D9): {detail}"
         )
+    return windows
+
+
+def stacked_oof(
+    level2: Level2,
+    fit: Callable[[pd.DataFrame], Any],
+    predict: Callable[[Any, pd.DataFrame], Any],
+    *,
+    min_seasons: float = D9_MIN_SEASONS,
+) -> tuple[pd.Series, list[FoldWindow]]:
+    """`models.meta.oof_predictions` over `level2.folds`, after every fold is checked: invalid
+    member provenance (`InvalidProvenance`) or a joined training window under `min_seasons`
+    (`IneligibleFold`) refuses before any fit."""
+    windows = check_level2(level2, min_seasons=min_seasons)
     return oof_predictions(level2.frame, level2.folds, fit, predict), windows

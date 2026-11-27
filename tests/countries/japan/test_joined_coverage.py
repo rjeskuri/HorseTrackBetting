@@ -16,7 +16,8 @@ Contract pinned here (the coder implements what these tests call):
   matched fails with `"duplicate_key"` when a (race_id, horse_no) of the race occurs more than once
   in the source, else with `"unmatched"` when a scheduled runner of the race has no source row;
   forecastable fails with `"no_forecast"` when a runner's forecast is missing; scored fails with
-  `"no_result"` when the race has no result (its `won` values are missing).
+  `"no_result"` when the race has no result: a `won` value is missing, or no runner won (every
+  `won` is 0/False; round 1, finding 3). A dead heat (two winners) is scored.
 - `cov.races(source, stage, *, era=None, race_class=None) -> int`: the races that reached
   `stage` (so `scheduled >= matched >= forecastable >= scored`), optionally of one era and one
   card class. The era of a race is `PRICE_ERA` from D10's price era start
@@ -308,6 +309,43 @@ def test_holdout_days_are_in_no_count() -> None:
     assert cov.duplicate_rows("jra") == 0
     assert cov.unmatched_scheduled("jra") == 0
     assert cov.unmatched_source("jra") == 0  # a holdout race's rows are not orphans either
+
+
+def test_a_race_needs_a_winner_to_be_scored() -> None:
+    # (won values of the race's runners, forecast missing for runner 1, the race's reason)
+    cases = [
+        ([0.0, 0.0, 0.0], False, "no_result"),  # fully forecast, nobody won
+        ([False, False], False, "no_result"),
+        ([0, 0, 0, 0], False, "no_result"),
+        ([0.0, 1.0, 0.0], False, None),  # one winner: scored
+        ([True, False], False, None),
+        ([1.0, 1.0, 0.0], False, None),  # a dead heat: scored
+        ([0.0, np.nan, 0.0], False, "no_result"),  # a missing result and no winner
+        ([0.0, 0.0, 0.0], True, "no_forecast"),  # the first failing stage wins
+    ]
+    day = date(2021, 4, 4)
+    card, rows = [], []
+    for n, (won, no_forecast, _reason) in enumerate(cases, start=1):
+        rid = race_id(day + timedelta(days=7 * (n % 3)), n)
+        cls = CLASSES[n % len(CLASSES)]
+        card.append((rid, day + timedelta(days=7 * (n % 3)), cls, len(won)))
+        for no, w in enumerate(won, start=1):
+            forecast = np.nan if (no_forecast and no == 1) else 1.0 / len(won)
+            rows.append({"race_id": rid, "horse_no": no, "forecast": forecast, "won": w})
+    source = pd.DataFrame(rows, columns=["race_id", "horse_no", "forecast", "won"])
+    cov = jc.joined_coverage(schedule_rows(card), {"jra": source})
+
+    expected = Counter(reason for _w, _f, reason in cases)
+    assert cov.races("jra", "scheduled") == len(cases)
+    assert cov.races("jra", "scored") == expected[None]
+    assert cov.races("jra", "forecastable") == len(cases) - expected["no_forecast"]
+    for reason in REASONS:
+        assert cov.drops("jra", reason) == expected[reason], reason
+    # per card class, each race in the class it was scheduled with
+    for cls in CLASSES:
+        want = [r for (_rid, _d, c, _n), (_w, _f, r) in zip(card, cases, strict=True) if c == cls]
+        assert cov.races("jra", "scored", race_class=cls) == want.count(None), cls
+        assert cov.drops("jra", "no_result", race_class=cls) == want.count("no_result"), cls
 
 
 # ------------------------------------------------------------------------------------------------

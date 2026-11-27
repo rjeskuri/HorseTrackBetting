@@ -13,9 +13,10 @@ Every scheduled race passes, per source, `STAGES` in order and drops at the firs
 one reason (`REASONS`): matched fails on `duplicate_key` (a key of the race occurs more than once
 in the source), else on `unmatched` (a scheduled runner has no source row); forecastable fails on
 `no_forecast` (a scheduled runner's forecast is missing); scored fails on `no_result` (a scheduled
-runner's `won` is missing). Counts split by era (`PRICE_ERA` from D10's `PRICE_ERA_START` on,
-`PRE_PRICE_ERA` before) and by card class. Key counts: source rows whose key repeats (every copy),
-scheduled keys with no source row, and source rows whose key is not scheduled.
+runner's `won` is missing, or no runner won; a dead heat is scored). Counts split by era
+(`PRICE_ERA` from D10's `PRICE_ERA_START` on, `PRE_PRICE_ERA` before) and by card class. Key
+counts: source rows whose key repeats (every copy), scheduled keys with no source row, and source
+rows whose key is not scheduled.
 
 `render_summary` is the committed view: a licensed source (`reports.is_withheld((s,))`: JRA-VAN,
 JRDB) shows `coverage.WITHHELD` and no figure (D21). `render_report` is the private view with every
@@ -24,6 +25,11 @@ figure, written by `write_private_report` through `write_report`, never into the
 `first_starts(runs)` labels each horse's first observed start (the history gaps of #377/#403):
 a `VERIFIED_DEBUT` in a DEBUT (新馬) race; a `STORE_START` in the store's first year, so earlier
 runs may predate the store; otherwise `UNVERIFIED` (a maiden debut, or runs outside JRA).
+
+`horsetrack japan joined-coverage --members PATH` (`joined_coverage_command`) runs it on the store:
+the schedule is the store's development starters of the price era (`studies.meta.read_development`),
+the sources the store's final Win price (`jra`) and the #87 member file (`MEMBER_SOURCE`,
+`studies.meta.read_members`); the private report adds `first_starts` over every store run.
 """
 
 from __future__ import annotations
@@ -33,14 +39,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import Annotated
 
+import numpy as np
 import pandas as pd
+import typer
 
 from horsetrack.core import paths
 from horsetrack.core.eval.holdout import is_holdout_day
-from horsetrack.core.eval.reports import is_withheld, write_report
-from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START
+from horsetrack.core.eval.reports import LicensedOutputInRepo, is_withheld, write_report
+from horsetrack.core.pricing import clean_odds
+from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
 from horsetrack.countries.japan.research.coverage import WITHHELD
+from horsetrack.countries.japan.studies import meta as study
 
 COUNTRY = "japan"
 REPORT_NAME = "joined-coverage.md"
@@ -54,6 +65,8 @@ DEBUT = "DEBUT"
 VERIFIED_DEBUT = "verified_debut"
 STORE_START = "store_start"
 UNVERIFIED = "unverified"
+HISTORY_LABELS = (VERIFIED_DEBUT, STORE_START, UNVERIFIED)
+MEMBER_SOURCE = "hktrack_members_jrdb"  # the #87 member file: JRDB-derived, so withheld (D21)
 
 # the last stage a race reaches when it drops for a reason; a race that drops for none is scored
 _REACHED = {"duplicate_key": 0, "unmatched": 0, "no_forecast": 1, "no_result": 2, None: 3}
@@ -190,7 +203,10 @@ def _source(
     # the source row of each scheduled runner, where it has exactly one
     single = rows.loc[in_schedule & ~repeated]
     no_forecast = set(single.loc[single["forecast"].isna(), "race_id"])
-    no_result = set(single.loc[single["won"].isna(), "race_id"])
+    winners = set(single.loc[single["won"].eq(True), "race_id"])
+    no_result = set(single.loc[single["won"].isna(), "race_id"]) | (
+        set(single["race_id"]) - winners
+    )
     failing = {
         "duplicate_key": set(rows.loc[repeated & rows["race_id"].isin(race_ids), "race_id"]),
         "unmatched": set(scheduled.loc[missing, "race_id"]),
@@ -216,8 +232,9 @@ _INTRO = (
     "stages scheduled, matched, forecastable and scored, and drops at the first it fails: "
     "`duplicate_key` (a runner key repeats in the source) or `unmatched` (a scheduled runner has "
     "no source row) at matched, `no_forecast` (a runner has no forecast after the joins) at "
-    "forecastable, `no_result` (a runner has no result) at scored. Eras split at D10's price era "
-    f"start, {PRICE_ERA_START.isoformat()}. Built by `research.joined_coverage` (#418)."
+    "forecastable, `no_result` (a runner has no result, or no runner won) at scored. Eras split "
+    f"at D10's price era start, {PRICE_ERA_START.isoformat()}. Built by "
+    "`research.joined_coverage` (#418)."
 )
 
 
@@ -260,8 +277,9 @@ def render_summary(cov: JoinedCoverage) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_report(cov: JoinedCoverage) -> str:
-    """The private view: every figure, the licensed ones included. Never inside the repository."""
+def render_report(cov: JoinedCoverage, history: pd.DataFrame | None = None) -> str:
+    """The private view: every figure, the licensed ones included, then, given `first_starts`'
+    `history`, the horses under each history label. Never inside the repository."""
     lines = [
         "# Joined forecast coverage: private report",
         "",
@@ -275,13 +293,28 @@ def render_report(cov: JoinedCoverage) -> str:
         lines.append("")
         lines += _source_lines(cov, s)
         lines.append("")
+    if history is not None:
+        counts = history["history"].value_counts()
+        lines += [
+            "## First observed starts by history label",
+            "",
+            f"Horses by the label of their first observed start in the store (`first_starts`): "
+            f"`{VERIFIED_DEBUT}` in a DEBUT race, `{STORE_START}` in the store's first year "
+            f"(earlier runs may predate the store), `{UNVERIFIED}` otherwise (#377, #403).",
+            "",
+            "| history | horses |",
+            "| --- | --- |",
+            *(f"| {label} | {_cell(int(counts.get(label, 0)))} |" for label in HISTORY_LABELS),
+        ]
     return "\n".join(lines).rstrip() + "\n"
 
 
-def write_private_report(cov: JoinedCoverage, path: Path | str | None = None) -> Path:
-    """`render_report(cov)` through `write_report`, by default to the reports folder."""
+def write_private_report(
+    cov: JoinedCoverage, path: Path | str | None = None, *, history: pd.DataFrame | None = None
+) -> Path:
+    """`render_report(cov, history)` through `write_report`, by default to the reports folder."""
     target = paths.reports_dir() / REPORT_NAME if path is None else Path(path)
-    return write_report(target, render_report(cov), sources=cov.sources)
+    return write_report(target, render_report(cov, history), sources=cov.sources)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -312,3 +345,72 @@ def first_starts(runs: pd.DataFrame, *, store_start: date | None = None) -> pd.D
             "history": history,
         }
     )
+
+
+# ------------------------------------------------------------------------------------------------
+# The command: the store and the #87 member file
+
+
+def store_sources(
+    runners: pd.DataFrame, races: pd.DataFrame, members: pd.DataFrame
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+    """The schedule, the store's starters (scratched runners left out), and two sources on it:
+    `jra`, the final Win price as the forecast, and `MEMBER_SOURCE`, the #87 member file keyed to
+    the store's horse numbers (its forecast missing when any member's is; a member row that is
+    not a store starter keeps no horse number). `won` is the store's: missing for a race not run,
+    otherwise whether the runner finished first."""
+    scratched = runners["is_scratched"].eq(True).to_numpy(dtype=bool, na_value=False)
+    starters = runners.loc[~scratched].merge(
+        races[["race_id", "race_class", "status"]], on="race_id", how="left"
+    )
+    first = starters["finish_pos"].eq(1).to_numpy(dtype=bool, na_value=False)
+    won = np.where(starters["status"].eq("run").to_numpy(dtype=bool, na_value=False), first, np.nan)
+    schedule = starters[["race_id", "horse_no", "race_date", "race_class"]]
+    store = starters[["race_id", "horse_no"]].assign(
+        forecast=1.0 / clean_odds(starters["win_odds"].to_numpy()), won=won
+    )
+    member_cols = [col for col, _ in study.MEMBERS.values()]
+    numbers = starters[["race_id", "horse_id", "horse_no"]].assign(won=won)
+    member = (
+        members[["race_id", "horse_id"]]
+        .assign(forecast=members[member_cols].mean(axis=1, skipna=False).to_numpy())
+        .merge(numbers, on=["race_id", "horse_id"], how="left", validate="many_to_one")
+    )
+    return schedule, {"jra": store, MEMBER_SOURCE: member[[*KEY, "forecast", "won"]]}
+
+
+def read_runs() -> pd.DataFrame:
+    """Every development run in the store (holdout days dropped, no price read), for
+    `first_starts`: race_id, race_date, horse_id, is_scratched and the race's race_class."""
+    runners, races = (
+        read_store_table(
+            name, columns=columns, start=date.min, end=date.max, touches_price=False
+        ).to_pandas(date_as_object=False)
+        for name, columns in (
+            ("runners", ["race_id", "race_date", "horse_id", "is_scratched"]),
+            ("races", ["race_id", "race_class"]),
+        )
+    )
+    return runners.merge(races, on="race_id", how="left")
+
+
+def joined_coverage_command(
+    members: Annotated[
+        Path,
+        typer.Option("--members", help="The #87 member file (JRDB-derived: withheld, D21)."),
+    ],
+) -> None:
+    """Count each source's development races through the joins, the store's and the #87 member
+    file's: the private report, with every figure and the first starts by history label, goes to
+    <reports dir>/joined-coverage.md; only the summary, which withholds licensed figures, prints."""
+    try:
+        runners, races = study.read_development(
+            [*study.RUNNER_COLUMNS, "horse_no"], [*study.RACE_COLUMNS, "race_class"]
+        )
+        schedule, sources = store_sources(runners, races, study.read_members(members))
+        cov = joined_coverage(schedule, sources)
+        write_private_report(cov, history=first_starts(read_runs()))
+    except (paths.DataDirNotSet, LicensedOutputInRepo, ValueError, KeyError, OSError) as exc:
+        typer.echo(f"ERROR joined-coverage failed: {type(exc).__name__}: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(render_summary(cov), nl=False)
