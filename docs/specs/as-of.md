@@ -349,7 +349,9 @@ abandonment that happens on race day is visible in every view from 00:00 JST of 
 before it happened: a known, accepted leak. `races.post_utc` exists since #227, but whether these
 four columns can change on race day after 00:00 JST, and so need a post-based rule, still awaits
 an owner decision; until then they stay under the race-date rule, and a feature or model that
-reads them carries this leak.
+reads them carries this leak. The JRA-VAN export cannot lift it: it holds each race's and runner's
+final version only, no pre-race card (#401; docs/specs/jravan.md, "Card versions (#401)", which
+names the feed that could carry the card forward).
 
 ## Known traps (07 §6)
 
