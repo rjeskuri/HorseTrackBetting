@@ -66,6 +66,20 @@ The run
   the scored races) and `races` (scored races with one or more of them)}}), `spa` ({`pvalue`,
   `n_rules`}) and `stepm` ({`superior`: list of variant names}).
 
+Added after the round-1 review of PR #473 (the family stays frozen; reporting and rerun rules only):
+- Reruns on one registry: the family test runs over the current run's scored non-reference
+  variants, whatever an earlier run recorded, so a variant that scored before and fails now is a
+  failed record, the run finishes and its report is written. Each run writes its own private
+  report (a run-specific name: an earlier report is never overwritten) and `run_ids` lists the
+  16-character prefixes of the ids of the registry records holding this run's results: the new
+  ones, or for an identical rerun the existing ones it reproduced.
+- The private report has a section headed `## Primary question`: the per-group reading of R1-R4
+  and B1-B5 and the sentence "the frozen spec defines no favourite-vs-longshot comparison rule",
+  with the answer "inconclusive" (no rule is invented after the run).
+- The report calls each gain the "gain of the registered meld over v0" and states that b_g
+  confounds a group intercept with form ("group intercept") and that the family test credits the
+  market refit as well ("market refit").
+
 Rulings assumed here (reversible implementation choices):
 - Ruling: favourite ranks count every runner priced on the T-2 board, including one scratched
   after T-2; a runner off the T-2 board has no rank.
@@ -840,3 +854,83 @@ def test_rows_on_a_holdout_day_are_refused_before_anything_is_written(tmp_path):
         fb.run_family(rows, folds, registry=registry, out_dir=tmp_path / "out", n_boot=N_BOOT)
     assert registry.records() == []
     assert not (tmp_path / "out").exists() or not any((tmp_path / "out").iterdir())
+
+
+# ---------------------------------------------------------------- 7. reruns and the private report
+
+
+def run_on(registry: Registry, base: Path, rows, folds) -> dict:
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(paths.DATA_DIR_VAR, str(base / "data"))
+        return fb.run_family(rows, folds, registry=registry, out_dir=base / "out", n_boot=N_BOOT)
+
+
+def ids_named(result: dict, ids: list[str]) -> set[str]:
+    """The full registry ids `result["run_ids"]` names, each prefix naming exactly one."""
+    out = set()
+    for prefix in result["run_ids"]:
+        hits = [i for i in ids if i.startswith(prefix)]
+        assert len(hits) == 1, prefix
+        out |= set(hits)
+    return out
+
+
+def test_a_rerun_in_which_a_variant_now_fails_still_reports_and_tests_the_current_run(tmp_path):
+    registry = tmp_registry(tmp_path)
+    first = run_on(registry, tmp_path, *run_rows(2))
+    assert first["variants"]["B5"]["status"] == "scored"
+
+    second = run_on(registry, tmp_path, *run_rows(3, max_odds=45.0))  # no band-5 runner now
+
+    assert second["variants"]["B5"]["status"] == "failed"
+    history = {(r.variant, r.status) for r in registry.records(fb.FAMILY_ID)}
+    assert {("B5", "scored"), ("B5", "failed")} <= history
+    scored_now = [v for v in NON_REFERENCE if second["variants"][v]["status"] == "scored"]
+    assert "B5" not in scored_now and len(scored_now) >= 9
+    assert second["spa"]["n_rules"] == len(scored_now)
+    assert set(second["stepm"]["superior"]) <= set(scored_now)
+    report = Path(second["report_path"])
+    assert report.is_file() and "B5" in report.read_text()
+
+
+def test_each_run_keeps_its_own_private_report_listing_its_records(tmp_path):
+    registry = tmp_registry(tmp_path)
+    rows, folds = run_rows(2)
+    a = run_on(registry, tmp_path, rows, folds)
+    a_text = Path(a["report_path"]).read_text()
+    b = run_on(registry, tmp_path, rows, folds)  # identical rerun: nothing new to append
+    c = run_on(registry, tmp_path, *run_rows(4))  # new inputs: 12 new records
+
+    ids = [line["run_id"] for line in registry_lines(registry) if line["kind"] == "run"]
+    assert len(ids) == 24
+    assert len({a["report_path"], b["report_path"], c["report_path"]}) == 3
+    assert Path(a["report_path"]).read_text() == a_text  # never overwritten
+    assert ids_named(a, ids) == set(ids[:12])
+    assert ids_named(b, ids) == set(ids[:12])  # the records it reproduced
+    assert ids_named(c, ids) == set(ids[12:])
+    for result in (a, b, c):
+        text = Path(result["report_path"]).read_text()
+        assert all(prefix in text for prefix in result["run_ids"])
+
+
+def section(text: str, heading: str) -> str:
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(heading))
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    return "\n".join(lines[start:end])
+
+
+def test_the_report_answers_the_primary_question_without_a_new_rule(noise_run):
+    text = Path(noise_run[0]["report_path"]).read_text()
+    primary = section(text, "## Primary question")
+    assert "the frozen spec defines no favourite-vs-longshot comparison rule" in primary.lower()
+    assert "inconclusive" in primary.lower()
+    for variant in ("R1", "R2", "R3", "R4", "B1", "B2", "B3", "B4", "B5"):
+        assert variant in primary, variant
+
+
+def test_the_report_labels_gains_as_the_registered_melds_and_states_the_confound(noise_run):
+    text = Path(noise_run[0]["report_path"]).read_text().lower()
+    assert "gain of the registered meld over v0" in text
+    assert "group intercept" in text
+    assert "market refit" in text

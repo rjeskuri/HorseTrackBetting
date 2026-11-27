@@ -9,7 +9,8 @@ The rules tested must be exactly the family's non-failed variants in the run reg
 result reports the registry family size, failed variants included, so a family cannot be tested
 on a hand-picked subset of what was tried. The one exception is ``reference_variants``: variants
 the family's frozen spec names as references (a re-run of an earlier result the rules are compared
-with, not a rule of the test). Each must be recorded in the family, and it leaves the test only.
+with, not a rule of the test). Each must be recorded in the family and named so by its frozen
+spec: a key of ``spec["variants"]`` absent from ``spec["inference"]["family"]["rules"]``.
 
 The cluster unit (through ``clusters``), ``block_size``, ``n_boot`` and StepM's ``level`` are owner
 decisions (08 §5.2, §9.6, §9.9) and have no defaults: callers pass them from the country's
@@ -110,6 +111,28 @@ def cluster_losses(losses: pd.DataFrame, clusters: pd.Series, order: pd.Series) 
     return pd.DataFrame(sums, index=labels, columns=losses.columns)
 
 
+def _check_reference(registry: Registry, family_id: str, reference: set[str]) -> None:
+    """Refuse a reference the family's frozen spec does not name as one: each must be a key of
+    ``spec["variants"]`` and absent from ``spec["inference"]["family"]["rules"]``."""
+    spec = registry.frozen_spec(family_id)
+    if spec is None:
+        raise FamilySizeMismatch(f"family {family_id!r} is not frozen: it names no reference")
+    variants = spec.get("variants")
+    inference = spec.get("inference")
+    family = inference.get("family") if isinstance(inference, dict) else None
+    rules = family.get("rules") if isinstance(family, dict) else None
+    if not isinstance(variants, dict) or not isinstance(rules, list):
+        raise FamilySizeMismatch(
+            f"family {family_id!r}'s frozen spec registers no variants and family-test rules"
+        )
+    refused = sorted((v for v in reference if v not in variants or v in rules), key=str)
+    if refused:
+        raise FamilySizeMismatch(
+            f"{refused} are not references in family {family_id!r}'s frozen spec (a reference "
+            "is a frozen variant that is not a family-test rule)"
+        )
+
+
 def _check_family(
     losses: pd.DataFrame,
     registry: Registry,
@@ -123,6 +146,8 @@ def _check_family(
         raise FamilySizeMismatch("losses have duplicate columns")
     records = registry.records(family_id)
     reference = set(reference_variants)
+    if reference:
+        _check_reference(registry, family_id, reference)
     unknown = sorted(reference - {r.variant for r in records}, key=str)
     if unknown:
         raise FamilySizeMismatch(
