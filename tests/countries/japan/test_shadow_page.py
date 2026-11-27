@@ -1,4 +1,4 @@
-"""The shadow page (ticket #122): `shadow.html` and `shadow.js` in
+"""The shadow page (tickets #122, #498): `shadow.html` and `shadow.js` in
 `src/horsetrack/countries/japan/board/web/`, the live board (#42's board.js) plus each row's shadow
 value, bucket label and avoid-flag chips, driven from node under a tiny fake DOM as in
 test_board_page.py.
@@ -9,17 +9,21 @@ Contract pinned here (the coder implements against it):
 `shadow.js`, as plain `<script src>` tags) and reuses board.js's render functions. Under node it
 sets `module.exports` (when `module` exists) to at least:
 
-- `renderShadow(feed, shadowFeed, {now, venue}) -> string`: the HTML for one venue (the plain
-  feed's first venue by default; `now` in ms since the epoch). `feed` is the plain feed
-  (docs/specs/board-feed.md, each row amended with `t2_odds` and `move_t2_pct`, which may be
-  absent); `shadowFeed` is #121's shadow feed or null. Rows join on (race_id, pool, combination).
-  The HTML carries every hook of board.js's `renderBoard` (venue tabs `data-venue`, race blocks
+- `renderShadow(feed, shadowFeed, {now, venue, race}) -> string`: the HTML for one race of one
+  venue (the plain feed's first venue by default; `now` in ms since the epoch; the race chosen as
+  board.js's `renderBoard` chooses it: `race` when it is of the venue, else the next race to post,
+  else the venue's last race). `feed` is the plain feed (docs/specs/board-feed.md, each row with
+  `t2_odds` and `move_t20_t2_pct`, which may be absent); `shadowFeed` is #121's shadow feed or
+  null. Rows join on (race_id, pool, combination). The HTML carries every hook of board.js's
+  `renderBoard` (venue tabs `data-venue`, the race strip's `#<hash>` links, the race block
   `data-race` containing `data-pool` blocks, rows `data-combination`, cells `data-col="odds"`,
   `"move-morning"`, `"move-t20"`), in the same order as `renderBoard` draws them for the same
-  plain feed: no sorting, highlighting or colouring by value. Rows come from the plain feed only:
+  plain feed: favourite first by the crowd's current odds (#498, the owner's display choice), never
+  sorted, highlighted or coloured by shadow value (D19). Rows come from the plain feed only:
   a shadow entry without a plain row draws nothing. Each row adds these cells:
-  - `data-col="move-t2"`: board.js's `formatMove(move_t2_pct)` with class `up` / `down` as the other
-    move cells; '-' when the figure is null or absent.
+  - `data-col="move-t20-t2"` (#498, the T-20→T-2 column, replacing the 'Since T-2' cell
+    `data-col="move-t2"`, which is gone): board.js's `formatMove(move_t20_t2_pct)` with class
+    `up` / `down` as the other move cells; '-' when the figure is null or absent.
   - `data-col="value"`: for WIN, `value_mean` then the band `value_q05` and `value_q95`, each with
     two decimals, in that order (e.g. `0.81 (0.74–0.88)`; no other decimal number in the cell).
     For every other pool, `value_at_low` and `value_at_high` with two decimals as `low–high`
@@ -36,9 +40,10 @@ sets `module.exports` (when `module` exists) to at least:
 - `poll() -> Promise`: one GET of `feed` and one of `shadow-feed` (relative or rooted), each with
   `If-None-Match` set to that URL's last ETag; a 200 replaces that feed, a 304 keeps it; while no
   shadow feed has been served (e.g. 503) the board still draws with every value '-'. It then sets
-  the innerHTML of the element with id `shadow` to
-  `renderShadow(feed, shadowFeed, {now: Date.now(), venue})`. The page starts polling at load and
-  polls again every 5 s (`setTimeout`/`setInterval` with 5000 ms).
+  the innerHTML of the element with id `shadow` to the shadow page of the selected venue and race.
+  The page starts polling at load and polls again every 5 s (`setTimeout`/`setInterval` with
+  5000 ms). As on the board page (#498): the URL hash selects the race at load, a strip link draws
+  that race alone, a poll keeps the selection and a venue tab draws that venue's default race.
 
 In the browser there is no module system: shadow.js must find board.js's functions some other way
 (board.js may expose them, e.g. on `window`, as long as test_board_page.py stays green). One test
@@ -53,7 +58,8 @@ not adopted. No stake words (stake, Kelly, wager, bet size, bet amount, fair odd
 in shadow.html, shadow.js, board.js or the rendered page, and no `<input>` or `<textarea>` does:
 the banner says 'no real money' rather than 'no stakes' for that reason.
 
-Both feeds are synthetic objects built here, of the shapes in the ticket.
+Both feeds are synthetic objects built here, of the shapes in the ticket; one test builds the plain
+feed with `feed.build_board` from synthetic odds logs under tmp_path.
 """
 
 from __future__ import annotations
@@ -68,6 +74,17 @@ from pathlib import Path
 
 import pytest
 from bs4 import BeautifulSoup
+
+# isort: split
+from page_fakes import (
+    BROWSER_FAKES,
+    chain_of,
+    click_target,
+    favourite_order,
+    kept_in_place,
+    moved_to_race,
+    strip_links,
+)
 
 REPO = Path(__file__).resolve().parents[3]
 WEB = REPO / "src" / "horsetrack" / "countries" / "japan" / "board" / "web"
@@ -116,7 +133,8 @@ function makeEl(id) {
     querySelector(sel) { return el("q:" + sel); }, querySelectorAll() { return []; },
     appendChild(c) { this.children.push(c); return c; }, append() {}, prepend() {},
     replaceChildren() { this.innerHTML = ""; }, closest() { return null; },
-    scrollIntoView() {}, focus() {}, matches() { return false; },
+    scrollIntoView(arg) { noteIntoView(this.id, arg); }, focus() {},
+    matches() { return false; },
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
   };
 }
@@ -131,13 +149,14 @@ global.document = {
   removeEventListener() {}, hidden: false, visibilityState: "visible",
 };
 global.addEventListener = (t, fn) => { (docHandlers[t] = docHandlers[t] || []).push(fn); };
+global.removeEventListener = () => {};
+/*BROWSER_FAKES*/
 global.setInterval = (fn, delay) => { timers.push({ fn, delay: Number(delay), keep: true });
   return timers.length; };
 global.setTimeout = (fn, delay) => { timers.push({ fn, delay: Number(delay), keep: false });
   return timers.length; };
 global.clearInterval = () => {}; global.clearTimeout = () => {};
 global.requestAnimationFrame = (cb) => setImmediate(() => cb(Date.now()));
-global.scrollTo = () => {};
 let servers = input.servers || {};
 global.fetch = async (url, init = {}) => {
   const u = String(url && url.url ? url.url : url);
@@ -184,6 +203,7 @@ const settle = async () => { for (let i = 0; i < 30; i++) await tick(); };
   for (const step of input.steps) {
     if (step.servers) servers = step.servers;
     const before = requests.length;
+    resetViewport();
     if (step.call) {
       results.push({ result: mods[step.mod || "shadow"][step.call](...step.args) });
       continue;
@@ -193,24 +213,41 @@ const settle = async () => { for (let i = 0; i < 30; i++) await tick(); };
     } else if (step.fire) {
       const due = timers.filter((t) => t.delay === step.fire && !t.done);
       for (const t of due) { if (!t.keep) t.done = true; t.fn(); }
+    } else if (step.click) {
+      clickChain(step.click, step.root || "shadow");
+    } else if (typeof step.hash === "string") {
+      location.hash = step.hash;
     }
     await settle();
-    results.push({ shadow: el("shadow").innerHTML, requests: requests.slice(before) });
+    results.push({ shadow: el("shadow").innerHTML, hash: location.hash,
+      requests: requests.slice(before), viewport: viewportState() });
   }
   fs.writeFileSync(OUT, JSON.stringify({ results, timers: timers.map((t) => t.delay) }));
 })().catch((e) => { console.error(e && e.stack ? e.stack : String(e)); process.exit(1); });
-"""
+""".replace("/*BROWSER_FAKES*/", BROWSER_FAKES)
 
 
 def run_js(
-    steps: list[dict], tmp_path: Path, *, servers: dict | None = None, browser: bool = False
+    steps: list[dict],
+    tmp_path: Path,
+    *,
+    servers: dict | None = None,
+    browser: bool = False,
+    hash_: str = "",
 ) -> dict:
     for path in (SCRIPT, BOARD_JS):
         assert path.is_file(), f"{path.relative_to(REPO)} is missing"
     out = tmp_path / "node-out.json"
+    payload = {
+        "steps": steps,
+        "servers": servers or {},
+        "browser": browser,
+        "now": ms(NOW),
+        "hash": hash_,
+    }
     proc = subprocess.run(
         [NODE, "-e", HARNESS, str(BOARD_JS), str(SCRIPT), str(out)],
-        input=json.dumps({"steps": steps, "servers": servers or {}, "browser": browser}),
+        input=json.dumps(payload),
         capture_output=True,
         text=True,
         timeout=60,
@@ -235,7 +272,8 @@ def rid(venue: str, no: int) -> str:
 
 
 def line(combo, odds, *, hi=None, mm=None, t20=None, t2=None, scr=False, no_t2=False) -> dict:
-    """One plain-feed row (board-feed.md), with the #40 amendment's T-2 fields unless no_t2."""
+    """One plain-feed row (board-feed.md), with the T-2 fields (#498) unless no_t2; `t2` is the
+    T-20 -> T-2 move, `move_t20_t2_pct`."""
     out = {
         "combination": combo,
         "odds": None if scr else odds,
@@ -248,7 +286,7 @@ def line(combo, odds, *, hi=None, mm=None, t20=None, t2=None, scr=False, no_t2=F
     }
     if not no_t2:
         out["t2_odds"] = None if scr else odds
-        out["move_t2_pct"] = None if scr else t2
+        out["move_t20_t2_pct"] = None if scr else t2
     return out
 
 
@@ -547,16 +585,24 @@ def venues_of(feed: dict) -> list[str]:
     return [v["venue"] for v in feed["venues"]]
 
 
+def race_keys(feed: dict) -> list[tuple[str, str]]:
+    return [(v["venue"], r["race_id"]) for v in feed["venues"] for r in v["races"]]
+
+
 def render_all(tmp_path: Path, feed=FEED, shadow=SHADOW) -> dict[str, BeautifulSoup]:
+    """race_id -> the shadow page of its venue with that race selected (one race per page)."""
+    keys = race_keys(feed)
     steps = [
-        call("renderShadow", feed, shadow, {"now": ms(NOW), "venue": v}) for v in venues_of(feed)
+        call("renderShadow", feed, shadow, {"now": ms(NOW), "venue": v, "race": r}) for v, r in keys
     ]
     shown = results(steps, tmp_path)
-    return {v: soup(html) for v, html in zip(venues_of(feed), shown, strict=True)}
+    return {r: soup(html) for (_, r), html in zip(keys, shown, strict=True)}
 
 
 def row_in(pages, venue, race_id, pool_code, combo):
-    return row_of(pool_block(race_block(pages[venue], race_id), pool_code), combo)
+    """The row in `pages` keyed by race_id (render_all) or, for one page, by venue."""
+    page = pages[race_id] if race_id in pages else pages[venue]
+    return row_of(pool_block(race_block(page, race_id), pool_code), combo)
 
 
 def decimals(shown: str) -> list[str]:
@@ -633,20 +679,21 @@ def test_renders_values_for_every_race_and_pool(tmp_path):
     assert names.index("board.js") < names.index("shadow.js"), srcs
 
     idx, taus = shadow_index(SHADOW), shadow_races(SHADOW)
+    keys = race_keys(FEED)
     boards = results(
         [
-            call("renderBoard", FEED, {"now": ms(NOW), "venue": v}, mod="board")
-            for v in venues_of(FEED)
+            call("renderBoard", FEED, {"now": ms(NOW), "venue": v, "race": r}, mod="board")
+            for v, r in keys
         ],
         tmp_path,
     )
     pages = render_all(tmp_path)
-    for venue, board_html in zip(venues_of(FEED), boards, strict=True):
-        page, board = pages[venue], soup(board_html)
+    for (venue, race_id), board_html in zip(keys, boards, strict=True):
+        page, board = pages[race_id], soup(board_html)
         assert {e["data-venue"] for e in page.select("[data-venue]")} == set(venues_of(FEED))
+        assert [b["data-race"] for b in race_blocks(page)] == [race_id]  # one race per page
         races = [r for v in FEED["venues"] if v["venue"] == venue for r in v["races"]]
-        assert [b["data-race"] for b in race_blocks(page)] == [r["race_id"] for r in races]
-        for race_ in races:
+        for race_ in [r for r in races if r["race_id"] == race_id]:
             block = race_block(page, race_["race_id"])
             assert {e["data-pool"] for e in block.select("[data-pool]")} == set(race_["pools"])
             tau = (taus.get(race_["race_id"]) or {}).get("tau_bucket_min")
@@ -724,16 +771,19 @@ def test_null_values_show_a_dash(tmp_path):
     for r in no_tau["races"]:
         if r["race_id"] == rid("TOK", 1):
             r["tau_bucket_min"] = None
-    with_nulls, without_shadow, tau_null = results(
+    t1, t11, k3, k10 = rid("TOK", 1), rid("TOK", 11), rid("KYO", 3), rid("KYO", 10)
+    with_nulls, t11_page, kyo3_bare, kyo10_bare, tau_null = results(
         [
-            call("renderShadow", FEED, SHADOW, {"now": ms(NOW), "venue": "TOK"}),
-            call("renderShadow", FEED, None, {"now": ms(NOW), "venue": "KYO"}),
-            call("renderShadow", FEED, no_tau, {"now": ms(NOW), "venue": "TOK"}),
+            call("renderShadow", FEED, SHADOW, {"now": ms(NOW), "venue": "TOK", "race": t1}),
+            call("renderShadow", FEED, SHADOW, {"now": ms(NOW), "venue": "TOK", "race": t11}),
+            call("renderShadow", FEED, None, {"now": ms(NOW), "venue": "KYO", "race": k3}),
+            call("renderShadow", FEED, None, {"now": ms(NOW), "venue": "KYO", "race": k10}),
+            call("renderShadow", FEED, no_tau, {"now": ms(NOW), "venue": "TOK", "race": t1}),
         ],
         tmp_path,
     )
-    tok, kyo = {"TOK": soup(with_nulls)}, {"KYO": soup(without_shadow)}
-    t1, k3, k10 = rid("TOK", 1), rid("KYO", 3), rid("KYO", 10)
+    tok = {"TOK": soup(with_nulls)}
+    kyo = {k3: soup(kyo3_bare), k10: soup(kyo10_bare)}
     dash_cells = [
         (t1, "WIN", "3", "value"),  # all-null entry (scratched)
         (t1, "PLACE", "3", "value"),
@@ -751,8 +801,7 @@ def test_null_values_show_a_dash(tmp_path):
         "0.12",
     ]
     # a band that is null: the mean shows, the band is '-'
-    t11 = {"TOK": soup(with_nulls)}
-    partial = text(cell(row_in(t11, "TOK", rid("TOK", 11), "WIN", "2"), "value"))
+    partial = text(cell(row_in({"TOK": soup(t11_page)}, "TOK", t11, "WIN", "2"), "value"))
     assert decimals(partial) == ["0.83"] and "-" in partial.replace("0.83", ""), partial
     # no shadow feed at all, and a race the shadow feed lacks: every value and bucket is '-'
     kyo_races = [r for v in FEED["venues"] if v["venue"] == "KYO" for r in v["races"]]
@@ -767,7 +816,8 @@ def test_null_values_show_a_dash(tmp_path):
                 assert not chips(row_el), key
     # KYO 10 is missing from the shadow feed: '-' even when the shadow feed is there
     with_shadow = {"KYO": soup(results(
-        [call("renderShadow", FEED, SHADOW, {"now": ms(NOW), "venue": "KYO"})], tmp_path
+        [call("renderShadow", FEED, SHADOW, {"now": ms(NOW), "venue": "KYO", "race": k10})],
+        tmp_path,
     )[0])}  # fmt: skip
     for n in ("1", "2", "3", "4"):
         row_el = row_in(with_shadow, "KYO", k10, "WIN", n)
@@ -782,7 +832,8 @@ def test_null_values_show_a_dash(tmp_path):
     # the page polls a shadow feed that is not there yet: the board shows, values are '-'
     out = run_js([{"poll": True}], tmp_path, servers={"plain": {"feed": FEED, "etag": '"p"'}})
     polled = {"KYO": soup(out["results"][-1]["shadow"])}
-    for race_ in FEED["venues"][0]["races"]:
+    assert [b["data-race"] for b in race_blocks(polled["KYO"])] == [k3]  # the next race to post
+    for race_ in FEED["venues"][0]["races"][:1]:
         for pool_code, body in race_["pools"].items():
             for row_ in body["rows"]:
                 row_el = row_in(polled, "KYO", race_["race_id"], pool_code, row_["combination"])
@@ -834,40 +885,164 @@ def test_the_bucket_label_is_shown(tmp_path):
 
 
 @needs_node
-def test_the_t2_move_is_shown(tmp_path):
+def test_the_t20_to_t2_move_is_shown(tmp_path):
     pages = render_all(tmp_path)
     count = 0
     for venue, race_, pool_code, row_ in all_rows(FEED):
         key = (race_["race_id"], pool_code, row_["combination"])
-        el = cell(row_in(pages, venue, *key), "move-t2")
-        pct = row_.get("move_t2_pct")  # absent on a feed without the T-2 amendment
+        row_el = row_in(pages, venue, *key)
+        el = cell(row_el, "move-t20-t2")
+        pct = row_.get("move_t20_t2_pct")  # absent on a feed without the T-2 fields
         assert move_text_ok(text(el), pct), (key, text(el), pct)
         assert ("up" in classes(el)) == (pct is not None and pct > 0), (key, pct)
         assert ("down" in classes(el)) == (pct is not None and pct < 0), (key, pct)
+        assert not row_el.select('[data-col="move-t2"]'), "the blank 'Since T-2' cell is back"
         count += pct is not None
     assert count >= 20
 
 
+def _write_logged_day(captures: dict[datetime, dict[str, float]], post: datetime) -> None:
+    """One TOK race (5R) of synthetic WIN captures, and its post time, under the data dir."""
+    from horsetrack.core import paths
+    from horsetrack.countries.japan import odds_log
+
+    log = paths.odds_snapshot_path("jra", DAY, "TOK")
+    for at, prices in captures.items():
+        stamp = utc_text(at)
+        rows = [
+            {
+                "snapshot_utc": stamp,
+                "race_id": rid("TOK", 5),
+                "pool": "WIN",
+                "combination": combo,
+                "odds": odds,
+                "status_raw": f"{at.hour:02d}時{at.minute:02d}分現在",
+                "source_update_utc": stamp,
+            }
+            for combo, odds in prices.items()
+        ]
+        odds_log.append_capture(log, rows)
+    odds_log.write_post_times(
+        log.with_name("TOK.races.json"), {5: post.astimezone(UTC)}, jst(6, 0).astimezone(UTC)
+    )
+
+
 @needs_node
-def test_rows_keep_the_board_order(tmp_path):
+def test_a_logged_day_shows_the_t20_to_t2_move(tmp_path, monkeypatch):
+    """Captures at T-20 and T-2 of a synthetic day, through build_board and the page: the
+    T-20→T-2 cell shows t2 / t20 - 1; before the T-2 capture it shows '-'."""
+    from horsetrack.core import paths
+    from horsetrack.countries.japan.board import feed as feed_mod
+
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(tmp_path / "data"))
+    post = jst(11, 0)  # T-20 10:40, T-2 10:58
+    _write_logged_day(
+        {
+            jst(8, 0): {"1": 4.0, "2": 2.5, "3": 9.0},
+            jst(10, 40): {"1": 5.0, "2": 2.0, "3": 9.0},
+            jst(10, 58): {"1": 4.0, "2": 2.6, "3": 12.6},
+            jst(10, 59): {"1": 3.5, "2": 2.6, "3": 12.0},
+        },
+        post,
+    )
+    day = datetime.fromisoformat(DAY).date()
+    late, early = (
+        json.loads(json.dumps(feed_mod.build_board(day, now=lambda at=at: at)))
+        for at in (jst(10, 59, 30), jst(10, 57))
+    )
+    pages = results(
+        [
+            call("renderShadow", late, None, {"now": ms(jst(10, 59, 30)), "venue": "TOK"}),
+            call("renderShadow", early, None, {"now": ms(jst(10, 57)), "venue": "TOK"}),
+        ],
+        tmp_path,
+    )
+    late_page, early_page = ({"TOK": soup(p)} for p in pages)
+    # combination: (the T-20→T-2 cell, its class): 4.0/5.0, 2.6/2.0, 12.6/9.0
+    want = {"1": ("-20.0%", "down"), "2": ("+30.0%", "up"), "3": ("+40.0%", "up")}
+    for combo, (shown, cls) in want.items():
+        el = cell(row_in(late_page, "TOK", rid("TOK", 5), "WIN", combo), "move-t20-t2")
+        assert text(el) == shown, (combo, text(el))
+        assert cls in classes(el), (combo, classes(el))
+        before = cell(row_in(early_page, "TOK", rid("TOK", 5), "WIN", combo), "move-t20-t2")
+        assert text(before) == "-", (combo, text(before))
+        assert "up" not in classes(before) and "down" not in classes(before)
+
+
+# A Win pool whose crowd order, feed order and shadow-value order all differ, with a tie.
+ORDER_FEED = {
+    "race_date": DAY,
+    "generated_utc": utc_text(NOW),
+    "venues": [
+        {
+            "venue": "TOK",
+            "races": [
+                race(
+                    "TOK",
+                    7,
+                    jst(11, 0),
+                    NOW,
+                    {
+                        "WIN": pool(
+                            line("1", 12.0, mm=1.0, t20=1.0, t2=1.0),
+                            line("2", 3.3, mm=1.0, t20=1.0, t2=1.0),
+                            line("3", None, scr=True),
+                            line("4", 1.7, mm=1.0, t20=1.0, t2=1.0),
+                            line("10", 3.3, mm=1.0, t20=1.0, t2=1.0),
+                        ),
+                    },
+                )
+            ],
+        }
+    ],
+}
+ORDER_SHADOW = {
+    "race_date": DAY,
+    "generated_utc": utc_text(NOW),
+    "models": {"WIN": "v0-synthetic"},
+    "races": [
+        shadow_race(
+            "TOK",
+            7,
+            jst(11, 0),
+            5,
+            {
+                "WIN": {
+                    "1": win(1.4, 1.3, 1.5),
+                    "2": win(0.6, 0.5, 0.7),
+                    "3": win(None, None, None, "scratched"),
+                    "4": win(0.9, 0.8, 1.0),
+                    "10": win(1.1, 1.0, 1.2),
+                }
+            },
+        )
+    ],
+}
+
+
+@needs_node
+def test_rows_run_favourite_first_as_on_the_board(tmp_path):
+    keys = race_keys(FEED)
     steps = []
-    for v in venues_of(FEED):
-        steps.append(call("renderBoard", FEED, {"now": ms(NOW), "venue": v}, mod="board"))
-        steps.append(call("renderShadow", FEED, SHADOW, {"now": ms(NOW), "venue": v}))
+    for v, r in keys:
+        opts = {"now": ms(NOW), "venue": v, "race": r}
+        steps.append(call("renderBoard", FEED, opts, mod="board"))
+        steps.append(call("renderShadow", FEED, SHADOW, opts))
+    opts = {"now": ms(NOW), "venue": "TOK"}
+    steps.append(call("renderShadow", ORDER_FEED, ORDER_SHADOW, opts))
     shown = results(steps, tmp_path)
-    for i, venue in enumerate(venues_of(FEED)):
+    for i, (_, race_id) in enumerate(keys):
         board, page = soup(shown[2 * i]), soup(shown[2 * i + 1])
-        assert order_of(page) == order_of(board), venue
-        # independently: feed order of races and rows, the board's pool order
-        want = []
-        for race_ in next(v for v in FEED["venues"] if v["venue"] == venue)["races"]:
-            rank = ["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE"]
-            for pool_code in sorted(race_["pools"], key=rank.index):
-                want += [
-                    (race_["race_id"], pool_code, r["combination"])
-                    for r in race_["pools"][pool_code]["rows"]
-                ]
-        assert order_of(page) == want, venue
+        assert order_of(page) == order_of(board), race_id
+        # independently: the board's pool order, rows favourite first by the crowd's odds
+        race_ = next(r for v in FEED["venues"] for r in v["races"] if r["race_id"] == race_id)
+        rank = ["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE"]
+        want = [
+            (race_id, pool_code, combo)
+            for pool_code in sorted(race_["pools"], key=rank.index)
+            for combo in favourite_order(race_["pools"][pool_code]["rows"])
+        ]
+        assert order_of(page) == want, race_id
         for block in race_blocks(page):
             for pool_el in block.select("[data-pool]"):
                 values = pool_el.select('[data-col="value"]')
@@ -875,9 +1050,78 @@ def test_rows_keep_the_board_order(tmp_path):
                 assert len({tuple(classes(v)) for v in figures}) <= 1, "value cells styled by value"
                 assert not [v for v in values if v.get("style")], "inline style on a value cell"
                 assert not [r for r in pool_el.select("[data-combination]") if r.get("style")]
-    tok = soup(shown[3])
-    assert not tok.select('[data-combination="99"]'), "a shadow-only row was drawn"
-    assert not tok.select('[data-combination="3,9"]'), "a shadow-only row was drawn"
+    tok1 = soup(shown[2 * keys.index(("TOK", rid("TOK", 1))) + 1])
+    assert not tok1.select('[data-combination="99"]'), "a shadow-only row was drawn"
+    assert not tok1.select('[data-combination="3,9"]'), "a shadow-only row was drawn"
+    # by the crowd's odds, ties by number ('2' before '10'), never by the shadow value
+    hand = pool_block(race_block(soup(shown[-1]), rid("TOK", 7)), "WIN")
+    combos = [e["data-combination"] for e in hand.select("[data-combination]")]
+    assert combos == ["4", "2", "10", "1", "3"], combos
+
+
+@needs_node
+def test_the_hash_and_the_strip_pick_the_race_and_a_poll_keeps_it(tmp_path):
+    k3, k10, t1 = rid("KYO", 3), rid("KYO", 10), rid("TOK", 1)
+    first = soup(results([call("renderShadow", FEED, SHADOW, {"now": ms(NOW)})], tmp_path)[0])
+    assert [b["data-race"] for b in race_blocks(first)] == [k3], "KYO 3 posts next at NOW"
+    links = strip_links(first, race_blocks(first))
+    assert set(links) == {3, 10}
+    tok_tab = first.select_one('[data-venue="TOK"]')
+    assert tok_tab is not None
+
+    newer = copy.deepcopy(SHADOW)
+    newer["races"][1]["pools"]["WIN"]["2"] = win(1.37, 1.29, 1.46, "tail")
+    plain = {"plain": {"feed": FEED, "etag": '"p1"'}}
+    one = {**plain, "shadow": {"feed": SHADOW, "etag": '"s1"'}}
+    two = {**plain, "shadow": {"feed": newer, "etag": '"s2"'}}
+    steps = [
+        {"fire": 5000, "servers": two},  # a poll with a new shadow feed
+        {"click": chain_of(click_target(links[3]), "shadow")},  # 3R on the strip
+        {"fire": 5000},
+        {"click": chain_of(tok_tab, "shadow")},  # the TOK tab
+        {"fire": 5000},
+    ]
+    out = run_js(steps, tmp_path, servers=one, browser=True, hash_=links[10]["href"])
+    got = [[b["data-race"] for b in race_blocks(soup(r["shadow"]))] for r in out["results"]]
+    assert got == [[k10], [k10], [k3], [k3], [t1], [t1]], got  # loaded with KYO 10's hash
+    assert out["results"][2]["hash"] == links[3]["href"], out["results"][2]["hash"]
+
+
+@needs_node
+def test_a_newly_selected_race_moves_the_viewport_and_a_poll_leaves_it(tmp_path):
+    # The reader is page_fakes.READ_Y px down before every step. Picking another race (strip
+    # link, back) brings it to the top of the viewport; a poll, new values or not, leaves it.
+    k3, k10, t1 = rid("KYO", 3), rid("KYO", 10), rid("TOK", 1)
+    first = soup(results([call("renderShadow", FEED, SHADOW, {"now": ms(NOW)})], tmp_path)[0])
+    links = strip_links(first, race_blocks(first))
+    to10 = links[10]["href"]
+    tok_tab = first.select_one('[data-venue="TOK"]')
+    newer = copy.deepcopy(SHADOW)
+    newer["races"][1]["pools"]["WIN"]["2"] = win(1.37, 1.29, 1.46, "tail")
+    plain = {"plain": {"feed": FEED, "etag": '"p1"'}}
+    one = {**plain, "shadow": {"feed": SHADOW, "etag": '"s1"'}}
+    two = {**plain, "shadow": {"feed": newer, "etag": '"s2"'}}
+    # (step, race drawn after it, the viewport moves to the race)
+    table = [
+        ({"fire": 5000}, k10, False),  # 304s
+        ({"fire": 5000, "servers": two}, k10, False),  # new values, same race
+        ({"click": chain_of(click_target(links[3]), "shadow")}, k3, True),  # 3R on the strip
+        ({"fire": 5000, "servers": one}, k3, False),
+        ({"hash": to10}, k10, True),  # back
+        ({"fire": 5000}, k10, False),
+        ({"click": chain_of(tok_tab, "shadow")}, t1, True),  # the TOK tab
+        ({"fire": 5000, "servers": two}, t1, False),
+    ]
+    out = run_js([step for step, _, _ in table], tmp_path, servers=one, browser=True, hash_=to10)
+    steps_out = out["results"][1:]  # results[0] is the page at load
+    got = [[b["data-race"] for b in race_blocks(soup(r["shadow"]))] for r in steps_out]
+    assert got == [[race] for _, race, _ in table], got
+    for i, ((step, race, moves), result) in enumerate(zip(table, steps_out, strict=True)):
+        where = (i, sorted(step)[0], race, result["viewport"])
+        if moves:
+            assert moved_to_race(result["viewport"]), ("left deep in the new race", where)
+        else:
+            assert kept_in_place(result["viewport"]), ("a poll moved the reader", where)
 
 
 def test_page_has_no_stake_words_or_amount_inputs(tmp_path):
