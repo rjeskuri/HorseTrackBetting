@@ -14,8 +14,9 @@ pushed into the scan. Per year it counts:
 - dividends per pool by (race_id, pool, combination), and of the matched rows the equal ones;
 - matched races whose runners match one to one with every Win odds equal (`win_odds_agree`), and
   whose dividend rows match one to one with every dividend equal (`payouts_agree`); a race with a
-  repeated runner key in either store agrees on neither, one with an unnumbered runner in either
-  store does not agree on Win odds;
+  repeated runner key in either store agrees on neither, even when every value matches (#394: a
+  race whose runners cannot be keyed one to one is not counted as agreeing), and one with an
+  unnumbered runner in either store does not agree on Win odds;
 - rows whose key occurs more than once in one store (`<table>.<source>_duplicate`); they are still
   matched row by row;
 - runners with a null `horse_no` (`runners.<source>_unnumbered`, #394): they have no key, so they
@@ -108,8 +109,14 @@ class Reconciliation:
             for f in fields:
                 lines.append(f"  {f} equal: {_of(o, f'{table}.equal.{f}', both)}")
             if table == "races":
-                lines.append(f"  every Win odds agree: {_of(o, 'races.win_odds_agree', both)}")
-                lines.append(f"  every payout agrees: {_of(o, 'races.payouts_agree', both)}")
+                lines.append(
+                    "  every Win odds agree (and no repeated or unnumbered runner key): "
+                    f"{_of(o, 'races.win_odds_agree', both)}"
+                )
+                lines.append(
+                    "  every payout agrees (and no repeated runner key): "
+                    f"{_of(o, 'races.payouts_agree', both)}"
+                )
         for pool in _pools(o):
             p = f"dividends.{pool}."
             equal = _of(o, p + "equal", p + "both")
@@ -141,6 +148,9 @@ class Reconciliation:
             "as minutes of the day, `finish_time_s` and `win_odds` at the tenth. "
             "`<table>.<source>_duplicate` counts the rows whose key repeats in that store; "
             "`runners.<source>_unnumbered` the runners with no horse number there (not matched). "
+            "A race with a repeated runner key in either store does not count as agreeing on Win "
+            "odds or payouts even when every value matches, and one with an unnumbered runner does "
+            "not count as agreeing on Win odds. "
             "`<check>.<status>` breaks a one-store or repeated-key count down by the race's "
             "`status` in that store's races (`no_race`: not in that store's races).",
             "",

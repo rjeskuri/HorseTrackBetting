@@ -217,7 +217,8 @@ post time a null `post_time_local`.
   table's sort key (`race_id`, `horse_no`, `horse_id`) puts the unnumbered runners last in their
   race, by horse id. A reader keyed on `(race_id, horse_no)` drops or counts those rows apart
   (`reconcile` counts them as `runners.<source>_unnumbered`); `horse_runs` keeps them as runs
-  with a null `draw`.
+  with a null `draw`. A `runners.parquet` built before #394 still holds 99 there: rebuild it
+  (`horsetrack japan jravan runners`, full range) before relying on the null.
 
 The run on the export: `horsetrack japan jravan runners`, run 2026-11-26. Every count, span,
 share, rate, wall time and peak memory of it is withheld (D21), in two files under
@@ -666,8 +667,13 @@ at a time, and changes neither store:
 - A runner with a null `horse_no` (jravan's undrawn runners of abandoned races) has no key: it
   stays out of the runner merge and of `runners.<source>_duplicate`, and is counted as
   `runners.<source>_unnumbered`. A matched race with a repeated runner key in either store
-  agrees on neither Win odds nor payouts; one with an unnumbered runner in either store does not
-  agree on Win odds.
+  agrees on neither Win odds nor payouts, even when every value matches (a race whose runners
+  cannot be keyed one to one is not counted as agreeing); one with an unnumbered runner in either
+  store does not agree on Win odds. The printed lines and the report legend say so.
+- An existing `runners.parquet` keeps the abandoned races' undrawn runners at horse number 99, so
+  `reconcile` run straight after this change still reports those duplicates. Run a full
+  `horsetrack japan jravan runners` rebuild first; only then does `reconcile` reflect the null
+  `horse_no`.
 - The command prints the overall counts and rates; the detail by year, with up to 20 failing race
   ids per check, goes to `reports/jravan-reconcile.md` through `write_report`
   (`sources=('jravan', 'jra')`), which refuses the repository. Its figures come from a licensed
