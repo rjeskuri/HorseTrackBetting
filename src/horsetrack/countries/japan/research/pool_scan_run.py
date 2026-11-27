@@ -1820,17 +1820,17 @@ def render_public_report(result: ScanResult) -> str:
         "(`authority`).",
         f"- It supersedes v3, `{v3}` (spec sha256 `{SUPERSEDED_SPECS[v3]}`), v2, `{v2}` (spec "
         f"sha256 `{SUPERSEDED_SPECS[v2]}`), and v1, `{v1}` (spec sha256 "
-        f"`{SUPERSEDED_SPECS[v1]}`), all run on 2026-11-27. The third review of PR #496 found "
-        "that v3 read a Place or Wide cell with no hit, in an odds band that pays in other "
-        "cells, as a certain total loss: its meeting-bootstrap se is 0, so its shrink weight was "
-        "1 and its omega and upper bound exactly 0. v4 gives such a cell the Jeffreys zero-hit "
-        "se and changes nothing for a cell that paid. The second review found that v2 scored a "
-        "race whose dividend named a combination off the priced board as if every ticket lost, "
-        "read a Place or Wide band that paid nothing as a known zero, reported variants searched "
-        "as the family size, decoded price row groups that span a holdout day, crossed class "
-        "with three dimensions only, and gave Place and Wide no #78 fit. v1's defects are in the "
-        "spec (`supersedes`). Their records stay in the registry, superseded; nothing is "
-        "deleted.",
+        f"`{SUPERSEDED_SPECS[v1]}`), all frozen and run on 2026-11-27 (UTC). The third review "
+        "of PR #496 found that v3 read a Place or Wide cell with no hit, in an odds band that "
+        "pays in other cells, as a certain total loss: its meeting-bootstrap se is 0, so its "
+        "shrink weight was 1 and its omega and upper bound exactly 0. v4 gives such a cell the "
+        "Jeffreys zero-hit se and changes nothing for a cell that paid. The second review found "
+        "that v2 scored a race whose dividend named a combination off the priced board as if "
+        "every ticket lost, read a Place or Wide band that paid nothing as a known zero, "
+        "reported variants searched as the family size, decoded price row groups that span a "
+        "holdout day, crossed class with three dimensions only, and gave Place and Wide no #78 "
+        "fit. v1's defects are in the spec (`supersedes`). Their records stay in the registry, "
+        "superseded; nothing is deleted.",
         f"- Requested range: development days from {result.start} to {result.end} (the run's "
         "arguments, not the store's measured span); holdout days are never read and "
         "`LockedHoldout` is never opened.",
