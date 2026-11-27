@@ -1,4 +1,4 @@
-"""The shadow page (ticket #122): `shadow.html` and `shadow.js` in
+"""The shadow page (tickets #122, #498): `shadow.html` and `shadow.js` in
 `src/horsetrack/countries/japan/board/web/`, the live board (#42's board.js) plus each row's shadow
 value, bucket label and avoid-flag chips, driven from node under a tiny fake DOM as in
 test_board_page.py.
@@ -9,17 +9,33 @@ Contract pinned here (the coder implements against it):
 `shadow.js`, as plain `<script src>` tags) and reuses board.js's render functions. Under node it
 sets `module.exports` (when `module` exists) to at least:
 
-- `renderShadow(feed, shadowFeed, {now, venue}) -> string`: the HTML for one venue (the plain
-  feed's first venue by default; `now` in ms since the epoch). `feed` is the plain feed
-  (docs/specs/board-feed.md, each row amended with `t2_odds` and `move_t2_pct`, which may be
-  absent); `shadowFeed` is #121's shadow feed or null. Rows join on (race_id, pool, combination).
-  The HTML carries every hook of board.js's `renderBoard` (venue tabs `data-venue`, race blocks
+- `renderShadow(feed, shadowFeed, {now, venue, race}) -> string`: the HTML for one race of one
+  venue (the plain feed's first venue by default; `now` in ms since the epoch; the race chosen as
+  board.js's `renderBoard` chooses it: `race` when it is of the venue, else the next race to post,
+  else the venue's last race). `feed` is the plain feed (docs/specs/board-feed.md, each row with
+  `t10_odds`, `t5_odds`, `t2_odds` and `move_t20_t2_pct`, which may be absent); `shadowFeed` is
+  #121's shadow feed (each entry with #499's `ladder`, which may be absent) or
+  null. Rows join on (race_id, pool, combination). The HTML carries every hook of board.js's
+  `renderBoard` (venue tabs `data-venue`, the race strip's `#<hash>` links, the race block
   `data-race` containing `data-pool` blocks, rows `data-combination`, cells `data-col="odds"`,
   `"move-morning"`, `"move-t20"`), in the same order as `renderBoard` draws them for the same
-  plain feed: no sorting, highlighting or colouring by value. Rows come from the plain feed only:
+  plain feed: favourite first by the crowd's current odds (#498, the owner's display choice), never
+  sorted, highlighted or coloured by shadow value (D19). Rows come from the plain feed only:
   a shadow entry without a plain row draws nothing. Each row adds these cells:
-  - `data-col="move-t2"`: board.js's `formatMove(move_t2_pct)` with class `up` / `down` as the other
-    move cells; '-' when the figure is null or absent.
+  - The odds ladder (#499, replacing #498's single T-20→T-2 cell `data-col="move-t20-t2"`, which
+    is gone, as is the 'Since T-2' cell `data-col="move-t2"`): five cells `data-col="ladder-t20"`,
+    `"ladder-t10"`, `"ladder-t5"`, `"ladder-t2"`, `"ladder-final"`, in that order, under header
+    cells reading `T-20`, `T-10`, `T-5`, `T-2`, `Final` in the same columns. Each shows the shadow
+    entry's `ladder` checkpoint ("20", "10", "5", "2", "0"): an observed one as its odds with one
+    decimal (e.g. `4.8`), class `up` / `down` when it is above / below the T-20 odds (none for
+    the T-20 cell itself, or without a T-20 figure); a projected one as `≈` and its odds with one
+    decimal (e.g. `≈4.8`), with class `projected`; a null one as `-`. A row with no ladder (no
+    shadow entry, a pool the shadow feed lacks such as Quinella, no shadow feed) shows the plain
+    row's `t20_odds`, `t10_odds`, `t5_odds`, `t2_odds` as observed and `-` for the rest (the final
+    always). The two feeds refresh apart, so per checkpoint an observed figure wins: where the
+    shadow ladder's point is projected or null and the plain row's reference for it is not null,
+    the cell shows the plain reference as observed (no `≈`, no `projected`); an observed ladder
+    point stays when the plain reference is null. A legend line in shadow.html explains the `≈`.
   - `data-col="value"`: for WIN, `value_mean` then the band `value_q05` and `value_q95`, each with
     two decimals, in that order (e.g. `0.81 (0.74–0.88)`; no other decimal number in the cell).
     For every other pool, `value_at_low` and `value_at_high` with two decimals as `low–high`
@@ -36,9 +52,12 @@ sets `module.exports` (when `module` exists) to at least:
 - `poll() -> Promise`: one GET of `feed` and one of `shadow-feed` (relative or rooted), each with
   `If-None-Match` set to that URL's last ETag; a 200 replaces that feed, a 304 keeps it; while no
   shadow feed has been served (e.g. 503) the board still draws with every value '-'. It then sets
-  the innerHTML of the element with id `shadow` to
-  `renderShadow(feed, shadowFeed, {now: Date.now(), venue})`. The page starts polling at load and
-  polls again every 5 s (`setTimeout`/`setInterval` with 5000 ms).
+  the innerHTML of the element with id `shadow` to the shadow page of the selected venue and race.
+  The page starts polling at load and polls again every 5 s (`setTimeout`/`setInterval` with
+  5000 ms). As on the board page (#498): the URL hash selects the race at load, a strip link draws
+  that race alone, a poll keeps the selection and a venue tab draws that venue's default race.
+  A poll that redraws the same race keeps each pool's horizontal scroll: the `[data-pool]` element
+  (shadow.html's `.pool`, `overflow-x: auto`) has the same `scrollLeft` after the redraw as before.
 
 In the browser there is no module system: shadow.js must find board.js's functions some other way
 (board.js may expose them, e.g. on `window`, as long as test_board_page.py stays green). One test
@@ -53,13 +72,15 @@ not adopted. No stake words (stake, Kelly, wager, bet size, bet amount, fair odd
 in shadow.html, shadow.js, board.js or the rendered page, and no `<input>` or `<textarea>` does:
 the banner says 'no real money' rather than 'no stakes' for that reason.
 
-Both feeds are synthetic objects built here, of the shapes in the ticket.
+Both feeds are synthetic objects built here, of the shapes in the ticket; one test builds the plain
+feed with `feed.build_board` from synthetic odds logs under tmp_path.
 """
 
 from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -68,6 +89,18 @@ from pathlib import Path
 
 import pytest
 from bs4 import BeautifulSoup
+
+# isort: split
+from page_fakes import (
+    BROWSER_FAKES,
+    chain_of,
+    click_target,
+    favourite_order,
+    kept_in_place,
+    moved_to_race,
+    strip_links,
+)
+from shadow_fakes import FakeOrdering, FakeWin
 
 REPO = Path(__file__).resolve().parents[3]
 WEB = REPO / "src" / "horsetrack" / "countries" / "japan" / "board" / "web"
@@ -116,7 +149,8 @@ function makeEl(id) {
     querySelector(sel) { return el("q:" + sel); }, querySelectorAll() { return []; },
     appendChild(c) { this.children.push(c); return c; }, append() {}, prepend() {},
     replaceChildren() { this.innerHTML = ""; }, closest() { return null; },
-    scrollIntoView() {}, focus() {}, matches() { return false; },
+    scrollIntoView(arg) { noteIntoView(this.id, arg); }, focus() {},
+    matches() { return false; },
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
   };
 }
@@ -131,13 +165,14 @@ global.document = {
   removeEventListener() {}, hidden: false, visibilityState: "visible",
 };
 global.addEventListener = (t, fn) => { (docHandlers[t] = docHandlers[t] || []).push(fn); };
+global.removeEventListener = () => {};
+/*BROWSER_FAKES*/
 global.setInterval = (fn, delay) => { timers.push({ fn, delay: Number(delay), keep: true });
   return timers.length; };
 global.setTimeout = (fn, delay) => { timers.push({ fn, delay: Number(delay), keep: false });
   return timers.length; };
 global.clearInterval = () => {}; global.clearTimeout = () => {};
 global.requestAnimationFrame = (cb) => setImmediate(() => cb(Date.now()));
-global.scrollTo = () => {};
 let servers = input.servers || {};
 global.fetch = async (url, init = {}) => {
   const u = String(url && url.url ? url.url : url);
@@ -162,6 +197,126 @@ global.fetch = async (url, init = {}) => {
     headers: new Headers({ ETag: s.etag, "Content-Type": "application/json" }),
   };
 };
+// input.liveDom: #shadow's innerHTML is parsed into fresh elements on every write, as a browser
+// replaces them (each with scrollLeft 0); querySelector(All) on #shadow and the document find them.
+const VOID_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+  "meta", "source", "track", "wbr"]);
+const unescapeAttr = (s) => s.replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+  .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+function parseAttrs(textIn) {
+  const attrs = {}, re = /([^\s=\/>"']+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?/g;
+  let m;
+  while ((m = re.exec(textIn))) {
+    const v = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4] !== undefined ? m[4]
+      : "";
+    attrs[m[1].toLowerCase()] = unescapeAttr(v);
+  }
+  return attrs;
+}
+function descendants(node) {
+  const out = [];
+  const walk = (n) => { for (const c of n.liveChildren || []) { out.push(c); walk(c); } };
+  walk(node);
+  return out;
+}
+function queryIn(node, sel) { return descendants(node).filter((e) => selectorMatches(e, sel)); }
+function liveNode(tag, attrs, parent) {
+  const cls = () => String(attrs.class || "").split(/\s+/).filter(Boolean);
+  const n = {
+    tagName: tag.toUpperCase(), nodeName: tag.toUpperCase(), nodeType: 1, attrs,
+    parentElement: parent, parentNode: parent, liveChildren: [],
+    scrollLeft: 0, scrollTop: 0, scrollWidth: 2000, clientWidth: 360, offsetLeft: 0,
+    offsetWidth: 0, offsetTop: 0,
+    get id() { return attrs.id || ""; },
+    get className() { return attrs.class || ""; },
+    get children() { return this.liveChildren.slice(); },
+    get dataset() {
+      const d = {};
+      for (const k of Object.keys(attrs)) {
+        if (!k.startsWith("data-")) continue;
+        d[k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = attrs[k];
+      }
+      return d;
+    },
+    getAttribute(k) { return k in attrs ? attrs[k] : null; },
+    hasAttribute(k) { return k in attrs; },
+    setAttribute(k, v) { attrs[k] = String(v); },
+    removeAttribute(k) { delete attrs[k]; },
+    classList: { contains: (c) => cls().includes(c), add() {}, remove() {}, toggle() {} },
+    matches(sel) { return selectorMatches(this, sel); },
+    closest(sel) {
+      for (let at = this; at; at = at.parentElement) if (selectorMatches(at, sel)) return at;
+      return null;
+    },
+    querySelectorAll(sel) { return queryIn(this, sel); },
+    querySelector(sel) { return queryIn(this, sel)[0] || null; },
+    getElementsByClassName(c) { return descendants(this).filter((e) => e.classList.contains(c)); },
+    getElementsByTagName(t) {
+      return descendants(this).filter((e) => t === "*" || e.tagName === t.toUpperCase());
+    },
+    scrollTo(a, b) {
+      if (a && typeof a === "object") {
+        if ("left" in a) this.scrollLeft = Number(a.left);
+        if ("top" in a) this.scrollTop = Number(a.top);
+      } else if (a !== undefined) {
+        this.scrollLeft = Number(a);
+        if (b !== undefined) this.scrollTop = Number(b);
+      }
+    },
+    addEventListener() {}, removeEventListener() {}, focus() {},
+    scrollIntoView(arg) { noteIntoView(this.id, arg); },
+  };
+  n.scroll = n.scrollTo;
+  return n;
+}
+function parseHtml(root, html) {
+  const top = [], stack = [root];
+  const re = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][\w-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
+  let m;
+  root.liveChildren = top;
+  while ((m = re.exec(html))) {
+    if (m[2] === undefined) continue;
+    const tag = m[2].toLowerCase();
+    if (m[1]) {
+      for (let i = stack.length - 1; i > 0; i--) {
+        if (stack[i].tagName === tag.toUpperCase()) { stack.length = i; break; }
+      }
+      continue;
+    }
+    const parent = stack[stack.length - 1];
+    const node = liveNode(tag, parseAttrs(m[3]), parent === root ? root : parent);
+    parent.liveChildren.push(node);
+    if (!VOID_TAGS.has(tag) && !/\/\s*$/.test(m[3])) stack.push(node);
+  }
+}
+if (input.liveDom) {
+  const root = el("shadow");
+  let html = "";
+  root.tagName = root.nodeName = "DIV";
+  root.attrs.id = "shadow";
+  root.liveChildren = [];
+  Object.defineProperty(root, "innerHTML", {
+    get: () => html,
+    set: (v) => { html = String(v); parseHtml(root, html); },
+    configurable: true,
+  });
+  Object.defineProperty(root, "children", {
+    get: () => root.liveChildren.slice(), configurable: true,
+  });
+  root.querySelectorAll = (sel) => queryIn(root, sel);
+  root.querySelector = (sel) => queryIn(root, sel)[0] || null;
+  root.getElementsByClassName = (c) => descendants(root).filter((e) => e.classList.contains(c));
+  document.querySelectorAll = (sel) => [root, ...descendants(root)]
+    .filter((e) => selectorMatches(e, sel));
+  document.querySelector = (sel) => document.querySelectorAll(sel)[0] || null;
+}
+function poolScroll() {
+  const out = {};
+  for (const e of queryIn(el("shadow"), "[data-pool]")) {
+    out[e.getAttribute("data-pool")] = e.scrollLeft;
+  }
+  return out;
+}
 const tick = () => new Promise((r) => setImmediate(r));
 const settle = async () => { for (let i = 0; i < 30; i++) await tick(); };
 (async () => {
@@ -180,10 +335,12 @@ const settle = async () => { for (let i = 0; i < 30; i++) await tick(); };
     for (const fn of docHandlers[t] || []) fn({ type: t });
   }
   await settle();
-  const results = [{ shadow: el("shadow").innerHTML, requests: requests.slice() }];
+  const results = [{ shadow: el("shadow").innerHTML, requests: requests.slice(),
+    pools: input.liveDom ? poolScroll() : undefined }];
   for (const step of input.steps) {
     if (step.servers) servers = step.servers;
     const before = requests.length;
+    resetViewport();
     if (step.call) {
       results.push({ result: mods[step.mod || "shadow"][step.call](...step.args) });
       continue;
@@ -193,24 +350,49 @@ const settle = async () => { for (let i = 0; i < 30; i++) await tick(); };
     } else if (step.fire) {
       const due = timers.filter((t) => t.delay === step.fire && !t.done);
       for (const t of due) { if (!t.keep) t.done = true; t.fn(); }
+    } else if (step.click) {
+      clickChain(step.click, step.root || "shadow");
+    } else if (typeof step.hash === "string") {
+      location.hash = step.hash;
+    } else if (step.scroll) {  // the reader scrolls pools sideways: {pool code: scrollLeft}
+      for (const e of queryIn(el("shadow"), "[data-pool]")) {
+        const code = e.getAttribute("data-pool");
+        if (code in step.scroll) e.scrollLeft = step.scroll[code];
+      }
     }
     await settle();
-    results.push({ shadow: el("shadow").innerHTML, requests: requests.slice(before) });
+    results.push({ shadow: el("shadow").innerHTML, hash: location.hash,
+      requests: requests.slice(before), viewport: viewportState(),
+      pools: input.liveDom ? poolScroll() : undefined });
   }
   fs.writeFileSync(OUT, JSON.stringify({ results, timers: timers.map((t) => t.delay) }));
 })().catch((e) => { console.error(e && e.stack ? e.stack : String(e)); process.exit(1); });
-"""
+""".replace("/*BROWSER_FAKES*/", BROWSER_FAKES)
 
 
 def run_js(
-    steps: list[dict], tmp_path: Path, *, servers: dict | None = None, browser: bool = False
+    steps: list[dict],
+    tmp_path: Path,
+    *,
+    servers: dict | None = None,
+    browser: bool = False,
+    hash_: str = "",
+    live_dom: bool = False,
 ) -> dict:
     for path in (SCRIPT, BOARD_JS):
         assert path.is_file(), f"{path.relative_to(REPO)} is missing"
     out = tmp_path / "node-out.json"
+    payload = {
+        "steps": steps,
+        "servers": servers or {},
+        "browser": browser,
+        "now": ms(NOW),
+        "hash": hash_,
+        "liveDom": live_dom,
+    }
     proc = subprocess.run(
         [NODE, "-e", HARNESS, str(BOARD_JS), str(SCRIPT), str(out)],
-        input=json.dumps({"steps": steps, "servers": servers or {}, "browser": browser}),
+        input=json.dumps(payload),
         capture_output=True,
         text=True,
         timeout=60,
@@ -235,7 +417,8 @@ def rid(venue: str, no: int) -> str:
 
 
 def line(combo, odds, *, hi=None, mm=None, t20=None, t2=None, scr=False, no_t2=False) -> dict:
-    """One plain-feed row (board-feed.md), with the #40 amendment's T-2 fields unless no_t2."""
+    """One plain-feed row (board-feed.md), with the T-2 fields (#498) unless no_t2; `t2` is the
+    T-20 -> T-2 move, `move_t20_t2_pct`."""
     out = {
         "combination": combo,
         "odds": None if scr else odds,
@@ -248,7 +431,7 @@ def line(combo, odds, *, hi=None, mm=None, t20=None, t2=None, scr=False, no_t2=F
     }
     if not no_t2:
         out["t2_odds"] = None if scr else odds
-        out["move_t2_pct"] = None if scr else t2
+        out["move_t20_t2_pct"] = None if scr else t2
     return out
 
 
@@ -547,16 +730,24 @@ def venues_of(feed: dict) -> list[str]:
     return [v["venue"] for v in feed["venues"]]
 
 
+def race_keys(feed: dict) -> list[tuple[str, str]]:
+    return [(v["venue"], r["race_id"]) for v in feed["venues"] for r in v["races"]]
+
+
 def render_all(tmp_path: Path, feed=FEED, shadow=SHADOW) -> dict[str, BeautifulSoup]:
+    """race_id -> the shadow page of its venue with that race selected (one race per page)."""
+    keys = race_keys(feed)
     steps = [
-        call("renderShadow", feed, shadow, {"now": ms(NOW), "venue": v}) for v in venues_of(feed)
+        call("renderShadow", feed, shadow, {"now": ms(NOW), "venue": v, "race": r}) for v, r in keys
     ]
     shown = results(steps, tmp_path)
-    return {v: soup(html) for v, html in zip(venues_of(feed), shown, strict=True)}
+    return {r: soup(html) for (_, r), html in zip(keys, shown, strict=True)}
 
 
 def row_in(pages, venue, race_id, pool_code, combo):
-    return row_of(pool_block(race_block(pages[venue], race_id), pool_code), combo)
+    """The row in `pages` keyed by race_id (render_all) or, for one page, by venue."""
+    page = pages[race_id] if race_id in pages else pages[venue]
+    return row_of(pool_block(race_block(page, race_id), pool_code), combo)
 
 
 def decimals(shown: str) -> list[str]:
@@ -584,15 +775,6 @@ def check_value(shown: str, pool_code: str, entry: dict | None, where: str) -> N
         assert re.fullmatch(pattern, shown), f"{where}: {shown!r}"
     if None in figures:
         assert "-" in shown, f"{where}: a null figure shows no '-': {shown!r}"
-
-
-def move_text_ok(shown: str, pct) -> bool:
-    shown = shown.strip()
-    if pct is None:
-        return shown == "-"
-    if pct == 0:
-        return shown in {"0.0%", "+0.0%", "±0.0%"}
-    return shown == f"{'+' if pct > 0 else ''}{pct:.1f}%"
 
 
 def chips(row_el) -> list:
@@ -633,20 +815,21 @@ def test_renders_values_for_every_race_and_pool(tmp_path):
     assert names.index("board.js") < names.index("shadow.js"), srcs
 
     idx, taus = shadow_index(SHADOW), shadow_races(SHADOW)
+    keys = race_keys(FEED)
     boards = results(
         [
-            call("renderBoard", FEED, {"now": ms(NOW), "venue": v}, mod="board")
-            for v in venues_of(FEED)
+            call("renderBoard", FEED, {"now": ms(NOW), "venue": v, "race": r}, mod="board")
+            for v, r in keys
         ],
         tmp_path,
     )
     pages = render_all(tmp_path)
-    for venue, board_html in zip(venues_of(FEED), boards, strict=True):
-        page, board = pages[venue], soup(board_html)
+    for (venue, race_id), board_html in zip(keys, boards, strict=True):
+        page, board = pages[race_id], soup(board_html)
         assert {e["data-venue"] for e in page.select("[data-venue]")} == set(venues_of(FEED))
+        assert [b["data-race"] for b in race_blocks(page)] == [race_id]  # one race per page
         races = [r for v in FEED["venues"] if v["venue"] == venue for r in v["races"]]
-        assert [b["data-race"] for b in race_blocks(page)] == [r["race_id"] for r in races]
-        for race_ in races:
+        for race_ in [r for r in races if r["race_id"] == race_id]:
             block = race_block(page, race_["race_id"])
             assert {e["data-pool"] for e in block.select("[data-pool]")} == set(race_["pools"])
             tau = (taus.get(race_["race_id"]) or {}).get("tau_bucket_min")
@@ -724,16 +907,19 @@ def test_null_values_show_a_dash(tmp_path):
     for r in no_tau["races"]:
         if r["race_id"] == rid("TOK", 1):
             r["tau_bucket_min"] = None
-    with_nulls, without_shadow, tau_null = results(
+    t1, t11, k3, k10 = rid("TOK", 1), rid("TOK", 11), rid("KYO", 3), rid("KYO", 10)
+    with_nulls, t11_page, kyo3_bare, kyo10_bare, tau_null = results(
         [
-            call("renderShadow", FEED, SHADOW, {"now": ms(NOW), "venue": "TOK"}),
-            call("renderShadow", FEED, None, {"now": ms(NOW), "venue": "KYO"}),
-            call("renderShadow", FEED, no_tau, {"now": ms(NOW), "venue": "TOK"}),
+            call("renderShadow", FEED, SHADOW, {"now": ms(NOW), "venue": "TOK", "race": t1}),
+            call("renderShadow", FEED, SHADOW, {"now": ms(NOW), "venue": "TOK", "race": t11}),
+            call("renderShadow", FEED, None, {"now": ms(NOW), "venue": "KYO", "race": k3}),
+            call("renderShadow", FEED, None, {"now": ms(NOW), "venue": "KYO", "race": k10}),
+            call("renderShadow", FEED, no_tau, {"now": ms(NOW), "venue": "TOK", "race": t1}),
         ],
         tmp_path,
     )
-    tok, kyo = {"TOK": soup(with_nulls)}, {"KYO": soup(without_shadow)}
-    t1, k3, k10 = rid("TOK", 1), rid("KYO", 3), rid("KYO", 10)
+    tok = {"TOK": soup(with_nulls)}
+    kyo = {k3: soup(kyo3_bare), k10: soup(kyo10_bare)}
     dash_cells = [
         (t1, "WIN", "3", "value"),  # all-null entry (scratched)
         (t1, "PLACE", "3", "value"),
@@ -751,8 +937,7 @@ def test_null_values_show_a_dash(tmp_path):
         "0.12",
     ]
     # a band that is null: the mean shows, the band is '-'
-    t11 = {"TOK": soup(with_nulls)}
-    partial = text(cell(row_in(t11, "TOK", rid("TOK", 11), "WIN", "2"), "value"))
+    partial = text(cell(row_in({"TOK": soup(t11_page)}, "TOK", t11, "WIN", "2"), "value"))
     assert decimals(partial) == ["0.83"] and "-" in partial.replace("0.83", ""), partial
     # no shadow feed at all, and a race the shadow feed lacks: every value and bucket is '-'
     kyo_races = [r for v in FEED["venues"] if v["venue"] == "KYO" for r in v["races"]]
@@ -767,7 +952,8 @@ def test_null_values_show_a_dash(tmp_path):
                 assert not chips(row_el), key
     # KYO 10 is missing from the shadow feed: '-' even when the shadow feed is there
     with_shadow = {"KYO": soup(results(
-        [call("renderShadow", FEED, SHADOW, {"now": ms(NOW), "venue": "KYO"})], tmp_path
+        [call("renderShadow", FEED, SHADOW, {"now": ms(NOW), "venue": "KYO", "race": k10})],
+        tmp_path,
     )[0])}  # fmt: skip
     for n in ("1", "2", "3", "4"):
         row_el = row_in(with_shadow, "KYO", k10, "WIN", n)
@@ -782,7 +968,8 @@ def test_null_values_show_a_dash(tmp_path):
     # the page polls a shadow feed that is not there yet: the board shows, values are '-'
     out = run_js([{"poll": True}], tmp_path, servers={"plain": {"feed": FEED, "etag": '"p"'}})
     polled = {"KYO": soup(out["results"][-1]["shadow"])}
-    for race_ in FEED["venues"][0]["races"]:
+    assert [b["data-race"] for b in race_blocks(polled["KYO"])] == [k3]  # the next race to post
+    for race_ in FEED["venues"][0]["races"][:1]:
         for pool_code, body in race_["pools"].items():
             for row_ in body["rows"]:
                 row_el = row_in(polled, "KYO", race_["race_id"], pool_code, row_["combination"])
@@ -833,41 +1020,908 @@ def test_the_bucket_label_is_shown(tmp_path):
     assert labels == {"@T-5", "@T-10", "@T-20"}
 
 
-@needs_node
-def test_the_t2_move_is_shown(tmp_path):
-    pages = render_all(tmp_path)
-    count = 0
-    for venue, race_, pool_code, row_ in all_rows(FEED):
-        key = (race_["race_id"], pool_code, row_["combination"])
-        el = cell(row_in(pages, venue, *key), "move-t2")
-        pct = row_.get("move_t2_pct")  # absent on a feed without the T-2 amendment
-        assert move_text_ok(text(el), pct), (key, text(el), pct)
-        assert ("up" in classes(el)) == (pct is not None and pct > 0), (key, pct)
-        assert ("down" in classes(el)) == (pct is not None and pct < 0), (key, pct)
-        count += pct is not None
-    assert count >= 20
+# ---------------------------------------------------------------- the odds ladder (#499)
+
+LADDER_COLS = ("ladder-t20", "ladder-t10", "ladder-t5", "ladder-t2", "ladder-final")
+LADDER_KEYS = ("20", "10", "5", "2", "0")
+LADDER_HEADS = ("T-20", "T-10", "T-5", "T-2", "Final")
+PLAIN_REFS = ("t20_odds", "t10_odds", "t5_odds", "t2_odds", None)  # the final has none
+
+
+def seen(odds):
+    return {"odds": odds, "observed": True}
+
+
+def ahead(odds):
+    return {"odds": odds, "observed": False}
+
+
+def ladder_line(combo, odds, t20, t10, *, hi=None) -> dict:
+    """A plain row 9 minutes before the post: T-20 and T-10 passed, T-5 and T-2 not yet."""
+    out = line(combo, odds, hi=hi, mm=0.0, t20=None, t2=None)
+    out.update(t20_odds=t20, t10_odds=t10, t5_odds=None, t2_odds=None)
+    out["move_t20_pct"] = None if t20 is None else round((odds / t20 - 1) * 100, 1)
+    return out
+
+
+LADDER_POST = jst(10, 10)  # NOW is 10:01: nine minutes to post
+
+
+def ladder_feeds() -> tuple[dict, dict]:
+    """TOK 8 at NOW, with a ladder per shadow entry: observed at T-20 and T-10, projected ahead.
+    Shadow entries agree with the plain rows' t20_odds / t10_odds."""
+    plain_race = race(
+        "TOK",
+        8,
+        LADDER_POST,
+        NOW,
+        {
+            "WIN": pool(
+                ladder_line("1", 2.4, 2.8, 2.5),
+                ladder_line("2", 5.1, 4.6, 4.9),
+                ladder_line("3", 9.3, 9.3, 9.3),
+                ladder_line("4", 31.0, None, 28.7),  # first priced after T-20
+            ),
+            "PLACE": pool(
+                ladder_line("1", 1.3, 1.4, 1.3, hi=1.6),
+                ladder_line("2", 1.9, 1.7, 1.8, hi=2.7),
+                ladder_line("4", 6.2, 6.6, 6.4, hi=9.9),  # its shadow entry has no ladder
+            ),
+            "QUINELLA_PLACE": pool(
+                ladder_line("1,2", 3.3, 3.7, 3.4, hi=4.1),
+                ladder_line("1,3", 5.6, 5.2, 5.9, hi=7.2),  # no shadow entry
+            ),
+            "QUINELLA": pool(  # no shadow pool, and no projection for it
+                ladder_line("1,2", 7.7, 8.4, 7.9),
+                ladder_line("1,3", 14.6, 13.2, 14.1),
+                ladder_line("2,4", 120.5, None, 133.3),
+            ),
+        },
+    )
+    plain = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW),
+        "venues": [{"venue": "TOK", "races": [plain_race]}],
+    }
+
+    def entry(values: dict, ladder: dict | None) -> dict:
+        out = dict(values)
+        if ladder is not None:
+            out["ladder"] = dict(zip(LADDER_KEYS, ladder, strict=True))
+        return out
+
+    shadow = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW),
+        "models": {"nowcast": "now-c3"},
+        "races": [
+            shadow_race(
+                "TOK",
+                8,
+                LADDER_POST,
+                16,
+                {
+                    "WIN": {
+                        "1": entry(
+                            win(0.9, 0.8, 1.0), (seen(2.8), seen(2.5), ahead(2.31), ahead(2.24),
+                                                 ahead(2.07))
+                        ),
+                        "2": entry(
+                            win(1.1, 1.0, 1.2), (seen(4.6), seen(4.9), ahead(5.43), ahead(5.71),
+                                                 ahead(6.02))
+                        ),
+                        "3": entry(
+                            win(0.7, 0.6, 0.8), (seen(9.3), seen(9.3), ahead(9.66), ahead(10.04),
+                                                 None)
+                        ),
+                        "4": entry(
+                            win(0.3, 0.2, 0.4), (None, seen(28.7), ahead(33.8), ahead(36.1),
+                                                 ahead(41.27))
+                        ),
+                    },
+                    "PLACE": {
+                        "1": entry(
+                            rng(0.8, 0.9), (seen(1.4), seen(1.3), ahead(1.21), ahead(1.08),
+                                            ahead(1.0))
+                        ),
+                        "2": entry(
+                            rng(0.7, 1.0), (seen(1.7), seen(1.8), ahead(1.93), ahead(2.04),
+                                            ahead(2.18))
+                        ),
+                        "4": entry(rng(0.5, 0.8), None),
+                    },
+                    "QUINELLA_PLACE": {
+                        "1,2": entry(
+                            rng(0.6, 0.75), (seen(3.7), seen(3.4), ahead(3.17), ahead(3.02),
+                                             ahead(2.88))
+                        ),
+                    },
+                },
+            )
+        ],
+    }  # fmt: skip
+    return plain, shadow
+
+
+def expected_ladder(row_: dict, entry: dict | None) -> list[dict | None]:
+    """The five cells of a row: the shadow ladder, else the plain row's references, observed."""
+    ladder = (entry or {}).get("ladder")
+    if ladder is not None:
+        return [ladder[k] for k in LADDER_KEYS]
+    return [None if ref is None or row_.get(ref) is None else seen(row_[ref]) for ref in PLAIN_REFS]
+
+
+def check_ladder_row(row_el, want: list[dict | None], where) -> None:
+    cells = [cell(row_el, col) for col in LADDER_COLS]
+    positions = [c for c in row_el.find_all(["th", "td"], recursive=False)]
+    assert [positions.index(c) for c in cells] == sorted(positions.index(c) for c in cells), where
+    t20 = want[0]["odds"] if want[0] is not None else None
+    for i, (el, expected) in enumerate(zip(cells, want, strict=True)):
+        shown, cls = text(el), classes(el)
+        at = (where, LADDER_COLS[i], shown, cls, expected)
+        if expected is None:
+            assert shown == "-", at
+            assert "projected" not in cls, at
+            continue
+        figure_ = f"{expected['odds']:.1f}"
+        if expected["observed"]:
+            assert shown == figure_, at
+            assert "projected" not in cls, at
+            if i == 0 or t20 is None:
+                assert "up" not in cls and "down" not in cls, at
+            else:
+                assert ("up" in cls) == (expected["odds"] > t20), at
+                assert ("down" in cls) == (expected["odds"] < t20), at
+        else:
+            assert re.fullmatch(rf"≈\s*{re.escape(figure_)}", shown), at
+            assert "projected" in cls, at
 
 
 @needs_node
-def test_rows_keep_the_board_order(tmp_path):
+def test_the_ladder_shows_observed_and_projected_odds(tmp_path):
+    plain, shadow = ladder_feeds()
+    opts = {"now": ms(NOW), "venue": "TOK"}
+    with_shadow, without, board = (
+        soup(html)
+        for html in results(
+            [
+                call("renderShadow", plain, shadow, opts),
+                call("renderShadow", plain, None, opts),
+                call("renderBoard", plain, opts, mod="board"),
+            ],
+            tmp_path,
+        )
+    )
+    # display only: the rows stay in the board's order, favourite first
+    assert order_of(with_shadow) == order_of(board) == order_of(without)
+    idx = shadow_index(shadow)
+    race_id = rid("TOK", 8)
+    kinds = {"observed": 0, "projected": 0, "null": 0, "coloured": 0}
+    for _, _race, pool_code, row_ in all_rows(plain):
+        key = (race_id, pool_code, row_["combination"])
+        row_el = row_of(pool_block(race_block(with_shadow, race_id), pool_code), key[2])
+        want = expected_ladder(row_, idx.get(key))
+        check_ladder_row(row_el, want, key)
+        assert not row_el.select('[data-col="move-t20-t2"]'), "the T-20→T-2 cell is back"
+        assert not row_el.select('[data-col="move-t2"]'), "the blank 'Since T-2' cell is back"
+        for i, w in enumerate(want):
+            if w is None:
+                kinds["null"] += 1
+            elif w["observed"]:
+                kinds["observed"] += 1
+                kinds["coloured"] += i > 0 and want[0] is not None and w["odds"] != want[0]["odds"]
+            else:
+                kinds["projected"] += 1
+        # without a shadow feed: the plain row's references, '-' ahead
+        bare = row_of(pool_block(race_block(without, race_id), pool_code), key[2])
+        check_ladder_row(bare, expected_ladder(row_, None), ("no shadow feed", key))
+    assert kinds["projected"] >= 15 and kinds["null"] >= 10 and kinds["coloured"] >= 6, kinds
+
+    # Quinella (no projection) and a combination without a shadow entry: observed, then '-'
+    block = race_block(with_shadow, race_id)
+    for pool_code, combo, t20, t10 in (
+        ("QUINELLA", "1,3", "13.2", "14.1"),
+        ("QUINELLA_PLACE", "1,3", "5.2", "5.9"),
+        ("PLACE", "4", "6.6", "6.4"),
+    ):
+        row_el = row_of(pool_block(block, pool_code), combo)
+        shown = [text(cell(row_el, col)) for col in LADDER_COLS]
+        assert shown == [t20, t10, "-", "-", "-"], (pool_code, combo, shown)
+
+    # the header names the five columns, each above its cells
+    for pool_el in block.select("[data-pool]"):
+        heads = [text(th) for th in pool_el.select("thead th")]
+        row_el = pool_el.select("[data-combination]")[0]
+        positions = row_el.find_all(["th", "td"], recursive=False)
+        for col, head in zip(LADDER_COLS, LADDER_HEADS, strict=True):
+            assert head in heads, (pool_el["data-pool"], heads)
+            assert heads.index(head) == positions.index(cell(row_el, col)), (col, heads)
+
+    # shadow.html explains the projected mark
+    legends = soup(PAGE.read_text(encoding="utf-8")).select(".legend")
+    assert any("≈" in text(e) for e in legends), "no legend line explains the ≈ mark"
+
+
+def ref_line(combo, odds, t20, t10, t5, t2, *, hi=None) -> dict:
+    """A plain row with its four references as given."""
+    out = line(combo, odds, hi=hi, mm=0.0, t20=None, t2=None)
+    out.update(t20_odds=t20, t10_odds=t10, t5_odds=t5, t2_odds=t2)
+    out["move_t20_pct"] = None if t20 is None else round((odds / t20 - 1) * 100, 1)
+    return out
+
+
+@needs_node
+def test_an_observed_plain_reference_wins_over_a_cached_projection(tmp_path):
+    """The plain feed has crossed T-5 (and for some rows T-2, T-10) while the cached shadow feed
+    still projects those checkpoints or has them null: the cell shows the plain feed's observed
+    figure. Where the plain feed has null, the ladder's observed point stays."""
+    post = jst(10, 2, 30)  # NOW 10:01, 1.5 minutes to post on the plain feed
+    # combination: (plain row, shadow ladder, the five cells wanted)
+    table = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.8, 2.5, 2.3, None),
+                  (seen(2.8), seen(2.5), ahead(2.21), ahead(2.14), ahead(2.07)),
+                  (seen(2.8), seen(2.5), seen(2.3), ahead(2.14), ahead(2.07))),
+            "2": (ref_line("2", 5.8, 4.6, 4.9, 5.6, 5.9),
+                  (seen(4.6), seen(4.9), None, ahead(5.71), ahead(6.02)),
+                  (seen(4.6), seen(4.9), seen(5.6), seen(5.9), ahead(6.02))),
+            "3": (ref_line("3", 8.6, 9.3, None, 8.8, None),
+                  (seen(9.3), seen(9.7), ahead(9.66), None, None),
+                  (seen(9.3), seen(9.7), seen(8.8), None, None)),
+            "4": (ref_line("4", 31.0, None, 28.7, 33.1, 35.2),
+                  (None, seen(28.7), ahead(33.8), ahead(36.1), ahead(41.27)),
+                  (None, seen(28.7), seen(33.1), seen(35.2), ahead(41.27))),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.4, 1.3, 1.24, None, hi=1.6),
+                  (seen(1.4), seen(1.3), ahead(1.21), ahead(1.08), ahead(1.0)),
+                  (seen(1.4), seen(1.3), seen(1.24), ahead(1.08), ahead(1.0))),
+            "2": (ref_line("2", 1.9, 1.7, 1.8, 1.8, None, hi=2.7),
+                  (seen(1.7), seen(1.8), seen(1.8), ahead(2.04), ahead(2.18)),
+                  (seen(1.7), seen(1.8), seen(1.8), ahead(2.04), ahead(2.18))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.7, 3.4, 3.2, None, hi=4.1),
+                    (seen(3.7), ahead(3.52), ahead(3.17), ahead(3.02), ahead(2.88)),
+                    (seen(3.7), seen(3.4), seen(3.2), ahead(3.02), ahead(2.88))),
+            "1,3": (ref_line("1,3", 5.6, 5.2, 5.9, None, None, hi=7.2),
+                    (seen(5.2), seen(5.9), seen(6.1), ahead(6.3), ahead(6.5)),
+                    (seen(5.2), seen(5.9), seen(6.1), ahead(6.3), ahead(6.5))),
+        },
+    }  # fmt: skip
+    plain = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW),
+        "venues": [
+            {
+                "venue": "TOK",
+                "races": [
+                    race("TOK", 9, post, NOW, {
+                        code: pool(*(r for r, _, _ in rows.values()))
+                        for code, rows in table.items()
+                    })
+                ],
+            }
+        ],
+    }  # fmt: skip
+    values = {"WIN": win(0.9, 0.8, 1.0)}
+    shadow = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW - timedelta(minutes=3)),
+        "models": {"nowcast": "now-c3"},
+        "races": [
+            shadow_race("TOK", 9, post, 5, {
+                code: {
+                    combo: {**values.get(code, rng(0.6, 0.8)),
+                            "ladder": dict(zip(LADDER_KEYS, ladder, strict=True))}
+                    for combo, (_, ladder, _) in rows.items()
+                }
+                for code, rows in table.items()
+            })
+        ],
+    }  # fmt: skip
+    (page,) = (soup(h) for h in results([call("renderShadow", plain, shadow, {"now": ms(NOW)})],
+                                        tmp_path))  # fmt: skip
+    block = race_block(page, rid("TOK", 9))
+    replaced = 0
+    for code, rows in table.items():
+        for combo, (_row, ladder, want) in rows.items():
+            row_el = row_of(pool_block(block, code), combo)
+            check_ladder_row(row_el, list(want), (code, combo))
+            replaced += sum(w != lad for w, lad in zip(want, ladder, strict=True))
+    assert replaced >= 7, replaced  # the fixture has stale points on both sides of the cutoff
+
+
+def merged(plain_row: dict, ladder) -> list[dict | None]:
+    """The same-schedule merge: an observed ladder point stays, else the plain reference when it is
+    not null, else the ladder's point (projected or null)."""
+    out = []
+    for point, ref in zip(ladder, PLAIN_REFS, strict=True):
+        value = None if ref is None else plain_row.get(ref)
+        keep = point is not None and point["observed"]
+        out.append(point if keep or value is None else seen(value))
+    return out
+
+
+def until_post(post: datetime, now: datetime) -> str:
+    """board.js's countdown, from first principles."""
+    diff = (post - now).total_seconds()
+    if diff > 0:
+        return f"{math.ceil(diff / 60)} min to post"
+    ago = math.floor(-diff / 60)
+    return "at post" if ago < 1 else f"post {ago} min ago"
+
+
+def says(head: str, phrase: str) -> bool:
+    """`phrase` in the header text, not as the tail of a longer number ('2 min' in '12 min')."""
+    return re.search(rf"(?<![\d.]){re.escape(phrase)}", head) is not None
+
+
+@needs_node
+def test_a_delayed_post_merges_only_references_of_the_same_schedule(tmp_path):
+    """/feed is the schedule authority (owner, 2026-11-27). The feeds refresh apart, so on a delay
+    or a correction one of them still carries the other post time. The header, the countdown, the
+    strip and the next-race mark use /feed's post_utc, never the later of the two. A shadow ladder
+    is used only when its post_utc equals /feed's: otherwise each cell shows the plain row's
+    observed reference ('-' where it is null, and the Final '-'), as for a row with no ladder. When
+    both agree, the same-schedule merge stays. Quinella rows (no ladder) always show the plain
+    references and '-' ahead. Every plain row below was taken for its own feed's post time."""
+    old, new = jst(10, 2, 30), jst(10, 12, 30)  # TOK 10 was due at OLD, is delayed to NEW
+    corrected, announced = jst(10, 15), jst(10, 20)  # a correction to an earlier post
+    # (plain row, shadow ladder or None for a row without one)
+    # plain for NEW (only T-20 at 9:52:30 passed); ladder for OLD (observed to T-2 at 10:00:30)
+    plain_new_ladder_old = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.5, None, None, None),
+                  (seen(2.8), seen(2.5), seen(2.3), seen(2.26), ahead(2.19))),
+            "2": (ref_line("2", 5.8, 4.9, None, None, None),
+                  (seen(4.6), seen(4.9), seen(5.6), seen(5.9), ahead(6.02))),
+            "3": (ref_line("3", 8.6, None, None, None, None),
+                  (seen(9.3), None, seen(8.8), seen(8.7), None)),
+            "4": (ref_line("4", 31.0, 28.7, None, None, None),
+                  (None, seen(28.7), seen(33.1), seen(35.2), ahead(36.0))),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.3, None, None, None, hi=1.6),
+                  (seen(1.4), seen(1.3), seen(1.24), seen(1.22), ahead(1.18))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.4, None, None, None, hi=4.1),
+                    (seen(3.7), seen(3.4), seen(3.2), seen(3.27), ahead(3.2))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, 7.9, None, None, None), None),
+            "2,4": (ref_line("2,4", 120.5, None, None, None, None), None),
+        },
+    }  # fmt: skip
+    # plain for OLD (every checkpoint passed); ladder for NEW (observed T-20, projected on)
+    plain_old_ladder_new = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.8, 2.5, 2.3, 2.26),
+                  (seen(2.5), ahead(2.41), ahead(2.33), ahead(2.27), ahead(2.19))),
+            "2": (ref_line("2", 5.8, 4.6, 4.9, 5.6, 5.9),
+                  (seen(4.9), ahead(5.43), ahead(5.62), ahead(5.77), ahead(6.02))),
+            "3": (ref_line("3", 8.6, 9.3, None, 8.8, 8.7),
+                  (None, ahead(9.04), ahead(8.93), None, None)),
+            "4": (ref_line("4", 31.0, None, 28.7, 33.1, 35.2),
+                  (seen(28.7), ahead(30.2), ahead(32.0), ahead(33.4), ahead(36.0))),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.4, 1.3, 1.24, 1.22, hi=1.6),
+                  (seen(1.3), ahead(1.27), ahead(1.23), ahead(1.21), ahead(1.18))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.7, 3.4, 3.2, 3.27, hi=4.1),
+                    (seen(3.4), ahead(3.38), ahead(3.31), ahead(3.27), ahead(3.2))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, 8.4, 7.9, 7.6, 7.8), None),
+            "2,4": (ref_line("2,4", 120.5, None, 133.3, 126.0, None), None),
+        },
+    }  # fmt: skip
+    # plain for the corrected 10:15 (T-20 at 9:55 passed); ladder for 10:20 (T-20 at 10:00)
+    plain_corrected = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.4, None, None, None),
+                  (seen(2.3), ahead(2.24), ahead(2.21), ahead(2.18), ahead(2.13))),
+            "2": (ref_line("2", 5.8, 5.3, None, None, None),
+                  (seen(5.6), ahead(5.71), ahead(5.77), ahead(5.83), ahead(5.9))),
+            "3": (ref_line("3", 8.6, None, None, None, None),
+                  (seen(8.9), ahead(8.8), ahead(8.7), None, None)),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.3, None, None, None, hi=1.6),
+                  (seen(1.2), ahead(1.18), ahead(1.16), ahead(1.14), ahead(1.11))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.6, None, None, None, hi=4.1),
+                    (seen(3.5), ahead(3.42), ahead(3.37), ahead(3.33), ahead(3.31))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, 8.1, None, None, None), None),
+        },
+    }  # fmt: skip
+    # both for OLD: the cached ladder has stale projected or null points the plain feed has crossed
+    both_old = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.8, 2.5, 2.3, 2.26),
+                  (seen(2.8), seen(2.5), seen(2.3), ahead(2.21), ahead(2.14))),
+            "2": (ref_line("2", 5.8, 4.6, 4.9, 5.6, 5.9),
+                  (seen(4.6), seen(4.9), None, ahead(5.71), ahead(6.02))),
+            "3": (ref_line("3", 8.6, 9.3, None, 8.8, None),
+                  (seen(9.3), seen(9.7), ahead(9.04), None, None)),
+            "4": (ref_line("4", 31.0, None, 28.7, 33.1, 35.2),
+                  (None, seen(28.7), seen(33.1), ahead(36.1), ahead(41.27))),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.4, 1.3, 1.24, 1.22, hi=1.6),
+                  (seen(1.4), seen(1.3), ahead(1.21), ahead(1.08), ahead(1.0))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.7, 3.4, 3.2, 3.27, hi=4.1),
+                    (seen(3.7), ahead(3.52), ahead(3.17), ahead(3.02), ahead(2.88))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, 8.4, 7.9, 7.6, 7.8), None),
+        },
+    }  # fmt: skip
+    # both for NEW: a ladder fetched just before T-20, so its T-20 is still projected or null
+    both_new = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.5, None, None, None),
+                  (ahead(2.6), ahead(2.41), ahead(2.33), ahead(2.27), ahead(2.19))),
+            "2": (ref_line("2", 5.8, 4.9, None, None, None),
+                  (None, ahead(5.43), ahead(5.62), ahead(5.77), ahead(6.02))),
+            "3": (ref_line("3", 8.6, None, None, None, None),
+                  (seen(9.1), ahead(9.04), ahead(8.93), None, None)),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.3, None, None, None, hi=1.6),
+                  (ahead(1.36), ahead(1.27), ahead(1.23), ahead(1.21), ahead(1.18))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.4, None, None, None, hi=4.1),
+                    (ahead(3.5), ahead(3.38), ahead(3.31), ahead(3.27), ahead(3.2))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, 7.9, None, None, None), None),
+        },
+    }  # fmt: skip
+
+    def feeds(table, plain_post, plain_at, shadow_post, shadow_at) -> tuple[dict, dict]:
+        plain = {
+            "race_date": DAY,
+            "generated_utc": utc_text(plain_at),
+            "venues": [{"venue": "TOK", "races": [
+                race("TOK", 10, plain_post, plain_at, {
+                    code: pool(*(r for r, _ in rows.values())) for code, rows in table.items()
+                })
+            ]}],
+        }  # fmt: skip
+        shadow_pools = {
+            code: {
+                combo: {**(win(0.9, 0.8, 1.0) if code == "WIN" else rng(0.6, 0.8)),
+                        "ladder": dict(zip(LADDER_KEYS, ladder, strict=True))}
+                for combo, (_, ladder) in rows.items()
+                if ladder is not None
+            }
+            for code, rows in table.items()
+        }  # fmt: skip
+        shadow = {
+            "race_date": DAY,
+            "generated_utc": utc_text(shadow_at),
+            "models": {"nowcast": "now-c3"},
+            "races": [shadow_race("TOK", 10, shadow_post, 16,
+                                  {c: p for c, p in shadow_pools.items() if p})],
+        }  # fmt: skip
+        return plain, shadow
+
+    def before(plain_row, ladder, same) -> list[dict | None]:
+        """The rule this test replaces: a ladder on another schedule shown as it is."""
+        if ladder is None:
+            return expected_ladder(plain_row, None)
+        return merged(plain_row, ladder) if same else list(ladder)
+
+    after_old = jst(10, 3)  # OLD has passed on /feed; NEW is still ahead on /shadow-feed
+    # (name, table, plain post, shadow post, now, which feed refreshed last)
+    cases = [
+        ("plain saw the delay first", plain_new_ladder_old, new, old, NOW, "plain"),
+        ("shadow saw the delay first", plain_old_ladder_new, old, new, NOW, "shadow"),
+        ("shadow saw the delay first, OLD passed", plain_old_ladder_new, old, new, after_old,
+         "shadow"),
+        ("a correction to an earlier post", plain_corrected, corrected, announced, NOW, "plain"),
+        ("both on the old post", both_old, old, old, NOW, "shadow"),
+        ("both on the delay", both_new, new, new, NOW, "plain"),
+    ]  # fmt: skip
     steps = []
-    for v in venues_of(FEED):
-        steps.append(call("renderBoard", FEED, {"now": ms(NOW), "venue": v}, mod="board"))
-        steps.append(call("renderShadow", FEED, SHADOW, {"now": ms(NOW), "venue": v}))
+    for _, table, plain_post, shadow_post, now, last in cases:
+        lag = now - timedelta(seconds=4)
+        plain_at, shadow_at = (now, lag) if last == "plain" else (lag, now)
+        plain, shadow = feeds(table, plain_post, plain_at, shadow_post, shadow_at)
+        steps.append(call("renderShadow", plain, shadow,
+                          {"now": ms(now), "venue": "TOK", "race": rid("TOK", 10)}))  # fmt: skip
+    pages = [soup(h) for h in results(steps, tmp_path)]
+
+    header_reverts = 0
+    for (name, table, plain_post, shadow_post, now, _), page in zip(cases, pages, strict=True):
+        same = plain_post == shadow_post
+        block = race_block(page, rid("TOK", 10))
+        quinella = differ = vs_merge = vs_plain = 0
+        for code, rows in table.items():
+            for combo, (plain_row, ladder) in rows.items():
+                plain_cells = expected_ladder(plain_row, None)
+                if ladder is None:
+                    want = plain_cells
+                    quinella += code == "QUINELLA"
+                elif same:
+                    want = merged(plain_row, ladder)
+                else:
+                    want = plain_cells
+                check_ladder_row(row_of(pool_block(block, code), combo), want, (name, code, combo))
+                differ += sum(w != b for w, b in zip(want, before(plain_row, ladder, same),
+                                                     strict=True))  # fmt: skip
+                if ladder is not None:
+                    vs_merge += sum(w != m for w, m in zip(want, merged(plain_row, ladder),
+                                                           strict=True))  # fmt: skip
+                    vs_plain += sum(w != p for w, p in zip(want, plain_cells, strict=True))
+                    vs_plain += sum(w != lad for w, lad in zip(want, ladder, strict=True))
+        assert quinella >= 1, (name, "the fixture needs a Quinella row without a ladder")
+        if same:  # the merge changes cells against both the ladder as is and the plain cells
+            assert vs_plain >= 8, (name, vs_plain)
+        else:  # the old rule and a merge across schedules both show other cells
+            assert differ >= 6 and vs_merge >= 6, (name, differ, vs_merge)
+
+        # the header, countdown and next-race mark follow /feed's post only
+        head = text(block.find("header"))
+        assert f"Post {plain_post:%H:%M} JST" in head, (name, head)
+        assert says(head, until_post(plain_post, now)), (name, head)
+        strip = [text(a) for a in page.select(".strip a")]
+        assert len(strip) == 1 and f"{plain_post:%H:%M}" in strip[0], (name, strip)
+        ahead_ = plain_post > now
+        assert ("next" in classes(block)) == ahead_, (name, classes(block))
+        assert ("off" in classes(block)) == (not ahead_), (name, classes(block))
+        if not same:
+            assert f"Post {shadow_post:%H:%M} JST" not in head, (name, head)
+            assert f"{shadow_post:%H:%M}" not in strip[0], (name, strip)
+            if until_post(shadow_post, now) != until_post(plain_post, now):
+                assert not says(head, until_post(shadow_post, now)), (name, head)
+            header_reverts += max(plain_post, shadow_post) != plain_post
+    assert header_reverts >= 3, header_reverts  # the later-post rule would show another header
+
+
+def schedule_feeds(no, table, plain_post, shadow_post, last) -> tuple[dict, dict]:
+    """TOK `no` on both feeds from a {pool: {combo: (plain row, ladder or None)}} table; either
+    post may be None (a log with no stored post time)."""
+    plain = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW),
+        "venues": [{"venue": "TOK", "races": [
+            race("TOK", no, plain_post, last, {
+                code: pool(*(r for r, _ in rows.values())) for code, rows in table.items()
+            })
+        ]}],
+    }  # fmt: skip
+    pools = {
+        code: {
+            combo: {**(win(0.9, 0.8, 1.0) if code == "WIN" else rng(0.6, 0.8)),
+                    "ladder": dict(zip(LADDER_KEYS, ladder, strict=True))}
+            for combo, (_, ladder) in rows.items()
+            if ladder is not None
+        }
+        for code, rows in table.items()
+    }  # fmt: skip
+    shadow_r = shadow_race("TOK", no, shadow_post or last, 0, {c: p for c, p in pools.items() if p})
+    if shadow_post is None:
+        shadow_r.update(post_utc=None, minutes_to_post=None)
+    shadow = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW),
+        "models": {"nowcast": "now-c3"},
+        "races": [shadow_r],
+    }
+    return plain, shadow
+
+
+def across_schedules(plain_row: dict, ladder) -> list[dict | None]:
+    """A ladder of another schedule: the plain row's observed references for the timed
+    checkpoints, and the ladder's Final only when it is observed (a projection is for the other
+    schedule)."""
+    out = expected_ladder(plain_row, None)
+    final = None if ladder is None else ladder[-1]
+    out[-1] = final if final is not None and final["observed"] else None
+    return out
+
+
+@needs_node
+def test_a_completed_race_without_a_post_time_shows_its_logged_ladder(tmp_path):
+    """A completed race whose log has final odds but no stored post time: both feeds carry a null
+    post_utc, which is the same (unknown) schedule (owner, 2026-11-27). The /shadow-feed ladder is
+    used: its observed checkpoints and its observed Final are shown, not '-'. The plain rows carry
+    no references (no post time to take them at); a Quinella row without a ladder shows '-'."""
+    nothing = (None, None, None, None)
+    table = {
+        "WIN": {
+            "1": (ref_line("1", 2.1, *nothing),
+                  (seen(2.8), seen(2.5), seen(2.3), seen(2.26), seen(2.1))),
+            "2": (ref_line("2", 6.4, *nothing),
+                  (seen(4.6), seen(4.9), seen(5.6), seen(5.9), seen(6.4))),
+            "3": (ref_line("3", 8.2, *nothing),
+                  (None, None, None, None, seen(8.2))),  # logged only at the off
+            "4": (ref_line("4", 37.5, *nothing),
+                  (None, seen(28.7), seen(33.1), None, seen(37.5))),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.1, *nothing, hi=1.5),
+                  (seen(1.4), seen(1.3), seen(1.24), seen(1.22), seen(1.1))),
+            "2": (ref_line("2", 2.3, *nothing, hi=3.1),
+                  (seen(1.7), seen(1.8), None, seen(2.04), seen(2.3))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.1, *nothing, hi=4.0),
+                    (seen(3.7), seen(3.4), seen(3.2), seen(3.27), seen(3.1))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, *nothing), None),
+        },
+    }  # fmt: skip
+    plain, shadow = schedule_feeds(12, table, None, None, jst(9, 40))
+    assert plain["venues"][0]["races"][0]["post_utc"] is None
+    assert shadow["races"][0]["post_utc"] is None
+    (page,) = (soup(h) for h in results(
+        [call("renderShadow", plain, shadow, {"now": ms(NOW), "venue": "TOK",
+                                              "race": rid("TOK", 12)})], tmp_path))  # fmt: skip
+    block = race_block(page, rid("TOK", 12))
+    finals = shown = 0
+    for code, rows in table.items():
+        for combo, (plain_row, ladder) in rows.items():
+            want = expected_ladder(plain_row, None) if ladder is None else list(ladder)
+            check_ladder_row(row_of(pool_block(block, code), combo), want, (code, combo))
+            finals += want[-1] is not None
+            shown += sum(w is not None for w in want)
+    assert finals == 7 and shown >= 25, (finals, shown)  # '-' everywhere would fail every row
+
+
+@needs_node
+def test_an_observed_final_is_kept_on_another_schedule(tmp_path):
+    """An observed Final ('0' with observed: true) in the /shadow-feed ladder is the price that
+    paid: it is shown whatever the schedules (owner, 2026-11-27), on a delay and when only one feed
+    has a post time. A projected Final from a ladder of another schedule is still '-', and the
+    timed checkpoints follow the existing rule: the plain row's observed references only."""
+    old, new = jst(9, 40), jst(9, 50)  # /feed has the delay to NEW, the ladder is for OLD
+    table = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.5, 2.4, 2.3, None),
+                  (seen(2.8), seen(2.5), seen(2.3), seen(2.26), seen(2.19))),
+            "2": (ref_line("2", 5.8, 4.9, None, 5.5, 5.7),
+                  (seen(4.6), seen(4.9), seen(5.6), seen(5.9), seen(6.05))),
+            "3": (ref_line("3", 8.6, None, None, None, None),
+                  (seen(9.3), None, seen(8.8), seen(8.7), ahead(8.4))),  # projected Final
+            "4": (ref_line("4", 31.0, 28.7, 30.0, None, None),
+                  (None, seen(28.7), seen(33.1), seen(35.2), None)),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.3, None, None, None, hi=1.6),
+                  (seen(1.4), seen(1.3), seen(1.24), seen(1.22), seen(1.17))),
+            "2": (ref_line("2", 1.9, 1.8, 1.9, None, None, hi=2.6),
+                  (seen(1.7), ahead(1.85), ahead(1.9), ahead(1.95), ahead(2.0))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.4, None, None, None, hi=4.1),
+                    (seen(3.7), seen(3.4), seen(3.2), seen(3.27), seen(3.42))),
+        },
+        "QUINELLA": {
+            "1,2": (ref_line("1,2", 7.7, 7.9, None, None, None), None),
+        },
+    }  # fmt: skip
+    # (name, race no, plain post, shadow post)
+    cases = [
+        ("a delay on /feed", 10, new, old),
+        ("/feed has a post time, the log none", 11, new, None),
+        ("the log has a post time, /feed none", 12, None, old),
+    ]
+    steps = []
+    for _, no, plain_post, shadow_post in cases:
+        plain, shadow = schedule_feeds(no, table, plain_post, shadow_post, jst(9, 59))
+        steps.append(call("renderShadow", plain, shadow,
+                          {"now": ms(NOW), "venue": "TOK", "race": rid("TOK", no)}))  # fmt: skip
+    pages = [soup(h) for h in results(steps, tmp_path)]
+    for (name, no, _, _), page in zip(cases, pages, strict=True):
+        block = race_block(page, rid("TOK", no))
+        kept = dropped = 0
+        for code, rows in table.items():
+            for combo, (plain_row, ladder) in rows.items():
+                want = across_schedules(plain_row, ladder)
+                check_ladder_row(row_of(pool_block(block, code), combo), want, (name, code, combo))
+                if ladder is not None and ladder[-1] is not None:
+                    kept += ladder[-1]["observed"]
+                    dropped += not ladder[-1]["observed"]
+        assert kept == 4 and dropped == 2, (name, kept, dropped)
+
+
+def _write_logged_day(captures: dict[datetime, dict[str, float]], post: datetime) -> None:
+    """One TOK race (5R) of synthetic WIN captures, and its post time, under the data dir."""
+    from horsetrack.core import paths
+    from horsetrack.countries.japan import odds_log
+
+    log = paths.odds_snapshot_path("jra", DAY, "TOK")
+    for at, prices in captures.items():
+        stamp = utc_text(at)
+        rows = [
+            {
+                "snapshot_utc": stamp,
+                "race_id": rid("TOK", 5),
+                "pool": "WIN",
+                "combination": combo,
+                "odds": odds,
+                "status_raw": f"{at.hour:02d}時{at.minute:02d}分現在",
+                "source_update_utc": stamp,
+            }
+            for combo, odds in prices.items()
+        ]
+        odds_log.append_capture(log, rows)
+    odds_log.write_post_times(
+        log.with_name("TOK.races.json"), {5: post.astimezone(UTC)}, jst(6, 0).astimezone(UTC)
+    )
+
+
+def _drift_nowcast():
+    """A fitted v0 nowcast with mu = 0.02 * tau in every cell (so mu(7) - mu(5) = 0.04)."""
+    from horsetrack.countries.japan.board.snapshot import load_decision_grid
+    from horsetrack.countries.japan.models.v0.nowcast import DriftCell, NowcastV0
+
+    grid, bands = load_decision_grid(), (2.0, 5.0, 10.0, 20.0, 50.0, 100.0)
+    pools = ("WIN", "PLACE", "QUINELLA_PLACE")
+    sigma0 = {(p, t): 0.1 for p in pools for t in grid.minutes}
+    cells = {
+        (p, t, b): DriftCell(p, t, b, 30, 0.02 * t, 0.1)
+        for p in pools
+        for t in grid.minutes
+        for b in range(len(bands) + 1)
+    }
+    return NowcastV0(bands, grid, 50.0, ("2026-11-14",), sigma0, cells, "drift-e2e")
+
+
+@needs_node
+def test_a_logged_day_shows_the_ladder(tmp_path, monkeypatch):
+    """Synthetic WIN captures through build_board, build_shadow (a known nowcast) and the page:
+    read at 10:45 (T-15) only T-20 is observed; read at 10:53 (T-7) T-20 and T-10 are, and T-5,
+    T-2 and the final are projected: O_now * exp(0.02 * (7 - k)), shown as '≈' with one decimal."""
+    from horsetrack.core import paths
+    from horsetrack.countries.japan.board import feed as feed_mod
+    from horsetrack.countries.japan.board.flags import FlagRules
+    from horsetrack.countries.japan.board.shadow_feed import build_shadow
+    from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels
+
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(tmp_path / "data"))
+    post = jst(11, 0)  # T-20 10:40, T-10 10:50, T-5 10:55
+    captures = {
+        jst(10, 30): {"1": 4.0, "2": 2.5, "3": 9.0},
+        jst(10, 40): {"1": 5.0, "2": 2.2, "3": 9.0},  # exactly T-20
+        jst(10, 45): {"1": 4.8, "2": 2.3, "3": 10.4},
+        jst(10, 50): {"1": 4.6, "2": 2.4, "3": 11.0},  # exactly T-10
+        jst(10, 53): {"1": 4.2, "2": 2.6, "3": 12.0},
+    }
+    _write_logged_day(captures, post)
+    models = ShadowModels(
+        win=FakeWin(), ordering=FakeOrdering(), nowcast=_drift_nowcast(), ids={"nowcast": "e2e"}
+    )
+    rules = FlagRules(floor_max_odds=1.3, tail_min_odds=50.0, tail_rank=6, stale_s=40.0)
+    day = datetime.fromisoformat(DAY).date()
+    steps, reads = [], (jst(10, 45), jst(10, 53))
+    for at in reads:
+        plain = json.loads(json.dumps(feed_mod.build_board(day, now=lambda at=at: at)))
+        shadow = json.loads(
+            json.dumps(
+                build_shadow(
+                    day, now=lambda at=at: at, models=models, flag_rules=rules, n_draws=8, seed=1
+                )
+            )
+        )
+        steps.append(call("renderShadow", plain, shadow, {"now": ms(at), "venue": "TOK"}))
+    early, late = ({"TOK": soup(p)} for p in results(steps, tmp_path))
+
+    def shown(page, combo):
+        row_el = row_in(page, "TOK", rid("TOK", 5), "WIN", combo)
+        return [(text(cell(row_el, c)), classes(cell(row_el, c))) for c in LADDER_COLS]
+
+    def near(got: str, want: float) -> bool:
+        m = re.fullmatch(r"≈\s*(\d+\.\d)", got)
+        return m is not None and abs(float(m.group(1)) - want) <= 0.051
+
+    for combo in ("1", "2", "3"):
+        t20, t10 = captures[jst(10, 40)][combo], captures[jst(10, 50)][combo]
+        # 10:53, tau 7: T-20 and T-10 observed, the T-10 cell coloured by its move since T-20
+        cells = shown(late, combo)
+        assert cells[0][0] == f"{t20:.1f}" and "projected" not in cells[0][1], (combo, cells)
+        assert cells[1][0] == f"{t10:.1f}" and "projected" not in cells[1][1], (combo, cells)
+        assert ("up" if t10 > t20 else "down") in cells[1][1], (combo, cells)
+        now_odds = captures[jst(10, 53)][combo]
+        for (got, cls), k in zip(cells[2:], (5, 2, 0), strict=True):
+            want = now_odds * math.exp(0.02 * (7 - k))
+            assert near(got, want) and "projected" in cls, (combo, k, got, want)
+        # 10:45, tau 15: T-20 observed, the rest projected from the 10:45 odds
+        cells = shown(early, combo)
+        assert cells[0][0] == f"{t20:.1f}" and "projected" not in cells[0][1], (combo, cells)
+        now_odds = captures[jst(10, 45)][combo]
+        for (got, cls), k in zip(cells[1:], (10, 5, 2, 0), strict=True):
+            want = now_odds * math.exp(0.02 * (15 - k))
+            assert near(got, want) and "projected" in cls, (combo, k, got, want)
+
+
+# A Win pool whose crowd order, feed order and shadow-value order all differ, with a tie.
+ORDER_FEED = {
+    "race_date": DAY,
+    "generated_utc": utc_text(NOW),
+    "venues": [
+        {
+            "venue": "TOK",
+            "races": [
+                race(
+                    "TOK",
+                    7,
+                    jst(11, 0),
+                    NOW,
+                    {
+                        "WIN": pool(
+                            line("1", 12.0, mm=1.0, t20=1.0, t2=1.0),
+                            line("2", 3.3, mm=1.0, t20=1.0, t2=1.0),
+                            line("3", None, scr=True),
+                            line("4", 1.7, mm=1.0, t20=1.0, t2=1.0),
+                            line("10", 3.3, mm=1.0, t20=1.0, t2=1.0),
+                        ),
+                    },
+                )
+            ],
+        }
+    ],
+}
+ORDER_SHADOW = {
+    "race_date": DAY,
+    "generated_utc": utc_text(NOW),
+    "models": {"WIN": "v0-synthetic"},
+    "races": [
+        shadow_race(
+            "TOK",
+            7,
+            jst(11, 0),
+            5,
+            {
+                "WIN": {
+                    "1": win(1.4, 1.3, 1.5),
+                    "2": win(0.6, 0.5, 0.7),
+                    "3": win(None, None, None, "scratched"),
+                    "4": win(0.9, 0.8, 1.0),
+                    "10": win(1.1, 1.0, 1.2),
+                }
+            },
+        )
+    ],
+}
+
+
+@needs_node
+def test_rows_run_favourite_first_as_on_the_board(tmp_path):
+    keys = race_keys(FEED)
+    steps = []
+    for v, r in keys:
+        opts = {"now": ms(NOW), "venue": v, "race": r}
+        steps.append(call("renderBoard", FEED, opts, mod="board"))
+        steps.append(call("renderShadow", FEED, SHADOW, opts))
+    opts = {"now": ms(NOW), "venue": "TOK"}
+    steps.append(call("renderShadow", ORDER_FEED, ORDER_SHADOW, opts))
     shown = results(steps, tmp_path)
-    for i, venue in enumerate(venues_of(FEED)):
+    for i, (_, race_id) in enumerate(keys):
         board, page = soup(shown[2 * i]), soup(shown[2 * i + 1])
-        assert order_of(page) == order_of(board), venue
-        # independently: feed order of races and rows, the board's pool order
-        want = []
-        for race_ in next(v for v in FEED["venues"] if v["venue"] == venue)["races"]:
-            rank = ["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE"]
-            for pool_code in sorted(race_["pools"], key=rank.index):
-                want += [
-                    (race_["race_id"], pool_code, r["combination"])
-                    for r in race_["pools"][pool_code]["rows"]
-                ]
-        assert order_of(page) == want, venue
+        assert order_of(page) == order_of(board), race_id
+        # independently: the board's pool order, rows favourite first by the crowd's odds
+        race_ = next(r for v in FEED["venues"] for r in v["races"] if r["race_id"] == race_id)
+        rank = ["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE"]
+        want = [
+            (race_id, pool_code, combo)
+            for pool_code in sorted(race_["pools"], key=rank.index)
+            for combo in favourite_order(race_["pools"][pool_code]["rows"])
+        ]
+        assert order_of(page) == want, race_id
         for block in race_blocks(page):
             for pool_el in block.select("[data-pool]"):
                 values = pool_el.select('[data-col="value"]')
@@ -875,9 +1929,112 @@ def test_rows_keep_the_board_order(tmp_path):
                 assert len({tuple(classes(v)) for v in figures}) <= 1, "value cells styled by value"
                 assert not [v for v in values if v.get("style")], "inline style on a value cell"
                 assert not [r for r in pool_el.select("[data-combination]") if r.get("style")]
-    tok = soup(shown[3])
-    assert not tok.select('[data-combination="99"]'), "a shadow-only row was drawn"
-    assert not tok.select('[data-combination="3,9"]'), "a shadow-only row was drawn"
+    tok1 = soup(shown[2 * keys.index(("TOK", rid("TOK", 1))) + 1])
+    assert not tok1.select('[data-combination="99"]'), "a shadow-only row was drawn"
+    assert not tok1.select('[data-combination="3,9"]'), "a shadow-only row was drawn"
+    # by the crowd's odds, ties by number ('2' before '10'), never by the shadow value
+    hand = pool_block(race_block(soup(shown[-1]), rid("TOK", 7)), "WIN")
+    combos = [e["data-combination"] for e in hand.select("[data-combination]")]
+    assert combos == ["4", "2", "10", "1", "3"], combos
+
+
+@needs_node
+def test_the_hash_and_the_strip_pick_the_race_and_a_poll_keeps_it(tmp_path):
+    k3, k10, t1 = rid("KYO", 3), rid("KYO", 10), rid("TOK", 1)
+    first = soup(results([call("renderShadow", FEED, SHADOW, {"now": ms(NOW)})], tmp_path)[0])
+    assert [b["data-race"] for b in race_blocks(first)] == [k3], "KYO 3 posts next at NOW"
+    links = strip_links(first, race_blocks(first))
+    assert set(links) == {3, 10}
+    tok_tab = first.select_one('[data-venue="TOK"]')
+    assert tok_tab is not None
+
+    newer = copy.deepcopy(SHADOW)
+    newer["races"][1]["pools"]["WIN"]["2"] = win(1.37, 1.29, 1.46, "tail")
+    plain = {"plain": {"feed": FEED, "etag": '"p1"'}}
+    one = {**plain, "shadow": {"feed": SHADOW, "etag": '"s1"'}}
+    two = {**plain, "shadow": {"feed": newer, "etag": '"s2"'}}
+    steps = [
+        {"fire": 5000, "servers": two},  # a poll with a new shadow feed
+        {"click": chain_of(click_target(links[3]), "shadow")},  # 3R on the strip
+        {"fire": 5000},
+        {"click": chain_of(tok_tab, "shadow")},  # the TOK tab
+        {"fire": 5000},
+    ]
+    out = run_js(steps, tmp_path, servers=one, browser=True, hash_=links[10]["href"])
+    got = [[b["data-race"] for b in race_blocks(soup(r["shadow"]))] for r in out["results"]]
+    assert got == [[k10], [k10], [k3], [k3], [t1], [t1]], got  # loaded with KYO 10's hash
+    assert out["results"][2]["hash"] == links[3]["href"], out["results"][2]["hash"]
+
+
+@needs_node
+def test_a_newly_selected_race_moves_the_viewport_and_a_poll_leaves_it(tmp_path):
+    # The reader is page_fakes.READ_Y px down before every step. Picking another race (strip
+    # link, back) brings it to the top of the viewport; a poll, new values or not, leaves it.
+    k3, k10, t1 = rid("KYO", 3), rid("KYO", 10), rid("TOK", 1)
+    first = soup(results([call("renderShadow", FEED, SHADOW, {"now": ms(NOW)})], tmp_path)[0])
+    links = strip_links(first, race_blocks(first))
+    to10 = links[10]["href"]
+    tok_tab = first.select_one('[data-venue="TOK"]')
+    newer = copy.deepcopy(SHADOW)
+    newer["races"][1]["pools"]["WIN"]["2"] = win(1.37, 1.29, 1.46, "tail")
+    plain = {"plain": {"feed": FEED, "etag": '"p1"'}}
+    one = {**plain, "shadow": {"feed": SHADOW, "etag": '"s1"'}}
+    two = {**plain, "shadow": {"feed": newer, "etag": '"s2"'}}
+    # (step, race drawn after it, the viewport moves to the race)
+    table = [
+        ({"fire": 5000}, k10, False),  # 304s
+        ({"fire": 5000, "servers": two}, k10, False),  # new values, same race
+        ({"click": chain_of(click_target(links[3]), "shadow")}, k3, True),  # 3R on the strip
+        ({"fire": 5000, "servers": one}, k3, False),
+        ({"hash": to10}, k10, True),  # back
+        ({"fire": 5000}, k10, False),
+        ({"click": chain_of(tok_tab, "shadow")}, t1, True),  # the TOK tab
+        ({"fire": 5000, "servers": two}, t1, False),
+    ]
+    out = run_js([step for step, _, _ in table], tmp_path, servers=one, browser=True, hash_=to10)
+    steps_out = out["results"][1:]  # results[0] is the page at load
+    got = [[b["data-race"] for b in race_blocks(soup(r["shadow"]))] for r in steps_out]
+    assert got == [[race] for _, race, _ in table], got
+    for i, ((step, race, moves), result) in enumerate(zip(table, steps_out, strict=True)):
+        where = (i, sorted(step)[0], race, result["viewport"])
+        if moves:
+            assert moved_to_race(result["viewport"]), ("left deep in the new race", where)
+        else:
+            assert kept_in_place(result["viewport"]), ("a poll moved the reader", where)
+
+
+@needs_node
+def test_a_poll_keeps_each_pools_horizontal_scroll(tmp_path):
+    # The reader scrolls each pool's table sideways (the [data-pool] element scrolls, as
+    # shadow.html's .pool overflow-x: auto); a poll redrawing the same race, 304s or new values,
+    # leaves every pool where the reader put it.
+    newer = copy.deepcopy(SHADOW)
+    newer["races"][1]["pools"]["WIN"]["2"] = win(1.37, 1.29, 1.46, "tail")
+    plain = {"plain": {"feed": FEED, "etag": '"p1"'}}
+    one = {**plain, "shadow": {"feed": SHADOW, "etag": '"s1"'}}
+    two = {**plain, "shadow": {"feed": newer, "etag": '"s2"'}}
+    first = {"WIN": 140, "PLACE": 0, "QUINELLA_PLACE": 75}
+    second = {"WIN": 20, "PLACE": 210, "QUINELLA_PLACE": 75}
+    steps = [
+        {"scroll": first},
+        {"fire": 5000},  # 304s: the same race drawn again
+        {"scroll": second},
+        {"fire": 5000, "servers": two},  # new values
+        {"fire": 5000},
+    ]
+    out = run_js(steps, tmp_path, servers=one, browser=True, live_dom=True)
+    loaded, scrolled, poll_304, rescrolled, poll_new, poll_again = out["results"]
+    k3 = rid("KYO", 3)
+    for r in out["results"]:
+        assert [b["data-race"] for b in race_blocks(soup(r["shadow"]))] == [k3]
+    assert loaded["pools"] == {"WIN": 0, "PLACE": 0, "QUINELLA_PLACE": 0}, loaded["pools"]
+    assert scrolled["pools"] == first and rescrolled["pools"] == second  # the fake holds them
+    assert poll_304["pools"] == first, poll_304["pools"]
+    assert poll_new["pools"] == second, poll_new["pools"]
+    assert poll_again["pools"] == second, poll_again["pools"]
+    # the new values were drawn: the poll did redraw
+    row2 = row_in({"KYO": soup(poll_new["shadow"])}, "KYO", k3, "WIN", "2")
+    check_value(text(cell(row2, "value")), "WIN", newer["races"][1]["pools"]["WIN"]["2"], "new")
 
 
 def test_page_has_no_stake_words_or_amount_inputs(tmp_path):
