@@ -147,28 +147,34 @@ reach the store, and documents the mapping.
 
 ### Development reads and the holdout (#415)
 
-The development readers (`countries/japan/models/v0/store.read_store_table`, and the speed
-study's `studies/speed_run.read_inputs`, through `tables.read_table(..., development=...)`) read
-through `core.eval.holdout.read_development(handle, country, ...)`, on one open handle
-(`pyarrow.memory_map`) of the table's file. It first narrows the requested range to the file's
-own first and last race_date: from each row group's footer statistics, or, for a row group
-written without them, by one Acero plan over those row groups together (a scan of race_date, a
-range filter and a min/max aggregate), so the file is scanned once for its bounds and only the
-two bounds, never a race_date column, reach Python. An open-ended read (`end=date.max`, as several callers
+The development readers take two routes over one open handle (`pyarrow.memory_map`) of the
+table's file. The speed study's `studies/speed_run.read_inputs`, through
+`tables.read_table(..., development=...)`, reads through
+`core.eval.holdout.read_development(handle, country, ...)`, which scans the handle with
+`pyarrow.parquet.read_table`. `countries/japan/models/v0/store.read_store_table` builds the same
+predicate with `core.eval.holdout.file_development_filter` on the handle and scans a `ds.dataset`
+of the file's path on a one-file read-only filesystem served from that handle, so its read is a
+dataset scan with the predicate as its filter. Either way the predicate first narrows the
+requested range to the file's own first and last race_date: from each row group's footer
+statistics, or, for a row group written without them, by one Acero plan over those row groups
+together (a scan of race_date, a projection and a min/max aggregate of the in-range days with a
+null count), so the file is scanned once for its bounds and only the two bounds and the count,
+never a race_date column, reach Python. An open-ended read (`end=date.max`, as several callers
 pass) so asks the holdout rule only about the days the file can hold, and a range outside the
 file returns no row. The price-era guard of `read_store_table` checks the requested start,
-before this narrowing. It then scans the same handle with `development_filter(country, start,
-end)`: the narrowed inclusive range minus the holdout days, built from the calendar and the
-committed `holdout.yaml`, never from the rows. (`read_store_table` builds that predicate with
-`file_development_filter` on the handle and scans a `ds.dataset` of the file's path served from
-the same handle, a one-file read-only filesystem, so its read is a dataset scan with the predicate
-as its filter.) Bounds and scan read one snapshot: a file
+before this narrowing. The predicate is then `development_filter(country, start, end)`: the
+narrowed inclusive range minus the holdout days, built from the calendar and the committed
+`holdout.yaml`, never from the rows. A null race_date is not a development row; `read_table`
+(`dated=True` on `read_development`) refuses a table with one, `ValueError` before any row is
+read (the null count comes from the footers or the same bounds scan), rather than dropping it,
+so the speed study never runs on an incomplete field. Bounds and scan read one snapshot: a file
 atomically replaced at its path (`os.replace`, as a rebuild does) during the read is read as it
 was. No table or record batch the scan returns holds a holdout row. What is skipped on disk is
-narrower: Parquet prunes a row group
-only from its min/max statistics, so a row group whose race days mix development and holdout
-days (any group spanning more than one day after the holdout start) is still read and decoded,
-and its holdout rows are dropped by the scan's filter before a table is built. Every store table
+narrower: Parquet prunes a row group only from its min/max statistics, so a row group holding
+both rows the scan needs and rows it excludes (a development and a holdout day, say 2026-12-02
+and 2026-12-03) is still read and decoded, and its excluded rows are dropped by the scan's
+filter before a table is built. A multi-day group after the holdout start is not necessarily
+such a group: 2026-12-03 and 12-04 are both holdout days. Every store table
 is Parquet; the other files under `$HORSETRACK_DATA_DIR` (the ingest manifest, JSONL logs, the
 raw page cache) have no row-group statistics and are not development reads. `LockedHoldout.open`
 remains the only way to holdout rows.

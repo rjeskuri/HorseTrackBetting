@@ -61,8 +61,10 @@ def read_table(
     `development` (a country), only that country's development rows are read:
     `core.eval.holdout.read_development` over the table's race_date, bounds and scan through one
     open handle, so no holdout row reaches the frame, and `filters` narrows that scan as its
-    `where`. Either way row groups are skipped only by their min/max statistics, and a row group
-    that mixes kept and excluded rows is still read from disk."""
+    `where`; a table with a null race_date on any row raises ValueError (from its footer null
+    counts or the bounds scan, before any row is read) rather than dropping it. Either way row
+    groups are skipped only by their min/max statistics, and a row group that mixes kept and
+    excluded rows is still read from disk."""
     spec = _spec(name)
     wanted = list(spec.columns) if columns is None else list(columns)
     unknown = [c for c in wanted if c not in spec.columns]
@@ -78,7 +80,7 @@ def read_table(
         if development is None:
             data = pq.read_table(file, columns=wanted, filters=filters)
         else:
-            data = read_development(file, development, columns=wanted, where=filters)
+            data = read_development(file, development, columns=wanted, where=filters, dated=True)
     target = pa.schema([(c, ARROW_TYPES[spec.columns[c]]) for c in wanted])
     frame = data.select(wanted).cast(target).to_pandas(types_mapper=_PANDAS_TYPES.get)
     for column in wanted:

@@ -571,6 +571,46 @@ def test_read_inputs_scans_no_holdout_row(tmp_path, monkeypatch, spy, days, stat
     assert_scan_excluded_holdout(spy, max(len(dev_races), len(dev_runners)))
 
 
+def null_one_race_date(tmp_path, table: str, race_day: date, statistics: str) -> None:
+    """Rewrites the JRA store's ``table`` with race_date set to null on one row of the first race
+    of ``race_day``, keeping the row groups small and mixed and the footer statistics mode."""
+    path = (tmp_path / "data").resolve() / "processed" / "jra" / f"{table}.parquet"
+    rows = pq.ParquetFile(path).read().to_pylist()
+    target = f"jra:{race_day.isoformat()}:TOK:01"
+    k = next(i for i, row in enumerate(rows) if row["race_id"] == target)
+    rows[k]["race_date"] = None
+    frame = _store_frame(table, rows)
+    pq.write_table(
+        frame,
+        path,
+        row_group_size=8,
+        write_statistics=statistics_for(statistics, frame.column_names),
+    )
+
+
+@pytest.mark.parametrize("statistics", ["all", "none", "no-race-date"])
+@pytest.mark.parametrize("table", ["runners", "races"])
+@pytest.mark.parametrize(
+    "race_day",
+    [
+        pytest.param(date(2026, 12, 5), id="dev-race"),
+        pytest.param(date(2026, 12, 3), id="held-race"),
+    ],
+)
+def test_read_inputs_refuses_a_missing_race_date(
+    tmp_path, monkeypatch, table, race_day, statistics
+):
+    """PR #427 review: main's speed study raised ValueError on a missing race_date; the
+    development filter must not drop an undated row silently, so the study never runs on an
+    incomplete field. Footer null counts may be absent (statistics 'none' / 'no-race-date')."""
+    assert not held(date(2026, 12, 5)) and held(date(2026, 12, 3))
+    write_speed_store(tmp_path, monkeypatch, DAYS, statistics)
+    null_one_race_date(tmp_path, table, race_day, statistics)
+
+    with pytest.raises(ValueError, match=r"(?i)race.?date.*missing|missing.*race.?date"):
+        read_inputs()
+
+
 # ---------------------------------------------------------------------------------------------
 # read_inputs reads one snapshot (PR #427 review: the span and the scan opened the file apart)
 # ---------------------------------------------------------------------------------------------
