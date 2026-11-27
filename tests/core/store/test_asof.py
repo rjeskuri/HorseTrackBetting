@@ -42,6 +42,13 @@ Pinned semantics, derived here by brute force rather than from the code under te
   `column`, `anchor` or `fallback`, is a ValueError; so is joining on a column a prefix matches.
 - kind 'static': every row is available at any t (no time field; `label_columns` allowed).
   `read_asof`/`asof_join` return it without its label columns; `read_label` refuses it.
+- kind 'current_value' with `in_view=True` (YAML `in_view: true`; #376, the owner's request of
+  2026-11-26: the jockey and trainer masters, "the master row as exported is used, with no
+  history"): the rule keeps kind 'current_value' and the table behaves as a static one, every
+  row in every view at any t, `asof_join` on `on` alone, label columns and prefixes dropped,
+  `read_label` refused. Without it (`in_view` defaults to False) a current_value table is
+  refused as before. `in_view` on any other kind, or one that is not a bool, is a ValueError;
+  so are label columns or prefixes on a current_value rule without it.
 - the session time zone of the connection never changes what a view returns.
 
 YAML format of `load_availability` (pinned below):
@@ -54,8 +61,9 @@ YAML format of `load_availability` (pinned below):
         anchor: <name>        # kind offset only, required
         offset_min: <number>  # kind offset only, required; minutes, int or float
         tz: <IANA zone>       # kind offset only, optional (required at query time on a DATE anchor)
-        label_columns: [<name>, ...]  # kinds column, offset and static only, optional
-        label_prefixes: [<prefix>, ...]  # kinds column, offset and static only, optional
+        label_columns: [<name>, ...]  # kinds column, offset, static (and in_view) only, optional
+        label_prefixes: [<prefix>, ...]  # kinds column, offset, static (and in_view) only, optional
+        in_view: true | false  # kind current_value only, optional (default false)
 
 A key that does not belong to the entry's kind, an unknown key, an unknown kind or a missing
 required key is a ValueError, and so is a `label_columns` or `label_prefixes` that is not a list
@@ -1482,6 +1490,231 @@ def test_load_availability_reads_a_static_rule(tmp_path: Path, con):
         _refuse_entry(tmp_path, entry)
 
 
+# --- current_value in a view (#376): the master row as exported, at any t -----------------------
+#
+# The owner's request on #376 (2026-11-26): the jockey and trainer masters are current values,
+# "the master row as exported is used, with no history". A current_value rule with in_view=True is
+# in every view at any t, as a static table is; without it the table is refused as before.
+
+EXPORTED = datetime(2026, 11, 30, 3, tzinfo=UTC)  # the export's own stamp
+MASTER = pd.DataFrame(
+    {
+        "jockey_code": ["01126", "05339", "00666", "00777"],
+        "name": ["J One", "J Two", "J Three", "J Four"],
+        "is_retired": [False, False, True, False],  # as of the export, not as of t
+        "trainer_code": ["01061", None, "00420", "01061"],
+        "career_wins": [812, 45, 1290, 3],
+        "stat_win_rate": [0.12, 0.05, 0.15, 0.01],
+        "stat_place_rate": [0.31, 0.2, 0.33, 0.1],
+        # after every decision time below but the last: an in_view rule ignores it
+        "exported_utc": utc_series([EXPORTED] * 4),
+    }
+)
+MASTER_TIMES = [*STATIC_TIMES, EXPORTED - US, EXPORTED]
+IN_VIEW_DROPS = [  # (label_columns, label_prefixes)
+    pytest.param((), (), id="no-labels"),
+    pytest.param(("career_wins",), (), id="a-label-column"),
+    pytest.param((), ("stat_",), id="a-label-prefix"),
+    pytest.param(("career_wins", "exported_utc"), ("stat_",), id="both"),
+]
+
+
+def by_code(frame: pd.DataFrame, column: str) -> dict[str, object]:
+    return {c: value(v) for c, v in zip(frame["jockey_code"], frame[column], strict=True)}
+
+
+@pytest.mark.parametrize("session", SESSION_ZONES[:2])
+@pytest.mark.parametrize(("labels", "prefixes"), IN_VIEW_DROPS)
+def test_an_in_view_current_value_table_is_whole_in_every_view_at_any_t(
+    con, labels, prefixes, session
+):
+    set_session_zone(con, session)
+    put(con, "jockeys", MASTER)
+    rule = Availability(
+        "jockeys", "current_value", label_columns=labels, label_prefixes=prefixes, in_view=True
+    )
+    assert (rule.kind, rule.in_view) == ("current_value", True)
+    assert (rule.column, rule.anchor, rule.offset, rule.tz, rule.fallback) == (None,) * 5
+    rules = {"jockeys": rule}
+    kept = {c for c in MASTER.columns if c not in labels and not c.startswith(prefixes)}
+
+    for t in MASTER_TIMES:
+        view = read_asof(con, "jockeys", t, rules=rules)
+        assert set(view.columns) == kept, f"t={t.isoformat()}"
+        assert sorted(view["jockey_code"]) == sorted(MASTER["jockey_code"]), f"t={t.isoformat()}"
+        for column in kept:  # every row as stored, the same at every t
+            assert by_code(view, column) == by_code(MASTER, column), f"{column} t={t.isoformat()}"
+
+    # one row per key, matched on the code alone: a key long before the export gets the row
+    keys = pd.DataFrame(
+        {
+            "jockey_code": ["00666", "09999", "01126", "05339", "00666"],
+            "t_utc": utc_series(
+                [STATIC_TIMES[0], at(12), EXPORTED, at(0), datetime(2100, 1, 1, tzinfo=UTC)]
+            ),
+        }
+    )
+    got = asof_join(keys, "jockeys", on=["jockey_code"], rules=rules, con=con)
+    got = got.reset_index(drop=True)
+    assert set(got.columns) == {"jockey_code", "t_utc"} | (kept - {"jockey_code"})
+    assert [value(v) for v in got["name"]] == ["J Three", None, "J One", "J Two", "J Three"]
+    assert [value(v) for v in got["is_retired"]] == [True, None, False, False, True]
+    assert [value(v) for v in got["trainer_code"]] == ["00420", None, "01061", None, "00420"]
+    if "career_wins" in kept:
+        assert [value(v) for v in got["career_wins"]] == [1290, None, 812, 45, 1290]
+
+    with pytest.raises(ValueError):
+        read_label(con, "jockeys", rules=rules)
+
+
+def test_an_in_view_table_refuses_joins_on_its_labels_and_a_misspelt_label(con):
+    put(con, "jockeys", MASTER)
+    rule = Availability(
+        "jockeys", "current_value", label_columns=("career_wins",), label_prefixes=("stat_",),
+        in_view=True,
+    )  # fmt: skip
+    rules = {"jockeys": rule}
+    assert set(read_asof(con, "jockeys", at(12), rules=rules).columns) == {
+        "jockey_code", "name", "is_retired", "trainer_code", "exported_utc",
+    }  # fmt: skip
+    for on in (["career_wins"], ["stat_win_rate"], ["jockey_code", "career_wins"]):
+        keys = MASTER[on].assign(t_utc=utc_series([at(12)] * len(MASTER)))
+        with pytest.raises(ValueError):
+            asof_join(keys, "jockeys", on=on, rules=rules, con=con)
+    misspelt = Availability(
+        "jockeys", "current_value", label_columns=("carrer_wins",), in_view=True
+    )
+    with pytest.raises(ValueError):  # a misspelt label column cannot let the real one through
+        read_asof(con, "jockeys", at(12), rules={"jockeys": misspelt})
+
+
+def test_a_current_value_rule_without_in_view_is_still_refused(con):
+    put(con, "jockeys", MASTER)
+    keys = pd.DataFrame({"jockey_code": ["01126"], "t_utc": utc_series([at(23)])})
+    for rule in (
+        Availability("jockeys", "current_value"),
+        Availability("jockeys", "current_value", in_view=False),
+    ):
+        assert (rule.kind, rule.in_view) == ("current_value", False)
+        rules = {"jockeys": rule}
+        for t in (STATIC_TIMES[0], at(12), EXPORTED, STATIC_TIMES[-1]):
+            with pytest.raises(CurrentValueTable):
+                read_asof(con, "jockeys", t, rules=rules)
+        with pytest.raises(CurrentValueTable):
+            asof_join(keys, "jockeys", on=["jockey_code"], rules=rules, con=con)
+        with pytest.raises(ValueError):
+            read_label(con, "jockeys", rules=rules)
+
+
+def test_availability_takes_in_view_on_current_value_only():
+    for fields in (
+        {"kind": "column", "column": "fetched_utc"},
+        {"kind": "offset", "anchor": "post_utc", "offset": timedelta(minutes=20)},
+        {"kind": "static"},
+        {"kind": "label_only"},
+        {"kind": "current_value"},
+    ):
+        assert Availability("t", **fields).in_view is False, fields  # the default
+    plain = Availability("t", "current_value", in_view=True)
+    assert (plain.kind, plain.in_view, plain.label_columns, plain.label_prefixes) == (
+        "current_value", True, (), (),
+    )  # fmt: skip
+    labelled = Availability(
+        "t", "current_value", in_view=True, label_columns=("career_wins",),
+        label_prefixes=("stat_",),
+    )  # fmt: skip
+    assert (labelled.label_columns, labelled.label_prefixes) == (("career_wins",), ("stat_",))
+
+    bad = [
+        # on any other kind
+        {"kind": "column", "column": "fetched_utc", "in_view": True},
+        {"kind": "offset", "anchor": "post_utc", "offset": timedelta(minutes=20), "in_view": True},
+        {"kind": "static", "in_view": True},
+        {"kind": "label_only", "in_view": True},
+        # not a bool
+        {"kind": "current_value", "in_view": 1},
+        {"kind": "current_value", "in_view": "true"},
+        {"kind": "current_value", "in_view": None},
+        # label columns and prefixes only with in_view
+        {"kind": "current_value", "label_columns": ("career_wins",)},
+        {"kind": "current_value", "in_view": False, "label_prefixes": ("stat_",)},
+        # still no time field
+        {"kind": "current_value", "in_view": True, "column": "exported_utc"},
+        {"kind": "current_value", "in_view": True, "anchor": "exported_utc",
+         "offset": timedelta(0)},
+        {"kind": "current_value", "in_view": True, "tz": "Asia/Tokyo"},
+        {"kind": "current_value", "in_view": True, "fallback": "exported_utc"},
+    ]  # fmt: skip
+    for fields in bad:
+        with pytest.raises(ValueError):
+            Availability("t", **fields)
+
+
+def test_load_availability_takes_in_view_on_current_value_only(tmp_path: Path, con):
+    path = tmp_path / "availability.yaml"
+    path.write_text(
+        "tables:\n"
+        "  jockeys:\n"
+        "    kind: current_value\n"
+        "    in_view: true\n"
+        "  trainers:\n"
+        "    kind: current_value\n"
+        "    in_view: true\n"
+        "    label_columns: [career_wins]\n"
+        "    label_prefixes: [stat_]\n"
+        "  horses:\n"
+        "    kind: current_value\n"
+        "  owners:\n"
+        "    kind: current_value\n"
+        "    in_view: false\n",
+        encoding="utf-8",
+    )
+    rules = load_availability("japan", path=path)
+    got = {t: (r.kind, r.in_view, r.label_columns, r.label_prefixes) for t, r in rules.items()}
+    assert got == {
+        "jockeys": ("current_value", True, (), ()),
+        "trainers": ("current_value", True, ("career_wins",), ("stat_",)),
+        "horses": ("current_value", False, (), ()),
+        "owners": ("current_value", False, (), ()),
+    }
+    for table in rules:
+        put(con, table, MASTER)
+    early = datetime(1990, 1, 1, tzinfo=UTC)
+    jockeys = read_asof(con, "jockeys", early, rules=rules)
+    assert set(jockeys.columns) == set(MASTER.columns)
+    assert by_code(jockeys, "career_wins") == by_code(MASTER, "career_wins")
+    trainers = read_asof(con, "trainers", early, rules=rules)
+    assert sorted(trainers["jockey_code"]) == sorted(MASTER["jockey_code"])
+    assert set(trainers.columns) == {
+        "jockey_code", "name", "is_retired", "trainer_code", "exported_utc",
+    }  # fmt: skip
+    for table in ("horses", "owners"):
+        with pytest.raises(CurrentValueTable):
+            read_asof(con, table, early, rules=rules)
+
+    for entry in (
+        # on any other kind, true or false
+        "kind: static\n    in_view: true",
+        "kind: static\n    in_view: false",
+        "kind: label_only\n    in_view: true",
+        "kind: column\n    column: fetched_utc\n    in_view: true",
+        "kind: offset\n    anchor: post_utc\n    offset_min: 0\n    in_view: true",
+        # not a bool
+        "kind: current_value\n    in_view: 1",
+        "kind: current_value\n    in_view: 'true'",
+        "kind: current_value\n    in_view:",
+        "kind: current_value\n    in_view: [true]",
+        # label columns and prefixes only with in_view
+        "kind: current_value\n    in_view: false\n    label_columns: [career_wins]",
+        "kind: current_value\n    label_prefixes: [stat_]",
+        # malformed view keys, or a time field, with it
+        "kind: current_value\n    in_view: true\n    label_columns: career_wins",
+        "kind: current_value\n    in_view: true\n    column: exported_utc",
+        "kind: current_value\n    in_view: true\n    anchor: exported_utc\n    offset_min: 0",
+    ):
+        _refuse_entry(tmp_path, entry)
+
+
 # --- joining on a label column -------------------------------------------------------------------
 
 JOIN_ON_LABEL_RULES = [
@@ -1803,6 +2036,9 @@ def test_load_availability_refuses_malformed_label_prefixes(tmp_path: Path, entr
 #   stored value.
 # - dividends, sectionals, incidents and running_comments rows enter the views at post_utc + 30
 #   min of their race.
+# - the finish (races' finish_time_s; runners' finish_pos, dead_heat and finish_time_s) is in the
+#   frame from 00:00 JST, null until post_utc + 30 min of the row's own race (#305, the owner's
+#   answer on #96, 2026-11-25); the other result columns stay labels.
 # - a race with no post time (or a row whose race_id has no races row) never shows those values.
 
 POST_JST = "Asia/Tokyo"
@@ -1827,12 +2063,13 @@ ORPHAN = ("jra:2026-11-28:NAK:03", date(2026, 11, 28))  # runners and results, n
 HORSES = (1, 2)
 FAR_FUTURE = datetime(2030, 1, 1, tzinfo=UTC)
 RUNNER_RESULT_LABELS = (
-    "finish_pos", "placing_raw", "placing_code", "dead_heat", "finish_time_s", "lbw_raw",
-    "lbw_lengths", "running_positions", "last_3f_s", "win_odds", "win_fav_rank",
+    "placing_raw", "placing_code", "lbw_raw", "lbw_lengths", "running_positions", "last_3f_s",
+    "win_odds", "win_fav_rank",
 )  # fmt: skip
-RACE_RESULT_LABELS = (
-    "finish_time_s", "split_times_s", "result_published_utc", "result_unpublished_utc",
-)  # fmt: skip
+RACE_RESULT_LABELS = ("split_times_s", "result_published_utc", "result_unpublished_utc")
+# null until post_utc + 30 min of the row's race (#305)
+RUNNER_FINISH = ("finish_pos", "dead_heat", "finish_time_s")
+RACE_FINISH = ("finish_time_s",)
 
 
 def expected_post(race_date: date, hhmm: str | None) -> datetime | None:
@@ -1873,6 +2110,8 @@ def runner_values(rid: str, horse_no: int) -> dict:
         "actual_wt_kg": 55.0 + horse_no,
         "is_scratched": horse_no == 2 and r % 2 == 0,
         "finish_pos": horse_no,
+        "dead_heat": (horse_no + r) % 2 == 0,
+        "finish_time_s": 71.0 + r + horse_no / 10,
         "placing_raw": str(horse_no),
         "win_odds": 2.5 * horse_no + r,
         "last_3f_s": 34.0 + r / 10,
@@ -2080,6 +2319,12 @@ def test_post_gated_views_match_a_point_in_time_lookup_at_every_boundary(post_co
                 (r, h): runner_values(r, h)[column] if r in weighed else None
                 for r in open_races for h in HORSES
             }, f"{column}, {where}"  # fmt: skip
+        assert set(RUNNER_FINISH) <= set(runners.columns), where
+        for column in RUNNER_FINISH:
+            assert by_runner(runners, column) == {
+                (r, h): runner_values(r, h)[column] if r in resulted else None
+                for r in open_races for h in HORSES
+            }, f"runners.{column}, {where}"  # fmt: skip
 
         races = read_asof(post_con, "races", t, rules=japan)
         assert set(races["race_id"]) == open_races - {ORPHAN[0]}, where
@@ -2088,6 +2333,12 @@ def test_post_gated_views_match_a_point_in_time_lookup_at_every_boundary(post_co
                 r: race_values(r)[column] if r in weighed else None
                 for r in open_races - {ORPHAN[0]}
             }, f"{column}, {where}"  # fmt: skip
+        assert set(RACE_FINISH) <= set(races.columns), where
+        for column in RACE_FINISH:
+            assert by_race(races, column) == {
+                r: race_values(r)[column] if r in resulted else None
+                for r in open_races - {ORPHAN[0]}
+            }, f"races.{column}, {where}"  # fmt: skip
 
         for table in RESULT_TABLES:
             view = read_asof(post_con, table, t, rules=japan)
@@ -2174,7 +2425,14 @@ def test_card_columns_open_at_midnight_jst_and_result_labels_stay_out(post_con, 
             r: race_values(r)[column] for r in same_day if r != ORPHAN[0]
         }, column
 
-    # the result columns stay labels: never in a view, at any t
+    # the finish is in the frame from 00:00 JST, null until post_utc + 30 min (#305)
+    assert set(RUNNER_FINISH) <= set(runners.columns) and set(RACE_FINISH) <= set(races.columns)
+    for column in RUNNER_FINISH:
+        assert by_runner(runners, column) == {(r, h): None for r in same_day for h in HORSES}
+    for column in RACE_FINISH:
+        assert by_race(races, column) == {r: None for r in same_day if r != ORPHAN[0]}
+
+    # the other result columns stay labels: never in a view, at any t
     for t in boundary_probes():
         runners = read_asof(post_con, "runners", t, rules=japan)
         assert not set(RUNNER_RESULT_LABELS) & set(runners.columns), t.isoformat()

@@ -17,7 +17,7 @@ race results; no JRDB, no JRA-VAN). No runner or race row appears.
   `uv run python -m horsetrack.countries.japan.studies.calibration --run`.
 - Store: `processed/jra/runners.parquet@b3226f2a22bfce26`, `processed/jra/races.parquet@4e6a394a57e3101a`.
 - The full report is under the data directory, at `reports/crowd-calibration-japan-4816f067ab5a.md`. Every record
-  is in `docs/experiments/registry-japan.md`.
+  is in `docs/experiments/registry/japan/`.
 
 ## Owner decisions used
 
@@ -278,7 +278,7 @@ race results; no JRDB, no JRA-VAN). No runner or race row appears.
   `uv run python -m horsetrack.countries.japan.studies.tail_beta`.
 - Store: `processed/jra/runners.parquet@b3226f2a22bfce26`, `processed/jra/races.parquet@4e6a394a57e3101a`, the
   builds #77 read. The full report is under the data directory, at `reports/tail-beta-japan-ee2e0cc56024.md`. The
-  four records are in `docs/experiments/registry-japan.md`.
+  four records are in `docs/experiments/registry/japan/`.
 - Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
   called. No holdout outcome or price was read.
 
@@ -464,7 +464,7 @@ over the JRA results store (netkeiba race results; no JRDB, no JRA-VAN). No runn
 - Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`. These are
   later builds than #77's (`b3226f2a22bfce26`, `4e6a394a57e3101a`): the store was rebuilt after #77, and it adds
   three development days (see Data and split). The full report is under the data directory, at
-  `reports/calibrated-market-japan-46f53f0b0fc3.md`. The eight records are in `docs/experiments/registry-japan.md`.
+  `reports/calibrated-market-japan-46f53f0b0fc3.md`. The eight records are in `docs/experiments/registry/japan/`.
 - Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
   called. No holdout outcome or price was read.
 
@@ -596,3 +596,368 @@ Each is filed under epic #72, `status:proposed`.
   (ΔLL with meeting-clustered bounds).
 - #321: the spline fitted on `run_fit`'s rows (dead-heat races left out), to check the study's spline matches D4's
   live fit, or align the two.
+
+---
+
+# Experiment report: the entropy gradient conditioned on the tail (Japan, #277)
+
+Ticket #277 (epic #72). #77's E3 bins each race by its normalised market entropy and finds the power β falling from
+bin 1 (the most concentrated markets) to bin 5: Δβ = β(bin 1) − β(bin 5) = +0.089 [+0.055, +0.123]. #285 found the
+far tail (runners above decimal 51.0) over-priced, and the number of such runners moves with the entropy, so the
+gradient could be the tail count's alone. This study refits the bins' β with the tail conditioned on. **Nothing is
+adopted.** Every figure is an aggregate over the JRA results store (netkeiba race results; no JRDB, no JRA-VAN). No
+runner or race row appears.
+
+- Registry family `japan-entropy-gradient-tail-conditioned`, spec sha256
+  `4eb7e26f48d2a135737ce1fa8bc6af30cc86d7170019339c920829f19dc135bf`. It is its own family, not #77's or #285's. The
+  spec was frozen in the registry before any development row was read. It holds the three methods, the cut points
+  (#77's, from `config/calibration.yaml`), the tail threshold, the tail-count strata, the minimum cell size, and the
+  survival rule.
+- Code: `countries/japan/studies/entropy_tail.py`; the records carry git `895ca69`, and the next commit only adds this
+  report, the registry rows and a ledger row. To reproduce, run
+  `uv run python -m horsetrack.countries.japan.studies.entropy_tail`. The three records are in
+  `docs/experiments/registry/japan/japan-entropy-gradient-tail-conditioned.md`, run ids `dd04cf13045a`, `3ea61d1a5671` and `bad5f5001e28`.
+- Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`. This is a
+  newer build than #77's and #285's, so the counts differ slightly: 43,130 development races and 601,265 priced
+  starters, against 43,058 and 600,231. The full report is under the data directory, at
+  `reports/entropy-tail-japan-4eb7e26f48d2.md`.
+- Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
+  called. No holdout outcome or price was read.
+
+## Owner decisions used
+
+| Decision | What it fixes here | Where it was signed |
+| --- | --- | --- |
+| #77 (2) | The entropy bins are the quintiles of the per-race normalised entropy over the first training window, frozen as four cut points in `config/calibration.yaml`. Not recomputed here. | #77, 2026-11-25 |
+| #77 (5) | The tail is a runner priced strictly above decimal 51.0 (`tail_min_odds`). | #77, 2026-11-25 |
+| D6, D9, D10 | D10 applies (no price before 2014-06-07). D6 and D9 do not bind: this study has no out-of-fold score. | §3, §4, #14 |
+| D11, D12, D14, D15 | Holdout A2 from 2026-11-28, fully locked, opened only by the owner. Not opened here. | §5, #14 |
+| D21 | No figure derived from a licensed source appears in the repository. None is used here. | #14 |
+
+The tail-count strata `[0, 1, 2, 3, 4, 5+]`, the 30-race minimum cell, the share's definition and the rule for
+"survives" are implementation choices recorded in the frozen spec, not owner decisions, and were written before any
+race was scored.
+
+## Hypothesis
+
+The null is the starting point: after the tail is conditioned on, the entropy bins have the same β and Δβ = 0. The
+gradient is the tail's alone if Δβ's 95% Wald CI covers 0 under both conditioned methods.
+
+- **Direction.** More tail runners go with a more concentrated market (a lower entropy bin, below), and tail runners are over-priced, so a
+  tail-driven gradient would shrink toward 0 when the tail is conditioned on.
+- **Failure rule** (the frozen spec's): the gradient *survives* conditioning on the tail, for each conditioned method,
+  when Δβ's 95% CI excludes 0. It is written after #77's E3 table, which looked at the same development races, so this
+  study cannot confirm a gradient independently.
+
+## Variants tried
+
+The family has 3 variants and 3 records, all scored. Each is one in-sample fit on every development race (no fold, no
+bootstrap), with Wald CIs (estimate ± 1.96 se, inverse observed information) that treat races as independent. The
+model in all three is the conditional logit P(i wins) ∝ exp(slope × ln(1/odds)) over each race's priced runners.
+
+- **unconditioned**: one β per bin, #77's E3.
+- **tail_share**: slope = β(bin) + γ × share, one joint fit over the five bins, where share is the race's runners
+  priced above 51.0 divided by its priced runners. The bin β is a race with no tail runner.
+- **tail_count_strata**: races cut by their count of runners above 51.0 into 0, 1, 2, 3, 4 and 5 or more; within each
+  stratum bin 1 and bin 5 get their own slope; Δβ is pooled over the strata by inverse variance (a stratum is used
+  when both cells hold at least 30 races; all six were).
+
+### The confounder: the tail count by entropy bin
+
+| Bin | Races | Mean tail runners | Mean tail share | Races with none |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 9,199 | 6.32 | 0.438 | 43 |
+| 2 | 8,656 | 5.39 | 0.371 | 74 |
+| 3 | 8,506 | 4.82 | 0.329 | 91 |
+| 4 | 8,156 | 4.12 | 0.282 | 138 |
+| 5 | 8,613 | 2.91 | 0.201 | 576 |
+
+The tail count falls steadily across the bins, as the premise said. The overlap is thin at the low end: bin 1 has 43
+races with no tail runner and bin 5 has 576.
+
+### Δβ = β(bin 1) − β(bin 5), three ways
+
+| Method | Races | Δβ | 95% CI | Excludes 0 |
+| --- | ---: | ---: | --- | --- |
+| unconditioned | 43,130 | +0.0879 | [+0.0540, +0.1217] | yes |
+| tail_share | 43,130 | +0.0473 | [+0.0067, +0.0878] | yes |
+| tail_count_strata | 17,812 | +0.0879 | [+0.0468, +0.1291] | yes |
+
+The share's coefficient is γ = +0.176 [+0.079, +0.274]: a race with every runner in the tail would have a slope 0.18
+higher than the bin's β. The strata method's races are the bin 1 and bin 5 cells only.
+
+### β by entropy bin, unconditioned and with the share
+
+| Bin | Unconditioned β | 95% CI | With the share (β at share 0) | 95% CI |
+| --- | ---: | --- | ---: | --- |
+| 1 | 1.0575 | [1.0387, 1.0763] | 0.9804 | [0.9339, 1.0268] |
+| 2 | 1.0199 | [0.9984, 1.0414] | 0.9552 | [0.9136, 0.9968] |
+| 3 | 1.0159 | [0.9925, 1.0394] | 0.9584 | [0.9190, 0.9978] |
+| 4 | 0.9972 | [0.9715, 1.0229] | 0.9477 | [0.9102, 0.9851] |
+| 5 | 0.9696 | [0.9415, 0.9978] | 0.9331 | [0.8985, 0.9677] |
+
+### Tail-count strata: β of bin 1 and bin 5 within each
+
+| Tail runners | Bin 1 races | Bin 5 races | β bin 1 | β bin 5 | Δβ | se |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 43 | 576 | 0.9475 | 0.9136 | +0.034 | 0.155 |
+| 1 | 204 | 1,316 | 1.2560 | 0.9749 | +0.281 | 0.088 |
+| 2 | 431 | 1,719 | 1.0424 | 0.9606 | +0.082 | 0.057 |
+| 3 | 703 | 1,932 | 1.0332 | 1.0116 | +0.022 | 0.047 |
+| 4 | 793 | 1,515 | 1.0419 | 0.9480 | +0.094 | 0.047 |
+| 5 or more | 7,025 | 1,555 | 1.0585 | 0.9630 | +0.095 | 0.034 |
+
+Every stratum has a positive Δβ, from +0.022 to +0.281, and the stratum with one tail
+runner (se 0.088) sits well above the rest. These are six CIs with no correction.
+
+## Does the gradient survive conditioning on the tail?
+
+**By the pre-registered rule, yes, under both conditioned methods; under the share model only just, and at about half
+its size.**
+
+- Within strata of the tail count, Δβ is +0.0879 [+0.0468, +0.1291], the same point estimate as unconditioned
+  (+0.0879) with a CI that excludes 0 by a wide margin. Conditioning this way removes none of it.
+- With the share as a covariate, Δβ falls to +0.0473 [+0.0067, +0.0878]: the point estimate drops by 46% and the
+  lower bound is 0.007, so the CI excludes 0 but is also consistent with a gradient near 0.007. The drop is bin 1's β
+  falling from 1.058 to 0.980 once the share is allowed to act on it, while bin 5's falls from 0.970 to 0.933. The
+  share's coefficient is positive and its CI excludes 0 (γ = +0.176), so the tail does move the slope
+  in the direction #285 found.
+
+The two conditioned methods disagree on size (+0.047 against +0.088), and each is an incomplete control. The strata
+are coarse at the top: the 5-or-more stratum holds 7,025 of bin 1's 9,199 races and carries the largest weight in the
+pool, and tail counts above 5 still differ between bins 1 and 5 within it (bin 1 averages 6.3 across all its races).
+The share model assumes the tail acts linearly in the share on the slope, the same way in every bin, and the share
+is also a function of field size. Neither method makes the tail count and the entropy independent. What is shown is
+that a gradient remains after both controls, not how large the entropy's own gradient is.
+
+## Alternatives rejected and why
+
+- **Fitting the bins on runners at or under 51.0 only.** Dropping the tail runners from each race's choice set
+  changes the winners a race can have and the entropy's meaning, and it was not pre-registered. It is a follow-up.
+- **A tail-share covariate centred on its mean.** The β by bin would then be a race of average share, not one with no
+  tail. The frozen share is uncentred, which makes the bin β a no-tail-runner slope; Δβ and its CI do not depend on
+  the centring because the share enters with one γ in every bin.
+- **Entropy bins recomputed within the body.** #77's cut points were signed on the full-field entropy. New cuts are an
+  owner decision, so they are not made here.
+- **A matched or reweighted design on the tail count.** Not pre-registered; strata and a covariate were the ticket's
+  two routes.
+- **Out-of-fold scoring of the conditioned β.** The ticket asks whether the gradient survives, an in-sample
+  estimation question, not whether it helps the price. A gradient that survives is still a screen, as in #77.
+- **Holdout.** Not read, not opened.
+
+## What this rules out
+
+- **The entropy gradient being the tail count's alone.** Under both conditioned methods Δβ's CI excludes 0 (the lower
+  bounds are +0.007 and +0.047), so a zero gradient after conditioning is out, at the resolution of these two
+  controls. The upper bounds (+0.088 with the share; +0.129 in strata) rule out a conditioned gradient much above
+  #77's unconditioned +0.089 [+0.055, +0.123].
+- **A tail effect that is negligible.** γ's CI excludes 0 (+0.079 to +0.274): races with more tail runners get a higher
+  slope, and conditioning on that takes about half of the gradient's point estimate in the share model.
+- **Not ruled out.** A gradient between 0.007 and about 0.05, the share model's range, cannot be told from the tail's
+  residual effect; the strata method has no such shrinkage but is coarse at the top. Neither CI is clustered by
+  meeting (#276), so both are likely too narrow. The result is in-sample on the same development races as #77, with
+  no family-wise correction, and it is not a finding for the holdout.
+
+## Follow-ups filed
+
+None filed. Proposed under epic #72, `status:proposed`; the orchestrator files them.
+
+- Refit the bins with the entropy computed on the runners at or under 51.0 (the body), so the bins cannot track the
+  tail count by construction; this needs new cut points from the owner.
+- Tail control by a flexible function of the tail count and field size (a spline, or the count within each field-size
+  band) in the joint fit, instead of a linear share, and finer strata at the top (6, 7, 8 and more tail runners).
+- Meeting-clustered CIs for Δβ under each method (the same need as #276).
+- When A6's pre-registered family (#88) takes the entropy gradient as a candidate, take the conditioned size (about
+  +0.05 to +0.09), not the unconditioned one.
+
+---
+
+# Experiment report: a hinge tail slope, continuous at 51.0 (Japan, #294)
+
+Ticket #294 (epic #72), the follow-up #285 filed. #285's tail β multiplies x = ln(1/odds) by an indicator of
+odds above 51.0, so at 51.0 its log-weight also steps down by increment × ln 51 (about 0.18 at its increment of
++0.045): its increment mixes a slope change and a level step. This study fits the conditional logit with log-weight
+β·x + γ·max(0, ln(1/51) − x), which is continuous at 51.0. β is the body slope on x, γ the coefficient on the
+distance past the knot, and the slope past the knot is `tail β` = β − γ. **Nothing is adopted.** Every figure is an
+aggregate over the JRA results store (netkeiba race results; no JRDB, no JRA-VAN). No runner or race row appears.
+
+- Registry family `japan-tail-hinge-final-win`, spec sha256
+  `695ff91ca8280bf458e782410bfaa906533c3c66db2d498c7a4ea43582439f56`. It is its own family, not #77's or #285's. The
+  spec was frozen in the registry before any development row was read. It holds the model, the three comparators, the
+  ΔLL rule, the fit and its CI, the tail threshold, the floor, the fold scheme, the bootstrap and the owner decisions.
+- Code: `countries/japan/studies/tail_hinge.py`; the records carry git `61cbe4b`, and the next commit only adds this
+  report, the registry summary and a ledger row. To reproduce, run
+  `uv run python -m horsetrack.countries.japan.studies.tail_hinge`. The four records are in
+  `docs/experiments/registry/japan/japan-tail-hinge-final-win.md`, run ids `c0d7b0358901`, `cfd3e9e869df`,
+  `c819b527cb54` and `d02ebc81e61c`.
+- Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`. This is a
+  newer build than #285's, so the counts differ slightly: 43,130 development races and 601,265 priced starters,
+  against 43,058 and 600,231. #285's tail β is refitted on this build as a comparator, so its figures here are not
+  #285's published ones. The full report is under the data directory, at `reports/tail-hinge-japan-695ff91ca828.md`.
+- Holdout: development days only. `calibration.read_development` drops holdout days, and `LockedHoldout.open` is not
+  called. No holdout outcome or price was read.
+
+## Owner decisions used
+
+| Decision | What it fixes here | Where it was signed |
+| --- | --- | --- |
+| #77 answer (c) (2026-11-25) | The tail is measured by a slope fitted on a separate slope above 51.0, pre-registered as its own family. This study fits the continuous form of it. | #77, owner answer of 2026-11-25 (DECISIONS `#77 (c)` in `tail_beta.py`, reused) |
+| #77 (4) | The no-floor-bound subset drops races with a runner at odds 1.1 or under from fitting and from scoring. | #77, 2026-11-25 |
+| #77 (5) | The tail is a runner priced above decimal 51.0 (`tail_min_odds` in `config/calibration.yaml`, `owner_signoff: 77`); the knot is ln(1/51). | #77, 2026-11-25 |
+| Floor 1.1 | A priced runner at or under odds 1.1 + 1e-9 is floor-bound. | `config/jra.yaml`; #77 (4) |
+| D6 | Winner log loss per race; a dead heat scores each of its k co-winners at 1/k. | §3, #14; the #69 answer (2026-11-24) |
+| D7 | Bootstrap clusters are meetings (venue x day); bounds are 95% one-sided; 10,000 replicates (`config/scoring.yaml`). | §3, #14 |
+| D9 | Walk-forward quarters, refit quarterly, expanding window, 1-week embargo; the first scored quarter is 2020-Q1 (`config/folds.yaml`). | §4, #14; the #70 answer |
+| D10 | Races before 2014-06-07 are excluded wherever the price enters. | §4, #14 |
+| D11, D12, D14, D15 | Holdout A2 from 2026-11-28, fully locked for outcomes and prices, opened only by the owner. Not opened here. | §5, #14; the #71 answer (`config/holdout.yaml`) |
+| D21 | No figure derived from a licensed source appears in the repository. None is used here. | #14 |
+
+The hinge form itself and the comparison against #285's tail β are the ticket's (#294, epic #72), not a signed owner
+decision on the model. The bootstrap seed (294) is an implementation choice for reproducibility: `scoring.yaml` signs
+no seed.
+
+## Hypothesis
+
+The null is the starting point: one slope for the whole price, so γ = 0 and the tail β equals the body slope. The
+frozen spec pre-registered the measures (β, γ and the tail β, overall, by year, with and without floor-bound races,
+and ΔLL against normalised, power-β and #285's tail β), not their directions. The failure rules below were written
+with this report, after the run, as #285's were; the sign of γ was not pre-registered and is not a prediction.
+
+- **Fails to show a slope change** if γ's 95% Wald CI covers 0.
+- **Fails to add to #285's tail β** if the lower bound of ΔLL against it is at or below 0.
+- **Reading γ.** The hinge cannot carry a jump, so a pure level step is partly absorbed as a negative γ. The
+  test-author's simulations on synthetic markets of 12,000 races (not committed figures) gave γ̂ ≈ −0.6 ± 0.13 for a
+  step of −0.5 and γ̂ ≈ −0.18 ± 0.10 for a step of −0.18, with no slope change in either. A negative γ is therefore
+  read beside #285's increment and its implied step of about −0.18 at 51.0, not alone.
+
+## Variants tried
+
+The family has 4 variants and 4 records, all scored: a walk-forward variant and an in-sample by-year variant, each on
+all races and on no floor-bound races. None failed, and there was no aborted run.
+
+Data and split:
+- The rows are #77's on the newer build: development days from 2014-06-07 to 2026-11-23, 43,130 races, 601,265 priced
+  starters, 66 dead-heat races. 195 floor-bound runners sit in 195 races (0.45%).
+- Out of fold covers 28 quarterly folds from 2020-Q1 to 2026-Q4 (the last is partial): 23,871 scored races in 1,991
+  meetings (23,752 without floor-bound races). The hinge model, #285's tail β and power-β are each refitted on every
+  fold's training rows.
+- In-sample slopes are one fit per group on every development race of the subset.
+- CIs on slopes are 95% two-sided Wald (estimate ± 1.96 se, inverse observed information; tail β's se uses the full
+  covariance), treating races as independent as #77's and #285's do. The ΔLL bounds are the one-sided 5% and 95%
+  quantiles of the paired bootstrap over meetings (D7, seed 294).
+
+### The slopes, overall (in-sample, every development race)
+
+| Subset | Races | Tail runners | Tail winners | Body β | Hinge γ | Tail β (β − γ) |
+| --- | ---: | ---: | ---: | --- | --- | --- |
+| all races | 43,130 | 204,353 | 1,219 | 0.9962 [0.9845, 1.0078] | −0.3691 [−0.4583, −0.2798] | 1.3652 [1.2805, 1.4500] |
+| no floor-bound races | 42,935 | 203,258 | 1,216 | 0.9949 [0.9832, 1.0066] | −0.3716 [−0.4611, −0.2822] | 1.3665 [1.2816, 1.4515] |
+
+### The slopes by year (in-sample)
+
+2014 runs from 2014-06-07 and 2026 to 2026-11-23. Races are of the all-races subset (the no-floor-bound figures differ
+by at most 0.04 in γ and 0.03 in tail β in any year, and the same 8 years have a γ CI that excludes 0).
+
+| Year | Races | Tail winners | Body β | Hinge γ | Tail β |
+| --- | ---: | ---: | --- | --- | --- |
+| 2014 | 1,990 | 65 | 0.9919 [0.9392, 1.0447] | −0.3771 [−0.8015, +0.0472] | 1.3691 [0.9648, 1.7733] |
+| 2015 | 3,454 | 99 | 0.9725 [0.9312, 1.0137] | −0.5519 [−0.8871, −0.2167] | 1.5244 [1.2046, 1.8441] |
+| 2016 | 3,454 | 106 | 0.9857 [0.9457, 1.0256] | −0.3783 [−0.6827, −0.0739] | 1.3640 [1.0752, 1.6528] |
+| 2017 | 3,455 | 111 | 0.9975 [0.9573, 1.0378] | −0.3391 [−0.6505, −0.0278] | 1.3367 [1.0411, 1.6323] |
+| 2018 | 3,454 | 98 | 0.9903 [0.9495, 1.0312] | −0.3773 [−0.6794, −0.0751] | 1.3676 [1.0815, 1.6537] |
+| 2019 | 3,452 | 85 | 0.9745 [0.9338, 1.0153] | −0.5228 [−0.8590, −0.1865] | 1.4973 [1.1762, 1.8184] |
+| 2020 | 3,456 | 109 | 0.9767 [0.9360, 1.0174] | −0.2395 [−0.5320, +0.0529] | 1.2162 [0.9401, 1.4923] |
+| 2021 | 3,456 | 88 | 1.0039 [0.9624, 1.0455] | −0.4793 [−0.8287, −0.1298] | 1.4832 [1.1491, 1.8173] |
+| 2022 | 3,456 | 93 | 1.0469 [1.0047, 1.0891] | −0.1313 [−0.4326, +0.1700] | 1.1782 [0.8940, 1.4624] |
+| 2023 | 3,456 | 81 | 0.9903 [0.9488, 1.0319] | −0.5585 [−0.9025, −0.2144] | 1.5488 [1.2201, 1.8776] |
+| 2024 | 3,454 | 98 | 1.0329 [0.9910, 1.0748] | −0.1672 [−0.4636, +0.1291] | 1.2001 [0.9208, 1.4794] |
+| 2025 | 3,455 | 99 | 0.9892 [0.9481, 1.0303] | −0.4511 [−0.7734, −0.1287] | 1.4403 [1.1337, 1.7469] |
+| 2026 | 3,138 | 87 | 0.9987 [0.9554, 1.0421] | −0.2946 [−0.6135, +0.0242] | 1.2934 [0.9917, 1.5950] |
+
+γ is negative in all 13 years and its CI excludes 0 in 8 (2015 to 2019, 2021, 2023, 2025); it covers 0 in 2014, 2020,
+2022, 2024 and 2026. The tail β runs from 1.178 (2022) to 1.549 (2023), and its CI excludes 1 in the same 8 years.
+These are 13 CIs with no family-wise correction. The spread across years (γ from −0.56 to −0.13) is within what the
+CIs allow.
+
+### Walk-forward: the slopes of each fold's training rows
+
+The first fold trains to 2019-12-29 (19,259 races): body β 0.9851 [0.9679, 1.0023], γ −0.4244 [−0.5587, −0.2900], tail
+β 1.4095 [1.2817, 1.5373]. Across the 28 folds β runs from 0.983 to 0.998, γ from −0.424 to −0.360 and the tail β
+from 1.358 to 1.409, with the last fold (trained to 2026-09-26) at −0.367 and 1.363. Without floor-bound races γ runs
+from −0.433 to −0.365 and the tail β from 1.361 to 1.417. Every fold's γ CI excludes 0. The per-fold figures are
+registry metrics, one per fold, named `*[test_year=Y]`.
+
+### Out-of-fold winner log loss, ΔLL of the hinge model
+
+ΔLL is the comparator's mean log loss minus the hinge model's, in nats per race. Positive means the hinge model is
+better. Bounds are one-sided 5% and 95%, meeting-clustered.
+
+| Subset | Races | Mean log loss (hinge) | ΔLL vs normalised | Lower | Upper | ΔLL vs power-β | Lower | Upper | ΔLL vs #285 tail β | Lower | Upper |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| all races | 23,871 | 1.92761 | +0.000884 | +0.000434 | +0.001312 | +0.000617 | +0.000193 | +0.001020 | +0.000285 | +0.000026 | +0.000546 |
+| no floor-bound races | 23,752 | 1.93332 | +0.000845 | +0.000390 | +0.001278 | +0.000605 | +0.000175 | +0.001016 | +0.000276 | +0.000012 | +0.000541 |
+
+The comparators' means on this build are 1.92850 (normalised), 1.92823 (power-β) and 1.92790 (#285's tail β) on all
+races.
+
+### Out-of-fold tail, runners above decimal 51.0
+
+Observed against expected winners under the hinge model, beside #77's and #285's tables. A point estimate, with no
+bounds.
+
+| Subset | Model | Tail runners | Observed | Expected | O / E |
+| --- | --- | ---: | ---: | ---: | ---: |
+| all races | hinge | 111,905 | 655 | 652.7 | 1.004 |
+| no floor-bound races | hinge | 111,226 | 654 | 649.5 | 1.007 |
+
+## Alternatives rejected and why
+
+- **A step plus a hinge (three parameters, β, γ and a level step at 51.0).** It would separate the step from the slope
+  change directly, instead of reading γ beside #285's increment. It is not the ticket's model and was not
+  pre-registered, so it would be its own family. It is the main follow-up below.
+- **A free knot, or a threshold other than 51.0.** The owner signed 51.0 (#77 (5)), and the threshold is in the
+  frozen spec, so another value is another family.
+- **Meeting-clustered slope CIs.** The pre-registered CI is Wald from the observed information. The ΔLL bounds do
+  resample meetings. Clustered slope intervals would be wider or narrower: #276.
+- **A spline in ln q** (D4's calibrated market). That is #275, and #320 is its paired comparison with the tail β.
+- **ΔLL by year.** Not pre-registered.
+- **Dropping a year with no tail winner.** Every year has 65 to 111 tail winners on this build, so each year is
+  identified; the code records an unidentified year as a table row, not a failed variant.
+
+## What this rules out
+
+- **A continuous single slope for the whole price.** γ is −0.3691 [−0.4583, −0.2798]: a zero hinge coefficient is
+  out, and the slope past 51.0 is at least 1.28 at the lower CI against a body slope near 1 (0.9962 [0.9845,
+  1.0078]). Without floor-bound races the figures are the same to the third decimal.
+- **That this is a slope change alone.** The tail β here (1.365) is not #285's (1.045 on the older build): they are
+  different quantities. #285's carries a step of about −0.18 at 51.0 and a slope near the body's. The hinge has no
+  step and so spends its one tail parameter on a steeper slope. Taken as arithmetic on the point estimates, the
+  hinge lowers a runner at odds 200 by about 0.50 in log-weight against the body slope extended, and #285's model by
+  about 0.24. The two models agree that the far tail is over-priced, and disagree on how it is cut. The data here
+  do not say which form is true: the simulations above show a level step reads as a negative γ, so part of this γ may
+  be a step the hinge cannot carry. A pure step of −0.18 would give γ̂ near −0.18, half the estimate, which
+  suggests a slope change as well, but that is a statement from synthetic markets of a different size, not a
+  decomposition.
+- **That the hinge adds nothing over #285's step form.** Out of fold the hinge gains +0.000285 nats per race over #285's tail
+  β (one-sided bounds +0.000026 and +0.000546), and +0.000276 [+0.000012, +0.000541] without floor-bound races. The
+  lower bound is above 0 but within 0.00003 of it, and the upper bound rules out a gain above about 0.0005 nats per
+  race. Against power-β the gain is +0.000617 [+0.000193, +0.001020] and against normalised +0.000884 [+0.000434,
+  +0.001312]. These are small and do not argue for adopting a tail slope on log loss.
+- **A tail bias left in the price after the hinge.** Observed over expected tail winners is 1.004 (655 against 652.7),
+  against 1.003 under #285's tail β and 0.83 and 0.87 under #77's de-vigs. This is a point estimate on the data that
+  set the slope's scale, with no bounds.
+- **Floor-bound races driving the tail.** Without them γ is −0.3716 [−0.4611, −0.2822].
+- **What is not ruled out.** The year-by-year γ and tail β are noisy (γ from −0.56 to −0.13) and their CIs treat races
+  as independent. These are the same races as #77's tail table and #285's, so the tables are one observation, not
+  three. The fold-by-fold slopes are stable because the training windows overlap, not because they are independent
+  checks. The result does not show that the hinge adds anything a calibrated market (D4) lacks.
+
+## Follow-ups filed
+
+Each is proposed under epic #72, `status:proposed`; the orchestrator files them.
+
+- A step plus hinge (three-parameter) tail model in its own family, to separate the level step from the slope change
+  that this hinge and #285's step model each carry only half of.
+- #275: D4's spline on the same folds and tail table (already filed).
+- #276: meeting-clustered CIs for the slopes (already filed).
+- #320: a paired comparison of the tail β and the spline on one store build (already filed).
