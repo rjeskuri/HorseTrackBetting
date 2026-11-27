@@ -130,12 +130,16 @@ reach the store, and documents the mapping.
 
 ## Read access
 
-- `tables.read_table(source, name, columns=None) -> pandas.DataFrame`: the declared columns (or the
-  requested subset), in declared or requested order whatever the file's order, cast to their
-  declared types. A name that is not in `schemas.TABLES` (case-sensitive) raises `ValueError`, as
-  does a column the table does not declare. A missing file raises `FileNotFoundError` naming the
-  table and the source. `development=<country>` reads only that country's development rows,
-  through `core.eval.holdout.read_development` (below), so a holdout row never reaches the frame.
+- `tables.read_table(source, name, columns=None, *, filters=None, development=None) ->
+  pandas.DataFrame`: the declared columns (or the requested subset), in declared or requested
+  order whatever the file's order, cast to their declared types. A name that is not in
+  `schemas.TABLES` (case-sensitive) raises `ValueError`, as does a column the table does not
+  declare. A missing file raises `FileNotFoundError` naming the table and the source. `filters=`,
+  a `pyarrow.dataset` expression (it may name columns not read), is applied by the Parquet scan
+  (`pyarrow.parquet.read_table(..., filters=...)`), so an excluded row never reaches the frame.
+  `development=<country>` reads only that country's development rows, through
+  `core.eval.holdout.read_development` (below), so a holdout row never reaches the frame; with
+  both, `filters` is passed as that read's `where`, narrowing the development scan.
 - `tables.connect(source) -> duckdb.DuckDBPyConnection`: an in-memory DuckDB with one view per
   declared table whose file exists for that source, named after the table. File paths are quoted
   as SQL strings, so a data directory with a `'` in it works. The views apply no holdout
@@ -148,8 +152,9 @@ study's `studies/speed_run.read_inputs`, through `tables.read_table(..., develop
 through `core.eval.holdout.read_development(handle, country, ...)`, on one open handle
 (`pyarrow.memory_map`) of the table's file. It first narrows the requested range to the file's
 own first and last race_date: from each row group's footer statistics, or, for a row group
-written without them, by a binary search on `count_rows` under a range filter, so no race_date
-value is materialized to find the bounds. An open-ended read (`end=date.max`, as several callers
+written without them, by one Acero plan over those row groups together (a scan of race_date, a
+range filter and a min/max aggregate), so the file is scanned once for its bounds and only the
+two bounds, never a race_date column, reach Python. An open-ended read (`end=date.max`, as several callers
 pass) so asks the holdout rule only about the days the file can hold, and a range outside the
 file returns no row. The price-era guard of `read_store_table` checks the requested start,
 before this narrowing. It then scans the same handle with `development_filter(country, start,

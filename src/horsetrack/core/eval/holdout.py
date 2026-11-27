@@ -81,6 +81,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.acero as acero
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 import yaml
@@ -296,35 +297,30 @@ def development_filter(
     return keep
 
 
-def _day_count(fragment: ds.Fragment, column: str, low: date, high: date) -> int:
-    day = ds.field(column)
-    span = (day >= pa.scalar(low, pa.date32())) & (day <= pa.scalar(high, pa.date32()))
-    return fragment.count_rows(filter=span)
-
-
-def _searched_bounds(
-    fragment: ds.Fragment, column: str, start: date, end: date
+def _scanned_bounds(
+    fragment: ds.ParquetFileFragment, column: str, start: date, end: date
 ) -> tuple[date, date] | None:
-    """The first and last ``column`` day in ``start..end`` of ``fragment``, by binary search on
-    row counts under a range filter (no value reaches Python), or None when it has none."""
-    if _day_count(fragment, column, start, end) == 0:
-        return None
-    low, high = start.toordinal(), end.toordinal()
-    while low < high:  # the first day d with a row in start..d
-        mid = (low + high) // 2
-        if _day_count(fragment, column, start, date.fromordinal(mid)) > 0:
-            high = mid
-        else:
-            low = mid + 1
-    first = date.fromordinal(low)
-    high = end.toordinal()
-    while low < high:  # the last day d with a row in d..end
-        mid = (low + high + 1) // 2
-        if _day_count(fragment, column, date.fromordinal(mid), end) > 0:
-            low = mid
-        else:
-            high = mid - 1
-    return first, date.fromordinal(low)
+    """The first and last ``column`` day in ``start..end`` of ``fragment``, or None when it has
+    none: one Acero scan of that column feeding a min/max aggregate, so the fragment is read once
+    and only the two bounds (``lo``, ``hi``) reach Python."""
+    day = ds.field(column)
+    span = (day >= pa.scalar(start, pa.date32())) & (day <= pa.scalar(end, pa.date32()))
+    source = ds.FileSystemDataset([fragment], fragment.physical_schema, fragment.format)
+    plan = acero.Declaration.from_sequence(
+        [
+            acero.Declaration("scan", acero.ScanNodeOptions(source, columns={column: day})),
+            acero.Declaration("filter", acero.FilterNodeOptions(span)),
+            acero.Declaration(
+                "aggregate",
+                acero.AggregateNodeOptions(
+                    [(column, "min", None, "lo"), (column, "max", None, "hi")]
+                ),
+            ),
+        ]
+    )
+    bounds = plan.to_table()
+    low, high = bounds.column("lo")[0].as_py(), bounds.column("hi")[0].as_py()
+    return None if low is None else (low, high)
 
 
 def _file_day_bounds(
@@ -332,7 +328,7 @@ def _file_day_bounds(
 ) -> tuple[date, date] | None:
     """A range holding every ``column`` day in ``start..end`` of the Parquet file ``fragment``,
     or None when it holds none. From each row group's footer statistics where it records them;
-    the row groups that do not are searched by row counts."""
+    the row groups that do not are scanned once, together, for their bounds."""
     meta = fragment.metadata
     lows, highs, unrecorded = [], [], []
     for g in range(meta.num_row_groups):
@@ -357,10 +353,10 @@ def _file_day_bounds(
         elif stats is None or not stats.has_null_count or stats.null_count < group.num_rows:
             unrecorded.append(g)
     if unrecorded:
-        searched = _searched_bounds(fragment.subset(row_group_ids=unrecorded), column, start, end)
-        if searched is not None:
-            lows.append(searched[0])
-            highs.append(searched[1])
+        scanned = _scanned_bounds(fragment.subset(row_group_ids=unrecorded), column, start, end)
+        if scanned is not None:
+            lows.append(scanned[0])
+            highs.append(scanned[1])
     return (min(lows), max(highs)) if lows else None
 
 
@@ -377,11 +373,11 @@ def read_development(
     """The development rows of the Parquet file open on ``handle`` with ``start <= column <=
     end``: exactly ``columns``, in that order, with ``where`` (a dataset expression, which may
     name columns not read) narrowing them further inside the scan. The range is first narrowed to
-    the file's own first and last day (footer statistics, or row counts for a row group without
-    them), so ``development_filter`` asks ``is_holdout_day`` only about days the file can hold;
-    a range outside the file returns no row. Bounds and scan read the one open handle, so a file
-    atomically replaced at its path meanwhile is read as it was. Raises ``HoldoutConfigError``
-    when the country has no valid holdout definition."""
+    the file's own first and last day (footer statistics, or one min/max scan of the row groups
+    without them), so ``development_filter`` asks ``is_holdout_day`` only about days the file
+    can hold; a range outside the file returns no row. Bounds and scan read the one open handle,
+    so a file atomically replaced at its path meanwhile is read as it was. Raises
+    ``HoldoutConfigError`` when the country has no valid holdout definition."""
     columns = list(columns)
     bounds = _file_day_bounds(ds.ParquetFileFormat().make_fragment(handle), column, start, end)
     if bounds is None:
@@ -391,7 +387,7 @@ def read_development(
         keep = development_filter(country, *bounds, column=column)
     if where is not None:
         keep = keep & where
-    return pq.read_table(handle, columns=columns, filters=keep).select(columns)
+    return pq.read_table(handle, columns=columns, filters=keep)
 
 
 def _race_days(frame: pd.DataFrame, date_col: str) -> pd.Series:
