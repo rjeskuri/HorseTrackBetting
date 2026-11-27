@@ -282,6 +282,66 @@ def test_curves_by_segment_use_each_segment_own_quantiles():
     )
 
 
+@pytest.mark.parametrize(
+    ("levels", "missing"),
+    [
+        (("maiden", "allowance", "graded"), (None, np.nan)),
+        ((1.0, 2.0, 3.0), (np.nan, np.nan)),
+    ],
+    ids=["labels-none-nan", "codes-nan"],
+)
+def test_bets_without_a_segment_stay_in_all_and_leave_the_named_curves(levels, missing):
+    """A race whose class code did not map keeps a null class: its bets count in the 'all' curve
+    (exactly the by=None curve, bounds included) and in no class curve; each class curve is the
+    curve of that class's bets alone, and no segment is labelled by the null."""
+    rng = np.random.default_rng(444)
+    n = 3_000
+    claim = rng.uniform(0.4, 3.0, n)
+    # the unmapped bets pay best, so dropping them from 'all' or folding them into a class shows
+    unmapped = rng.random(n) < 0.15
+    p = np.where(unmapped, 0.7, 0.25)
+    bets = pd.DataFrame(
+        {
+            "claim": claim,
+            "ret": 2.0 * (rng.random(n) < p),
+            "meeting": rng.integers(0, 60, n).astype(str),
+            "race_class": pd.Series([levels[i % len(levels)] for i in range(n)], dtype=object),
+        }
+    )
+    where = np.flatnonzero(unmapped)
+    bets.loc[where[::2], "race_class"] = missing[0]
+    bets.loc[where[1::2], "race_class"] = missing[1]
+    quantiles = (0.5, 0.8, 0.95)
+
+    curve = _curve(bets, quantiles, by="race_class", n_boot=300, seed=21)
+
+    assert list(curve.columns) == COLUMNS
+    assert curve["segment"].notna().all()
+    assert set(curve["segment"]) == {"all", *levels}
+    assert len(curve) == 4 * (len(levels) + 1)
+
+    alone = _curve(bets, quantiles, n_boot=300, seed=21).reset_index(drop=True)
+    pd.testing.assert_frame_equal(_segment(curve, "all"), alone, check_dtype=False)
+    assert int(_segment(curve, "all")["n_bets"].sum()) == n
+
+    named = bets[~unmapped]
+    for level in levels:
+        sub = named[named["race_class"] == level].reset_index(drop=True)
+        got = _segment(curve, level)
+        assert int(got["n_bets"].sum()) == len(sub)
+        _check_bands(
+            got,
+            sub["claim"].to_numpy(),
+            sub["ret"].to_numpy(),
+            sub["meeting"].to_numpy(),
+            quantiles,
+        )
+        own = _curve(sub, quantiles, n_boot=300, seed=21)
+        cols = [c for c in COLUMNS if c != "segment"]
+        pd.testing.assert_frame_equal(got[cols], own[cols], check_dtype=False)
+    assert sum(int(_segment(curve, lv)["n_bets"].sum()) for lv in levels) == len(named)
+
+
 # --- the bounds -----------------------------------------------------------------------------
 
 

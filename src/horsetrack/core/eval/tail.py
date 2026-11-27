@@ -63,11 +63,13 @@ def tail_curve(
 
     One row per (segment, band) with the columns of ``COLUMNS``. The ``'all'`` segment covers every
     bet; with ``by`` set, one more segment per level of that column follows, labelled by the level.
+    A bet with no ``by`` value (None or NaN, e.g. a race whose class code did not map) counts in
+    ``'all'`` only: it is in no named segment, and no segment is labelled by the null.
     Within a segment the rows go from the lowest band to the highest (``band`` 0, 1, ...).
 
-    Raises KeyError for a column not in ``bets``; ValueError for no bets, a missing claim, return,
-    cluster or ``by`` value, or ``quantiles`` empty or not strictly increasing inside (0, 1). Each
-    band's bootstrap uses ``seed``, so the same seed reproduces the whole curve.
+    Raises KeyError for a column not in ``bets``; ValueError for no bets, a missing claim, return
+    or cluster, or ``quantiles`` empty or not strictly increasing inside (0, 1). Each band's
+    bootstrap uses ``seed``, so the same seed reproduces the whole curve.
     """
     columns = [claim_col, return_col, cluster_col] + ([] if by is None else [by])
     missing = [c for c in columns if c not in bets.columns]
@@ -85,8 +87,6 @@ def tail_curve(
     for column, what in [(claim_col, "claim"), (return_col, "return"), (cluster_col, "cluster")]:
         if bets[column].isna().any():
             raise ValueError(f"{bets[column].isna().sum()} bet(s) have no {what} ({column!r})")
-    if by is not None and bets[by].isna().any():
-        raise ValueError(f"{bets[by].isna().sum()} bet(s) have no segment ({by!r})")
 
     claims = bets[claim_col].to_numpy(dtype=float)
     returns = bets[return_col].to_numpy(dtype=float)
@@ -97,7 +97,10 @@ def tail_curve(
 
     segments = [(ALL, np.arange(len(bets)))]
     if by is not None:
-        groups = pd.Series(np.arange(len(bets))).groupby(bets[by].to_numpy(), sort=True)
+        # dropna: a bet with no segment stays in 'all' and leaves the named curves
+        groups = pd.Series(np.arange(len(bets))).groupby(
+            bets[by].to_numpy(), sort=True, dropna=True
+        )
         segments += [(label, idx.to_numpy()) for label, idx in groups]
 
     rows = []
