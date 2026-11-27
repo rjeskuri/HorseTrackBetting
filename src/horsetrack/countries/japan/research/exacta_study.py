@@ -66,13 +66,16 @@ E1_ID = "japan/131-exacta-category-v2"
 E1_B1_ID = "japan/131-exacta-category-b1-v2"
 E1_B3_ID = "japan/131-exacta-category-b3-v2"
 C_ID = "japan/131-exacta-logscore-v2"
-E2_ID = "japan/131-exacta-rule-v2"
+# E2 v3 (review of 0c39a8d): rule-v2 took its favourite from _COMMON's final Win odds, against
+# the signed spec's section 5 ("Selection uses only the board at t"). v3 changes only E2's
+# selection keys (_E2_SELECTION) and supersedes rule-v2, whose freeze stays in the registry.
+E2_ID = "japan/131-exacta-rule-v3"
 SUPERSEDES = {
     E1_ID: "japan/131-exacta-category-v1",
     E1_B1_ID: "japan/131-exacta-category-b1-v1",
     E1_B3_ID: "japan/131-exacta-category-b3-v1",
     C_ID: "japan/131-exacta-logscore-v1",
-    E2_ID: "japan/131-exacta-rule-v1",
+    E2_ID: "japan/131-exacta-rule-v2",
 }
 FITTED = "full_development"  # #115's one lambda2 fit over the development out-of-fold races
 LAMBDA2S = [FITTED, 1.0]
@@ -388,6 +391,30 @@ _SEGMENTS = {
 }
 
 
+# E2's selection keys (v3). Signed spec section 5: "at T-2 ... Selection uses only the board at
+# t. A selection variable taken from final odds is look-ahead"; section 6: the favourite's Win
+# odds are "at t for E2". primary_metric: the owner's reframe of 2026-11-27 on #131.
+_E2_SELECTION = {
+    "selection_time": "T-2",
+    "favourite": "lowest Win odds on the Win board at T-2 (the board at t), ties to the lowest "
+    "number",
+    "category": "fav_first, fav_second or no_fav of combination c against the favourite on the "
+    "Win board at T-2 (combo_category)",
+    "scopes": {
+        "all": "every scored race",
+        "headline": "favourite's Win odds at T-2 >= 3.0 and less popular; on #130 days, spec "
+        "section 6: 'the real exacta pool total exists (the odds log's investment row). There, "
+        'the lower tertile within each logged day defines "less popular"\'',
+    },
+    "primary_metric": "expected return per 100 yen staked at the final dividend, takeout and "
+    "breakage in, with its CI (owner reframe 2026-11-27 on #131: rank every option by expected "
+    "return at the final price, CI beside it)",
+    "revision": "v3 (review of 0c39a8d, 2026-11-27): rule-v2 took the favourite from the lowest "
+    "final Win odds; v3 takes the favourite and the category from the board at T-2, as the "
+    "signed spec's sections 5 and 6 say, and changes nothing else",
+}
+
+
 def _e1_members() -> list[dict]:
     return [{"category": c, "cell": cell} for c in CATEGORIES for cell in SEGMENT_CELLS]
 
@@ -465,6 +492,7 @@ def family_specs() -> dict[str, dict]:
             "logged pool totals",
             "benchmark": "no bet (loss 0)",
             "scored_on": "#130-logged development meetings only, once there are min_meetings",
+            **copy.deepcopy(_E2_SELECTION),
         },
     }
     return {fid: {**spec, "supersedes": SUPERSEDES[fid]} for fid, spec in specs.items()}
