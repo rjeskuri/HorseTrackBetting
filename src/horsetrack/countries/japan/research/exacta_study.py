@@ -76,13 +76,19 @@ C_ID = "japan-131-exacta-logscore-v2"
 # Ids (#525, owner 2026-11-27): the registry refuses "/" in a family id, so the live families take
 # the "japan-131-..." form with the specs (and hashes) frozen under the legacy "japan/131-..." ids;
 # SUPERSEDES names the legacy records as they stand in the registry.
-E2_ID = "japan-131-exacta-rule-v4"
+# E2 v5 (GPT-6.2 Sol review round 5 of 2c73ca0): v4 inherited _COMMON's Win probabilities (#114's
+# out-of-fold calibration, built from final Win odds) and its eligibility (races with such rows):
+# look-ahead for a T-2 rule. v5 takes p_c(t) from the T-2 Win board's normalised implied shares
+# and scores every #130-logged development day with T-2 Win and exacta boards; nothing else
+# changes. v4's spec stays frozen under its #525 id (``superseded_specs``) and the legacy id.
+E2_V4_ID = "japan-131-exacta-rule-v4"
+E2_ID = "japan-131-exacta-rule-v5"
 SUPERSEDES = {
     E1_ID: "japan/131-exacta-category-v1",
     E1_B1_ID: "japan/131-exacta-category-b1-v1",
     E1_B3_ID: "japan/131-exacta-category-b3-v1",
     C_ID: "japan/131-exacta-logscore-v1",
-    E2_ID: "japan/131-exacta-rule-v3",
+    E2_ID: E2_V4_ID,
 }
 FITTED = "full_development"  # #115's one lambda2 fit over the development out-of-fold races
 LAMBDA2S = [FITTED, 1.0]
@@ -459,6 +465,64 @@ def _e1_like(estimator: str, lambda2, estimand: str, **extra) -> dict:
     }
 
 
+# E2's inputs, the keys in which v5 differs from v4. v5: p_c(t) and eligibility from the T-2
+# boards. v4's values are kept to freeze its spec under its #525 id (``superseded_specs``).
+_E2_V5_INPUTS = {
+    "win_probabilities": "normalised implied Win shares on the Win board at T-2 (1 / odds over "
+    "the race's sum of 1 / odds, over the starters on that board), fed to the discounted "
+    "Harville at the registered lambda2",
+    "data": "development race days only (is_holdout_day False, filtered before any outcome, "
+    "odds or dividend is read); every #130-logged development day whose log holds the Win "
+    "board and the exacta board at T-2, each race with both boards at T-2 scored; no row of a "
+    "fitted Win model is required",
+    "rule": "at T-2 buy exacta c of category X when q_c(t) / p_c(t) < k; q_c(t) from the exacta "
+    "board at t, p_c(t) discounted Harville on the normalised implied Win shares of the Win "
+    "board at t",
+    "revision": "v5 (GPT-6.2 Sol review round 5 of 2c73ca0, 2026-11-28): rule-v4 took p_c(t) from "
+    "#114's calibrated Win probabilities, built from final Win odds, and scored only races "
+    "with #114 rows: look-ahead for a T-2 rule. v5 takes p_c(t) from the normalised implied "
+    "Win shares on the T-2 Win board and scores every #130-logged development day with T-2 Win "
+    "and exacta boards, and changes nothing else. " + _E2_SELECTION["revision"],
+}
+_E2_V4_INPUTS = {
+    "win_probabilities": _COMMON["win_probabilities"],
+    "data": _COMMON["data"],
+    "rule": "at T-2 buy exacta c of category X when q_c(t) / p_c(t) < k; q_c(t) from the exacta "
+    "board at t, p_c(t) Harville on the Win board at t",
+    "revision": _E2_SELECTION["revision"],
+}
+
+
+def _e2(inputs: Mapping[str, str]) -> dict:
+    return {
+        **copy.deepcopy(_COMMON),
+        "estimator": "rule",
+        "members": [
+            {"category": c, "cut": k, "scope": s}
+            for c in ("fav_second", "no_fav")
+            for k in (0.6, 0.7, 0.8, 0.9)
+            for s in ("all", "headline")
+        ],
+        "cuts": [0.6, 0.7, 0.8, 0.9],
+        "stake_yen": 100,
+        "lambda2": FITTED,
+        "family_size": 16,
+        "judged_at": "final dividends, own impact from the payout identity with the race's "
+        "logged pool totals",
+        "benchmark": "no bet (loss 0)",
+        "scored_on": "#130-logged development days available at each run, with n and the CI, "
+        "re-scored as more days are logged",
+        **copy.deepcopy(_E2_SELECTION),
+        **inputs,
+    }
+
+
+def superseded_specs() -> dict[str, dict]:
+    """Superseded specs frozen again under their #525 ids, so each live ``supersedes`` names a
+    freeze in the registry: rule-v4, as frozen under "japan/131-exacta-rule-v4"."""
+    return {E2_V4_ID: {**_e2(_E2_V4_INPUTS), "supersedes": "japan/131-exacta-rule-v3"}}
+
+
 def family_specs() -> dict[str, dict]:
     """The pre-registered families as plain-JSON dicts, a fresh copy on every call."""
     b2 = "rho_S = sum_r R^B2_{S,r} / sum_r rate_r (null 1)"
@@ -496,27 +560,6 @@ def family_specs() -> dict[str, dict]:
             "family_size": len(LAMBDA2S),
             "interval": "paired meeting bootstrap of the mean, 95% one-sided bounds",
         },
-        E2_ID: {
-            **copy.deepcopy(_COMMON),
-            "estimator": "rule",
-            "rule": "at T-2 buy exacta c of category X when q_c(t) / p_c(t) < k; q_c(t) from "
-            "the exacta board at t, p_c(t) Harville on the Win board at t",
-            "members": [
-                {"category": c, "cut": k, "scope": s}
-                for c in ("fav_second", "no_fav")
-                for k in (0.6, 0.7, 0.8, 0.9)
-                for s in ("all", "headline")
-            ],
-            "cuts": [0.6, 0.7, 0.8, 0.9],
-            "stake_yen": 100,
-            "lambda2": FITTED,
-            "family_size": 16,
-            "judged_at": "final dividends, own impact from the payout identity with the race's "
-            "logged pool totals",
-            "benchmark": "no bet (loss 0)",
-            "scored_on": "#130-logged development days available at each run, with n and the CI, "
-            "re-scored as more days are logged",
-            **copy.deepcopy(_E2_SELECTION),
-        },
+        E2_ID: _e2(_E2_V5_INPUTS),
     }
     return {fid: {**spec, "supersedes": SUPERSEDES[fid]} for fid, spec in specs.items()}

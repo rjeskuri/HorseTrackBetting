@@ -73,6 +73,40 @@ Restart of 66a2338 (owner, 2026-11-27), sections 10 to 12 below:
   reports, and None on the estimate's FoldMetric (``rho``, ``mean_return`` for B3,
   ``rho_unrounded`` for breakage), with the unavailable statistic ``f"{estimate}_bounds"``
   listed on the same fold with its reason. A cell of two or more meetings keeps finite bounds.
+
+GPT-6.2 Sol review round 5 of 2c73ca0, sections 13 to 16 below:
+
+- Corrected Win boards (finding exacta_run.py:324): #114's out-of-fold artifact holds ``q``, the
+  normalised implied Win shares (1 / odds over the race's sum) of the board it was built on.
+  ``load_races`` compares each development race's current board (the runners' Win odds,
+  normalised the same way) with that ``q`` and raises ``RunRefused`` naming the race when they
+  differ by more than float noise (a 0.1 tick on the longest price is a difference), even with
+  the same horse numbers; so ``main(["score"])`` refuses with nothing recorded and no report. An
+  identical board passes, and a holdout race's board is never read, so it never refuses.
+- C without a race above 110 yen (finding exacta_run.py:493): ``score`` completes when every
+  scored dividend is at or below 110 yen. Both C variants keep their record with the unavailable
+  ``log_score_gain`` (value ``UNAVAILABLE_VALUE``, n 0) and their ``log_score`` row (mean, lo, hi
+  unavailable, n 0); E1's members, the max test and the e1 reports are all written. A C sample of
+  one meeting keeps its mean (log q_w - log p_w at ``implied_share``'s D + 5, discounted Harville
+  at each lambda2) without bounds: lo and hi unavailable in the row, None on the FoldMetric, and
+  ``log_score_gain_bounds`` unavailable on the same fold.
+- Return per 100 yen at the final dividend (finding docs/experiments/131-exacta-overload.md:88):
+  each B2 and B1 member (the two boxes that are bets paid at the dividend; B3 is not) carries
+  ``return_per_100`` = 100 * sum_r R_r / n, the gross yen returned per 100 yen staked on the box
+  in each of the cell's n races, with one-sided 95% meeting-bootstrap bounds
+  ``return_per_100_lo`` / ``_hi`` in the member rows and the e1 reports, and the FoldMetric
+  ``return_per_100`` (with lo and hi) on the record's development fold. It is a metric, never a
+  param: params stay estimator, lambda2, category, cell and direction, so family sizes (84, 42,
+  84) and the max test's 84 are unchanged. Bounds follow E1's rules: an empty cell has the
+  unavailable ``return_per_100``, a one-meeting cell keeps the value without bounds and lists
+  ``return_per_100_bounds``. rho stays the pre-registered estimand.
+- Breakage at the minimum payout (finding exacta_run.py:605): a dividend at or below 110 yen (the
+  "Plus 10" floor, jra.yaml) may have been raised by the floor, so its unrounded value is unknown.
+  Each breakage row carries ``n_floor``, the cell's races at the floor; ``rho_unrounded`` and
+  ``breakage_share`` are over the cell's other races only (a 120 yen dividend still gets D + 5),
+  unavailable when every race of the cell is at the floor; ``rho`` (paid) is over all the cell's
+  races. In the registry a fold with ``n_floor`` > 0 carries one more unavailable marker (the
+  floor races' correction), whose FoldMetric ``n`` is ``n_floor``; a fold without one has none.
 """
 
 from __future__ import annotations
@@ -270,7 +304,9 @@ def _write_store(data: Path, races: list[dict]) -> None:
 
 def _write_fits(data: Path, races: list[dict], *, win_id: str, ordering_id: str, lambda2: float,
                 p_shift: float = 0.0) -> None:  # fmt: skip
-    """The v0 fit files ``_fits`` reads; the out-of-fold file covers every synthetic race."""
+    """The v0 fit files ``_fits`` reads; the out-of-fold file covers every synthetic race. Like
+    #114's artifact it holds ``q``, the normalised implied Win shares of the board ``races`` carry
+    (1 / odds over the race's sum of 1 / odds), beside ``p_cal``."""
     model = data / "models" / "japan" / "v0"
     model.mkdir(parents=True, exist_ok=True)
     oof = model / f"win_calibration_oof-{win_id}.parquet"
@@ -278,8 +314,9 @@ def _write_fits(data: Path, races: list[dict], *, win_id: str, ordering_id: str,
     for r in races:
         raw = {h: v * (1 + p_shift * ((h % 3) - 1)) for h, v in r["p"].items()}
         total = sum(raw.values())
-        rows += [{"race_id": r["race_id"], "horse_no": h, "p_cal": v / total}
-                 for h, v in raw.items()]  # fmt: skip
+        inv = sum(1 / o for o in r["odds"].values())
+        rows += [{"race_id": r["race_id"], "horse_no": h, "q": (1 / r["odds"][h]) / inv,
+                  "p_cal": v / total} for h, v in raw.items()]  # fmt: skip
     pq.write_table(pa.Table.from_pandas(pd.DataFrame(rows), preserve_index=False), oof)
     (model / f"win-{win_id}.json").write_text(json.dumps({"fit_id": win_id}), encoding="utf-8")
     (model / f"ordering-{ordering_id}.json").write_text(
@@ -298,9 +335,11 @@ FIT_A = {"win_id": "winfitA0001", "ordering_id": "ordfitA0001", "lambda2": 0.81}
 
 
 def _setup(data: Path, races: list[dict] | None = None, fits: dict | None = None) -> list[dict]:
+    """The store of ``races`` and an out-of-fold file built from the same Win boards (a store
+    whose development Win board differs from the artifact's ``q`` is refused, section 13)."""
     races = _base_races() if races is None else races
     _write_store(data, races)
-    _write_fits(data, _base_races(), **(fits or FIT_A))
+    _write_fits(data, races, **(fits or FIT_A))
     return races
 
 
@@ -1226,7 +1265,7 @@ RUN_FAMILY_IDS = {
     "japan-131-exacta-category-b1-v2",
     "japan-131-exacta-category-b3-v2",
     "japan-131-exacta-logscore-v2",
-    "japan-131-exacta-rule-v4",
+    "japan-131-exacta-rule-v5",
     MAX_TEST_FAMILY,
     BREAKAGE_FAMILY,
 }
@@ -1330,3 +1369,444 @@ def test_a_backfill_that_fills_an_empty_cell_keeps_every_variant_and_family_size
         for category in CATEGORIES:
             fold = (f"development:{category}:field:15-18", "rho_unrounded")
             assert fold in _unavailable(old) and fold in _present(record), (record.variant, fold)
+
+
+# ---------------------------------------------------------------------------------------------
+# Shared by sections 13 to 16: independent references (loops, from the spec's definitions)
+# ---------------------------------------------------------------------------------------------
+
+FLOOR_YEN = 110.0  # JRA's minimum payout per 100 yen ("Plus 10", jra.yaml)
+
+
+def _ref_exacta(p: dict[int, float], lambda2: float) -> dict[tuple[int, int], float]:
+    """Discounted Harville by loops: P(i, j) = p_i p_j^l2 / sum_{k != i} p_k^l2, p renormalised."""
+    total = sum(p.values())
+    q = {h: v / total for h, v in p.items()}
+    return {(i, j): q[i] * q[j] ** lambda2 / sum(q[k] ** lambda2 for k in q if k != i)
+            for i, j in itertools.permutations(q, 2)}  # fmt: skip
+
+
+def _ref_favourite(odds: dict[int, float]) -> int:
+    return min(odds, key=lambda h: (odds[h], h))
+
+
+def _ref_category(combo, fav) -> str:
+    return "fav_first" if combo[0] == fav else "fav_second" if combo[1] == fav else "no_fav"
+
+
+def _ref_box(race: dict, lambda2: float) -> dict[str, dict[str, float]]:
+    """B1 and B2 return per unit staked on each category's box at the paid dividend."""
+    (winner, dividend, _), fav = race["exacta"][0], _ref_favourite(race["win_odds"])
+    h = _ref_exacta(race["p"], lambda2)
+    cat = _ref_category(tuple(winner), fav)
+    box = [c for c in h if _ref_category(c, fav) == cat]
+    out = {e: dict.fromkeys(CATEGORIES, 0.0) for e in ("b1", "b2")}
+    out["b1"][cat] = dividend / 100 / len(box)
+    out["b2"][cat] = h[tuple(winner)] / sum(h[c] for c in box) * dividend / 100
+    return out
+
+
+def _race_cells(race: dict) -> set[str]:
+    """The race's signed cells from its race card and final Win odds."""
+    odds = race["win_odds"]
+    fav_odds, n = odds[_ref_favourite(odds)], len(odds)
+    band = ("le1.9" if fav_odds < 2.0 else "2.0-2.9" if fav_odds < 3.0
+            else "3.0-4.9" if fav_odds < 5.0 else "ge5.0")  # fmt: skip
+    group = {"DEBUT": "maiden", "MAIDEN": "maiden", "C1": "win1-3", "C2": "win1-3",
+             "C3": "win1-3"}.get(race["race_class"], "open")  # fmt: skip
+    less = race["race_no"] <= 4 or group == "maiden"
+    cells = {"all", f"fav_odds:{band}",
+             f"field:{'5-10' if n <= 10 else '11-14' if n <= 14 else '15-18'}",
+             f"class:{group}", "popularity:less" if less else "popularity:rest"}  # fmt: skip
+    if fav_odds >= 3.0 and less:
+        cells.add("headline")
+    return cells
+
+
+def _lambda_values(meta) -> dict:
+    return {study.FITTED: meta["lambda2_full_development"], 1.0: 1.0}
+
+
+def test_the_references_on_a_hand_computed_race():
+    race = {"win_odds": {1: 1.8, 2: 3.1, 3: 4.6}, "p": {1: 0.5, 2: 0.3, 3: 0.2},
+            "exacta": [((1, 2), 480.0, False)]}  # fmt: skip
+    plain = _ref_box(race, 1.0)  # fav_first box mass is p_1 = 0.5 at any lambda2
+    assert plain["b2"]["fav_first"] == pytest.approx(0.3 / 0.5 * 4.8)  # 2.88
+    assert plain["b1"]["fav_first"] == pytest.approx(4.8 / 2)  # 2 combinations, 2.4
+    assert plain["b2"]["no_fav"] == plain["b1"]["fav_second"] == 0.0
+    half = _ref_box(race, 0.5)
+    share = math.sqrt(0.3) / (math.sqrt(0.3) + math.sqrt(0.2))
+    assert half["b2"]["fav_first"] == pytest.approx(share * 4.8)  # 2.6425...
+    assert half["b1"]["fav_first"] == plain["b1"]["fav_first"]  # B1 does not use p
+
+
+# ---------------------------------------------------------------------------------------------
+# 13. A corrected Win board with the same horses is refused (Sol 5, exacta_run.py:324)
+# ---------------------------------------------------------------------------------------------
+
+
+def _corrected_board(races: list[dict], change: str) -> tuple[list[dict], str]:
+    """``races`` with one development race's Win board corrected, its horse numbers unchanged."""
+    out = copy.deepcopy(races)
+    race = next(r for r in out if r["race_date"] not in HOLDOUT_DAYS)
+    odds = race["odds"]
+    by_price = sorted(odds, key=lambda h: (odds[h], h))
+    if change == "one_tick_on_the_longest_price":
+        odds[by_price[-1]] = round(odds[by_price[-1]] + 0.1, 1)
+    elif change == "longest_price_up_5":
+        odds[by_price[-1]] = round(odds[by_price[-1]] + 5.0, 1)
+    else:  # the favourite and the second favourite swap prices: the favourite changes
+        a, b = by_price[0], by_price[1]
+        odds[a], odds[b] = odds[b], odds[a]
+    assert set(odds) == set(races[out.index(race)]["odds"])
+    return out, race["race_id"]
+
+
+CORRECTIONS = ("one_tick_on_the_longest_price", "longest_price_up_5", "favourite_swapped")
+
+
+@pytest.mark.parametrize("change", CORRECTIONS)
+def test_a_corrected_win_board_with_the_same_horses_is_refused(isolated, monkeypatch, change):
+    data = isolated["data"]
+    base = _base_races()
+    corrected, race_id = _corrected_board(base, change)
+    if change == "favourite_swapped":
+        i = [r["race_id"] for r in base].index(race_id)
+        assert _ref_favourite(corrected[i]["odds"]) != _ref_favourite(base[i]["odds"])
+    _write_store(data, corrected)
+    _write_fits(data, base, **FIT_A)  # the artifact was built on the board before the correction
+
+    with pytest.raises(exacta_run.RunRefused, match=re.escape(race_id)):
+        exacta_run.load_races()
+
+    _cli_n_boot(monkeypatch)
+    assert exacta_run.main(["freeze"]) == 0
+    for action in (["score"], ["breakage"]):
+        try:
+            code = exacta_run.main(action)
+        except exacta_run.RunRefused:
+            code = None
+        assert code != 0, action
+    assert _cli_registry(data).records() == []  # refused: no record, no failure record
+    assert not _reports(data).exists() or list(_reports(data).iterdir()) == []  # no report
+
+
+def test_an_unchanged_board_passes_and_a_holdout_board_is_never_compared(isolated):
+    data = isolated["data"]
+    base = _base_races()
+    _write_store(data, base)
+    _write_fits(data, base, **FIT_A)
+    races, _ = exacta_run.load_races()
+    assert len(races) == 216
+
+    # A holdout race's board corrected after the artifact was built: never read, so no refusal.
+    changed = copy.deepcopy(base)
+    held = next(r for r in changed if r["race_date"] in HOLDOUT_DAYS)
+    by_price = sorted(held["odds"], key=held["odds"].get)
+    held["odds"][by_price[0]], held["odds"][by_price[1]] = (held["odds"][by_price[1]],
+                                                            held["odds"][by_price[0]])  # fmt: skip
+    _write_store(data, changed)
+    again, _ = exacta_run.load_races()
+    assert again == races
+
+
+# ---------------------------------------------------------------------------------------------
+# 14. C with no race above 110 yen, and C of one meeting (Sol 5, exacta_run.py:493)
+# ---------------------------------------------------------------------------------------------
+
+
+def _at_floor(races: list[dict], keep_meeting: str | None = None) -> list[dict]:
+    """Every dividend set to 110 yen, except the races of ``keep_meeting``."""
+    out = copy.deepcopy(races)
+    for r in out:
+        if r["race_date"] in HOLDOUT_DAYS or r["meeting_id"] == keep_meeting:
+            continue
+        if "dividend" in r:  # a store race
+            r["dividend"] = FLOOR_YEN
+        else:  # a scoring input
+            r["exacta"] = [(combo, FLOOR_YEN, refund) for combo, _, refund in r["exacta"]]
+    return out
+
+
+def _c_records(reg: Registry) -> dict[str, RunRecord]:
+    return {r.variant: r for r in reg.records(_family_of("C"))}
+
+
+def test_score_completes_when_no_dividend_is_above_110_yen(isolated, monkeypatch):
+    data = isolated["data"]
+    base = _base_races()
+    _write_store(data, _at_floor(base))
+    _write_fits(data, base, **FIT_A)
+    _cli_n_boot(monkeypatch)
+    assert exacta_run.main(["freeze"]) == 0
+    assert exacta_run.main(["score"]) == 0
+
+    reg = _cli_registry(data)
+    assert [r for r in reg.records() if r.status == "failed"] == []
+    assert _counts(reg) == EXPECTED_COUNTS  # E1, B1, B3, both C variants and the max test
+    c = _c_records(reg)
+    assert sorted(c) == sorted(f"c|lambda2={k}" for k in LAMBDA_KEYS)
+    for variant, record in c.items():
+        assert ("development", "log_score_gain") in _unavailable(record), variant
+        assert ("development", "log_score_gain") not in _present(record), variant
+        (marker,) = [f for f in record.metrics if f.metric.startswith("log_score_gain:")]
+        assert marker.value == exacta_run.UNAVAILABLE_VALUE and marker.n == 0, marker
+
+    (js,) = _reports(data).glob(f"e1-{SHA[:12]}*.json")
+    report = json.loads(js.read_text(encoding="utf-8"))
+    assert report["spa"]["family_size"] == 84
+    assert len(report["members"]) == (2 + 1 + 2) * len(CATEGORIES) * len(study.SEGMENT_CELLS)
+    rows = {str(r["lambda2"]): r for r in report["log_score"]}
+    assert set(rows) == {str(k) for k in LAMBDA_KEYS}
+    for row in rows.values():
+        assert row["n"] == 0, row
+        for stat in ("mean", "lo", "hi"):
+            assert _is_unavailable(row[stat]), (row, stat)
+    (md,) = _reports(data).glob(f"e1-{SHA[:12]}*.md")
+    _, cells = _markdown_cells(md.read_text(encoding="utf-8"))
+    assert not {"nan", "-nan", "inf", "-inf", "+inf"} & set(cells)
+
+
+def _ref_log_score(races: list[dict], lambda2: float) -> list[float]:
+    out = []
+    for r in races:
+        (winner, dividend, _) = r["exacta"][0]
+        if dividend <= FLOOR_YEN:
+            continue
+        q = r["rate"] / ((dividend + 5.0) / 100)
+        out.append(math.log(q) - math.log(_ref_exacta(r["p"], lambda2)[tuple(winner)]))
+    return out
+
+
+def test_a_one_meeting_c_sample_keeps_its_mean_without_bounds(loaded, tmp_path):
+    races, meta = loaded
+    meeting = races[0]["meeting_id"]
+    sample = _at_floor(races, keep_meeting=meeting)
+    kept = [r for r in sample if r["meeting_id"] == meeting]
+    assert len(kept) >= 2
+    reg = _frozen_registry(tmp_path)
+    result = _score(reg, sample, meta)
+    assert result["spa"]["family_size"] == 84
+
+    rows = {str(r["lambda2"]): r for r in result["log_score"]}
+    c = _c_records(reg)
+    for key, value in _lambda_values(meta).items():
+        want = _ref_log_score(kept, value)
+        row = rows[str(key)]
+        assert row["n"] == len(want) == len(kept) and row["meetings"] == 1, row
+        assert row["mean"] == pytest.approx(sum(want) / len(want), rel=1e-9), row
+        assert _is_unavailable(row["lo"]) and _is_unavailable(row["hi"]), row
+        record = c[f"c|lambda2={key}"]
+        gain = _present(record)[("development", "log_score_gain")]
+        assert gain.value == pytest.approx(row["mean"], rel=1e-12)
+        assert (gain.lo, gain.hi) == (None, None), gain
+        assert ("development", "log_score_gain_bounds") in _unavailable(record), record.variant
+
+
+# ---------------------------------------------------------------------------------------------
+# 15. Return per 100 yen staked at the final dividend (Sol 5, 131-exacta-overload.md:88)
+# ---------------------------------------------------------------------------------------------
+
+PARAM_KEYS = {"estimator", "lambda2", "category", "cell", "direction"}
+
+
+def _ref_return_per_100(races: list[dict], meta: dict) -> dict[tuple, tuple[float, int]]:
+    """{(estimator, lambda2 key, category, cell): (100 * sum R / n, n)} for B2 and B1."""
+    cells = {r["race_id"]: _race_cells(r) for r in races}
+    out = {}
+    for key, value in _lambda_values(meta).items():
+        boxes = {r["race_id"]: _ref_box(r, value) for r in races}
+        for estimator, column in (("B2", "b2"), ("B1", "b1")):
+            if estimator == "B1" and key != study.FITTED:
+                continue
+            for category in CATEGORIES:
+                for cell in study.SEGMENT_CELLS:
+                    ids = [i for i in boxes if cell in cells[i]]
+                    total = sum(boxes[i][column][category] for i in ids)
+                    out[(estimator, str(key), category, cell)] = (
+                        100 * total / len(ids) if ids else math.nan,
+                        len(ids),
+                    )
+    return out
+
+
+def test_score_measures_return_per_100_yen_at_the_final_dividend(sparse, tmp_path):
+    races, meta, exp = sparse
+    assert meta["lambda2_full_development"] != 1.0  # the two lambda2 keys give other returns
+    reg = _frozen_registry(tmp_path)
+    result = _score(reg, races, meta)
+    ref = _ref_return_per_100(races, meta)
+    by_variant = {(r.family_id, r.variant): r for r in reg.records()}
+
+    seen_values = set()
+    for m in result["members"]:
+        est, key = m["estimator"], str(m["lambda2"])
+        record = by_variant[(_family_of(est), f"{est.lower()}|lambda2={m['lambda2']}|"
+                                              f"{m['category']}|{m['cell']}")]  # fmt: skip
+        assert set(record.params) == PARAM_KEYS, record.params  # a metric, never a param
+        present, missing = _present(record), _unavailable(record)
+        metric, bounds = ("development", "return_per_100"), ("development", "return_per_100_bounds")
+        if est == "B3":  # paid at Harville-fair odds, not the dividend: no return per 100 yen
+            assert metric not in present, record.variant
+            assert _is_unavailable(m.get("return_per_100")), m
+            continue
+        want, n = ref[(est, key, m["category"], m["cell"])]
+        assert m["n"] == n, m
+        if m["cell"] in exp["empty"]:
+            assert _is_unavailable(m["return_per_100"]), m
+            assert metric in missing and metric not in present, record.variant
+            continue
+        assert m["return_per_100"] == pytest.approx(want, rel=1e-9), m
+        assert present[metric].value == pytest.approx(want, rel=1e-9), record.variant
+        assert present[metric].n == n, record.variant
+        seen_values.add(round(want, 6))
+        if m["cell"] in exp["one_meeting"]:
+            assert _is_unavailable(m["return_per_100_lo"]), m
+            assert _is_unavailable(m["return_per_100_hi"]), m
+            assert (present[metric].lo, present[metric].hi) == (None, None), record.variant
+            assert bounds in missing, record.variant
+        else:
+            lo, hi = m["return_per_100_lo"], m["return_per_100_hi"]
+            assert _finite(lo) and _finite(hi) and lo <= want <= hi, m
+            assert (present[metric].lo, present[metric].hi) == pytest.approx((lo, hi)), m
+            assert bounds not in missing, record.variant
+            if m["cell"] == "all" and want > 0:
+                assert lo < want < hi, m  # a real interval, not [x, x]
+    assert len(seen_values) > 20  # varied answers: no constant passes
+
+    # Identity unchanged: the families and the max test keep their sizes.
+    sizes = {_family_of("B2"): 84, _family_of("B1"): 42, _family_of("B3"): 84,
+             _family_of("C"): 2}  # fmt: skip
+    assert {f: reg.family_size(f) for f in sizes} == sizes
+    assert result["spa"]["family_size"] == result["stepm"]["family_size"] == 84
+
+
+def test_the_e1_report_shows_return_per_100_beside_rho(loaded, isolated, tmp_path):
+    races, meta = loaded
+    result = _score(_frozen_registry(tmp_path), races, meta)
+    ref = _ref_return_per_100(races, meta)
+    out = isolated["data"] / "reports" / "japan" / "131-exacta"
+    exacta_run.write_outputs(result, SHA, out)
+    (js,) = out.glob(f"e1-{SHA[:12]}*.json")
+    members = json.loads(js.read_text(encoding="utf-8"))["members"]
+    checked = 0
+    for m in members:
+        if m["estimator"] == "B3":
+            continue
+        want, _ = ref[(m["estimator"], str(m["lambda2"]), m["category"], m["cell"])]
+        assert m["return_per_100"] == pytest.approx(want, rel=1e-9), m
+        assert m["return_per_100_lo"] <= want <= m["return_per_100_hi"], m
+        checked += 1
+    assert checked == (2 + 1) * len(CATEGORIES) * len(study.SEGMENT_CELLS)
+
+    (md,) = out.glob(f"e1-{SHA[:12]}*.md")
+    rows = [
+        [c.strip() for c in line.strip().strip("|").split("|")]
+        for line in md.read_text(encoding="utf-8").splitlines()
+        if line.startswith("|")
+    ]
+    header = rows[0]
+    col = next(i for i, name in enumerate(header) if "100" in name)  # the value, then its bounds
+    at = {name: header.index(name) for name in ("estimator", "lambda2", "category", "cell")}
+    shown = 0
+    for row in rows[2:]:
+        if row[at["estimator"]] == "B3" or len(row) != len(header):
+            continue
+        want, _ = ref[(row[at["estimator"]], row[at["lambda2"]], row[at["category"]],
+                       row[at["cell"]])]  # fmt: skip
+        assert float(row[col]) == pytest.approx(want, abs=0.51), row
+        shown += 1
+    assert shown == checked
+
+
+# ---------------------------------------------------------------------------------------------
+# 16. Breakage at the 110-yen floor is counted, not imputed (Sol 5, exacta_run.py:605)
+# ---------------------------------------------------------------------------------------------
+
+
+def _floor_sample(races: list[dict]) -> list[dict]:
+    """Every maiden race pays the 110-yen floor; every other win1-3 race pays 120 yen (one step
+    above it); the rest keep their dividends (all 120 yen or more)."""
+    out = copy.deepcopy(races)
+    for k, r in enumerate(out):
+        (combo, _, refund) = r["exacta"][0]
+        if r["race_class"] == "MAIDEN":
+            r["exacta"] = [(combo, FLOOR_YEN, refund)]
+        elif r["race_class"] == "C2" and k % 2 == 0:
+            r["exacta"] = [(combo, 120.0, refund)]
+    return out
+
+
+def _ref_floor_breakage(races, meta) -> dict[tuple, dict]:
+    cells = {r["race_id"]: _race_cells(r) for r in races}
+    out = {}
+    for key, value in _lambda_values(meta).items():
+        rows = [(r, _ref_box(r, value)["b2"], r["exacta"][0][1]) for r in races]
+        for category in CATEGORIES:
+            for cell in study.SEGMENT_CELLS:
+                sub = [(r, b2[category], d) for r, b2, d in rows if cell in cells[r["race_id"]]]
+                ok = [(r, ret, d) for r, ret, d in sub if d > FLOOR_YEN]
+                up = sum(ret * (d + 5.0) / d for _, ret, d in ok)
+                ok_rate = sum(r["rate"] for r, _, _ in ok)
+                out[(str(key), category, cell)] = {
+                    "n": len(sub),
+                    "n_floor": len(sub) - len(ok),
+                    "rho": sum(ret for _, ret, _ in sub) / sum(r["rate"] for r, _, _ in sub),
+                    "rho_unrounded": up / ok_rate if ok else math.nan,
+                    "breakage_share": 1 - sum(ret for _, ret, _ in ok) / up if up > 0
+                    else math.nan,
+                }  # fmt: skip
+    return out
+
+
+BREAKAGE_STATS = {"breakage_share", "rho_unrounded", "rho_unrounded_bounds"}
+
+
+def test_breakage_counts_floor_dividends_and_adds_back_only_above_the_floor(loaded, tmp_path):
+    races, meta = loaded
+    sample = _floor_sample(races)
+    assert {r["exacta"][0][1] for r in sample} >= {FLOOR_YEN, 120.0}
+    reg = _frozen_registry(tmp_path)
+    rows = exacta_run.breakage(reg, copy.deepcopy(sample), copy.deepcopy(meta), SHA,
+                               n_boot=N_BOOT)  # fmt: skip
+    ref = _ref_floor_breakage(sample, meta)
+    assert len(rows) == len(ref)
+    kinds = set()
+    for row in rows:
+        want = ref[(str(row["lambda2"]), row["category"], row["cell"])]
+        assert row["n"] == want["n"] and row["n_floor"] == want["n_floor"], row
+        assert row["rho"] == pytest.approx(want["rho"], rel=1e-9), row  # paid: every race
+        if want["n_floor"] == want["n"]:  # every race at the floor: nothing to add back
+            kinds.add("all_floor")
+            assert _is_unavailable(row["rho_unrounded"]), row
+            assert _is_unavailable(row["breakage_share"]), row
+            continue
+        kinds.add("some_floor" if want["n_floor"] else "no_floor")
+        for stat in ("rho_unrounded", "breakage_share"):
+            if math.isnan(want[stat]):
+                assert _is_unavailable(row[stat]), (row, stat)
+            else:
+                assert row[stat] == pytest.approx(want[stat], rel=1e-9), (row, stat)
+    assert kinds == {"all_floor", "some_floor", "no_floor"}
+    # the 120-yen dividends (win1-3, no floor race) still get half a step added back
+    for key in LAMBDA_KEYS:
+        win13 = ref[(str(key), "fav_first", "class:win1-3")]
+        assert win13["n_floor"] == 0 and win13["rho_unrounded"] > win13["rho"]
+
+    # The registry: the floor races' correction is an unavailable statistic with their count.
+    records = reg.records(BREAKAGE_FAMILY)
+    assert len(records) == len(LAMBDA_KEYS)
+    for record in records:
+        key = record.params["lambda2"]
+        _unavailable(record)  # markers well formed, none in params
+        for category in CATEGORIES:
+            for cell in study.SEGMENT_CELLS:
+                fold = f"development:{category}:{cell}"
+                want = ref[(str(key), category, cell)]
+                floor = [f for f in record.metrics if f.fold == fold and _marker(f) is not None
+                         and _marker(f)[0] not in BREAKAGE_STATS]  # fmt: skip
+                if want["n_floor"]:
+                    assert len(floor) == 1, (fold, floor)
+                    assert floor[0].n == want["n_floor"], (fold, floor)
+                else:
+                    assert floor == [], (fold, floor)
