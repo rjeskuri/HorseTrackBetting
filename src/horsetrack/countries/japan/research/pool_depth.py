@@ -20,12 +20,15 @@ refunded votes in the total; JRA pays (sales - refunds) x rate). `pool_totals`, 
 Place and Wide pay by the stake-back-share rule with co-placers, so the identity does not hold for
 them. The spec registers two treatments: `depth-only` (`depth_table` gives no capacity for them)
 and `co-placer` (`run_coplacer`): for each paying combination, given the race's realised
-co-placers (the `dividends` rows), JRA's rule pays per yen d = 1 + (rV - sum W) / (P W_i), the
+co-placers (the `dividends` rows), the pre-registered rule (`jra-stake-back-share` in the spec,
+taken as JRA's) pays per yen d = 1 + (rV - sum W) / (P W_i), the
 sum over the P paying combinations; own stake s on combination i adds s to V, to W_i and to the
 sum, and the capacity solves (1 + e) d(s) / d(0) = 1 + k. With c = (1 + k) / (1 + e) and
 A = rV - sum W that is s = (1 - c)(A + P W_i) / ((c d(0) - 1) P + 1 - r); at P = 1 it is the
 single-winner identity again. The run checks the rule against the paid dividends and is recorded
-failed when it reproduces fewer than the spec's share. `run_exacta_impact` is #350's measure: the
+failed when it reproduces fewer than the spec's share; the rule of
+`core.pricing.stake_back_share_dividend`, r(1 + (V - sum W) / (P W_i)), is checked beside it as a
+diagnostic only. `run_exacta_impact` is #350's measure: the
 own impact of 100 yen on one exacta (FORECAST) combination by pool size
 (`research.exacta_impact.own_impact`, its POOL_BIN_EDGES), from the final votes.
 
@@ -183,7 +186,7 @@ def coplacer_capacities(
 
 def _rule_dividends(pool, combo, paid_money, places, rate, *, rule: str) -> np.ndarray:
     """The dividend per 100 yen of paying combinations at no own stake, broken to 10 yen and at
-    least 110: JRA's rule (`jra`, 1 + (rV - sum W) / (P W_i) per yen) or the rule of
+    least 110: the pre-registered rule (`jra`, 1 + (rV - sum W) / (P W_i) per yen) or the rule of
     `core.pricing.stake_back_share_dividend` (`core`, r(1 + (V - sum W) / (P W_i)))."""
     with np.errstate(divide="ignore", invalid="ignore"):
         if rule == "jra":
@@ -563,7 +566,8 @@ def coplacer_rows(
     """The paying Place and Wide combinations of `rows` (`depth_rows` of those pools) given the
     race's realised co-placers (`paid`, `dividends` rows): the depth columns plus places (P, the
     race's paying combinations), paid_yen (their money), dividend (as paid), jra_dividend and
-    core_dividend (the two rules at no own stake) and `capacity_{e:g}` per edge (JRA's rule)."""
+    core_dividend (the two rules at no own stake) and `capacity_{e:g}` per edge (by the
+    pre-registered rule)."""
     _columns(paid, "paid", [*KEYS, "dividend", "is_refund"])
     refund = paid["is_refund"].astype("boolean").fillna(False).to_numpy(dtype=bool)
     paid = paid.loc[paid["pool"].isin(list(CO_PLACER)).to_numpy(dtype=bool) & ~refund]
@@ -1239,14 +1243,15 @@ def _coplacer_report(result, rows, spec, run, date_from, date_to, gate) -> str:
         *_about(run.family_id, run.spec_hash, VARIANT_COPLACER, date_from, date_to),
         "## The rule against the paid dividends",
         "",
-        "JRA's stake-back-share rule: per yen 1 + (rV - sum W) / (P W_i), broken to 10 yen, at "
+        "The pre-registered rule: per yen 1 + (rV - sum W) / (P W_i), broken to 10 yen, at "
         "least 110, V net of refunds, P the race's paying combinations, r the base payout rate "
         "(boosted days are not adjusted).",
         "",
         f"- paying combinations: {len(rows):,}; without a capacity (A <= 0 or no money row): "
         f"{no_cap:,}",
-        f"- JRA rule reproduces the paid dividend: {result.rule_match:.4f} (gate {gate}); the "
-        f"rule of core.pricing.stake_back_share_dividend: {result.core_match:.4f}",
+        f"- the pre-registered rule reproduces the paid dividend: {result.rule_match:.4f} "
+        f"(gate {gate}); the rule of core.pricing.stake_back_share_dividend: "
+        f"{result.core_match:.4f}",
         f"- status: **{result.status}**",
         "",
         "## Capacity of the paying combinations per pool x class group x odds band",
@@ -1300,9 +1305,10 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
             "# Pool depth and stake capacity, Japan (N3, #432)",
             "",
             f"Family `{result.family_id}`, spec sha256 `{result.spec_hash}` (frozen before the "
-            "run; docs/specs/pool-depth-prereg.md). Race days "
-            f"{result.date_from.isoformat()} to {result.date_to.isoformat()}, development days "
-            "only. The JRA-VAN store is licensed: every figure computed from it is "
+            "run; docs/specs/pool-depth-prereg.md). Race days from "
+            f"{result.date_from.isoformat()} to the run's last day (a span of the store: "
+            f"{WITHHELD}), development days only. The JRA-VAN store is licensed: every figure "
+            "computed from it is "
             f"{WITHHELD}, in the private report `{report}` under `$HORSETRACK_DATA_DIR/reports/`.",
             "",
             "## Hypothesis",
@@ -1340,10 +1346,13 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
             "- The dividend itself (`models.decision.own_stake_dividend`): floor(100 x rate x "
             "(V + s) / (W + s)) to 10 yen, at least 110. Pool 1,000,000, W 10,000, rate 0.725: "
             "7,250 per 100 yen with no stake, 6,590 with a stake of 1,000.",
-            "- Place and Wide (co-placer variant): JRA pays 1 + (rV - sum W) / (P W_i) per yen, "
-            "the sum over the P paying combinations. With A = rV - sum W and "
-            "c = (1 + k) / (1 + e) the capacity is s = (1 - c)(A + P W_i) / ((c d0 - 1) P + "
-            "1 - r), d0 the dividend with no stake; at P = 1 it is the single-winner identity.",
+            "- Place and Wide (co-placer variant): the pre-registered rule pays "
+            "1 + (rV - sum W) / (P W_i) per yen, the sum over the P paying combinations. With "
+            "A = rV - sum W and c = (1 + k) / (1 + e) the capacity is s = (1 - c)(A + P W_i) / "
+            "((c d0 - 1) P + 1 - r), d0 the dividend with no stake; at P = 1 it is the "
+            "single-winner identity. The run checks the rule against the paid dividends and is "
+            "recorded failed when it reproduces fewer than the spec's share of them (95%); the "
+            f"share itself is {WITHHELD}.",
             "- The exacta (#350): 100 yen on one combination moves its dividend by "
             "(V + s) / V x W / (W + s) - 1, with W the combination's final money.",
             "",
@@ -1360,18 +1369,24 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
             "- Capacity with breakage and the 110-yen floor: rejected; breakage makes the stake "
             "a step function of the price, and the continuous stake is the stated quantity.",
             "- The gross pool for V: rejected; refunded votes do not pay.",
+            "- The rule of `core.pricing.stake_back_share_dividend`, r(1 + (V - sum W) / "
+            "(P W_i)), the stake-back-share rule as `config/jra.yaml` states it: not the "
+            "pre-registered co-placer rule. Its agreement with the paid dividends is a "
+            f"diagnostic in the private report ({WITHHELD}).",
             "",
             "## What this rules out",
             "",
             f"Which cells the flat stake fits, and so where betting big is possible: {WITHHELD}. "
-            "By the identity alone, a stake that is a small share of the money already on the "
-            "combination never eats half of the edge.",
+            "By the identity alone, whatever the pool, a stake below W k / (1 + k), k = e / 2, "
+            "never eats half of the edge: about 2.4% of the money already on the combination at "
+            "e = 0.05, 4.8% at 0.10 and 9.1% at 0.20.",
             "",
             "## Follow-ups filed",
             "",
-            "Proposed, not filed by this run: the trifecta's depth by a streaming exact "
-            "quantile; the capacity column beside the leaderboard rows; publishable figures "
-            "from the logged public days (#130).",
+            "Proposed, not filed by this run: the co-placer variant re-registered as a new "
+            "family on the rule of `core.pricing.stake_back_share_dividend`; the trifecta's "
+            "depth by a streaming exact quantile; the capacity column beside the leaderboard "
+            "rows; publishable figures from the logged public days (#130).",
             "",
         ]
     )
@@ -1435,10 +1450,14 @@ def run_command(
             depth = result
         else:
             others.append(VariantRun(variant, status, result.run_id))
-    write_summary(default_registry(COUNTRY), summary_dir(COUNTRY))
     if public and depth is not None:
         doc = env.repo_root() / "docs" / "experiments" / "pool-depth-japan.md"
         write_report(doc, render_public_report(depth, variants=others), sources=())
         typer.echo(f"wrote {doc.relative_to(env.repo_root())}")
+    try:
+        write_summary(default_registry(COUNTRY), summary_dir(COUNTRY))
+    except ValueError as exc:  # a family of the registry the summary cannot name
+        typer.echo(f"the committed summary was not regenerated: {exc}", err=True)
+        failed = True
     if failed:
         raise typer.Exit(1)
