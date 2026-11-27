@@ -44,8 +44,12 @@ owner's answers of 2026-11-26 that still hold (benchmark, omega basis, one-sided
   source (a post-race table such as the Win payout table `dividends`, `sectionals`, `incidents`,
   `running_comments`; `jrdb_post_race`; `horses`; the final board), or holds a value whose stamp
   is missing or later than its race's decision instant (a value stamped exactly at t is
-  available). The name rules stay, declared or not: `odds_final`, every `final_*` column, the
-  store's `win_odds` and `win_fav_rank`, and every label of Japan's availability config
+  available). A missing value stamped after t (a board update after t blanking a price) is a late
+  observation and refused the same way, with or without a source; a value with neither source
+  nor stamp (an unmatched left join) is genuinely missing, accepted, and never selected. A price
+  column may be object dtype, pd.NA for a missing price. The name rules stay, declared or not:
+  `odds_final`, every `final_*` column, the store's `win_odds` and `win_fav_rank`, and every
+  label of Japan's availability config
   (`core.store.asof.load_availability`) are refused as a segment or a selection column. Outcome
   columns (won, win_dividend, odds_final, takeout) are read only to score, never declared.
 - Evaluation population: every return the study reports (bet counts, omega, the expected return,
@@ -60,6 +64,8 @@ owner's answers of 2026-11-26 that still hold (benchmark, omega basis, one-sided
   - `stages` holds "log_loss", "max_stat", "omega" and "roi" in that order (others allowed).
     `log_loss[rule_id]`: `passed` (bool), `delta_ll` with its bootstrap bounds `lo` and `hi`.
     `max_stat`: `tested` (every rule whose claim was scored) and `superior` (StepM's verdict).
+    When SPA or StepM raises, `max_stat` carries the reason as its `"error"`, finds no rule
+    superior, and every other stage is measured as before.
     `omega[rule_id]`: `n_bets`; `omega_selected`, the posterior mean of the selected bets'
     payout-weighted return multiplier, sum((1 - t_i) * omega_i) / sum(1 - t_i); `expected_return`,
     `{"mean", "low", "high", "level"}`: the posterior mean and central credible interval of the
@@ -80,7 +86,13 @@ owner's answers of 2026-11-26 that still hold (benchmark, omega basis, one-sided
     `dropped_variants` and the variants already in the family, failed ones included.
   - Each rule's last registry record carries, as metrics, every measurement made:
     `delta_ll_vs_calibrated_market` (lo, hi), `stepm_superior` (1.0 or 0.0), `omega_selected`,
-    `expected_return` (lo = low, hi = high), `p_beats_takeout` and `roi_win_dividend`.
+    `expected_return` (lo = low, hi = high), `p_beats_takeout` and `roi_win_dividend`, and the
+    predictive interval apart: `predictive_roi_100` (lo, hi its bounds, value a point between
+    them) and `predictive_roi_100_level` (its level); no `stepm_superior` when StepM did not
+    run. Its `notes` (`RunRecord.notes`, run metadata outside the variant identity that
+    `family_size` counts) map each stage ('log_loss', 'max_stat', 'omega', 'roi') whose
+    measurement for the rule could not be made to the reason its report entry gives, and hold
+    nothing for a measurement made.
   - The holdout passed in is never opened. A rerun whose frame cannot score a rule the registry
     holds scored is a ValueError naming it, before any record.
 - `sources` is validated before anything is scored or written: a bare str or bytes, a collection
@@ -1008,6 +1020,89 @@ def test_a_forced_verdict_changes_no_measurement(tmp_path, main_runners, main_ru
             assert all(name in metrics for name in RETURN_METRICS), (gate, rid, sorted(metrics))
 
 
+MAX_STAT_RULES = MAIN_RULES[:2]  # segments A and B
+
+
+def meetingless_race(data: pd.DataFrame) -> str:
+    """A scored race of segment C, outside every MAX_STAT_RULES segment: the race left without a
+    meeting_id below."""
+    outside = data[(data["seg"] == "C") & (data["race_date"] >= FIRST_SCORED)]
+    return str(outside["race_id"].iloc[0])
+
+
+def _stepm_raising(*args, **kwargs):
+    raise RuntimeError("StepM failed (forced by the test)")
+
+
+@pytest.fixture(scope="module")
+def max_stat_failures(tmp_path_factory, main_runners) -> dict:
+    """Each way the max-statistic stage fails, and the run it gave (or what run_study raised): a
+    scored race outside every rule's segment with no meeting_id (SPA resamples every scored race
+    of the benchmark by meeting), and #75's StepM raising."""
+    race = meetingless_race(main_runners)
+    no_meeting = main_runners.copy()
+    no_meeting.loc[no_meeting["race_id"] == race, "meeting_id"] = None
+    cases = {
+        "a scored race outside every segment has no meeting_id": (no_meeting, None),
+        "StepM raises": (main_runners, (stepm, _stepm_raising)),
+    }
+    out: dict = {}
+    for k, (label, (data, patched)) in enumerate(cases.items()):
+        root = tmp_path_factory.mktemp(f"max-stat-{k}")
+        try:
+            with pytest.MonkeyPatch.context() as patch:
+                if patched is not None:
+                    _replace_everywhere(patch, *patched)
+                out[label] = run_frozen(root, f"test-88-max-stat-{k}", MAX_STAT_RULES, data)
+        except Exception as exc:  # reported by the tests, not raised in setup
+            out[label] = exc
+    return out
+
+
+def test_a_max_statistic_failure_stops_no_measurement(main_runners, main_run, max_stat_failures):
+    """No stage gates another, the max-statistic stage included. When SPA cannot run (a scored
+    race outside both rules' segments has no meeting_id) or StepM raises, the study still
+    reports: `max_stat` carries the reason, finds no rule superior and so leaves no survivor, and
+    every rule keeps its log-loss result, omega, expected return, P(omega_s > 1/(1 - t)),
+    predictive interval and realised ROI exactly as in the main run, its last registry record
+    carrying them, and its rung S0. No StepM verdict is recorded for a test that did not run."""
+    race = meetingless_race(main_runners)
+    rows = main_runners["race_id"] == race
+    # Premise: the race is scored, in segment C (no rule here bets it), and only its meeting_id
+    # is taken away.
+    assert scored(main_runners)["race_id"].eq(race).any()
+    assert (main_runners.loc[rows, "seg"] == "C").all()
+    assert not any(rule[2]["seg"] == "C" for rule in MAX_STAT_RULES)
+    stopped = {
+        label: repr(run) for label, run in max_stat_failures.items() if not isinstance(run, Run)
+    }
+    assert stopped == {}, f"a max-statistic failure stopped the study: {stopped}"
+
+    baseline = main_run.report
+    for label, run in max_stat_failures.items():
+        report = run.report
+        max_stat = report.stages["max_stat"]
+        assert explained(max_stat), (label, max_stat)
+        assert list(max_stat.get("superior", [])) == [], (label, max_stat)
+        assert list(report.survivors) == [], (label, report.survivors)
+        for rule in MAX_STAT_RULES:
+            rid = rule[0]
+            ll, unforced = report.stages["log_loss"][rid], baseline.stages["log_loss"][rid]
+            assert (ll["delta_ll"], ll["lo"], ll["hi"]) == pytest.approx(
+                (unforced["delta_ll"], unforced["lo"], unforced["hi"]), rel=1e-9
+            ), (label, rid)
+            assert omega_numbers(report.stages["omega"][rid]) == pytest.approx(
+                omega_numbers(baseline.stages["omega"][rid]), rel=1e-9
+            ), (label, rid)
+            roi, unforced = report.stages["roi"][rid], baseline.stages["roi"][rid]
+            assert roi["n_bets"] == unforced["n_bets"], (label, rid)
+            assert roi["roi"] == pytest.approx(unforced["roi"], rel=1e-12), (label, rid)
+            assert report.rungs[rid] == "S0", (label, rid)
+            metrics = last_metrics(run, rid)
+            assert {LOG_LOSS_METRIC, *RETURN_METRICS} <= set(metrics), (label, rid, sorted(metrics))
+            assert "stepm_superior" not in metrics, (label, rid, metrics["stepm_superior"])
+
+
 REASON_NO_BET = "P6-seg-c-none"
 REASON_NO_CLAIM = "P4-j2-beta"
 REASON_RULES = [
@@ -1066,6 +1161,134 @@ def test_a_measurement_that_cannot_be_made_carries_its_reason(reason_run):
     assert set(RETURN_METRICS) <= set(metrics), sorted(metrics)
     assert metrics["roi_win_dividend"][0].value == pytest.approx(realised_roi(rows), rel=1e-9)
     assert report.rungs == dict.fromkeys(ids, "S0")
+
+
+def reread(run: Run) -> dict[str, list[RunRecord]]:
+    """The family's records by variant, in append order, read back from the registry's file by a
+    Registry opened afresh on it."""
+    registry = Registry(run.registry.path, holdout_log=run.registry.holdout_log)
+    registry.verify()
+    out: dict[str, list[RunRecord]] = {}
+    for record in registry.records(run.spec.family_id):
+        out.setdefault(record.variant, []).append(record)
+    return out
+
+
+def notes_of(record: RunRecord) -> dict[str, str]:
+    """The run metadata a record carries outside its variant identity (`RunRecord.notes`)."""
+    return dict(getattr(record, "notes", None) or {})
+
+
+def identity_of(record: RunRecord) -> tuple:
+    """What `Registry.family_size` counts a variant by (core.eval.registry)."""
+    fields = ("hypothesis_id", "variant", "fold_scheme", "sources", "components", "params")
+    return (*(getattr(record, name) for name in fields), record.data_builds)
+
+
+def unpaid_winner(data: pd.DataFrame, rule: tuple) -> pd.DataFrame:
+    """`data` with no win_dividend on the first scored winner the rule selects."""
+    rows = bets_of(data, rule)
+    out = data.copy()
+    out.loc[rows.index[rows["won"] == 1][0], "win_dividend"] = np.nan
+    return out
+
+
+def test_a_measurement_failure_is_persisted_in_the_registry(
+    tmp_path, monkeypatch, main_runners, reason_run, max_stat_failures
+):
+    """A reason the report gives is kept in the registry too, outside the variant identity. Read
+    back from the file, each rule's last record carries in `notes`, by stage ('log_loss',
+    'max_stat', 'omega', 'roi'), the reason each of its measurements could not be made, exactly
+    as the report's entry states it, and nothing for a measurement made: a selected winner with
+    no dividend (the ROI), a rule that selects no bet (omega and the ROI), a claim that cannot be
+    scored (log loss), and a max-statistic stage that failed (every rule it tested). The
+    family's size and each rule's variant identity are those of its first record."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    rule = MAX_STAT_RULES[1]
+    unpaid = run_frozen(
+        tmp_path / "unpaid",
+        "test-88-unpaid-winner",
+        MAX_STAT_RULES,
+        unpaid_winner(main_runners, rule),
+    )
+    roi = unpaid.report.stages["roi"][rule[0]]
+    assert explained(roi) and not finite(roi.get("roi")), roi  # premise: the report explains it
+
+    def expected_notes(run: Run, rid: str) -> dict[str, str]:
+        """The reasons the report gives for the rule's measurements that could not be made."""
+        stages = run.report.stages
+        out = {
+            stage: stages[stage][rid]["error"]
+            for stage in ("log_loss", "omega", "roi")
+            if explained(stages[stage][rid])
+        }
+        if explained(stages["max_stat"]) and rid in stages["max_stat"]["tested"]:
+            out["max_stat"] = stages["max_stat"]["error"]
+        return out
+
+    checked = []
+    for run in (unpaid, reason_run):
+        records = reread(run)
+        for each in run.rules:
+            expected = expected_notes(run, each[0])
+            assert notes_of(records[each[0]][-1]) == expected, (run.spec.family_id, each[0])
+            checked += list(expected)
+    assert {"log_loss", "omega", "roi"} <= set(checked), checked  # premise: each stage failed once
+
+    completed = [run for run in max_stat_failures.values() if isinstance(run, Run)]
+    assert len(completed) == len(max_stat_failures), (
+        "a max-statistic failure stopped the study (test_a_max_statistic_failure_stops_no_"
+        f"measurement): {max_stat_failures}"
+    )
+    for run in completed:
+        records, max_stat = reread(run), run.report.stages["max_stat"]
+        assert explained(max_stat) and max_stat["tested"], max_stat  # premise
+        for rid in max_stat["tested"]:
+            expected = expected_notes(run, rid)
+            assert expected["max_stat"] == max_stat["error"]
+            assert notes_of(records[rid][-1]) == expected, (run.spec.family_id, rid)
+
+    for run in (unpaid, reason_run, *completed):
+        family_id, records = run.spec.family_id, reread(run)
+        assert run.report.family_size == run.registry.family_size(family_id) == len(run.rules)
+        for each in run.rules:
+            first, last = records[each[0]][0], records[each[0]][-1]
+            assert identity_of(last) == identity_of(first), (family_id, each[0])
+
+
+PREDICTIVE_LEVEL = f"{PREDICTIVE}_level"
+
+
+def test_the_last_record_carries_the_predictive_interval_apart(main_run, omega_run, direction_run):
+    """Read back from the registry's file, each rule's last record carries the predictive
+    interval of the ROI of its next 100 bets as the metric `predictive_roi_100` (lo and hi its
+    bounds, its value a point between them) and that interval's level as
+    `predictive_roi_100_level`, beside and apart from the expected return's credible interval
+    (`expected_return`), which is narrower and stays as it was."""
+    checked = 0
+    for run in (main_run, omega_run, direction_run):
+        records = reread(run)
+        for rule in run.rules:
+            rid = rule[0]
+            entry = run.report.stages["omega"][rid]
+            (low, high, level), er = entry[PREDICTIVE], entry["expected_return"]
+            assert finite(low) and finite(high) and low < high, (rid, entry)  # premise
+            metrics: dict[str, list] = {}
+            for metric in records[rid][-1].metrics:
+                metrics.setdefault(metric.metric, []).append(metric)
+            assert len(metrics.get(PREDICTIVE, [])) == 1, (rid, sorted(metrics))
+            assert len(metrics.get(PREDICTIVE_LEVEL, [])) == 1, (rid, sorted(metrics))
+            (predictive,), (coverage,) = metrics[PREDICTIVE], metrics[PREDICTIVE_LEVEL]
+            assert (predictive.lo, predictive.hi) == pytest.approx((low, high), rel=1e-12), rid
+            assert predictive.lo <= predictive.value <= predictive.hi, (rid, predictive)
+            assert coverage.value == pytest.approx(level, rel=1e-12), (rid, coverage)
+            (expected,) = metrics["expected_return"]
+            assert (expected.value, expected.lo, expected.hi) == pytest.approx(
+                (er["mean"], er["low"], er["high"]), rel=1e-9
+            ), rid
+            assert predictive.hi - predictive.lo > expected.hi - expected.lo, (rid, predictive)
+            checked += 1
+    assert checked == len(MAIN_RULES) + len(OMEGA_RULES) + len(DIRECTION_RULES)
 
 
 def test_roi_reads_the_winners_dividends_when_losers_carry_none(gap_run):
@@ -1381,6 +1604,61 @@ def test_an_input_published_after_the_decision_time_is_refused(
     assert outcomes == dict.fromkeys(outcomes, "look-ahead"), outcomes
 
 
+def test_a_late_stamped_null_is_a_late_observation(tmp_path, monkeypatch, main_runners):
+    """A missing value is an observation when its declaration stamps it: a board update after t
+    that blanks a price the board held at t (T-1 against this family's T-5, say), a second after
+    t or after the race, with its source or without one, and a card amendment after t that
+    blanks a race's segment, are each refused with LookAheadSelection before anything is scored
+    or written, like a late value. A genuinely missing input, with neither source nor stamp (as
+    an unmatched left join leaves it), and a value observed missing by t are accepted; the
+    runner is then not selected (test_a_missing_price_in_an_object_column_is_unselected)."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    rule = MAIN_RULES[0]
+    t = decision_utc(main_runners)
+    row = bets_of(main_runners, rule).index[0]
+    race = main_runners["race_id"] == main_runners.loc[row, "race_id"]
+    post = main_runners.loc[row, "post_utc"]
+    # Premise: the row is a scored bet of the rule priced on the board by t, in a race of A.
+    assert main_runners.loc[row, "odds_t" + AVAILABLE] <= t.loc[row]
+    assert (main_runners.loc[race, "seg"] == "A").all() and race.sum() > 1
+
+    def blanked(col: str, rows, source: str | None, when) -> pd.DataFrame:
+        out = main_runners.copy()
+        out.loc[rows, col] = None
+        out.loc[rows, col + SOURCE] = source
+        out.loc[rows, col + AVAILABLE] = when
+        assert np.all(pd.isna(out.loc[rows, col]))  # premise: the value is missing
+        return out
+
+    second = pd.Timedelta(seconds=1)
+    refused = {
+        "a T-1 board update blanking the price": blanked(
+            "odds_t", row, BOARD, post - pd.Timedelta(minutes=1)
+        ),
+        "the price blanked a second after t": blanked("odds_t", row, BOARD, t.loc[row] + second),
+        "the price blanked after the race": blanked(
+            "odds_t", row, BOARD, post + pd.Timedelta(minutes=30)
+        ),
+        "the price blanked at T-1, no source": blanked(
+            "odds_t", row, None, post - pd.Timedelta(minutes=1)
+        ),
+        "the race's segment blanked a second after t": blanked(
+            "seg", race, RACES, t.loc[race] + second
+        ),
+    }
+    accepted = {
+        "the price genuinely missing (no source, no stamp)": blanked("odds_t", row, None, pd.NaT),
+        "the price observed missing at t": blanked("odds_t", row, BOARD, t.loc[row]),
+        "the race's segment genuinely missing": blanked("seg", race, None, pd.NaT),
+    }
+    outcomes = {
+        label: outcome_before_scoring(tmp_path, f"late-null-{k}", [rule], data)
+        for k, (label, data) in enumerate({**refused, **accepted}.items())
+    }
+    want = {**dict.fromkeys(refused, "look-ahead"), **dict.fromkeys(accepted, "scored")}
+    assert outcomes == want, outcomes
+
+
 # ---------------------------------------------------------------------------------------------
 # DoD: the holdout is not opened
 # ---------------------------------------------------------------------------------------------
@@ -1572,6 +1850,69 @@ def test_returns_are_reported_on_the_walk_forward_test_rows_only(
         assert run.report.p_beats_takeout[rid] == pytest.approx(
             main_run.report.p_beats_takeout[rid]
         )
+
+
+MISSING_TRAINING_ROWS = 30  # training-only rows the rules would select, their price missing
+MISSING_SCORED_BETS = 3  # per rule: scored bets whose price is genuinely missing
+
+
+def with_missing_prices(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.Index, pd.Index]:
+    """`data` with odds_t an object column holding pd.NA for a missing price: on training-only
+    rows the main rules would select (observed missing at t: still declared as the board at t,
+    stamped by t), and on the first scored bets of each main rule, genuinely missing (no source,
+    no stamp, as an unmatched left join leaves them). Also the two sets of rows."""
+    early = data[data["race_date"] < FIRST_SCORED]
+    training = pd.Index(
+        np.concatenate([selected(early, rule).index for rule in MAIN_RULES])
+    ).unique()[:MISSING_TRAINING_ROWS]
+    blank = pd.Index(
+        np.concatenate([bets_of(data, rule).index[:MISSING_SCORED_BETS] for rule in MAIN_RULES])
+    )
+    prices = data["odds_t"].astype(object)
+    prices.loc[training.union(blank)] = pd.NA
+    out = data.assign(odds_t=prices)
+    out.loc[blank, "odds_t" + SOURCE] = None
+    out.loc[blank, "odds_t" + AVAILABLE] = pd.NaT
+    return out, training, blank
+
+
+def test_a_missing_price_in_an_object_column_is_unselected(
+    tmp_path, monkeypatch, main_runners, main_run
+):
+    """A price column of object dtype, pd.NA for a missing price. On training-only rows it stops
+    no rule: they are never bets. On the scored rows a missing price is simply not selected.
+    Every rule keeps the main run's log-loss result (selection does not enter it), and its bet
+    count and realised ROI are those of its selected bets among the scored rows less the ones
+    whose price is missing; omega and P(omega_s > 1/(1 - t)) are measured on them."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    data, training, blank = with_missing_prices(main_runners)
+    priced = main_runners.copy()
+    priced.loc[blank, "odds_t"] = np.nan  # the same prices, the missing ones as NaN floats
+    # Premise: an object column holding pd.NA on training-only rows and on scored bets.
+    on_scored = scored(main_runners).index
+    assert data["odds_t"].dtype == object
+    assert data.loc[training.union(blank), "odds_t"].map(lambda v: v is pd.NA).all()
+    assert len(training) == MISSING_TRAINING_ROWS and not training.isin(on_scored).any()
+    assert len(blank) == MISSING_SCORED_BETS * len(MAIN_RULES) and blank.isin(on_scored).all()
+    try:
+        run = run_frozen(tmp_path / "missing", "test-88-missing-prices", MAIN_RULES, data)
+    except Exception as exc:
+        pytest.fail(f"a missing price in an object column stopped the study: {exc!r}")
+
+    report, baseline = run.report, main_run.report
+    for stage in ("log_loss", "omega", "roi"):
+        assert set(report.stages[stage]) == {rule[0] for rule in MAIN_RULES}, stage
+    for rule in MAIN_RULES:
+        rid, rows = rule[0], bets_of(priced, rule)
+        assert len(rows) == len(bets_of(main_runners, rule)) - MISSING_SCORED_BETS  # premise
+        ll, unforced = report.stages["log_loss"][rid], baseline.stages["log_loss"][rid]
+        assert (ll["delta_ll"], ll["lo"], ll["hi"]) == pytest.approx(
+            (unforced["delta_ll"], unforced["lo"], unforced["hi"]), rel=1e-9
+        ), rid
+        entry, roi = report.stages["omega"][rid], report.stages["roi"][rid]
+        assert entry["n_bets"] == roi["n_bets"] == len(rows), (rid, entry["n_bets"], len(rows))
+        assert roi["roi"] == pytest.approx(realised_roi(rows), rel=1e-9, abs=1e-12), rid
+        assert finite(entry["omega_selected"]) and 0.0 <= entry["p_beats_takeout"] <= 1.0, entry
 
 
 # ---------------------------------------------------------------------------------------------

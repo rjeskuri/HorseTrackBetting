@@ -22,6 +22,10 @@ Contract pinned here (the coder implements what these tests call):
   both parameter uncertainty and outcome noise. The level is the coder's choice (anything from a
   50% to a 99% central interval passes).
 - The same ``seed`` gives identical outputs.
+- The model's bound (#88): a bet's win probability ``omega * (1 - t) / O`` stays below 1 in every
+  posterior draw that ``expected_return``, ``p_beats_takeout`` and ``omega_mean`` read, so a bet
+  returns at most its odds and a segment's mean expected return per unit stake is at most the
+  mean decimal odds of its bets.
 
 Every dataset is synthetic and generated here with a seeded numpy RNG. Each test first asserts the
 premise it relies on (computed from the data, independently of the code under test), so the
@@ -413,3 +417,71 @@ def test_a_level_whose_bets_all_won_is_fitted_and_shrunk(odds, band, n_won):
         prob = fit.p_beats_takeout(seg(s))
         assert 0.0 <= prob < 0.5, (s, prob)
         assert math.isfinite(fit.posterior_mean(seg(s)))
+
+
+# --- the model's probability bound in the posterior draws (#88) ----------------------------------
+
+
+def near_certain(odds: float, takeout: float, n_won: int, n: int, level: str = "s") -> pd.DataFrame:
+    """n unit-stake bets at one price and takeout, in one band, of which the first n_won won."""
+    won = np.array([1] * n_won + [0] * (n - n_won))
+    return pd.DataFrame(
+        {
+            "stake": 1.0,
+            "payout": odds * won,
+            "odds": odds,
+            "won": won,
+            "band": "fav",
+            "takeout": takeout,
+            "segment": level,
+        }
+    )
+
+
+BOUND_CASES = {
+    "19-of-20-at-1.0": [near_certain(1.0, 0.2, 19, 20)],
+    "29-of-30-at-1.0-takeout-0.1": [near_certain(1.0, 0.1, 29, 30)],
+    "19-of-20-at-1.0-beside-another-level": [
+        near_certain(1.0, 0.2, 19, 20),
+        near_certain(4.0, 0.2, 8, 40, level="r"),
+    ],
+    "19-of-20-at-1.2": [near_certain(1.2, 0.2, 19, 20)],
+}
+
+
+@pytest.mark.parametrize("case", list(BOUND_CASES), ids=list(BOUND_CASES))
+def test_return_draws_respect_the_models_probability_bound(case):
+    """Round 3 of PR #345: bets that won almost every time at a price near 1. Each wins with
+    probability omega * (1 - t) / O < 1, so each returns at most its odds O per unit stake and
+    the segment's mean expected return per unit stake is at most its bets' mean odds, in every
+    posterior draw: the expected return's mean and upper bound stay at or below it, and so does
+    omega_mean times the payout rate. At odds 1.0 every bet pays at most its stake, so the
+    expected return never exceeds 1 and P(beats takeout) is 0; at odds 1.2 the bound is 1.2, not
+    break-even, and the bets that returned 1.14 per unit are still likely to beat it."""
+    bets = pd.concat(BOUND_CASES[case], ignore_index=True)
+    query = seg("s")
+    own = bets[bets["segment"] == "s"]
+    bound = float(own["odds"].mean())  # the most the segment's bets can return per unit stake
+    payout = float((1 - own["takeout"]).mean())
+    realised = float((own["won"] * own["odds"]).mean())
+    # Premise: the bets returned close to the bound, so a posterior that ignores it crosses it.
+    assert bound - 0.07 <= realised < bound, (realised, bound)
+
+    fit = fit_segment_roi(
+        bets,
+        segment_cols=["segment"],
+        odds_band_col="band",
+        takeout_col="takeout",
+        seed=7802,
+        draws=DRAWS,
+    )
+    er = fit.expected_return(query)
+    assert all(math.isfinite(v) for v in (er.mean, er.low, er.high)), er
+    ceiling = bound * (1 + 1e-12)  # the bound, give or take the rounding of a mean
+    assert er.low <= er.mean <= er.high <= ceiling, (er, bound)
+    assert fit.omega_mean(query) * payout <= ceiling, (fit.omega_mean(query), bound)
+    p = fit.p_beats_takeout(query)
+    if bound <= 1.0:
+        assert p == 0.0, (p, er)
+    else:
+        assert er.high > 1.0 and p > 0.5, (p, er)

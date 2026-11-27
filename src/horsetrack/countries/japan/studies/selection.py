@@ -19,10 +19,12 @@ Before anything is scored or written, `run_study` refuses:
   beside it: `X__source`, on every row one of ADMITTED_SOURCES (the board at t, or the races or
   runners card read through an as-of view at t), and `X__available_utc`, a timezone-aware UTC
   instant at or before the race's decision instant (`post_utc` minus the n minutes of
-  `decision_time` "T-n") on every row holding a value. So a post-race table joined onto runners
-  (the Win payout's `combination`, say), or a value published after t, is refused by its
-  declaration whatever its name; an input declared from an admitted source and stamped by t is
-  trusted as declared.
+  `decision_time` "T-n") on every row holding a value, and on every row it stamps: a missing value
+  stamped after t (a board update blanking a price) is a late observation, with or without a
+  source; only a missing value with no stamp is genuinely missing (never selected). So a
+  post-race table joined onto runners (the Win payout's `combination`, say), or a value published
+  after t, is refused by its declaration whatever its name; an input declared from an admitted
+  source and stamped by t is trusted as declared.
 - a row on a holdout day (`core.eval.holdout.is_holdout_day`), or a spec or frame it cannot run
   (ValueError).
 
@@ -39,18 +41,20 @@ Stages, each for every rule:
    lower bound above 0 and the fold-weighted coefficient on the rule's `direction` side (answer 6).
 2. Max statistic. #75's SPA and StepM over the rules whose claims were scored, on per-race losses
    (the benchmark's outside a rule's segment), in `cluster_unit` clusters ordered by race date,
-   with the family's frozen `max_stat`.
+   with the family's frozen `max_stat`. When SPA or StepM raises, the stage carries the reason as
+   its "error" and finds no rule superior; the stages below are measured as ever.
 3. Omega. #78's model on the rule's selected bets (answer 4) at the final Win odds, with odds-band
    fixed effects cut at the frozen `odds_band_cut_points` (answer 7). From one set of
    payout-weighted posterior draws of the bets' mean expected return per unit stake,
-   mean((1 - t_i) * omega_i): `expected_return` (mean and credible interval, break-even 1),
+   mean((1 - t_i) * omega_i), each bet's win probability held below 1 so that no bet returns more
+   than its odds: `expected_return` (mean and credible interval, break-even 1),
    `p_beats_takeout` (P that it exceeds 1: omega_s > 1/(1 - t)) and `omega_selected` (its mean
    over 1 - mean t_i). `predictive_roi_100`, the interval of the ROI of the next PREDICTIVE_BETS
    bets, is reported apart.
 4. ROI. One unit to Win on each selected bet, paid at `win_dividend`; a loser pays 0.
 A rule's bets are its segment's runners whose selection columns are all in [lo, hi] (inclusive,
 None an open end, a missing value never selected) among the rows the walk-forward folds score:
-the population log loss is scored on, never training-only rows.
+the population log loss is scored on; training-only rows are never read for selection.
 
 A measurement that cannot be made is NaN in its entry, which carries the reason as "error"; no
 failure stops another rule or stage. Survivors (passed stage 1 and found superior by StepM) are a
@@ -59,8 +63,11 @@ diagnostic. Every rule's rung is S0, D19's default; rules move only through the 
 
 Records: before StepM, one failed record per dropped variant the family does not hold yet and one
 per rule (status 'failed' when its claim could not be scored); at the end a second per rule with
-every measurement made as metrics. A record already in the registry is not appended again, and a
-rerun whose frame cannot score a variant the family holds scored is refused before any record.
+every measurement made as metrics (the predictive interval apart, as `predictive_roi_100` and its
+level `predictive_roi_100_level`) and, in `notes`, each failed stage's reason ('log_loss',
+'max_stat', 'omega', 'roi'), outside the variant identity. A record already in the registry is
+not appended again, and a rerun whose frame cannot score a variant the family holds scored is
+refused before any record.
 `sources` defaults to licensed sources (fails closed, D21): pass the sources `data` was built from.
 """
 
@@ -114,6 +121,7 @@ _DECISION_TIME = re.compile(r"T-([0-9]+)")
 OMEGA_DRAWS = 4000  # posterior draws of the omega model: Monte Carlo precision only
 PREDICTIVE_BETS = 100  # 08 §5.2 step 4: the posterior predictive ROI of the next 100 bets
 PREDICTIVE = f"predictive_roi_{PREDICTIVE_BETS}"
+PREDICTIVE_LEVEL = f"{PREDICTIVE}_level"  # its level, a metric apart so no level reads as an ROI
 AVOID = "S0"  # D19's default rung: the study makes no rung decision
 EVALUATED = "all_folds"  # the fold label of a measurement on the walk-forward test rows
 UNSTATED_SOURCES = ("jra", "jrdb")  # fails closed: unnamed sources are treated as licensed
@@ -294,9 +302,14 @@ def _input_problem(data: pd.DataFrame, col: str, t: pd.Series) -> str | None:
         return f"{int((present & source.isna()).sum())} value(s) with no source"
     if not isinstance(stamp.dtype, pd.DatetimeTZDtype):
         return f"{stamp_col} is not a timezone-aware instant ({stamp.dtype})"
-    late = present & ~(stamp <= t)  # a missing stamp, or a race without a post, is late too
+    # A value unstamped, or a stamp (a blank value's too) after t or on a race without a post, is
+    # late; only a missing value with no stamp is genuinely missing.
+    late = ~(stamp <= t) & (present | stamp.notna())
     if late.any():
-        return f"{int(late.sum())} value(s) stamped after their race's decision time, or unstamped"
+        return (
+            f"{int(late.sum())} value(s), missing ones included, stamped after their race's "
+            "decision time, or a value unstamped"
+        )
     return None
 
 
@@ -423,18 +436,25 @@ def _in_segment(frame: pd.DataFrame, segment: dict) -> np.ndarray:
     return keep
 
 
-def _selected(frame: pd.DataFrame, rule: RuleSpec) -> np.ndarray:
-    """The rule's bets: its segment, every selection column present and in [lo, hi]."""
-    keep = _in_segment(frame, rule.segment)
+def _selected(frame: pd.DataFrame, rule: RuleSpec, rows: np.ndarray) -> np.ndarray:
+    """The rule's bets among `rows`: its segment, every selection column present and in [lo, hi].
+    Selection columns are read on those rows only, and a missing value (NaN, None or pd.NA) is
+    never selected."""
+    keep = np.flatnonzero(rows & _in_segment(frame, rule.segment))
     for col in rule.selection_cols:
-        values = frame[col].astype("float64").to_numpy()
+        values = frame[col].iloc[keep]
+        present = values.notna().to_numpy()
+        keep, values = keep[present], values[present].to_numpy(dtype="float64")
         lo, hi = rule.thresholds[col]
-        keep &= ~np.isnan(values)
+        inside = np.ones(len(keep), dtype=bool)
         if lo is not None:
-            keep &= values >= lo
+            inside &= values >= lo
         if hi is not None:
-            keep &= values <= hi
-    return keep
+            inside &= values <= hi
+        keep = keep[inside]
+    out = np.zeros(len(frame), dtype=bool)
+    out[keep] = True
+    return out
 
 
 def _race_ll(p: pd.Series, frame: pd.DataFrame, rows: np.ndarray) -> pd.Series:
@@ -574,6 +594,12 @@ def run_study(
     folds = walk_forward(frame["race_date"], scheme=scheme)
     boot = bootstrap_settings()
     rules = {rule.rule_id: rule for rule in spec.rules}
+    # The evaluation population: the rows the walk-forward folds score, as log loss does. Each
+    # rule's bets are selected among them before anything is scored or written.
+    evaluated = np.zeros(len(frame), dtype=bool)
+    for fold in folds:
+        evaluated[fold.test_idx] = True
+    bets_of = {rid: _selected(frame, rule, evaluated) for rid, rule in rules.items()}
     identity = {
         "git_sha": _git_sha(),
         "data_builds": _frame_build(frame),
@@ -581,7 +607,7 @@ def run_study(
         "fold_scheme": "walk_forward:" + json.dumps(dataclasses.asdict(scheme), sort_keys=True),
     }
 
-    def record(rule: RuleSpec, metrics: list[FoldMetric], failed: bool) -> RunRecord:
+    def record(rule: RuleSpec, metrics: list[FoldMetric], failed: bool, notes=None) -> RunRecord:
         params = {
             "spec_sha256": frozen_hash,
             "segment": dict(rule.segment),
@@ -603,6 +629,7 @@ def run_study(
             params=params,
             metrics=tuple(metrics),
             status="failed" if failed else "scored",
+            notes=notes or None,
             **identity,
         )
 
@@ -747,23 +774,23 @@ def run_study(
             "family_id": spec.family_id,
         }
         frame_losses = pd.DataFrame(losses)
-        found = spa(bench, frame_losses, **common)
-        superior = set(stepm(bench, frame_losses, level=spec.max_stat["level"], **common).superior)
-        max_stat |= {
-            "superior": [rid for rid in tested if rid in superior],
-            "spa_pvalue": found.pvalue,
-            "spa_pvalue_lower": found.pvalue_lower,
-            "spa_pvalue_upper": found.pvalue_upper,
-            "family_size": found.family_size,
-            "n_clusters": found.n_clusters,
-        }
+        test = "SPA"
+        try:
+            found = spa(bench, frame_losses, **common)
+            max_stat |= {
+                "spa_pvalue": found.pvalue,
+                "spa_pvalue_lower": found.pvalue_lower,
+                "spa_pvalue_upper": found.pvalue_upper,
+                "family_size": found.family_size,
+                "n_clusters": found.n_clusters,
+            }
+            test = "StepM"
+            step = stepm(bench, frame_losses, level=spec.max_stat["level"], **common)
+            max_stat["superior"] = [rid for rid in tested if rid in set(step.superior)]
+        except Exception as exc:  # recorded with the stage; no rule is superior, the rest stands
+            max_stat["error"] = f"{test} could not run: {exc!r}"
     # A diagnostic only: no stage below reads it.
     survivors = [rid for rid in rules if log_loss[rid]["passed"] and rid in max_stat["superior"]]
-    # The evaluation population: the rows the walk-forward folds score, as log loss does.
-    evaluated = np.zeros(len(frame), dtype=bool)
-    for fold in folds:
-        evaluated[fold.test_idx] = True
-    bets_of = {rid: _selected(frame, rule) & evaluated for rid, rule in rules.items()}
 
     # Stage 3: #78's omega model on each rule's selected bets, odds-band fixed effects. Every bet
     # of a fit is in the rule's segment, so the bets identify only their own mix's multiplier
@@ -836,20 +863,27 @@ def run_study(
         roi[rid] = entry
 
     # Every measurement made, whatever the rule's verdicts; a NaN one is no metric, and its
-    # stage entry carries the reason.
+    # stage entry carries the reason, which the record keeps in its notes by stage.
     outcome = []
     for rid, rule in rules.items():
         extra = []
-        if rid in losses:
+        if rid in losses and "error" not in max_stat:
             superior = float(rid in max_stat["superior"])
-            extra += _metric(EVALUATED, "stepm_superior", superior, max_stat.get("n_clusters", 0))
+            extra += _metric(EVALUATED, "stepm_superior", superior, max_stat["n_clusters"])
         entry, er = omega[rid], omega[rid]["expected_return"]
         n_bets = entry["n_bets"]
+        low, high, level = entry[PREDICTIVE]
         extra += _metric(EVALUATED, "omega_selected", entry["omega_selected"], n_bets)
         extra += _metric(EVALUATED, "expected_return", er["mean"], n_bets, er["low"], er["high"])
+        extra += _metric(EVALUATED, PREDICTIVE, (low + high) / 2, n_bets, low, high)
+        extra += _metric(EVALUATED, PREDICTIVE_LEVEL, level, n_bets)
         extra += _metric(EVALUATED, "p_beats_takeout", entry["p_beats_takeout"], n_bets)
         extra += _metric(EVALUATED, "roi_win_dividend", roi[rid]["roi"], roi[rid]["n_bets"])
-        outcome.append(record(rule, metrics[rid] + extra, rid not in losses))
+        stages = {"log_loss": log_loss[rid], "omega": entry, "roi": roi[rid]}
+        notes = {stage: e["error"] for stage, e in stages.items() if "error" in e}
+        if "error" in max_stat and rid in tested:
+            notes["max_stat"] = max_stat["error"]
+        outcome.append(record(rule, metrics[rid] + extra, rid not in losses, notes))
     append(outcome)
 
     return StudyReport(
