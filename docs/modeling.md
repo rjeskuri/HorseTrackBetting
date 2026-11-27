@@ -98,7 +98,8 @@ flowchart TB
     subgraph L6["C6: decision layer, shadow only"]
         SV["Shadow value over nowcast draws<br/>#118 japan/models/v0/shadow_values.py<br/>v0"]
         SLOG["Shadow log at each grid point<br/>#119 japan/shadow/log.py<br/>#120 japan/shadow/day.py<br/>built"]
-        STAKE["Value with our own stake #100,<br/>staking rungs on paper #101<br/>planned"]
+        STAKE["Shadow EV with our own stake #100<br/>japan/models/decision.py<br/>built"]
+        SDEC["Shadow decisions logged and scored #101<br/>planned"]
     end
     BOARD --> NC0
     NC0 -.->|"replaced by"| NC1
@@ -118,13 +119,14 @@ flowchart TB
     SV -.-> STAKE
     NC1 -.-> STAKE
     EXO -.-> STAKE
+    STAKE -.-> SDEC
 
     classDef v0 fill:#dbeafe,stroke:#1d4ed8,color:#0b1f4d
     classDef built fill:#dcfce7,stroke:#15803d,color:#052e16
     classDef planned fill:#f3f4f6,stroke:#6b7280,stroke-dasharray: 5 5,color:#111827
     class NC0,CAL,RES,ORD,SV v0
-    class ASOF,BOARD,SLOG,NC1,ABIL built
-    class INTR,SPEED,META,EXO,STAKE planned
+    class ASOF,BOARD,SLOG,NC1,ABIL,STAKE built
+    class INTR,SPEED,META,EXO,SDEC planned
 ```
 
 The work is split into seven layers, and each is tested both on its own and for what it adds
