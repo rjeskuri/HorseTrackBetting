@@ -27,8 +27,9 @@ its holdout rows before any table is returned.
 ``read_development(handle, country, *, columns, start, end, where, column)`` is the development
 scan of one Parquet file through one open handle (#415, PR #427 review): it first narrows
 ``start..end`` to the file's own first and last ``column`` day (from the row groups' footer
-statistics; a row group without them is searched by ``count_rows`` under a range filter, so no
-value is materialized), so an open-ended read (``end=date.max``) asks ``is_holdout_day`` only
+statistics; the row groups without them are scanned once, together, by one Acero plan of a scan,
+a range filter and a min/max aggregate on the same handle, so only the two bounds reach Python),
+so an open-ended read (``end=date.max``) asks ``is_holdout_day`` only
 about the days the file can hold, then scans the same handle with ``development_filter`` over
 that narrowed range. The bounds and the scan read one snapshot of the file even when it is
 atomically replaced meanwhile. ``split_off`` and ``LockedHoldout.open`` below are unchanged and
