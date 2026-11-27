@@ -85,14 +85,17 @@ The study: `studies/nowcast.py`, `horsetrack japan nowcast-study`
   differs between "no post time" and "no Wide on any training day"). `own_logged_days` stays.
 
 #411 review (the fixes' contract)
-- Wide shares are pair-aware. JRA's Wide rule (config/jra.yaml `stake_back_share`,
-  `core.pricing.stake_back_share_dividend`): the three pairs among the first three win, each gets
-  its stake back plus a third of the net pool less the three winning pairs' stakes, over its own.
-  The pair {a,b} wins with {a,x} and {b,x} for one third runner x, so its low figure uses
-  max over x of (m_ax + m_bx) and its high figure the min. `nc.wide_odds(shares, combinations,
-  payout) -> (lo, hi)` is that forward rule and `nc.wide_money(lo, combinations, payout) -> money`
-  (pool units) its inverse, rows of 2-D input being boards or draws, `combinations` the pairs as
-  "a,b" text in column order. `nc.pool_shares(WIDE, odds, combinations=...)` uses the inverse
+- Wide shares are pair-aware. JRA's Wide rule (config/jra.yaml `stake_back_share`): the three
+  pairs among the first three win, each paid by the shared identity
+  `core.pricing.stake_back_share_dividend`, rate x (1 + D / (3 m)), D the losers' money (施行規則
+  付録第六, (W + D/P) x R: the rate covers the returned stake too). The pair {a,b} wins with
+  {a,x} and {b,x} for one third runner x, so its low figure uses max over x of (m_ax + m_bx)
+  and its high figure the min. The fixtures' Wide figures (`wide_figures`) are that identity by
+  brute force over every feasible top three, without breakage and floored only where stated.
+  `nc.wide_odds(shares, combinations, payout) -> (lo, hi)` is that forward rule and
+  `nc.wide_money(lo, combinations, payout) -> money` (pool units) its inverse, rows of 2-D input
+  being boards or draws, `combinations` the pairs as "a,b" text in column order.
+  `nc.pool_shares(WIDE, odds, combinations=...)` uses the inverse
   (`rule_sum` its money total); the C1 draws (`ShadowNowcast`) and the drift forecaster
   (`studies.nowcast.drift_forecaster`) print and read Wide figures by it. WIN and PLACE keep
   their rules.
@@ -104,11 +107,18 @@ The study: `studies/nowcast.py`, `horsetrack japan nowcast-study`
   `logger.compact.compact_day`, so how the marker is carried is the module's choice.
 - A runner scratched in the logged WIN/PLACE rows (status_raw "SCR", no price) at capture t
   removes its Wide pairs from the Wide board from t on, the final board included; JRA's log
-  simply stops listing those pairs.
-- A fold whose test days give only unscorable cases completes with its `unscored_no_fit` kept.
-- A run that reads our logged days registers under `japan-c1-nowcast-final-shares-v3`, its spec
-  naming both sources, and writes its reports under a name of its own; a JRA-VAN-only run keeps
-  v2, its spec hash and its report.
+  simply stops listing those pairs. t is the fetched_utc of the row reporting the scratch (kept
+  through compaction and `read_logged_day`), its snapshot_utc where it has none: a round that
+  starts before a grid cutoff and fetches the scratch after it leaves the pairs on that board.
+- A fold whose test days give only unscorable cases completes with its `unscored_no_fit` kept,
+  and so does a run in which no case at all is scored (its report still renders).
+- The Wide reason tracks confirmed finals apart from usable grid boards and names each missing
+  input: a missing final capture with "final capture", missing boards before the post with
+  "pre-post board" or "board(s) before the post"; a store whose Wide paths all have a confirmed
+  final does not point to recompaction.
+- A run that reads our logged days registers under `japan-c1-nowcast-logged-wide-v1`, its spec
+  naming both sources, and writes its reports as `nowcast-japan-logged-wide-v1-<spec hash[:12]>`;
+  a JRA-VAN-only run keeps v2, its spec hash and its report.
 - Each (race, pool) path is timed by its own source's post time. JRA-VAN wins a (race, pool) only
   where its path has a post time. `wide_coverage` reads the logged days the folds read (`--end`).
 
@@ -125,6 +135,7 @@ import hashlib
 import itertools
 import json
 import math
+import re
 from collections import defaultdict
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
@@ -143,6 +154,7 @@ from horsetrack.core.eval.distributional import pit
 from horsetrack.core.eval.folds import FoldScheme, walk_forward
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.registry import default_registry
+from horsetrack.core.pricing import stake_back_share_dividend
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board.snapshot import (
     FINAL_TEXT,
@@ -1117,16 +1129,56 @@ LATE_ENTRY = "99"  # a WIN runner our log prices only at the close (see logged_c
 
 
 WIDE_PAYOUT = 1.0 - WIDE_TAKEOUT
+# No rounding in the fixtures' figures: core.pricing's dividend truncation step, per 1 yen, set
+# far below any tolerance here (relative error under 1e-11 on figures of 1 to 1e3).
+NO_BREAKAGE = 1e-12
+
+
+def jra_dividend(own: float, co_winners: Sequence[float], *, floor: float | None = None) -> float:
+    """JRA's stake-back-share dividend per 1 yen (施行規則 付録第六, (W + D/P) x R; HKTrack
+    B-betting-rules.md §1.5): `core.pricing.stake_back_share_dividend` itself, with the Wide rate,
+    no breakage and `floor` as the minimum dividend."""
+    return stake_back_share_dividend(
+        float(own),
+        [float(c) for c in co_winners],
+        rate=WIDE_PAYOUT,
+        unit=1.0,
+        dividend_step=NO_BREAKAGE,
+        min_dividend=floor,
+    )
 
 
 def wide_figures(
     money: np.ndarray, pairs: Sequence[str] = WIDE_PAIRS, *, floor: bool = True
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Low and high Wide figures of pair money `money` (units of the pool) by JRA's rule, found
-    over every feasible result: for each set of three runners finishing first to third, the three
-    pairs among them win, and each gets its stake back plus a third of the net pool less the
-    three winning pairs' stakes, over its own stakes. A pair's low figure is its smallest dividend
-    over the results it wins in, its high figure the largest; floored at the minimum dividend."""
+    """Low and high Wide figures of pair money `money` (units of the pool, summing to 1) by JRA's
+    rule, found by brute force over every feasible result: for each set of three runners finishing
+    first to third, the three pairs among them win, and each is paid by the shared stake-back-share
+    identity (`jra_dividend`: rate x (1 + losers' money / (3 x own))), the other two winning pairs
+    its co-winners. A pair's low figure is its smallest dividend over the results it wins in, its
+    high figure the largest; floored at the minimum dividend (110 yen) when `floor`."""
+    money = np.asarray(money, dtype=float)
+    column = {p: j for j, p in enumerate(pairs)}
+    runners = sorted({int(x) for p in pairs for x in p.split(",")})
+    lo, hi = np.full(len(pairs), np.inf), np.full(len(pairs), -np.inf)
+    for trio in itertools.combinations(runners, 3):
+        winners = [column[f"{a},{b}"] for a, b in itertools.combinations(trio, 2)]
+        for j in winners:
+            dividend = jra_dividend(
+                money[j],
+                [money[w] for w in winners if w != j],
+                floor=WIDE_FLOOR if floor else None,
+            )
+            lo[j], hi[j] = min(lo[j], dividend), max(hi[j], dividend)
+    return lo, hi
+
+
+def additive_wide_figures(
+    money: np.ndarray, pairs: Sequence[str] = WIDE_PAIRS
+) -> tuple[np.ndarray, np.ndarray]:
+    """The form the review rejected: 1 + (rate - the three winning pairs' money) / (3 x own), the
+    rate applied to the pool before the winning stakes are taken out (so not to the returned
+    stake). It equals JRA's only when the three winning pairs hold equal money."""
     money = np.asarray(money, dtype=float)
     column = {p: j for j, p in enumerate(pairs)}
     runners = sorted({int(x) for p in pairs for x in p.split(",")})
@@ -1137,22 +1189,18 @@ def wide_figures(
         for j in winners:
             dividend = 1.0 + pot / (3.0 * money[j])
             lo[j], hi[j] = min(lo[j], dividend), max(hi[j], dividend)
-    if floor:
-        return np.maximum(lo, WIDE_FLOOR), np.maximum(hi, WIDE_FLOOR)
     return lo, hi
 
 
 def generic_low(money: np.ndarray, places: int = 3) -> np.ndarray:
-    """The stake-back low figure with the P - 1 most-backed *other combinations* as co-winners,
-    whatever they are: right for PLACE, not for Wide pairs (it ignores which pairs can win
-    together)."""
+    """The stake-back low figure (the shared identity) with the P - 1 most-backed *other
+    combinations* as co-winners, whatever they are: right for PLACE's structure, not for Wide
+    pairs (it ignores which pairs can win together)."""
     money = np.asarray(money, dtype=float)
     lo = np.empty(len(money))
     for i, own in enumerate(money):
         others = np.sort(np.delete(money, i))
-        lo[i] = 1.0 + (WIDE_PAYOUT - own - others[len(others) - (places - 1) :].sum()) / (
-            places * own
-        )
+        lo[i] = jra_dividend(own, others[len(others) - (places - 1) :])
     return lo
 
 
@@ -1218,11 +1266,13 @@ _JST = timezone(timedelta(hours=9))
 
 
 def log_row(r: dict) -> dict:
-    """A row in compact.SCHEMA as the logger writes it (docs/specs/odds-log.md): a row of a final
+    """A row in compact.SCHEMA as the logger writes it (docs/specs/odds-log.md; `fetched_utc` only
+    where the row has one, as the key is optional in the log): a row of a final
     capture (`is_final_capture` in the fixtures) shows the page's final state, 最終オッズ with no
     clock (`source_update_utc` null, docs/specs/board-at-t.md); any other row the page's clock."""
     out = {
         "snapshot_utc": r["snapshot_utc"],
+        **({} if r.get("fetched_utc") is None else {"fetched_utc": r["fetched_utc"]}),
         "race_id": r["race_id"],
         "pool": r["pool"],
         "combination": r["combination"],
@@ -1503,15 +1553,20 @@ WIDE_BOARDS = tuple(
 
 def test_wide_figures_are_priced_over_the_results_a_pair_can_win_in():
     """#411 review: `wide_odds(shares, combinations, payout)` prints each pair's low and high
-    figure as JRA's rule does over every feasible top three (`wide_figures`, brute force here).
-    Fields of 5 to 16 runners, pair money drawn directly or from runner strengths, and a field
-    with a scratched runner's pairs missing; on each the rule that takes the two most-backed other
-    pairs as co-winners (`generic_low`) prints different figures, so it cannot pass. Rows of a
-    2-D input are draws."""
+    figure as JRA's rule does over every feasible top three (`wide_figures`, brute force through
+    `core.pricing.stake_back_share_dividend` here). Fields of 5 to 16 runners, pair money drawn
+    directly or from runner strengths, and a field with a scratched runner's pairs missing; on
+    each the rule that takes the two most-backed other pairs as co-winners (`generic_low`) prints
+    different figures, and so does the form with the rate applied before the winning stakes are
+    taken out (`additive_wide_figures`; the winning pairs' money is unequal on every board), so
+    neither can pass. Rows of a 2-D input are draws."""
     for seed, runners, kind in WIDE_BOARDS:
         pairs, money = wide_board(seed, runners, kind)
         expected_lo, expected_hi = wide_figures(money, pairs, floor=False)
         assert np.abs(generic_low(money) - expected_lo).max() > 0.05, (runners, kind)
+        additive_lo, additive_hi = additive_wide_figures(money, pairs)
+        assert np.abs(additive_lo - expected_lo).max() > 0.05, (runners, kind)
+        assert np.abs(additive_hi - expected_hi).max() > 0.05, (runners, kind)
         lo, hi = nc.wide_odds(money, pairs, payout=WIDE_PAYOUT)
         np.testing.assert_allclose(lo, expected_lo, rtol=1e-9, err_msg=f"{runners} {kind}")
         np.testing.assert_allclose(hi, expected_hi, rtol=1e-9, err_msg=f"{runners} {kind}")
@@ -1529,13 +1584,17 @@ def test_wide_figures_are_priced_over_the_results_a_pair_can_win_in():
 
 def test_wide_money_inverts_the_pair_rule():
     """#411 review: `wide_money(lo, combinations, payout)` recovers each pair's money (units of
-    the pool) from the low figures JRA's pair rule prints, on every board of WIDE_BOARDS and row
-    by row for a 2-D input."""
+    the pool) from the low figures JRA's pair rule prints (brute force through
+    `core.pricing.stake_back_share_dividend`), on every board of WIDE_BOARDS and row by row for a
+    2-D input; and the round trip through its own forward rule (`wide_odds`) recovers the money."""
     for seed, runners, kind in WIDE_BOARDS:
         pairs, money = wide_board(seed, runners, kind)
         lo, _ = wide_figures(money, pairs, floor=False)
         got = nc.wide_money(lo, pairs, payout=WIDE_PAYOUT)
         np.testing.assert_allclose(got, money, rtol=1e-6, atol=1e-12, err_msg=f"{runners} {kind}")
+        forward, _ = nc.wide_odds(money, pairs, payout=WIDE_PAYOUT)
+        back = nc.wide_money(forward, pairs, payout=WIDE_PAYOUT)
+        np.testing.assert_allclose(back, money, rtol=1e-6, atol=1e-12, err_msg=f"{runners} {kind}")
 
     boards = [wide_board(seed, range(1, 13), "pairs") for seed in (121, 122, 123)]
     pairs = boards[0][0]
@@ -1557,8 +1616,9 @@ def test_pool_shares_reads_each_pool_by_its_own_rule():
     """#411 review: `pool_shares` gives WIN shares as 1/O normalised and PLACE shares by the
     stake-back rule with the most-backed other runners (both as before), and Wide shares by the
     pair rule, given the board's pairs (`combinations=`): the money shares, with `rule_sum` (the
-    recovered money's total) 1. Boards of 8 to 16 runners for WIN and PLACE, WIDE_BOARDS and a
-    2-D board stack for Wide."""
+    recovered money's total) 1 on Wide boards built by the shared `core.pricing` identity
+    (`wide_figures`). Boards of 8 to 16 runners for WIN and PLACE, WIDE_BOARDS and a 2-D board
+    stack for Wide."""
     rng = np.random.default_rng(4111)
     for k in (8, 12, 16):
         shares = place_board(rng, k)
@@ -1703,6 +1763,72 @@ def test_a_logged_scratch_takes_its_wide_pairs_off_the_board():
     assert seen == set(map(float, GRID))
 
 
+FETCH_LAG_S = 20.0  # a page's fetch after its capture round starts (fetched_utc - snapshot_utc)
+
+
+def fetched(rows: list[dict], lags: dict[tuple[str, float], float]) -> list[dict]:
+    """`rows` with a fetched_utc: the round's snapshot_utc plus FETCH_LAG_S seconds, or plus
+    `lags[(race_id, minutes to post)]` seconds for the WIN and PLACE pages of that round."""
+    out = []
+    for r in rows:
+        lag = FETCH_LAG_S
+        if r["pool"] in (WIN, PLACE):
+            lag = lags.get((r["race_id"], r["minutes_to_post"]), FETCH_LAG_S)
+        out.append({**r, "fetched_utc": r["snapshot_utc"] + timedelta(seconds=lag)})
+    return out
+
+
+def test_a_scratch_counts_on_the_wide_board_from_its_page_fetch():
+    """#411 review: a scratch is known from the fetched_utc of the WIN or PLACE row that reports
+    it (snapshot_utc when the row has none), not from the start of its capture round. Two races,
+    runner 6 scratched in each, logged and compacted and read as the study reads a logged day
+    (`read_logged_day`, then `extract` with its scratches):
+    - race 1: the round at T-2 (snapshot at the T-2 cutoff) reports the scratch on pages fetched
+      30 s later, after that cutoff and before the T-1 one. The T-2 Wide board still carries
+      runner 6's pairs (its case renormalised over the pairs priced at the close); the T-1 board
+      does not. The T-1 round's own pages are fetched 20 s after the T-1 cutoff, too late for
+      it, so the T-2 round's fetch time is what takes the pairs off.
+    - race 2: the round at T-6 reports it on pages fetched 70 s later, after the T-5 cutoff (the
+      next round, at T-5, starts before the cutoff too). The T-5 board carries the pairs; T-2 on
+      it does not.
+    Each board keeps the pairs exactly when the scratch's fetch is after its cutoff."""
+    day = TEST_DAYS[1]
+    rng = np.random.default_rng(4116)
+    rows, known = [], {}
+    for race_no, round_min, lag_s in ((1, 2.0, 30.0), (2, 6.0, 70.0)):
+        race_id = race_id_of(day, race_no)
+        race = race_rows(rng, day, race_no, WIDE_RUNNERS) + wide_rows(day, race_no)
+        race = logged_scratch(race, race_id, "6", from_minute=round_min)
+        rows += fetched(race, {(race_id, round_min): lag_s})
+        known[race_id] = round_min - lag_s / 60.0  # minutes before the post the scratch is known
+    write_logged_day(day, rows)
+    path = paths.processed_dir("jra") / "odds_timeseries" / f"{day.isoformat()}.parquet"
+    own = study.read_logged_day(path, None)
+    cases, _, _ = extract(own.frame, scratches=own.scratches)
+
+    with_six = {p for p in WIDE_PAIRS if "6" in p.split(",")}
+    seen = defaultdict(set)
+    kept_at = defaultdict(set)
+    for i in np.flatnonzero(cases.pool == WIDE):
+        race_id, tau, r = str(cases.race_id[i]), float(cases.tau[i]), cases.rows(i)
+        combinations = set(cases.combination[r])
+        seen[race_id].add(tau)
+        if tau > known[race_id]:  # the cutoff is before the scratch's fetch: the pairs stay
+            kept_at[race_id].add(tau)
+            assert combinations == set(WIDE_PAIRS), (race_id, tau)
+            assert cases.scratched[i] == len(with_six), (race_id, tau)
+            no_final = {c for c, s in zip(cases.combination[r], cases.s_f[r], strict=True)
+                        if np.isnan(s)}  # fmt: skip
+            assert no_final == with_six, (race_id, tau)
+        else:
+            assert combinations == set(WIDE_PAIRS) - with_six, (race_id, tau)
+            assert cases.scratched[i] == 0, (race_id, tau)
+    for race_id in known:
+        assert seen[race_id] == set(map(float, GRID)), race_id
+    assert 2.0 in kept_at[race_id_of(day, 1)] and 1.0 not in kept_at[race_id_of(day, 1)]
+    assert 5.0 in kept_at[race_id_of(day, 2)] and 2.0 not in kept_at[race_id_of(day, 2)]
+
+
 # ---------------------------------------------------------------- #411 review: the study
 
 
@@ -1751,8 +1877,77 @@ def test_a_fold_with_only_unscorable_cases_completes(run_on):
     assert "unscored_no_fit" in text
 
 
+def test_a_run_whose_only_fold_holds_wide_only_logs_renders_its_report(run_on):
+    """#411 review: a Wide-only capture (`log-day --pools`, so our log holds Wide and nothing
+    else) on the only fold's test days, before any Wide cell exists: no case of the run can be
+    scored. The run still completes and renders its report: the fold is reported with no scored
+    case and its 2 days x 2 races x len(GRID) unscored ones, no comparison holds a scored case,
+    the report states why Wide is not fitted, and the run is in the registry."""
+    jravan = {d: day_rows(d, races=2) for d in TRAIN_DAYS}
+    tested = JRAVAN_DAYS[len(TRAIN_DAYS) :]  # the one fold's test week
+    logged = {d: wide_rows(d, 1) + wide_rows(d, 2) for d in tested}
+    dump, text = run_on("wide-only-run", jravan=jravan, logged=logged)
+
+    assert dump["counts"]["folds"] == len(dump["folds"]) == 1, dump["folds"]
+    fold = dump["folds"][0]
+    assert fold["cases"] == 0 and fold["test_days"] == len(tested) == 2, fold
+    assert fold["unscored_no_fit"] == 2 * 2 * len(GRID), fold
+    scored = [r for comparison in dump["gains"].values() for r in comparison.get("day", [])
+              if r.get("n_cases")]  # fmt: skip
+    assert not scored, scored
+    assert dump["wide"]["fitted"] is False
+    assert dump["wide"]["reason"] in text
+    records = default_registry(COUNTRY).records()
+    assert records and all(r.family_id.startswith(LOGGED_FAMILY) for r in records)
+
+
+FINAL_CAPTURE = re.compile(r"final capture", re.IGNORECASE)
+PRE_POST_BOARD = re.compile(r"pre-post board|boards? before the post", re.IGNORECASE)
+
+
+def test_the_wide_reason_names_each_missing_input(run_on):
+    """#411 review: confirmed finals and usable grid boards are tracked apart, and the Wide reason
+    names what is missing. Two kinds of logged Wide race, each with its pool total:
+    - blocked: the logger stopped at T-5 (no capture shows the final state), so no target;
+    - after the post: a confirmed final capture, taken only after the post, so no board before
+      it.
+    The blocked race alone gives the missing final capture (`FINAL_CAPTURE`) and no case; the
+    after-post race alone gives the missing boards before the post (`PRE_POST_BOARD`), and neither
+    counts a path without a final capture nor points to recompaction; both together name both.
+    The three reasons differ and each is printed in its report."""
+    jravan = {d: day_rows(d, races=2) for d in STUDY_DAYS}
+    blocked_day, after_day = JRAVAN_DAYS[0], JRAVAN_DAYS[1]
+    blocked = stopped(wide_rows(blocked_day, 1), last_minute=5)
+    after_post = [r for r in wide_rows(after_day, 2) if r["minutes_to_post"] < 0]
+    assert after_post and all(r["is_final_capture"] for r in after_post)
+
+    stores = {
+        "blocked": {blocked_day: blocked},
+        "after-post": {after_day: after_post},
+        "both": {blocked_day: blocked, after_day: after_post},
+    }
+    reasons, counts = {}, {}
+    for name, logged in stores.items():
+        dump, text = run_on(f"reason-{name}", jravan=jravan, logged=logged)
+        wide = dump["wide"]
+        assert wide["fitted"] is False, name
+        assert wide["wide_cases"] == 0, name
+        assert WIDE not in scored_by_pool(dump), name
+        assert wide["reason"] in text, name
+        reasons[name], counts[name] = wide["reason"], dump["counts"]["no_final_capture"]
+
+    assert counts == {"blocked": 1, "after-post": 0, "both": 1}, counts
+    assert FINAL_CAPTURE.search(reasons["blocked"]), reasons["blocked"]
+    assert not PRE_POST_BOARD.search(reasons["blocked"]), reasons["blocked"]
+    assert PRE_POST_BOARD.search(reasons["after-post"]), reasons["after-post"]
+    assert "recompact" not in reasons["after-post"].lower(), reasons["after-post"]
+    assert FINAL_CAPTURE.search(reasons["both"]), reasons["both"]
+    assert PRE_POST_BOARD.search(reasons["both"]), reasons["both"]
+    assert len(set(reasons.values())) == 3, reasons
+
+
 V2_FAMILY = "japan-c1-nowcast-final-shares-v2"
-V3_FAMILY = "japan-c1-nowcast-final-shares-v3"
+LOGGED_FAMILY = "japan-c1-nowcast-logged-wide-v1"
 
 
 def v2_spec_hash() -> str:
@@ -1783,9 +1978,10 @@ def frozen_specs(registry) -> dict[str, dict]:
 
 def test_a_run_reading_our_logs_is_its_own_family_and_report(run_on, tmp_path):
     """#411 review: a full run on JRA-VAN days alone keeps #85's family v2, its spec hash and
-    its report; the same store with our logged days added registers under v3, frozen with a spec
-    of its own that names both sources, and writes its report under another name, leaving v2's
-    report as it was."""
+    its report; the same store with our logged days added registers under
+    japan-c1-nowcast-logged-wide-v1, frozen with a spec of its own that names both sources, and
+    writes its report as `nowcast-japan-logged-wide-v1-<spec hash[:12]>.md`, leaving v2's report
+    as it was."""
     reports = tmp_path / "reports"
     data = run_on.store("families", jravan={d: day_rows(d, races=2) for d in STUDY_DAYS}, logged={})
     registry = default_registry(COUNTRY)
@@ -1802,18 +1998,20 @@ def test_a_run_reading_our_logs_is_its_own_family_and_report(run_on, tmp_path):
     for day in STUDY_DAYS:
         write_logged_day(day, wide_rows(day, 1) + wide_rows(day, 2))
     mixed, _ = run_on.run(data, trial=False, out_dir=reports)
-    v3 = run_on.result
+    logged = run_on.result
     assert scored_by_pool(mixed).get(WIDE, 0) > 0  # the logged days were read
-    assert v3["family_id"] == V3_FAMILY
-    assert v3["spec_hash"] != v2["spec_hash"]
-    assert registry.frozen_spec_hash(V3_FAMILY) == v3["spec_hash"]
+    assert logged["family_id"] == LOGGED_FAMILY
+    assert logged["spec_hash"] != v2["spec_hash"]
+    assert registry.frozen_spec_hash(LOGGED_FAMILY) == logged["spec_hash"]
     assert registry.frozen_spec_hash(V2_FAMILY) == v2["spec_hash"]
     added = registry.records()[len(first) :]
-    assert added and {r.family_id for r in added} == {V3_FAMILY}
-    assert Path(v3["report_path"]) not in v2_files
+    assert added and {r.family_id for r in added} == {LOGGED_FAMILY}
+    logged_report = Path(logged["report_path"])
+    assert logged_report.name == f"nowcast-{COUNTRY}-logged-wide-v1-{logged['spec_hash'][:12]}.md"
+    assert logged_report not in v2_files
     assert {p: p.read_bytes() for p in v2_files} == v2_files
-    spec = frozen_specs(registry)[V3_FAMILY]
-    assert spec["family_id"] == V3_FAMILY
+    spec = frozen_specs(registry)[LOGGED_FAMILY]
+    assert spec["family_id"] == LOGGED_FAMILY
     text = json.dumps(spec)
     assert "processed/jravan/odds_timeseries" in text and "processed/jra/odds_timeseries" in text
 

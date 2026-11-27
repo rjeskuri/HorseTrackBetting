@@ -6,7 +6,8 @@ exactly `logger.compact.SCHEMA`), read one day at a time by column and with the 
 only. D10: race days from 2014-06-07 (`PRICE_ERA_START`) only, since the nowcast is the price
 half. Our own compacted logged days, `processed/jra/odds_timeseries/<YYYY-MM-DD>.parquet` (owner,
 #85: added to the training as they accrue; #411), are read beside them, by the same columns and
-pools plus status_raw and `is_final_state`, with `--end` applied to both (`read_logged_day`):
+pools plus status_raw, fetched_utc and `is_final_state`, with `--end` applied to both
+(`read_logged_day`):
 - only their rows with a post time;
 - per (race, pool), the JRA-VAN path wins where it has a post time; otherwise our logged path
   supplies it (in practice our logs add Wide, D3). Each path is timed by its own source's post;
@@ -14,13 +15,16 @@ pools plus status_raw and `is_final_state`, with `--end` applied to both (`read_
   pool all show the final state, docs/specs/board-at-t.md); one whose capture stopped before the
   close gives no case and no growth observation and is counted (`no_final_capture`);
 - a runner scratched in our logged WIN or PLACE rows takes its Wide pairs off the Wide board from
-  that capture on (`models.nowcast.extract`, `scratches=`), JRA-VAN's WIN rows or not.
+  the reporting page's fetched_utc on (its snapshot_utc where it has none;
+  `models.nowcast.extract`, `scratches=`), JRA-VAN's WIN rows or not.
 D14: holdout days of either source are dropped by `is_holdout_day` on the file name, before any
 read; the holdout is not opened. Grades are the jravan races table's `race_class` (None for a
 race it does not hold). Wide is fitted and scored where the folds' training days hold Wide
-cases; the report states plainly why when they do not, and a (pool, tau) a fold's training gives
-no fit for is not scored there (counted per fold, `unscored_no_fit`; a fold of such cases only
-is reported with no PIT). Wide coverage reads the logged days the folds read.
+cases; the report states plainly why when they do not (naming each missing input: a final
+capture, a board before the post), and a (pool, tau) a fold's training gives no fit for is not
+scored there (counted per fold, `unscored_no_fit`; a fold of such cases only is reported with no
+PIT, and a run with no scored case still renders its report). Wide coverage reads the logged
+days the folds read.
 
 Folds: D9's walk-forward (`config/folds.yaml`) over the development race days. Each fold fits on
 its training days only: the structural nowcast, the same with beta = 0 (`no_features`), and #116's
@@ -45,8 +49,10 @@ D14); counts. One registry record per comparison (E19), failures included, then 
 regenerates the committed summary. Family `japan-c1-nowcast-final-shares-v2` supersedes
 `japan-c1-nowcast-final-shares`, whose spec dropped late-scratch cases against #69; it is the
 family of a run on JRA-VAN days alone. A run that reads our logged days registers under
-`japan-c1-nowcast-final-shares-v3` (#411), whose spec names both sources and the rules above,
-and writes its reports as `nowcast-japan-v3-<spec hash>`, so v2's reports are never replaced. A
+`japan-c1-nowcast-logged-wide-v1` (#411), whose spec names both sources and the rules above,
+and writes its reports as `nowcast-japan-logged-wide-v1-<spec hash>`, so v2's reports are never
+replaced. It is a line of its own, not a successor of #410's `japan-c1-nowcast-final-shares-v3`
+or `-v4`. A
 `--trial` run is a run too: its records go to the family's `-trial` family with
 `params["trial"] = True`, and it never freezes or alters the family's spec.
 """
@@ -93,7 +99,7 @@ HYPOTHESIS = "E19"
 FAMILY_ID = "japan-c1-nowcast-final-shares-v2"  # JRA-VAN days alone (#85)
 TRIAL_FAMILY_ID = f"{FAMILY_ID}-trial"  # trial runs' records; a trial never freezes FAMILY_ID
 SUPERSEDES = "japan-c1-nowcast-final-shares"
-LOGGED_FAMILY_ID = "japan-c1-nowcast-final-shares-v3"  # with our own logged days (#411)
+LOGGED_FAMILY_ID = "japan-c1-nowcast-logged-wide-v1"  # with our own logged days (#411)
 LOGGED_SOURCE = "jra"  # our own compacted logs, processed/jra/odds_timeseries
 COLUMNS = [
     "race_id",
@@ -107,8 +113,9 @@ COLUMNS = [
     "odds_hi",
     "investment",
 ]
-# Our logs add the scratch markers (Wide boards) and the final-state flag (compact.py).
-LOGGED_COLUMNS = [*COLUMNS, "status_raw"]
+# Our logs add the scratch markers (Wide boards), each page's fetch time (when a scratch is
+# known) and the final-state flag (compact.py).
+LOGGED_COLUMNS = [*COLUMNS, "status_raw", "fetched_utc"]
 FINAL_STATE = "is_final_state"
 FORECASTERS = ("structural", "no_features", "random_walk", "drift_v0")
 COMPARISONS = (
@@ -143,6 +150,7 @@ class LoggedDay:
     frame: pd.DataFrame  # the paths our log supplies
     scratches: pd.DataFrame  # every WIN / PLACE scratch row of the log (for the Wide boards)
     no_final_capture: dict[str, int]  # per pool: paths dropped for want of a final capture
+    final_capture: dict[str, int]  # per pool: paths kept, each with a confirmed final capture
 
 
 def _paths(frame: pd.DataFrame) -> pd.MultiIndex:
@@ -168,12 +176,14 @@ def _final_paths(frame: pd.DataFrame) -> pd.MultiIndex:
 
 def read_logged_day(path: Path, jravan: pd.DataFrame | None) -> LoggedDay:
     """One of our own compacted logged days, as `read_day` (with status_raw and, where the file
-    has it, `is_final_state`). Kept: rows with a post time (a row without one cannot be placed on
-    the tau grid); the (race, pool) paths the same day's JRA-VAN rows `jravan` do not hold with a
-    post time (JRA-VAN wins a path only where it can be timed); and, of those, the paths with a
-    confirmed final capture: a logged path whose capture stopped before the close has no final
-    board or V_final, so it is no target and no growth observation, and is counted. A file
-    compacted before #411 has no final-state flag, so none of its paths is kept (recompact)."""
+    has them, fetched_utc and `is_final_state`). Kept: rows with a post time (a row without one
+    cannot be placed on the tau grid); the (race, pool) paths the same day's JRA-VAN rows `jravan`
+    do not hold with a post time (JRA-VAN wins a path only where it can be timed); and, of those,
+    the paths with a confirmed final capture (counted per pool, `final_capture`): a logged path
+    whose capture stopped before the close has no final board or V_final, so it is no target and
+    no growth observation, and is counted (`no_final_capture`). A file compacted before #411 has
+    no final-state flag, so none of its paths is kept (recompact). The scratch rows keep their
+    fetched_utc: a scratch is known from its page's fetch (`models.nowcast._scratches`)."""
     present = set(pq.read_schema(path).names)
     frame = read_day(path, [c for c in (*LOGGED_COLUMNS, FINAL_STATE) if c in present])
     scratches = frame[(frame["status_raw"] == SCRATCHED) & frame["pool"].isin((nc.WIN, nc.PLACE))]
@@ -184,11 +194,13 @@ def read_logged_day(path: Path, jravan: pd.DataFrame | None) -> LoggedDay:
     final = _final_paths(frame)
     paths = frame[["race_id", "pool"]].drop_duplicates()
     stopped = paths[~_paths(paths).isin(final)]
+    kept = paths[_paths(paths).isin(final)]
     frame = frame[_paths(frame).isin(final)].drop(columns=[FINAL_STATE], errors="ignore")
     return LoggedDay(
         frame.reset_index(drop=True),
         scratches.reset_index(drop=True),
         {str(k): int(v) for k, v in stopped["pool"].value_counts().items()},
+        {str(k): int(v) for k, v in kept["pool"].value_counts().items()},
     )
 
 
@@ -263,18 +275,38 @@ def wide_coverage(logged: list[tuple[str, Path]] | None = None) -> dict:
 
 
 def wide_status(
-    coverage: dict, cases: nc.Cases, folds, cells: list[dict], no_final_capture: int = 0
+    coverage: dict,
+    cases: nc.Cases,
+    folds,
+    cells: list[dict],
+    no_final_capture: int = 0,
+    final_capture: int = 0,
 ) -> dict:
     """Whether Wide (D3) was fitted, and when not, a sentence saying why: no Wide in our logs, no
-    post time on the logged Wide races, no logged Wide path with a final capture
-    (`no_final_capture` Wide paths dropped), Wide cases on no fold's training day, or too few of
-    them for a cell. The Wide cases and days are counted either way."""
+    post time on the logged Wide races, no logged Wide path giving a case, Wide cases on no fold's
+    training day, or too few of them for a cell. Confirmed finals are tracked apart from usable
+    grid boards, and a path-level reason names each missing input: `no_final_capture` Wide paths
+    dropped for want of a final capture, `final_capture` Wide paths kept with one that still give
+    no case (no usable board before the post on the tau grid). The Wide cases and days are
+    counted either way."""
     logged = coverage["own_logged_days"]
     wide_races = sum(e["wide_races"] for e in logged)
     with_post = sum(e["wide_races_with_post_time"] for e in logged)
     wide_days = sorted(set(cases.day[cases.pool == nc.WIDE].tolist()))
     trained = sorted({d for train, _, _ in folds for d in train} & set(wide_days))
     fitted = any(c["pool"] == nc.WIDE for c in cells)
+    missing = []
+    if no_final_capture > 0:
+        missing.append(
+            f"{no_final_capture} reached no confirmed final capture (a capture showing the final "
+            "state), so they give no final board (a day compacted before #411 carries no "
+            "final-state flag: recompact it)"
+        )
+    if final_capture > 0:
+        missing.append(
+            f"the {final_capture} with a confirmed final capture have no usable pre-post board "
+            "on the tau grid (none of their captures before the post gives a grid case)"
+        )
     reasons = (
         (
             not wide_races,
@@ -288,11 +320,10 @@ def wide_status(
             "days: the race card now gives the post times, #411).",
         ),
         (
-            not wide_days and no_final_capture > 0,
-            f"Wide is not fitted: none of the {no_final_capture} logged Wide paths with a post "
-            "time reached a confirmed final capture (a capture showing the final state), so none "
-            "gives a final board (a day compacted before #411 carries no final-state flag: "
-            "recompact it).",
+            not wide_days and (no_final_capture > 0 or final_capture > 0),
+            "Wide is not fitted: no logged Wide path with a post time gives a case; "
+            + "; ".join(missing)
+            + ".",
         ),
         (
             not trained,
@@ -318,7 +349,8 @@ def wide_status(
 
 def build_spec(grid, scheme, bootstrap: dict, v0_config: dict, *, logged: bool = False) -> dict:
     """The family's design, frozen before any development row is read: #85's v2 on the JRA-VAN
-    days alone, or with `logged` (our own logged development days are read, #411) v3."""
+    days alone, or with `logged` (our own logged development days are read, #411)
+    `LOGGED_FAMILY_ID`'s."""
     spec = {
         "family_id": FAMILY_ID,
         "supersedes": f"{SUPERSEDES}: its spec dropped late-scratch cases, against the owner's "
@@ -379,13 +411,18 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict, *, logged: bool =
 
 
 def _logged_spec(v2: dict) -> dict:
-    """v3: v2's design on the JRA-VAN days and our own logged development days (#411)."""
+    """`LOGGED_FAMILY_ID`: v2's design on the JRA-VAN days and our own logged development days
+    (#411), a line of its own beside #410's final-shares-v3 and -v4."""
     spec = {k: v for k, v in v2.items() if k != "supersedes"}
     spec["family_id"] = LOGGED_FAMILY_ID
     spec["extends"] = (
         f"{FAMILY_ID}: the same design, with our own logged development days read beside the "
         "JRA-VAN days and Wide (D3) fitted from them (#411); v2 stays the family of a run on "
         "JRA-VAN days alone"
+    )
+    spec["supersedes"] = (
+        "none: a separate line from #410's japan-c1-nowcast-final-shares-v3 and -v4, not a "
+        "successor of either"
     )
     spec["hypotheses"] = {
         HYPOTHESIS: v2["hypotheses"][HYPOTHESIS].replace(
@@ -405,10 +442,13 @@ def _logged_spec(v2: dict) -> dict:
         "case and no growth observation and is counted (no_final_capture)",
         "wide_shares": "the low figures inverted by JRA's pair rule (models.nowcast.wide_money): "
         "the pair {a,b} wins with {a,x} and {b,x} for one third runner x, its low figure with "
-        "max over x of (m_ax + m_bx); the drift's Wide draws are read back by the same rule",
+        "max over x of (m_ax + m_bx), each winning pair paid by the stake-back-share identity "
+        "(core.pricing): (1 - takeout) x (1 + D / (3 m)), D the losers' money; the drift's Wide "
+        "draws are read back by the same rule",
         "wide_scratches": "a runner scratched in our logged WIN or PLACE rows (status_raw SCR) "
-        "takes its Wide pairs off the Wide board from that capture on (JRA's page stops listing "
-        "them), so a case from before the scratch is renormalised by #69's rule",
+        "takes its Wide pairs off the Wide board from the reporting row's fetched_utc on (its "
+        "snapshot_utc where it has none; JRA's page stops listing them), so a case from before "
+        "the scratch is renormalised by #69's rule",
         "unscored": "a (pool, tau) a fold's training days give no fit for (Wide before our logs "
         "accrue) is not scored in that fold and is counted (unscored_no_fit)",
     }
@@ -583,7 +623,8 @@ def run_study(
     files = [(d, p) for d, p in files if d not in set(held)]
     logged = [(d, p) for d, p in logged if d not in set(held)]
 
-    # A run that reads our logged days is v3 (#411); one on JRA-VAN days alone stays #85's v2.
+    # A run that reads our logged days is LOGGED_FAMILY_ID's (#411); one on JRA-VAN days alone
+    # stays #85's v2.
     base = LOGGED_FAMILY_ID if logged else FAMILY_ID
     sources = (SOURCE, LOGGED_SOURCE) if logged else (SOURCE,)
     spec = build_spec(grid, scheme, bootstrap, v0_config, logged=bool(logged))
@@ -610,7 +651,7 @@ def run_study(
     counts: dict[str, int] = defaultdict(int)
     if logged:
         counts["no_final_capture"] = 0
-    no_final_wide = 0
+    no_final_wide = final_wide = 0
     for i, (_, (jravan_path, logged_path)) in enumerate(days):
         frame = None if jravan_path is None else read_day(jravan_path)
         scratches = None
@@ -618,6 +659,7 @@ def run_study(
             own = read_logged_day(logged_path, frame)
             counts["no_final_capture"] += sum(own.no_final_capture.values())
             no_final_wide += own.no_final_capture.get(nc.WIDE, 0)
+            final_wide += own.final_capture.get(nc.WIDE, 0)
             scratches = own.scratches
             if frame is None:
                 frame = own.frame
@@ -798,7 +840,9 @@ def run_study(
         "pit": _pit_rows(pit_acc),
     }
     coverage = wide_coverage(logged)  # the logged days the folds read
-    report_data["wide"] = wide_status(coverage, cases, folds, cells, no_final_wide) | coverage
+    report_data["wide"] = (
+        wide_status(coverage, cases, folds, cells, no_final_wide, final_wide) | coverage
+    )
     about = {
         "family": f"`{family}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
@@ -810,8 +854,8 @@ def run_study(
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "trial (records marked params.trial, spec not frozen)": trial,
     }
-    # v3's reports carry their family's version, so they never take a v2 report's name.
-    version = "-v3" if logged else ""
+    # A logged run's reports carry their family's name, so they never take a v2 report's name.
+    version = "-logged-wide-v1" if logged else ""
     stem = f"nowcast-{COUNTRY}{version}-{spec_hash[:12]}" + ("-trial" if trial else "")
     report = write_report(
         out_dir / f"{stem}.md", render_report(gains, report_data, about, grid), sources=sources

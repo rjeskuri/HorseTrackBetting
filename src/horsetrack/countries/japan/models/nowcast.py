@@ -13,10 +13,14 @@ Shares (per pool, over the combinations priced on a board)
   the pool's minimum dividend are read at it. The money sums to 1 when the rule holds, which the
   study reports as the rule's check (`rule_sum`).
 - Wide pairs are not free co-winners: the pair {a, b} wins with {a, x} and {b, x} for one third
-  runner x, so its low figure has T_ab = max over x of (m_ax + m_bx) with P = 3, its high figure
-  the min (`wide_odds`). The inverse (`wide_money`) solves the linear system of a fixed choice of
-  x per pair and iterates the choice to the rule's fixed point. The runners are those the pairs
-  name; `pool_shares(WIDE, ..., combinations=)` needs the pairs.
+  runner x, and each winning pair is paid by the official stake-back-share identity
+  (`core.pricing.stake_back_share_gross`, as `stake_back_share_dividend`):
+  (1 - takeout) x (1 + D / (3 m_ab)), D = 1 - m_ab - T_ab the losers' money, the rate covering the
+  returned stake too. Its low figure has T_ab = max over x of (m_ax + m_bx), its high figure the
+  min (`wide_odds`). The inverse (`wide_money`) solves the linear system of a fixed choice of x
+  per pair and iterates the choice to the rule's fixed point. The runners are those the pairs
+  name; `pool_shares(WIDE, ..., combinations=)` needs the pairs. (PLACE's closed form above keeps
+  #85's form, the rate applied before the winning stakes are taken out.)
 - `late_composition(v1, s1, v2, s2)` = (v2 s2 - v1 s1) / (v2 - v1), the money bet in between.
 
 The board at t (`race_view`; rows in `logger.compact.SCHEMA`)
@@ -31,8 +35,10 @@ The board at t (`race_view`; rows in `logger.compact.SCHEMA`)
 - Each pool is timed by the post time on its own rows (rows of two sources can time one race's
   pools differently); a pool without one gives no case.
 - A runner scratched in the race's WIN or PLACE rows (status_raw `SCR`, or a `scratches=` row)
-  takes its Wide pairs off the Wide board from that snapshot on, the final board included: JRA's
-  page stops listing them, so their last prices would otherwise carry to the close.
+  takes its Wide pairs off the Wide board from the instant the scratch is known on, the final
+  board included: JRA's page stops listing them, so their last prices would otherwise carry to the
+  close. The scratch is known at the reporting row's fetched_utc, its snapshot_utc where it has
+  none, so a capture round that straddles a grid cutoff does not move it before the cutoff.
 
 The model
 - s_final = phi s_t + (1 - phi) s_late, phi = V_t / V_final, and
@@ -93,6 +99,7 @@ from horsetrack.core.eval import distributional
 from horsetrack.core.eval.bootstrap import paired_bootstrap
 from horsetrack.core.eval.folds import FoldScheme, walk_forward
 from horsetrack.core.eval.holdout import is_holdout_day
+from horsetrack.core.pricing import stake_back_share_gross
 from horsetrack.countries.japan.board import snapshot
 from horsetrack.countries.japan.board.snapshot import RaceBoard
 from horsetrack.countries.japan.models.v0.nowcast import HoldoutDayError
@@ -245,24 +252,29 @@ def wide_odds(
 ) -> tuple[np.ndarray, np.ndarray]:
     """The low and high figures JRA's Wide rule prints for pair money `shares` (units of the pool;
     rows of a 2-D input are boards or draws, columns the pairs `combinations`, "a,b"). The pair
-    {a, b} wins with {a, x} and {b, x} for one third runner x, each winning pair getting its stake
-    back plus a third of the net pool less the three pairs' stakes: low with max over x of
-    (m_ax + m_bx), high with the min. Not floored."""
+    {a, b} wins with {a, x} and {b, x} for one third runner x, each winning pair paid by the
+    stake-back-share identity (`core.pricing.stake_back_share_gross`): payout x (1 + D / (3 m_ab)),
+    D = 1 - m_ab - (m_ax + m_bx) the losers' money, so the rate covers the returned stake too.
+    Low with max over x of (m_ax + m_bx), high with the min. Not floored, no breakage."""
     m = np.asarray(shares, dtype=float)
     flat = np.atleast_2d(m)
     co = _co_winners(flat, _wide_layout(tuple(combinations)))
     with np.errstate(divide="ignore", invalid="ignore"):
-        lo = 1.0 + (payout - flat - co.max(axis=2)) / (WIDE_WINNERS * flat)
-        hi = 1.0 + (payout - flat - co.min(axis=2)) / (WIDE_WINNERS * flat)
+        lo, hi = (
+            stake_back_share_gross(flat, 1.0 - flat - t, rate=payout, winners=WIDE_WINNERS)
+            for t in (co.max(axis=2), co.min(axis=2))
+        )
     return lo.reshape(m.shape), hi.reshape(m.shape)
 
 
 def wide_money(lo: np.ndarray, combinations: Sequence[str], payout: float) -> np.ndarray:
     """Each pair's money in units of the pool from its low figure, the inverse of `wide_odds`:
-    m_ab = c_ab (payout - max over x of (m_ax + m_bx)), c = 1 / (3 (lo - 1) + 1). For a fixed
-    choice of the x per pair that is linear in m; the choice is iterated (start: the generic
-    stake-back money, then the x of the current solution) until it no longer changes, which makes
-    the solution the rule's exact fixed point. Rows of a 2-D `lo` are boards or draws."""
+    lo / payout - 1 = (1 - m_ab - T_ab) / (3 m_ab), T_ab = max over x of (m_ax + m_bx), so
+    m_ab = c_ab (1 - T_ab) with c = 1 / (3 (lo / payout - 1) + 1). For a fixed choice of the x per
+    pair that is linear in m, m_ab + c_ab (m_ax + m_bx) = c_ab; the choice is iterated (start: the
+    generic stake-back money of the same identity, then the x of the current solution) until it no
+    longer changes, which makes the solution the rule's exact fixed point. Rows of a 2-D `lo` are
+    boards or draws."""
     lo = np.asarray(lo, dtype=float)
     flat = np.atleast_2d(lo)
     layout = _wide_layout(tuple(combinations))
@@ -271,8 +283,10 @@ def wide_money(lo: np.ndarray, combinations: Sequence[str], payout: float) -> np
     ok = np.isfinite(flat).all(axis=1)
     if not ok.any():
         return out.reshape(lo.shape)
-    c = 1.0 / (WIDE_WINNERS * (flat[ok] - 1.0) + 1.0)
-    money = stake_back_money(flat[ok], WIDE_WINNERS, payout)
+    gross = flat[ok] / payout  # the figure per unit of the rate: 1 + D / (3 m)
+    c = 1.0 / (WIDE_WINNERS * (gross - 1.0) + 1.0)
+    # PLACE's closed form at rate 1 is the same identity with the P - 1 largest others as T.
+    money = stake_back_money(gross, WIDE_WINNERS, 1.0)
     rows, pairs = np.arange(len(c))[:, None], np.arange(k)[None, :]
     chosen = None
     for _ in range(_WIDE_ITERATIONS):
@@ -284,7 +298,7 @@ def wide_money(lo: np.ndarray, combinations: Sequence[str], payout: float) -> np
         system[:, pairs[0], pairs[0]] = 1.0
         system[rows, pairs, layout[0][pairs, pick]] += c
         system[rows, pairs, layout[1][pairs, pick]] += c
-        money = np.linalg.solve(system[:, :, :k], (c * payout)[:, :, None])[:, :, 0]
+        money = np.linalg.solve(system[:, :, :k], c[:, :, None])[:, :, 0]
     out[ok] = money
     return out.reshape(lo.shape)
 
@@ -401,8 +415,9 @@ class _State:
 def _series(
     pool: str, rows: pd.DataFrame, scratched: Mapping[int, int] | None = None
 ) -> _Series | None:
-    """`scratched`: runner -> the first instant it is scratched in the race's WIN or PLACE rows,
-    applied to Wide: a pair naming that runner is off the board from then on."""
+    """`scratched`: runner -> the first instant its scratch is known in the race's WIN or PLACE
+    rows (`_scratches`), applied to Wide: a pair naming that runner is off the board from then
+    on."""
     prices = rows[rows["combination"] != POOL_ROW]
     totals = rows[(rows["combination"] == POOL_ROW) & rows["investment"].notna()]
     totals = totals.sort_values("snap", kind="stable").drop_duplicates("snap", keep="last")
@@ -526,8 +541,10 @@ def _prepare(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _scratches(*frames: pd.DataFrame | None) -> dict[str, dict[int, int]]:
-    """race_id -> runner -> the first snapshot (microseconds) of a WIN or PLACE row of that runner
-    whose status_raw is the scratch marker (`snapshot.SCRATCHED`)."""
+    """race_id -> runner -> the first instant (microseconds) a WIN or PLACE row of that runner
+    whose status_raw is the scratch marker (`snapshot.SCRATCHED`) is known: its page's
+    fetched_utc, its snapshot_utc where it has none (docs/specs/board-at-t.md), so a round that
+    starts before a grid cutoff and fetches the scratch after it leaves the pairs on that board."""
     marked = []
     for frame in frames:
         if frame is None or "status_raw" not in frame.columns or frame.empty:
@@ -538,7 +555,12 @@ def _scratches(*frames: pd.DataFrame | None) -> dict[str, dict[int, int]]:
             & (frame["combination"] != POOL_ROW)
         ]
         if len(rows):
-            marked.append(rows.assign(snap=_micros(rows["snapshot_utc"]))[
+            known = rows["snapshot_utc"]
+            if "fetched_utc" in rows.columns:
+                known = pd.to_datetime(rows["fetched_utc"], utc=True).fillna(
+                    pd.to_datetime(known, utc=True)
+                )
+            marked.append(rows.assign(snap=_micros(known))[
                 ["race_id", "combination", "snap"]])  # fmt: skip
     out: dict[str, dict[int, int]] = {}
     if not marked:
@@ -1510,7 +1532,12 @@ def gain_table(
             row[f"{metric}_candidate"] = float(g[metric].mean())
             row[f"{metric}_baseline"] = float(g[f"{metric}_baseline"].mean())
         rows.append(row)
-    return pd.DataFrame(rows)
+    columns = ["pool", "tau_min", "n_cases", "n_days"] + [
+        name
+        for gain, (metric, _) in GAINS.items()
+        for name in (gain, f"{gain}_lo", f"{gain}_hi", f"{metric}_candidate", f"{metric}_baseline")
+    ]
+    return pd.DataFrame(rows, columns=columns)  # no scored case: no rows, the same columns
 
 
 def compare(
