@@ -619,3 +619,35 @@ def test_a_poll_after_a_cutoff_fills_its_reference_without_a_log_write(
             assert line["move_t20_t2_pct"] == pytest.approx(want, abs=0.05), (combination, line)
         else:
             assert line["t2_odds"] is None, (combination, line)
+
+
+@pytest.mark.parametrize("cutoff_min", [10, 5], ids=["T-10", "T-5"])
+@pytest.mark.parametrize("race", sorted(CUTOFF_RACES), ids=lambda r: f"{r[0]}{r[1]}")
+def test_a_poll_after_t10_or_t5_fills_its_reference_without_a_log_write(
+    serve, clock, race, cutoff_min
+):
+    """#499: the T-10 and T-5 references fill at their cutoffs as T-20 and T-2 do, without a log
+    write (the latest capture at or before both is the post - 20m10s one)."""
+    venue, no = race
+    post, (_, at_t20, _) = CUTOFF_RACES[race]
+    cutoff = post - timedelta(minutes=cutoff_min)
+    field = f"t{cutoff_min}_odds"
+    log_cutoff_day()
+    clock.set(cutoff - timedelta(seconds=5))
+    srv = serve(min_rebuild_s=0)
+
+    before = get(srv, "/feed")
+    assert before.status == 200
+    etag = before.headers["ETag"]
+    for combination in ("1", "2"):
+        line = win_line(before.json(), venue, no, combination)
+        assert line[field] is None, (combination, line)
+
+    clock.set(cutoff + timedelta(seconds=5))  # the cutoff passed; still no log write
+    after = get(srv, "/feed", {"If-None-Match": etag})
+
+    assert after.status == 200, f"the T-{cutoff_min} column stays empty after its cutoff"
+    assert after.headers["ETag"] != etag
+    for i, combination in enumerate(("1", "2")):
+        line = win_line(after.json(), venue, no, combination)
+        assert line[field] == at_t20[i], (combination, line)
