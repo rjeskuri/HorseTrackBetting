@@ -14,8 +14,12 @@ Before anything is scored or written, `run_study` refuses:
   bare 'jrdb' would become 'j', 'r', 'd', 'b' and slip past the registry's withholding (D21).
 - an input outside the selection-input contract (`LookAheadSelection`), for each column X a rule
   reads in its segment or selection. By name: the final price and the result (`odds_final`,
-  `won`, `win_dividend`, any `final_*`, the store's `win_odds` and `win_fav_rank`) and every label
-  of Japan's availability config (`core.store.asof.load_availability`). Otherwise X is declared
+  `won`, `win_dividend`, any `final_*`, the store's `win_odds` and `win_fav_rank`), every label
+  of Japan's availability config (`core.store.asof.load_availability`, read at each run), and
+  every column it gates at `post_utc` + offset with offset > -n for `decision_time` "T-n" (the
+  finish since #305, at post_utc + 30 min): a view at t still holds it null. A gate opening
+  exactly at t is not refused by name, and one at another anchor is left to the declaration
+  below (the ruling on #88). Otherwise X is declared
   beside it: `X__source`, on every row one of ADMITTED_SOURCES (the board at t, or the races or
   runners card read through an as-of view at t), and `X__available_utc`, a timezone-aware UTC
   instant at or before the race's decision instant (`post_utc` minus the n minutes of
@@ -112,7 +116,8 @@ FINAL_ODDS, DIVIDEND, TAKEOUT = "odds_final", "win_dividend", "takeout"
 ODDS_BAND = "odds_band"  # the omega model's favourite-longshot band, cut from the final odds
 BASE_COLUMNS = ["race_id", "race_date", "won", FINAL_ODDS, DIVIDEND, TAKEOUT]
 # The final price, the result, and the store's names for the final Win odds and favourite rank;
-# every label of Japan's availability config is look-ahead too (`_check_look_ahead`).
+# every label of Japan's availability config, and every column it gates at the post opening after
+# the decision instant, is look-ahead too (`_check_look_ahead`).
 LOOK_AHEAD = frozenset({FINAL_ODDS, DIVIDEND, "won", "win_odds", "win_fav_rank"})
 LOOK_AHEAD_PREFIX = "final_"
 # The selection-input contract: each input X is declared by X__source and X__available_utc.
@@ -260,13 +265,22 @@ def _real(value: object) -> bool:
 
 def _check_look_ahead(spec: FamilySpec) -> None:
     """Selection hygiene (08 §5.2): refuse a family any of whose rules selects its bets, through
-    its segment or a selection column, on a final-price or result column. Every rule, survivor
-    or not, so a family's validity never depends on what the data let through."""
+    its segment or a selection column, on a final-price or result column, or on one a view at the
+    decision instant still holds null (gated at post_utc + offset, offset > -n for "T-n"). Every
+    rule, survivor or not, so a family's validity never depends on what the data let through."""
     tables = load_availability(COUNTRY).values()
+    t = pd.Timedelta(minutes=-_decision_minutes(spec.decision_time))  # t relative to the post
+    gated_after_t = {
+        col
+        for table in tables
+        for gate in table.gates
+        if gate.anchor == POST and gate.offset > t
+        for col in gate.columns
+    }
 
     def look_ahead(col: str) -> bool:
         final = col in LOOK_AHEAD or col.startswith(LOOK_AHEAD_PREFIX)
-        return final or any(table.is_label(col) for table in tables)
+        return final or col in gated_after_t or any(table.is_label(col) for table in tables)
 
     offending = {
         rule.rule_id: cols
@@ -277,7 +291,9 @@ def _check_look_ahead(spec: FamilySpec) -> None:
         raise LookAheadSelection(
             f"rules select on look-ahead columns {offending}: a bet is selected from the board "
             "at t or from as-of features only (08 §5.2, selection hygiene; a label of "
-            f"countries/{COUNTRY}/config/availability.yaml is never in a view at t)"
+            f"countries/{COUNTRY}/config/availability.yaml is never in a view at t, and a column "
+            f"it gates at {POST} + offset is null in one until the gate opens, after "
+            f"{spec.decision_time} when offset > -n)"
         )
 
 

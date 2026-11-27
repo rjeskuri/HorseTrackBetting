@@ -143,7 +143,7 @@ from horsetrack.core.eval.registry import WITHHELD_LABEL, Registry, RunRecord, w
 from horsetrack.core.eval.reports import LicensedOutputInRepo
 from horsetrack.core.eval.segment_roi import fit_segment_roi
 from horsetrack.core.eval.snooping import stepm
-from horsetrack.core.store.asof import load_availability
+from horsetrack.core.store.asof import Gate, Via, load_availability
 from horsetrack.countries.japan.models.v0.calibration import fit_win_calibration
 from horsetrack.countries.japan.studies.selection import (
     FamilyNotFrozen,
@@ -204,6 +204,10 @@ PREDICTIVE = "predictive_roi_100"
 SOURCE, AVAILABLE = "__source", "__available_utc"
 BOARD, RACES, RUNNERS = "board_at_t", "races", "runners"
 DECISION_MINUTES = 5  # make_family's decision_time, "T-5"
+# The finish (runners finish_pos, dead_heat, finish_time_s; races finish_time_s): since #305 (the
+# owner's answer on #96) gated in the views at post_utc + 30 min instead of label columns.
+POST_UTC = "post_utc"
+FINISH = ("finish_pos", "dead_heat", "finish_time_s")
 # Sources a selection input can never come from: the race's results (the Win payout table and the
 # other post-race tables of the availability config), a label-only or current-value table, and the
 # final board.
@@ -519,6 +523,25 @@ def availability_labels() -> list[str]:
     return sorted(names)
 
 
+def post_gates(rules=None) -> dict[str, timedelta]:
+    """Every column a gate of Japan's availability config (or of `rules`) anchors at its race's
+    post (`gated_columns` with anchor post_utc, the races row's own or read through `via`), with
+    the gate's offset: the latest one when two tables gate the same name."""
+    offsets: dict[str, timedelta] = {}
+    for rule in (load_availability("japan") if rules is None else rules).values():
+        for gate in rule.gates:
+            if gate.anchor == POST_UTC:
+                for col in gate.columns:
+                    offsets[col] = max(gate.offset, offsets.get(col, gate.offset))
+    return offsets
+
+
+def gated_after(minutes: int) -> list[str]:
+    """The post-gated columns a view at t = post - `minutes` still holds null: offset > -minutes,
+    the gate opening after the decision instant (the ruling on #88)."""
+    return sorted(c for c, off in post_gates().items() if off > timedelta(minutes=-minutes))
+
+
 def finite(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
@@ -544,11 +567,11 @@ def make_rule(rule_id, claim, segment, selection_cols, thresholds, direction) ->
     )
 
 
-def make_family(family_id: str, rules: list[tuple]) -> FamilySpec:
+def make_family(family_id: str, rules: list[tuple], minutes: int = DECISION_MINUTES) -> FamilySpec:
     return FamilySpec(
         family_id=family_id,
         rules=[make_rule(*rule) for rule in rules],
-        decision_time=f"T-{DECISION_MINUTES}",  # five minutes before the off: a test value
+        decision_time=f"T-{minutes}",  # five minutes before the off by default: a test value
         cluster_unit="meeting_id",
         benchmark=BENCHMARK,
         max_stat=dict(MAX_STAT),
@@ -655,12 +678,15 @@ def _replace_everywhere(patch: pytest.MonkeyPatch, original, fake) -> None:
             patch.setattr(module, original.__name__, fake)
 
 
-def outcome_before_scoring(root: Path, name: str, rules: list[tuple], data, **kwargs) -> str:
-    """How run_study treats a frozen family on `data` when scoring would raise: 'look-ahead'
-    (LookAheadSelection), 'scored' (it began scoring), 'completed', or another exception's type.
-    Whatever the outcome, no record was written and the holdout was not opened."""
+def outcome_before_scoring(
+    root: Path, name: str, rules: list[tuple], data, *, minutes: int = DECISION_MINUTES, **kwargs
+) -> str:
+    """How run_study treats a frozen family (decision time T-`minutes`) on `data` when scoring
+    would raise: 'look-ahead' (LookAheadSelection), 'scored' (it began scoring), 'completed', or
+    another exception's type. Whatever the outcome, no record was written and the holdout was
+    not opened."""
     registry = new_registry(root / name)
-    spec = make_family(f"test-88-{name}", rules)
+    spec = make_family(f"test-88-{name}", rules, minutes)
     freeze(registry, spec)
     holdout = TrippedHoldout()
     with pytest.MonkeyPatch.context() as patch:
@@ -1498,49 +1524,63 @@ def test_every_label_of_the_availability_config_is_refused_as_a_selection_column
     tmp_path, monkeypatch, main_runners
 ):
     """A view at t never returns a label column (Japan's availability config: each table's
-    `label_columns`, and every name under a `label_prefixes` entry), so no bet is selected on
-    one. Each label column, holding the finishing position and declared from the runners card
-    with a stamp before t, is the only selection column of the real rule (segment A): [1, 1]
-    would bet the winners only and report their return. Every run is refused before scoring."""
+    `label_columns`, and every name under a `label_prefixes` entry), and holds a column gated at
+    the post null until its gate opens (the finish since #305: post_utc + 30 min, after any
+    decision instant), so no bet is selected on either. Each label column and each column gated
+    after T-5, holding the finishing position and declared from the runners card with a stamp
+    before t, is the only selection column of the real rule (segment A): [1, 1] would bet the
+    winners only and report their return. Every run is refused before scoring."""
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
     check_main_premise(main_runners)
     labels = availability_labels()
     # Premise: the config's results are among them, beyond the final price.
-    assert {"finish_pos", "placing_code", "last_3f_s", "result_published_utc"} <= set(labels)
+    assert {"placing_code", "last_3f_s", "result_published_utc"} <= set(labels)
     assert {"dividend", "is_final_capture"} <= set(labels)  # the board's payout columns
     assert any(name.endswith("win_odds") and name != "win_odds" for name in labels)  # a prefix
     assert all(is_availability_label(name) for name in labels)
+    # Premise: the finish is gated at the post with a positive offset (#305), so it opens after
+    # the decision instant of any T-n.
+    gates = post_gates()
+    assert all(col in gates and gates[col] > timedelta(0) for col in FINISH), gates
+    gated = gated_after(DECISION_MINUTES)
+    assert set(FINISH) <= set(gated), gated
+    columns = list(dict.fromkeys([*labels, *gated]))
     finish = finish_positions(main_runners)
     data = declare(
-        main_runners.assign(**dict.fromkeys(labels, finish)), **dict.fromkeys(labels, RUNNERS)
+        main_runners.assign(**dict.fromkeys(columns, finish)), **dict.fromkeys(columns, RUNNERS)
     )
     assert (data.loc[data["won"] == 1, "finish_pos"] == 1).all()
     assert (data.loc[data["won"] == 0, "finish_pos"] >= 2).all()
+    assert (data["finish_pos" + AVAILABLE] < decision_utc(data)).all()
 
     cases = [
-        (col, ("P4-seg-a", "beta", {"seg": "A"}, [col], {col: [1, 1]}, "above")) for col in labels
+        (col, ("P4-seg-a", "beta", {"seg": "A"}, [col], {col: [1, 1]}, "above")) for col in columns
     ]
     accepted = _accepted(tmp_path, "label-selection", cases, data)
-    assert accepted == [], f"label columns accepted as a selection column: {accepted}"
+    assert accepted == [], f"look-ahead columns accepted as a selection column: {accepted}"
 
 
 def test_a_segment_on_a_look_ahead_column_is_refused(tmp_path, monkeypatch, main_runners):
-    """The segment half of selection hygiene: a rule whose segment is read from a result label
-    or a final-price column is refused like a selection column, declared or not. Runner-level
-    segments that are the winners (`finish_pos` 1) or the final favourites (`final_rank` 1), and
-    segment A's races (the real claim) under the name of a race result, a board payout or a
-    prefixed label."""
+    """The segment half of selection hygiene: a rule whose segment is read from a result label,
+    a column gated after the decision instant or a final-price column is refused like a
+    selection column, declared or not. Runner-level segments that are the winners (`finish_pos`
+    1, gated at post_utc + 30 min since #305) or the final favourites (`final_rank` 1), and
+    segment A's races (the real claim) under the name of a race result, a board payout, a
+    prefixed label or a finish column."""
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
     renamed = ["result_published_utc", "dividend", "tyb_segment"]
-    assert all(is_availability_label(name) for name in ["finish_pos", *renamed])
+    assert all(is_availability_label(name) for name in renamed)
+    finish_named = ["dead_heat", "finish_time_s"]
+    assert {"finish_pos", *finish_named} <= set(gated_after(DECISION_MINUTES))
     data = declare(
         main_runners.assign(
             finish_pos=finish_positions(main_runners),
-            **{col: main_runners["seg"] for col in renamed},
+            **{col: main_runners["seg"] for col in [*renamed, *finish_named]},
         ),
         finish_pos=RUNNERS,
         final_rank=BOARD,
         **dict.fromkeys(renamed, RACES),
+        **dict.fromkeys(finish_named, RUNNERS),
     )
     anywhere = {"odds_t": [None, None]}
     cases = [
@@ -1549,10 +1589,113 @@ def test_a_segment_on_a_look_ahead_column_is_refused(tmp_path, monkeypatch, main
     ]
     cases += [
         (col, ("P4-seg-a", "beta", {col: "A"}, ["odds_t"], {"odds_t": [1.5, 4.0]}, "above"))
-        for col in renamed
+        for col in [*renamed, *finish_named]
     ]
     accepted = _accepted(tmp_path, "label-segment", cases, data)
     assert accepted == [], f"look-ahead columns accepted as a segment: {accepted}"
+
+
+def gate_frame(data: pd.DataFrame, columns: list[str], minutes: int) -> pd.DataFrame:
+    """`data` with each of `columns` holding the finishing position (so [1, 1] bets the winners)
+    and declared from the runners or the races card, alternately, stamped exactly at its race's
+    decision instant under T-`minutes`: a stamp the contract admits, so only a name can refuse
+    the column."""
+    out = data.assign(**dict.fromkeys(columns, finish_positions(data)))
+    for k, col in enumerate(columns):
+        out[col + SOURCE] = (RUNNERS, RACES)[k % 2]
+        out[col + AVAILABLE] = decision_utc(out, minutes)
+    return out
+
+
+def gate_outcomes(root: Path, name: str, data: pd.DataFrame, columns, minutes: int) -> dict:
+    """run_study's outcome (outcome_before_scoring) for each column as the only selection column
+    of the real rule ([1, 1], segment A), in a family decided at T-`minutes`, by (column, n)."""
+    frame = gate_frame(data, list(columns), minutes)
+    return {
+        (col, minutes): outcome_before_scoring(
+            root,
+            f"{name}-{minutes}-{k}",
+            [("P4-seg-a", "beta", {"seg": "A"}, [col], {col: [1, 1]}, "above")],
+            frame,
+            minutes=minutes,
+        )
+        for k, col in enumerate(columns)
+    }
+
+
+def test_a_column_gated_after_the_post_is_refused_by_name(tmp_path, monkeypatch, main_runners):
+    """The ruling on #88 after #305: a column Japan's availability config gates at post_utc +
+    offset, with offset > -n for the family's decision time T-n (a view at t still holds it
+    null), is look-ahead by name, like a label. Each post-gated column of the config, declared
+    from an admitted source and stamped exactly at t, is the only selection column of the real
+    rule at T-0, T-5, T-60 and T-61: refused with LookAheadSelection before anything is scored
+    or written exactly when its gate opens after t. So the finish (post_utc + 30 min) is refused
+    at every T-n, and the horse weights and the same-day going (post_utc - 60 min) are accepted
+    up to T-60 (the gate opens at t) and refused at T-61."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    gates = post_gates()
+    # Premise: the finish opens after the post and the weights and going an hour before it;
+    # none is a label, so only its gate can refuse a column.
+    assert all(col in gates and gates[col] > timedelta(0) for col in FINISH), gates
+    assert gates["horse_wt_kg"] == gates["going"] == timedelta(minutes=-60), gates
+    assert not [col for col in gates if is_availability_label(col)], gates
+    decision_times = (0, DECISION_MINUTES, 60, 61)
+    expected = {
+        (col, n): "look-ahead" if offset > timedelta(minutes=-n) else "scored"
+        for col, offset in gates.items()
+        for n in decision_times
+    }
+    assert expected["horse_wt_kg", 60] == "scored" and expected["horse_wt_kg", 61] == "look-ahead"
+    assert all(expected[col, n] == "look-ahead" for col in FINISH for n in decision_times)
+
+    outcomes: dict = {}
+    for n in decision_times:
+        outcomes |= gate_outcomes(tmp_path, "post-gate", main_runners, sorted(gates), n)
+    wrong = {key: (outcomes[key], want) for key, want in expected.items() if outcomes[key] != want}
+    assert wrong == {}, f"(column, n): (outcome, expected) {wrong}"
+
+
+def test_only_a_gate_at_the_post_that_opens_after_t_is_refused(tmp_path, monkeypatch, main_runners):
+    """The gates are read from load_availability("japan") at each run, as the labels are, and
+    only a gate anchored at post_utc counts (the ruling on #88). With three hypothetical gates
+    added to the config the study reads, a T-0 family is refused a column gated at the post + 1
+    minute (on runners, read through races), and accepts a column gated at the post + 0 (on
+    races: open at t) and one gated at another anchor + 30 minutes (left to the declared-stamp
+    contract), each declared from an admitted source and stamped at t."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    real_loader = load_availability
+    via = Via(table="races", on=("race_id",))
+    added = {
+        "races": (
+            Gate(("hyp_at_post",), POST_UTC, timedelta(0)),
+            Gate(("hyp_other_anchor",), "entries_closed_utc", timedelta(minutes=30)),
+        ),
+        "runners": (Gate(("hyp_after_post",), POST_UTC, timedelta(minutes=1), via),),
+    }
+
+    def with_hypothetical_gates(*args, **kwargs):
+        return {
+            table: dataclasses.replace(rule, gates=(*rule.gates, *added.get(table, ())))
+            for table, rule in real_loader(*args, **kwargs).items()
+        }
+
+    # Premise: the real config gates none of them; the patched one gates each as described.
+    columns = ["hyp_after_post", "hyp_at_post", "hyp_other_anchor"]
+    real, patched = real_loader("japan"), with_hypothetical_gates("japan")
+    assert not set(columns) & {col for rule in real.values() for col in rule.gated}
+    assert post_gates(patched)["hyp_after_post"] == timedelta(minutes=1)
+    assert post_gates(patched)["hyp_at_post"] == timedelta(0)
+    assert "hyp_other_anchor" in patched["races"].gated
+    assert "hyp_other_anchor" not in post_gates(patched)
+
+    with pytest.MonkeyPatch.context() as patch:
+        _replace_everywhere(patch, real_loader, with_hypothetical_gates)
+        outcomes = gate_outcomes(tmp_path, "hypothetical-gate", main_runners, columns, 0)
+    assert outcomes == {
+        ("hyp_after_post", 0): "look-ahead",
+        ("hyp_at_post", 0): "scored",
+        ("hyp_other_anchor", 0): "scored",
+    }, outcomes
 
 
 def payout_join(data: pd.DataFrame) -> pd.DataFrame:
@@ -1854,12 +1997,15 @@ def test_a_licensed_source_cannot_slip_past_the_registry_or_its_summary(
         run = run_spec(tmp_path / f"public{k}", spec, main_runners, sources=sources)
         records = run.registry.records(spec.family_id)
         assert records, sources
-        summary = tmp_path / f"summary{k}.md"
+        # The summary directory (#334/#525): one <family_id>.md per family and a README index.
+        summary = tmp_path / f"summary{k}"
         write_summary(run.registry, summary)
-        text = summary.read_text(encoding="utf-8")
-        assert text.count(WITHHELD_LABEL) == len(records), text
+        index = (summary / "README.md").read_text(encoding="utf-8")
+        assert f"({spec.family_id}.md)" in index, index
+        text = (summary / f"{spec.family_id}.md").read_text(encoding="utf-8")
+        assert spec.family_id in text and text.count(WITHHELD_LABEL) == len(records), text
         names = {metric.metric for record in records for metric in record.metrics}
-        assert names and not [name for name in names if name in text], text
+        assert names and not [name for name in names if name in text + index], (text, index)
 
 
 # ---------------------------------------------------------------------------------------------
