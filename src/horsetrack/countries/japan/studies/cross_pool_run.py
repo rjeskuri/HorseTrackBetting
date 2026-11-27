@@ -43,8 +43,9 @@ named, `@missing` or `@unavailable` for a table not fingerprinted, and is raised
 private report and the cell file through `write_report`. A trial (`trial=True`, `--trial`) runs
 the same code on the `TRIAL_SCHEME` folds without a freeze: its records go to `TRIAL_FAMILY_ID`
 (params `trial`), its files carry "trial", and `FAMILY_ID` is never frozen or written. The CLI
-then regenerates the registry summary and, after `--run`, `docs/experiments/cross-pool-japan.md`,
-whose figures are all withheld (D21). Measurement only: nothing is adopted.
+then writes this study's pages of the committed registry summary (`write_committed_summary`) and,
+after `--run`, `docs/experiments/cross-pool-japan.md`, whose figures are all withheld (D21).
+Measurement only: nothing is adopted.
 
 Memory: one day file at a time (WIN and QUINELLA rows at or before t only, the columns the board
 needs); `final_odds` one pool and year at a time, its year row group picked by the race_date
@@ -66,6 +67,7 @@ import os
 import re
 import resource
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -92,6 +94,7 @@ from horsetrack.core.eval.registry import (
     _spec_hash,
     default_registry,
     summary_dir,
+    summary_stem,
     write_summary,
 )
 from horsetrack.core.eval.reports import write_report
@@ -1398,7 +1401,7 @@ def _pair_rows(feats, races, date_from, date_to, counts) -> pd.DataFrame:
     ids = np.asarray(ids, dtype=object)
     where_race = pd.Index(ids)
     meta = races.drop_duplicates("race_id").set_index("race_id").reindex(ids)
-    keep = meta["meeting_id"].notna().to_numpy()
+    keep = meta["meeting_id"].notna().to_numpy(dtype=bool, copy=True)  # writable under CoW
     counts["pair_excluded_no_race_row"] = int((~keep).sum())
     a, b = feats["a"].to_numpy(dtype=np.int64), feats["b"].to_numpy(dtype=np.int64)
     key = code.astype(np.int64) * 65536 + a * 256 + b
@@ -2074,6 +2077,53 @@ def render_public_report(result: CrossPoolResult) -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------- registry summary
+
+
+class _Families:
+    """The registry restricted to some families, for `write_summary` (as in `studies.ability`)."""
+
+    def __init__(self, registry, families: set[str]) -> None:
+        self._registry, self._families = registry, families
+
+    def records(self, family_id: str | None = None):
+        return [r for r in self._registry.records(family_id) if r.family_id in self._families]
+
+
+_INDEX_LINE = re.compile(r"- \[([^\]]+)\]\(([^)]+)\.md\)")
+
+
+def _index_family(line: str) -> str | None:
+    """The family a line of write_summary's index lists (its label, whose summary file the line
+    links: a legacy '/' id links its '--' file), or None for any other line."""
+    match = _INDEX_LINE.fullmatch(line)
+    return match[1] if match and summary_stem(match[1]) == match[2] else None
+
+
+def write_committed_summary(registry) -> None:
+    """This study's family files, by `write_summary` over `FAMILY_ID` and `TRIAL_FAMILY_ID` of
+    `registry`, and the committed index with their lines added, ordered by family id: every
+    family the index lists stays (#131's legacy '/' ids, filed as '--', included), and no other
+    family's file is written, so a fresh local registry drops nothing and no other ticket's
+    uncommitted family enters (#92's `write_committed_summary`)."""
+    directory = summary_dir(COUNTRY)
+    mine = _Families(registry, {FAMILY_ID, TRIAL_FAMILY_ID})
+    if not mine.records():
+        return
+    with tempfile.TemporaryDirectory() as scratch:
+        write_summary(mine, scratch)
+        for path in sorted(Path(scratch).glob("*.md")):
+            if path.stem != "README":
+                write_report(directory / path.name, path.read_text("utf-8"), sources=())
+        fresh = Path(scratch, "README.md").read_text("utf-8").splitlines()
+    index = directory / "README.md"
+    committed = index.read_text("utf-8").splitlines() if index.exists() else []
+    entries = {family: line for line in committed + fresh if (family := _index_family(line))}
+    head = [line for line in fresh if not _index_family(line)]
+    lines = [*head, *(entries[family] for family in sorted(entries))]
+    write_report(index, "\n".join(lines) + "\n", sources=())
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -2120,7 +2170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         log=lambda message: print(message, file=sys.stderr),
         trial=args.trial,
     )
-    write_summary(registry, summary_dir(COUNTRY))
+    write_committed_summary(registry)
     public = None
     if not args.trial:  # the family's page; a trial's records are in the registry summary
         public = env.repo_root() / "docs" / "experiments" / "cross-pool-japan.md"

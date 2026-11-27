@@ -76,6 +76,17 @@ Fix round 2 (the re-check of PR #493 at f1a6575; the orchestrator's decisions) a
   private report for availability, never says a pool was settled, and reads the same whatever was
   unavailable.
 
+Restart (the owner's code-only fixes; the frozen spec hash is unchanged) adds:
+
+- `write_committed_summary(registry)`, #92's pattern (`studies/ability.py`): the summary pages of
+  `FAMILY_ID` and `TRIAL_FAMILY_ID` written from `registry`'s records of those families alone
+  (each page what `write_summary` writes for them), and the committed index (`summary_dir`'s
+  `README.md`) kept with their lines added, ordered by family id: every family it lists stays
+  (#131's legacy `japan/131-...` ids, filed as `japan--131-...`, included), no other family's
+  file is written or changed, a family only in the local registry never enters, and with no
+  cross-pool record nothing is written. The CLI's `--run` and `--trial` call it in place of
+  `write_summary` over the whole registry.
+
 Expected values are derived here from first principles or from the dependencies the brief names
 (`models.condlogit`, `models.v0.calibration`, `core.eval.folds`), never from the module under test.
 Every store, board, result and dividend is synthetic and built in the test; HORSETRACK_DATA_DIR
@@ -115,9 +126,10 @@ import pytest
 
 from horsetrack.core import env
 from horsetrack.core.config import load_country_yaml
+from horsetrack.core.eval import registry as registry_mod
 from horsetrack.core.eval.folds import FoldScheme, walk_forward
 from horsetrack.core.eval.holdout import is_holdout_day
-from horsetrack.core.eval.registry import Registry
+from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord, write_summary
 from horsetrack.core.eval.reports import LicensedOutputInRepo
 from horsetrack.core.eval.tail import COLUMNS as TAIL_COLUMNS
 from horsetrack.core.paths import DataDirInsideRepo
@@ -2276,3 +2288,251 @@ def test_public_report_names_the_planned_pools_and_never_claims_one_settled(tmp_
     assert named and all("planned" in line.lower() for line in named), named
     assert all(pool in " ".join(named) for pool in POOLS), named
     assert any("availab" in ln.lower() and "private report" in ln.lower() for ln in prose)
+
+
+# ---------------------------------------------------------------- the committed registry summary
+
+SUMMARY_SHA = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+OTHER_FAMILIES = ("japan-alpha-final-win", "japan-beta-final-win", "win5-gamma-v1")
+LEGACY_FAMILIES = {  # #131's '/' ids, written before #525, and the '--' files they are filed as
+    "japan/131-exacta-category-v1": "japan--131-exacta-category-v1",
+    "japan/131-exacta-category-v1/max-test": "japan--131-exacta-category-v1--max-test",
+}
+UNCOMMITTED = "japan-uncommitted-final-win"  # another ticket's family, only in the local registry
+
+
+def summary_record(family: str, variant: str, *, value: float = 0.1) -> RunRecord:
+    """Another study's run, on a public source so its page shows its values."""
+    return RunRecord(
+        hypothesis_id="E33",
+        family_id=family,
+        variant=variant,
+        ticket=92,
+        git_sha=SUMMARY_SHA,
+        data_builds={"jra_runners": "processed/jra/runners.parquet@00aa11bb22cc33dd"},
+        sources=("jra",),
+        fold_scheme="walk_forward:synthetic",
+        components={"study": "studies/other.py"},
+        params={"thin_starts": 30},
+        metrics=(FoldMetric("all_folds", "delta_ll", value, None, None, 10),),
+        status="scored",
+    )
+
+
+def cross_pool_record(family: str, variant: str, *, status="scored", value=0.01) -> RunRecord:
+    """A run shaped like the study's (E25, jravan, the spec hash in params, trial flagged)."""
+    params: dict = {"minutes_before": 2, "seed": SEED, "spec_hash": "ab" * 32}
+    if family == TRIAL_FAMILY:
+        params["trial"] = True
+    return RunRecord(
+        hypothesis_id="E25",
+        family_id=family,
+        variant=variant,
+        ticket=435,
+        git_sha=SUMMARY_SHA,
+        data_builds={"jravan_odds_timeseries": "processed/jravan/odds_timeseries@00aa11bb22cc33dd"},
+        sources=("jravan",),
+        fold_scheme="walk_forward:synthetic",
+        components={"features": variant.split(":")[0], "offset": variant.split(":")[1]},
+        params=params,
+        metrics=(FoldMetric("all_folds", "delta_ll", value, None, None, 10),),
+        status=status,
+    )
+
+
+def seal_legacy_summary_runs(path: Path, records: list[RunRecord]) -> None:
+    """Append ``records`` as run lines the way the registry chains and seals them, bypassing
+    ``append``'s checks: how #131's '/' family ids, written before #525, sit in the real log.
+    Copied from tests/countries/japan/test_ability_study.py ``seal_legacy_runs``."""
+
+    def canonical(value) -> str:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        )
+
+    data = path.read_bytes() if path.exists() else b""
+    head = hashlib.sha256(data[:-1].split(b"\n")[-1]).hexdigest() if data else "0" * 64
+    with open(path, "ab") as handle:
+        for i, record in enumerate(records):
+            fields = dataclasses.asdict(record)
+            text = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            run_id = hashlib.sha256(text.encode("ascii")).hexdigest()
+            body = {"kind": "run", "run_id": run_id, "record": fields, "prev": head}
+            body["utc"] = f"2026-11-2{i % 7}T08:00:00+00:00"
+            body["seal"] = hashlib.sha256(canonical(body).encode("ascii")).hexdigest()
+            line = canonical(body).encode("ascii")
+            handle.write(line + b"\n")
+            head = hashlib.sha256(line).hexdigest()
+
+
+def point_the_repo_at(tmp_path: Path, monkeypatch) -> Path:
+    """The repository root (so the summary folder and the public page) under tmp; returns the
+    Japan summary folder."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    folder = lambda country: repo / "docs" / "experiments" / "registry" / country  # noqa: E731
+    monkeypatch.setattr(env, "repo_root", lambda: repo)
+    monkeypatch.setattr(registry_mod, "summary_dir", folder)
+    monkeypatch.setattr(cross_pool_run, "summary_dir", folder)
+    return folder("japan")
+
+
+def snapshot(folder: Path) -> dict[str, bytes]:
+    return (
+        {p.name: p.read_bytes() for p in folder.iterdir() if p.is_file()} if folder.exists() else {}
+    )
+
+
+def commit_summary(tmp_path: Path, summary: Path, cross_pool: tuple[str, ...]) -> list[str]:
+    """The committed summary: other families, #131's legacy ids and the cross-pool families
+    `cross_pool` (each with an old failed run), written by `write_summary`; returns the families."""
+    path = tmp_path / "committed" / "japan.jsonl"
+    path.parent.mkdir(parents=True)
+    committed = Registry(path, holdout_log=tmp_path / "no-holdout.jsonl")
+    committed.append(summary_record(OTHER_FAMILIES[0], "alpha:variant", value=0.25))
+    committed.append(summary_record(OTHER_FAMILIES[1], "beta:variant", value=0.375))
+    seal_legacy_summary_runs(
+        path, [summary_record(f, f"legacy:{i}") for i, f in enumerate(LEGACY_FAMILIES)]
+    )
+    committed.append(summary_record(OTHER_FAMILIES[2], "gamma:variant", value=0.5))
+    for family in cross_pool:
+        committed.append(cross_pool_record(family, "x_cross:normalised", status="failed"))
+    committed.verify()
+    write_summary(committed, summary)
+    listed = summary.joinpath("README.md").read_text(encoding="utf-8")
+    for family, stem in LEGACY_FAMILIES.items():
+        assert f"- [{family}]({stem}.md)" in listed  # the committed index holds the legacy lines
+    return [*OTHER_FAMILIES, *LEGACY_FAMILIES, *cross_pool]
+
+
+def local_registry(tmp_path: Path) -> Registry:
+    """The local registry before the run: a rerun of a committed family, #131's legacy runs with
+    other values, and another ticket's family that was never committed."""
+    path = tmp_path / "data" / "registry" / "japan.jsonl"
+    path.parent.mkdir(parents=True)
+    local = Registry(path, holdout_log=tmp_path / "no-holdout.jsonl")
+    local.append(summary_record(OTHER_FAMILIES[0], "alpha:local-rerun", value=0.875))
+    seal_legacy_summary_runs(
+        path,
+        [
+            summary_record(f, f"legacy:local:{i}", value=0.625)
+            for i, f in enumerate(LEGACY_FAMILIES)
+        ],
+    )
+    local.append(summary_record(UNCOMMITTED, "elsewhere", value=0.125))
+    return local
+
+
+def append_fresh(registry: Registry, family: str) -> None:
+    for i, variant in enumerate(sorted(EXPECTED_VARIANTS)):
+        registry.append(cross_pool_record(family, variant, value=0.01 * (i + 1)))
+
+
+def page_of(records: list[RunRecord], family: str, scratch: Path) -> bytes:
+    """What `write_summary` writes as the page of `family` from `records` alone."""
+    alone = Registry(scratch / "alone.jsonl", holdout_log=scratch / "no-holdout.jsonl")
+    for record in records:
+        alone.append(record)
+    write_summary(alone, scratch / "pages")
+    return scratch.joinpath("pages", f"{family}.md").read_bytes()
+
+
+def index_of(before: bytes, families) -> str:
+    """The committed index with exactly `families`' lines, ordered by family id (the label; a
+    legacy '/' id links its '--' file), under the committed index's own head."""
+    head = [line for line in before.decode("utf-8").splitlines() if not line.startswith("- [")]
+    entries = [f"- [{f}]({f.replace('/', '--')}.md)" for f in sorted(set(families))]
+    return "\n".join([*head, *entries]) + "\n"
+
+
+def assert_only_cross_pool_pages(summary: Path, before, committed, fresh: dict, scratch: Path):
+    """The summary after the write: the index keeps every committed family and adds the fresh
+    ones, no uncommitted family enters, each fresh page is its family's local records alone, and
+    every other committed file is byte for byte what it was."""
+    after = snapshot(summary)
+    index = after["README.md"].decode("utf-8")
+    assert index == index_of(before["README.md"], [*committed, *fresh])
+    assert UNCOMMITTED not in index
+    assert f"{UNCOMMITTED}.md" not in after
+    assert set(after) == set(before) | {f"{family}.md" for family in fresh}
+    for family, records in fresh.items():
+        want = page_of(records, family, scratch / family)
+        assert want != before.get(f"{family}.md"), "the fresh page must differ from the committed"
+        assert after[f"{family}.md"] == want, f"{family}.md is not its fresh records' page"
+    for name, data in before.items():
+        if name != "README.md" and name.removesuffix(".md") not in fresh:
+            assert after[name] == data, f"{name} changed"
+
+
+@pytest.mark.parametrize(
+    ("mine", "committed_cross_pool"),
+    [
+        ((FAMILY_ID,), (FAMILY_ID, TRIAL_FAMILY)),  # a rerun of the frozen family
+        ((TRIAL_FAMILY,), (FAMILY_ID,)),  # a first trial: its line enters the index
+        ((FAMILY_ID, TRIAL_FAMILY), ()),  # neither committed yet
+    ],
+    ids=["rerun", "first-trial", "first-of-both"],
+)
+def test_the_committed_summary_writes_only_the_cross_pool_families(
+    tmp_path, monkeypatch, mine, committed_cross_pool
+):
+    summary = point_the_repo_at(tmp_path, monkeypatch)
+    committed = commit_summary(tmp_path, summary, committed_cross_pool)
+    before = snapshot(summary)
+    local = local_registry(tmp_path)
+    for family in mine:
+        append_fresh(local, family)
+
+    cross_pool_run.write_committed_summary(local)
+
+    fresh = {family: local.records(family) for family in mine}
+    assert_only_cross_pool_pages(summary, before, committed, fresh, tmp_path / "expected")
+
+
+@pytest.mark.parametrize("committed", [True, False], ids=["committed", "no-summary-yet"])
+@pytest.mark.parametrize("others", [True, False], ids=["other-families", "empty-registry"])
+def test_the_committed_summary_writes_nothing_without_cross_pool_records(
+    tmp_path, monkeypatch, committed, others
+):
+    summary = point_the_repo_at(tmp_path, monkeypatch)
+    if committed:
+        commit_summary(tmp_path, summary, (FAMILY_ID,))
+    before = snapshot(summary)
+    if others:
+        local = local_registry(tmp_path)
+    else:
+        local = Registry(tmp_path / "data" / "empty.jsonl", holdout_log=tmp_path / "no.jsonl")
+
+    cross_pool_run.write_committed_summary(local)
+
+    assert snapshot(summary) == before
+
+
+@pytest.mark.parametrize("mode", ["--run", "--trial"])
+def test_the_cli_summary_writes_only_the_run_s_own_family(tmp_path, monkeypatch, mode):
+    """The CLI's summary after a run or a trial: the run's family page from its fresh records
+    and its index line; every other committed page and index line untouched, legacy ones
+    included; the local registry's uncommitted family absent (the real run rewrote ~50 pages)."""
+    summary = point_the_repo_at(tmp_path, monkeypatch)
+    data = tmp_path / "data"
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(data))
+    committed = commit_summary(tmp_path, summary, (FAMILY_ID,))  # the trial family not yet
+    before = snapshot(summary)
+    local = local_registry(tmp_path)
+    monkeypatch.setattr(cross_pool_run, "default_registry", lambda country: local)
+    own = TRIAL_FAMILY if mode == "--trial" else FAMILY_ID
+    calls: list[dict] = []
+
+    def stand_in(**kwargs):  # the run's records, then a result: no store is read
+        calls.append(kwargs)
+        family = TRIAL_FAMILY if kwargs.get("trial") else FAMILY_ID
+        append_fresh(kwargs["registry"], family)
+        return dataclasses.replace(figures_result(data), family_id=family)
+
+    monkeypatch.setattr(cross_pool_run, "run_cross_pool", stand_in)
+
+    assert main([mode, "--to", "2026-10-31", "--out", str(tmp_path / "out")]) == 0
+
+    assert len(calls) == 1 and calls[0]["registry"] is local
+    fresh = {own: local.records(own)}
+    assert_only_cross_pool_pages(summary, before, committed, fresh, tmp_path / "expected")
