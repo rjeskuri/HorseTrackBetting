@@ -33,7 +33,10 @@ the payout rate would lift exactly the rows the market prices worst.
 Withholding (D21). A row is withheld when it is marked licensed or its sources name JRDB or
 JRA-VAN in any spelling (``core.eval.reports.is_withheld``). ``public_view`` drops withheld rows
 and reshrinks the rest over themselves alone, so no public shrunk value or rank depends on a
-licensed row; the public text lists withheld rows by option id and family only. The private
+licensed row; the public text lists withheld rows by option id and family only. Its variants
+total still counts withheld families, by the ticket's decision (#449, Context): a variant count is
+set by a study's spec, not by licensed data, so it is no D21 figure, and a public-only total would
+understate the search the multiple-testing count exists to disclose. The private
 writer passes every row's sources to ``write_report`` and itself refuses a path inside the
 repository when any row is withheld, so a row marked licensed under a public source name is
 refused too.
@@ -310,7 +313,16 @@ def _n(row: LeaderboardRow) -> str:
 
 
 def _variants_total(rows: list[LeaderboardRow]) -> int:
-    """The sum over distinct families of each family's variants searched (its largest count)."""
+    """The sum over distinct families of each family's variants searched (its largest count).
+
+    Withheld families count too, in the public text as in the private one: the ticket's Context
+    (#449) sets the total as "the sum over distinct families, withheld ones included". A variant
+    count is set by a study's pre-registered spec, not by JRDB or JRA-VAN data, so it is no D21
+    figure; the total exists for multiple-testing honesty, and a public-only total would
+    understate how many variants were searched in all. Every figure of a withheld row (return,
+    bounds, se, n, n_meetings, payout_rate, shrunk value, rule, note, sources) stays out of the
+    public text, which names withheld rows by option id and family only.
+    """
     families: dict[str, int] = {}
     for row in rows:
         families[row.family_id] = max(families.get(row.family_id, 0), row.variants_searched)
@@ -354,8 +366,13 @@ def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool)
         "first; rows with no measured return follow, unranked. Each CI bound is one-sided at the "
         "level shown.",
         "",
+        # Over every row, withheld ones included, public or not, by the ticket's decision (#449,
+        # Context): a variant count is set by a study's spec, not by licensed data, so it is no
+        # D21 figure, and a public-only total would understate the search. No other figure of a
+        # withheld row reaches the public text (see ``_variants_total``).
         f"Variants searched in total: {_variants_total(rows)} (the sum over distinct families, "
-        "withheld ones included).",
+        "withheld ones included: a variant count is set by a study's spec, not by licensed "
+        "data).",
         "",
     ]
     if public:
