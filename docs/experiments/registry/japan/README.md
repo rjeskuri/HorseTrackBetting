@@ -13,6 +13,8 @@ per family, each holding that family's runs.
 - [japan-c4-meta-final-win](japan-c4-meta-final-win.md)
 - [japan-calibrated-market-final-win](japan-calibrated-market-final-win.md)
 - [japan-coplacer-place-e15](japan-coplacer-place-e15.md)
+- [japan-cross-pool-t2-trial](japan-cross-pool-t2-trial.md)
+- [japan-cross-pool-t2-v1](japan-cross-pool-t2-v1.md)
 - [japan-crowd-calibration-final-win](japan-crowd-calibration-final-win.md)
 - [japan-debut-maiden-members-v1](japan-debut-maiden-members-v1.md)
 - [japan-debut-maiden-members-v2](japan-debut-maiden-members-v2.md)
