@@ -502,11 +502,42 @@ def _enrich_runners(
     }
 
 
+def _attach_rail_setting(
+    races: pd.DataFrame, source: str, going_pages: list[dict[str, Any]], summary: BuildSummary
+) -> pd.DataFrame:
+    """`races` with `rail_setting` from the going pages (ticket #253), through the adapter's
+    `parse_going` / `attach_rail_setting`. Read from the raw cache on every build, never through
+    the parse cache: they are few, and a page added since the last build must show. A page that
+    cannot be read or parsed is listed in the summary and leaves the rest alone."""
+    adapter = get_adapter(source)
+    if not going_pages:
+        return races
+    parts = []
+    for row in going_pages:
+        page = parse_worker.read_raw_page(_job(source, row, ""))
+        label = {"page_type": row["page_type"], "key": row["key"]}
+        if page is None:
+            summary.unreadable.append({**label, "error": "raw file missing or corrupt"})
+            continue
+        try:
+            parts.append(adapter.parse_going(page))
+        except Exception as exc:  # an error page or a redesign: not fatal to the build
+            summary.failed.append({**label, "error": " ".join(str(exc).split())[:300]})
+    if not parts:
+        return races
+    return adapter.attach_rail_setting(races, pd.concat(parts, ignore_index=True))
+
+
 def _assemble(
-    frames: dict[str, pd.DataFrame], source: str, summary: BuildSummary, present_types: set[str]
+    frames: dict[str, pd.DataFrame],
+    source: str,
+    summary: BuildSummary,
+    present_types: set[str],
+    going_pages: list[dict[str, Any]],
 ) -> dict[str, pd.DataFrame]:
     """`present_types`: the page types the manifest holds; a SOURCE_TABLES table is written only
-    when one of its page types is among them."""
+    when one of its page types is among them. `going_pages`: the manifest rows of the source's
+    going pages (馬場情報), which fill `races.rail_setting`."""
     start_month = season_start_month(source)
     _drop_duplicate_pages(frames, "races", "race_id", summary)
     _drop_duplicate_pages(frames, "horses", "horse_id", summary, newest="profile_scraped_utc")
@@ -527,6 +558,8 @@ def _assemble(
             [instants.get(rid) for rid in races["race_id"]], index=races.index, dtype=_UTC_DTYPE
         )
 
+    races = _attach_rail_setting(races, source, going_pages, summary)
+
     keys = _race_keys(runners["race_id"])
     for column in ("meeting_id", "race_date", "venue", "race_no"):
         runners[column] = keys[column]
@@ -538,7 +571,11 @@ def _assemble(
     names = [name for name in schemas.FED_BY if name not in schemas.SOURCE_TABLES]
     for name in schemas.SOURCE_TABLES:
         if present_types & set(schemas.FED_BY[name]):
-            frames[name] = _first_non_null(frames[name], schemas.TABLES[name].sort_by[0])
+            keys = schemas.LATEST_FETCH.get(name)
+            if keys is not None:
+                frames[name] = _latest_fetch(frames[name], keys)
+            else:
+                frames[name] = _first_non_null(frames[name], schemas.TABLES[name].sort_by[0])
             names.append(name)
     out = {}
     for name in names:
@@ -560,6 +597,16 @@ def _first_non_null(frame: pd.DataFrame, id_column: str) -> pd.DataFrame:
     )
     first = frame.groupby(id_column, sort=False, as_index=False).first()
     return first.astype(object).where(first.notna(), None)
+
+
+def _latest_fetch(frame: pd.DataFrame, keys: tuple[str, ...]) -> pd.DataFrame:
+    """One row per `keys` (e.g. one publication of a race's Win sales): the row with the latest
+    `fetched_utc`, the smaller page key on a tie; rows missing a key are dropped."""
+    frame = frame.loc[frame[list(keys)].notna().all(axis=1)]
+    frame = frame.sort_values(
+        ["fetched_utc", PAGE_KEY], ascending=[False, True], kind="stable", na_position="last"
+    )
+    return frame.drop_duplicates(list(keys), keep="first")
 
 
 # ---------------------------------------------------------------- output
@@ -680,7 +727,11 @@ def build_tables(
     keys first) restrict the parsing of this run only. Safe to run while a backfill adds pages."""
     started = time.monotonic()
     summary = BuildSummary(source)
+    going_type = getattr(get_adapter(source), "going_page_type", None)
     manifest = read_manifest(source)
+    # going pages are consumed at assembly (_attach_rail_setting), not parsed into the cache
+    going_pages = [row for row in manifest if row["page_type"] == going_type]
+    manifest = [row for row in manifest if row["page_type"] != going_type]
 
     by_type = Counter(row["page_type"] for row in manifest)
     versions = {
@@ -699,7 +750,8 @@ def build_tables(
         _parse_pages(jobs, default_workers() if workers is None else int(workers), cache, summary)
         frames, included = _collect(cache, wanted, summary)
 
-    tables = _assemble(frames, source, summary, {page_type for page_type, _ in wanted})
+    present_types = {page_type for page_type, _ in wanted}
+    tables = _assemble(frames, source, summary, present_types, going_pages)
     _write_tables(tables, processed_dir(source))
 
     included = _account(summary, pages, jobs, included)

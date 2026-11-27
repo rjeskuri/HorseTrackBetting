@@ -23,6 +23,13 @@ Tier 2 (ticket #130): every race list also links 枠連, 馬単, 3連複 and 3�
 for the pools a World is given in `tier2` (built with `jradb_pages.legs`, prices from
 `exotic_board`), so a request for any other pool's page gets the error page (`served` False). A
 `win5` day adds a WIN5 link to that day's オッズ menu and its page (`jradb_pages.win5`).
+Since #358 bracket quinella (枠連) is captured every round with tier 1: its page always exists
+(TIER1_EXOTIC), whatever `tier2` says.
+
+The evening before (#358): `ClockedSite` answers as of a fake clock. Before `opens_at` its オッズ
+menu is `menu_before` (the race date's meetings not on it yet: the day-before sales are not
+open), and from `block_from` on every request is refused with `status` (403: the breaker opens).
+Every request's fake time is kept in `at`, in the order of `seen`.
 
 Every value is invented. No real page, name or scraped value is copied here.
 """
@@ -31,7 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -87,6 +94,7 @@ TIER2 = {
     "TRIO": ("3連複", "7"),
     "TIERCE": ("3連単", "8"),
 }
+TIER1_EXOTIC = ("BRACKET_QUINELLA",)  # #358: captured every round with tier 1, its page served
 UNIT_STAKE = 100  # yen per ticket, jra.yaml
 
 Link = tuple[str, str]  # (path, cname)
@@ -323,13 +331,14 @@ class World:
                 self._odds[(day, m.venue, n, kind)] = link
                 self.pages[link] = self.odds_page(race, kind, day, m.name)
             # The race list offers more pools than the four (tier 2, #130): their pages exist
-            # only for the World's `tier2` pools; any other is the error page (never served).
+            # only for the World's `tier2` pools and bracket quinella (tier 1 since #358); any
+            # other is the error page (never served).
             extra = {}
             for pool, (label, digit) in TIER2.items():
                 link = (ODDS_PATH, _cname(f"pw15{digit}ou10{mid}{n:02d}{ymd}Z"))
                 extra[label] = link[1]
                 self._odds[(day, m.venue, n, pool)] = link
-                if pool in self.tier2:
+                if pool in self.tier2 or pool in TIER1_EXOTIC:
                     self.pages[link] = pages.legs(
                         day,
                         m.name,
@@ -506,6 +515,43 @@ class JradbSite:
 
     def links(self) -> list[Link]:
         return [s.link for s in self.seen]
+
+
+@dataclass
+class ClockedSite(JradbSite):
+    """The double as of a fake clock (#358). `clock()` is read at each request and kept in `at`.
+    Before `opens_at` (or always, when it is None) the オッズ menu is `menu_before` when given: the
+    race date's meetings not listed yet, the day-before sales not open. From `block_from` on,
+    every request is answered `status` with an empty body."""
+
+    clock: Callable[[], datetime] | None = None
+    opens_at: datetime | None = None
+    menu_before: bytes | None = None
+    block_from: datetime | None = None
+    status: int = 403
+    at: list[datetime] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self._menu_open = self.pages.get(ODDS_MENU)
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        assert self.clock is not None, "a ClockedSite needs its clock"
+        t = self.clock()
+        self.at.append(t)
+        if self.block_from is not None and t >= self.block_from:
+            url = request.url
+            self.seen.append(Seen(request.method, url.host, url.path, None, None, False))
+            return httpx.Response(self.status, content=b"", headers={"Content-Type": "text/html"})
+        is_open = self.opens_at is not None and t >= self.opens_at
+        if self.menu_before is not None and not is_open:
+            self.pages[ODDS_MENU] = self.menu_before
+        elif self._menu_open is not None:
+            self.pages[ODDS_MENU] = self._menu_open
+        return super().handler(request)
+
+    def times_of(self, link: Link) -> list[datetime]:
+        """The fake time of every request for `link`, in order."""
+        return [t for s, t in zip(self.seen, self.at, strict=True) if s.link == link]
 
 
 class RecordingFetcher(Fetcher):

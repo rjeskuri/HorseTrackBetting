@@ -10,9 +10,15 @@ Contract pinned here (the coder follows it):
 * `main()` lists the files with `git ls-files` in the current directory (the repo root), reads
   them relative to it, prints one line per violation on stdout (each naming the path and the
   rule, nothing else on stdout) and exits 1, or prints nothing and exits 0.
+* `jravan` (#360) is a path rule on the file's name (the part after the last `/`), whatever its
+  content and folder: a name ending `.jvd` in any letter case is a JV-Data record file
+  (detail JRAVAN_RECORD); a name starting `JV-Data` and ending `.xlsx` or `.pdf`, both in any
+  letter case, is the JV-Data specification (detail JRAVAN_SPEC). A file gives at most one
+  `jravan` violation; the other rules still apply to it as before.
 
-Every input that looks like a secret, a home path, an email address or an artifact link is
-assembled at run time from parts, so this file passes its own tracked-tree test.
+Every input that looks like a secret, a home path, an email address, an artifact link or a
+JV-Data file name is assembled at run time from parts, so this file passes its own tracked-tree
+test.
 """
 
 from __future__ import annotations
@@ -38,6 +44,9 @@ DATA, FIXTURE, SIZE, JRDB, SECRET, PERSONAL = (
     "secret",
     "personal",
 )
+JRAVAN = "jravan"
+JRAVAN_RECORD = "JV-Data record file; licensed data stays under $HORSETRACK_DATA_DIR/raw/jravan"
+JRAVAN_SPEC = "JV-Data specification; it stays under $HORSETRACK_DATA_DIR/specs/jravan"
 LIMIT = 256 * 1024
 MARKER = "<!-- synthetic:"
 
@@ -51,6 +60,10 @@ GH_NOREPLY = "users.noreply" + ".github.com"
 ANTHROPIC_NOREPLY = "noreply" + AT + "anthropic.com"
 KEY_BODY = "MIIEpAIBAAKCAQEA" + "Q7wZ" * 10
 UUID = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+JVD = "." + "jvd"
+JV_DATA = "JV-" + "Data"
+# Made-up bytes in the shape of a fixed-width record: a two-letter family, a date, padding.
+RECORD = b"RA" + b"7" + b"20251123" + b"0" * 40 + b"\r\n"
 
 # Files this ticket adds: checked by the tracked-tree test even before they are committed.
 OWN_FILES = (
@@ -87,6 +100,34 @@ def assert_refused_exactly(cpt, files: dict[str, bytes], refused: set[str], rule
     assert not missed, f"not reported under {rule!r}: {missed}"
     wrongly = {p: sorted(r) for p, r in found.items() if p not in refused}
     assert not wrongly, f"clean input reported: {wrongly}"
+
+
+def assert_jravan(cpt, files: dict[str, bytes], expected: dict[str, tuple[str, set[str]]]) -> None:
+    """Each expected path has exactly one `jravan` violation, with that detail, and exactly the
+    other rules named beside it; every other path in `files` is not reported at all."""
+    got: dict[str, list] = defaultdict(list)
+    for v in run(cpt, files):
+        assert isinstance(v.detail, str), v
+        got[v.path].append(v)
+    wrongly = {p: sorted(v.rule for v in vs) for p, vs in got.items() if p not in expected}
+    assert not wrongly, f"clean input reported: {wrongly}"
+    for path, (detail, others) in expected.items():
+        mine = [v.detail for v in got.get(path, []) if v.rule == JRAVAN]
+        assert mine == [detail], (path, mine)
+        rest = sorted(v.rule for v in got.get(path, []) if v.rule != JRAVAN)
+        assert rest == sorted(others), (path, rest)
+
+
+def tracked_repo(root: Path, tracked: dict[str, bytes], untracked: dict[str, bytes]) -> Path:
+    """A fresh git repository under `root` with `tracked` added and `untracked` only on disk."""
+    repo = root / "repo"
+    repo.mkdir()
+    for rel, body in {**tracked, **untracked}.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_bytes(body)
+    git(repo, "init", "-q")
+    git(repo, "add", "--", *tracked)
+    return repo
 
 
 def key_header(kind: str) -> str:
@@ -167,6 +208,48 @@ def test_a_tracked_data_path_is_refused(cpt):
     }
     refused = {p for p in files if p.startswith("data/")}
     assert_refused_exactly(cpt, files, refused, DATA)
+
+
+def test_a_tracked_playwright_mcp_path_is_refused_as_data(cpt):
+    files = {
+        ".playwright-mcp/page-2026-11-24T10-00-00.yml": b"- text: Win 3.4\n",
+        ".playwright-mcp/console-2026-11-24T10-00-01.log": b"[LOG] ok\n",
+        ".playwright-mcp/traces/2026/odds.json": b"{}\n",
+        ".playwright-mcp/shot.png": b"\x89PNG\r\n\x1a\n",
+        ".playwright-mcp/.gitkeep": b"",
+        "docs/playwright-mcp.md": b"# Playwright MCP notes\n",
+        "src/x/playwright_mcp.py": b"X = 1\n",
+        ".playwright-mcp.md": b"# near miss\n",
+        "playwright-mcp/page.yml": b"- text: x\n",
+        "docs/.playwright-mcp/page.yml": b"- text: x\n",
+        "tests/test_playwright_mcp.py": b"def test_x():\n    pass\n",
+    }
+    refused = {p for p in files if p.startswith(".playwright-mcp/")}
+    assert_refused_exactly(cpt, files, refused, DATA)
+    detail = " ".join(v.detail for v in run(cpt, files) if v.path in refused)
+    assert ".playwright-mcp/" in detail
+
+
+def test_the_playwright_mcp_folder_is_git_ignored():
+    def ignored(path: str) -> bool:
+        proc = subprocess.run(
+            ["git", "check-ignore", "-q", "--", path],
+            cwd=REPO,
+            env=clean_env(),
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode in (0, 1), proc.stderr
+        return proc.returncode == 0
+
+    for path in (
+        ".playwright-mcp/x.yml",
+        ".playwright-mcp/page-2026-11-24T10-00-00.yml",
+        ".playwright-mcp/nested/dir/shot.png",
+    ):
+        assert ignored(path), f"{path} is not git-ignored"
+    for path in ("docs/playwright-mcp.md", "playwright-mcp/x.yml", ".playwright-mcp.md"):
+        assert not ignored(path), f"{path} is wrongly git-ignored"
 
 
 def test_a_fixture_outside_synthetic_is_refused(cpt):
@@ -271,6 +354,142 @@ def test_a_jrdb_style_file_name_is_refused(cpt):
         "tests/fixtures/synthetic/jrdb/BAC201231.txt",
     }
     assert_refused_exactly(cpt, files, refused, JRDB)
+
+
+def test_a_jvdata_record_file_is_refused_in_any_folder_and_case(cpt, tmp_path):
+    refused = {
+        "2025" + JVD: RECORD,
+        "x/2025" + JVD: RECORD,
+        "x/20251123" + JVD.upper(): RECORD,
+        "raw/jravan/RA20251123" + ".J" + "vd": b"",
+        "notes/jravan/2025/11/se_20251123" + ".jV" + "D": b"\x00\xff\x80\x1a",
+        "tests/fixtures/synthetic/jravan/sample" + JVD: RECORD,
+        "src/horsetrack/countries/japan/jravan/samples/hr" + JVD.upper(): RECORD,
+        ".cache/jv/" + JVD: RECORD,
+        # A JV-Data name that is not a spec type: a record file, reported once.
+        "docs/" + JV_DATA + JVD: RECORD,
+    }
+    # The other rules still apply beside jravan.
+    alongside = {
+        "data/raw/jravan/20251123" + JVD: (RECORD, {DATA}),
+        "tests/fixtures/jravan/2025" + JVD: (RECORD, {FIXTURE}),
+        "exports/2025_full" + JVD.upper(): (RECORD * (LIMIT // len(RECORD) + 1), {SIZE}),
+    }
+    clean = {
+        "x/2025.txt": RECORD,
+        "x/2025.jv": RECORD,
+        "x/jvd.txt": b"x\n",
+        "docs/jravan.md": ("Record files end " + JVD + ".\n").encode(),
+    }
+    files = {**refused, **{p: body for p, (body, _) in alongside.items()}, **clean}
+    expected = {p: (JRAVAN_RECORD, set()) for p in refused}
+    expected.update({p: (JRAVAN_RECORD, rules) for p, (_, rules) in alongside.items()})
+    assert_jravan(cpt, files, expected)
+
+    # The command reports tracked record files only, one line each.
+    tracked = {
+        "README.md": b"# demo\n",
+        "2025" + JVD: RECORD,
+        "raw/jravan/20251123" + JVD.upper(): RECORD,
+    }
+    repo = tracked_repo(tmp_path, tracked, {"scratch/2026" + JVD: RECORD})
+    proc = run_script(repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    lines = sorted(ln for ln in proc.stdout.splitlines() if ln.strip())
+    assert lines == sorted(
+        [
+            "2025" + JVD + ": " + JRAVAN + ": " + JRAVAN_RECORD,
+            "raw/jravan/20251123" + JVD.upper() + ": " + JRAVAN + ": " + JRAVAN_RECORD,
+        ]
+    ), lines
+
+
+def test_the_jvdata_specification_is_refused(cpt, tmp_path):
+    xlsx = b"PK\x03\x04" + b"\x00" * 26
+    pdf = b"%PDF-1.7\n%made up\n"
+    refused = {
+        "docs/" + JV_DATA + "4901.xlsx": xlsx,
+        JV_DATA + "4901.pdf": pdf,
+        JV_DATA + ".pdf": pdf,
+        JV_DATA + "4901.XLSX": xlsx,
+        "specs/jravan/" + JV_DATA.lower() + "4901.xlsx": xlsx,
+        "notes/" + JV_DATA.upper() + "_spec.Pdf": pdf,
+        "x/" + "jV-" + "dAtA" + " 4.9.0.1.pDF": pdf,
+        "tests/fixtures/synthetic/" + JV_DATA + "_sample.xlsx": xlsx,
+        "docs/jravan/" + JV_DATA + "仕様書_4.9.0.1.xlsx": xlsx,
+        "blank/" + JV_DATA + "4901.pdf": b"",
+    }
+    alongside = {
+        "data/specs/" + JV_DATA + "4901.pdf": (pdf, {DATA}),
+        "tests/fixtures/jravan/" + JV_DATA + "4901.xlsx": (xlsx, {FIXTURE}),
+        "docs/" + JV_DATA + "_full.pdf": (pdf + b"\0" * LIMIT, {SIZE}),
+    }
+    clean = {
+        JV_DATA + "4901.csv": b"a,b\n",
+        "notes/" + JV_DATA + ".md": b"# notes\n",
+        "docs/spec.pdf": pdf,
+        "reports/jravan_counts.xlsx": xlsx,
+    }
+    files = {**refused, **{p: body for p, (body, _) in alongside.items()}, **clean}
+    expected = {p: (JRAVAN_SPEC, set()) for p in refused}
+    expected.update({p: (JRAVAN_SPEC, rules) for p, (_, rules) in alongside.items()})
+    assert_jravan(cpt, files, expected)
+
+    tracked = {
+        "docs/" + JV_DATA + "4901.xlsx": xlsx,
+        JV_DATA + "4901.pdf": pdf,
+        "notes/" + JV_DATA + ".md": b"# notes\n",
+        "docs/specs/jravan.md": ("Layouts: " + JV_DATA + "4901.xlsx, kept outside git.\n").encode(),
+    }
+    repo = tracked_repo(tmp_path, tracked, {"scratch/" + JV_DATA + "4902.pdf": pdf})
+    proc = run_script(repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    lines = sorted(ln for ln in proc.stdout.splitlines() if ln.strip())
+    assert lines == sorted(
+        [
+            "docs/" + JV_DATA + "4901.xlsx: " + JRAVAN + ": " + JRAVAN_SPEC,
+            JV_DATA + "4901.pdf: " + JRAVAN + ": " + JRAVAN_SPEC,
+        ]
+    ), lines
+
+
+def test_jravan_names_without_data_are_not_refused(cpt):
+    spec_doc = (
+        "# JRA-VAN\n\nRecord files end " + JVD + " and stay under $HORSETRACK_DATA_DIR/raw/jravan;"
+        " the layouts come from " + JV_DATA + "4901.xlsx under $HORSETRACK_DATA_DIR/specs/jravan.\n"
+    )
+    clean = {
+        "notes/jvd.md": ("# What a " + JVD + " file holds\n").encode(),
+        "docs/specs/jravan.md": spec_doc.encode(),
+        "docs/research/jravan-cloud-windows.md": b"# JRA-VAN on a cloud Windows VM\n",
+        "tests/countries/japan/test_jravan_spec.py": ("SPEC = '" + JV_DATA + ".xlsx'\n").encode(),
+        "tests/countries/japan/test_jravan_records.py": b"def test_x():\n    pass\n",
+        "src/horsetrack/countries/japan/jravan/__init__.py": b"",
+        "src/horsetrack/countries/japan/jravan/jvd.py": ("SUFFIX = '" + JVD + "'\n").encode(),
+        "src/horsetrack/countries/japan/jravan/" + JV_DATA.lower() + "_layouts.py": b"X = 1\n",
+        "tests/fixtures/synthetic/jravan/ra_record.txt": RECORD,
+        # Near misses on the record rule: "jvd" in the name, but the name does not end ".jvd".
+        "x/jvd.txt": b"x\n",
+        "x/a.jvdx": b"x\n",
+        "x/2025jvd": RECORD,
+        "docs/jvd": b"x\n",
+        "x/2025_jvd.csv": b"a,b\n",
+        "x/jvd/2025.txt": RECORD,
+        # Near misses on the spec rule: a JV-Data name of another type, or .xlsx/.pdf without
+        # a name starting JV-Data.
+        JV_DATA + "4901.csv": b"a,b\n",
+        "notes/" + JV_DATA + ".md": b"# notes\n",
+        "docs/my" + JV_DATA + ".xlsx": b"PK\x03\x04",
+        "docs/spec.pdf": b"%PDF-1.7\n",
+        "reports/jravan.xlsx": b"PK\x03\x04",
+    }
+    # A live rule beside them, so passing means these names are judged clean, not unchecked.
+    control = {"x/2025" + JVD: RECORD, JV_DATA + "4901.pdf": b"%PDF-1.7\n"}
+    assert_jravan(
+        cpt,
+        {**clean, **control},
+        {"x/2025" + JVD: (JRAVAN_RECORD, set()), JV_DATA + "4901.pdf": (JRAVAN_SPEC, set())},
+    )
 
 
 def test_secret_patterns_are_refused_and_masked(cpt):

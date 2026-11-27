@@ -12,13 +12,18 @@ month first), then every task of a race date outranks every task of an older dat
 list before its results. Registered as "jra" in `core.ingest.adapters.ADAPTERS`.
 
 Store hooks: `result_published_utc()` and `result_unpublished_utc()` give the store build the odds
-logger's first-seen result publication times and their lower bounds (ticket #225).
+logger's first-seen result publication times and their lower bounds (ticket #225);
+`going_page_type`, `parse_going` and `attach_rail_setting` let it fill `races.rail_setting` from
+the going pages (馬場情報) in the raw cache (ticket #253; fetched by `jra.going_fetch`).
+
+Win sales: `win_sales` pages (JRADB 単勝・複勝 pages, fetched by `jra.win_sales_fetch`) are
+classified and parsed by `jra.win_sales` into the store's `win_sales` table (ticket #278).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from importlib import import_module
 from zoneinfo import ZoneInfo
 
@@ -35,6 +40,7 @@ from horsetrack.core.ingest.types import (
     RawPage,
 )
 from horsetrack.countries.japan import odds_log
+from horsetrack.countries.japan.jra import going_fetch, win_sales
 from horsetrack.countries.japan.jra.netkeiba import (
     common,
     parse_fixture,
@@ -103,6 +109,8 @@ class JRAAdapter:
 
     def followup_tasks(self, parsed: ParsedPage) -> list[FetchTask]:
         meta = (parsed.get("_meta") or [{}])[0]
+        if meta.get("page_type") == going_fetch.MENU_PAGE_TYPE:
+            return going_fetch.followups(parsed)
         if meta.get("page_type") != "racelist":
             return []
         today = self._today()
@@ -131,6 +139,10 @@ class JRAAdapter:
         """Decide by content, never by HTTP status: netkeiba serves missing races as 200."""
         if page_type == "results":
             return parse_results.classify(body)
+        if page_type in going_fetch.PAGE_TYPES:
+            return going_fetch.classify(body)
+        if page_type == win_sales.PAGE_TYPE:
+            return _classify_win_sales(body)
         soup = BeautifulSoup(body, "lxml")
         if page_type == PEDIGREE_PAGE_TYPE:
             # every planned race comes from our own history or is asked for by id: a card without
@@ -149,7 +161,14 @@ class JRAAdapter:
     # ------------------------------------------------------------ parsing
 
     def parse(self, page: RawPage) -> ParsedPage:
-        """Dispatch to netkeiba.parse_<page_type>, so new parser modules plug in untouched."""
+        """Dispatch to netkeiba.parse_<page_type>, so new parser modules plug in untouched. Going
+        pages (#253) are not tables: the tab page gives its follow-ups, the going page nothing."""
+        if page.page_type == going_fetch.MENU_PAGE_TYPE:
+            return going_fetch.parse_menu(page)
+        if page.page_type == going_fetch.GOING_PAGE_TYPE:
+            return {}
+        if page.page_type == win_sales.PAGE_TYPE:
+            return _parse_win_sales(page)
         module = _parser_module(page.page_type)
         if module is not None:
             return module.parse(page)
@@ -161,10 +180,29 @@ class JRAAdapter:
     def parser_version(self, page_type: str) -> str | None:
         """PARSER_VERSION of netkeiba.parse_<page_type> ("0" when it declares none); None when the
         page type has no parser, which the store build skips."""
+        if page_type == win_sales.PAGE_TYPE:
+            return win_sales.PARSER_VERSION
         module = _parser_module(page_type)
         return None if module is None else str(getattr(module, "PARSER_VERSION", "0"))
 
     # ------------------------------------------------------------ store hooks
+
+    going_page_type = going_fetch.GOING_PAGE_TYPE
+
+    # pandas is imported here, not at the top: parse workers import this module and need none
+    def parse_going(self, page: RawPage):
+        """A cached going page as `going.parse_going_page` rows (ValueError for an error page);
+        the manifest's fetch time, else the epoch, is the `fetched_utc`."""
+        from horsetrack.countries.japan.jra import going
+
+        fetched = page.fetched_utc or datetime.fromtimestamp(0, timezone.utc)
+        return going.parse_going_page(page.body, fetched_utc=fetched)
+
+    def attach_rail_setting(self, races, going_rows):
+        """`races` with `rail_setting` from the concatenated `parse_going` rows."""
+        from horsetrack.countries.japan.jra import going
+
+        return going.attach_rail_setting(races, going_rows)
 
     def result_published_utc(self) -> dict[str, datetime]:
         """race_id -> when its official result was first seen published (aware UTC): every
@@ -177,6 +215,25 @@ class JRAAdapter:
         result, for the bounded races of every results sidecar only (a late sighting has none).
         The store build fills `races.result_unpublished_utc` from it."""
         return _logged_results(odds_log.read_unpublished)
+
+
+def _classify_win_sales(body: bytes) -> str:
+    """A 単勝・複勝 page names its race; a block or error page does not (#278)."""
+    try:
+        win_sales.page_race(win_sales.soup(body))
+    except ValueError:
+        return STATUS_BLOCKED
+    return STATUS_FETCHED
+
+
+def _parse_win_sales(page: RawPage) -> ParsedPage:
+    """A cached 単勝・複勝 page as one `win_sales` row, none without a Win figure (#278). The
+    manifest's fetch time dates a live page's clock; a page without one is an error, never dated
+    by a guess."""
+    if page.fetched_utc is None:
+        raise ValueError(f"win_sales/{page.key}: the manifest has no fetch time")
+    record = win_sales.parse_win_sales(page.body, fetched_utc=page.fetched_utc)
+    return {} if record is None else {win_sales.PAGE_TYPE: [record]}
 
 
 def _logged_results(read) -> dict[str, datetime]:

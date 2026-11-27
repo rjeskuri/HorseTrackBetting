@@ -28,11 +28,29 @@ once they end; a venue stops polling once every race with a post time is logged.
 retried at the next one, is never a bound and is not an odds failure; a CircuitOpen is a block,
 as from any site call.
 
+The day before (ticket #358, logger.yaml `day_before`, JRA only): the race date's sales open the
+evening before (about 18:30 Tokyo), and from then on every race is logged at least at JV-Link's
+time-series grain. Nothing is sent before probe_from on the day before (a run started earlier
+sleeps until then). From max(start, probe_from) the site's `sales_open()` is called every
+probe_every_s (start to start) while before probe_until, until one says True; a run started at or
+after probe_until and before the first window W calls it once, at its start (a restart in the
+night resumes the window); a run started at or after W never probes. A probe that raises a
+CircuitOpen is a block for the race date, as from any site call; any other failed probe is retried
+at the next and is no venue's failure. The first probe that says True opens the window
+(DaySummary.sales_open_utc): discovery, post times and rounds start there, every day_before.every_s,
+each round capturing every race of every venue (a full cycle due every round, whatever
+hot_races.all_every_s says) within its budget (every_s x the rate), until W. At the first round
+from W every venue's cycle falls due at once, so no race waits longer than the night's grain across
+the switch; from W the race date runs as before (its windows, hot races, tier 2, results). Without
+an open (no racing that day, or the sales not open by probe_until) only the probes are sent before
+W, and the day runs as without the block.
+
 Several sources (ticket #38, logger.yaml `sources`): `run_sources` runs each source's run_day on
 a thread of its own, all at once, each with its own site (so its own host, rate and budget), store,
-schedule (`source_config`) and block marker. A block on one source's host stops that source only.
-Any other error escaping a source's day stops that source only (stopped 'error'): `on_error` hears
-of it at once, and run_sources still returns every source's summary.
+schedule (`source_config`), block marker and race date (#358: JRA's may be tomorrow while NAR's is
+today). A block on one source's host stops that source only. Any other error escaping a source's
+day stops that source only (stopped 'error'): `on_error` hears of it at once, and run_sources still
+returns every source's summary.
 
 The block policy is the schedule's `on_block`. Every block appends a marker line, and a run that
 finds one for its host and date sends nothing. `cooldown_min: null` stops the day at the first
@@ -86,6 +104,8 @@ class Site(Protocol):
     def capture_tier2(self, venue: str, races: list[int]) -> MeetingCapture: ...  # with `tier2`
 
     def published_results(self, venue: str) -> set[int]: ...  # with `results`
+
+    def sales_open(self) -> bool: ...  # with `day_before`: the race date's sales are open
 
 
 class Store(Protocol):
@@ -142,6 +162,7 @@ class DaySummary:
     requests: int = 0  # requests the successful captures sent
     deferred: int = 0  # race captures a round left out for budget
     stopped: str | None = None  # 'circuit_open' when a block ended the day, 'error' (run_sources)
+    sales_open_utc: datetime | None = None  # the probe that found the sales open (#358); None: none
 
 
 # ---------------------------------------------------------------- time
@@ -231,10 +252,15 @@ def plan_round(
 
 
 def _plan(
-    now: datetime, venues: list[VenueState], config: Mapping[str, Any], rps: float
+    now: datetime,
+    venues: list[VenueState],
+    config: Mapping[str, Any],
+    rps: float,
+    every: float | None = None,
 ) -> tuple[list[Job], int]:
-    """plan_round's jobs, and how many race captures were due at the venues it could capture."""
-    every = _every_s(now, config)
+    """plan_round's jobs, and how many race captures were due at the venues it could capture.
+    `every`: the round's every_s (None: the window in force at `now`)."""
+    every = _every_s(now, config) if every is None else every
     if every is None:
         return [], 0
     budget = every * rps
@@ -361,9 +387,10 @@ def run_day(
     venues: list[str] | None = None,
     resume: Callable[[float], Site] | None = None,
 ) -> DaySummary:
-    """Log every venue of `race_date` (discovered when `venues` is None) from the first window to
-    its end, round by round, and return what was done. `resume(requests_per_second)`: the site the
-    day goes on with after a block's cooldown (None: the same site)."""
+    """Log every venue of `race_date` (discovered when `venues` is None) from the first window, or
+    from the day-before sales open with `day_before`, to its end, round by round, and return what
+    was done. `resume(requests_per_second)`: the site the day goes on with after a block's cooldown
+    (None: the same site)."""
     day = _Day(race_date, site, store, config, now, sleep, Path(block_marker), resume)
     return day.run(venues)
 
@@ -376,7 +403,7 @@ SOURCES = ("jra", "nar")
 def source_config(config: Mapping[str, Any], source: str) -> dict[str, Any]:
     """One source's schedule (the mapping run_day takes) out of logger.yaml. JRA's is the top level,
     as before #38; another source's is its own block (`nar:`) over the top level's keys, with no
-    tier 2 or results polling (#225) unless its block has them."""
+    tier 2, results polling (#225) or day-before window (#358) unless its block has them."""
     if source not in SOURCES:
         raise ValueError(f"unknown source {source!r}; known: {', '.join(SOURCES)}")
     out = {k: v for k, v in config.items() if k not in SOURCES and k != "sources"}
@@ -385,8 +412,8 @@ def source_config(config: Mapping[str, Any], source: str) -> dict[str, Any]:
     block = config.get(source)
     if not isinstance(block, Mapping):
         raise ValueError(f"logger.yaml has no {source!r} block")
-    out.pop("tier2", None)
-    out.pop("results", None)
+    for key in ("tier2", "results", "day_before"):
+        out.pop(key, None)
     return {**out, **block}
 
 
@@ -400,6 +427,7 @@ class Source:
     block_marker: Path | str
     venues: list[str] | None = None
     resume: Callable[[float], Site] | None = None  # run_day's `resume`
+    race_date: date | None = None  # its own race date (#358); None: run_sources' race_date
 
 
 def run_sources(
@@ -411,17 +439,18 @@ def run_sources(
     on_error: Callable[[str, Exception], None] | None = None,
 ) -> dict[str, DaySummary]:
     """Every source's run_day at once, each on a thread of its own (one source runs in the calling
-    thread), keyed by its site's source. Returns once every day is over. An error escaping one
-    source's day stops that source only: `on_error(source, exc)` is called once, from that
-    source's thread, as soon as its day fails; its summary is stopped 'error', as is each of its
-    venues still running. Nothing is raised for it."""
+    thread), keyed by its site's source, each for its own `race_date` (`race_date` for a source
+    without one). Returns once every day is over. An error escaping one source's day stops that
+    source only: `on_error(source, exc)` is called once, from that source's thread, as soon as
+    its day fails; its summary is stopped 'error', as is each of its venues still running.
+    Nothing is raised for it."""
     keys = [s.site.source for s in sources]
     if len(set(keys)) != len(keys):
         raise ValueError(f"a source given twice: {keys}")
-    days = {
-        k: _Day(race_date, s.site, s.store, s.config, now, sleep, Path(s.block_marker), s.resume)
-        for k, s in zip(keys, sources, strict=True)
-    }
+    days = {}
+    for k, s in zip(keys, sources, strict=True):
+        day = s.race_date or race_date
+        days[k] = _Day(day, s.site, s.store, s.config, now, sleep, Path(s.block_marker), s.resume)
 
     def target(key: str, s: Source) -> None:
         day = days[key]
@@ -464,6 +493,13 @@ class _Day:
             log.warning("results polling off: the site or store has no results methods")
             self.results = None
         self.grid = sorted(set(self.tier2["grid_min"]), reverse=True) if self.tier2 else []
+        self.first = _windows(race_date, config)[0][0]  # W, the race date's first window
+        self.day_before = config.get("day_before")
+        if self.day_before and not callable(getattr(site, "sales_open", None)):
+            log.warning("day-before window off: the site has no sales_open")  # a site before #358
+            self.day_before = None
+        self.opened: datetime | None = None  # the day-before window's open (#358)
+        self.switched = False  # the first round from W after a day-before window has run
 
     def run(self, codes: list[str] | None) -> DaySummary:
         if blocked(self.marker, self.site.host, self.race_date):
@@ -471,13 +507,16 @@ class _Day:
             self._add(codes or [])
             self._stop_running("circuit_open")
             return self.summary
-        first = _windows(self.race_date, self.config)[0][0]
-        self._sleep_until(first)
+        self._add(codes or [])  # given venues: stopped like the others by a block on a probe
         on_block = self.config["on_block"]
         cooldown = on_block["cooldown_min"]
         resumes = 0 if cooldown is None else 1
         while True:
             try:
+                if self.opened is None:
+                    self._probe()
+                if self.opened is None:
+                    self._sleep_until(self.first)
                 if codes is None:
                     codes = list(self.site.discover())
                 self._add(codes)
@@ -520,6 +559,64 @@ class _Day:
         if wait > 0:
             self.sleep(wait)
 
+    # ------------------------------------------------ the day before (ticket #358)
+
+    def _probe(self) -> None:
+        """The day-before probes: from probe_from on the day before (or now, when later), every
+        probe_every_s while before probe_until, or once now when that is past; never from W on.
+        The first that finds the sales open opens the window (`opened`). A CircuitOpen is raised
+        (a block); any other failed probe is retried at the next."""
+        db = self.day_before
+        if not db:
+            return
+        eve = self.race_date - timedelta(days=1)
+        until = _wall(db["probe_until"], eve)
+        every = timedelta(seconds=float(db["probe_every_s"]))
+        self._sleep_until(_wall(db["probe_from"], eve))
+        t = self.now()
+        while t < self.first:
+            at = self.now()
+            try:
+                if self.site.sales_open():
+                    self.opened = self.summary.sales_open_utc = at
+                    log.info("%s: the %s sales are open at %s", self.site.host, self.race_date, at)
+                    return
+            except _CALL_ERRORS as exc:
+                log.info("%s: odds menu probe failed, retried at the next: %s", self.site.host, exc)
+            t += every
+            if t >= until:
+                log.info("%s: the %s sales not open by %s", self.site.host, self.race_date, until)
+                return
+            self._sleep_until(t)
+
+    def _night(self, t: datetime) -> bool:
+        """Whether a round starting at `t` is in the day-before window (from the open to W)."""
+        return self.opened is not None and self.opened <= t < self.first
+
+    def _every(self, t: datetime) -> float | None:
+        """every_s of a round starting at `t`: the day-before window's, else the race date's
+        window in force; None before both."""
+        if self._night(t):
+            return float(self.day_before["every_s"])
+        return _every_s(t, self.config, self.race_date)
+
+    def _schedule(self, t: datetime) -> Mapping[str, Any]:
+        """The schedule of a round starting at `t`: in the day-before window, every venue's full
+        cycle falls due every round (all_every_s is the window's every_s)."""
+        if not self._night(t):
+            return self.config
+        hot = {**self.config["hot_races"], "all_every_s": float(self.day_before["every_s"])}
+        return {**self.config, "hot_races": hot}
+
+    def _switch(self, t: datetime) -> None:
+        """At the first round from W after a day-before window, every venue's cycle falls due at
+        once: the night's cycles ran at its every_s, the race date's run at all_every_s."""
+        if self.opened is None or self.switched or t < self.first:
+            return
+        self.switched = True
+        for v in self.venues.values():
+            v.state.cycle_start, v.state.cycle_left = None, None
+
     # ------------------------------------------------ rounds
 
     def _end(self, v: _Venue) -> datetime:
@@ -541,7 +638,7 @@ class _Day:
     def _next_round(self, start: datetime) -> datetime:
         """every_s after `start`, or the next window's start when that is sooner."""
         windows = _windows(self.race_date, self.config)
-        every = _every_s(start, self.config, self.race_date)
+        every = self._every(start)
         later = [w for w, _ in windows if w > start][:1]
         return min(later + ([start + timedelta(seconds=every)] if every is not None else []))
 
@@ -549,25 +646,27 @@ class _Day:
         all_every = timedelta(seconds=self.config["hot_races"]["all_every_s"])
         while True:
             start = self.now()
+            self._switch(start)
+            schedule = self._schedule(start)
             active = self._active(start)
             if not active and self._results_wake() is None:
                 return
             for v in active:  # post times refresh as each full cycle starts
                 fresh = v.read_at is None or start - v.read_at >= all_every
-                if fresh and _new_cycle_due(v.state, start, self.config):
+                if fresh and _new_cycle_due(v.state, start, schedule):
                     self._read(v, start)
             active = self._active(self.now())
             jobs: list[Job] = []
             if active:
-                rps = self.site.requests_per_second
-                jobs, wanted = _plan(start, [v.state for v in active], self.config, rps)
+                rps, every = self.site.requests_per_second, self._every(start)
+                jobs, wanted = _plan(start, [v.state for v in active], schedule, rps, every)
                 self.summary.deferred += wanted - sum(
                     1 if j.races is None else len(j.races) for j in jobs
                 )
                 for job in jobs:
                     v = self.venues[job.venue]
                     if self._running(v, self.now()):
-                        self._capture(v, job, start)
+                        self._capture(v, job, start, schedule)
             polled = self._results_round()
             if self.tier2 and active:
                 self._tier2_round(start, sum(job.requests for job in jobs) + polled)
@@ -592,12 +691,12 @@ class _Day:
             self.store.write_post_times(v.state.code, merged)
             self._count_tier2(v)
 
-    def _capture(self, v: _Venue, job: Job, start: datetime) -> None:
+    def _capture(self, v: _Venue, job: Job, start: datetime, schedule: Mapping[str, Any]) -> None:
         if v.started_at is not None:  # the floor between real capture starts
             wait = self.config["min_poll_interval_s"] - _secs(self.now() - v.started_at)
             if wait > 0:
                 self.sleep(wait)
-        due = _cycle_due(v.state, start, self.config)
+        due = _cycle_due(v.state, start, schedule)
         v.state.last_capture = start
         t0 = v.started_at = self.now()
         try:
@@ -693,7 +792,7 @@ class _Day:
     def _tier2_round(self, start: datetime, spent: float) -> None:
         """The grid points due at `start`, in what tier 1 left of the round's budget (`spent`: its
         planned cost); a capture that would run past the next round's start is left for later."""
-        every = _every_s(start, self.config, self.race_date)
+        every = self._every(start)
         if every is None:
             return
         rps = self.site.requests_per_second
