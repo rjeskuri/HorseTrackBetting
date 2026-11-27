@@ -466,6 +466,10 @@ def fit_segment_roi(
             "segment ROI fit: every tau sample is out of range or has its mode on p = 1"
         )
     weights = np.exp(log_w - special.logsumexp(log_w))
+    # Log weights of large magnitude (a big fit's log-likelihood) round the normalising
+    # difference, so the weights can sum past 1 by more than multinomial's 1e-12 tolerance when
+    # one sample dominates; renormalise them exactly (#430).
+    weights = weights / weights.sum()
 
     theta_draws = []
     for k, count in enumerate(rng.multinomial(draws, weights)):
