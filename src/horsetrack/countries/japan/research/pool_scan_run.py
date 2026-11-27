@@ -39,6 +39,7 @@ import json
 import sys
 from collections import Counter
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -143,7 +144,8 @@ Z = float(special.ndtri(LEVEL))
 
 RACE_COLUMNS = ["race_id", "race_date", "meeting_id", "venue", "race_class", "field_size"]
 RACE_COLUMNS += ["surface", "status"]
-BOARD_COLUMNS = ["race_id", "pool", "combination", "odds", "status_raw", "investment"]
+HEAD_COLUMNS = ["race_id", "pool", "combination", "odds", "investment"]  # WIN and pool totals
+BOARD_COLUMNS = ["race_id", "pool", "combination", "odds", "status_raw"]  # one pool's board
 PAID_COLUMNS = ["race_id", "pool", "combination", "dividend", "is_refund"]
 RACE_LEVELS = ("class", "field", "fav", "surface", "venue")  # the pool-independent segments
 
@@ -852,27 +854,29 @@ def _read_windows(name: str, columns: list[str], windows, *, touches_price: bool
 
 
 def _read_year(windows: list[tuple[date, date]], store: _Store, calendar: BoostCalendar) -> None:
-    """One calendar year's price windows: races, the board and the dividends, then every pool."""
+    """One calendar year's price windows: races, the WIN board and every pool's total, the
+    dividends, then each pool's board, read, scored and dropped one pool at a time so that only
+    one pool's rows are in memory (the same rows as one read of all six)."""
     races = _read_windows("races", RACE_COLUMNS, windows, touches_price=False).to_pandas()
     if races.empty:
         return
-    board = _read_windows(
-        "final_odds",
-        BOARD_COLUMNS,
-        windows,
-        touches_price=True,
-        where=ds.field("pool").isin(list(POOLS)),
+    totals_or_win = ds.field("pool").isin(list(POOLS)) & (
+        (ds.field("pool") == "WIN") | (ds.field("combination") == pool_scan.POOL_ROW)
     )
-    is_total = pc.equal(board["combination"], pool_scan.POOL_ROW)
-    win = board.filter(pc.and_(pc.equal(board["pool"], "WIN"), pc.invert(is_total)))
+    head = _read_windows(
+        "final_odds", HEAD_COLUMNS, windows, touches_price=True, where=totals_or_win
+    )
+    is_total = pc.equal(head["combination"], pool_scan.POOL_ROW)
+    win = head.filter(pc.and_(pc.equal(head["pool"], "WIN"), pc.invert(is_total)))
     fav = win.group_by("race_id").aggregate([("odds", "min")]).to_pandas()
     races["race_date"] = pd.to_datetime(races["race_date"]).dt.date
     races = _scored_races(races, fav.set_index("race_id")["odds_min"], store)
     if races.empty:
         return
     store.races.append(races)
-    totals = board.filter(is_total).select(["race_id", "pool", "investment"]).to_pandas()
+    totals = head.filter(is_total).select(["race_id", "pool", "investment"]).to_pandas()
     totals = totals.dropna().set_index(["race_id", "pool"])["investment"].to_dict()
+    del head, win, is_total
     ids = pa.array(races["race_id"].tolist(), type=pa.string())
     paid = (
         ds.dataset(paths.processed_dir(SOURCE) / "dividends.parquet", format="parquet")
@@ -890,10 +894,30 @@ def _read_year(windows: list[tuple[date, date]], store: _Store, calendar: BoostC
     }
     year = windows[0][0].year
     for pool in POOLS:
+        board = _read_windows(
+            "final_odds", BOARD_COLUMNS, windows, touches_price=True, where=ds.field("pool") == pool
+        )
         try:
             _score_pool(pool, races, board, paid, totals, calendars, year, store)
         except Exception as exc:  # a data error fails the pool's variants, not the scan
             store.errors[pool].append(f"{year}: {type(exc).__name__}: {exc}")
+        del board
+        pa.default_memory_pool().release_unused()
+
+
+@contextmanager
+def _system_memory_pool():
+    """Arrow allocates from the system allocator while the scan reads and fits, then the pool
+    in use before is restored. A year's read decodes every pool of the board (trifecta's rows
+    included) before its filter keeps N1's six, a transient of about a gigabyte; the default
+    allocator (mimalloc) keeps each one resident, so the resident set ratchets up year by year,
+    while the system allocator hands it back. Allocation only: nothing read or scored changes."""
+    previous = pa.default_memory_pool()
+    pa.set_memory_pool(pa.system_memory_pool())
+    try:
+        yield
+    finally:
+        pa.set_memory_pool(previous)
 
 
 def _read_store(start: date, end: date, log: Callable[[str], None]) -> _Store:
@@ -1458,13 +1482,14 @@ def run_scan(
     if date_to < start:
         raise ValueError(f"date_to {date_to} is before the scan's first day {start}")
 
-    store = _read_store(start, date_to, log)
-    races = pd.concat(store.races, ignore_index=True) if store.races else pd.DataFrame()
-    races = races.set_index("race_id") if len(races) else pd.DataFrame(columns=["race_date"])
-    pools: dict[str, dict[str, _Span]] = {}
-    for pool in POOLS:
-        log(f"scoring {pool}")
-        pools[pool] = _scan_pool(pool, store, races, seed)
+    with _system_memory_pool():
+        store = _read_store(start, date_to, log)
+        races = pd.concat(store.races, ignore_index=True) if store.races else pd.DataFrame()
+        races = races.set_index("race_id") if len(races) else pd.DataFrame(columns=["race_date"])
+        pools: dict[str, dict[str, _Span]] = {}
+        for pool in POOLS:
+            log(f"scoring {pool}")
+            pools[pool] = _scan_pool(pool, store, races, seed)
 
     git_sha = _commit()
     base = {

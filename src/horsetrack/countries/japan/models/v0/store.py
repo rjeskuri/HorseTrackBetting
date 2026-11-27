@@ -81,7 +81,16 @@ def read_store_table(
         keep = file_development_filter(
             handle, COUNTRY, start=start, end=end, where=where, column=DATE_COLUMN
         )
-        return dataset.to_table(columns=columns, filter=keep)
+        strings = [f.name for f in dataset.schema if pa.types.is_string(f.type)]
+        if not strings:
+            return dataset.to_table(columns=columns, filter=keep)
+        # The scan decodes its string columns as dictionaries and casts the rows it keeps back
+        # to strings: the same table, without densely decoding every row the filter drops (a
+        # year of final_odds decodes every pool's board before a pool filter, #430).
+        options = ds.ParquetReadOptions(dictionary_columns=strings)
+        compact = ds.dataset(path, filesystem=snapshot, format=ds.ParquetFileFormat(options))
+        table = compact.to_table(columns=columns, filter=keep)
+        return table.cast(pa.schema([dataset.schema.field(c) for c in columns]))
 
 
 class _Snapshot(pafs.FileSystemHandler):
