@@ -42,6 +42,9 @@ The model
   `N_CAL_DRAWS` common draws. A view's tau uses the smallest grid tau at or above it.
 - `random_walk`: q_final = q_t with its fitted noise, softmax(ln s_t + sigma_rw eps).
 - `Nowcast.from_params(phi=, sigma=)`: the known nowcast (beta = 0, phi fixed, V_final = V_t / phi).
+- `draws_from_shocks(view, pool=, shocks=)` is `draws` from per-runner shocks the caller gives (a
+  Wide pair's eps (eps_a + eps_b) / sqrt 2), so the decision layer (#100) draws WIN, PLACE and Wide
+  from one set and keeps their covariance.
 
 Folds and scores
 - `Nowcast.fit` and `compare` refuse a holdout day (`HoldoutDayError`, D14); `fit_folds` drops
@@ -862,6 +865,29 @@ def _structural(s, mu, phi, sigma, eps) -> np.ndarray:
     return phi * s[..., None, :] + (1.0 - phi) * _softmax(z)
 
 
+def _shock_eps(combinations: Sequence[str], shocks: Mapping[int, np.ndarray]) -> np.ndarray:
+    """eps (n, k) of a board's combinations from per-runner shocks: a runner's own column for a
+    WIN or PLACE combination "h", (eps_a + eps_b) / sqrt 2 for a Wide pair "a,b" (as
+    `ShadowNowcast`); runners no combination names are ignored. ValueError unless every column is
+    1-D, all of one length, and every runner the combinations name has one."""
+    columns = {h: np.asarray(x, dtype=float) for h, x in shocks.items()}
+    shapes = {x.shape for x in columns.values()}
+    if len(shapes) != 1 or len(next(iter(shapes))) != 1:
+        raise ValueError(f"shocks must be 1-D columns of one length, not shapes {sorted(shapes)}")
+    (n,) = shapes.pop()
+    eps = np.empty((n, len(combinations)))
+    for j, text in enumerate(combinations):
+        horses = _combination_key(text)
+        missing = [h for h in horses if h not in columns]
+        if missing:
+            raise ValueError(f"no shock for runner(s) {missing} of combination {text!r}")
+        if len(horses) == 1:
+            eps[:, j] = columns[horses[0]]
+        else:
+            eps[:, j] = sum(columns[h] for h in horses) / math.sqrt(len(horses))
+    return eps
+
+
 def _random_walk(s, sigma, eps) -> np.ndarray:
     with np.errstate(divide="ignore"):
         return _softmax(np.log(s)[..., None, :] + sigma * eps)
@@ -1131,6 +1157,16 @@ class Nowcast:
         eps = np.random.default_rng(seed).standard_normal((n, k))
         shares, phi = self._draw_shares(view, pool, eps)
         return Draws(shares=shares, v_final=self._v_final(view, pool, phi, n))
+
+    def draws_from_shocks(
+        self, view: RaceView, *, pool: str, shocks: Mapping[int, np.ndarray]
+    ) -> Draws:
+        """The draws of `pool` from per-runner shocks the caller gives ({horse number: (n,)
+        column}), so pools drawn from one set move together: see `_shock_eps`. One draw per
+        shock; given the columns `draws` would draw for the board's runners, it is `draws`."""
+        eps = _shock_eps(view.pools[pool].combinations, shocks)
+        shares, phi = self._draw_shares(view, pool, eps)
+        return Draws(shares=shares, v_final=self._v_final(view, pool, phi, len(eps)))
 
     def random_walk(self, view: RaceView, *, pool: str, n: int, seed: int) -> Draws:
         """The q_final = q_t baseline: softmax(ln s_t + sigma_rw eps)."""

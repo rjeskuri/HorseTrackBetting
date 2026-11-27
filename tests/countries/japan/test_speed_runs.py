@@ -23,6 +23,12 @@ Contract pinned here (`horsetrack.countries.japan.models.speed_runs`):
     races whose result_available_utc is strictly before that run's decision time,
     race_utc - `decision_min` minutes: never the run's own race, never a race published at or
     after its decision time (a same-day race published before it counts).
+  - early_pos_mean3 is #129's (`handicap.factors._race_late` / `_pace`, for #97's pace term, the
+    owner on #97, 2026-11-26): a start's early position is (p - 1) / (n - 1), p its first-corner
+    position (the first entry of running_positions) and n races.field_size, null when n <= 1 or p
+    is missing; a run's early_pos_mean3 is the mean over the horse's newest 3 starts that have
+    one, read from the same starts as the style (other kept races published strictly before its
+    decision time; holdout and jump races feed nothing), null when there is none.
   - Jump races (surface "jump", owner on #96) are excluded; races on holdout days
     (`core.eval.holdout.is_holdout_day("japan", race_date)`) are never read: their runs are in
     no row and feed no style. Races without a post time are excluded. Scratched runners are no
@@ -33,8 +39,8 @@ Contract pinned here (`horsetrack.countries.japan.models.speed_runs`):
     n_holdout + n_jump + n_no_post_time + n_kept == n_races.
 - `build_card(races, runners, race_id, *, at_utc) -> DataFrame`: the target race's non-scratched
   runners with the frame's columns minus the result (no finish_time_s, no result_available_utc,
-  no finish column at all). Each runner's style reads the horse's starts in other races whose
-  result_available_utc is strictly before at_utc, never the target race.
+  no finish column at all). Each runner's style and early_pos_mean3 read the horse's starts in
+  other races whose result_available_utc is strictly before at_utc, never the target race.
 - `read_inputs(*, start, end) -> (races, runners)`: the JRA store's races and runners with
   start <= race_date <= end, column-scoped (no price column), holdout days never returned.
 
@@ -73,7 +79,16 @@ UTC = timezone.utc
 RESULT_LAG = timedelta(minutes=30)  # the owner's rule (docs/specs/as-of.md)
 STYLES = ("front", "stalker", "midpack", "closer")  # #129
 PAR_KEYS = ("track", "surface", "distance", "layout", "rail", "class_level")
-CARD_COLUMNS = ("race_id", "race_utc", "horse_id", "style", "weight_kg", "draw", *PAR_KEYS)
+CARD_COLUMNS = (
+    "race_id",
+    "race_utc",
+    "horse_id",
+    "style",
+    "early_pos_mean3",
+    "weight_kg",
+    "draw",
+    *PAR_KEYS,
+)
 RESULT_COLUMNS = ("finish_time_s", "result_available_utc")
 RUN_COLUMNS = (*CARD_COLUMNS, *RESULT_COLUMNS)
 COUNT_KEYS = (
@@ -103,12 +118,16 @@ def post_instant(day: date, hhmm: str) -> pd.Timestamp:
     return pd.Timestamp(datetime.combine(day, time(hh, mm), tzinfo=JST).astimezone(UTC))
 
 
-def run(horse, corner=None, pos=None, secs=None, kg=55.0, draw=None, scratched=False):
+def run(
+    horse, corner=None, pos=None, secs=None, kg=55.0, draw=None, scratched=False, positions=None
+):
     """One runner: horse id, first-corner position (None: no corner positions), finish_pos and
-    finish_time_s (None: not placed / no time), carried kg, draw, scratched."""
+    finish_time_s (None: not placed / no time), carried kg, draw, scratched. `positions`, when
+    given, is the whole running_positions list (its first entry the first corner)."""
     return {
         "horse": horse,
-        "corner": corner,
+        "corner": positions[0] if positions else corner,
+        "positions": positions,
         "pos": pos,
         "secs": secs,
         "kg": kg,
@@ -146,6 +165,8 @@ def make(specs):
         )
         for horse_no, r in enumerate(spec["runners"], start=1):
             corner = None if r["corner"] is None else [r["corner"], r["corner"], r["corner"]]
+            if r.get("positions"):
+                corner = list(r["positions"])
             runners.append(
                 {
                     "jurisdiction": "jra",
@@ -746,3 +767,199 @@ def test_read_inputs_scopes_by_date_and_columns_and_never_returns_a_holdout_day(
     # the early front is out of range and the holdout front is never read: H is a closer
     assert style_of(frame, rid(after, "TOK", 1), "H") == "closer"
     assert row(frame, rid(start, "TOK", 1), "H")["finish_time_s"] == pytest.approx(91.0)
+
+
+# ---------------------------------------------------------------------------------------------
+# early_pos_mean3: #129's mean early position, for #97's pace term (the owner, 2026-11-26)
+# ---------------------------------------------------------------------------------------------
+
+
+def early_of(frame, race_id, horse):
+    value = row(frame, race_id, horse)["early_pos_mean3"]
+    return None if is_null(value) else float(value)
+
+
+def assert_early(got, want, label):
+    if want is None:
+        assert got is None, (label, got)
+    else:
+        assert got == pytest.approx(want, abs=1e-9), label
+
+
+def field_with(horse, n, corner, *, positions=None):
+    """n runners, `horse` at first-corner position `corner` (None: no corner positions) or with
+    the whole `positions` list; the others at the remaining positions, in finishing order."""
+    taken = positions[0] if positions else corner
+    rest = [p for p in range(1, n + 1) if p != taken][: n - 1]
+    out = [run(horse, corner=corner, pos=1, secs=95.0, positions=positions)]
+    out += [
+        run(f"x{k}", corner=p, pos=k + 2, secs=95.0 + 0.2 * (k + 1)) for k, p in enumerate(rest)
+    ]
+    return out
+
+
+# E's starts, oldest first: (day, race_no, field size, first corner or None, the whole list)
+E_TARGET_DAY = date(2026, 10, 10)
+E_STARTS = (
+    (date(2026, 9, 5), 1, 8, 1, [1, 4, 6]),  # 0/7 = 0.0 (the first entry, not the last)
+    (date(2026, 9, 12), 1, 10, 4, [4, 2, 1]),  # 3/9
+    (date(2026, 9, 19), 1, 8, None, None),  # no corner position: no early position
+    (date(2026, 9, 26), 1, 1, 1, None),  # a field of one: no early position
+    (date(2026, 10, 3), 1, 5, 5, None),  # 4/4 = 1.0
+    (E_TARGET_DAY, 1, 9, 3, None),  # 2/8, post 10:05, published 10:35 JST
+)
+
+
+def early_history():
+    specs = [
+        {"day": d, "race_no": no, "runners": field_with("E", n, c, positions=ps)}
+        for d, no, n, c, ps in E_STARTS
+    ]
+    specs.append(
+        {"day": E_TARGET_DAY, "race_no": 3, "post": "10:50", "runners": field_with("E", 8, 1)}
+    )
+    specs.append(
+        {
+            "day": date(2026, 10, 17),
+            "race_no": 2,
+            "post": "11:05",
+            "runners": field_with("E", 8, 8),
+        }
+    )
+    return make(specs)
+
+
+def test_runs_early_position_is_the_mean_of_the_newest_three():
+    races, runners = early_history()
+    starts = [rid(d, "TOK", no) for d, no, *_ in E_STARTS]
+    target = rid(E_TARGET_DAY, "TOK", 3)
+    # the target against E_TARGET_DAY race 1's publication (10:35 JST): before it at T-16 and at
+    # T-15 (not strictly before), after it at T-14 and T-2
+    with_r1 = (2 / 8 + 4 / 4 + 3 / 9) / 3
+    without_r1 = (4 / 4 + 3 / 9 + 0 / 7) / 3
+    for decision_min, want in ((16, without_r1), (15, without_r1), (14, with_r1), (DEC, with_r1)):
+        frame, _ = build_runs(races, runners, decision_min=decision_min)
+        assert_early(early_of(frame, target, "E"), want, decision_min)
+
+    frame, _ = build_runs(races, runners, decision_min=DEC)
+    expected = {
+        starts[0]: None,  # nothing before the first start
+        starts[1]: 0.0,  # a front runner's 0.0 is a value, not a null
+        starts[2]: (0 / 7 + 3 / 9) / 2,
+        starts[3]: (0 / 7 + 3 / 9) / 2,  # the start with no corner adds nothing
+        starts[4]: (0 / 7 + 3 / 9) / 2,  # nor does the field of one
+        starts[5]: (4 / 4 + 3 / 9 + 0 / 7) / 3,
+        # the newest three: the target (0/7), E_TARGET_DAY race 1 and 2026-10-03
+        rid(date(2026, 10, 17), "TOK", 2): (0 / 7 + 2 / 8 + 4 / 4) / 3,
+    }
+    for race_id, want in expected.items():
+        assert_early(early_of(frame, race_id, "E"), want, race_id)
+
+
+def test_card_early_position_uses_only_results_published_before_at_utc():
+    races, runners = early_history()
+    target = rid(E_TARGET_DAY, "TOK", 3)
+    with_r1 = (2 / 8 + 4 / 4 + 3 / 9) / 3
+    without_r1 = (4 / 4 + 3 / 9 + 0 / 7) / 3
+    for hhmm, want in (("10:20", without_r1), ("10:35", without_r1), ("10:36", with_r1)):
+        card = build_card(races, runners, target, at_utc=post_instant(E_TARGET_DAY, hhmm))
+        assert "early_pos_mean3" in card.columns
+        got = card.set_index("horse_id")["early_pos_mean3"]["E"]
+        assert_early(None if is_null(got) else float(got), want, hhmm)
+    # the style_history world: H was 8th of 8 at the first corner on D0 (7/7) and 1st in D1
+    # race 1 (0/7); o1 1st (0/7) then 2nd (1/7); the target and the later races never count
+    races, runners = style_history()
+    target = rid(D1, "TOK", 3)
+    cases = {"10:35": {"H": 1.0, "o1": 0.0, "o7": 6 / 7}, "10:49": {"H": 0.5, "o1": 1 / 14}}
+    cases["10:49"]["o7"] = (6 / 7 + 7 / 7) / 2
+    for hhmm, wants in cases.items():
+        card = build_card(races, runners, target, at_utc=post_instant(D1, hhmm))
+        got = card.set_index("horse_id")["early_pos_mean3"]
+        for horse, want in wants.items():
+            assert got[horse] == pytest.approx(want, abs=1e-9), (hhmm, horse)
+
+
+def test_runs_early_position_window_is_the_styles():
+    # H: 1.0 on a development day; 0.0 on a holdout day (never read) and 0.0 in a jump race
+    # earlier on the target's day (a jump start feeds nothing): only the 1.0 counts.
+    held, after = dev_and_held_days()
+    before = date(2026, 11, 21)
+    others = [f"o{k}" for k in range(1, 8)]
+    specs = [
+        {"day": before, "race_no": 1, "runners": field([*others, "H"])},
+        {"day": held, "race_no": 1, "runners": field(["H", *others])},
+        {"day": after, "race_no": 2, "surface": "jump", "runners": field(["H", *others])},
+        {"day": after, "race_no": 5, "post": "14:05", "runners": field(["H", *others])},
+    ]
+    races, runners = make(specs)
+    target = rid(after, "TOK", 5)
+    frame, _ = build_runs(races, runners, decision_min=DEC)
+    assert_early(early_of(frame, target, "H"), 1.0, "runs")
+    assert_early(early_of(frame, rid(before, "TOK", 1), "H"), None, "first start")
+    card = build_card(races, runners, target, at_utc=post_instant(after, "14:03"))
+    assert card.set_index("horse_id")["early_pos_mean3"]["H"] == pytest.approx(1.0, abs=1e-9)
+    # o7, 7th at the first corner on the development day (6/7): 6/7 alone
+    assert_early(early_of(frame, target, "o7"), 6 / 7, "o7")
+
+
+def reference_early(starts, horse, own_race, cutoff):
+    """#129's mean early position from first principles: the horse's starts in other races
+    published strictly before `cutoff` with (p - 1) / (n - 1) defined, newest 3."""
+    seen = [
+        s
+        for s in starts
+        if s["horse"] == horse
+        and s["race_id"] != own_race
+        and s["available"] < cutoff
+        and s["corner"] is not None
+        and s["n"] > 1
+    ]
+    seen.sort(key=lambda s: s["post"], reverse=True)
+    values = [(s["corner"] - 1) / (s["n"] - 1) for s in seen[:3]]
+    return sum(values) / len(values) if values else None
+
+
+def test_runs_early_position_matches_the_rule_over_a_random_calendar():
+    rng = random.Random(129)
+    horses = [f"h{k:02d}" for k in range(30)]
+    specs, starts = [], []
+    for d in range(6):
+        day = date(2026, 9, 5) + timedelta(days=d)
+        for no in range(1, 8):
+            hh, mm = divmod(10 * 60 + 5 + 25 * (no - 1), 60)
+            hhmm = f"{hh}:{mm:02d}"
+            post = post_instant(day, hhmm)
+            n = 1 if rng.random() < 0.08 else rng.randint(5, 14)
+            chosen = rng.sample(horses, n)
+            corners = list(range(1, n + 1))
+            rng.shuffle(corners)
+            runners = []
+            for k, (h, c) in enumerate(zip(chosen, corners, strict=True), start=1):
+                corner = None if rng.random() < 0.15 else c
+                later = [rng.randint(1, n), rng.randint(1, n)]
+                positions = None if corner is None else [corner, *later]
+                runners.append(
+                    run(h, corner=corner, pos=k, secs=90.0 + 0.1 * k, positions=positions)
+                )
+                starts.append(
+                    {
+                        "horse": h,
+                        "race_id": rid(day, "TOK", no),
+                        "post": post,
+                        "available": post + RESULT_LAG,
+                        "corner": corner,
+                        "n": n,
+                    }
+                )
+            specs.append({"day": day, "race_no": no, "post": hhmm, "runners": runners})
+    races, runners = make(specs)
+    for decision_min in (2, 16, 60):
+        frame, _ = build_runs(races, runners, decision_min=decision_min)
+        lag = timedelta(minutes=decision_min)
+        valued = 0
+        for s in starts:
+            want = reference_early(starts, s["horse"], s["race_id"], s["post"] - lag)
+            got = early_of(frame, s["race_id"], s["horse"])
+            assert_early(got, want, (s["race_id"], s["horse"], decision_min))
+            valued += want is not None
+        assert valued > len(starts) // 2  # the calendar exercises the rule, not only nulls

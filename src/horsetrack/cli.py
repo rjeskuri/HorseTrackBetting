@@ -5,6 +5,7 @@ import typer
 from horsetrack import __version__
 from horsetrack.core.ingest.cli import scrape_app
 from horsetrack.core.store.cli import store_app
+from horsetrack.countries.japan.bets.cli import bets_app
 from horsetrack.countries.japan.board.server import board_serve_command
 from horsetrack.countries.japan.handicap.workouts_jravan import (
     workouts_command as jravan_workouts_command,
@@ -81,6 +82,7 @@ japan.command("ability-study")(ability_study_command)
 japan.command("debut-members")(debut_members_command)
 japan.command("coverage")(coverage_command)
 japan.add_typer(spread_scan_app, name="spread-scan")
+japan.add_typer(bets_app, name="bets")
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
 japan.add_typer(jrdb, name="jrdb")
 jrdb.command("build")(jrdb_build_command)

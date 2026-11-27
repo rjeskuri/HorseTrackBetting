@@ -19,8 +19,9 @@ no store reads and no registry writes (the run lives in ``exacta_run``).
 from __future__ import annotations
 
 import copy
+import dataclasses
 import math
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from numbers import Integral
@@ -28,6 +29,7 @@ from numbers import Integral
 import numpy as np
 import pandas as pd
 
+from horsetrack.core.eval.folds import load_country_scheme
 from horsetrack.countries.japan.research.exacta_consistency import (
     CATEGORIES,
     combo_category,
@@ -91,6 +93,12 @@ SUPERSEDES = {
     E2_ID: E2_V4_ID,
 }
 FITTED = "full_development"  # #115's one lambda2 fit over the development out-of-fold races
+# #284 (owner DoD 2026-11-27): lambda2 fitted again per walk-forward fold, on the fold's training
+# races alone. B3 and C are re-scored out of sample under these new frozen ids, beside the v2
+# families (their ``full_development`` rows stay, labelled partly in-sample).
+PER_FOLD = "per_fold"
+B3_PER_FOLD_ID = "japan-131-exacta-category-b3-v3"
+C_PER_FOLD_ID = "japan-131-exacta-logscore-v3"
 LAMBDA2S = [FITTED, 1.0]
 
 
@@ -266,6 +274,63 @@ def score_races(
         *SEGMENT_CELLS,
     ]  # fmt: skip
     frame = pd.DataFrame(rows, columns=columns)
+    frame.attrs["excluded"] = excluded
+    return frame
+
+
+def _fold_holding(day: date, fold_lambdas: Sequence):
+    """The fold whose [test_start, test_end] window holds ``day``, or None."""
+    for fold in fold_lambdas:
+        if fold.test_start <= day <= fold.test_end:
+            return fold
+    return None
+
+
+def score_races_per_fold(
+    races: Iterable[Mapping],
+    *,
+    holdout_day: Callable[[str, date], bool],
+    fold_lambdas: Sequence,
+) -> pd.DataFrame:
+    """``score_races``' frame with each race scored at the lambda2 of the fold whose test window
+    holds its date (#284), and a ``lambda2`` column with the value used.
+
+    ``fold_lambdas`` are objects with ``test_start``, ``test_end`` and ``lambda2`` (None when the
+    fold has no training race). A race on a holdout day is dropped first, before its exacta rows
+    are read (``holdout_day``); then a race in no window is counted as ``no_test_window`` and a
+    race in a fold without a lambda2 as ``no_training_races``, in ``frame.attrs["excluded"]``
+    beside ``score_races``' own reasons."""
+    excluded: dict[str, int] = {}
+
+    def count(reason: str, n: int = 1) -> None:
+        excluded[reason] = excluded.get(reason, 0) + n
+
+    by_fold: dict[int, list[tuple[int, Mapping, float]]] = {}
+    for position, race in enumerate(races):
+        if holdout_day("japan", race["race_date"]):
+            count("holdout_day")
+            continue
+        fold = _fold_holding(race["race_date"], fold_lambdas)
+        if fold is None:
+            count("no_test_window")
+        elif fold.lambda2 is None:
+            count("no_training_races")
+        else:
+            by_fold.setdefault(id(fold), []).append((position, race, fold.lambda2))
+    parts = []
+    for chunk in by_fold.values():
+        lam = chunk[0][2]
+        part = score_races([r for _, r, _ in chunk], holdout_day=holdout_day, lambda2=lam)
+        for reason, n in part.attrs["excluded"].items():
+            count(reason, n)
+        position = {r["race_id"]: pos for pos, r, _ in chunk}
+        parts.append(part.assign(lambda2=lam, _pos=part["race_id"].map(position)))
+    if parts:
+        frame = pd.concat(parts, ignore_index=True)
+        frame = frame.sort_values("_pos", kind="stable").drop(columns="_pos")
+        frame = frame.reset_index(drop=True)
+    else:
+        frame = score_races([], holdout_day=holdout_day).assign(lambda2=pd.Series(dtype=float))
     frame.attrs["excluded"] = excluded
     return frame
 
@@ -563,3 +628,58 @@ def family_specs() -> dict[str, dict]:
         E2_ID: _e2(_E2_V5_INPUTS),
     }
     return {fid: {**spec, "supersedes": SUPERSEDES[fid]} for fid, spec in specs.items()}
+
+
+def per_fold_family_specs() -> dict[str, dict]:
+    """The #284 families as plain-JSON dicts (a fresh copy per call), beside ``family_specs``:
+    B3 and C with lambda2 fitted per walk-forward fold. Each is its v2 spec with the lambda2 (and
+    the family size that counted two lambda2 values) changed, the fold scheme it was frozen
+    under and the fit's definition; the v2 specs and their hashes stand. A changed folds.yaml is
+    a new family."""
+    v2 = family_specs()
+    fit = {
+        "method": "ordering.fit_ordering(family='discounted_harville').lambdas[0], the "
+        "maximum-likelihood stage-1 fit",
+        "folds": "core.eval.folds.walk_forward over every development race date from "
+        "2014-06-07 under fold_scheme (folds.yaml)",
+        "training": "the fold's own training races only: development out-of-fold (#114) races "
+        "dated on or before the fold's train_end, which the embargo puts before its first "
+        "scored race; no race of the test window, the embargo or a later fold is in the fit",
+        "scoring": "each race at the lambda2 of the fold whose test window holds its date",
+        "first_fold": "the first scored quarter (2020-Q1) has no training race, so no lambda2: "
+        "its races are left out and counted as no_training_races",
+    }
+    common = {
+        "lambda2": PER_FOLD,
+        "ordering": "discounted Harville; lambda2 fitted per walk-forward fold on the fold's "
+        "training races alone (out of sample), its fit id recorded with each run; "
+        "full_development, #115's single fit over the scored races, stays in the v2 family "
+        "beside these rows",
+        "relabel": "owner 2026-11-27 on #284: the per-fold rows and the full_development rows "
+        "(partly in-sample) are both kept as ranked rows",
+        "lambda2_fit": fit,
+        "fold_scheme": dataclasses.asdict(load_country_scheme("japan")),
+    }
+    revision = (
+        "v3 (#284, owner 2026-11-27): lambda2 fitted per walk-forward fold instead of #115's "
+        "single full-development fit; the estimand, members and design are v2's"
+    )
+    b3 = {
+        **v2[E1_B3_ID],
+        **common,
+        "family_size": len(CATEGORIES) * len(SEGMENT_CELLS),
+        "role": "#284 out-of-fold diagnostic: the v2 B3 members at the per-fold lambda2",
+        "revision": revision,
+        "complements": E1_B3_ID,
+    }
+    c = {
+        **v2[C_ID],
+        **common,
+        "family_size": 1,
+        "role": "#284 out-of-fold log-score total at the per-fold lambda2",
+        "revision": revision,
+        "complements": C_ID,
+    }
+    for spec in (b3, c):
+        spec.pop("supersedes")
+    return {B3_PER_FOLD_ID: b3, C_PER_FOLD_ID: c}
