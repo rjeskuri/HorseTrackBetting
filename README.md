@@ -1,6 +1,6 @@
 # HorseTrackBetting
 
-Research and tooling for pari-mutuel horse racing. A bet pays at the final odds, so the work asks whether a model adds anything over the final price, and measures it honestly: walk-forward splits, a paired bootstrap, a locked holdout per country. A null result is an acceptable answer.
+Research and tooling for pari-mutuel horse racing. A bet pays at the final odds, so the work ranks every option (race type, pool, combination, rule, model) by its return per ¥100 at the final price and keeps every result, nulls and failed variants included, on one leaderboard per country. It measures honestly: walk-forward splits, a paired bootstrap, and a locked holdout per country that checks whether the ranking holds up. A null result is an acceptable answer: the aim is to find the best of the options, played small and by hand, with every bet logged as data.
 
 ## Layout
 - `src/horsetrack/core`: only HTTP/ingest, storage, pari-mutuel pricing maths and the evaluation harness.
