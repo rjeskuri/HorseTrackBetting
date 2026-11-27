@@ -926,10 +926,12 @@ def _chunks(
 
 def _pool_check(votes: pd.DataFrame, board: pd.DataFrame) -> dict[str, int]:
     """The `__pool__` rows of both tables compared: gross and net votes x 100 against the board's
-    investment."""
-    v = votes.loc[votes["combination"].to_numpy() == POOL_ROW]
+    investment. The keys merge as objects: pandas 3 cannot outer-merge two Arrow string keys
+    without chunks, as a month without rows gives."""
+    keys = {"race_id": object, "pool": object}
+    v = votes.loc[votes["combination"].to_numpy() == POOL_ROW].astype(keys)
     b = board.loc[board["combination"].to_numpy() == POOL_ROW, ["race_id", "pool", "investment"]]
-    m = v.merge(b, on=["race_id", "pool"], how="outer", indicator=True)
+    m = v.merge(b.astype(keys), on=["race_id", "pool"], how="outer", indicator=True)
     both = m["_merge"].to_numpy() == "both"
     investment = _numbers(m["investment"])
     gross = UNIT * _numbers(m["votes"])
