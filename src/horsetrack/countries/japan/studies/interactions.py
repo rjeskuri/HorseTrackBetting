@@ -41,7 +41,10 @@ every D9 fold, from 2020-Q1. Per block member: its standalone paired ΔLL agains
 its ΔLL at the final price, the paired ΔLL of its stage-2 meta against the base's stage-2 meta; its
 C4 marginal against the market-only meta; and its tail return at the final price, the realised
 Win return per unit stake of every scored runner banded by its stage-2 claim p x O_final
-(`core.eval.tail.tail_curve`, D7's meeting bounds), the top band a leaderboard row.
+(`core.eval.tail.tail_curve`, D7's meeting bounds), the top band a leaderboard row. A runner is
+settled at the store's recorded Win dividend for its race and horse number (`win_paid`): a JRA
+dead heat pays each winner its own dividend, and a dividend paid before a later disqualification
+stands.
 
 Every variant, failures included, is a registry record; the JRA store is netkeiba results (no
 JRDB, no JRA-VAN), so the records carry the source `jra` and their figures are public. Holdout
@@ -49,6 +52,18 @@ days are never read (`read_store_table`, `split_off`); the holdout is not opened
 adopted (D16, D19: ranked, not adopted). A horse x jockey estimate is predictive, never causal
 (booking endogeneity, 05 §4.2), and never a bet trigger. A `--trial` run's records go to the
 family's `-trial` family with `params.trial` set, and it never freezes the family's spec.
+
+The level-1 fits are checkpointed (`save_checkpoint`, one file published by rename) under a key of
+the spec's level1, tau and folds sections and the store builds they read (`level1_key`), so a
+stopped launch resumes and a level-2 amendment re-scores the saved out-of-fold predictions. Each
+member-fold keeps the git revision it was fitted at, and every record after level 1 names them
+(`params.fit_revisions`); every failed member-fold fit, an earlier launch's included, is a failed
+record of its own (`fit_failures`); a stopped or failed launch records every planned variant as
+failed.
+
+Family `japan-c2-interactions-final-win-v2` supersedes `japan-c2-interactions-final-win` (#93's
+review, round 1), whose records stay in the registry: v1 settled a winner at its final odds over
+the race's number of winners, and its records named one git revision for fits made at two.
 """
 
 from __future__ import annotations
@@ -56,6 +71,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import re
 import resource
 import tempfile
@@ -66,9 +82,11 @@ from typing import Annotated
 
 import numpy as np
 import pandas as pd
+import pyarrow.dataset as ds
 import typer
 
 from horsetrack.core import paths
+from horsetrack.core.config import load_source
 from horsetrack.core.eval.folds import Fold, load_country_scheme, walk_forward
 from horsetrack.core.eval.holdout import _git_sha, split_off
 from horsetrack.core.eval.registry import RunRecord, default_registry, summary_dir, write_summary
@@ -112,10 +130,17 @@ from horsetrack.countries.japan.studies.meta import (
 
 COUNTRY = "japan"
 TICKET = 93
-FAMILY_ID = "japan-c2-interactions-final-win"
+FAMILY_ID = "japan-c2-interactions-final-win-v2"
 TRIAL_FAMILY_ID = f"{FAMILY_ID}-trial"
+SUPERSEDES = "japan-c2-interactions-final-win"
+SUPERSEDED_SPEC = "3060dfbf9626cf7d46186153de6ee4b6c0b65111acadbefc464d5aca300bded0"
 ARTIFACTS = "interaction_artifacts"
-SOURCES = ("jra",)
+SOURCE = "jra"
+SOURCES = (SOURCE,)
+WIN = "WIN"  # the dividends table's Win pool code
+DIVIDEND_COLUMNS = ["race_id", "pool", "combination", "dividend", "is_refund"]
+LEVEL1_SECTIONS = ("level1", "tau", "folds")  # the spec sections the level-1 fits depend on
+META = "__meta__"  # the checkpoint's metadata entry
 BOOTSTRAP_SEED = 93
 RESULTS_FROM = c2_rating.RATING_FROM  # 2010-01-01
 DISCOUNTS = (1.0, 0.5, 0.25)
@@ -208,6 +233,14 @@ def build_spec(scheme, bootstrap: dict) -> dict:
     }
     return {
         "family_id": FAMILY_ID,
+        "supersedes": f"{SUPERSEDES} (spec sha256 {SUPERSEDED_SPEC}): its tail settled a winner "
+        "at its final Win odds over the race's number of winners, not at the recorded dividend "
+        "(a JRA dead heat pays each winner its own dividend, and a dividend paid before a later "
+        "disqualification stands), and its records named one git revision for level-1 fits made "
+        "at two; found in #93's review (round 1). Its level1, tau and folds sections are kept "
+        "unchanged, so its saved level-1 fits are re-scored, not refitted (adopt_v1_checkpoint: "
+        "a member-fold's revision is the stopped second launch's where its u equals that "
+        "launch's saved u bit for bit, else the completing launch's)",
         "ticket": TICKET,
         "hypotheses": {
             "E35": "horse x jockey: tau_hj < 0.1 and its cells add nothing at the final price "
@@ -237,10 +270,11 @@ def build_spec(scheme, bootstrap: dict) -> dict:
             "and folds), out of fold over the scored races, with the same bounds",
             "C4 marginal": "descriptive: each member's stage-2 meta against the market-only "
             "stage-2 meta, paired, the same bounds",
-            "tail": "descriptive: realised Win return per unit stake (O_final x won, a dead "
-            "heat's co-winner at 1/m) of every scored runner by band of its stage-2 claim "
-            f"p x O_final, quantile bands at {list(TAIL_QUANTILES)}, D7's meeting bounds; the "
-            "top band (claims from the 99th percentile) is the leaderboard row",
+            "tail": "descriptive: realised Win return per unit stake (the store's recorded Win "
+            "dividend for the runner's race and horse number over the unit stake, 0 without "
+            "one) of every scored runner by band of its stage-2 claim p x O_final, quantile "
+            f"bands at {list(TAIL_QUANTILES)}, D7's meeting bounds; the top band (claims from "
+            "the 99th percentile) is the leaderboard row",
             "cells": "descriptive: n_prior (cell_sizes) per out-of-fold starter, by band and "
             "quantile, per interaction; n_half = 1 / (I tau^2) at 08 §3.3's I = "
             f"{INFO_PER_RUN} and at the base's own mean information per run on the last fold, "
@@ -306,9 +340,20 @@ def build_spec(scheme, bootstrap: dict) -> dict:
             "scored rows",
             "market_only": "studies.ability.market_only_oof: u = beta * ln q on the same rows "
             "and folds",
-            "tail": "claim = stage-2 p x win_odds (cleaned final decimal odds); return = "
-            "win_odds x won / m (m co-winners); clusters meeting_id",
+            "dividends": "the store's dividends rows of pool WIN for the frame's races "
+            "(development days only), joined by race_id and the runners' horse_no; each "
+            "combination one horse number, at most one row per race and number",
+            "tail": "claim = stage-2 p x win_odds (cleaned final decimal odds); return = the "
+            "runner's WIN dividend / the source's unit stake (config jra.yaml), the stake on a "
+            "refund row, 0 without a row; clusters meeting_id",
         },
+        "provenance": "each level-1 member-fold keeps the git revision (HEAD) it was fitted at, "
+        "in the checkpoint and in every later record's params.fit_revisions (member -> revision "
+        "-> outer folds); the checkpoint is keyed by the level1, tau and folds sections and the "
+        "runners and races builds, so a change elsewhere re-scores the saved fits; every failed "
+        "member-fold fit, an earlier launch's included, is a failed record "
+        "fit:<member>:<fold>@<revision>; a stopped or failed launch records every planned "
+        "variant as failed",
         "folds": {
             "level1": "D9's quarters (studies.ability.level1_quarters) over the level-1 dates; "
             "each quarter trains on every earlier row to its embargo",
@@ -470,7 +515,9 @@ def info_per_run(u: np.ndarray, frame: pd.DataFrame) -> float:
 @dataclasses.dataclass
 class Level1:
     """Each member's out-of-fold u (NaN off the outer folds), each fold's tau points and extra
-    feature coefficients, the last fold's tau intervals, errors and timings."""
+    feature coefficients, the last fold's tau intervals, timings, each member-fold's fitting
+    revision (`fits`: fold -> member -> git sha), every failed member-fold fit of this and earlier
+    launches (`failures`), and the members still without a prediction on a fold (`errors`)."""
 
     u: dict[str, np.ndarray]
     taus: list[dict]
@@ -480,6 +527,56 @@ class Level1:
     seconds: dict[str, float]
     local: dict[str, list[str]]
     prior_sd: dict[str, dict[str, float]] = dataclasses.field(default_factory=dict)
+    fits: dict[str, dict[str, str]] = dataclasses.field(default_factory=dict)
+    failures: list[dict] = dataclasses.field(default_factory=list)
+
+
+def _json(value) -> str:
+    """`value` as JSON, a numpy scalar as its Python value."""
+    return json.dumps(value, default=lambda x: x.item() if isinstance(x, np.generic) else str(x))
+
+
+def _plain(value):
+    """`value` as it reads back from JSON."""
+    return json.loads(_json(value))
+
+
+def _pairs(picks: list[dict]) -> list[tuple]:
+    return [(p["fold"], p["drift_var_per_day"], p["scale"]) for p in picks]
+
+
+def save_checkpoint(path: Path, out: Level1, done: set[str], picks: list[dict]) -> None:
+    """The level-1 state as one .npz (each member's u and the metadata), written to a temporary
+    file beside it and published by rename: a stop mid-save leaves the last complete one."""
+    meta = {
+        "taus": out.taus,
+        "done": sorted(done),
+        "seconds": out.seconds,
+        "local": out.local,
+        "prior_sd": out.prior_sd,
+        "fits": out.fits,
+        "failures": out.failures,
+        "intervals": out.intervals,
+        "info": out.info,
+        "picks": _plain(picks),
+    }
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            np.savez(fh, **{META: np.array(_json(meta))}, **out.u)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def load_checkpoint(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
+    """A checkpoint's metadata and each member's u."""
+    with np.load(path) as arrays:
+        meta = json.loads(arrays[META].item())
+        return meta, {m: np.array(arrays[m]) for m in MEMBERS}
 
 
 def _numeric(frame: pd.DataFrame) -> pd.DataFrame:
@@ -519,12 +616,14 @@ def level1_members(
     outer: list[Fold],
     picks: list[dict],
     *,
+    revision: str,
     intervals: bool = True,
     checkpoint: Path | None = None,
     log=print,
 ) -> Level1:
     """Each member fitted on every outer fold's training rows and predicting its test rows, the
-    fold's rating pair as the rating feature; tau intervals on the last fold's fits."""
+    fold's rating pair as the rating feature; tau intervals on the last fold's fits. A fit is
+    stamped with `revision`; a checkpoint's fits, failures and intervals are carried forward."""
     n = len(frame)
     data = _numeric(frame)
     out = Level1(
@@ -538,20 +637,30 @@ def level1_members(
     )
     done, warm = set(), {}  # warm: each member's last fit, to start the next fold's from
     if checkpoint is not None and checkpoint.exists():
-        saved = json.loads(checkpoint.with_suffix(".json").read_text("utf-8"))
-        arrays = np.load(checkpoint)
-        out.u = {m: np.array(arrays[m]) for m in MEMBERS}
+        saved, out.u = load_checkpoint(checkpoint)
+        if _pairs(saved["picks"]) != _pairs(_plain(picks)):
+            raise ValueError(f"{checkpoint.name} was fitted at other rating pairs than this run's")
         out.taus, done = saved["taus"], set(saved["done"])
         out.seconds, out.local, out.prior_sd = saved["seconds"], saved["local"], saved["prior_sd"]
-        # a member-fold without a prediction (one that failed) is fitted again, and its error,
-        # if it recurs, recorded again
-        log(f"  resumed {len(done)} folds from {checkpoint.name}; earlier errors {saved['errors']}")
+        out.fits, out.failures = saved["fits"], saved["failures"]
+        out.intervals, out.info = saved["intervals"], float(saved["info"])
+        # a member-fold without a prediction (one that failed) is fitted again; its earlier
+        # failures stay, each a record
+        log(f"  resumed {len(done)} folds from {checkpoint.name}; {len(out.failures)} failed fits")
     started = time.monotonic()
     for i, (fold, pick) in enumerate(zip(outer, picks, strict=True)):
         label = fold.test_start.isoformat()
         last = i == len(outer) - 1
-        todo = [m for m in MEMBERS if np.isnan(out.u[m][fold.test_idx]).any()]
-        if label in done and not todo and not (last and intervals):
+        todo = {m for m in MEMBERS if np.isnan(out.u[m][fold.test_idx]).any()}
+        if last and intervals:  # the tau intervals are the last fold's fits'
+            todo |= {
+                m
+                for m, (blocks, _) in MEMBERS.items()
+                if any(b.name not in out.intervals for b in blocks)
+            }
+        if last and not np.isfinite(out.info):  # the base's information per run
+            todo.add(BASE)
+        if label in done and not todo:
             continue
         pair = (pick["drift_var_per_day"], pick["scale"])
         fold_data = data.assign(**{RATING: rating[pair].to_numpy()})
@@ -559,7 +668,7 @@ def level1_members(
         row = next((dict(t) for t in out.taus if t["fold"] == label), {"fold": label})
         row |= {"train_rows": len(train), "test_rows": len(test)}
         for member, (blocks, _) in MEMBERS.items():
-            if member not in todo and not (last and intervals and (blocks or member == BASE)):
+            if member not in todo:
                 continue
             t0 = time.monotonic()
             try:
@@ -596,31 +705,140 @@ def level1_members(
                             }
                     del fit
                 out.u[member][fold.test_idx] = u
-            except Exception as exc:  # recorded by the member's variants, never dropped
-                out.errors.setdefault(member, f"{label}: {type(exc).__name__}: {exc}")
+                out.fits.setdefault(label, {})[member] = revision
+            except Exception as exc:  # a record of its own (fit_failures), never dropped
+                failure = {"fold": label, "member": member, "revision": revision}
+                failure["error"] = f"{type(exc).__name__}: {exc}"
+                if failure not in out.failures:
+                    out.failures.append(failure)
             out.seconds[member] = out.seconds.get(member, 0.0) + time.monotonic() - t0
         out.taus = [t for t in out.taus if t["fold"] != label] + [row]
         done.add(label)
         log(f"  fold {label} ({i + 1}/{len(outer)}): {_progress(started)}")
         if checkpoint is not None:
-            np.savez(checkpoint, **out.u)
-            checkpoint.with_suffix(".json").write_text(
-                json.dumps(
-                    {
-                        "taus": out.taus,
-                        "errors": out.errors,
-                        "done": sorted(done),
-                        "seconds": out.seconds,
-                        "local": out.local,
-                        "prior_sd": out.prior_sd,
-                    }
-                ),
-                "utf-8",
-            )
+            save_checkpoint(checkpoint, out, done, picks)
+    for member in MEMBERS:  # each member's variants fail while a fold has no prediction
+        gaps = [
+            f.test_start.isoformat() for f in outer if np.isnan(out.u[member][f.test_idx]).any()
+        ]
+        if gaps:
+            why = [
+                f["error"] for f in out.failures if (f["member"], f["fold"]) == (member, gaps[0])
+            ]
+            out.errors[member] = f"{gaps[0]}: {why[-1] if why else 'no prediction'}"
     return out
 
 
+def fit_revisions(fits: dict[str, dict[str, str]], order: list[str]) -> dict[str, dict]:
+    """member -> fitting revision -> the outer folds (of `order`) it fitted, as runs of
+    consecutive folds, 'first..last' (one fold as itself)."""
+    out = {}
+    for member in MEMBERS:
+        by: dict[str, list[int]] = {}
+        for i, label in enumerate(order):
+            if (rev := fits.get(label, {}).get(member)) is not None:
+                by.setdefault(rev, []).append(i)
+        spans = {}
+        for rev, pos in by.items():
+            runs = [[pos[0], pos[0]]]
+            for p in pos[1:]:
+                if p == runs[-1][1] + 1:
+                    runs[-1][1] = p
+                else:
+                    runs.append([p, p])
+            spans[rev] = [order[a] if a == b else f"{order[a]}..{order[b]}" for a, b in runs]
+        out[member] = spans
+    return out
+
+
+def fit_failures(failures: list[dict], fold_scheme: str) -> list[Variant]:
+    """A failed variant per failed member-fold fit (`Level1.failures`), the same whichever launch
+    records it."""
+    return [
+        Variant(
+            _hypothesis(f["member"]),
+            f"fit:{f['member']}:{f['fold']}@{f['revision'][:7]}",
+            fold_scheme,
+            {"model": "models/interactions.py", "study": "studies/interactions.py"}
+            | {"member": f["member"]},
+            {"discounts": list(DISCOUNTS), "stable_runs": STABLE_RUNS}
+            | {"fold": f["fold"], "fit_revision": f["revision"]},
+            error=f["error"],
+        )
+        for f in failures
+    ]
+
+
 # --------------------------------------------------------------------------- level 2
+
+
+def read_win_dividends(race_ids) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The development starters' horse numbers from the price era (race_id, horse_id,
+    horse_no) and the store's WIN dividend rows of `race_ids`, column-scoped."""
+    table = read_store_table(
+        "runners",
+        columns=["race_id", "race_date", "horse_id", "horse_no"],
+        start=PRICE_ERA_START,
+        end=date.max,
+        touches_price=False,
+    )
+    numbers, _ = split_off(table.to_pandas(date_as_object=False), "race_date", COUNTRY)
+    scope = ds.field("pool").isin([WIN]) & ds.field("race_id").isin(list(race_ids))
+    dataset = ds.dataset(paths.processed_dir(SOURCE) / "dividends.parquet", format="parquet")
+    dividends = dataset.to_table(columns=DIVIDEND_COLUMNS, filter=scope).to_pandas()
+    return numbers.drop(columns="race_date"), dividends
+
+
+def win_paid(
+    price: pd.DataFrame, numbers: pd.DataFrame, dividends: pd.DataFrame, unit: float
+) -> tuple[np.ndarray, dict]:
+    """Each priced starter's Win return per unit stake at the recorded dividends: its race's WIN
+    row for its horse number pays dividend / unit (a refund row, the stake); no row pays 0."""
+    keyed = price[["race_id", "horse_id"]].astype(object)
+    numbers = numbers.astype({"race_id": object, "horse_id": object})
+    rows = keyed.merge(numbers, on=["race_id", "horse_id"], how="left", validate="one_to_one")
+    horse_no = pd.to_numeric(rows["horse_no"]).astype(float)
+    if horse_no.isna().any():
+        raise ValueError(f"{int(horse_no.isna().sum())} priced starters have no horse number")
+    win = dividends.loc[dividends["pool"].eq(WIN)]
+    refund = win["is_refund"].eq(True).to_numpy(dtype=bool, na_value=False)
+    pays = np.where(refund, 1.0, pd.to_numeric(win["dividend"]).to_numpy(dtype=float) / unit)
+    paying = pd.DataFrame(
+        {
+            "race_id": win["race_id"].astype(object).to_numpy(),
+            "horse_no": pd.to_numeric(win["combination"], errors="coerce").astype(float),
+            "pays": pays,
+        }
+    )
+    if paying["horse_no"].isna().any() or not np.isfinite(pays).all():
+        raise ValueError("a WIN dividend row is not one horse number with a finite dividend")
+    joined = pd.DataFrame({"race_id": rows["race_id"], "horse_no": horse_no}).merge(
+        paying, on=["race_id", "horse_no"], how="left", validate="many_to_one"
+    )
+    paid = joined["pays"].fillna(0.0).to_numpy(dtype=float)
+    won = price["won"].to_numpy(dtype=bool)
+    races = pd.Series(price["race_id"].astype(object).unique())
+    counts = {
+        "win_dividend_rows": len(paying),
+        "win_dividend_rows_without_a_priced_starter": int(
+            len(paying) - joined["pays"].notna().sum()
+        ),
+        "races_without_a_win_dividend": int((~races.isin(set(paying["race_id"]))).sum()),
+        "paid_starters": int((paid > 0).sum()),
+        "paid_starters_not_placed_first": int(((paid > 0) & ~won).sum()),
+        "first_placed_starters_without_a_dividend": int((won & (paid == 0)).sum()),
+        "starters_paid_otherwise_than_odds_over_winners": _settled_otherwise(price, paid),
+    }
+    return paid, counts
+
+
+def _settled_otherwise(frame: pd.DataFrame, paid) -> int:
+    """How many of the frame's starters `paid` settles otherwise than v1's rule did (a placed
+    first at its final odds over the race's number of them, others 0)."""
+    won = frame["won"].to_numpy(dtype=bool)
+    m = frame.groupby("race_id")["won"].transform("sum").to_numpy(dtype=float)
+    v1 = np.where(won, frame["win_odds"].to_numpy(dtype=float) / np.maximum(m, 1.0), 0.0)
+    return int((np.abs(np.asarray(paid, dtype=float) - v1) > 1e-9).sum())
 
 
 def member_frame(price: pd.DataFrame, level1: pd.DataFrame, u: dict, first) -> tuple:
@@ -651,13 +869,11 @@ def member_frame(price: pd.DataFrame, level1: pd.DataFrame, u: dict, first) -> t
 
 def _tail(p: pd.Series, scored: Scored, spec: dict, name: str) -> tuple[list, dict]:
     rows = scored.rows
-    won = rows["won"].to_numpy(dtype=float)
-    m = rows.groupby("race_id")["won"].transform("sum").to_numpy(dtype=float)
     odds = rows["win_odds"].to_numpy(dtype=float)
     bets = pd.DataFrame(
         {
             "claim": p.reindex(rows.index).to_numpy() * odds,
-            "ret": np.where(won > 0, odds / np.maximum(m, 1.0), 0.0),
+            "ret": rows["paid"].to_numpy(dtype=float),  # at the recorded dividend (win_paid)
             "meeting_id": rows["meeting_id"].to_numpy(),
         }
     )
@@ -707,9 +923,17 @@ class Inputs:
 
 
 def compute_study(
-    inputs: Inputs, spec: dict, scheme, *, checkpoint: Path | None = None, log=print
+    inputs: Inputs,
+    spec: dict,
+    scheme,
+    *,
+    checkpoint: Path | None = None,
+    revision: str | None = None,
+    log=print,
 ) -> tuple[Study, pd.DataFrame]:
-    """Every variant, and the per-runner export. Pure but for the optional fit checkpoint."""
+    """Every variant, and the per-runner export. Pure but for the optional fit checkpoint; the
+    fits are stamped with `revision` (default: git HEAD)."""
+    revision = revision or _git_sha()
     level1, price = inputs.level1, inputs.price
     study = Study(counts=dict(inputs.counts))
     fold_scheme = "walk_forward:" + json.dumps(spec["folds"], sort_keys=True)
@@ -800,8 +1024,21 @@ def compute_study(
         ),
     )
     log(f"level-1 fits: {len(outer)} folds x {len(MEMBERS)} members, pairs {sorted(needed)}")
-    l1 = level1_members(level1, rating, outer, picks, checkpoint=checkpoint, log=log)
+    l1 = level1_members(
+        level1, rating, outer, picks, revision=revision, checkpoint=checkpoint, log=log
+    )
     del rating
+    revisions = fit_revisions(l1.fits, [f.test_start.isoformat() for f in outer])
+    params = params | {"fit_revisions": revisions}  # every record from here on names them
+    study.tables["fit_revisions"] = [
+        {"member": m, "revision": rev, "folds": ", ".join(spans)}
+        | {"n": sum(by_member.get(m) == rev for by_member in l1.fits.values())}
+        for m, by in revisions.items()
+        for rev, spans in by.items()
+    ]
+    study.counts["level1_fit_revisions"] = len({rev for by in revisions.values() for rev in by})
+    study.counts["level1_failed_fits"] = len(l1.failures)
+    study.variants += fit_failures(l1.failures, fold_scheme)
     study.counts |= {f"level1_seconds[{m}]": round(s) for m, s in l1.seconds.items()}
     study.tables["tau_by_fold"] = l1.taus
     study.tables["tau"] = []
@@ -891,6 +1128,11 @@ def compute_study(
     rows = rows.reset_index(drop=True)
     scored = Scored.of(rows, rfolds)
     study.counts |= {"scored_folds": len(rfolds), "scored_races": scored.n_races}
+    sr = scored.rows
+    study.counts |= {
+        "scored_paid_starters_not_placed_first": int((sr["paid"].gt(0) & ~sr["won"]).sum()),
+        "scored_starters_paid_otherwise_than_odds_over_winners": _settled_otherwise(sr, sr["paid"]),
+    }
     base = comp | {"score": "winner_log_loss", "baseline": "calibrated_market"}
     meta_params = params | {"ridge": 0.0, "bounds": "none", "quadratic": False, "segments": []}
 
@@ -1070,12 +1312,19 @@ def load_inputs(log=print) -> Inputs:
     p_runners, p_races = read_development()
     price, price_counts = store_frame(p_runners, p_races)
     del p_runners, p_races
-    counts |= {f"level2_{k}": v for k, v in price_counts.items()}
+    numbers, dividends = read_win_dividends(price["race_id"].unique())
+    paid, paid_counts = win_paid(
+        price, numbers, dividends, float(load_source(COUNTRY, SOURCE).unit_stake)
+    )
+    price["paid"] = paid
+    del numbers, dividends
+    counts |= {f"level2_{k}": v for k, v in (price_counts | paid_counts).items()}
     log(f"read {len(level1)} level-1 starters, {len(price)} priced starters")
     return Inputs(level1=level1, results=results, price=price, counts=counts)
 
 
 SECTIONS = (
+    ("fit_revisions", "Level-1 fitting revision (git HEAD at the fit) per member and outer fold"),
     ("cells", "Cell sizes: prior runs per out-of-fold starter's cell (from 2015-Q1)"),
     ("cell_bands", "Cell sizes by band of n_prior (share of out-of-fold starters)"),
     ("horse_x_trainer", "Horse x trainer (not fitted: aliased where the trainer is constant)"),
@@ -1084,7 +1333,7 @@ SECTIONS = (
     ("tau_by_fold", "tau and extra-feature coefficients per outer fold (empirical Bayes)"),
     ("delta", "Stage-2 ΔLL against the D4 calibrated market (out of fold; meeting bootstrap)"),
     ("comparisons", "Paired ΔLL (positive: the first beats the second; meeting bootstrap)"),
-    ("tail", "Tail return at the final price by band of stage-2 claim (per ¥100, flat stakes)"),
+    ("tail", "Tail return by band of stage-2 claim (per ¥100, flat, at the recorded dividends)"),
     ("coefficients", "Stage 2 per fold (unbounded; Wald 95% two-sided and meeting one-sided 95%)"),
     ("pooled", "Stage-2 alpha pooled over the scored rows (in-sample)"),
 )
@@ -1125,6 +1374,30 @@ def artifact_stem(spec_hash: str, builds: dict, trial: bool) -> str:
     return f"interactions-{COUNTRY}-{spec_hash[:12]}-{digest[:12]}" + ("-trial" if trial else "")
 
 
+def level1_key(spec: dict, builds: dict) -> str:
+    """The level-1 checkpoint's key: the spec's level1, tau and folds sections and the store
+    builds level 1 reads. A change to either starts the fits afresh; a change elsewhere in the
+    spec (level 2, the tail) re-scores the saved fits."""
+    part = {"spec": {k: spec[k] for k in LEVEL1_SECTIONS}, "builds": dict(builds)}
+    text = json.dumps(part, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest()[:12]
+
+
+def checkpoint_path(spec: dict, builds: dict, trial: bool) -> Path:
+    key = level1_key(spec, builds)
+    name = f"interactions-{COUNTRY}-level1-{key}" + ("-trial" if trial else "")
+    return paths.data_dir() / "features" / COUNTRY / f"{name}.npz"
+
+
+def _file_build(name: str) -> str:
+    """A store table's build, '<path>@<sha256 prefix>' (`store_builds`' form)."""
+    digest = hashlib.sha256()
+    with open(paths.processed_dir(SOURCE) / f"{name}.parquet", "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return f"processed/{SOURCE}/{name}.parquet@{digest.hexdigest()[:16]}"
+
+
 def _record(variant, git_sha, builds, spec_hash, trial, *, artifacts=True) -> RunRecord:
     params = dict(variant.params) | {"spec_sha256": spec_hash}
     if trial:
@@ -1152,6 +1425,24 @@ def _record(variant, git_sha, builds, spec_hash, trial, *, artifacts=True) -> Ru
     )
 
 
+def append_new(registry, records: list[RunRecord]) -> tuple[list[str], list[str]]:
+    """Append each record its family does not hold yet (equal but for git_sha); each record's
+    run id (the held one's when held), and the variants appended."""
+    held = {}
+    for family in {r.family_id for r in records}:
+        held |= {_run_id(dataclasses.replace(r, git_sha="")): r for r in registry.records(family)}
+    ids, appended = [], []
+    for record in records:
+        key = _run_id(dataclasses.replace(record, git_sha=""))
+        if key in held:
+            ids.append(_run_id(held[key]))
+            continue
+        ids.append(registry.append(record))
+        held[key] = record
+        appended.append(record.variant)
+    return ids, appended
+
+
 class _Families:
     """The registry restricted to some families, for `write_summary`."""
 
@@ -1175,7 +1466,7 @@ def write_committed_summary(registry, log=print) -> list[str]:
     index line (the index lists exactly the committed files) until `write_summary` can split
     it (#330). Returns the families kept out of the tree."""
     directory = summary_dir(COUNTRY)
-    mine = _Families(registry, {FAMILY_ID, TRIAL_FAMILY_ID})
+    mine = _Families(registry, {FAMILY_ID, TRIAL_FAMILY_ID, SUPERSEDES})
     if not mine.records():
         return []
     held = []
@@ -1247,43 +1538,60 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
         spec_hash = registry.freeze_family(FAMILY_ID, spec)
     family = TRIAL_FAMILY_ID if trial else FAMILY_ID
     git_sha = _git_sha()
-    builds = store_builds()
+    level1_builds = store_builds()
+    builds = level1_builds | {f"{SOURCE}_dividends": _file_build("dividends")}
     stem = artifact_stem(spec_hash, builds, trial)
-    checkpoint = paths.data_dir() / "features" / COUNTRY / f"{stem}-level1.npz"
+    checkpoint = checkpoint_path(spec, level1_builds, trial)
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    fold_scheme = "walk_forward:" + json.dumps(spec["folds"], sort_keys=True)
     started = time.monotonic()
     try:
         inputs = load_inputs(log=log)
-        study, export = compute_study(inputs, spec, scheme, checkpoint=checkpoint, log=log)
-    except Exception as exc:
-        fold_scheme = "walk_forward:" + json.dumps(spec["folds"], sort_keys=True)
-        for hypothesis, name in planned():
-            failed = Variant(
+        study, export = compute_study(
+            inputs, spec, scheme, checkpoint=checkpoint, revision=git_sha, log=log
+        )
+    except (Exception, KeyboardInterrupt) as exc:  # a launch stopped by hand is a run too
+        stopped = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        failed = [
+            Variant(
                 hypothesis,
                 name,
                 fold_scheme,
                 {"study": "studies/interactions.py"},
-                {},
+                {"aborted_utc": stopped},
                 error=f"{type(exc).__name__}: {exc}",
             )
-            registry.append(_record(failed, git_sha, builds, spec_hash, trial, artifacts=False))
+            for hypothesis, name in planned()
+        ]
+        records = [_record(v, git_sha, builds, spec_hash, trial, artifacts=False) for v in failed]
+        append_new(registry, records)
+        if checkpoint.exists():  # its failed fits, in case no launch resumes it
+            saved, _ = load_checkpoint(checkpoint)
+            fits = fit_failures(saved["failures"], fold_scheme)
+            append_new(
+                registry,
+                [_record(v, git_sha, builds, spec_hash, trial, artifacts=False) for v in fits],
+            )
         write_committed_summary(registry)
         raise
     log(f"computed ({_progress(started)})")
 
-    blank = {_run_id(dataclasses.replace(r, git_sha="")): r for r in registry.records(family)}
-    record_ids, appended = {}, []
-    for variant in study.variants:
-        record = _record(variant, git_sha, builds, spec_hash, trial)
-        same = blank.get(_run_id(dataclasses.replace(record, git_sha="")))
-        if same is None:
-            record_ids[variant.name] = registry.append(record)
-            appended.append(variant.name)
-        else:
-            record_ids[variant.name] = _run_id(same)
+    records = [
+        _record(v, git_sha, builds, spec_hash, trial, artifacts=not v.name.startswith("fit:"))
+        for v in study.variants
+    ]
+    ids, appended = append_new(registry, records)
+    record_ids = {r.variant: run_id for r, run_id in zip(records, ids, strict=True)}
+    by_revision: dict[str, int] = {}
+    for row in study.tables["fit_revisions"]:
+        by_revision[row["revision"]] = by_revision.get(row["revision"], 0) + row["n"]
+    fits = "level-1 fit revisions" + (" (a mixed run)" if len(by_revision) > 1 else "")
     about = {
         "family": f"`{family}`, spec sha256 `{spec_hash}`",
+        "supersedes": f"`{SUPERSEDES}`, spec sha256 `{SUPERSEDED_SPEC}`",
         "git": git_sha,
+        fits: ", ".join(f"`{r[:7]}` ({n} member-folds)" for r, n in sorted(by_revision.items())),
+        "level-1 checkpoint": f"`{checkpoint.name}`",
         "data": ", ".join(builds.values()),
         "artifacts (report, JSON, export)": f"`{stem}`",
         "records": f"{len(appended)} appended; {len(record_ids) - len(appended)} already held",
@@ -1314,6 +1622,113 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
         "records_appended": len(appended),
         "failed_variants": [v.name for v in study.variants if v.error],
     }
+
+
+# --------------------------------------------------------------------------- v1's launches
+# Run once by #93's review (round 1), kept as the code behind the records and the checkpoint
+# they wrote: `uv run python -c "from horsetrack.countries.japan.studies import interactions as
+# s; s.adopt_v1_checkpoint(); s.record_v1_launches()"`.
+
+V1_STEM = "interactions-japan-3060dfbf9626-faff16a8cb38"  # v1's artifacts and checkpoints
+V1_STOPPED = "56d0669b82969ffe6c96d06ae8300c389ba810b9"  # the second launch, stopped by hand
+V1_COMPLETING = "b5a726cc8ae34f8b349e8bfa2be01cb57abb8d13"  # the third, resumed the second's
+V1_LAUNCHES = {  # the stopped launches' errors; neither wrote a record
+    "022d4fc8281f479e5b1418d890a98a06a8914046": "KeyboardInterrupt: stopped by hand after 5 of "
+    "48 level-1 folds were saved (2015-01-01..2016-01-01): trainer_x_track's dense fit "
+    "alternated U and W; the next launch fitted every fold afresh",
+    V1_STOPPED: "KeyboardInterrupt: stopped by hand after 40 of 48 level-1 folds were saved "
+    "(2015-01-01..2024-10-01): horse_aptitude's empirical Bayes did not converge from "
+    "2024-04-01; the next launch resumed its checkpoint",
+}
+V1_NOTE = "appended 2026-11-28 by #93's review (round 1); the launch wrote no record"
+
+
+def adopt_v1_checkpoint(log=print) -> Path:
+    """v1's completed level-1 checkpoint (an .npz and a .json, no revisions) as this spec's. A
+    member-fold whose u equals, bit for bit, the stopped second launch's saved u was fitted at
+    V1_STOPPED; every other at V1_COMPLETING, which resumed that checkpoint and fitted only the
+    member-folds without a prediction and the last fold. The second launch's failed fits are its
+    saved folds without a prediction (it kept each member's first error only); the last fold's
+    tau intervals, the base's information per run and the rating pairs are v1's report's."""
+    features = paths.data_dir() / "features" / COUNTRY
+    scheme = load_country_scheme(COUNTRY)
+    spec = build_spec(scheme, {**bootstrap_settings(), "seed": BOOTSTRAP_SEED})
+    target = checkpoint_path(spec, store_builds(), trial=False)
+    if target.exists():
+        raise FileExistsError(f"{target} exists")
+    final = json.loads((features / f"{V1_STEM}-level1.json").read_text("utf-8"))
+    stopped = json.loads((features / f"{V1_STEM}-level1-at-56d0669.json").read_text("utf-8"))
+    report = json.loads((paths.reports_dir() / f"{V1_STEM}.json").read_text("utf-8"))
+    u = {}
+    for name in ("", "-at-56d0669"):
+        with np.load(features / f"{V1_STEM}-level1{name}.npz") as arrays:
+            u[name] = {m: np.array(arrays[m]) for m in MEMBERS}
+    level1, _ = level1_frame(*read_level1())
+    outer = [q for q in level1_quarters(level1["race_date"], scheme) if q.test_start >= LEVEL1_FROM]
+    labels = [f.test_start.isoformat() for f in outer]
+    if len(level1) != len(u[""][BASE]) or sorted(final["done"]) != labels:
+        raise ValueError("v1's checkpoint does not match the level-1 frame and its folds")
+    out = Level1(
+        u=u[""],
+        taus=final["taus"],
+        intervals={},
+        info=float(report["counts"]["level1_info_per_run_measured_last_fold"]),
+        errors={},
+        seconds=final["seconds"],
+        local=final["local"],
+        prior_sd=final["prior_sd"],
+    )
+    for fold, label in zip(outer, labels, strict=True):
+        for m in MEMBERS:
+            now, then = u[""][m][fold.test_idx], u["-at-56d0669"][m][fold.test_idx]
+            carried = not np.isnan(then).any() and np.array_equal(now, then)
+            out.fits.setdefault(label, {})[m] = V1_STOPPED if carried else V1_COMPLETING
+            if label in stopped["done"] and np.isnan(then).any():
+                kept = stopped["errors"].get(m, "")
+                error = kept.split(": ", 1)[1] if kept.startswith(f"{label}: ") else None
+                error = error or f"no error kept (the launch kept {m}'s first only: {kept})"
+                out.failures.append(
+                    {"fold": label, "member": m, "revision": V1_STOPPED, "error": error}
+                )
+    keys = ("member", "fold", "tau", "lower", "upper", "levels", "seconds")
+    out.intervals = {r["block"]: {k: r[k] for k in keys} for r in report["tables"]["tau"]}
+    save_checkpoint(target, out, set(final["done"]), report["tables"]["selection"])
+    log(f"{target.name}: {len(out.failures)} failed fits; fits {fit_revisions(out.fits, labels)}")
+    return target
+
+
+def record_v1_launches(log=print) -> list[str]:
+    """The records v1's stopped launches did not write, in v1's family under v1's spec: each
+    launch's planned variants as failed at its revision, and the second launch's failed fits
+    (from the adopted checkpoint). Returns their run ids."""
+    registry = default_registry(COUNTRY)
+    if registry.frozen_spec_hash(SUPERSEDES) != SUPERSEDED_SPEC:
+        raise ValueError(f"{SUPERSEDES} is not frozen with {SUPERSEDED_SPEC}")
+    scheme = load_country_scheme(COUNTRY)
+    spec = build_spec(scheme, {**bootstrap_settings(), "seed": BOOTSTRAP_SEED})
+    fold_scheme = "walk_forward:" + json.dumps(spec["folds"], sort_keys=True)
+    builds = store_builds()  # v1's records' builds
+    for r in registry.records(SUPERSEDES):
+        if r.fold_scheme != fold_scheme or not r.data_builds.items() >= builds.items():
+            raise ValueError(f"{SUPERSEDES}'s records have another fold scheme or store build")
+
+    def v1(variant: Variant, sha: str) -> RunRecord:
+        variant = dataclasses.replace(variant, params=variant.params | {"backfilled": V1_NOTE})
+        record = _record(variant, sha, builds, SUPERSEDED_SPEC, False, artifacts=False)
+        return dataclasses.replace(record, family_id=SUPERSEDES)
+
+    records = [
+        v1(Variant(h, name, fold_scheme, {"study": "studies/interactions.py"}, {}, error=e), sha)
+        for sha, e in V1_LAUNCHES.items()
+        for h, name in planned()
+    ]
+    saved, _ = load_checkpoint(checkpoint_path(spec, builds, trial=False))
+    stopped = [f for f in saved["failures"] if f["revision"] == V1_STOPPED]
+    records += [v1(v, V1_STOPPED) for v in fit_failures(stopped, fold_scheme)]
+    ids, appended = append_new(registry, records)
+    log(f"{SUPERSEDES}: {len(appended)} of {len(records)} records appended")
+    write_committed_summary(registry, log=log)
+    return ids
 
 
 def interaction_study_command(
