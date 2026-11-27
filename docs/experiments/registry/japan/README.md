@@ -14,6 +14,7 @@ per family, each holding that family's runs.
 - [japan-crowd-calibration-final-win](japan-crowd-calibration-final-win.md)
 - [japan-entropy-gradient-tail-conditioned](japan-entropy-gradient-tail-conditioned.md)
 - [japan-family-l-exotic-pool-choice](japan-family-l-exotic-pool-choice.md)
+- [japan-pool-depth-coplacer-v2](japan-pool-depth-coplacer-v2.md)
 - [japan-pool-depth-v1](japan-pool-depth-v1.md)
 - [japan-same-day-bias-final-win](japan-same-day-bias-final-win.md)
 - [japan-speed-top3-c3](japan-speed-top3-c3.md)

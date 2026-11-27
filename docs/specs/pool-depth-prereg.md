@@ -119,10 +119,24 @@ quantile is a follow-up) and BRACKET_QUINELLA (needs the horse-to-bracket map).
 
 ## After the run (2026-11-27; not part of the frozen spec)
 
-The three runs are in `docs/experiments/pool-depth-japan.md`. The `co-placer` run was recorded
-**failed** by its rule check (the share the rule reproduced: withheld (D21)). A co-placer variant
-on another rule (for instance that of `core.pricing.stake_back_share_dividend`) is a new family,
-frozen before it runs.
+Every run is listed, with its status and registry id, in `docs/experiments/pool-depth-japan.md`;
+the failures are kept.
+
+- First invocation, at `f21e0aa`: `depth` and `exacta-own-impact` scored, `co-placer` **failed** by
+  its rule check.
+- Review round 1 corrected how the frozen spec is applied, not the spec: the scans filter holdout
+  and pre-2014-06-07 rows inside the scan; `pool_votes` and `final_odds` keep confirmed records
+  only (データ区分 4 and 5: a day-before close, 2, is no final money); the co-placer check counts
+  every eligible paid combination, one without its votes or final price as not reproduced, and
+  gates each pool apart (both must reach `min_rule_match`); the exacta run is failed when every
+  pool-size bin is empty; a run's identity is a digest of what it read, and its private report is
+  `<variant stem>-<first 16 hex of its run id>.md`, not the spec-hash name above.
+- Second invocation, at `3ff70c5`, under the same frozen spec: `depth` and `exacta-own-impact`
+  scored, `co-placer` **failed** again by its rule check, on the rule itself rather than on
+  missing votes or prices: the frozen rule is not JRA's (see "Co-placer v2" below).
+- `japan-pool-depth-coplacer-v2`, frozen before its run, at `42b46cc`: `co-placer` **scored** by
+  its rule check in both pools (the shares: withheld (D21)). The Place and Wide capacity of this
+  study is that run's.
 
 ## Co-placer v2: the co-placer variant re-registered (2026-11-27)
 
@@ -131,9 +145,9 @@ spec sha256 **`82a471b219bfee2e65f53c5c12e2f66514757169d82184b6be45b35b2454e89a`
 `src/horsetrack/countries/japan/config/pool_depth_coplacer_v2.yaml` and frozen with `horsetrack
 japan pool-depth freeze --spec pool_depth_coplacer_v2`.
 
-Why: `japan-pool-depth-v1`'s co-placer runs were recorded **failed** by their rule check, with
-every eligible paid combination present in the votes and final odds. The frozen rule is applied
-as registered; it is the rule that does not reproduce JRA's payouts. It returns the paying
+Why: `japan-pool-depth-v1`'s co-placer runs were recorded **failed** by their rule check, and not
+for want of votes or prices. The frozen rule is applied as registered; it is the rule that does not
+reproduce JRA's payouts. It returns the paying
 combinations' own money untaxed, while JRA takes the payout rate on the whole net pool, those
 stakes included. This registration was written after v1's private report, whose pre-registered
 diagnostic gives how often the rule below reproduces the payouts (withheld, D21); it changes the

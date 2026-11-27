@@ -11,3 +11,6 @@ built on a licensed source shows no values here.
 | P432 | depth | scored | withheld (licensed source) | | | | |
 | P432 | co-placer | failed | withheld (licensed source) | | | | |
 | P432 | exacta-own-impact | scored | withheld (licensed source) | | | | |
+| P432 | depth | scored | withheld (licensed source) | | | | |
+| P432 | co-placer | failed | withheld (licensed source) | | | | |
+| P432 | exacta-own-impact | scored | withheld (licensed source) | | | | |

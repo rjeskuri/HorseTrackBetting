@@ -114,6 +114,12 @@ SPECS = {
 # in japan-pool-depth-v1), `core` r(1 + (V - sum W) / (P W_i)) (core.pricing, japan-pool-depth-
 # coplacer-v2)
 RULES = {"jra-stake-back-share": "jra", "core-stake-back-share": "core"}
+# the private reports' file stems, per variant: `<stem>-<first 16 hex of the run id>.md`
+STEMS = {
+    VARIANT_DEPTH: "pool-depth-japan",
+    VARIANT_COPLACER: "pool-depth-coplacer-japan",
+    VARIANT_EXACTA: "exacta-impact-history-japan",
+}
 UNIT, STEP, FLOOR = 100, 10, 110  # yen per ticket, breakage, the Plus-10 minimum
 CONFIRMED = ("4", "5")  # データ区分 確定 and 確定(月曜): the final records (2 is the day before's)
 BATCH_ROWS = 65_536
@@ -1016,7 +1022,7 @@ def run_depth(
         return _depth_metrics(table, spec), "scored", text, result
 
     run_id, _, report, result = _recorded(
-        run, VARIANT_DEPTH, (date_from, date_to), out_dir, "pool-depth-japan", body
+        run, VARIANT_DEPTH, (date_from, date_to), out_dir, STEMS[VARIANT_DEPTH], body
     )
     return replace(result, report_path=report, run_id=run_id)
 
@@ -1203,7 +1209,7 @@ def run_coplacer(
         return metrics, status, text, result
 
     run_id, _, report, result = _recorded(
-        run, VARIANT_COPLACER, (date_from, date_to), out_dir, "pool-depth-coplacer-japan", body
+        run, VARIANT_COPLACER, (date_from, date_to), out_dir, STEMS[VARIANT_COPLACER], body
     )
     return replace(result, report_path=report, run_id=run_id)
 
@@ -1275,7 +1281,7 @@ def run_exacta_impact(
         return metrics, status, text, ImpactResult(bins, Path(), "", status)
 
     run_id, _, report, result = _recorded(
-        run, VARIANT_EXACTA, (date_from, date_to), out_dir, "exacta-impact-history-japan", body
+        run, VARIANT_EXACTA, (date_from, date_to), out_dir, STEMS[VARIANT_EXACTA], body
     )
     return replace(result, report_path=report, run_id=run_id)
 
@@ -1460,14 +1466,16 @@ def _impact_report(bins: pd.DataFrame, spec, run, date_from, date_to, status) ->
 
 @dataclass(frozen=True)
 class VariantRun:
-    """A run listed in the public report: its variant, status and registry id, and the file name
-    of its private report when the listing knows it."""
+    """A run listed in the public report: its variant, status and registry id, and where the
+    listing knows them its private report's file name, family, spec hash and commit."""
 
     variant: str
     status: str
     run_id: str
     report: str | None = None
     family_id: str | None = None
+    spec_hash: str | None = None
+    commit: str | None = None
 
 
 def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] = ()) -> str:
@@ -1476,18 +1484,25 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
     `variants` lists the runs to show (every run of the family, failures included); without it,
     the depth run of `result` alone."""
     runs = list(variants) or [VariantRun(VARIANT_DEPTH, "scored", result.run_id)]
-    listed = [
-        f"- `{v.variant}`"
-        + ("" if v.family_id in (None, result.family_id) else f" (family `{v.family_id}`)")
-        + f": {v.status}, registry run `{v.run_id}`"
-        + ("" if v.report is None else f", private report `{v.report}`")
-        + f"; every figure {WITHHELD}."
-        for v in runs
-    ]
+
+    def line(v: VariantRun) -> str:
+        other = v.family_id not in (None, result.family_id)
+        family = f" (family `{v.family_id}`, spec sha256 `{v.spec_hash}`)" if other else ""
+        commit = "" if v.commit is None else f" at `{v.commit[:7]}`"
+        report = "" if v.report is None else f", private report `{v.report}`"
+        return (
+            f"- `{v.variant}`{family}{commit}: {v.status}, registry run `{v.run_id}`{report}; "
+            f"every figure {WITHHELD}."
+        )
+
+    listed = [line(v) for v in runs]
     report = Path(result.report_path).name
-    validated = any(v.variant == VARIANT_COPLACER and v.status == "scored" for v in runs)
+    validated = [v for v in runs if v.variant == VARIANT_COPLACER and v.status == "scored"]
     coplacer_follow_up = (
-        []
+        [
+            "- #489, the co-placer re-registration: done here by family "
+            f"`{validated[-1].family_id}`, whose co-placer run is scored; the ticket can close."
+        ]
         if validated
         else [
             "- #489: the Place and Wide co-placer capacity re-registered and run on a rule that "
@@ -1504,8 +1519,9 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
             f"{result.date_from.isoformat()} to the run's last day (a span of the store: "
             f"{WITHHELD}), development days only, confirmed vote and odds records only. The "
             "JRA-VAN store is licensed: every figure computed from it is "
-            f"{WITHHELD}, in the private report `{report}` under `$HORSETRACK_DATA_DIR/reports/` "
-            "(each run's report carries the first 16 hex digits of its registry run id).",
+            f"{WITHHELD}, in the private report `{report}` under `$HORSETRACK_DATA_DIR/reports/`. "
+            "A run's private report is named in its line below where it carries the run's id "
+            "(its first 16 hex digits); the first invocation's runs named theirs by the spec hash.",
             "",
             "## Hypothesis",
             "",
@@ -1550,6 +1566,11 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
             "dividend, Place and Wide apart, a paid combination without its votes or final price "
             "counting as not reproduced, and is recorded failed when either pool's share is "
             f"below the spec's (95%); the shares themselves are {WITHHELD}.",
+            "- Place and Wide, re-registered (family `japan-pool-depth-coplacer-v2`): the rule of "
+            "`core.pricing.stake_back_share_dividend` pays r(1 + B / (P W_i)) per yen, "
+            "B = V - sum W the losers' money. Our stake adds to V and to sum W alike, so B stays "
+            "and the capacity is s = (1 - c)(B + P W_i) / (P(c - 1) + c B / W_i), whatever r "
+            "is; at P = 1 it is the single-winner identity again. The same gate applies.",
             "- The exacta (#350): 100 yen on one combination moves its dividend by "
             "(V + s) / V x W / (W + s) - 1, with W the combination's final money.",
             "",
@@ -1566,10 +1587,12 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
             "- Capacity with breakage and the 110-yen floor: rejected; breakage makes the stake "
             "a step function of the price, and the continuous stake is the stated quantity.",
             "- The gross pool for V: rejected; refunded votes do not pay.",
-            "- The rule of `core.pricing.stake_back_share_dividend`, r(1 + (V - sum W) / "
-            "(P W_i)), the stake-back-share rule as `config/jra.yaml` states it: not the "
-            "pre-registered co-placer rule. Its agreement with the paid dividends is a "
-            f"diagnostic in the private report ({WITHHELD}).",
+            "- The co-placer rule frozen in `japan-pool-depth-v1`, 1 + (rV - sum W) / (P W_i): "
+            "rejected by its own rule check (its runs are recorded failed and kept); it leaves "
+            "the paying combinations' own money untaxed, while JRA takes the payout rate on the "
+            "whole net pool. The rule of `core.pricing.stake_back_share_dividend`, the "
+            "stake-back-share rule as `config/jra.yaml` states it, was v1's diagnostic and is "
+            f"`japan-pool-depth-coplacer-v2`'s registered rule ({WITHHELD}).",
             "",
             "## What this rules out",
             "",
@@ -1677,7 +1700,7 @@ def run_command(
     depth = _latest_depth(registry, reports)
     if public and depth is not None:
         doc = env.repo_root() / "docs" / "experiments" / "pool-depth-japan.md"
-        runs = family_runs(registry, families, reports)
+        runs = family_runs(registry, families, reports, folder)
         write_report(doc, render_public_report(depth, variants=runs), sources=())
         typer.echo(f"wrote {doc.relative_to(env.repo_root())}")
     update_summary(registry, families, summary_dir(COUNTRY))
@@ -1697,23 +1720,32 @@ def _latest_depth(registry: Registry, reports: Mapping[str, str]) -> DepthResult
         return None
     record = scored[-1]
     run_id = _run_id(record)
-    report = Path(reports.get(run_id, f"pool-depth-japan-{run_id[:16]}.md"))
+    report = Path(reports.get(run_id, f"{STEMS[VARIANT_DEPTH]}-{run_id[:16]}.md"))
     days = [date.fromisoformat(record.params[k]) for k in ("date_from", "date_to")]
     return DepthResult(pd.DataFrame(), report, family, record.params["spec_hash"], run_id, *days)
 
 
 def family_runs(
-    registry: Registry, families: Sequence[str], reports: Mapping[str, str] | None = None
+    registry: Registry,
+    families: Sequence[str],
+    reports: Mapping[str, str] | None = None,
+    folder: Path | None = None,
 ) -> list[VariantRun]:
-    """Every run of `families` in the registry, in append order, failures included, with the
-    private report name of those `reports` (run id -> file name) knows."""
+    """Every run of `families` in the registry, in append order, failures included, with its
+    family, spec hash and commit, and its private report's name where `reports` (run id -> file
+    name) gives it or `folder` holds `<STEMS[variant]>-<first 16 hex of the run id>.md`."""
     reports = {} if reports is None else reports
     out = []
     for record in registry.records():
         if record.family_id in families:
             run_id = _run_id(record)
-            out.append(VariantRun(record.variant, record.status, run_id, reports.get(run_id),
-                                  record.family_id))  # fmt: skip
+            report = reports.get(run_id)
+            named = f"{STEMS[record.variant]}-{run_id[:16]}.md"
+            if report is None and folder is not None and (Path(folder) / named).is_file():
+                report = named
+            out.append(VariantRun(record.variant, record.status, run_id, report,
+                                  record.family_id, record.params.get("spec_hash"),
+                                  record.git_sha))  # fmt: skip
     return out
 
 
