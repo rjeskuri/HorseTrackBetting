@@ -784,7 +784,8 @@ abandoned race (レース中止), `A` a NAR race (地方競馬), `B` an overseas
 - `census(*, raw=None, as_of)` reads `stored/<DATASPEC>/RA|SE/*.jvd` of every DATASPEC folder,
   streamed, and counts per record type the records per データ区分 and per race year, the keys
   (the layout's key items) holding more than one version with their codes in データ作成年月日
-  order (a tie in read order), and the pre-race versions (`1`, `2`) of races run before
+  order (a same-day tie by each version's last occurrence in read order: folders, then files,
+  sorted), and the pre-race versions (`1`, `2`) of races run before
   `as_of`. A version is a key's (データ区分, データ作成年月日): a record repeating one already read
   (the same record in `stored/RACE` and `stored/DIFN`) counts once, the repeats as `duplicates`.
   Each record's two-byte record type is checked first, whatever its width or day: one that is not
@@ -792,7 +793,10 @@ abandoned race (レース中止), `A` a NAR race (地方競馬), `B` an overseas
   Its race date is read next, from its 開催年 and 開催月日 bytes alone: a record on a holdout day
   is read no further, whatever its width, and counted only as `holdout_skipped` (D14); one
   without a valid race date only as `undated`. The others are then checked: one of the wrong
-  width, or too short to hold its date, stops the census (`RecordLengthError`).
+  width, or too short to hold its date, stops the census (`RecordLengthError`). Either error
+  names its file (`stored/<DATASPEC>/<RA|SE>/<file>`). Combos pool every folder, while the
+  builders read `stored/RACE` one year file at a time: a combo's last version is the one
+  `latest_versions` keeps only for the same records in the same order.
 - `final_only`: true when no version `1`-`6` is held; null (inconclusive) when the record type
   has no record to count (no file, only empty files, every record skipped), never true. The
   command fails, writing no report, when RA or SE has no file under any `stored/<DATASPEC>/`

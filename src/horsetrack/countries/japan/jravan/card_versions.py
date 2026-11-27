@@ -20,8 +20,9 @@ only if the export holds a pre-race version. `census` counts what it holds; noth
   (`is_holdout_day('japan', race_date)`, D14) is read no further, whatever its width, and counted
   only in `holdout_skipped`. The others are then checked and decoded
   (`records.decode_lines`, a bad width raising `RecordLengthError` with the file's record number;
-  a record too short to hold its date is one). A record without a valid race date cannot be
-  cleared of being on a holdout day, so it is counted only in `undated`.
+  a record too short to hold its date is one). Either error names its file
+  (`stored/<DATASPEC>/<RA|SE>/<file>`). A record without a valid race date cannot be cleared of
+  being on a holdout day, so it is counted only in `undated`.
 - `final_only` is true when no version before the final result (データ区分 1-6) is held, and null
   (inconclusive) when the record type has no record to count: no file, only empty files, or every
   record skipped. The command fails on a record type with no file under any DATASPEC folder.
@@ -29,8 +30,11 @@ only if the export holds a pre-race version. `census` counts what it holds; noth
   (the same record in `stored/RACE` and `stored/DIFN`, or twice in one file) is counted once, and
   the repeats in `duplicates` only. A key's versions are pooled over every folder and file of its
   record type, so the key-level counts do not depend on where a version is filed.
-- A key's versions are ordered by データ作成年月日, a tie in read order, as `latest_versions`
-  gives a tie to the later row: the combo ends with the version the builders keep.
+- A key's versions are ordered by データ作成年月日, a same-day tie by each version's last
+  occurrence in read order (folders, then files, sorted; records in file order), as
+  `latest_versions` gives a tie to the later row. Combos are export-wide, over every folder,
+  while the builders read only `stored/RACE`, one year file at a time: a combo ends with the
+  version `latest_versions` keeps only when it is given the same records in the same order.
 
 The report (`CardVersions.to_json`, written by `records.write_build_report` to
 `<reports dir>/jravan-card-versions.json`) holds counts, codes, years and the as-of date only
@@ -197,9 +201,12 @@ def _holdout_flags(days: np.ndarray, holdout: Callable[[date], bool]) -> np.ndar
     return flags[inverse.reshape(-1)]
 
 
-def _read(files: list[Path], layout: spec.RecordSpec) -> tuple[dict[str, np.ndarray], int, int]:
+def _read(
+    raw: Path, files: list[Path], layout: spec.RecordSpec
+) -> tuple[dict[str, np.ndarray], int, int]:
     """Per record outside the holdout: its key bytes, データ区分, データ作成年月日, race date and
-    開催年, in read order; and the records skipped as on a holdout day and as undated."""
+    開催年, in read order; and the records skipped as on a holdout day and as undated. A
+    `RecordTypeError` or `RecordLengthError` names its file, relative to `raw`."""
     key_items = [item.name for item in layout.items if item.is_key]
     year, mmdd = records.leaf_bytes(layout, YEAR), records.leaf_bytes(layout, MMDD)
     cache: dict[date, bool] = {}
@@ -212,26 +219,30 @@ def _read(files: list[Path], layout: spec.RecordSpec) -> tuple[dict[str, np.ndar
     parts: dict[str, list[np.ndarray]] = collections.defaultdict(list)
     skipped = undated = 0
     for path in files:
-        for first, lines in records.iter_lines(path, layout):
-            records.check_types(lines, layout, first)  # before any date is trusted
-            days = _line_dates(lines, year, mmdd)  # the only bytes read before the holdout check
-            dated = ~np.isnat(days)
-            held = np.zeros(len(days), dtype=bool)
-            held[dated] = _holdout_flags(days[dated], holdout)
-            skipped += int(held.sum())
-            rest = np.flatnonzero(~held)
-            if not rest.size:
-                continue
-            kept_lines = lines if rest.size == len(lines) else [lines[i] for i in rest]
-            cols = records.decode_lines(kept_lines, layout, first + rest)
-            days, use = days[rest], dated[rest]
-            undated += int((~use).sum())
-            parts["key"].append(_join(*(cols[name][use] for name in key_items)))
-            parts["kubun"].append(cols[KUBUN][use])
-            parts["created"].append(cols[CREATED][use])
-            parts["day"].append(days[use])
-            parts["year"].append(cols[YEAR][use])
-            del cols, kept_lines
+        try:
+            for first, lines in records.iter_lines(path, layout):
+                records.check_types(lines, layout, first)  # before any date is trusted
+                days = _line_dates(lines, year, mmdd)  # all that is read before the holdout check
+                dated = ~np.isnat(days)
+                held = np.zeros(len(days), dtype=bool)
+                held[dated] = _holdout_flags(days[dated], holdout)
+                skipped += int(held.sum())
+                rest = np.flatnonzero(~held)
+                if not rest.size:
+                    continue
+                kept_lines = lines if rest.size == len(lines) else [lines[i] for i in rest]
+                cols = records.decode_lines(kept_lines, layout, first + rest)
+                days, use = days[rest], dated[rest]
+                undated += int((~use).sum())
+                parts["key"].append(_join(*(cols[name][use] for name in key_items)))
+                parts["kubun"].append(cols[KUBUN][use])
+                parts["created"].append(cols[CREATED][use])
+                parts["day"].append(days[use])
+                parts["year"].append(cols[YEAR][use])
+                del cols, kept_lines
+        except (records.RecordTypeError, records.RecordLengthError) as exc:
+            exc.args = (f"{path.relative_to(raw).as_posix()}: {exc}",)  # its attributes kept
+            raise
     kept = {name: np.concatenate(chunks) for name, chunks in parts.items()}
     return kept, skipped, undated
 
@@ -251,13 +262,17 @@ def _section(kept: dict[str, np.ndarray], as_of: date) -> dict[str, Any]:
             "multi_version_keys": 0, "combos": {}, "pre_race_on_run_races": 0, "held": {},
             "final_only": None,
         }  # fmt: skip
-    # one row per version, in read order
-    _, first = np.unique(_join(kept["key"], kept["kubun"], kept["created"]), return_index=True)
-    first = np.sort(first)
-    duplicates = len(kept["key"]) - len(first)
-    key, created, day = kept["key"][first], kept["created"][first], kept["day"][first]
-    kubun_text, kubun = _codes(kept["kubun"][first])
-    year_text, year = _codes(kept["year"][first])
+    # one row per version at its last occurrence, in read order (`np.unique` keeps the first
+    # occurrence, so it is given the records reversed)
+    total = len(kept["key"])
+    joined = _join(kept["key"], kept["kubun"], kept["created"])
+    _, from_end = np.unique(joined[::-1], return_index=True)
+    del joined
+    last = np.sort(total - 1 - from_end)
+    duplicates = total - len(last)
+    key, created, day = kept["key"][last], kept["created"][last], kept["day"][last]
+    kubun_text, kubun = _codes(kept["kubun"][last])
+    year_text, year = _codes(kept["year"][last])
 
     by_kubun: collections.Counter[str] = collections.Counter()
     for i, n in enumerate(np.bincount(kubun, minlength=len(kubun_text))):
@@ -283,7 +298,7 @@ def _section(kept: dict[str, np.ndarray], as_of: date) -> dict[str, Any]:
             combos[COMBO_SEPARATOR.join(kubun_text[k] for k in versions)] += 1
 
     return {
-        "records": len(first),
+        "records": len(last),
         "duplicates": int(duplicates),
         "by_kubun": dict(sorted(by_kubun.items())),
         "by_year": {y: dict(sorted(c.items())) for y, c in sorted(by_year.items())},
@@ -303,7 +318,7 @@ def census(*, raw: Path | None = None, as_of: date) -> CardVersions:
     for record_type in RECORD_TYPES:
         files = _files(raw, record_type)
         layout = spec.record_spec(record_type)
-        kept, skipped, undated = _read(files, layout) if files else ({}, 0, 0)
+        kept, skipped, undated = _read(raw, files, layout) if files else ({}, 0, 0)
         sections[record_type] = {
             **_section(kept, as_of),
             "holdout_skipped": skipped,

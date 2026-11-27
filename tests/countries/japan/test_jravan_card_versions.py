@@ -20,15 +20,24 @@ Contract pinned here (the coder follows it), module
       {"name": "card-versions", "as_of": "YYYY-MM-DD",
        "record_types": {"RA": {...}, "SE": {...}}}
   and per record type:
-  - `records`: the records counted; `holdout_skipped`: the records on a holdout day
+  - A version is a key's (データ区分, データ作成年月日), the key being the layout's key items (the
+    race's, and for SE also 馬番 and 血統登録番号). `records`: the versions counted, each once,
+    pooled over every `stored/<DATASPEC>/` folder and file; `duplicates`: the records repeating a
+    version already read (the same record in `stored/RACE` and `stored/DIFN`, or twice in one
+    file), which are in no other figure. `holdout_skipped`: the records on a holdout day
     (`core.eval.holdout.is_holdout_day('japan', race_date)`), of which only the date is read: they
     are in no other figure.
-  - `by_kubun`: データ区分 -> records (only the values present); `by_year`: race year (開催年,
-    as a string) -> データ区分 -> records.
-  - `multi_version_keys`: the keys (the layout's key items: the race's, and for SE also 馬番 and
-    血統登録番号) holding more than one record; `combos`: for those keys, their データ区分 in
-    データ作成年月日 order joined with " > " (`2 > 7`) -> keys.
-  - `pre_race_on_run_races`: records of a `PRE_RACE` データ区分 whose race date is before `as_of`.
+  - `by_kubun`: データ区分 -> versions (only the values present); `by_year`: race year (開催年,
+    as a string) -> データ区分 -> versions.
+  - `multi_version_keys`: the keys holding more than one version (a key whose records all repeat
+    one version holds one); `combos`: for those keys, their versions' データ区分 joined with
+    " > " (`2 > 7`) -> keys, in データ作成年月日 order, a same-day tie in the order of each
+    version's last occurrence in read order (the `stored/` folders, then their files, in sorted
+    order; records in file order), as `records.latest_versions` gives a tie to the later row.
+    Combos are export-wide (every `stored/<DATASPEC>/` folder pooled) while the builders read only
+    `stored/RACE`, one year file at a time: a combo ends with the version `latest_versions` keeps
+    (a trailing `0`: the key is dropped) only for the same records given to it in the same order.
+  - `pre_race_on_run_races`: versions of a `PRE_RACE` データ区分 whose race date is before `as_of`.
   - `held`: each データ区分 present -> its `KUBUN_NAMES` name; `final_only`: true when no record of
     データ区分 1-6 is present, and null (inconclusive, never true) when the record type has no
     record to count: no file under any `stored/<DATASPEC>/`, only empty files, or every record
@@ -63,6 +72,7 @@ here). Expected values are written out by hand from the plans below.
 from __future__ import annotations
 
 import collections
+import itertools
 import json
 import math
 import re
@@ -525,6 +535,151 @@ def test_a_record_on_a_holdout_day_only_adds_to_the_skipped_total(data: Path) ->
         got = section(report, record_type)
         assert {k: got.get(k, "<missing>") for k in want} == want, record_type
         assert set(got["held"]) == set(want["by_kubun"]), record_type
+
+
+# ------------------------------------------------------------------------------------------------
+# A repeated version counts once, and a same-day tie ranks it at its last occurrence
+
+DAY = date(2025, 5, 25)  # every key's race day
+CARD, FINAL = DAY - timedelta(days=2), DAY + timedelta(days=1)  # データ作成年月日
+REPEAT_AS_OF = date(2025, 6, 1)
+OTHER = {"SE": "0", "RA": "9"}  # "X" below: a deletion of a runner, an abandoned race
+RACE25, DIFN, SNPN = "RACE/2025.jvd", "DIFN/all.jvd", "SNPN/2025.jvd"  # read DIFN, RACE, SNPN
+
+
+def version(record_type: str, kubun: str, created: date, key: int = 1) -> bytes:
+    """The record of key `key` (RA: TOK race 10 + key; SE: 馬番 `key` of TOK race 11) in version
+    (kubun, created); the same arguments give the same bytes."""
+    if record_type == "RA":
+        return ra(DAY, TOK, 10 + key, kubun, created)
+    return se(DAY, TOK, 11, key, f"20211000{key:02d}", kubun, created)
+
+
+# case -> (records as (file under stored/, データ区分, データ作成年月日, key), in read order per
+# file; expected: versions, duplicates, multi-version keys, combos, by_kubun, pre-race versions)
+REPEAT_CASES = {
+    "a-result-the-other-version-and-the-result-again-on-one-day": (
+        [(RACE25, "7", FINAL, 1), (RACE25, "X", FINAL, 1), (RACE25, "7", FINAL, 1)],
+        (2, 1, 1, {"X > 7": 1}, {"7": 1, "X": 1}, 0),
+    ),
+    "the-other-version-the-result-and-the-other-again-on-one-day": (
+        [(RACE25, "X", FINAL, 1), (RACE25, "7", FINAL, 1), (RACE25, "X", FINAL, 1)],
+        (2, 1, 1, {"7 > X": 1}, {"7": 1, "X": 1}, 0),
+    ),
+    "three-versions-and-two-repeats-on-one-day": (
+        [(RACE25, "7", FINAL, 1), (RACE25, "5", FINAL, 1), (RACE25, "X", FINAL, 1),
+         (RACE25, "7", FINAL, 1), (RACE25, "5", FINAL, 1)],
+        (3, 2, 1, {"X > 7 > 5": 1}, {"5": 1, "7": 1, "X": 1}, 0),
+    ),
+    "a-card-then-a-same-day-repeat-of-the-result": (
+        [(RACE25, "2", CARD, 1), (RACE25, "7", FINAL, 1), (RACE25, "X", FINAL, 1),
+         (RACE25, "7", FINAL, 1)],
+        (3, 1, 1, {"2 > X > 7": 1}, {"2": 1, "7": 1, "X": 1}, 1),
+    ),
+    "a-repeated-result-after-an-earlier-card": (  # the repeat changes no order
+        [(RACE25, "2", CARD, 1), (RACE25, "7", FINAL, 1), (RACE25, "7", FINAL, 1)],
+        (2, 1, 1, {"2 > 7": 1}, {"2": 1, "7": 1}, 1),
+    ),
+    "a-repeated-card-keeps-its-earlier-date": (  # its date ranks it, not where it repeats
+        [(RACE25, "2", CARD, 1), (RACE25, "7", FINAL, 1), (RACE25, "2", CARD, 1)],
+        (2, 1, 1, {"2 > 7": 1}, {"2": 1, "7": 1}, 1),
+    ),
+    "the-same-record-in-two-folders": (  # one version: no `7 > 7`
+        [(RACE25, "7", FINAL, 1), (DIFN, "7", FINAL, 1)],
+        (1, 1, 0, {}, {"7": 1}, 0),
+    ),
+    "a-card-and-its-result-in-two-folders": (
+        [(RACE25, "2", CARD, 1), (RACE25, "7", FINAL, 1), (DIFN, "2", CARD, 1),
+         (DIFN, "7", FINAL, 1)],
+        (2, 2, 1, {"2 > 7": 1}, {"2": 1, "7": 1}, 1),
+    ),
+    "a-same-day-tie-across-folders-in-read-order": (  # DIFN is read before RACE
+        [(RACE25, "7", FINAL, 1), (DIFN, "7", FINAL, 1), (DIFN, "X", FINAL, 1)],
+        (2, 1, 1, {"X > 7": 1}, {"7": 1, "X": 1}, 0),
+    ),
+    "the-last-occurrence-over-every-folder": (  # export-wide: SNPN is read after RACE
+        [(DIFN, "7", FINAL, 1), (DIFN, "X", FINAL, 1), (RACE25, "7", FINAL, 1),
+         (SNPN, "X", FINAL, 1)],
+        (2, 2, 1, {"7 > X": 1}, {"7": 1, "X": 1}, 0),
+    ),
+    "two-keys-interleaved-in-one-file": (
+        [(RACE25, "7", FINAL, 1), (RACE25, "7", FINAL, 2), (RACE25, "X", FINAL, 1),
+         (RACE25, "2", CARD, 2), (RACE25, "7", FINAL, 1), (RACE25, "7", FINAL, 2)],
+        (4, 2, 2, {"X > 7": 1, "2 > 7": 1}, {"2": 1, "7": 2, "X": 1}, 1),
+    ),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("case", list(REPEAT_CASES))
+@pytest.mark.parametrize("record_type", ("RA", "SE"))
+def test_a_repeated_version_counts_once_and_ties_at_its_last_occurrence(
+    data: Path, record_type: str, case: str
+) -> None:
+    plan, (n_versions, n_duplicates, n_multi, combos, by_kubun, n_pre) = REPEAT_CASES[case]
+    x = OTHER[record_type]
+    raw = raw_of(data)
+    files: dict[str, list[bytes]] = collections.defaultdict(list)
+    for where, kubun, created, key in plan:
+        files[where].append(version(record_type, x if kubun == "X" else kubun, created, key))
+    for where, recs in files.items():
+        folder, name = where.split("/")
+        put(raw, f"stored/{folder}", record_type, name, recs)
+
+    got = section(card_versions.census(raw=raw, as_of=REPEAT_AS_OF), record_type)
+    want_by_kubun = {x if k == "X" else k: n for k, n in by_kubun.items()}
+    want = {
+        "records": n_versions,
+        "duplicates": n_duplicates,
+        "multi_version_keys": n_multi,
+        "combos": {c.replace("X", x): n for c, n in combos.items()},
+        "by_kubun": want_by_kubun,
+        "by_year": {str(DAY.year): want_by_kubun},
+        "pre_race_on_run_races": n_pre,
+        "holdout_skipped": 0,
+        "undated": 0,
+        "final_only": not set(want_by_kubun) & NOT_FINAL,
+    }
+    assert {k: got.get(k, "<missing>") for k in want} == want, (record_type, case)
+    assert n_versions + n_duplicates == len(plan)  # the plan's own arithmetic
+
+
+# one key's versions: the result, the other version and a flash result on one day, a card before
+ORDER_VERSIONS = (("7", FINAL), ("X", FINAL), ("5", FINAL), ("2", CARD))
+
+
+@pytest.mark.parametrize("record_type", ("RA", "SE"))
+def test_a_combo_ends_with_the_version_latest_versions_keeps_from_the_same_records(
+    data: Path, layouts: dict[str, spec.RecordSpec], record_type: str
+) -> None:
+    """Every ordering of three records of one key in one `stored/RACE` year file, repeats
+    included: the combo orders the versions by date, a tie by last occurrence, and ends with the
+    version `records.latest_versions` keeps from those records (the builders' call)."""
+    layout = layouts[record_type]
+    key = [item.name for item in layout.items if item.is_key]
+    x = OTHER[record_type]
+    versions = [(x if k == "X" else k, created) for k, created in ORDER_VERSIONS]
+    for n, order in enumerate(itertools.product(versions, repeat=3)):
+        recs = [version(record_type, k, created) for k, created in order]
+        raw = data / "raw" / f"order-{n}"
+        put(raw, "stored/RACE", record_type, "2025.jvd", recs)
+        got = section(card_versions.census(raw=raw, as_of=REPEAT_AS_OF), record_type)
+
+        last = {v: i for i, v in enumerate(order)}  # each version's last occurrence
+        ranked = [k for k, _ in sorted(last, key=lambda v: (v[1], last[v]))]
+        want = {
+            "records": len(last),
+            "duplicates": len(order) - len(last),
+            "multi_version_keys": int(len(last) > 1),
+            "combos": {" > ".join(ranked): 1} if len(last) > 1 else {},
+        }
+        assert {k: got.get(k, "<missing>") for k in want} == want, (record_type, order)
+
+        cols = records.decode(b"".join(recs), layout)
+        index = pd.DataFrame(
+            {name: records.text(cols[name]) for name in (*key, races.CREATED, races.KUBUN)}
+        )
+        kept = records.latest_versions(index, key)[races.KUBUN].tolist()
+        assert kept == ([] if ranked[-1] == "0" else [ranked[-1]]), (record_type, order)
 
 
 # ------------------------------------------------------------------------------------------------
