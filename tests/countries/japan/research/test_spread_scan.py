@@ -70,9 +70,16 @@ what these tests call):
   - records no 'scored' run when the range holds no bet (a refusal or 'failed' records are both
     allowed) and then leaves an existing candidate-cell file as it was;
   - names the private report per run, so another seed, range or store never overwrites an earlier
-    run's report, and every registry record of the run names that report (its file name).
+    run's report, and every registry record of the run names that report (its file name);
+  - keeps that report reference out of what makes a variant: a rerun of the same spec, range, seed
+    and replicates at another commit, or on a refreshed store (the same rows in new files), is new
+    runs (new run ids, its own report) of the same variants, so `Registry.family_size` of each
+    family stays at the two variants; another seed is new variants.
 - `horsetrack japan spread-scan run` writes the registry summary into `summary_dir('japan')` and
   keeps in its index every family the index lists, whether or not the local registry holds it.
+  It never drops a row an existing family file publishes: when the local registry does not hold
+  the runs a family's file lists, that file stays as it was (or the command refuses); when it
+  does, the file is rewritten with every run.
 - `ScanResult.rows`: one row per (variant, spread, cell with at least one bet), the 't2' rows in
   rank order then the 'lookahead' rows in rank order; `rank` is 1, 2, ... within each variant,
   rows with a `shrunk_edge` first by `shrunk_edge` descending, then the rows without one. A row
@@ -101,6 +108,8 @@ import builtins
 import itertools
 import json
 import math
+import os
+import re
 import shutil
 import uuid
 from collections import Counter
@@ -2006,5 +2015,160 @@ def test_the_run_command_keeps_every_family_the_summary_index_lists(tmp_path, mo
         assert summary.joinpath(f"{family}.md").is_file(), family
     for family, data_bytes in before.items():
         assert summary.joinpath(f"{family}.md").read_bytes() == data_bytes, f"{family}.md changed"
+    after = _tree(committed_dir) if committed_dir.is_dir() else {}
+    assert after == committed_before, "the committed summary was touched"
+
+
+# --- review fixes, round 2 (PR #524): variant identity and the published summary ----------------
+
+FAKE_SHA = "0123456789abcdef0123456789abcdef01234567"  # another commit, for a code-only rerun
+
+
+def refresh_store(data: Path) -> None:
+    """A store refresh: every store file rewritten with the same rows in new bytes (uncompressed)
+    and a later modification time, so any fingerprint of the files changes and no row does."""
+    for path in sorted((data / "processed" / "jravan").rglob("*.parquet")):
+        pq.write_table(pq.read_table(path), path, compression="none")
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
+
+
+def test_a_refresh_rerun_is_new_runs_of_the_same_variants(tmp_path, monkeypatch):
+    data = tiny_store(tmp_path)
+    guard(monkeypatch)
+    registry = frozen_registry(tmp_path)
+    out_dir = tmp_path / "out"
+    seen = len(registry_lines(registry))
+    runs: list[tuple[str, object, bytes, list[dict]]] = []  # label, result, report bytes, records
+
+    def scan(label: str, seed: int = SEED) -> None:
+        nonlocal seen
+        monkeypatch.setenv(DATA_VAR, str(data))
+        result = ss.run_scan(
+            date_from=date(2019, 1, 1),
+            date_to=date(2019, 12, 31),
+            out_dir=out_dir,
+            seed=seed,
+            n_boot=N_BOOT,
+            registry=registry,
+        )
+        lines = registry_lines(registry)
+        new = [e for e in lines[seen:] if e["kind"] == "run"]
+        seen = len(lines)
+        runs.append((label, result, Path(result.report_path).read_bytes(), new))
+
+    scan("first")
+    refresh_store(data)
+    scan("store refresh")
+    monkeypatch.setattr(ss, "_git_sha", lambda: FAKE_SHA, raising=False)
+    monkeypatch.setattr(holdout, "_git_sha", lambda: FAKE_SHA)
+    scan("code-only rerun")
+
+    first_rows = runs[0][1].rows
+    assert first_rows, "the tiny store's meeting is scored"
+    ids_before: set[str] = set()
+    for label, result, _, new in runs:
+        assert result.rows == first_rows, f"{label}: the same rows give the same cells"
+        assert len(new) == len(ss.FAMILIES) * len(VARIANTS), f"{label}: one record per variant"
+        assert {e["record"]["status"] for e in new} == {"scored"}, label
+        ids = {e["run_id"] for e in new}
+        assert set(result.run_ids.values()) == ids, label
+        assert not ids & ids_before, f"{label}: a rerun must be new runs, not the earlier ones"
+        ids_before |= ids
+    reports = [Path(result.report_path).resolve() for _, result, _, _ in runs]
+    assert len(set(reports)) == len(runs), "a refresh rerun overwrote an earlier run's report"
+    for (label, _, text, new), path in zip(runs, reports, strict=True):
+        assert path.read_bytes() == text, f"{label}: its report was rewritten by a later run"
+        for entry in new:
+            assert path.name in json.dumps(entry["record"]), f"{label}: a record lost its report"
+
+    registry.verify()
+    for family_id in ss.FAMILIES:
+        assert registry.family_size(family_id) == len(VARIANTS), (
+            f"{family_id}: a store refresh or a code-only rerun of the same spec, range and seed "
+            f"counted as new variants ({registry.family_size(family_id)}, not {len(VARIANTS)})"
+        )
+    scan("another seed", seed=SEED + 1)
+    for family_id in ss.FAMILIES:
+        assert registry.family_size(family_id) == 2 * len(VARIANTS), (
+            f"{family_id}: another seed is new variants"
+        )
+
+
+_SUMMARY_ROW = re.compile(r"\| P503 \| (t2|lookahead) \| (\w+) \| .*\|")
+
+
+def summary_rows(path: Path) -> Counter:
+    """A family file's run rows, each line as written, as a multiset."""
+    return Counter(
+        line for line in path.read_text("utf-8").splitlines() if _SUMMARY_ROW.fullmatch(line)
+    )
+
+
+def by_variant(rows: Counter) -> Counter:
+    return Counter({_SUMMARY_ROW.fullmatch(line).groups(): n for line, n in rows.items()})
+
+
+def test_the_run_command_never_drops_a_row_a_family_summary_publishes(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from horsetrack.cli import app
+
+    committed_dir = REPO_ROOT / "docs" / "experiments" / "registry" / "japan"
+    committed_before = _tree(committed_dir) if committed_dir.is_dir() else {}
+    summary = tmp_path / "summary" / "registry" / "japan"
+    summary.mkdir(parents=True)
+    monkeypatch.setattr(ss, "summary_dir", lambda country: summary, raising=False)
+    monkeypatch.setattr(registry_module, "summary_dir", lambda country: summary)
+    guard(monkeypatch)
+    for module in (reports, ss, registry_module):  # nothing is written into the repository
+        real = getattr(module, "write_report", None)
+        if real is None:
+            continue
+
+        def outside(path, text, *, sources, repo_root=None, _real=real):
+            if reports.is_inside(Path(path), REPO_ROOT):
+                raise Forbidden(f"write_report({path}) is inside the repository")
+            return _real(path, text, sources=sources, repo_root=repo_root)
+
+        monkeypatch.setattr(module, "write_report", outside)
+
+    runner = CliRunner()
+    scan = ["japan", "spread-scan", "run", "--from", "2019-01-01", "--to", "2019-12-31"]
+    scan += ["--n-boot", "50"]
+
+    def family_files() -> dict[str, Path]:
+        return {family: summary / f"{family}.md" for family in ss.FAMILIES}
+
+    # 1-2. one data directory, two runs: its registry holds every run the files list
+    monkeypatch.setenv(DATA_VAR, str(tiny_store(tmp_path / "a")))
+    frozen = runner.invoke(app, ["japan", "spread-scan", "freeze"])
+    assert frozen.exit_code == 0, frozen.output
+    for n_runs, seed in ((1, SEED), (2, SEED + 1)):
+        done = runner.invoke(app, [*scan, "--seed", str(seed)])
+        assert done.exit_code == 0, (done.output, done.exception)
+        for family, path in family_files().items():
+            assert path.is_file(), family
+            assert by_variant(summary_rows(path)) == Counter(
+                {(v, "scored"): n_runs for v in VARIANTS}
+            ), f"{family}: after {n_runs} run(s) the file lists every run of the registry"
+    published = {family: summary_rows(path) for family, path in family_files().items()}
+
+    # 3. a fresh data directory: its registry lacks the two published runs of each family
+    monkeypatch.setenv(DATA_VAR, str(tiny_store(tmp_path / "b")))
+    frozen = runner.invoke(app, ["japan", "spread-scan", "freeze"])
+    assert frozen.exit_code == 0, frozen.output
+    done = runner.invoke(app, [*scan, "--seed", str(SEED)])
+    assert not isinstance(done.exception, PROGRAMMING_ERRORS), (done.output, done.exception)
+    for family, path in family_files().items():
+        assert path.is_file(), f"{family}.md was removed"
+        dropped = published[family] - summary_rows(path)
+        assert not dropped, (
+            f"{family}.md dropped {sum(dropped.values())} published row(s) its local registry "
+            "does not hold"
+        )
+    listed = summary.joinpath("README.md").read_text("utf-8")
+    for family in ss.FAMILIES:
+        assert f"({family}.md)" in listed, f"the index dropped {family}"
     after = _tree(committed_dir) if committed_dir.is_dir() else {}
     assert after == committed_before, "the committed summary was touched"

@@ -29,8 +29,10 @@ the holdout is not opened.
 - Variants searched: 27 spreads, 2 variants per family (`t2`, `lookahead`), 12 registry records
   per run; by design at most 78 cell labels per spread, so at most 2,106 ranked rows per variant.
 - Private report of the run of record:
-  `$HORSETRACK_DATA_DIR/reports/spread-scan-japan-9291d2e5b95029e4.md` (named per run, and named
-  in each of its records as `params.report`); candidate cells:
+  `$HORSETRACK_DATA_DIR/reports/spread-scan-japan-9291d2e5b95029e4.md` (named per run by a digest
+  of the spec hash, range, seed, replicates, commit and store fingerprint, and named in each of
+  that run's records as `params.report`; later code names a run's report in `data_builds.report`,
+  see "Family size" below); candidate cells:
   `$HORSETRACK_DATA_DIR/reports/candidate-cells/spread-scan.json`; both written through
   `write_report` with the source `jravan`.
 
@@ -144,4 +146,18 @@ leaderboard (#447) and a `lookahead` cell is a ceiling only; nothing here is ado
   `README.md` lines). Since the review fixes the command writes the six N8 files from their own
   records only and merges their lines into `README.md`, keeping every family it lists
   (`studies/ability.py`'s way); the run of record adds its 12 rows to the six N8 files and leaves
-  every other file, `README.md` included, as it was.
+  every other file, `README.md` included, as it was. Since PR #524's second review the command
+  also never drops a published row: when the local registry would not write again every row an
+  existing N8 file lists (a fresh data directory), it keeps that file as it was, names it and
+  exits 1, the run itself recorded.
+- **Family size.** `Registry.family_size` reads 4 for each N8 family, for 2 distinct rules (`t2`,
+  `lookahead`). It compares every `params` key, and the run of record's records at `65fcbfc`
+  carry the report's file name in `params.report`, which the first run's records at `c59a484` do
+  not, so the same two rules count twice; with that key set aside, the two runs' records are the
+  same 2 variants per family (checked on the local registry). The registry is append-only, so
+  those records stay as written. PR #524's second review moved the name to `data_builds.report`,
+  after its `@`, which `family_size` reads as a refresh rather than an identity: from that code
+  on, a rerun of the same spec, range, seed and replicates at another commit or on a refreshed
+  store adds runs, not variants (a first run at that code still counts once against the earlier
+  records, whose builds hold no `report` entry). That change touches provenance only, no scored
+  output, so the scan was not run again.

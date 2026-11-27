@@ -17,9 +17,10 @@ shrink N1 (#430) uses for Place and Wide: a spread's return is not one combinati
 
 `run_scan` reads the jravan store a calendar year at a time, development days from 2014-06-07
 only (D10, D14), refuses unless the registry holds every family frozen with its spec, writes the
-private report (one file per run, named in its records) and the candidate cells through
-`write_report`, and appends one record per (family, variant), failures included; a range without a
-bet is a failed run and writes nothing. D21: every figure stays under the data directory.
+private report (one file per run, named in its records' `data_builds`, `REPORT_BUILD`) and the
+candidate cells through `write_report`, and appends one record per (family, variant), failures
+included; a range without a bet is a failed run and writes nothing. D21: every figure stays under
+the data directory.
 """
 
 from __future__ import annotations
@@ -67,6 +68,10 @@ COUNTRY, SOURCE, STUDY = "japan", "jravan", "spread-scan"
 TICKET, HYPOTHESIS_ID = 503, "P503"
 FAMILY_PREFIX = "japan-n8-spread-scan"
 FOLD_SCHEME = "in-sample:development-days"
+# the data_builds entry naming a run's private report after its '@': run provenance, not variant
+# identity (`Registry.family_size` ignores what follows a build's last '@'), so a rerun at
+# another commit or on a refreshed store is new runs of the same variants (#524)
+REPORT_BUILD, NO_REPORT = "report", "not-written"
 VARIANTS = ("t2", "lookahead")
 STAKE = 100
 DEFAULT_SEED, DEFAULT_N_BOOT = 20261127, 1000
@@ -955,24 +960,22 @@ def run_scan(
     # one report per run: its name changes with the spec, range, seed, replicates, code and store
     report_name = f"spread-scan-japan-{_sha256(_canonical({**params, **base}))[:16]}.md"
 
-    def records(metrics: Any, status: str, extra: Mapping[str, Any]) -> list[RunRecord]:
+    def records(metrics: Any, status: str, report: str) -> list[RunRecord]:
+        builds = {**base["data_builds"], REPORT_BUILD: f"reports/{STUDY}@{report}"}
         return [
             RunRecord(
                 hypothesis_id=HYPOTHESIS_ID,
                 family_id=family_id,
                 variant=variant,
                 ticket=TICKET,
+                git_sha=base["git_sha"],
+                data_builds=builds,
                 sources=(SOURCE,),
                 fold_scheme=FOLD_SCHEME,
                 components={},
-                params={
-                    **params,
-                    "family_spec_hash": _spec_hash(family_spec(family_id)),
-                    **extra,
-                },
+                params={**params, "family_spec_hash": _spec_hash(family_spec(family_id))},
                 metrics=tuple(metrics(family_id, variant)),
                 status=status,
-                **base,
             )
             for family_id in FAMILIES
             for variant in VARIANTS
@@ -1003,9 +1006,9 @@ def run_scan(
             sources=(SOURCE,),
         )
     except Exception:
-        _append(registry, records(lambda f, v: (), "failed", {}))
+        _append(registry, records(lambda f, v: (), "failed", NO_REPORT))
         raise
-    scored = records(lambda f, v: _metrics(rows, f, v), "scored", {"report": report_name})
+    scored = records(lambda f, v: _metrics(rows, f, v), "scored", report_name)
     run_ids = _append(registry, scored)
     return ScanResult(rows, report_path, cells_path, params["spec_hash"], run_ids, dict(skipped))
 
@@ -1026,19 +1029,33 @@ class _Families:
 _INDEX_ENTRY = re.compile(r"- \[([^\]]+)\]\(\1\.md\)")  # a family's line in write_summary's index
 
 
-def write_committed_summary(registry: Registry) -> Path:
+def _table_lines(text: str) -> Counter:
+    """A summary file's table lines (its header and one per run and metric), as a multiset."""
+    return Counter(line for line in text.splitlines() if line.startswith("|"))
+
+
+def write_committed_summary(registry: Registry) -> tuple[Path, list[str]]:
     """The six families' files, by `write_summary` over their records alone, and the index with
     their lines added: every family the index lists stays and no other family's file is written,
-    so a fresh local registry drops nothing (`studies/ability.py`'s way)."""
+    so a fresh local registry drops nothing (`studies/ability.py`'s way). A family file holding a
+    row the local registry would not write again (runs recorded under another data directory) is
+    kept as it was; the second value names the files kept."""
     directory = summary_dir(COUNTRY)
     mine = _Families(registry, set(FAMILIES))
     if not mine.records():
-        return directory
+        return directory, []
+    kept = []
     with tempfile.TemporaryDirectory() as scratch:
         write_summary(mine, scratch)  # type: ignore[arg-type]
         for path in sorted(Path(scratch).glob("*.md")):
-            if path.stem != "README":
-                write_report(directory / path.name, path.read_text("utf-8"), sources=())
+            if path.stem == "README":
+                continue
+            text, target = path.read_text("utf-8"), directory / path.name
+            published = _table_lines(target.read_text("utf-8")) if target.is_file() else Counter()
+            if published - _table_lines(text):  # a published row this registry would drop
+                kept.append(path.name)
+                continue
+            write_report(target, text, sources=())
         fresh = Path(scratch, "README.md").read_text("utf-8").splitlines()
     index = directory / "README.md"
     listed = index.read_text("utf-8").splitlines() if index.exists() else []
@@ -1047,7 +1064,7 @@ def write_committed_summary(registry: Registry) -> Path:
     write_report(
         index, "\n".join([*head, *(entries[f] for f in sorted(entries))]) + "\n", sources=()
     )
-    return directory
+    return directory, kept
 
 
 spread_scan_app = typer.Typer(no_args_is_help=True, help="N8: the popularity-rank spread scan.")
@@ -1089,4 +1106,12 @@ def run_command(
     typer.echo(f"report={result.report_path}\ncells={result.cells_path}")
     for key, run_id in result.run_ids.items():
         typer.echo(f"run {key} {run_id}")
-    typer.echo(f"summary={write_committed_summary(registry)}")
+    directory, kept = write_committed_summary(registry)
+    typer.echo(f"summary={directory}")
+    if kept:
+        typer.echo(
+            f"run recorded, summary kept: {', '.join(kept)} publish runs this data directory's "
+            "registry does not hold; write the summary from the registry that holds them",
+            err=True,
+        )
+        raise typer.Exit(1)

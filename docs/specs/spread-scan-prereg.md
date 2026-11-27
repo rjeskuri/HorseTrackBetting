@@ -139,8 +139,12 @@ a run ranks at most 27 x 78 = 2,106 rows per variant. These counts are the desig
   through `write_report`.
 - One registry record per (family, variant), failures included, hypothesis id `P503`, metrics per
   row (`mean_return[<spread>]` with its bounds and `shrunk_edge[<spread>]`, fold = segment); each
-  scored record names its report in `params.report`. A range without a bet is recorded as failed
-  and writes neither file.
+  scored record names its report's file name in `data_builds.report`, after its `@`
+  (`reports/spread-scan@<file name>`), and a failed record `reports/spread-scan@not-written`. What
+  follows a build's last `@` is provenance, not variant identity, so a rerun of the same spec,
+  range, seed and replicates at another commit or on a refreshed store is new runs of the same 2
+  variants per family (PR #524's second review; the run-of-record records at `65fcbfc` carry the
+  name in `params.report`). A range without a bet is recorded as failed and writes neither file.
 
 ## Rulings (reversible implementation choices)
 
@@ -155,3 +159,9 @@ a run ranks at most 27 x 78 = 2,106 rows per variant. These counts are the desig
 - `mean_odds`: the variant board's favourite price; `payout_rate`: the stake-weighted race and
   pool payout rate.
 - Families: one per pool; hypothesis id `P503` (a ticket-scoped P id, as #283's `P283`).
+- The report's name: in `data_builds.report` after its `@` (`studies/ability.py`'s
+  `ability_artifacts` way), the record's only provenance slot `family_size` does not count; a
+  failed record carries `@not-written`, so a failed attempt and its retry are one variant.
+- A family summary file the local registry would drop a row of: kept as it was, the command
+  naming it and exiting 1 after the run is recorded, so a fresh data directory never shrinks
+  the published history.
