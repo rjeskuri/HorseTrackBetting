@@ -37,20 +37,27 @@ Contract pinned here (round-1 findings 684/745; round-2 findings A, B, C):
   after T-2) stays a row with `scratched` True and its `win_odds_t2`: it ranks, it is not scored.
 - Each race left out counts under one reason only. Every other race is in `rows` whole.
 
-D. The family the study now records under is a new one:
-- `FAMILY_ID == "japan-form-bands-t2-win-v2"`; `FAMILY_ID_V1 == "japan-form-bands-t2-win"`, the
-  family frozen and run first, left as it is.
+Round 3 (owner, #218, 2026-11-27, fix B): a fold's refit is checked against every row the v0
+file holds for that fold, whatever the requested range (the rows outside the range enter the
+check, they are not scored); a dead heat is dropped as `dropped_dead_heat_no_v0_reference` only
+when the v0 file holds no row of its fold at all.
+
+D. The family the study now records under is v3 (owner, #218, 2026-11-27, decision A):
+- `FAMILY_ID == "japan-form-bands-t2-win-v3"`; `FAMILY_ID_V2 == "japan-form-bands-t2-win-v2"` and
+  `FAMILY_ID_V1 == "japan-form-bands-t2-win"`, the families frozen and run before, left as they are.
 - `build_spec(n_boot, data)` and `data_description(date_from, date_to, scheme)` stay the v1
   builders, byte-identical: the real v1 spec hashes to `V1_SPEC_HASH` below.
-- `build_spec_v2(n_boot, data)` and `data_description_v2(date_from, date_to, scheme)` are v2's.
-  v2 differs from v1 only in `family_id` and `data` (and optionally `inputs`, `rulings`,
-  `approved`, `supersedes`): the variants, bands, rank groups, meld, walk-forward, scoring and
-  inference are identical. v2's data description states the revised eligibility (dead heats,
-  store-validated starters and scratches).
-- `run_study(out_dir, *, date_from, date_to, n_boot)` freezes `build_spec_v2(n_boot,
-  data_description_v2(date_from, date_to, scheme))` under `FAMILY_ID` in `default_registry` before
-  reading rows and records the 12 variants there; nothing goes to the v1 family. (The test swaps
-  `form_bands.load_country_scheme` for a monthly scheme: the synthetic days are three months.)
+- `build_spec_v2(n_boot, data)` and `data_description_v2(date_from, date_to, scheme)` stay the v2
+  builders, byte-identical: the real v2 spec hashes to `V2_SPEC_HASH` below.
+- `build_spec_v3(n_boot, data)` and `data_description_v3(date_from, date_to, scheme)` are v3's.
+  v3 is v2's design exactly: it differs from v2 in `family_id`, `data` and `supersedes` (which
+  names v2), and optionally in `inputs`, `rulings` and `approved`. v3's data description names the
+  round-3 drop reasons (`dropped_dead_heat_embargo`, `dropped_dead_heat_no_v0_reference`) and the
+  void rule for a race with no runner rows.
+- `run_study(out_dir, *, date_from, date_to, n_boot)` freezes `build_spec_v3(n_boot,
+  data_description_v3(date_from, date_to, scheme))` under `FAMILY_ID` in `default_registry` before
+  reading rows and records the 12 variants there; nothing goes to the v1 or v2 family. (The test
+  swaps `form_bands.load_country_scheme` for a monthly scheme: the synthetic days are three months.)
 
 Data: a synthetic data directory under tmp_path, nine race days in 2025 (development days); the
 v0 file is made here by `models.v0.calibration` itself. Expected values come from that module,
@@ -64,6 +71,7 @@ from __future__ import annotations  # noqa: I001
 import copy
 import hashlib
 import json
+import shutil
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -82,6 +90,7 @@ from horsetrack.countries.japan.models.v0 import calibration
 from horsetrack.countries.japan.studies import form_bands as fb
 
 V1_SPEC_HASH = "3585a45d05f6ecfcf1de92d605d08982ec2b8c4def4d9932823c63c031655bad"
+V2_SPEC_HASH = "4d1f93ba902c368184c395c58a64bdf2c0a8e79b94d8b8893c82d406e8421256"  # as frozen
 DAYS = [
     date(2025, 1, 1), date(2025, 1, 8), date(2025, 1, 15), date(2025, 1, 22),  # v0 trains only
     date(2025, 2, 5), date(2025, 2, 12), date(2025, 2, 19),  # v0 fold 0
@@ -474,15 +483,79 @@ def test_a_dead_heat_inside_the_embargo_after_its_fold_fits_cutoff_is_dropped(ex
     assert counts["dead_heat_races_refit"] == 2
 
 
-def test_a_folds_dead_heats_without_v0_rows_to_check_against_are_dropped(extended):
-    rows, _, counts, _ = read(extended, date(2025, 3, 13), date(2025, 3, 31))
+LATE_MARCH = (date(2025, 3, 13), date(2025, 3, 31))  # fold 1's v0 days before it, Mar 5 and 12
+
+
+def no_v0_reference_fold() -> int:
+    _, now = world()
+    _, v0_folds = v0_frame_and_folds(now + extra_runners(now=True))
+    return next(i for i, f in enumerate(v0_folds) if f.test_start <= NO_V0_DAY <= f.test_end)
+
+
+def with_v0_file(extended: Path, base: Path, edit) -> Path:
+    """A copy of the extended data directory whose v0 file is `edit(v0 file)`."""
+    data = base / "data"
+    shutil.copytree(extended, data)
+    oof = pq.read_table(data / fb.V0_OOF).to_pandas()
+    pq.write_table(pa.Table.from_pandas(edit(oof), preserve_index=False), data / fb.V0_OOF)
+    return data
+
+
+def test_a_dead_heat_is_scored_against_its_folds_v0_rows_outside_the_range(extended):
+    k = no_v0_reference_fold()
+    oof = pq.read_table(extended / fb.V0_OOF).to_pandas()
+    oof["race_date"] = pd.to_datetime(oof["race_id"].str.slice(4, 14)).dt.date
+    pinned = oof[oof["fold"] == k]
+    lo, hi = LATE_MARCH
+    assert min(pinned["race_date"]) < lo  # the fold's v0 rows lie before the range...
+    in_range = pinned[(pinned["race_date"] >= lo) & (pinned["race_date"] <= hi)]
+    assert set(in_range["race_id"]) == {rid(EXCLUDED_DAY, 1)}  # ...but one, the store contradicts
+
+    rows, _, counts, _ = read(extended, lo, hi)
+    assert counts["dropped_v0_disagrees_with_store"] == 1
+    assert counts.get("dropped_dead_heat_no_v0_reference", 0) == 0
+    assert counts["dead_heat_races_refit"] == 1
+    assert set(rows["race_id"]) == {DH_NO_V0_REFERENCE}  # the rows before the range: not scored
+    mine = rows.sort_values("horse_no")
+    assert mine["horse_no"].astype(int).tolist() == list(range(1, FIELD + 1))
+    assert int(mine["won"].sum()) == 2 and set(mine["fold"].astype(int)) == {k}
+
+    _, now = world()
+    now += extra_runners(now=True)
+    frame, v0_folds = v0_frame_and_folds(now)
+    model = calibration.fit_win_calibration(frame.iloc[v0_folds[k].train_idx])
+    race_rows = sorted((r for r in now if r["race_id"] == DH_NO_V0_REFERENCE),
+                       key=lambda r: r["horse_no"])  # fmt: skip
+    inv = 1.0 / np.array([r["win_odds"] for r in race_rows])
+    want = model.predict_many(inv / inv.sum(), np.zeros(FIELD, dtype=int))
+    got = mine["p_cal"].to_numpy(dtype=float)
+    assert np.isfinite(got).all()
+    np.testing.assert_allclose(got, want, rtol=1e-6)
+
+
+def test_a_folds_refit_is_checked_against_its_v0_rows_outside_the_range(extended, tmp_path):
+    def spoil(oof: pd.DataFrame) -> pd.DataFrame:  # a fold-1 race before the range, Mar 5
+        target = oof["race_id"] == rid(date(2025, 3, 5), 1)
+        assert target.any() and set(oof.loc[target, "fold"]) == {no_v0_reference_fold()}
+        oof.loc[target, "p_cal"] = oof.loc[target, "p_cal"] * (
+            1.0 + 0.1 * (oof.loc[target, "horse_no"] % 2)
+        )
+        return oof
+
+    data = with_v0_file(extended, tmp_path, spoil)
+    with pytest.raises(ValueError):
+        read(data, *LATE_MARCH)  # the same read of the unspoilt file scores (test above)
+
+
+@pytest.mark.parametrize("span", [LATE_MARCH, (date(2025, 3, 1), date(2025, 3, 31))],
+                         ids=["late-march", "all-march"])  # fmt: skip
+def test_a_dead_heat_in_a_fold_the_v0_file_holds_no_row_of_is_dropped(extended, tmp_path, span):
+    k = no_v0_reference_fold()
+    data = with_v0_file(extended, tmp_path, lambda oof: oof[oof["fold"] != k])
+    rows, _, counts, _ = read(data, *span)
     assert counts.get("dropped_dead_heat_no_v0_reference", 0) == 1
     assert DH_NO_V0_REFERENCE not in set(rows["race_id"])
     assert counts["dead_heat_races_refit"] == 0
-
-    rows, _, counts, _ = read(extended, date(2025, 3, 1), date(2025, 3, 31))  # v0 rows in fold 1
-    assert counts.get("dropped_dead_heat_no_v0_reference", 0) == 0
-    assert int(rows.loc[rows["race_id"] == DH_NO_V0_REFERENCE, "won"].sum()) == 2
 
 
 @pytest.mark.parametrize(
@@ -514,7 +587,7 @@ def test_run_study_on_a_span_with_no_eligible_race_records_failed_variants(exten
     assert set(result["errors"]) == set(fb.VARIANTS)
 
 
-# ---------------------------------------------------------------- D. the v2 family
+# ---------------------------------------------------------------- D. the families: v1, v2, v3
 
 
 def spec_hash(spec: dict) -> str:
@@ -537,12 +610,20 @@ SAME_IN_V2 = ("ticket", "hypothesis_id", "question", "null", "meld", "bands", "r
 MAY_DIFFER = {"family_id", "data", "inputs", "rulings", "approved", "supersedes"}
 
 
+def real_specs() -> tuple[dict, dict, dict]:
+    """v1, v2 and v3 as the real run builds them (2000 resamples, the real span and scheme)."""
+    span = (fb.DATE_FROM, fb.DATE_TO, load_country_scheme("japan"))
+    return (fb.build_spec(2000, fb.data_description(*span)),
+            fb.build_spec_v2(2000, fb.data_description_v2(*span)),
+            fb.build_spec_v3(2000, fb.data_description_v3(*span)))  # fmt: skip
+
+
 def test_v2_differs_from_v1_only_in_its_family_and_eligibility():
-    assert fb.FAMILY_ID == "japan-form-bands-t2-win-v2"
+    assert fb.FAMILY_ID_V2 == "japan-form-bands-t2-win-v2"
     scheme = load_country_scheme("japan")
     v1 = fb.build_spec(2000, fb.data_description(fb.DATE_FROM, fb.DATE_TO, scheme))
     v2 = fb.build_spec_v2(2000, fb.data_description_v2(fb.DATE_FROM, fb.DATE_TO, scheme))
-    assert v2["family_id"] == fb.FAMILY_ID
+    assert v2["family_id"] == fb.FAMILY_ID_V2
     for key in SAME_IN_V2:
         assert v2[key] == v1[key], key
     differing = {k for k in v1.keys() | v2.keys() if v1.get(k) != v2.get(k)}
@@ -551,17 +632,55 @@ def test_v2_differs_from_v1_only_in_its_family_and_eligibility():
     assert "dead heat" in described and "scratch" in described
 
 
-def test_run_study_freezes_and_records_under_the_v2_family_only(tmp_path):
+def test_the_v2_spec_builder_still_gives_the_frozen_v2_spec():
+    assert fb.FAMILY_ID_V2 == "japan-form-bands-t2-win-v2"
+    scheme = load_country_scheme("japan")
+    v2 = fb.build_spec_v2(2000, fb.data_description_v2(fb.DATE_FROM, fb.DATE_TO, scheme))
+    assert v2["family_id"] == fb.FAMILY_ID_V2
+    assert spec_hash(v2) == V2_SPEC_HASH
+
+
+def test_v3_differs_from_v2_only_in_its_family_and_eligibility():
+    assert fb.FAMILY_ID == "japan-form-bands-t2-win-v3"
+    assert len({fb.FAMILY_ID, fb.FAMILY_ID_V2, fb.FAMILY_ID_V1}) == 3
+    v1, v2, v3 = real_specs()
+    assert v3["family_id"] == fb.FAMILY_ID
+    for key in SAME_IN_V2:  # v2's design, which is v1's
+        assert v3[key] == v2[key] == v1[key], key
+    differing = {k for k in v2.keys() | v3.keys() if v2.get(k) != v3.get(k)}
+    assert {"family_id", "data", "supersedes"} <= differing <= MAY_DIFFER
+    assert fb.FAMILY_ID_V2 in v3["supersedes"]
+    for key in ("days", "h", "t2", "fold_scheme"):  # v2's sources and span
+        assert v3["data"][key] == v2["data"][key], key
+    described = json.dumps(v3["data"]).lower()
+    assert "dropped_dead_heat_embargo" in described
+    assert "dropped_dead_heat_no_v0_reference" in described
+    assert any(words in described for words in ("no runner", "without runner", "runnerless"))
+
+
+def test_run_study_freezes_and_records_under_the_v3_family_only(tmp_path):
     data = build_data_dir(tmp_path)
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv(paths.DATA_DIR_VAR, str(data))
         mp.setattr(fb, "load_country_scheme", lambda country: MONTHLY)
-        result = fb.run_study(tmp_path / "out", date_from=READ_FROM, date_to=LAST_DAY, n_boot=50)
         registry = default_registry("japan")
         assert registry.path.resolve().is_relative_to(data.resolve())
-        want = spec_hash(fb.build_spec_v2(50, fb.data_description_v2(READ_FROM, LAST_DAY, MONTHLY)))
+        v1, v2, _ = real_specs()  # the earlier families, frozen before this run
+        frozen = {fb.FAMILY_ID_V1: registry.freeze_family(fb.FAMILY_ID_V1, v1),
+                  fb.FAMILY_ID_V2: registry.freeze_family(fb.FAMILY_ID_V2, v2)}  # fmt: skip
+        assert frozen == {fb.FAMILY_ID_V1: V1_SPEC_HASH, fb.FAMILY_ID_V2: V2_SPEC_HASH}
+        before = registry.path.read_bytes()
+        result = fb.run_study(tmp_path / "out", date_from=READ_FROM, date_to=LAST_DAY, n_boot=50)
+        registry = default_registry("japan")
+        want = spec_hash(fb.build_spec_v3(50, fb.data_description_v3(READ_FROM, LAST_DAY, MONTHLY)))
         assert registry.frozen_spec_hash(fb.FAMILY_ID) == want == result["spec_hash"]
-        assert registry.frozen_spec_hash(fb.FAMILY_ID_V1) is None
-        assert registry.records(fb.FAMILY_ID_V1) == []
+        for family, spec_sha in frozen.items():  # v1 and v2 untouched
+            assert registry.frozen_spec_hash(family) == spec_sha, family
+            assert registry.records(family) == [], family
         assert sorted(r.variant for r in registry.records(fb.FAMILY_ID)) == sorted(fb.VARIANTS)
-    assert result["family_id"] == fb.FAMILY_ID
+        after = registry.path.read_bytes()
+        assert after.startswith(before)
+        added = [json.loads(line) for line in after[len(before) :].decode().splitlines()]
+        families = {line.get("family_id") or line["record"]["family_id"] for line in added}
+        assert added and families == {fb.FAMILY_ID}
+    assert result["family_id"] == fb.FAMILY_ID == "japan-form-bands-t2-win-v3"

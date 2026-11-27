@@ -937,19 +937,20 @@ def test_the_report_labels_gains_as_the_registered_melds_and_states_the_confound
     assert "market refit" in text
 
 
-# ---------------------------------------------------------------- 8. round-2 review: v2 family
+# ---------------------------------------------------------------- 8. the family recorded: v3
 
 
-def test_run_family_freezes_and_records_under_the_v2_family(noise_run):
+def test_run_family_freezes_and_records_under_the_v3_family(noise_run):
     result, registry = noise_run[0], noise_run[1]
-    spec = fb.build_spec_v2(N_BOOT, None)
+    spec = fb.build_spec_v3(N_BOOT, None)
     want = hashlib.sha256(
         json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    assert fb.FAMILY_ID == "japan-form-bands-t2-win-v2" == spec["family_id"]
+    assert fb.FAMILY_ID == "japan-form-bands-t2-win-v3" == spec["family_id"]
     assert registry.frozen_spec_hash(fb.FAMILY_ID) == want == result["spec_hash"]
-    assert registry.frozen_spec_hash(fb.FAMILY_ID_V1) is None
-    assert registry.records(fb.FAMILY_ID_V1) == []
+    for earlier in (fb.FAMILY_ID_V1, fb.FAMILY_ID_V2):
+        assert registry.frozen_spec_hash(earlier) is None, earlier
+        assert registry.records(earlier) == [], earlier
 
 
 def test_the_report_never_says_a_negative_b_lowers_its_groups_probability(noise_run):

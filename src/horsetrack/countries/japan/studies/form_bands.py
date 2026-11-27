@@ -34,8 +34,11 @@ row against the store, counts each race it leaves out once by reason and never r
 v0 row as a scratch. Each run writes its own private report.
 
 Families: v1 (`FAMILY_ID_V1`, `build_spec` / `data_description`) is the owner's pre-registration
-as frozen and first run; v2 (`FAMILY_ID`, `build_spec_v2` / `data_description_v2`) is the same
-design with the corrected eligibility (reviews of PR #473), the family the study records under.
+as frozen and first run; v2 (`FAMILY_ID_V2`, `build_spec_v2` / `data_description_v2`) is the same
+design with the corrected eligibility (reviews of PR #473), frozen and run second; v3
+(`FAMILY_ID`, `build_spec_v3` / `data_description_v3`) is v2's design with the round-3 and round-4
+eligibility (owner on #218, 2026-11-27), the family the study records under. Each builder stays
+byte-identical: its family's frozen hash is built from it.
 
 T-2 bands come from JRA-VAN, a licensed source (D21): every record carries the source `jravan`,
 the committed registry summary withholds its figures, and the report goes through `write_report`
@@ -88,7 +91,8 @@ COUNTRY = "japan"
 TICKET = 218
 HYPOTHESIS_ID = "E218"  # no 08 §4 number: the ticket's, as #256's E256
 FAMILY_ID_V1 = "japan-form-bands-t2-win"  # the pre-registered family, frozen and run first
-FAMILY_ID = "japan-form-bands-t2-win-v2"  # the corrected eligibility (review of PR #473)
+FAMILY_ID_V2 = "japan-form-bands-t2-win-v2"  # the corrected eligibility (review of PR #473)
+FAMILY_ID = "japan-form-bands-t2-win-v3"  # round-3/4 eligibility (owner on #218, 2026-11-27)
 BOOTSTRAP_SEED = 218
 N_BOOT = 2000  # the approved pre-registration's meeting resamples
 FWE_LEVEL = 0.05
@@ -411,13 +415,46 @@ def build_spec_v2(n_boot: int, data: Mapping | None = None) -> dict:
     ]
     return {
         **spec,
-        "family_id": FAMILY_ID,
+        "family_id": FAMILY_ID_V2,
         "supersedes": f"{FAMILY_ID_V1}: its data.rows rule read a T-2 runner missing from v0 as "
         "a scratch and its rows left out first-place dead heats (round-1 and round-2 reviews of "
         "PR #473); the design is unchanged",
         "approved": "v1's pre-registration (owner on #218, 2026-11-25; reframed 2026-11-27), "
         "with the eligibility corrected and frozen by Claude under the 2026-11-27 reframe (later "
         "variants added by Claude and counted, without a new sign-off)",
+    }
+
+
+def build_spec_v3(n_boot: int, data: Mapping | None = None) -> dict:
+    """v3: v2's design exactly, with the round-3 and round-4 eligibility of the rows in `data`
+    (`data_description_v3`; owner on #218, 2026-11-27)."""
+    spec = build_spec_v2(n_boot, data)
+    spec["inputs"] = {
+        **spec["inputs"],
+        "p_cal": f"v0, the calibrated-market Win probability out of fold ({V0_OOF}, #114); a "
+        "first-place dead heat, which that file leaves out, gets its fold's v0 fit refitted "
+        "from the store as models.v0.calibration.run_fit makes it, the refit checked to "
+        "reproduce the file on every row the file holds for that fold (development days), "
+        "inside the run's span or not",
+    }
+    spec["rulings"] = [
+        *spec["rulings"],
+        "a race in the store's races table with no runner rows is void (dropped_void)",
+        "a dead heat dated less than the fold scheme's embargo_days after its fold's train_end "
+        "is dropped (dropped_dead_heat_embargo)",
+        "a dead heat whose fold has no row in the v0 file is dropped "
+        "(dropped_dead_heat_no_v0_reference); the file's rows of a fold outside the run's span "
+        "enter the refit's check and are not scored",
+    ]
+    return {
+        **spec,
+        "family_id": FAMILY_ID,
+        "supersedes": f"{FAMILY_ID_V2}: the round-4 review of PR #473 found that the round-3 "
+        "exclusions (runnerless void races, the dead-heat embargo, dead heats without a v0 "
+        "reference) changed which races v2's frozen hash admits; the design is unchanged",
+        "approved": "v1's pre-registration (owner on #218, 2026-11-25), frozen by Claude under "
+        "the owner's 2026-11-27 reframe and the owner's 2026-11-27 decision on #218 that the "
+        "corrected eligibility rules go into a new family v3, v2 frozen as it is",
     }
 
 
@@ -580,7 +617,7 @@ def run_family(
     the repository before anything is written."""
     _refuse_holdout(rows)
     out_dir = paths.outside_repo(Path(out_dir), what="out_dir")
-    spec = build_spec_v2(n_boot, data)
+    spec = build_spec_v3(n_boot, data)
     spec_hash = registry.freeze_family(FAMILY_ID, spec)
 
     groups = assign_groups(rows)
@@ -854,6 +891,32 @@ def data_description_v2(date_from: date, date_to: date, scheme: FoldScheme) -> d
     }
 
 
+def data_description_v3(date_from: date, date_to: date, scheme: FoldScheme) -> dict:
+    """v3's rows: v2's sources and span, with the round-3 and round-4 eligibility."""
+    v2 = data_description_v2(date_from, date_to, scheme)
+    return {
+        **v2,
+        "population": "the store's races on those days (processed/jra races and runners), a "
+        "race of the races table without runner rows included",
+        "p_cal": f"{V0_OOF}; for a first-place dead heat with every starter priced (which that "
+        "file leaves out) the fold's v0 fit refitted from the store as "
+        "models.v0.calibration.run_fit makes it (fit_win_calibration on the fold's training "
+        "rows from 2014-06-07), predict_many on the race's normalised 1/odds, each co-winner "
+        "won; the refit must reproduce the file's p_cal from the file's q on every row the file "
+        "holds for that fold on development days, inside the span or not (rows outside the span "
+        "are checked, not scored)",
+        "dropped": "each race once, counted under its first reason: void, no winner or no "
+        "runner rows (dropped_void); no priced winner; a dead heat with an unpriced starter; not "
+        "in v0 for another reason; an unnumbered confirmed starter; a v0 row the store's "
+        "current starter fields contradict (runner absent, scratched or unpriced, or its "
+        "normalised 1/odds changed); a confirmed starter without a v0 row; a dead heat outside "
+        "every fold; a dead heat dated less than the scheme's embargo_days after its fold's "
+        "train_end (dropped_dead_heat_embargo); a dead heat whose fold has no row in the v0 file "
+        "(dropped_dead_heat_no_v0_reference); a T-2 runner the store does not hold; a starter "
+        "without h",
+    }
+
+
 def _per_race(store: pd.DataFrame, race_ids: Sequence[str] = ()) -> pd.DataFrame:
     """Per store race: its winners, dead-heat winners, a priced winner, and whether it has an
     unnumbered or an unpriced numbered confirmed starter. A race of `race_ids` (the races table)
@@ -917,21 +980,22 @@ def _refit_p_cal(
 
 
 def read_rows(date_from: date, date_to: date, scheme: FoldScheme) -> tuple:
-    """The run's rows, the folds, the counts and the data builds (see `data_description_v2`).
+    """The run's rows, the folds, the counts and the data builds (see `data_description_v3`).
 
     The population is the store's races on the development days read; each race left out is
-    counted once, under its first reason (`data_description_v2`'s "dropped"). v0's fold fits are
-    refitted from the store as `models.v0.calibration.run_fit` makes them; they must reproduce
-    the v0 file's p_cal on every race the file holds and the run keeps (else ValueError), and
-    they give a first-place dead heat its p_cal. One day of odds is read at a time, WIN rows
-    only; the store is read column-scoped."""
+    counted once, under its first reason (`data_description_v3`'s "dropped"). v0's fold fits are
+    refitted from the store as `models.v0.calibration.run_fit` makes them; each must reproduce
+    the v0 file's p_cal on every development row the file holds for its fold, inside the span or
+    not (else ValueError), and they give a first-place dead heat its p_cal. One day of odds is
+    read at a time, WIN rows only; the store is read column-scoped."""
     data = paths.data_dir()
     oof = pq.read_table(data / V0_OOF, columns=["race_id", "horse_no", "fold", "q", "p_cal"])
-    oof = oof.to_pandas()
-    oof["race_date"] = pd.to_datetime(oof["race_id"].str.slice(4, 14)).dt.date
-    oof = oof[(oof["race_date"] >= date_from) & (oof["race_date"] <= date_to)]
-    oof = oof.loc[~oof["race_date"].map(lambda d: is_holdout_day(COUNTRY, d)).to_numpy(dtype=bool)]
-    oof = oof.astype({"horse_no": "int64"})
+    pinned = oof.to_pandas()
+    pinned["race_date"] = pd.to_datetime(pinned["race_id"].str.slice(4, 14)).dt.date
+    pinned = pinned.loc[
+        ~pinned["race_date"].map(lambda d: is_holdout_day(COUNTRY, d)).to_numpy(dtype=bool)
+    ].astype({"horse_no": "int64"})  # every development row: each refit is checked against them
+    oof = pinned[(pinned["race_date"] >= date_from) & (pinned["race_date"] <= date_to)]
 
     table = read_store_table(
         "runners", columns=STORE_COLUMNS, start=PRICE_ERA_START, end=date_to, touches_price=True
@@ -1027,23 +1091,27 @@ def read_rows(date_from: date, date_to: date, scheme: FoldScheme) -> tuple:
     embargoed = set(dh_rows.loc[(since < scheme.embargo_days).to_numpy(dtype=bool), "race_id"])
     order.append(("dropped_dead_heat_embargo", embargoed))
     candidates -= embargoed
-    # a fold with no kept v0 row to check its refit against prices none of its dead heats
+    # a fold the v0 file holds no row of has nothing to check its refit against: its dead
+    # heats are dropped; otherwise the refit is checked against all of the fold's file rows
+    # (the file's own q and p_cal), inside the span or not, and only the span is scored
     dh_rows = dh_rows[~dh_rows["race_id"].isin(embargoed)]
-    no_reference = set(dh_rows.loc[~dh_rows["fold"].isin(set(kept_v0["fold"])), "race_id"])
+    no_reference = set(dh_rows.loc[~dh_rows["fold"].isin(set(pinned["fold"])), "race_id"])
     order.append(("dropped_dead_heat_no_v0_reference", no_reference))
     candidates -= no_reference
     dh_rows = dh_rows[~dh_rows["race_id"].isin(no_reference)].assign(p_cal=np.nan)
-    fold_rows = {}
-    for k in sorted(set(kept_v0["fold"].astype(int))):
+    fold_rows, reference = {}, {}
+    for k in sorted(set(kept_v0["fold"].astype(int)) | set(dh_rows["fold"])):
+        reference[k] = pinned[pinned["fold"] == k]
         fold_rows[k] = pd.concat(
-            [kept_v0.loc[kept_v0["fold"] == k, ["race_id", "q"]],
+            [reference[k][["race_id", "q"]],
              dh_rows.loc[dh_rows["fold"] == k, ["race_id", "q"]]], ignore_index=True,
         )  # fmt: skip
+    del pinned
     refit = _refit_p_cal(frame, folds, fold_rows)
     del frame
     for k, p in refit.items():
-        n_v0 = int((kept_v0["fold"] == k).sum())
-        file_p = kept_v0.loc[kept_v0["fold"] == k, "p_cal"].to_numpy(dtype=float)
+        n_v0 = len(reference[k])
+        file_p = reference[k]["p_cal"].to_numpy(dtype=float)
         if not np.allclose(p[:n_v0], file_p, rtol=1e-6, atol=1e-9):
             worst = float(np.max(np.abs(p[:n_v0] - file_p)))
             raise ValueError(
@@ -1150,9 +1218,9 @@ def run_study(
     """The real run: freeze the spec before any row is read, build the rows and run the family."""
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     scheme = load_country_scheme(COUNTRY)
-    data = data_description_v2(date_from, date_to, scheme)
+    data = data_description_v3(date_from, date_to, scheme)
     registry = default_registry(COUNTRY)
-    registry.freeze_family(FAMILY_ID, build_spec_v2(n_boot, data))  # before any row is read
+    registry.freeze_family(FAMILY_ID, build_spec_v3(n_boot, data))  # before any row is read
     rows, folds, counts, builds = read_rows(date_from, date_to, scheme)
     return run_family(
         rows, folds, registry=registry, out_dir=out_dir, n_boot=n_boot, data=data,
