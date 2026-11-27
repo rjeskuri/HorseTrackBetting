@@ -85,14 +85,17 @@ def read_store_table(
 
 
 class _Snapshot(pafs.FileSystemHandler):
-    """A read-only filesystem holding the one file `path`, served zero-copy from the memory map
-    `handle`: a dataset of `path` on it reads the snapshot the handle opened, even after the file
-    is atomically replaced on disk."""
+    """A read-only filesystem holding the one file `path`, served from the memory map `handle`: a
+    dataset of `path` on it reads the snapshot the handle opened, even after the file is
+    atomically replaced on disk. Each open reads the map by byte range (`_Ranges`), so a scan
+    pages in only the column chunks it reads: one buffer over the whole map would have the kernel
+    page in the whole file (Arrow advises WILLNEED for every buffer it maps), a resident set the
+    size of the file for a one-year read of `final_odds` (#430)."""
 
     def __init__(self, path: str, handle: pa.MemoryMappedFile) -> None:
         self.path = path
-        handle.seek(0)
-        self.buffer = handle.read_buffer()  # the whole map, not a copy
+        self.handle = handle
+        self.size = handle.size()
 
     def get_type_name(self) -> str:
         return "snapshot"
@@ -102,7 +105,7 @@ class _Snapshot(pafs.FileSystemHandler):
 
     def get_file_info(self, paths: list[str]) -> list[pafs.FileInfo]:
         return [
-            pafs.FileInfo(p, pafs.FileType.File, size=self.buffer.size)
+            pafs.FileInfo(p, pafs.FileType.File, size=self.size)
             if p == self.path
             else pafs.FileInfo(p, pafs.FileType.NotFound)
             for p in paths
@@ -114,7 +117,7 @@ class _Snapshot(pafs.FileSystemHandler):
     def open_input_file(self, path: str) -> pa.NativeFile:
         if path != self.path:
             raise FileNotFoundError(path)
-        return pa.BufferReader(self.buffer)
+        return pa.PythonFile(_Ranges(self.handle, self.size), mode="r")
 
     open_input_stream = open_input_file
 
@@ -123,3 +126,40 @@ class _Snapshot(pafs.FileSystemHandler):
 
     create_dir = delete_dir = delete_dir_contents = delete_root_dir_contents = _read_only
     delete_file = move = copy_file = open_output_stream = open_append_stream = _read_only
+
+
+class _Ranges:
+    """A read-only file object over the open handle with a position of its own: each read is one
+    `read_at` of the handle (thread-safe, the handle's own position untouched)."""
+
+    closed = False
+
+    def __init__(self, handle: pa.NativeFile, size: int) -> None:
+        self._handle, self._size, self._position = handle, size, 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return False
+
+    def tell(self) -> int:
+        return self._position
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        base = {0: 0, 1: self._position, 2: self._size}[whence]
+        self._position = base + offset
+        return self._position
+
+    def read(self, nbytes: int | None = -1) -> bytes:
+        left = max(0, self._size - self._position)
+        count = left if nbytes is None or nbytes < 0 else min(nbytes, left)
+        data = self._handle.read_at(count, self._position) if count else b""
+        self._position += count
+        return data
+
+    def close(self) -> None:
+        self.closed = True
