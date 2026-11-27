@@ -17,6 +17,18 @@ Shares and the late composition
   PLACE_REL_TOL, including boards whose favourite's low figure sits at the floor. Without high
   figures the low figures alone are used (owner, #410). The rule inside is left to the module.
   WIN is unaffected.
+- `place_shares(odds, odds_hi) -> (shares, rule_sum, reader)` reads one board as `pool_shares`
+  does and names the read: `joint` (both figures), `low_only`, or `undetermined` when the figures
+  above the floor cannot tell the money apart (ruling on #410: e.g. two favourites at the floor
+  at both ends, whose swap prints the same board); such a board is still read, not dropped.
+- `ShadowNowcast` (#116's draws interface) starts a PLACE board's draws from the same shares
+  `race_view` reads from the same figures, the high figures included.
+- The study's Place measurement (#410): `closing_boards(frame, PLACE)` yields the final board
+  each race is scored on; `place_rule_measurement(boards, votes)` reads each as scored and
+  validates it against final H1 votes (data_kubun 4 or 5) on every priced runner, counting the
+  rest by reason; `final_place_votes(days)` reads `pool_votes` through the scoped store reader
+  only, so no holdout row reaches it; an empty measurement is a failed, unvalidated record and
+  the report calls the Place rows a diagnostic.
 - `late_composition(v1, s1, v2, s2) -> np.ndarray`: the composition of the money bet between two
   snapshots, (v2 * s2 - v1 * s1) / (v2 - v1).
 - The final shares are s_final = phi * s_t + (1 - phi) * s_late, with phi = V_t / V_final.
@@ -113,7 +125,8 @@ from horsetrack.core.eval.folds import FoldScheme, walk_forward
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.registry import default_registry
 from horsetrack.core.pricing import stake_back_share_dividend
-from horsetrack.countries.japan.board.snapshot import PLACE, WIDE, WIN
+from horsetrack.countries.japan.board.snapshot import PLACE, WIDE, WIN, RaceBoard
+from horsetrack.countries.japan.jravan.votes import POOL_VOTES_SCHEMA
 from horsetrack.countries.japan.logger.compact import SCHEMA
 from horsetrack.countries.japan.models.nowcast import (
     Draws,
@@ -121,10 +134,13 @@ from horsetrack.countries.japan.models.nowcast import (
     Nowcast,
     PoolBoard,
     RaceView,
+    ShadowNowcast,
+    closing_boards,
     compare,
     extract,
     fit_folds,
     late_composition,
+    place_shares,
     pool_shares,
     race_view,
     score_cases,
@@ -1284,3 +1300,402 @@ def test_place_shares_without_high_figures_fall_back_to_the_low_figures():
             assert (shares > 0).all()
             assert int(np.argmax(shares)) == int(np.argmin(lo))
         np.testing.assert_allclose(missing, bare, rtol=1e-12, atol=0.0)
+
+
+# ---------------------------------------------------------------- #410 review
+
+PLACE_FLOOR = PLACE_POOL.min_dividend / PLACE_UNIT
+
+
+def place_race_board(money_yen, *, hi_missing: Sequence[int] = ()) -> tuple[RaceBoard, np.ndarray]:
+    """A RaceBoard 5 minutes before the post whose PLACE figures JRA prints from `money_yen`
+    (runners 1..k, a high figure None on the runners of `hi_missing`), with WIN priced on every
+    runner and the Place pool's total; and the high figures as the board holds them (NaN)."""
+    lo, hi, _ = jra_place_figures(money_yen)
+    hi = hi.copy()
+    hi[list(hi_missing)] = np.nan
+    post = post_of(TEST_DAYS[0], 4)
+    capture = post - timedelta(minutes=5)
+    board = RaceBoard(
+        race_id=race_id_of(TEST_DAYS[0], 4),
+        post_utc=post,
+        at_utc=capture,
+        capture_utc=capture,
+        final=False,
+        win={j + 1: 2.0 + j for j in range(len(lo))},
+        place={
+            j + 1: (float(lo[j]), None if np.isnan(hi[j]) else float(hi[j])) for j in range(len(lo))
+        },
+        wide={},
+        totals={PLACE: float(np.sum(money_yen))},
+        scratched=frozenset(),
+    )
+    return board, hi
+
+
+def place_view_shares(money_yen, hi) -> np.ndarray:
+    """The PLACE shares `race_view` reads 5 minutes before the post from the board JRA prints
+    from `money_yen` (high figures `hi`, NaN where absent), in runner order."""
+    lo, _, _ = jra_place_figures(money_yen)
+    race_id, post = race_id_of(TEST_DAYS[0], 4), post_of(TEST_DAYS[0], 4)
+    rows = [
+        row(race_id, 4, PLACE, str(j + 1), post, 5, odds=lo[j],
+            odds_hi=None if np.isnan(hi[j]) else hi[j])
+        for j in range(len(lo))
+    ]  # fmt: skip
+    rows.append(row(race_id, 4, PLACE, POOL_ROW, post, 5, investment=float(np.sum(money_yen))))
+    board = race_view(to_frame(rows), race_id, tau_min=5).pools[PLACE]
+    order = np.array([int(c) - 1 for c in board.combinations])
+    out = np.empty(len(lo))
+    out[order] = board.shares
+    return out
+
+
+@pytest.mark.parametrize(
+    ("money", "hi_missing"),
+    [
+        (PLACE_BOARDS[0][1], ()),  # 14 runners, the favourite's low figure at the floor
+        (PLACE_BOARDS[1][1], ()),  # 12 runners, two low figures at the floor
+        (PLACE_BOARDS[3][1], ()),  # 8 runners, the favourite at the floor at both ends
+        (PLACE_BOARDS[0][1], (5,)),  # a high figure missing: both read the low figures alone
+    ],
+    ids=["14-favourite-at-floor", "12-two-lows-at-floor", "8-heavy-favourite", "one-high-missing"],
+)
+def test_shadow_place_draws_start_from_the_same_shares_as_race_view(money, hi_missing):
+    """#410 review item 6: the shadow adapter reads a PLACE board's figures as `race_view` does,
+    the high figures included. With the known nowcast at phi = 1 every draw is the board, so each
+    draw prints the stake-back-share figures (`place_odds`, untruncated, floored) of the shares
+    the board is read into; those are the shares `race_view` reads from the same figures, and on
+    a board whose favourite is at the floor they are not the low figures' read."""
+    board, hi = place_race_board(money, hi_missing=hi_missing)
+    lo, _, places = jra_place_figures(money)
+    assert places == 3  # place_odds pays three places
+    expected = place_view_shares(money, hi)
+    np.testing.assert_allclose(
+        expected, pool_shares(PLACE, lo, odds_hi=hi)[0], rtol=1e-9, atol=1e-12
+    )
+    k, n = len(lo), 6
+    rng = np.random.default_rng(4106)
+    shocks = {j + 1: rng.standard_normal(n) for j in range(k)}
+    shadow = ShadowNowcast(Nowcast.from_params(phi=1.0, sigma=1e-6))
+    drawn = shadow.draws(board, pool=PLACE, tau_min=5, shocks=shocks)
+    assert drawn.combinations == tuple(str(j + 1) for j in range(k))
+    want_lo, want_hi = place_odds(expected, 1.0)
+    np.testing.assert_allclose(drawn.odds, np.tile(want_lo, (n, 1)), rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(drawn.odds_hi, np.tile(want_hi, (n, 1)), rtol=1e-9, atol=1e-9)
+    if not hi_missing:  # the low figures' read prints another board
+        low_lo, low_hi = place_odds(pool_shares(PLACE, lo)[0], 1.0)
+        gap = max(np.abs(want_lo - low_lo).max(), np.abs(want_hi - low_hi).max())
+        assert gap > 0.1, gap  # precondition: the two reads differ on this board
+        assert np.abs(drawn.odds_hi - low_hi).max() > 0.1 or np.abs(drawn.odds - low_lo).max() > 0.1
+
+
+# Two favourites of 51% and 40% of the Place money: each is placed with the other in every set
+# that prints its figures, so both print the floor at both ends, and every other runner's figures
+# hold their money only as a sum; swapping the two prints the same board.
+UNIDENTIFIED = _yen([5100, 4000, 250, 200, 150, 150, 100, 50])
+
+
+def test_place_board_with_unidentified_favourites_is_flagged():
+    """#410 review item 7, ruling: a joint read whose figures above the floor cannot tell the
+    money apart is flagged `undetermined`, still read (shares total 1, positive, the other runners
+    and the two favourites' sum recovered) and not dropped; the known boards, more seeded boards,
+    and boards with one favourite at the floor at both ends stay `joint` and recover the money."""
+    lo, hi, places = jra_place_figures(UNIDENTIFIED)
+    assert places == 3
+    assert (lo[:2] == PLACE_FLOOR).all() and (hi[:2] == PLACE_FLOOR).all(), (lo, hi)
+    assert (lo[2:] > PLACE_FLOOR).all() and (hi[2:] > PLACE_FLOOR).all(), (lo, hi)
+    swapped = UNIDENTIFIED.copy()
+    swapped[[0, 1]] = swapped[[1, 0]]
+    lo_s, hi_s, _ = jra_place_figures(swapped)
+    np.testing.assert_array_equal(lo_s, lo)
+    np.testing.assert_array_equal(hi_s, hi)
+
+    shares, _, reader = place_shares(lo, hi)
+    assert reader == "undetermined"
+    assert shares is not None
+    shares = np.asarray(shares, dtype=float)
+    assert np.isfinite(shares).all() and (shares > 0).all(), shares
+    assert shares.sum() == pytest.approx(1.0, abs=1e-9)
+    truth = UNIDENTIFIED / UNIDENTIFIED.sum()
+    np.testing.assert_allclose(shares[2:], truth[2:], rtol=PLACE_REL_TOL, atol=0)
+    assert shares[:2].sum() == pytest.approx(truth[:2].sum(), abs=PLACE_ABS_TOL)
+    np.testing.assert_allclose(pool_shares(PLACE, lo, odds_hi=hi)[0], shares, rtol=1e-12)
+
+    known = [money for _, money, _ in PLACE_BOARDS]
+    known += [money for _, money in random_place_boards(30, seed=4107)]
+    both_ends = 0
+    for money in known:
+        lo, hi, _ = jra_place_figures(money)
+        favourite = int(np.argmax(money))
+        both_ends += bool(lo[favourite] == PLACE_FLOOR and hi[favourite] == PLACE_FLOOR)
+        shares, _, reader = place_shares(lo, hi)
+        assert reader == "joint", (money, lo, hi)
+        assert_recovers(shares, money)
+    assert both_ends >= 2, both_ends  # boards with one favourite at the floor at both ends
+
+
+def place_votes_rows(race_id: str, money_yen, *, kubun: str = "4", extra=()) -> list[dict]:
+    """A race's PLACE H1 votes (100-yen tickets) on runners 1..k, plus `extra` slots."""
+    combos = [str(j + 1) for j in range(len(money_yen))] + list(extra)
+    votes = [int(m) // 100 for m in money_yen] + [1000] * len(extra)
+    return [
+        {"race_id": race_id, "combination": c, "votes": v, "data_kubun": kubun}
+        for c, v in zip(combos, votes, strict=True)
+    ]
+
+
+def summary_row(measured: dict, reader: str, label: str = "all") -> dict:
+    found = [r for r in measured["summary"] if r["reader"] == reader and r["boards"] == label]
+    assert len(found) == 1, measured["summary"]
+    return found[0]
+
+
+def counted(measured: dict, reason: str) -> int:
+    return sum(v for k, v in measured["counts"].items() if k.split(":")[0] == reason)
+
+
+def test_place_rule_measurement_validates_the_boards_as_scored():
+    """#410: each closing board is read as scored (`place_shares`) and validated only against
+    final H1 votes (data_kubun 4 or 5) on every priced runner; the rest are counted by reason, and
+    coverage per read is validated / scored. A board printed from its votes is reproduced and,
+    read jointly, within tolerance where the low figures alone are not."""
+    rid = [race_id_of(TEST_DAYS[0], n) for n in range(1, 7)]
+    fav_floor = PLACE_BOARDS[0][1]  # 14 runners, P = 3, the favourite's low figure at the floor
+    two_places = PLACE_BOARDS[4][1]  # 6 runners, P = 2
+    twelve = PLACE_BOARDS[1][1]
+    boards, votes = [], []
+
+    def add(race_id, money, *, hi_missing=(), kubun="4", extra=(), drop=None, with_votes=True):
+        lo, hi, _ = jra_place_figures(money)
+        hi = hi.copy()
+        hi[list(hi_missing)] = np.nan
+        boards.append((race_id, tuple(str(j + 1) for j in range(len(lo))), lo, hi))
+        if with_votes:
+            rows = place_votes_rows(race_id, money, kubun=kubun, extra=extra)
+            votes.extend(r for r in rows if r["combination"] != drop)
+
+    add(rid[0], fav_floor)  # (a) validated, joint
+    add(rid[1], two_places, kubun="5", extra=("7", "8"))  # validated, joint, P as scored = 2
+    add(rid[2], twelve, hi_missing=(4,))  # (b) validated, low_only, every runner kept
+    add(rid[3], fav_floor, kubun="2")  # (c) the day-before close
+    add(rid[4], twelve, drop="3")  # (d) a priced runner without votes
+    add(rid[5], two_places, with_votes=False)  # no votes for the race
+    measured = study.place_rule_measurement(boards, pd.DataFrame(votes))
+
+    assert measured["counts"]["boards_scored"] == 6
+    assert measured["counts"]["boards_validated"] == 3
+    assert counted(measured, "unavailable_votes_not_final") == 1
+    assert counted(measured, "unavailable_votes_missing_on_a_priced_runner") == 1
+    assert counted(measured, "unavailable_no_votes") == 1
+    assert study.place_validated(measured)
+
+    joint = summary_row(measured, "joint")
+    assert (joint["n_scored"], joint["n"]) == (5, 2)
+    assert joint["coverage"] == pytest.approx(2 / 5)
+    assert joint["share_reproduced"] == pytest.approx(1.0)
+    p3 = summary_row(measured, "joint", "P=3")
+    assert (p3["n_scored"], p3["n"], p3["coverage"]) == (3, 1, pytest.approx(1 / 3))
+    assert p3["share_within_tolerance"] == pytest.approx(1.0)
+    assert p3["low_only_share_within_tolerance"] == pytest.approx(0.0)
+    p2 = summary_row(measured, "joint", "P=2")
+    assert (p2["n_scored"], p2["n"]) == (2, 1)
+    assert p2["share_reproduced"] == pytest.approx(1.0)  # with P as scored, not from 8 slots
+    assert p2["share_slot_places_differ"] == pytest.approx(1.0)
+
+    low = summary_row(measured, "low_only")
+    assert (low["n_scored"], low["n"], low["coverage"]) == (1, 1, pytest.approx(1.0))
+    assert low["share_reproduced"] == pytest.approx(1.0)
+    assert summary_row(measured, "low_only", "P=3")["n"] == 1
+
+    empty = study.place_rule_measurement(
+        boards, pd.DataFrame(columns=["race_id", "combination", "votes", "data_kubun"])
+    )
+    assert empty["counts"]["boards_scored"] == 6
+    assert empty["counts"]["boards_validated"] == 0
+    assert counted(empty, "unavailable_no_votes") == 6
+    assert not study.place_validated(empty)
+    for r in empty["summary"]:
+        assert r["n"] == 0 and r["coverage"] == 0.0, r
+
+
+def test_place_rule_measurement_counts_an_undetermined_board_under_its_own_reader():
+    """Ruling on #410 review item 7: an undetermined board is a diagnostic in the measurement,
+    counted under its own read and not as a joint one, even with final votes on every runner."""
+    lo, hi, _ = jra_place_figures(UNIDENTIFIED)
+    fav_lo, fav_hi, _ = jra_place_figures(PLACE_BOARDS[0][1])
+    rid = [race_id_of(TEST_DAYS[0], n) for n in (1, 2)]
+    boards = [
+        (rid[0], tuple(str(j + 1) for j in range(len(lo))), lo, hi),
+        (rid[1], tuple(str(j + 1) for j in range(len(fav_lo))), fav_lo, fav_hi),
+    ]
+    votes = place_votes_rows(rid[0], UNIDENTIFIED) + place_votes_rows(rid[1], PLACE_BOARDS[0][1])
+    measured = study.place_rule_measurement(boards, pd.DataFrame(votes))
+    assert measured["counts"]["boards_validated"] == 2
+    undetermined = summary_row(measured, "undetermined")
+    assert (undetermined["n_scored"], undetermined["n"]) == (1, 1)
+    assert undetermined["share_reproduced"] == pytest.approx(1.0)
+    joint = summary_row(measured, "joint")
+    assert (joint["n_scored"], joint["n"]) == (1, 1)
+
+
+def write_pool_votes(data_dir: Path, rows: list[dict]) -> Path:
+    path = data_dir / "processed" / "jravan" / "pool_votes.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist(rows, schema=POOL_VOTES_SCHEMA), path)
+    return path
+
+
+def store_votes(day: date, race_no: int, pool: str, votes: dict[str, int], kubun="4") -> list[dict]:
+    race_id = race_id_of(day, race_no)
+    return [
+        {
+            "jurisdiction": "jra",
+            "race_id": race_id,
+            "race_date": day,
+            "venue": VENUE,
+            "race_no": race_no,
+            "pool": pool,
+            "combination": c,
+            "votes": v,
+            "refund_votes": 0,
+            "fav_rank": None,
+            "data_kubun": kubun,
+        }
+        for c, v in votes.items()
+    ]
+
+
+def test_place_votes_are_read_through_the_scoped_reader_and_drop_holdout_days(
+    data_dir, monkeypatch
+):
+    """D14, #415: `final_place_votes` reads `pool_votes` only through the store's scoped reader,
+    so a holdout day's votes never reach the study even when that day is asked for; only the
+    PLACE runner slots of the days asked are returned, with their data_kubun."""
+    dev, held, other = date(2026, 11, 28), date(2026, 11, 29), date(2026, 11, 22)
+    assert not is_holdout_day(COUNTRY, dev) and not is_holdout_day(COUNTRY, other)
+    assert is_holdout_day(COUNTRY, held)
+    dev_place = {"1": 4100, "2": 900, "3": 350}
+    rows = (
+        store_votes(dev, 1, PLACE, dev_place)
+        + store_votes(dev, 2, PLACE, {"1": 700, "2": 650}, kubun="2")
+        + store_votes(dev, 1, PLACE, {POOL_ROW: 5350})
+        + store_votes(dev, 1, WIN, {"1": 9000, "2": 100})
+        + store_votes(held, 1, PLACE, {"1": 1234, "2": 4321})
+        + store_votes(other, 1, PLACE, {"1": 55, "2": 66})
+    )
+    path = write_pool_votes(data_dir, rows)
+
+    inside, outside, scoped = [0], [], []
+    real_reader = study.read_store_table
+
+    def reader(name, *args, **kwargs):
+        scoped.append(name)
+        inside[0] += 1
+        try:
+            return real_reader(name, *args, **kwargs)
+        finally:
+            inside[0] -= 1
+
+    monkeypatch.setattr(study, "read_store_table", reader)
+    import builtins
+
+    for module, name in ((pq, "read_table"), (pq, "ParquetFile"), (pq, "read_metadata"),
+                         (pq, "read_schema"), (ds, "dataset"), (pa, "memory_map"),
+                         (pd, "read_parquet"), (builtins, "open")):  # fmt: skip
+        real = getattr(module, name)
+
+        def spy(source, *args, _real=real, **kwargs):
+            if "pool_votes" in str(source) and not inside[0]:
+                outside.append(str(source))
+            return _real(source, *args, **kwargs)
+
+        monkeypatch.setattr(module, name, spy)
+
+    got = study.final_place_votes([dev.isoformat(), held.isoformat()])
+    monkeypatch.undo()
+    assert not outside, outside
+    assert "pool_votes" in scoped
+    assert path.exists()
+    races = set(got["race_id"])
+    assert races == {race_id_of(dev, 1), race_id_of(dev, 2)}, races
+    assert not any(held.isoformat() in r for r in got["race_id"])
+    assert POOL_ROW not in set(got["combination"])
+    first = got[got["race_id"] == race_id_of(dev, 1)]
+    assert dict(zip(first["combination"], first["votes"].astype(int), strict=True)) == dev_place
+    kubun = dict(zip(got["race_id"], got["data_kubun"], strict=False))
+    assert kubun == {race_id_of(dev, 1): "4", race_id_of(dev, 2): "2"}
+
+
+def test_an_empty_place_measurement_is_an_unvalidated_failed_record(
+    data_dir, tmp_path, monkeypatch
+):
+    """#410: with no votes for the scored boards the measurement validates none; its registry
+    record (variant place_rule_vs_votes) is failed and marked unvalidated, `records_appended`
+    counts it, and the report reads the Place rows as a diagnostic."""
+    write_jravan_store(data_dir, TRAIN_DAYS + TEST_DAYS[:1])
+    write_pool_votes(data_dir, [])
+    monkeypatch.setattr(study, "load_country_scheme", lambda country: FOLD_SCHEME)
+    summary = tmp_path / "summary"
+    monkeypatch.setattr(study, "summary_dir", lambda country: summary)
+    monkeypatch.setattr("horsetrack.core.eval.registry.summary_dir", lambda country: summary)
+    result = study.run_study(
+        trial=True, test_days_per_fold=1, n_draws=30, out_dir=tmp_path / "out", log=lambda *a: None
+    )
+    records = default_registry(COUNTRY).records()
+    place = [r for r in records if r.variant == "place_rule_vs_votes"]
+    assert len(place) == 1, [r.variant for r in records]
+    assert place[0].status == "failed"
+    assert place[0].params.get("unvalidated") is True
+    assert result["records_appended"] == len(records)
+    report = Path(result["report_path"]).read_text()
+    lines = [ln for ln in report.splitlines() if "Place" in ln and "diagnostic" in ln.lower()]
+    assert lines, "the report does not call the Place rows a diagnostic"
+
+
+def test_closing_boards_are_the_final_boards_with_their_figures():
+    """`closing_boards` yields each race's final PLACE board as scored: each combination's latest
+    row, only the priced ones (a runner scratched at the close is off it), a missing high figure
+    kept as NaN; races without a post time are skipped and other pools ignored."""
+    day = TEST_DAYS[0]
+    rows = []
+    expected = {}
+    for race_no, k in ((1, 8), (2, 10)):
+        race_id, post = race_id_of(day, race_no), post_of(day, race_no)
+        rng = np.random.default_rng(race_no)
+        early = rng.uniform(1.2, 9.0, size=(k, 2))
+        late = rng.uniform(1.2, 9.0, size=(k, 2))
+        for j in range(k):
+            c = str(j + 1)
+            rows.append(row(race_id, race_no, PLACE, c, post, 10, odds=early[j, 0],
+                            odds_hi=early[j, 0] + early[j, 1]))  # fmt: skip
+            rows.append(row(race_id, race_no, WIN, c, post, 2, odds=3.0 + j, final=True))
+        lo, hi = late[:, 0], late[:, 0] + late[:, 1]
+        hi[1] = np.nan  # runner 2 prints no high figure at the close
+        keep = []
+        for j in range(k):
+            if j == 2:  # runner 3 scratched at the close: a row with no price
+                rows.append(row(race_id, race_no, PLACE, str(j + 1), post, -2, final=True))
+                continue
+            if j == 4:  # runner 5's latest row is the early one
+                keep.append((str(j + 1), early[j, 0], early[j, 0] + early[j, 1]))
+                continue
+            rows.append(row(race_id, race_no, PLACE, str(j + 1), post, -2, odds=lo[j],
+                            odds_hi=None if np.isnan(hi[j]) else hi[j], final=True))  # fmt: skip
+            keep.append((str(j + 1), lo[j], hi[j]))
+        rows.append(row(race_id, race_no, PLACE, POOL_ROW, post, -2, investment=5e7, final=True))
+        expected[race_id] = sorted(keep, key=lambda t: int(t[0]))
+    no_post = {**row(race_id_of(day, 3), 3, PLACE, "1", post_of(day, 3), 5, odds=2.0, odds_hi=3.0)}
+    rows.append({**no_post, "post_utc": None, "minutes_to_post": None})
+
+    got = {race_id: (combos, lo, hi) for race_id, combos, lo, hi in closing_boards(
+        to_frame(rows), PLACE)}  # fmt: skip
+    assert set(got) == set(expected)
+    for race_id, keep in expected.items():
+        combos, lo, hi = got[race_id]
+        assert tuple(combos) == tuple(c for c, _, _ in keep)
+        np.testing.assert_allclose(np.asarray(lo, float), [x for _, x, _ in keep], rtol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(hi, float), [x for _, _, x in keep], rtol=1e-12, equal_nan=True
+        )
+        assert np.isnan(np.asarray(hi, float)[combos.index("2")])

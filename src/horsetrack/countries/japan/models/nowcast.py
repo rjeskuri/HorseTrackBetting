@@ -1,7 +1,8 @@
 """The C1 final-price nowcast v0: the structural phi_t x s_late model (#85, epic #73; 08 §3.2 C1).
 
 Not the drift nowcast of #116 (`models/v0/nowcast.py`), which stays as it is; `ShadowNowcast`
-puts this model behind #116's draws interface so the shadow values can switch by config.
+puts this model behind #116's draws interface so the shadow values can switch by config, reading
+a board's figures (the Place high figures included) as `race_view` does.
 
 Shares (per pool, over the combinations priced on a board)
 - A combination's share is its money over the pool. With per-combination money on every priced
@@ -13,7 +14,10 @@ Shares (per pool, over the combinations priced on a board)
   The low figure prices i with the P - 1 most-backed others, the high with the P - 1
   least-backed. A PLACE board with a high figure on every combination is read from both
   (`place_money_fit`, #410: least squares at each figure's truncation midpoint, floored figures
-  left out); otherwise from the low figures alone, m_i (P (lo_i / rate - 1) + 1) = 1 - (the P - 1
+  left out; a fit whose used figures hold some money only as a sum, e.g. two favourites at the
+  floor at both ends, keeps its minimum-norm shares and `place_shares` names the read
+  `undetermined`, by an SVD rank test of the used equations, `PLACE_RANK_RTOL`; ruling, #410);
+  otherwise from the low figures alone, m_i (P (lo_i / rate - 1) + 1) = 1 - (the P - 1
   largest other m_j), solved in closed form (`stake_back_money`), low figures below the minimum
   dividend read at it. The money sums to 1 when the rule holds, which the study reports as the
   rule's check (`rule_sum`). Wide (QUINELLA_PLACE) is inverted by the same rule, not yet measured
@@ -131,6 +135,10 @@ TINY = 1e-300
 # pool of 10 billion yen) at it, so an iterate without positive money cannot overflow them
 PLACE_FIT_MIN_MONEY = 1e-8
 PLACE_FIT_ITER = 20  # the Place fit's re-weightings at most; it stops once the money settles
+# a joint Place fit is undetermined when the smallest singular value of its used equations' design
+# is at most this times the largest (ruling, #410: figures that hold some runners' money only as
+# a sum, e.g. two favourites at the floor at both ends)
+PLACE_RANK_RTOL = 1e-9
 _US_PER_MIN = 60_000_000
 _FAR_FUTURE = np.iinfo(np.int64).max
 
@@ -238,36 +246,62 @@ def place_money_fit(
     g = (f + step / 2) / rate its equation m_i (P (g - 1) + 1) + (the others' money in S) = 1 is
     solved by least squares in figure units (each row over P m_i, iterated with the order of the
     money); a figure at the floor bounds the payment only and is left out. The money is not
-    constrained to total 1: its total is the rule's check."""
+    constrained to total 1: its total is the rule's check. Where the used equations do not
+    determine the money (`place_fit_determined`), the least squares keeps the minimum-norm
+    solution."""
+    return _place_fit(lo, hi, places, rate, floor, step)[0]
+
+
+def place_fit_determined(
+    lo: np.ndarray, hi: np.ndarray, places: int, rate: float, floor: float, step: float
+) -> np.ndarray:
+    """Per board, whether `place_money_fit`'s used equations determine the money: their design at
+    the fitted money's order has full column rank (its smallest singular value above
+    `PLACE_RANK_RTOL` times its largest)."""
+    return _place_fit(lo, hi, places, rate, floor, step)[1]
+
+
+def _place_fit(
+    lo: np.ndarray, hi: np.ndarray, places: int, rate: float, floor: float, step: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """`place_money_fit`'s money and `place_fit_determined`'s flags."""
     lo, hi = np.atleast_2d(lo).astype(float), np.atleast_2d(hi).astype(float)
     k = lo.shape[1]
     use = np.concatenate([lo > floor + 1e-9, hi > floor + 1e-9], axis=1)  # (n, 2k)
     c = places * ((np.concatenate([lo, hi], axis=1) + step / 2) / rate - 1.0) + 1.0
     c = np.where(use, c, 0.0)
-    eye = np.eye(k, dtype=bool)
     m = 1.0 / np.where(np.isfinite(c[:, k:]) & (c[:, k:] > 0), c[:, k:], 1.0)
     m /= m.sum(axis=1, keepdims=True)
     active = np.arange(len(m))  # the rows whose money has not settled
     for _ in range(PLACE_FIT_ITER):
         if not len(active):
             break
-        now, ca = m[active], c[active]
-        desc = np.argsort(-now, axis=1, kind="stable")
-        design = np.concatenate(
-            [
-                np.where(eye, ca[:, :k, None], _others(desc, places)),
-                np.where(eye, ca[:, k:, None], _others(desc[:, ::-1], places)),
-            ],
-            axis=1,
-        )  # (n, 2k, k)
+        now = m[active]
         weight = np.where(
             use[active], 1.0 / (places * np.tile(np.maximum(now, PLACE_FIT_MIN_MONEY), 2)), 0.0
         )
-        new = _least_squares(design * weight[:, :, None], weight)
+        new = _least_squares(_place_design(now, c[active], places) * weight[:, :, None], weight)
         settled = np.isclose(new, now, rtol=1e-10, atol=1e-12).all(axis=1)
         m[active] = new
         active = active[~settled]
-    return m
+    weight = np.where(use, 1.0 / (places * np.tile(np.maximum(m, PLACE_FIT_MIN_MONEY), 2)), 0.0)
+    sv = np.linalg.svd(_place_design(m, c, places) * weight[:, :, None], compute_uv=False)
+    return m, sv[:, -1] > PLACE_RANK_RTOL * sv[:, 0]
+
+
+def _place_design(m: np.ndarray, c: np.ndarray, places: int) -> np.ndarray:
+    """The Place fit's design ((n, 2k, k)) at the order of money `m`: row i of the low figures
+    holds c_i at i and 1 at the P - 1 most-backed others, of the high the P - 1 least-backed."""
+    k = m.shape[1]
+    eye = np.eye(k, dtype=bool)
+    desc = np.argsort(-m, axis=1, kind="stable")
+    return np.concatenate(
+        [
+            np.where(eye, c[:, :k, None], _others(desc, places)),
+            np.where(eye, c[:, k:, None], _others(desc[:, ::-1], places)),
+        ],
+        axis=1,
+    )
 
 
 def _least_squares(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -301,21 +335,23 @@ def place_shares(
     odds: np.ndarray, odds_hi: np.ndarray | None = None
 ) -> tuple[np.ndarray | None, float, str | None]:
     """One PLACE board's (shares, rule_sum) exactly as `pool_shares` reads it, and the read it
-    used: `joint` (`place_money_fit` over both figures) or `low_only` (`stake_back_money`); None
-    when the pool is not sold for this many runners."""
+    used: `joint` (`place_money_fit` over both figures), `undetermined` (the same fit, whose used
+    figures do not determine the money, `place_fit_determined`: the minimum-norm shares, read
+    and flagged, not dropped) or `low_only` (`stake_back_money`); None when the pool is not sold
+    for this many runners."""
     odds = np.asarray(odds, dtype=float)
     if odds.ndim != 1:
         raise ValueError("place_shares reads one board: odds must be 1-D")
-    shares, rule_sum, joint = _read_shares(PLACE, odds, None, odds_hi)
+    shares, rule_sum, reader = _read_shares(PLACE, odds, None, odds_hi)
     if shares is None:
         return None, rule_sum, None
-    return shares, rule_sum, "joint" if bool(joint[0]) else "low_only"
+    return shares, rule_sum, str(reader[0])
 
 
 def _read_shares(
     pool: str, odds, investment, odds_hi
 ) -> tuple[np.ndarray | None, float, np.ndarray | None]:
-    """`pool_shares`, and per row whether the joint Place fit was used (None off the rule)."""
+    """`pool_shares`, and per row the Place read used (`place_shares`; None off the rule)."""
     odds = np.asarray(odds, dtype=float)
     if investment is not None:
         money = np.asarray(investment, dtype=float)
@@ -329,13 +365,13 @@ def _read_shares(
         return None, math.nan, None
     rate = 1.0 - float(_pool_config(pool).takeout)
     money = stake_back_money(np.maximum(odds, _floor(pool)), places, rate)
-    joint = np.zeros(len(np.atleast_2d(odds)), dtype=bool)
+    reader = np.full(len(np.atleast_2d(odds)), "low_only", dtype=object)
     if pool == PLACE and odds_hi is not None:
         hi = np.broadcast_to(np.asarray(odds_hi, dtype=float), odds.shape)
         rows = np.atleast_1d(np.isfinite(hi).all(axis=-1))
         if rows.any():
             step = float(_pool_config(pool).dividend_step) / 100.0
-            fit = place_money_fit(
+            fit, determined = _place_fit(
                 np.atleast_2d(odds)[rows], np.atleast_2d(hi)[rows], places, rate,
                 _floor(pool), step,
             )  # fmt: skip
@@ -344,9 +380,11 @@ def _read_shares(
             flat = np.atleast_2d(money).copy()
             flat[np.flatnonzero(rows)[sound]] = fit[sound]
             money = flat.reshape(money.shape)
-            joint[np.flatnonzero(rows)[sound]] = True
+            reader[np.flatnonzero(rows)[sound]] = np.where(
+                determined[sound], "joint", "undetermined"
+            )
     total = money.sum(axis=-1, keepdims=True)
-    return money / total, float(total[0]) if odds.ndim == 1 else math.nan, joint
+    return money / total, float(total[0]) if odds.ndim == 1 else math.nan, reader
 
 
 # ---------------------------------------------------------------- the board at t
@@ -1521,8 +1559,9 @@ class ShadowNowcast:
     """A Nowcast behind #116's draws interface (`v0.shadow_values.NowcastModel`): odds draws for
     one pool of a `RaceBoard` from shared per-runner shocks. WIN draws keep the board's sum of
     1/O; PLACE and Wide print the stake-back-share figures of the drawn money, floored at the
-    minimum dividend. A RaceBoard carries no lag boards, so the velocity features are 0 here, and
-    a Wide pair's shock is (eps_a + eps_b) / sqrt 2 as in v0."""
+    minimum dividend, from the shares `race_view` reads from the same figures (`pool_shares`
+    with the high figures, #410). A RaceBoard carries no lag boards, so the velocity features are
+    0 here, and a Wide pair's shock is (eps_a + eps_b) / sqrt 2 as in v0."""
 
     model: Nowcast
 
@@ -1548,7 +1587,8 @@ class ShadowNowcast:
         if tau_min <= 0:
             odds = np.tile(lo, (n, 1))
             return PoolDraws(pool, combinations, odds, None if hi is None else np.tile(hi, (n, 1)))
-        shares, _ = pool_shares(pool, lo)
+        # the board's figures are read as `race_view` reads them, the high figures included
+        shares, _ = pool_shares(pool, lo, odds_hi=hi)
         if shares is None:
             raise KeyError(f"{pool} is not sold for {len(lo)} runners")
         minutes = float(tau_min)

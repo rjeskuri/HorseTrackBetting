@@ -98,6 +98,8 @@ PLACE_FINAL_KUBUN = ("4", "5")
 # (tests/countries/japan/test_nowcast.py states the derivation).
 PLACE_REL_TOL = 0.075
 PLACE_ABS_TOL = 0.01
+# `models.nowcast.place_shares`'s read whose figures do not determine the money: a diagnostic
+UNDETERMINED = "undetermined"
 COLUMNS = [
     "race_id",
     "venue",
@@ -261,7 +263,8 @@ def place_rule_measurement(
     are (race_id, combinations, low, high) as `models.nowcast.closing_boards` gives them (every
     priced runner, a high figure NaN where the board has none); `votes` the PLACE H1 rows
     (`race_id`, `combination`, `votes`, `data_kubun`). Each board is read as the study reads it
-    (`models.nowcast.place_shares`: P from its priced runners, `joint` or `low_only`). It is
+    (`models.nowcast.place_shares`: P from its priced runners, `joint`, `undetermined` or
+    `low_only`; an undetermined board is counted under its own read, a diagnostic). It is
     validated when its race's H1 record is final (data_kubun in `PLACE_FINAL_KUBUN`) with positive
     votes on every priced runner; otherwise it is unavailable, counted by reason. Per validated
     board: whether the rule reproduces every printed figure from the votes (P as scored, and
@@ -333,7 +336,8 @@ def _reproduces(share: np.ndarray, lo: np.ndarray, hi: np.ndarray, places: int) 
 
 
 def _place_summary(scored: pd.DataFrame, boards: pd.DataFrame) -> list[dict]:
-    """Per read used in scoring (`joint`, `low_only`) and number of places (and over all): the
+    """Per read used in scoring (`joint`, `low_only`, `undetermined`) and number of places (and
+    over all): the
     boards scored, those validated and their share (coverage); on the validated boards, the share
     whose printed figures the rule reproduces from the votes, the share read within #410's
     tolerance as scored (and by the low figures alone, the fallback, on the same boards), and
@@ -383,8 +387,15 @@ def _validated_stats(v: pd.DataFrame) -> dict:
 
 
 def place_validated(measured: dict) -> bool:
-    """Whether the measurement validated any board (an empty or failed one validates none)."""
-    return "error" not in measured and measured.get("counts", {}).get("boards_validated", 0) > 0
+    """Whether the measurement validated any board read by a determined read (`joint` or
+    `low_only`; an empty or failed one validates none, and an `undetermined` board is a
+    diagnostic, ruling #410)."""
+    if "error" in measured or measured.get("counts", {}).get("boards_validated", 0) <= 0:
+        return False
+    return any(
+        row["boards"] == "all" and row["reader"] != UNDETERMINED and row["n"] > 0
+        for row in measured.get("summary", [])
+    )
 
 
 def _place_metrics(measured: dict) -> tuple[FoldMetric, ...]:
@@ -438,7 +449,11 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
             "stake-back-share rule (core.pricing.stake_back_share_dividend: rate x (1 + D / "
             "(P x share)), truncated to 10 yen, floored at the minimum dividend): a board with a "
             "high figure on every runner by models.nowcast.place_money_fit (least squares over "
-            "both figures at their truncation midpoints, floored figures left out), else the "
+            "both figures at their truncation midpoints, floored figures left out; a fit whose "
+            "used figures do not determine the money, by an SVD rank test of their design with "
+            "relative tolerance models.nowcast.PLACE_RANK_RTOL, keeps its minimum-norm shares, "
+            "is still scored and is flagged undetermined by models.nowcast.place_shares, and its "
+            "Place rows are a diagnostic), else the "
             "low figures alone in closed form (owner, #410); the rule's money total at t is "
             "reported; #116's drift draws are printed as JRA prints (truncated, floored) and "
             "read by the same rule",
@@ -446,7 +461,8 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
             "folds, on the closing PLACE board of every race with a Place case "
             "(models.nowcast.closing_boards: the final board the cases score, every priced "
             "runner kept), read as scored (models.nowcast.place_shares: P from the priced "
-            "runners, the joint or low-only read), against the PLACE votes (H1) of processed/"
+            "runners, the joint, undetermined or low-only read), against the PLACE votes (H1) of "
+            "processed/"
             f"{SOURCE}/{POOL_VOTES}.parquet, read by the store's scoped reader (development "
             "days only); a board is validated when its H1 record is final (data_kubun "
             f"{'/'.join(PLACE_FINAL_KUBUN)}) with positive votes on every priced runner, else "
@@ -1023,7 +1039,10 @@ def _measure_place_rule(
                 _place_metrics(measured), git_sha, place_builds, spec_hash, trial=trial
             )
         else:
-            measured["error"] = "unvalidated: no scored Place board has final votes on every runner"
+            measured["error"] = (
+                "unvalidated: no scored Place board with a determined read has final votes on "
+                "every runner"
+            )
             record = _place_record(
                 _place_metrics(measured),
                 git_sha,
@@ -1086,10 +1105,9 @@ def _place_status(measured: dict) -> str:
             "shares are not shown to be money shares and the Place gains are not evidence; the Win "
             "rows are unaffected."
         )
+    alls = [row for row in measured.get("summary", []) if row["boards"] == "all"]
     unvalidated = sorted(
-        row["reader"]
-        for row in measured.get("summary", [])
-        if row["boards"] == "all" and row["n"] == 0
+        row["reader"] for row in alls if row["n"] == 0 and row["reader"] != UNDETERMINED
     )
     tail = (
         f" The {' and '.join(unvalidated)} read validated no board, so the Place rows of the "
@@ -1097,6 +1115,12 @@ def _place_status(measured: dict) -> str:
         if unvalidated
         else ""
     )
+    if any(row["reader"] == UNDETERMINED for row in alls):
+        tail += (
+            f" The `{UNDETERMINED}` read (figures that hold some runners' money only as a sum; "
+            "minimum-norm shares) is a diagnostic whatever its measurement, so the Place rows "
+            "of the boards it read are a diagnostic."
+        )
     return (
         "**Place rows: read with the rule's measurement.** The Place shares were checked against "
         "the final votes on the scored closing boards (coverage, reproduction and tolerance per "
@@ -1185,7 +1209,9 @@ def render_report(gains: dict, data: dict, about: dict, grid) -> str:
         "against its final PLACE votes (H1, data_kubun "
         f"{'/'.join(PLACE_FINAL_KUBUN)}). `reader`: the read used in scoring (`joint`: both "
         "figures; `low_only`: the low figures, on a board without a high figure on every "
-        "runner or whose joint fit left a runner without money). `n_scored`: boards scored "
+        "runner or whose joint fit left a runner without money; `undetermined`: the joint fit "
+        "where the figures above the floor do not determine the money, read at its "
+        "minimum-norm shares, a diagnostic). `n_scored`: boards scored "
         "with it; `n`: those validated (final votes on every priced runner); `coverage`: "
         "their share. `share_reproduced`: validated boards on which "
         "`core.pricing.stake_back_share_dividend` gives every printed figure from the votes (P "
