@@ -6,12 +6,18 @@ puts this model behind #116's draws interface so the shadow values can switch by
 Shares (per pool, over the combinations priced on a board)
 - A combination's share is its money over the pool. With per-combination money on every priced
   row (`investment`), that money; else WIN shares are 1/O normalised, and the stake-back-share
-  pools (PLACE, QUINELLA_PLACE; `payout_rule` in config/jra.yaml) invert the low figures by that
-  rule: a combination's low figure prices it with the P - 1 most-backed others, so in units of
-  the pool m_i (P lo_i - P + 1) = (1 - takeout) - (the P - 1 largest other m_j), P from
-  `places_for(starters)`. That is solved in closed form (`stake_back_money`); low figures below
-  the pool's minimum dividend are read at it. The money sums to 1 when the rule holds, which the
-  study reports as the rule's check (`rule_sum`).
+  pools (PLACE, QUINELLA_PLACE; `payout_rule` in config/jra.yaml) invert their figures by that
+  rule, `core.pricing.stake_back_share_dividend`: placed in a set S of P (from
+  `places_for(starters)`), combination i pays rate (1 + (1 - M_S) / (P m_i)) in units of the
+  pool, rate = 1 - takeout, truncated to the dividend step and floored at the minimum dividend.
+  The low figure prices i with the P - 1 most-backed others, the high with the P - 1
+  least-backed. A PLACE board with a high figure on every combination is read from both
+  (`place_money_fit`, #410: least squares at each figure's truncation midpoint, floored figures
+  left out); otherwise from the low figures alone, m_i (P (lo_i / rate - 1) + 1) = 1 - (the P - 1
+  largest other m_j), solved in closed form (`stake_back_money`), low figures below the minimum
+  dividend read at it. The money sums to 1 when the rule holds, which the study reports as the
+  rule's check (`rule_sum`). Wide (QUINELLA_PLACE) is inverted by the same rule, not yet measured
+  against its money.
 - `late_composition(v1, s1, v2, s2)` = (v2 s2 - v1 s1) / (v2 - v1), the money bet in between.
 
 The board at t (`race_view`; rows in `logger.compact.SCHEMA`)
@@ -121,6 +127,10 @@ CAL_SEED = 85
 SIGMA_BOUNDS = (1e-3, 20.0)
 SD_FLOOR = 1e-6  # the Gaussian log score's sd floor, in ln-share units
 TINY = 1e-300
+# the Place fit's weights read money below this (in units of the pool; one 100-yen ticket in a
+# pool of 10 billion yen) at it, so an iterate without positive money cannot overflow them
+PLACE_FIT_MIN_MONEY = 1e-8
+PLACE_FIT_ITER = 20  # the Place fit's re-weightings at most; it stops once the money settles
 _US_PER_MIN = 60_000_000
 _FAR_FUTURE = np.iinfo(np.int64).max
 
@@ -149,30 +159,32 @@ def late_composition(v1: float, s1: np.ndarray, v2: float, s2: np.ndarray) -> np
     return (v2 * s2 - v1 * s1) / (v2 - v1)
 
 
-def stake_back_money(lo: np.ndarray, places: int, payout: float) -> np.ndarray:
+def stake_back_money(lo: np.ndarray, places: int, rate: float) -> np.ndarray:
     """Each combination's money in units of the pool from its low figure, by the stake-back-share
-    rule with `places` winning tickets and `payout` = 1 - takeout.
+    rule (`core.pricing.stake_back_share_dividend`, untruncated) with `places` winning tickets
+    and `rate` = 1 - takeout.
 
-    With a_i = 1 / (P (lo_i - 1) + 1) the rule reads m_i = a_i (payout - T_i), T_i the P - 1
-    largest other m_j. The P largest a form the top set S: for i in S, m_i = (payout - M_S)
-    a_i / (1 - a_i) with M_S = payout B / (1 + B), B = sum_S a / (1 - a); outside S,
-    m_i = a_i (payout - M_S + m_min(S)). Rows of a 2-D `lo` are boards (or draws)."""
+    With a_i = 1 / (P (lo_i / rate - 1) + 1) the rule reads m_i = a_i (1 - T_i), T_i the P - 1
+    largest other m_j. The P largest a form the top set S: for i in S, m_i = (1 - M_S)
+    a_i / (1 - a_i) with M_S = B / (1 + B), B = sum_S a / (1 - a); outside S,
+    m_i = a_i (1 - M_S + m_min(S)). Rows of a 2-D `lo` are boards (or draws)."""
     lo = np.asarray(lo, dtype=float)
-    a = 1.0 / (places * (np.atleast_2d(lo) - 1.0) + 1.0)
+    a = 1.0 / (places * (np.atleast_2d(lo) / rate - 1.0) + 1.0)
     top = np.argsort(-a, axis=1, kind="stable")[:, :places]
     a_top = np.take_along_axis(a, top, axis=1)
     ratio = a_top / (1.0 - a_top)
     b = ratio.sum(axis=1, keepdims=True)
-    m_top = payout * b / (1.0 + b)
-    in_top = (payout - m_top) * ratio
-    money = a * (payout - m_top + in_top[:, -1:])
+    m_top = b / (1.0 + b)
+    in_top = (1.0 - m_top) * ratio
+    money = a * (1.0 - m_top + in_top[:, -1:])
     np.put_along_axis(money, top, in_top, axis=1)
     return money.reshape(lo.shape)
 
 
-def stake_back_odds(shares: np.ndarray, places: int, payout: float) -> tuple[np.ndarray, ...]:
+def stake_back_odds(shares: np.ndarray, places: int, rate: float) -> tuple[np.ndarray, ...]:
     """The low and high figures the stake-back-share rule prints for money `shares` (rows sum to
-    1): low with the P - 1 most-backed others, high with the P - 1 least-backed. Rows are draws."""
+    1), untruncated and unfloored: rate (1 + (1 - M_S) / (P m_i)), low with the P - 1 most-backed
+    others in S, high with the P - 1 least-backed. Rows are draws."""
     m = np.atleast_2d(np.asarray(shares, dtype=float))
     desc, asc = -np.sort(-m, axis=1), np.sort(m, axis=1)
     p1 = places - 1
@@ -182,17 +194,104 @@ def stake_back_odds(shares: np.ndarray, places: int, payout: float) -> tuple[np.
     t_big = np.where(m >= desc[:, p1 - 1 : p1], big_p - m, big)
     t_small = np.where(m <= asc[:, p1 - 1 : p1], small_p - m, small)
     with np.errstate(divide="ignore", invalid="ignore"):
-        lo = 1.0 + (payout - m - t_big) / (places * m)
-        hi = 1.0 + (payout - m - t_small) / (places * m)
+        lo = rate * (1.0 + (1.0 - m - t_big) / (places * m))
+        hi = rate * (1.0 + (1.0 - m - t_small) / (places * m))
     return lo, hi
 
 
+def printed_figures(pool: str, figures: np.ndarray | None) -> np.ndarray | None:
+    """Figures as JRA prints them: truncated down to the pool's dividend step, floored at its
+    minimum dividend (NaN stays NaN)."""
+    if figures is None:
+        return None
+    step = float(_pool_config(pool).dividend_step) / 100.0
+    cut = np.floor(np.asarray(figures, dtype=float) / step + 1e-9) * step
+    return np.where(np.isnan(cut), np.nan, np.maximum(cut, _floor(pool)))
+
+
+def _others(order: np.ndarray, places: int) -> np.ndarray:
+    """(n, k, k) indicators: row i marks the P - 1 combinations other than i that come first in
+    `order` ((n, k) positions, e.g. descending money)."""
+    n, k = order.shape
+    p1 = places - 1
+    first = np.zeros((n, k), dtype=bool)
+    np.put_along_axis(first, order[:, :p1], True, axis=1)
+    out = np.repeat(first[:, None, :], k, axis=1)
+    rows, eye = np.arange(n), np.arange(k)
+    out[:, eye, eye] = False
+    # a combination among the first P - 1 takes the P-th in its own place
+    for r in range(p1):
+        out[rows, order[:, r], order[:, p1]] = True
+    return out
+
+
+def place_money_fit(
+    lo: np.ndarray, hi: np.ndarray, places: int, rate: float, floor: float, step: float
+) -> np.ndarray:
+    """Each combination's money in units of the pool from its low and high figures (rows of 2-D
+    arrays are boards), by JRA's Place rule read through its printing.
+
+    A figure of i is its payment over the placed set S holding i,
+    `core.pricing.stake_back_share_dividend`: rate (1 + (1 - M_S) / (P m_i)), truncated to `step`
+    and floored at `floor`; the low figure's S holds the P - 1 most-backed others, the high's the
+    P - 1 least-backed. A figure f above the floor puts that payment in [f, f + step), so with
+    g = (f + step / 2) / rate its equation m_i (P (g - 1) + 1) + (the others' money in S) = 1 is
+    solved by least squares in figure units (each row over P m_i, iterated with the order of the
+    money); a figure at the floor bounds the payment only and is left out. The money is not
+    constrained to total 1: its total is the rule's check."""
+    lo, hi = np.atleast_2d(lo).astype(float), np.atleast_2d(hi).astype(float)
+    k = lo.shape[1]
+    use = np.concatenate([lo > floor + 1e-9, hi > floor + 1e-9], axis=1)  # (n, 2k)
+    c = places * ((np.concatenate([lo, hi], axis=1) + step / 2) / rate - 1.0) + 1.0
+    c = np.where(use, c, 0.0)
+    eye = np.eye(k, dtype=bool)
+    m = 1.0 / np.where(np.isfinite(c[:, k:]) & (c[:, k:] > 0), c[:, k:], 1.0)
+    m /= m.sum(axis=1, keepdims=True)
+    active = np.arange(len(m))  # the rows whose money has not settled
+    for _ in range(PLACE_FIT_ITER):
+        if not len(active):
+            break
+        now, ca = m[active], c[active]
+        desc = np.argsort(-now, axis=1, kind="stable")
+        design = np.concatenate(
+            [
+                np.where(eye, ca[:, :k, None], _others(desc, places)),
+                np.where(eye, ca[:, k:, None], _others(desc[:, ::-1], places)),
+            ],
+            axis=1,
+        )  # (n, 2k, k)
+        weight = np.where(
+            use[active], 1.0 / (places * np.tile(np.maximum(now, PLACE_FIT_MIN_MONEY), 2)), 0.0
+        )
+        new = _least_squares(design * weight[:, :, None], weight)
+        settled = np.isclose(new, now, rtol=1e-10, atol=1e-12).all(axis=1)
+        m[active] = new
+        active = active[~settled]
+    return m
+
+
+def _least_squares(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Each row's least-squares x of a x = b ((n, r, k) and (n, r)): by the normal equations, or
+    by the pseudo-inverse when a row's are singular."""
+    at = np.swapaxes(a, 1, 2)
+    try:
+        return np.linalg.solve(at @ a, at @ b[:, :, None])[:, :, 0]
+    except np.linalg.LinAlgError:
+        return (np.linalg.pinv(a) @ b[:, :, None])[:, :, 0]
+
+
 def pool_shares(
-    pool: str, odds: np.ndarray, investment: np.ndarray | None = None
+    pool: str,
+    odds: np.ndarray,
+    investment: np.ndarray | None = None,
+    *,
+    odds_hi: np.ndarray | None = None,
 ) -> tuple[np.ndarray | None, float]:
     """(shares, rule_sum) of one board's priced combinations (or, for 2-D `odds`, of each row).
-    `rule_sum` is the stake-back money's total in units of the pool (1 when the rule holds), NaN
-    when the rule was not used; shares are None when the pool is not sold for this many runners
+    `odds` are the low figures, `odds_hi` the high (PLACE only: a board, or row, with a high
+    figure on every combination is read by `place_money_fit`, else by `stake_back_money` from the
+    low figures). `rule_sum` is the money's total in units of the pool (1 when the rule holds),
+    NaN when no rule was used; shares are None when the pool is not sold for this many runners
     (Wide counts its pairs, which gives its three places from 4 runners, as `places_for` does)."""
     odds = np.asarray(odds, dtype=float)
     if investment is not None:
@@ -205,8 +304,22 @@ def pool_shares(
     places = _pool_config(pool).places_for(odds.shape[-1])
     if places == 0 or odds.shape[-1] < places:
         return None, math.nan
-    payout = 1.0 - float(_pool_config(pool).takeout)
-    money = stake_back_money(np.maximum(odds, _floor(pool)), places, payout)
+    rate = 1.0 - float(_pool_config(pool).takeout)
+    money = stake_back_money(np.maximum(odds, _floor(pool)), places, rate)
+    if pool == PLACE and odds_hi is not None:
+        hi = np.broadcast_to(np.asarray(odds_hi, dtype=float), odds.shape)
+        rows = np.atleast_1d(np.isfinite(hi).all(axis=-1))
+        if rows.any():
+            step = float(_pool_config(pool).dividend_step) / 100.0
+            fit = place_money_fit(
+                np.atleast_2d(odds)[rows], np.atleast_2d(hi)[rows], places, rate,
+                _floor(pool), step,
+            )  # fmt: skip
+            # a fit that leaves a combination without positive money keeps the low figures' read
+            sound = np.isfinite(fit).all(axis=1) & (fit > 0).all(axis=1)
+            flat = np.atleast_2d(money).copy()
+            flat[np.flatnonzero(rows)[sound]] = fit[sound]
+            money = flat.reshape(money.shape)
     total = money.sum(axis=-1, keepdims=True)
     return money / total, float(total[0]) if odds.ndim == 1 else math.nan
 
@@ -343,7 +456,7 @@ def _total_at(series: _Series, at: int) -> float | None:
 
 
 def _shares_of(pool: str, state: _State) -> tuple[np.ndarray | None, float]:
-    return pool_shares(pool, state.lo, state.inv)
+    return pool_shares(pool, state.lo, state.inv, odds_hi=state.hi)
 
 
 def _pool_board(series: _Series, post: int, tau_min: float) -> tuple[PoolBoard, float] | None:
@@ -1417,8 +1530,8 @@ class ShadowNowcast:
         if pool == WIN:
             return PoolDraws(pool, combinations, 1.0 / (drawn * float((1.0 / lo).sum())), None)
         places = _pool_config(pool).places_for(board.starters)
-        payout = 1.0 - float(_pool_config(pool).takeout)
-        low, high = stake_back_odds(drawn, places, payout)
+        rate = 1.0 - float(_pool_config(pool).takeout)
+        low, high = stake_back_odds(drawn, places, rate)
         floor = _floor(pool)
         return PoolDraws(pool, combinations, np.maximum(low, floor), np.maximum(high, floor))
 

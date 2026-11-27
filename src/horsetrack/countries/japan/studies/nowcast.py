@@ -26,9 +26,13 @@ Report (through `write_report`; every figure is withheld, D21): per comparison a
 the log-score, CRPS and KL gains with one-sided 95% bounds resampling race days (the ticket) and
 meetings (D7); PIT deciles and 50% / 90% coverage per forecaster; sigma_t and beta per pool and
 tau across folds; the phi_t profile against the observed V_t / V_final; the board's age at t; the
-Place rule's check; Wide coverage (development days only: a holdout day's file is never read,
-D14); counts. One registry record per comparison (E19), failures included, then `write_summary`
-regenerates the committed summary. Family `japan-c1-nowcast-final-shares-v2` supersedes
+Place rule's check at t; the Place rule against the final votes (#410: the final PLACE figures of
+`final_odds` against the H1 votes of `pool_votes` on the development days read, before the
+folds); Wide coverage (development days only: a holdout day's file is never read, D14); counts.
+One registry record per comparison (E19) and one for the Place rule (#410), failures included,
+then `write_summary` regenerates the committed summary. Family
+`japan-c1-nowcast-final-shares-v3` supersedes v2, whose Place shares inverted the low figures by a
+rule that applied the takeout to the pool rather than the dividend; v2 superseded
 `japan-c1-nowcast-final-shares`, whose spec dropped late-scratch cases against #69. A `--trial`
 run is a run too: its records go to the family's `-trial` family with `params["trial"] = True`,
 and it never freezes or alters the family's spec.
@@ -50,6 +54,7 @@ from typing import Annotated
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import typer
 
@@ -64,6 +69,7 @@ from horsetrack.core.eval.registry import (
     write_summary,
 )
 from horsetrack.core.eval.reports import write_report
+from horsetrack.core.pricing import stake_back_share_dividend
 from horsetrack.countries.japan.board.snapshot import RaceBoard, load_decision_grid
 from horsetrack.countries.japan.models import nowcast as nc
 from horsetrack.countries.japan.models.v0.nowcast import NowcastV0
@@ -73,9 +79,17 @@ COUNTRY = "japan"
 TICKET = 85
 SOURCE = "jravan"
 HYPOTHESIS = "E19"
-FAMILY_ID = "japan-c1-nowcast-final-shares-v2"
+FAMILY_ID = "japan-c1-nowcast-final-shares-v3"
 TRIAL_FAMILY_ID = f"{FAMILY_ID}-trial"  # trial runs' records; a trial never freezes FAMILY_ID
-SUPERSEDES = "japan-c1-nowcast-final-shares"
+SUPERSEDES = "japan-c1-nowcast-final-shares-v2"
+PLACE_TICKET = 410
+PLACE_VARIANT = "place_rule_vs_votes"  # the Place rule measured against the final votes (#410)
+FINAL_ODDS, POOL_VOTES = "final_odds.parquet", "pool_votes.parquet"
+# #410's tolerance for shares read from a board's figures against its money (per runner): a
+# figure truncated by up to 0.1 moves the share it implies by up to 6.8% at a figure of 2.0
+# (tests/countries/japan/test_nowcast.py states the derivation).
+PLACE_REL_TOL = 0.075
+PLACE_ABS_TOL = 0.01
 COLUMNS = [
     "race_id",
     "venue",
@@ -169,13 +183,180 @@ def wide_coverage() -> dict:
     return {"own_logged_days": days}
 
 
+# ---------------------------------------------------------------- the Place rule (#410)
+
+
+def _place_rows(path: Path, columns: list[str], days: pa.Array) -> pd.DataFrame:
+    """The PLACE combination rows of a jravan-only table on `days` (development days only, D14),
+    one batch at a time."""
+    parts = []
+    for batch in pq.ParquetFile(path).iter_batches(
+        batch_size=1_000_000, columns=["pool", "race_date", *columns]
+    ):
+        keep = pc.and_(
+            pc.and_(pc.equal(batch["pool"], nc.PLACE), pc.is_in(batch["race_date"], days)),
+            pc.not_equal(batch["combination"], nc.POOL_ROW),
+        )
+        part = batch.filter(keep)
+        if part.num_rows:
+            parts.append(part.select(columns).to_pandas())
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
+
+
+def _file_build(name: str) -> str:
+    digest = hashlib.sha256()
+    with open(paths.processed_dir(SOURCE) / name, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 23), b""):
+            digest.update(chunk)
+    return f"processed/{SOURCE}/{name}@{digest.hexdigest()[:16]}"
+
+
+def place_rule_builds() -> dict[str, str]:
+    return {
+        "jravan_final_odds": _file_build(FINAL_ODDS),
+        "jravan_pool_votes": _file_build(POOL_VOTES),
+    }
+
+
+def jra_place_figures(share: np.ndarray, places: int) -> tuple[np.ndarray, np.ndarray]:
+    """The low and high Place figures JRA prints for money shares `share`: each runner's
+    `core.pricing.stake_back_share_dividend` with the P - 1 most-backed others (low) and the
+    P - 1 least-backed (high), per 100 yen, over 100."""
+    pool = config.load_source(COUNTRY, "jra").pools[nc.PLACE]
+    unit = float(config.load_source(COUNTRY, "jra").unit_stake)
+    kw = {
+        "rate": 1.0 - float(pool.takeout),
+        "unit": unit,
+        "dividend_step": float(pool.dividend_step),
+        "min_dividend": float(pool.min_dividend),
+    }
+    order = np.argsort(-share, kind="stable")
+    lo, hi = np.empty(len(share)), np.empty(len(share))
+    for i in range(len(share)):
+        others = share[order[order != i]]
+        lo[i] = stake_back_share_dividend(share[i], others[: places - 1].tolist(), **kw) / unit
+        hi[i] = stake_back_share_dividend(share[i], others[-(places - 1) :].tolist(), **kw) / unit
+    return lo, hi
+
+
+def place_rule_measurement(days: list[str]) -> dict:
+    """#410: the Place rule against the money on the final boards of `days` (the development days
+    read): the final PLACE figures (`final_odds`) of the runners priced with both, against their
+    final votes (`pool_votes`, H1). Per board: whether the rule reproduces every printed figure
+    from the votes (with P from the priced runners, and from the registered slots), and how far
+    the shares read from the figures (`pool_shares`, joint and low-only) are from the vote
+    shares."""
+    folder = paths.processed_dir(SOURCE)
+    wanted = pa.array([date.fromisoformat(d) for d in days], pa.date32())
+    figures = _place_rows(
+        folder / FINAL_ODDS, ["race_id", "combination", "odds", "odds_hi"], wanted
+    )
+    votes = _place_rows(folder / POOL_VOTES, ["race_id", "combination", "votes"], wanted)
+    pa.default_memory_pool().release_unused()
+    slots = votes.groupby("race_id").size()
+    priced = figures[(figures["odds"] > 0) & (figures["odds_hi"] > 0)]
+    boards = priced.merge(votes, on=["race_id", "combination"], how="left")
+    place_pool = config.load_source(COUNTRY, "jra").pools[nc.PLACE]
+    counts: dict[str, int] = defaultdict(int)
+    counts["races_with_place_figures"] = int(figures["race_id"].nunique())
+    rows = []
+    for race_id, g in boards.groupby("race_id", sort=False):
+        money = g["votes"].to_numpy(dtype=float)
+        k = len(money)
+        places = place_pool.places_for(k)
+        if not (np.isfinite(money).all() and (money > 0).all()):
+            counts["boards_without_votes_on_every_priced_runner"] += 1
+            continue
+        if places < 2 or k < places:
+            counts["boards_not_sold"] += 1
+            continue
+        lo, hi = g["odds"].to_numpy(dtype=float), g["odds_hi"].to_numpy(dtype=float)
+        share = money / money.sum()
+        alt = place_pool.places_for(int(slots.get(race_id, k)))
+        row = {
+            "places": places,
+            "reproduced": _reproduces(share, lo, hi, places),
+            "places_from_slots_differ": alt != places,
+        }
+        row["reproduced_with_slot_places"] = (
+            row["reproduced"] if alt == places else alt >= 2 and _reproduces(share, lo, hi, alt)
+        )
+        for reader, hi_in in (("joint", hi), ("low_only", None)):
+            got, rule_sum = nc.pool_shares(nc.PLACE, lo, odds_hi=hi_in)
+            err = np.abs(np.asarray(got) - share)
+            row[f"{reader}_max_rel_error"] = float((err / share).max())
+            row[f"{reader}_max_abs_error"] = float(err.max())
+            row[f"{reader}_rule_sum"] = rule_sum
+        rows.append(row)
+    counts["boards_measured"] = len(rows)
+    return {"counts": dict(counts), "summary": _place_summary(pd.DataFrame(rows))}
+
+
+def _reproduces(share: np.ndarray, lo: np.ndarray, hi: np.ndarray, places: int) -> bool:
+    want_lo, want_hi = jra_place_figures(share, places)
+    return bool(
+        np.allclose(want_lo, lo, rtol=0, atol=1e-6) and np.allclose(want_hi, hi, rtol=0, atol=1e-6)
+    )
+
+
+def _place_summary(boards: pd.DataFrame) -> list[dict]:
+    """Per reader and number of places (and over all boards): the boards, the share whose
+    printed figures the rule reproduces from the votes, the share read within #410's tolerance,
+    and quantiles of the worst per-runner errors and of the rule's money total."""
+    if boards.empty:
+        return []
+    out = []
+    groups = [("all", boards)] + [(f"P={p}", g) for p, g in boards.groupby("places", sort=True)]
+    for reader in ("joint", "low_only"):
+        for label, g in groups:
+            rel = g[f"{reader}_max_rel_error"].to_numpy()
+            ab = g[f"{reader}_max_abs_error"].to_numpy()
+            total = g[f"{reader}_rule_sum"].to_numpy()
+            out.append(
+                {
+                    "reader": reader,
+                    "boards": label,
+                    "n": len(g),
+                    "share_reproduced": float(g["reproduced"].mean()),
+                    "share_slot_places_differ": float(g["places_from_slots_differ"].mean()),
+                    "share_reproduced_with_slot_places": float(
+                        g["reproduced_with_slot_places"].mean()
+                    ),
+                    "share_within_tolerance": float(
+                        ((rel <= PLACE_REL_TOL) & (ab <= PLACE_ABS_TOL)).mean()
+                    ),
+                    "max_rel_error_q50": float(np.quantile(rel, 0.5)),
+                    "max_rel_error_q95": float(np.quantile(rel, 0.95)),
+                    "max_rel_error_max": float(rel.max()),
+                    "max_abs_error_q95": float(np.quantile(ab, 0.95)),
+                    "rule_sum_q05": float(np.quantile(total, 0.05)),
+                    "rule_sum_q50": float(np.quantile(total, 0.5)),
+                    "rule_sum_q95": float(np.quantile(total, 0.95)),
+                }
+            )
+    return out
+
+
+def _place_metrics(measured: dict) -> tuple[FoldMetric, ...]:
+    out = []
+    for row in measured["summary"]:
+        for key in ("share_reproduced", "share_within_tolerance", "max_rel_error_q95"):
+            if np.isfinite(row[key]):
+                name = f"{key}:{row['reader']}:{row['boards']}"
+                out.append(FoldMetric("pooled", name, float(row[key]), None, None, int(row["n"])))
+    return tuple(out)
+
+
 def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
     """The family's design, frozen before any development row is read."""
     return {
         "family_id": FAMILY_ID,
-        "supersedes": f"{SUPERSEDES}: its spec dropped late-scratch cases, against the owner's "
-        "#69 rule (core/eval/scoring.py); found in #85's review",
+        "supersedes": f"{SUPERSEDES}: its Place shares inverted the low figures alone by a rule "
+        "that applied the takeout to the pool, not to the dividend, so they were not money "
+        "shares (#410); v2 superseded japan-c1-nowcast-final-shares, whose spec dropped "
+        "late-scratch cases against the owner's #69 rule",
         "ticket": TICKET,
+        "place_ticket": PLACE_TICKET,
         "hypotheses": {
             HYPOTHESIS: "the structural nowcast (phi_t x s_late, logistic-normal late composition "
             "with velocity and favourite-rank features) forecasts the final ln-shares of the Win "
@@ -198,10 +379,23 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
             "dropped": "cases with no board at t or no final board, and cases whose final board "
             "prices a combination the board at t does not (added_by_close), each counted; a race "
             "without a post time gives no case",
-            "place_shares": "the low figures inverted by the stake-back-share rule (no per-runner "
-            "money in the series); the rule's money total at t is reported, and where it is not "
-            "1 Place shares are not money shares and Place results are a diagnostic (ticket: "
-            "ship Win)",
+            "place_shares": "no per-runner money in the series, so the figures are read by JRA's "
+            "stake-back-share rule (core.pricing.stake_back_share_dividend: rate x (1 + D / "
+            "(P x share)), truncated to 10 yen, floored at the minimum dividend): a board with a "
+            "high figure on every runner by models.nowcast.place_money_fit (least squares over "
+            "both figures at their truncation midpoints, floored figures left out), else the "
+            "low figures alone in closed form (owner, #410); the rule's money total at t is "
+            "reported; #116's drift draws are printed as JRA prints (truncated, floored) and "
+            "read by the same rule",
+            "place_rule_measurement": "before the folds, on the final boards of the development "
+            f"days read: processed/{SOURCE}/{FINAL_ODDS} PLACE figures against processed/"
+            f"{SOURCE}/{POOL_VOTES} PLACE votes (H1) of the runners priced with both figures, "
+            "boards with positive votes on every priced runner; P = places_for(priced runners), "
+            "and again with P from the registered slots; per board, whether the rule reproduces "
+            "every printed figure from the votes, and the share read (joint and low-only) "
+            f"against the vote shares within {PLACE_REL_TOL} relative and {PLACE_ABS_TOL} "
+            "absolute per runner, its worst errors and the rule's money total; one registry "
+            "record, failed when it cannot run",
         },
         "grid": {"minutes": list(grid.minutes), "primary": grid.primary},
         "fold_scheme": dataclasses.asdict(scheme),
@@ -211,6 +405,7 @@ def build_spec(grid, scheme, bootstrap: dict, v0_config: dict) -> dict:
             "random_walk": "the structural fit's random_walk (softmax(ln s_t + sigma_rw eps))",
             "drift_v0": "models.v0.nowcast.NowcastV0.fit on the same boards, bands and prior_n of "
             f"nowcast_v0.yaml ({v0_config['bands']}, {v0_config['prior_n']}), no board-age limit",
+            PLACE_VARIANT: "data.place_rule_measurement",
         },
         "comparisons": [f"{a}_vs_{b}" for a, b in COMPARISONS],
         "scores": "per case (race, pool, tau): mean over combinations of the Gaussian log score "
@@ -252,7 +447,8 @@ def drift_examples(cases: nc.Cases, days: list[str]) -> pd.DataFrame:
 
 def drift_forecaster(model: NowcastV0):
     """#116's drift as a share forecaster: its odds draws, read back into shares by the pool's
-    share rule (WIN 1/O, PLACE the stake-back inverse)."""
+    share rule (WIN 1/O; PLACE its low and high draws printed as JRA prints them, then read by
+    the Place rule as a board is)."""
 
     def forecast(view: nc.RaceView, *, pool: str, n: int, seed: int) -> nc.Draws:
         board = view.pools[pool]
@@ -270,7 +466,10 @@ def drift_forecaster(model: NowcastV0):
         eps = np.random.default_rng(seed).standard_normal((n, len(keys)))
         shocks = {h: eps[:, j] for j, h in enumerate(keys)}
         drawn = model.draws(race, pool=pool, tau_min=int(round(view.tau_min)), shocks=shocks)
-        shares, _ = nc.pool_shares(pool, drawn.odds)
+        odds, odds_hi = drawn.odds, drawn.odds_hi
+        if pool == nc.PLACE:  # read as the boards are: printed figures by the Place rule
+            odds, odds_hi = nc.printed_figures(pool, odds), nc.printed_figures(pool, odds_hi)
+        shares, _ = nc.pool_shares(pool, odds, odds_hi=odds_hi)
         return nc.Draws(shares=shares, v_final=np.full(n, np.nan))
 
     return forecast
@@ -402,8 +601,29 @@ def run_study(
     held = [d for d, _ in files if is_holdout_day(COUNTRY, date.fromisoformat(d))]
     files = [(d, p) for d, p in files if d not in set(held)]
     builds = data_builds(files)
-    grades = read_grades(PRICE_ERA_START)
     started = time.monotonic()
+    log("measuring the Place rule on the final boards (#410)")
+    try:
+        place_builds = builds | place_rule_builds()
+        place_measured = place_rule_measurement([d for d, _ in files])
+        place_record = _place_record(
+            _place_metrics(place_measured), git_sha, place_builds, spec_hash, trial=trial
+        )
+    except Exception as exc:  # recorded as a failed run; the folds still run
+        place_measured = {"error": f"{type(exc).__name__}: {exc}"}
+        place_record = _place_record(
+            (),
+            git_sha,
+            builds,
+            spec_hash,
+            trial=trial,
+            status="failed",
+            error=place_measured["error"],
+        )
+    if place_record not in registry.records(family):
+        registry.append(place_record)
+    log(f"  Place rule measured ({_progress(started)})")
+    grades = read_grades(PRICE_ERA_START)
     log(f"reading {len(files)} development days")
     case_chunks, growth_chunks, case_parts, growth_parts = [], [], [], []
     counts: dict[str, int] = defaultdict(int)
@@ -560,6 +780,7 @@ def run_study(
         "folds": fold_rows,
         "board_age_min": board_age(cases),
         "place_rule_sum": place_rule_check(cases),
+        "place_measurement": place_measured,
         "phi": _phi_diagnostics(phi),
         "cells": cells,
         "pit": _pit_rows(pit_acc),
@@ -733,6 +954,33 @@ def _record(
     )
 
 
+def _place_record(
+    metrics, git_sha, builds, spec_hash, *, trial: bool, status: str = "scored", error=None
+) -> RunRecord:
+    params = {"spec_sha256": spec_hash, "rel_tol": PLACE_REL_TOL, "abs_tol": PLACE_ABS_TOL}
+    if trial:
+        params["trial"] = True
+    if error is not None:
+        params["error"] = error
+    return RunRecord(
+        hypothesis_id=HYPOTHESIS,
+        family_id=TRIAL_FAMILY_ID if trial else FAMILY_ID,
+        variant=PLACE_VARIANT,
+        ticket=PLACE_TICKET,
+        git_sha=git_sha,
+        data_builds=builds,
+        sources=(SOURCE,),
+        fold_scheme="none: the final boards of the development days read",
+        components={
+            "rule": "core/pricing.py stake_back_share_dividend",
+            "reader": "countries/japan/models/nowcast.py pool_shares",
+        },
+        params=params,
+        metrics=tuple(metrics),
+        status=status,
+    )
+
+
 # ---------------------------------------------------------------- the report
 
 
@@ -809,12 +1057,27 @@ def render_report(gains: dict, data: dict, about: dict, grid) -> str:
         "",
         _table(data["board_age_min"]),
         "",
-        "## Place shares: the stake-back rule's money total at t (1 when the rule holds)",
+        "## Place shares: the rule against the final votes (#410)",
         "",
-        "The series carries no per-runner Place money, so Place shares invert the low figures. "
-        "Where this total is not 1 the board's low figures are not the stake-back-share rule "
-        "applied to the money, Place shares are not money shares, and the Place rows above are "
-        "a diagnostic, not evidence (the ticket: ship Win).",
+        "The final PLACE figures against the final PLACE votes on the development days read. "
+        "`share_reproduced`: boards on which `core.pricing.stake_back_share_dividend` gives "
+        "every printed low and high figure from the votes (P from the priced runners; "
+        "`_with_slot_places` with P from the registered slots, which differ on "
+        "`share_slot_places_differ`). `share_within_tolerance`: boards whose shares read from "
+        f"the figures are within {PLACE_REL_TOL} relative and {PLACE_ABS_TOL} absolute of the "
+        "vote shares on every runner (`joint`: both figures, the board path; `low_only`: the "
+        "fallback). Errors are each board's worst runner; `rule_sum` the read money's total.",
+        "",
+        _table(data["place_measurement"].get("summary", []))
+        if "error" not in data["place_measurement"]
+        else f"Not measured: {data['place_measurement']['error']}",
+        "",
+        _table([data["place_measurement"].get("counts", {})]),
+        "",
+        "## Place shares: the rule's money total at t (1 when the rule holds)",
+        "",
+        "The series carries no per-runner Place money, so Place shares are read from the figures "
+        "at t by the rule measured above.",
         "",
         _table(data["place_rule_sum"]),
         "",

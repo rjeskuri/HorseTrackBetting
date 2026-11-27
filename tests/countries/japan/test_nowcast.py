@@ -8,6 +8,15 @@ Shares and the late composition
   over the priced runners. PLACE shares come from the per-runner money or the low odds by a rule
   left to the module; here they only have to sum to 1, with the largest share on the runner with
   the lowest low odds.
+- Sound Place shares (#410): `pool_shares(PLACE, odds, investment=None, *, odds_hi=None)` returns
+  (shares, rule_sum). Per-runner money on every runner (finite, positive) is used as-is. Otherwise
+  the shares come from the printed figures (`odds` the low, `odds_hi` the high) and must recover
+  the money of a board JRA prints from known money (`jra_place_figures` below: JRA's
+  stake-back-share dividend, `core.pricing.stake_back_share_dividend`, over every placed set,
+  truncated to 10 yen, floored at the minimum dividend), within PLACE_ABS_TOL and
+  PLACE_REL_TOL, including boards whose favourite's low figure sits at the floor. Without high
+  figures the low figures alone are used (owner, #410). The rule inside is left to the module.
+  WIN is unaffected.
 - `late_composition(v1, s1, v2, s2) -> np.ndarray`: the composition of the money bet between two
   snapshots, (v2 * s2 - v1 * s1) / (v2 - v1).
 - The final shares are s_final = phi * s_t + (1 - phi) * s_late, with phi = V_t / V_final.
@@ -84,6 +93,7 @@ HORSETRACK_DATA_DIR points at a tmp dir.
 # block is written in its final order and I001 is waived so lint passes before and after.
 from __future__ import annotations  # noqa: I001
 
+import itertools
 import math
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
@@ -102,6 +112,7 @@ from horsetrack.core.eval.distributional import pit
 from horsetrack.core.eval.folds import FoldScheme, walk_forward
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.registry import default_registry
+from horsetrack.core.pricing import stake_back_share_dividend
 from horsetrack.countries.japan.board.snapshot import PLACE, WIDE, WIN
 from horsetrack.countries.japan.logger.compact import SCHEMA
 from horsetrack.countries.japan.models.nowcast import (
@@ -114,6 +125,7 @@ from horsetrack.countries.japan.models.nowcast import (
     extract,
     fit_folds,
     late_composition,
+    pool_shares,
     race_view,
     score_cases,
 )
@@ -159,16 +171,19 @@ def softmax(x: np.ndarray) -> np.ndarray:
 
 
 def place_odds(shares: np.ndarray, pool_total: float) -> tuple[np.ndarray, np.ndarray]:
-    """Low and high PLACE odds under JRA's three-place rule: the net pool less the stakes on the
-    three placed runners is split in three, each third over its runner's stakes. Low odds: placed
-    with the two most-backed others; high odds: with the two least-backed."""
+    """Low and high PLACE odds under JRA's stake-back-share rule with three places
+    (`core.pricing.stake_back_share_dividend`, untruncated): placed with two others, a runner pays
+    rate x (1 + D / (3 s_i)), D the share on the runners outside the three, rate = 1 - takeout,
+    at least 1.1. Low odds: placed with the two most-backed others; high odds: with the two
+    least-backed. `pool_total` only scales the money, which the rule does not see."""
     money = np.asarray(shares, dtype=float) * pool_total
-    net = (1.0 - TAKEOUT) * pool_total
-    lo, hi = np.empty(len(money)), np.empty(len(money))
-    for i, own in enumerate(money):
-        others = np.sort(np.delete(money, i))
-        lo[i] = 1.0 + (net - own - others[-2:].sum()) / (3.0 * own)
-        hi[i] = 1.0 + (net - own - others[:2].sum()) / (3.0 * own)
+    share = money / money.sum()
+    rate = 1.0 - TAKEOUT
+    lo, hi = np.empty(len(share)), np.empty(len(share))
+    for i, own in enumerate(share):
+        others = np.sort(np.delete(share, i))
+        lo[i] = rate * (1.0 + (1.0 - own - others[-2:].sum()) / (3.0 * own))
+        hi[i] = rate * (1.0 + (1.0 - own - others[:2].sum()) / (3.0 * own))
     return np.maximum(lo, 1.1), np.maximum(hi, 1.1)
 
 
@@ -1049,3 +1064,223 @@ def test_a_trial_run_is_a_registry_record_marked_as_a_trial(data_dir, tmp_path, 
     full = registry.records()[len(trial) :]
     assert full
     assert not any(marked_trial(r) for r in full), [(r.variant, r.params) for r in full]
+
+
+# ---------------------------------------------------------------- sound Place shares (#410)
+
+JRA = config.load_source(COUNTRY, "jra")
+PLACE_POOL = JRA.pools[PLACE]
+PLACE_RATE = 1.0 - float(PLACE_POOL.takeout)
+PLACE_UNIT = float(JRA.unit_stake)  # dividends per 100 yen, in 10-yen steps: 0.1 in odds
+
+# The tolerance comes from that truncation. Placed in a set S, a runner's figure f is
+# rate (1 + D / (P s)), so its share s solves s (P (f / rate - 1) + 1) = 1 - T, T the share of the
+# other runners in S. A figure truncated by up to 0.1 moves the share it implies by up to
+# 0.1 P / (P f - (P - 1) rate) of itself: 6.8% at f = 2.0 with three places, 6.3% with two (rate
+# 0.8), and less from a higher figure. Every board below prints a high figure of 2.0 or more on
+# every runner but the most-backed (`assert_readable`), whose share is what the others leave of
+# the pool, so its error is the others' errors summed, capped at a point of the pool; 7.5% leaves
+# the T term its room. A least-squares fit of both figures under this rule stays under 2.5% and
+# 0.004 of the pool on every board here; the low figures alone miss by 17-135% on the boards
+# whose favourite is at the floor.
+PLACE_REL_TOL = 0.075  # per runner: |share - money share| / money share
+PLACE_ABS_TOL = 0.01  # per runner, in units of the pool
+
+
+def jra_place_figures(money_yen: Sequence[int]) -> tuple[np.ndarray, np.ndarray, int]:
+    """(low, high, places): JRA's printed Place figures for per-runner money in yen. For every
+    placed set S of P runners (P = `places_for(starters)`), each runner i in S is paid JRA's
+    stake-back-share dividend, `core.pricing.stake_back_share_dividend` (pinned by
+    tests/core/test_pricing.py): 100 x rate x (1 + D / (P x s_i)) yen per 100-yen ticket, s_i its
+    share of the pool, D the share on the runners outside S, rate = 1 - takeout; truncated down to
+    10 yen and paid at least the minimum dividend. The low figure is the least of runner i's
+    payments over the sets holding it, the high the greatest."""
+    money = [int(m) for m in money_yen]
+    places = PLACE_POOL.places_for(len(money))
+    assert places >= 2, len(money)
+    pool = float(sum(money))
+    lo = [math.inf] * len(money)
+    hi = [-math.inf] * len(money)
+    for placed in itertools.combinations(range(len(money)), places):
+        for i in placed:
+            paid = stake_back_share_dividend(
+                money[i] / pool,
+                [money[j] / pool for j in placed if j != i],
+                rate=PLACE_RATE,
+                unit=PLACE_UNIT,
+                dividend_step=float(PLACE_POOL.dividend_step),
+                min_dividend=float(PLACE_POOL.min_dividend),
+            )
+            lo[i], hi[i] = min(lo[i], paid), max(hi[i], paid)
+    return np.array(lo) / PLACE_UNIT, np.array(hi) / PLACE_UNIT, places
+
+
+def assert_readable(money_yen, hi) -> None:
+    """The boards' precondition for the tolerance: high figures of 2.0 or more but on the
+    most-backed runner."""
+    others = np.delete(np.asarray(hi), int(np.argmax(money_yen)))
+    assert others.min() >= 2.0, others
+
+
+def random_place_boards(n: int, seed: int = 410) -> list[tuple[str, np.ndarray]]:
+    """Seeded boards of 5 to 16 runners with one favourite holding 25-55% of the Place money,
+    in 100-yen tickets on a pool of about 80 million yen; those the tolerance covers."""
+    rng = np.random.default_rng(seed)
+    boards = []
+    while len(boards) < n:
+        k = int(rng.integers(8, 17)) if len(boards) % 3 else int(rng.integers(5, 8))
+        rest = np.sort(rng.dirichlet(np.full(k - 1, 1.5)))[::-1]
+        favourite = rng.uniform(0.25, 0.55)
+        weights = np.concatenate([[favourite], (1.0 - favourite) * rest])
+        money = (np.maximum(np.round(weights * 8e7 / 100), 1) * 100).astype(np.int64)
+        money = rng.permutation(money)  # the favourite is not always runner 1
+        others = np.delete(jra_place_figures(money)[1], int(np.argmax(money)))
+        if others.min() >= 2.0:
+            boards.append((f"random-{len(boards)}-{k}-runners", money))
+    return boards
+
+
+def _yen(values: Sequence[int]) -> np.ndarray:
+    return np.asarray(values, dtype=np.int64) * 1000
+
+
+# (id, money in yen, how many low figures sit at the floor; the favourite's is the first)
+PLACE_BOARDS = [
+    (
+        "14-runners-favourite-at-the-floor",
+        _yen([4200, 900, 700, 600, 500, 450, 400, 350, 300, 250, 200, 150, 120, 80]),
+        1,
+    ),
+    (
+        "12-runners-two-lows-at-the-floor",
+        _yen([1700, 6300, 250, 230, 220, 210, 200, 190, 190, 180, 170, 160]),
+        2,
+    ),
+    (
+        "16-runners-open-race",
+        _yen([900, 850, 800, 700, 650, 600, 600, 550, 500, 450, 400, 350, 300, 300, 250, 200]),
+        0,
+    ),
+    ("8-runners-heavy-favourite", _yen([1200, 1000, 3000, 900, 700, 500, 300, 200]), 1),
+    ("6-runners-pay-two-places", _yen([2000, 3000, 1800, 1300, 1000, 900]), 0),
+    *((name, money, None) for name, money in random_place_boards(9)),
+]
+
+
+def assert_recovers(shares, money_yen) -> None:
+    truth = np.asarray(money_yen, dtype=float) / float(np.sum(money_yen))
+    assert shares is not None
+    got = np.asarray(shares, dtype=float)
+    assert got.shape == truth.shape
+    assert np.isfinite(got).all() and (got > 0).all(), got
+    assert got.sum() == pytest.approx(1.0, abs=1e-9)
+    abs_err = np.abs(got - truth)
+    rel_err = abs_err / truth
+    worst = int(np.argmax(rel_err))
+    assert rel_err.max() <= PLACE_REL_TOL, (
+        f"runner {worst + 1}: share {got[worst]:.4f} vs money {truth[worst]:.4f}"
+    )
+    assert abs_err.max() <= PLACE_ABS_TOL, abs_err
+
+
+@pytest.mark.parametrize(
+    ("money", "at_floor"), [(m, f) for _, m, f in PLACE_BOARDS], ids=[b[0] for b in PLACE_BOARDS]
+)
+def test_place_shares_recover_the_money_on_a_known_board(money, at_floor):
+    """DoD #410: Place shares from the printed low and high figures total 1 and match the money
+    behind them within PLACE_REL_TOL and PLACE_ABS_TOL, including the boards where a heavily
+    backed favourite's low figure is at the floor and the low figures alone fail."""
+    lo, hi, _ = jra_place_figures(money)
+    assert_readable(money, hi)
+    favourite = int(np.argmax(money))
+    if at_floor is not None:  # the named boards are what they say
+        floor = PLACE_POOL.min_dividend / PLACE_UNIT
+        assert int(np.sum(lo == floor)) == at_floor, lo
+        assert bool(lo[favourite] == floor) is (at_floor > 0), lo
+    shares, _ = pool_shares(PLACE, lo, odds_hi=hi)
+    assert_recovers(shares, money)
+    # the same board, priced from the figures, whatever partial money the log carries
+    partial = np.asarray(money, dtype=float)
+    partial[favourite], partial[(favourite + 1) % len(partial)] = np.nan, 0.0
+    assert_recovers(pool_shares(PLACE, lo, partial, odds_hi=hi)[0], money)
+
+
+def test_place_shares_from_the_board_at_t_recover_the_money():
+    """`race_view` reads the Place board at t and at t - 5 minutes from the logged low and high
+    figures (no per-runner money in the rows, as on JRA-VAN boards), and both boards' shares match
+    the money behind them."""
+    day, race_no = TEST_DAYS[0], 4
+    race_id, post = race_id_of(day, race_no), post_of(day, race_no)
+    boards = {  # 12 runners each; the favourite changes between the two minutes
+        10: _yen([1100, 5500, 800, 600, 450, 400, 300, 250, 200, 150, 150, 100]),
+        5: _yen([700, 900, 650, 4300, 500, 450, 400, 300, 250, 200, 150, 120]),
+        FINAL_MIN: _yen([800, 1000, 600, 4600, 500, 400, 400, 300, 250, 200, 150, 100]),
+    }
+    rows = []
+    for minutes, money in boards.items():
+        final = minutes == FINAL_MIN
+        lo, hi, _ = jra_place_figures(money)
+        assert_readable(money, hi)
+        for j in range(len(money)):
+            rows.append(
+                row(
+                    race_id,
+                    race_no,
+                    PLACE,
+                    str(j + 1),
+                    post,
+                    minutes,
+                    odds=lo[j],
+                    odds_hi=hi[j],
+                    final=final,
+                )
+            )
+            rows.append(
+                row(race_id, race_no, WIN, str(j + 1), post, minutes, odds=2.0 + j, final=final)
+            )
+        total = float(np.sum(money))
+        rows.append(
+            row(race_id, race_no, PLACE, POOL_ROW, post, minutes, investment=total, final=final)
+        )
+    view = race_view(to_frame(rows), race_id, tau_min=5)
+    board = view.pools[PLACE]
+    order = np.array([int(c) - 1 for c in board.combinations])
+    assert sorted(order.tolist()) == list(range(12))
+    assert board.total == pytest.approx(float(np.sum(boards[5])))
+    assert_recovers(board.shares, boards[5][order])
+    assert_recovers(board.shares_lag5, boards[10][order])
+
+
+def test_place_money_on_every_runner_is_used_as_is_and_win_is_unaffected():
+    """Per-runner money, finite and positive on every runner, is the shares as it is, with or
+    without the figures; WIN shares stay 1/O normalised."""
+    rng = np.random.default_rng(4101)
+    for _, money, _ in PLACE_BOARDS[:6]:
+        lo, hi, _ = jra_place_figures(money)
+        noisy = np.asarray(money, dtype=float) * rng.uniform(0.5, 1.5, size=len(money))
+        expected = noisy / noisy.sum()  # not the figures' money: the money given wins
+        for shares in (
+            pool_shares(PLACE, lo, noisy)[0],
+            pool_shares(PLACE, lo, noisy, odds_hi=hi)[0],
+            pool_shares(PLACE, lo, investment=noisy, odds_hi=hi)[0],
+        ):
+            np.testing.assert_allclose(shares, expected, rtol=1e-12, atol=0.0)
+        win = rng.uniform(1.2, 150.0, size=len(money))
+        shares, _ = pool_shares(WIN, win)
+        np.testing.assert_allclose(shares, (1.0 / win) / (1.0 / win).sum(), rtol=1e-12, atol=0.0)
+
+
+def test_place_shares_without_high_figures_fall_back_to_the_low_figures():
+    """Owner (#410): without high figures, Place shares come from the low figures alone. They
+    still total 1, put the largest share on the lowest low figure, and an all-missing high column
+    reads as none."""
+    for _, money, _ in PLACE_BOARDS[2:6]:
+        lo, _, _ = jra_place_figures(money)
+        bare, _ = pool_shares(PLACE, lo)
+        missing, _ = pool_shares(PLACE, lo, odds_hi=np.full(len(lo), np.nan))
+        for shares in (bare, missing):
+            shares = np.asarray(shares, dtype=float)
+            assert shares.sum() == pytest.approx(1.0, abs=1e-9)
+            assert (shares > 0).all()
+            assert int(np.argmax(shares)) == int(np.argmin(lo))
+        np.testing.assert_allclose(missing, bare, rtol=1e-12, atol=0.0)
