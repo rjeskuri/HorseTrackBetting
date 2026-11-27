@@ -758,7 +758,7 @@ it was read; nothing does today:
   no store table holds its rows. The logger would need to fetch each race's 出馬表 page from that
   race list before the off, as often as a late scratch matters, and write the parsed rows with
   their fetch time into a table whose availability rule is the owner's.
-- JV-Link's regular (non-setup) RACE reads during race week deliver the `1` and `2` versions while
+- JV-Link's regular (non-setup) RACE reads during race week deliver versions `1` and `2` while
   they are current. The export is a bulk read of the stored data (#196), and the Windows VM logs
   nothing between exports (no repository code runs there); keeping them would need a race-week
   reader on the VM and a folder of its own under `raw/jravan/`.
