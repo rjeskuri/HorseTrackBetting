@@ -36,6 +36,7 @@ command run by hand. The same inputs give the same bytes.
 | `dividends` | `dividends.py` | `dividends` | store table | that of `dividends` |
 | `final-odds` | `odds.py` | `final_odds` | jravan-only | `label_only` |
 | `votes` | `votes.py` | `pool_votes` | jravan-only | `label_only` |
+| `career-counts` | `career_counts.py` | `career_counts` | jravan-only | the owner's, asked on #407 |
 | `timeseries` | `timeseries.py` | `odds_timeseries/<YYYY-MM-DD>.parquet` | the odds log's schema | that of `odds_timeseries` |
 | `masters` | `masters.py` | `horses`, `horse_pedigree`; `jockeys`, `trainers` | store tables; jravan-only | `horses` refused, `horse_pedigree` `static`; `current_value` with `in_view` |
 | `bloodlines` | `bloodlines.py` | `breeding_horses`, `produce`, `lineages` | jravan-only | `static` |
@@ -763,3 +764,42 @@ read; nothing does today:
   they are current. The export is a bulk read of the stored data (#196), and the Windows VM logs
   nothing between exports (no repository code runs there); keeping them would need a race-week
   reader on the VM and a folder of its own under `raw/jravan/`.
+
+## CK: career counts (#407)
+
+`horsetrack.countries.japan.jravan.career_counts` writes `processed/jravan/career_counts.parquet`
+from JV-Data CK (出走別着度数): per runner of a race, its placings so far under each condition, and
+its jockey's and trainer's this year and in total, as of that race. It is not in `schemas.TABLES`;
+its availability rule is the owner's (asked on #407), and until `config/availability.yaml` holds
+one no view serves it.
+
+- `build_career_counts(*, raw=None, out=None, chunk_records=20_000) -> BuildReport` reads
+  `<raw>/stored/SNPN/CK/all.jvd` (one multi-GB file; no file is a `FileNotFoundError`) in two
+  steps, in bounded memory. One pass streams it through `records.iter_lines`: each record's type is
+  checked, then its race date is read from its 開催年 and 開催月日 bytes alone, and a record on a
+  holdout day is read no further, whatever its width, and counted only as `holdout_skipped`. Every
+  other record must be the layout's width (`RecordLengthError` with the file's record number); one
+  without a valid race date (`undated`) or outside the JRA venues 01-10 (`non_jra`) is dropped, and
+  the rest are spilled, undecoded, to one temporary file per race month beside the output (removed
+  when the build ends). Each month is then decoded alone: one version per key
+  (`records.latest_versions` on 開催年, 開催月日, 競馬場コード, 開催回, 開催日目, レース番号 and
+  血統登録番号; a key whose latest version is a deletion has no rows), sorted, and written as one
+  row group through a `ParquetWriter` (zstd) into a tmp file, then `os.replace`. Rows are sorted
+  by `race_id, horse_id, subject, period, condition` (plain string order); the same records, in any
+  order and at any chunk size, give the same bytes.
+- `CAREER_COUNTS_SCHEMA`: `race_id` (`keys.race_id`), `race_date`, `horse_id` (血統登録番号; CK
+  has no 馬番), `subject` (`horse`, `jockey`, `trainer`), `subject_id`, `period` (`career`,
+  `this_year`), `condition`, and `first`, `second`, `third`, `fourth`, `fifth`, `unplaced` (int64,
+  null when not a number).
+- The rows come from the layout, never a list: a leaf whose name ends in `着回数` with six repeats
+  is a placing-counts item (1st to 5th and out of the first five), its `condition` the name
+  without `着回数` and a trailing `・` or `･` (`芝直・着回数` -> `芝直`). A top-level item is a
+  `horse` row (`subject_id` 血統登録番号, `period` `career`); a sub-item of the group whose name
+  holds `騎手` a `jockey` row (`subject_id` the top-level 騎手コード), of the one holding `調教師` a
+  `trainer` row (調教師コード); the group's first occurrence is `this_year` (本年), the second
+  `career` (累計). The owner's and breeder's groups and 脚質傾向 write no row.
+
+`horsetrack japan jravan career-counts` runs the build and writes `reports/jravan-career_counts.json`
+through `write_build_report`, counts only: `records`, `holdout_skipped`, `undated`, `non_jra`,
+`versions_dropped`, `deletions`, `kept` (runners with rows) and `rows`, and `rows` per race year.
+Its figures, wall time and peak memory are withheld (D21).
