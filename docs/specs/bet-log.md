@@ -24,6 +24,12 @@ directory that name the same file are the same log):
   `HORSETRACK_DATA_DIR` moves, a file under the old data dir is no longer the day's log;
 - a refused path creates nothing.
 
+An open `BetLog` re-resolves `bet_log_path(day)` at the start of every call (`record`, `read`,
+`check`, `staked_yen`). Once that is no longer its path (`HORSETRACK_DATA_DIR` moved in the
+environment or `.env`), the call raises `ValueError` and touches neither the old file nor the new
+data dir, so a process holding a log cannot stake into the old file while a fresh `check` at the
+new place sees an empty day. Moved back, the same object works again.
+
 - One JSON object per line, compact separators, ASCII-escaped (so UTF-8), each line ending in `\n`.
 - The file is opened only for append, never truncated or rewritten. Each `record` is one line,
   written, flushed and `os.fsync`ed before it returns (and the directory fsynced when the file is
@@ -52,6 +58,14 @@ directory that name the same file are the same log):
 - Every stored record must be a bet the log would take on its day: a record whose `race_id` is
   dated another day (a log copied under another day's name, or one record edited) is tampering, as
   is a combination not in the store's order.
+
+### Format version
+
+There is one line format, `{seq, prev_sha256, record, sha256}`, the first to reach main; no earlier
+format was released (an unmerged revision of #453 wrote lines without `sha256`, and no bet log
+existed under the owner's data dir). A line without `sha256` is not an older version: it is refused
+as tampered. A future change to the line or record format must add an explicit, append-only
+upgrade, in a ticket of its own, rather than read old lines loosely.
 
 ### Record fields
 
@@ -82,8 +96,11 @@ no timestamps normalised. `record` returns the stored record and does not change
 
 ### Combinations
 
-A combination is stored as the store's dividends hold it (`jravan/dividends.py`), so a bet joins
-its dividend on `race_id`, `pool` and `combination`:
+A combination is stored as the store's dividends hold it (`jravan/dividends.py`), so a bet of one
+of the eight single-race pools that table covers (WIN to TIERCE) joins its dividend on `race_id`,
+`pool` and `combination`. WIN5 is not in that table, and the WIN5 history (`research/win5.py`)
+stores day-level payouts and the number of winning combinations, not the combinations, so settling
+a WIN5 bet needs combination-level WIN5 results (task 7, #454). The order:
 
 - the legs of a pool whose jra config `kind` is `ordered_*` (FORECAST, TIERCE: finishing order) or
   `multi_race_*` (WIN5: race order) are stored as given;

@@ -7,6 +7,10 @@ bet past the day cap or off the flat stake is recorded and flagged, never refuse
 gate before betting. Stakes are not outcomes, so a holdout day's bets are read back and counted
 like any other day's. The format is in docs/specs/bet-log.md. The log is the owner's financial
 record and stays outside the repository.
+
+Format: there is one line format, ``{seq, prev_sha256, record, sha256}``, the first to reach main.
+A line without ``sha256`` is not an older version; it is refused as tampered. A future format
+change adds an explicit, append-only upgrade rather than reading old lines loosely.
 """
 
 from __future__ import annotations
@@ -302,7 +306,8 @@ def _fsync_dir(path: Path) -> None:
 
 
 class BetLog:
-    """One race day's bet log. Every call reads and verifies the whole file first."""
+    """One race day's bet log. Every call checks that ``bet_log_path(day)`` is still its path,
+    then reads and verifies the whole file."""
 
     def __init__(self, path: Path, *, day: date, limits: Limits) -> None:
         _check_day(day)
@@ -319,7 +324,17 @@ class BetLog:
         self._day = day
         self._limits = limits
 
+    def _still_own(self) -> None:
+        """ValueError, before any file is touched, once ``bet_log_path(day)`` is no longer this
+        log's path (``HORSETRACK_DATA_DIR`` moved), so no process stakes into a stale file."""
+        own = bet_log_path(self._day)
+        if own.resolve() != self._path.resolve():
+            raise ValueError(
+                f"{self._path} is no longer the bet log of {self._day.isoformat()}, which is {own}"
+            )
+
     def _load(self) -> _State:
+        self._still_own()
         try:
             with open(self._path, "rb") as fh:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_SH)  # no half-written line from a writer
@@ -355,6 +370,7 @@ class BetLog:
         """Append one placed bet and return the stored record, its combination in the store's
         order, or raise BetRefused and write nothing. A bet past the cap or off the flat stake is
         recorded and flagged."""
+        self._still_own()
         reason = _refusal(bet, self._day)
         if reason is not None:
             raise BetRefused(f"the bet {reason}; nothing was written")

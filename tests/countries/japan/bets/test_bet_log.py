@@ -10,6 +10,9 @@ Contract pinned here, module ``horsetrack.countries.japan.bets.log``:
 - ``BetLog(path, *, day, limits)`` accepts only ``bet_log_path(day)``, compared after resolving: a
   path inside the repository raises ``BetLogInRepo`` (a RuntimeError), any other path a
   ValueError, and nothing is created (review fix, ruling 1: one log per race day, at one place).
+  An open ``BetLog`` re-resolves ``bet_log_path(day)`` before every call (``record``, ``read``,
+  ``check``, ``staked_yen``); once that is no longer its path the call raises ValueError and writes
+  nothing anywhere (second review fix).
 - A bet is a dict of ``race_id`` (``jra:<day>:<VENUE>:<NN>``, the log's own day, a jra venue code;
   a WIN5 bet, and only a WIN5 bet, takes the day-level ``jra:<day>:WIN5``), ``pool`` (one of
   POOLS), ``combination`` (horse numbers joined by ``,``, as many as the pool's legs, no leading
@@ -968,6 +971,46 @@ def test_a_day_has_one_log_at_its_bet_log_path(D, tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         BetLog(own, day=DEV_DAY, limits=NO_FLAT)
     assert BetLog(bet_log_path(DEV_DAY), day=DEV_DAY, limits=NO_FLAT).staked_yen() == 0
+
+
+def test_an_open_log_refuses_every_call_once_the_data_dir_moves(D, tmp_path, monkeypatch):
+    # review fix: an open BetLog re-resolves bet_log_path(day) on every call, so a process holding
+    # one cannot stake into the old file while a fresh check() at the new place sees an empty day
+    log, path = open_log()
+    first = log.record(bet(1_000, race=1))
+    before = path.read_bytes()
+
+    moved = (tmp_path / "moved").resolve()
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(moved))
+    assert bet_log_path(DEV_DAY) == moved / "bets" / "japan" / path.name != path
+    calls = {
+        "record": lambda: log.record(bet(100, race=2)),
+        "read": lambda: log.read(),
+        "check": lambda: log.check(100),
+        "staked_yen": lambda: log.staked_yen(),
+    }
+    for name, call in calls.items():
+        try:
+            call()
+        except ValueError:  # the constructor's one-path refusal
+            pass
+        else:
+            pytest.fail(f"{name} on an open log ran after {paths.DATA_DIR_VAR} moved")
+        assert path.read_bytes() == before, f"{name} wrote to the old log"
+        assert not moved.exists(), f"{name} created something under the new data dir"
+
+    fresh = BetLog(bet_log_path(DEV_DAY), day=DEV_DAY, limits=NO_FLAT)
+    assert fresh.staked_yen() == 0
+    assert fresh.check(100) == CapCheck(fits=True, staked_yen=0, remaining_yen=CAP, off_flat=False)
+
+    # moved back, the same object works again: the setting is read on each call, not cached
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(D))
+    assert log.read() == [first]
+    assert log.staked_yen() == 1_000
+    assert log.check(100).staked_yen == 1_000
+    assert log.record(bet(100, race=2))["seq"] == 2
+    assert BetLog(path, day=DEV_DAY, limits=NO_FLAT).staked_yen() == 1_100
+    assert not moved.exists()
 
 
 @pytest.mark.parametrize(
