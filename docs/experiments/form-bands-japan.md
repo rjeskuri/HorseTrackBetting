@@ -6,8 +6,8 @@ favourite ranks are read from the JRA-VAN time-series Win board at T-2, a licens
 coefficient, count, rate and sign of this study, and the outcome of its family test, is derived from JRA-VAN data.
 This report says what was pre-registered, what ran, where the full report lives and which registry records hold it.
 
-There are two families, each holding the same 12 variants. **Variants searched: 24, over two families.** The
-registry counts each family's 12 once, whatever the number of runs.
+There are three families, each holding the same 12 variants. **Variants searched: 36, over three families.**
+The registry counts each family's 12 once, whatever the number of runs.
 
 - **v1, the pre-registered family:** `japan-form-bands-t2-win`, spec sha256
   `3585a45d05f6ecfcf1de92d605d08982ec2b8c4def4d9932823c63c031655bad`.
@@ -27,34 +27,51 @@ registry counts each family's 12 once, whatever the number of runs.
     confirmed starter missing from v0 now dropped its race, where the frozen `data.rows` rule read it as a
     scratch. So it is not a run under v1's frozen rule. It is superseded, and it stays in the append-only registry
     so that the count is honest.
-- **v2, the corrected family and the run of record:** `japan-form-bands-t2-win-v2`, spec sha256
+- **v2, the first corrected family:** `japan-form-bands-t2-win-v2`, spec sha256
   `4d1f93ba902c368184c395c58a64bdf2c0a8e79b94d8b8893c82d406e8421256`.
   - The design is v1's exactly: the variants, groups, meld, walk-forward, scoring and inference are unchanged.
     Only the rows' eligibility (`data`, with `inputs.p_cal`, `rulings`, `approved` and `supersedes`) differs, as
     the round-1 and round-2 reviews of PR #473 corrected it (below).
   - Claude froze it under the owner's 2026-11-27 reframe, which lets Claude add variants and count them without
     a new sign-off. It was frozen before its run read any row.
-  - Run of record: git `36e9f3b`, run ids `5468464cbff10aaa` (P0), `2399ba7c801ad791` (B1), `9621c016d2fd0277`
-    (B2), `9676bf8f2bace0db` (B3), `583c30098ca50cfa` (B4), `a14b8280fae07b59` (B5), `f3d653bfe1da3910` (R1),
-    `5c1ec1b381d2ca63` (R2), `5c14264b57c41e2c` (R3), `ce470397f4025dbb` (R4), `23ebf013690949f9` (BA) and
-    `482c4f89b52df882` (RA). Private report: `reports/form-bands-japan-4d1f93ba902c-20261127T054829124881Z.md`,
+  - Its run, **superseded by v3:** git `36e9f3b`, run ids `5468464cbff10aaa` (P0), `2399ba7c801ad791` (B1),
+    `9621c016d2fd0277` (B2), `9676bf8f2bace0db` (B3), `583c30098ca50cfa` (B4), `a14b8280fae07b59` (B5),
+    `f3d653bfe1da3910` (R1), `5c1ec1b381d2ca63` (R2), `5c14264b57c41e2c` (R3), `ce470397f4025dbb` (R4),
+    `23ebf013690949f9` (BA) and `482c4f89b52df882` (RA). Private report:
+    `reports/form-bands-japan-4d1f93ba902c-20261127T054829124881Z.md`, with its figures as JSON beside it (same
+    stem, `.json`).
+  - The round-4 review of PR #473 found that the round-3 exclusions (a race with no runner rows is void, the
+    dead-heat embargo, a dead heat without a v0 reference) changed which races are eligible under v2's frozen
+    hash. On the owner's decision of 2026-11-27 on #218, v2 stays frozen exactly as it is and the corrected rules
+    go into v3. v2's run stays in the append-only registry so that the count is honest.
+- **v3, the corrected family and the run of record:** `japan-form-bands-t2-win-v3`, spec sha256
+  `dd7c9a1ee1020b536bb4aacaabd3c1e28b839572aa4e33f010754583688dc942`.
+  - The design is v2's (and v1's) exactly. It differs from v2 only in `family_id`, `data`, `inputs.p_cal`,
+    `rulings`, `approved` and `supersedes`, which names v2. The eligibility is the round-3 and round-4 rules
+    (below).
+  - Claude froze it under the owner's 2026-11-27 reframe and the owner's 2026-11-27 decision on #218 that the
+    corrected rules go into v3. It was frozen before its run read any row.
+  - Run of record: git `5f07f3a`, run ids `a525c2b93b170961` (P0), `4937871dbf56109d` (B1), `c5e62b1abe9d33eb`
+    (B2), `c0a1cfe376d9daf5` (B3), `c96f0eb006e48de8` (B4), `afffb16a625a1e47` (B5), `d25b9ff88786bef1` (R1),
+    `4b5ac1e45f50accc` (R2), `50e71d7d6cd2d971` (R3), `9dc55e7f6b4a083b` (R4), `6d1032d5e53fd841` (BA) and
+    `0ce664ef462d745f` (RA). Private report: `reports/form-bands-japan-dd7c9a1ee102-20261127T105844050073Z.md`,
     with its figures as JSON beside it (same stem, `.json`).
 - **Registry summaries.** Every record carries the sources `jra` and `jravan`, so
-  `docs/experiments/registry/japan/japan-form-bands-t2-win.md` and `japan-form-bands-t2-win-v2.md` show every
-  value as withheld. The Status column (scored or failed) is shown, by the registry's design; the values behind
-  each status are not.
-- **Code at `36e9f3b`:**
+  `docs/experiments/registry/japan/japan-form-bands-t2-win.md`, `japan-form-bands-t2-win-v2.md` and
+  `japan-form-bands-t2-win-v3.md` show every value as withheld. The Status column (scored or failed) is shown,
+  by the registry's design; the values behind each status are not.
+- **Code at `5f07f3a`:**
   - `countries/japan/studies/form_bands.py`, tested in `tests/countries/japan/test_form_bands.py` and
     `test_form_bands_reader.py`.
   - The `reference_variants` argument of `core/eval/snooping.py`, tested in
     `tests/core/eval/test_snooping_reference.py`, and `Registry.frozen_spec`.
   - To reproduce, run `uv run python -m horsetrack.countries.japan.studies.form_bands`. It freezes and records
-    v2. It reads one day of the time series at a time (WIN rows only) and the store column-scoped, and it prints
+    v3. It reads one day of the time series at a time (WIN rows only) and the store column-scoped, and it prints
     only identifiers (family, spec hash, run ids, report path), never a figure.
   - Each run writes its own private report, named by its UTC start time, so no earlier report is overwritten.
     The report lists the ids of the records that hold its results, whether appended or reproduced from an
     identical earlier run.
-- **Data builds,** the same for all three runs: `processed/jra/runners.parquet@6f3cec95347e0132`,
+- **Data builds,** the same for all four runs: `processed/jra/runners.parquet@6f3cec95347e0132`,
   `processed/jra/races.parquet@9cce511831074b64`,
   `models/japan/v0/win_calibration_oof-aac501f927b0.parquet@e61c7078ac0a6e46`,
   `features/jra/handicap@51777b77c4c5c478` and `processed/jravan/odds_timeseries@6f5ac71d1926c803`.
@@ -73,6 +90,7 @@ registry counts each family's 12 once, whatever the number of runs.
 | Pre-registration | The meld form, the five odds bands, the four rank groups, the 12 variants, the primary question, the scoring, the meeting bootstrap (2000 resamples, seed 218) and SPA / StepM at 5% family-wise, before any run. | #218, owner comments of 2026-11-25 |
 | T-2 board | Bands and favourite ranks come from the Win board at T-2 (D2's primary), read from the JRA-VAN time series. JRA-VAN is handled as JRDB is (D21). | #218, owner comments of 2026-11-25 |
 | Reframe | The pre-registration is frozen in the registry before any run; all 12 variants are member rows, ranked, with CI and the variants-searched count; results are private. Later variants are added by Claude and counted, without a new sign-off (v2). Adoption is by rank. | #218, owner comment of 2026-11-27 |
+| v3 | The round-3 eligibility rules (runnerless races void, the dead-heat embargo against the fold's `train_end`, dead heats without a v0 reference) and the fold-wide refit check go into a new family v3, frozen before its run, whose run is the run of record; v2 stays frozen exactly as it is. | #218, owner comment of 2026-11-27 |
 | D2 | T-2 is the primary decision time (`config/decision.yaml`). | `docs/problem-statement.md` §1, #14 |
 | D6 | Winner log loss per race, a dead heat's winners at 1/k, void races dropped and counted, scratched runners removed and the probabilities renormalised over the starters. | §3, #14; the #69 answer |
 | D7 | Meetings (venue x day) resampled; 95%, one-sided. | §3, #14 |
@@ -82,9 +100,10 @@ registry counts each family's 12 once, whatever the number of runs.
 
 ## Data and method
 
-The rows are v2's. The design is the same in both families.
+The rows are v3's. The design is the same in all three families.
 
-- **Rows.** The population is the store's races on the development race days 2020-01-01 to 2026-11-15. A race's
+- **Rows.** The population is the store's races on the development race days 2020-01-01 to 2026-11-15, a race
+  of the races table without runner rows included (it is void). A race's
   starters are the store's confirmed starters, those whose `is_scratched` is not True. Each starter carries:
   - its `p_cal` from the v0 out-of-fold file (`win_calibration_oof-aac501f927b0`: #114's calibrated market, the
     input #129's V2 used);
@@ -97,8 +116,10 @@ The rows are v2's. The design is the same in both families.
   - The study refits each of v0's fold fits from the store, as `models.v0.calibration.run_fit` makes them:
     `fit_win_calibration` on the fold's training rows of v0's development frame from 2014-06-07, over the same
     folds.
-  - The refit must reproduce the file's `p_cal` on every race the file holds and the run keeps. If it does not
-    (the store's training rows have changed), the run stops.
+  - The refit must reproduce the file's `p_cal`, from the file's own normalised 1/odds, on every development row
+    the file holds for that fold, inside the run's span or not (the rows outside it are checked, never scored).
+    If it does not (the store's training rows have changed), the run stops. v2 checked only the rows the file
+    holds and the run keeps.
   - A first-place dead heat whose starters are all priced gets its fold's refit prediction on its normalised
     1/odds. Each co-winner counts as a winner at 1/k (D6).
 - **v0 rows checked against the store.** Every v0 row is checked against the store's current starter fields: the
@@ -107,7 +128,7 @@ The rows are v2's. The design is the same in both families.
 - **Unnumbered runners.** The store's horse number may be missing. An unnumbered scratched runner leaves its
   race intact. An unnumbered confirmed starter takes its race out.
 - **Races left out.** Each is counted once, under the first of these reasons that applies:
-  1. void (no winner);
+  1. void: no winner, or no runner rows (`dropped_void`);
   2. a winner, but none with a final price;
   3. a dead heat with an unpriced starter;
   4. not in v0 for another reason;
@@ -115,8 +136,14 @@ The rows are v2's. The design is the same in both families.
   6. a v0 row the store contradicts;
   7. a confirmed starter without a v0 row;
   8. a dead heat outside every fold;
-  9. a T-2 runner the store does not hold;
-  10. a starter without `h`.
+  9. a dead heat dated less than the fold scheme's `embargo_days` after its fold's `train_end`
+     (`dropped_dead_heat_embargo`);
+  10. a dead heat in a fold the v0 file holds no row of, so its refit has nothing to be checked against
+      (`dropped_dead_heat_no_v0_reference`);
+  11. a T-2 runner the store does not hold;
+  12. a starter without `h`.
+
+  Reasons 9 and 10, and the runnerless void, are v3's; v2's run did not apply them.
 
   Scoring then drops and counts any race with a starter off the T-2 board, and any race without a winner. The
   counts are in the private report.
@@ -124,7 +151,7 @@ The rows are v2's. The design is the same in both families.
   scratched row. It takes part in the ranking and is never scored.
 - **v1's rows** (both runs) took the v0 file's starters as given and left out the races that file omits. In the
   first run, any T-2 runner missing from v0 was read as a scratch, which is the frozen `data.rows` rule. The
-  second run was the partial correction (above); v2 completes it.
+  second run was the partial correction (above); v2 completed it, and v3 adds the round-3 and round-4 rules.
 - **The T-2 board.** For each race, each runner's latest WIN row at 2 minutes or more before the scheduled post,
   read as `studies.cross_pool.boards_at` reads it. A runner whose latest row is scratched or unpriced is off the
   board. The time series is a sequence of snapshots, so the board read at T-2 is the latest snapshot at or
@@ -184,27 +211,27 @@ readings are figure-derived and are not stated here.
 
 ## Variants tried
 
-All 12 were registered before the first run, and every run records all 12, whatever they show. In both
-families that makes 24 variants searched. Within a run, every variant is scored on the same development races
-and folds (D9 walk-forward, 2020-Q2 to 2026-Q4, 2020-Q1 training only). v2's races differ from v1's by the
-eligibility above. Each variant's gain of the registered meld over v0,
+All 12 were registered before the first run, and every run records all 12, whatever they show. Over the three
+families that makes 36 variants searched. Within a run, every variant is scored on the same development races
+and folds (D9 walk-forward, 2020-Q2 to 2026-Q4, 2020-Q1 training only). v2's races differ from v1's, and v3's
+from v2's, by the eligibility above. Each variant's gain of the registered meld over v0,
 with its one-sided bound and two-sided 95% interval, is withheld (D21) and is in the private reports. Each
 record's status (scored or failed) is in the committed registry summaries.
 
-| Variant | Design | v2, run of record | v1, first run | v1, second run (superseded) |
-| --- | --- | --- | --- | --- |
-| P0 | one b over every runner (#129's V2, the reference) | `5468464cbff10aaa` | `3fe170189fe62eba` | `4c7dea4e42c2f518` |
-| B1 | one b for odds band [1, 3) only | `2399ba7c801ad791` | `04ad26d0cb345057` | `20a9069c61117f4a` |
-| B2 | one b for odds band [3, 7) only | `9621c016d2fd0277` | `d02f95cd43c45b52` | `4537f408d1a34c26` |
-| B3 | one b for odds band [7, 15) only | `9676bf8f2bace0db` | `dabbc4558a368c0f` | `570898b9f44b6f20` |
-| B4 | one b for odds band [15, 50) only | `583c30098ca50cfa` | `1a341e83bc72144b` | `aed79d91002c40bb` |
-| B5 | one b for odds band [50, ∞) only | `a14b8280fae07b59` | `859f8c530c79f2cb` | `9e195ed56d5874ec` |
-| R1 | one b for the T-2 favourite only | `f3d653bfe1da3910` | `d53b8b253b2647d1` | `737cbfa04736738b` |
-| R2 | one b for ranks 2-3 only | `5c1ec1b381d2ca63` | `579d34cb0e08de76` | `81573ebb829227d0` |
-| R3 | one b for ranks 4-6 only | `5c14264b57c41e2c` | `3758c6cecf22c7ec` | `8d041ce3effb2fc9` |
-| R4 | one b for ranks 7 and longer only | `ce470397f4025dbb` | `b07c5d28368ec6f6` | `72de994ece80707b` |
-| BA | all five band coefficients together | `23ebf013690949f9` | `983ac7cfac9fcb80` | `a4fa71a6043226c2` |
-| RA | all four rank coefficients together | `482c4f89b52df882` | `c1476a950951ff48` | `0294e37a29f7de22` |
+| Variant | Design | v3, run of record | v2 (superseded) | v1, first run | v1, second run (superseded) |
+| --- | --- | --- | --- | --- | --- |
+| P0 | one b over every runner (#129's V2, the reference) | `a525c2b93b170961` | `5468464cbff10aaa` | `3fe170189fe62eba` | `4c7dea4e42c2f518` |
+| B1 | one b for odds band [1, 3) only | `4937871dbf56109d` | `2399ba7c801ad791` | `04ad26d0cb345057` | `20a9069c61117f4a` |
+| B2 | one b for odds band [3, 7) only | `c5e62b1abe9d33eb` | `9621c016d2fd0277` | `d02f95cd43c45b52` | `4537f408d1a34c26` |
+| B3 | one b for odds band [7, 15) only | `c0a1cfe376d9daf5` | `9676bf8f2bace0db` | `dabbc4558a368c0f` | `570898b9f44b6f20` |
+| B4 | one b for odds band [15, 50) only | `c96f0eb006e48de8` | `583c30098ca50cfa` | `1a341e83bc72144b` | `aed79d91002c40bb` |
+| B5 | one b for odds band [50, ∞) only | `afffb16a625a1e47` | `a14b8280fae07b59` | `859f8c530c79f2cb` | `9e195ed56d5874ec` |
+| R1 | one b for the T-2 favourite only | `d25b9ff88786bef1` | `f3d653bfe1da3910` | `d53b8b253b2647d1` | `737cbfa04736738b` |
+| R2 | one b for ranks 2-3 only | `4b5ac1e45f50accc` | `5c1ec1b381d2ca63` | `579d34cb0e08de76` | `81573ebb829227d0` |
+| R3 | one b for ranks 4-6 only | `50e71d7d6cd2d971` | `5c14264b57c41e2c` | `3758c6cecf22c7ec` | `8d041ce3effb2fc9` |
+| R4 | one b for ranks 7 and longer only | `9dc55e7f6b4a083b` | `ce470397f4025dbb` | `b07c5d28368ec6f6` | `72de994ece80707b` |
+| BA | all five band coefficients together | `6d1032d5e53fd841` | `23ebf013690949f9` | `983ac7cfac9fcb80` | `a4fa71a6043226c2` |
+| RA | all four rank coefficients together | `0ce664ef462d745f` | `482c4f89b52df882` | `c1476a950951ff48` | `0294e37a29f7de22` |
 
 ## Alternatives rejected and why
 
@@ -228,11 +255,12 @@ figures are:
 
 - Every result is a gain of the registered meld over v0. It includes the group-intercept and market-refit terms,
   so it rules nothing in or out about form alone (see "How to read the results").
-- It covers the races left in once the counted drops are made. First-place dead heats are in v2, scored with
-  v0's refitted fold fits. Races without a priced winner, and races with a starter that v0 cannot price, are
+- It covers the races left in once the counted drops are made. First-place dead heats are in v3, scored with
+  v0's refitted fold fits, unless they fall in the embargo after their fold's `train_end` or in a fold the v0
+  file holds no row of. Races without a priced winner, and races with a starter that v0 cannot price, are
   outside it.
 
-In every case it is a development-day result with one run of record (v2), searched over 24 variants in two
+In every case it is a development-day result with one run of record (v3), searched over 36 variants in three
 families. It is no holdout claim and supports no adoption by itself.
 
 ## Follow-ups filed
@@ -242,6 +270,6 @@ families. It is no holdout claim and supports no adoption by itself.
   intercept and from a group-specific reshaping of v0. The owner approves it before any run.
 - #475: the same family on our own logged T-2 boards (#130) once a training fold holds enough logged development
   days, as a second source for the bands.
-- #476: `write_summary` refuses the registry while another family's id holds a `/`. Both families' summary files
-  were written from a view of the well-named families.
+- #476: `write_summary` refuses the registry while another family's id holds a `/`. The three families' summary
+  files were written from a view of the well-named families.
 - #87 and #102 take this family's records as a candidate input, by rank.
