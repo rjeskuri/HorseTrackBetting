@@ -5,9 +5,12 @@ Pre-registration: docs/specs/shadow-calibration-prereg.md; the frozen spec is ``
 registry (``Registry.freeze_family``; again with the same spec is a no-op), and ``--run`` refuses
 to read a record, a dividend or a board unless the family is frozen with exactly that spec. Every
 variant is one registry record, failures and empty results included. The full output goes
-through ``write_report`` under the data dir, named by the spec hash and the commit so a rerun
-keeps every earlier run's files: the report (strict JSON, a missing value as null) and the
-settlement file, one JSON line per shadow record with its log key, decision time and outcome.
+through ``write_report`` under the data dir: the report (strict JSON, a missing value as null)
+and the settlement file, one JSON line per shadow record with its log key, decision time and
+outcome. Both are named by the spec hash, the commit and the run's artifact id (``_artifact_id``:
+its records' run ids and its settlement text), so a new commit, a rebuilt input or a changed
+result writes new files beside the old ones, and a file that exists is never replaced: a rerun
+that reproduces an earlier run keeps that run's report and settlement file as written.
 
 Inputs: the spec's days' v0 shadow logs (``models.shadow.read_shadow``: development days only), the
 jra store's dividends with the scratch refunds (``bets.settle.day_dividends``), each race's final
@@ -25,6 +28,7 @@ import math
 import sys
 from collections import Counter
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,7 +41,14 @@ from horsetrack.core.config import load_country_yaml, load_source
 from horsetrack.core.eval.bootstrap import paired_bootstrap
 from horsetrack.core.eval.holdout import _git_sha
 from horsetrack.core.eval.leaderboard import rank, rows_from_registry, shrink
-from horsetrack.core.eval.registry import FoldMetric, RunRecord, _spec_hash, default_registry
+from horsetrack.core.eval.registry import (
+    FoldMetric,
+    RunRecord,
+    _canonical,
+    _sha256,
+    _spec_hash,
+    default_registry,
+)
 from horsetrack.core.eval.reports import write_report
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.bets.log import load_limits
@@ -432,6 +443,24 @@ def _settlement(settled: pd.DataFrame) -> str:
     return "".join(_json(row, ensure_ascii=False) + "\n" for row in rows)
 
 
+def _artifact_id(run_ids: Sequence[str], settlement: str | None) -> str:
+    """The run's artifact id: 16 hex digits of the sha256 of its records' run ids, in plan order,
+    and of its settlement text. A run id is the sha256 of the whole record: its commit, its
+    ``data_builds`` (each shadow and odds log's bytes and the jra store build), its params and
+    results. The settlement text holds each record's outcome at the dividend it used. So the id
+    changes with any of them, and a run that reproduces another has that run's id."""
+    return _sha256(_canonical({"run_ids": list(run_ids), "settlement": settlement}))[:16]
+
+
+def _write_new(path: Path, text: str) -> bool:
+    """Write ``text`` to ``path`` through ``write_report`` unless the file exists, and say whether
+    it was written: an existing report or settlement file is never replaced."""
+    if path.exists():
+        return False
+    write_report(path, text, sources=(SOURCE,))
+    return True
+
+
 def _primary(variants: list[dict], spec: dict) -> dict:
     """The primary estimate stated whole: P5 at the primary tau with D7's meeting clusters, its
     slope and either its interval or why there is none, and the meetings behind it."""
@@ -542,7 +571,8 @@ def run_study(out_dir: Path | None = None) -> dict:
     components = {"shadow_models": "; ".join(sorted(models)) or "none"}
     existing = registry.records(FAMILY_ID)
     records = [_record(v, git_sha, builds, components) for v in variants]
-    run_ids = [registry.append(r) for r in records if r not in existing]
+    run_ids = [_sha256(_canonical(asdict(r))) for r in records]  # as Registry.append names a run
+    appended = [registry.append(r) for r in records if r not in existing]
     counts = {
         "load_error": None if load_error is None else f"{type(load_error).__name__}: {load_error}",
         "leaderboard_rows": len(rows),
@@ -558,12 +588,13 @@ def run_study(out_dir: Path | None = None) -> dict:
             },
             "races_with_final_win_board": len({race for race, _ in finals}),
         }
-    stem = f"shadow-calibration-{COUNTRY}-{spec_hash[:12]}-{git_sha[:7]}"
-    settlement = None
-    if settled is not None:
-        path = write_report(
-            out_dir / f"{stem}-settlement.jsonl", _settlement(settled), sources=(SOURCE,)
-        )
+    lines = None if settled is None else _settlement(settled)
+    artifact_id = _artifact_id(run_ids, lines)
+    stem = f"shadow-calibration-{COUNTRY}-{spec_hash[:12]}-{git_sha[:7]}-{artifact_id}"
+    settlement, written = None, []
+    if lines is not None:
+        path = out_dir / f"{stem}-settlement.jsonl"
+        written += [str(path)] if _write_new(path, lines) else []
         settlement = {
             "path": str(path),
             "n_records": len(settled),
@@ -575,17 +606,20 @@ def run_study(out_dir: Path | None = None) -> dict:
             "family_id": FAMILY_ID,
             "spec_hash": spec_hash,
             "git_sha": git_sha,
+            "artifact_id": artifact_id,
             "written_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "counts": counts,
             "primary": _primary(variants, spec),
             "variants": [v | {"metrics": [m.__dict__ for m in v["metrics"]]} for v in variants],
             **out,
             "settlement": settlement,
-            "records_appended": run_ids,
+            "run_ids": run_ids,
+            "records_appended": appended,
         }
     )
-    report = write_report(out_dir / f"{stem}.json", _json(payload, indent=2), sources=(SOURCE,))
-    return payload | {"report_path": str(report)}
+    report = out_dir / f"{stem}.json"
+    written += [str(report)] if _write_new(report, _json(payload, indent=2)) else []
+    return payload | {"report_path": str(report), "written": written}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
