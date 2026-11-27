@@ -14,6 +14,9 @@ from horsetrack.countries.japan.jra.win_sales_fetch import fetch_win_sales_comma
 from horsetrack.countries.japan.jravan.bloodlines import (
     bloodlines_command as jravan_bloodlines_command,
 )
+from horsetrack.countries.japan.jravan.card_versions import (
+    card_versions_command as jravan_card_versions_command,
+)
 from horsetrack.countries.japan.jravan.check import check_command as jravan_check_command
 from horsetrack.countries.japan.jravan.dividends import (
     dividends_command as jravan_dividends_command,
@@ -72,6 +75,7 @@ jrdb.command("build")(jrdb_build_command)
 jravan = typer.Typer(no_args_is_help=True, help="JRA-VAN DataLab (JV-Data) commands.")
 japan.add_typer(jravan, name="jravan")
 jravan.command("bloodlines")(jravan_bloodlines_command)
+jravan.command("card-versions")(jravan_card_versions_command)
 jravan.command("check")(jravan_check_command)
 jravan.command("dividends")(jravan_dividends_command)
 jravan.command("dump")(jravan_dump_command)
