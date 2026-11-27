@@ -32,15 +32,20 @@ a betting-edge claim, nothing is adopted, and the holdout is not opened.
   Win and exacta boards; `LockedHoldout` is never opened. A race whose exacta pool has refund
   votes (a scratch after sales) is excluded and counted. A run that scores no race records its
   members as failed and writes no report.
-- Private outputs, through `write_report` with the source `jravan`:
-  `$HORSETRACK_DATA_DIR/reports/exacta-ceiling-japan-<commit>-<build>-seed<seed>.md` and `.json`
-  (every ranked member with its p source, family size and the variants searched, the
-  descriptives, the exclusions and the span), and the ranked member file
-  `$HORSETRACK_DATA_DIR/reports/candidate-cells/exacta-ceiling.json` (written by the pre-registered seed
-  431 only).
-- Variants searched: 64, every member family of the study: 16
+- Private outputs, through `write_report` with the source `jravan`: each run's report and export
+  `$HORSETRACK_DATA_DIR/reports/exacta-ceiling-japan-<commit>-<build>-seed<seed>-<from>-<to>.md`
+  and `.json`, named by the run's commit, data build, seed and asked days so that no run
+  overwrites another's (every ranked member with its p source, status, the days its run scored,
+  family size and the variants searched; the descriptives and the exclusions); and the
+  ledger-linked ranked member file `$HORSETRACK_DATA_DIR/reports/candidate-cells/exacta-ceiling.json`, written
+  only by the run of record (seed 431, asked days 2014-06-07 to
+  2026-11-27); any other run leaves it alone.
+- Variants frozen: 64, every member family of the study: 16
   members at #115's full-development lambda2 and the same 16 at plain Harville, for
-  each p source (v2 and v1); family size 16 each.
+  each p source (v2 and v1); family size 16 each. Each run's report and export state
+  beside it the variants searched, the ones actually scored: the run's own and each v1 member
+  with a scored record in the registry. A v1 member without one is an unavailable row, ranked
+  last and not counted.
 
 ## Hypothesis
 
@@ -63,7 +68,9 @@ bound, return per 100 yen and its upper bound, n selected, n races and n meeting
 Descriptives (`japan-431-exacta-ceiling-descriptive-v2`, and v1's `japan-431-exacta-ceiling-descriptive`): D = sum q / sum p per category
 and cell, and the Quinella x order split, each with a two-sided 95% meeting-bootstrap interval:
 withheld (D21). A member with no bet keeps its row, ranked last, with an unavailable marker in the
-registry; a failed run is recorded too (the registry summary lists every run's status).
+registry; a v1 member with no scored record in the registry keeps an unavailable row, ranked after
+those and not counted as searched; a failed run is recorded too (the registry summary lists every
+run's status).
 
 ## Alternatives rejected and why
 
