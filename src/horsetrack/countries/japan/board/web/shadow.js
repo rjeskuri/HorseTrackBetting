@@ -12,7 +12,9 @@
  * plain feed in board.js's order, favourite first by the crowd's current odds (#498, the owner's
  * display choice), except Exacta, Trio and Trifecta: the shadow race's 15 most likely
  * combinations by `p_model`, most likely first, each joined to the plain row of its odds ('-'
- * without one). Every row has a Model p cell, the shadow race's `p_model` as a percent. The pools
+ * without one), leaving out first every combination /feed shows scratched (a runner SCR on its
+ * WIN or PLACE row, or the combination's own row SCR). Every row has a Model p cell, the shadow
+ * race's `p_model` as a percent. The pools
  * without a price forecast (NO_FORECAST: no nowcast, #400) show value = Model p x the odds now
  * and say so; the tier-2 sections show their capture's age. The shadow feed (#121) is joined on
  * (race_id, pool, combination) and never highlights or colours a row by value or probability
@@ -86,9 +88,24 @@
     return p && typeof p === "object" ? p : null;
   }
 
+  /* The runners the plain feed marks scratched, {horse number text: true}: a current SCR row on
+   * WIN or on PLACE, either is enough. */
+  function scratchedRunners(pools) {
+    var out = Object.create(null);
+    ["WIN", "PLACE"].forEach(function (code) {
+      var body = own(pools, code);
+      (body && Array.isArray(body.rows) ? body.rows : []).forEach(function (l) {
+        if (l && typeof l === "object" && l.status === "SCR") out[String(l.combination)] = true;
+      });
+    });
+    return out;
+  }
+
   /* A ranked section's rows: the TOP combinations of `p` by probability, most likely first (ties
-   * in the feed's order), each the plain row of the same combination or a row without odds. */
-  function topRows(p, body) {
+   * in the feed's order), each the plain row of the same combination or a row without odds. The
+   * two feeds are polled apart, so `p` can predate a scratch /feed already shows: a combination
+   * with a runner in `scratched`, or whose own plain row is SCR, is left out before the TOP. */
+  function topRows(p, body, scratched) {
     if (!p) return [];
     var lines = Object.create(null);
     (body && Array.isArray(body.rows) ? body.rows : []).forEach(function (l) {
@@ -97,7 +114,8 @@
     var probs = Object.create(null);
     var keys = Object.keys(p).filter(function (c) {
       probs[c] = num(p[c]);
-      return probs[c] !== null;
+      if (probs[c] === null || (c in lines && lines[c].status === "SCR")) return false;
+      return !c.split(",").some(function (h) { return scratched[h] === true; });
     });
     keys.sort(function (a, b) { return probs[b] - probs[a]; });
     return keys.slice(0, TOP).map(function (c) {
@@ -255,12 +273,15 @@
       },
     };
     function sections(race, nowMs) {
+      var scratched = scratchedRunners(race.pools);
       return SECTIONS.map(function (code) {
         var body = own(race.pools, code);
         var section = { code: code, body: body,
           note: (NO_FORECAST[code] ? NO_FORECAST_NOTE : "") +
             (LATEST_ONLY[code] ? captureAgeNote(body, nowMs) : "") };
-        if (RANKED[code]) section.rows = topRows(pModelOf(shadowRace(race.race_id), code), body);
+        if (RANKED[code]) {
+          section.rows = topRows(pModelOf(shadowRace(race.race_id), code), body, scratched);
+        }
         return section;
       });
     }

@@ -16,10 +16,12 @@ Rules (docs/specs/board-feed.md, "The shadow feed"):
   Display only: values, flags and the shadow log do not read it.
 - `p_model` (ticket #506), per race: {pool: {combination: probability}} of the board as of now.
   WIN is `models.win.predict(q, board.context())` with q the board's 1/O_WIN normalised; every
-  other pool is `model_probabilities(p, models.ordering, brackets=...)`, brackets by JRA's draw of
-  the largest horse number on the board (scratched included). Scratched runners are off the board,
-  so they have no key and the rest renormalise. Without an ordering fit only WIN; without models
-  None. Display only: it never reaches a value, a flag or the shadow log.
+  other pool is `model_probabilities(p, models.ordering, brackets=..., starters=...)`, brackets by
+  JRA's draw of the largest horse number on the board (scratched included). Scratched runners are
+  off the board, so they have no key and the rest renormalise; the places Place and Wide pay are
+  those of the start of sales, `starters` the board's priced runners plus its scratched ones (the
+  logs do not say when sales opened, so a scratch is taken as after). Without an ordering fit only
+  WIN; without models None. Display only: it never reaches a value, a flag or the shadow log.
 - `cache`: a mapping the caller keeps between builds. A race's values are recomputed only when its
   board (capture time and figures) or its bucket changed, its p_model only when its board did;
   flags read the clock on every build. The log readers live in the same mapping, so a rebuild
@@ -263,15 +265,16 @@ def _p_model(
     runners = sorted(board.win)
     if not runners:
         return None
-    numbers = set(board.win) | set(board.place) | set(board.scratched)
-    numbers |= {h for pair in board.wide for h in pair}
-    drawn = max(numbers)  # the draw was made before any scratch
+    fielded = set(board.win) | set(board.place) | set(board.scratched)
+    starters = len(fielded)  # at the start of sales: a scratch is taken as after it
+    drawn = max(fielded | {h for pair in board.wide for h in pair})  # drawn before any scratch
     key = (
         board.race_id,
         _iso(board.capture_utc),
         tuple(sorted(models.ids.items())),
         tuple(sorted(board.win.items())),
         drawn,
+        starters,
     )
     slot = ("p_model", board.race_id)
     if cache is not None:
@@ -286,7 +289,10 @@ def _p_model(
         # ordered finishes need the fit's discounts: another ordering model gives WIN only
         ordering = models.ordering if isinstance(models.ordering, OrderingFit) else None
         found = model_probabilities(
-            dict(zip(runners, p.tolist(), strict=True)), ordering, brackets=_brackets(drawn)
+            dict(zip(runners, p.tolist(), strict=True)),
+            ordering,
+            brackets=_brackets(drawn),
+            starters=starters,
         )
     except Exception:  # the race shows without probabilities; tried again on the next build
         log.exception("%s: model probabilities failed; shown without", board.race_id)

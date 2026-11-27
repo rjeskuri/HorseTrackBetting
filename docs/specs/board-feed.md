@@ -185,10 +185,10 @@ reaches a value, a flag, the shadow log or `verify()`.
 - WIN: the calibrated Win model on the board's current WIN odds, `q = (1/O_WIN) / sum(1/O_WIN)`
   over the board's runners and `p = models.win.predict(q, board.context())` (not an average over
   nowcast draws).
-- Every other pool: `shadow_values.model_probabilities(p, models.ordering, brackets=...)`, exact
-  sums over the v0 ordering model's ordered first three (discounted Harville,
+- Every other pool: `shadow_values.model_probabilities(p, models.ordering, brackets=...,
+  starters=...)`, exact sums over the v0 ordering model's ordered first three (discounted Harville,
   P(i, j, k) = p_i * p_j^l2 / sum_{l != i} p_l^l2 * p_k^l3 / sum_{l not in {i, j}} p_l^l3): PLACE
-  `"7"` P(in the first `places`, from the jra config for the board's starters), QUINELLA `"a,b"`
+  `"7"` P(in the first `places`, from the jra config for the starters), QUINELLA `"a,b"`
   (a < b) P({first two} = {a, b}), QUINELLA_PLACE `"a,b"` P(both in the first three), FORECAST
   `"a,b"` P(a first, b second), TRIO `"a,b,c"` (ascending) P({first three} = {a, b, c}), TIERCE
   `"a,b,c"` P(a, b, c in that order), BRACKET_QUINELLA `"x,y"` (x <= y) P({bracket of the first,
@@ -197,6 +197,13 @@ reaches a value, a flag, the shadow log or `verify()`.
   4,896 ordered triples), never per day at once.
 - Scratches: a runner with a current SCR WIN or PLACE row is off the board, so it has no key and
   the others renormalise, as the shadow values do.
+- Places: JRA fixes the places Place and Wide pay, and whether each is sold, at the start of sales
+  (jra config `places_paid`), so a scratch after sales opened leaves them unchanged. The starters
+  are the board's priced runners plus its scratched ones (WIN, PLACE and SCR rows; the logs do not
+  say when sales opened, so a scratch is taken as after): 8 drawn and one out, Place pays three
+  places over the seven left; 5 drawn and one out, Place is still sold with two; 4 drawn and one
+  out, Wide is still sold and Place is not. The ordered finishes are over the runners left. The
+  shadow values (`shadow_values()`, the shadow log) keep the board's priced runners (#566).
 - The bracket draw: N is the largest horse number on the board, scratched runners included (the
   draw was made before the scratch). N <= 8: no bracket quinella. 9 to 16: brackets 1..16-N take
   one horse each and the rest two, in number order; 17: bracket 8 takes three; 18: brackets 7 and
@@ -205,7 +212,7 @@ reaches a value, a flag, the shadow log or `verify()`.
 - Without an ordering fit (or with an ordering model that has no discounts) only WIN; without
   models `p_model` is null; a failed computation is logged and shows null, tried again next build.
 - Recompute: cached with the values (`cache`), recomputed only when the board (capture time, WIN
-  figures, largest number) or the model ids changed.
+  figures, largest number, starters) or the model ids changed.
 
 ### The shadow page
 
@@ -217,6 +224,12 @@ bet type whatever the plain feed holds, in this order: Win, Place, Quinella, Wid
   favourite first (#498). Exacta, Trio and Trifecta list the 15 combinations with the largest
   `p_model` (all of them when fewer exist), most likely first, each joined to the plain feed's
   latest-capture row for its odds (`-` without one); without a shadow feed they list none.
+- Scratches first: the two feeds are polled apart, so /feed can show a scratch the shadow feed's
+  `p_model` has not caught up with. Before the 15 are taken, Exacta, Trio and Trifecta leave out
+  every combination with a runner whose current plain WIN or PLACE row is `SCR` (either is
+  enough, with or without a tier-2 row for the combination) and every combination whose own
+  tier-2 row is `SCR`; the next most likely eligible combinations move up. An eligible combination
+  missing from the capture, or in a race with no tier-2 capture, still shows odds `-`.
 - Model p: every row has a `Model p` cell (`data-col="p-model"`), `p_model[pool][combination]` as
   a percent with one decimal, `-` without one.
 - Value: Win, Place and Wide keep the shadow values. Quinella, Bracket quinella, Exacta, Trio and

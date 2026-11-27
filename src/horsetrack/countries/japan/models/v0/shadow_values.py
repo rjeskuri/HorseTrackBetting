@@ -254,6 +254,7 @@ def model_probabilities(
     ordering: OrderingFit | None,
     *,
     brackets: Mapping[int, int] | None = None,
+    starters: int | None = None,
 ) -> dict[str, dict[str, float]]:
     """Pool -> combination text (the odds log's) -> probability, for the runners in `p`.
 
@@ -261,14 +262,18 @@ def model_probabilities(
     and WIN is that; without an ordering fit WIN is all there is. With one, P(i, j, k first three
     in that order) is the fit's discounted Harville model (`ordering._order_probs`) and every other
     pool is an exact sum over those ordered triples:
-    - PLACE "7": P(7 in the first `places`), places from the jra config for len(p) runners;
+    - PLACE "7": P(7 in the first `places`), places from the jra config for `starters`;
     - QUINELLA "a,b" (a < b): P({first two} = {a, b}); FORECAST "a,b": P(a first, b second);
-    - QUINELLA_PLACE "a,b" (a < b): P(a and b both in the first `places`, 3 from 4 runners);
+    - QUINELLA_PLACE "a,b" (a < b): P(a and b both in the first `places`, 3 from 4 starters);
     - TRIO "a,b,c" (a < b < c): P({first three} = {a, b, c}); TIERCE "a,b,c": P(a, b, c in order);
     - BRACKET_QUINELLA "x,y" (x <= y), only with `brackets` (horse -> bracket; horses not in `p`
       are ignored): P({bracket of the first, bracket of the second} = {x, y}).
+    `starters` (default len(p)) is the runners at the start of sales: JRA fixes the places Place and
+    Wide pay, and whether they are sold, then, so a runner scratched after sales opened leaves them
+    unchanged (8 drawn and one out: Place still pays three places over the seven left). Only the
+    places come from it; the ordered finishes are over the runners in `p` alone.
     Each pool keys every combination of the runners and no other; a pool the config does not sell
-    for len(p) runners is left out, and so is every pool but WIN with fewer than three runners.
+    for `starters` is left out, and so is every pool but WIN with fewer than three runners.
     One race at a time: an 18-runner race has 4,896 ordered triples.
     """
     horses = sorted(int(h) for h in p)
@@ -278,6 +283,9 @@ def model_probabilities(
     names = [str(h) for h in horses]
     out: dict[str, dict[str, float]] = {WIN: dict(zip(names, q.tolist(), strict=True))}
     n = len(horses)
+    starters = n if starters is None else int(starters)
+    if starters < n:
+        raise ValueError(f"{starters} starters at the start of sales, but {n} runners in p")
     if ordering is None or n < 3:
         return out
     _check_family(ordering.family)
@@ -288,7 +296,7 @@ def model_probabilities(
     pools = load_source("japan", "jra").pools
     every = range(n)
 
-    places = pools[PLACE].places_for(n)
+    places = pools[PLACE].places_for(starters)
     if places:
         place = sum(marginals[:places]).tolist()
         out[PLACE] = {names[i]: place[i] for i in every}
@@ -299,7 +307,7 @@ def model_probabilities(
         for j in every
         if i < j
     }
-    places = pools[WIDE].places_for(n)
+    places = pools[WIDE].places_for(starters)
     if places:
         one_way = sum(m for (a, b), m in pairs.items() if b < places)
         wide = (one_way + one_way.T).tolist()
