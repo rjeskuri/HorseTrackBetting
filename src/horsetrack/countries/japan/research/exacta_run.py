@@ -2,15 +2,22 @@
 
 `python -m horsetrack.countries.japan.research.exacta_run {freeze|count|score|max-test|breakage}`
 
-- freeze: ``freeze_family`` for every spec of ``exacta_study.family_specs`` in the Japan registry,
-  and E2 also under ``E2_REGISTRY_ID``, the id #281 scores it under (no "/", #525). It records the
-  specs only: the committed summary lists runs, and a freeze is not one.
+- freeze: ``freeze_family`` for every spec of ``exacta_study.family_specs`` in the Japan registry.
+  It records the specs only: the committed summary lists runs, and a freeze is not one.
 - count: row counts only (no outcome is scored): development races with a FORECAST dividend,
   out-of-fold Win probabilities, the ordering fit, and #130-logged meetings with exacta boards.
 - score: E1 (B2) with its variants B1, B3 and the log-score total C; every variant is a registry
   record, SPA and StepM run over E1's members, and the tables go through ``write_report``.
+  B2 and B1 also carry ``return_per_100`` (100 * sum R / n, gross yen per 100 yen staked on
+  the box in each race at the final dividend) with one-sided meeting-bootstrap bounds: a metric,
+  never a param; rho stays the pre-registered estimand.
 - breakage: descriptive, not a test: the share of B2's paid return that rounding the dividend
-  down to 10 yen takes, per lambda2, category and cell, and rho with half a step added back.
+  down to 10 yen takes, per lambda2, category and cell, and rho with half a step added back;
+  dividends at the 110-yen floor are counted, not imputed.
+
+``load_races`` refuses (``RunRefused``) a development race whose Win board in the store differs
+from the one #114's out-of-fold artifact was built on (its ``q``), so ``p_cal`` is never paired
+with a corrected board; a corrected race the exacta scorer always excludes is skipped and counted.
 
 Before writing anything, score and max-test refuse (``RunRefused``) a family frozen with a spec
 other than the one in use, and a Win or ordering fit other than the one the family's scored
@@ -21,8 +28,12 @@ checks before it builds any frame.
 A member whose cell is empty, or a statistic that cannot be computed (a 0 / 0 breakage share, a
 shrinkage without a positive SE), keeps its row with its count; the statistic is NaN in the
 returned rows, ``n/a`` in a markdown table, ``null`` in a JSON report, and in the registry it is no
-FoldMetric but an entry of ``params["unavailable"]`` with the reason. Report names hold the commit
-and a digest of ``data_builds``, so two data builds at one commit keep separate files.
+FoldMetric of the statistic: the record's metrics hold the marker ``"<name>:unavailable:<reason>"``
+instead (value 0.0, a placeholder; no bounds), never an entry in params, which are the variant's
+identity, so a coverage change (a backfill) reruns a variant and never makes a new one. A cell of
+fewer than two meetings keeps its estimate without bootstrap bounds (``<estimate>_bounds`` is
+unavailable): redrawing one meeting gives a degenerate [x, x]. Report names hold the commit and a
+digest of ``data_builds``, so two data builds at one commit keep separate files.
 
 D14: race days are filtered with ``is_holdout_day`` from the races table's dates (the only column
 read for every row) before any outcome, odds, class or dividend is read, and the readers take only
@@ -70,13 +81,16 @@ from horsetrack.countries.japan.research.exacta_consistency import (
 COUNTRY = "japan"
 FIRST_DAY = date(2014, 6, 7)
 SOURCES = ("jra",)
-MAX_TEST_ID = f"{study.E1_ID}/max-test"
-E2_REGISTRY_ID = study.E2_ID.replace("/", "-")  # #525: #281 records E2 without "/"
+MAX_TEST_ID = f"{study.E1_ID}-max-test"
+E2_REGISTRY_ID = study.E2_ID  # E2's registry id (#525, already "/"-free), for exacta_rules
 SCORED_FAMILIES = (study.E1_ID, study.E1_B1_ID, study.E1_B3_ID, study.C_ID)
-BREAKAGE_ID = "japan/131-exacta-breakage"
+BREAKAGE_ID = "japan-131-exacta-breakage"
 BREAKAGE_STEP = 10.0  # JRA pays per 100 yen rounded down to 10 yen
 STEPM_FWER = 0.05  # the spec's 95% level as a family-wise error rate
 RACE_COLUMNS = ["race_id", "meeting_id", "race_date", "race_no", "race_class", "race_class_raw"]
+# Float noise in a Win share; a 0.1 tick on a 999.9 price moves a share by about 1e-7.
+BOARD_TOLERANCE = 1e-9
+FLOOR_YEN = 110.0  # JRA's minimum payout per 100 yen ("Plus 10", jra.yaml)
 
 
 class RunRefused(RuntimeError):
@@ -136,16 +150,30 @@ def _fmt(value, digits: int) -> str:
     return f"{value:.{digits}f}" if _available(value) else "n/a"
 
 
-def _metrics(fold: str, entries, n: int) -> tuple[list[FoldMetric], list[dict]]:
-    """FoldMetrics of the available ``(metric, value, lo, hi, reason)`` entries; the others as
-    ``params["unavailable"]`` entries carrying their reason."""
-    metrics, unavailable = [], []
+UNAVAILABLE_VALUE = 0.0  # the registry needs a finite value; an unavailable marker carries none
+FEW_MEETINGS = "fewer than two meetings: no bootstrap interval"
+
+
+def _unavailable_metric(fold: str, name: str, reason: str, n: int) -> FoldMetric:
+    """The marker of an unavailable statistic: ``"<name>:unavailable:<reason>"``, no bounds."""
+    return FoldMetric(fold, f"{name}:unavailable:{reason}", UNAVAILABLE_VALUE, None, None, n)
+
+
+def _metrics(fold: str, entries, n: int) -> list[FoldMetric]:
+    """FoldMetrics of ``(metric, value, lo, hi, reason)`` entries. An unavailable value is its
+    marker with ``reason``. Bounds of None are not part of the statistic; a NaN bound of an
+    available value (a cell of fewer than two meetings) leaves the value without bounds and adds
+    the ``<metric>_bounds`` marker."""
+    metrics = []
     for metric, value, lo, hi, reason in entries:
-        if _available(value):
+        if not _available(value):
+            metrics.append(_unavailable_metric(fold, metric, reason, n))
+        elif (lo is None and hi is None) or (_available(lo) and _available(hi)):
             metrics.append(FoldMetric(fold, metric, float(value), lo, hi, n))
         else:
-            unavailable.append({"fold": fold, "metric": metric, "reason": reason})
-    return metrics, unavailable
+            metrics.append(FoldMetric(fold, metric, float(value), None, None, n))
+            metrics.append(_unavailable_metric(fold, f"{metric}_bounds", FEW_MEETINGS, n))
+    return metrics
 
 
 def _record_key(record: RunRecord) -> str:
@@ -275,11 +303,25 @@ def count() -> dict:
     }
 
 
+def _board_shares(odds: dict) -> dict:
+    """Normalised implied Win shares of a Win board: 1 / odds over the race's sum of 1 / odds."""
+    inv = {h: 1.0 / v for h, v in odds.items()}
+    total = sum(inv.values())
+    return {h: v / total for h, v in inv.items()}
+
+
 def load_races() -> tuple[list[dict], dict]:
-    """The scoring inputs of every development race with out-of-fold Win probabilities."""
+    """The scoring inputs of every development race with out-of-fold Win probabilities.
+
+    ``RunRefused`` when a race's Win board in the store is not the board the out-of-fold artifact
+    was built on (its normalised implied shares differ from the artifact's ``q`` by more than
+    ``BOARD_TOLERANCE``, same horses or not) and the exacta scorer would score the race: ``p_cal``
+    would be from the old board. A mismatched race the scorer always excludes
+    (``exacta_study.exclusion_reason``) is left out and counted in ``dropped_before_scoring`` as
+    ``board_corrected_<reason>``, so a correction no score reads never aborts the run."""
     races = development_races()
     win_id, oof_path, ordering_id, lambda2 = _fits()
-    oof = _read(oof_path, ["race_id", "horse_no", "p_cal"], races["race_id"].tolist())
+    oof = _read(oof_path, ["race_id", "horse_no", "q", "p_cal"], races["race_id"].tolist())
     races = races[races["race_id"].isin(set(oof["race_id"]))]
     ids = races["race_id"].tolist()
     runners_read = _read(
@@ -297,6 +339,8 @@ def load_races() -> tuple[list[dict], dict]:
     odds = {k: dict(zip(g["horse_no"], g["win_odds"], strict=True)) for k, g in
             runners.groupby("race_id")}  # fmt: skip
     p = {k: dict(zip(g["horse_no"], g["p_cal"], strict=True)) for k, g in oof.groupby("race_id")}
+    built_on = {k: dict(zip(g["horse_no"], g["q"], strict=True)) for k, g in
+                oof.groupby("race_id")}  # fmt: skip
     rows: dict[str, list] = {}
     for r in dividends.itertuples(index=False):
         combo = tuple(int(h) for h in str(r.combination).split(","))
@@ -309,6 +353,22 @@ def load_races() -> tuple[list[dict], dict]:
             dropped["p_or_odds_mismatch"] = dropped.get("p_or_odds_mismatch", 0) + 1
             continue
         t = takeout.race_takeout(race.race_id, "FORECAST", race_class_raw=race.race_class_raw)
+        exacta = rows.get(race.race_id, [])
+        shares, q = _board_shares(field), built_on[race.race_id]
+        gap = max(abs(shares[h] - q[h]) for h in shares)
+        if not gap <= BOARD_TOLERANCE:
+            reason = study.exclusion_reason(
+                n_starters=len(field), boost_may_be_withheld=t.boost_may_be_withheld, exacta=exacta
+            )
+            if reason is None:
+                raise RunRefused(
+                    f"{race.race_id}: the Win board in the store is not the one "
+                    f"{oof_path.name} was built on (implied shares differ by {gap:.3g}): "
+                    "refit the Win model on the corrected board"
+                )
+            key = f"board_corrected_{reason}"
+            dropped[key] = dropped.get(key, 0) + 1
+            continue
         out.append(
             {
                 "race_id": race.race_id,
@@ -320,7 +380,7 @@ def load_races() -> tuple[list[dict], dict]:
                 "p": {int(h): float(v) for h, v in probs.items()},
                 "rate": t.payout_rate,
                 "boost_may_be_withheld": t.boost_may_be_withheld,
-                "exacta": rows.get(race.race_id, []),
+                "exacta": exacta,
             }
         )
     # "<identity>@<digest>": the identity is the table, the digest its development rows read
@@ -390,7 +450,8 @@ EMPTY_CELL = "no scored race in the cell"
 
 def _member_metrics(sub: pd.DataFrame, column: str, ratio: bool, seed: int, n_boot: int) -> dict:
     """rho, its meeting-bootstrap SE and one-sided bounds; all NaN for an empty cell. A cell of
-    one meeting redraws that meeting in every replicate, so its SE is 0 (not float residue)."""
+    one meeting redraws that meeting in every replicate, so its SE is 0 (not float residue) and
+    its bounds are NaN: the degenerate [x, x] would read as a 95% interval."""
     if sub.empty:
         return {"rho": math.nan, "se": math.nan, "lo": math.nan, "hi": math.nan, "n": 0,
                 "meetings": 0}  # fmt: skip
@@ -399,9 +460,25 @@ def _member_metrics(sub: pd.DataFrame, column: str, ratio: bool, seed: int, n_bo
                                n_boot=n_boot, seed=seed)  # fmt: skip
     lower = study.rho_interval(sub[column], rates, sub["meeting_id"], alternative="greater",
                                n_boot=n_boot, seed=seed)  # fmt: skip
-    se = 0.0 if upper.n_meetings == 1 else upper.se
-    return {"rho": upper.rho, "se": se, "lo": lower.bound, "hi": upper.bound,
+    few = upper.n_meetings < 2
+    return {"rho": upper.rho, "se": 0.0 if few else upper.se,
+            "lo": math.nan if few else lower.bound, "hi": math.nan if few else upper.bound,
             "n": len(sub), "meetings": upper.n_meetings}  # fmt: skip
+
+
+PAID_AT_DIVIDEND = ("B2", "B1")  # boxes paid at the final dividend; B3 is paid at Harville odds
+
+
+def _return_per_100(sub: pd.DataFrame, column: str, estimator: str, seed: int, n_boot: int):
+    """B2 and B1: the gross yen returned per 100 yen staked on the box in each of the cell's
+    races at the final dividend, 100 * sum R / n, with its one-sided 95% meeting-bootstrap
+    bounds (E1's rules: NaN in an empty cell, no bounds in a cell of one meeting). NaN for B3."""
+    if estimator not in PAID_AT_DIVIDEND:
+        return dict.fromkeys(("return_per_100", "return_per_100_lo", "return_per_100_hi"),
+                             math.nan)  # fmt: skip
+    m = _member_metrics(sub, column, False, seed, n_boot)
+    return {"return_per_100": 100 * m["rho"], "return_per_100_lo": 100 * m["lo"],
+            "return_per_100_hi": 100 * m["hi"]}  # fmt: skip
 
 
 def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10000) -> dict:
@@ -428,8 +505,9 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
                 for cell in study.SEGMENT_CELLS:
                     sub = frame[(frame["category"] == category) & frame[cell]]
                     m = _member_metrics(sub, column, ratio, seed, n_boot)
+                    r100 = _return_per_100(sub, column, estimator, seed, n_boot)
                     results.append({"estimator": estimator, "family": family, "lambda2": key,
-                                    "category": category, "cell": cell, **m})  # fmt: skip
+                                    "category": category, "cell": cell, **m, **r100})  # fmt: skip
     table = pd.DataFrame(results)
     table["rho_eb"] = np.nan
     for key in lambdas:
@@ -463,26 +541,33 @@ def score(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10
         if row.estimator == "B2":
             why = EMPTY_CELL if row.n == 0 else "bootstrap SE is 0: no precision to shrink with"
             entries.append(("rho_eb", row.rho_eb, None, None, why))
-        metrics, unavailable = _metrics("development", entries, int(row.n))
+        if row.estimator in PAID_AT_DIVIDEND:
+            entries.append(("return_per_100", row.return_per_100, float(row.return_per_100_lo),
+                            float(row.return_per_100_hi), EMPTY_CELL))  # fmt: skip
+        metrics = _metrics("development", entries, int(row.n))
         params = {"estimator": row.estimator, "lambda2": row.lambda2, "category": row.category,
                   "cell": row.cell, "direction": study.DIRECTIONS[row.category]}  # fmt: skip
-        if unavailable:
-            params["unavailable"] = unavailable
         append(_record(row.family, variant, params, comps, metrics, meta, sha))
 
     # C: the log-score total, one paired comparison per lambda2.
     c_rows = []
     for key, value in lambdas.items():
         gain = _log_score(races, value)
-        ci = paired_bootstrap(gain["gain"], gain["meeting_id"], n_boot=n_boot, level=0.95,
-                              seed=seed)  # fmt: skip
-        c_rows.append({"lambda2": key, "mean": ci.mean, "lo": ci.lo, "hi": ci.hi,
-                       "n": len(gain), "meetings": ci.n_clusters})  # fmt: skip
+        if gain.empty:  # every scored dividend at or below the 110-yen floor
+            mean, lo, hi, meetings = math.nan, math.nan, math.nan, 0
+        else:
+            ci = paired_bootstrap(gain["gain"], gain["meeting_id"], n_boot=n_boot, level=0.95,
+                                  seed=seed)  # fmt: skip
+            mean, meetings = ci.mean, ci.n_clusters
+            lo, hi = (ci.lo, ci.hi) if meetings >= 2 else (math.nan, math.nan)
+        c_rows.append({"lambda2": key, "mean": mean, "lo": lo, "hi": hi,
+                       "n": len(gain), "meetings": meetings})  # fmt: skip
         comps = {**components, "ordering": meta["ordering_fit"] if key == study.FITTED
                  else "plain_harville"}  # fmt: skip
+        why = "no scored race pays above the 110-yen floor: q_w is unknown at the floor"
         append(_record(
             study.C_ID, f"c|lambda2={key}", {"estimator": "C", "lambda2": key}, comps,
-            [FoldMetric("development", "log_score_gain", ci.mean, ci.lo, ci.hi, len(gain))],
+            _metrics("development", [("log_score_gain", mean, lo, hi, why)], len(gain)),
             meta, sha,
         ))  # fmt: skip
 
@@ -557,13 +642,20 @@ def write_outputs(summary: dict, sha: str, out: Path) -> None:
     write_report(out / f"{stem}.json", text, sources=SOURCES)
     table = pd.DataFrame(summary["members"])
     lines = [f"# #131 exacta study: E1 results ({sha[:12]})", "",
-             "| estimator | lambda2 | category | cell | n | estimate | 95% lo | 95% hi | EB |",
-             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]  # fmt: skip
+             "| estimator | lambda2 | category | cell | n | estimate | 95% lo | 95% hi | EB | "
+             "return per 100 yen | its 95% lo | its 95% hi |",
+             "|" + " --- |" * 12]  # fmt: skip
     for r in table.itertuples(index=False):
         eb = "" if r.estimator != "B2" else _fmt(r.rho_eb, 3)
         lines.append(f"| {r.estimator} | {r.lambda2} | {r.category} | {r.cell} | {r.n} | "
-                     f"{_fmt(r.rho, 3)} | {_fmt(r.lo, 3)} | {_fmt(r.hi, 3)} | {eb} |")  # fmt: skip
+                     f"{_fmt(r.rho, 3)} | {_fmt(r.lo, 3)} | {_fmt(r.hi, 3)} | {eb} | "
+                     f"{_fmt(r.return_per_100, 1)} | {_fmt(r.return_per_100_lo, 1)} | "
+                     f"{_fmt(r.return_per_100_hi, 1)} |")  # fmt: skip
     write_report(out / f"{stem}.md", "\n".join(lines) + "\n", sources=SOURCES)
+
+
+AT_FLOOR = "dividend at or below the 110-yen floor: its unrounded value is unknown, not imputed"
+ALL_AT_FLOOR = "every race of the cell pays at or below the 110-yen floor"
 
 
 def breakage(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int = 10000):
@@ -577,7 +669,13 @@ def breakage(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int =
     E1's races and frozen loss are unchanged; one registry record per lambda2. ``RunRefused``
     unless E1 is frozen with the spec in use and ``meta``'s fits are E1's. Holdout races are
     dropped (D14) before any dividend is read. An empty cell keeps its row with every statistic
-    NaN; a cell without a winning return has rho 0 and a NaN share (0 / 0)."""
+    NaN; a cell without a winning return has rho 0 and a NaN share (0 / 0).
+
+    A dividend at or below 110 yen (JRA's minimum payout) may have been raised by the floor, so
+    its unrounded value is unknown: such races are counted (``n_floor``, and in the registry the
+    unavailable ``floor_correction`` with n = ``n_floor``) and left out of ``rho_unrounded`` and
+    ``breakage_share``, which are NaN when every race of the cell is at the floor. ``rho``
+    (paid) is over every race of the cell."""
     _check_frozen(registry, (study.E1_ID,))
     _check_fits(registry, meta, (study.E1_ID,))
     races = [r for r in races if not is_holdout_day(COUNTRY, r["race_date"])]
@@ -586,48 +684,54 @@ def breakage(registry, races: list[dict], meta: dict, sha: str, *, n_boot: int =
     rows = []
     for key, frame in score_frames(races, meta).items():
         d = frame["race_id"].map(dividend)
-        frame = frame.assign(b2_unrounded=frame["b2"] * (d + BREAKAGE_STEP / 2) / d)
-        metrics, unavailable = [], []
+        frame = frame.assign(b2_unrounded=frame["b2"] * (d + BREAKAGE_STEP / 2) / d,
+                             at_floor=d <= FLOOR_YEN)  # fmt: skip
+        metrics = []
         for category in CATEGORIES:
             for cell in study.SEGMENT_CELLS:
                 sub = frame[(frame["category"] == category) & frame[cell]]
-                m = _member_metrics(sub, "b2_unrounded", True, 131, n_boot)
-                unrounded = sub["b2_unrounded"].sum()
+                above = sub[~sub["at_floor"]]  # the races whose unrounded dividend is known
+                n_floor = len(sub) - len(above)
+                m = _member_metrics(above, "b2_unrounded", True, 131, n_boot)
+                unrounded = above["b2_unrounded"].sum()
+                paid = math.nan if sub.empty else study.rho(sub["b2"], sub["rate"])
                 if sub.empty:
-                    paid, share, why = math.nan, math.nan, EMPTY_CELL
+                    share, why = math.nan, EMPTY_CELL
+                elif above.empty:
+                    share, why = math.nan, ALL_AT_FLOOR
                 else:
-                    paid = study.rho(sub["b2"], sub["rate"])
-                    share = float(1 - sub["b2"].sum() / unrounded) if unrounded > 0 else math.nan
+                    share = float(1 - above["b2"].sum() / unrounded) if unrounded > 0 else math.nan
                     why = "no winning return in the cell: the share is 0 / 0"
-                rows.append({"lambda2": key, "category": category, "cell": cell, "n": m["n"],
-                             "rho": paid, "breakage_share": share,
+                rows.append({"lambda2": key, "category": category, "cell": cell, "n": len(sub),
+                             "n_floor": n_floor, "rho": paid, "breakage_share": share,
                              "rho_unrounded": m["rho"], "lo": m["lo"], "hi": m["hi"]})  # fmt: skip
-                got, missing = _metrics(
-                    f"development:{category}:{cell}",
+                fold = f"development:{category}:{cell}"
+                metrics += _metrics(
+                    fold,
                     [("breakage_share", share, None, None, why),
-                     ("rho_unrounded", m["rho"], m["lo"], m["hi"], EMPTY_CELL)],
+                     ("rho_unrounded", m["rho"], m["lo"], m["hi"],
+                      EMPTY_CELL if sub.empty else ALL_AT_FLOOR)],
                     m["n"],
                 )  # fmt: skip
-                metrics += got
-                unavailable += missing
+                if n_floor:
+                    metrics.append(_unavailable_metric(fold, "floor_correction", AT_FLOOR, n_floor))
         comps = {"win": meta["win_fit"], "ordering": meta["ordering_fit"] if key == study.FITTED
                  else "plain_harville"}  # fmt: skip
         params = {"estimator": "B2 breakage", "lambda2": key, "step_yen": BREAKAGE_STEP,
                   "unrounded": "D + step / 2", "family": study.E1_ID,
                   "role": "post-hoc descriptive (review of 0c39a8d), not a test"}  # fmt: skip
-        if unavailable:
-            params["unavailable"] = unavailable
         append(_record(BREAKAGE_ID, f"breakage|lambda2={key}", params, comps, metrics, meta, sha))
     return rows
 
 
 def _breakage_markdown(rows: list[dict], sha: str) -> str:
     lines = [f"# #131 exacta study: breakage of B2's paid return ({sha[:12]})", "",
-             "| lambda2 | category | cell | n | rho (paid) | breakage share | 1 - share | "
-             "rho unrounded | 95% lo | 95% hi |",
-             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]  # fmt: skip
+             "| lambda2 | category | cell | n | n at 110-yen floor | rho (paid) | breakage share | "
+             "1 - share | rho unrounded | 95% lo | 95% hi |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]  # fmt: skip
     for r in rows:
         lines.append(f"| {r['lambda2']} | {r['category']} | {r['cell']} | {r['n']} | "
+                     f"{r['n_floor']} | "
                      f"{_fmt(r['rho'], 4)} | {_fmt(r['breakage_share'], 4)} | "
                      f"{_fmt(1 - r['breakage_share'], 4)} | {_fmt(r['rho_unrounded'], 4)} | "
                      f"{_fmt(r['lo'], 4)} | {_fmt(r['hi'], 4)} |")  # fmt: skip
@@ -635,12 +739,11 @@ def _breakage_markdown(rows: list[dict], sha: str) -> str:
 
 
 def freeze() -> dict[str, str]:
-    """Freeze every family spec; the committed summary (runs only) is left alone."""
+    """Freeze every family spec, and each superseded spec under its #525 id so every live
+    ``supersedes`` names a freeze; the committed summary (runs only) is left alone."""
     registry = default_registry(COUNTRY)
-    specs = study.family_specs()
-    frozen = {fid: registry.freeze_family(fid, spec) for fid, spec in specs.items()}
-    frozen[E2_REGISTRY_ID] = registry.freeze_family(E2_REGISTRY_ID, specs[study.E2_ID])
-    return frozen
+    specs = {**study.superseded_specs(), **study.family_specs()}
+    return {fid: registry.freeze_family(fid, spec) for fid, spec in specs.items()}
 
 
 def _recorded(registry, family: str, meta: dict, sha: str, run: Callable[[], object]):

@@ -6,7 +6,9 @@ Rules (docs/specs/board-feed.md):
   ignored, so the board is the one that could be shown at `now()`.
 - Current: the latest row per (race, pool, combination). Morning reference: the earliest priced
   row captured on race day at or after `morning_from` Japan time. T-20 reference: the latest row
-  at or before post - 20 min, null before then or without a post time. Moves are on `odds`.
+  at or before post - 20 min, null before then or without a post time; the T-10, T-5 (#499) and
+  T-2 (#498) references are picked the same way at post - 10, 5 and 2 min. Moves are on `odds`;
+  the T-20 -> T-2 move is t2 / t20 - 1.
 - A runner whose current WIN or PLACE row is `SCR` is scratched on every combination of its race
   that contains its number, listed or not since.
 - The feed is JSON-ready and carries prices only: no probability, value or bet field.
@@ -31,6 +33,10 @@ _RUNNER_POOLS = ("WIN", "PLACE")  # one runner per combination: where a scratch 
 # The board's pools: tier 1 (logger.yaml `pools`). Tier-2 and WIN5 rows never reach the feed.
 BOARD_POOLS = frozenset({"WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE"})
 T20 = timedelta(minutes=20)
+T10 = timedelta(minutes=10)
+T5 = timedelta(minutes=5)
+T2 = timedelta(minutes=2)
+CHECKPOINTS = (T20, T10, T5, T2)  # the references a line carries, each filled at its cutoff
 
 _instant = odds_log._instant
 
@@ -85,25 +91,40 @@ def _venues_logged(race_date: date, day_dir: Path | None = None) -> list[str]:
     return sorted(p.name[: -len(_LOG_SUFFIX)] for p in folder.glob(f"*{_LOG_SUFFIX}"))
 
 
+def _reference(
+    history: list[tuple[datetime, dict[str, Any]]], at: datetime | None
+) -> dict[str, Any] | None:
+    """The latest row captured at or before `at` when it is priced; None without `at`."""
+    if at is None:
+        return None
+    before = [row for t, row in history if t <= at]
+    return before[-1] if before and _priced(before[-1]) else None
+
+
+def checkpoint_at(
+    post_utc: datetime | None, now_utc: datetime, offset: timedelta
+) -> datetime | None:
+    """post - offset once now has reached it; None before then or without a post time."""
+    return None if post_utc is None or now_utc < post_utc - offset else post_utc - offset
+
+
 def _row_feed(
     history: list[tuple[datetime, dict[str, Any]]],
     morning_start: datetime,
     morning_end: datetime,
-    t20_at: datetime | None,
+    cutoffs: dict[timedelta, datetime | None],
     scratched: bool = False,
 ) -> dict[str, Any]:
-    """One combination's line from its rows in capture order (at the same instant, log order);
-    `scratched` when one of its runners is out of the race."""
+    """One combination's line from its rows in capture order (at the same instant, log order),
+    with its references at `cutoffs` (offset -> post - offset, or None while ahead); `scratched`
+    when one of its runners is out of the race."""
     _, current = history[-1]
     morning = next(
         (row for at, row in history if morning_start <= at < morning_end and _priced(row)), None
     )
-    t20 = None
-    if t20_at is not None:
-        before = [row for at, row in history if at <= t20_at]
-        t20 = before[-1] if before and _priced(before[-1]) else None
+    refs = [_reference(history, cutoffs.get(offset)) for offset in CHECKPOINTS]
     morning_odds = None if morning is None else morning.get("odds")
-    t20_odds = None if t20 is None else t20.get("odds")
+    t20_odds, t10_odds, t5_odds, t2_odds = (None if r is None else r.get("odds") for r in refs)
     priced = _priced(current) and not scratched
     return {
         "combination": current.get("combination"),
@@ -114,6 +135,10 @@ def _row_feed(
         "move_morning_pct": _move(current.get("odds"), morning_odds) if priced else None,
         "t20_odds": t20_odds,
         "move_t20_pct": _move(current.get("odds"), t20_odds) if priced else None,
+        "t10_odds": t10_odds,
+        "t5_odds": t5_odds,
+        "t2_odds": t2_odds,
+        "move_t20_t2_pct": _move(t2_odds, t20_odds) if priced else None,
     }
 
 
@@ -126,7 +151,7 @@ def _race_feed(
     morning_start: datetime,
     morning_end: datetime,
 ) -> dict[str, Any]:
-    t20_at = None if post_utc is None or now_utc < post_utc - T20 else post_utc - T20
+    cutoffs = {offset: checkpoint_at(post_utc, now_utc, offset) for offset in CHECKPOINTS}
     ordered = sorted(rows, key=lambda pair: pair[0])  # stable: log order within an instant
     histories: dict[str, dict[Any, list[tuple[datetime, dict[str, Any]]]]] = {}
     for at, row in ordered:
@@ -152,7 +177,7 @@ def _race_feed(
                     histories[pool][c],
                     morning_start,
                     morning_end,
-                    t20_at,
+                    cutoffs,
                     scratched=bool(_runners(c) & out_runners),
                 )
                 for c in sorted(histories[pool], key=_combination_order)
@@ -203,8 +228,8 @@ def build_board(
     day_dir: Path | None = None,
 ) -> dict[str, Any]:
     """The board of `race_date` as of `now()`: every venue logged that day (or only `venues`),
-    races in number order, each pool's lines with their morning and T-20 moves. The logs are read
-    from `day_dir` when given (a pulled VM folder), else the Mac's own day folder."""
+    races in number order, each pool's lines with their morning, T-20 and T-20 -> T-2 moves. The
+    logs are read from `day_dir` when given (a pulled VM folder), else the Mac's own day folder."""
     now_utc = now().astimezone(timezone.utc)
     morning_start = datetime.combine(race_date, time.fromisoformat(morning_from), _JST)
     morning_end = datetime.combine(race_date + timedelta(days=1), time(0, 0), _JST)
