@@ -160,16 +160,18 @@ so each family maps fields instead of slicing bytes:
 - Meetings: one row per `meeting_id`, `run` when any race ran, else `abandoned`; `day_night` and
   `surface_mix` null.
 
-The run on the export: `horsetrack japan jravan races`, run 2026-11-26. Every count, span, share,
-rate, wall time, peak memory and on-disk size of it is withheld (D21), the per-year table of
-records, versions dropped, deletions, races written, NAR, overseas and unmapped included; they are
-in the build report `jravan-races.json` and in `jravan-spec-figures.md`, both under
-`$HORSETRACK_DATA_DIR/reports/`. Race ids are unique and every race has a surface. Unmapped codes
-occur only in the early years of the export: condition codes the `race_class` mapping lacks (and
-the unset `000`), so those races have no class, and the unset `weight_type` `0`; no `going` is
+The run on the export: `horsetrack japan jravan races`, run 2026-11-26. Every count, span, share
+and rate of it is withheld (D21), in two files under `$HORSETRACK_DATA_DIR/reports/`. The build
+report `jravan-races.json` holds the counts listed above, per year and in total (the total also
+`years`, the year files read), and the unmapped codes per column with their counts.
+`jravan-spec-figures.md` holds the removed text: the per-year table, the races and meetings
+written and the abandoned ones, the years and counts of the unmapped codes, the races with the
+course letters `A1` and `A2`, and the races without a post time. Race ids are unique and every
+race has a surface. The unmapped codes are condition codes the `race_class` mapping lacks (and the
+unset `000`), so those races have no class, and the unset `weight_type` `0`; no `going` is
 counted, and an abandoned race with an unset going is null. Not counted (`rail_setting` is not a
-counted column): the early turf course letters `A1` and `A2` give a null `rail_setting`, and some
-early races have no post time.
+counted column): the turf course letters `A1` and `A2` give a null `rail_setting`, and the export
+has races without a post time (a null `post_time_local`).
 
 ## SE: runners (#365)
 
@@ -209,15 +211,18 @@ early races have no post time.
   runners carry 馬番 99 as printed.
 
 The run on the export: `horsetrack japan jravan runners`, run 2026-11-26. Every count, span,
-share, rate, wall time, peak memory and on-disk size of it is withheld (D21), the per-year table of
-records, versions dropped, deletions, runners written, NAR, overseas and unmapped and the count per
-placing code included; they are in the build report `jravan-runners.json` and in
-`jravan-spec-figures.md`, both under `$HORSETRACK_DATA_DIR/reports/`. Every runner's race is in
-`races`, and no code is unmapped. Every run race carries the winner's time but a few early ones,
-which have runner records but none placed first; some early run races have a starter count other
-than their field size (the early years hold only part of each field). Some placed runners have no
-beaten lengths: a placed non-winner with a blank margin (most of them demoted) leaves it and every
-runner behind it unknown.
+share, rate, wall time and peak memory of it is withheld (D21), in two files under
+`$HORSETRACK_DATA_DIR/reports/`. The build report `jravan-runners.json` holds the counts listed
+above, per year and in total (the total also `years` and `races_timed`), and the unmapped codes
+per field with their counts. `jravan-spec-figures.md` holds the removed text: the per-year table,
+the wall time and peak memory, the runners per placing code, the run races with and without the
+winner's time, the races whose starter count differs from their field size, the placed runners
+without beaten lengths and the demoted ones among them, and the runners of abandoned races
+without a draw. Every runner's race is in `races`, and no code is unmapped. The export has run
+races whose records hold no runner placed first (no winner's time) and run races whose records
+hold only part of the field (a starter count other than the field size); a placed non-winner with
+a blank margin, a demoted runner among them, leaves its beaten lengths and those of every runner
+behind it unknown.
 
 ## HR: payouts (#366)
 
@@ -260,13 +265,16 @@ The pool flags, each `1` when set, per pool (単勝 複勝 枠連 馬連 ワイ�
 pools flagged), `refunded_horses` (horse numbers set), `races` (records kept) and `rows`.
 
 The build on the export: `horsetrack japan jravan dividends`, run 2026-11-26. Every count, span,
-share, rate, wall time, peak memory and on-disk size of it is withheld (D21), the rows and races
-per pool and each pool's first year (its start of sale) included; they are in the build report
-`jravan-dividends.json` and in `jravan-spec-figures.md`, both under
-`$HORSETRACK_DATA_DIR/reports/`. Every record is of a JRA venue, one version each (データ区分 `2`
-throughout, no deletion). The export never sets 不成立フラグ or 特払フラグ, in any year; 返還フラグ
-and refunded horse numbers occur only in the later years, none in the early ones. A pool has rows
-from the year its sale began.
+share, rate and wall time of it is withheld (D21), in two files under
+`$HORSETRACK_DATA_DIR/reports/`. The build report `jravan-dividends.json` holds the counts listed
+above, per 開催年 and in total: the flag counts, `refunded_horses`, `races` and `rows`, with no
+breakdown by pool. `jravan-spec-figures.md` holds the removed text: the year files and the span,
+the wall time, the records, races and rows, the flag counts and the years they occur in, and the
+rows, races and first year (its start of sale) of each pool. Every record is of a JRA venue,
+with データ区分 `2` and no deletion; how many versions each race key has is withheld (D21). The
+export never sets 不成立フラグ or 特払フラグ, in any year; the years in which 返還フラグ and
+refunded horse numbers occur are withheld (D21) (the build report counts both per 開催年). A pool
+has rows from the year its sale began.
 
 ## O1-O6: final odds (#367)
 
@@ -322,9 +330,9 @@ included: none of them has a final price that pays.
 - `published_utc`: in the stored export 発表月日時分 is `00000000` on every record (the workbook
   sets it for intermediate odds only), so it is null throughout `final_odds`; it is set on the
   time series (#369).
-- データ区分 in the export: 5 (確定, Monday) on almost every record, 9 (race cancelled) on the
-  cancelled races in each of O1-O5 (O6 not surveyed; their count withheld (D21), in
-  `jravan-spec-figures.md`), whose prices print `****`.
+- データ区分 in the export: 5 (確定, Monday) and, on the cancelled races in each of O1-O5 (O6 not
+  surveyed), 9 (race cancelled), whose prices print `****`; how many records and races carry each
+  is withheld (D21), in `jravan-spec-figures.md`.
 
 Availability rule `label_only` (the owner's request on #376, 2026-11-26; docs/specs/as-of.md):
 `final_odds` is a label or a conditioner, never a feature at t, so `read_asof` and `asof_join`
@@ -336,10 +344,12 @@ records over the six types), `rows` and rows per pool, in total (`counts`) and p
 (`by_year`, the years that have rows).
 
 The build on the export: `horsetrack japan jravan final-odds`, run 2026-11-26. Every count, span,
-share, rate, wall time, peak memory and on-disk size of it is withheld (D21), each record type's
-first year, the records, the row groups, and the rows per pool (slots and pool rows together) and
-each pool's first year included; they are in the build report `jravan-final-odds.json` and in
-`jravan-spec-figures.md`, both under `$HORSETRACK_DATA_DIR/reports/`.
+share, rate, wall time, peak memory and on-disk size of it is withheld (D21), in two files under
+`$HORSETRACK_DATA_DIR/reports/`. The build report `jravan-final-odds.json` holds the counts listed
+above: `records`, `rows` and the rows per pool (slots and pool rows together), in total and per
+race year with rows, with no breakdown by record type. `jravan-spec-figures.md` holds the removed
+text: each record type's first year and the export's end, the records, the rows, row groups and
+file size, the wall time and peak memory, and the rows and first year of each pool.
 
 ## H1 and H6: pool votes (#368)
 
@@ -352,15 +362,15 @@ raise `LabelOnlyTable` and `read_label` returns it whole.
 - `build_pool_votes(*, years=None, raw=None, out=None, chunk_records=500) -> BuildReport` reads
   `<raw>/stored/RACE/H1/<YYYY>.jvd` and `H6/<YYYY>.jvd` (`raw` the export root, default
   `raw/jravan`; `years` None reads every year file of either folder, a year without an H6 file
-  (the early years of the export) reads H1 alone; a named year with neither file is a
-  `FileNotFoundError`). Each file is streamed twice through `records.iter_file`, `chunk_records`
-  records at a time: the first pass reads the version keys and keeps one version per race
-  (`latest_versions` on 開催年, 開催月日, 競馬場コード, 開催回, 開催日目, レース番号; a race whose
-  latest record of a type is a deletion has no rows of that type), the second turns the kept
-  records of JRA venues into rows, so no more than one chunk is decoded at a time. Each year's
-  rows, H1 and H6 together, are sorted by `race_id, pool, combination` (plain string order) and
-  written as exactly one row group through a `ParquetWriter` (zstd) into a tmp file, then
-  `os.replace`; the same inputs give the same bytes, whatever the chunk size.
+  reads H1 alone; a named year with neither file is a `FileNotFoundError`). Each file is
+  streamed twice through `records.iter_file`, `chunk_records` records at a time: the first pass
+  reads the version keys and keeps one version per race (`latest_versions` on 開催年, 開催月日,
+  競馬場コード, 開催回, 開催日目, レース番号; a race whose latest record of a type is a deletion
+  has no rows of that type), the second turns the kept records of JRA venues into rows, so no
+  more than one chunk is decoded at a time. Each year's rows, H1 and H6 together, are sorted by
+  `race_id, pool, combination` (plain string order) and written as exactly one row group through
+  a `ParquetWriter` (zstd) into a tmp file, then `os.replace`; the same inputs give the same
+  bytes, whatever the chunk size.
 - `votes_rows(record_type, cols)` maps decoded H1 or H6 arrays to rows (`POOL_VOTES_SCHEMA`):
   `jurisdiction` `jra`, `race_id` (`keys.race_id`), `race_date`, `venue` and `race_no` from the
   race id, `pool` and `combination`, `votes`, `refund_votes`, `fav_rank` (int64) and
@@ -387,14 +397,18 @@ raise `LabelOnlyTable` and `read_label` returns it whole.
 `refunds_<POOL>` (pool rows with refunded votes).
 
 The build on the export: `horsetrack japan jravan votes`, run 2026-11-26. Every count, span,
-share, rate, wall time, peak memory and on-disk size of it is withheld (D21), the year files of
-each type, the row groups, and per pool the combination rows, the sold pools (`__pool__` rows),
-those with refunds and the first year sold included; they are in the build report
-`jravan-votes.json` and in `jravan-spec-figures.md`, both under `$HORSETRACK_DATA_DIR/reports/`.
-Every record is of a JRA venue, one version each (no version dropped, no deletion). データ区分 is
-`5` on every race but the abandoned ones (`9`); almost every abandoned race prints no number on
-its combination votes, so those combination rows have a null `votes` (their pool totals are
-numbers). Some combination rows hold zero votes and some a null `fav_rank`.
+share, rate, wall time, peak memory and on-disk size of it is withheld (D21), in two files under
+`$HORSETRACK_DATA_DIR/reports/`. The build report `jravan-votes.json` holds the counts listed
+above, per year and in total, with no breakdown by record type or データ区分.
+`jravan-spec-figures.md` holds the removed text: the span and the year files of each type, the wall
+time, peak memory, file size and row groups, the records, races and rows, the abandoned races per
+type and those that print no combination votes, the combination rows with a null `votes`, with
+zero votes and with a null `fav_rank`, and per pool the combination rows, the sold pools
+(`__pool__` rows), those with refunds and the first year sold. Every record is of a JRA venue,
+with no deletion; how many versions each race key has is withheld (D21). データ区分 is `5` on
+every race but the abandoned ones (`9`). An abandoned race can print no number on its combination
+votes, so those combination rows have a null `votes` (their pool totals are numbers), and a
+combination row can hold zero votes or a null `fav_rank`.
 
 ## The 0B41/0B42 time series (#369)
 
@@ -443,10 +457,10 @@ t. **Open (owner decision, the epic's open question):** whether a 発表 minute 
 availability time for a bettor, i.e. how long after it the board was actually in hand. The data
 does not answer it; until the owner rules, nothing here adds a lag.
 
-データ区分 in the export: 1 (中間, intermediate) on most records, 2 (前日売最終, the day-before
-close) on a few, 3 (最終) and 4 (確定) on about one record per race and family each; the shares
-are withheld (D21), in `jravan-spec-figures.md`. The 確定 board is announced after the race, so
-`is_final_capture` is almost always a post-race row (`minutes_to_post` < 0; the counts withheld
+データ区分 in the export: 1 (中間, intermediate), 2 (前日売最終, the day-before close), 3 (最終)
+and 4 (確定); how often each occurs is withheld (D21), in `jravan-spec-figures.md` (the build
+report counts the records per データ区分). The 確定 board is announced after the race, so
+`is_final_capture` can mark a post-race row (`minutes_to_post` < 0; how many do is withheld
 (D21)); a reader that wants the last board before the off filters on `snapshot_utc`, not on
 `is_final_capture`.
 
@@ -457,16 +471,19 @@ per pool, repeated rows, races and races without a post time, and per year the d
 records, rows and snapshots per race (median, min, max).
 
 The build on the export: `horsetrack japan jravan timeseries`, run 2026-11-26. Every count, span,
-share, rate, wall time, peak memory and on-disk size of it is withheld (D21), the first and last
-race day, the race days, records, rows per pool, races and repeated rows dropped, the rerun, and
-the snapshots per race by year (distinct announcement minutes over both families: median, min,
-max) included; they are in the build report `jravan-timeseries.json` and in
-`jravan-spec-figures.md`, both under `$HORSETRACK_DATA_DIR/reports/`. No day failed, every race
-has a jravan post time, and the rerun rewrote nothing (every day unchanged).
+share, rate, wall time, peak memory and on-disk size of it is withheld (D21), in two files under
+`$HORSETRACK_DATA_DIR/reports/`. The build report `jravan-timeseries.json` holds the counts listed
+above, of the run that last wrote it (in total also the non-JRA and no-snapshot records and the
+rows with a dividend); it names years, never a race day. `jravan-spec-figures.md` holds the
+removed text: the first and last race day, the race days, records, rows per pool, races and
+repeated rows dropped, the wall time, peak memory and size on disk, the rerun, the shares per
+データ区分, the post-race final captures, and the table of snapshots per race by year (distinct
+announcement minutes over both families: median, min, max). No day failed, every race has a
+jravan post time, and the rerun rewrote nothing (every day unchanged).
 
-D14: the export ends 2026-11-23, before the 2026-11-28 holdout start; readers drop holdout days
-by file name before reading. D10: pre-2014-06-07 days are kept; whether a model reads them is the
-model's business.
+D14: the export ends before the 2026-11-28 holdout start (its last race day is withheld (D21), in
+`jravan-spec-figures.md`); readers drop holdout days by file name before reading. D10:
+pre-2014-06-07 days are kept; whether a model reads them is the model's business.
 
 ## UM, KS, CH: horse, jockey and trainer masters (#370)
 
@@ -508,15 +525,18 @@ traps).
   t, as exported, with the look-ahead docs/specs/as-of.md documents; `read_label` refuses them.
 
 The run on the export: `horsetrack japan jravan masters`, run 2026-11-26. Every count, span, share,
-rate, wall time, peak memory and on-disk size of it is withheld (D21), the records, versions
-dropped, deletions and rows written per type, the kept UM versions by データ区分 and the counts
-behind each statement below included; they are in the build report `jravan-masters.json` and in
-`jravan-spec-figures.md`, both under `$HORSETRACK_DATA_DIR/reports/`. No record is a deletion and
-no code is unmapped; the kept UM versions carry データ区分 `1`, `2`, `3`, `4` and `9`. Every horse
-has a colour, some a mark, and a few no 産地名. Pedigree: a sire, dam or dam-sire name is almost
-never missing, and a small number per ancestor have no breeding id. Most jockeys and trainers are
-retired; a few jockeys have a stable, every one a trainer code in `trainers`. Every jravan runner
-has its horse in `horses`, and every `jockey_key` and `trainer_key` joins but the unset `00000`.
+rate, wall time and peak memory of it is withheld (D21), in two files under
+`$HORSETRACK_DATA_DIR/reports/`. The build report `jravan-masters.json` holds the counts listed
+above: per record type `records`, `versions_dropped` and `deletions`, the rows written per table,
+and the unmapped codes per field with their counts; it has no breakdown by year or データ区分.
+`jravan-spec-figures.md` holds the removed text: the per-type table, the wall time and peak
+memory, the latest データ作成年月日, the kept UM versions by データ区分, the horses by sex, the
+retired ones, those with a mark and those without 産地名, the pedigree names and breeding ids
+missing per ancestor, the retired jockeys and trainers, the jockeys with a stable, and the runners
+with the unset jockey or trainer code. No record is a deletion and no code is unmapped; the kept
+UM versions carry データ区分 `1`, `2`, `3`, `4` and `9`. Every horse has a colour, and every
+jockey with a stable has a trainer code in `trainers`. Every jravan runner has its horse in
+`horses`, and every `jockey_key` and `trainer_key` joins but the unset `00000`.
 
 ## HN, SK, BT: bloodlines (#371)
 
@@ -588,12 +608,12 @@ through `write_build_report`, counts only: per record type `<RT>_records`,
 breeding id).
 
 The build on the export: `horsetrack japan jravan bloodlines`, run 2026-11-26. Every count, span,
-share, rate, wall time, peak memory and on-disk size of it is withheld (D21), the records,
-versions dropped, deletions and rows written per type and the sire ids and their resolution
-included; they are in the build report `jravan-bloodlines.json` and in `jravan-spec-figures.md`,
-both under `$HORSETRACK_DATA_DIR/reports/`. No record is a deletion. Most breeding horses have a
-sire id, and almost every sire id is a written breeding horse; every non-null pedigree id and
-every lineage resolves to a breeding horse.
+share, rate, wall time and peak memory of it is withheld (D21), in two files under
+`$HORSETRACK_DATA_DIR/reports/`. The build report `jravan-bloodlines.json` holds every count
+listed above; `jravan-spec-figures.md` holds the removed text: the wall time and peak memory, the
+per-type table, and the sire ids, pedigree ids and lineages with their resolution. No record is a
+deletion. Every non-null pedigree id and every lineage resolves to a breeding horse; not every
+breeding horse has a sire id, and not every sire id is a written breeding horse.
 
 ## The dump of unmapped families (#363)
 

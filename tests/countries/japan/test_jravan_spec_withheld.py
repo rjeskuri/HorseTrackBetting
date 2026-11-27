@@ -32,13 +32,14 @@ end (`.`, `:` before whitespace) and the block's ends.
 - Every `## ` heading of the pre-fix doc survives.
 - Local only (`local` marker, own skip: the data dir or its reports dir absent, or the pre-fix
   commit not in this clone): under `$HORSETRACK_DATA_DIR/reports/` the eight build reports and
-  `jravan-spec-figures.md` exist, and the latter holds every figure the rules above flag in the
-  pre-fix doc's measured-run passages (from the block starting "The run on the export" or "The
-  build on the export" to the section's end).
+  `jravan-spec-figures.md` exist, and the latter holds every figure the rules above flag anywhere
+  in the pre-fix doc (prose and table cells, every section), except a number the doc now writes
+  as a code constant (`1,234` in the pre-fix doc, `1_234` in a code span now).
 
 D21: this file holds no figure from the export. Figures are found by pattern, never by value;
-every example below is made up. Failure messages give line numbers and rule names only, so a
-failing run does not reprint a figure.
+every example below is made up. Every check on the doc or the private file fails through
+`fail_unless` (no assertion rewriting, no traceback), with line numbers, rule names and counts
+only, so a failing run does not reprint a figure.
 """
 
 from __future__ import annotations
@@ -59,7 +60,9 @@ DOC = REPO_ROOT / DOC_REL
 WITHHELD = "withheld (D21)"
 FIGURES_FILE = "jravan-spec-figures.md"
 # The last commit whose doc still publishes the figures (#375's merge): the local test reads the
-# removed passages from it. A public commit id, not a figure.
+# removed figures from it. A public commit id, not a figure. Pointing at it is deliberate: the
+# owner answered on #408 (2026-11-26) "fix forward only", with no history rewrite and no
+# force-push, so the figures stay in history and this commit stays reachable.
 PRE_FIX = "bc138f2d957fcf09f008355a950211de30d41cfa"
 
 # Measured-run sections: heading prefix -> the build report its command writes.
@@ -164,6 +167,14 @@ KEPT_TABLE_NAMES = {
 
 # ------------------------------------------------------------------------------------------------
 # Reading the doc
+
+
+def fail_unless(ok: bool, message: str) -> None:
+    """Fail with `message` alone. A plain `assert` on doc or private-file text would let pytest's
+    assertion rewriting print the compared values, which can be the withheld figures."""
+    if not ok:
+        pytest.fail(message, pytrace=False)
+
 
 CODE_SPAN = re.compile(r"`[^`]*`")
 SEPARATOR_ROW = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
@@ -328,7 +339,7 @@ def section(text: str, prefix: str) -> str:
         for i, line in enumerate(lines)
         if line.startswith(prefix) and not line[len(prefix) : len(prefix) + 1].isalnum()
     ]
-    assert len(starts) == 1, f"{len(starts)} `## ` headings start with {prefix!r}"
+    fail_unless(len(starts) == 1, f"{len(starts)} `## ` headings start with {prefix!r}")
     body = []
     for line in lines[starts[0] + 1 :]:
         if line.startswith("## "):
@@ -346,17 +357,6 @@ def first_cell_names(text: str) -> set[str]:
     return names
 
 
-def measured_passage(text: str, prefix: str) -> str:
-    body = section(text, prefix)
-    starts = [
-        m.start()
-        for m in re.finditer(r"(?m)^The (?:run|build) on the export", body)
-        if m.start() == 0 or body[m.start() - 2 : m.start()] == "\n\n"
-    ]
-    assert starts, f"no measured-run passage in {prefix!r}"
-    return body[starts[0] :]
-
-
 @pytest.fixture(scope="module")
 def doc() -> str:
     return DOC.read_text(encoding="utf-8")
@@ -364,7 +364,7 @@ def doc() -> str:
 
 def assert_sections_kept(text: str) -> None:
     missing = [h for h in HEADINGS if h not in headings(text)]
-    assert not missing, f"headings lost: {missing}"
+    fail_unless(not missing, f"headings lost: {missing}")
 
 
 # ------------------------------------------------------------------------------------------------
@@ -423,7 +423,7 @@ def test_the_doc_states_no_figure_of_the_export(doc, rule):
 
     assert_sections_kept(doc)
     lines = sorted({line for line, _text in hits(doc, finder)})
-    assert not lines, f"{DOC_REL}: {rule} figures on lines {lines} (D21: withhold them)"
+    fail_unless(not lines, f"{DOC_REL}: {rule} figures on lines {lines} (D21: withhold them)")
 
 
 def test_no_table_row_holds_a_figure(doc):
@@ -439,9 +439,11 @@ def test_no_table_row_holds_a_figure(doc):
     assert_sections_kept(doc)
     for prefix, names in KEPT_TABLE_NAMES.items():
         lost = sorted(set(names) - first_cell_names(section(doc, prefix)))
-        assert not lost, f"{prefix}: table rows lost: {lost}"
+        fail_unless(not lost, f"{prefix}: table rows lost: {lost}")
     rows = figure_rows(doc)
-    assert not rows, f"{DOC_REL}: table rows with figures on lines {rows} (D21: withhold them)"
+    fail_unless(
+        not rows, f"{DOC_REL}: table rows with figures on lines {rows} (D21: withhold them)"
+    )
 
 
 @pytest.mark.parametrize("prefix", list(SECTIONS))
@@ -449,14 +451,14 @@ def test_each_measured_section_names_its_private_reports(doc, prefix):
     report = SECTIONS[prefix]
     body = section(doc, prefix)
     kept = [name for name in KEPT_NAMES[prefix] if name not in body]
-    assert not kept, f"{prefix}: names lost: {kept}"
+    fail_unless(not kept, f"{prefix}: names lost: {kept}")
     if prefix == "## The 0B41/0B42 time series":
         start = load_country_yaml("japan", "holdout")["holdout"]["start"]
-        assert str(start) in body, f"{prefix}: the holdout start is no longer stated"
+        fail_unless(str(start) in body, f"{prefix}: the holdout start is no longer stated")
 
     needed = (WITHHELD, report, FIGURES_FILE)
     holding = [b for _line, b in blocks(body) if all(token in b for token in needed)]
-    assert holding, f"{prefix}: no paragraph holds all of {needed}"
+    fail_unless(bool(holding), f"{prefix}: no paragraph holds all of {needed}")
 
 
 # ------------------------------------------------------------------------------------------------
@@ -469,8 +471,52 @@ def normalized(text: str) -> str:
     return WHITESPACE.sub(" ", text.replace("`", ""))
 
 
+def flagged_figures(text: str) -> dict[str, set[int]]:
+    """Every figure the rules flag in the whole doc, normalized -> the lines it is on: the prose
+    rules' hits and the numbers in table figure cells."""
+    found: dict[str, set[int]] = {}
+    for finder in PROSE_RULES.values():
+        for line, figure in hits(text, finder):
+            found.setdefault(normalized(figure).strip(), set()).add(line)
+    for line, _raw, masked in table_data_rows(text):
+        for cell in cells(masked):
+            if FIGURE_CELL.match(cell):
+                for figure in re.findall(NUMBER, cell):
+                    found.setdefault(figure, set()).add(line)
+    return found
+
+
+GROUPED = re.compile(r"\d{1,3}(?:,\d{3})+(?!\d)")
+CODE_CONSTANT = re.compile(r"`(\d{1,3}(?:_\d{3})+)`")
+
+
+def code_constants(text: str) -> set[str]:
+    """The numbers the doc writes as code constants (`1_234` in a code span), digits only."""
+    return {m.group(1).replace("_", "") for m in CODE_CONSTANT.finditer(text)}
+
+
+def written_as_constant(figure: str, constants: set[str]) -> bool:
+    """A figure that opens with a `,`-grouped number the doc now writes as a code constant."""
+    m = GROUPED.match(figure)
+    return m is not None and m.group().replace(",", "") in constants
+
+
 @pytest.mark.local
-def test_private_reports_hold_the_withheld_figures():
+def test_private_reports_hold_the_withheld_figures(doc):
+    made_up = (
+        "| pool | rows |\n|---|---|\n| WIN | 12,345 |\n\nin chunks of 4,321 records, 6,789 races"
+        " on 2.5 GB (1977-1999)\n\nan ok, 17 files check, 3.5% of `81,234`"
+    )
+    found = flagged_figures(made_up)
+    expected = {"12,345", "4,321", "4,321 records", "6,789", "6,789 races", "2.5 GB", "1977"}
+    expected |= {"17 files", "5%", "81,234"}
+    assert set(found) == expected, sorted(found)
+    assert found["6,789 races"] == {5}, found["6,789 races"]
+    constants = code_constants("chunks of `4_321` (records), `12_345_678`, `9_9`, 55_555")
+    assert constants == {"4321", "12345678"}, constants
+    kept = [f for f in sorted(found) if written_as_constant(f, constants)]
+    assert kept == ["4,321", "4,321 records"], kept
+
     try:
         reports = paths.reports_dir()
     except paths.DataDirNotSet:
@@ -492,19 +538,21 @@ def test_private_reports_hold_the_withheld_figures():
     ).stdout
 
     absent = [name for name in [*SECTIONS.values(), FIGURES_FILE] if not (reports / name).is_file()]
-    assert not absent, f"missing under the reports dir: {absent}"
-    figures = normalized((reports / FIGURES_FILE).read_text(encoding="utf-8"))
+    fail_unless(not absent, f"missing under the reports dir: {absent}")
+    archive = normalized((reports / FIGURES_FILE).read_text(encoding="utf-8"))
 
-    for prefix in SECTIONS:
-        passage = measured_passage(old, prefix)
-        wanted = {
-            normalized(t) for finder in PROSE_RULES.values() for _l, t in hits(passage, finder)
-        }
-        for _number, _raw, masked in table_data_rows(passage):
-            for cell in cells(masked):
-                if FIGURE_CELL.match(cell):
-                    wanted |= set(re.findall(NUMBER, cell))
-        assert wanted, f"{prefix}: no figure found in the pre-fix passage"
-        missing = [t for t in wanted if t.strip() not in figures]
-        # Counts only: the values are the licensed figures themselves.
-        assert not missing, f"{prefix}: {len(missing)} withheld figures not in {FIGURES_FILE}"
+    published = flagged_figures(old)
+    fail_unless(bool(published), "no figure found in the pre-fix doc: the rules have broken")
+    constants = code_constants(doc)
+    missing = [
+        figure
+        for figure in published
+        if figure not in archive and not written_as_constant(figure, constants)
+    ]
+    # Counts and pre-fix line numbers only: the values are the licensed figures themselves.
+    lines = sorted({line for figure in missing for line in published[figure]})
+    fail_unless(
+        not missing,
+        f"{len(missing)} of {len(published)} figures the pre-fix doc published are not in "
+        f"{FIGURES_FILE} (pre-fix {DOC_REL} lines {lines})",
+    )
