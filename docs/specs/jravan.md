@@ -23,10 +23,10 @@ each run's section names.
 ## What is built
 
 Every command below is `horsetrack japan jravan <command>`, reads `raw/jravan/` and, apart from
-`check`, `dump` and `reconcile`, writes the `jravan` source's tables under `processed/jravan/`
-(how they sit beside the store's: docs/specs/store.md, "The jravan source"). None of it runs on
-its own: there is no scheduler, no manifest and no fetcher, and a rebuild is a command run by hand.
-The same inputs give the same bytes.
+`check`, `dump`, `reconcile` and `card-versions`, writes the `jravan` source's tables under
+`processed/jravan/` (how they sit beside the store's: docs/specs/store.md, "The jravan source").
+None of it runs on its own: there is no scheduler, no manifest and no fetcher, and a rebuild is a
+command run by hand. The same inputs give the same bytes.
 
 | command | module | writes | table kind | availability rule (docs/specs/as-of.md) |
 |---|---|---|---|---|
@@ -39,8 +39,10 @@ The same inputs give the same bytes.
 | `timeseries` | `timeseries.py` | `odds_timeseries/<YYYY-MM-DD>.parquet` | the odds log's schema | that of `odds_timeseries` |
 | `masters` | `masters.py` | `horses`, `horse_pedigree`; `jockeys`, `trainers` | store tables; jravan-only | `horses` refused, `horse_pedigree` `static`; `current_value` with `in_view` |
 | `bloodlines` | `bloodlines.py` | `breeding_horses`, `produce`, `lineages` | jravan-only | `static` |
+| `workouts` | `handicap/workouts_jravan.py` | `workouts` | jravan-only | none: its readers apply the module's own publication rule (#229), and the as-of views refuse it |
 | `dump` | `dump.py` | `interim/jravan/records/` | not tables | none |
 | `reconcile` | `reconcile.py` | `reports/jravan-reconcile.md` | not a table | n/a |
+| `card-versions` | `card_versions.py` | `reports/jravan-card-versions.json` only | not a table | n/a |
 
 Order: `races` before `runners` (which rewrites the races file's `finish_time_s`); `races` and
 `dividends` before `timeseries`, whose `post_utc`, `minutes_to_post`, `dividend` and `is_refund`
@@ -671,3 +673,92 @@ jravan table, a jravan-only table, the time-series day files or a dumped family
 report goes to `reports/data-coverage.md`; `--write-doc` writes the committed
 [docs/data-coverage.md](../data-coverage.md), where every JRA-VAN and JRDB supply shows
 `withheld (D21)` and no figure.
+
+## HC and WC: workouts (#229)
+
+`horsetrack.countries.japan.handicap.workouts_jravan` (beside #137's JRDB `workouts`);
+`horsetrack japan jravan workouts`. JRA-VAN's 坂路 (HC) and ウッド (WC) automatic workout times as a
+second, first-party workout source with #137's columns:
+
+- `build_workout_table(raw=None, out=None)` reads every `stored/SLOP/HC/<YYYY>.jvd` and
+  `stored/WOOD/WC/<YYYY>.jvd` (a missing folder is no rows; neither is a `FileNotFoundError`),
+  keeps one version per key (`records.latest_versions` on the layout's key items, across all the
+  year files of a record type; a kept deletion has no row) and writes `workouts.parquet`, sorted
+  by workout date, centre, course, time and horse, through `records.write_parquet`. An `out`
+  inside the repository is `paths.DataDirInsideRepo`.
+- Columns: `horse_id` (血統登録番号 as printed, the store's id; blank or all zeros null, the row
+  kept), `workout_date` and `race_date` (both 調教年月日; `race_date` lets `read_store_table` scope
+  and drop holdout days by workout date), `workout_time` (調教時刻, `HH:MM`), `centre` (トレセン区分
+  0 `miho`, 1 `ritto`, else `other`), `course` (`hill` for HC, `wood` for WC), `furlongs` (the
+  largest n whose n-furlong total is measured), `split_first_s` (that total), `split_mid_s` (the
+  3-furlong total), `final_furlong_s` (the 200 m to 0 m lap). Times are tenths of a second; all
+  zeros (no measure) or all nines (over the limit) is null. The totals are found by the distance
+  in the item name, since one name is spelled differently from the others. `effort` and `partner`
+  are null: the source has neither.
+- As of t (owner decisions on #229, 2026-11-27): a workout counts from `published_at`, (workout
+  date + 1 day) 00:00 Asia/Tokyo, strictly before t, and only for a race on a later day;
+  データ作成年月日 is ignored, and the latest stored version is used at every t (accepted
+  look-ahead, as for the masters). `workout_table` and `workout_features` are #137's with these
+  rules: `days_since_hard` is always null, and no JRDB table or `HORSETRACK_JRDB_FEATURES` is read.
+- The command writes the build counts to `reports/jravan-workouts.json` and the coverage per
+  centre and course (first and last workout date, rows, horses; holdout days not read) to
+  `reports/jravan-workouts-coverage.json`, both through `write_report`.
+
+## Card versions (#401)
+
+`horsetrack.countries.japan.jravan.card_versions`; `horsetrack japan jravan card-versions
+[--as-of YYYY-MM-DD]` (default today in Tokyo). It builds no table: it states which versions of
+the race card the export holds.
+
+JV-Data publishes a race (RA) and each runner (SE) in versions told apart by データ区分, each
+stamped with データ作成年月日: `1` entries (出走馬名表) and `2` the card (出馬表) before the race,
+`3`-`6` flash results (速報成績) on race day, `7` the final result (成績); besides these, `9` an
+abandoned race (レース中止), `A` a NAR race (地方競馬), `B` an overseas race (海外国際レース) and
+`0` a deletion (削除). The builders keep each key's latest version (`records.latest_versions`).
+
+- `census(*, raw=None, as_of)` reads `stored/<DATASPEC>/RA|SE/*.jvd` of every DATASPEC folder,
+  streamed, and counts per record type the records per データ区分 and per race year, the keys
+  (the layout's key items) holding more than one version with their codes in データ作成年月日
+  order (a same-day tie by each version's last occurrence in read order: folders, then files,
+  sorted), and the pre-race versions (`1`, `2`) of races run before
+  `as_of`. A version is a key's (データ区分, データ作成年月日): a record repeating one already read
+  (the same record in `stored/RACE` and `stored/DIFN`) counts once, the repeats as `duplicates`.
+  Each record's two-byte record type is checked first, whatever its width or day: one that is not
+  the folder's type (a file of another type misfiled there) stops the census (`RecordTypeError`).
+  Its race date is read next, from its 開催年 and 開催月日 bytes alone: a record on a holdout day
+  is read no further, whatever its width, and counted only as `holdout_skipped` (D14); one
+  without a valid race date only as `undated`. The others are then checked: one of the wrong
+  width, or too short to hold its date, stops the census (`RecordLengthError`). Either error
+  names its file (`stored/<DATASPEC>/<RA|SE>/<file>`). Combos pool every folder, while the
+  builders read `stored/RACE` one year file at a time: a combo's last version is the one
+  `latest_versions` keeps only for the same records in the same order.
+- `final_only`: true when no version `1`-`6` is held; null (inconclusive) when the record type
+  has no record to count (no file, only empty files, every record skipped), never true. The
+  command fails, writing no report, when RA or SE has no file under any `stored/<DATASPEC>/`
+  (an incomplete copy of the export), and prints `inconclusive` for a null verdict.
+- The report, `<reports dir>/jravan-card-versions.json` through `records.write_build_report`,
+  holds counts, codes and years only; its figures are withheld (D21).
+
+The export holds the final version only (the run of 2026-11-27): RA holds `7`, `9`, `A` and `B`,
+SE `7`, `9`, `A`, `B` and `0`, and neither holds a record of データ区分 `1`-`6`. A key with more
+than one version holds re-issues of one code (and, in SE, an overseas runner later deleted), never
+a card before a result. So no pre-race card survives for a race already run, `latest_versions`
+always keeps the result, and `runners.is_scratched`, `races.field_size`, `races.status` and
+`meetings.status` keep the accepted leak (docs/specs/as-of.md, "Accepted leak: results-derived
+card columns"): the JRA-VAN export cannot lift it.
+
+The card versions can only be carried forward, by reading them before the race, each with the time
+it was read; nothing does today:
+
+- The JRA official 出馬表 on race day is the feed for it. `jra/official_card.py` parses a race's
+  出馬表 page (JRADB `pw01dde`) into `races` and `racecard_runners` rows, the scratches as printed
+  (`is_scratched`) and each runner row stamped `card_scraped_utc`, the page's fetch time. The
+  logger does not fetch that page: `log-day` reads the 出馬表 menu and the card race list for the
+  post times only (`jra/capture.py`, `read_post_times`), nothing calls `official_card.parse`, and
+  no store table holds its rows. The logger would need to fetch each race's 出馬表 page from that
+  race list before the off, as often as a late scratch matters, and write the parsed rows with
+  their fetch time into a table whose availability rule is the owner's.
+- JV-Link's regular (non-setup) RACE reads during race week deliver the `1` and `2` versions while
+  they are current. The export is a bulk read of the stored data (#196), and the Windows VM logs
+  nothing between exports (no repository code runs there); keeping them would need a race-week
+  reader on the VM and a folder of its own under `raw/jravan/`.
