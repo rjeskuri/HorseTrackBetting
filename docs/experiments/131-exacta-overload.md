@@ -12,8 +12,9 @@ is in [131-exacta-e1-members.md](131-exacta-e1-members.md) and every registry re
 [japan--131-exacta-category-b3-v2.md](registry/japan/japan--131-exacta-category-b3-v2.md),
 [japan--131-exacta-category-v2--max-test.md](registry/japan/japan--131-exacta-category-v2--max-test.md)
 and [japan--131-exacta-logscore-v2.md](registry/japan/japan--131-exacta-logscore-v2.md), and the
-v1 files of the same names with `v1`. The rule families are frozen, not scored, so they have no
-file. Nothing is adopted; no rule is staked.
+v1 files of the same names with `v1`; the post-hoc breakage diagnostic is
+[japan--131-exacta-breakage.md](registry/japan/japan--131-exacta-breakage.md). The rule families
+are frozen, not scored, so they have no file. Nothing is adopted; no rule is staked.
 
 The results name the v2 families (`japan/131-exacta-*-v2`, frozen 2026-11-27). v2 supersedes the
 v1 families of 2026-11-25 only for the λ2 label: the owner, 2026-11-26 on #131, "Relabel λ2
@@ -190,6 +191,56 @@ Reading the ranked rows (the null result, as rows rather than a closed verdict):
   popularity:less at 1.007 to 1.008 (ranks 29 to 32), no_fav class:open at 0.997 to 1.004 (ranks
   47 and 71).
 
+### What B2 measures, and what it does not
+
+- B2 measures the historical paid return of a category's box against the payout rate: whether
+  the exacta pool's prices are fair against the outcomes. Its expectation is
+  `rate · Σ_S π_c p_c/q_c ÷ Σ_S p_c` (spec section 4). When outcomes follow the exacta pool
+  (π = q), that is `rate` exactly, so expected ρ = 1, however much more mass the pool puts on
+  favourite-first combinations than Win plus Harville does.
+- So ρ ≈ 1 does not show that the pool agrees with Win plus Harville. The direct cross-pool
+  ratio (the pool's `Σ_S q / Σ_S p` against Win-implied Harville, the ticket's quantity) is not
+  measured by B2. History cannot compute it, since only the paying exacta's dividend is stored;
+  it needs full exacta boards (D, on #130-logged days, #281).
+- Two results bear on the cross-pool ratio only indirectly, and both are partly in-sample at
+  λ2 = 0.8104 (#115's full-development fit; #284 refits it per fold):
+  - B3 (E1″) measures Harville's calibration against outcomes. With B2 ≈ 1 (prices fair against
+    outcomes), B3 ≠ 1 on a category means the pool and Harville differ there in B3's direction,
+    but B3 gives no size for `Σ_S q / Σ_S p`.
+  - C measures the pool's log-score gain over Harville on the paying exacta. A positive gain
+    means the two differ and the pool forecasts better; it gives no sign or size by category.
+
+### Breakage (descriptive, post-hoc)
+
+E1 centres its loss on the nominal payout rate, while B2 is paid at dividends rounded down to
+¥10. If the pool is fair before rounding, the paid ρ is about `1 − b_S`, where `b_S` is the
+share of the category's unrounded payout that rounding takes. Short dividends lose more to
+rounding, so `b_S` is largest for fav_first. Computed from the same 23,629 development races
+(`exacta_run breakage`, git `27af886`, registry family `japan/131-exacta-breakage`, one record
+per λ2), with the unrounded dividend taken at `D + 5`, uniform within the ¥10 step, as
+`implied_share` does. The frozen E1 loss and the paid-return results above are unchanged.
+
+| Category | b_S, cell "all" (λ2 0.8104 / 1) | b_S over the 14 cells | ρ paid, "all" (λ2 0.8104) | ρ unrounded, "all" [95% lower, upper] |
+|---|---|---|---|---|
+| fav_first | 0.36% / 0.39% | 0.07% to 0.68% | 1.0245 | 1.0282 [1.0116, 1.0450] |
+| fav_second | 0.28% / 0.28% | 0.07% to 0.44% | 1.0031 | 1.0059 [0.9828, 1.0293] |
+| no_fav | 0.09% / 0.10% | 0.05% to 0.16% | 0.9955 | 0.9964 [0.9840, 1.0090] |
+
+- Rounding takes under 0.7% of the payout in every cell (most in fav_first with the favourite
+  at 1.9 or less: 0.63% and 0.68%). It pushes the paid ρ down, most for fav_first, so it can
+  make a fair pool look like a favourite-first shortfall, by at most that much.
+- The observed fav_first departures are not within the breakage effect. Overall, fav_first's ρ
+  is above 1 (1.024), the opposite of a shortfall; with breakage added back it moves further
+  above 1 (1.028, lower bound 1.012). The one nominal fav_first exclusion in the registered
+  direction, class:open (paid ρ 0.935), stays below 1 unrounded: 0.938, upper bound 0.9998 at
+  λ2 0.8104; 0.933, upper bound 0.994 plain. Its 6.5% departure is about 20 times its 0.30%
+  breakage share.
+- The other nominal exclusions (fav_second class:maiden and popularity:less, no_fav class:open)
+  are above 1 and move further above it unrounded.
+- Limits: the uniform-within-the-step assumption, and the ¥100 minimum payout (dividends at the
+  floor are not rounded down from a uniform value). Both matter only for the shortest dividends.
+  The bounds are E1's one-sided 95% meeting-bootstrap bounds, unadjusted for the 84 cells.
+
 ### Variants searched (context, not a pass/fail test)
 
 - E1 searched 84 members (λ2 {`full_development` 0.8104, 1} × 3 categories × 14 cells; family
@@ -215,10 +266,14 @@ Reading the ranked rows (the null result, as rows rather than a closed verdict):
   0.864 [0.808, 0.924], no_fav 1.053 [0.974, 1.148]; plain Harville 1.191 [1.136, 1.247], 0.736
   [0.688, 0.786], 1.501 [1.351, 1.686]. The ordering model is miscalibrated by category, plain
   Harville badly so; the exacta pool is not.
-- Read together (spec section 4): B2 ≈ 1 in every category while B3 departs from 1, so the gap
-  between the exacta pool and Win plus Harville sits in the ordering model, not in the exacta
-  pool.
-- E2 (ratio-cut rules): **not yet scorable.** The frozen family needs at least 100 #130-logged
+- Read together: B2 ≈ 1 in every category says the exacta pool's paid returns are fair against
+  the outcomes; B3 departing from 1 says Harville is not. Neither measures how far the pool's
+  prices sit from Win plus Harville (section "What B2 measures"), and B3 and C at λ2 = 0.8104
+  are partly in-sample. Spec section 4 reads "B2 < rate on fav_first with B3 ≈ 1" as a
+  cross-pool overload: B2 < rate would show the pool overloading favourite-first against the
+  outcomes, and B3 ≈ 1 would carry that over to Harville. Here B2 ≈ 1, which is consistent with
+  any cross-pool ratio.
+- E2 (ratio-cut rules, `japan/131-exacta-rule-v3`): **not yet scorable.** The frozen family needs at least 100 #130-logged
   development meetings with exacta boards; the data directory holds 0 (two logged Kyoto days,
   2026-11-21 and 22, with WIN, PLACE, QUINELLA and QUINELLA_PLACE only). The owner's 2026-11-27
   reframe drops the 100-meeting gate in favour of scoring the logged days available at each run;
@@ -238,7 +293,13 @@ families (frozen 2026-11-27, run at git `5d68473`):
 - C `japan/131-exacta-logscore-v2`: 2 members, scored (above).
 - Max test `japan/131-exacta-category-v2/max-test`: one record (SPA p 0.175, StepM at a 5%
   family-wise error: no member).
-- E2 `japan/131-exacta-rule-v2`: frozen, 16 members, not scored (above).
+- E2 `japan/131-exacta-rule-v3`: frozen 2026-11-27, 16 members, not scored (above). It
+  supersedes `japan/131-exacta-rule-v2` (frozen the same day, not scored, its freeze kept), whose
+  favourite came from the final Win odds; v3 selects on the Win board at T-2, as spec sections 5
+  and 6 require.
+- Breakage `japan/131-exacta-breakage`: post-hoc and descriptive, not a test and not in any
+  family's max test; two records (one per λ2), each with the breakage share and the unrounded ρ
+  of all 42 category × cell members (git `27af886`, 30 s, 0.44 GB peak).
 
 The superseded v1 families (frozen and scored 2026-11-25, label `in_fold` for the same fit),
 whose records stay in the registry:
@@ -274,19 +335,29 @@ whose records stay in the registry:
 
 ## What this rules out
 
-- A favourite-first overload in the JRA exacta pool, overall: ρ_fav_first is 1.024 with a
-  one-sided 95% lower bound of 1.008, so any overload (ρ < 1) is excluded at that level; the
-  favourite-first box returns slightly more than the pool-fair rate, not less. This direction was
-  not the registered alternative, so it is an observation, not a tested claim.
-- An underload of favourite-second or no-favourite combinations of more than about 2.6% and 0.8%
-  of the payout (upper bounds 1.026 and 1.008 overall, λ2 = 0.8104), and, in the owner's headline
-  cell, of more than about 12.7% for favourite-second (upper bound 1.127).
+All of it is about the historical paid-return proxy: whether the pool's prices are fair against
+the outcomes. B2 does not measure the direct cross-pool ratio (the pool against Win-implied
+Harville), so nothing here rules out the pool putting more mass on favourite-first combinations
+than Harville does ("What B2 measures"; B3 and C bear on it only indirectly and are partly
+in-sample).
+
+- A favourite-first shortfall in the paid return, overall: ρ_fav_first is 1.024 with a
+  one-sided 95% lower bound of 1.008, so a paid return below the payout rate (ρ < 1) is
+  excluded at that level; the favourite-first box returns slightly more than the pool-fair rate,
+  not less, and more again with breakage added back (1.028, lower bound 1.012). This direction
+  was not the registered alternative, so it is an observation, not a tested claim.
+- A paid return of favourite-second or no-favourite boxes above the payout rate by more than
+  about 2.6% and 0.8% (upper bounds 1.026 and 1.008 overall, λ2 = 0.8104), and, in the owner's
+  headline cell, by more than about 12.7% for favourite-second (upper bound 1.127).
 - A profit from boxing a category at final dividends: it needs ρ > 1/rate ≈ 1.33, and every cell
   with more than 2,000 races has its upper bound below 1.13. Only the favourite-at-5.0-or-more
   cell (189 races) is too thin to rule it out.
 - What it does not rule out: a rule that selects single combinations by their board ratio at
   T-2 (E2). A box averages over a category; a selective rule can still find mispriced
   combinations inside it, and only logged boards can test that.
+- Nor does it rule out a cross-pool gap: the exacta pool pricing favourite-first combinations
+  higher or lower than Win plus Harville. That needs the full-board ratio D on logged days
+  (#281).
 
 ## Follow-ups filed
 
