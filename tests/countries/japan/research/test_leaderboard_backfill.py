@@ -728,13 +728,19 @@ def test_backfill_writes_nothing_to_the_registry(reg, tmp_path):
 
 
 @pytest.mark.local
-def test_the_real_registry_backfills():
+def test_the_real_registry_backfills(tmp_path):
     try:
-        path = paths.data_dir() / "registry" / "japan.jsonl"
+        real = paths.data_dir() / "registry" / "japan.jsonl"
     except paths.DataDirNotSet:
         pytest.skip(f"{paths.DATA_DIR_VAR} is not set: the real registry is unavailable")
-    if not path.is_file():
-        pytest.skip(f"no real Japan registry at {path}")
+    if not real.is_file():
+        pytest.skip(f"no real Japan registry at {real}")
+    # Other sessions append to the real registry concurrently, so run against a snapshot of it,
+    # cut at the last complete line. The read-only guarantee on the registry file itself is
+    # pinned by test_backfill_writes_nothing_to_the_registry.
+    data = real.read_bytes()
+    path = tmp_path / "japan.jsonl"
+    path.write_bytes(data[: data.rfind(b"\n") + 1])
     registry = Registry(path, holdout_log=REAL_COUNTRIES / "japan" / "holdout_log.jsonl")
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
 
