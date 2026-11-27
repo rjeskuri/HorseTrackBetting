@@ -34,6 +34,7 @@ import importlib
 import json
 import os
 import re
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -55,6 +56,12 @@ UTC = timezone.utc
 REPO = Path(__file__).resolve().parents[4]
 BETTING = REPO / "src" / "horsetrack" / "countries" / "japan" / "config" / "betting.yaml"
 CAP = yaml.safe_load(BETTING.read_text(encoding="utf-8"))["day_cap_yen"]
+POOL_KINDS = {  # the jra config's pools and their kinds (ordered_*, *_bracket, ...)
+    pool: spec["kind"]
+    for pool, spec in yaml.safe_load((BETTING.parent / "jra.yaml").read_text(encoding="utf-8"))[
+        "pools"
+    ].items()
+}
 DAY = date(2026, 12, 5)  # a development day by the committed rule (asserted below)
 HELD = date(2026, 11, 29)  # the first holdout day by the committed rule (asserted below)
 DIVIDEND_COLUMNS = ["race_id", "pool", "combination", "dividend", "is_refund"]
@@ -695,6 +702,110 @@ def test_settle_a_holdout_day_needs_no_results_store(D, held):
 
 # ---------------------------------------------------------------- the real store (local)
 
+FIELD_COLUMNS = ["race_id", "horse_no", "bracket", "is_scratched"]
+_NUMBERS = re.compile(r"[0-9]+(?:,[0-9]+)*")
+
+
+def store_day(store: Path, day: date) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The store's own dividend rows and runners (``FIELD_COLUMNS``) of ``day``'s races, read
+    straight from its parquet files and keyed by the log's race_id (jra:<day>:<VENUE>:<NN>); no
+    runners when the store has no runners table."""
+    races = pq.read_table(
+        store / "races.parquet", columns=["race_id", "race_date", "venue", "race_no"]
+    ).to_pandas()
+    races = races[[pd.Timestamp(d).date() == day for d in races["race_date"]]]
+    keyed = {
+        r.race_id: f"jra:{day.isoformat()}:{r.venue}:{int(r.race_no):02d}"
+        for r in races.itertuples()
+    }
+    wanted = pc.field("race_id").isin(list(keyed))
+    paid = ds.dataset(store / "dividends.parquet").to_table(DIVIDEND_COLUMNS, filter=wanted)
+    paid = paid.to_pandas()
+    paid["race_id"] = paid["race_id"].map(keyed)
+    if (store / "runners.parquet").is_file():
+        field = ds.dataset(store / "runners.parquet").to_table(FIELD_COLUMNS, filter=wanted)
+        field = field.to_pandas()
+    else:
+        field = pd.DataFrame(columns=FIELD_COLUMNS)
+    field["race_id"] = field["race_id"].map(keyed)
+    return paid, field
+
+
+def dividend_rows(frame: pd.DataFrame) -> Counter:
+    """``frame``'s ``DIVIDEND_COLUMNS`` rows as a multiset of tuples, a missing dividend None."""
+    rows = frame[DIVIDEND_COLUMNS].to_dict("records")
+    return Counter(
+        (
+            r["race_id"],
+            r["pool"],
+            r["combination"],
+            None if pd.isna(r["dividend"]) else float(r["dividend"]),
+            bool(r["is_refund"]),
+        )
+        for r in rows
+    )
+
+
+def assert_store_rows_and_scratch_refunds(
+    got: pd.DataFrame, paid: pd.DataFrame, field: pd.DataFrame
+) -> list[tuple]:
+    """Assert that ``got`` (``day_dividends`` of a day) holds every one of ``paid`` (the store's
+    own dividend rows of its races) as it is, and beside them only refund rows for scratched
+    runners; return those added rows. ``field`` is the races' runners (``FIELD_COLUMNS``).
+
+    An added row is ``is_refund`` with no dividend, in a pool its race has store rows of, of a
+    combination the store has no row of in that race and pool, and holds a runner ``field`` marks
+    ``is_scratched`` in its race: a horse number (all its numbers the race's entered horses) or,
+    in a bracket pool, a bracket of a scratched runner left with fewer runners running than the
+    combination uses. A race without a scratch gets no added row."""
+    have, own = dividend_rows(got), dividend_rows(paid)
+    lost = sorted((own - have).elements(), key=repr)
+    assert not lost, f"{len(lost)} store rows day_dividends lost or changed, e.g. {lost[:3]}"
+    added = sorted((have - own).elements(), key=repr)
+
+    def legs(pool: str, combination: str) -> tuple[int, ...]:
+        numbers = [int(n) for n in combination.split(",")]
+        ordered = POOL_KINDS[pool].startswith(("ordered_", "multi_race_"))
+        return tuple(numbers if ordered else sorted(numbers))
+
+    pools = {(race, pool) for race, pool, *_ in own}
+    present = {
+        (race, pool, legs(pool, combination))
+        for race, pool, combination, *_ in own
+        if pool in POOL_KINDS and isinstance(combination, str) and _NUMBERS.fullmatch(combination)
+    }
+    field = field.dropna(subset=["horse_no"]).assign(
+        is_scratched=lambda f: f["is_scratched"].astype("boolean").fillna(False).astype(bool)
+    )
+    horses, gone, bracket_gone, bracket_left = {}, {}, {}, {}
+    for race, runners in field.groupby("race_id"):
+        out, ran = runners[runners["is_scratched"]], runners[~runners["is_scratched"]]
+        horses[race] = {int(n) for n in runners["horse_no"]}
+        gone[race] = {int(n) for n in out["horse_no"]}
+        bracket_gone[race] = {int(b) for b in out["bracket"].dropna()}
+        bracket_left[race] = Counter(int(b) for b in ran["bracket"].dropna())
+    scratched = {race for race, numbers in gone.items() if numbers}
+    unscratched = sorted({row[0] for row in added} - scratched)
+    assert not unscratched, f"refund rows added to races without a scratch: {unscratched}"
+
+    def scratch_refund(row: tuple) -> bool:
+        race, pool, combination, dividend, refund = row
+        if not (refund and dividend is None and (race, pool) in pools and pool in POOL_KINDS):
+            return False
+        if not (isinstance(combination, str) and _NUMBERS.fullmatch(combination)):
+            return False
+        numbers = legs(pool, combination)
+        if (race, pool, numbers) in present:
+            return False
+        if POOL_KINDS[pool].endswith("_bracket"):
+            uses = Counter(numbers)
+            return any(b in bracket_gone[race] and bracket_left[race][b] < uses[b] for b in uses)
+        return set(numbers) <= horses[race] and bool(set(numbers) & gone[race])
+
+    wrong = [row for row in added if not scratch_refund(row)]
+    assert not wrong, f"{len(wrong)} added rows are not scratch refunds, e.g. {wrong[:3]}"
+    return added
+
 
 @pytest.mark.local
 def test_real_store_settles_a_development_day(D, monkeypatch):
@@ -704,43 +815,23 @@ def test_real_store_settles_a_development_day(D, monkeypatch):
     if not ((store / "races.parquet").is_file() and (store / "dividends.parquet").is_file()):
         pytest.skip(f"the jra store is missing: {store}")
 
-    races = pq.read_table(
-        store / "races.parquet", columns=["race_id", "race_date", "venue", "race_no"]
-    ).to_pandas()
-    races["day"] = [pd.Timestamp(d).date() for d in races["race_date"]]
-    days = sorted(d for d in set(races["day"]) if not is_holdout_day("japan", d))
+    races = pq.read_table(store / "races.parquet", columns=["race_date"]).to_pandas()
+    days = sorted(
+        d
+        for d in {pd.Timestamp(t).date() for t in races["race_date"]}
+        if not is_holdout_day("japan", d)
+    )
     if not days:
         pytest.skip("the jra store holds no development day")
     day = days[-1]
-    keyed = {
-        r.race_id: f"jra:{day.isoformat()}:{r.venue}:{int(r.race_no):02d}"
-        for r in races[races["day"] == day].itertuples()
-    }
-    paid = (
-        ds.dataset(store / "dividends.parquet")
-        .to_table(columns=DIVIDEND_COLUMNS, filter=pc.field("race_id").isin(list(keyed)))
-        .to_pandas()
-    )
-    paid["race_id"] = paid["race_id"].map(keyed)
-
-    def key(frame: pd.DataFrame) -> list[tuple]:
-        rows = frame[DIVIDEND_COLUMNS].to_dict("records")
-        return sorted(
-            (
-                r["race_id"],
-                r["pool"],
-                r["combination"],
-                None if pd.isna(r["dividend"]) else float(r["dividend"]),
-                bool(r["is_refund"]),
-            )
-            for r in rows
-        )
+    paid, field = store_day(store, day)
 
     (D / "processed").mkdir(parents=True)
     (D / "processed" / "jra").symlink_to(store, target_is_directory=True)
     from horsetrack.countries.japan.bets.settle import day_dividends
 
-    assert key(day_dividends(day)) == key(paid)
+    # the store's own rows kept as they are; beside them only scratch refund rows
+    assert_store_rows_and_scratch_refunds(day_dividends(day), paid, field)
 
     # a race with one winner and a placed horse that did not win: three bets, settled by hand
     bets_placed: list[tuple] = []

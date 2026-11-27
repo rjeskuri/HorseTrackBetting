@@ -250,9 +250,10 @@ def _scratch_refunds(paid: pd.DataFrame, runners: pd.DataFrame) -> pd.DataFrame:
     """Refund rows (``is_refund`` true, no dividend) of the combinations JRA returns for runners
     scratched before the start (取消 WV, 除外 WX: ``runners.is_scratched``; a runner pulled up,
     競走中止, or disqualified, 失格, ran), which the store's ``dividends`` never holds. In each
-    race with such a runner, for each pool of its ``paid`` rows but WIN5 (JRA puts the leg's
-    favourite in for a scratched WIN5 horse): every combination ``_refunded`` gives that the store
-    has no row of. A pool without rows (not sold, 不成立, or no results yet) gets none."""
+    race with such a runner, for each pool of its ``paid`` rows but WIN5 (the store holds no WIN5
+    combination dividends, and JRA's WIN5 scratch rule is not established: an assumption in
+    docs/ledger.md), every combination ``_refunded`` gives that the store has no row of. A pool
+    without rows (not sold, 不成立, or no results yet) gets none."""
     scratched = runners["is_scratched"].astype("boolean").fillna(False).to_numpy(dtype=bool)
     fields: dict[str, list[tuple[int, int | None, bool]]] = {}
     for race_id, horse_no, bracket, gone in zip(

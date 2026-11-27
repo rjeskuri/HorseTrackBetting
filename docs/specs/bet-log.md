@@ -264,8 +264,11 @@ each race with a scratched runner and each pool the race has dividend rows of.
 - BRACKET_QUINELLA: a pair of two brackets is refunded only when one of them has no runner left; a
   pair of one bracket (`"7,7"`, ゾロ目) when that bracket, entered with two or more, has fewer than
   two left.
-- WIN5: never refunded for a scratched leg horse (JRA counts the ticket on the leg's win favourite
-  instead); a WIN5 bet stays `unsettled` as above.
+- WIN5: `day_dividends`, and so `bets settle`, adds no refund rows for a scratched leg horse, and
+  a WIN5 bet stays `unsettled` as above, because the store holds no WIN5 combination dividends to
+  refund against. JRA's WIN5 rule for a scratched horse is not established here: `docs/ledger.md`
+  (site, rules and pricing) carries the reading of netkeiba's WIN5 shortfall as refunds of
+  combinations with a scratched horse as an assumption, unverified from a JRA page (#324).
 - A combination the store already has a row of keeps that row, and a pool without rows (not sold,
   不成立, or no results yet) gets no refund rows, so its bets stay `unsettled`. A store without a
   `runners` table, which the store build never writes beside `races` (both come from the results
