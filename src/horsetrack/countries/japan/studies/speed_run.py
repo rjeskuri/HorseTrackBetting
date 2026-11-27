@@ -11,10 +11,13 @@ cell alone? The null is that it does not.
   mean), and a race without a 3rd-placed runner uses the runners placed 1-2 present. The label
   averages the placed runners that have a time; #416 leaves it unchanged (a change is the owner's
   decision). Jump races, races without a post time and races with no placed, timed runner are left
-  out and counted, in that order. The kept races' coverage (#416) is read from finish_pos before
-  any time: n_missing_timing (a runner placed 1-3 has no time), n_short_order (fewer than three
-  runners placed 1-3; a dead heat for 2nd is three) and n_tie (a place in 1-3 shared), each counted
-  on its own; the bool column complete_timing is True when every runner placed 1-3 has a time.
+  out and counted, in that order; of the last, n_untimed_order (#416) counts the official orders
+  without a time (a runner placed 1-3, none of them timed), apart from races nobody placed in
+  (abandoned), and neither is counted again in the kept races' coverage. The kept races' coverage
+  (#416) is read from finish_pos before any time: n_missing_timing (a runner placed 1-3 has no
+  time), n_short_order (fewer than three runners placed 1-3; a dead heat for 2nd is three) and
+  n_tie (a place in 1-3 shared), each counted on its own; the bool column complete_timing is True
+  when every runner placed 1-3 has a time.
   post_utc is post_time_local on the Asia/Tokyo wall clock of race_date (as-of.md, #227);
   result_available_utc = post_utc + 30 min, the same-day dividends rule (availability.yaml; the
   owner's answers on #80 and #96).
@@ -32,7 +35,9 @@ cell alone? The null is that it does not.
 - `timing_sensitivity` (#416): the fold loop twice per error model on the same fold windows, those
   of every development race. "existing" is `predict_folds` on the full table, the published
   comparison. "complete" is the table restricted to complete_timing: the other races are in no
-  fit, the same-day variant reads only complete-timing races' results, and they are not scored.
+  fit, the same-day variant reads only complete-timing races' results, and they are not scored. A
+  fold with no complete-timing race to train or to test on is skipped and recorded with its reason
+  (attrs["folds"], attrs["n_skipped_folds"]); the arm fails only when no race is scored in both.
   Per prediction, each arm's `RmseDiff` against par_only and `gain_change_bootstrap`'s paired
   change on the races both arms score (delta = gain_complete - gain_existing, D7's bounds from
   meeting draws that recompute all four RMSEs on the same draw).
@@ -47,9 +52,10 @@ error model, appends one registry record per variant (failures included), rewrit
 registry summary and writes the full report (every cell) through `write_report`. Next to each
 variant N, `N:complete_timing` records the complete-timing arm (its gain and the paired change) in
 #416's own family, `japan-speed-top3-c3-timing`, whose spec (#305's plus the sensitivity) is frozen
-with #305's before any outcome is read; #305's frozen spec is unchanged. A record that differs from
-one already in the registry only in its commit is not appended again. Nothing is adopted (D16),
-and the holdout is never opened.
+with #305's before any outcome is read; #305's frozen spec is unchanged. A record identical to one
+already in the registry, its commit included, is not appended again; a rerun at another commit is,
+so the registry names the code behind each result. Nothing is adopted (D16), and the holdout is
+never opened.
 """
 
 from __future__ import annotations
@@ -238,9 +244,12 @@ def build_race_table(
     top3_time = races["race_id"].map(_mean_placed_1_3(runners)).astype(float)
     placed = top3_time.notna().to_numpy()
     counts["n_no_placed_time"] = int((~placed).sum())
+    by_race = _coverage(runners)
+    # of those, an official order placed 1-3 without a time, apart from races nobody placed in
+    counts["n_untimed_order"] = int(races.loc[~placed, "race_id"].isin(by_race.index).sum())
     races, days, post, top3_time = races[placed], days[placed], post[placed], top3_time[placed]
     # every kept race has a runner placed 1-3, so each has its coverage row
-    coverage = _coverage(runners).reindex(races["race_id"]).astype(bool)
+    coverage = by_race.reindex(races["race_id"]).astype(bool)
     for flag in ("missing_timing", "short_order", "tie"):
         counts[f"n_{flag}"] = int(coverage[flag].sum())
 
@@ -296,7 +305,9 @@ def _predict_folds(
     only: str | None = None,
 ) -> pd.DataFrame:
     """`predict_folds`; with `only`, a boolean column, the folds are still those of every
-    development race, but only the races where it is True are fitted, observed and scored."""
+    development race, but only the races where it is True are fitted, observed and scored, and a
+    fold with none of them to train or to test on is skipped: its `folds` entry carries the reason
+    under "skipped", and attrs["n_skipped_folds"] counts them."""
     if (
         isinstance(decision_min, bool)
         or not isinstance(decision_min, Real)
@@ -316,6 +327,18 @@ def _predict_folds(
         label = fold_label(k, fold.test_start, fold.test_end)
         train = dev.iloc[fold.train_idx[kept[fold.train_idx]]]
         test = dev.iloc[fold.test_idx[kept[fold.test_idx]]]
+        skip = None
+        if only is not None and train.empty:
+            skip = f"no {only} training race to fit on"
+        elif only is not None and test.empty:
+            skip = f"no {only} test race to score"
+        if skip is not None:
+            folds.append(
+                {"fold": label, "train_end": fold.train_end.isoformat()}
+                | {"n_train": len(train), "n_test": len(test), "n_scored": 0}
+                | {"n_unseen_cell": 0, "skipped": skip}
+            )
+            continue
         models = {}
         for name, variant_spec in specs.items():  # one fit at a time
             models[name] = SpeedModel(variant_spec).fit(train).observe(test)
@@ -349,6 +372,7 @@ def _predict_folds(
     out.attrs["n_holdout_dropped"] = len(table) - len(dev)
     if only is not None:
         out.attrs[f"n_not_{only}"] = int((~kept).sum())
+        out.attrs["n_skipped_folds"] = sum(1 for f in folds if f.get("skipped"))
     out.attrs["folds"] = folds
     return out
 
@@ -596,8 +620,9 @@ def _timing_arms(
     complete = _predict_folds(
         table, spec=spec, scheme=scheme, decision_min=decision_min, only="complete_timing"
     )
-    if complete.empty:
-        raise ValueError("no development test race with complete timing was scored")
+    # a fold the complete arm skips is not a failure; no race scored in both arms is
+    if not existing["race_id"].isin(complete["race_id"]).any():
+        raise ValueError("no development test race with complete timing is scored in both arms")
     gains = {
         model: {
             "existing": _arm_gain(existing, model, boot),
@@ -856,6 +881,7 @@ def compute_study(
         counts[error_name] |= {
             "n_scored_complete_timing": len(complete),
             "n_not_complete_timing": complete.attrs["n_not_complete_timing"],
+            "n_skipped_folds_complete_timing": complete.attrs["n_skipped_folds"],
             "n_scored_both": arms["gains"][PREDICTIONS[0]]["paired"]["n_races"],
         }
         tables[f"folds:{error_name}{TIMING_SUFFIX}"] = complete.attrs["folds"]
@@ -1051,8 +1077,9 @@ def run_study(out_dir: Path | None = None) -> dict:
     records = [_record(v, git_sha, builds, fold_scheme) for v in variants]
     run_ids = {}
     for variant, record in zip(variants, records, strict=True):
-        # a rerun that differs only in the commit is already recorded
-        if not any(dataclasses.replace(record, git_sha=r.git_sha) == r for r in existing):
+        # only an exact match, its commit included, is already recorded: the registry names
+        # the code behind each result
+        if record not in existing:
             run_ids[variant.name] = registry.append(record)
     about = {
         "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",

@@ -23,9 +23,12 @@ Contract pinned here (`horsetrack.countries.japan.studies.speed_run`):
     -> "unknown", and class_level (race_class). post_utc is post_time_local on the Asia/Tokyo
     wall clock of race_date, as a tz-aware UTC instant (docs/specs/as-of.md, #227).
   - `counts`, a dict: n_races (races in), n_jump (surface "jump", excluded), n_no_post_time
-    (excluded), n_no_placed_time (no runner placed 1-3 with a finish time, excluded), n_kept
-    (= len(table)), and the coverage of the kept races (#416), each counted on its own, so a race
-    may be in more than one: n_missing_timing (a runner placed 1-3 has no finish time),
+    (excluded), n_no_placed_time (no runner placed 1-3 with a finish time, excluded: the total of
+    that exclusion), n_untimed_order (#416, the part of n_no_placed_time with at least one runner
+    placed 1-3 and none of them timed: an official order without a time, apart from the races
+    where nobody is placed, such as an abandoned race), n_kept (= len(table)), and the coverage
+    of the kept races (#416), each counted on its own, so a race may be in more than one:
+    n_missing_timing (a runner placed 1-3 has no finish time),
     n_short_order (fewer than three runners placed 1-3: placings not awarded, e.g. only 1 and 2;
     a dead heat for 2nd, 1,2,2, is three runners and not short) and n_tie (two or more runners
     share a place in 1-3). Who placed comes from finish_pos alone, before any time is looked at.
@@ -67,13 +70,21 @@ Contract pinned here (`horsetrack.countries.japan.studies.speed_run`):
   and "complete" (`RmseDiff` against par_only over each arm's scored races) and "paired" (a dict
   over the races scored in both arms: n_races, n_meetings, gain_existing, gain_complete, each arm's
   gain on those races, delta = gain_complete - gain_existing, and meeting-clustered one-sided
-  bounds lo, hi on delta). A table without complete_timing is a ValueError.
+  bounds lo, hi on delta). A table without complete_timing is a ValueError. A fold the complete
+  arm cannot fit (no complete training race) or score (no complete test race) is skipped, not a
+  failure: its attrs["folds"] entry carries "skipped", a non-empty reason (the scored folds' entries
+  have none), attrs["n_skipped_folds"] counts them, and the arm fails only when no race is left
+  scored in both arms.
 - `compute_study(table, spec, scheme, minutes)` (#416 part): next to each existing-label variant
   `N`, a variant `N:complete_timing` (a registry record each, failures included) whose metrics
   include ("all", "rmse_gain_s"), the complete arm's gain, and ("all", "rmse_gain_change_s"), the
   paired delta with its bounds. `render_report` shows the builder's coverage counts and, for each
   error model and prediction, the existing gain, the complete-timing gain and the paired delta
   side by side on one table row (floats as `markdown_table` writes them, 4 decimals).
+- `run_study(out_dir)` (#416 part): a record identical to one already in the registry (its
+  commit, git_sha, included) is not appended again; a rerun at another commit is appended, so the
+  registry names the code that produced each result. Pinned with a registry under tmp_path and
+  the fold loop (`compute_study`) and the store read replaced by fixed variants and a card.
 - `read_inputs() -> (races, runners)`: the JRA store's races and runners
   (`processed_dir("jra")`), holdout days dropped, shaped for `build_race_table`; it reads no
   JRDB table.
@@ -106,6 +117,7 @@ import pytest
 from horsetrack.core.config import load_country_yaml
 from horsetrack.core.eval.folds import FoldScheme, walk_forward
 from horsetrack.core.eval.holdout import is_holdout_day
+from horsetrack.core.eval.registry import FoldMetric, Registry
 from horsetrack.core.store import schemas, tables
 from horsetrack.countries.japan.models.speed import SpeedSpec
 from horsetrack.countries.japan.studies import speed_run as study
@@ -139,6 +151,7 @@ COUNT_KEYS = (
     "n_jump",
     "n_no_post_time",
     "n_no_placed_time",
+    "n_untimed_order",
     "n_kept",
     "n_missing_timing",
     "n_short_order",
@@ -402,6 +415,7 @@ def test_builder_counts_missing_timing_short_orders_and_ties_separately(seed):
         "n_tie": n(5),
     }, multiplicity
     assert counts["n_kept"] == len(specs) and counts["n_no_placed_time"] == 0
+    assert counts["n_untimed_order"] == 0
     assert int(rows["complete_timing"].sum()) == n(2)
 
 
@@ -433,7 +447,7 @@ def test_builder_excludes_jump_races():
 
 @pytest.mark.parametrize(
     "n_complete, n_jump, n_two_placed, n_dh_second, n_abandoned, n_untimed, n_no_post, n_missing",
-    [(3, 1, 1, 1, 1, 1, 1, 2), (5, 3, 2, 0, 0, 2, 0, 0), (1, 0, 0, 2, 3, 0, 2, 3)],
+    [(3, 1, 1, 1, 1, 3, 1, 2), (5, 3, 2, 0, 0, 2, 0, 0), (1, 0, 0, 2, 3, 0, 2, 3)],
 )
 def test_builder_counts_the_races_dropped_and_their_coverage(
     n_complete, n_jump, n_two_placed, n_dh_second, n_abandoned, n_untimed, n_no_post, n_missing
@@ -441,25 +455,42 @@ def test_builder_counts_the_races_dropped_and_their_coverage(
     specs, kept = [], []
 
     def add(kind, n, runners, **race):
-        for _ in range(n):
+        for j in range(n):
             no = len(specs) + 1
-            specs.append({"race_no": no, "runners": runners(no), **race})
+            specs.append({"race_no": no, "runners": runners(no, j), **race})
             if kind == "kept":
                 kept.append(rid(DAY, "TOK", no))
 
-    add("kept", n_complete, lambda no: full_field(90.0 + no))
+    def no_placings(no, j):
+        # nobody placed; in one of every two an unplaced runner has a time, which places no one
+        rest = [(None, None)] * 5
+        return [(None, None), *rest] if j % 2 == 0 else [(None, 50.0 + no), *rest]
+
+    def untimed_order(no, j):
+        # an official order placed 1-3 with no time in the top 3: full, short, 4th timed only
+        return (
+            [(1, None), (2, None), (3, None), (4, None)],
+            [(1, None), (2, None), (None, None)],
+            [(1, None), (2, None), (3, None), (4, 99.0 + no)],
+        )[j % 3]
+
+    add("kept", n_complete, lambda no, j: full_field(90.0 + no))
     # a dead heat for 1st has a 3rd-placed runner: complete
-    add("kept", 1, lambda no: [(1, 80.0), (1, 80.0), (3, 80.4), (4, 80.9)])
-    add("jump", n_jump, lambda no: full_field(200.0 + no), surface="jump", distance=3000)
-    add("kept", n_two_placed, lambda no: [(1, 100.0 + no), (2, 100.4 + no), (None, None)])
-    add("kept", n_dh_second, lambda no: [(1, 84.0), (2, 84.3), (2, 84.3), (4, 84.6)])
+    add("kept", 1, lambda no, j: [(1, 80.0), (1, 80.0), (3, 80.4), (4, 80.9)])
+    add("jump", n_jump, lambda no, j: full_field(200.0 + no), surface="jump", distance=3000)
+    add("kept", n_two_placed, lambda no, j: [(1, 100.0 + no), (2, 100.4 + no), (None, None)])
+    add("kept", n_dh_second, lambda no, j: [(1, 84.0), (2, 84.3), (2, 84.3), (4, 84.6)])
     # placed 1, 2 and 3, the 3rd without a time: kept, missing timing, not a short order
-    add("kept", n_missing, lambda no: [(1, 70.0 + no), (2, 70.2 + no), (3, None), (4, 71.0 + no)])
-    # abandoned: nobody placed, nobody timed
-    add("drop", n_abandoned, lambda no: [(None, None)] * 6)
-    # placed, but without a finish time
-    add("drop", n_untimed, lambda no: [(1, None), (2, None), (3, None), (4, None)])
-    add("drop", n_no_post, lambda no: full_field(95.0 + no), post=None)
+    add(
+        "kept",
+        n_missing,
+        lambda no, j: [(1, 70.0 + no), (2, 70.2 + no), (3, None), (4, 71.0 + no)],
+    )
+    # abandoned: nobody placed
+    add("drop", n_abandoned, no_placings)
+    # placed, but without a finish time in the top 3
+    add("drop", n_untimed, untimed_order)
+    add("drop", n_no_post, lambda no, j: full_field(95.0 + no), post=None)
     races, runners = card(specs)
 
     table, counts = build_race_table(races, runners, estimand=ESTIMAND)
@@ -469,7 +500,9 @@ def test_builder_counts_the_races_dropped_and_their_coverage(
         "n_races": len(specs),
         "n_jump": n_jump,
         "n_no_post_time": n_no_post,
+        # the whole exclusion, and apart from it the official orders placed 1-3 without a time
         "n_no_placed_time": n_abandoned + n_untimed,
+        "n_untimed_order": n_untimed,
         "n_kept": len(kept),
         # the untimed races left out are not counted again among the kept races' coverage
         "n_missing_timing": n_missing,
@@ -1154,6 +1187,97 @@ def test_timing_sensitivity_requires_the_complete_timing_flag(calendar):
         sensitivity(table)
 
 
+GAP_FOLDS = (0, 2)  # the folds gap_table leaves the complete arm unable to fit (0) or score (2)
+
+
+def gap_table(calendar):
+    """The calendar with complete_timing False on every race of the first fold's training days
+    (the complete arm has nothing to fit that fold on) and of the third fold's test days (it has
+    nothing to score there); every other race is complete. The windows are walk_forward's over
+    the development races, the full table's."""
+    table, _ = calendar
+    dev = development(table)
+    folds = walk_forward(dev["race_date"], scheme=FOLD_SCHEME)
+    assert len(folds) == 4
+    gap_days = set(dev["race_date"].iloc[folds[0].train_idx])
+    gap_days |= set(dev["race_date"].iloc[folds[2].test_idx])
+    table = table.assign(complete_timing=~table["race_date"].isin(gap_days).to_numpy())
+    # the other folds still have complete races to train and test on
+    in_gap = dev["race_date"].isin(gap_days).to_numpy()
+    for k in (1, 3):
+        assert (~in_gap[folds[k].train_idx]).sum() > 0
+        assert (~in_gap[folds[k].test_idx]).sum() > 0
+    return table
+
+
+@pytest.fixture(scope="module")
+def gap_case(calendar):
+    return gap_table(calendar)
+
+
+def fold_labels(folds: list[dict]) -> tuple[list[str], set[str]]:
+    """The fold labels in order, and those of GAP_FOLDS."""
+    labels = [f["fold"] for f in folds]
+    return labels, {labels[k] for k in GAP_FOLDS}
+
+
+def skipped_folds(folds: list[dict]) -> dict[str, str]:
+    return {f["fold"]: f["skipped"] for f in folds if f.get("skipped")}
+
+
+def test_timing_sensitivity_skips_a_fold_the_complete_arm_cannot_fit_or_score(gap_case):
+    table = gap_case
+    result = sensitivity(table)
+    existing, complete = result["existing"], result["complete"]
+    # the published arm is untouched: four folds, every one scored
+    labels, skipped = fold_labels(existing.attrs["folds"])
+    assert len(labels) == 4 and len(skipped) == 2
+    assert set(existing["fold"]) == set(labels)
+
+    # the complete arm keeps every fold label in order, the skipped ones marked with a reason
+    assert [f["fold"] for f in complete.attrs["folds"]] == labels
+    reasons = skipped_folds(complete.attrs["folds"])
+    assert set(reasons) == skipped
+    for label, why in reasons.items():
+        assert isinstance(why, str) and why.strip(), label
+    assert complete.attrs["n_skipped_folds"] == len(skipped)
+
+    # the later folds are scored: every race the published arm scores there, all complete
+    later = set(labels) - skipped
+    assert set(complete["fold"]) == later
+    expected = set(existing.loc[existing["fold"].isin(later), "race_id"])
+    assert expected and set(complete["race_id"]) == expected
+    complete_ids = set(table.loc[table["complete_timing"], "race_id"])
+    assert set(complete["race_id"]) <= complete_ids
+
+    # and the paired change is computed over them
+    for model in PREDICTIONS:
+        paired = result["gains"][model]["paired"]
+        assert paired["n_races"] == len(expected), model
+        assert result["gains"][model]["complete"].n_races == len(expected), model
+        assert paired["lo"] <= paired["delta"] + 1e-12, model
+        assert paired["delta"] <= paired["hi"] + 1e-12, model
+
+
+def test_compute_study_scores_the_complete_arm_from_the_folds_it_can_fit(gap_case):
+    table = gap_case
+    variants, tables, _ = study.compute_study(table, STUDY_SPEC, FOLD_SCHEME, 2)
+    for v in variants:
+        assert v.error is None, (v.name, v.error)
+    by_name = {v.name: v for v in variants}
+    for error_name in ("t5", "normal"):
+        labels, skipped = fold_labels(tables[f"folds:{error_name}"])
+        arm_folds = tables[f"folds:{error_name}:complete_timing"]
+        assert [f["fold"] for f in arm_folds] == labels
+        assert set(skipped_folds(arm_folds)) == skipped
+        for model in PREDICTIONS:
+            v = by_name[f"{error_name}:{model}_vs_par_only:complete_timing"]
+            metrics = metrics_of(v)
+            assert ("all", "rmse_gain_s") in metrics and ("all", "rmse_gain_change_s") in metrics
+            folds = {fold for fold, name in metrics if fold != "all" and name == "rmse_gain_s"}
+            assert folds == set(labels) - skipped, v.name
+
+
 # compute_study and render_report: the sensitivity is a registry record beside each variant
 
 
@@ -1240,3 +1364,85 @@ def test_render_report_shows_the_coverage_and_the_sensitivity_side_by_side(study
         ]
         assert len(set(cells)) == 3, cells
         assert any(all(c in line for c in cells) for line in lines), (error_name, cells)
+
+
+# run_study: an identical record is not appended twice; a rerun at another commit is
+
+
+def canned_variants(gain: float) -> list:
+    """One existing variant, its complete-timing arm and a failed variant, as compute_study
+    returns them; `gain` moves the first variant's metric."""
+    params = {"error_model": "normal", "decision_time_min": 2}
+    timing = params | {"arm": "complete_timing", "fold_windows": "full_table"}
+    components = {"model": "countries.japan.models.speed.SpeedModel", "baseline": "par_only"}
+    return [
+        study.Variant(
+            "normal:variant_on_vs_par_only",
+            components | {"prediction": "variant_on"},
+            params,
+            metrics=(FoldMetric("all", "rmse_gain_s", gain, gain - 0.1, gain + 0.1, 40),),
+        ),
+        study.Variant(
+            "normal:variant_on_vs_par_only:complete_timing",
+            components | {"prediction": "variant_on", "arm": "complete_timing"},
+            timing,
+            metrics=(FoldMetric("all", "rmse_gain_s", 0.25, 0.05, 0.45, 30),),
+        ),
+        study.Variant(
+            "t5:variant_off_vs_par_only",
+            components | {"prediction": "variant_off"},
+            params | {"error_model": "t5"},
+            error="ValueError: no development test race was scored",
+        ),
+    ]
+
+
+def test_run_study_appends_a_rerun_at_a_new_commit_and_not_an_identical_record(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str((tmp_path / "data").resolve()))
+    registry = Registry(tmp_path / "registry" / "japan.jsonl", holdout_log=tmp_path / "h.jsonl")
+    races, runners = card([{"race_no": k, "runners": full_field(90.0 + k)} for k in (1, 2, 3)])
+    now = {"sha": "a" * 40, "gain": 0.5}
+    summaries = []
+    monkeypatch.setattr(study, "default_registry", lambda country: registry)
+    monkeypatch.setattr(study, "read_inputs", lambda: (races, runners))
+    monkeypatch.setattr(
+        study, "store_builds", lambda: {"jra_races": "processed/jra/races.parquet@synthetic"}
+    )
+    monkeypatch.setattr(
+        study,
+        "compute_study",
+        lambda table, spec, scheme, minutes: (canned_variants(now["gain"]), {}, {}),
+    )
+    monkeypatch.setattr(study, "_git_sha", lambda: now["sha"])
+    # the committed summary is in the repository: not rewritten from a test
+    monkeypatch.setattr(study, "write_summary", lambda reg, directory: summaries.append(directory))
+    names = {v.name for v in canned_variants(0.5)}
+
+    def runs() -> list[tuple[str, str]]:
+        families = (study.FAMILY_ID, study.TIMING_FAMILY_ID)
+        return sorted((r.variant, r.git_sha) for f in families for r in registry.records(f))
+
+    # (commit, the first variant's gain, the variants appended, the registry after the run)
+    steps = [
+        ("a" * 40, 0.5, names, {(n, "a" * 40) for n in names}),
+        # the same code and outcome again: already recorded
+        ("a" * 40, 0.5, set(), {(n, "a" * 40) for n in names}),
+        # a new commit, the same outcome: recorded, so the registry names the new code too
+        ("b" * 40, 0.5, names, {(n, sha) for n in names for sha in ("a" * 40, "b" * 40)}),
+        ("b" * 40, 0.5, set(), {(n, sha) for n in names for sha in ("a" * 40, "b" * 40)}),
+    ]
+    # a changed outcome at a known commit: only the record that changed
+    changed = "normal:variant_on_vs_par_only"
+    steps.append(("b" * 40, 0.75, {changed}, steps[-1][3]))
+    for k, (sha, gain, appended, after) in enumerate(steps):
+        now |= {"sha": sha, "gain": gain}
+        result = study.run_study(tmp_path / "out")
+        assert set(result["run_ids"]) == appended, k
+        got = runs()
+        assert set(got) == after, k
+        expected_n = sum(len(s[2]) for s in steps[: k + 1])
+        assert len(got) == expected_n, k
+    assert len(summaries) == len(steps)
+    assert sum(1 for variant, _ in runs() if variant == changed) == 3

@@ -307,8 +307,10 @@ Ticket #416 (follow-up to #305, epic #73) checks the race-level target before la
   `6e61cb2147ffce77a077db5957957cc83147299c0609cfe95b33d517b3f8f7bd`.
   - The spec is #305's unchanged, plus the coverage definitions and the sensitivity. It was frozen before any
     outcome was read.
-  - #305's family keeps its frozen spec (`72f5c802e96e...`). Its four records were reproduced exactly, so none was
-    appended again.
+  - #305's family keeps its frozen spec (`72f5c802e96e...`). Its four records were reproduced at `997e0ef` in every
+    field but the commit (theirs is `2ab5bf4`). The run's dedupe then ignored the commit, so none was appended again.
+    Since #416's review the dedupe matches the commit too, so a rerun at a new commit appends its records and the
+    registry names the code behind each result.
 - Code at `997e0ef`. The store is the same as #305's (`races.parquet@9cce511831074b64`,
   `runners.parquet@6f3cec95347e0132`).
 - The full report is under the data directory at `reports/speed-japan-72f5c802e96e-6e61cb2147ff.md`. The records are
@@ -339,8 +341,12 @@ Ticket #416 (follow-up to #305, epic #73) checks the race-level target before la
 | Short orders | 0 |
 | Ties | 335 |
 | Complete timing | 56,267 |
+| Untimed official orders (excluded, not kept: placed 1–3, none timed) | 0 |
 
 - No runner placed 1–3 lacks a finish time. All 168,951 such runners are timed.
+- `n_untimed_order` counts the part of the "no runner placed 1–3 with a finish time" exclusion that has an official
+  order (a runner placed 1–3) but no time in it, apart from races nobody placed in, such as an abandoned race. It
+  was added after the run; its 0 follows from `n_no_placed_time` = 0 at the same store builds.
 - No race placed fewer than three runners. #305's 110 partly placed races are exactly the 110 dead heats for 2nd: three
   runners in the top 3, with nobody placed 3rd.
 - The 335 ties are 77 dead heats for 1st, 110 for 2nd and 148 for 3rd. No race has two. They keep #305's convention:
@@ -350,7 +356,9 @@ Ticket #416 (follow-up to #305, epic #73) checks the race-level target before la
 
 The complete arm reruns the fold loop on the races with complete timing only. It uses the published arm's fold
 windows (walk-forward over every development race), so dropping races never moves a window. The dropped races are in
-no fit. The same-day variant does not read their results, and they are not scored. The change is measured on the races
+no fit. The same-day variant does not read their results, and they are not scored. A fold with no complete-timing race
+to train or to test on is skipped and recorded with its reason, and the arm fails only when no race is scored in both
+arms; on this store every race has complete timing, so no fold is skipped. The change is measured on the races
 both arms score:
 - delta = gain(complete) − gain(existing);
 - its bounds come from a meeting-clustered paired bootstrap (D7, 95% one-sided, 10,000 replicates, seed 305), which
