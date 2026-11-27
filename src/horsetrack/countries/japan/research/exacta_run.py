@@ -2,8 +2,9 @@
 
 `python -m horsetrack.countries.japan.research.exacta_run {freeze|count|score|max-test|breakage}`
 
-- freeze: ``freeze_family`` for every spec of ``exacta_study.family_specs`` in the Japan registry.
-  It records the specs only: the committed summary lists runs, and a freeze is not one.
+- freeze: ``freeze_family`` for every spec of ``exacta_study.family_specs`` in the Japan registry,
+  and E2 also under ``E2_REGISTRY_ID``, the id #281 scores it under (no "/", #525). It records the
+  specs only: the committed summary lists runs, and a freeze is not one.
 - count: row counts only (no outcome is scored): development races with a FORECAST dividend,
   out-of-fold Win probabilities, the ordering fit, and #130-logged meetings with exacta boards.
 - score: E1 (B2) with its variants B1, B3 and the log-score total C; every variant is a registry
@@ -70,6 +71,7 @@ COUNTRY = "japan"
 FIRST_DAY = date(2014, 6, 7)
 SOURCES = ("jra",)
 MAX_TEST_ID = f"{study.E1_ID}/max-test"
+E2_REGISTRY_ID = study.E2_ID.replace("/", "-")  # #525: #281 records E2 without "/"
 SCORED_FAMILIES = (study.E1_ID, study.E1_B1_ID, study.E1_B3_ID, study.C_ID)
 BREAKAGE_ID = "japan/131-exacta-breakage"
 BREAKAGE_STEP = 10.0  # JRA pays per 100 yen rounded down to 10 yen
@@ -635,7 +637,10 @@ def _breakage_markdown(rows: list[dict], sha: str) -> str:
 def freeze() -> dict[str, str]:
     """Freeze every family spec; the committed summary (runs only) is left alone."""
     registry = default_registry(COUNTRY)
-    return {fid: registry.freeze_family(fid, spec) for fid, spec in study.family_specs().items()}
+    specs = study.family_specs()
+    frozen = {fid: registry.freeze_family(fid, spec) for fid, spec in specs.items()}
+    frozen[E2_REGISTRY_ID] = registry.freeze_family(E2_REGISTRY_ID, specs[study.E2_ID])
+    return frozen
 
 
 def _recorded(registry, family: str, meta: dict, sha: str, run: Callable[[], object]):

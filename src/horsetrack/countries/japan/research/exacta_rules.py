@@ -25,12 +25,18 @@ the boards at t.
   exacta odds bands of ``EXACTA_ODDS_BANDS`` (< 10, 10-30, 30-100, >= 100) and one constant
   segment column, the member's variant. Its status (fitted, failed, not attempted), the rows it
   was given and the member's meeting count are record metrics, never params.
+- The max test (SPA + StepM over the 16 members) settles at the own-impact dividend; when a
+  member's hit is floor-bound it is unavailable (recorded, no p-value) and a published-payout
+  sensitivity over the same 16 members is recorded beside it (``_max_test``).
 - D, the full-board category ratio on the final boards, over every loaded race whose final exacta
-  board prices every ordered pair of the final Win board's horses (a partial board is counted as
-  incomplete and left out); the agreement of the race-card proxy with the lower final-pool
-  tertile of each race day. Neither needs a board at t or a post time.
-- The ordering fit is the artifact ``models/japan/v0/current.json`` names, recorded by its content
-  hash; a fit whose out-of-fold training races reach the earliest scored race date is refused.
+  board prices every ordered pair of the final Win board's horses with an identified share (a
+  partial board, or one quoting a pair at 1.1 or less, is counted as incomplete and left out);
+  the agreement of the race-card proxy with the lower final-pool tertile of
+  each race day. Neither needs a board at t or a post time.
+- The ordering fit is the artifact ``models/japan/v0/current.json`` names, recorded by its fit id
+  and content hash in the odds_log build's refresh (provenance: a refit is another run, not a new
+  variant); a fit whose out-of-fold training races reach the earliest scored race date is
+  refused. The manifest's relative out-of-fold path resolves against the working directory.
 
 Development days only: a holdout day's race is dropped, and its log folder never opened, before
 anything else of it is read (D14); LockedHoldout is not opened. Public JRA data only.
@@ -89,7 +95,7 @@ MINUTES_BEFORE_POST = 2
 BLOCK_SIZE = 5
 STEPM_FWER = exacta_run.STEPM_FWER
 FROZEN_E2_HASH = "28929cd783cd9e25ae8c7f39f30f2b0891720b60864a38fdbb13d7dcd2a8d3bc"  # rule-v4
-E2_RULE_ID = study.E2_ID.replace("/", "-")  # #525: no "/" in a registry family id
+E2_RULE_ID = exacta_run.E2_REGISTRY_ID  # #525: no "/"; `exacta_run freeze` freezes it too
 MAX_TEST_ID = f"{E2_RULE_ID}-max-test"
 COUNTRY = "japan"
 SOURCES = ("jra",)
@@ -109,6 +115,7 @@ SHRINK_DRAWS = 4000
 SHRINK_STATUSES = ("fitted", "failed", "not_attempted")
 STORE_TABLES = ("races", "runners", "dividends")
 MODEL_DIR = ("models", "japan", "v0")
+ORDERING_MODEL = "discounted_harville"  # the command's component; the fit is provenance
 
 
 def variant(category: str, cut: float, scope: str) -> str:
@@ -453,6 +460,7 @@ def score_e2(
         "spa": None,
         "stepm": None,
         "max_test": {"status": "not_run", "reason": "no race scored"},
+        "published_max_test": None,  # run only when the own-impact max test is unavailable
         "bets": bets,
     }
     if len(frame):
@@ -461,7 +469,7 @@ def score_e2(
                                     n_boot, seed, impact_unavailable))  # fmt: skip
         except snooping.FamilySizeMismatch:
             raise
-        except (ValueError, ZeroDivisionError, FloatingPointError, np.linalg.LinAlgError) as exc:
+        except MAX_TEST_ERRORS as exc:
             # e.g. arch needs at least 3 meetings: the failed max test is a record too
             error = f"{type(exc).__name__}: {exc}"[:500]
             params = {"family": E2_RULE_ID, "spec_hash": FROZEN_E2_HASH, "error": error,
@@ -472,18 +480,59 @@ def score_e2(
     return result
 
 
+MAX_TEST_ERRORS = (ValueError, ZeroDivisionError, FloatingPointError, np.linalg.LinAlgError)
+PUBLISHED_MAX_TEST = "spa+stepm-published"  # the published-payout sensitivity's variant
+
+
 def _max_test(
     append, registry, frame, components, data_builds, sha, n_boot, seed, impact_unavailable
 ) -> dict:
-    """SPA and StepM over the 16 decision-time members, per-race loss stake - payout, meetings as
-    clusters. Where a floor-bound winner leaves the impact-adjusted payout unavailable the
-    published payout stands in: a 110 yen floor still binds after our stake, and boost-withheld
-    races are already excluded. How many races that touched is a metric, never a param."""
+    """SPA and StepM over the 16 decision-time members, per-race loss stake - payout at the
+    own-impact dividend, meetings as clusters. A member's floor-bound hit has no own-impact
+    payout, and the published dividend is no stand-in (our stake on the losers can lift a 110 yen
+    floor to 120): the own-impact max test is then unavailable, recorded with its reason and no
+    p-value, and SPA + StepM over the same 16 members at every hit's published dividend (as
+    ``roi_published``) is recorded beside it as ``PUBLISHED_MAX_TEST``, a sensitivity under
+    MAX_TEST_ID that adds no variant to the rule family. A floor-bound winner no member selected
+    pays 0 to every member and leaves the own-impact test intact. The race count is a metric."""
     frame = frame.set_index("race_id")
     names = [variant(*key) for key in MEMBERS]
-    paid = {n: frame[("payout", n)].where(frame[("payout", n)].notna(), frame[("published", n)])
-            for n in names}  # fmt: skip
-    losses = pd.DataFrame({n: frame[("stake", n)] - paid[n] for n in names})
+    count = FoldMetric("development", "impact_unavailable_races", float(impact_unavailable), None,
+                       None, len(frame))  # fmt: skip
+    unidentified = [n for n in names if frame[("payout", n)].isna().any()]
+    run = (append, registry, frame, names, components, data_builds, sha, n_boot, seed, count)
+    if not unidentified:
+        return _spa_stepm(*run, payout="payout", name="spa+stepm")
+    reason = (f"{len(unidentified)} of {len(names)} members hold a floor-bound (100 or 110 yen) "
+              f"hit, which has no own-impact payout")  # fmt: skip
+    params = {"family": E2_RULE_ID, "spec_hash": FROZEN_E2_HASH, "unavailable": reason,
+              "block_size": BLOCK_SIZE, "stepm_fwer": STEPM_FWER}  # fmt: skip
+    metrics = [count, FoldMetric("development", "members_impact_unavailable",
+                                 float(len(unidentified)), None, None, len(frame))]  # fmt: skip
+    append(_record(MAX_TEST_ID, "spa+stepm", params, components, metrics, data_builds, sha,
+                   status="failed"))  # fmt: skip
+    out = {"spa": None, "stepm": None, "max_test": {"status": "unavailable", "reason": reason}}
+    try:
+        published = _spa_stepm(*run, payout="published", name=PUBLISHED_MAX_TEST)
+    except snooping.FamilySizeMismatch:
+        raise
+    except MAX_TEST_ERRORS as exc:
+        error = f"{type(exc).__name__}: {exc}"[:500]
+        params = {"family": E2_RULE_ID, "spec_hash": FROZEN_E2_HASH, "error": error,
+                  "block_size": BLOCK_SIZE, "stepm_fwer": STEPM_FWER}  # fmt: skip
+        append(_record(MAX_TEST_ID, PUBLISHED_MAX_TEST, params, components, [count], data_builds,
+                       sha, status="failed"))  # fmt: skip
+        published = {"spa": None, "stepm": None, "max_test": {"status": "failed", "error": error}}
+    out["published_max_test"] = published
+    return out
+
+
+def _spa_stepm(
+    append, registry, frame, names, components, data_builds, sha, n_boot, seed, count, *,
+    payout: str, name: str,
+) -> dict:  # fmt: skip
+    """SPA + StepM on losses stake - frame[(payout, member)], recorded as variant `name`."""
+    losses = pd.DataFrame({n: frame[("stake", n)] - frame[(payout, n)] for n in names})
     kw = {"clusters": frame["meeting_id"], "order": pd.to_datetime(frame["race_date"]),
           "block_size": BLOCK_SIZE, "n_boot": n_boot, "seed": seed, "registry": registry,
           "family_id": E2_RULE_ID}  # fmt: skip
@@ -498,8 +547,7 @@ def _max_test(
         FoldMetric("development", "stepm_superior", float(len(stepm.superior)), None, None,
                    stepm.n_clusters),
         FoldMetric("development", "family_size", float(spa.family_size), None, None, spa.n_rules),
-        FoldMetric("development", "impact_unavailable_races", float(impact_unavailable), None,
-                   None, len(frame)),
+        count,
     ]  # fmt: skip
     status, max_test = "scored", {"status": "scored"}
     if math.isfinite(spa.pvalue):
@@ -508,8 +556,7 @@ def _max_test(
     else:  # degenerate bootstrap (e.g. one meeting): recorded as failed, not dropped
         status, params["error"] = "failed", "SPA p-value not finite"
         max_test = {"status": "failed", "error": params["error"]}
-    append(_record(MAX_TEST_ID, "spa+stepm", params, components, metrics, data_builds, sha,
-                   status))  # fmt: skip
+    append(_record(MAX_TEST_ID, name, params, components, metrics, data_builds, sha, status))
     return {
         "spa": {"pvalue": spa.pvalue, "lower": spa.pvalue_lower, "upper": spa.pvalue_upper,
                 "n_rules": spa.n_rules, "family_size": spa.family_size,
@@ -531,10 +578,12 @@ def d_descriptive(
 ) -> dict:
     """D = sum_S q / sum_S p per race on the final boards, by category: n_races, mean, median;
     and ``incomplete_boards``. A race counts when its final exacta board prices every ordered pair
-    of the final Win board's horses, whatever its pool total, post time and boards at t; a race
-    with final prices that miss a pair is incomplete and left out of every category; a race
-    without final FORECAST prices is neither. Prices for horses off the final Win board (scratched)
-    are not required and not used."""
+    of the final Win board's horses with an identified share, whatever its pool total, post time
+    and boards at t. A race with final prices that miss a pair, or that quote a pair at 1.1 or less
+    (a floor-bound 100 or 110 yen, whose share is unidentified), is no full board: it is counted
+    in ``incomplete_boards`` and left out of every category. A race without final FORECAST prices
+    is neither. Prices for horses off the final Win board (scratched) are not required and not
+    used."""
     values: dict[str, list[float]] = {c: [] for c in CATEGORIES}
     incomplete = 0
     for race in races:
@@ -544,8 +593,9 @@ def d_descriptive(
         board = race["final_exacta_odds"]
         if len(win) < 2 or not board:
             continue
-        if any(board.get(pair) is None for pair in permutations(win, 2)):
-            incomplete += 1
+        pairs = list(permutations(win, 2))
+        if any(board.get(c) is None or _yen(board[c]) <= MIN_DIVIDEND for c in pairs):
+            incomplete += 1  # a pair unpriced, or priced at the floor: no full-board ratio
             continue
         p = _win_p(win)
         dividends = {tuple(c): _yen(o) for c, o in board.items()
@@ -801,6 +851,20 @@ def load_logged_races(*, minutes_before: int = MINUTES_BEFORE_POST) -> list[dict
 # --------------------------------------------------------------------------- the ordering fit
 
 
+def _oof_path(saved: str, model_dir: Path) -> Path:
+    """The out-of-fold file a manifest names. The fitter (``models.v0.ordering.run_fit``) opens
+    ``--oof`` relative to its working directory and saves the argument verbatim, so a relative
+    path resolves against the working directory; one not found there is tried in the model dir."""
+    oof = Path(saved)
+    if oof.is_absolute():
+        return oof
+    for base in (Path.cwd(), model_dir):
+        if (base / oof).exists():
+            return base / oof
+    raise FileNotFoundError(f"the ordering fit's out-of-fold file {saved} is in neither the "
+                            f"working directory nor the model dir")  # fmt: skip
+
+
 def _ordering_artifact() -> dict:
     """The ordering artifact ``current.json`` names, pinned by the sha256 of the bytes its lambda2
     is read from, and its training window: the race dates (``jra:<YYYY-MM-DD>:...``) of the
@@ -812,9 +876,7 @@ def _ordering_artifact() -> dict:
     fit = json.loads(raw)
     manifest_path = model_dir / f"manifest-ordering-{fit['fit_id']}.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    oof = Path(manifest["oof"]["path"])
-    if not oof.is_absolute():
-        oof = model_dir / oof
+    oof = _oof_path(manifest["oof"]["path"], model_dir)
     race_ids = pc.unique(pq.read_table(oof, columns=["race_id"])["race_id"]).to_pylist()
     days = {date.fromisoformat(str(rid).split(":")[1]) for rid in race_ids}
     if not days:
@@ -836,11 +898,14 @@ def _rows_digest(rows: Iterable[Mapping]) -> str:
 
 def _data_builds(info: dict, ordering: Mapping | None = None) -> dict[str, str]:
     """The builds a run consumed, the same four keys whether or not any race was logged. odds_log:
-    the consumed log content and resolved post times of every log read, and the content hash of
-    the ordering artifact that turned them into selections; per store table a fingerprint of the
-    logged development races' rows read from it."""
+    the consumed log content and resolved post times of every log read, and the fit id and
+    content hash of the ordering artifact that turned them into selections, all after the "@" (a
+    refresh: a refit is another run of the same variants, not a new variant); per store table a
+    fingerprint of the logged development races' rows read from it."""
     digest = hashlib.sha256("\n".join(info["logs"]).encode()).hexdigest()[:16]
-    refresh = digest if ordering is None else f"{digest}+ordering-{ordering['sha256'][:12]}"
+    refresh = digest
+    if ordering is not None:
+        refresh = f"{digest}+ordering-{ordering['fit_id']}-{ordering['sha256'][:12]}"
     builds = {"odds_log": f"odds_snapshots/jra/{FORECAST}@{refresh}"}
     consumed = info.get("store_rows", {})
     for name in STORE_TABLES:
@@ -873,6 +938,13 @@ def _num(value, digits: int = 3) -> str:
     return "-" if value is None else f"{value:.{digits}f}"
 
 
+def _spa_line(spa: dict, stepm: dict | None) -> str:
+    superior = stepm["superior"] if stepm else []
+    return (f"SPA p-value {_num(spa['pvalue'])} over {spa['n_rules']} rules (family size "
+            f"{spa['family_size']}, {spa['n_clusters']} meetings); StepM superior: "
+            f"{', '.join(superior) or 'none'}.")  # fmt: skip
+
+
 def _render(summary: dict) -> str:
     lines = [f"# #281 E2 ratio-cut rules, {E2_RULE_ID} ({summary['git_sha'][:12]})", "",
              f"Races scored {summary['n_races']}, meetings {summary['n_meetings']}; "
@@ -899,15 +971,20 @@ def _render(summary: dict) -> str:
     if max_test.get("error") or max_test.get("reason"):
         lines.append(f"Reason: {max_test.get('error') or max_test.get('reason')}")
     if spa:
-        superior = summary["stepm"]["superior"] if summary["stepm"] else []
-        lines.append(f"SPA p-value {_num(spa['pvalue'])} over {spa['n_rules']} rules (family "
-                     f"size {spa['family_size']}, {spa['n_clusters']} meetings); StepM superior: "
-                     f"{', '.join(superior) or 'none'}. A floor-bound winner's race enters at "
-                     f"its published payout.")  # fmt: skip
+        lines.append(_spa_line(spa, summary["stepm"]) + " Payouts at the own-impact dividend.")
+    published = summary.get("published_max_test")
+    if published:
+        lines += ["", "Published-payout sensitivity (every hit at its published dividend, as "
+                  "published ROI; not the own-impact test): "
+                  f"{published['max_test']['status']}."]  # fmt: skip
+        if published["max_test"].get("error"):
+            lines.append(f"Reason: {published['max_test']['error']}")
+        if published["spa"]:
+            lines.append(_spa_line(published["spa"], published["stepm"]))
     d = summary["d"]
     lines += ["", "## D, the full-board category ratio on the final boards", "",
-              f"Final boards missing a priced pair of the final field (left out): "
-              f"{d['incomplete_boards']}.", "",
+              f"Final boards missing a priced pair of the final field, or quoting a pair at 1.1 "
+              f"or less (unidentified share), left out: {d['incomplete_boards']}.", "",
               "| category | races | mean | median |", "| --- | --- | --- | --- |"]  # fmt: skip
     for category in CATEGORIES:
         row = d[category]
@@ -944,7 +1021,9 @@ def exacta_rules_command() -> None:
         data_builds = _data_builds(info)
         ordering = _ordering_artifact()
         data_builds = _data_builds(info, ordering)
-        components = {"ordering": ordering["fit_id"]}
+        # the model, not the fit: the fit id and hash are provenance in data_builds (a refit is
+        # another run of the same 16 members)
+        components = {"ordering": ORDERING_MODEL}
         result = score_e2(
             races, registry=registry, git_sha=sha, lambda2=ordering["lambda2"],
             data_builds=data_builds, components=components,
@@ -972,5 +1051,6 @@ def exacta_rules_command() -> None:
     write_report(out / f"{stem}.md", _render(summary), sources=SOURCES)
     write_summary(registry, summary_dir(COUNTRY))
     keys = ("read", "data_builds", "logged_meetings_with_forecast", "n_races", "n_meetings",
-            "excluded", "impact_unavailable", "spa", "stepm", "max_test", "d", "proxy")  # fmt: skip
+            "excluded", "impact_unavailable", "spa", "stepm", "max_test", "published_max_test",
+            "d", "proxy")  # fmt: skip
     typer.echo(json.dumps({k: summary[k] for k in keys}, indent=1))

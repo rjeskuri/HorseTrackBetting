@@ -90,6 +90,28 @@ none.
   on different inputs (more logs, another ordering artifact) keep both reports. No latest
   pointer is written: the newest report is the newest file.
 
+### Round-4 changes to the v4 contract (supersede the bullets above where they differ)
+
+- **One dashed freeze id.** `exacta_run freeze` (#131's command) also freezes E2's v4 spec under
+  `japan-131-exacta-rule-v4` (`exacta_run.E2_REGISTRY_ID`, which `E2_RULE_ID` now is), so the real
+  freeze-then-score workflow runs without a hand-made freeze. The slashed freeze stays for #131.
+- **The fit is provenance.** The command's component is the model (`ordering:
+  discounted_harville`); the fit id and artifact hash sit after the "@" of the `odds_log` build:
+  `odds_snapshots/jra/FORECAST@<logs>+ordering-<fit_id>-<sha12>`. A refit is another run of the
+  same 16 members, and the family size (and the max test's) stays 16.
+- **Out-of-fold path.** A relative `oof.path` in the ordering manifest resolves against the
+  working directory, as the fitter (`models/v0/ordering.py::run_fit`) opened and saved it; one not
+  found there is tried in the model dir. The fitter is unchanged.
+- **No published stand-in in the own-impact max test.** When any member's hit is floor-bound
+  (¥100 or ¥110), the own-impact SPA + StepM is unavailable: a failed `spa+stepm` record with the
+  reason in `params["unavailable"]` and no p-value (our stake on the losers can lift a ¥110 floor
+  to ¥120, so the published figure is no own-impact payout). Beside it, `spa+stepm-published`
+  under `MAX_TEST_ID` is a sensitivity over the same 16 members with every hit at its published
+  dividend (as `roi_published`); it adds no variant to the rule family. A floor-bound winner no
+  member selected leaves the own-impact test intact.
+- **D needs identified shares.** A final board quoting any pair of the final field at 1.1 or less
+  is no full board: it is counted in `incomplete_boards` and left out of every category.
+
 ## Run of 2026-11-27 (git `483f790`), v3, history
 
 - Inputs as in the run below: 2 development day folders, 2 odds logs, 0 `FORECAST` rows, 0

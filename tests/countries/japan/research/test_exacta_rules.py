@@ -64,6 +64,7 @@ import math
 import shutil
 import statistics
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from itertools import permutations
@@ -78,6 +79,7 @@ from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.registry import Registry, default_registry
 from horsetrack.core.eval import registry as registry_module
 from horsetrack.countries.japan import odds_log, takeout
+from horsetrack.countries.japan.models.v0 import ordering as ordering_fitter
 from horsetrack.countries.japan.research import exacta_impact, exacta_run
 from horsetrack.countries.japan.research.exacta_study import E2_ID, family_specs
 from horsetrack.countries.japan.research import exacta_rules as er
@@ -1878,9 +1880,10 @@ def write_fits(
     return model / ordering
 
 
-@pytest.fixture
-def command(data_dir, tmp_path, monkeypatch):
-    """The command against tmp data and a tmp summary dir; the repo's summary must not change."""
+@contextmanager
+def command_env(data_dir, tmp_path, monkeypatch):
+    """The command against tmp data and a tmp summary dir; the repo's summary must not change.
+    Yields the tmp Japan registry with nothing frozen in it."""
     before = _snapshot(REPO_SUMMARY)
     summary = tmp_path / "summary" / "japan"
     summary.mkdir(parents=True)
@@ -1889,9 +1892,7 @@ def command(data_dir, tmp_path, monkeypatch):
     monkeypatch.setattr(exacta_run, "summary_dir", lambda country: summary, raising=False)
     monkeypatch.setattr(exacta_run, "_git_sha", lambda: SHA)
     write_fits(data_dir)
-    reg = default_registry("japan")
-    reg.freeze_family(RULE_ID, family_specs()[E2_ID])
-    yield reg
+    yield default_registry("japan")
     after = _snapshot(REPO_SUMMARY)
     if after != before:
         for name in set(after) - set(before):
@@ -1899,6 +1900,21 @@ def command(data_dir, tmp_path, monkeypatch):
         for name, raw in before.items():
             (REPO_SUMMARY / name).write_bytes(raw)
         pytest.fail("the test wrote the repository's committed Japan summary (restored)")
+
+
+@pytest.fixture
+def command(data_dir, tmp_path, monkeypatch):
+    """The command's environment with E2 frozen by hand under the dashed id."""
+    with command_env(data_dir, tmp_path, monkeypatch) as reg:
+        reg.freeze_family(RULE_ID, family_specs()[E2_ID])
+        yield reg
+
+
+@pytest.fixture
+def unfrozen_command(data_dir, tmp_path, monkeypatch):
+    """The command's environment with nothing frozen: the test runs the real freeze."""
+    with command_env(data_dir, tmp_path, monkeypatch) as reg:
+        yield reg
 
 
 def reports(suffix: str) -> list[Path]:
@@ -2182,3 +2198,276 @@ def test_the_markdown_report_renders_the_max_test_d_and_the_proxy(command, data_
     every = [line for line, cells in rows if "all" in cells]
     assert len(headline) == len(every) == 8
     assert not any("retrospective" in line.lower() for line, _ in rows)  # v4: no such label
+
+
+# ---------------------------------------------------------------------------------------------
+# Round-4 fixes on 8a58d47 (owner's restart, 2026-11-27 evening)
+# ---------------------------------------------------------------------------------------------
+
+EXTRA_VENUES = ("KYO", "HSN", "NAK", "CKY", "KOK")
+
+
+def add_meetings(data: Path, venues=EXTRA_VENUES) -> None:
+    """Five more meetings on the Tokyo day (other venues, so other meeting ids), three C1 races
+    of six each, with boards at t and a final board with a pool total: with Tokyo, six meetings,
+    so the max test can run (its block of 5 meetings needs at least 5). Call after
+    ``build_logged_day``."""
+    day_dir = log_dir(data, LOG_DAY)
+    h6 = range(1, 7)
+    races, dividends, runners = [], [], []
+    for v, venue in enumerate(venues):
+        post = {no: datetime(2026, 11, 21, 1, 5, tzinfo=UTC) + timedelta(minutes=30 * (no - 1))
+                for no in (1, 2, 3)}  # fmt: skip
+        odds_log.write_post_times(day_dir / f"{venue}.races.json", post, SIDECAR_UPDATED)
+        log = day_dir / f"{venue}.jsonl.gz"
+        for no in (1, 2, 3):
+            win_t = {1: round(3.2 + 0.3 * v + 0.1 * no, 1), 2: 3.6, 3: 4.4, 4: 6.5, 5: 9.0,
+                     6: 15.0}  # fmt: skip
+            fc_t = ratio_board(win_t)
+            win_f = {h: round(o * 1.03, 1) for h, o in win_t.items()}
+            fc_f = forecast_board(h6, 1.5 + 0.2 * no)
+            snap_t = (post[no] - timedelta(minutes=5)).isoformat()
+            snap_f = (post[no] + timedelta(minutes=1)).isoformat()
+            odds_log.append_capture(log, capture(LOG_DAY, venue, no, snap_t, win_t, fc_t,
+                                                 400_000 * (no + v)))  # fmt: skip
+            odds_log.append_capture(log, capture(LOG_DAY, venue, no, snap_f, win_f, fc_f,
+                                                 1_200_000 + 300_000 * no, final=True))  # fmt: skip
+            chosen = sorted(ref_select(win_t, fc_t, RATE, LAMBDA2)[("no_fav", 0.9)])
+            winner = chosen[(no + v) % len(chosen)] if (no + v) % 2 == 0 else (6, 5)
+            rid = f"jra:{LOG_DAY.isoformat()}:{venue}:{no:02d}"
+            races.append(store_race(LOG_DAY, venue, no, "C1"))
+            dividends.append({"race_id": rid, "pool": "FORECAST",
+                              "combination": f"{winner[0]},{winner[1]}",
+                              "dividend": 10.0 * math.floor(10 * fc_f[winner]),
+                              "is_refund": False})  # fmt: skip
+            runners.extend(store_runners(rid, h6))
+    for name, rows in (("races", races), ("dividends", dividends), ("runners", runners)):
+        rewrite_table(data, name, lambda f, rows=rows: pd.concat([f, pd.DataFrame(rows)],
+                                                                  ignore_index=True))  # fmt: skip
+
+
+def scored_metric(record, name: str):
+    found = metric_map(record).get(name)
+    return None if found is None else found.value
+
+
+def test_the_real_freeze_then_score_workflow_uses_one_dashed_id(unfrozen_command, data_dir):
+    """Finding :345 (high): ``exacta_run freeze`` (#131's freeze command, run here for real, not a
+    hand-made freeze) and the scorer use the one dashed id: the scorer accepts the freeze and
+    records its 16 members under ``japan-131-exacta-rule-v4``."""
+    reg = unfrozen_command
+    build_logged_day(data_dir)
+    assert exacta_run.main(["freeze"]) == 0
+    assert reg.frozen_spec_hash(RULE_ID) == FROZEN
+    er.exacta_rules_command()  # no refusal
+    members = reg.records(RULE_ID)
+    assert len(members) == 16 and {r.status for r in members} == {"scored"}
+    assert all(r.params["spec_hash"] == FROZEN for r in members)
+    assert all("roi_published" in metric_map(r) or scored_metric(r, "n_bets") == 0
+               for r in members)  # fmt: skip
+    assert not [r for r in reg.records(MAX_ID) if r.variant == "run"]  # no failed run record
+    families = {r.family_id for r in reg.records()}
+    assert families <= {RULE_ID, MAX_ID} and not any("/" in f for f in families)
+
+
+def write_refit(data: Path, *, fit_id: str, lambda2: float) -> Path:
+    """A refit of the ordering model: another fit id, other lambdas, on the same out-of-fold
+    file, named by current.json. Returns the new artifact."""
+    model = data.joinpath(*MODEL_DIR)
+    oof = model / "win_calibration_oof-winfit281.parquet"
+    artifact = model / f"ordering-{fit_id}.json"
+    files = {
+        artifact.name: {"family": "discounted_harville", "fit_id": fit_id,
+                        "lambdas": [lambda2, 0.88], "n_races": 8},
+        f"manifest-ordering-{fit_id}.json": {"fit_id": fit_id, "oof": {"path": str(oof)}},
+        "current.json": {"win": "win-winfit281.json", "ordering": artifact.name},
+    }  # fmt: skip
+    for name, body in files.items():
+        (model / name).write_text(json.dumps(body), encoding="utf-8")
+    return artifact
+
+
+def names_fit(record, fit_id: str) -> bool:
+    return any(fit_id in str(value) for value in record.data_builds.values())
+
+
+def test_a_refit_with_a_new_fit_id_adds_runs_not_variants(command, data_dir):
+    """Finding :947: a refit (new fit id, new lambdas) is another run of the same 16 members,
+    not 16 new variants: the family stays 16 and so does the max test's family size. Each run
+    still names its fit id in its provenance (a data_builds value)."""
+    build_logged_day(data_dir)
+    add_meetings(data_dir)
+    er.exacta_rules_command()
+    (first_max,) = [r for r in command.records(MAX_ID) if r.variant != "run"]
+    assert first_max.status == "scored"  # three meetings: the max test runs
+    assert scored_metric(first_max, "family_size") == 16
+
+    write_refit(data_dir, fit_id="ordrefit9b", lambda2=0.87)
+    er.exacta_rules_command()
+    members = command.records(RULE_ID)
+    assert len(members) == 32
+    assert command.family_size(RULE_ID) == 16
+    tests = [r for r in command.records(MAX_ID) if r.variant != "run"]
+    assert len(tests) == 2 and {r.status for r in tests} == {"scored"}
+    assert [scored_metric(r, "family_size") for r in tests] == [16.0, 16.0]
+    for fit_id, other, records in (
+        ("ordfit281", "ordrefit9b", [*members[:16], tests[0]]),
+        ("ordrefit9b", "ordfit281", [*members[16:], tests[1]]),
+    ):
+        assert all(names_fit(r, fit_id) for r in records), fit_id
+        assert not any(names_fit(r, other) for r in records), fit_id
+
+
+OOF_FILE = "win_calibration_oof-winfit281.parquet"
+
+
+def fit_ordering_from(workdir: Path, data: Path, *, through: date) -> str:
+    """Run the real ordering fitter (``models.v0.ordering.run_fit``) from `workdir` with a
+    cwd-relative ``--oof`` argument, as `python -m ... --fit --oof fits/<file>` would; the fit
+    goes to the model dir. Its out-of-fold races run on four weekly days through `through`, and
+    the store's runners carry their finishes (``build_logged_day`` rewrites the store after).
+    Returns the fit id."""
+    rng = np.random.default_rng(through.toordinal())
+    p_cal = [0.3, 0.24, 0.18, 0.13, 0.09, 0.06]
+    oof, results = [], []
+    for k in range(4):
+        day = through - timedelta(days=7 * k)
+        for no in range(1, 5):
+            rid = f"jra:{day.isoformat()}:TOK:{no:02d}"
+            finish = rng.permutation(6) + 1
+            for h in range(1, 7):
+                oof.append({"race_id": rid, "horse_no": h, "p_cal": p_cal[h - 1]})
+                results.append({"race_id": rid, "horse_no": h, "finish_pos": int(finish[h - 1]),
+                                "dead_heat": False, "is_scratched": False})  # fmt: skip
+    (workdir / "fits").mkdir(parents=True)
+    pd.DataFrame(oof).to_parquet(workdir / "fits" / OOF_FILE, index=False)
+    store = data / "processed" / "jra"
+    store.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(results).to_parquet(store / "runners.parquet", index=False)
+    manifest = ordering_fitter.run_fit(Path("fits") / OOF_FILE, data.joinpath(*MODEL_DIR))
+    return manifest["fit_id"]
+
+
+@pytest.mark.parametrize("manifest_form", ["as_fitted", "legacy_relative"])
+@pytest.mark.parametrize("through, overlaps", [(OOF_THROUGH, False), (LOG_DAY, True)])
+def test_a_cwd_relative_oof_path_from_the_fitter_is_found(
+    command, data_dir, tmp_path, monkeypatch, manifest_form, through, overlaps
+):
+    """Finding :817: the fitter opens ``--oof`` relative to the working directory and saves the
+    argument verbatim. Scoring from the fitter's working directory finds that file (the oof is
+    not in the model dir), whether the manifest holds what the fitter now writes or the legacy
+    cwd-relative string, and the training window is read from it: a window reaching the scored
+    day still gives no scored ROI."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    fit_id = fit_ordering_from(workdir, data_dir, through=through)
+    model = data_dir.joinpath(*MODEL_DIR)
+    manifest_path = model / f"manifest-ordering-{fit_id}.json"
+    if manifest_form == "legacy_relative":
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["oof"]["path"] = str(Path("fits") / OOF_FILE)
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert not (model / "fits" / OOF_FILE).exists()
+    current = json.loads((model / "current.json").read_text(encoding="utf-8"))
+    current["ordering"] = f"ordering-{fit_id}.json"
+    (model / "current.json").write_text(json.dumps(current), encoding="utf-8")
+    build_logged_day(data_dir)
+    if overlaps:
+        run_command()
+        assert not [r for r in command.records(RULE_ID)
+                    if r.status == "scored" and "roi" in metric_map(r)]  # fmt: skip
+        failed = [r for r in command.records() if r.status == "failed"]
+        assert failed and not any("FileNotFoundError" in json.dumps(r.params) for r in failed)
+        return
+    er.exacta_rules_command()  # no FileNotFoundError
+    members = command.records(RULE_ID)
+    assert len(members) == 16 and {r.status for r in members} == {"scored"}
+    assert any("roi" in metric_map(r) for r in members)
+    assert all(names_fit(r, fit_id) or any(fit_id in str(v) for v in r.components.values())
+               for r in members)  # fmt: skip
+
+
+def max_test_records(reg) -> tuple[list, list]:
+    """(own-impact, published-payout sensitivity) max-test records: the sensitivity record says
+    "published" in its family id or variant."""
+    found = [r for r in reg.records() if r.family_id.startswith(MAX_ID) and r.variant != "run"]
+    published = [r for r in found if "published" in f"{r.family_id} {r.variant}".lower()]
+    return [r for r in found if r not in published], published
+
+
+@pytest.mark.parametrize("floor", FLOOR)
+def test_the_own_impact_max_test_takes_no_published_dividend_for_a_floor_bound_hit(tmp_path, floor):
+    """Finding :484: a floor-bound (100 or 110 yen) winner that a member selected has no
+    own-impact payout (our bets on the losers can lift a 110 yen floor to 120), so the own-impact
+    max test is unavailable, with a reason, and recorded without a p-value; a separate
+    published-payout sensitivity SPA + StepM over the same 16 members is recorded and labelled.
+    A floor-bound winner no member selected leaves the own-impact max test intact (a miss pays
+    0 whatever the winning investment)."""
+    races = make_races(281, DAYS)
+    hit = next(i for i, r in enumerate(races)
+               if r["exacta"][0][0] in ref_select(r["win_odds_t"], r["exacta_odds_t"], RATE,
+                                                  LAMBDA2)[("no_fav", 0.9)])  # fmt: skip
+    hit_races = list(races)
+    hit_races[hit] = dict(races[hit], exacta=[(races[hit]["exacta"][0][0], floor, False)])
+    reg = new_registry(tmp_path / "hit")
+    result = er.score_e2(hit_races, registry=reg, git_sha="abc1234", lambda2=LAMBDA2,
+                         data_builds=BUILDS, n_boot=50, seed=131)  # fmt: skip
+    assert result["impact_unavailable"] == 1
+    assert result["max_test"]["status"] == "unavailable"
+    assert result["max_test"].get("reason")
+    own, published = max_test_records(reg)
+    assert own, "the unavailable own-impact max test is a registry record too"
+    for r in own:
+        assert r.status != "scored" and "spa_pvalue" not in metric_map(r)
+    (sens,) = published
+    assert sens.status == "scored"
+    assert scored_metric(sens, "family_size") == 16
+    assert 0.0 <= scored_metric(sens, "spa_pvalue") <= 1.0
+
+    selected = set()
+    for r in races:
+        chosen = ref_select(r["win_odds_t"], r["exacta_odds_t"], RATE, LAMBDA2)
+        selected |= {(r["race_id"], c) for c in chosen[("no_fav", 0.9)] | chosen[
+            ("fav_second", 0.9)]}  # fmt: skip
+    miss = next(i for i, r in enumerate(races)
+                if (r["race_id"], r["exacta"][0][0]) not in selected)  # fmt: skip
+    miss_races = list(races)
+    miss_races[miss] = dict(races[miss], exacta=[(races[miss]["exacta"][0][0], floor, False)])
+    reg2 = new_registry(tmp_path / "miss")
+    intact = er.score_e2(miss_races, registry=reg2, git_sha="abc1234", lambda2=LAMBDA2,
+                         data_builds=BUILDS, n_boot=50, seed=131)  # fmt: skip
+    assert intact["impact_unavailable"] == 1 and intact["max_test"]["status"] == "scored"
+    own2, _ = max_test_records(reg2)
+    assert [r.status for r in own2] == ["scored"]
+    assert 0.0 <= scored_metric(own2[0], "spa_pvalue") <= 1.0
+
+
+@pytest.mark.parametrize("quote", [1.0, 1.1])
+def test_d_counts_a_final_board_with_a_floor_quote_as_unidentified_not_full(quote):
+    """Finding :547: a final board quoting a pair at 1.0 or 1.1 (100 or 110 yen) prices every
+    pair, but that pair's share is unidentified, so the board is no full-board ratio: it is left
+    out of every category and counted among D's non-full boards. A 1.2 quote is identified: that
+    board stays a full board."""
+    a = d_race("a", {1: 2.0, 2: 4.0, 3: 6.5, 4: 9.0, 5: 14.0, 6: 22.0},
+               {"fav_first": 1.3, "fav_second": 1.0, "no_fav": 1.0})  # fmt: skip
+    b = d_race("b", {1: 8.0, 2: 3.1, 3: 3.6, 4: 6.0, 5: 11.0, 6: 19.0, 7: 40.0},
+               {"fav_first": 1.1, "fav_second": 0.9, "no_fav": 1.0})  # fmt: skip
+    f = d_race("f", {1: 5.5, 2: 7.0, 3: 1.7, 4: 12.0, 5: 25.0},
+               {"fav_first": 2.0, "fav_second": 0.6, "no_fav": 0.8})  # fmt: skip
+    floor_board = d_race("g", {1: 1.4, 2: 4.5, 3: 7.0, 4: 11.0, 5: 18.0},
+                         {"fav_first": 0.5, "fav_second": 2.4, "no_fav": 2.2})  # fmt: skip
+    floor_board["final_exacta_odds"][(1, 2)] = quote
+    edge = d_race("h", {1: 1.6, 2: 3.8, 3: 6.0, 4: 10.0, 5: 16.0, 6: 30.0},
+                  {"fav_first": 0.9, "fav_second": 1.2, "no_fav": 1.1})  # fmt: skip
+    edge["final_exacta_odds"][(1, 2)] = 1.2
+    got = er.d_descriptive([a, floor_board, b, edge, f], lambda2=LAMBDA2)
+    counted = {k: v for k, v in got.items() if k not in ALL_CATS}
+    assert sum(counted.values()) == 1, counted  # the floor-quote board, once
+    full = [a, b, edge, f]
+    ratios = [ref_d(r["final_win_odds"], r["final_exacta_odds"], RATE) for r in full]
+    for cat in ALL_CATS:
+        values = [r[cat] for r in ratios]
+        assert got[cat]["n_races"] == 4, cat
+        assert got[cat]["mean"] == pytest.approx(statistics.mean(values), rel=1e-9), cat
+        assert got[cat]["median"] == pytest.approx(statistics.median(values), rel=1e-9), cat
