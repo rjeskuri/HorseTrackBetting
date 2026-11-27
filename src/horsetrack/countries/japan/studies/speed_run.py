@@ -24,7 +24,8 @@ cell alone? The null is that it does not.
   replicate here draws whole meetings the same way and recomputes both RMSEs over the pooled races
   of the draw, model and baseline on the same draw (paired).
 - `rmse_table`: the overall row and one row per distinct `by` value, each with its own bounds.
-- `read_inputs()`: the JRA store's races and runners, column-scoped, holdout days dropped.
+- `read_inputs(*, source='jra')`: the store copy's races and runners, column-scoped, holdout
+  days never scanned beyond their race_date (`read_store_table`).
 
 The study (`run_study`; CLI `python -m horsetrack.countries.japan.studies.speed_run --run [--out
 DIR]`, an `--out` inside the repository refused) freezes its spec in the run registry before any
@@ -65,8 +66,9 @@ from horsetrack.core.eval.registry import (
     write_summary,
 )
 from horsetrack.core.eval.reports import write_report
-from horsetrack.core.store.tables import read_table, table_path
+from horsetrack.core.store.tables import table_path, to_frame
 from horsetrack.countries.japan.models.speed import SpeedModel, SpeedSpec
+from horsetrack.countries.japan.models.v0.store import read_store_table
 
 COUNTRY = "japan"
 SOURCE = "jra"  # the store's JRA results (netkeiba); no JRDB, no JRA-VAN
@@ -420,12 +422,28 @@ def rmse_table(
 # --------------------------------------------------------------------------- reading
 
 
-def read_inputs() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """The JRA store's races (RACE_COLUMNS) and runners (RUNNER_COLUMNS and race_date),
-    column-scoped, holdout days dropped. No JRDB table is read (D21)."""
-    races = read_table(SOURCE, "races", columns=list(RACE_COLUMNS))
-    runners = read_table(SOURCE, "runners", columns=[*RUNNER_COLUMNS, "race_date"])
-    return _development(races), _development(runners)
+def read_inputs(*, source: str = SOURCE) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The store copy `source`'s races (RACE_COLUMNS) and runners (RUNNER_COLUMNS and race_date),
+    column-scoped through `read_store_table`, which never scans a holdout day's other columns, in
+    `read_table`'s dtypes. `source` defaults to the JRA store (#404: 'jravan' reads the JRA-VAN
+    copy). No JRDB table is read (D21)."""
+    return tuple(
+        to_frame(
+            name,
+            read_store_table(
+                name,
+                columns=columns,
+                start=date.min,
+                end=date.max,
+                touches_price=False,
+                source=source,
+            ),
+        )
+        for name, columns in (
+            ("races", list(RACE_COLUMNS)),
+            ("runners", [*RUNNER_COLUMNS, "race_date"]),
+        )
+    )
 
 
 # --------------------------------------------------------------------------- the study

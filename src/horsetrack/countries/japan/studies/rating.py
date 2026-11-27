@@ -25,9 +25,10 @@ mu_before, sigma_before and the member's logp; see `export_frame`). A rerun appe
 the family does not hold: one equal to a held record but for its git commit is the same run
 reproduced. The `meeting_clustered:` stage-2 record (D7's bound, which the frozen stage-2 weight
 rule reads) was added after the first run; the frozen spec is unchanged. The JRA store is
-netkeiba results: no JRDB, no JRA-VAN; `read_results(source=...)` can read another store copy
-(#404: 'jravan', the JRA-VAN copy), but `run_study` reads the JRA one. Nothing is adopted (D16)
-and the holdout is never read.
+netkeiba results: no JRDB, no JRA-VAN; `run_study(source=..., start=...)` and `read_results`
+can read another store copy (#404: 'jravan', the JRA-VAN copy) and the rating's results from an
+earlier start than RATING_FROM, both recorded in the spec. Nothing is adopted (D16) and the
+holdout is never read.
 CLI: `python -m horsetrack.countries.japan.studies.rating --run [--out DIR]`.
 """
 
@@ -92,8 +93,11 @@ MEMBER = "rating"
 STAGE2 = MetaSpec([MEMBER], quadratic=False, segment_cols=[], form="stage2", ridge=0.0)
 
 
-def build_spec(scheme, bootstrap: dict) -> dict:
-    """The family's pre-registered spec, frozen in the registry before any outcome is read."""
+def build_spec(
+    scheme, bootstrap: dict, *, sources: Sequence[str] = SOURCES, start: date = RATING_FROM
+) -> dict:
+    """The family's pre-registered spec, frozen in the registry before any outcome is read;
+    `sources` and `start` are the store copy and the first day of the rating's results."""
     return {
         "family_id": FAMILY_ID,
         "ticket": TICKET,
@@ -115,7 +119,7 @@ def build_spec(scheme, bootstrap: dict) -> dict:
             "fixed": FIXED,
             "drift_grid": list(DRIFT_GRID),
             "scale_grid": list(SCALE_GRID),
-            "input": f"every starter of the store's run races from {RATING_FROM.isoformat()} "
+            "input": f"every starter of the store's run races from {start.isoformat()} "
             "(no price read); a starter without a placing ranks tied last; race_utc is the "
             "race date at 00:00 JST plus race_no minutes",
             "member": "models.rating.rating_member over the store frame's priced starters",
@@ -130,17 +134,18 @@ def build_spec(scheme, bootstrap: dict) -> dict:
         "bootstrap": bootstrap,
         "price_era_start": PRICE_ERA_START.isoformat(),
         "adoption": "none (D16): no holdout is opened and nothing is adopted",
-        "sources": list(SOURCES),
+        "sources": list(sources),
     }
 
 
-def read_results(*, source: str = "jra") -> pd.DataFrame:
-    """The rating's input: every starter of a run race from RATING_FROM, no price column, from
-    the store copy `source` (`read_store_table`'s; 'jravan' reads the JRA-VAN copy)."""
+def read_results(*, source: str = "jra", start: date = RATING_FROM) -> pd.DataFrame:
+    """The rating's input: every starter of a run race from `start` (default RATING_FROM), no
+    price column, from the store copy `source` (`read_store_table`'s; 'jravan' reads the JRA-VAN
+    copy, whose earlier years an earlier `start` can take for the burn-in)."""
     runners = read_store_table(
         "runners",
         columns=["race_id", "horse_id", "finish_pos", "is_scratched"],
-        start=RATING_FROM,
+        start=start,
         end=date.max,
         touches_price=False,
         source=source,
@@ -148,7 +153,7 @@ def read_results(*, source: str = "jra") -> pd.DataFrame:
     races = read_store_table(
         "races",
         columns=["race_id", "race_date", "race_no", "status"],
-        start=RATING_FROM,
+        start=start,
         end=date.max,
         touches_price=False,
         source=source,
@@ -372,7 +377,9 @@ def render_report(study: Study, spec: dict, about: dict, record_ids: dict[str, s
     )
 
 
-def _record(variant: Variant, git_sha: str, builds: dict[str, str]) -> RunRecord:
+def _record(
+    variant: Variant, git_sha: str, builds: dict[str, str], sources: tuple[str, ...] = SOURCES
+) -> RunRecord:
     return RunRecord(
         hypothesis_id=variant.hypothesis_id,
         family_id=FAMILY_ID,
@@ -380,7 +387,7 @@ def _record(variant: Variant, git_sha: str, builds: dict[str, str]) -> RunRecord
         ticket=TICKET,
         git_sha=git_sha,
         data_builds=builds,
-        sources=SOURCES,
+        sources=sources,
         fold_scheme=variant.fold_scheme,
         components=variant.components,
         params=variant.params,
@@ -426,22 +433,29 @@ def export_frame(
     return pd.concat(parts, ignore_index=True)
 
 
-def run_study(out_dir: Path | None = None) -> dict:
-    """Run the pre-registered family on Japan's development data; write its report and export."""
+def run_study(
+    out_dir: Path | None = None, *, source: str = "jra", start: date = RATING_FROM
+) -> dict:
+    """Run the pre-registered family on Japan's development data; write its report and export.
+    `source` names the store copy read (#404: 'jravan' the JRA-VAN copy), for the development rows
+    and the rating's results alike, and is recorded in the spec, the records and the report;
+    `start` is the rating results' first day (default RATING_FROM)."""
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
+    sources = (source,)
     scheme = load_country_scheme(COUNTRY)
-    spec = build_spec(scheme, {**bootstrap_settings(), "seed": BOOTSTRAP_SEED})
+    boot = {**bootstrap_settings(), "seed": BOOTSTRAP_SEED}
+    spec = build_spec(scheme, boot, sources=sources, start=start)
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
     spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any outcome is read
 
-    builds = store_builds()
-    runners, races = read_development()
+    builds = store_builds(source)
+    runners, races = read_development(source=source)
     frame, counts = store_frame(runners, races)
     del runners, races
     folds = walk_forward(frame["race_date"], scheme=scheme)
     frame["p_cal"] = baseline_oof(frame, folds)
-    results = read_results()
+    results = read_results(source=source, start=start)
     counts |= {"rating_races": int(results["race_id"].nunique()), "rating_starters": len(results)}
     members, states = member_grid(results, frame)
     del results
@@ -452,7 +466,7 @@ def run_study(out_dir: Path | None = None) -> dict:
     blank = {_run_id(dataclasses.replace(r, git_sha="")): r for r in registry.records(FAMILY_ID)}
     record_ids, appended = {}, []
     for variant in study.variants:
-        record = _record(variant, git_sha, builds)
+        record = _record(variant, git_sha, builds, sources)
         same = blank.get(_run_id(dataclasses.replace(record, git_sha="")))
         if same is None:
             record_ids[variant.name] = registry.append(record)
@@ -468,7 +482,7 @@ def run_study(out_dir: Path | None = None) -> dict:
     report = write_report(
         out_dir / f"rating-{COUNTRY}-{spec_hash[:12]}.md",
         render_report(study, spec, about, record_ids),
-        sources=SOURCES,
+        sources=sources,
     )
     export_path = paths.data_dir() / "features" / COUNTRY / f"rating-{spec_hash[:12]}.parquet"
     export_path.parent.mkdir(parents=True, exist_ok=True)

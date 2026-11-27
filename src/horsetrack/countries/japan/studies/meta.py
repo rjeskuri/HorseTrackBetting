@@ -9,7 +9,7 @@ their values and the full report goes through `write_report`, outside the reposi
 read, never written or run: only the key and member columns of the file.
 
 The final Win price and outcomes come from this repository's JRA store (`read_development` takes
-a `source`, #404, 'jravan' for the JRA-VAN copy; `run_study` reads the JRA one; `read_store_table`:
+a `source`, #404, 'jravan' for the JRA-VAN copy, and so does `run_study`; `read_store_table`:
 column- and date-scoped, holdout days dropped, nothing before 2014-06-07; then `split_off`'s
 development rows; the holdout is never opened). q is the normalised final Win price. The D4
 baseline is the calibrated market (`models.v0.calibration`, a spline in ln q) fitted in-fold on
@@ -193,8 +193,21 @@ def file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build_spec(scheme: FoldScheme, bootstrap: dict, thresholds: list[float], digest: str) -> dict:
-    """The family's pre-registered spec, frozen in the registry before any outcome is read."""
+def on_store(sources: Sequence[str], source: str) -> tuple[str, ...]:
+    """`sources` with the JRA store copy 'jra' replaced by the copy `source` read (#404)."""
+    return tuple(source if s == "jra" else s for s in sources)
+
+
+def build_spec(
+    scheme: FoldScheme,
+    bootstrap: dict,
+    thresholds: list[float],
+    digest: str,
+    *,
+    source: str = "jra",
+) -> dict:
+    """The family's pre-registered spec, frozen in the registry before any outcome is read;
+    `source` is the store copy read (#404)."""
     return {
         "family_id": FAMILY_ID,
         "ticket": TICKET,
@@ -276,7 +289,7 @@ def build_spec(scheme: FoldScheme, bootstrap: dict, thresholds: list[float], dig
         "adoption": "none (D16): no holdout is opened and nothing is adopted",
         "price_era_start": PRICE_ERA_START.isoformat(),
         "decisions": SPEC_DECISIONS,
-        "sources": list(MEMBER_SOURCES),
+        "sources": list(on_store(MEMBER_SOURCES, source)),
     }
 
 
@@ -984,7 +997,13 @@ def _run_id(record: RunRecord) -> str:
     return hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 
-def _record(variant: MetaVariant, git_sha: str, builds: dict[str, str], member_build: str):
+def _record(
+    variant: MetaVariant,
+    git_sha: str,
+    builds: dict[str, str],
+    member_build: str,
+    source: str = "jra",
+):
     licensed = variant.sources != STORE_SOURCES
     return RunRecord(
         hypothesis_id=variant.hypothesis_id,
@@ -993,7 +1012,7 @@ def _record(variant: MetaVariant, git_sha: str, builds: dict[str, str], member_b
         ticket=TICKET,
         git_sha=git_sha,
         data_builds={**builds, **({"hktrack_member_oof": member_build} if licensed else {})},
-        sources=variant.sources,
+        sources=on_store(variant.sources, source),
         fold_scheme=variant.fold_scheme,
         components=variant.components,
         params=variant.params,
@@ -1002,8 +1021,10 @@ def _record(variant: MetaVariant, git_sha: str, builds: dict[str, str], member_b
     )
 
 
-def run_study(members_path: Path, out_dir: Path | None = None) -> dict:
+def run_study(members_path: Path, out_dir: Path | None = None, *, source: str = "jra") -> dict:
     """Run the pre-registered family on Japan's development data and write its private report.
+    `source` names the store copy read (#404: 'jravan' the JRA-VAN copy), recorded in place of
+    'jra' in the spec, every record's sources and the report's.
 
     Raises `paths.DataDirInsideRepo` for an `out_dir` or a member file inside the repository and
     `FamilyAlreadyFrozen` when the family is frozen with another spec (another member file)."""
@@ -1012,14 +1033,14 @@ def run_study(members_path: Path, out_dir: Path | None = None) -> dict:
     digest = file_digest(members_path)
     scheme = load_country_scheme(COUNTRY)
     boot = {**bootstrap_settings(), "seed": BOOTSTRAP_SEED}
-    spec = build_spec(scheme, boot, overlay_thresholds(), digest)
+    spec = build_spec(scheme, boot, overlay_thresholds(), digest, source=source)
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
     spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any outcome is read
 
-    builds = store_builds()
+    builds = store_builds(source)
     member_build = f"HKTrack:outputs/oof/{MEMBER_FILE}@{digest[:16]}"
-    runners, races = read_development()
+    runners, races = read_development(source=source)
     frame, counts = store_frame(runners, races)
     del runners, races
     folds = walk_forward(frame["race_date"], scheme=scheme)
@@ -1035,7 +1056,7 @@ def run_study(members_path: Path, out_dir: Path | None = None) -> dict:
     reproduced = {_run_id(dataclasses.replace(r, git_sha="")): r for r in existing}
     record_ids, appended = {}, []
     for variant in study.variants:
-        record = _record(variant, git_sha, builds, member_build)
+        record = _record(variant, git_sha, builds, member_build, source)
         same = reproduced.get(_run_id(dataclasses.replace(record, git_sha="")))
         if same is None:  # a new run: appended
             record_ids[variant.name] = registry.append(record)
@@ -1054,7 +1075,7 @@ def run_study(members_path: Path, out_dir: Path | None = None) -> dict:
     report = write_report(
         out_dir / f"meta-{COUNTRY}-{spec_hash[:12]}.md",
         render_report(study, spec, about, record_ids),
-        sources=MEMBER_SOURCES,
+        sources=on_store(MEMBER_SOURCES, source),
     )
     return {
         "family_id": FAMILY_ID,

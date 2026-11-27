@@ -73,7 +73,9 @@ def bootstrap_settings() -> dict:
     return {**calibration.bootstrap_settings(), "seed": TICKET}
 
 
-def build_spec(owner: dict, scheme: FoldScheme, bootstrap: dict, floor: float) -> dict:
+def build_spec(
+    owner: dict, scheme: FoldScheme, bootstrap: dict, floor: float, *, source: str = SOURCE
+) -> dict:
     """The family's pre-registered spec, frozen in the registry before anything is scored."""
     return {
         "family_id": FAMILY_ID,
@@ -123,7 +125,7 @@ def build_spec(owner: dict, scheme: FoldScheme, bootstrap: dict, floor: float) -
         "price_era_start": PRICE_ERA_START.isoformat(),
         "decisions": DECISIONS,
         "owner_signoff": owner["owner_signoff"],
-        "sources": [SOURCE],
+        "sources": [source],
     }
 
 
@@ -320,7 +322,9 @@ def render_report(study: Study, spec: dict, about: dict) -> str:
     return "\n".join(lines)
 
 
-def _record(variant: Variant, git_sha: str, builds: dict[str, str]) -> RunRecord:
+def _record(
+    variant: Variant, git_sha: str, builds: dict[str, str], source: str = SOURCE
+) -> RunRecord:
     return RunRecord(
         hypothesis_id=variant.hypothesis_id,
         family_id=FAMILY_ID,
@@ -328,7 +332,7 @@ def _record(variant: Variant, git_sha: str, builds: dict[str, str]) -> RunRecord
         ticket=TICKET,
         git_sha=git_sha,
         data_builds=builds,
-        sources=(SOURCE,),
+        sources=(source,),
         fold_scheme=variant.fold_scheme,
         components=variant.components,
         params=variant.params,
@@ -337,8 +341,10 @@ def _record(variant: Variant, git_sha: str, builds: dict[str, str]) -> RunRecord
     )
 
 
-def run_study(out_dir: Path | None = None) -> dict:
-    """Run the pre-registered study on Japan's development data and write its report.
+def run_study(out_dir: Path | None = None, *, source: str = SOURCE) -> dict:
+    """Run the pre-registered study on Japan's development data and write its report. `source`
+    names the store copy read (#404: 'jravan' the JRA-VAN copy), recorded in the spec, the
+    records, the data builds and the report's `write_report` sources.
 
     Raises `calibration.MissingOwnerDecision` before the store is read when
     config/calibration.yaml lacks an input, `paths.DataDirInsideRepo` for an `out_dir` inside the
@@ -346,14 +352,18 @@ def run_study(out_dir: Path | None = None) -> dict:
     owner = calibration.owner_inputs()
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     spec = build_spec(
-        owner, load_country_scheme(COUNTRY), bootstrap_settings(), calibration.win_floor()
+        owner,
+        load_country_scheme(COUNTRY),
+        bootstrap_settings(),
+        calibration.win_floor(),
+        source=source,
     )
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
     spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any development row is read
 
-    builds = calibration.store_builds()
-    runners, races = calibration.read_development()
+    builds = calibration.store_builds(source)
+    runners, races = calibration.read_development(source=source)
     frame, counts = calibration.development_frame(runners, races)
     del runners, races
     study = compute_study(frame, spec)
@@ -361,7 +371,7 @@ def run_study(out_dir: Path | None = None) -> dict:
     del frame
 
     existing = registry.records(FAMILY_ID)
-    records = [_record(v, git_sha, builds) for v in study.variants]
+    records = [_record(v, git_sha, builds, source) for v in study.variants]
     appended = [registry.append(r) for r in records if r not in existing]
     about = {
         "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
@@ -372,7 +382,7 @@ def run_study(out_dir: Path | None = None) -> dict:
     report = write_report(
         out_dir / f"calibrated-market-{COUNTRY}-{spec_hash[:12]}.md",
         render_report(study, spec, about),
-        sources=(SOURCE,),
+        sources=(source,),
     )
     return {
         "family_id": FAMILY_ID,

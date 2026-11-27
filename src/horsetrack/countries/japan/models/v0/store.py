@@ -3,8 +3,9 @@
 `read_store_table` reads `processed_dir(source)/<name>.parquet` through pyarrow.dataset (`source`
 defaults to `SOURCE`, 'jra'; `source='jravan'` reads the JRA-VAN copy): only the named columns,
 with the inclusive date range pushed into the scan as a dataset expression. Holdout days (#71's
-`is_holdout_day`, looked up at call time) are never returned, and a read that touches prices may
-not start before D10's price era (2014-06-07), whichever the source.
+`is_holdout_day`, looked up at call time) are found from a scan of `race_date` alone and excluded
+from the scan of the asked columns, so no other column of a held day is read; and a read that
+touches prices may not start before D10's price era (2014-06-07), whichever the source.
 
 When #46 lands, this may delegate to its `read_table`.
 """
@@ -72,12 +73,10 @@ def read_store_table(
     in_range = (day >= pa.scalar(start, pa.date32())) & (day <= pa.scalar(end, pa.date32()))
     if where is not None:
         in_range = in_range & where
-    scan = columns if DATE_COLUMN in columns else [*columns, DATE_COLUMN]
-    table = dataset.to_table(columns=scan, filter=in_range)
-
-    days = pc.unique(table.column(DATE_COLUMN)).to_pylist()
+    # Find the holdout days from race_date alone, so no other column of a held day is scanned.
+    dates = dataset.to_table(columns=[DATE_COLUMN], filter=in_range).column(DATE_COLUMN)
+    days = pc.unique(dates).to_pylist()
     holdout = [d for d in days if d is not None and is_holdout_day(COUNTRY, d)]
     if holdout:
-        dropped = pc.is_in(table.column(DATE_COLUMN), value_set=pa.array(holdout, pa.date32()))
-        table = table.filter(pc.invert(dropped))
-    return table.select(columns)
+        in_range = in_range & ~day.isin(pa.array(holdout, pa.date32()))
+    return dataset.to_table(columns=columns, filter=in_range)

@@ -58,9 +58,16 @@ def read_table(source: str, name: str, columns: Sequence[str] | None = None) -> 
     missing = [c for c in wanted if c not in pq.read_schema(path).names]
     if missing:
         raise ValueError(f"table {name!r} of source {source!r}: {path} has no column {missing}")
+    return to_frame(name, pq.read_table(path, columns=wanted).select(wanted))
+
+
+def to_frame(name: str, data: pa.Table) -> pd.DataFrame:
+    """An Arrow table of the declared table `name`'s columns as a frame with `read_table`'s
+    dtypes (the module docstring)."""
+    spec = _spec(name)
+    wanted = list(data.column_names)
     target = pa.schema([(c, ARROW_TYPES[spec.columns[c]]) for c in wanted])
-    data = pq.read_table(path, columns=wanted).select(wanted).cast(target)
-    frame = data.to_pandas(types_mapper=_PANDAS_TYPES.get)
+    frame = data.cast(target).to_pandas(types_mapper=_PANDAS_TYPES.get)
     for column in wanted:
         if spec.columns[column] == schemas.STR:  # pandas 3 reads strings as `str`, NaN for missing
             values = frame[column].astype(object)

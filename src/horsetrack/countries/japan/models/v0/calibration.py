@@ -42,6 +42,7 @@ from horsetrack.countries.japan.models.v0.store import (
 )
 
 COUNTRY = "japan"
+DEFAULT_SOURCES = ("jra",)  # the store copy a fit is trained on unless it says otherwise
 STORE_COLUMNS = [
     "race_id",
     "race_date",
@@ -109,6 +110,9 @@ class WinCalibration:
     train_start: date
     train_end: date
     n_races: int
+    # The store copies the fit was trained on (#404). Left out of `_content`, so out of the fit
+    # id, and out of a 'jra' fit file, so those stay as before; a file without it is a 'jra' fit.
+    sources: tuple[str, ...] = DEFAULT_SOURCES
 
     def _score(self, q: np.ndarray) -> np.ndarray:
         knots = np.asarray(self.knots, dtype=float)
@@ -149,7 +153,8 @@ class WinCalibration:
         }
 
     def to_json(self) -> str:
-        return json.dumps({"fit_id": self.fit_id, **self._content()}, indent=2)
+        provenance = {} if self.sources == DEFAULT_SOURCES else {"sources": list(self.sources)}
+        return json.dumps({"fit_id": self.fit_id, **self._content(), **provenance}, indent=2)
 
     @classmethod
     def from_json(cls, s: str) -> WinCalibration:
@@ -161,6 +166,7 @@ class WinCalibration:
             train_start=date.fromisoformat(data["train_start"]),
             train_end=date.fromisoformat(data["train_end"]),
             n_races=int(data["n_races"]),
+            sources=tuple(str(s) for s in data.get("sources", DEFAULT_SOURCES)),
         )
 
 
@@ -348,7 +354,7 @@ def run_fit(
     predictions over Japan's fold scheme, and write the fit, the predictions and a manifest.
 
     `source` names the store copy read (#404): 'jra' by default, 'jravan' the JRA-VAN copy; a
-    run on another copy than 'jra' names it in the manifest's `sources`.
+    run on another copy than 'jra' names it in the manifest's and the fit file's `sources`.
 
     An `out_dir` that resolves inside the repository raises `paths.DataDirInsideRepo` before
     anything is read or written."""
@@ -366,7 +372,7 @@ def run_fit(
     )
     frame, races_left_out, runners_dropped = _development_frame(table)
     del table
-    model = fit_win_calibration(frame, n_knots=n_knots)
+    model = dataclasses.replace(fit_win_calibration(frame, n_knots=n_knots), sources=(source,))
 
     scheme = load_country_scheme(COUNTRY)
     folds = walk_forward(frame["race_date"], scheme=scheme)
