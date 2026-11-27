@@ -229,17 +229,22 @@ re-runs nothing.
   L5, the takeout calendar, will be listed with no return.
 - Each row's selection label comes from that row's own selection inputs, not from the variant it was scored in:
   - L1: the threshold rule reads the winning set's final TRIO or QUINELLA price, so its rows are look-ahead
-    (decision time for the board-at-t variants). Its comparator, always the TRIO or always the QUINELLA on every
-    combination of the starters, reads no price and is selectable from the card, so it carries no look-ahead label:
-    one card-only row per pool, the same for every X.
+    (decision time for the board-at-t variants). Its historical comparator, always the TRIO or always the QUINELLA
+    on every combination of the starters, reads no price and is selectable from the card, so it carries no
+    look-ahead label: one card-only row per pool, the same for every X. The board-at-t comparator bets only the
+    combinations priced on the board at t (`_priced_sets`), so a partial board gives it other tickets than the
+    historical comparator and an empty board leaves it unmeasured: it is a decision-time row of its own, one per
+    pool, the same for every X, listed with no return in this revision (the board-at-t variants are data pending).
   - L4, same-bracket: the rule and its comparator, the QUINELLAs within the bracket, read only the card's brackets
     and scratches, so both rows are card only.
   - L4, market-order TIERCE: the rule takes its three horses from the final Win order, and both comparators, the
     TRIO and the box, bet those same three horses, so all three rows are look-ahead (decision time at t).
   - Each paired difference keeps its rule's label: look-ahead for the L1 final-price rows and both market-order
-    comparisons, card only for the same-bracket comparison.
-  - #451 as written labels every row from its variant's suffix, comparators included; the L1 comparator rows need
-    the card-only label instead.
+    comparisons, decision time for the L1 board-at-t rows (no return in this revision), card only for the
+    same-bracket comparison.
+  - #451 as written labels every row from its variant's suffix, comparators included; the historical L1 comparator
+    rows need the card-only label instead, and the board-at-t L1 comparator rows keep the decision-time label, one
+    row per pool rather than one per X.
 - "No rule is adopted" above now reads as a measured position: under D18 as amended, a loss-avoidance rule and its
   stated comparator will each be a row, with the paired difference beside them, and no Family L standard is needed
   before either ranks. The re-runs filed as #352 and #353 stay follow-ups.
