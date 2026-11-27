@@ -32,7 +32,10 @@ sets `module.exports` (when `module` exists) to at least:
     decimal (e.g. `≈4.8`), with class `projected`; a null one as `-`. A row with no ladder (no
     shadow entry, a pool the shadow feed lacks such as Quinella, no shadow feed) shows the plain
     row's `t20_odds`, `t10_odds`, `t5_odds`, `t2_odds` as observed and `-` for the rest (the final
-    always). A legend line in shadow.html explains the `≈` mark.
+    always). The two feeds refresh apart, so per checkpoint an observed figure wins: where the
+    shadow ladder's point is projected or null and the plain row's reference for it is not null,
+    the cell shows the plain reference as observed (no `≈`, no `projected`); an observed ladder
+    point stays when the plain reference is null. A legend line in shadow.html explains the `≈`.
   - `data-col="value"`: for WIN, `value_mean` then the band `value_q05` and `value_q95`, each with
     two decimals, in that order (e.g. `0.81 (0.74–0.88)`; no other decimal number in the cell).
     For every other pool, `value_at_low` and `value_at_high` with two decimals as `low–high`
@@ -53,6 +56,8 @@ sets `module.exports` (when `module` exists) to at least:
   The page starts polling at load and polls again every 5 s (`setTimeout`/`setInterval` with
   5000 ms). As on the board page (#498): the URL hash selects the race at load, a strip link draws
   that race alone, a poll keeps the selection and a venue tab draws that venue's default race.
+  A poll that redraws the same race keeps each pool's horizontal scroll: the `[data-pool]` element
+  (shadow.html's `.pool`, `overflow-x: auto`) has the same `scrollLeft` after the redraw as before.
 
 In the browser there is no module system: shadow.js must find board.js's functions some other way
 (board.js may expose them, e.g. on `window`, as long as test_board_page.py stays green). One test
@@ -192,6 +197,126 @@ global.fetch = async (url, init = {}) => {
     headers: new Headers({ ETag: s.etag, "Content-Type": "application/json" }),
   };
 };
+// input.liveDom: #shadow's innerHTML is parsed into fresh elements on every write, as a browser
+// replaces them (each with scrollLeft 0); querySelector(All) on #shadow and the document find them.
+const VOID_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+  "meta", "source", "track", "wbr"]);
+const unescapeAttr = (s) => s.replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+  .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+function parseAttrs(textIn) {
+  const attrs = {}, re = /([^\s=\/>"']+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?/g;
+  let m;
+  while ((m = re.exec(textIn))) {
+    const v = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4] !== undefined ? m[4]
+      : "";
+    attrs[m[1].toLowerCase()] = unescapeAttr(v);
+  }
+  return attrs;
+}
+function descendants(node) {
+  const out = [];
+  const walk = (n) => { for (const c of n.liveChildren || []) { out.push(c); walk(c); } };
+  walk(node);
+  return out;
+}
+function queryIn(node, sel) { return descendants(node).filter((e) => selectorMatches(e, sel)); }
+function liveNode(tag, attrs, parent) {
+  const cls = () => String(attrs.class || "").split(/\s+/).filter(Boolean);
+  const n = {
+    tagName: tag.toUpperCase(), nodeName: tag.toUpperCase(), nodeType: 1, attrs,
+    parentElement: parent, parentNode: parent, liveChildren: [],
+    scrollLeft: 0, scrollTop: 0, scrollWidth: 2000, clientWidth: 360, offsetLeft: 0,
+    offsetWidth: 0, offsetTop: 0,
+    get id() { return attrs.id || ""; },
+    get className() { return attrs.class || ""; },
+    get children() { return this.liveChildren.slice(); },
+    get dataset() {
+      const d = {};
+      for (const k of Object.keys(attrs)) {
+        if (!k.startsWith("data-")) continue;
+        d[k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = attrs[k];
+      }
+      return d;
+    },
+    getAttribute(k) { return k in attrs ? attrs[k] : null; },
+    hasAttribute(k) { return k in attrs; },
+    setAttribute(k, v) { attrs[k] = String(v); },
+    removeAttribute(k) { delete attrs[k]; },
+    classList: { contains: (c) => cls().includes(c), add() {}, remove() {}, toggle() {} },
+    matches(sel) { return selectorMatches(this, sel); },
+    closest(sel) {
+      for (let at = this; at; at = at.parentElement) if (selectorMatches(at, sel)) return at;
+      return null;
+    },
+    querySelectorAll(sel) { return queryIn(this, sel); },
+    querySelector(sel) { return queryIn(this, sel)[0] || null; },
+    getElementsByClassName(c) { return descendants(this).filter((e) => e.classList.contains(c)); },
+    getElementsByTagName(t) {
+      return descendants(this).filter((e) => t === "*" || e.tagName === t.toUpperCase());
+    },
+    scrollTo(a, b) {
+      if (a && typeof a === "object") {
+        if ("left" in a) this.scrollLeft = Number(a.left);
+        if ("top" in a) this.scrollTop = Number(a.top);
+      } else if (a !== undefined) {
+        this.scrollLeft = Number(a);
+        if (b !== undefined) this.scrollTop = Number(b);
+      }
+    },
+    addEventListener() {}, removeEventListener() {}, focus() {},
+    scrollIntoView(arg) { noteIntoView(this.id, arg); },
+  };
+  n.scroll = n.scrollTo;
+  return n;
+}
+function parseHtml(root, html) {
+  const top = [], stack = [root];
+  const re = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][\w-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
+  let m;
+  root.liveChildren = top;
+  while ((m = re.exec(html))) {
+    if (m[2] === undefined) continue;
+    const tag = m[2].toLowerCase();
+    if (m[1]) {
+      for (let i = stack.length - 1; i > 0; i--) {
+        if (stack[i].tagName === tag.toUpperCase()) { stack.length = i; break; }
+      }
+      continue;
+    }
+    const parent = stack[stack.length - 1];
+    const node = liveNode(tag, parseAttrs(m[3]), parent === root ? root : parent);
+    parent.liveChildren.push(node);
+    if (!VOID_TAGS.has(tag) && !/\/\s*$/.test(m[3])) stack.push(node);
+  }
+}
+if (input.liveDom) {
+  const root = el("shadow");
+  let html = "";
+  root.tagName = root.nodeName = "DIV";
+  root.attrs.id = "shadow";
+  root.liveChildren = [];
+  Object.defineProperty(root, "innerHTML", {
+    get: () => html,
+    set: (v) => { html = String(v); parseHtml(root, html); },
+    configurable: true,
+  });
+  Object.defineProperty(root, "children", {
+    get: () => root.liveChildren.slice(), configurable: true,
+  });
+  root.querySelectorAll = (sel) => queryIn(root, sel);
+  root.querySelector = (sel) => queryIn(root, sel)[0] || null;
+  root.getElementsByClassName = (c) => descendants(root).filter((e) => e.classList.contains(c));
+  document.querySelectorAll = (sel) => [root, ...descendants(root)]
+    .filter((e) => selectorMatches(e, sel));
+  document.querySelector = (sel) => document.querySelectorAll(sel)[0] || null;
+}
+function poolScroll() {
+  const out = {};
+  for (const e of queryIn(el("shadow"), "[data-pool]")) {
+    out[e.getAttribute("data-pool")] = e.scrollLeft;
+  }
+  return out;
+}
 const tick = () => new Promise((r) => setImmediate(r));
 const settle = async () => { for (let i = 0; i < 30; i++) await tick(); };
 (async () => {
@@ -210,7 +335,8 @@ const settle = async () => { for (let i = 0; i < 30; i++) await tick(); };
     for (const fn of docHandlers[t] || []) fn({ type: t });
   }
   await settle();
-  const results = [{ shadow: el("shadow").innerHTML, requests: requests.slice() }];
+  const results = [{ shadow: el("shadow").innerHTML, requests: requests.slice(),
+    pools: input.liveDom ? poolScroll() : undefined }];
   for (const step of input.steps) {
     if (step.servers) servers = step.servers;
     const before = requests.length;
@@ -228,10 +354,16 @@ const settle = async () => { for (let i = 0; i < 30; i++) await tick(); };
       clickChain(step.click, step.root || "shadow");
     } else if (typeof step.hash === "string") {
       location.hash = step.hash;
+    } else if (step.scroll) {  // the reader scrolls pools sideways: {pool code: scrollLeft}
+      for (const e of queryIn(el("shadow"), "[data-pool]")) {
+        const code = e.getAttribute("data-pool");
+        if (code in step.scroll) e.scrollLeft = step.scroll[code];
+      }
     }
     await settle();
     results.push({ shadow: el("shadow").innerHTML, hash: location.hash,
-      requests: requests.slice(before), viewport: viewportState() });
+      requests: requests.slice(before), viewport: viewportState(),
+      pools: input.liveDom ? poolScroll() : undefined });
   }
   fs.writeFileSync(OUT, JSON.stringify({ results, timers: timers.map((t) => t.delay) }));
 })().catch((e) => { console.error(e && e.stack ? e.stack : String(e)); process.exit(1); });
@@ -245,6 +377,7 @@ def run_js(
     servers: dict | None = None,
     browser: bool = False,
     hash_: str = "",
+    live_dom: bool = False,
 ) -> dict:
     for path in (SCRIPT, BOARD_JS):
         assert path.is_file(), f"{path.relative_to(REPO)} is missing"
@@ -255,6 +388,7 @@ def run_js(
         "browser": browser,
         "now": ms(NOW),
         "hash": hash_,
+        "liveDom": live_dom,
     }
     proc = subprocess.run(
         [NODE, "-e", HARNESS, str(BOARD_JS), str(SCRIPT), str(out)],
@@ -1108,6 +1242,96 @@ def test_the_ladder_shows_observed_and_projected_odds(tmp_path):
     assert any("≈" in text(e) for e in legends), "no legend line explains the ≈ mark"
 
 
+def ref_line(combo, odds, t20, t10, t5, t2, *, hi=None) -> dict:
+    """A plain row with its four references as given."""
+    out = line(combo, odds, hi=hi, mm=0.0, t20=None, t2=None)
+    out.update(t20_odds=t20, t10_odds=t10, t5_odds=t5, t2_odds=t2)
+    out["move_t20_pct"] = None if t20 is None else round((odds / t20 - 1) * 100, 1)
+    return out
+
+
+@needs_node
+def test_an_observed_plain_reference_wins_over_a_cached_projection(tmp_path):
+    """The plain feed has crossed T-5 (and for some rows T-2, T-10) while the cached shadow feed
+    still projects those checkpoints or has them null: the cell shows the plain feed's observed
+    figure. Where the plain feed has null, the ladder's observed point stays."""
+    post = jst(10, 2, 30)  # NOW 10:01, 1.5 minutes to post on the plain feed
+    # combination: (plain row, shadow ladder, the five cells wanted)
+    table = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.8, 2.5, 2.3, None),
+                  (seen(2.8), seen(2.5), ahead(2.21), ahead(2.14), ahead(2.07)),
+                  (seen(2.8), seen(2.5), seen(2.3), ahead(2.14), ahead(2.07))),
+            "2": (ref_line("2", 5.8, 4.6, 4.9, 5.6, 5.9),
+                  (seen(4.6), seen(4.9), None, ahead(5.71), ahead(6.02)),
+                  (seen(4.6), seen(4.9), seen(5.6), seen(5.9), ahead(6.02))),
+            "3": (ref_line("3", 8.6, 9.3, None, 8.8, None),
+                  (seen(9.3), seen(9.7), ahead(9.66), None, None),
+                  (seen(9.3), seen(9.7), seen(8.8), None, None)),
+            "4": (ref_line("4", 31.0, None, 28.7, 33.1, 35.2),
+                  (None, seen(28.7), ahead(33.8), ahead(36.1), ahead(41.27)),
+                  (None, seen(28.7), seen(33.1), seen(35.2), ahead(41.27))),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.4, 1.3, 1.24, None, hi=1.6),
+                  (seen(1.4), seen(1.3), ahead(1.21), ahead(1.08), ahead(1.0)),
+                  (seen(1.4), seen(1.3), seen(1.24), ahead(1.08), ahead(1.0))),
+            "2": (ref_line("2", 1.9, 1.7, 1.8, 1.8, None, hi=2.7),
+                  (seen(1.7), seen(1.8), seen(1.8), ahead(2.04), ahead(2.18)),
+                  (seen(1.7), seen(1.8), seen(1.8), ahead(2.04), ahead(2.18))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.7, 3.4, 3.2, None, hi=4.1),
+                    (seen(3.7), ahead(3.52), ahead(3.17), ahead(3.02), ahead(2.88)),
+                    (seen(3.7), seen(3.4), seen(3.2), ahead(3.02), ahead(2.88))),
+            "1,3": (ref_line("1,3", 5.6, 5.2, 5.9, None, None, hi=7.2),
+                    (seen(5.2), seen(5.9), seen(6.1), ahead(6.3), ahead(6.5)),
+                    (seen(5.2), seen(5.9), seen(6.1), ahead(6.3), ahead(6.5))),
+        },
+    }  # fmt: skip
+    plain = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW),
+        "venues": [
+            {
+                "venue": "TOK",
+                "races": [
+                    race("TOK", 9, post, NOW, {
+                        code: pool(*(r for r, _, _ in rows.values()))
+                        for code, rows in table.items()
+                    })
+                ],
+            }
+        ],
+    }  # fmt: skip
+    values = {"WIN": win(0.9, 0.8, 1.0)}
+    shadow = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW - timedelta(minutes=3)),
+        "models": {"nowcast": "now-c3"},
+        "races": [
+            shadow_race("TOK", 9, post, 5, {
+                code: {
+                    combo: {**values.get(code, rng(0.6, 0.8)),
+                            "ladder": dict(zip(LADDER_KEYS, ladder, strict=True))}
+                    for combo, (_, ladder, _) in rows.items()
+                }
+                for code, rows in table.items()
+            })
+        ],
+    }  # fmt: skip
+    (page,) = (soup(h) for h in results([call("renderShadow", plain, shadow, {"now": ms(NOW)})],
+                                        tmp_path))  # fmt: skip
+    block = race_block(page, rid("TOK", 9))
+    replaced = 0
+    for code, rows in table.items():
+        for combo, (_row, ladder, want) in rows.items():
+            row_el = row_of(pool_block(block, code), combo)
+            check_ladder_row(row_el, list(want), (code, combo))
+            replaced += sum(w != lad for w, lad in zip(want, ladder, strict=True))
+    assert replaced >= 7, replaced  # the fixture has stale points on both sides of the cutoff
+
+
 def _write_logged_day(captures: dict[datetime, dict[str, float]], post: datetime) -> None:
     """One TOK race (5R) of synthetic WIN captures, and its post time, under the data dir."""
     from horsetrack.core import paths
@@ -1371,6 +1595,40 @@ def test_a_newly_selected_race_moves_the_viewport_and_a_poll_leaves_it(tmp_path)
             assert moved_to_race(result["viewport"]), ("left deep in the new race", where)
         else:
             assert kept_in_place(result["viewport"]), ("a poll moved the reader", where)
+
+
+@needs_node
+def test_a_poll_keeps_each_pools_horizontal_scroll(tmp_path):
+    # The reader scrolls each pool's table sideways (the [data-pool] element scrolls, as
+    # shadow.html's .pool overflow-x: auto); a poll redrawing the same race, 304s or new values,
+    # leaves every pool where the reader put it.
+    newer = copy.deepcopy(SHADOW)
+    newer["races"][1]["pools"]["WIN"]["2"] = win(1.37, 1.29, 1.46, "tail")
+    plain = {"plain": {"feed": FEED, "etag": '"p1"'}}
+    one = {**plain, "shadow": {"feed": SHADOW, "etag": '"s1"'}}
+    two = {**plain, "shadow": {"feed": newer, "etag": '"s2"'}}
+    first = {"WIN": 140, "PLACE": 0, "QUINELLA_PLACE": 75}
+    second = {"WIN": 20, "PLACE": 210, "QUINELLA_PLACE": 75}
+    steps = [
+        {"scroll": first},
+        {"fire": 5000},  # 304s: the same race drawn again
+        {"scroll": second},
+        {"fire": 5000, "servers": two},  # new values
+        {"fire": 5000},
+    ]
+    out = run_js(steps, tmp_path, servers=one, browser=True, live_dom=True)
+    loaded, scrolled, poll_304, rescrolled, poll_new, poll_again = out["results"]
+    k3 = rid("KYO", 3)
+    for r in out["results"]:
+        assert [b["data-race"] for b in race_blocks(soup(r["shadow"]))] == [k3]
+    assert loaded["pools"] == {"WIN": 0, "PLACE": 0, "QUINELLA_PLACE": 0}, loaded["pools"]
+    assert scrolled["pools"] == first and rescrolled["pools"] == second  # the fake holds them
+    assert poll_304["pools"] == first, poll_304["pools"]
+    assert poll_new["pools"] == second, poll_new["pools"]
+    assert poll_again["pools"] == second, poll_again["pools"]
+    # the new values were drawn: the poll did redraw
+    row2 = row_in({"KYO": soup(poll_new["shadow"])}, "KYO", k3, "WIN", "2")
+    check_value(text(cell(row2, "value")), "WIN", newer["races"][1]["pools"]["WIN"]["2"], "new")
 
 
 def test_page_has_no_stake_words_or_amount_inputs(tmp_path):

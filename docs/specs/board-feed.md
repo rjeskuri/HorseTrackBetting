@@ -65,7 +65,9 @@ that moment. `generated_utc` is `now()`.
   before post - 2 min, without a post time, and when the combination has no row by then.
 - T-10 and T-5 references (`t10_odds`, `t5_odds`, ticket #499): picked exactly as `t20_odds` is,
   at post - 10 min and post - 5 min. The shadow page's odds ladder falls back to these four
-  references when a row has no shadow ladder. `board-serve` rebuilds `/feed` when any of post - 20,
+  references when a row has no shadow ladder, and, as the two feeds refresh apart, shows a
+  non-null reference as observed in place of a projected or null ladder point (an observed
+  ladder point stays). `board-serve` rebuilds `/feed` when any of post - 20,
   10, 5 or 2 min passes, so each reference fills at its cutoff without a log write.
 - Move: `current / reference - 1`, in percent rounded to one decimal, on `odds` (the low figure
   of a ranged pool such as PLACE or QUINELLA_PLACE). Null when either figure is missing.
@@ -158,8 +160,11 @@ no value, flag, row order, shadow log record or `verify()`.
   terms. `mu(pool, tau, b)` is the fitted cell's mean, the expected `ln O_final - ln O_tau`, on the
   nowcast's grid; between neighbouring grid taus (T-20, T-10, an off-grid tau_now) it is linear in
   tau, below the smallest grid tau linear toward `mu(0) = 0`, and beyond the largest (T-60) it is
-  that cell's. `tau_now` is the minutes from the race's latest capture (available by `now`) to the
-  post, 0 after the post. The figure shown is `exp(ln O_k)`, the median odds under the nowcast's
+  that cell's. mu reads only the cells it needs (the exact grid cell, or the two bracketing tau);
+  a checkpoint whose projection needs a cell the fit lacks (for tau_now or for k) is null, the
+  others still project. `tau_now` is the minutes from the capture (`snapshot_utc`) of the row
+  O_now comes from to the post, 0 after the post: with staggered captures each pool projects
+  from its own row's capture, not from the race's newest capture of another pool. The figure shown is `exp(ln O_k)`, the median odds under the nowcast's
   log-normal drift (the mean would add `sigma^2 / 2`; the median is the forecast a reader can hold
   half above and half below), floored at 1.0 and rounded to two decimals. It is a forecast of the
   crowd's drift, not a value and not a signal.

@@ -19,13 +19,21 @@ signature):
   cell's mean on the nowcast's grid (60, 30, 16, 5, 2, 1), linear in tau between neighbouring
   grid taus (T-20, T-10, a tau_now off the grid), the T-60 cell beyond T-60, and mu(0) = 0. The
   projected odds are exp of that (the median), floored at 1.0.
+- tau_now is anchored to the capture of the row O_now comes from (its `snapshot_utc`): minutes from
+  that capture to the post, not from now and not from the race's newest capture of another pool.
+  With staggered captures (WIN at post - 12, a later Wide-only capture at post - 9) WIN projects
+  from tau 12 and Wide from tau 9, whatever now is.
+- mu(tau) reads only the cells it needs: the exact grid cell, or the two grid cells bracketing tau
+  (only the upper one below the smallest grid tau). A fitted nowcast missing an unrelated (pool,
+  tau) (`NowcastV0.cell` raises KeyError for it) still projects; a checkpoint whose projection
+  needs the missing cell (for tau_now or for k) is null.
 - Without models every projected checkpoint is null (observed ones stay); a pool the nowcast has
   no cells for gets null ahead while its observed checkpoints stay.
 - The ladder is display only: the values, flags and shadow log are unchanged (their own tests).
 
 The nowcasts are built here from known cells (no fit file), and every expected odds figure is
-derived here from the logged rows and those cells. In these tests the board read and now coincide
-(each race's last capture is at now), so tau_now is the same read either way. All rows are
+derived here from the logged rows and those cells, tau_now from each row's own capture. Most races
+here capture every pool at now; the staggered-capture test does not. All rows are
 synthetic and written under tmp_path; nothing waits on a real clock.
 """
 
@@ -108,13 +116,15 @@ def mu_b(pool: str, tau: int, band: int) -> float:
     return POOL_B[pool] * BAND_B[band] * math.log1p(tau) / 4.0
 
 
-def nowcast_of(mu: MuFn, pools=POOLS, fit_id: str = "test-fit") -> NowcastV0:
-    """A fitted v0 nowcast with the cell means mu(pool, tau, band) on every grid tau and band."""
-    sigma0 = {(p, t): 0.12 for p in pools for t in GRID.minutes}
+def nowcast_of(mu: MuFn, pools=POOLS, fit_id: str = "test-fit", missing=()) -> NowcastV0:
+    """A fitted v0 nowcast with the cell means mu(pool, tau, band) on every grid tau and band, but
+    none (no cell, no sigma0: `cell` raises KeyError) for each (pool, tau) in `missing`."""
+    sigma0 = {(p, t): 0.12 for p in pools for t in GRID.minutes if (p, t) not in missing}
     cells = {
         (p, t, b): DriftCell(p, t, b, 40, float(mu(p, t, b)), 0.1)
         for p in pools
         for t in GRID.minutes
+        if (p, t) not in missing
         for b in range(len(BANDS) + 1)
     }
     return NowcastV0(BANDS, GRID, 50.0, ("2026-11-14",), sigma0, cells, fit_id)
@@ -132,24 +142,38 @@ def ref_band(odds: float) -> int:
     return bisect_right(list(BANDS), float(odds))
 
 
-def ref_mu(mu: MuFn, pool: str, tau: float, band: int) -> float:
-    """The cell mean at any tau: linear between grid taus, the T-60 cell beyond, 0 at the post."""
+def ref_mu(mu: MuFn, pool: str, tau: float, band: int, missing=()) -> float:
+    """The cell mean at any tau: linear between grid taus, the T-60 cell beyond, 0 at the post.
+    Reads only the exact cell or the two bracketing it; KeyError when one of those is missing."""
     if tau <= 0:
         return 0.0
     grid = sorted(GRID.minutes)
+
+    def at(t: int) -> float:
+        if (pool, t) in missing:
+            raise KeyError((pool, t))
+        return mu(pool, t, band)
+
     if tau >= grid[-1]:
-        return mu(pool, grid[-1], band)
-    points = [(0.0, 0.0)] + [(float(t), mu(pool, t, band)) for t in grid]
-    for (t0, m0), (t1, m1) in zip(points, points[1:], strict=False):
-        if t0 <= tau <= t1:
-            return m0 + (tau - t0) / (t1 - t0) * (m1 - m0)
-    raise AssertionError(tau)
+        return at(grid[-1])
+    if tau in grid:
+        return at(int(tau))
+    lo = max([0, *(t for t in grid if t < tau)])
+    hi = min(t for t in grid if t > tau)
+    m0, m1 = (0.0 if lo == 0 else at(lo)), at(hi)
+    return m0 + (tau - lo) / (hi - lo) * (m1 - m0)
 
 
-def ref_projected(mu: MuFn, pool: str, odds_now: float, tau_now: float, k: int) -> float:
+def ref_projected(
+    mu: MuFn, pool: str, odds_now: float, tau_now: float, k: int, missing=()
+) -> float | None:
+    """The projected median odds at post - k, or None when a cell it needs is missing."""
     b = ref_band(odds_now)
-    raw = odds_now * math.exp(ref_mu(mu, pool, tau_now, b) - ref_mu(mu, pool, k, b))
-    return max(1.0, raw)
+    try:
+        shift = ref_mu(mu, pool, tau_now, b, missing) - ref_mu(mu, pool, k, b, missing)
+    except KeyError:
+        return None
+    return max(1.0, odds_now * math.exp(shift))
 
 
 def _key(row: dict) -> tuple[str, str]:
@@ -161,9 +185,10 @@ def _priced(row: dict) -> bool:
 
 
 def ref_ladders(
-    rows: list[dict], race: Race, now: datetime, mu: MuFn | None, *, no_cells=()
+    rows: list[dict], race: Race, now: datetime, mu: MuFn | None, *, no_cells=(), missing=()
 ) -> dict[tuple[str, str], dict[str, dict | None]]:
-    """{(pool, combination): {"20": entry or None, ...}} from the logged rows of `race`."""
+    """{(pool, combination): {"20": entry or None, ...}} from the logged rows of `race`; each
+    projection from the current row's own capture (tau_now = post - its snapshot_utc)."""
     mine = [r for r in rows if r["race_id"] == race.race_id and r["pool"] in POOLS]
     mine = sorted(mine, key=lambda r: instant(r["snapshot_utc"]))  # stable: log order
     final_snaps = {
@@ -171,12 +196,12 @@ def ref_ladders(
         for r in mine
         if r.get("source_update_utc") is None and FINAL_TEXT in (r.get("status_raw") or "")
     }
-    tau_now = (race.post - now) / timedelta(minutes=1)
     out: dict[tuple[str, str], dict[str, dict | None]] = {}
     for key in sorted({_key(r) for r in mine if instant(r["snapshot_utc"]) <= now}):
         history = [r for r in mine if _key(r) == key and instant(r["snapshot_utc"]) <= now]
         pool = key[0]
         current = history[-1]
+        tau_now = max(0.0, (race.post - instant(current["snapshot_utc"])) / timedelta(minutes=1))
         ladder: dict[str, dict | None] = {}
         for k in CHECKPOINTS:
             cutoff = race.post - timedelta(minutes=k)
@@ -191,11 +216,10 @@ def ref_ladders(
                 ok = ref is not None and _priced(ref)
                 ladder[str(k)] = {"odds": ref["odds"], "observed": True} if ok else None
                 continue
-            if mu is None or pool in no_cells or not _priced(current):
-                ladder[str(k)] = None
-            else:
-                odds = ref_projected(mu, pool, current["odds"], tau_now, k)
-                ladder[str(k)] = {"odds": odds, "observed": False}
+            odds = None
+            if mu is not None and pool not in no_cells and _priced(current):
+                odds = ref_projected(mu, pool, current["odds"], tau_now, k, missing)
+            ladder[str(k)] = None if odds is None else {"odds": odds, "observed": False}
         out[key] = ladder
     return out
 
@@ -435,3 +459,91 @@ def test_a_pool_the_nowcast_does_not_fit_shows_dashes_ahead():
             for v in e["ladder"].values()
         )
     assert projected > 20
+
+
+# ---------------------------------------------------------------- the anchor of a projection
+
+
+def test_the_projection_starts_from_the_capture_of_the_row_it_uses():
+    """Staggered captures: every pool at post - 25 and post - 12, then Wide alone at post - 9; now
+    is post - 7. WIN and PLACE project from tau 12 (their rows' capture), Wide from tau 9; neither
+    from the Wide-only capture for WIN, nor from now (tau 7)."""
+    r = race("CHU", 6, 7.0, EIGHT)
+    day = SyntheticDay(DAY, [r])
+    day.capture(r, r.post - timedelta(minutes=25), 1.0)
+    day.capture(r, r.post - timedelta(minutes=12), 1.06)
+    wide_only = [
+        row for row in capture_rows(r, r.post - timedelta(minutes=9), 0.97) if row["pool"] == WIDE
+    ]
+    odds_log.append_capture(log_path(DAY, r.venue), wide_only)
+    day.rows.extend(wide_only)
+
+    (got,) = build(T0, models_of(nowcast_of(mu_a)))["races"]
+    want = ref_ladders(day.rows, r, T0, mu_a)
+    counts = assert_ladders(got, want, r.race_id)
+    assert counts["projected"] > 50, counts
+
+    anchors = {WIN: 12.0, PLACE: 12.0, WIDE: 9.0}
+    told = {WIN: 0, PLACE: 0, WIDE: 0}  # projections a wrong anchor would miss
+    for pool, combination in want:
+        current = [
+            row for row in day.rows if (row["pool"], row["combination"]) == (pool, combination)
+        ][-1]
+        assert (r.post - instant(current["snapshot_utc"])) / timedelta(minutes=1) == anchors[pool]
+        shown = got["pools"][pool][combination]["ladder"]
+        for k in ("5", "2", "0"):
+            assert shown[k] is not None and shown[k]["observed"] is False, (pool, combination, k)
+            right = ref_projected(mu_a, pool, current["odds"], anchors[pool], int(k))
+            assert shown[k]["odds"] == pytest.approx(right, abs=TOL), (pool, combination, k)
+            wrong = {ref_projected(mu_a, pool, current["odds"], tau, int(k)) for tau in (9.0, 7.0)}
+            told[pool] += all(abs(w - right) > 3 * TOL for w in wrong if w is not None)
+    assert told[WIN] >= 10 and told[PLACE] >= 5, told  # the fixture tells the anchors apart
+
+
+# ---------------------------------------------------------------- a nowcast with a missing cell
+
+
+def test_a_missing_grid_cell_blanks_only_the_checkpoints_that_need_it():
+    """A fit without WIN cells at T-60 still projects WIN from tau 7 (cells 5 and 16) to T-5, T-2
+    and the final; tau 45 (between 30 and 60) and tau 75 (beyond 60) need the T-60 cell, so WIN
+    is null ahead there while PLACE and Wide project. A fit without WIN at T-5, read at tau 25:
+    T-20 (cells 16, 30), T-2 (cell 2) and the final project; T-10 (cells 5, 16) and T-5 are null."""
+    near = race("FUK", 1, 7.0, EIGHT)
+    mid = race("FUK", 2, 45.0, SIX)
+    far = race("FUK", 3, 75.0, EIGHT2)
+    early = race("NII", 1, 25.0, EIGHT)
+    day = SyntheticDay(DAY, [near, mid, far, early])
+    for r, offsets in ((near, (25, 12, 7)), (mid, (50, 45)), (far, (90, 75)), (early, (40, 25))):
+        for i, off in enumerate(offsets):
+            day.capture(r, r.post - timedelta(minutes=off), FACTORS[i])
+
+    def win_ladders(feed: dict, r: Race) -> dict[str, dict]:
+        return {c: e["ladder"] for c, e in by_id(feed)[r.race_id]["pools"][WIN].items()}
+
+    no60 = frozenset({(WIN, 60)})
+    feed = build(T0, models_of(nowcast_of(mu_a, missing=no60)))
+    for r in (near, mid, far, early):
+        assert_ladders(by_id(feed)[r.race_id], ref_ladders(day.rows, r, T0, mu_a, missing=no60),
+                       f"no WIN T-60: {r.race_id}")  # fmt: skip
+    for combination, ladder in win_ladders(feed, near).items():
+        for k in ("5", "2", "0"):
+            assert ladder[k] is not None and ladder[k]["observed"] is False, (combination, k)
+    for r in (mid, far):
+        for ladder in win_ladders(feed, r).values():
+            assert all(ladder[k] is None for k in ("20", "10", "5", "2", "0")), (r.race_id, ladder)
+        for pool in (PLACE, WIDE):
+            for combination, entry in by_id(feed)[r.race_id]["pools"][pool].items():
+                assert entry["ladder"]["5"] is not None, (r.race_id, pool, combination)
+                assert entry["ladder"]["5"]["observed"] is False, (r.race_id, pool, combination)
+
+    no5 = frozenset({(WIN, 5)})
+    feed = build(T0, models_of(nowcast_of(mu_a, missing=no5)))
+    for r in (near, mid, far, early):
+        assert_ladders(by_id(feed)[r.race_id], ref_ladders(day.rows, r, T0, mu_a, missing=no5),
+                       f"no WIN T-5: {r.race_id}")  # fmt: skip
+    for combination, ladder in win_ladders(feed, early).items():
+        for k in ("20", "2", "0"):
+            assert ladder[k] is not None and ladder[k]["observed"] is False, (combination, k)
+        assert ladder["10"] is None and ladder["5"] is None, (combination, ladder)
+    for combination, ladder in win_ladders(feed, mid).items():  # tau 45 needs only 30 and 60
+        assert all(ladder[k] is not None for k in ("20", "2", "0")), (combination, ladder)

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
+from bisect import bisect_left
 from collections.abc import Callable, MutableMapping
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -73,9 +74,8 @@ class _DayRows:
     """The rows a board as of now needs, per race: the latest row per board key available by the
     last now, plus every row available after it (a replay's later captures). For the odds ladder
     (#499) it also keeps, of the rows available by now, the latest captured at or before each
-    checkpoint post - k per board key, the rows of the captures showing a final price and the
-    latest capture time. A clock that goes back, or a change of post times, reads the logs again
-    from the start."""
+    checkpoint post - k per board key and the rows of the captures showing a final price. A clock
+    that goes back, or a change of post times, reads the logs again from the start."""
 
     def __init__(self, race_date: date, day_dir: Path | None = None) -> None:
         self.race_date, self.day_dir = race_date, day_dir
@@ -93,7 +93,6 @@ class _DayRows:
         self.refs: dict[str, dict[int, dict[tuple, tuple[datetime, int, dict]]]] = {}
         self.final_snaps: dict[str, set[datetime]] = {}  # captures holding a final row
         self.finals: dict[str, list[dict[str, Any]]] = {}  # their rows, once available
-        self.last_capture: dict[str, datetime] = {}
 
     def _offer(self, race_id: str, entry: Entry) -> None:
         slot = self.latest.setdefault(race_id, {})
@@ -111,9 +110,6 @@ class _DayRows:
             return
         if snap in self.final_snaps.get(race_id, ()):
             self.finals.setdefault(race_id, []).append(row)
-        last = self.last_capture.get(race_id)
-        if last is None or snap > last:
-            self.last_capture[race_id] = snap
         post = self.post_of(race_id)
         if post is None:
             return
@@ -241,29 +237,36 @@ def _drift(nowcast: Any, pool: str) -> Callable[[float, int], float] | None:
         return None
     taus = sorted(int(t) for t in grid.minutes)
 
+    def at(tau: int, band: int) -> float:
+        return 0.0 if tau == 0 else float(nowcast.cell(pool, tau, band).mu)
+
     def mu(tau: float, band: int) -> float:
+        """Reads only the exact grid cell or the two bracketing tau; KeyError for a missing one."""
         if tau <= 0:
             return 0.0
         if tau >= taus[-1]:
-            return float(nowcast.cell(pool, taus[-1], band).mu)
-        points = [(0, 0.0)] + [(t, float(nowcast.cell(pool, t, band).mu)) for t in taus]
-        for (t0, m0), (t1, m1) in zip(points, points[1:], strict=False):
-            if t0 <= tau <= t1:
-                return m0 + (tau - t0) / (t1 - t0) * (m1 - m0)
-        raise AssertionError(tau)  # unreachable: 0 < tau < taus[-1]
+            return at(taus[-1], band)
+        i = bisect_left(taus, tau)
+        hi = taus[i]
+        if hi == tau:
+            return at(hi, band)
+        lo = taus[i - 1] if i > 0 else 0
+        m0, m1 = at(lo, band), at(hi, band)
+        return m0 + (tau - lo) / (hi - lo) * (m1 - m0)
 
     return mu
 
 
-def _projector(models: ShadowModels | None, tau_now: float | None):
-    """pool -> (odds_now, k) -> the projected median odds at post - k, or None for a pool the
-    nowcast cannot project: exp(ln O_now + mu(tau_now, b) - mu(k, b)), b the band of O_now,
-    floored at 1.0 and rounded to two decimals."""
+def _projector(models: ShadowModels | None):
+    """(pool, odds_now, tau_now, k) -> the projected median odds at post - k, or None when the
+    nowcast cannot project it (no cells for the pool, or a cell it needs is missing):
+    exp(ln O_now + mu(tau_now, b) - mu(k, b)), b the band of O_now, floored at 1.0 and rounded to
+    two decimals."""
     nowcast = None if models is None else models.nowcast
     bands = getattr(nowcast, "bands", None)
     drifts: dict[str, Any] = {}
 
-    def project(pool: str, odds_now: float, k: int) -> float | None:
+    def project(pool: str, odds_now: float, tau_now: float | None, k: int) -> float | None:
         if tau_now is None or bands is None or odds_now <= 0:
             return None
         if pool not in drifts:
@@ -274,7 +277,7 @@ def _projector(models: ShadowModels | None, tau_now: float | None):
         band = band_of(odds_now, bands)
         try:
             shift = mu(tau_now, band) - mu(k, band)
-        except KeyError:  # a pool or tau the fit has no data for
+        except KeyError:  # a cell the projection needs that the fit has no data for
             return None
         return round(max(FLOOR, math.exp(math.log(odds_now) + shift)), 2)
 
@@ -300,11 +303,8 @@ def _ladders(
     final = None
     if day_rows.finals.get(race_id):
         final = final_board(day_rows.finals[race_id], race_id, post_utc=post)
-    last = day_rows.last_capture.get(race_id)
-    tau_now = None
-    if post is not None and last is not None:
-        tau_now = max(0.0, (post - last) / timedelta(minutes=1))
-    project = _projector(models, tau_now)
+    project = _projector(models)
+    current = day_rows.latest.get(race_id, {})  # the row each board figure comes from
     refs = day_rows.refs.get(race_id, {})
     figures = {WIN: board.win, PLACE: board.place, WIDE: board.wide}
     finals = {} if final is None else {WIN: final.win, PLACE: final.place, WIDE: final.wide}
@@ -313,6 +313,12 @@ def _ladders(
         for runners, figure in shown.items():
             combination = f"{runners[0]},{runners[1]}" if pool == WIDE else str(runners)
             odds_now, key = _low(figure), (pool, runners)  # key: the board key of snapshot._key
+            # tau_now: minutes to the post from the capture of the row O_now comes from
+            entry = current.get(key)
+            snap = None if entry is None else odds_log._instant(entry[2].get("snapshot_utc"))
+            tau_now = None
+            if post is not None and snap is not None:
+                tau_now = max(0.0, (post - snap) / timedelta(minutes=1))
             ladder: dict[int, dict | None] = {}
             for k in (*LADDER_MINUTES, 0):
                 if k == 0:
@@ -326,7 +332,7 @@ def _ladders(
                     priced = row is not None and snapshot._priced(row)
                     ladder[k] = {"odds": float(row["odds"]), "observed": True} if priced else None
                     continue
-                odds = None if odds_now is None else project(pool, odds_now, k)
+                odds = None if odds_now is None else project(pool, odds_now, tau_now, k)
                 ladder[k] = None if odds is None else {"odds": odds, "observed": False}
             out[(pool, combination)] = ladder
     return out

@@ -104,17 +104,19 @@
   ];
 
   /* The five checkpoints of a row, each {odds, observed} or null: the shadow entry's ladder, else
-   * the plain row's references as observed and null ahead (the final always). */
+   * the plain row's references as observed and null ahead (the final always). The two feeds
+   * refresh apart, so an observed point wins: the plain row's reference replaces a projected or
+   * null ladder point, and an observed ladder point stays. */
   function ladderOf(entry, line) {
     var ladder = own(entry, "ladder");
+    var hasLadder = ladder && typeof ladder === "object";
     return LADDER.map(function (c) {
-      if (ladder && typeof ladder === "object") {
-        var point = own(ladder, c[1]);
-        if (!point || typeof point !== "object" || num(own(point, "odds")) === null) return null;
-        return { odds: num(point.odds), observed: point.observed === true };
-      }
+      var point = hasLadder ? own(ladder, c[1]) : null;
+      if (!point || typeof point !== "object" || num(own(point, "odds")) === null) point = null;
+      else point = { odds: num(point.odds), observed: point.observed === true };
+      if (point !== null && point.observed) return point;
       var ref = c[2] === null ? null : num(own(line, c[2]));
-      return ref === null ? null : { odds: ref, observed: true };
+      return ref !== null ? { odds: ref, observed: true } : point;
     });
   }
 
@@ -176,13 +178,38 @@
     el.className = "chip" + (cls ? " " + cls : "");
   }
 
+  /* The race drawn in #shadow, or null. */
+  function drawnRace(root) {
+    var block = root.querySelector ? root.querySelector("[data-race]") : null;
+    return block && block.getAttribute ? block.getAttribute("data-race") : null;
+  }
+
+  /* Each pool's horizontal scroll ({pool code: scrollLeft}); the .pool sections scroll sideways
+   * on a narrow screen and innerHTML replaces them. */
+  function poolScroll(root) {
+    var out = {};
+    var pools = root.querySelectorAll ? root.querySelectorAll("[data-pool]") : [];
+    Array.prototype.forEach.call(pools, function (e) {
+      out[e.getAttribute("data-pool")] = e.scrollLeft;
+    });
+    return out;
+  }
+
   function draw() {
     var root = document.getElementById("shadow");
     if (!root || !state.feed) return;
     var pick = board.selection(state.feed, state.venue);
     state.venue = pick.venue;
+    var race = drawnRace(root), scroll = poolScroll(root);
     root.innerHTML = renderShadow(state.feed, state.shadow,
       { now: Date.now(), venue: pick.venue, race: pick.race });
+    if (race !== null && drawnRace(root) === race) {  // the same race redrawn: keep each pool
+      var pools = root.querySelectorAll ? root.querySelectorAll("[data-pool]") : [];
+      Array.prototype.forEach.call(pools, function (e) {
+        var code = e.getAttribute("data-pool");
+        if (has.call(scroll, code) && scroll[code]) e.scrollLeft = scroll[code];
+      });
+    }
     board.followSelected("#shadow");
   }
 
