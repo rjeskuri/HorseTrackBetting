@@ -63,9 +63,10 @@ member-fold keeps the git revision it was fitted at, and every record after leve
 record of its own (`fit_failures`); a stopped or failed launch records every planned variant as
 failed. A completed launch's artifacts (the report, its JSON, the export) are named by the spec,
 the builds and a digest of its results (`artifact_stem`, `results_digest`), and its records cite
-them; an existing artifact is never rewritten. So a launch that changes a result (a retry that
-recovers a failed fold) writes beside the earlier launch's files, whose records keep citing
-them, and a record equal to a held one but for git_sha and its artifacts is not appended again.
+them; a finished launch's artifacts are never rewritten. So a launch that changes a result (a
+retry that recovers a failed fold) writes beside the earlier launch's files, whose records keep
+citing them, and a record equal to a held one but for git_sha and its artifacts is not appended
+again. A launch publishes all three artifacts before it appends a record that cites them.
 
 Family `japan-c2-interactions-final-win-v2` supersedes `japan-c2-interactions-final-win` (#93's
 review, round 1), whose records stay in the registry: v1 settled a winner at its final odds over
@@ -1486,23 +1487,31 @@ def _identity(record: RunRecord) -> str:
     return _run_id(dataclasses.replace(record, git_sha="", data_builds=builds))
 
 
-def append_new(registry, records: list[RunRecord]) -> tuple[list[str], list[str]]:
-    """Append each record its family does not hold yet (`_identity`: a held record equal but
-    for git_sha and the artifacts it cites keeps citing its own launch's, which hold the same
-    result); each record's run id (the held one's when held), and the variants appended."""
+def plan_new(registry, records: list[RunRecord]) -> tuple[list[str], list[RunRecord]]:
+    """Each record's run id (the held one's when its family holds it, `_identity`: a held record
+    equal but for git_sha and the artifacts it cites keeps citing its own launch's, which hold
+    the same result), and the records to append, whose ids are the ones the registry's append
+    returns (`_run_id`: the sha256 of the canonical record)."""
     held = {}
     for family in {r.family_id for r in records}:
-        held |= {_identity(r): r for r in registry.records(family)}
-    ids, appended = [], []
+        held |= {_identity(r): _run_id(r) for r in registry.records(family)}
+    ids, new = [], []
     for record in records:
         key = _identity(record)
-        if key in held:
-            ids.append(_run_id(held[key]))
-            continue
-        ids.append(registry.append(record))
-        held[key] = record
-        appended.append(record.variant)
-    return ids, appended
+        if key not in held:
+            held[key] = _run_id(record)
+            new.append(record)
+        ids.append(held[key])
+    return ids, new
+
+
+def append_new(registry, records: list[RunRecord]) -> tuple[list[str], list[str]]:
+    """Append each record its family does not hold yet (`plan_new`); each record's run id (the
+    held one's when held), and the variants appended."""
+    ids, new = plan_new(registry, records)
+    for record in new:
+        registry.append(record)
+    return ids, [r.variant for r in new]
 
 
 class _Families:
@@ -1588,7 +1597,8 @@ def planned() -> list[tuple[str, str]]:
 
 def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) -> dict:
     """Run the pre-registered family on Japan's development data; write the report, the export
-    and the registry records."""
+    and the registry records. It publishes the report, its JSON and the export before it appends
+    a record that cites them."""
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     scheme = load_country_scheme(COUNTRY)
     spec = build_spec(scheme, {**bootstrap_settings(), "seed": BOOTSTRAP_SEED})
@@ -1606,14 +1616,10 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     fold_scheme = "walk_forward:" + json.dumps(spec["folds"], sort_keys=True)
     started = time.monotonic()
-    try:
-        inputs = load_inputs(log=log)
-        study, export = compute_study(
-            inputs, spec, scheme, checkpoint=checkpoint, revision=git_sha, log=log
-        )
-        bare = [_record(v, git_sha, builds, spec_hash, trial) for v in study.variants]
-        stem = artifact_stem(spec_hash, builds, trial, results_digest(bare, study, export))
-    except (Exception, KeyboardInterrupt) as exc:  # a launch stopped by hand is a run too
+
+    def record_aborted(exc: BaseException) -> None:
+        """A stopped or failed launch as a run: every planned variant failed, citing no
+        artifact, and the checkpoint's failed fits."""
         stopped = datetime.now(timezone.utc).isoformat(timespec="seconds")
         failed = [
             Variant(
@@ -1633,19 +1639,26 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
             fits = fit_failures(saved["failures"], fold_scheme)
             append_new(registry, [_record(v, git_sha, builds, spec_hash, trial) for v in fits])
         write_committed_summary(registry)
+
+    try:
+        inputs = load_inputs(log=log)
+        study, export = compute_study(
+            inputs, spec, scheme, checkpoint=checkpoint, revision=git_sha, log=log
+        )
+        bare = [_record(v, git_sha, builds, spec_hash, trial) for v in study.variants]
+        stem = artifact_stem(spec_hash, builds, trial, results_digest(bare, study, export))
+    except (Exception, KeyboardInterrupt) as exc:  # a launch stopped by hand is a run too
+        record_aborted(exc)
         raise
     log(f"computed ({_progress(started)})")
 
     report_path, json_path = out_dir / f"{stem}.md", out_dir / f"{stem}.json"
     export_path = paths.data_dir() / "features" / COUNTRY / f"{stem}.parquet"
-    kept = {p for p in (report_path, json_path, export_path) if p.exists()}
-    for path in sorted(kept):  # an earlier launch with these results wrote it: never replaced
-        log(f"{path.name} exists (the same results digest): kept, not rewritten")
     records = []
     for v in study.variants:  # a failed fit's record cites no artifact (as an aborted run's)
         cites = None if v.name.startswith("fit:") else stem
         records.append(_record(v, git_sha, builds, spec_hash, trial, stem=cites))
-    ids, appended = append_new(registry, records)
+    ids, new = plan_new(registry, records)
     record_ids = {r.variant: run_id for r, run_id in zip(records, ids, strict=True)}
     by_revision: dict[str, int] = {}
     for row in study.tables["fit_revisions"]:
@@ -1659,18 +1672,30 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
         "level-1 checkpoint": f"`{checkpoint.name}`",
         "data": ", ".join(builds.values()),
         "artifacts (report, JSON, export; the spec, the builds, the results' digest)": f"`{stem}`",
-        "records": f"{len(appended)} appended; {len(record_ids) - len(appended)} already held",
+        "records": f"{len(new)} appended; {len(record_ids) - len(new)} already held",
         "trial (records marked params.trial, spec not frozen)": trial,
         "run time": _progress(started),
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    if report_path not in kept:
-        write_report(report_path, render_report(study, spec, about, record_ids), sources=SOURCES)
-    if json_path not in kept:
-        shown = {"about": about, "counts": study.counts, "tables": study.tables}
-        write_report(json_path, json.dumps(shown, indent=1, default=str), sources=SOURCES)
-    if export_path not in kept:
-        _publish_parquet(export, export_path)
+    # The files at the stem are kept only when all three exist and every record is held (a pure
+    # relaunch). The stem is the results digest, which covers every record's identity, so a
+    # launch that finished this stem left every record held: files here otherwise were left by a
+    # launch stopped while publishing or appending, and the whole set is written again.
+    if not new and all(p.exists() for p in (report_path, json_path, export_path)):
+        for path in (report_path, json_path, export_path):
+            log(f"{path.name} exists (the same results digest): kept, not rewritten")
+    else:
+        try:
+            report = render_report(study, spec, about, record_ids)
+            write_report(report_path, report, sources=SOURCES)
+            shown = {"about": about, "counts": study.counts, "tables": study.tables}
+            write_report(json_path, json.dumps(shown, indent=1, default=str), sources=SOURCES)
+            _publish_parquet(export, export_path)
+        except (Exception, KeyboardInterrupt) as exc:  # no record cites a set not all on disk
+            record_aborted(exc)
+            raise
+    for record in new:  # each returns the run id the report lists (`plan_new`)
+        registry.append(record)
     write_committed_summary(registry)
     return {
         "family_id": family,
@@ -1679,7 +1704,7 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
         "report_path": str(report_path),
         "export_path": str(export_path),
         "registry_path": str(registry.path),
-        "records_appended": len(appended),
+        "records_appended": len(new),
         "failed_variants": [v.name for v in study.variants if v.error],
     }
 

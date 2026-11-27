@@ -20,12 +20,22 @@ Contract pinned here (`horsetrack.countries.japan.studies.interactions.run_study
 - A launch whose results cannot be digested (a value with no text form) after `compute_study`
   returns writes no artifact, records every planned variant (`planned()`) as failed, and the
   exception surfaces.
+- A launch publishes its report, JSON and export before it appends a record citing them (review
+  round 6): one stopped while publishing (a KeyboardInterrupt or an OSError from a write, after
+  one or two of the three have landed) appends no record citing artifacts, records every
+  planned variant failed, and the stop surfaces. Whatever launches follow, every record that
+  cites artifacts cites a stem whose three files are on disk.
+- A retry whose results equal the stopped launch's writes all three files at that stem, over
+  whatever the stopped launch left there, and its report lists, for each of its variants, a run
+  id the registry holds: the held record's when held, the appended one's otherwise.
 
-Not pinned: the stem's layout beyond being a safe file stem, the report's and JSON's contents,
-the log lines. The store files are synthetic bytes (only their hashes are read), `load_inputs`
-and `compute_study` are replaced (the compute is pinned elsewhere), git revisions are fixed per
-launch, and every path is under `tmp_path`; an autouse guard fails a test that changes the
-committed registry summary or a holdout log.
+Not pinned: the stem's layout beyond being a safe file stem, the report's and JSON's contents
+(but for the run ids the report lists), the log lines, the order in which a launch writes its
+three files (the stop comes from `interactions.write_report` and `interactions._publish_parquet`,
+the module's writers, sharing one count). The store files are synthetic bytes (only their
+hashes are read), `load_inputs` and `compute_study` are replaced (the compute is pinned
+elsewhere), git revisions are fixed per launch, and every path is under `tmp_path`; an autouse
+guard fails a test that changes the committed registry summary or a holdout log.
 """
 
 from __future__ import annotations
@@ -314,3 +324,163 @@ def test_a_launch_whose_results_cannot_be_digested_records_every_planned_variant
     assert {r.status for r in held} == {"failed"}
     assert not any(interactions.ARTIFACTS in r.data_builds for r in held)
     assert files_under(root) == {}, "an artifact was written for a launch that failed"
+
+
+# --------------------------------------------------------------------------- a stopped publication
+
+WRITERS = ("write_report", "_publish_parquet")  # the module's writers of the three artifacts
+HEX = re.compile(r"[0-9a-f]{16,}")  # a run id as a report may show it (a prefix of 16 or more)
+SCORED = sorted((name, "scored") for name in (HELD[1], RECOVERED[1], STEADY[1]))
+
+
+def interrupt_publication(monkeypatch, *, landed: int, stop: BaseException):
+    """Raise `stop` at the launch's artifact write after `landed` writes have landed, whichever
+    artifact it writes first (the reports' and the export's writer share one count); returns
+    the call that puts the real writers back."""
+    real = {name: getattr(interactions, name) for name in WRITERS}
+    count = 0
+
+    def wrapping(writer):
+        def write(*args, **kwargs):
+            nonlocal count
+            count += 1
+            if count == landed + 1:
+                raise stop
+            return writer(*args, **kwargs)
+
+        return write
+
+    for name, writer in real.items():
+        monkeypatch.setattr(interactions, name, wrapping(writer))
+
+    def resume() -> None:
+        for name, writer in real.items():
+            monkeypatch.setattr(interactions, name, writer)
+
+    return resume
+
+
+def runs(root: Path) -> dict[str, dict]:
+    """The family's runs as the registry's lines hold them: run id to record."""
+    lines = (root / "data" / "registry" / "japan.jsonl").read_text("ascii").splitlines()
+    entries = [json.loads(line) for line in lines]
+    return {
+        e["run_id"]: e["record"]
+        for e in entries
+        if e["kind"] == "run" and e["record"]["family_id"] == interactions.FAMILY_ID
+    }
+
+
+def dangling(root: Path) -> list[str]:
+    """Each record that cites artifacts not all on disk, with what is missing."""
+    on_disk = set(files_under(root))
+    stems = {Path(name).stem for name in on_disk}
+    out = []
+    for r in records(root):
+        if interactions.ARTIFACTS not in r.data_builds:
+            continue
+        cited = [s for s in stems if cites(r, s)]
+        missing = sorted(artifacts(cited[0]) - on_disk) if cited else ["all three"]
+        if missing:
+            out.append(f"{r.variant} at {r.git_sha[:4]}: {missing}")
+    return out
+
+
+def listed(report: Path, root: Path) -> list[tuple[str, str]]:
+    """The runs the report lists by run id, as (variant, status) of the registry's record; an id
+    the registry does not hold is ('not in the registry', id). Hex a record holds (the spec's
+    sha256, a git revision, a build) or the superseded spec's sha256 is not a run id."""
+    held = runs(root)
+    known = set(HEX.findall(json.dumps(list(held.values()))))
+    known |= {interactions.SUPERSEDED_SPEC, *SHA}
+    out = []
+    for token in set(HEX.findall(report.read_text("utf-8"))) - known:
+        match = [run_id for run_id in held if run_id.startswith(token)]
+        record = held[match[0]] if match else None
+        out.append(
+            (record["variant"], record["status"]) if record else ("not in the registry", token)
+        )
+    return sorted(out)
+
+
+def unlisted(report: Path, root: Path, stem: str) -> list[str]:
+    """The records citing `stem` whose run id its report does not list."""
+    shown = set(HEX.findall(report.read_text("utf-8")))
+    return [
+        f"{r['variant']} {run_id[:16]}"
+        for run_id, r in runs(root).items()
+        if stem in json.dumps(r, sort_keys=True)
+        and not any(run_id.startswith(token) for token in shown)
+    ]
+
+
+@pytest.mark.parametrize("landed", [1, 2])
+@pytest.mark.parametrize(
+    "kind",
+    [pytest.param(KeyboardInterrupt, id="stopped_by_hand"), pytest.param(OSError, id="disk")],
+)
+def test_a_stopped_publication_records_a_failed_run_and_a_recovering_retry_cites_whole_sets(
+    tmp_path, monkeypatch, kind, landed
+):
+    root, out = tmp_path.resolve(), tmp_path.resolve() / "reports"
+    fake_store(root / "data")
+    resume = interrupt_publication(monkeypatch, landed=landed, stop=kind("stopped publishing"))
+    with pytest.raises(kind):
+        launch(monkeypatch, out, results(recovered=False), SHA[0])
+    stopped = records(root)
+    resume()
+
+    retry = launch(monkeypatch, out, results(recovered=True), SHA[1])
+
+    stem = retry["artifact_stem"]
+    assert dangling(root) == [], "a record cites a report, JSON or export that is not on disk"
+    assert [r.variant for r in stopped if interactions.ARTIFACTS in r.data_builds] == [], (
+        "the stopped launch appended records citing artifacts it had not published"
+    )
+    assert sorted((r.hypothesis_id, r.variant) for r in stopped) == sorted(interactions.planned())
+    assert {r.status for r in stopped} == {"failed"}
+    assert artifacts(stem) <= set(files_under(root))
+    appended = records(root)[len(stopped) :]
+    assert sorted((r.variant, r.status) for r in appended) == SCORED
+    assert retry["records_appended"] == 3
+    assert all(cites(r, stem) for r in appended)
+    report = Path(retry["report_path"])
+    assert listed(report, root) == SCORED
+    assert unlisted(report, root, stem) == []
+
+
+@pytest.mark.parametrize("landed", [1, 2])
+def test_a_retry_with_the_stopped_launchs_results_rewrites_its_set_and_lists_held_ids(
+    tmp_path, monkeypatch, landed
+):
+    root, out = tmp_path.resolve(), tmp_path.resolve() / "reports"
+    fake_store(root / "data")
+    first = launch(monkeypatch, out, results(recovered=False), SHA[0])
+    resume = interrupt_publication(
+        monkeypatch, landed=landed, stop=KeyboardInterrupt("stopped by hand while publishing")
+    )
+    with pytest.raises(KeyboardInterrupt):
+        launch(monkeypatch, out, results(recovered=True), SHA[1])
+    resume()
+    before = files_under(root)
+    for name in before:
+        os.utime(root / name, ns=(OLD, OLD))
+
+    retry = launch(monkeypatch, out, results(recovered=True), SHA[2])
+
+    stem1, stem = first["artifact_stem"], retry["artifact_stem"]
+    assert stem != stem1
+    now = files_under(root)
+    assert set(now) == artifacts(stem1) | artifacts(stem)
+    mtime = {name: (root / name).stat().st_mtime_ns for name in now}
+    assert sorted(name for name in artifacts(stem) if mtime[name] == OLD) == [], (
+        "the retry kept a file the stopped launch left at its stem"
+    )
+    assert {name: (now[name], mtime[name]) for name in artifacts(stem1)} == {
+        name: (before[name], OLD) for name in artifacts(stem1)
+    }, "the first launch's artifacts were rewritten"
+    assert dangling(root) == [], "a record cites a report, JSON or export that is not on disk"
+    assert retry["records_appended"] == 1, "only the recovered variant is new to the registry"
+    report = Path(retry["report_path"])
+    assert listed(report, root) == SCORED, "the report lists a run id the registry does not hold"
+    assert unlisted(report, root, stem) == []
