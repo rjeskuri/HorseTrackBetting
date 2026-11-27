@@ -565,15 +565,20 @@ def _convention_rows(record: RunRecord, block: Mapping, size: int) -> list[Leade
 def _record_rows(
     record: RunRecord, size: int, adapter: Adapter | None
 ) -> tuple[list[LeaderboardRow], str | None]:
-    """The record's rows (the adapter's, else the convention's) and why it has none, if known."""
+    """The record's rows (the adapter's, else the convention's) and why it has none, if known.
+    An adapter's rows are marked licensed when the record is, keeping an adapter's own mark."""
     try:
+        has_block = "leaderboard" in record.params
+        block = record.params.get("leaderboard")
+        problem = _block_problem(block) if has_block else None
         if adapter is not None:
-            return list(adapter(record, size)), None
-        if "leaderboard" not in record.params:
-            return [], None
-        block = record.params["leaderboard"]
-        problem = _block_problem(block)
-        if problem is not None:
+            licensed = is_licensed_record(record)
+            made = [
+                dataclasses.replace(row, licensed=row.licensed or licensed)
+                for row in adapter(record, size)
+            ]
+            return made, None if made else problem
+        if not has_block or problem is not None:
             return [], problem
         return _convention_rows(record, block, size), None
     except RowRefused as exc:
@@ -612,11 +617,13 @@ def rows_from_registry(
     Each other run gives its rows: an adapter's when ``adapters`` holds its family (called with
     the run and the family size), else one measured row per development-fold ``return_per_100``
     metric under a well-formed ``params['leaderboard']`` block (``docs/specs/leaderboard.md``).
-    Per option id the latest such run in append order wins. A variant none of whose runs gave a
-    row gets one unmeasured row from its latest run, with the reason in ``note`` when its block
-    is malformed. Every row carries the family size as its variants searched, the run's ticket,
-    sources and status (old 'rejected' and 'adopted' runs read like 'scored'), and ``licensed``
-    as ``is_licensed_record``.
+    The latest non-holdout run of each variant, in append order, gives all of that variant's rows,
+    adapter or not: a rerun that drops a segment drops its earlier row, and a latest run that
+    gives no row (failed, no development return, a malformed block) lists the variant as one
+    unmeasured row from that run, with the reason in ``note`` when its block is malformed. Every
+    row carries the family size as its variants searched, the run's ticket, sources and status
+    (old 'rejected' and 'adopted' runs read like 'scored'), and ``licensed`` as
+    ``is_licensed_record`` (an adapter's row also keeps its own True).
     """
     adapters = adapters or {}
     families: dict[str, list[RunRecord]] = {}
@@ -627,20 +634,10 @@ def rows_from_registry(
     for family_id, runs in families.items():
         size = registry.family_size(family_id)
         adapter = adapters.get(family_id)
-        options: dict[str, LeaderboardRow] = {}
-        latest: dict[str, tuple[RunRecord, str | None]] = {}
-        covered: set[str] = set()
+        latest: dict[str, RunRecord] = {}
         for record in runs:
+            latest[record.variant] = record
+        for record in latest.values():
             made, problem = _record_rows(record, size, adapter)
-            for row in made:
-                options[row.option_id] = row
-            if made:
-                covered.add(record.variant)
-            latest[record.variant] = (record, problem)
-        rows += options.values()
-        rows += [
-            _unmeasured_row(record, size, problem)
-            for variant, (record, problem) in latest.items()
-            if variant not in covered
-        ]
+            rows += made or [_unmeasured_row(record, size, problem)]
     return rows

@@ -91,10 +91,12 @@ A study that wants measured rows records, per variant:
 - Every row carries the family size as `variants_searched`, the run's `ticket`, `sources` and
   `status`, and `licensed = is_licensed_record(record)`, which is exactly what `write_summary`
   withholds (a withheld name among the sources, the data build names or the components).
-- Per option id, the latest run in append order wins.
-- A variant none of whose runs gave a row (a failed run, a legacy family whose metrics are not
+- Per variant, its latest non-holdout run in append order gives all of that variant's rows;
+  earlier runs give none. A rerun that drops a segment drops that segment's earlier row, and a
+  later failed, unmeasured or malformed run replaces earlier measured rows.
+- A variant whose latest run gives no row (a failed run, a legacy family whose metrics are not
   returns, a block with no development return) gets one unmeasured row `'<family_id>/<variant>'`
-  from its latest run: kind from its block if valid, else `other`; pool from its block or None;
+  from that run: kind from its block if valid, else `other`; pool from its block or None;
   rule its variant text; selection `unknown`; status the run's.
 - A malformed block (not a mapping, a missing or unknown field, a value outside its vocabulary)
   lists the variant unmeasured with the reason in `note`; the rest of the registry still reads.
@@ -102,9 +104,11 @@ A study that wants measured rows records, per variant:
 ### Adapters
 
 `adapters` maps a family id to `adapter(record, family_size) -> list[LeaderboardRow]`. For a
-family with an adapter, the adapter is called once per non-holdout run of that family and its
-rows replace the convention's. An adapter returning `[]` for every run of a variant leaves that
-variant the default unmeasured row. Adapters exist for legacy families recorded before the
+family with an adapter, the adapter is called with each variant's latest non-holdout run (the
+same per-variant rule) and its rows replace the convention's. Each adapter row's `licensed` is
+`row.licensed or is_licensed_record(record)`, so an adapter cannot publish a run `write_summary`
+withholds. An adapter returning `[]` leaves that variant the default unmeasured row, with the
+reason in `note` when the run's block is malformed. Adapters exist for legacy families recorded before the
 convention (#451 backfills them).
 
 ## Outputs

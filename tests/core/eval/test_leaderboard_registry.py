@@ -31,7 +31,13 @@ from pathlib import Path
 import pytest
 
 from horsetrack.core.eval import registry as registry_module
-from horsetrack.core.eval.leaderboard import LeaderboardRow, rank, rows_from_registry
+from horsetrack.core.eval.leaderboard import (
+    LeaderboardRow,
+    public_view,
+    rank,
+    render_markdown,
+    rows_from_registry,
+)
 from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord, is_licensed_record
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -891,3 +897,249 @@ def test_a_malformed_block_is_listed_not_raised(tmp_path, block, words):
     assert rows["N23-good/ok"].return_per_100 == 85.0
     assert rows["N24-bad/fine"].return_per_100 == 79.0
     assert rows["N25-after/later"].return_per_100 == 77.0
+
+
+# --------------------------------------------------------------------------- review fixes (#588)
+
+
+def adapted_row(record: RunRecord, size: int, value: float, **extra) -> LeaderboardRow:
+    """An adapter's row that copies the record's sources and leaves ``licensed`` as given."""
+    return LeaderboardRow(
+        option_id=f"{record.family_id}/{record.variant}[adapted]",
+        family_id=record.family_id,
+        ticket=record.ticket,
+        kind="comparator",
+        pool="WIN",
+        segment="adapted",
+        rule=f"adapted {record.variant}",
+        selection="card_only",
+        sources=record.sources,
+        variants_searched=size,
+        status=record.status,
+        return_per_100=value,
+        se_per_100=2.0,
+        n=500,
+        n_unit="bets",
+        **extra,
+    )
+
+
+def test_adapter_rows_of_a_licensed_run_are_withheld(tmp_path):
+    reg = open_registry(tmp_path)
+    append_all(
+        reg,
+        [
+            # licensed by a component naming JRDB, under a public source name
+            make_record(
+                family_id="A30-adapted",
+                variant="jrdb-comp",
+                sources=("jra",),
+                components={"features": "jrdb-idm-v1"},
+                metrics=(dev("roi_pct", 1.2345, None, None, 500),),
+            ),
+            # licensed by its source
+            make_record(
+                family_id="A30-adapted",
+                variant="jravan-src",
+                sources=("jravan",),
+                metrics=(dev("roi_pct", 1.1789, None, None, 500),),
+            ),
+            # a public run whose row the adapter itself marks licensed
+            make_record(
+                family_id="A30-adapted",
+                variant="marked",
+                sources=("netkeiba",),
+                metrics=(dev("roi_pct", 1.0617, None, None, 500),),
+            ),
+            # a public run the adapter leaves alone: not over-withheld
+            make_record(
+                family_id="A30-adapted",
+                variant="public",
+                sources=("jra", "netkeiba"),
+                metrics=(dev("roi_pct", 0.8432, None, None, 500),),
+            ),
+        ],
+    )
+
+    def adapter(record: RunRecord, size: int) -> list[LeaderboardRow]:
+        value = round(record.metrics[0].value * 100, 2)
+        extra = {"licensed": True} if record.variant == "marked" else {}
+        return [adapted_row(record, size, value, **extra)]
+
+    rows = read_rows(reg, adapters={"A30-adapted": adapter})
+
+    withheld = {
+        "A30-adapted/jrdb-comp[adapted]": "123.45",
+        "A30-adapted/jravan-src[adapted]": "117.89",
+        "A30-adapted/marked[adapted]": "106.17",
+    }
+    assert set(rows) == {*withheld, "A30-adapted/public[adapted]"}
+    for option in withheld:
+        assert rows[option].licensed is True, option
+        assert rows[option].withheld, option
+    public_row = rows["A30-adapted/public[adapted]"]
+    assert public_row.licensed is False
+    assert not public_row.withheld
+
+    shown = public_view(rows.values())
+    assert [r.option_id for r in shown] == ["A30-adapted/public[adapted]"]
+    text = render_markdown(list(rows.values()), title="Japan leaderboard", public=True)
+    assert "84.32" in text  # the public row's return is shown
+    for option, figure in withheld.items():
+        assert figure not in text, f"{option}'s return {figure} is in the public text"
+
+
+LATEST_RUN_CASES = [
+    # (id, later runs of R40-latest/v after one measured run with 'all' and 'class:maiden',
+    #  expected {option id: (status, return or None, ticket)} for variant v)
+    (
+        "failed-rerun",
+        [{"status": "failed", "metrics": (), "ticket": 611}],
+        {"R40-latest/v": ("failed", None, 611)},
+    ),
+    (
+        "rerun-drops-a-segment",
+        [{"metrics": (dev("return_per_100", 96.5, 91.0, 102.0, 820),), "ticket": 612}],
+        {"R40-latest/v": ("scored", 96.5, 612)},
+    ),
+    (
+        "rerun-keeps-only-a-new-segment",
+        [
+            {
+                "metrics": (dev("return_per_100[class:open]", 73.25, 69.0, 77.5, 640),),
+                "ticket": 613,
+            }
+        ],
+        {"R40-latest/v[class:open]": ("scored", 73.25, 613)},
+    ),
+    (
+        "rerun-with-no-convention-metric",
+        [{"metrics": (dev("log_loss_gain", 0.002, 0.001, 0.003, 900),), "ticket": 614}],
+        {"R40-latest/v": ("scored", None, 614)},
+    ),
+    (
+        "failed-then-measured-again",
+        [
+            {"status": "failed", "metrics": (), "ticket": 615},
+            {
+                "metrics": (dev("return_per_100[class:maiden]", 101.0, 94.0, 108.0, 210),),
+                "ticket": 616,
+            },
+        ],
+        {"R40-latest/v[class:maiden]": ("scored", 101.0, 616)},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("later", "expected"),
+    [case[1:] for case in LATEST_RUN_CASES],
+    ids=[case[0] for case in LATEST_RUN_CASES],
+)
+def test_the_latest_run_of_a_variant_replaces_all_its_rows(tmp_path, later, expected):
+    reg = open_registry(tmp_path)
+    block = {"leaderboard": WIN_BLOCK}
+    records = [
+        make_record(
+            family_id="R40-latest",
+            variant="v",
+            ticket=610,
+            params=block,
+            metrics=(
+                dev("return_per_100", 88.75, 84.0, 93.5, 800),
+                dev("return_per_100[class:maiden]", 92.5, 85.0, 100.0, 200),
+            ),
+        ),
+        make_record(
+            family_id="R40-latest",
+            variant="sibling",
+            ticket=620,
+            params=block,
+            metrics=(dev("return_per_100", 81.5, 77.0, 86.0, 750),),
+        ),
+    ]
+    shas = ["b" * 40, "c" * 40]
+    for sha, overrides in zip(shas, later, strict=False):
+        records.append(
+            make_record(family_id="R40-latest", variant="v", git_sha=sha, params=block, **overrides)
+        )
+    append_all(reg, records)
+
+    rows = read_rows(reg)
+
+    assert set(rows) == {*expected, "R40-latest/sibling"}
+    for option, (status, value, ticket) in expected.items():
+        row = rows[option]
+        assert row.status == status, option
+        assert row.return_per_100 == value, option
+        assert row.measured is (value is not None), option
+        assert row.ticket == ticket, option
+    sibling = rows["R40-latest/sibling"]
+    assert (sibling.return_per_100, sibling.ticket) == (81.5, 620)
+    # no figure of the superseded run ranks
+    assert all(r.return_per_100 not in (88.75, 92.5) for r in rows.values())
+
+
+def test_a_later_malformed_run_supersedes_a_measured_one(tmp_path):
+    reg = open_registry(tmp_path)
+    append_all(
+        reg,
+        [
+            make_record(
+                family_id="R41-broken-later",
+                variant="v",
+                params={"leaderboard": WIN_BLOCK},
+                metrics=(dev("return_per_100", 89.25, 85.0, 93.5, 600),),
+            ),
+            make_record(
+                family_id="R41-broken-later",
+                variant="v",
+                git_sha=OTHER_SHA,
+                ticket=617,
+                params={"leaderboard": {**WIN_BLOCK, "kind": "bogus"}},
+                metrics=(dev("return_per_100", 97.0, 92.0, 102.0, 650),),
+            ),
+        ],
+    )
+
+    rows = read_rows(reg)
+
+    assert set(rows) == {"R41-broken-later/v"}
+    row = rows["R41-broken-later/v"]
+    assert row.return_per_100 is None and not row.measured
+    assert row.ticket == 617
+    assert row.note and ("kind" in row.note.lower() or "bogus" in row.note.lower()), row.note
+
+
+@pytest.mark.parametrize(("block", "words"), MALFORMED_CASES[:2] + MALFORMED_CASES[-1:])
+def test_a_malformed_block_under_an_empty_adapter_names_the_problem(tmp_path, block, words):
+    reg = open_registry(tmp_path)
+    append_all(
+        reg,
+        [
+            make_record(
+                family_id="A31-empty",
+                variant="broken",
+                ticket=452,
+                params={"leaderboard": block},
+                metrics=(dev("return_per_100", 87.5, 80.0, 95.0, 400),),
+            ),
+            make_record(
+                family_id="A31-empty",
+                variant="fine",
+                params={"leaderboard": PLACE_BLOCK},
+                metrics=(dev("return_per_100", 79.0, 75.0, 83.0, 500),),
+            ),
+        ],
+    )
+
+    rows = read_rows(reg, adapters={"A31-empty": lambda record, size: []})
+
+    assert set(rows) == {"A31-empty/broken", "A31-empty/fine"}
+    broken = rows["A31-empty/broken"]
+    assert broken.return_per_100 is None and not broken.measured
+    assert broken.ticket == 452
+    assert broken.note, "the malformed block's reason is not in note"
+    assert any(word.lower() in broken.note.lower() for word in words), broken.note
+    # the adapter, not the convention, gives this family's rows
+    assert not rows["A31-empty/fine"].measured
