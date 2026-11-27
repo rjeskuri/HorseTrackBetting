@@ -16,7 +16,8 @@ variant rows from the registry, never executed again.
 - rho = sum returned / sum (staked x rate), each race's own payout rate; break-even 1 / rate. Its
   one-sided 95% bounds come from #131's meeting bootstrap (``exacta_study.rho_interval``).
 - Every frozen member is a ranked row (owner reframe, 2026-11-27): rho descending, a member
-  without a bet last. No verdict and no kill rule.
+  without a bet last, a v1 member with no scored record after it (unavailable, not counted as
+  searched). No verdict and no kill rule.
 - Descriptives: D = sum q / sum p per category and cell, and the Quinella x order split (each
   Quinella pair share split by Harville's order probabilities, against the exacta shares).
 
@@ -25,7 +26,9 @@ variant rows from the registry, never executed again.
 D14; never ``LockedHoldout``), none before 2014-06-07 (D10), one year per ``load_races`` call.
 A run that scores no race records its members as failed and publishes nothing
 (``NoEligibleRace``). Every figure goes through ``write_report`` (jravan is withheld, D21) and
-the private registry.
+the private registry. Each run writes its own report and export, named by its commit, data build,
+seed and asked days and carrying the days it scored; only the run of record (seed 431 over
+``RECORD_DAYS``) writes the ledger-linked ``CELLS_FILE``.
 """
 
 from __future__ import annotations
@@ -114,6 +117,10 @@ UNIT = 100.0  # yen per vote
 WITHHELD = "withheld (D21)"
 LOOK_AHEAD = "look-ahead: the selection reads the final boards"
 CELLS_FILE = Path("candidate-cells") / "exacta-ceiling.json"
+# The run of record (the ledger row): seed DEFAULT_SEED over these asked days. Only it writes
+# CELLS_FILE; every other run writes its own report and export and leaves that file alone.
+RECORD_DAYS = (FIRST_DAY, date(2026, 11, 27))
+NO_RECORD = "no scored record of this superseded member in the registry"
 NO_BET = "no combination selected"
 FEW_MEETINGS = "fewer than two meetings: no bootstrap bound"
 EMPTY = "no scored race with a share in the cell"
@@ -662,6 +669,7 @@ class CeilingRow:
     n_races: int
     n_meetings: int
     run: str = ""  # the commit of the run the row comes from (a v1 row: its recorded run)
+    unavailable: str = ""  # why the row has no figure: a v1 member with no scored record
 
     @property
     def p_source(self) -> str:
@@ -673,15 +681,17 @@ class CeilingResult:
     rows: tuple[CeilingRow, ...]  # FAMILY_ID's 16 members in rank order
     variant_rows: tuple[CeilingRow, ...]  # PLAIN_ID's 16, in rank order
     # every member of every member family ranked together: this run's 32 and the v1 families'
-    # latest scored rows in the registry (labelled by p source and span)
+    # latest scored rows in the registry (labelled by p source and span), a v1 member with no
+    # scored record as an unavailable row, ranked last
     ranked: tuple[CeilingRow, ...]
     descriptives: tuple[dict, ...]
     excluded: dict
     meta: dict
     report_path: Path
-    cells_path: Path | None  # None: a seed other than the pre-registered one writes no cells
+    cells_path: Path | None  # None: only the run of record (RECORD_DAYS, seed 431) writes it
     run_ids: tuple[str, ...]
-    variants_searched: int
+    variants_searched: int  # the variants actually scored, of VARIANTS_SEARCHED frozen
+    export_path: Path | None = None  # this run's own ranked export, beside its report
 
 
 def _check_frozen(registry: Registry) -> None:
@@ -851,43 +861,59 @@ def _value(metric: FoldMetric | None, attr: str = "value") -> float:
 
 
 def _superseded_rows(registry: Registry) -> list[CeilingRow]:
-    """The v1 families' members as rows: each member's latest scored record in the registry
-    (rho, its bounds, the return per 100 yen and the counts, as ``_member_metrics`` wrote them)."""
+    """Every member of the v1 families as a row, in spec order: its latest scored record in the
+    registry (rho, its bounds, the return per 100 yen and the counts, as ``_member_metrics`` wrote
+    them), or, with no scored record, an unavailable row (no figure, ranked last, not counted)."""
     latest: dict[tuple[str, str], RunRecord] = {}
     for record in registry.records():
         if record.family_id in V1_MEMBER_FAMILIES and record.status == "scored":
             latest[(record.family_id, record.variant)] = record
+    specs, nan = superseded_specs(), math.nan
     rows = []
-    for (family, _), record in sorted(latest.items()):
-        m = {x.metric: x for x in record.metrics}
-        rho, r100 = m.get("rho"), m.get("return_per_100")
-        p = record.params
-        rows.append(
-            CeilingRow(
-                family,
-                str(p["lambda2"]),  # "full_development" or "1.0", as the run labels them
-                str(p["category"]),
-                float(p["cut"]),
-                str(p["cell"]),
-                _value(rho),
-                _value(rho, "hi"),
-                _value(rho, "lo"),
-                _value(r100),
-                _value(r100, "hi"),
-                int(_value(m.get("n_selected"))) if "n_selected" in m else 0,
-                int(rho.n) if rho is not None else 0,
-                int(_value(m.get("n_meetings"))) if "n_meetings" in m else 0,
-                record.git_sha[:12],
-            )
-        )
+    for family in V1_MEMBER_FAMILIES:
+        for category, cut, cell in MEMBERS:
+            record = latest.get((family, f"{category}|k={cut}|{cell}"))
+            if record is None:
+                label = str(specs[family]["lambda2"])  # as the v1 run labelled it
+                nothing = (nan, nan, nan, nan, nan, 0, 0, 0)
+                rows.append(
+                    CeilingRow(family, label, category, cut, cell, *nothing, unavailable=NO_RECORD)
+                )
+            else:
+                rows.append(_recorded_row(family, record))
     return rows
 
 
+def _recorded_row(family: str, record: RunRecord) -> CeilingRow:
+    m = {x.metric: x for x in record.metrics}
+    rho, r100 = m.get("rho"), m.get("return_per_100")
+    p = record.params
+    return CeilingRow(
+        family,
+        str(p["lambda2"]),  # "full_development" or "1.0", as the run labels them
+        str(p["category"]),
+        float(p["cut"]),
+        str(p["cell"]),
+        _value(rho),
+        _value(rho, "hi"),
+        _value(rho, "lo"),
+        _value(r100),
+        _value(r100, "hi"),
+        int(_value(m.get("n_selected"))) if "n_selected" in m else 0,
+        int(rho.n) if rho is not None else 0,
+        int(_value(m.get("n_meetings"))) if "n_meetings" in m else 0,
+        record.git_sha[:12],
+    )
+
+
 def _ranked(rows) -> tuple[CeilingRow, ...]:
+    """rho descending; a member without a bet after every member with one, and an unavailable
+    row (no scored record) after both."""
+
     def key(item):
         k, row = item
         good = row.rho is not None and math.isfinite(row.rho)
-        return (not good, -row.rho if good else 0.0, k)
+        return (bool(row.unavailable), not good, -row.rho if good else 0.0, k)
 
     return tuple(row for _, row in sorted(enumerate(rows), key=key))
 
@@ -969,7 +995,9 @@ def run_ceiling(
 ) -> CeilingResult:
     """Score every frozen member on the development days of [max(date_from, 2014-06-07),
     date_to]; one registry record per member and per descriptive (a failure too), and the
-    private report and ranked member file under ``out_dir``. With the default registry, the
+    private report and this run's own export under ``out_dir`` (named by its commit, data build,
+    seed and asked days, carrying the days it scored). Only the run of record (seed 431 over
+    ``RECORD_DAYS``) also writes the ledger-linked ``CELLS_FILE``. With the default registry, the
     committed summary of this study's families is regenerated."""
     default = registry is None
     registry = default_registry(COUNTRY) if default else registry
@@ -1022,8 +1050,9 @@ def run_ceiling(
         rows, variant_rows = _ranked(groups[FAMILY_ID]), _ranked(groups[PLAIN_ID])
         ranked = _ranked([*groups[FAMILY_ID], *groups[PLAIN_ID], *_superseded_rows(registry)])
         span = (min(scored_days), max(scored_days))
-        report_path, cells_path = _write_private(
-            out_dir, sha, meta, ranked, descriptives, dict(excluded), span, seed
+        window = (max(date_from, FIRST_DAY), date_to)  # the asked days, as `_days` clamps them
+        report_path, export_path, cells_path = _write_private(
+            out_dir, sha, meta, ranked, descriptives, dict(excluded), span, window, seed
         )
     except RunRefused:
         raise
@@ -1071,7 +1100,8 @@ def run_ceiling(
         report_path,
         cells_path,
         tuple(run_ids),
-        VARIANTS_SEARCHED,
+        sum(not row.unavailable for row in ranked),
+        export_path,
     )
 
 
@@ -1170,60 +1200,104 @@ def _json_safe(value):
     return value
 
 
-def _write_private(out_dir, sha, meta, ranked, descriptives, excluded, span, seed):
+def _status(row: CeilingRow) -> str:
+    if row.unavailable:
+        return f"unavailable: {row.unavailable}"
+    return "scored" if _available(row.rho) else f"scored, {NO_BET}"
+
+
+def _write_private(out_dir, sha, meta, ranked, descriptives, excluded, span, window, seed):
+    """The report and this run's export (``<stem>.md``, ``<stem>.json``), and ``CELLS_FILE``
+    for the run of record alone; (report, export, cells or None)."""
     specs = family_specs()
     hashes = {f: _spec_hash(s) for f, s in specs.items()}
     tag = hashlib.sha256(json.dumps(meta["data_builds"], sort_keys=True).encode()).hexdigest()[:8]
-    # The seed is part of the identity: a re-run at another seed never overwrites this report.
-    stem = f"exacta-ceiling-japan-{sha[:12]}-{tag}-seed{seed}"
+    # The run's identity: its commit, the rows it read, its seed and its asked days, so no other
+    # run (another seed, a shorter span) ever overwrites this run's report or export.
+    asked = f"{window[0]:%Y%m%d}-{window[1]:%Y%m%d}"
+    stem = f"exacta-ceiling-japan-{sha[:12]}-{tag}-seed{seed}-{asked}"
+    of_record = seed == DEFAULT_SEED and tuple(window) == RECORD_DAYS
+    searched = sum(not r.unavailable for r in ranked)  # only the variants actually scored
+    scored = f"{span[0]} to {span[1]}"
+
+    def days(r: CeilingRow) -> str:
+        if r.family_id in MEMBER_FAMILIES:
+            return scored  # the first and last development day this run scored
+        if r.unavailable:
+            return "none (no scored record)"
+        return f"the days scored by run {r.run} (in that run's private report)"
+
     leaderboard = [
         {
             "rank": k + 1,
             "option": f"{r.family_id}:{r.category}|k={r.cut}|{r.cell}",
             **asdict(r),
+            "status": _status(r),
             "p_source": r.p_source,
             "p": P_SOURCES[r.p_source],
-            "span": SPANS[r.p_source],
+            "eligible": SPANS[r.p_source],
+            "span": days(r),
             "label": "look-ahead",
             "family_size": len(MEMBERS),  # the members of the row's own family
-            "variants_searched": VARIANTS_SEARCHED,  # every member family of the study
+            "variants_searched": searched,  # the variants this export actually scored
+            "variants_frozen": VARIANTS_SEARCHED,  # every member family of the study
+            "export": stem,
+            "run_of_record": of_record,
             "seed": seed if r.family_id in MEMBER_FAMILIES else "its run's recorded seed",
             "break_even_rho": "1 / rate (rho = 1 is the payout rate)",
         }
         for k, r in enumerate(ranked)
     ]
+    missing = len(ranked) - searched
     lines = [
         f"# N2 (#431): exacta look-ahead ceiling on final boards ({sha[:12]}, seed {seed})",
         "",
         f"**{LOOK_AHEAD}.** Not a betting rule and not a proven bound on the T-2 rule.",
         "",
-        f"- Span scored by this run (p source `board`): {span[0]} to {span[1]}",
-        *[f"- p source `{k}`: {v}; span: {SPANS[k]}" for k, v in P_SOURCES.items()],
+        f"- Run `{stem}`: asked {window[0]} to {window[1]}, seed {seed}; "
+        + (
+            f"the run of record (it writes `{CELLS_FILE.as_posix()}`)"
+            if of_record
+            else f"not the run of record (seed {DEFAULT_SEED}, asked {RECORD_DAYS[0]} to "
+            f"{RECORD_DAYS[1]}): `{CELLS_FILE.as_posix()}` is left alone, this run's export is "
+            f"`{stem}.json`"
+        ),
+        f"- Span scored by this run (p source `board`): {scored}",
+        *[f"- p source `{k}`: {v}; eligible: {SPANS[k]}" for k, v in P_SOURCES.items()],
         f"- Seed {seed}, {N_BOOT} meeting-bootstrap replicates, one-sided {LEVEL:.0%} bounds",
-        f"- Variants searched: {VARIANTS_SEARCHED} (every member family of the study, "
-        f"{len(MEMBERS)} members each: this run's {', '.join(MEMBER_FAMILIES)} and the "
-        f"superseded {', '.join(V1_MEMBER_FAMILIES)}, whose rows come from their recorded runs)",
+        f"- Variants searched: {searched} scored of the {VARIANTS_SEARCHED} frozen "
+        f"({len(MEMBERS)} members in each member family of the study: this run's "
+        f"{', '.join(MEMBER_FAMILIES)} and the superseded {', '.join(V1_MEMBER_FAMILIES)}, whose "
+        "rows come from their recorded runs)"
+        + (
+            f"; {missing} superseded members have no scored record in this registry: unavailable "
+            "rows, ranked last, not counted"
+            if missing
+            else ""
+        ),
         f"- Win probabilities `{meta['win_fit']}`, ordering fit `{meta['ordering_fit']}`, "
         f"lambda2 full_development = {meta.get('lambda2_full_development')}",
         *[f"- Family `{f}`, spec sha256 `{h}`" for f, h in hashes.items()],
         *[f"- Build `{k}`: `{v}`" for k, v in meta["data_builds"].items()],
         "",
         "## Ranked members (rho = return over staked x rate; the CI column is the one-sided 95% "
-        "upper bound; family size = the row's family, variants searched = the study)",
+        "upper bound; family size = the row's family, variants searched = the variants this run "
+        "scored, of the study's frozen)",
         "",
-        "| rank | family | p source | run | lambda2 | category | cut | cell | rho | upper (CI) | "
-        "lower | return per 100 yen | its upper | n selected | n races | n meetings | family "
-        "size | variants searched |",
-        "|" + " --- |" * 18,
+        "| rank | family | p source | run | span | status | lambda2 | category | cut | cell | rho "
+        "| upper (CI) | lower | return per 100 yen | its upper | n selected | n races | "
+        "n meetings | family size | variants searched |",
+        "|" + " --- |" * 20,
     ]
     for row in leaderboard:
         lines.append(
-            f"| {row['rank']} | {row['family_id']} | {row['p_source']} | {row['run']} | "
+            f"| {row['rank']} | {row['family_id']} | {row['p_source']} | {row['run'] or 'none'} | "
+            f"{row['span']} | {row['status']} | "
             f"{row['lambda2']} | {row['category']} | {row['cut']} | {row['cell']} | "
             f"{_num(row['rho'])} | {_num(row['upper'])} | {_num(row['lower'])} | "
             f"{_num(row['return_per_100'], 1)} | {_num(row['return_per_100_upper'], 1)} | "
             f"{row['n_selected']} | {row['n_races']} | {row['n_meetings']} | "
-            f"{row['family_size']} | {row['variants_searched']} |"
+            f"{row['family_size']} | {row['variants_searched']} of {row['variants_frozen']} |"
         )
     lines += [
         "",
@@ -1243,26 +1317,37 @@ def _write_private(out_dir, sha, meta, ranked, descriptives, excluded, span, see
     text = "\n".join(lines) + "\n"
     report = write_report(out_dir / f"{stem}.md", text, sources=SOURCES)
     payload = {
+        "run": {
+            "export": stem,
+            "commit": sha,
+            "data_build": tag,
+            "seed": seed,
+            "asked": window,
+            "scored": span,
+            "run_of_record": of_record,
+        },
         "meta": meta,
         "span": span,
         "seed": seed,
         "family_size": len(MEMBERS),
-        "variants_searched": VARIANTS_SEARCHED,
+        "variants_searched": searched,
+        "variants_frozen": VARIANTS_SEARCHED,
+        "unavailable": missing,
         "leaderboard": leaderboard,
         "descriptives": descriptives,
         "excluded": excluded,
         "spec_hashes": hashes,
         "superseded_spec_hashes": {f: _spec_hash(s) for f, s in superseded_specs().items()},
     }
-    write_report(
+    export = write_report(
         out_dir / f"{stem}.json", json.dumps(_json_safe(payload), indent=1) + "\n", sources=SOURCES
     )
-    if seed != DEFAULT_SEED:  # the ranked member file is the pre-registered seed's alone
-        return report, None
+    if not of_record:  # the ledger-linked file is the run of record's alone
+        return report, export, None
     cells = write_report(
         out_dir / CELLS_FILE, json.dumps(_json_safe(leaderboard), indent=1) + "\n", sources=SOURCES
     )
-    return report, cells
+    return report, export, cells
 
 
 class _Mine:
@@ -1345,15 +1430,20 @@ a betting-edge claim, nothing is adopted, and the holdout is not opened.
   Win and exacta boards; `LockedHoldout` is never opened. A race whose exacta pool has refund
   votes (a scratch after sales) is excluded and counted. A run that scores no race records its
   members as failed and writes no report.
-- Private outputs, through `write_report` with the source `jravan`:
-  `$HORSETRACK_DATA_DIR/reports/exacta-ceiling-japan-<commit>-<build>-seed<seed>.md` and `.json`
-  (every ranked member with its p source, family size and the variants searched, the
-  descriptives, the exclusions and the span), and the ranked member file
-  `$HORSETRACK_DATA_DIR/reports/{CELLS_FILE.as_posix()}` (written by the pre-registered seed
-  {DEFAULT_SEED} only).
-- Variants searched: {VARIANTS_SEARCHED}, every member family of the study: {len(MEMBERS)}
+- Private outputs, through `write_report` with the source `jravan`: each run's report and export
+  `$HORSETRACK_DATA_DIR/reports/exacta-ceiling-japan-<commit>-<build>-seed<seed>-<from>-<to>.md`
+  and `.json`, named by the run's commit, data build, seed and asked days so that no run
+  overwrites another's (every ranked member with its p source, status, the days its run scored,
+  family size and the variants searched; the descriptives and the exclusions); and the
+  ledger-linked ranked member file `$HORSETRACK_DATA_DIR/reports/{CELLS_FILE.as_posix()}`, written
+  only by the run of record (seed {DEFAULT_SEED}, asked days {RECORD_DAYS[0]} to
+  {RECORD_DAYS[1]}); any other run leaves it alone.
+- Variants frozen: {VARIANTS_SEARCHED}, every member family of the study: {len(MEMBERS)}
   members at #115's full-development lambda2 and the same {len(MEMBERS)} at plain Harville, for
-  each p source (v2 and v1); family size {len(MEMBERS)} each.
+  each p source (v2 and v1); family size {len(MEMBERS)} each. Each run's report and export state
+  beside it the variants searched, the ones actually scored: the run's own and each v1 member
+  with a scored record in the registry. A v1 member without one is an unavailable row, ranked
+  last and not counted.
 
 ## Hypothesis
 
@@ -1376,7 +1466,9 @@ bound, return per 100 yen and its upper bound, n selected, n races and n meeting
 Descriptives (`{DESCRIPTIVE_ID}`, and v1's `{V1_DESCRIPTIVE_ID}`): D = sum q / sum p per category
 and cell, and the Quinella x order split, each with a two-sided 95% meeting-bootstrap interval:
 {WITHHELD}. A member with no bet keeps its row, ranked last, with an unavailable marker in the
-registry; a failed run is recorded too (the registry summary lists every run's status).
+registry; a v1 member with no scored record in the registry keeps an unavailable row, ranked after
+those and not counted as searched; a failed run is recorded too (the registry summary lists every
+run's status).
 
 ## Alternatives rejected and why
 
@@ -1446,5 +1538,8 @@ def run_command(
         typer.echo(f"failed: {exc}; recorded, nothing published", err=True)
         raise typer.Exit(1) from exc
     public = write_report(env.repo_root() / PUBLIC_REPORT, render_public_report(result), sources=())
-    typer.echo(f"report={result.report_path}\ncells={result.cells_path}\npublic={public}")
+    typer.echo(
+        f"report={result.report_path}\nexport={result.export_path}\ncells={result.cells_path}\n"
+        f"public={public}"
+    )
     typer.echo(f"rows={len(result.rows)} ranked={len(result.ranked)} records={len(result.run_ids)}")

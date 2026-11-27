@@ -95,8 +95,10 @@ cell ∈ {all races, headline} = **16**, family `japan-431-exacta-ceiling-v2` (v
   comparable.
 - **Variants searched: 64**, every member family of the study: 16 per family, v2's two (the run)
   and v1's two (superseded, recorded). Family size 16 each. Every row of the private report and
-  of the ranked member file carries both: `family_size` (its own family) and
-  `variants_searched` (the study).
+  of each run's export carries `family_size` (its own family), `variants_frozen` (the study's
+  64) and `variants_searched`, the variants that run actually scored: its own 32 and each v1
+  member with a scored record in the registry. A v1 member without one keeps an unavailable row
+  (status and reason, ranked last) and is not counted, so no output claims more than it scored.
 - **Favourite:** the lowest final Win odds (`final_odds` WIN), ties to the lowest number; the
   category is `combo_category` against it.
 - **Cells:** all scored races, and #131's headline cell (`exacta_study.segment_cells`): the
@@ -174,12 +176,17 @@ Each with a two-sided 95% meeting-bootstrap interval (10,000 replicates).
   marker `run:unavailable:no eligible race in the asked development days` and stops: no scored
   record, no private report, no ranked member file and no public report is written, so a short
   date-range check never replaces the run of record's outputs.
-- Private (through `write_report`, source `jravan`): the report
-  `$HORSETRACK_DATA_DIR/reports/exacta-ceiling-japan-<commit>-<build>-seed<seed>.md` and `.json`
-  (the seed in the name: a re-run at another seed never overwrites the run of record's report),
-  and the ranked member file `$HORSETRACK_DATA_DIR/reports/candidate-cells/exacta-ceiling.json`,
-  written only by a run at the pre-registered seed 431. Both rank all 64 members, each row with
-  its p source, span, run, family size and the variants searched.
+- Private (through `write_report`, source `jravan`): each run's report and export
+  `$HORSETRACK_DATA_DIR/reports/exacta-ceiling-japan-<commit>-<build>-seed<seed>-<from>-<to>.md`
+  and `.json`, named by the run's commit, data build, seed and asked days, so no run (another
+  seed, a shorter span) overwrites another's. The export carries the run's identity (commit,
+  build, seed, asked days, whether it is the run of record) and the first and last development
+  day it scored; each row of a run's own families carries those scored days as its span, and a
+  v1 row names the run it comes from. The ledger-linked ranked member file
+  `$HORSETRACK_DATA_DIR/reports/candidate-cells/exacta-ceiling.json` is written only by the run
+  of record: seed 431 over the asked days 2014-06-07 to 2026-11-27 (`RECORD_DAYS`); any other
+  run leaves it alone. Each ranks all 64 members, each row with its p source, status, span,
+  run, family size, the variants searched and the variants frozen.
 - Public: `docs/experiments/exacta-ceiling-japan.md` (every figure withheld, D21), the registry
   summary under `docs/experiments/registry/japan/` (`write_summary`, never hand-edited) and the
   ledger rows.
