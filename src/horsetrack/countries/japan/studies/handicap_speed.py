@@ -3,25 +3,31 @@
 #129 built the handicap factors with an interim speed figure (the final time against the in-fold
 class-par median) and measured the out-of-fold `handicap_score` alone (V1) and melded into the
 calibrated-market Win baseline v0 (V2). #96's expected top-3 time has landed, so the speed family
-now reads it (`handicap/factors.py`, `_speed_figures`). This study rebuilds the per-day table with
-it and reruns #129's two comparisons with `core.eval.scoring` and `core.eval.bootstrap`, next to
-the same comparisons on #129's kept table (the interim par), and scores the swap itself: the new
-score against the old, paired on the same races. It adopts nothing (D16); the holdout is never
-opened and no JRDB or JRA-VAN table is read (D21).
+now reads it (`handicap/factors.py`). This study rebuilds the per-day table with it, each past
+start's figure as of its own race day with its day variant (`speed_at_start_day=True`), and reruns
+#129's two comparisons with `core.eval.scoring` and `core.eval.bootstrap`, next to the same
+comparisons on #129's kept table (the interim par, pinned to `features/jra/handicap`), and scores
+the swap itself: the new score against the old, paired on the same races. It adopts nothing (D16);
+the holdout is never opened and no JRDB or JRA-VAN table is read (D21).
+
+This is the v2 family. v1 (`japan-handicap-speed-96-final-win`) fitted every past start in the
+model (no day variant, so it tested the new par alone); its records stay in the registry.
 
 - V1: the out-of-fold score alone against equal chances (winner log loss, a dead heat's k co-winners
   at 1/k, pseudo-R2 against ln n, gain in nats per race), and against v0.
-- V2: exp(a ln p_cal + b ln h) over v0, (a, b) the conditional logit fitted on the v0 folds before
-  the one scored (walk-forward, `fit_conditional_logit`); the first fold only trains.
+- V2: exp(a ln p_cal + b ln h) over v0, (a, b) the conditional logit fitted on the v0 rows of the
+  folds before the one scored and no later than that fold's training cutoff (D9's embargo, the
+  v0 manifest's `train_end`; walk-forward, `fit_conditional_logit`); the first fold only trains.
 - The bounds are D7's: a paired bootstrap over meetings (venue x day), one-sided 95% (the lower
   bound a claim rests on), plus the two-sided 95% interval.
 
 Order of `run_study` (CLI `python -m horsetrack.countries.japan.studies.handicap_speed --run
 [--out DIR] [--rebuild]`): build the spec, freeze the family in the run registry (a different spec
 under the same id stops the run), only then build the table (`build_handicap_table(...,
-out_dir=TABLE_DIR)`, a directory beside #129's, which is kept; an existing one is reused unless
-`--rebuild`), read the outcomes, score, append one registry record per variant (failures included)
-and write the report through `write_report`. `compute_study` is pure.
+out_dir=TABLE_DIR, speed_at_start_day=True)`, a directory beside #129's, which is kept; an existing
+one is reused only when its completion marker names this range and mode, else rebuilt), read the
+outcomes, score, append one registry record per variant (failures included) and write the report
+through `write_report`. `compute_study` is pure.
 """
 
 from __future__ import annotations
@@ -55,14 +61,17 @@ from horsetrack.countries.japan.studies.calibration import Study, Variant, _mark
 
 COUNTRY = "japan"
 TICKET = 219
-FAMILY_ID = "japan-handicap-speed-96-final-win"
+FAMILY_ID = "japan-handicap-speed-96-final-win-v2"
+V1_FAMILY_ID = "japan-handicap-speed-96-final-win"  # superseded, kept in the registry
+V1_SPEC_SHA256 = "16b385befd691c9e957de14b56f465ed6cfda04bcaffcec42b199b23ebabcad8"
 HYPOTHESIS_ID = "E39"  # 08 §4: C3's figure; this is its use inside the handicap score (#129)
 SOURCE = "jra"  # the store's JRA results (netkeiba); no JRDB, no JRA-VAN
 BOOTSTRAP_SEED = 219  # reproducibility only; scoring.yaml signs no seed
 FIRST_DAY = PRICE_ERA_START  # 2014-06-07, #129's first development day
 LAST_DAY = date(2026, 11, 15)  # #129's last development day (every day is before the holdout)
 V0_FIT_ID = "aac501f927b0"  # #129's baseline: v0's out-of-fold p_cal, `win_calibration_oof-<id>`
-TABLE_DIR = "handicap-96"  # features/jra/<TABLE_DIR>; #129's table stays in features/jra/handicap
+TABLE_DIR = "handicap-96-v2"  # features/jra/<TABLE_DIR>; v1's handicap-96 and #129's handicap stay
+INTERIM_DIR = "handicap"  # features/jra/<INTERIM_DIR>: #129's table, the interim par, read-only
 INTERIM = "interim_par"
 V96 = "v96"
 KEYS = ["race_id", "horse_no"]
@@ -81,8 +90,18 @@ def table_dir() -> Path:
     return paths.data_dir() / "features" / "jra" / TABLE_DIR
 
 
+def interim_dir() -> Path:
+    """#129's table, pinned here and not through `factors.handicap_dir()`, so a rebuild of the #96
+    table can never be compared with itself."""
+    return paths.data_dir() / "features" / "jra" / INTERIM_DIR
+
+
 def v0_oof_path() -> Path:
     return paths.data_dir() / "models" / COUNTRY / "v0" / f"win_calibration_oof-{V0_FIT_ID}.parquet"
+
+
+def v0_manifest_path() -> Path:
+    return v0_oof_path().with_name(f"manifest-win_calibration-{V0_FIT_ID}.json")
 
 
 def bootstrap_settings() -> dict:
@@ -113,18 +132,29 @@ def build_spec(boot: dict, scheme: FoldScheme) -> dict:
             "would point to leakage before an edge",
             "H3": "the swap is worth little: |gain of the #96 score over the interim-par score| is "
             "under 0.01 nats per race",
-            "note": "in the per-day table every start is in the fold (train_end = the cut), so "
-            "its figure is par - time with the day variant at its prior; the day variant enters "
-            "only for a start after train_end, which the table never has",
+            "note": "v2 supersedes the v1 family (spec sha256 "
+            f"{V1_SPEC_SHA256}), whose per-day table put every past start in the model's fit "
+            "(train_end = the cut), so its figure had the day variant at its prior and tested "
+            "the new par alone. v1's results were known when this spec was frozen: H1-H3 are "
+            "carried from v1 unchanged, not tuned to them. v2's figure is as of the start's own "
+            "race day, with that day's earlier results observed (the day variant); two changes "
+            "besides: the V2 meld admits only v0 rows no later than the scored fold's training "
+            "cutoff (D9's embargo, which v1 skipped), and the #96 table is written to "
+            f"features/jra/{TABLE_DIR}",
         },
+        "supersedes": {"family_id": V1_FAMILY_ID, "spec_sha256": V1_SPEC_SHA256},
         "figure": "speed = SpeedModel(SpeedSpec(PAR_KEYS, VARIANT_KEYS, same_day_variant=True, "
-        "t_df=5.0)).expected_top3_time at post - 2 min (D2) minus finish_time_s; the model fitted "
-        "on speed_run.build_race_table(estimand='mean_placed_1_3') of the races to the cut "
-        "(handicap/factors.py, #219)",
-        "table": f"features/jra/{TABLE_DIR}: build_handicap_table({FIRST_DAY}, {LAST_DAY}), the "
-        "default ridge conditional logit (alpha 1, SCORE_FEATURES), out of fold over #70's scheme",
-        "interim_table": "features/jra/handicap, #129's table (the in-fold class-par median), "
-        "rescored here with the same code",
+        "t_df=5.0)).expected_top3_time at post - 2 min (D2) minus finish_time_s, for each past "
+        "start as of its own race day E: the model fitted on speed_run.build_race_table("
+        "estimand='mean_placed_1_3') of the races before E, having observed E's results (one fit "
+        f"per race day); no figure for a start in the first {factors.SPEED_WARMUP_DAYS} days of "
+        "the store, or in a cell with no earlier race (handicap/factors.py "
+        "`_own_day_expected`, #219)",
+        "table": f"features/jra/{TABLE_DIR}: build_handicap_table({FIRST_DAY}, {LAST_DAY}, "
+        "speed_at_start_day=True), the default ridge conditional logit (alpha 1, SCORE_FEATURES), "
+        "out of fold over #70's scheme",
+        "interim_table": f"features/jra/{INTERIM_DIR}, #129's table (the in-fold class-par median),"
+        " rescored here with the same code",
         "development_days": [FIRST_DAY.isoformat(), LAST_DAY.isoformat()],
         "baseline": f"v0's calibrated Win model out of fold, win_calibration_oof-{V0_FIT_ID} (#114,"
         " #123); its folds are the meld's",
@@ -132,8 +162,9 @@ def build_spec(boot: dict, scheme: FoldScheme) -> dict:
             "V1": "the score alone vs equal chances (ln n), pseudo-R2 and gain in nats per race",
             "handicap_vs_market": "gain = ll(v0) - ll(score) on the races both score",
             "V2": "exp(a ln p_cal + b ln h) normalised within the race; (a, b) the conditional "
-            "logit on the v0 folds before the scored one; gain = ll(v0) - ll(meld) over the "
-            "scored folds on the same rows",
+            "logit on the v0 rows of the folds before the scored one and dated no later than "
+            "its training cutoff (the v0 manifest's train_end); gain = ll(v0) - ll(meld) over "
+            "the scored folds on the same rows",
             "swap": "the #96 score against the interim-par score on their common races, alone "
             "and melded; gain = ll(interim) - ll(#96)",
         },
@@ -152,12 +183,14 @@ def build_spec(boot: dict, scheme: FoldScheme) -> dict:
 class Inputs:
     """`scores`: one table per source (race_id, race_date, horse_no, h, a null where no fold scores
     the row); `outcomes`: race_id, horse_no, won of the declared runners; `meetings`: race_id ->
-    meeting_id; `v0`: race_id, horse_no, fold, p_cal."""
+    meeting_id; `v0`: race_id, horse_no, fold, p_cal; `v0_train_end`: v0 fold -> the last day that
+    fold's fit trained on (D9's embargo)."""
 
     scores: dict[str, pd.DataFrame]
     outcomes: pd.DataFrame
     meetings: pd.Series
     v0: pd.DataFrame
+    v0_train_end: dict[int, date]
 
 
 def _rows(scores: pd.DataFrame, outcomes: pd.DataFrame, col: str) -> pd.DataFrame:
@@ -226,13 +259,17 @@ def _alone(source: str, inputs: Inputs, boot: dict) -> tuple[list, dict]:
 
 def _meld(source: str, inputs: Inputs) -> tuple[pd.DataFrame, pd.DataFrame]:
     """The walk-forward meld's rows (fold, race_date, ll_v0, ll_meld per race) and its (a, b) per
-    fold. Fold k's meld is fitted on the v0 folds before k; the first fold only trains."""
+    fold. Fold k's meld is fitted on the v0 folds before k, on the days up to fold k's training
+    cutoff (D9's one-week embargo: the days between it and the fold's first test day are not
+    trained on); the first fold only trains."""
     rows = _rows(inputs.scores[source], inputs.outcomes, "h")
     rows = rows.merge(inputs.v0, on=KEYS, how="inner")
     rows["x_m"], rows["x_h"] = np.log(rows["p_cal"]), np.log(rows["h"])
+    day = pd.to_datetime(rows["race_date"])
     coefs, parts = [], []
     for k in sorted(rows["fold"].unique())[1:]:
-        train, test = rows[rows["fold"] < k], rows[rows["fold"] == k].copy()
+        cutoff = pd.Timestamp(inputs.v0_train_end[int(k)])
+        train, test = rows[(rows["fold"] < k) & (day <= cutoff)], rows[rows["fold"] == k].copy()
         fit = fit_conditional_logit(
             train[["x_m", "x_h"]].to_numpy(), train["race_id"], train["won"].to_numpy()
         )
@@ -325,15 +362,18 @@ def read_outcomes() -> tuple[pd.DataFrame, pd.Series]:
     return runners.to_pandas(), races.set_index("race_id")["meeting_id"]
 
 
-def read_v0() -> pd.DataFrame:
+def read_v0() -> tuple[pd.DataFrame, dict[int, date]]:
+    """v0's out-of-fold rows and each fold's training cutoff from its manifest."""
     frame = pd.read_parquet(v0_oof_path(), columns=[*KEYS, "fold", "p_cal"])
     frame["horse_no"] = frame["horse_no"].astype("int64")
-    return frame
+    folds = json.loads(v0_manifest_path().read_text())["folds"]
+    return frame, {int(f["fold"]): date.fromisoformat(f["train_end"]) for f in folds}
 
 
 def store_builds(tables: dict[str, Path]) -> dict[str, str]:
     builds = speed_run.store_builds()
     builds[f"v0_oof_{V0_FIT_ID}"] = f"models/{COUNTRY}/v0/{v0_oof_path().name}"
+    builds[f"v0_manifest_{V0_FIT_ID}"] = f"models/{COUNTRY}/v0/{v0_manifest_path().name}"
     for name, directory in tables.items():
         builds[f"handicap_table_{name}"] = f"{directory.relative_to(paths.data_dir())}: " + (
             f"{len(list(directory.glob('*.parquet')))} race days"
@@ -385,18 +425,21 @@ def run_study(out_dir: Path | None = None, *, rebuild: bool = False) -> dict:
     registry = default_registry(COUNTRY)
     spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before the table or any outcome is read
 
-    new_dir = table_dir()
-    if rebuild or not any(new_dir.glob("*.parquet")):
-        factors.build_handicap_table(FIRST_DAY, LAST_DAY, out_dir=new_dir)
+    new_dir, old_dir = table_dir(), interim_dir()
+    if new_dir.resolve() == old_dir.resolve():
+        raise ValueError("the #96 table and #129's interim table are one directory")
+    if rebuild or not factors.table_complete(new_dir, FIRST_DAY, LAST_DAY, speed_at_start_day=True):
+        factors.build_handicap_table(FIRST_DAY, LAST_DAY, out_dir=new_dir, speed_at_start_day=True)
     outcomes, meetings = read_outcomes()
+    v0, v0_train_end = read_v0()
     inputs = Inputs(
-        {V96: read_scores(new_dir), INTERIM: read_scores(factors.handicap_dir())},
-        outcomes, meetings, read_v0(),
+        {V96: read_scores(new_dir), INTERIM: read_scores(old_dir)},
+        outcomes, meetings, v0, v0_train_end,
     )  # fmt: skip
     study = compute_study(inputs, spec)
     del inputs
 
-    builds = store_builds({"96": new_dir, "129": factors.handicap_dir()})
+    builds = store_builds({"96": new_dir, "129": old_dir})
     fold_scheme = speed_run.scheme_label(scheme)
     run_ids = {}
     for v in study.variants:
