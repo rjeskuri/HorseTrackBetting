@@ -17,13 +17,16 @@ shrink N1 (#430) uses for Place and Wide: a spread's return is not one combinati
 
 `run_scan` reads the jravan store a calendar year at a time, development days from 2014-06-07
 only (D10, D14), refuses unless the registry holds every family frozen with its spec, writes the
-private report and the candidate cells through `write_report`, and appends one record per
-(family, variant), failures included. D21: every figure stays under the data directory.
+private report (one file per run, named in its records) and the candidate cells through
+`write_report`, and appends one record per (family, variant), failures included; a range without a
+bet is a failed run and writes nothing. D21: every figure stays under the data directory.
 """
 
 from __future__ import annotations
 
 import json
+import re
+import tempfile
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -203,6 +206,8 @@ def _orders(rows: pd.DataFrame, scratched: set[tuple[str, int]]) -> dict[str, tu
     """race -> (horse numbers by ascending price, ties by the lower number; the first's price) from
     one row per (race, combination); the pool row, unpriced and `scratched` runners dropped."""
     rows = rows.loc[rows["combination"].to_numpy() != POOL_ROW]
+    if rows.empty:  # e.g. a day file the builder wrote from the O2 feed alone: no WIN row
+        return {}
     odds = pd.to_numeric(rows["odds"], errors="coerce").to_numpy(dtype=float, na_value=np.nan)
     frame = pd.DataFrame(
         {
@@ -213,10 +218,14 @@ def _orders(rows: pd.DataFrame, scratched: set[tuple[str, int]]) -> dict[str, tu
     )
     keep = np.isfinite(frame["odds"].to_numpy()) & (frame["odds"].to_numpy() > 0)
     if scratched:
-        keep &= [
-            (r, int(h)) not in scratched
-            for r, h in zip(frame["race_id"], frame["horse"], strict=True)
-        ]
+        keep &= np.fromiter(
+            (
+                (r, int(h)) not in scratched
+                for r, h in zip(frame["race_id"], frame["horse"], strict=True)
+            ),
+            dtype=bool,
+            count=len(frame),
+        )
     frame = frame.loc[keep].sort_values(["race_id", "odds", "horse"], kind="stable")
     return {
         race: ([int(h) for h in part["horse"]], float(part["odds"].iloc[0]))
@@ -549,7 +558,8 @@ class _Bets:
 
 
 def _scan_year(start: date, end: date, bets: _Bets, skipped: Counter) -> None:
-    """Read one year's development rows and settle every spread in every scored race."""
+    """Read one year's development rows and settle every spread in every race; keep the races
+    holding a bet (the scored races), whose pool totals cut the year's pool-size tertiles."""
     common = {"start": start, "end": end, "touches_price": True, "source": SOURCE}
     races = read_store_table("races", columns=RACE_COLUMNS, **common).to_pandas()
     if races.empty:
@@ -573,67 +583,93 @@ def _scan_year(start: date, end: date, bets: _Bets, skipped: Counter) -> None:
     finals = _orders(_read_final(start, end).to_pandas(), scratched)
     orders, totals = _read_boards(set(races["race_date"]), scratched, _decision_minutes())
 
-    facts = []
+    kept = []  # (race, its race_cells arguments but the edges, its bets): races holding a bet
     for race in races.itertuples(index=False):
         rid = race.race_id
         if rid not in orders:
             skipped["race: no T-2 Win board"] += 1
-        elif rid not in totals:
+            continue
+        if rid not in totals:
             skipped["race: no T-2 Win pool total"] += 1
-        elif rid not in finals:
+            continue
+        if rid not in finals:
             skipped["race: no final Win board"] += 1
-        else:
-            facts.append(race)
-    if not facts:
-        return
-    edges = pool_tertiles(totals[r.race_id] for r in facts)
-    n = len(VARIANTS) * len(SPREAD_IDS)
-    for race in facts:
-        rid = race.race_id
-        t2, final = orders[rid], finals[rid]
-        try:
-            cells = race_cells(
-                race_class=race.race_class,
-                field_size=int(starters.get(rid, 0)),
-                fav_odds=t2[1],
-                pool_total=totals[rid],
-                pool_edges=edges,
-                surface=race.surface,
-            )
+            continue
+        segment = {
+            "race_class": race.race_class,
+            "field_size": int(starters.get(rid, 0)),
+            "fav_odds": orders[rid][1],
+            "pool_total": totals[rid],
+            "surface": race.surface,
+        }
+        try:  # every segment but the pool size, whose edges need the year's races holding a bet
+            race_cells(**segment, pool_edges=(totals[rid], totals[rid]))
         except ValueError:
             skipped["race: segments undefined"] += 1
             continue
-        paid_race, horse_brackets = lookups.get(rid, {}), brackets.get(rid, {})
-        row = {k: np.zeros(n) for k in ("cost", "ret", "tickets", "rate")}
-        bought = np.zeros(n, dtype=bool)
-        rates: dict[str, float] = {}
-        for v, (ranked, _) in enumerate((t2, final)):
-            for k, spread_id in enumerate(SPREAD_IDS):
-                spread, j = SPREADS[spread_id], v * len(SPREAD_IDS) + k
-                if len(ranked) < spread.top_rank:
-                    skipped[f"no bet: field below the top rank: {VARIANTS[v]} {spread_id}"] += 1
-                    continue
-                if spread.pool not in paid_race:
-                    skipped[f"no bet: pool not settled: {VARIANTS[v]} {spread_id}"] += 1
-                    continue
-                if spread.kind == "bracket" and not set(ranked[:3]) <= set(horse_brackets):
-                    skipped[f"no bet: bracket unknown: {VARIANTS[v]} {spread_id}"] += 1
-                    continue
-                tickets = expand(spread_id, ranked, brackets=horse_brackets)
-                settled = _settle(tickets, paid_race)
-                if spread.pool not in rates:
-                    rates[spread.pool] = _rate(rid, spread.pool)
-                bought[j] = True
-                row["cost"][j], row["ret"][j] = settled.cost, settled.ret
-                row["tickets"][j], row["rate"][j] = tickets.n_tickets, rates[spread.pool]
+        bought, row = _race_bets(
+            rid,
+            (orders[rid][0], finals[rid][0]),
+            lookups.get(rid, {}),
+            brackets.get(rid, {}),
+            skipped,
+        )
+        if not bought.any():
+            skipped["race: no bet in any spread"] += 1
+            continue
+        kept.append((race, segment, bought, row))
+    if not kept:
+        return
+    edges = pool_tertiles(segment["pool_total"] for _, segment, _, _ in kept)
+    for race, segment, bought, row in kept:
+        rid = race.race_id
         bets.race_id.append(rid)
         bets.meeting.append(race.meeting_id)
         bets.day.append(race.race_date)
-        bets.cells.append(cells)
-        bets.fav.append((t2[1], final[1]))
+        bets.cells.append(race_cells(**segment, pool_edges=edges))
+        bets.fav.append((orders[rid][1], finals[rid][1]))
         bets.bought.append(bought)
         for key in ("cost", "ret", "tickets", "rate"):
             getattr(bets, key).append(row[key])
+
+
+def _race_bets(
+    rid: str,
+    rankings: tuple[list, list],
+    paid_race: Paid,
+    horse_brackets: Mapping[int, int],
+    skipped: Counter,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """One race's bets per column (variant x spread). A spread is bought in both variants or in
+    neither (the spec's 'same races'): both rankings reach its highest rank, the race pays its
+    pool, and for the bracket spread both rankings' ranks 1-3 have a bracket."""
+    n = len(VARIANTS) * len(SPREAD_IDS)
+    row = {k: np.zeros(n) for k in ("cost", "ret", "tickets", "rate")}
+    bought = np.zeros(n, dtype=bool)
+    rates: dict[str, float] = {}
+    for k, spread_id in enumerate(SPREAD_IDS):
+        spread = SPREADS[spread_id]
+        if min(len(ranked) for ranked in rankings) < spread.top_rank:
+            skipped[f"no bet: field below the top rank: {spread_id}"] += 1
+            continue
+        if spread.pool not in paid_race:
+            skipped[f"no bet: pool not settled: {spread_id}"] += 1
+            continue
+        if spread.kind == "bracket" and not all(
+            set(ranked[:3]) <= set(horse_brackets) for ranked in rankings
+        ):
+            skipped[f"no bet: bracket unknown: {spread_id}"] += 1
+            continue
+        if spread.pool not in rates:
+            rates[spread.pool] = _rate(rid, spread.pool)
+        for v, ranked in enumerate(rankings):
+            j = v * len(SPREAD_IDS) + k
+            tickets = expand(spread_id, ranked, brackets=horse_brackets)
+            settled = _settle(tickets, paid_race)
+            bought[j] = True
+            row["cost"][j], row["ret"][j] = settled.cost, settled.ret
+            row["tickets"][j], row["rate"][j] = tickets.n_tickets, rates[spread.pool]
+    return bought, row
 
 
 # --------------------------------------------------------------------------- scoring
@@ -790,6 +826,10 @@ class FamilyNotFrozen(ValueError):
     """The registry does not hold a family frozen with `family_spec`: nothing was read."""
 
 
+class NoBetInRange(ValueError):
+    """The range holds no race with a bet: the run is recorded as failed and writes no output."""
+
+
 @dataclass
 class ScanResult:
     rows: list[dict[str, Any]]
@@ -912,8 +952,10 @@ def run_scan(
         "n_boot": n_boot,
     }
     base = {"git_sha": _commit(), "data_builds": _builds()}
+    # one report per run: its name changes with the spec, range, seed, replicates, code and store
+    report_name = f"spread-scan-japan-{_sha256(_canonical({**params, **base}))[:16]}.md"
 
-    def records(metrics: Any, status: str) -> list[RunRecord]:
+    def records(metrics: Any, status: str, extra: Mapping[str, Any]) -> list[RunRecord]:
         return [
             RunRecord(
                 hypothesis_id=HYPOTHESIS_ID,
@@ -923,7 +965,11 @@ def run_scan(
                 sources=(SOURCE,),
                 fold_scheme=FOLD_SCHEME,
                 components={},
-                params={**params, "family_spec_hash": _spec_hash(family_spec(family_id))},
+                params={
+                    **params,
+                    "family_spec_hash": _spec_hash(family_spec(family_id)),
+                    **extra,
+                },
                 metrics=tuple(metrics(family_id, variant)),
                 status=status,
                 **base,
@@ -938,17 +984,18 @@ def run_scan(
         for year in range(start.year, end.year + 1):
             lo, hi = max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
             _scan_year(lo, hi, bets, skipped)
+        if not bets.race_id:  # nothing to score: no report, the last candidate cells stay
+            raise NoBetInRange(f"no development race from {start} to {end} holds a bet")
         rows = _score(bets, seed=seed, n_boot=n_boot, level=_level())
         summary = {
             **params,
+            "git_sha": base["git_sha"],
             "families": ", ".join(f"{f} {_spec_hash(family_spec(f))}" for f in FAMILIES),
             "races scored": len(bets.race_id),
             "rows": len(rows),
         }
         report_path = write_report(
-            out_dir / f"spread-scan-japan-{params['spec_hash']}.md",
-            _report(rows, summary, skipped),
-            sources=(SOURCE,),
+            out_dir / report_name, _report(rows, summary, skipped), sources=(SOURCE,)
         )
         cells_path = write_report(
             out_dir / "candidate-cells" / "spread-scan.json",
@@ -956,9 +1003,10 @@ def run_scan(
             sources=(SOURCE,),
         )
     except Exception:
-        _append(registry, records(lambda f, v: (), "failed"))
+        _append(registry, records(lambda f, v: (), "failed", {}))
         raise
-    run_ids = _append(registry, records(lambda f, v: _metrics(rows, f, v), "scored"))
+    scored = records(lambda f, v: _metrics(rows, f, v), "scored", {"report": report_name})
+    run_ids = _append(registry, scored)
     return ScanResult(rows, report_path, cells_path, params["spec_hash"], run_ids, dict(skipped))
 
 
@@ -973,6 +1021,33 @@ class _Families:
 
     def records(self, family_id: str | None = None) -> list[RunRecord]:
         return [r for r in self._registry.records(family_id) if r.family_id in self._families]
+
+
+_INDEX_ENTRY = re.compile(r"- \[([^\]]+)\]\(\1\.md\)")  # a family's line in write_summary's index
+
+
+def write_committed_summary(registry: Registry) -> Path:
+    """The six families' files, by `write_summary` over their records alone, and the index with
+    their lines added: every family the index lists stays and no other family's file is written,
+    so a fresh local registry drops nothing (`studies/ability.py`'s way)."""
+    directory = summary_dir(COUNTRY)
+    mine = _Families(registry, set(FAMILIES))
+    if not mine.records():
+        return directory
+    with tempfile.TemporaryDirectory() as scratch:
+        write_summary(mine, scratch)  # type: ignore[arg-type]
+        for path in sorted(Path(scratch).glob("*.md")):
+            if path.stem != "README":
+                write_report(directory / path.name, path.read_text("utf-8"), sources=())
+        fresh = Path(scratch, "README.md").read_text("utf-8").splitlines()
+    index = directory / "README.md"
+    listed = index.read_text("utf-8").splitlines() if index.exists() else []
+    entries = {m[1]: line for line in listed + fresh if (m := _INDEX_ENTRY.fullmatch(line))}
+    head = [line for line in fresh if not _INDEX_ENTRY.fullmatch(line)]
+    write_report(
+        index, "\n".join([*head, *(entries[f] for f in sorted(entries))]) + "\n", sources=()
+    )
+    return directory
 
 
 spread_scan_app = typer.Typer(no_args_is_help=True, help="N8: the popularity-rank spread scan.")
@@ -998,23 +1073,20 @@ def run_command(
 ) -> None:
     """Scan the frozen spreads on development days and record the run; prints no figure."""
     registry = default_registry(COUNTRY)
-    result = run_scan(
-        date_from=date.fromisoformat(date_from),
-        date_to=date.fromisoformat(date_to),
-        out_dir=paths.data_dir() / "reports",
-        seed=seed,
-        n_boot=n_boot,
-        registry=registry,
-    )
+    try:
+        result = run_scan(
+            date_from=date.fromisoformat(date_from),
+            date_to=date.fromisoformat(date_to),
+            out_dir=paths.data_dir() / "reports",
+            seed=seed,
+            n_boot=n_boot,
+            registry=registry,
+        )
+    except NoBetInRange as exc:
+        typer.echo(f"not scored (recorded as failed): {exc}", err=True)
+        raise typer.Exit(1) from None
     typer.echo(f"spec_hash={result.spec_hash}")
     typer.echo(f"report={result.report_path}\ncells={result.cells_path}")
     for key, run_id in result.run_ids.items():
         typer.echo(f"run {key} {run_id}")
-    folder = summary_dir(COUNTRY)
-    committed = {p.stem for p in folder.glob("*.md") if p.stem != "README"}
-    try:  # the families already summarised, and this scan's
-        write_summary(_Families(registry, committed | set(FAMILIES)), folder)  # type: ignore[arg-type]
-    except ValueError as exc:
-        typer.echo(f"summary not written: {exc}", err=True)
-        raise typer.Exit(1) from None
-    typer.echo(f"summary={folder}")
+    typer.echo(f"summary={write_committed_summary(registry)}")

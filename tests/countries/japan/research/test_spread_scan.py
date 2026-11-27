@@ -58,7 +58,21 @@ what these tests call):
     private report (`ScanResult.report_path`, under `out_dir`) and the candidate cells,
     `ScanResult.cells_path == out_dir / 'candidate-cells' / 'spread-scan.json'`, a strict JSON
     array of `ScanResult.rows`. An `out_dir` inside the repository raises `LicensedOutputInRepo`
-    and leaves no file there.
+    and leaves no file there;
+  - skips, in both variants, a race without a T-2 Win board: a day file may hold no WIN row at all
+    (the JRA-VAN builder writes a day from either feed alone, e.g. only the O2 QUINELLA rows), and
+    the scan completes whatever the year's scratches;
+  - bets both variants on the same races: a spread is bought in a race in both variants or in
+    neither (both boards rank its highest rank, the race pays its pool), so the t2 and lookahead
+    rows of one (spread, cell) hold the same races;
+  - cuts the pool-size tertiles per calendar year over the year's races holding at least one bet
+    (a race skipped for its segments or without any bet moves no edge);
+  - records no 'scored' run when the range holds no bet (a refusal or 'failed' records are both
+    allowed) and then leaves an existing candidate-cell file as it was;
+  - names the private report per run, so another seed, range or store never overwrites an earlier
+    run's report, and every registry record of the run names that report (its file name).
+- `horsetrack japan spread-scan run` writes the registry summary into `summary_dir('japan')` and
+  keeps in its index every family the index lists, whether or not the local registry holds it.
 - `ScanResult.rows`: one row per (variant, spread, cell with at least one bet), the 't2' rows in
   rank order then the 'lookahead' rows in rank order; `rank` is 1, 2, ... within each variant,
   rows with a `shrunk_edge` first by `shrunk_edge` descending, then the rows without one. A row
@@ -1569,3 +1583,428 @@ def test_a_family_frozen_with_another_spec_is_refused(tmp_path, monkeypatch):
         run(monkeypatch, data, out_dir, registry)
     assert [e for e in registry_lines(registry) if e["kind"] == "run"] == []
     assert not (out_dir / "candidate-cells" / "spread-scan.json").exists()
+
+
+# --- review fixes (PR #524): coverage, tertiles, empty ranges, run-specific outputs --------------
+
+TINY_POOL = 1.0e6  # the T-2 Win pool written over an unscored meeting's races
+
+
+def rewrite(path: Path, schema: pa.Schema, change) -> None:
+    """Rewrite one synthetic store file through `change` (its rows -> the rows to write)."""
+    rows = pq.read_table(path).to_pylist()
+    pq.write_table(pa.Table.from_pylist(change(rows), schema=schema), path)
+
+
+def race_no(race_id: str) -> int:
+    return int(race_id.split(":")[3])
+
+
+def top_rank(spread_id: str) -> int:
+    legs = SPREADS[spread_id][1]
+    return 3 if legs is None else max(max(leg) for leg in legs)
+
+
+def scored_reference(facts: Sequence[RaceFacts]) -> dict[tuple[str, str, str], dict]:
+    """(variant, spread, cell) -> stake, return, bets, tickets, days and meetings under the spec's
+    rules, from the facts alone: a spread is bought in a race in both variants or in neither (both
+    rankings reach its highest rank and the race pays its pool); the pool-size tertiles are numpy's
+    linear 1/3 and 2/3 quantiles per calendar year over the races holding at least one bet."""
+    bets: dict[str, dict[str, dict[str, tuple[int, float, int]]]] = {}
+    for race in facts:
+        pools = {p for p, _, _ in race.paid}
+        shortest = min(len(r) for r in race.ranked.values())
+        for spread_id, (pool, _) in SPREADS.items():
+            if pool not in pools or shortest < top_rank(spread_id):
+                continue
+            for variant, ranked in race.ranked.items():
+                tickets = {
+                    combo_text(pool, c) for c in expected_combos(spread_id, ranked, race.brackets)
+                }
+                ret = sum(d for p, text, d in race.paid if p == pool and text in tickets)
+                per = bets.setdefault(race.race_id, {}).setdefault(spread_id, {})
+                per[variant] = (STAKE * len(tickets), ret, len(tickets))
+    scored = [race for race in facts if race.race_id in bets]
+    levels: dict[str, str] = {}
+    for year in {race.meeting.day.year for race in scored}:
+        group = [race for race in scored if race.meeting.day.year == year]
+        totals = [POOL_LEVELS[race.meeting.pool_level] for race in group]
+        low, high = np.quantile(totals, [1 / 3, 2 / 3])
+        for race, total in zip(group, totals, strict=True):
+            levels[race.race_id] = "low" if total < low else "mid" if total < high else "high"
+    acc: dict[tuple[str, str, str], dict] = {}
+    for race in scored:
+        m = race.meeting
+        cells = expected_cells(
+            m.race_class, m.field, ODDS[m.fav][0], levels[race.race_id], m.surface
+        )
+        for spread_id, by_variant in bets[race.race_id].items():
+            for variant, (cost, ret, n_tickets) in by_variant.items():
+                for cell in cells:
+                    a = acc.setdefault(
+                        (variant, spread_id, cell),
+                        {
+                            "cost": 0,
+                            "ret": 0.0,
+                            "n_bets": 0,
+                            "n_tickets": 0,
+                            "days": set(),
+                            "meetings": set(),
+                        },
+                    )
+                    a["cost"] += cost
+                    a["ret"] += ret
+                    a["n_bets"] += 1
+                    a["n_tickets"] += n_tickets
+                    a["days"].add(m.day)
+                    a["meetings"].add(m.meeting_id)
+    for a in acc.values():
+        a["rho"] = a["ret"] / a["cost"]
+    return acc
+
+
+def assert_rows_match(result, ref) -> None:
+    by = rows_by_key(result.rows)
+    assert set(by) == set(ref), (
+        f"rows the reference has not: {sorted(set(by) - set(ref))[:5]}; "
+        f"reference cells without a row: {sorted(set(ref) - set(by))[:5]}; skipped {result.skipped}"
+    )
+    for key, row in by.items():
+        a = ref[key]
+        assert row["n_bets"] == a["n_bets"], key
+        assert row["n_tickets"] == a["n_tickets"], key
+        assert row["n_race_days"] == len(a["days"]), key
+        assert row["n_meetings"] == len(a["meetings"]), key
+        assert row["mean_return"] == pytest.approx(a["rho"], rel=1e-9), key
+
+
+def test_a_day_file_without_win_rows_skips_its_races_and_the_scan_completes(tmp_path, monkeypatch):
+    d0, d1 = boost_free_days(date(2019, 3, 2), 2, ("TOK",))
+    kept = Meeting(d0, "TOK", "MAIDEN", "A", 8, "turf", "low")
+    o2_only = Meeting(d1, "TOK", "C1", "B", 12, "dirt", "mid")
+    data = tmp_path / "data"
+    facts = write_store(data, [kept, o2_only])
+    folder = data / "processed" / "jravan"
+
+    def quinella_only(rows):
+        """The day as the builder writes it from the O2 feed alone: QUINELLA rows, no WIN row."""
+        out = []
+        for row in rows:
+            if row["pool"] != "WIN":
+                continue
+            if row["combination"] == "__pool__":
+                out.append({**row, "pool": "QUINELLA", "investment": row["investment"] * 1.5})
+            elif int(row["combination"]) > 1:
+                out.append({**row, "pool": "QUINELLA", "combination": f"1,{row['combination']}"})
+        assert out and not any(r["pool"] == "WIN" for r in out)
+        return out
+
+    rewrite(folder / "odds_timeseries" / f"{d1.isoformat()}.parquet", BOARD_SCHEMA, quinella_only)
+    # one scratched runner in the year (in a race of the O2-only day)
+    scratch = (f"{o2_only.meeting_id}:03", 7)
+
+    def scratched(rows):
+        for row in rows:
+            if (row["race_id"], row["horse_no"]) == scratch:
+                row.update(is_scratched=True, finish_pos=None, win_odds=None, win_fav_rank=None)
+        return rows
+
+    rewrite(folder / "runners.parquet", arrow_schema("runners"), scratched)
+    assert pq.read_table(folder / "runners.parquet").column("is_scratched").to_pylist().count(True)
+
+    guard(monkeypatch)
+    result = run(
+        monkeypatch,
+        data,
+        tmp_path / "out",
+        frozen_registry(tmp_path),
+        date_from=date(2019, 1, 1),
+        date_to=date(2019, 12, 31),
+    )
+    assert_rows_match(result, scored_reference([f for f in facts if f.meeting == kept]))
+    no_board = {k: n for k, n in result.skipped.items() if "no T-2 Win board" in k}
+    assert sum(no_board.values()) == UNIT, result.skipped
+
+
+def unequal_coverage_store(data: Path) -> list[RaceFacts]:
+    """Two meetings of eight runners. In X's races 1-10 ranks 7 and 8 have no price at T-2 (six
+    ranked there, eight on the final board); in Y's races 1-5 the final board lacks ranks 6-8
+    (eight ranked at T-2, five on the final board)."""
+    d0, d1 = boost_free_days(date(2019, 3, 9), 2, ("TOK",))
+    x = Meeting(d0, "TOK", "MAIDEN", "A", 8, "turf", "low")
+    y = Meeting(d1, "TOK", "C1", "B", 8, "dirt", "high")
+    facts = write_store(data, [x, y])
+    folder = data / "processed" / "jravan"
+    short_t2 = {f.race_id: f for f in facts if f.meeting == x and race_no(f.race_id) <= 10}
+    short_final = {f.race_id: f for f in facts if f.meeting == y and race_no(f.race_id) <= 5}
+    unpriced = {(rid, str(h)) for rid, f in short_t2.items() for h in f.ranked["t2"][6:]}
+    missing = {(rid, str(h)) for rid, f in short_final.items() for h in f.ranked["lookahead"][5:]}
+
+    def unprice_at_t2(rows):
+        for row in rows:
+            at_t2 = row["minutes_to_post"] == 2.0
+            if row["pool"] == "WIN" and at_t2 and (row["race_id"], row["combination"]) in unpriced:
+                row["odds"] = None
+        return rows
+
+    def drop_final(rows):
+        return [
+            r
+            for r in rows
+            if not (r["pool"] == "WIN" and (r["race_id"], r["combination"]) in missing)
+        ]
+
+    rewrite(folder / "odds_timeseries" / f"{d0.isoformat()}.parquet", BOARD_SCHEMA, unprice_at_t2)
+    rewrite(folder / "final_odds.parquet", FINAL_ODDS_SCHEMA, drop_final)
+    for f in short_t2.values():
+        f.ranked["t2"] = f.ranked["t2"][:6]
+    for f in short_final.values():
+        f.ranked["lookahead"] = f.ranked["lookahead"][:5]
+    return facts
+
+
+def test_both_variants_bet_the_same_races_when_the_boards_rank_different_fields(
+    tmp_path, monkeypatch
+):
+    data = tmp_path / "data"
+    facts = unequal_coverage_store(data)
+    ref = scored_reference(facts)
+    # the store reaches the case: a seven-rank and a six-rank spread lose races, unequally
+    seven, six = "trifecta:1/2-4/2-7", "trio:1/2-6"
+    assert ref[("t2", seven, "all")]["n_bets"] == 2 * UNIT - 10 - 5
+    assert ref[("t2", six, "all")]["n_bets"] == 2 * UNIT - 5
+    guard(monkeypatch)
+    result = run(
+        monkeypatch,
+        data,
+        tmp_path / "out",
+        frozen_registry(tmp_path),
+        date_from=date(2019, 1, 1),
+        date_to=date(2019, 12, 31),
+    )
+    by = rows_by_key(result.rows)
+    pairs = {(s, c) for _, s, c in by}
+    for spread_id, cell in sorted(pairs):
+        t2, ahead = by.get(("t2", spread_id, cell)), by.get(("lookahead", spread_id, cell))
+        assert t2 is not None and ahead is not None, f"{spread_id} {cell} has one variant only"
+        assert (t2["n_bets"], t2["n_meetings"], t2["n_race_days"]) == (
+            ahead["n_bets"],
+            ahead["n_meetings"],
+            ahead["n_race_days"],
+        ), f"{spread_id} {cell}: the variants bet different races"
+    assert_rows_match(result, ref)
+
+
+def test_pool_size_tertiles_come_from_the_races_holding_a_bet(tmp_path, monkeypatch):
+    d0, d1, d2 = boost_free_days(date(2019, 2, 2), 3, ("TOK", "KYO"))
+    assert {d0.year, d1.year, d2.year} == {2019}
+    valid = [
+        Meeting(d0, "TOK", "MAIDEN", "A", 8, "turf", "low"),
+        Meeting(d1, "TOK", "C1", "B", 12, "dirt", "mid"),
+        Meeting(d2, "TOK", "OP", "A", 10, "turf", "high"),
+    ]
+    unknown_class = Meeting(d0, "KYO", "C2", "A", 8, "dirt", "mid")  # race_cells refuses it
+    no_dividends = Meeting(d1, "KYO", "C3", "B", 8, "turf", "mid")  # no spread can be settled
+    data = tmp_path / "data"
+    facts = write_store(data, [*valid, unknown_class, no_dividends])
+    folder = data / "processed" / "jravan"
+    unscored = {unknown_class.meeting_id, no_dividends.meeting_id}
+
+    def unknown(rows):
+        for row in rows:
+            if row["meeting_id"] == unknown_class.meeting_id:
+                row["race_class"] = "JG1"
+        return rows
+
+    def unsettled(rows):
+        return [r for r in rows if not r["race_id"].startswith(no_dividends.meeting_id + ":")]
+
+    def tiny_pool(rows):
+        for row in rows:
+            meeting = row["race_id"].rsplit(":", 1)[0]
+            if meeting in unscored and row["pool"] == "WIN" and row["combination"] == "__pool__":
+                row["investment"] = TINY_POOL
+        return rows
+
+    rewrite(folder / "races.parquet", arrow_schema("races"), unknown)
+    rewrite(folder / "dividends.parquet", arrow_schema("dividends"), unsettled)
+    for day in (d0, d1):
+        rewrite(folder / "odds_timeseries" / f"{day.isoformat()}.parquet", BOARD_SCHEMA, tiny_pool)
+
+    scored = [f for f in facts if f.meeting in valid]
+    ref = scored_reference(scored)
+    # the store discriminates: edges over every race with a T-2 board would move valid races
+    every = [POOL_LEVELS[f.meeting.pool_level] for f in scored] + [TINY_POOL] * 2 * UNIT
+    low, high = np.quantile(every, [1 / 3, 2 / 3])
+    moved = {
+        f.meeting.pool_level
+        for f in scored
+        if ("low" if POOL_LEVELS[f.meeting.pool_level] < low else "mid"
+            if POOL_LEVELS[f.meeting.pool_level] < high else "high") != f.meeting.pool_level
+    }  # fmt: skip
+    assert moved, "the unscored races must shift the edges for this test to discriminate"
+    assert {c: ref[("t2", "exacta:1/2-3", f"pool_size:{c}")]["n_bets"] for c in POOL_LEVELS} == {
+        c: UNIT for c in POOL_LEVELS
+    }
+
+    guard(monkeypatch)
+    result = run(
+        monkeypatch,
+        data,
+        tmp_path / "out",
+        frozen_registry(tmp_path),
+        date_from=date(2019, 1, 1),
+        date_to=date(2019, 12, 31),
+    )
+    assert_rows_match(result, ref)
+
+
+PROGRAMMING_ERRORS = (TypeError, KeyError, AttributeError, IndexError, NameError)
+
+
+def test_a_range_without_a_bet_records_no_scored_run_and_keeps_the_candidate_cells(
+    tmp_path, monkeypatch
+):
+    _, held = _late_days()
+    (day,) = boost_free_days(date(2019, 4, 6), 1, ("TOK",))
+    data = tmp_path / "data"
+    write_store(
+        data,
+        [
+            Meeting(day, "TOK", "MAIDEN", "A", 8, "turf", "low"),
+            Meeting(held, "TOK", "G1", "A", 8, "dirt", "high", huge=True),  # a holdout day
+        ],
+    )
+    guard(monkeypatch)
+    registry = frozen_registry(tmp_path)
+    out_dir = tmp_path / "out"
+    first = run(
+        monkeypatch,
+        data,
+        out_dir,
+        registry,
+        date_from=date(2019, 1, 1),
+        date_to=date(2019, 12, 31),
+    )
+    cells = out_dir / "candidate-cells" / "spread-scan.json"
+    exported = cells.read_bytes()
+    assert first.rows and _strict(exported.decode("utf-8")) == first.rows
+    seen = len(registry_lines(registry))
+    for lo, hi in ((held, held), (date(2018, 1, 1), date(2018, 12, 31))):
+        try:
+            run(monkeypatch, data, out_dir, registry, date_from=lo, date_to=hi)
+        except Exception as exc:  # a refusal is an allowed outcome; a crash is not
+            assert not isinstance(exc, PROGRAMMING_ERRORS), repr(exc)
+        assert cells.read_bytes() == exported, f"{lo}..{hi}: the candidate cells were replaced"
+        lines = registry_lines(registry)
+        new = [e["record"] for e in lines[seen:] if e["kind"] == "run"]
+        assert not [r for r in new if r["status"] == "scored"], (
+            f"{lo}..{hi} holds no bet, yet a run was recorded as scored"
+        )
+        seen = len(lines)
+    registry.verify()
+    assert Counter(r.status for r in registry.records())["scored"] == len(ss.FAMILIES) * 2
+
+
+def test_each_run_keeps_its_own_report_and_its_records_name_it(tmp_path, monkeypatch):
+    data_a = tiny_store(tmp_path / "a")
+    data_b = tmp_path / "b" / "data"
+    (day,) = boost_free_days(date(2019, 4, 13), 1, ("KYO",))
+    write_store(data_b, [Meeting(day, "KYO", "C1", "B", 12, "dirt", "mid")])
+    guard(monkeypatch)
+    registry = frozen_registry(tmp_path)
+    out_dir = tmp_path / "out"
+    runs = [  # (store, first day, seed): each differs from the first in one input
+        (data_a, date(2014, 6, 7), SEED),
+        (data_a, date(2014, 6, 7), SEED + 1),
+        (data_a, date(2019, 1, 1), SEED),
+        (data_b, date(2014, 6, 7), SEED),
+    ]
+    written: list[tuple[Path, bytes, list[dict]]] = []  # per run: report, its bytes, its records
+    seen = len(registry_lines(registry))
+    for data, start, seed in runs:
+        monkeypatch.setenv(DATA_VAR, str(data))
+        result = ss.run_scan(
+            date_from=start,
+            date_to=date(2019, 12, 31),
+            out_dir=out_dir,
+            seed=seed,
+            n_boot=N_BOOT,
+            registry=registry,
+        )
+        assert result.rows, "every run scores the store's meeting"
+        report = Path(result.report_path)
+        assert reports.is_inside(report, out_dir) and report.is_file()
+        lines = registry_lines(registry)
+        written.append(
+            (report, report.read_bytes(), [e for e in lines[seen:] if e["kind"] == "run"])
+        )
+        seen = len(lines)
+    paths_seen = [path.resolve() for path, _, _ in written]
+    assert len(set(paths_seen)) == len(runs), "a rerun overwrote an earlier run's report"
+    for path, text, _ in written:
+        assert path.read_bytes() == text, f"{path.name} was rewritten by a later run"
+    for path, _, new in written:
+        assert len(new) == len(ss.FAMILIES) * 2
+        for entry in new:
+            assert path.name in json.dumps(entry["record"]), (
+                f"run {entry['run_id']} does not name its report {path.name}"
+            )
+
+
+def _tree(folder: Path) -> dict[str, bytes]:
+    return {str(p.relative_to(folder)): p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+
+
+def test_the_run_command_keeps_every_family_the_summary_index_lists(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from horsetrack.cli import app
+
+    committed_dir = REPO_ROOT / "docs" / "experiments" / "registry" / "japan"
+    committed_before = _tree(committed_dir) if committed_dir.is_dir() else {}
+    data = tiny_store(tmp_path)
+    monkeypatch.setenv(DATA_VAR, str(data))
+    summary = tmp_path / "summary" / "registry" / "japan"
+    summary.mkdir(parents=True)
+    others = ["japan-alpha-final-win", "japan-beta-place-e1", "win5-gamma-v1"]
+    for family in others:
+        summary.joinpath(f"{family}.md").write_text(f"## {family}\n\nsynthetic\n", "utf-8")
+    index = ["# Experiment registry index", "", *(f"- [{f}]({f}.md)" for f in others)]
+    summary.joinpath("README.md").write_text("\n".join(index) + "\n", "utf-8")
+    before = {family: summary.joinpath(f"{family}.md").read_bytes() for family in others}
+
+    monkeypatch.setattr(ss, "summary_dir", lambda country: summary, raising=False)
+    monkeypatch.setattr(registry_module, "summary_dir", lambda country: summary)
+    guard(monkeypatch)
+    for module in (reports, ss, registry_module):  # nothing is written into the repository
+        real = getattr(module, "write_report", None)
+        if real is None:
+            continue
+
+        def outside(path, text, *, sources, repo_root=None, _real=real):
+            if reports.is_inside(Path(path), REPO_ROOT):
+                raise Forbidden(f"write_report({path}) is inside the repository")
+            return _real(path, text, sources=sources, repo_root=repo_root)
+
+        monkeypatch.setattr(module, "write_report", outside)
+
+    runner = CliRunner()
+    frozen = runner.invoke(app, ["japan", "spread-scan", "freeze"])
+    assert frozen.exit_code == 0, frozen.output
+    done = runner.invoke(
+        app,
+        ["japan", "spread-scan", "run", "--from", "2019-01-01", "--to", "2019-12-31"]
+        + ["--n-boot", "50"],
+    )
+    assert done.exit_code == 0, (done.output, done.exception)
+
+    listed = summary.joinpath("README.md").read_text("utf-8")
+    for family in [*others, *ss.FAMILIES]:
+        assert f"({family}.md)" in listed, f"the index dropped {family}"
+    for family in ss.FAMILIES:
+        assert summary.joinpath(f"{family}.md").is_file(), family
+    for family, data_bytes in before.items():
+        assert summary.joinpath(f"{family}.md").read_bytes() == data_bytes, f"{family}.md changed"
+    after = _tree(committed_dir) if committed_dir.is_dir() else {}
+    assert after == committed_before, "the committed summary was touched"
