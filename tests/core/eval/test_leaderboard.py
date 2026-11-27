@@ -1011,3 +1011,163 @@ def test_rows_round_trip_through_json():
 
     with pytest.raises(RowRefused):  # a tampered file is refused like a bad row
         from_json(text.replace('"comparator"', '"bogus"'))
+
+
+# ------------------------------------------------------------------------- descriptive rows (#451)
+# A descriptive row (``descriptive=True``, default False) is a measurement shown on the board but
+# given no D16 rank: WIN5's pool-level day value is a share of the pool paid back to all bettors,
+# not a return per ¥100 on a ticket (docs/experiments/win5-carryover-japan.md, "On the
+# leaderboard"). ``shrink`` gives it no shrunk value and leaves it out of its pool's estimate;
+# ``rank`` gives it rank None, after the ranked rows and before the unmeasured ones, by family id
+# then option id. An unmeasured descriptive row has no value to show and sorts with the unmeasured
+# rows.
+
+
+def desc(option_id: str, ret: float | None = None, se: float | None = None, **extra):
+    return make_row(option_id, ret, se, descriptive=True, **extra)
+
+
+def test_a_row_is_not_descriptive_unless_marked():
+    assert LeaderboardRow(**GOOD).descriptive is False
+    assert LeaderboardRow(**(GOOD | {"descriptive": True})).descriptive is True
+    assert make_row("plain", 80.0, 5.0).descriptive is False
+
+
+DESCRIPTIVE_POOLS = [
+    # (ranked rows [(id, return, se)], descriptive rows [(id, return, se)]) in pool WIN5; a
+    # descriptive row far from the rest and precise would drag the pool estimate if it counted.
+    pytest.param(
+        [("w-a", 72.0, 4.0), ("w-b", 81.0, 6.0), ("w-c", 90.0, 3.0)],
+        [("d-hi", 300.0, 1.0)],
+        id="three-ranked-one-descriptive",
+    ),
+    pytest.param(
+        [("w-a", 60.0, 2.5), ("w-b", 95.0, 9.0)],
+        [("d-lo", 5.0, 0.5), ("d-mid", 88.0, 4.0)],
+        id="two-ranked-two-descriptive",
+    ),
+    pytest.param(
+        [("w-only", 77.0, 5.0)],
+        [("d-a", 140.0, 2.0), ("d-b", 20.0, 3.0)],
+        id="a-pool-of-one-once-descriptive-rows-are-out",
+    ),
+    pytest.param([], [("d-a", 105.0, 1.5), ("d-b", 93.0, 2.0)], id="descriptive-only"),
+]
+
+
+@pytest.mark.parametrize(("ranked", "descriptive"), DESCRIPTIVE_POOLS)
+def test_shrink_leaves_descriptive_rows_out_of_the_pool(ranked, descriptive):
+    plain = [make_row(oid, x, se, pool="WIN5") for oid, x, se in ranked]
+    marked = [desc(oid, x, se, pool="WIN5", shrunk_per_100=999.0) for oid, x, se in descriptive]
+    other = [make_row("p-1", 70.0, 3.0, pool="PLACE"), make_row("p-2", 84.0, 2.0, pool="PLACE")]
+    rows = [*marked[:1], *plain, *other, *marked[1:]]
+
+    out = shrink(rows)
+
+    assert [r.option_id for r in out] == [r.option_id for r in rows]
+    # expected over the non-descriptive rows alone, from the ticket's formulas
+    want = expected_shrunk([*plain, *other]) | {r.option_id: None for r in marked}
+    assert_shrunk(out, want)
+    got = by_id(out)
+    for oid, x, _ in descriptive:
+        assert got[oid].descriptive is True
+        assert got[oid].return_per_100 == pytest.approx(x), "the value itself is kept"
+    if len(ranked) == 1:
+        assert got[ranked[0][0]].shrunk_per_100 == pytest.approx(ranked[0][1]), "a pool of one"
+
+
+def test_descriptive_rows_follow_the_ranked_rows_unranked_before_the_unmeasured():
+    rows = [
+        make_row("u-b", family="fam-b"),
+        desc("d-z", 140.0, 2.0, family="fam-a", pool="WIN5"),
+        make_row("m-low", 55.0, pool=None),
+        desc("d-a", 101.0, pool=None, family="fam-b"),
+        make_row("m-high", 92.0, pool=None),
+        desc("d-m", 30.0, 1.0, family="fam-a", pool="WIN5", shrunk_per_100=500.0),
+        make_row("u-a", family="fam-a"),
+        desc("d-unmeasured", family="fam-a"),
+        make_row("m-mid", 70.0, pool=None),
+    ]
+    expected = [
+        (1, "m-high"),
+        (2, "m-mid"),
+        (3, "m-low"),
+        (None, "d-m"),
+        (None, "d-z"),
+        (None, "d-a"),
+        (None, "d-unmeasured"),
+        (None, "u-a"),
+        (None, "u-b"),
+    ]
+
+    assert ranked_ids(rank(rows)) == expected
+    assert ranked_ids(rank(list(reversed(rows)))) == expected
+    assert ranked_ids(rank(shrink(rows))) == expected
+
+
+@pytest.mark.parametrize("public", [False, True])
+def test_descriptive_rows_render_with_their_value_and_no_rank(public):
+    ranked = three_win_rows()
+    marked = desc(
+        "d-win5", 105.0, pool="WIN", ci_lo=102.0, ci_level=0.95, n=4, n_unit="days", variants=7
+    )
+    rows = [marked, *ranked, make_row("u-none", family="fam-z")]
+    if public:
+        rows.append(desc("d-secret", 131.79, 2.0, pool="WIN", sources=("jrdb",)))
+
+    text = render_markdown(rows, title=TITLE, public=public)
+
+    want = expected_shrunk(ranked)
+    order = sorted((r.option_id for r in ranked), key=lambda oid: -want[oid])
+    for position, oid in enumerate(order, start=1):
+        line = table_line(text, oid)
+        assert cells(line)[0] == str(position)
+        assert f"{want[oid]:.2f}" in line, "shrunk over the non-descriptive rows alone"
+    line = table_line(text, "d-win5")
+    assert not any(ch.isdigit() for ch in cells(line)[0]), "a descriptive row has no rank"
+    assert "105.00" in line and "102.00" in line
+    assert "4" in cells(line) or "4 days" in cells(line)
+    positions = [text.index(table_line(text, oid)) for oid in [*order, "d-win5", "u-none"]]
+    assert positions == sorted(positions), "ranked, then descriptive, then unmeasured"
+    head = text[: text.index("| ")]
+    assert "descriptive" in head.lower(), "the header says descriptive rows are not ranked"
+    if public:
+        before, section = withheld_section(text)
+        assert "d-secret" not in before and "d-secret" in section
+        assert "131.79" not in text
+
+
+def test_public_view_keeps_public_descriptive_rows_unshrunk():
+    ranked = three_win_rows()
+    rows = [
+        *ranked,
+        desc("d-pub", 150.0, 2.0, pool="WIN"),
+        desc("d-secret", 160.0, 2.0, pool="WIN", sources=("jrdb",)),
+        make_row("w-secret", 99.0, 3.0, sources=("jra-van",)),
+    ]
+
+    out = by_id(public_view(rows))
+
+    assert set(out) == {*(r.option_id for r in ranked), "d-pub"}
+    assert out["d-pub"].descriptive is True
+    assert out["d-pub"].shrunk_per_100 is None
+    assert out["d-pub"].return_per_100 == pytest.approx(150.0)
+    assert_shrunk([out[r.option_id] for r in ranked], expected_shrunk(ranked))
+
+
+def test_the_descriptive_flag_round_trips_through_json():
+    rows = [
+        desc("d-1", 105.0, pool="WIN5", ci_lo=102.0, ci_level=0.95, n=4, n_unit="days"),
+        make_row("r-1", 80.0, 5.0),
+    ]
+
+    text = to_json(rows)
+    back = from_json(text)
+
+    assert back == rows
+    assert [r.descriptive for r in back] == [True, False]
+    assert [item["descriptive"] for item in json.loads(text)] == [True, False]
+    assert from_json(to_json(shrink(rows))) == shrink(rows)
+    older = json.loads(to_json([rows[1]]))
+    del older[0]["descriptive"]  # a file written before the flag existed
+    assert from_json(json.dumps(older))[0].descriptive is False

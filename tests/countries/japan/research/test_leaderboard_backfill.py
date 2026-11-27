@@ -28,6 +28,15 @@ horses (pool TRIO), _vs_box the six TIERCE orders (pool TIERCE), both on the rul
 every bin of the edges is a row, a bin with no metric an unmeasured cell named as
 ``win5_study._metrics`` names its fold ('ratio <lo>..<hi>', the last 'ratio <lo>..inf').
 
+Fix round 2: #135's WIN5 bins are descriptive rows (``LeaderboardRow.descriptive``): shown with
+their value, never ranked. #131's exacta families ('japan-131-exacta-*' and the legacy slash
+'japan/131-exacta-*' ids) give one measured row per development 'return_per_100' metric, option
+``'<family>/<variant>'``, kind 'cell', pool 'FORECAST' (the jra config's EXACTA pool), payout rate
+1 - its takeout on 2026-11-23, the recorded value and one-sided 95% bounds, n in races, segment the
+variant's cell (its last '|' part), selection 'look_ahead' (E1's favourite is the lowest final Win
+odds); rho, bootstrap_se, rho_eb, mean_return, markers and other folds give none. The debut and
+maiden families: 'combined:<class>' variants are 'model', 'member:<m>:<class>' variants 'member'.
+
 Every registry is a temp file under ``tmp_path``; every figure is made up. The real registry is
 read only by the ``local`` test, which prints no figure.
 """
@@ -669,6 +678,7 @@ def test_win5_bins_become_rows_with_a_lower_bound(reg, level):
         assert row.payout_rate == pytest.approx(0.70)
         assert (row.n, row.n_unit) == (n, "days")
         assert row.kind == "cell"
+        assert row.descriptive is True, "a pool-level day value is shown, not ranked"
         assert row.rule == "every WIN5 combination, pool-level value"
         assert row.selection == "look_ahead"
         assert row.ticket == 135
@@ -728,10 +738,311 @@ def test_win5_every_bin_of_the_edges_is_a_row(reg, edges, measured, empty):
         row = win5[f"carryover {fold}"]
         assert row.option_id == f"{WIN5}/pool-level[carryover {fold}]"
         assert row.kind == "cell"
+        assert row.descriptive is True
         assert row.pool == "WIN5"
         assert row.family_id == WIN5
         assert row.status == "scored"
         assert_unmeasured(row)
+
+
+def test_win5_bins_are_shown_but_not_ranked(reg):
+    """A WIN5 cell above 1 does not outrank a ticket rule (win5-carryover-japan.md:125)."""
+    reg.append(
+        win5_record(
+            [
+                FoldMetric(fold=f, metric="mean_day_value", value=v, lo=lo, hi=None, n=n)
+                for f, v, lo, n in WIN5_BINS
+            ]
+        )
+    )
+    rule = "L1:TRIO:threshold_20:final_look_ahead"
+    reg.append(l_record(rule, metrics=l_metrics(0.6, 0.55, n=1000, meetings=80)))
+    rows = backfill().legacy_rows(reg)
+
+    ranked = {r.row.option_id: r.rank for r in rank(rows)}
+    text = render_markdown(rows, title="Japan leaderboard", public=True)
+
+    assert ranked[f"{FAMILY_L}/{rule}"] == 1, "the ticket rule ranks first though it returns less"
+    for fold, value, lo, _ in WIN5_BINS:
+        option = f"{WIN5}/pool-level[carryover {fold}]"
+        assert ranked[option] is None
+        row = next(r for r in rows if r.option_id == option)
+        assert row.descriptive is True
+        assert row.return_per_100 == pytest.approx(100 * value)
+        line = next(ln for ln in text.splitlines() if ln.startswith("|") and option in ln)
+        assert f"{100 * value:.2f}" in line and f"{100 * lo:.2f}" in line
+        assert not any(ch.isdigit() for ch in line.strip("| ").split("|")[0])
+    for row in rows:
+        if row.family_id != WIN5:
+            assert row.descriptive is False, row.option_id
+
+
+# --------------------------------------------------------------------------- exacta (#131)
+
+E1 = "japan-131-exacta-category-v2"
+E1_B1 = "japan-131-exacta-category-b1-v2"
+E1_B3 = "japan-131-exacta-category-b3-v2"
+_DIRECTIONS = {"fav_first": "less", "fav_second": "greater", "no_fav": "greater"}
+_EMPTY = "no scored race in the cell"
+EXACTA_PAYOUT = 0.75  # 1 - the jra FORECAST (馬単, EXACTA) takeout of 0.25 since 2014-06-07
+
+
+def exacta_record(family: str, variant: str, metrics, **kw) -> RunRecord:
+    """A #131 E1 record as ``exacta_run.score`` writes it (made-up values)."""
+    estimator, lam, category, cell = variant.split("|")
+    params = {
+        "estimator": estimator.upper(),
+        "lambda2": lam.split("=", 1)[1],
+        "category": category,
+        "cell": cell,
+        "direction": _DIRECTIONS[category],
+    }
+    return record(
+        hypothesis_id="E43",
+        family_id=family,
+        variant=variant,
+        ticket=131,
+        sources=("jra",),
+        fold_scheme="oof:#114 walk-forward test quarters (folds.yaml)",
+        components={"win": "synthetic-win-fit", "ordering": "synthetic-ordering-fit"},
+        params=params,
+        metrics=tuple(metrics),
+        **kw,
+    )
+
+
+def e1_metrics(ret: float, lo, hi, n: int, *, b2: bool = True) -> list[FoldMetric]:
+    """rho with its bounds, bootstrap_se, rho_eb (B2 only) and return_per_100, as recorded."""
+    rho = ret / 75.0
+    metrics = [
+        dev("rho", rho, rho - 0.02, rho + 0.02, n),
+        dev("bootstrap_se", 0.0123, None, None, n),
+    ]
+    if b2:
+        metrics.append(dev("rho_eb", 1.0111, None, None, n))
+    metrics.append(dev("return_per_100", ret, lo, hi, n))
+    return metrics
+
+
+EXACTA_ROWS = [
+    # (family, variant, return_per_100, lo, hi, n races)
+    (E1, "b2|lambda2=full_development|fav_first|all", 74.25, 72.5, 76.0, 20000),
+    (E1, "b2|lambda2=full_development|fav_first|fav_odds:le1.9", 79.5, 76.25, 82.75, 4800),
+    (E1, "b2|lambda2=1.0|no_fav|class:maiden", 68.0, 64.5, 71.5, 9100),
+    (E1_B1, "b1|lambda2=full_development|fav_second|headline", 83.75, 61.0, 108.5, 310),
+    (E1_B1, "b1|lambda2=full_development|no_fav|popularity:less", 70.125, 66.0, 74.25, 7400),
+    # any 'japan-131-exacta-*' family, not only the three named today
+    (
+        "japan-131-exacta-category-v3",
+        "b2|lambda2=full_development|fav_first|field:11-14",
+        77.0,
+        74.0,
+        80.0,
+        6000,
+    ),
+]
+
+
+def test_exacta_returns_become_measured_forecast_cells(reg):
+    for family, variant, ret, lo, hi, n in EXACTA_ROWS:
+        reg.append(exacta_record(family, variant, e1_metrics(ret, lo, hi, n, b2=family != E1_B1)))
+
+    rows = read(reg)
+
+    ranks = {r.row.option_id: r.rank for r in rank(list(rows.values()))}
+    for family, variant, ret, lo, hi, n in EXACTA_ROWS:
+        option = f"{family}/{variant}"
+        assert under(rows, family, variant) == [option], "rho, bootstrap_se, rho_eb give no row"
+        row = rows[option]
+        assert row.measured, option
+        assert row.kind == "cell"
+        assert row.pool == "FORECAST"
+        assert row.payout_rate == pytest.approx(EXACTA_PAYOUT)
+        assert row.return_per_100 == pytest.approx(ret), "already per ¥100: not rescaled"
+        assert (row.ci_lo, row.ci_hi) == (pytest.approx(lo), pytest.approx(hi))
+        assert row.ci_level == pytest.approx(0.95)
+        assert (row.n, row.n_unit) == (n, "races")
+        assert row.segment == variant.rsplit("|", 1)[1]
+        assert row.selection == "look_ahead"
+        assert row.ticket == 131
+        assert row.status == "scored"
+        assert row.variants_searched == reg.family_size(family)
+        assert row.descriptive is False, "a box return per ¥100 is a ticket return: ranked"
+        assert row.licensed is False and not row.withheld
+        assert isinstance(ranks[option], int), option
+
+
+def test_an_exacta_cell_of_one_meeting_keeps_its_return_without_bounds(reg):
+    variant = "b2|lambda2=full_development|fav_second|fav_odds:ge5.0"
+    few = "unavailable:fewer than two meetings: no bootstrap interval"
+    reg.append(
+        exacta_record(
+            E1,
+            variant,
+            [
+                dev("rho", 0.8125, None, None, 9),
+                dev(f"rho_bounds:{few}", 0.0, None, None, 9),
+                dev("bootstrap_se", 0.0, None, None, 9),
+                dev("return_per_100", 61.25, None, None, 9),
+                dev(f"return_per_100_bounds:{few}", 0.0, None, None, 9),
+            ],
+        )
+    )
+
+    rows = read(reg)
+
+    option = f"{E1}/{variant}"
+    assert under(rows, E1, variant) == [option]
+    row = rows[option]
+    assert row.return_per_100 == pytest.approx(61.25)
+    assert (row.ci_lo, row.ci_hi) == (None, None)
+    assert (row.n, row.n_unit) == (9, "races")
+    assert row.kind == "cell" and row.pool == "FORECAST"
+
+
+EXACTA_UNMEASURED = [
+    # (family, variant, metrics): no development return_per_100, so one unmeasured 'cell' row
+    (
+        E1,
+        "b2|lambda2=1.0|fav_second|fav_odds:ge5.0",
+        [  # an empty cell: every statistic is its marker (value 0.0, a placeholder)
+            dev(f"rho:unavailable:{_EMPTY}", 0.0, None, None, 0),
+            dev(f"bootstrap_se:unavailable:{_EMPTY}", 0.0, None, None, 0),
+            dev(f"rho_eb:unavailable:{_EMPTY}", 0.0, None, None, 0),
+            dev(f"return_per_100:unavailable:{_EMPTY}", 0.0, None, None, 0),
+        ],
+    ),
+    (
+        E1_B3,
+        "b3|lambda2=full_development|fav_first|all",
+        [  # B3 is paid at Harville odds: mean_return, never return_per_100
+            dev("mean_return", 0.97, 0.95, 0.99, 20000),
+            dev("bootstrap_se", 0.0101, None, None, 20000),
+        ],
+    ),
+    (
+        "japan-131-exacta-breakage",
+        "breakage|lambda2=full_development",
+        [
+            FoldMetric("development:fav_first:all", "breakage_share", 0.0042, None, None, 20000),
+            FoldMetric("development:fav_first:all", "rho_unrounded", 1.031, 1.01, 1.05, 20000),
+        ],
+    ),
+    (
+        "japan-131-exacta-logscore-v2",
+        "c|lambda2=1.0",
+        [dev("log_score_gain", 0.0211, 0.018, 0.024, 20000)],
+    ),
+    (
+        E1,
+        "b2|lambda2=full_development|no_fav|headline",
+        [FoldMetric("logged_days", "return_per_100", 88.5, 80.0, 97.0, 40)],  # not development
+    ),
+]
+
+
+def test_exacta_runs_without_a_development_return_are_unmeasured_cells(reg):
+    reg.append(exacta_record(E1, EXACTA_ROWS[0][1], e1_metrics(74.25, 72.5, 76.0, 20000)))
+    for family, variant, metrics in EXACTA_UNMEASURED:
+        run = record(
+            hypothesis_id="E43",
+            family_id=family,
+            variant=variant,
+            ticket=131,
+            sources=("jra",),
+            params={"variant": variant},
+            metrics=tuple(metrics),
+        )
+        reg.append(run)
+
+    rows = read(reg)
+
+    for family, variant, _ in EXACTA_UNMEASURED:
+        option = f"{family}/{variant}"
+        assert under(rows, family, variant) == [option], f"{variant} is one unmeasured row"
+        row = rows[option]
+        assert row.kind == "cell", option
+        assert row.status == "scored"
+        assert_unmeasured(row)
+    assert rows[f"{E1}/{EXACTA_ROWS[0][1]}"].measured
+
+
+def test_legacy_slash_exacta_ids_read_like_the_hyphen_ids(reg):
+    family = "japan/131-exacta-category-v1"
+    measured = "b2|lambda2=in_fold|fav_first|fav_odds:2.0-2.9"
+    seal_legacy(reg, exacta_record(family, measured, e1_metrics(81.5, 78.0, 85.0, 9900)))
+    rho_only = "b2|lambda2=in_fold|no_fav|all"
+    seal_legacy(
+        reg,
+        exacta_record(
+            family,
+            rho_only,
+            [dev("rho", 0.99, 0.97, 1.01, 20000), dev("bootstrap_se", 0.011, None, None, 20000)],
+        ),
+    )
+
+    rows = read(reg)
+
+    row = rows[f"{family}/{measured}"]
+    assert row.return_per_100 == pytest.approx(81.5)
+    assert (row.ci_lo, row.ci_hi, row.ci_level) == (
+        pytest.approx(78.0),
+        pytest.approx(85.0),
+        pytest.approx(0.95),
+    )
+    assert (row.kind, row.pool, row.segment, row.selection) == (
+        "cell",
+        "FORECAST",
+        "fav_odds:2.0-2.9",
+        "look_ahead",
+    )
+    assert (row.n, row.n_unit) == (9900, "races")
+    assert row.payout_rate == pytest.approx(EXACTA_PAYOUT)
+    unmeasured = rows[f"{family}/{rho_only}"]
+    assert unmeasured.kind == "cell"
+    assert_unmeasured(unmeasured)
+
+
+# ------------------------------------------------------------------------- debut and maiden (#438)
+
+DEBUT_MAIDEN_VARIANTS = [
+    # (variant, hypothesis, kind): 'combined' fits the six members together, a model
+    ("combined:DEBUT", "E34", "model"),
+    ("combined:MAIDEN", "E34", "model"),
+    ("member:ability:DEBUT", "E34", "member"),
+    ("member:late_win:MAIDEN", "E34", "member"),
+    ("member:workouts_jrdb:DEBUT", "E34", "member"),
+    ("member:pedigree_prior:MAIDEN", "E37", "member"),
+]
+
+
+@pytest.mark.parametrize("status", ["scored", "failed"])
+@pytest.mark.parametrize(
+    "family", ["japan-debut-maiden-members-v1", "japan-debut-maiden-members-v2"]
+)
+def test_debut_maiden_combined_variants_are_models_and_members_members(reg, family, status):
+    for variant, hypothesis, _ in DEBUT_MAIDEN_VARIANTS:
+        sources = ("jra", "jrdb") if "jrdb" in variant else ("jra", "netkeiba")
+        metrics = () if status == "failed" else (dev("log_loss_gain", 0.0017, 0.0004, 0.003, 900),)
+        reg.append(
+            record(
+                hypothesis_id=hypothesis,
+                family_id=family,
+                variant=variant,
+                ticket=438,
+                sources=sources,
+                metrics=metrics,
+                status=status,
+            )
+        )
+
+    rows = read(reg)
+
+    got = {v: rows[f"{family}/{v}"].kind for v, _, _ in DEBUT_MAIDEN_VARIANTS}
+    assert got == {v: kind for v, _, kind in DEBUT_MAIDEN_VARIANTS}
+    for variant, _, _ in DEBUT_MAIDEN_VARIANTS:
+        assert_unmeasured(rows[f"{family}/{variant}"])
+        assert rows[f"{family}/{variant}"].status == status
 
 
 # --------------------------------------------------------------------------- the other families
