@@ -188,7 +188,7 @@ def _before(runs: pd.DataFrame, before_utc: datetime, columns=RUN_COLUMNS) -> pd
 def _cells(read: pd.DataFrame, sire_of: dict) -> pd.DataFrame:
     sire = read["horse_id"].map(sire_of)
     known = read.assign(sire_id=sire).dropna(subset=CELL_KEYS)
-    out = known.groupby(CELL_KEYS, sort=True).agg(
+    out = known.groupby(CELL_KEYS, sort=True, observed=True).agg(
         n_runs=("horse_id", "size"), n_horses=("horse_id", "nunique")
     )
     return out.reset_index()[CELL_COLUMNS].astype({"n_runs": np.int64, "n_horses": np.int64})
