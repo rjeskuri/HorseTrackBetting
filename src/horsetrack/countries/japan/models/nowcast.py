@@ -5,9 +5,10 @@ puts this model behind #116's draws interface so the shadow values can switch by
 
 Shares (per pool, over the combinations priced on a board)
 - A combination's share is its money over the pool. With per-combination money on every priced
-  row (`investment`), that money; else WIN shares are 1/O normalised, and the stake-back-share
-  pools (PLACE, QUINELLA_PLACE; `payout_rule` in config/jra.yaml) invert the low figures by that
-  rule: a combination's low figure prices it with the P - 1 most-backed others, so in units of
+  row (`investment`), that money; else WIN shares are 1/O normalised, and the pools that pay
+  several combinations on every result (PLACE, QUINELLA_PLACE: `places_paid` in config/jra.yaml
+  exceeds `legs`) invert the low figures by the stake-back-share rule every JRA pool pays by: a
+  combination's low figure prices it with the P - 1 most-backed others, so in units of
   the pool m_i (P lo_i - P + 1) = (1 - takeout) - (the P - 1 largest other m_j), P from
   `places_for(starters)`. That is solved in closed form (`stake_back_money`); low figures below
   the pool's minimum dividend are read at it. The money sums to 1 when the rule holds, which the
@@ -133,8 +134,11 @@ def _pool_config(pool: str):
     return config.load_source(COUNTRY, "jra").pools[pool]
 
 
-def _stake_back(pool: str) -> bool:
-    return _pool_config(pool).payout_rule == "stake_back_share"
+def _pays_several(pool: str) -> bool:
+    """True for a pool that pays several combinations on every result (PLACE, QUINELLA_PLACE), so
+    its board prints a low figure per combination; WIN pays one, and 1/O gives its shares."""
+    spec = _pool_config(pool)
+    return any(rule.places > spec.legs for rule in spec.places_paid)
 
 
 def _floor(pool: str) -> float:
@@ -199,7 +203,7 @@ def pool_shares(
         money = np.asarray(investment, dtype=float)
         if money.size and np.all(np.isfinite(money) & (money > 0)):
             return money / money.sum(axis=-1, keepdims=True), math.nan
-    if not _stake_back(pool):
+    if not _pays_several(pool):
         inverse = 1.0 / odds
         return inverse / inverse.sum(axis=-1, keepdims=True), math.nan
     places = _pool_config(pool).places_for(odds.shape[-1])
