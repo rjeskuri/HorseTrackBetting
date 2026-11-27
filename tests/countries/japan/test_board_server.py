@@ -509,3 +509,145 @@ def test_the_plain_feed_has_no_value_fields(serve):
     assert {r.race_id for r in races} == {
         race["race_id"] for venue in plain["venues"] for race in venue["races"]
     }
+
+
+# ---------------------------------------------------------------- the clock's cutoffs (#498)
+#
+# The T-20 and T-2 references follow the clock as well as the logs: a reference is null until
+# post - 20 / post - 2 min has passed, then it is the last priced capture at or before that
+# instant. A feed built just before a cutoff must not be served after it until a log changes.
+# The clock seam assumed: the `datetime` of the feed module, which `feed.utc_now` (and so
+# `build_board`'s default `now`) reads; the server takes its now from `feed.utc_now` too.
+
+
+class _Clock:
+    def __init__(self, at: datetime):
+        self.at = at
+
+    def set(self, at: datetime) -> None:
+        self.at = at
+
+
+@pytest.fixture
+def clock(monkeypatch) -> _Clock:
+    from horsetrack.countries.japan.board import feed as board_feed
+
+    state = _Clock(jst(9, 0))
+
+    class FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            at = state.at
+            return at.astimezone(tz) if tz is not None else at.replace(tzinfo=None)
+
+    monkeypatch.setattr(board_feed, "datetime", FakeDateTime)
+    return state
+
+
+# venue, race, post (JST), WIN odds of runners 1 and 2 at post-45m, post-20m-10s, post-2m-10s
+CUTOFF_RACES = {
+    ("TOK", 1): (jst(9, 50), ((6.0, 3.0), (5.0, 3.2), (4.0, 3.6))),
+    ("KYO", 3): (jst(10, 12), ((8.0, 2.5), (7.0, 2.6), (5.6, 2.9))),
+}
+
+
+def log_cutoff_day() -> None:
+    for venue in sorted({v for v, _ in CUTOFF_RACES}):
+        posts = {no: post for (v, no), (post, _) in CUTOFF_RACES.items() if v == venue}
+        sidecar = log_path(venue).with_name(f"{venue}.races.json")
+        odds_log.write_post_times(
+            sidecar, {no: p.astimezone(UTC) for no, p in posts.items()}, jst(6, 0)
+        )
+    offsets = (
+        timedelta(minutes=45),
+        timedelta(minutes=20, seconds=10),
+        timedelta(minutes=2, seconds=10),
+    )
+    captures = []
+    for (venue, no), (post, odds) in CUTOFF_RACES.items():
+        for offset, (one, two) in zip(offsets, odds, strict=True):
+            captures.append((post - offset, venue, {(no, "1"): one, (no, "2"): two}))
+    for at, venue, win in sorted(captures, key=lambda c: c[0]):
+        capture(venue, at, win)
+
+
+def win_line(board: dict, venue: str, no: int, combination: str) -> dict:
+    v = next(v for v in board["venues"] if v["venue"] == venue)
+    race = next(r for r in v["races"] if r["race_no"] == no)
+    return next(r for r in race["pools"]["WIN"]["rows"] if r["combination"] == combination)
+
+
+@pytest.mark.parametrize("cutoff_min", [20, 2], ids=["T-20", "T-2"])
+@pytest.mark.parametrize("race", sorted(CUTOFF_RACES), ids=lambda r: f"{r[0]}{r[1]}")
+def test_a_poll_after_a_cutoff_fills_its_reference_without_a_log_write(
+    serve, clock, race, cutoff_min
+):
+    venue, no = race
+    post, (_, at_t20, at_t2) = CUTOFF_RACES[race]
+    cutoff = post - timedelta(minutes=cutoff_min)
+    log_cutoff_day()
+    clock.set(cutoff - timedelta(seconds=5))
+    srv = serve(min_rebuild_s=0)
+
+    before = get(srv, "/feed")
+    assert before.status == 200
+    etag = before.headers["ETag"]
+    for i, combination in enumerate(("1", "2")):
+        line = win_line(before.json(), venue, no, combination)
+        if cutoff_min == 20:
+            assert line["t20_odds"] is None, (combination, line)
+        else:
+            assert line["t20_odds"] == at_t20[i], (combination, line)
+        assert line["t2_odds"] is None, (combination, line)
+        assert line["move_t20_t2_pct"] is None, (combination, line)
+
+    clock.set(cutoff - timedelta(seconds=2))  # no cutoff passed, no log changed
+    held = get(srv, "/feed", {"If-None-Match": etag})
+    assert held.status == 304, "nothing changed: the poll stays a 304"
+
+    clock.set(cutoff + timedelta(seconds=5))  # the cutoff passed; still no log write
+    after = get(srv, "/feed", {"If-None-Match": etag})
+
+    assert after.status == 200, f"the T-{cutoff_min} column stays empty after its cutoff"
+    assert after.headers["ETag"] != etag
+    for i, combination in enumerate(("1", "2")):
+        line = win_line(after.json(), venue, no, combination)
+        assert line["t20_odds"] == at_t20[i], (combination, line)
+        if cutoff_min == 2:
+            assert line["t2_odds"] == at_t2[i], (combination, line)
+            want = round((at_t2[i] / at_t20[i] - 1) * 100, 1)
+            assert line["move_t20_t2_pct"] == pytest.approx(want, abs=0.05), (combination, line)
+        else:
+            assert line["t2_odds"] is None, (combination, line)
+
+
+@pytest.mark.parametrize("cutoff_min", [10, 5], ids=["T-10", "T-5"])
+@pytest.mark.parametrize("race", sorted(CUTOFF_RACES), ids=lambda r: f"{r[0]}{r[1]}")
+def test_a_poll_after_t10_or_t5_fills_its_reference_without_a_log_write(
+    serve, clock, race, cutoff_min
+):
+    """#499: the T-10 and T-5 references fill at their cutoffs as T-20 and T-2 do, without a log
+    write (the latest capture at or before both is the post - 20m10s one)."""
+    venue, no = race
+    post, (_, at_t20, _) = CUTOFF_RACES[race]
+    cutoff = post - timedelta(minutes=cutoff_min)
+    field = f"t{cutoff_min}_odds"
+    log_cutoff_day()
+    clock.set(cutoff - timedelta(seconds=5))
+    srv = serve(min_rebuild_s=0)
+
+    before = get(srv, "/feed")
+    assert before.status == 200
+    etag = before.headers["ETag"]
+    for combination in ("1", "2"):
+        line = win_line(before.json(), venue, no, combination)
+        assert line[field] is None, (combination, line)
+
+    clock.set(cutoff + timedelta(seconds=5))  # the cutoff passed; still no log write
+    after = get(srv, "/feed", {"If-None-Match": etag})
+
+    assert after.status == 200, f"the T-{cutoff_min} column stays empty after its cutoff"
+    assert after.headers["ETag"] != etag
+    for i, combination in enumerate(("1", "2")):
+        line = win_line(after.json(), venue, no, combination)
+        assert line[field] == at_t20[i], (combination, line)
