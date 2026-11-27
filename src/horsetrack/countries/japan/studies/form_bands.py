@@ -854,9 +854,10 @@ def data_description_v2(date_from: date, date_to: date, scheme: FoldScheme) -> d
     }
 
 
-def _per_race(store: pd.DataFrame) -> pd.DataFrame:
+def _per_race(store: pd.DataFrame, race_ids: Sequence[str] = ()) -> pd.DataFrame:
     """Per store race: its winners, dead-heat winners, a priced winner, and whether it has an
-    unnumbered or an unpriced numbered confirmed starter."""
+    unnumbered or an unpriced numbered confirmed starter. A race of `race_ids` (the races table)
+    with no runner rows is a race with no winner."""
     starter = store["starter"].to_numpy()
     numbered = store["horse_no"].notna().to_numpy()
     priced = np.isfinite(store["win_odds"].to_numpy(dtype=float))
@@ -871,13 +872,21 @@ def _per_race(store: pd.DataFrame) -> pd.DataFrame:
             "unpriced": starter & numbered & ~priced,
         }
     )
-    return flags.groupby("race_id").agg(
+    per = flags.groupby("race_id").agg(
         winners=("winners", "sum"),
         dh_winners=("dh_winners", "sum"),
         priced_winner=("priced_winner", "any"),
         unnumbered=("unnumbered", "any"),
         unpriced=("unpriced", "any"),
     )
+    empty = pd.Index(race_ids).difference(per.index)
+    if len(empty):
+        none = pd.DataFrame(
+            {"winners": 0, "dh_winners": 0, "priced_winner": False, "unnumbered": False,
+             "unpriced": False}, index=empty,
+        )  # fmt: skip
+        per = pd.concat([per, none]).astype(per.dtypes.to_dict())
+    return per
 
 
 def _store_q(store: pd.DataFrame) -> pd.DataFrame:
@@ -921,7 +930,7 @@ def read_rows(date_from: date, date_to: date, scheme: FoldScheme) -> tuple:
     oof = oof.to_pandas()
     oof["race_date"] = pd.to_datetime(oof["race_id"].str.slice(4, 14)).dt.date
     oof = oof[(oof["race_date"] >= date_from) & (oof["race_date"] <= date_to)]
-    oof = oof[~oof["race_date"].map(lambda d: is_holdout_day(COUNTRY, d))]
+    oof = oof.loc[~oof["race_date"].map(lambda d: is_holdout_day(COUNTRY, d)).to_numpy(dtype=bool)]
     oof = oof.astype({"horse_no": "int64"})
 
     table = read_store_table(
@@ -952,11 +961,16 @@ def read_rows(date_from: date, date_to: date, scheme: FoldScheme) -> tuple:
         "races", columns=["race_id", "race_date", "meeting_id"], start=date_from, end=date_to,
         touches_price=False,
     ).to_pandas()  # fmt: skip
-    store = store[~store["race_date"].map(lambda d: is_holdout_day(COUNTRY, d))]
+    store = store.loc[
+        ~store["race_date"].map(lambda d: is_holdout_day(COUNTRY, d)).to_numpy(dtype=bool)
+    ]
+    races = races.loc[
+        ~races["race_date"].map(lambda d: is_holdout_day(COUNTRY, d)).to_numpy(dtype=bool)
+    ]
     store["horse_no"] = store["horse_no"].astype("Int64")
     store["win_odds"] = clean_odds(store["win_odds"].to_numpy())
     store["starter"] = ~store["is_scratched"].eq(True).to_numpy(dtype=bool, na_value=False)
-    per = _per_race(store)
+    per = _per_race(store, races["race_id"])  # a races-table race with no runner rows is void
 
     v0_races = set(oof["race_id"])
     order: list[tuple[str, set[str]]] = []
@@ -1007,8 +1021,20 @@ def read_rows(date_from: date, date_to: date, scheme: FoldScheme) -> tuple:
     order.append(("dropped_dead_heat_no_fold", no_fold))
     candidates -= no_fold
     dh_rows = dh_rows[~dh_rows["race_id"].isin(no_fold)].astype({"fold": "int64"})
+    # D9's embargo after the training cutoff of the fold fit that prices the dead heat
+    cutoff = dh_rows["fold"].map({k: fold.train_end for k, fold in enumerate(folds)})
+    since = (dh_rows["race_date"] - cutoff).map(lambda gap: gap.days)
+    embargoed = set(dh_rows.loc[(since < scheme.embargo_days).to_numpy(dtype=bool), "race_id"])
+    order.append(("dropped_dead_heat_embargo", embargoed))
+    candidates -= embargoed
+    # a fold with no kept v0 row to check its refit against prices none of its dead heats
+    dh_rows = dh_rows[~dh_rows["race_id"].isin(embargoed)]
+    no_reference = set(dh_rows.loc[~dh_rows["fold"].isin(set(kept_v0["fold"])), "race_id"])
+    order.append(("dropped_dead_heat_no_v0_reference", no_reference))
+    candidates -= no_reference
+    dh_rows = dh_rows[~dh_rows["race_id"].isin(no_reference)].assign(p_cal=np.nan)
     fold_rows = {}
-    for k in sorted(set(kept_v0["fold"].astype(int)) | set(dh_rows["fold"])):
+    for k in sorted(set(kept_v0["fold"].astype(int))):
         fold_rows[k] = pd.concat(
             [kept_v0.loc[kept_v0["fold"] == k, ["race_id", "q"]],
              dh_rows.loc[dh_rows["fold"] == k, ["race_id", "q"]]], ignore_index=True,
@@ -1060,7 +1086,8 @@ def read_rows(date_from: date, date_to: date, scheme: FoldScheme) -> tuple:
         columns=["race_id", "horse_no", "handicap_score"])  # fmt: skip
     h = h.rename(columns={"handicap_score": "h"}).astype({"horse_no": "int64"})
     t2 = pd.concat(t2_parts, ignore_index=True) if t2_parts else pd.DataFrame(
-        {"race_id": [], "horse_no": pd.Series(dtype="int64"), "win_odds_t2": []})  # fmt: skip
+        {"race_id": pd.Series(dtype=object), "horse_no": pd.Series(dtype="int64"),
+         "win_odds_t2": pd.Series(dtype=float)})  # fmt: skip
     t2 = t2[t2["race_id"].isin(set(oof["race_id"]))]
 
     starters = (

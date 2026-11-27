@@ -220,15 +220,66 @@ def ts_row(r: dict, odds, *, combination=None, investment=None) -> dict:
     }  # fmt: skip
 
 
-def build_data_dir(base: Path, *, unnumbered: bool = True) -> Path:
-    assert not any(is_holdout_day("japan", d) for d in DAYS)
+# Round-3 fixes (GPT re-check of PR #473): races planted only in the extended data directory.
+# v0's development frame leaves out every one of them (dead heats, void, unpriced winner), so the
+# v0 file and the fold fits are those of the base world.
+EMPTY_RACE_NO = 21  # a races-table row with no runner rows
+EMPTY_IN_RANGE, EMPTY_OUT_OF_RANGE = rid(SPECIAL_DAY, EMPTY_RACE_NO), rid(DAYS[1], EMPTY_RACE_NO)
+EMBARGO_DAY, FIRST_SCORED_DAY = date(2025, 2, 4), DAYS[4]  # fold 0 trains to 2025-01-29
+DH_IN_EMBARGO, DH_AFTER_EMBARGO = rid(EMBARGO_DAY, 1), rid(FIRST_SCORED_DAY, N_NORMAL + 1)
+# in fold 1's window, after its kept v0 days: a dead heat; a day whose one v0 race the store now
+# contradicts, beside a void race; a day with no v0 race at all (void, unpriced winner)
+NO_V0_DAY, EXCLUDED_DAY, VOID_DAY = date(2025, 3, 19), date(2025, 3, 24), date(2025, 3, 26)
+DH_NO_V0_REFERENCE = rid(NO_V0_DAY, 1)
+EXTRA_DAYS = (EMBARGO_DAY, NO_V0_DAY, EXCLUDED_DAY, VOID_DAY)
+
+
+def void_race(rng, day: date, race_no: int) -> list[dict]:
+    rows = race(rng, day, race_no)
+    for r in rows:
+        r["finish_pos"] = None
+    return rows
+
+
+def dead_heat_race(rng, day: date, race_no: int) -> list[dict]:
+    rows = race(rng, day, race_no)
+    by = {r["finish_pos"]: r for r in rows}
+    by[2]["finish_pos"] = 1
+    by[1]["dead_heat"] = by[2]["dead_heat"] = True
+    return rows
+
+
+def extra_runners(*, now: bool) -> list[dict]:
+    rng = np.random.default_rng(473)
+    rows = dead_heat_race(rng, EMBARGO_DAY, 1)
+    rows += dead_heat_race(rng, FIRST_SCORED_DAY, N_NORMAL + 1)
+    rows += dead_heat_race(rng, NO_V0_DAY, 1)
+    late = race(rng, EXCLUDED_DAY, 1, not_winner=3)
+    if now:  # v0 saw horse 3 run; the store now scratches it
+        late[2].update(win_odds=np.nan, finish_pos=None, is_scratched=True)
+    rows += late + void_race(rng, EXCLUDED_DAY, 2) + void_race(rng, VOID_DAY, 1)
+    unpriced = race(rng, VOID_DAY, 2)
+    next(r for r in unpriced if r["finish_pos"] == 1)["win_odds"] = np.nan
+    return rows + unpriced
+
+
+def build_data_dir(base: Path, *, unnumbered: bool = True, extras: bool = False) -> Path:
+    assert not any(is_holdout_day("japan", d) for d in (*DAYS, *EXTRA_DAYS))
     then, now = world(unnumbered=unnumbered)
+    if extras:
+        then += extra_runners(now=False)
+        now += extra_runners(now=True)
     data = base / "data"
     store = data / "processed" / "jra"
     store.mkdir(parents=True)
+    empty = (
+        [{"race_id": EMPTY_IN_RANGE, "race_date": SPECIAL_DAY, "race_no": EMPTY_RACE_NO},
+         {"race_id": EMPTY_OUT_OF_RANGE, "race_date": DAYS[1], "race_no": EMPTY_RACE_NO}]
+        if extras else []
+    )  # fmt: skip
     races = pd.DataFrame(
         [{"race_id": r["race_id"], "race_date": r["race_date"],
-          "meeting_id": f"{r['race_date'].isoformat()}:TOK"} for r in now]
+          "meeting_id": f"{r['race_date'].isoformat()}:TOK"} for r in now + empty]
     ).drop_duplicates("race_id")  # fmt: skip
     race_schema = pa.schema(
         [("race_id", pa.string()), ("race_date", pa.date32()), ("meeting_id", pa.string())]
@@ -251,7 +302,7 @@ def build_data_dir(base: Path, *, unnumbered: bool = True) -> Path:
     handicap.mkdir(parents=True)
     odds_dir.mkdir(parents=True)
     rng = np.random.default_rng(7)
-    for day in DAYS:
+    for day in sorted({r["race_date"] for r in now}):
         mine = [r for r in now if r["race_date"] == day and r["horse_no"] is not None]
         pd.DataFrame(
             {"race_id": [r["race_id"] for r in mine], "horse_no": [r["horse_no"] for r in mine],
@@ -264,10 +315,10 @@ def build_data_dir(base: Path, *, unnumbered: bool = True) -> Path:
     return data
 
 
-def read(data: Path):
+def read(data: Path, date_from: date = READ_FROM, date_to: date = LAST_DAY):
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv(paths.DATA_DIR_VAR, str(data))
-        return fb.read_rows(READ_FROM, LAST_DAY, MONTHLY)
+        return fb.read_rows(date_from, date_to, MONTHLY)
 
 
 @pytest.fixture(scope="module")
@@ -385,6 +436,82 @@ def test_every_other_race_is_read_whole_with_v0s_p_cal(read_back):
     oof = pq.read_table(data / fb.V0_OOF).to_pandas().set_index(["race_id", "horse_no"])["p_cal"]
     got = mine.set_index(["race_id", mine["horse_no"].astype(int)])["p_cal"]
     np.testing.assert_allclose(got.to_numpy(dtype=float), oof.loc[got.index].to_numpy(), rtol=1e-6)
+
+
+# ---------------------------------------------------------------- round 3: the GPT re-check
+# 1. a races-table race with no runner rows is void; 2. a dead heat inside D9's one-week embargo
+# after its fold fit's training cutoff is dropped; 3. a fold with dead heats and no v0 rows to
+# check the refit against drops its dead heats; 4. a span with nothing to score does not raise.
+
+
+@pytest.fixture(scope="module")
+def extended(tmp_path_factory):
+    return build_data_dir(tmp_path_factory.mktemp("extended"), extras=True)
+
+
+def test_a_race_with_no_runner_rows_is_counted_void_once(extended):
+    rows, _, counts, _ = read(extended)
+    assert EMPTY_IN_RANGE not in set(rows["race_id"])
+    assert counts["dropped_void"] == 2  # VOID and the runnerless race; not the one before READ_FROM
+
+
+def test_a_dead_heat_inside_the_embargo_after_its_fold_fits_cutoff_is_dropped(extended):
+    _, now = world()
+    _, v0_folds = v0_frame_and_folds(now + extra_runners(now=True))
+    k = next(i for i, f in enumerate(v0_folds) if f.test_start <= EMBARGO_DAY <= f.test_end)
+    cutoff = v0_folds[k].train_end  # the fold fit's cutoff, not the window's start
+    assert (EMBARGO_DAY - cutoff).days < MONTHLY.embargo_days <= (FIRST_SCORED_DAY - cutoff).days
+    assert cutoff < v0_folds[k].test_start - timedelta(days=1)
+
+    rows, _, counts, _ = read(extended)
+    assert counts.get("dropped_dead_heat_embargo", 0) == 1
+    present = set(rows["race_id"])
+    assert DH_IN_EMBARGO not in present
+    scored = rows[rows["race_id"] == DH_AFTER_EMBARGO]
+    assert len(scored) == FIELD and int(scored["won"].sum()) == 2
+    assert set(scored["fold"].astype(int)) == {k} and scored["p_cal"].notna().all()
+    assert rid(SPECIAL_DAY, DEAD_HEAT) in present
+    assert counts["dead_heat_races_refit"] == 2
+
+
+def test_a_folds_dead_heats_without_v0_rows_to_check_against_are_dropped(extended):
+    rows, _, counts, _ = read(extended, date(2025, 3, 13), date(2025, 3, 31))
+    assert counts.get("dropped_dead_heat_no_v0_reference", 0) == 1
+    assert DH_NO_V0_REFERENCE not in set(rows["race_id"])
+    assert counts["dead_heat_races_refit"] == 0
+
+    rows, _, counts, _ = read(extended, date(2025, 3, 1), date(2025, 3, 31))  # v0 rows in fold 1
+    assert counts.get("dropped_dead_heat_no_v0_reference", 0) == 0
+    assert int(rows.loc[rows["race_id"] == DH_NO_V0_REFERENCE, "won"].sum()) == 2
+
+
+@pytest.mark.parametrize(
+    ("day", "want"),
+    [(EXCLUDED_DAY, {"dropped_void": 1, "dropped_v0_disagrees_with_store": 1,
+                     "dropped_no_priced_winner": 0}),
+     (VOID_DAY, {"dropped_void": 1, "dropped_v0_disagrees_with_store": 0,
+                 "dropped_no_priced_winner": 1})],
+    ids=["v0-rows-all-dropped", "no-v0-rows"],
+)  # fmt: skip
+def test_a_span_with_no_eligible_race_returns_its_drop_counts(extended, day, want):
+    rows, _, counts, _ = read(extended, day, day)
+    assert len(rows) == 0
+    assert {k: counts[k] for k in want} == want
+    assert counts["races_read"] == 0
+
+
+def test_run_study_on_a_span_with_no_eligible_race_records_failed_variants(extended, tmp_path):
+    day = EXCLUDED_DAY
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(paths.DATA_DIR_VAR, str(extended))
+        mp.setattr(fb, "load_country_scheme", lambda country: MONTHLY)
+        result = fb.run_study(tmp_path / "out", date_from=day, date_to=day, n_boot=50)
+        records = default_registry("japan").records(fb.FAMILY_ID)
+    assert result["counts"]["dropped_void"] == 1
+    assert result["counts"]["dropped_v0_disagrees_with_store"] == 1
+    assert sorted(r.variant for r in records) == sorted(fb.VARIANTS)
+    assert {r.status for r in records} == {"failed"}
+    assert set(result["errors"]) == set(fb.VARIANTS)
 
 
 # ---------------------------------------------------------------- D. the v2 family
