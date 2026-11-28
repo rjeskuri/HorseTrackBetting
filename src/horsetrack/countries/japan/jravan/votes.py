@@ -5,9 +5,9 @@ table (`horsetrack japan jravan votes`, #368).
 `records.iter_file`: a first pass over a file reads the version keys and picks one version per
 race (`records.latest_versions`), a second turns the kept records of JRA venues into rows, so no
 more than one chunk of records is decoded at a time. Each year's rows (H1 and H6) are sorted by
-`race_id, pool, combination` (plain string order) and written as one row group of
-`<out>/pool_votes.parquet`, through a tmp file and `os.replace`; the same inputs give the same
-bytes.
+`race_id, pool, combination` (plain string order) and written as one row group per race day of
+`<out>/pool_votes.parquet` (`records.write_days`, #502), through a tmp file and `os.replace`; the
+same inputs give the same bytes.
 
 Each registered slot of a sold pool (`発売フラグ<P>` 7) is one row: `combination` the legs of its
 馬番 or 組番 joined with `,`, leading zeros dropped (FORECAST and TIERCE in finishing order, the
@@ -363,7 +363,7 @@ def build_pool_votes(
     """Read the export's H1 and H6 year files (`raw` the export root, default
     `paths.raw_dir('jravan')`; `years` None for every year file of either folder), `chunk_records`
     records at a time, and write `<out>/pool_votes.parquet` (default
-    `paths.processed_dir('jravan')`), one row group per year. Returns the counts, no record
+    `paths.processed_dir('jravan')`), one row group per race day. Returns the counts, no record
     content."""
     root = Path(raw) if raw is not None else paths.raw_dir(SOURCE)
     target = (Path(out) if out is not None else paths.processed_dir(SOURCE)) / FILENAME
@@ -388,8 +388,7 @@ def build_pool_votes(
                     counts.update(_row_counts(rows))
                     table = _table(rows)
                     del rows
-                    if table.num_rows:
-                        writer.write_table(table, row_group_size=table.num_rows)
+                    records.write_days(writer, table)
                     del table
                 by_year[year] = counts
         os.replace(tmp, target)

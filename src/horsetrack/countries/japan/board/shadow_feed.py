@@ -25,8 +25,9 @@ Rules (docs/specs/board-feed.md, "The shadow feed"):
   priced there and scratched later counts, one already SCR there does not); at or after it (a
   logger first run in the race date's 07:00 window), or with no `probe_until`, the log missed the
   opening and every runner it shows counts, SCR there or on the board included (the scratch
-  taken as after the opening). Without an ordering fit only WIN; without models None. Display
-  only: it never reaches a value, a flag or the shadow log.
+  taken as after the opening). Without an ordering fit only WIN; without models None. On the
+  page it never reaches a value or a flag; shadow-day (#564) logs the same p_model of its
+  decision board through `_p_model` and `_starters`.
 - `cache`: a mapping the caller keeps between builds. A race's values are recomputed only when its
   board (capture time and figures) or its bucket changed, its p_model only when its board did;
   flags read the clock on every build. The log readers live in the same mapping, so a rebuild
@@ -73,10 +74,10 @@ from horsetrack.countries.japan.models.v0.ordering import OrderingFit
 from horsetrack.countries.japan.models.v0.shadow_values import (
     ShadowModels,
     model_probabilities,
+    point_seed,
     shadow_values,
 )
 from horsetrack.countries.japan.research.win5 import live_pool_ev
-from horsetrack.countries.japan.shadow.day import point_seed
 
 log = logging.getLogger(__name__)
 
