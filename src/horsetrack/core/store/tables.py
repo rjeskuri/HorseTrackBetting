@@ -9,13 +9,16 @@ timestamps, list columns `object` holding numpy arrays.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 from pathlib import Path
 
 import duckdb
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
+from horsetrack.core.eval.holdout import read_development
 from horsetrack.core.paths import processed_dir
 from horsetrack.core.store import schemas
 
@@ -44,9 +47,24 @@ def table_path(source: str, name: str) -> Path:
     return processed_dir(source) / f"{_spec(name).name}.parquet"
 
 
-def read_table(source: str, name: str, columns: Sequence[str] | None = None) -> pd.DataFrame:
+def read_table(
+    source: str,
+    name: str,
+    columns: Sequence[str] | None = None,
+    *,
+    filters: ds.Expression | None = None,
+    development: str | None = None,
+) -> pd.DataFrame:
     """A source's table as a frame: the requested (default: all declared) columns, in that order,
-    cast to their declared types."""
+    cast to their declared types. `filters`, a dataset expression (it may name columns not read),
+    is applied by the Parquet scan, so a row it excludes never reaches the frame. With
+    `development` (a country), only that country's development rows are read:
+    `core.eval.holdout.read_development` over the table's race_date, bounds and scan through one
+    open handle, so no holdout row reaches the frame, and `filters` narrows that scan as its
+    `where`; a table with a null race_date on any row raises ValueError (from its footer null
+    counts or the bounds scan, before any row is read) rather than dropping it. Either way row
+    groups are skipped only by their min/max statistics, and a row group that mixes kept and
+    excluded rows is still read from disk."""
     spec = _spec(name)
     wanted = list(spec.columns) if columns is None else list(columns)
     unknown = [c for c in wanted if c not in spec.columns]
@@ -55,19 +73,16 @@ def read_table(source: str, name: str, columns: Sequence[str] | None = None) -> 
     path = table_path(source, name)
     if not path.exists():
         raise FileNotFoundError(f"table {name!r} of source {source!r}: {path} does not exist")
-    missing = [c for c in wanted if c not in pq.read_schema(path).names]
-    if missing:
-        raise ValueError(f"table {name!r} of source {source!r}: {path} has no column {missing}")
-    return to_frame(name, pq.read_table(path, columns=wanted).select(wanted))
-
-
-def to_frame(name: str, data: pa.Table) -> pd.DataFrame:
-    """An Arrow table of the declared table `name`'s columns as a frame with `read_table`'s
-    dtypes (the module docstring)."""
-    spec = _spec(name)
-    wanted = list(data.column_names)
+    with pa.memory_map(str(path)) if development else nullcontext(path) as file:
+        missing = [c for c in wanted if c not in pq.read_schema(file).names]
+        if missing:
+            raise ValueError(f"table {name!r} of source {source!r}: {path} has no column {missing}")
+        if development is None:
+            data = pq.read_table(file, columns=wanted, filters=filters)
+        else:
+            data = read_development(file, development, columns=wanted, where=filters, dated=True)
     target = pa.schema([(c, ARROW_TYPES[spec.columns[c]]) for c in wanted])
-    frame = data.cast(target).to_pandas(types_mapper=_PANDAS_TYPES.get)
+    frame = data.select(wanted).cast(target).to_pandas(types_mapper=_PANDAS_TYPES.get)
     for column in wanted:
         if spec.columns[column] == schemas.STR:  # pandas 3 reads strings as `str`, NaN for missing
             values = frame[column].astype(object)

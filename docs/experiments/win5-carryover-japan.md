@@ -107,3 +107,25 @@ Filed as `status:proposed` tickets under epic #72, for the owner to promote or d
    ledger's row asks.
 4. #325: grow the WIN5 carryover sample, recording each new carryover day's pool-level return as new days run (the
    [1, 2) bin has 1 net-pool day; the [2, inf) bin has none).
+
+## On the leaderboard (2026-11-27)
+
+Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
+adoption verdicts. Nothing is adopted or rejected: every option, model and member will be a row on the planned
+`horsetrack japan leaderboard` (#452; this revision does not have the command yet), ranked by its shrunk return per
+¥100 at the final price, and a row with no measured return will be listed after the ranking, never dropped. Where
+this report says "not adopted", "rules out" or "rejected", read a measured position. This section reopens and
+re-runs nothing.
+
+- Registry family: `win5-carryover-v1`.
+- As task 4 (#451, planned) specifies, each carryover-ratio bin with days, (0, 0.5), [0.5, 1) and [1, 2), will be a
+  measured WIN5 cell row with its pool-level day value and its one-sided lower bound only, labelled look-ahead,
+  because the net pool is known only after the close. The [2, inf) bin had no days and the study wrote no metric for
+  it, so it will be listed as unmeasured, with no value. The gross-pool carryover-day metric will give no row.
+- The cells are descriptive measurements, shown on the leaderboard but not given a D16 rank. A cell's value is the
+  mean share of the day's pool paid back to all its bettors, not the return per ¥100 staked on any ticket, and the
+  study measured no ticket strategy, so a cell above 1 does not outrank a ticket rule. A WIN5 row ranks under D16
+  only on a walk-forward return per ¥100 staked on a defined selection rule: a follow-up of epic #447, not a re-run
+  here.
+- "Nothing is adopted" and "the null result stands for any buyable WIN5 rule" now read as a measured position: no
+  buyable WIN5 rule has a measured return yet. The follow-ups #322 to #325 stay as filed.

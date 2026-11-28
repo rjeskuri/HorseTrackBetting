@@ -94,7 +94,10 @@ RATING_FROM = date(2010, 1, 1)  # #91: the rating reads results from the store's
 FIRST_SCORED = date(2020, 1, 1)  # Japan's fold scheme: min_train 22 quarters from 2014-06-07
 N_RUN = 8
 N_HORSES = 24
-LAST_WEEKLY = date(2024, 12, 28)  # past #87's member span (2023 on) and scored seasons (2024)
+LAST_WEEKLY = date(2024, 12, 28)  # past the member span and #87's scored seasons (2024)
+# The synthetic member file's first day: seven seasons before 2024-Q1, D9 met (#418), as
+# main's test_meta_study_d9.py LONG_START; both copies' stores already hold those years.
+MEMBERS_FROM = date(2017, 1, 1)
 EARLY_START = date(2009, 1, 1)  # an earlier rating start than RATING_FROM (#404 review)
 
 # Three weeks from the holdout start: the committed rule holds out some days and not others.
@@ -590,9 +593,10 @@ def test_a_jravan_rating_run_reads_and_records_the_jravan_store(tmp_path, monkey
 
 
 def write_members(path: Path, source: str) -> Path:
-    """A synthetic #87 member file (HKTrack's OOF layout) over the source's starters from 2023."""
+    """A synthetic #87 member file (HKTrack's OOF layout) over the source's starters from
+    MEMBERS_FROM, so every scored fold's level-2 window meets D9's five seasons (#418)."""
     _, runners = WORLD[source]
-    rows = runners.loc[runners["race_date"] >= date(2023, 1, 1)]
+    rows = runners.loc[runners["race_date"] >= MEMBERS_FROM]
     rng = np.random.default_rng(87)
     q = 1.0 / rows["win_odds"].to_numpy()
     table = pa.table(

@@ -7,8 +7,10 @@ adds the tier-2 pools and WIN5 (ticket #130; `--pools` picks tier 1's only, brac
 them since #358), its `results` block the result-publication polls (ticket #225), kept in the odds
 log's `<VENUE>.results.json`, its `day_before` block the evening before the race date, from the
 day-before sales open (ticket #358: the JRA site's `sales_open` reads the オッズ menu; see
-`schedule`). Log records go to `logs_dir('japan')/log-day-<date>.log` (the earliest race date of
-the run's sources); the terminal gets a few lines. At the end one line per venue is appended to
+`schedule`), its `cards` block each race's 出馬表 on a grid of its own (ticket #426), every capture
+appended to the card log `<VENUE>.cards.jsonl.gz` beside the odds log. Log records go to
+`logs_dir('japan')/log-day-<date>.log` (the earliest race date of the run's sources); the
+terminal gets a few lines. At the end one line per venue is appended to
 `logs_dir('japan')/health.log` (see `health.py`), each ALERT also on stderr.
 
 The race date (#358): `--date D` is D for every source. Without it each source has its own: today
@@ -87,8 +89,10 @@ from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.jra.capture import (
     ODDS_POOLS,
     SOURCE,
+    CardCapture,
     MeetingCapture,
     Win5,
+    capture_cards,
     capture_meeting,
     capture_tier2,
     discover_venues,
@@ -215,6 +219,9 @@ class JraSite:
             win5=self.win5,
         )  # fmt: skip
 
+    def capture_cards(self, venue: str, races: list[int]) -> CardCapture:
+        return capture_cards(self.fetcher, self.race_date, venue, races=races, now=self.now)
+
     def published_results(self, venue: str) -> set[int]:
         return published_results(self.fetcher, self.race_date, venue)
 
@@ -258,10 +265,15 @@ def _results_path(race_date: date, venue: str, source: str = SOURCE) -> Path:
     return _log_path(race_date, venue, source).with_name(f"{venue}.results.json")
 
 
+def _cards_path(race_date: date, venue: str, source: str = SOURCE) -> Path:
+    return _log_path(race_date, venue, source).with_name(f"{venue}.cards.jsonl.gz")
+
+
 @dataclass
 class OddsLogStore:
     """schedule.Store over the odds log: one gzip member per capture, post times in the sidecar,
-    first-seen result publication times in the results sidecar (ticket #225)."""
+    first-seen result publication times in the results sidecar (ticket #225), race-card captures
+    in the card log, one gzip member per capture (ticket #426)."""
 
     race_date: date
     now: Callable[[], datetime]
@@ -269,6 +281,13 @@ class OddsLogStore:
 
     def write(self, venue: str, capture: MeetingCapture) -> int:
         return odds_log.append_capture(_log_path(self.race_date, venue, self.source), capture.rows)
+
+    def write_cards(self, venue: str, capture: CardCapture) -> int:
+        """Append the capture's race and runner rows, each with its `table`, as one member of the
+        card log: earlier captures are never rewritten. Returns the rows written."""
+        rows = [{**r, "table": "races"} for r in capture.races]
+        rows += [{**r, "table": "racecard_runners"} for r in capture.runners]
+        return odds_log.append_capture(_cards_path(self.race_date, venue, self.source), rows)
 
     def write_post_times(self, venue: str, times: dict[int, datetime]) -> None:
         sidecar = _sidecar_path(self.race_date, venue, self.source)
@@ -501,6 +520,12 @@ def _plan(run: _SourceRun) -> list[str]:
         [f"tier 2: {','.join(tier2['pools'])} at T-{',T-'.join(map(str, tier2['grid_min']))} min,"
          " from what tier 1 leaves of each round"] if tier2 else []
     )  # fmt: skip
+    cards = config.get("cards")
+    cards_line = (
+        [f"race cards: each race's card at T-{',T-'.join(map(str, cards['grid_min']))} min,"
+         " after the hot races, results and tier 2, before spare full-cycle refreshes"]
+        if cards else []
+    )  # fmt: skip
     results = config.get("results")
     results_line = (
         [f"results: every {results['every_s']} s from first post to last post +"
@@ -516,6 +541,7 @@ def _plan(run: _SourceRun) -> list[str]:
         f" a full cycle at most every {hot['all_every_s']} s{fine}",
         f"pools: {','.join(pools)}",
         *tier2_line,
+        *cards_line,
         *results_line,
         f"rate: {_number(_rate(run.key, host))} req/s to {host}"
         " (a round's budget is every_s x the rate)",

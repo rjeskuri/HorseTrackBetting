@@ -5,24 +5,29 @@ module builds both from the store's races and runners only (no JRDB table, D21).
 
 - `build_runs(races, runners, *, decision_min)`: one row per run, a non-scratched runner of a kept
   race, with race_id, race_utc (= post_utc: post_time_local on the Asia/Tokyo wall clock of
-  race_date, as-of.md, #227), horse_id, style, weight_kg (actual_wt_kg, the exact carried kg),
-  draw, #305's par keys (track, surface, distance, layout, rail, class_level; a null key is
-  "unknown"), finish_time_s (null when the runner has none: unplaced runners are kept) and
+  race_date, as-of.md, #227), horse_id, style, early_pos_mean3, weight_kg (actual_wt_kg, the exact
+  carried kg), draw, #305's par keys (track, surface, distance, layout, rail, class_level; a null
+  key is "unknown"), finish_time_s (null when the runner has none: unplaced runners are kept) and
   result_available_utc = post_utc + 30 min (the same-day dividends rule, availability.yaml).
   Races are left out and counted, in this order: holdout days (`is_holdout_day("japan", d)`,
-  never read: their runs are in no row and feed no style), jump races (the owner on #96: a jump
-  start feeds no flat horse's style window either), races without a post time. Scratched runners
-  of kept races are no run and are counted. The counts: n_races, n_holdout, n_jump,
-  n_no_post_time, n_kept, n_scratched, n_runs.
+  never read: their runs are in no row and feed no style or early position), jump races (the
+  owner on #96: a jump start feeds no flat horse's window either), races without a post time.
+  Scratched runners of kept races are no run and are counted. The counts: n_races, n_holdout,
+  n_jump, n_no_post_time, n_kept, n_scratched, n_runs.
 - style is #129's first-corner rule (`handicap.factors._style_code` / `_finish_style`): the most
   frequent style over the horse's newest 5 starts that have a first-corner position, ties to the
   more forward style, null when there is none. A run's window holds the horse's runs in other
   kept races whose result_available_utc is strictly before its decision time, race_utc -
   decision_min: never the run's own race, never a race published at or after that time.
+- early_pos_mean3 is #129's (`handicap.factors._race_late` / `_pace`), #97's pace input (the owner
+  on #97, 2026-11-26): a start's early position is (p - 1) / (n - 1), p its first-corner position
+  (the first entry of running_positions) and n the race's field_size, null when n <= 1 or p is
+  missing; the mean over the horse's newest 3 starts that have one, in the style's window; null
+  when there is none.
 - `build_card(races, runners, race_id, *, at_utc)`: the target race's non-scratched runners with
-  the frame's columns minus the result; each style reads the horse's starts in other kept races
-  published strictly before at_utc. A card after the off (at_utc > post_utc), for a race on a
-  holdout day, a jump race or a race without a post time is refused (ValueError).
+  the frame's columns minus the result; each style and early_pos_mean3 read the horse's starts in
+  other kept races published strictly before at_utc. A card after the off (at_utc > post_utc),
+  for a race on a holdout day, a jump race or a race without a post time is refused (ValueError).
 - `read_inputs(*, start, end, source="jra")`: the store copy's races and runners (the JRA store
   by default; `source="jravan"` the JRA-VAN copy, #404) with start <= race_date <= end
   through #114's scoped reader (`models.v0.store.read_store_table`): only the columns above (no
@@ -56,6 +61,7 @@ from horsetrack.countries.japan.studies.speed_run import (
 COUNTRY = "japan"
 SOURCE = "jra"  # read_inputs' default: the store's JRA results (netkeiba); no JRDB
 STYLE_WINDOW = 5  # #129: the newest 5 starts with a first-corner position
+EARLY_WINDOW = 3  # #129: the newest 3 starts with an early position
 RACE_COLUMNS = (
     "race_id",
     "race_date",
@@ -79,7 +85,16 @@ RUNNER_COLUMNS = (
     "is_scratched",
 )
 PAR_KEYS = tuple(KEYS)
-CARD_COLUMNS = ("race_id", "race_utc", "horse_id", "style", "weight_kg", "draw", *PAR_KEYS)
+CARD_COLUMNS = (
+    "race_id",
+    "race_utc",
+    "horse_id",
+    "style",
+    "early_pos_mean3",
+    "weight_kg",
+    "draw",
+    *PAR_KEYS,
+)
 RESULT_COLUMNS = ("finish_time_s", "result_available_utc")
 RUN_COLUMNS = (*CARD_COLUMNS, *RESULT_COLUMNS)
 
@@ -100,8 +115,8 @@ def _first_corner(positions: pd.Series) -> list[int | None]:
 
 
 def _starts(races: pd.DataFrame, runners: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
-    """Every non-scratched runner of a kept race with its race's columns, its style code and
-    result_available_utc, and the counts of what was left out."""
+    """Every non-scratched runner of a kept race with its race's columns, its style code, early
+    position and result_available_utc, and the counts of what was left out."""
     _check(races, RACE_COLUMNS, "races")
     _check(runners, RUNNER_COLUMNS, "runners")
     races = races.loc[:, list(RACE_COLUMNS)].reset_index(drop=True)
@@ -137,15 +152,20 @@ def _starts(races: pd.DataFrame, runners: pd.DataFrame) -> tuple[pd.DataFrame, d
     for key, column in KEYS.items():
         values = frame[column].astype(object)
         frame[key] = values.where(values.notna(), UNKNOWN)
-    code = pl.DataFrame(
+    corner, size = pl.col("p"), pl.col("n")
+    coded = pl.DataFrame(
         {
             "p": pl.Series(_first_corner(frame["running_positions"]), dtype=pl.Int64),
             "n": pl.Series(
                 [None if pd.isna(n) else int(n) for n in frame["field_size"]], dtype=pl.Int64
             ),
         }
-    ).select(_style_code(pl.col("p"), pl.col("n")).alias("code"))["code"]
-    frame["style_code"] = code.to_pandas(use_pyarrow_extension_array=False).to_numpy()
+    ).select(
+        _style_code(corner, size).alias("code"),
+        pl.when(size > 1).then((corner - 1) / (size - 1)).alias("early"),  # #129's `_race_late`
+    )
+    for column, name in (("code", "style_code"), ("early", "early")):
+        frame[name] = coded[column].to_pandas(use_pyarrow_extension_array=False).to_numpy()
     return frame.reset_index(drop=True), counts
 
 
@@ -153,51 +173,75 @@ def _ns(stamps) -> np.ndarray:
     return pd.DatetimeIndex(pd.to_datetime(stamps, utc=True)).as_unit("ns").asi8
 
 
-def _styles(history: pd.DataFrame, horse: pd.Series, cutoff: np.ndarray) -> list[str | None]:
-    """Each query's style: #129's rule over the newest STYLE_WINDOW starts of `history` by that
-    horse with a style code and result_available_utc strictly before its cutoff (ns, UTC)."""
-    coded = history.loc[history["style_code"].notna()]
-    hist_t = _ns(coded["result_available_utc"])
+def _windows(history: pd.DataFrame, column: str, horse: pd.Series, cutoff: np.ndarray, k: int):
+    """`history`'s non-null `column` values sorted by (horse, result_available_utc), and each
+    query's window [lo, hi) there: its horse's newest k values published strictly before its
+    cutoff (ns, UTC)."""
+    valued = history.loc[history[column].notna()]
+    hist_t = _ns(valued["result_available_utc"])
     ranks = np.unique(np.concatenate([hist_t, cutoff]))
     base = len(ranks) + 1
-    ids, _ = pd.factorize(pd.concat([coded["horse_id"], horse], ignore_index=True))
-    hist_h, query_h = ids[: len(coded)].astype(np.int64), ids[len(coded) :].astype(np.int64)
+    ids, _ = pd.factorize(pd.concat([valued["horse_id"], horse], ignore_index=True))
+    hist_h, query_h = ids[: len(valued)].astype(np.int64), ids[len(valued) :].astype(np.int64)
     # one sort key per start: the horse, then the publication instant (dense rank, exact)
     hist_key = hist_h * base + np.searchsorted(ranks, hist_t)
     order = np.argsort(hist_key, kind="stable")
     hist_key = hist_key[order]
-    codes = coded["style_code"].to_numpy(dtype=float)[order].astype(np.int64)
+    values = valued[column].to_numpy(dtype=float)[order]
+    hi = np.searchsorted(hist_key, query_h * base + np.searchsorted(ranks, cutoff), side="left")
+    first = np.searchsorted(hist_key, query_h * base, side="left")
+    return values, np.maximum(first, hi - k), hi
+
+
+def _styles(history: pd.DataFrame, horse: pd.Series, cutoff: np.ndarray) -> list[str | None]:
+    """Each query's style: #129's rule over the newest STYLE_WINDOW starts of `history` by that
+    horse with a style code and result_available_utc strictly before its cutoff (ns, UTC)."""
+    values, lo, hi = _windows(history, "style_code", horse, cutoff, STYLE_WINDOW)
+    codes = values.astype(np.int64)
     onehot = np.zeros((len(codes) + 1, len(STYLES)), dtype=np.int64)
     onehot[np.arange(1, len(codes) + 1), codes] = 1
     cum = onehot.cumsum(axis=0)
-
-    hi = np.searchsorted(hist_key, query_h * base + np.searchsorted(ranks, cutoff), side="left")
-    first = np.searchsorted(hist_key, query_h * base, side="left")
-    lo = np.maximum(first, hi - STYLE_WINDOW)
     tally = cum[hi] - cum[lo]
     styled = pl.DataFrame({f"_style{k}": tally[:, k] for k in range(len(STYLES))})
     return styled.select(_finish_style())["style"].to_list()
+
+
+def _early(history: pd.DataFrame, horse: pd.Series, cutoff: np.ndarray) -> np.ndarray:
+    """Each query's early_pos_mean3: the mean early position over the newest EARLY_WINDOW starts
+    of `history` by that horse with one, published strictly before its cutoff; NaN with none."""
+    values, lo, hi = _windows(history, "early", horse, cutoff, EARLY_WINDOW)
+    total, count = np.zeros(len(hi)), np.zeros(len(hi))
+    for back in range(1, EARLY_WINDOW + 1):  # newest first, each value exactly once
+        idx = hi - back
+        ok = idx >= lo
+        total[ok] += values[idx[ok]]
+        count[ok] += 1
+    mean = np.full(len(hi), np.nan)
+    return np.divide(total, count, out=mean, where=count > 0)
 
 
 def build_runs(
     races: pd.DataFrame, runners: pd.DataFrame, *, decision_min: float
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     """One row per run (RUN_COLUMNS) and the counts of what was left out (module docstring).
-    Each run's style reads the horse's other starts published before race_utc - decision_min."""
+    Each run's style and early_pos_mean3 read the horse's other starts published before race_utc
+    - decision_min."""
     if not decision_min >= 0:
         raise ValueError(f"decision_min must be >= 0 (a time before the off), got {decision_min}")
     starts, counts = _starts(races, runners)
     cutoff = _ns(starts["race_utc"]) - int(pd.Timedelta(minutes=decision_min).value)
     # decision_min >= 0 puts a run's own race (published 30 min after its off) past its cutoff
     starts["style"] = _styles(starts, starts["horse_id"], cutoff)
+    starts["early_pos_mean3"] = _early(starts, starts["horse_id"], cutoff)
     frame = starts.loc[:, list(RUN_COLUMNS)].reset_index(drop=True)
     counts["n_runs"] = len(frame)
     return frame, counts
 
 
 def build_card(races: pd.DataFrame, runners: pd.DataFrame, race_id: str, *, at_utc) -> pd.DataFrame:
-    """The target race's non-scratched runners with CARD_COLUMNS; each style reads the horse's
-    starts in other kept races published strictly before `at_utc` (module docstring)."""
+    """The target race's non-scratched runners with CARD_COLUMNS; each style and early_pos_mean3
+    read the horse's starts in other kept races published strictly before `at_utc` (module
+    docstring)."""
     at = pd.Timestamp(at_utc)
     if at.tzinfo is None:
         raise ValueError("at_utc must be timezone-aware")
@@ -223,6 +267,7 @@ def build_card(races: pd.DataFrame, runners: pd.DataFrame, race_id: str, *, at_u
     card = card.reset_index(drop=True)
     cutoff = np.full(len(card), int(at.as_unit("ns").value), dtype=np.int64)
     card["style"] = _styles(history, card["horse_id"], cutoff)
+    card["early_pos_mean3"] = _early(history, card["horse_id"], cutoff)
     return card.loc[:, list(CARD_COLUMNS)]
 
 

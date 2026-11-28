@@ -226,8 +226,11 @@ def test_the_default_source_is_still_jra(tmp_path, monkeypatch):
 
 
 class _ScanSpy:
-    """A pyarrow dataset that records every scan made through it: the columns asked for and the
-    row filter in force (its own `filter()` narrowing combined with the scan's)."""
+    """A pyarrow dataset that records every scan made through it: the columns asked for, the
+    row filter in force (its own `filter()` narrowing combined with the scan's) and the days that
+    filter lets through. The days are read when the scan is made, while the reader's handle is
+    still open (#415's reader serves the dataset from a memory-mapped snapshot it closes on
+    return), by the same filter over race_date alone."""
 
     def __init__(self, real, log, narrowed=None):
         self._real, self._log, self._narrowed = real, log, narrowed
@@ -241,8 +244,10 @@ class _ScanSpy:
         return self._narrowed if filter is None else self._narrowed & filter
 
     def _note(self, columns, filter):
-        scan = {"dataset": self._real, "columns": columns, "filter": self._combined(filter)}
-        self._log.append(scan)
+        reached = self._real.to_table(columns=["race_date"], filter=self._combined(filter))
+        days = set(reached.column("race_date").to_pylist())
+        names = _column_names(columns, self._real)
+        self._log.append({"columns": columns, "names": names, "days": days})
 
     def _scan(self, method, columns=None, filter=None, **kwargs):
         self._note(columns, filter)
@@ -321,12 +326,11 @@ def test_a_holdout_days_other_columns_are_never_scanned(
     assert table.column_names == columns
     assert race_ids(table) == Counter(r["race_id"] for r in want)
 
-    wide = [s for s in log if _column_names(s["columns"], s["dataset"]) - {"race_date"}]
+    wide = [s for s in log if s["names"] - {"race_date"}]
     assert wide, "the reader made no scan of the requested columns through pyarrow.dataset"
     for scan in wide:
-        # The same filter, applied to race_date alone, shows which days that scan read.
-        reached = scan["dataset"].to_table(columns=["race_date"], filter=scan["filter"])
-        days = set(reached.column("race_date").to_pylist())
+        # The days that scan's filter let through, read over race_date while the scan was made.
+        days = scan["days"]
         assert not days & set(held), (
             f"a scan of {scan['columns']} reached holdout day(s) "
             f"{sorted(days & set(held))[:3]} before they were dropped"

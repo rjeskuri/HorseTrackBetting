@@ -30,8 +30,10 @@ venues:
 # estimate it from the overround, never assume today's.
 # Dividends per 100 yen are multiples of 10, with a 110-yen floor ("Plus 10").
 # `takeout_unknown_before_history`: Pool.takeout_on returns None before 2014-06-07.
-# `payout_rule: stake_back_share` (Place and Wide): a winning ticket gets its stake back plus 1/P of the
-# losers' money, so the board shows a min-max range per ticket.
+# `payout_rule: stake_back_share` on every single-race pool: a winning ticket gets its stake back plus 1/P
+# of the losers' money, P the winning combinations (04 §1.2, 競馬法 第8条). Place and Wide pay several on
+# every result, so their board shows a min-max range per ticket; the others pay one but for a dead heat,
+# and with one the two rules give the same dividend. `equal_split` is the other venues' rule.
 pools:
   WIN:
     labels: ["単勝", "WIN"]
@@ -42,6 +44,7 @@ pools:
     kind: win
     dividend_step: 10
     min_dividend: 110
+    payout_rule: stake_back_share
     enabled: true
   PLACE:
     labels: ["複勝", "PLACE"]
@@ -65,7 +68,8 @@ pools:
     kind: unordered_top2_bracket
     dividend_step: 10
     min_dividend: 110
-    enabled: false        # sold only with 9+ runners; needs the horse -> bracket map
+    payout_rule: stake_back_share
+    enabled: true         # sold only with 9+ runners; priced from the card's horse -> bracket map
   QUINELLA:
     labels: ["馬連", "QUINELLA"]
     takeout: 0.225
@@ -75,6 +79,7 @@ pools:
     kind: unordered_top2
     dividend_step: 10
     min_dividend: 110
+    payout_rule: stake_back_share
     enabled: true
   QUINELLA_PLACE:
     labels: ["ワイド", "WIDE"]
@@ -98,6 +103,7 @@ pools:
     kind: ordered_top2
     dividend_step: 10
     min_dividend: 110
+    payout_rule: stake_back_share
     enabled: false
   TRIO:
     labels: ["3連複", "三連複", "TRIO"]
@@ -108,6 +114,7 @@ pools:
     kind: unordered_top3
     dividend_step: 10
     min_dividend: 110
+    payout_rule: stake_back_share
     enabled: false
   TIERCE:
     labels: ["3連単", "三連単", "TRIFECTA"]
@@ -118,6 +125,7 @@ pools:
     kind: ordered_top3
     dividend_step: 10
     min_dividend: 110
+    payout_rule: stake_back_share
     enabled: false
   WIN5:
     labels: ["WIN5"]
