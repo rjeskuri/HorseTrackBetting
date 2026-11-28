@@ -74,7 +74,7 @@ from horsetrack.core import paths
 from horsetrack.core.config import load_source
 from horsetrack.core.eval.folds import Fold, FoldScheme, load_country_scheme, walk_forward
 from horsetrack.core.eval.holdout import _git_sha, split_off
-from horsetrack.core.eval.registry import RunRecord, default_registry
+from horsetrack.core.eval.registry import RunRecord, _record_data, default_registry
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.eval.scoring import gain, per_race_log_loss
 from horsetrack.core.pricing import clean_odds
@@ -1126,9 +1126,9 @@ def render_report(
 
 
 def _run_id(record: RunRecord) -> str:
-    """The registry's run id: the sha256 of the record's canonical JSON."""
+    """The registry's run id: the sha256 of the record's canonical JSON (as its line holds it)."""
     canonical = json.dumps(
-        dataclasses.asdict(record),
+        _record_data(record),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
