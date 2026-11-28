@@ -20,7 +20,9 @@ added (`models.interactions.fit_with_blocks`):
   a debut runner's level is shrunk toward its trainer's debut mean beyond the trainer's main
   effect (which the base already uses as every runner's prior mean);
 - transfer_step (E93): an indicator of a run after a stable change of trainer
-  (`models.interactions.transfer_step`, STABLE_RUNS runs with the new trainer).
+  (`models.interactions.transfer_step`, STABLE_RUNS runs with the new trainer);
+- all_blocks (E571, #571): every block and extra feature above in one member, fitted together, so
+  #98's meld can weigh C2 as a whole (its u is a column of the export like every member's).
 
 Horse x trainer is not fitted: where a horse keeps one trainer its cell is the horse (aliased,
 08 §3.3), and the base has no static horse term for it to be told from; the registry records it
@@ -68,7 +70,11 @@ retry that recovers a failed fold) writes beside the earlier launch's files, who
 citing them, and a record equal to a held one but for git_sha and its artifacts is not appended
 again. A launch publishes all three artifacts before it appends a record that cites them.
 
-Family `japan-c2-interactions-final-win-v2` supersedes `japan-c2-interactions-final-win` (#93's
+Family `japan-c2-interactions-final-win-v3` (#571) supersedes `japan-c2-interactions-final-win-v2`:
+v3's spec is v2's (`v2_spec`, frozen as V2_SPEC) with the all-blocks member added, so v2's frozen
+spec and records stay as they are. A v3 launch without a checkpoint of its own starts from v2's
+(`seed_checkpoint`): v2's six members' fits are carried with their revisions and failures, and
+only the all-blocks member is fitted. v2 superseded `japan-c2-interactions-final-win` (#93's
 review, round 1), whose records stay in the registry: v1 settled a winner at its final odds over
 the race's number of winners, and its records named one git revision for fits made at two.
 """
@@ -81,6 +87,7 @@ import json
 import os
 import re
 import resource
+import shutil
 import tempfile
 import time
 from datetime import date, datetime, timezone
@@ -136,11 +143,15 @@ from horsetrack.countries.japan.studies.meta import (
 )
 
 COUNTRY = "japan"
-TICKET = 93
-FAMILY_ID = "japan-c2-interactions-final-win-v2"
+TICKET = 571  # v3's launches; v1's and v2's are #93's
+FAMILY_ID = "japan-c2-interactions-final-win-v3"
 TRIAL_FAMILY_ID = f"{FAMILY_ID}-trial"
-SUPERSEDES = "japan-c2-interactions-final-win"
-SUPERSEDED_SPEC = "3060dfbf9626cf7d46186153de6ee4b6c0b65111acadbefc464d5aca300bded0"
+V2_TICKET = 93
+V2_FAMILY_ID = "japan-c2-interactions-final-win-v2"
+V2_SPEC = "2dde55836222c16552431d0037f0aabf4fbc55e814e79d139d5d7aa90e24d2e0"
+V1_FAMILY_ID = "japan-c2-interactions-final-win"
+V1_SPEC = "3060dfbf9626cf7d46186153de6ee4b6c0b65111acadbefc464d5aca300bded0"
+SUPERSEDES, SUPERSEDED_SPEC = V2_FAMILY_ID, V2_SPEC
 ARTIFACTS = "interaction_artifacts"
 SOURCE = "jra"
 SOURCES = (SOURCE,)
@@ -180,7 +191,13 @@ MEMBERS: dict[str, tuple[list, list[str]]] = {  # member -> (its blocks, its ext
     "trainer_debut": ([B("trainer_debut", ("trainer_key", "debut_flag"), VC)], ["debut"]),
     "transfer_step": ([], ["transfer"]),
 }
-HYPOTHESIS = {"horse_x_jockey": "E35", "trainer_x_track": "E36"}  # E93 otherwise
+V2_MEMBERS = tuple(MEMBERS)  # v2's members, each a block member of its own
+ALL_BLOCKS = "all_blocks"  # #571: every v2 member's blocks and features, fitted together
+MEMBERS[ALL_BLOCKS] = (
+    [b for m in V2_MEMBERS for b in MEMBERS[m][0]],
+    [f for m in V2_MEMBERS for f in MEMBERS[m][1]],
+)
+HYPOTHESIS = {"horse_x_jockey": "E35", "trainer_x_track": "E36", ALL_BLOCKS: "E571"}  # else E93
 CELLS = {  # the cell-size table's interactions
     "horse_x_jockey": ("horse_id", "jockey_key"),
     "horse_x_trainer": ("horse_id", "trainer_key"),
@@ -232,15 +249,18 @@ def option_id(member: str) -> str:
 # --------------------------------------------------------------------------- the spec
 
 
-def build_spec(scheme, bootstrap: dict) -> dict:
-    """The family's pre-registered spec, frozen in the registry before any outcome is read."""
-    blocks = {
-        member: [{"name": b.name, "cols": list(b.cols), "kind": b.kind} for b in blocks]
-        for member, (blocks, _) in MEMBERS.items()
-    }
+def _blocks_spec(blocks) -> list[dict]:
+    return [{"name": b.name, "cols": list(b.cols), "kind": b.kind} for b in blocks]
+
+
+def v2_spec(scheme, bootstrap: dict) -> dict:
+    """#93's v2 spec as frozen (sha256 V2_SPEC, its six members): its level1, tau and folds
+    sections key v2's level-1 checkpoint (`seed_checkpoint`)."""
+    members = {m: MEMBERS[m] for m in V2_MEMBERS}
+    blocks = {member: _blocks_spec(blocks) for member, (blocks, _) in members.items()}
     return {
-        "family_id": FAMILY_ID,
-        "supersedes": f"{SUPERSEDES} (spec sha256 {SUPERSEDED_SPEC}): its tail settled a winner "
+        "family_id": V2_FAMILY_ID,
+        "supersedes": f"{V1_FAMILY_ID} (spec sha256 {V1_SPEC}): its tail settled a winner "
         "at its final Win odds over the race's number of winners, not at the recorded dividend "
         "(a JRA dead heat pays each winner its own dividend, and a dividend paid before a later "
         "disqualification stands), and its records named one git revision for level-1 fits made "
@@ -248,7 +268,7 @@ def build_spec(scheme, bootstrap: dict) -> dict:
         "unchanged, so its saved level-1 fits are re-scored, not refitted (adopt_v1_checkpoint: "
         "a member-fold's revision is the stopped second launch's where its u equals that "
         "launch's saved u bit for bit, else the completing launch's)",
-        "ticket": TICKET,
+        "ticket": V2_TICKET,
         "hypotheses": {
             "E35": "horse x jockey: tau_hj < 0.1 and its cells add nothing at the final price "
             "(08 §4 E35; the negative control; booking endogeneity makes any estimate "
@@ -305,7 +325,7 @@ def build_spec(scheme, bootstrap: dict) -> dict:
             "drift_grid": list(c2_rating.DRIFT_GRID),
             "scale_grid": list(c2_rating.SCALE_GRID),
             "members": blocks,
-            "extra_features": {m: f for m, (_, f) in MEMBERS.items() if f},
+            "extra_features": {m: f for m, (_, f) in members.items() if f},
             "fit": "models.interactions.fit_with_blocks: the penalised MAP with each prior "
             "group's tau^2 by empirical Bayes (MacKay's fixed point, models.ability's rule); "
             f"blocks of more than {ix.DENSE_MAX} parameters take block-Jacobi steps (exact MAP, "
@@ -371,12 +391,50 @@ def build_spec(scheme, bootstrap: dict) -> dict:
         },
         "bootstrap": bootstrap,
         "price_era_start": PRICE_ERA_START.isoformat(),
-        "leaderboard": {m: option_id(m) for m in [*MEMBERS, MARKET_ONLY]},
+        "leaderboard": {m: option_id(m) for m in [*members, MARKET_ONLY]},
         "export": "per level-1 out-of-fold runner (from 2015-Q1): each member's u, under the "
         "data dir",
         "adoption": "none (D16, D19): ranked rows only; no holdout is opened",
         "sources": list(SOURCES),
     }
+
+
+def build_spec(scheme, bootstrap: dict) -> dict:
+    """The family's pre-registered spec, frozen in the registry before any outcome is read: v2's
+    with the all-blocks member (#571) added; every other section is v2's."""
+    spec = v2_spec(scheme, bootstrap)
+    blocks, features = MEMBERS[ALL_BLOCKS]
+    spec |= {
+        "family_id": FAMILY_ID,
+        "supersedes": f"{V2_FAMILY_ID} (spec sha256 {V2_SPEC}), which stays frozen with its "
+        "records: this spec is v2's with the all-blocks member added (#571), so the meta-model "
+        "(#98) can weigh C2 as a whole. v2's six members, its level 2, tail, folds and bootstrap "
+        "are unchanged; a launch without a level-1 checkpoint of its own starts from v2's "
+        "(seed_checkpoint: v2's member-folds keep their fitting revisions and failed fits, and "
+        "only the all-blocks member is fitted)",
+        "ticket": TICKET,
+    }
+    spec["hypotheses"] = spec["hypotheses"] | {
+        "E571": "every #93 block fitted together in one member (horse x jockey; trainer x track "
+        "with its one-factor east/west term; the structured aptitude with its rank-one horse x "
+        "track term; the trainer debut prior with the debut indicator; the transfer step): "
+        "measured standalone against the base and at the final price against the base's and "
+        "the market-only stage-2 meta, with its tail; the null is no gain over the base at "
+        "either, and no tail return above the takeout's"
+    }
+    level1 = dict(spec["level1"])
+    level1["members"] = level1["members"] | {ALL_BLOCKS: _blocks_spec(blocks)}
+    level1["extra_features"] = level1["extra_features"] | {ALL_BLOCKS: list(features)}
+    level1["all_blocks"] = (
+        "the base with every block of the other members (their names, columns and kinds) and "
+        "both extra features, one fit_with_blocks fit per outer fold with every tau^2 by "
+        "empirical Bayes together; its fixed point and MAP start from its own previous fold's "
+        "fit, the first fold's from 0 and TAU2_START; its tau bounds on the last outer fold's "
+        "fit, as each member's"
+    )
+    spec["level1"] = level1
+    spec["leaderboard"] = {m: option_id(m) for m in [*MEMBERS, MARKET_ONLY]}
+    return spec
 
 
 # --------------------------------------------------------------------------- inputs
@@ -522,9 +580,11 @@ def info_per_run(u: np.ndarray, frame: pd.DataFrame) -> float:
 @dataclasses.dataclass
 class Level1:
     """Each member's out-of-fold u (NaN off the outer folds), each fold's tau points and extra
-    feature coefficients, the last fold's tau intervals, timings, each member-fold's fitting
-    revision (`fits`: fold -> member -> git sha), every failed member-fold fit of this and earlier
-    launches (`failures`), and the members still without a prediction on a fold (`errors`)."""
+    feature coefficients, the last fold's tau intervals (keyed '<member>:<block>', `_interval`:
+    the all-blocks member shares its blocks' names with the other members), timings, each
+    member-fold's fitting revision (`fits`: fold -> member -> git sha), every failed member-fold
+    fit of this and earlier launches (`failures`), and the members still without a prediction on
+    a fold (`errors`)."""
 
     u: dict[str, np.ndarray]
     taus: list[dict]
@@ -546,6 +606,11 @@ def _json(value) -> str:
 def _plain(value):
     """`value` as it reads back from JSON."""
     return json.loads(_json(value))
+
+
+def _interval(member: str, block: str) -> str:
+    """A tau interval's key in `Level1.intervals`."""
+    return f"{member}:{block}"
 
 
 def _pairs(picks: list[dict]) -> list[tuple]:
@@ -580,10 +645,35 @@ def save_checkpoint(path: Path, out: Level1, done: set[str], picks: list[dict]) 
 
 
 def load_checkpoint(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
-    """A checkpoint's metadata and each member's u."""
+    """A checkpoint's metadata and each member's u; a member it lacks (v2's checkpoint has no
+    all-blocks member) is NaN everywhere, so it is fitted on every fold. Intervals keyed by the
+    block alone (v1's and v2's) are keyed by their member too (`_interval`)."""
     with np.load(path) as arrays:
         meta = json.loads(arrays[META].item())
-        return meta, {m: np.array(arrays[m]) for m in MEMBERS}
+        n = len(arrays[BASE])
+        u = {m: np.array(arrays[m]) if m in arrays.files else np.full(n, np.nan) for m in MEMBERS}
+    meta["intervals"] = {
+        (k if ":" in k else _interval(v["member"], k)): v for k, v in meta["intervals"].items()
+    }
+    return meta, u
+
+
+def seed_checkpoint(target: Path, source: Path, log=print) -> bool:
+    """`source` (v2's level-1 checkpoint) copied to `target` when `target` is absent, published
+    by rename; `source` is never changed. A launch resuming it keeps v2's member-folds (their u,
+    taus, revisions, failed fits and intervals) and fits only the members it lacks."""
+    if target.exists() or not source.exists():
+        return False
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    os.close(fd)
+    try:
+        shutil.copyfile(source, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    log(f"  {target.name}: seeded from {source.name}")
+    return True
 
 
 def _numeric(frame: pd.DataFrame) -> pd.DataFrame:
@@ -663,7 +753,7 @@ def level1_members(
             todo |= {
                 m
                 for m, (blocks, _) in MEMBERS.items()
-                if any(b.name not in out.intervals for b in blocks)
+                if any(_interval(m, b.name) not in out.intervals for b in blocks)
             }
         if last and not np.isfinite(out.info):  # the base's information per run
             todo.add(BASE)
@@ -701,7 +791,7 @@ def level1_members(
                         for b in blocks:
                             t1 = time.monotonic()
                             iv = fit.tau(b.name)
-                            out.intervals[b.name] = {
+                            out.intervals[_interval(member, b.name)] = {
                                 "member": member,
                                 "fold": label,
                                 "tau": iv.mean,
@@ -1093,7 +1183,7 @@ def compute_study(
                     )
             table = []
             for b in blocks:
-                iv = l1.intervals.get(b.name)
+                iv = l1.intervals.get(_interval(member, b.name))
                 if iv is None:
                     raise RuntimeError(f"no tau interval for {b.name}")
                 metrics.append(
@@ -1367,7 +1457,7 @@ SECTIONS = (
 
 def render_report(study: Study, spec: dict, about: dict, record_ids: dict[str, str]) -> str:
     """The full report: aggregate tables only, never a runner or race row."""
-    lines = [f"# C2 interactions at the final Win price ({COUNTRY}, #{TICKET})", ""]
+    lines = [f"# C2 interactions at the final Win price ({COUNTRY}, #{V2_TICKET}, #{TICKET})", ""]
     lines += [*(f"- {k}: {v}" for k, v in about.items()), ""]
     lines += ["## Decision rules (frozen)", ""]
     lines += [*(f"- {k}: {v}" for k, v in spec["decision_rules"].items())]
@@ -1537,7 +1627,7 @@ def write_committed_summary(registry, log=print) -> list[str]:
     index line (the index lists exactly the committed files) until `write_summary` can split
     it (#330). Returns the families kept out of the tree."""
     directory = summary_dir(COUNTRY)
-    mine = _Families(registry, {FAMILY_ID, TRIAL_FAMILY_ID, SUPERSEDES})
+    mine = _Families(registry, {FAMILY_ID, TRIAL_FAMILY_ID, V2_FAMILY_ID, V1_FAMILY_ID})
     if not mine.records():
         return []
     held = []
@@ -1569,8 +1659,9 @@ def write_committed_summary(registry, log=print) -> list[str]:
     return held
 
 
-def planned() -> list[tuple[str, str]]:
-    """Every variant a completed run records, for the failure records of an aborted run."""
+def planned(members: tuple[str, ...] = tuple(MEMBERS)) -> list[tuple[str, str]]:
+    """Every variant a completed run records, for the failure records of an aborted run (v1's
+    and v2's: `members=V2_MEMBERS`)."""
     out = [
         (
             "E35" if n == "horse_x_jockey" else "E36" if n == "trainer_x_track" else "E93",
@@ -1579,18 +1670,18 @@ def planned() -> list[tuple[str, str]]:
         for n in CELLS
     ]
     out += [("E93", "horse_x_trainer:not_fitted"), ("E93", "selection:rating_pair")]
-    out += [(_hypothesis(m), f"tau:{m}") for m in MEMBERS if m != BASE]
-    for m in MEMBERS:
+    out += [(_hypothesis(m), f"tau:{m}") for m in members if m != BASE]
+    for m in members:
         out += [(_hypothesis(m), f"stage2:q:{m}"), (_hypothesis(m), f"{CLUSTERED}:stage2:q:{m}")]
     out.append(("E93", f"stage2:q:{MARKET_ONLY}"))
-    for m in MEMBERS:
+    for m in members:
         if m != BASE:
             out += [
                 (_hypothesis(m), f"level1:{m}_vs_{BASE}"),
                 (_hypothesis(m), f"marginal:stage2:{m}_vs_{BASE}"),
             ]
         out.append((_hypothesis(m), f"marginal:stage2:{m}_vs_{MARKET_ONLY}"))
-    out += [(_hypothesis(m), f"tail:stage2:{m}") for m in MEMBERS]
+    out += [(_hypothesis(m), f"tail:stage2:{m}") for m in members]
     out += [("E93", f"tail:stage2:{MARKET_ONLY}"), ("E93", "tail:calibrated_market")]
     return out
 
@@ -1614,6 +1705,8 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
     builds = level1_builds | {f"{SOURCE}_dividends": _file_build("dividends")}
     checkpoint = checkpoint_path(spec, level1_builds, trial)
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    v2_checkpoint = checkpoint_path(v2_spec(scheme, spec["bootstrap"]), level1_builds, False)
+    seeded = seed_checkpoint(checkpoint, v2_checkpoint, log=log)
     fold_scheme = "walk_forward:" + json.dumps(spec["folds"], sort_keys=True)
     started = time.monotonic()
 
@@ -1669,7 +1762,8 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
         "supersedes": f"`{SUPERSEDES}`, spec sha256 `{SUPERSEDED_SPEC}`",
         "git": git_sha,
         fits: ", ".join(f"`{r[:7]}` ({n} member-folds)" for r, n in sorted(by_revision.items())),
-        "level-1 checkpoint": f"`{checkpoint.name}`",
+        "level-1 checkpoint": f"`{checkpoint.name}`"
+        + (f" (seeded from v2's `{v2_checkpoint.name}`)" if seeded else ""),
         "data": ", ".join(builds.values()),
         "artifacts (report, JSON, export; the spec, the builds, the results' digest)": f"`{stem}`",
         "records": f"{len(new)} appended; {len(record_ids) - len(new)} already held",
@@ -1737,7 +1831,7 @@ def adopt_v1_checkpoint(log=print) -> Path:
     tau intervals, the base's information per run and the rating pairs are v1's report's."""
     features = paths.data_dir() / "features" / COUNTRY
     scheme = load_country_scheme(COUNTRY)
-    spec = build_spec(scheme, {**bootstrap_settings(), "seed": BOOTSTRAP_SEED})
+    spec = v2_spec(scheme, {**bootstrap_settings(), "seed": BOOTSTRAP_SEED})
     target = checkpoint_path(spec, store_builds(), trial=False)
     if target.exists():
         raise FileExistsError(f"{target} exists")
@@ -1747,7 +1841,7 @@ def adopt_v1_checkpoint(log=print) -> Path:
     u = {}
     for name in ("", "-at-56d0669"):
         with np.load(features / f"{V1_STEM}-level1{name}.npz") as arrays:
-            u[name] = {m: np.array(arrays[m]) for m in MEMBERS}
+            u[name] = {m: np.array(arrays[m]) for m in V2_MEMBERS}
     level1, _ = level1_frame(*read_level1())
     outer = [q for q in level1_quarters(level1["race_date"], scheme) if q.test_start >= LEVEL1_FROM]
     labels = [f.test_start.isoformat() for f in outer]
@@ -1764,7 +1858,7 @@ def adopt_v1_checkpoint(log=print) -> Path:
         prior_sd=final["prior_sd"],
     )
     for fold, label in zip(outer, labels, strict=True):
-        for m in MEMBERS:
+        for m in V2_MEMBERS:
             now, then = u[""][m][fold.test_idx], u["-at-56d0669"][m][fold.test_idx]
             carried = not np.isnan(then).any() and np.array_equal(now, then)
             out.fits.setdefault(label, {})[m] = V1_STOPPED if carried else V1_COMPLETING
@@ -1776,7 +1870,9 @@ def adopt_v1_checkpoint(log=print) -> Path:
                     {"fold": label, "member": m, "revision": V1_STOPPED, "error": error}
                 )
     keys = ("member", "fold", "tau", "lower", "upper", "levels", "seconds")
-    out.intervals = {r["block"]: {k: r[k] for k in keys} for r in report["tables"]["tau"]}
+    out.intervals = {
+        _interval(r["member"], r["block"]): {k: r[k] for k in keys} for r in report["tables"]["tau"]
+    }
     save_checkpoint(target, out, set(final["done"]), report["tables"]["selection"])
     log(f"{target.name}: {len(out.failures)} failed fits; fits {fit_revisions(out.fits, labels)}")
     return target
@@ -1787,31 +1883,31 @@ def record_v1_launches(log=print) -> list[str]:
     launch's planned variants as failed at its revision, and the second launch's failed fits
     (from the adopted checkpoint). Returns their run ids."""
     registry = default_registry(COUNTRY)
-    if registry.frozen_spec_hash(SUPERSEDES) != SUPERSEDED_SPEC:
-        raise ValueError(f"{SUPERSEDES} is not frozen with {SUPERSEDED_SPEC}")
+    if registry.frozen_spec_hash(V1_FAMILY_ID) != V1_SPEC:
+        raise ValueError(f"{V1_FAMILY_ID} is not frozen with {V1_SPEC}")
     scheme = load_country_scheme(COUNTRY)
-    spec = build_spec(scheme, {**bootstrap_settings(), "seed": BOOTSTRAP_SEED})
+    spec = v2_spec(scheme, {**bootstrap_settings(), "seed": BOOTSTRAP_SEED})
     fold_scheme = "walk_forward:" + json.dumps(spec["folds"], sort_keys=True)
     builds = store_builds()  # v1's records' builds
-    for r in registry.records(SUPERSEDES):
+    for r in registry.records(V1_FAMILY_ID):
         if r.fold_scheme != fold_scheme or not r.data_builds.items() >= builds.items():
-            raise ValueError(f"{SUPERSEDES}'s records have another fold scheme or store build")
+            raise ValueError(f"{V1_FAMILY_ID}'s records have another fold scheme or store build")
 
     def v1(variant: Variant, sha: str) -> RunRecord:
         variant = dataclasses.replace(variant, params=variant.params | {"backfilled": V1_NOTE})
-        record = _record(variant, sha, builds, SUPERSEDED_SPEC, False)
-        return dataclasses.replace(record, family_id=SUPERSEDES)
+        record = _record(variant, sha, builds, V1_SPEC, False)
+        return dataclasses.replace(record, family_id=V1_FAMILY_ID, ticket=V2_TICKET)
 
     records = [
         v1(Variant(h, name, fold_scheme, {"study": "studies/interactions.py"}, {}, error=e), sha)
         for sha, e in V1_LAUNCHES.items()
-        for h, name in planned()
+        for h, name in planned(V2_MEMBERS)
     ]
     saved, _ = load_checkpoint(checkpoint_path(spec, builds, trial=False))
     stopped = [f for f in saved["failures"] if f["revision"] == V1_STOPPED]
     records += [v1(v, V1_STOPPED) for v in fit_failures(stopped, fold_scheme)]
     ids, appended = append_new(registry, records)
-    log(f"{SUPERSEDES}: {len(appended)} of {len(records)} records appended")
+    log(f"{V1_FAMILY_ID}: {len(appended)} of {len(records)} records appended")
     write_committed_summary(registry, log=log)
     return ids
 
@@ -1826,5 +1922,6 @@ def interaction_study_command(
         ),
     ] = False,
 ) -> None:
-    """Fit the C2 interaction blocks (E35, E36, #93) on D9's folds and write the report."""
+    """Fit the C2 interaction blocks (E35, E36, #93) and the all-blocks member (E571, #571) on
+    D9's folds and write the report."""
     typer.echo(json.dumps(run_study(trial=trial, log=typer.echo), indent=2))
