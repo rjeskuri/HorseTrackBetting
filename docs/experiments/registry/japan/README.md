@@ -45,6 +45,7 @@ per family, each holding that family's runs.
 - [japan-crowd-calibration-final-win](japan-crowd-calibration-final-win.md)
 - [japan-debut-maiden-members-v1](japan-debut-maiden-members-v1.md)
 - [japan-debut-maiden-members-v2](japan-debut-maiden-members-v2.md)
+- [japan-debut-prior-segments-final-win](japan-debut-prior-segments-final-win.md)
 - [japan-entropy-gradient-tail-conditioned](japan-entropy-gradient-tail-conditioned.md)
 - [japan-family-l-exotic-pool-choice](japan-family-l-exotic-pool-choice.md)
 - [japan-handicap-speed-96-final-win](japan-handicap-speed-96-final-win.md)
