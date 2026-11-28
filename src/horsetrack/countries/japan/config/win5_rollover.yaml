@@ -1,0 +1,37 @@
+# The WIN5 rollover study's pre-registered spec (ticket #323; docs/specs/win5-rollover-study.md),
+# read by `horsetrack japan win5-rollover freeze|score` (countries/japan/research/win5_rollover.py).
+#
+# Follow-up of #135: its day bootstrap cannot see a rollover that never occurred in its sample (its
+# [1, 2) bin scored 1.059 on 4 days, 0 no-hit). This study estimates the no-hit rate (a WIN5 day
+# with no winning ticket) with an exact Clopper-Pearson interval, and the EV of each carryover bin
+# net of rollover risk: (1 - q) x the mean day value of the bin's won days, with its break-even
+# no-hit rate 1 - 1 / won value. The bins, the net pool and the cap are those of #135.
+#
+# `horsetrack japan win5-rollover freeze` freezes this file, as loaded, in the japan registry
+# (append-only: a freeze cannot be undone). Any edit after the freeze is another spec, which
+# `score` refuses: a changed study is a new family_id, frozen again before it is scored.
+#
+# Keys:
+#   family_id:          the registry family the study is frozen and scored under.
+#   hypothesis:         the null and the headline figure, stated before scoring.
+#   interval:           exact two-sided Clopper-Pearson interval of the no-hit count.
+#   confidence:         its level.
+#   pool:               net-of-refunds: the net pool of #135 (research.win5.net_pool).
+#   ratio_edges:        the bins of #135: carryover_in / (break_even_takeout x net pool).
+#   break_even_takeout: the rate of the break-even carryover, 0.30 on every day.
+#   payout_cap_yen:     the cap per 100-yen ticket (as #135).
+family_id: win5-rollover-v1
+hypothesis: >-
+  The null: a carryover day's expected value is below 1 once rollover risk is counted. The
+  headline is the pooled adjusted EV, (1 - q) x won value with q the no-hit rate over all
+  development WIN5 days (carryover or not), and its stress figure at the upper bound of q; each
+  bin's own-rate EV is secondary, since a bin's own rate on a handful of days carries no
+  information (0 of 4 days has an upper bound of about 60%). A bin whose pooled EV at the upper
+  bound of q stays above 1 is not shown wrong by rollover risk; a bin whose break-even no-hit
+  rate lies inside the interval cannot be told from 1.
+interval: clopper-pearson
+confidence: 0.95
+pool: net-of-refunds
+ratio_edges: [0, 0.5, 1, 2]
+break_even_takeout: 0.30
+payout_cap_yen: 600000000
