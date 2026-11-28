@@ -551,7 +551,7 @@ One registry record each, failures included. ΔLL is the dividends' log loss min
 ## Alternatives rejected and why
 
 - Fitting the E43 orderings once on the market for every input: rejected for E43, where 04 §2.3 refits the ordering on whatever probabilities feed it; kept for E44, where owner answer 1 makes one ordering, fitted once on the market, serve both inputs.
-- The equal split R*100/(P*(D_c+5)) for several winning combinations (#99 question 3(b)) as a second Place and Wide de-vig: the owner chose the statute's de-vig (answer 3(a)) for every race-pool with several winning combinations; Place's and Wide's censoring at the floor is registered instead as the 'drop' and 'bound' variants (#459 comment of 2026-11-27).
+- The equal split R*100/(P*(D_c+5)) for several winning combinations (#99 question 3(b)) as a second Place and Wide de-vig: the owner chose the statute's de-vig (answer 3(a)) for every race-pool with several winning combinations; Place's and Wide's censoring at the floor is registered instead as the 'drop' and 'bound' variants (#459 comment of 2026-11-27). Under the reframe (each candidate de-vig a variant) its ticket chance, R*100/(D_c+5), is registered since as the second family, `japan-c5-exotic-dividends-per-ticket` (`docs/experiments/exotic-c5-per-ticket-japan.md`).
 - Fitting alpha on every training race of every fold: Henery's quadrature on every training race of 28 expanding folds is hours of compute for one parameter per fold; the spec caps the fit at 2000 hash-sampled training races per fold.
 - A bootstrap interval on the E44 ratio (#99 question 1 options (a) and (c)): owner answer 1(b), the ratio is a point estimate beside the two bounded gains.
 
@@ -1112,8 +1112,9 @@ Every record is a row of `horsetrack japan leaderboard` under `japan-c5-exotic-d
 
 ## Follow-ups filed
 
-Proposed (`status:proposed` under epic #73):
+Proposed (`status:proposed` under epic #73; not linked as its sub-issues, since #73 is at GitHub's cap of 100):
 
-- Run the log-linear pool (`exotic.pool_blend`) once #4/#21's odds logs hold full final boards of the exotic pools, and settle the leaderboard bet at the full board's expected value rather than the most probable combination.
-- Score C5 at the decision time (D2: T-2) on logged boards instead of the final Win price, so its leaderboard rows are decision-time selections, not look-ahead.
-- Feed C5 the D9-compliant meta-model once #91's and #98's members land (stage2:q:form is #87's documented D9 shortfall).
+- #671: run the log-linear pool (`exotic.pool_blend`) once #4/#21's odds logs hold full final boards of the exotic pools, and settle the leaderboard bet at the full board's expected value rather than the most probable combination.
+- #672: score C5 at the decision time (D2: T-2) on logged boards instead of the final Win price, so its leaderboard rows are decision-time selections, not look-ahead.
+- #673: feed C5 the D9-compliant meta-model once #91's and #98's members land (stage2:q:form is #87's documented D9 shortfall).
+- #674: append a run's registry records in one batch (`Registry.append` re-verifies the hash chain on every record, so a run of hundreds of variants spends most of its wall time appending).
