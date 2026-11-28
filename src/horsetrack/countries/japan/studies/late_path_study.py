@@ -566,14 +566,14 @@ def render_report(study: Study, plan: dict, about: dict, folds: list[dict]) -> s
         "to the decision time t = post - tau, and reads nothing after t; C1 is fitted on earlier "
         "days only.",
         "",
+        "Gains are per race in nats (the final's winner log loss minus the final + path's): "
+        "positive means the path helps. `lo` / `hi` are one-sided 95% bounds; the path "
+        "coefficients are fitted walk-forward over the scored quarters (the first only trains).",
+        "",
         f"## Headline: E23 at ending `{e23['primary_end']}`, "
         f"{float(e23['primary_window_min']):g} min",
         "",
         _markdown_table(headline) if headline else "_Not computed._",
-        "",
-        "Gains are per race in nats (the final's winner log loss minus the final + path's): "
-        "positive means the path helps. `lo` / `hi` are one-sided 95% bounds; the path "
-        "coefficients are fitted walk-forward over the scored quarters (the first only trains).",
         "",
         f"## The paper (arXiv {plan['paper']['arxiv']})",
         "",
