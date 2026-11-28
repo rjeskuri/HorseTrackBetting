@@ -102,3 +102,52 @@ paid combinations), capped at 1. At the 110-yen minimum the share is censored
   `docs/experiments/exotic-c5-japan.md` (`render_public_report`: the publishable pair's figures
   only, every stage2:q:form variant by name and status).
 - Nothing is adopted: every variant is a ranked or unmeasured leaderboard row.
+
+## Second family: Place and Wide against the per-ticket de-vig
+
+Status: **pre-registered** before its run, frozen by the run itself as its first step. Family id:
+**`japan-c5-exotic-dividends-per-ticket`**, spec sha256
+**`b559e99c14f73a307e9f075dcb405a67b713feec2640d2d31ea0be4e908c65d1`**. The spec is
+`studies.exotic_c5.default_per_ticket_spec()` (`build_per_ticket_spec` on the same fold scheme and
+bootstrap, seed 459); `horsetrack japan exotic-c5 --family japan-c5-exotic-dividends-per-ticket`
+freezes it before either seam reads a row and refuses to run under any other spec. The first
+family's spec above is unchanged (sha256 `cdaa71d9…f76e`), so its freeze and records stand.
+
+Why a second family: the first family's Place and Wide rows rest on one baseline, P × the statute
+share, which its own E43 Place result suggests understates the chance a ticket pays
+(`docs/ledger.md`, the #459 Place rows). The owner's reframe on #99 (2026-11-27) registers each
+candidate Place and Wide de-vig as a variant, and the first spec was frozen before the review of
+PR #668 asked for a second candidate, so the second de-vig is a family of its own.
+
+- **Baseline** (`place_wide_devigs: [per_ticket]`): the chance a paid ticket c pays is its own
+  implied share, min(1, R·100/(D_c + 5)) (R the race's payout rate from `takeout.race_takeout`,
+  boosts and `race_class_raw` in; D_c its dividend per 100 yen, the 5-yen mean breakage back):
+  the money on c against what c pays, as in a pool with one winner. It is P × #99 question
+  3(b)'s equal split R·100/(P·(D_c + 5)), which answer 3(a) did not choose as the share of the
+  money; here it is a ticket chance, the reframe's second candidate. With D_c ≥ 100 the cap
+  never binds (R·100/105 < 1).
+- **Pools**: Place and Wide only. A pool paying one combination per result has the one share
+  R·100/(D + 5) under either de-vig, so Win, Quinella, Exacta, Trio and Trifecta would repeat
+  the first family's records; no E44 (`e44_pools: []`).
+- **Everything else as the first family**: the same rows and days (development days only, the
+  holdout never opened), the same scoreable race-pools (no refund row, no dividend under 100 yen,
+  every paid combination named in the field), inputs (`normalised`, `calibrated`,
+  `stage2:q:form`), orderings (all four, the fitted two refitted per fold), blends (`none`,
+  `linear` with α fitted per fold on at most 2,000 hash-sampled training races against this
+  baseline's q, `log_linear` recorded as not runnable), floor treatments (`drop`, `bound`), score
+  (log loss at 1/k per paid combination), metrics (E43 `delta_ll_vs_dividends` with D7's bounds,
+  per-fold `alpha`; E16 on super_premium race-pools) and leaderboard block on each no-blend
+  variant.
+- **What the comparison means**: the model's log loss and the leaderboard bet do not read the
+  baseline, so on the same race-pools a variant's ΔLL here minus its statute twin's is the
+  statute baseline's log loss minus the per-ticket one's, and each no-blend return equals the
+  twin's. The public report sets each publishable variant beside its twin's ΔLL and bounds,
+  read from the first family's registry records (`statute_twins`).
+- **Outputs**: one registry record per variant; the private report under
+  `$HORSETRACK_DATA_DIR/reports/`; the committed summary
+  `docs/experiments/registry/japan/japan-c5-exotic-dividends-per-ticket.md` (by `write_summary`,
+  stage2:q:form's records withheld) and the public report
+  `docs/experiments/exotic-c5-per-ticket-japan.md` (the publishable pair's figures only). Nothing
+  is adopted: every variant is a ranked or unmeasured leaderboard row.
+- **The null**: the per-ticket dividends are at least as good as C5 in Place and in Wide
+  (ΔLL ≤ 0).
