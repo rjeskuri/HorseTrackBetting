@@ -65,6 +65,7 @@ from horsetrack.countries.japan.models.v0.calibration import (
 )
 from horsetrack.countries.japan.models.v0.ordering import _git_sha
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
+from horsetrack.countries.japan.studies import source_family
 
 COUNTRY = "japan"
 TICKET = 125
@@ -458,7 +459,7 @@ def _record(
         components["residual"] = fit_id
     return RunRecord(
         hypothesis_id=HYPOTHESIS_ID,
-        family_id=FAMILY_ID,
+        family_id=source_family(FAMILY_ID, source),  # another store copy, its own family (#404)
         variant=f"segments-{len(segments)}-ridge-{ridge:g}",
         ticket=TICKET,
         git_sha=_git_sha() or "unknown",
@@ -507,7 +508,8 @@ def run_fit(
     `source` names the store copy read (#404): 'jra' by default, 'jravan' the JRA-VAN copy. The
     registry record, the report's `write_report` sources and (off 'jra') the manifest name it,
     with the base fit's own `sources`, so a licensed copy's figures are withheld
-    (`core.eval.reports.WITHHELD_SOURCES`); off 'jra' the output file names carry the source.
+    (`core.eval.reports.WITHHELD_SOURCES`); off 'jra' the output file names carry the source and
+    the record is in its own family `<FAMILY_ID>-<source>` (`studies.source_family`).
 
     An `out_dir` that resolves inside the repository raises `paths.DataDirInsideRepo` before
     anything is read or written."""

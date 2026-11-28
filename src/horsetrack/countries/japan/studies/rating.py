@@ -27,7 +27,8 @@ reproduced. The `meeting_clustered:` stage-2 record (D7's bound, which the froze
 rule reads) was added after the first run; the frozen spec is unchanged. The JRA store is
 netkeiba results: no JRDB, no JRA-VAN; `run_study(source=..., start=...)` and `read_results`
 can read another store copy (#404: 'jravan', the JRA-VAN copy) and the rating's results from an
-earlier start than RATING_FROM, both recorded in the spec. Nothing is adopted (D16) and the
+earlier start than RATING_FROM, both recorded in the spec; another copy is its own family,
+`<FAMILY_ID>-<source>`. Nothing is adopted (D16) and the
 holdout is never read.
 CLI: `python -m horsetrack.countries.japan.studies.rating --run [--out DIR]`.
 """
@@ -53,6 +54,7 @@ from horsetrack.core.eval.reports import write_report
 from horsetrack.countries.japan.models.meta import MetaSpec, fit_meta, oof_predictions
 from horsetrack.countries.japan.models.rating import DynamicRating, rating_member
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
+from horsetrack.countries.japan.studies import source_family
 from horsetrack.countries.japan.studies.calibration import (
     Study,
     Variant,
@@ -94,12 +96,13 @@ STAGE2 = MetaSpec([MEMBER], quadratic=False, segment_cols=[], form="stage2", rid
 
 
 def build_spec(
-    scheme, bootstrap: dict, *, sources: Sequence[str] = SOURCES, start: date = RATING_FROM
+    scheme, bootstrap: dict, *, source: str = SOURCES[0], start: date = RATING_FROM
 ) -> dict:
     """The family's pre-registered spec, frozen in the registry before any outcome is read;
-    `sources` and `start` are the store copy and the first day of the rating's results."""
+    `source` and `start` are the store copy and the first day of the rating's results. A copy
+    other than 'jra' is its own family (`source_family`, #404)."""
     return {
-        "family_id": FAMILY_ID,
+        "family_id": source_family(FAMILY_ID, source),
         "ticket": TICKET,
         "hypotheses": {
             "E38": "a forward-filtered dynamic rating member correlates below "
@@ -134,7 +137,7 @@ def build_spec(
         "bootstrap": bootstrap,
         "price_era_start": PRICE_ERA_START.isoformat(),
         "adoption": "none (D16): no holdout is opened and nothing is adopted",
-        "sources": list(sources),
+        "sources": [source],
     }
 
 
@@ -378,11 +381,15 @@ def render_report(study: Study, spec: dict, about: dict, record_ids: dict[str, s
 
 
 def _record(
-    variant: Variant, git_sha: str, builds: dict[str, str], sources: tuple[str, ...] = SOURCES
+    variant: Variant,
+    git_sha: str,
+    builds: dict[str, str],
+    sources: tuple[str, ...] = SOURCES,
+    family_id: str = FAMILY_ID,
 ) -> RunRecord:
     return RunRecord(
         hypothesis_id=variant.hypothesis_id,
-        family_id=FAMILY_ID,
+        family_id=family_id,
         variant=variant.name,
         ticket=TICKET,
         git_sha=git_sha,
@@ -438,7 +445,8 @@ def run_study(
 ) -> dict:
     """Run the pre-registered family on Japan's development data; write its report and export.
     `source` names the store copy read (#404: 'jravan' the JRA-VAN copy), for the development rows
-    and the rating's results alike, and is recorded in the spec, the records and the report;
+    and the rating's results alike, and is recorded in the spec, the records and the report; a
+    copy other than 'jra' runs as its own family `<FAMILY_ID>-<source>` (`source_family`);
     `start` is the rating results' first day (default RATING_FROM); one after the price era's
     first day (the development rows' first day) raises ValueError before the spec is frozen,
     since the earlier priced starters would have no rating."""
@@ -449,13 +457,13 @@ def run_study(
             "every priced starter"
         )
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
-    sources = (source,)
+    sources, family_id = (source,), source_family(FAMILY_ID, source)
     scheme = load_country_scheme(COUNTRY)
     boot = {**bootstrap_settings(), "seed": BOOTSTRAP_SEED}
-    spec = build_spec(scheme, boot, sources=sources, start=start)
+    spec = build_spec(scheme, boot, source=source, start=start)
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
-    spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any outcome is read
+    spec_hash = registry.freeze_family(family_id, spec)  # before any outcome is read
 
     builds = store_builds(source)
     runners, races = read_development(source=source)
@@ -471,10 +479,10 @@ def run_study(
     study.counts = {**counts, "scored_folds": len(folds), **study.counts}
 
     # A record equal to one in the registry but for its git commit is the same run reproduced.
-    blank = {_run_id(dataclasses.replace(r, git_sha="")): r for r in registry.records(FAMILY_ID)}
+    blank = {_run_id(dataclasses.replace(r, git_sha="")): r for r in registry.records(family_id)}
     record_ids, appended = {}, []
     for variant in study.variants:
-        record = _record(variant, git_sha, builds, sources)
+        record = _record(variant, git_sha, builds, sources, family_id)
         same = blank.get(_run_id(dataclasses.replace(record, git_sha="")))
         if same is None:
             record_ids[variant.name] = registry.append(record)
@@ -482,7 +490,7 @@ def run_study(
         else:
             record_ids[variant.name] = _run_id(same)
     about = {
-        "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
+        "family": f"`{family_id}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
         "store": ", ".join(builds.values()),
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -498,7 +506,7 @@ def run_study(
         export_path, index=False
     )
     return {
-        "family_id": FAMILY_ID,
+        "family_id": family_id,
         "spec_hash": spec_hash,
         "report_path": str(report),
         "export_path": str(export_path),

@@ -71,6 +71,7 @@ from horsetrack.core.eval.reports import write_report
 from horsetrack.core.store.tables import table_path, to_frame
 from horsetrack.countries.japan.models.speed import SpeedModel, SpeedSpec
 from horsetrack.countries.japan.models.v0.store import read_store_table
+from horsetrack.countries.japan.studies import source_family
 
 COUNTRY = "japan"
 SOURCE = "jra"  # the store's JRA results (netkeiba); no JRDB, no JRA-VAN
@@ -483,14 +484,15 @@ def build_spec(
 ) -> dict:
     """The family's pre-registered spec, frozen before any outcome is read. `source` is the store
     copy read and `start` the first race day read (#404); the default spec is unchanged, and a
-    `start` is recorded only when one is given."""
+    `start` is recorded only when one is given. A copy other than 'jra' is its own family
+    (`source_family`)."""
     licensed = {
         SOURCE: "no licensed source (JRDB, JRA-VAN) is read",
         "jravan": "JRA-VAN, a licensed source, is read (the jravan store copy), so the report is "
         "withheld; no JRDB table is read",
     }.get(source, f"the store copy {source} is read; no JRDB table is read")
     spec = {
-        "family_id": FAMILY_ID,
+        "family_id": source_family(FAMILY_ID, source),
         "ticket": TICKET,
         "hypotheses": {
             "null": "the same-day variant does not lower the time RMSE of E[top-3 time] below the "
@@ -690,7 +692,7 @@ def _record(
     params = variant.params | ({"error": variant.error} if variant.error else {})
     return RunRecord(
         hypothesis_id=HYPOTHESIS_ID,
-        family_id=FAMILY_ID,
+        family_id=source_family(FAMILY_ID, source),
         variant=variant.name,
         ticket=TICKET,
         git_sha=git_sha,
@@ -756,13 +758,15 @@ def run_study(out_dir: Path | None = None, *, source: str = SOURCE, start: date 
     error model, append the registry records, rewrite the committed summary and write the
     report outside the tree. `source` names the store copy read (#404: 'jravan' the JRA-VAN
     copy) and `start` the first race day read (default every day); both are recorded in the spec,
-    and the source in the records, the data builds and the report's `write_report` sources."""
+    and the source in the records, the data builds and the report's `write_report` sources; a
+    copy other than 'jra' runs as its own family `<FAMILY_ID>-<source>` (`source_family`)."""
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     scheme, minutes = load_country_scheme(COUNTRY), decision_min()
     spec = build_spec(bootstrap_settings(), scheme, minutes, source=source, start=start)
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
-    spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any outcome is read
+    family_id = source_family(FAMILY_ID, source)
+    spec_hash = registry.freeze_family(family_id, spec)  # before any outcome is read
 
     builds = store_builds(source)
     races, runners = read_inputs(source=source, start=start)
@@ -775,7 +779,7 @@ def run_study(out_dir: Path | None = None, *, source: str = SOURCE, start: date 
     variants, tables, counts = compute_study(table, spec, scheme, minutes)
     counts = {"builder": builder} | counts
 
-    existing = registry.records(FAMILY_ID)
+    existing = registry.records(family_id)
     fold_scheme = scheme_label(scheme)
     records = [_record(v, git_sha, builds, fold_scheme, source) for v in variants]
     run_ids = {}
@@ -784,7 +788,7 @@ def run_study(out_dir: Path | None = None, *, source: str = SOURCE, start: date 
             run_ids[variant.name] = registry.append(record)
     write_summary(registry, summary_dir(COUNTRY))
     about = {
-        "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
+        "family": f"`{family_id}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
         "store": ", ".join(builds.values()),
         "run ids": ", ".join(f"{k} `{v}`" for k, v in run_ids.items()) or "already recorded",
@@ -796,7 +800,7 @@ def run_study(out_dir: Path | None = None, *, source: str = SOURCE, start: date 
         sources=(source,),
     )
     return {
-        "family_id": FAMILY_ID,
+        "family_id": family_id,
         "spec_hash": spec_hash,
         "report_path": str(report),
         "registry_path": str(registry.path),

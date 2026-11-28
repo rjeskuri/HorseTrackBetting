@@ -49,12 +49,19 @@ Round 2 of the review adds:
   the copy, so it never overwrites a jra fit with the same fit id.
 - `studies.rating.run_study(start=...)` refuses a start after the price era's first day before
   any store read or freeze.
+
+The owner's decision on reruns (2026-11-28, option (a)): a run on another store copy freezes,
+reads and writes its own family `<FAMILY_ID>-<source>` (`studies.source_family(family_id,
+source)`) with its own spec: rating, speed/par, meta, calibrated market, and the v0 residual
+(whose record's family follows the store copy it reads; it freezes no spec). The jra family IDs
+and their default spec hashes are main's, pinned below.
 """
 
 # Ruff reads the module under test as third-party until it exists, then as first-party; the
 # block is written in its final order and I001 is waived so lint passes before and after.
 from __future__ import annotations  # noqa: I001
 
+import dataclasses
 import inspect
 import json
 from collections import Counter
@@ -70,7 +77,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from horsetrack.core import paths
-from horsetrack.core.eval import holdout, reports
+from horsetrack.core.eval import holdout, registry as run_registry, reports
 from horsetrack.core.eval.registry import Registry, default_registry
 from horsetrack.core.store import schemas, tables
 from horsetrack.countries.japan.handicap import pp
@@ -572,7 +579,8 @@ def test_a_jravan_rating_run_reads_and_records_the_jravan_store(tmp_path, monkey
 
     assert [c.get("source") for c in development_calls] == ["jravan"]
     assert [(c.get("source"), c.get("start")) for c in results_calls] == [("jravan", EARLY_START)]
-    records = default_registry("japan").records(rating.FAMILY_ID)
+    assert default_registry("japan").records(rating.FAMILY_ID) == []  # the jra family's
+    records = default_registry("japan").records(jravan_family(rating.FAMILY_ID))
     assert records
     for record in records:
         _only_jravan(record)
@@ -612,7 +620,8 @@ def test_a_jravan_meta_run_reads_and_records_the_jravan_store(tmp_path, monkeypa
     meta.run_study(members, data.parent / "out", source="jravan")
 
     assert [c.get("source") for c in calls] == ["jravan"]
-    records = default_registry("japan").records(meta.FAMILY_ID)
+    assert default_registry("japan").records(meta.FAMILY_ID) == []  # the jra family's
+    records = default_registry("japan").records(jravan_family(meta.FAMILY_ID))
     market_only = [r for r in records if "jrdb" not in r.sources]
     member_based = [r for r in records if "jrdb" in r.sources]
     assert market_only and member_based, [(r.variant, r.sources) for r in records]
@@ -642,7 +651,9 @@ def test_residual_runs_on_two_store_copies_keep_their_own_outputs(tmp_path, monk
     jra = residual.run_fit(base_path)
     jra_record = _latest_record(residual.FAMILY_ID)
     van = residual.run_fit(base_path, source="jravan")
-    van_record = _latest_record(residual.FAMILY_ID)
+    van_record = _latest_record(jravan_family(residual.FAMILY_ID))
+    # The jra family holds the jra run alone; the jravan run went to its own family.
+    assert default_registry("japan").records(residual.FAMILY_ID) == [jra_record]
 
     # The jra run writes where it always has.
     v0_dir = data / "models" / "japan" / "v0"
@@ -748,19 +759,23 @@ def test_a_jravan_speed_study_reads_freezes_records_and_reports_the_jravan_store
     written: list[tuple] = []
     _spy(monkeypatch, speed_run, "read_inputs", reads)
     _spy_write_report(monkeypatch, speed_run, written)
+    van_family = jravan_family(speed_run.FAMILY_ID)
     assert _frozen_spec(speed_run.FAMILY_ID) is None  # a fresh registry
+    assert _frozen_spec(van_family) is None
 
     speed_run.run_study(data.parent / "out", source="jravan")
 
     assert [c.get("source") for c in reads] == ["jravan"]
-    spec = _frozen_spec(speed_run.FAMILY_ID)
+    assert _frozen_spec(speed_run.FAMILY_ID) is None  # the jra family is not frozen
+    assert default_registry("japan").records(speed_run.FAMILY_ID) == []
+    spec = _frozen_spec(van_family)
     assert spec is not None
     assert spec["sources"] == ["jravan"]
     assert "jravan" in spec["races"] and "(jra)" not in spec["races"], spec["races"]
     d21 = spec["decisions"]["D21"]
     assert "JRA-VAN" in d21 and "no licensed source" not in d21, d21
     assert "first_race_day_read" not in spec  # no start given
-    records = default_registry("japan").records(speed_run.FAMILY_ID)
+    records = default_registry("japan").records(van_family)
     assert records
     for record in records:
         assert tuple(record.sources) == ("jravan",), (record.variant, record.sources)
@@ -916,6 +931,7 @@ def test_a_rating_run_from_after_the_price_era_start_is_refused_before_any_read(
         rating.run_study(tmp_path / "out", source=source, start=start)
     assert calls == [], "a store read or the freeze ran before the refusal"
     assert _frozen_spec(rating.FAMILY_ID) is None
+    assert _frozen_spec(jravan_family(rating.FAMILY_ID)) is None
 
 
 @pytest.mark.parametrize("start", [PRICE_ERA_START, RATING_FROM, EARLY_START], ids=str)
@@ -926,5 +942,174 @@ def test_a_rating_run_from_the_price_era_start_or_earlier_still_runs(start, tmp_
     with pytest.raises(_Stop):
         rating.run_study(tmp_path / "out", source="jravan", start=start)
     assert [c.get("source") for c in calls] == ["jravan"]
-    spec = _frozen_spec(rating.FAMILY_ID)
+    assert _frozen_spec(rating.FAMILY_ID) is None  # the jra family is not frozen
+    spec = _frozen_spec(jravan_family(rating.FAMILY_ID))
     assert spec is not None and spec["sources"] == ["jravan"]
+
+
+# ---------------------------------------------------------------------------------------------
+# The owner's decision (2026-11-28, option (a)): a jravan run is its own family
+# ---------------------------------------------------------------------------------------------
+
+# Main's jra family IDs, spelled out: the decision keeps them exactly.
+MAIN_FAMILY_IDS = {
+    "rating": "japan-c2-rating-final-win",
+    "speed_run": "japan-speed-top3-c3",
+    "meta": "japan-c4-meta-final-win",
+    "calibrated_market": "japan-calibrated-market-final-win",
+    "residual": "japan-v0-win-residual",
+}
+
+# `registry._spec_hash(build_spec(...))` of each study's default (jra) spec, computed at
+# origin/main 05388cd (and the branch base b0aa198); meta's with the digest "0" * 64.
+MAIN_SPEC_HASHES = {
+    "rating": "7ec8931213c607c1a76ded5e191b84b0d69b415c5c16ec30427375403fc4f21f",
+    "meta": "ad38adb1306006158493b345d8113af127912d57f61fbe488231eaeeda2e219c",
+    "calibrated_market": "46f53f0b0fc33aa562a6efa9062b8d00ddd71cfb79ead9f28e30ed81022aa9d9",
+    "calibration": "4816f067ab5a50cb7dc07cd3dff85292532aa76a7b6b07d938f4c30dd5563c36",
+    "speed_run": "72f5c802e96e40850b46fc9b85a0544f4f53a3b12255ea2cf3fae767f02c115f",
+}
+
+
+def _default_specs() -> dict[str, dict]:
+    """Each study's default spec, built through the call that works on main and on the new API."""
+    owner, floor = study_calibration.owner_inputs(), study_calibration.win_floor()
+    return {
+        "rating": rating.build_spec(
+            rating.load_country_scheme("japan"),
+            {**rating.bootstrap_settings(), "seed": rating.BOOTSTRAP_SEED},
+        ),
+        "meta": meta.build_spec(
+            meta.load_country_scheme("japan"),
+            {**meta.bootstrap_settings(), "seed": meta.BOOTSTRAP_SEED},
+            meta.overlay_thresholds(),
+            "0" * 64,
+        ),
+        "calibrated_market": calibrated_market.build_spec(
+            owner,
+            calibrated_market.load_country_scheme("japan"),
+            calibrated_market.bootstrap_settings(),
+            floor,
+        ),
+        "calibration": study_calibration.build_spec(
+            owner,
+            study_calibration.load_country_scheme("japan"),
+            study_calibration.bootstrap_settings(),
+            floor,
+        ),
+        "speed_run": speed_run.build_spec(
+            speed_run.bootstrap_settings(),
+            speed_run.load_country_scheme("japan"),
+            speed_run.decision_min(),
+        ),
+    }
+
+
+def test_the_jra_family_ids_and_default_spec_hashes_are_mains():
+    modules = {
+        "rating": rating,
+        "speed_run": speed_run,
+        "meta": meta,
+        "calibrated_market": calibrated_market,
+        "residual": residual,
+    }
+    assert {name: m.FAMILY_ID for name, m in modules.items()} == MAIN_FAMILY_IDS
+    hashes = {name: run_registry._spec_hash(spec) for name, spec in _default_specs().items()}
+    assert hashes == MAIN_SPEC_HASHES
+
+
+@pytest.mark.parametrize("family_id", sorted(MAIN_FAMILY_IDS.values()))
+def test_source_family_names_the_jra_family_unchanged_and_another_copy_by_suffix(family_id):
+    from horsetrack.countries.japan import studies
+
+    for source, want in (
+        ("jra", family_id),
+        ("jravan", f"{family_id}-jravan"),
+        ("nar", f"{family_id}-nar"),
+    ):
+        assert studies.source_family(family_id, source) == want, source
+
+
+def _run_rating(data: Path, source: str) -> None:
+    rating.run_study(data.parent / f"out-{source}", source=source)
+
+
+def _run_speed(data: Path, source: str) -> None:
+    speed_run.run_study(data.parent / f"out-{source}", source=source)
+
+
+def _run_meta(data: Path, source: str) -> None:
+    members = write_members(data.parent / f"members-{source}.parquet", source)
+    meta.run_study(members, data.parent / f"out-{source}", source=source)
+
+
+def _run_calibrated_market(data: Path, source: str) -> None:
+    calibrated_market.run_study(data.parent / f"out-{source}", source=source)
+
+
+def _run_residual(data: Path, source: str) -> None:
+    # Each residual rests on a base fit of its own copy, so its record names that copy alone.
+    base = BASE if source == "jra" else dataclasses.replace(BASE, sources=(source,))
+    base_path = data.parent / f"base-{source}.json"
+    base_path.write_text(base.to_json(), encoding="utf-8")
+    residual.run_fit(base_path, data.parent / f"out-{source}", source=source)
+
+
+# name: (the jra family ID, one run on a copy, whether the study freezes a spec)
+STUDY_RUNS = {
+    "rating": (rating.FAMILY_ID, _run_rating, True),
+    "speed_run": (speed_run.FAMILY_ID, _run_speed, True),
+    "meta": (meta.FAMILY_ID, _run_meta, True),
+    "calibrated_market": (calibrated_market.FAMILY_ID, _run_calibrated_market, True),
+    "residual": (residual.FAMILY_ID, _run_residual, False),
+}
+
+
+def jravan_family(family_id: str) -> str:
+    return f"{family_id}-jravan"
+
+
+@pytest.mark.parametrize("order", [("jra", "jravan"), ("jravan", "jra")], ids="-then-".join)
+@pytest.mark.parametrize("study", list(STUDY_RUNS))
+def test_each_study_runs_on_both_copies_in_either_order_into_its_own_family(
+    study, order, tmp_path, monkeypatch
+):
+    data = fresh_data(tmp_path, monkeypatch, f"both-{study}")
+    monkeypatch.setattr(speed_run, "summary_dir", lambda country: tmp_path / "summary" / country)
+    monkeypatch.setattr(residual, "read_segments", lambda *a, **k: ())  # `segments: []`
+    family_id, run, freezes = STUDY_RUNS[study]
+    families = {"jra": family_id, "jravan": f"{MAIN_FAMILY_IDS[study]}-jravan"}
+    registry = default_registry("japan")
+    assert registry.frozen_spec_hash(families["jra"]) is None  # a fresh registry
+
+    hashes: dict[str, str | None] = {}
+    for source in order:
+        other = "jravan" if source == "jra" else "jra"
+        before = registry.frozen_spec_hash(families[other])
+        run(data, source)  # on the registry the other copy's run already populated, no raise
+        # The run leaves the other copy's family as it was: unfrozen, or frozen with its hash.
+        assert registry.frozen_spec_hash(families[other]) == before, (source, other)
+        hashes[source] = registry.frozen_spec_hash(families[source])
+
+    for source, family in families.items():
+        other = "jravan" if source == "jra" else "jra"
+        if freezes:
+            spec = _frozen_spec(family)
+            assert spec is not None, f"{family} was not frozen"
+            assert spec["family_id"] == family
+            assert source in spec["sources"] and other not in spec["sources"], spec["sources"]
+        else:
+            assert hashes[source] is None and _frozen_spec(family) is None, "the residual froze"
+        records = registry.records(family)
+        assert records, f"{family}: no records"
+        for record in records:
+            assert record.family_id == family
+            assert source in record.sources, (family, record.variant, record.sources)
+            assert other not in record.sources, (family, record.variant, record.sources)
+            builds = list(record.data_builds.values())
+            assert any(f"{source}/" in b for b in builds), builds
+            assert not any(f"{other}/" in b for b in builds), builds
+    if freezes:
+        assert hashes["jra"] != hashes["jravan"]
+        if study in ("rating", "speed_run", "calibrated_market"):  # no member-file digest
+            assert hashes["jra"] == MAIN_SPEC_HASHES[study]

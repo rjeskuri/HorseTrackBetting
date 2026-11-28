@@ -41,7 +41,7 @@ from horsetrack.core.eval.reports import write_report
 from horsetrack.core.eval.scoring import gain, per_race_log_loss
 from horsetrack.countries.japan.models.v0 import calibration as d4
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START
-from horsetrack.countries.japan.studies import calibration
+from horsetrack.countries.japan.studies import calibration, source_family
 from horsetrack.countries.japan.studies.calibration import Study, Variant
 
 COUNTRY = calibration.COUNTRY
@@ -76,9 +76,10 @@ def bootstrap_settings() -> dict:
 def build_spec(
     owner: dict, scheme: FoldScheme, bootstrap: dict, floor: float, *, source: str = SOURCE
 ) -> dict:
-    """The family's pre-registered spec, frozen in the registry before anything is scored."""
+    """The family's pre-registered spec, frozen in the registry before anything is scored; a
+    store copy `source` other than 'jra' is its own family (`source_family`, #404)."""
     return {
-        "family_id": FAMILY_ID,
+        "family_id": source_family(FAMILY_ID, source),
         "ticket": TICKET,
         "hypotheses": {
             HYPOTHESIS: "D4's calibrated market (the spline in ln q) against the normalised, "
@@ -327,7 +328,7 @@ def _record(
 ) -> RunRecord:
     return RunRecord(
         hypothesis_id=variant.hypothesis_id,
-        family_id=FAMILY_ID,
+        family_id=source_family(FAMILY_ID, source),
         variant=variant.name,
         ticket=TICKET,
         git_sha=git_sha,
@@ -344,7 +345,8 @@ def _record(
 def run_study(out_dir: Path | None = None, *, source: str = SOURCE) -> dict:
     """Run the pre-registered study on Japan's development data and write its report. `source`
     names the store copy read (#404: 'jravan' the JRA-VAN copy), recorded in the spec, the
-    records, the data builds and the report's `write_report` sources.
+    records, the data builds and the report's `write_report` sources; a copy other than 'jra'
+    runs as its own family `<FAMILY_ID>-<source>` (`source_family`).
 
     Raises `calibration.MissingOwnerDecision` before the store is read when
     config/calibration.yaml lacks an input, `paths.DataDirInsideRepo` for an `out_dir` inside the
@@ -360,7 +362,8 @@ def run_study(out_dir: Path | None = None, *, source: str = SOURCE) -> dict:
     )
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
-    spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any development row is read
+    family_id = source_family(FAMILY_ID, source)
+    spec_hash = registry.freeze_family(family_id, spec)  # before any development row is read
 
     builds = calibration.store_builds(source)
     runners, races = calibration.read_development(source=source)
@@ -370,11 +373,11 @@ def run_study(out_dir: Path | None = None, *, source: str = SOURCE) -> dict:
     study.counts = {**counts, **study.counts}
     del frame
 
-    existing = registry.records(FAMILY_ID)
+    existing = registry.records(family_id)
     records = [_record(v, git_sha, builds, source) for v in study.variants]
     appended = [registry.append(r) for r in records if r not in existing]
     about = {
-        "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
+        "family": f"`{family_id}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
         "store": ", ".join(builds.values()),
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -385,7 +388,7 @@ def run_study(out_dir: Path | None = None, *, source: str = SOURCE) -> dict:
         sources=(source,),
     )
     return {
-        "family_id": FAMILY_ID,
+        "family_id": family_id,
         "spec_hash": spec_hash,
         "report_path": str(report),
         "registry_path": str(registry.path),

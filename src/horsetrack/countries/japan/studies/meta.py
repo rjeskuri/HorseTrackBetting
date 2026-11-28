@@ -73,6 +73,7 @@ from horsetrack.countries.japan.models.meta import (
 )
 from horsetrack.countries.japan.models.v0.calibration import fit_win_calibration
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
+from horsetrack.countries.japan.studies import source_family
 from horsetrack.countries.japan.studies.calibration import (
     Study,
     Variant,
@@ -207,9 +208,9 @@ def build_spec(
     source: str = "jra",
 ) -> dict:
     """The family's pre-registered spec, frozen in the registry before any outcome is read;
-    `source` is the store copy read (#404)."""
+    `source` is the store copy read (#404); a copy other than 'jra' is its own family."""
     return {
-        "family_id": FAMILY_ID,
+        "family_id": source_family(FAMILY_ID, source),
         "ticket": TICKET,
         "hypotheses": {
             "E40": "stage 2 at the final Win price (u = alpha * m + beta * ln q, unbounded) "
@@ -1007,7 +1008,7 @@ def _record(
     licensed = variant.sources != STORE_SOURCES
     return RunRecord(
         hypothesis_id=variant.hypothesis_id,
-        family_id=FAMILY_ID,
+        family_id=source_family(FAMILY_ID, source),
         variant=variant.name,
         ticket=TICKET,
         git_sha=git_sha,
@@ -1024,7 +1025,8 @@ def _record(
 def run_study(members_path: Path, out_dir: Path | None = None, *, source: str = "jra") -> dict:
     """Run the pre-registered family on Japan's development data and write its private report.
     `source` names the store copy read (#404: 'jravan' the JRA-VAN copy), recorded in place of
-    'jra' in the spec, every record's sources and the report's.
+    'jra' in the spec, every record's sources and the report's; a copy other than 'jra' runs as
+    its own family `<FAMILY_ID>-<source>` (`source_family`).
 
     Raises `paths.DataDirInsideRepo` for an `out_dir` or a member file inside the repository and
     `FamilyAlreadyFrozen` when the family is frozen with another spec (another member file)."""
@@ -1036,7 +1038,8 @@ def run_study(members_path: Path, out_dir: Path | None = None, *, source: str = 
     spec = build_spec(scheme, boot, overlay_thresholds(), digest, source=source)
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
-    spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before any outcome is read
+    family_id = source_family(FAMILY_ID, source)
+    spec_hash = registry.freeze_family(family_id, spec)  # before any outcome is read
 
     builds = store_builds(source)
     member_build = f"HKTrack:outputs/oof/{MEMBER_FILE}@{digest[:16]}"
@@ -1052,7 +1055,7 @@ def run_study(members_path: Path, out_dir: Path | None = None, *, source: str = 
     study.counts = {**counts, **member_counts, "scored_folds": len(scored), **study.counts}
     del frame, meta
 
-    existing = registry.records(FAMILY_ID)
+    existing = registry.records(family_id)
     reproduced = {_run_id(dataclasses.replace(r, git_sha="")): r for r in existing}
     record_ids, appended = {}, []
     for variant in study.variants:
@@ -1064,7 +1067,7 @@ def run_study(members_path: Path, out_dir: Path | None = None, *, source: str = 
         else:  # the same run reproduced at another commit: not a new record
             record_ids[variant.name] = _run_id(same)
     about = {
-        "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
+        "family": f"`{family_id}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
         "store": ", ".join(builds.values()),
         "members": member_build,
@@ -1078,7 +1081,7 @@ def run_study(members_path: Path, out_dir: Path | None = None, *, source: str = 
         sources=on_store(MEMBER_SOURCES, source),
     )
     return {
-        "family_id": FAMILY_ID,
+        "family_id": family_id,
         "spec_hash": spec_hash,
         "report_path": str(report),
         "registry_path": str(registry.path),
