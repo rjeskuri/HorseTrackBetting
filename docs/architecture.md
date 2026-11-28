@@ -71,8 +71,9 @@ flowchart LR
 ### 1b. Stores and outputs
 
 Everything below lives under `$HORSETRACK_DATA_DIR`, outside the repository (`core/paths.py`,
-`core/env.py`, `.env.example`). Only the committed registry summary and the reports that carry no
-licensed-source output are in git.
+`core/env.py`, `.env.example`). Only the committed registry summary, the public leaderboard and the
+reports that carry no licensed-source output are in git. The bet log is the owner's financial
+record and never leaves the data dir.
 
 ```mermaid
 flowchart LR
@@ -85,7 +86,11 @@ flowchart LR
   odds[("odds_snapshots/ and vm/<br>odds logs, results sidecars")]
   mdl[("models/japan/v0/")]
   shlog[("shadow/japan/<br>sealed shadow log")]
-  reg[("registry/ and reports/")]
+  reg[("registry/ and reports/<br>incl. the private leaderboard")]
+  lbd["leaderboard build"]
+  pubd["docs/leaderboard/<br>public rows"]
+  bets["bets check, record,<br>settle, shortlist"]
+  betd[("bets/japan/<br>bet log, settled files")]
   board["board page"]
   spage["shadow page"]
   phone["phone via tunnel (#505)"]
@@ -94,6 +99,13 @@ flowchart LR
   scr --> raw --> proc
   proc --> fits --> mdl
   fits --> reg --> summ
+  reg --> lbd
+  lbd -->|"private rows"| reg
+  lbd --> pubd
+  reg -->|"shortlist"| bets
+  proc -->|"final dividends"| bets
+  bets --> betd
+  betd -->|"played per option"| bets
   odds --> board
   odds --> spage
   mdl --> spage
@@ -119,8 +131,13 @@ flowchart LR
 | `logs/japan/` | log-day's health lines and block markers (`countries/japan/logger/health.py`, `countries/japan/logger/log_day.py`) | the owner |
 | `models/japan/v0/` | `countries/japan/models/v0/calibration.py`, `countries/japan/models/v0/nowcast.py`, `countries/japan/models/v0/ordering.py`, `countries/japan/models/v0/residual.py` | `countries/japan/models/v0/loader.py` |
 | `shadow/japan/{date}.jsonl` | `countries/japan/shadow/log.py` (also through `log_decisions` in `countries/japan/models/shadow.py`) | `countries/japan/models/shadow.py` (`read_shadow`, development days only, then `settle_shadow` against the final dividends, #101); the shadow page never reads it |
-| `registry/{country}.jsonl` | `core/eval/registry.py`, from the studies and fits | its committed summary `docs/experiments/registry/japan/` |
+| `registry/{country}.jsonl` | `core/eval/registry.py`, from the studies and fits | its committed summary `docs/experiments/registry/japan/`; `countries/japan/research/leaderboard_build.py` (the leaderboard rows) |
 | `reports/` | `core/eval/reports.py` (`write_report`), `core/store/checks.py` | the owner |
+| `reports/candidate-cells/` | the studies, in the candidate-cell schema (#430), e.g. `countries/japan/research/exacta_ceiling.py` | `countries/japan/research/leaderboard_build.py` |
+| `reports/leaderboard-japan.{md,json}` (the private leaderboard, withheld figures included) | `countries/japan/research/leaderboard_build.py` (`horsetrack japan leaderboard`), through `core/eval/leaderboard.py` (`write_leaderboard`) | the owner; `countries/japan/bets/shortlist.py` rebuilds the rows itself and writes no file |
+| `docs/leaderboard/japan.md` (in git) | `horsetrack japan leaderboard --public`: the public rows, withheld rows listed by id only (D21) | the owner |
+| `bets/japan/{date}.jsonl` | `countries/japan/bets/log.py` (`horsetrack japan bets record`), hash-chained, one file per race day; spec `docs/specs/bet-log.md` | `countries/japan/bets/cli.py` (`check`, `settle`, `shortlist`) |
+| `bets/japan/{date}.settled.json` | `countries/japan/bets/cli.py` (`bets settle`), from `countries/japan/bets/settle.py` | `countries/japan/bets/shortlist.py` (what was played on each option) |
 | `features/`, `jrdb/`, `fixtures/` | `countries/japan/handicap/` feature sets; JRDB specs; real pages for `local` tests | the fits; `countries/japan/jrdb/parse.py`; the `local` tests |
 | board page, shadow page | `countries/japan/board/server.py` (`board-serve`, bound to localhost), `countries/japan/board/web/` | the owner's browser |
 | phone via tunnel | `countries/japan/board/tunnel.py` (`board-serve --tunnel`: a cloudflared quick tunnel, every path behind a per-run access token in `board/access-token`; docs/specs/board-feed.md) | the owner's phone |
@@ -169,7 +186,7 @@ flowchart TD
 | health lines | `countries/japan/logger/health.py` |
 | pull-vm | `countries/japan/logger/pull_vm.py` |
 
-### 2b. From the board at t to the phone
+### 2b. From the board at t to the phone and the bet log
 
 ```mermaid
 flowchart TD
@@ -186,6 +203,11 @@ flowchart TD
   sfeed["shadow feed"]
   spage["shadow page"]
   tun["tunnel to the phone (#505)"]
+  lbp[("private leaderboard<br>(reports/)")]
+  short["day's shortlist<br>and cap left"]
+  hand["bets placed by hand<br>flat stakes, ¥30,000 day cap"]
+  blog[("bet log")]
+  settle["settlement against<br>the final dividends"]
   olog --> bat
   olog --> feed --> bpage
   bat --> now --> sv
@@ -200,8 +222,17 @@ flowchart TD
   sfeed --> spage
   bpage --> tun
   spage --> tun
+  lbp --> short
+  blog -->|"staked so far"| short
+  short --> hand
+  tun -->|"owner reads"| hand
+  hand -->|"bets check, record"| blog
+  blog --> settle
+  settle -->|"played per option"| short
   classDef planned stroke-dasharray: 5 5,fill:#f4f4f4,color:#666
+  classDef owner stroke-width:3px
   class pick planned
+  class hand owner
 ```
 
 | Box | Code |
@@ -216,6 +247,15 @@ flowchart TD
 | sealed shadow log | `countries/japan/shadow/log.py`, written by `shadow-day` in `countries/japan/shadow/day.py`; spec `docs/specs/shadow-log.md` |
 | shadow feed, shadow page | `countries/japan/board/shadow_feed.py`, `countries/japan/board/server.py`, `countries/japan/board/web/shadow.html`, `countries/japan/board/web/shadow.js` |
 | tunnel to the phone | `countries/japan/board/tunnel.py`, started by `board-serve --tunnel` (`countries/japan/board/server.py` gates every path with the run's access token); spec `docs/specs/board-feed.md` |
+| private leaderboard | `reports/leaderboard-japan.{md,json}` under the data dir, written by `countries/japan/research/leaderboard_build.py` (`horsetrack japan leaderboard`); spec `docs/specs/leaderboard.md` (view 4) |
+| day's shortlist and cap left | `countries/japan/bets/shortlist.py`, run as `horsetrack japan bets shortlist --date D` (`countries/japan/bets/cli.py`): the top-ranked, measured options with their CI, the variants searched, a `[look-ahead]` label where the selection reads a later board, the day's staked total and the cap left; terminal only, nothing written (D21) |
+| bets placed by hand | the owner, on the betting site; no code logs in to a betting account or places a bet. Flat stake and the ¥30,000 race-day cap are the owner's, set in `countries/japan/config/betting.yaml` |
+| bet log | `countries/japan/bets/log.py` (`BetLog`, `bets check` and `bets record`; `bet_log_path`, `load_limits`), `$HORSETRACK_DATA_DIR/bets/japan/{date}.jsonl`; spec `docs/specs/bet-log.md` |
+| settlement | `countries/japan/bets/settle.py`, `bets settle --date D`, into `{date}.settled.json`; a holdout day's bets are labelled `holdout` and not settled (`is_holdout_day`, `core/eval/holdout.py`) |
+
+The shortlist is a terminal listing, not a feed: the shadow page and the phone do not show it. The
+settled file feeds back only into the shortlist's "played" line; turning settled bets into
+leaderboard rows is not built.
 
 Two processes compute shadow values from the same odds log and fits: `shadow-day` seals them into the
 shadow log, and `board-serve` recomputes them for the shadow feed, which never reads the log. Both read
@@ -304,7 +344,10 @@ flowchart TD
   reg[("run registry")]
   rep["experiment report"]
   ledger["ledger"]
-  adopt["adoption decision (D16)"]
+  lb["leaderboard<br>every option a row,<br>ranked (D16, D17)"]
+  short["shortlist"]
+  hand["bets placed by hand<br>flat stakes, ¥30,000 day cap (D19)"]
+  blog["bet log and<br>settlement"]
   card["model card"]
   own --> ps --> cfg
   cfg --> folds
@@ -315,11 +358,14 @@ flowchart TD
   study --> snoop --> reg
   reg --> rep
   rep --> ledger
-  rep --> adopt
-  hold -->|"holdout gain"| adopt
-  own --> adopt --> card
+  rep --> card
+  reg --> lb
+  lb --> short --> hand --> blog
+  blog -->|"played per option"| short
+  blog -.->|"settled bets as rows"| lb
+  lb -->|"ranking checked<br>at the opening (D15)"| hold
   classDef owner stroke-width:3px
-  class own,ps,adopt owner
+  class own,ps,hold,hand owner
 ```
 
 | Box | Code or document |
@@ -335,11 +381,17 @@ flowchart TD
 | run registry | `core/eval/registry.py`; summary `docs/experiments/registry/japan/` |
 | experiment report | template `docs/experiment-report.md`; reports in `docs/experiments/`; licensed-source outputs through `core/eval/reports.py` into the data dir |
 | ledger | `docs/ledger.md` |
-| adoption decision | owner sign-off per D16 |
+| leaderboard | `core/eval/leaderboard.py` (rows, shrinkage within a pool, ranking, writers; `rows_from_registry`); `countries/japan/research/leaderboard_build.py` (`horsetrack japan leaderboard`: the registry and the candidate-cell files into the private leaderboard under the data dir and, with `--public`, `docs/leaderboard/japan.md`); `countries/japan/research/leaderboard_backfill.py` (the legacy families); spec `docs/specs/leaderboard.md` |
+| shortlist | `countries/japan/bets/shortlist.py` (`horsetrack japan bets shortlist`; view 2b) |
+| bets placed by hand | the owner; no code places a bet. Flat stake and cap: `countries/japan/config/betting.yaml`, checked and flagged, never blocked, by `countries/japan/bets/log.py` |
+| bet log and settlement | `countries/japan/bets/log.py`, `countries/japan/bets/settle.py`, `countries/japan/bets/cli.py`; spec `docs/specs/bet-log.md` (view 2b). The dashed arrow is not built: settlement feeds only the shortlist's "played" line today |
 | model card | `countries/japan/MODEL_CARD.md`, `countries/hongkong/MODEL_CARD.md` |
 
-The owner gates three places: the problem statement and the configs that encode it, every holdout
-opening, and every adoption.
+Nothing is adopted or rejected (D16 as amended 2026-11-27, epic #447): the leaderboard ranks every
+option and the top-ranked are played by hand. The owner gates three places: the problem statement
+and the configs that encode it, every holdout opening (a check on whether the ranking holds, not a
+pass or fail), and staking, which is the flat stakes, the ¥30,000 race-day cap and every bet placed
+by hand.
 
 ## 5. Harness workflow
 
