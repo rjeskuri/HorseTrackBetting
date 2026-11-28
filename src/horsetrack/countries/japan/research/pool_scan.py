@@ -10,7 +10,8 @@ rows grouped by (segment levels, odds band, odds) with a count and wins are the 
 A refunded combination is staked nowhere: it is counted, not summed. It is refunded when
 `dividends` has an `is_refund` row for it, whatever the board's price, or when the board printed
 it cancelled after sale (null `odds`, `status_raw` asterisks only, `****`); the jravan `dividends`
-table writes no refund rows (#443), so on that store the board's text is the only refund signal.
+table writes a refund row for every combination holding a refunded horse or bracket of the HR
+record (#443).
 A refunded combination without a price counts under the odds band `unpriced`. Every race is in a
 cell of each segment, a field of 1-4 starters in `field:le4` (owner 2026-11-27: keep all data).
 

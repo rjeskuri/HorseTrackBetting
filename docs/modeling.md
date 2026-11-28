@@ -84,7 +84,7 @@ flowchart TB
         LIN["Lineage prior: sire × surface × band, damsire at ¼<br/>#95 japan/models/lineage.py<br/>built; E37 run planned"]
     end
     subgraph L3["C3: speed and par"]
-        SPEED["Par and expected top-3 time #96,<br/>horse relative speed p_speed #97<br/>planned"]
+        SPEED["Par and expected top-3 time #96 japan/models/speed.py;<br/>horse relative speed p_speed #97 japan/models/speed_horse.py,<br/>E39 at the final price #347 japan/studies/p_speed.py<br/>built, not adopted"]
     end
     subgraph L4["C4: meta-model at the final price, shrunk toward the market (α = 0)"]
         CAL["Calibrated market (D4)<br/>#114 japan/models/v0/calibration.py<br/>v0"]
@@ -125,8 +125,8 @@ flowchart TB
     classDef built fill:#dcfce7,stroke:#15803d,color:#052e16
     classDef planned fill:#f3f4f6,stroke:#6b7280,stroke-dasharray: 5 5,color:#111827
     class NC0,CAL,RES,ORD,SV v0
-    class ASOF,BOARD,SLOG,NC1,ABIL,STAKE built
-    class INTR,SPEED,META,EXO,SDEC planned
+    class ASOF,BOARD,SLOG,NC1,ABIL,STAKE,SPEED built
+    class INTR,META,EXO,SDEC planned
 ```
 
 The work is split into seven layers, and each is tested both on its own and for what it adds
@@ -150,8 +150,8 @@ flowchart LR
     INT["Interactions: jockey, trainer, track #93,<br/>competition #94<br/>planned"]
     LIN["Lineage prior: sire × surface × band,<br/>damsire at ¼ #95 japan/models/lineage.py"]
     PL["Plackett-Luce ability on the top 3, pooled jockey,<br/>trainer and sire #92 japan/models/ability.py"]
-    PAR["Par and expected top-3 time #96<br/>planned"]
-    PSPD["Horse relative speed, p_speed #97<br/>planned"]
+    PAR["Par and expected top-3 time #96<br/>japan/models/speed.py"]
+    PSPD["Horse relative speed, p_speed #97<br/>japan/models/speed_horse.py,<br/>E39 #347 japan/studies/p_speed.py"]
     MKT["Calibrated-market baseline (D4)<br/>#114 japan/models/v0/calibration.py"]
     META["Meta-model at the final price,<br/>shrunk toward the market (α = 0)<br/>#87, #98: planned"]
     PP --> HCP
@@ -159,7 +159,7 @@ flowchart LR
     PAR -.->|"par swap #219"| HCP
     GOING -.->|"rail setting #253"| BIAS
     GOING -.->|"variant prior"| PAR
-    PAR -.-> PSPD
+    PAR --> PSPD
     RAT --> PL
     INT -.-> PL
     LIN -.->|"debut and thin-history prior, E37"| PL
@@ -175,7 +175,8 @@ flowchart LR
 The meta-model is where everything known about the horses meets the market's own view, the final
 price. Each box on the left is a member or a set of features, and an arrow means its output is an
 input of the box it points to; today the past-performance lines feeding the handicap factors and
-the dynamic rating feeding the Plackett-Luce ability (#92's study) run in code, and every other
+the dynamic rating feeding the Plackett-Luce ability (#92's study) and the par feeding the horse
+speed model (#97, scored at the final price by #347's study) run in code, and every other
 flow is planned. The ability model's sire comes from the JRA-VAN pedigree, so its results are
 withheld (D21). The meta-model starts from the calibrated market and
 gives a member weight only when it improves on the final price, so a member that adds nothing ends
