@@ -242,7 +242,8 @@ row for row:
   (the group's 馬番 or 組番 split into its 1, 2 or 3 equal-width legs, joined with `,`, leading
   zeros dropped; FORECAST and TIERCE in finishing order, the others ascending), `dividend` (払戻金,
   yen per 100 as printed) and `is_refund` false. Within a race the pools come in that order, then
-  the record's slot order (dead heats give several slots). 人気順 is not used.
+  the record's slot order (dead heats give several slots), then the pool's refund rows (below).
+  人気順 is not used.
 - A slot is a row only when every leg and the payout are positive integers: blank slots, zeros
   (an unsold pool prints zeros and a blank payout) and zero or blank payouts write nothing, so a
   pool not yet sold in a year has no rows, never zeros.
@@ -256,7 +257,13 @@ The pool flags, each `1` when set, per pool (単勝 複勝 枠連 馬連 ワイ�
 - 返還フラグ (refund): some tickets were refunded, typically a horse scratched after sales opened.
   It writes no row of its own; the pool's paid combinations are still rows.
 - 返還馬番情報 (one `1` per refunded horse number), 返還枠番情報 and 返還同枠情報 (brackets) write
-  no row.
+  refund rows (#443): in each horse-number pool (WIN, PLACE, QUINELLA, QUINELLA_PLACE, FORECAST,
+  TRIO, TIERCE) every combination over the horse numbers 1..登録頭数 holding a refunded horse is a
+  row with `is_refund` true and a null `dividend`, in the paid rows' text (FORECAST and TIERCE
+  every ordered permutation); in BRACKET_QUINELLA every bracket pair holding a 返還枠番 bracket,
+  and b,b for each 返還同枠 bracket. They follow the pool's paid rows and are written whatever the
+  pool's 返還フラグ; a pool flagged 不成立 or 特払 writes none, and a combination that also paid
+  stays its paid row only.
 
 `horsetrack japan jravan dividends [--year YYYY ...]` runs the build and writes
 `reports/jravan-dividends.json` through `write_build_report`: per 開催年 (`by_year`) and in total
