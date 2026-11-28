@@ -1073,6 +1073,13 @@ KINDS = [
     ("japan-speed-top3-c3-timing", "member"),  # #416, the C3 speed member on complete timing
     ("japan-debut-maiden-members-v1", "member"),  # #438, member by member in debuts and maidens
     ("japan-debut-maiden-members-v2", "member"),
+    # #538, E37's lineage member families (netkeiba pedigree): v1, v2, v3 and their trials
+    ("japan-c2-lineage-e37-netkeiba", "member"),
+    ("japan-c2-lineage-e37-netkeiba-trial", "member"),
+    ("japan-c2-lineage-e37-netkeiba-v2", "member"),
+    ("japan-c2-lineage-e37-netkeiba-v2-trial", "member"),
+    ("japan-c2-lineage-e37-netkeiba-v3", "member"),
+    ("japan-c2-lineage-e37-netkeiba-v3-trial", "member"),
     # E25 (#435): the T-2 cross-pool signal in a conditional logit over the final Win price
     ("japan-cross-pool-t2-v1", "model"),
     ("japan-cross-pool-t2-trial", "model"),
@@ -1160,6 +1167,10 @@ def test_every_committed_summary_family_gets_a_justified_kind(reg):
         "japan-speed-top3-c3-timing",
         "japan-debut-maiden-members-v1",
         "japan-debut-maiden-members-v2",
+        "japan-c2-lineage-e37-netkeiba",  # #538's E37 runs
+        "japan-c2-lineage-e37-netkeiba-trial",
+        "japan-c2-lineage-e37-netkeiba-v2",
+        "japan-c2-lineage-e37-netkeiba-v3",
     ):
         assert family in families, f"{family} has no committed summary"
     checked = [

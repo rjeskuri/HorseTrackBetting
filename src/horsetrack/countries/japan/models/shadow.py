@@ -11,6 +11,10 @@ log, and that only through ``ShadowLog.append``; the bet log (#453) is only read
   (``board_odds``) and the claimed EV per yen over the refits (``ev_mean``, ``ev_q05``, ``ev_q95``,
   ``n_refits``). The flat stake priced inside the dividend is not logged: it is betting.yaml's,
   pinned by ``git_sha``, and no key of the log names a stake.
+- ``replay_day`` (#618): a development day's ``DecisionPoint``s decided by #100's
+  ``ShadowDecider`` (C4 behind ``models.meta_adapter.MetaAdapter``) and appended, mode 'replay',
+  to the day's v0 log in one batch; a holdout day is neither decided nor logged, and a key v0
+  already logged is refused, never overwritten.
 - ``read_shadow``: the records of development days through ``ShadowLog.read``; a holdout day gives
   none, its log stays sealed.
 - ``settle_shadow``: each record a paper ticket of 100 yen, settled by #454's ``settle_bets`` (the
@@ -74,10 +78,12 @@ from horsetrack.countries.japan.shadow.log import (
 if TYPE_CHECKING:
     from horsetrack.core.eval.leaderboard import RankedRow
     from horsetrack.countries.japan.models.decision import ShadowDecision
+    from horsetrack.countries.japan.models.nowcast import RaceView
 
 TICKET_YEN = 100  # a paper ticket: dividends are quoted per 100 yen
 ANY = "*"  # pool and combination of a no_board record
 OK = "ok"
+REPLAY = "replay"  # the mode of a day decided after the fact (replay_day)
 MOVED = (WON, LOST, REFUNDED)  # the outcomes whose stake left the day's money
 QUANTILES = (0.05, 0.95)  # the claimed EV's spread over refits, as v0's value_q05 / value_q95
 _MAX_DRAWS_PER_CHUNK = 2_000_000  # replicate-by-cluster draws built at once, as core.eval.bootstrap
@@ -175,7 +181,20 @@ def log_decisions(
     record is built before any is appended, and the log checks the batch whole, so a bad decision,
     a repeated (race_id, pool, combination, tau_min) or a sealed log (ValueError, from the log's
     ``RecordRefused`` and ``LogSealed``) writes nothing."""
-    meta = {
+    meta = _meta(decision_utc, board_capture_utc, mode=mode, models=models, git_sha=git_sha)
+    return log.append([_record(decision, meta) for decision in decisions])
+
+
+def _meta(
+    decision_utc: datetime,
+    board_capture_utc: datetime,
+    *,
+    mode: str,
+    models: Mapping[str, str] | None,
+    git_sha: str,
+) -> dict[str, Any]:
+    """The fields a batch of records shares: its times in UTC, mode, status, fit ids and sha."""
+    return {
         "decision_utc": _utc_text("decision_utc", decision_utc),
         "board_capture_utc": _utc_text("board_capture_utc", board_capture_utc),
         "written_utc": datetime.now(timezone.utc).isoformat(),
@@ -184,7 +203,61 @@ def log_decisions(
         "models": None if models is None else dict(models),
         "git_sha": git_sha,
     }
-    return log.append([_record(decision, meta) for decision in decisions])
+
+
+@dataclass(frozen=True, kw_only=True)
+class DecisionPoint:
+    """One grid point of a day: its ``RaceView``, the aware decision and board-capture times, and
+    the field at sale Place and Wide pay from (None: the Win board's runners)."""
+
+    view: RaceView
+    decision_utc: datetime
+    board_capture_utc: datetime
+    field_at_sale: int | None = None
+
+
+def replay_day(
+    day: date,
+    points: Iterable[DecisionPoint],
+    *,
+    decider: Any,
+    models: Mapping[str, str] | None,
+    git_sha: str,
+) -> int:
+    """Decide every point of ``day`` with ``decider.decide(point.view,
+    field_at_sale=point.field_at_sale)`` (#100's ``ShadowDecider``) and append the decisions, as
+    ``log_decisions``'s records with mode 'replay' and each point's own times, to the day's v0
+    ``ShadowLog`` (``shadow_log_path(day)``); returns the records appended.
+
+    A holdout day (the committed rule, ``is_holdout_day``) is neither decided nor logged: 0. Every
+    point is checked before any is decided (a race not on ``day``, or a time that is not aware, is
+    a ValueError), and the whole day is one ``ShadowLog.append``, so a refused record (a key the
+    log already holds, as when v0 logged the day) or a sealed log writes nothing."""
+    batch = list(points)
+    if is_holdout_day(COUNTRY, day):
+        return 0
+    metas = []
+    for point in batch:
+        if not isinstance(point, DecisionPoint):
+            raise TypeError(f"points must be DecisionPoints, got {type(point).__name__}")
+        race_id = point.view.race_id
+        if _day_of(race_id) != day:
+            raise ValueError(f"{race_id} is not a race of {day.isoformat()}")
+        metas.append(
+            _meta(
+                point.decision_utc,
+                point.board_capture_utc,
+                mode=REPLAY,
+                models=models,
+                git_sha=git_sha,
+            )
+        )
+    records = [
+        _record(decision, meta)
+        for point, meta in zip(batch, metas, strict=True)
+        for decision in decider.decide(point.view, field_at_sale=point.field_at_sale)
+    ]
+    return ShadowLog(shadow_log_path(day), day=day).append(records)
 
 
 def read_shadow(days: Iterable[date]) -> pd.DataFrame:
