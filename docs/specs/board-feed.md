@@ -180,7 +180,9 @@ cache=None) -> dict`
 `p_model` (ticket #506): per race, `{pool: {combination: probability}}` of the board as of `now()`,
 keyed by the odds log's combination texts, so it joins the plain feed's rows (tier 1 and tier 2).
 Display only: it is not in `pools`, whose entries keep exactly their value fields, and it never
-reaches a value, a flag, the shadow log or `verify()`.
+reaches a value or a flag. The feed never writes it to the shadow log; shadow-day (#564) logs the
+same p_model, formed by the same code (`_p_model`, `_starters`) on its own decision board, with
+each shadow record (docs/specs/shadow-log.md, "Shadow-day records").
 
 - WIN: the calibrated Win model on the board's current WIN odds, `q = (1/O_WIN) / sum(1/O_WIN)`
   over the board's runners and `p = models.win.predict(q, board.context())` (not an average over
