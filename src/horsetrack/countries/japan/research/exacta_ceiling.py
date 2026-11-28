@@ -60,6 +60,7 @@ from horsetrack.core.eval.registry import (
     Registry,
     RunRecord,
     _canonical,
+    _record_data,
     _sha256,
     _spec_hash,
     default_registry,
@@ -1176,10 +1177,10 @@ def _descriptive_record(kind, label, rows, meta, sha, specs, seed: int) -> RunRe
 def _append(registry: Registry, records: list[RunRecord]) -> list[str]:
     """Append each record not already in the registry (a rerun of the same commit and data
     reuses its records); the run ids in order."""
-    held = {_sha256(_canonical(asdict(r))) for r in registry.records()}
+    held = {_sha256(_canonical(_record_data(r))) for r in registry.records()}
     ids = []
     for record in records:
-        run_id = _sha256(_canonical(asdict(record)))
+        run_id = _sha256(_canonical(_record_data(record)))
         if run_id not in held:
             registry.append(record)
             held.add(run_id)
