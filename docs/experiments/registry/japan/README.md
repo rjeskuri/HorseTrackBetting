@@ -33,6 +33,7 @@ per family, each holding that family's runs.
 - [japan-c2-rating-final-win](japan-c2-rating-final-win.md)
 - [japan-c4-meta-final-win](japan-c4-meta-final-win.md)
 - [japan-c5-exotic-dividends](japan-c5-exotic-dividends.md)
+- [japan-c5-exotic-dividends-per-ticket](japan-c5-exotic-dividends-per-ticket.md)
 - [japan-calibrated-market-final-win](japan-calibrated-market-final-win.md)
 - [japan-coplacer-place-e15](japan-coplacer-place-e15.md)
 - [japan-cross-pool-t2-trial](japan-cross-pool-t2-trial.md)
