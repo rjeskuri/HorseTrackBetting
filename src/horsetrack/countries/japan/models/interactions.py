@@ -13,7 +13,10 @@ discounted top-k Plackett-Luce likelihood, `models.ability._stages`):
 - 'structured' (cols: horse, distance in metres, surface): the horse's a_h + b_h z + c_h z^2 +
   e_h 1{surface == 'dirt'}, z = (d - mean) / sd over the training rows; each of the four
   coefficients has its own N(0, tau_k^2) prior. The block's tau is the prior sd of its term
-  averaged over the training rows, sqrt(mean_i sum_k tau_k^2 x_ik^2).
+  averaged over the training rows, sqrt(mean_i sum_k tau_k^2 x_ik^2). With `prior_means` (#572)
+  a coefficient's prior is centred on its horse's mean m (the sire line's), N(m_hk, tau_k^2):
+  the fit solves #93's term in delta = theta - m on the fixed offset X . m, and predicts a
+  listed horse never seen in training at m.
 - 'low_rank' (cols: row entity, column entity): rank one, U_r W_c, with W centred over the
   columns seen in training and scaled to unit root mean square, so a row's term is a contrast
   between columns; U_r ~ N(0, tau^2) and tau is the block's tau. A column a row never ran at is
@@ -293,6 +296,8 @@ class _Term:
     surface_col: str = ""
     z_mean: float = 0.0
     z_sd: float = 1.0
+    prior_index: pd.Index | None = None  # the horses with prior means (#572), and their m
+    prior_mu: np.ndarray | None = None  # len(prior_index) x K
     # low rank
     col: str = ""
     col_index: pd.Index | None = None
@@ -320,6 +325,17 @@ class _Term:
         if ccodes is None:
             ccodes = _lookup(self.col_index, frame, (self.col,))
         return np.where(ccodes >= 0, self.W[np.maximum(ccodes, 0)], 0.0)[:, None]
+
+    def prior_u(self, frame: pd.DataFrame, cov: np.ndarray) -> np.ndarray | None:
+        """Each row's X . m, its horse's prior means at its covariates (0 for a horse without
+        any), or None for a term without prior means."""
+        if self.prior_index is None:
+            return None
+        codes = _lookup(self.prior_index, frame, self.key_cols)
+        ok = codes >= 0
+        out = np.zeros(len(frame))
+        out[ok] = np.einsum("ik,ik->i", cov[ok], self.prior_mu[codes[ok]])
+        return out
 
 
 @dataclass
@@ -383,7 +399,13 @@ def _centred_basis(m: int) -> np.ndarray:
 class _Model:
     """The terms, the parameters and the solver of one fit."""
 
-    def __init__(self, frame: pd.DataFrame, base: AbilityModel, blocks: list[InteractionBlock]):
+    def __init__(
+        self,
+        frame: pd.DataFrame,
+        base: AbilityModel,
+        blocks: list[InteractionBlock],
+        prior_means: dict[str, tuple[pd.Index, np.ndarray]] | None = None,
+    ):
         for col in ("race_id", "finish_pos"):
             if col not in frame.columns:
                 raise ValueError(f"frame lacks {col!r}")
@@ -417,6 +439,8 @@ class _Model:
                 term = _low_rank_term(block.name, block, frame)
             if not term.m:
                 raise ValueError(f"block {block.name!r} has no level in the training rows")
+            if prior_means and block.name in prior_means:
+                term.prior_index, term.prior_mu = prior_means[block.name]
             term.local = term.m * term.K > DENSE_MAX
             self._add(term, block.name)
 
@@ -430,11 +454,20 @@ class _Model:
         self.P = offset
         self.theta = np.zeros(self.P)
         self.has_local = any(t.local for t in self.terms)
-        self._pb = _problem(sp.csr_matrix((self.n, self.P + self.has_local)), codes, pos, self.st)
+        self.fixed = self._prior_offset(frame)  # sum of X . m over the prior means, or None
+        self.has_offset = self.has_local or self.fixed is not None
+        self._pb = _problem(sp.csr_matrix((self.n, self.P + self.has_offset)), codes, pos, self.st)
         self._D = self._design(self.X, [(t, t.codes, t.X) for t in self.terms])
         self._at = None  # _evaluate at the current point, while it holds
         self.z = np.full(len(self.groups), math.log(TAU2_START))
         self.counts = {"rows": self.n, "races": int(codes.max()) + 1}
+
+    def _prior_offset(self, frame: pd.DataFrame) -> np.ndarray | None:
+        """The training rows' sum over the terms of X . m (#572's prior means), fixed through the
+        fit: a coefficient theta = m + delta with delta ~ N(0, tau^2) is #93's term in delta on
+        this offset. None when no term has prior means."""
+        parts = [t.prior_u(frame, t.X) for t in self.terms if t.prior_index is not None]
+        return np.sum(parts, axis=0) if parts else None
 
     def label(self, g: int) -> str:
         """A prior group's name: its term's, with the coefficient of a structured block."""
@@ -486,7 +519,8 @@ class _Model:
         return out
 
     def _offset(self) -> np.ndarray:
-        out = np.zeros(self.n)
+        """The rows' u outside the joint design: the prior means' X . m and the local terms."""
+        out = np.zeros(self.n) if self.fixed is None else self.fixed.copy()
         for term in self.terms:
             if term.local:
                 out += self._local_u(term)
@@ -498,7 +532,7 @@ class _Model:
     def _joint(self) -> tuple[object, np.ndarray]:
         """The `_Problem` and pseudo-parameters for `_evaluate`: the joint design and, with local
         terms, their sum as one more column at coefficient 1."""
-        if not self.has_local:
+        if not self.has_offset:
             return dataclasses.replace(self._pb, D=self._D), self.theta
         D = sp.hstack([self._D, sp.csr_matrix(self._offset()[:, None])], format="csr")
         return dataclasses.replace(self._pb, D=D), np.r_[self.theta, 1.0]
@@ -506,7 +540,7 @@ class _Model:
     def _evaluate(self, theta: np.ndarray | None = None):
         pb, star = self._joint()
         if theta is not None:
-            star = np.r_[theta, 1.0] if self.has_local else theta
+            star = np.r_[theta, 1.0] if self.has_offset else theta
         loglik, score, info = _evaluate(star, pb)
         return loglik, score[: self.P], info[: self.P, : self.P]
 
@@ -528,9 +562,9 @@ class _Model:
         jac = [self._w_jacobian(t) for t in terms]
         extra = [c.shape[1] for c in jac]
         parts = [self._D, *jac] + (
-            [sp.csr_matrix(self._offset()[:, None])] if self.has_local else []
+            [sp.csr_matrix(self._offset()[:, None])] if self.has_offset else []
         )
-        star = np.r_[self.theta, np.zeros(sum(extra)), [1.0] if self.has_local else []]
+        star = np.r_[self.theta, np.zeros(sum(extra)), [1.0] if self.has_offset else []]
         loglik, score, info = _evaluate(star, dataclasses.replace(pb, D=sp.hstack(parts, "csr")))
         bases = []
         for t in terms:
@@ -552,7 +586,7 @@ class _Model:
         # cell, so the step is Newton's (quadratic near the MAP); Gauss-Newton's where that is
         # not positive definite
         exact = H.copy()
-        _, gu, _ = self._scores(self._D @ self.theta + (self._offset() if self.has_local else 0.0))
+        _, gu, _ = self._scores(self._D @ self.theta + (self._offset() if self.has_offset else 0.0))
         at = P
         for t, basis in zip(terms, bases, strict=True):
             mc = len(t.col_index)
@@ -572,7 +606,7 @@ class _Model:
         for b in bases:
             d_w.append(b @ step[at : at + b.shape[1]])
             at += b.shape[1]
-        offset = self._offset() if self.has_local else 0.0
+        offset = self._offset() if self.has_offset else 0.0
 
         def objective(theta: np.ndarray, ws: list[np.ndarray]) -> float:
             u = self._D @ theta + offset
@@ -640,7 +674,7 @@ class _Model:
         loglik, score, info = self._at
         step = _solve(info + np.diag(prec), score - prec * self.theta)
         current = -loglik + 0.5 * float(prec @ (self.theta * self.theta))
-        offset = self._offset() if self.has_local else 0.0
+        offset = self._offset() if self.has_offset else 0.0
         for _ in range(HALVINGS):
             trial = self.theta + step
             value = -self._ll(self._D @ trial + offset) + 0.5 * float(prec @ (trial * trial))
@@ -1080,6 +1114,9 @@ class InteractionFit:
             else:
                 cov = term.covariates(frame)
             codes = _lookup(term.index, frame, term.key_cols)
+            prior = term.prior_u(frame, cov)
+            if prior is not None:  # every listed horse, seen in training or not, at m + delta
+                u += prior
             if term.local:
                 ok = codes >= 0
                 u[ok] += np.einsum("ik,ik->i", cov[ok], th[codes[ok]])
@@ -1100,25 +1137,70 @@ class InteractionFit:
         )[OUT_COLUMNS]
 
 
+STRUCTURED_COEFS = ("a", "b", "c", "e")  # a structured block's coefficients, in its X's order
+
+
+def _prior_tables(
+    prior_means: dict[str, pd.DataFrame] | None, blocks: list[InteractionBlock]
+) -> dict[str, tuple[pd.Index, np.ndarray]]:
+    """`prior_means` checked, as (horse index, len x 4 means) per block; a table whose means are
+    all 0 is dropped, so its fit is #93's exactly."""
+    if prior_means is None:
+        return {}
+    if not isinstance(prior_means, dict):
+        raise ValueError(f"prior_means must map block names to tables, got {prior_means!r}")
+    kinds = {b.name: b.kind for b in blocks}
+    out = {}
+    for name, table in prior_means.items():
+        if name not in kinds:
+            raise ValueError(f"prior_means names {name!r}, which is no block of the fit")
+        if kinds[name] != STRUCTURED:
+            raise ValueError(f"prior_means: block {name!r} is {kinds[name]}, not structured")
+        if not isinstance(table, pd.DataFrame):
+            raise ValueError(f"prior_means[{name!r}] must be a DataFrame")
+        extra = [c for c in table.columns if c not in STRUCTURED_COEFS]
+        if extra:
+            raise ValueError(f"prior_means[{name!r}]: {extra} are not among {STRUCTURED_COEFS}")
+        if not table.index.is_unique:
+            raise ValueError(f"prior_means[{name!r}]: its horse ids repeat")
+        mu = np.zeros((len(table), len(STRUCTURED_COEFS)))
+        for k, coef in enumerate(STRUCTURED_COEFS):
+            if coef in table.columns:
+                mu[:, k] = pd.to_numeric(table[coef]).to_numpy(dtype=float)
+        if np.isinf(mu).any():
+            raise ValueError(f"prior_means[{name!r}] has an infinite mean")
+        mu = np.nan_to_num(mu)
+        if np.any(mu != 0):
+            out[name] = (pd.Index(table.index.to_numpy(dtype=object)), mu)
+    return out
+
+
 def fit_with_blocks(
     frame: pd.DataFrame,
     base: AbilityModel,
     blocks: list[InteractionBlock],
     *,
     start: dict | None = None,
+    prior_means: dict[str, pd.DataFrame] | None = None,
 ) -> InteractionFit:
     """`base` (an unfitted AbilityModel: its k, discounts, features and entity columns) with the
     blocks added, fitted on frame's rows only (its training window); see the module docstring.
     `start` (another fit's `warm_start()`, or a dict with only its "prior_sd") starts the solver
     there instead of at 0 and TAU2_START: a walk-forward fit starts from the previous fold's,
     which changes the steps it takes, not the MAP and fixed point it stops at (within MAP_TOL and
-    EB_TOL; a low-rank block's W from the previous fold's, so not from the score's direction)."""
+    EB_TOL; a low-rank block's W from the previous fold's, so not from the score's direction).
+
+    `prior_means` (#572) maps a structured block's name to a table indexed by its horse ids with
+    columns among 'a', 'b', 'c', 'e': the prior mean m of each coefficient, in the block's units,
+    so theta_hk ~ N(m_hk, tau_k^2) (a sire line's distance slope and dirt term). A horse the table
+    lacks, a coefficient without a column, or a missing value has mean 0 (#93's prior); a listed
+    horse unseen in training is predicted at its means. None, or every mean 0, is #93's fit."""
     if not isinstance(base, AbilityModel):
         raise TypeError(f"base must be an AbilityModel, got {type(base).__name__}")
     for block in blocks:
         if not isinstance(block, InteractionBlock):
             raise TypeError(f"blocks must be InteractionBlocks, got {type(block).__name__}")
-    model = _Model(frame, base, list(blocks))
+    model = _Model(frame, base, list(blocks), _prior_tables(prior_means, list(blocks)))
     if start:
         model.warm(start)
     model.empirical_bayes()

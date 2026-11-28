@@ -40,6 +40,17 @@ Contract pinned here (`horsetrack.countries.japan.models.interactions`):
   shorter than `stable_runs` (a one-off, then back) never turns it on. A run's value reads the
   horse's runs up to and including that run, never a later one: a run's own trainer is on its
   card, the next run's is not.
+- The lineage prior on the structured aptitude (#572): `fit_with_blocks(frame, base, blocks, *,
+  prior_means=None)`. `prior_means` maps a structured block's name to a DataFrame indexed by that
+  block's horse ids with columns 'b' and/or 'e': the prior mean of the horse's distance slope b_h
+  and dirt term e_h (its sire line's), so b_h ~ N(m_b[h], tau_b^2) and e_h ~ N(m_e[h], tau_e^2),
+  in the block's own units (z = (d - mean) / sd over the training rows, sd the population sd, as
+  #93 fits it). A horse the table lacks, or a coefficient without a column, has prior mean 0
+  (#93's prior). A horse never seen in training is predicted at its prior means (a debut horse is
+  rated as its sire line), one the table lacks at 0 as before. `prior_means=None` (the default),
+  or every mean 0, is #93's fit. A key that is not a block of the fit, or a block that is not
+  structured, or a column other than the block's coefficients ('a', 'b', 'c', 'e'), raises
+  ValueError.
 
 Not pinned: the CI's method and level; what tau means for a structured or low-rank block
 (only that it is a sane interval); the low-rank rank; the form of z(d); unseen cells; missing ids;
@@ -77,6 +88,7 @@ from interactions_synth import (
     FIELD_HORSES,
     MIX_TRAIN_RACES,
     OPTIMA,
+    SIRE_LINES,
     SPARSE_ROLES,
     SPARSE_VENUES,
     TT_TRAIN_RACES,
@@ -85,6 +97,7 @@ from interactions_synth import (
     alias_frame,
     aptitude_frame,
     east_west_frame,
+    lineage_aptitude_frame,
     mixed_frame,
     sequence_frame,
     trainer_track_frame,
@@ -595,3 +608,177 @@ def test_one_factor_trainer_track_term_learns_east_west():
         for w in ("w1", "w2", "w3", "w4"):
             dd = (at(e, "tokyo") - at(w, "tokyo")) - (at(e, "kyoto") - at(w, "kyoto"))
             assert dd > 0.8, (e, w, dd)
+
+
+# ---------------------------------------------------------------------------------------------
+# #572: the lineage prior on the structured aptitude's (b_h, e_h)
+# ---------------------------------------------------------------------------------------------
+
+LINE_BASE = dict(k=3, discounts=UNIT3, entity_cols=(), features=["x1"])
+
+
+def line_means(horses: pd.DataFrame) -> pd.DataFrame:
+    """Each horse's sire-line (b, e), the planted SIRE_LINES, indexed by horse_id."""
+    line = [SIRE_LINES[s] for s in horses["sire_id"]]
+    return pd.DataFrame(line, index=horses.index, columns=["b", "e"], dtype=float)
+
+
+def aptitudes(fit, train: pd.DataFrame, horse_ids) -> pd.DataFrame:
+    """Each horse's fitted (b, e) read from predict alone, in the block's units: b is half of u
+    at z = +1 less u at z = -1 on turf (the quadratic and the level cancel), e is u on dirt less
+    u on turf at z = 0; z = (d - mean) / sd over train's rows (population sd). One single-runner
+    probe race per horse and point, a week after training."""
+    mean = float(train["distance_m"].mean())
+    sd = float(train["distance_m"].std(ddof=0))
+    points = {"hi": (mean + sd, "turf"), "lo": (mean - sd, "turf"), "dirt": (mean, "dirt")}
+    points["turf"] = (mean, "turf")
+    when = after(train)
+    rows = [
+        (f"probe:{h}:{tag}", when, h, 0.0, d, surface)
+        for h in horse_ids
+        for tag, (d, surface) in points.items()
+    ]
+    probe = pd.DataFrame(
+        rows, columns=["race_id", "race_utc", "horse_id", "x1", "distance_m", "surface"]
+    )
+    u = predict_on(fit, probe)["u"]
+    u = pd.Series(u.to_numpy(dtype=float), index=u.index.get_level_values("race_id"))
+    out = {
+        h: (
+            (u[f"probe:{h}:hi"] - u[f"probe:{h}:lo"]) / 2.0,
+            u[f"probe:{h}:dirt"] - u[f"probe:{h}:turf"],
+        )
+        for h in horse_ids
+    }
+    return pd.DataFrame.from_dict(out, orient="index", columns=["b", "e"])
+
+
+def gap(a: pd.DataFrame, b: pd.DataFrame) -> pd.Series:
+    """The Euclidean distance between two (b, e) tables, per horse (a's index)."""
+    b = b.reindex(a.index)
+    return np.hypot(a["b"] - b["b"], a["e"] - b["e"])
+
+
+@pytest.fixture(scope="module")
+def lineage_data():
+    """interactions_synth.lineage_aptitude_frame: four sire lines with distinct (b, e), each with
+    veterans of about 400 runs (two outliers far from their line), young horses of 2 runs and a
+    debut horse; the structured block fitted on the 1,200 training races without the prior
+    (#93's fit)."""
+    train, test, horses = lineage_aptitude_frame(57200)
+    plain = fit_with_blocks(train, AbilityModel(**LINE_BASE), [APT])
+    return {"train": train, "test": test, "horses": horses, "plain": plain}
+
+
+def lineage_fits(data: dict) -> tuple:
+    """lineage_data plus the fit with the sire lines' means as the block's (b, e) prior, fitted
+    once per module (called in the test body, so a missing prior fails the test, not a fixture's
+    setup)."""
+    train, test, horses, plain = data["train"], data["test"], data["horses"], data["plain"]
+    means = line_means(horses)
+    if "lined" not in data:
+        base = AbilityModel(**LINE_BASE)
+        data["lined"] = fit_with_blocks(train, base, [APT], prior_means={APT.name: means})
+    return train, test, horses, means, plain, data["lined"]
+
+
+def test_lineage_prior_shrinks_aptitude_toward_the_sire_line(lineage_data):
+    """Young horses (2 runs): with the lineage prior every one is rated nearer its own sire
+    line's (b, e) than any other line's, and their mean distance to their line is under 0.35 and
+    under 0.4 times its value without the prior (#93's prior mean 0, where the young horses' terms
+    sit near 0, between the lines). A debut horse (no training run) is rated at its line's (b, e)
+    exactly. Veterans (about 400 runs) stay near their own data: each outlier, planted 1.2 off its
+    line in both terms, is within 0.45 of its own planted (b, e) and under a third as far from it
+    as from its line, and the prior moves the veterans less than a third as much as the young."""
+    train, _, horses, means, plain, lined = lineage_fits(lineage_data)
+    role = horses["role"]
+    young = horses.index[role == "young"]
+    veterans = horses.index[role.isin(["veteran", "outlier"])]
+    outliers = horses.index[role == "outlier"]
+    debut = horses.index[role == "debut"]
+    assert (horses.loc[young, "n_train"] == 2).all()
+    assert (horses.loc[veterans, "n_train"] > 300).all()
+    assert (horses.loc[debut, "n_train"] == 0).all() and len(debut) == len(SIRE_LINES)
+    own = horses[["b", "e"]]
+
+    seen = list(young) + list(veterans)
+    with_prior = aptitudes(lined, train, seen + list(debut))
+    without = aptitudes(plain, train, seen)
+
+    lines = pd.DataFrame(list(SIRE_LINES.values()), index=list(SIRE_LINES), columns=["b", "e"])
+    for h in young:
+        dist = np.hypot(lines["b"] - with_prior.at[h, "b"], lines["e"] - with_prior.at[h, "e"])
+        assert dist.idxmin() == horses.at[h, "sire_id"], (h, with_prior.loc[h].tolist(), dist)
+    near_with = gap(with_prior.loc[young], means).mean()
+    near_without = gap(without.loc[young], means).mean()
+    assert near_with < 0.35, (near_with, near_without)
+    assert near_with < 0.4 * near_without, (near_with, near_without)
+
+    np.testing.assert_allclose(
+        with_prior.loc[debut].to_numpy(), means.loc[debut].to_numpy(), atol=1e-6
+    )
+
+    for h in outliers:
+        to_own = float(gap(with_prior.loc[[h]], own).iloc[0])
+        to_line = float(gap(with_prior.loc[[h]], means).iloc[0])
+        assert to_own < 0.45, (h, with_prior.loc[h].tolist(), own.loc[h].tolist())
+        assert to_own < to_line / 3.0, (h, to_own, to_line)
+    moved = gap(with_prior.loc[seen], without)
+    assert moved[veterans].mean() < moved[young].mean() / 3.0, moved.groupby(role).mean()
+
+
+def test_without_a_lineage_prior_the_aptitude_is_93s(lineage_data):
+    """prior_means=None and a table of zero means give #93's fit: the same u on the held-out
+    races. A horse the table lacks, or a coefficient without a column, keeps prior mean 0: with a
+    table of the lines' b only, a debut horse is rated at its line's b with e = 0, and a horse
+    neither seen nor in the table at (0, 0)."""
+    train, test, horses, means, plain, _ = lineage_fits(lineage_data)
+    base = AbilityModel(**LINE_BASE)
+    want = predict_on(plain, test)["u"].to_numpy(dtype=float)
+    for label, fit in (
+        ("None", fit_with_blocks(train, base, [APT], prior_means=None)),
+        ("zeros", fit_with_blocks(train, base, [APT], prior_means={APT.name: 0.0 * means})),
+    ):
+        got = predict_on(fit, test)["u"].to_numpy(dtype=float)
+        np.testing.assert_allclose(got, want, atol=1e-6, err_msg=label)
+
+    debut = horses.index[horses["role"] == "debut"]
+    b_only = fit_with_blocks(train, base, [APT], prior_means={APT.name: means[["b"]]})
+    got = aptitudes(b_only, train, [*debut, "h:stranger"])
+    np.testing.assert_allclose(got.loc[debut, "b"], means.loc[debut, "b"], atol=1e-6)
+    np.testing.assert_allclose(got.loc[debut, "e"], 0.0, atol=1e-6)
+    np.testing.assert_allclose(got.loc["h:stranger"].to_numpy(), 0.0, atol=1e-9)
+
+
+def test_lineage_prior_improves_held_out_log_loss_of_young_horses(lineage_data):
+    """ΔLL against #93's structured aptitude, synthetically: on the 600 held-out races, each with
+    two young horses among six veterans, the winner log-likelihood with the lineage prior beats
+    the fit without it by more than 0.015 nats per race (the reference gain is about 0.06)."""
+    _, test, _, _, plain, lined = lineage_fits(lineage_data)
+    blind = test.drop(columns=["finish_pos"])
+    p_with = predict_on(lined, blind)
+    check_probabilities(p_with, test["race_id"])
+    p_without = predict_on(plain, blind)
+    won = test["finish_pos"].to_numpy() == 1
+    ll_with = np.log(p_with["p_ability"].to_numpy(dtype=float)[won]).sum()
+    ll_without = np.log(p_without["p_ability"].to_numpy(dtype=float)[won]).sum()
+    per_race = (ll_with - ll_without) / test["race_id"].nunique()
+    assert per_race > 0.015, per_race
+
+
+def test_lineage_prior_means_are_checked(lineage_data):
+    """A prior table for a name that is no block of the fit, for a block that is not structured,
+    or with a column that is no coefficient of the block, raises ValueError."""
+    train, means = lineage_data["train"], line_means(lineage_data["horses"])
+    base = AbilityModel(**LINE_BASE)
+    venue = train.assign(venue=np.where(np.arange(len(train)) % 2, "tokyo", "kyoto"))
+    vc = block("horse_x_track_vc", ("horse_id", "venue"), VC)
+    bad = {
+        "unknown block": ([APT], {"not_a_block": means}),
+        "not structured": ([APT, vc], {vc.name: means}),
+        "unknown column": ([APT], {APT.name: means.rename(columns={"b": "slope"})}),
+    }
+    for label, (blocks, prior) in bad.items():
+        with pytest.raises(ValueError):
+            fit_with_blocks(venue, base, blocks, prior_means=prior)
+            pytest.fail(label)

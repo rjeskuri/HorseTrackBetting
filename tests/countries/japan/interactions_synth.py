@@ -327,3 +327,102 @@ def sequence_frame(sequences: dict[str, str], seed: int) -> tuple[pd.DataFrame, 
     labelled = zip(frame.index, frame["key"], frame["run"], strict=True)
     where = {(key, run): label for label, key, run in labelled}
     return frame.drop(columns=["key", "run"]), where
+
+
+# ---------------------------------------------------------------------------------------------
+# Sire lines under the structured aptitude (#572: the lineage prior on b_h and e_h)
+# ---------------------------------------------------------------------------------------------
+
+# Four sire lines with distinct distance slopes b and dirt terms e, each sign of each in two
+# lines, so both coefficients average 0 over the lines (a common slope or dirt term cancels
+# within a race: only the prior sets its level). The units are the structured block's: b per
+# unit z = (d - mean) / sd over the training rows (population sd), e on the dirt indicator.
+# Per line: LINE_VETERANS horses that run about 400 times in the training races, one of them (in
+# lines s:0 and s:3, the opposites) an outlier LINE_OUTLIER away from its line in both terms;
+# LINE_YOUNG horses of YOUNG_RUNS training runs; and one debut horse that never runs in training.
+# A horse's own (b, e) is its line's plus a deviation (sd LINE_SD, centred over the veterans and
+# over the young horses). Every horse has a level (sd 0.3) and no quadratic term. 1,200 training
+# races of 8 runners, at most one young horse in a race; then LINE_TEST_RACES held-out races,
+# each with two young horses (their later runs) among six veterans. Distance and surface are
+# drawn per race.
+SIRE_LINES = {"s:0": (0.9, 0.7), "s:1": (-0.9, 0.7), "s:2": (0.9, -0.7), "s:3": (-0.9, -0.7)}
+LINE_VETERANS = 6
+LINE_YOUNG = 6
+YOUNG_RUNS = 2
+LINE_SD = 0.2
+LINE_OUTLIER = 1.2
+OUTLIER_LINES = ("s:0", "s:3")
+LINE_TRAIN_RACES = 1200
+LINE_TEST_RACES = 600
+LINE_RUNNERS = 8
+
+
+def lineage_aptitude_frame(seed: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """(train, test, horses). train and test: race_id, race_utc, horse_id, finish_pos, x1,
+    distance_m, surface. horses, one row per horse (index horse_id): sire_id, role ('veteran',
+    'outlier', 'young' or 'debut'), b and e (its planted own terms, in the units above), and
+    n_train (its training runs)."""
+    rng = np.random.default_rng(seed)
+    rows = []  # horse_id, sire_id, role
+    for s, sire in enumerate(SIRE_LINES):
+        for i in range(LINE_VETERANS):
+            outlier = sire in OUTLIER_LINES and i == 0
+            rows.append((f"h:v{s}{i}", sire, "outlier" if outlier else "veteran"))
+        for i in range(LINE_YOUNG):
+            rows.append((f"h:y{s}{i}", sire, "young"))
+        rows.append((f"h:d{s}", sire, "debut"))
+    horses = pd.DataFrame(rows, columns=["horse_id", "sire_id", "role"]).set_index("horse_id")
+    line = np.array([SIRE_LINES[s] for s in horses["sire_id"]], dtype=float)
+    own = line.copy()
+    for role in ("veteran", "young"):
+        at = (horses["role"] == role).to_numpy()
+        dev = rng.normal(0.0, LINE_SD, size=(int(at.sum()), 2))
+        own[at] += dev - dev.mean(axis=0)
+    out = (horses["role"] == "outlier").to_numpy()
+    own[out] -= np.sign(line[out]) * LINE_OUTLIER
+    horses["b"], horses["e"] = own[:, 0], own[:, 1]
+    level = rng.normal(0.0, 0.3, size=len(horses))
+
+    ids = horses.index.to_numpy(dtype=object)
+    veterans = np.flatnonzero(horses["role"].isin(["veteran", "outlier"]).to_numpy())
+    young = np.flatnonzero((horses["role"] == "young").to_numpy())
+    young_slots = rng.permutation(np.repeat(young, YOUNG_RUNS))
+    young_races = rng.choice(LINE_TRAIN_RACES, size=len(young_slots), replace=False)
+    picks = []
+    for r in range(LINE_TRAIN_RACES):
+        hit = np.flatnonzero(young_races == r)
+        first = [young_slots[hit[0]]] if len(hit) else []
+        rest = rng.choice(veterans, LINE_RUNNERS - len(first), replace=False)
+        picks.append(np.r_[first, rest].astype(np.int64))
+    for _ in range(LINE_TEST_RACES):
+        picks.append(
+            np.r_[
+                rng.choice(young, 2, replace=False),
+                rng.choice(veterans, LINE_RUNNERS - 2, replace=False),
+            ].astype(np.int64)
+        )
+    n_races = LINE_TRAIN_RACES + LINE_TEST_RACES
+    horse = np.concatenate(picks)
+    codes = np.repeat(np.arange(n_races), LINE_RUNNERS)
+    distance = rng.choice(DISTANCES, size=n_races)[codes].astype(float)
+    surface = rng.choice(np.array(["turf", "dirt"], dtype=object), size=n_races)[codes]
+    in_train = codes < LINE_TRAIN_RACES
+    z = (distance - distance[in_train].mean()) / distance[in_train].std()
+    dirt = (surface == "dirt").astype(float)
+    x1 = rng.normal(size=len(codes))
+    u = X_COEF * x1 + level[horse] + own[horse, 0] * z + own[horse, 1] * dirt
+    pos = pl_positions(rng, u, codes)
+    frame = pd.DataFrame(
+        {
+            "race_id": labels(codes, prefix="jra:l"),
+            "race_utc": race_times(codes),
+            "horse_id": ids[horse],
+            "finish_pos": pos.astype(np.int64),
+            "x1": x1,
+            "distance_m": distance.astype(np.int64),
+            "surface": surface,
+        }
+    )
+    train, test = frame[in_train], frame[~in_train]
+    horses["n_train"] = train["horse_id"].value_counts().reindex(horses.index, fill_value=0)
+    return train.reset_index(drop=True), test.reset_index(drop=True), horses
