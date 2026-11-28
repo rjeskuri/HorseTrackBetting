@@ -7,7 +7,8 @@ margin names, beaten-lengths sum and pound conversion). `build_runners` reads
 `raw/jravan/stored/RACE/SE/<YYYY>.jvd` one year at a time, keeps one version per runner
 (`records.latest_versions` on the layout's key items) and the JRA venues (01-10), writes
 `processed/jravan/runners.parquet` in the store's column order, types and sort key, then sets
-`finish_time_s` on `races.parquet` (from `races.build_races`) to each race's winner's time. The
+`finish_time_s` on `races.parquet` (from `races.build_races`) to each race's winner's time; both
+files keep one row group per race day (#502). The
 code values each mapping uses are the constants below (the code-table text stays in the licensed
 workbook); a code a mapping lacks becomes null and is counted per code in the report. A blank or
 all-zero margin code is JV-Data's "unset": null and never counted. See docs/specs/jravan.md.
@@ -287,7 +288,7 @@ def fill_winners_time(runners: pd.DataFrame, path: Path) -> int:
     times = [None if t is None or pd.isna(t) else float(t) for t in times]
     at = table.schema.get_field_index("finish_time_s")
     table = table.set_column(at, table.schema.field(at), pa.array(times, type=pa.float64()))
-    records.write_parquet(table.replace_schema_metadata(None), path)
+    records.write_parquet(table.replace_schema_metadata(None), path, by_day=True)
     return sum(t is not None for t in times)
 
 
@@ -343,7 +344,7 @@ def build_runners(
     runners = pa.concat_tables(tables) if tables else schema.empty_table()
     del tables
     runners = runners.take(pc.sort_indices(runners, [(c, "ascending") for c in sort_by]))
-    records.write_parquet(runners, out / "runners.parquet")
+    records.write_parquet(runners, out / "runners.parquet", by_day=True)
     timed = fill_winners_time(
         runners.select(["race_id", "horse_no", "finish_pos", "finish_time_s"]).to_pandas(),
         races_path,

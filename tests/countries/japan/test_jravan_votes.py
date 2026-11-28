@@ -15,8 +15,9 @@ Contract pinned here (the coder follows it), module `horsetrack.countries.japan.
   2004, reads H1 alone) with the layouts `spec.record_spec('H1')` and `spec.record_spec('H6')`,
   streamed `chunk_records` records at a time; keeps one version per race and record type and JRA
   venues only; writes `<out>/pool_votes.parquet` (`out` a folder, default
-  `paths.processed_dir('jravan')`): schema `POOL_VOTES_SCHEMA`, one row group per year, rows
-  sorted by `race_id, pool, combination` (plain string order), byte-stable. The report's name is
+  `paths.processed_dir('jravan')`): schema `POOL_VOTES_SCHEMA`, one row group per race day
+  (ascending, #502), rows sorted by `race_id, pool, combination` (plain string order),
+  byte-stable. The report's name is
   `votes` and `counts['rows']` is the rows written; it holds counts only.
 - `horsetrack japan jravan votes`: the same build, then `records.write_build_report`
   (`<reports dir>/jravan-votes.json`).
@@ -781,12 +782,15 @@ def test_build_writes_pool_votes_year_by_year_in_race_order(data: Path, tmp_path
     assert store_rows(data) == ROWS_2023 + ROWS_2024
     assert report.counts["rows"] == len(ROWS_2023) + len(ROWS_2024)
     assert all(isinstance(v, int) for v in report.counts.values())
-    # One row group per year, in year order.
+    # One row group per race day, in day order (#502): 2023-01-07, 2023-12-28, 2024-06-01 and
+    # 2024-06-02 (two races).
     meta = pq.ParquetFile(path)
-    assert meta.metadata.num_row_groups == 2
-    for group, (year, rows) in enumerate(((2023, ROWS_2023), (2024, ROWS_2024))):
+    rows = ROWS_2023 + ROWS_2024
+    days = sorted({r[0].split(":")[1] for r in rows})
+    assert meta.metadata.num_row_groups == len(days) == 4
+    for group, day in enumerate(days):
         ids = meta.read_row_group(group, columns=["race_id"]).column("race_id").to_pylist()
-        assert ids == [r[0] for r in rows], year
+        assert ids == [r[0] for r in rows if r[0].split(":")[1] == day], day
 
     # One year only, a year with no H6 file.
     votes.build_pool_votes(years=[2023])
@@ -1018,7 +1022,8 @@ def test_two_builds_write_identical_bytes(data: Path) -> None:
 # The real export (local: needs $HORSETRACK_DATA_DIR with the export and the workbook)
 
 REAL_YEAR = 2004  # the first year with H6 (Trifecta from autumn), every H1 pool sold
-LEGS = {"WIN": 1, "PLACE": 1, "BRACKET_QUINELLA": 2, "QUINELLA": 2, "QUINELLA_PLACE": 2,
+REAL_RECORDS = 60  # the first records of each type's year file (a whole year took ~7 min, #502)
+LEGS ={"WIN": 1, "PLACE": 1, "BRACKET_QUINELLA": 2, "QUINELLA": 2, "QUINELLA_PLACE": 2,
         "FORECAST": 2, "TRIO": 3, "TIERCE": 3}  # fmt: skip
 ORDERED = {"FORECAST", "TIERCE"}
 H1_NAMES = ("単勝", "複勝", "枠連", "馬連", "ワイド", "馬単", "3連複")
@@ -1042,11 +1047,19 @@ def _expected_counts(cols: Mapping[str, np.ndarray], jv: str, number: str) -> di
 @pytest.mark.local
 def test_a_real_year_maps(tmp_path: Path) -> None:
     export, workbook = wb.real_export_or_skip()
-    sources = {rt: export / "stored" / "RACE" / rt / f"{REAL_YEAR}.jvd" for rt in ("H1", "H6")}
-    if not all(s.is_file() for s in sources.values()):
+    real = {rt: export / "stored" / "RACE" / rt / f"{REAL_YEAR}.jvd" for rt in ("H1", "H6")}
+    if not all(s.is_file() for s in real.values()):
         pytest.skip(f"no H1 or H6 file for {REAL_YEAR}")
+    raw = tmp_path / "export"
+    sources = {}
+    for rt, source in real.items():
+        with open(source, "rb") as handle:
+            lines = [line for _, line in zip(range(REAL_RECORDS), handle, strict=False)]
+        sources[rt] = raw / "stored" / "RACE" / rt / f"{REAL_YEAR}.jvd"
+        sources[rt].parent.mkdir(parents=True)
+        sources[rt].write_bytes(b"".join(lines))
     out = tmp_path / "out"
-    report = votes.build_pool_votes(years=[REAL_YEAR], raw=export, out=out)
+    report = votes.build_pool_votes(years=[REAL_YEAR], raw=raw, out=out)
     got = pq.read_table(out / FILENAME)
     assert got.schema == votes.POOL_VOTES_SCHEMA
     check_schema(got.schema)
