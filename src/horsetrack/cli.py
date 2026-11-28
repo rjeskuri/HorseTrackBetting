@@ -66,6 +66,7 @@ from horsetrack.countries.japan.studies import interactions
 from horsetrack.countries.japan.studies.ability import ability_study_command
 from horsetrack.countries.japan.studies.competition import competition_study_command
 from horsetrack.countries.japan.studies.debut_members import debut_members_command
+from horsetrack.countries.japan.studies.debut_prior import debut_prior_command
 from horsetrack.countries.japan.studies.late_path_study import late_path_study_command
 from horsetrack.countries.japan.studies.lineage import lineage_study_command
 from horsetrack.countries.japan.studies.nowcast import nowcast_study_command
@@ -96,6 +97,7 @@ japan.command("nowcast-fit")(nowcast_fit_command)
 japan.command("ability-study")(ability_study_command)
 japan.command("competition-study")(competition_study_command)
 japan.command("debut-members")(debut_members_command)
+japan.command("debut-prior")(debut_prior_command)
 japan.command("interaction-study")(interactions.interaction_study_command)
 japan.command("lineage-study")(lineage_study_command)
 japan.command("coverage")(coverage_command)
