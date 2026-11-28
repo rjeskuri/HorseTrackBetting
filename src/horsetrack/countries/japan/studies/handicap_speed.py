@@ -486,7 +486,7 @@ def run_study(
             components={"run": "table build, out-of-fold scoring and the six variants"},
             params={"error": f"{type(exc).__name__}: {exc}", "bootstrap": boot,
                     "max_minutes": max_minutes},
-            metrics=[], status="failed",
+            metrics=(), status="failed",
         )  # fmt: skip
         if failed not in registry.records(FAMILY_ID):
             registry.append(failed)
