@@ -92,6 +92,10 @@ from horsetrack.core.eval.reports import (
 
 KINDS = ("rule", "comparator", "cell", "model", "member", "other")
 SELECTIONS = ("decision_time", "card_only", "look_ahead", "unknown")
+# #713: the rule read on the nowcast's projection of the final board from the board at post - k,
+# placeable at T-k (not look-ahead) and not the plain board at T-k either; exactly these three.
+PREDICTED_FINAL_SELECTIONS = ("predicted_final@T-10", "predicted_final@T-5", "predicted_final@T-2")
+ACCEPTED_SELECTIONS = (*SELECTIONS, *PREDICTED_FINAL_SELECTIONS)
 N_UNITS = ("bets", "races", "days")
 
 _WRITER = "horsetrack.core.eval.leaderboard"
@@ -171,8 +175,8 @@ class LeaderboardRow:
         for name in ("segment", "rule", "status"):
             if not isinstance(getattr(self, name), str):
                 return f"{name} must be a string"
-        if self.selection not in SELECTIONS:
-            return f"selection {self.selection!r} is not one of {SELECTIONS}"
+        if self.selection not in ACCEPTED_SELECTIONS:
+            return f"selection {self.selection!r} is not one of {ACCEPTED_SELECTIONS}"
         if not isinstance(self.sources, tuple) or not all(isinstance(s, str) for s in self.sources):
             return f"sources must be a tuple of source names, got {self.sources!r}"
         if not _is_int(self.variants_searched) or self.variants_searched < 1:
@@ -656,8 +660,8 @@ def _block_problem(block: object) -> str | None:
         return f"pool must be a non-blank string or None, got {block['pool']!r}"
     if not _is_text(block["rule"]):
         return f"rule must be a non-blank string, got {block['rule']!r}"
-    if block["selection"] not in SELECTIONS:
-        return f"selection {block['selection']!r} is not one of {SELECTIONS}"
+    if block["selection"] not in ACCEPTED_SELECTIONS:
+        return f"selection {block['selection']!r} is not one of {ACCEPTED_SELECTIONS}"
     if block["payout_rate"] is not None and not _finite_number(block["payout_rate"]):
         return f"payout_rate must be a finite number or None, got {block['payout_rate']!r}"
     level = block["ci_level"]
