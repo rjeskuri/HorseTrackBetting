@@ -389,7 +389,7 @@ def load_day_races(race_date: date) -> pd.DataFrame:
     runners = read_table(SOURCE, "runners", columns=list(speed_run.RUNNER_COLUMNS))
     runners = runners.loc[runners["race_id"].isin(out["race_id"])]
     if not runners.empty:
-        top3, _ = speed_run._mean_placed_1_3(runners)
+        top3 = speed_run._mean_placed_1_3(runners)
     out["top3_time_s"] = out["race_id"].map(top3).astype(float)
     return out
 
