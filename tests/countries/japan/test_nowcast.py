@@ -2223,6 +2223,53 @@ def test_a_run_with_no_fold_completes_and_says_why_wide_is_not_fitted(run_on):
     assert not NO_FOLD.search(folded["wide"].get("reason") or ""), folded["wide"]
 
 
+@pytest.mark.parametrize("logged_days", [0, 2], ids=["jravan-only", "logged-wide"])
+def test_a_run_with_no_fold_never_overwrites_the_full_studys_reports(run_on, logged_days):
+    """#411 restart (2026-11-28): a zero-fold run (`--end` before D9's first test window) has the
+    full study's family, spec hash and trial flag, so it must not take the full study's report
+    name. The full study runs first (one scored fold over JRAVAN_DAYS; with `logged_days` of our
+    Wide logs at the start of TRAIN_DAYS, under the logged family); then, in the same data and
+    out dirs, a run ending before the first test week. Both of the full study's reports keep their
+    bytes, and the zero-fold run writes its own .md and .json elsewhere, still saying why Wide is
+    not fitted."""
+    jravan = {d: day_rows(d, races=2) for d in JRAVAN_DAYS}
+    logged = {d: wide_rows(d, 1) + wide_rows(d, 2) for d in TRAIN_DAYS[:logged_days]}
+    family = LOGGED_FAMILY if logged_days else JRAVAN_FAMILY
+    data = run_on.store(f"no-fold-name-{logged_days}", jravan=jravan, logged=logged)
+
+    full_dump, _ = run_on.run(data, trial=False)  # the documented study, not a trial
+    full = run_on.result
+    assert full["family_id"] == family
+    assert full_dump["counts"]["folds"] > 0 and sum(scored_by_pool(full_dump).values()) > 0
+    full_md = Path(full["report_path"])
+
+    def digests(files) -> dict:
+        return {p: hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None
+                for p in files}  # fmt: skip
+
+    full_files = digests((full_md, full_md.with_suffix(".json")))
+    assert all(p.stat().st_size for p in full_files)
+
+    early_end = TRAIN_DAYS[5]  # three weeks: under FOLD_SCHEME's min_train, so no test window
+    zero_dump, zero_text = run_on.run(data, end=early_end, trial=False)
+    zero = run_on.result
+    # The collision's preconditions: the same family and spec hash as the full study.
+    assert (zero["family_id"], zero["spec_hash"]) == (family, full["spec_hash"])
+    assert zero_dump["counts"]["folds"] == 0 and zero_dump["folds"] == []
+
+    assert digests(full_files) == full_files, "the zero-fold run overwrote the full study's reports"
+    zero_md = Path(zero["report_path"])
+    zero_files = {zero_md, zero_md.with_suffix(".json")}
+    assert zero_files.isdisjoint(full_files), (zero_md, full_md)
+    assert zero_md.stem != full_md.stem
+    assert all(p.is_file() for p in zero_files)
+    wide = zero_dump["wide"]
+    assert wide["fitted"] is False and wide["reason"], wide
+    assert wide["reason"] in zero_text
+    if logged_days:
+        assert NO_FOLD.search(wide["reason"]), wide["reason"]
+
+
 FINAL_CAPTURE = re.compile(r"final capture", re.IGNORECASE)
 PRE_POST_BOARD = re.compile(r"pre-post board|boards? before the post", re.IGNORECASE)
 

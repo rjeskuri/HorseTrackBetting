@@ -71,7 +71,9 @@ figures by a rule that applied the takeout to the pool rather than the dividend;
 family of a run on JRA-VAN days alone. A run that reads our logged days registers under
 `japan-c1-nowcast-logged-wide-v1` (#411), whose spec (v6's design with our logged days) names
 both sources and the rules above, and writes its reports as
-`nowcast-japan-logged-wide-v1-<spec hash>`, so the JRA-VAN-only reports are never replaced. It
+`nowcast-japan-logged-wide-v1-<spec hash>`, so the JRA-VAN-only reports are never replaced. A
+run with no fold (`--end` before D9's first test window) suffixes its reports `-no-fold`, so it
+never replaces the full study's reports either. It
 is a line of its own, not a successor of #410's `japan-c1-nowcast-final-shares-v3` to `-v6`. A
 `--trial` run is a run too: its records go to the family's `-trial` family with
 `params["trial"] = True`, and it never freezes or alters the family's spec.
@@ -1283,9 +1285,14 @@ def run_study(
         "trial (records marked params.trial, spec not frozen)": trial,
     }
     # A logged run's reports carry their family's name, so they never take a JRA-VAN-only
-    # report's name.
+    # report's name; a run with no fold shares the full study's family and spec, so its reports
+    # are suffixed -no-fold and never replace the full study's.
     version = "-logged-wide-v1" if logged else ""
-    stem = f"nowcast-{COUNTRY}{version}-{spec_hash[:12]}" + ("-trial" if trial else "")
+    stem = (
+        f"nowcast-{COUNTRY}{version}-{spec_hash[:12]}"
+        + ("" if folds else "-no-fold")
+        + ("-trial" if trial else "")
+    )
     diagnostics = {"undetermined": gains_undetermined, "unvalidated": gains_unvalidated}
     report = write_report(
         out_dir / f"{stem}.md",
