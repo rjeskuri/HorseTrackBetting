@@ -442,7 +442,8 @@ BOARD_COLUMNS = [
 BOARD_KEYS = ["race_id", "pool", "combination", "snapshot_utc", "fetched_utc", "post_utc"]
 # the keys a board may lack (view_at reads the ones it has); race_id, pool and combination it must
 BOARD_STAMPS = frozenset({"snapshot_utc", "fetched_utc", "post_utc"})
-BOARD_FEATURES = ["odds"]
+# status_raw: a capture's status, `SCR` for a scratch (the board-at-t rule, board-at-t.md)
+BOARD_FEATURES = ["odds", "status_raw"]
 # The card values that pick the races and the starters. They are race and starter filters read
 # from the store's card (read_store_table), not through feature_view: runners.is_scratched is an
 # approved feature at t (model_inputs.yaml, scratches_at_t), races.status is no feature at all.

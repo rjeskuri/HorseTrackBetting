@@ -9,6 +9,8 @@ test_feature_boundary.py):
   config classifies never reaches `RaceView.board`, while the board at t keeps its prices. Every
   board column is an approved feature of odds_timeseries (`approved_features`) or one of the
   board's identifiers (race_id, pool, combination, snapshot_utc, fetched_utc, post_utc).
+  `status_raw` is such a feature (model_inputs.yaml, scratches_at_t): the board at t carries each
+  combination's latest status, a scratch's `SCR` included (docs/specs/board-at-t.md).
 - `render_report(study, spec, about)` identifies the study's predictors that carry a documented
   approximation (`feature_boundary.approximations`): the starters come from runners.is_scratched
   and the races from races.status, both results-derived card values (docs/specs/as-of.md,
@@ -80,9 +82,12 @@ CAPTURES = [
 AT_T = {("TRIO", "2,9,14"): 21.0, ("WIN", "9"): 3.2, ("WIN", "3"): 7.7}  # RACE's board at T
 
 
-def _board_con(new=None, captures=CAPTURES, *, drop=(), posts=None) -> duckdb.DuckDBPyConnection:
+def _board_con(
+    new=None, captures=CAPTURES, *, drop=(), posts=None, status=None
+) -> duckdb.DuckDBPyConnection:
     """An in-memory odds_timeseries of `captures` (race -> post from `posts`, default POST),
-    without the columns in `drop`."""
+    without the columns in `drop`; each capture's `status_raw` is `status(snapshot, odds)`, or
+    blank without `status`."""
     posts = posts or {}
     frame = pd.DataFrame(
         [
@@ -99,7 +104,7 @@ def _board_con(new=None, captures=CAPTURES, *, drop=(), posts=None) -> duckdb.Du
                 "odds": odds,
                 "odds_hi": NAN,
                 "investment": 1000.0,
-                "status_raw": "",
+                "status_raw": "" if status is None else status(snap, odds),
                 "is_final_capture": final,
                 "dividend": 8900.0,
                 "is_refund": False,
@@ -155,6 +160,45 @@ def test_every_board_column_is_an_approved_feature_or_an_identifier(rules):
     columns = set(view.board.columns)
     assert {"pool", "combination", "odds"} <= columns
     assert columns <= approved | IDENTIFIERS, sorted(columns - approved - IDENTIFIERS)
+
+
+def _status(snap: datetime, odds) -> str:
+    """A capture's status text: `SCR` for a scratch (no price), else the page's JST time text."""
+    if odds is None:
+        return "SCR"
+    local = snap + timedelta(hours=9)
+    return f"{local.hour}時{local.minute:02d}分現在"
+
+
+# RACE's WIN 3, priced at 05:40, is scratched at 05:52; WIN 12 is scratched at 05:57, after T
+SCRATCHES = [
+    (RACE, "WIN", "3", at(5, 52), at(5, 52, 2), None, False),
+    (RACE, "WIN", "12", at(5, 57), at(5, 57, 2), None, False),
+]
+
+
+@pytest.mark.parametrize("t", [at(5, 51), T, at(6, 0)], ids=["05:51", "05:55", "06:00"])
+def test_the_board_at_t_carries_each_captures_status(rules, t):
+    """status_raw is an approved feature at t (model_inputs.yaml, scratches_at_t; the board-at-t
+    scratch rule of docs/specs/board-at-t.md reads it): the board at t keeps it, each (pool,
+    combination) with the status of its latest capture available at t, so a scratch (`SCR`, no
+    price) is on the board from its fetch on; the board's label columns stay off it."""
+    from horsetrack.countries.japan.feature_boundary import approved_features
+
+    assert "status_raw" in approved_features("odds_timeseries", source="jra", rules=rules)
+    captures = [*CAPTURES, *SCRATCHES]
+    con = _board_con(captures=captures, status=_status)
+    try:
+        view = avoidance.view_at(con, RACE, t, rules=rules)
+    finally:
+        con.close()
+    assert "status_raw" in view.board.columns, "the board at t lost status_raw"
+    for column in ODDS_LABELS:
+        assert column not in view.board.columns, f"{column} is on the board at t"
+    assert not view.board.duplicated(["pool", "combination"]).any()
+    got = view.board.set_index(["pool", "combination"])["status_raw"].to_dict()
+    latest = _expected_latest(captures, RACE, t)
+    assert got == {key: _status(row[3], row[5]) for key, row in latest.items()}
 
 
 def test_the_report_names_the_results_derived_predictors():
