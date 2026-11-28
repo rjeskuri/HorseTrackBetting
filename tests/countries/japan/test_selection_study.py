@@ -98,7 +98,18 @@ owner's answers of 2026-11-26 that still hold (benchmark, omega basis, one-sided
     (for 'max_stat': the stage's `"error"` for a rule it tested, `untested[rule_id]` for a rule
     it did not), and hold nothing for a measurement made.
   - The holdout passed in is never opened. A rerun whose frame cannot score a rule the registry
-    holds scored is a ValueError naming it, before any record.
+    holds scored keeps every other rule's measurements (#578): the unscored rule carries its
+    reason, and the family-wide max-statistic stage, which needs every scored variant, carries
+    as its `"error"` the reason it could not run, naming that rule.
+  - No input failure stops another rule, fold or race (#578): a starter without a final price
+    loses its race's benchmark only, and the report names that race in a reason; one fold whose
+    claim cannot be fitted loses that fold only (the fold named in a reason in the rule's
+    log-loss entry and its last record's notes); a race of a segment without a meeting_id loses
+    the bootstrap interval only (`lo`/`hi` not finite, `passed` False, the reason as the entry's
+    `"error"`), the gain and coefficients kept in the report and the record.
+- A declared source must be able to supply the column (#578): a column of a post-race store
+  table (the Win payout's `combination` or `pool`, `core.store.schemas`) declared from `runners`
+  or `races` is refused with `LookAheadSelection`; a card table's own column is trusted.
 - `sources` is validated before anything is scored or written: a bare str or bytes, a collection
   holding anything but non-blank names, or an empty one is refused (TypeError or ValueError). A
   collection naming a licensed source in any spelling keeps the registry's repository-write guard
@@ -148,6 +159,7 @@ from horsetrack.core.eval.reports import LicensedOutputInRepo
 from horsetrack.core.eval.segment_roi import fit_segment_roi
 from horsetrack.core.eval.snooping import stepm
 from horsetrack.core.store.asof import Gate, Via, load_availability
+from horsetrack.countries.japan.models.condlogit import fit_conditional_logit
 from horsetrack.countries.japan.models.v0.calibration import fit_win_calibration
 from horsetrack.countries.japan.studies.selection import (
     FamilyNotFrozen,
@@ -156,6 +168,7 @@ from horsetrack.countries.japan.studies.selection import (
     RuleSpec,
     load_family,
     run_study,
+    spec_hash,
 )
 
 TAKEOUT = 0.2
@@ -2259,14 +2272,20 @@ RERUN_RULES = [
 ]
 
 
-def test_a_rerun_that_cannot_score_a_scored_rule_writes_nothing(
+def test_a_rerun_that_cannot_score_a_scored_rule_keeps_the_other_rules_results(
     tmp_path, monkeypatch, main_runners
 ):
-    """The registry is append-only, so a rule scored once stays in the family. A rerun on a
-    refresh every rule can still be scored on is another run; a rerun on a refresh where
-    `seg2` has no usable value, so P4-seg2-x can no longer be scored, is a ValueError naming that
-    rule, raised before the rerun appends a record (not part-way, after its first records)."""
+    """#578 (PR #345 round 6, selection.py:775), replacing #88's abort. The registry is
+    append-only, so a rule scored once stays in the family. A rerun on a refresh every rule can
+    still be scored on is another run. A rerun on a refresh where `seg2` has no usable value, so
+    P4-seg2-x can no longer be scored, still completes: P4-seg-b keeps the measurements the
+    refresh gave it (log loss, omega, ROI), reported and appended as its latest record; P4-seg2-x
+    carries the reason its claim could not be scored; and the family-wide max-statistic stage,
+    which tests every scored variant of the family, does not run on the rest: it carries the
+    reason, naming P4-seg2-x, finds no rule superior, and leaves no StepM verdict in any record.
+    The family size is unchanged and the holdout is not opened."""
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    kept, lost = (rule[0] for rule in RERUN_RULES)
     k = pd.factorize(main_runners["race_id"])[0] % 3
     data = declare(main_runners.assign(seg2=np.where(k == 0, "X", "Y")), seg2=RACES)
     first = run_frozen(tmp_path / "rerun", "test-88-rerun", RERUN_RULES, data)
@@ -2279,15 +2298,54 @@ def test_a_rerun_that_cannot_score_a_scored_rule_writes_nothing(
     assert set(report.rungs) == {rule[0] for rule in RERUN_RULES}
     grown = registry.records()
     assert len(grown) > len(before)  # a refresh is another run of the family
+    assert finite(report.stages["log_loss"][lost]["delta_ll"])  # premise: scored on the refresh
 
     blank = refresh.assign(seg2=None)
     holdout = TrippedHoldout()
-    with pytest.raises(ValueError) as caught:
-        run_study(spec, blank, registry=registry, holdout=holdout, seed=STUDY_SEED)
-    assert not isinstance(caught.value, LookAheadSelection)
-    assert "P4-seg2-x" in str(caught.value)
-    assert registry.records() == grown, "the refused rerun appended records"
+    try:
+        rerun = run_study(spec, blank, registry=registry, holdout=holdout, seed=STUDY_SEED)
+    except Exception as exc:
+        pytest.fail(f"a rerun that cannot score {lost} stopped the study: {exc!r}")
     assert holdout.calls == []
+    stages = rerun.stages
+    for stage in ("log_loss", "omega", "roi"):
+        assert set(stages[stage]) == {kept, lost}, (stage, sorted(stages[stage]))
+
+    # The rule the refresh can still score: the refresh's measurements, exactly.
+    ll, was = stages["log_loss"][kept], report.stages["log_loss"][kept]
+    assert (ll["delta_ll"], ll["lo"], ll["hi"]) == pytest.approx(
+        (was["delta_ll"], was["lo"], was["hi"]), rel=1e-9
+    ), ll
+    assert omega_numbers(stages["omega"][kept]) == pytest.approx(
+        omega_numbers(report.stages["omega"][kept]), rel=1e-9
+    )
+    assert stages["roi"][kept]["n_bets"] == report.stages["roi"][kept]["n_bets"]
+    assert stages["roi"][kept]["roi"] == pytest.approx(report.stages["roi"][kept]["roi"], rel=1e-12)
+    # The rule it cannot: its reason, no number.
+    assert explained(stages["log_loss"][lost]), stages["log_loss"][lost]
+    assert not finite(stages["log_loss"][lost].get("delta_ll"))
+    # The family-wide test: not run on a subset of the family, and saying why.
+    max_stat = stages["max_stat"]
+    assert explained(max_stat), max_stat
+    assert lost in max_stat["error"], max_stat["error"]
+    assert list(max_stat.get("superior", [])) == [] and list(rerun.survivors) == [], max_stat
+    assert rerun.rungs == dict.fromkeys((kept, lost), "S0")
+
+    # Persisted: each rule's latest record is this rerun's.
+    assert len(registry.records()) > len(grown), "the rerun appended no record"
+    records = {
+        rid: [r for r in registry.records(spec.family_id) if r.variant == rid]
+        for rid in (kept, lost)
+    }
+    last = records[kept][-1]
+    values = {m.metric: m for m in last.metrics if m.fold == "all_folds"}
+    assert values[LOG_LOSS_METRIC].value == pytest.approx(ll["delta_ll"], rel=1e-9), last.metrics
+    assert set(RETURN_METRICS) <= {m.metric for m in last.metrics}, last.metrics
+    assert "stepm_superior" not in {m.metric for m in last.metrics}, last.metrics
+    assert notes_of(last).get("max_stat") == max_stat["error"], notes_of(last)
+    assert notes_of(records[lost][-1]).get("log_loss") == stages["log_loss"][lost]["error"]
+    assert rerun.family_size == registry.family_size(spec.family_id) == len(RERUN_RULES)
+    registry.verify()
 
 
 def test_report_states_p_beats_takeout_per_segment(main_run, omega_run):
@@ -2694,3 +2752,304 @@ def test_the_committed_family_is_the_one_the_owner_approved(tmp_path, monkeypatc
     for rid, value in run.report.p_beats_takeout.items():
         assert math.isfinite(value) and 0.0 <= value <= 1.0, (rid, value)
     assert set(run.report.stages["roi"]) == set(OWNER_RULES)
+
+
+# ---------------------------------------------------------------------------------------------
+# #578: no input failure stops another rule, fold or race (PR #345 round 6, five failure paths)
+# ---------------------------------------------------------------------------------------------
+
+COMMITTED_FAMILY_HASH = "b44ee710203c414517aba6f2d7cc763ebd29c9854029383ad3a2719e999ff802"
+
+
+def strings_in(value) -> list[str]:
+    """Every string in a nested report entry: dict keys and values, list items."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for k, v in value.items() for s in (*strings_in(k), *strings_in(v))]
+    if isinstance(value, (list, tuple, set)):
+        return [s for v in value for s in strings_in(v)]
+    return []
+
+
+def names(value, needle: str) -> bool:
+    """Whether some reason string in `value` names `needle` (a race id, a fold's start)."""
+    return any(needle in s for s in strings_in(value))
+
+
+def scored_folds(data: pd.DataFrame) -> list:
+    """D9's walk-forward folds that score rows of `data`, in order (positions are frame rows)."""
+    folds = walk_forward(
+        data["race_date"].reset_index(drop=True), scheme=load_country_scheme("japan")
+    )
+    return [fold for fold in folds if len(fold.test_idx)]
+
+
+def fold_races(data: pd.DataFrame, mask) -> dict[str, tuple[set, set]]:
+    """For each scoring fold, by its start (isoformat): the races holding a `mask` runner among
+    its training rows, and among its test rows."""
+    frame, inside = data.reset_index(drop=True), np.asarray(mask, dtype=bool)
+    out = {}
+    for fold in scored_folds(frame):
+        train = fold.train_idx[inside[fold.train_idx]]
+        test = fold.test_idx[inside[fold.test_idx]]
+        out[fold.test_start.isoformat()] = (
+            set(frame["race_id"].iloc[train]),
+            set(frame["race_id"].iloc[test]),
+        )
+    return out
+
+
+def assert_as_in(run: Run, baseline: Run, rid: str, *, log_loss: bool = True) -> None:
+    """The rule's omega and ROI (and, with `log_loss`, its log-loss result) are those of the same
+    rule, data aside from the failure, and seed in `baseline`."""
+    stages, was = run.report.stages, baseline.report.stages
+    if log_loss:
+        ll, unforced = stages["log_loss"][rid], was["log_loss"][rid]
+        assert (ll["delta_ll"], ll["lo"], ll["hi"]) == pytest.approx(
+            (unforced["delta_ll"], unforced["lo"], unforced["hi"]), rel=1e-9
+        ), (run.spec.family_id, rid, ll)
+        assert ll["coef"] == pytest.approx(unforced["coef"], rel=1e-9), (rid, ll)
+    assert omega_numbers(stages["omega"][rid]) == pytest.approx(
+        omega_numbers(was["omega"][rid]), rel=1e-9
+    ), (run.spec.family_id, rid)
+    assert stages["roi"][rid]["n_bets"] == was["roi"][rid]["n_bets"], rid
+    assert stages["roi"][rid]["roi"] == pytest.approx(was["roi"][rid]["roi"], rel=1e-12), rid
+
+
+def last_record(run: Run, rid: str) -> RunRecord:
+    return reread(run)[rid][-1]
+
+
+def test_a_starter_without_a_final_price_loses_only_its_race(
+    tmp_path, monkeypatch, main_runners, main_run
+):
+    """#578 path 1 (selection.py:718, high). One losing starter with no final odds, a starter no
+    rule bets, makes its race's calibrated-market benchmark unmeasurable: in a race outside every
+    rule's segment in the last scored fold (never a training row), in the first scored fold (a
+    training row of every later fold), or in a race of segment A itself. The study completes:
+    every rule's log-loss claim is scored (finite gain and bounds; outside the rules' races, in
+    the last fold, exactly the main run's), its omega, expected return and ROI are the main run's
+    (its bets are untouched), each rule's last record carries the gain, and the report names the
+    race whose measurement could not be made in a reason. The holdout is not opened."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    folds = scored_folds(main_runners)
+    taken = set().union(*(set(bets_of(main_runners, rule).index) for rule in MAX_STAT_RULES))
+
+    def unpriced(fold, segment: str) -> tuple[pd.DataFrame, str]:
+        rows = main_runners.iloc[fold.test_idx]
+        rows = rows[(rows["seg"] == segment) & (rows["won"] == 0) & ~rows.index.isin(taken)]
+        row = rows.index[0]
+        out = main_runners.copy()
+        out.loc[row, "odds_final"] = np.nan
+        return out, str(main_runners.loc[row, "race_id"])
+
+    cases = {
+        "outside every segment, last scored fold": (*unpriced(folds[-1], "C"), True),
+        "outside every segment, first scored fold": (*unpriced(folds[0], "C"), False),
+        "in segment A, first scored fold": (*unpriced(folds[0], "A"), False),
+    }
+    for k, (label, (data, race, exact)) in enumerate(cases.items()):
+        # Premise: one starter's final price is missing, and no rule bets it.
+        assert int(data["odds_final"].isna().sum()) == 1, label
+        assert (data["odds_final"].isna() & data["race_id"].eq(race)).any(), label
+        try:
+            run = run_frozen(
+                tmp_path / f"no-price-{k}", f"test-578-no-price-{k}", MAX_STAT_RULES, data
+            )
+        except Exception as exc:
+            pytest.fail(f"{label}: a starter without a final price stopped the study: {exc!r}")
+        report = run.report
+        for rule in MAX_STAT_RULES:
+            rid = rule[0]
+            ll = report.stages["log_loss"][rid]
+            assert all(finite(ll.get(key)) for key in ("delta_ll", "lo", "hi")), (label, rid, ll)
+            assert_as_in(run, main_run, rid, log_loss=exact)
+            metrics = last_metrics(run, rid)
+            assert LOG_LOSS_METRIC in metrics, (label, rid, sorted(metrics))
+        assert names(report.stages, race), f"{label}: no reason names race {race}"
+        assert report.rungs == dict.fromkeys((rule[0] for rule in MAX_STAT_RULES), "S0"), label
+        assert run.holdout.calls == [] and run.log_after == run.log_before, label
+
+
+def test_a_post_race_column_declared_from_a_card_table_is_refused(
+    tmp_path, monkeypatch, main_runners
+):
+    """#578 path 3 (selection.py:317, medium). The declared source must be able to supply the
+    column: a merged runners frame stamped `runners` (or `races`) at the card's opening, before
+    t, carrying the Win payout's `combination` (selected with [null, null], it bets the winners
+    only) or its `pool` (as a segment), is refused with LookAheadSelection before anything is
+    scored or written, though neither name is look-ahead by itself. A card table's own column so
+    declared (runners' `draw`, races' `weight_type`, the synthetic `jockey` and `seg`) is still
+    trusted. The committed family's frozen hash is unchanged by the contract."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    joined = payout_join(main_runners)
+    joined = joined.assign(
+        draw=joined["horse_id"].astype(int),
+        weight_type=np.where(joined["seg"] == "A", "handicap", "other"),
+    )
+    joined = declare(joined, draw=RUNNERS, weight_type=RACES)
+    before_t = card_stamp(joined)
+    assert (before_t < decision_utc(joined)).all()  # premise: stamped before t
+    # Premise: neither payout column is refused by its name, nor any control column.
+    for col in ("combination", "pool", "draw", "weight_type", "jockey", "seg"):
+        assert not is_availability_label(col) and col not in post_gates(), col
+        assert col not in LOOK_AHEAD and not col.startswith("final_"), col
+    select = ("P4-seg-a", "beta", {"seg": "A"}, ["combination"], {"combination": [None, None]})
+    select += ("above",)
+    winners = selected(joined, select)
+    assert winners["won"].all() and realised_roi(winners) > 1.0  # premise: winners only
+    segment = ("P4-winners", "omega", {"pool": "WIN"}, ["odds_t"], {"odds_t": [None, None]})
+    segment += ("above",)
+
+    def stamped(**sources: str) -> pd.DataFrame:
+        out = joined.copy()
+        for col, source in sources.items():
+            out[col + SOURCE] = source
+            out[col + AVAILABLE] = before_t
+        return out
+
+    refused = {
+        "combination from runners": (select, stamped(combination=RUNNERS)),
+        "combination from races": (select, stamped(combination=RACES)),
+        "a merged runners frame, every payout column from runners": (
+            select,
+            stamped(combination=RUNNERS, pool=RUNNERS),
+        ),
+        "pool from runners, as a segment": (segment, stamped(pool=RUNNERS)),
+        "pool from races, as a segment": (segment, stamped(pool=RACES)),
+    }
+    accepted = {
+        "the real rule on the merged frame": (MAIN_RULES[0], joined),
+        "runners' draw from runners": (
+            ("P4-seg-a-draw", "beta", {"seg": "A"}, ["draw"], {"draw": [1, 4]}, "above"),
+            joined,
+        ),
+        "races' weight_type from races": (
+            ("P3-handicap", "beta", {"weight_type": "handicap"}, ["odds_t"], LONGSHOTS, "below"),
+            joined,
+        ),
+        "jockey from runners": (OMEGA_RULES[1], joined),
+    }
+    outcomes = {
+        label: outcome_before_scoring(tmp_path, f"source-{k}", [rule], data)
+        for k, (label, (rule, data)) in enumerate({**refused, **accepted}.items())
+    }
+    want = {**dict.fromkeys(refused, "look-ahead"), **dict.fromkeys(accepted, "scored")}
+    assert outcomes == want, outcomes
+    assert spec_hash(load_family("japan")) == COMMITTED_FAMILY_HASH
+
+
+def test_one_unfit_fold_leaves_the_rules_other_folds_scored(
+    tmp_path, monkeypatch, main_runners, main_run
+):
+    """#578 path 4 (selection.py:714, medium). A fold whose claim cannot be fitted loses that fold
+    only, and the report and the rule's last record name it in a reason. (a) Segment E first
+    runs in 2022-Q1, so that fold has E test races and no E training race; every later fold is
+    fitted, the rule is scored on their races (and tested by StepM), and A's claim beside it is
+    the main run's. (b) The conditional logit fails in segment A's 2022-Q3 fold only (forced):
+    A keeps every other fold's coefficient exactly as in the main run, its gain is scored on the
+    other folds' races, and B is the main run's."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    a_rule, b_rule = MAX_STAT_RULES
+    a_id = a_rule[0]
+
+    # (a) A segment whose first scored fold has no training race.
+    start = "2022-01-01"
+    late = main_runners.copy()
+    late.loc[(late["seg"] == "C") & (late["race_date"] >= pd.Timestamp(start)), "seg"] = "E"
+    e_rule = ("P6-seg-e", "beta", {"seg": "E"}, ["odds_t"], {"odds_t": [None, 3.0]}, "above")
+    races_e = fold_races(late, late["seg"] == "E")
+    labels = list(races_e)
+    assert start in races_e, labels  # premise: a fold starts there
+    assert races_e[start][1] and not races_e[start][0], races_e[start]
+    later = labels[labels.index(start) + 1 :]
+    assert all(not races_e[label][1] for label in labels[: labels.index(start)])
+    assert all(races_e[label][0] for label in later) and any(races_e[label][1] for label in later)
+    run = run_frozen(tmp_path / "unfit-first", "test-578-unfit-first", [a_rule, e_rule], late)
+    ll = run.report.stages["log_loss"][e_rule[0]]
+    assert all(finite(ll.get(key)) for key in ("delta_ll", "lo", "hi")), ll
+    fitted = set(ll.get("coef_by_fold", {}))
+    assert fitted and start not in fitted and fitted <= set(later), sorted(fitted)
+    assert ll["n_races"] == sum(len(races_e[label][1]) for label in fitted), ll
+    assert names(ll, start), f"no reason in the log-loss entry names the {start} fold: {ll}"
+    assert names(notes_of(last_record(run, e_rule[0])), start), last_record(run, e_rule[0]).notes
+    if not explained(run.report.stages["max_stat"]):
+        assert e_rule[0] in run.report.stages["max_stat"]["tested"]
+    assert_as_in(run, main_run, a_id)
+
+    # (b) One fold in the middle of a scored claim fails to fit.
+    target = "2022-07-01"
+    races_a = fold_races(main_runners, main_runners["seg"] == "A")
+    date_of = main_runners.groupby("race_id")["race_date"].first()
+    a_races = set(main_runners.loc[main_runners["seg"] == "A", "race_id"])
+    last_trained = {label: date_of[list(tr)].max() for label, (tr, te) in races_a.items() if tr}
+    assert target in races_a and races_a[target][1], target  # premise: A races are scored there
+    assert [lb for lb, day in last_trained.items() if day == last_trained[target]] == [target]
+    unforced = main_run.report.stages["log_loss"][a_id]
+    assert target in unforced["coef_by_fold"]  # premise: the main run fitted that fold
+    assert unforced["n_races"] == sum(len(te) for _, te in races_a.values())
+
+    def unfit_in_target(X, race_ids, won, *args, **kwargs):
+        ids = set(np.asarray(race_ids).tolist())
+        if ids <= a_races and date_of[list(ids)].max() == last_trained[target]:
+            raise RuntimeError("the conditional logit did not converge (forced by the test)")
+        return fit_conditional_logit(X, race_ids, won, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        _replace_everywhere(patch, fit_conditional_logit, unfit_in_target)
+        run = run_frozen(
+            tmp_path / "unfit-middle", "test-578-unfit-middle", MAX_STAT_RULES, main_runners
+        )
+    ll = run.report.stages["log_loss"][a_id]
+    assert all(finite(ll.get(key)) for key in ("delta_ll", "lo", "hi")), ll
+    kept = {label: c for label, c in unforced["coef_by_fold"].items() if label != target}
+    assert set(ll.get("coef_by_fold", {})) == set(kept), sorted(ll.get("coef_by_fold", {}))
+    assert ll["coef_by_fold"] == pytest.approx(kept, rel=1e-9)
+    assert ll["n_races"] == unforced["n_races"] - len(races_a[target][1]), ll
+    assert names(ll, target), f"no reason in the log-loss entry names the {target} fold: {ll}"
+    assert names(notes_of(last_record(run, a_id)), target), last_record(run, a_id).notes
+    assert LOG_LOSS_METRIC in last_metrics(run, a_id)
+    assert_as_in(run, main_run, a_id, log_loss=False)
+    assert_as_in(run, main_run, b_rule[0])
+    assert run.holdout.calls == []
+
+
+def test_a_race_without_a_meeting_keeps_the_gain_already_computed(
+    tmp_path, monkeypatch, main_runners, main_run
+):
+    """#578 path 5 (selection.py:738, medium). A scored race of segment A without a meeting_id
+    leaves A's clustered bootstrap interval uncomputable, nothing else: A keeps the main run's
+    gain, pooled and per-fold coefficients and direction, its bounds are not finite, `passed` is
+    False (survival cannot be established) and the entry carries the reason as its "error"; its
+    last record keeps the gain as a metric and that reason as its 'log_loss' note. A's omega and
+    ROI and B's whole result are the main run's."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path))
+    a_rule, b_rule = MAX_STAT_RULES
+    a_id = a_rule[0]
+    in_a = scored(main_runners)
+    race = str(in_a.loc[in_a["seg"] == "A", "race_id"].iloc[0])
+    data = main_runners.copy()
+    data.loc[data["race_id"] == race, "meeting_id"] = None
+    # Premise: a scored race of A, only its meeting_id taken away.
+    assert data["meeting_id"].isna().sum() == (main_runners["race_id"] == race).sum() > 0
+    try:
+        run = run_frozen(tmp_path / "meetingless", "test-578-meetingless", MAX_STAT_RULES, data)
+    except Exception as exc:
+        pytest.fail(f"a race without a meeting_id stopped the study: {exc!r}")
+    ll, unforced = run.report.stages["log_loss"][a_id], main_run.report.stages["log_loss"][a_id]
+    assert finite(ll.get("delta_ll")), ll
+    assert ll["delta_ll"] == pytest.approx(unforced["delta_ll"], rel=1e-9), ll
+    assert ll.get("coef") == pytest.approx(unforced["coef"], rel=1e-9), ll
+    assert ll.get("coef_by_fold") == pytest.approx(unforced["coef_by_fold"], rel=1e-9), ll
+    assert ll.get("points_the_rule_way") == unforced["points_the_rule_way"], ll
+    assert not finite(ll.get("lo")) and not finite(ll.get("hi")), ll
+    assert ll["passed"] is False and a_id not in run.report.survivors, ll
+    assert explained(ll), ll
+    last = last_record(run, a_id)
+    gains = [m for m in last.metrics if m.metric == LOG_LOSS_METRIC and m.fold == "all_folds"]
+    assert [m.value for m in gains] == pytest.approx([unforced["delta_ll"]], rel=1e-9), gains
+    assert notes_of(last).get("log_loss") == ll["error"], notes_of(last)
+    assert_as_in(run, main_run, a_id, log_loss=False)
+    assert_as_in(run, main_run, b_rule[0])
+    assert run.holdout.calls == []
