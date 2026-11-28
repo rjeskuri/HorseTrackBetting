@@ -31,6 +31,11 @@ menu is `menu_before` (the race date's meetings not on it yet: the day-before sa
 open), and from `block_from` on every request is refused with `status` (403: the breaker opens).
 Every request's fake time is kept in `at`, in the order of `seen`.
 
+Race cards (ticket #426): each meeting's 出馬表 race list links one card page (出馬表, JRADB
+pw01dde) per race, served under a checksum of its own; `make_card` builds its field from the
+race's runners (`card_spec`, `card_page`, `card_link`), and `scratched` prints 取消 / 除外 in place
+of a runner's number, so a test can serve a card changing over time.
+
 Every value is invented. No real page, name or scraped value is copied here.
 """
 
@@ -248,6 +253,53 @@ class Win5Day:
         return [f"jra:{day.isoformat()}:{v}:{n:02d}" for v, n in self.legs]
 
 
+# ---------------------------------------------------------------- race cards (#426)
+
+
+def card_horse_id(race: Race, horse_no: int) -> str:
+    """The 10-character id the card links runner `horse_no` of `race` under (invented)."""
+    return f"20{list(VENUES).index(race.venue):02d}{race.day:%m}{race.number:02d}{horse_no:02d}"
+
+
+def make_card(race: Race, meeting: str, scratched: Mapping[int, str] | None = None) -> pages.Card:
+    """The race card of `race`: one runner per horse of its Win board, numbered as the board,
+    brackets as JRA allots them; `scratched[h]` (取消 / 除外) printed in place of runner h's
+    number. Names, codes and the race's conditions are invented."""
+    runners = sorted(race.win)
+    brackets = _brackets(len(runners))
+    k = _seed(race)
+    field = tuple(
+        pages.CardRunner(
+            number=h,
+            bracket=brackets[h],
+            horse_id=card_horse_id(race, h),
+            name=f"シケンバ{race.number}ノ{h}",
+            sex="牡セ牝"[(h + k) % 3],
+            age=3 + (h + k) % 4,
+            carried_kg=54.0 + (h + k) % 5,
+            jockey_code=f"{(h * 37 + k * 11) % 100000:05d}",
+            jockey=f"騎手 {h}",
+            trainer_code=f"{(h * 53 + k * 7 + 1) % 100000:05d}",
+            trainer=f"調教 {h}",
+            scratched=(scratched or {}).get(h),
+        )
+        for h in runners
+    )
+    return pages.Card(
+        day=race.day,
+        meeting=meeting,
+        race_no=race.number,
+        race_name=f"試験特別{race.number}",
+        category="3歳以上",
+        race_class="1勝クラス",
+        weight_rule="定量",
+        distance_m=1200 + 200 * (race.number % 5),
+        detail="（ダート・右）",
+        post=race.post_text,
+        runners=field,
+    )
+
+
 # ---------------------------------------------------------------- the week
 
 
@@ -285,6 +337,7 @@ class World:
         self._results_lists: dict[tuple[date, str], Link] = {}
         self._result_cnames: dict[tuple[date, str], dict[int, str]] = {}
         self._odds: dict[tuple[date, str, int, str], Link] = {}
+        self._cards: dict[tuple[date, str, int], Link] = {}
         self._meetings: dict[tuple[date, str], Meeting] = {}
         card_menu: dict[date, list[tuple[str, str]]] = {}
         odds_menu: dict[date, list[tuple[str, str]]] = {}
@@ -354,7 +407,13 @@ class World:
                 **extra,
             }
         times = {n: make_race(day, m.venue, n).post_text for n in range(1, m.races + 1)}
-        self.pages[card] = pages.card_race_list(day, m.name, times)
+        cards = {}
+        for n in range(1, m.races + 1):  # each race's card page (#426), its own checksum
+            link = (CARD_PATH, _cname(f"pw01dde10{mid}{n:02d}{ymd}"))
+            self._cards[(day, m.venue, n)] = link
+            cards[n] = link[1]
+            self.pages[link] = pages.card(make_card(make_race(day, m.venue, n), m.name))
+        self.pages[card] = pages.card_race_list(day, m.name, times, cards)
         self.pages[odds] = pages.odds_race_list(day, m.name, buttons, times)
         return card, odds
 
@@ -400,6 +459,21 @@ class World:
 
     def results_list(self, day: date, venue: str) -> Link:
         return self._results_lists[(day, venue)]
+
+    def card_link(self, day: date, venue: str, number: int) -> Link:
+        """Where race `number`'s card page (出馬表, #426) is served."""
+        return self._cards[(day, venue, number)]
+
+    def card_spec(
+        self, day: date, venue: str, number: int, scratched: Mapping[int, str] | None = None
+    ) -> pages.Card:
+        return make_card(self.race(day, venue, number), self.meeting(day, venue).name, scratched)
+
+    def card_page(
+        self, day: date, venue: str, number: int, scratched: Mapping[int, str] | None = None
+    ) -> bytes:
+        """Race `number`'s card page, with `scratched` runners (取消 / 除外) when given."""
+        return pages.card(self.card_spec(day, venue, number, scratched))
 
     def odds_link(self, day: date, venue: str, number: int, kind: str) -> Link:
         return self._odds[(day, venue, number, kind)]

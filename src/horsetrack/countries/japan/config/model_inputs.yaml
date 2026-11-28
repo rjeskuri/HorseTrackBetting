@@ -181,9 +181,10 @@ inputs:
       - {source: jravan, table: horse_runs, column: placing_raw}
     tickets: [403, 377, 404]
     note: >-
-      A horse's earlier runs, read from runners (#128). Both stores hold JRA races only;
-      `horse_runs` (every run of a horse) is built from the jravan races and runners (#403)
-      and not for the jra store, and the NAR and overseas runs are left out (#377).
+      A horse's earlier runs, read from runners (#128). Both stores' runners hold JRA races
+      only; `horse_runs` (every run of a horse) is built from the jravan races and runners
+      (#403) and not for the jra store, and includes the NAR and overseas runs under their own
+      jurisdiction, win_odds null (#377).
   margins:
     layers: [C2]
     role: feature_at_t
@@ -310,11 +311,12 @@ inputs:
     layers: [C2]
     role: feature_at_t
     supplies:
-      - {source: jravan, table: records/SNPN/CK, column: _record}
+      - {source: jravan, table: career_counts, column: first}
     tickets: [407]
     note: >-
       JV-Data CK (each runner's placings so far, by surface, distance, going and venue, and its
-      jockey's and trainer's), dumped but not mapped into a table.
+      jockey's and trainer's), mapped into the long jravan table (#407); `first` stands for its
+      six placing-count columns.
 
   # ---------------------------------------------------------------------------------------------
   # C3: speed and par
