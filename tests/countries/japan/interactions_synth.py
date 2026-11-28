@@ -393,3 +393,79 @@ def sequence_frame(sequences: dict[str, str], seed: int) -> tuple[pd.DataFrame, 
     labelled = zip(frame.index, frame["key"], frame["run"], strict=True)
     where = {(key, run): label for label, key, run in labelled}
     return frame.drop(columns=["key", "run"]), where
+
+
+# ---------------------------------------------------------------------------------------------
+# The horse_aptitude member's shape: two horse-level blocks over dense jockey and trainer
+# entities, horses that keep their trainer, east/west stabling, #570
+# ---------------------------------------------------------------------------------------------
+
+HA_HORSES = 60
+HA_TRAINERS = 6
+HA_JOCKEYS = 10
+HA_RACES = 1000
+HA_CROSSOVER = 0.25  # the weight of a horse's off-region runs against its home-region runs
+HA_TRAINER_KEPT = 0.9  # a horse's runs for its home trainer (horse % 6)
+
+
+def horse_aptitude_frame(seed: int, races: int = HA_RACES) -> pd.DataFrame:
+    """race_id, race_utc, horse_id, jockey_id, trainer_id, finish_pos, x1, venue, distance_m,
+    surface: `races` races of 8 of 60 horses, each at one of 4 venues (tokyo and nakayama east,
+    kyoto and hanshin west). A horse is stabled east or west (half each) and its trainer, one of
+    6 (3 east, 3 west), is its home trainer (horse % 6) in 90% of its runs; a horse is drawn for
+    a race with weight 1 in its own region's venues and 0.25 in the other region's (a 20 to 30%
+    crossover). Planted: x1, a jockey and a trainer main effect, a horse level (sd 0.3, the
+    structured block's a_h), a per-horse distance slope (sd 0.3) and a per-horse east/west
+    effect (sd 0.2, rank one). The two horse-level blocks of the real member then confound the
+    trainer entity (the trainer is nearly the horse's stable) and each other (both carry the
+    horse's level)."""
+    rng = np.random.default_rng(seed)
+    runners = 8
+    codes = np.repeat(np.arange(races), runners)
+    venue_idx = rng.integers(0, len(VENUES), size=races)
+    east_venue = np.array([VENUE_SIGN[v] > 0 for v in VENUES])[venue_idx]
+    stable_east = (np.arange(HA_HORSES) % HA_TRAINERS) < HA_TRAINERS // 2
+    horse = np.empty(races * runners, dtype=np.int64)
+    for r in range(races):
+        weight = np.where(stable_east == east_venue[r], 1.0, HA_CROSSOVER)
+        horse[r * runners : (r + 1) * runners] = rng.choice(
+            HA_HORSES, runners, replace=False, p=weight / weight.sum()
+        )
+    home = horse % HA_TRAINERS
+    kept = rng.random(len(horse)) < HA_TRAINER_KEPT
+    trainer = np.where(kept, home, rng.integers(0, HA_TRAINERS, size=len(horse)))
+    jockey = rng.integers(0, HA_JOCKEYS, size=len(horse))
+    venue = venue_idx[codes]
+    distance = rng.choice(DISTANCES, size=races)[codes]
+    surface = rng.choice(np.array(["turf", "dirt"], dtype=object), size=races)[codes]
+    sign = np.array([VENUE_SIGN[v] for v in VENUES], dtype=float)[venue]
+    level = rng.normal(0.0, 0.3, size=HA_HORSES)
+    slope = rng.normal(0.0, 0.3, size=HA_HORSES)
+    ew = rng.normal(0.0, 0.2, size=HA_HORSES)
+    t_main = centred(rng.normal(0.0, 0.3, size=HA_TRAINERS))
+    j_main = centred(rng.normal(0.0, 0.2, size=HA_JOCKEYS))
+    x1 = rng.normal(size=len(codes))
+    z = (distance - 2000.0) / 700.0
+    u = (
+        X_COEF * x1
+        + t_main[trainer]
+        + j_main[jockey]
+        + level[horse]
+        + slope[horse] * z
+        + ew[horse] * sign
+    )
+    pos = pl_positions(rng, u, codes)
+    return pd.DataFrame(
+        {
+            "race_id": labels(codes, prefix="jra:k"),
+            "race_utc": race_times(codes),
+            "horse_id": np.array([f"h:{i:02d}" for i in horse], dtype=object),
+            "jockey_id": np.array([f"j:{i:02d}" for i in jockey], dtype=object),
+            "trainer_id": np.array([f"t:{i}" for i in trainer], dtype=object),
+            "finish_pos": pos.astype(np.int64),
+            "x1": x1,
+            "venue": np.array(VENUES, dtype=object)[venue],
+            "distance_m": distance.astype(np.int64),
+            "surface": surface,
+        }
+    )

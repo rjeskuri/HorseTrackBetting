@@ -87,6 +87,7 @@ from interactions_synth import (
     aptitude_frame,
     east_west_frame,
     few_run_cells_frame,
+    horse_aptitude_frame,
     horse_jockey_frame,
     mixed_frame,
     sequence_frame,
@@ -794,3 +795,82 @@ def test_weak_variance_converges_within_eb_max(monkeypatch):
                         start_sd,
                     )
     assert crawled >= 4, crawled
+
+
+# ---------------------------------------------------------------------------------------------
+# #570 review: two local terms on the same row entity (the horse_aptitude member's shape)
+# ---------------------------------------------------------------------------------------------
+
+HA_SEEDS = range(8)
+HA_BASE = dict(k=3, discounts=UNIT3, entity_cols=("jockey_id", "trainer_id"), features=["x1"])
+HA_FORCED_DENSE_MAX = 50  # below the 240 (structured: 4 x 60 horses) and 60 (low rank) levels
+HA_TRAINER = "entity:trainer_id"
+TRAINER_SD_TOL = 0.15  # the trainer entity, which the horses' stable confounds: see the test
+SD_ABS_TOL = 0.005  # an sd this small moves nothing: the planted effects are 0.2 to 0.3
+
+
+def test_two_local_horse_terms_match_the_dense_fit(monkeypatch):
+    """The horse_aptitude member's shape (studies.interactions.MEMBERS): jockey and trainer as
+    dense base entities, the structured distance/surface block and the low-rank horse x track
+    block both on the horse. 60 horses in 1,000 races, each keeping its home trainer in 90% of
+    its runs, stabled east or west with a 25% weight on the other region's venues (a 20 to 30%
+    crossover), a planted horse level, distance slope and east/west effect. DENSE_MAX is forced
+    to 50 so that both horse-level blocks are local (asserted; the jockey and trainer entities
+    and the dense fit's every term are not). Two local terms on one entity share the horse's
+    direction in the dense block: a posterior that subtracts each one's coupling to that block
+    separately takes the shared direction away twice, its Schur complement goes indefinite, and
+    the empirical-Bayes loop does not converge (RuntimeError after EB_MAX updates: 6 of the first
+    12 seeds on the first commit of the coupling, none in the dense fit). For each of 8 seeds
+    (3 of which, 1, 4 and 6, fail there) the local fit converges within EB_MAX updates, and its
+    prior sds
+    match the dense fit's: within SD_TOL (5%) of the dense value or 0.005 where that is the
+    larger, for every group but the trainer entity, whose sd the stable confounds with the
+    horses' levels and which the block-diagonal approximation (no within-race coupling between
+    runners, as in the local steps) puts 4 to 10% low in every seed (measured against a posterior
+    that couples the levels of the two terms per horse, which is the exact one up to that
+    approximation); it is within 15%. The two fits' utilities agree within 0.05 (measured
+    0.014 to 0.022)."""
+    for seed in HA_SEEDS:
+        frame = horse_aptitude_frame(seed)
+        home = frame["horse_id"].str[2:].astype(int) % 6
+        assert (frame["trainer_id"].str[2:].astype(int) == home).mean() > 0.85
+        dense = fit_with_blocks(frame, AbilityModel(**HA_BASE), [APT, HV])
+        assert not dense._model.has_local
+
+        record = []
+        original = interactions._Model._posterior
+
+        def recording(self, z, *, trace, original=original, record=record):
+            out = original(self, z, trace=trace)
+            record.append(trace)
+            return out
+
+        with monkeypatch.context() as patch:
+            patch.setattr(interactions, "DENSE_MAX", HA_FORCED_DENSE_MAX)
+            patch.setattr(interactions._Model, "_posterior", recording)
+            local = fit_with_blocks(frame, AbilityModel(**HA_BASE), [APT, HV])  # no RuntimeError
+        is_local = {t.label: t.local for t in local._model.terms}
+        assert is_local == {
+            "entity:jockey_id": False,
+            HA_TRAINER: False,
+            APT.name: True,
+            HV.name: True,
+        }, (seed, is_local)
+        assert 2 <= sum(record) <= EB_MAX, (seed, sum(record))
+
+        assert set(dense.prior_sd_) == set(local.prior_sd_)
+        for name, sd_dense in dense.prior_sd_.items():
+            sd_local = local.prior_sd_[name]
+            assert math.isfinite(sd_local) and sd_local >= FLOOR_SD * (1 - 1e-9), (seed, name)
+            if name == HA_TRAINER:
+                assert abs(sd_local - sd_dense) < TRAINER_SD_TOL * sd_dense, (
+                    seed,
+                    sd_local,
+                    sd_dense,
+                )
+            else:
+                tol = max(SD_TOL * sd_dense, SD_ABS_TOL)
+                assert abs(sd_local - sd_dense) < tol, (seed, name, sd_local, sd_dense)
+        u_dense = predict_on(dense, frame)["u"].to_numpy(dtype=float)
+        u_local = predict_on(local, frame)["u"].to_numpy(dtype=float)
+        assert np.abs(u_local - u_dense).max() < 0.05, seed
