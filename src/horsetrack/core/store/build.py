@@ -3,7 +3,8 @@ contract: docs/specs/store.md, "Build").
 
     manifest (read-only) -> pages to parse (new sha256 or parser version) -> parse cache
     parse cache -> one frame per table -> keys denormalised, runners enriched from horse_runs
-    -> processed_dir(source)/<table>.parquet (atomic) + _build.json + reports_dir()/store-build-*.md
+    -> processed_dir(source)/<table>.parquet (atomic; the tables that lead with their day a row
+       group per run of one race day, #510) + _build.json + reports_dir()/store-build-*.md
 
 `page_types` and `limit` only restrict what is PARSED in this run; the tables are always assembled
 from every cached page that still matches the manifest, so a partial run never drops rows an
@@ -31,6 +32,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -627,8 +629,30 @@ def _replace_atomically(tmp: Path, path: Path) -> None:
         raise
 
 
+def _by_day(table: str) -> bool:
+    """A dated table whose declared sort leads with its day (race_id's second part is the day):
+    `meetings`, `races`, `runners`, `win_sales`. `horse_runs` (horse_id first, so its day changes
+    on nearly every row) and the tables without a race_date keep the writer's default row groups
+    (#678)."""
+    spec = schemas.TABLES[table]
+    return "race_date" in spec.columns and spec.sort_by[0] in ("race_id", "race_date")
+
+
+def _day_runs(table: pa.Table) -> list[pa.Table]:
+    """`table` cut, in its own row order, into its maximal runs of one race day (zero-copy
+    slices); a run of rows without a day is a run of its own. Nothing is re-sorted, so a day whose
+    rows come in several runs gives several slices."""
+    day = pc.fill_null(table["race_date"].cast(pa.int32()), _INT32_MAX).to_numpy()
+    edges = [0, *(np.flatnonzero(day[1:] != day[:-1]) + 1).tolist(), table.num_rows]
+    return [table.slice(lo, hi - lo) for lo, hi in zip(edges, edges[1:], strict=False)]
+
+
 def _write_tables(tables: dict[str, pd.DataFrame], folder: Path) -> None:
-    """Every table goes to a tmp file first; only when all are written are they moved into place."""
+    """Every table goes to a tmp file first; only when all are written are they moved into place.
+    A table that leads with its day (`_by_day`) is written a row group per run of one race day in
+    its row order (#510), so each group's race_date statistics record one day with no null and a
+    development read prunes every holdout day's group from the footer alone (D14); the others get
+    the writer's default row groups."""
     folder.mkdir(parents=True, exist_ok=True)
     staged = []
     try:
@@ -636,7 +660,12 @@ def _write_tables(tables: dict[str, pd.DataFrame], folder: Path) -> None:
             tmp = folder / f"{name}.parquet.{os.getpid()}.tmp"
             staged.append((tmp, folder / f"{name}.parquet"))
             table = pa.Table.from_pandas(frame, schema=arrow_schema(name), preserve_index=False)
-            pq.write_table(table, tmp, compression="zstd")
+            if _by_day(name) and table.num_rows:
+                with pq.ParquetWriter(tmp, table.schema, compression="zstd") as writer:
+                    for part in _day_runs(table):
+                        writer.write_table(part, row_group_size=part.num_rows)
+            else:
+                pq.write_table(table, tmp, compression="zstd")
     except BaseException:
         for tmp, _ in staged:
             tmp.unlink(missing_ok=True)
