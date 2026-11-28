@@ -26,7 +26,8 @@ on its normalised names and refuses a table carrying any UKC (JRDB) column;
 `read_netkeiba_pedigree` reads the store's file through it.
 
 The run (`run_study`; the spec `build_spec`, frozen before any outcome is read). Family
-`japan-c2-lineage-e37-netkeiba-v2` (v1's run stopped on a 3-sire block; its records stay): JRA
+`japan-c2-lineage-e37-netkeiba-v3` (v1's run stopped on a 3-sire block, v2's lineage members on
+folds without a nonzero feature; their records stay): JRA
 results, the netkeiba pedigree and the JRA final prices only, so its figures may be public.
 Level 1 is #92's (`studies.ability`: the same frame, folds, rating member, discount and pair
 selection) with the netkeiba sire name in place of the JRA-VAN sire (the base member); a fit
@@ -104,10 +105,11 @@ OUT_COLUMNS = ["segment", "races", "meetings", "delta_ll", "lower", "upper"]
 
 COUNTRY = "japan"
 TICKET = 538
-FAMILY_ID = "japan-c2-lineage-e37-netkeiba-v2"
+FAMILY_ID = "japan-c2-lineage-e37-netkeiba-v3"
 TRIAL_FAMILY_ID = f"{FAMILY_ID}-trial"  # a trial's records; a trial never freezes FAMILY_ID
-SUPERSEDES = "japan-c2-lineage-e37-netkeiba"  # v1: its run failed on a 3-sire block (2014-Q1)
-FAMILIES = (FAMILY_ID, TRIAL_FAMILY_ID, SUPERSEDES, f"{SUPERSEDES}-trial")  # in the summary
+V1 = "japan-c2-lineage-e37-netkeiba"  # its run failed on a 3-sire block (2014-Q1)
+SUPERSEDES = f"{V1}-v2"  # its lineage members failed on folds with no nonzero feature
+FAMILIES = (FAMILY_ID, TRIAL_FAMILY_ID, SUPERSEDES, f"{SUPERSEDES}-trial", V1, f"{V1}-trial")
 MIN_SIRES = 50  # a fit's sire effects, and a quarter's prior, need this many sires (v2)
 SIRE_RULE = {"sire_id": MIN_SIRES}
 SOURCES = ("jra",)  # JRA results and prices and the netkeiba pedigree: no JRDB, no JRA-VAN
@@ -359,10 +361,13 @@ def build_spec(scheme, bootstrap: dict, plan: Plan = FULL) -> dict:
     """The family's pre-registered spec, frozen in the registry before any outcome is read."""
     return {
         "family_id": FAMILY_ID,
-        "supersedes": f"{SUPERSEDES}: its run stopped when #92's empirical Bayes did not "
-        "converge on a sire block of 3 netkeiba sires from 7 runs (the base member's fit for "
-        "2014-Q1); its records stay. v2 adds the sire_block and prior_from rules, which read "
-        "counts of ids only, and changes nothing else",
+        "supersedes": f"{SUPERSEDES}, whose lineage members failed: on an outer fold whose "
+        "training rows end before the first prior (2016-10-01) the feature is 0 on every "
+        "training row, so its unpenalised coefficient is not identified; v3 adds the "
+        f"empty_feature rule and changes nothing else. {SUPERSEDES} superseded {V1}, whose run "
+        "stopped when #92's empirical Bayes did not converge on a sire block of 3 netkeiba "
+        "sires from 7 runs (the base member's fit for 2014-Q1); v2 added the sire_block and "
+        "prior_from rules. Both families' records stay",
         "ticket": TICKET,
         "hypotheses": {
             "E37": "a sire x surface x distance-band lineage prior (the damsire at a weight) fed "
@@ -418,6 +423,9 @@ def build_spec(scheme, bootstrap: dict, plan: Plan = FULL) -> dict:
             "lineage_member": "the base member at the fold's selected rating pair and discounts "
             f"(not reselected) with the unpenalised feature `{LINEAGE}`: an ablation of one "
             "feature",
+            "empty_feature": "an outer fold whose training rows have the feature 0 on every row "
+            "fits without it (coefficient 0: the base member's model at that fold, its test rows "
+            "predicted the same way); such a fold has no coefficient record",
             "folds": "D9's quarters over the level-1 dates (expanding, the scheme's embargo); "
             "inner folds every quarter from inner_from; out of fold from "
             "level1_out_of_fold_from",
@@ -587,13 +595,17 @@ def base_members(level1, grid, outer, selection) -> np.ndarray:
     return u
 
 
-def lineage_member(level1, feature, members, outer, selection, log=print):
+def lineage_member(level1, feature, members, outer, selection, base, log=print):
     """A lineage member's u on the outer folds' test rows (the base member's fold selection plus
-    the feature) and its coefficient on the feature per fold."""
+    the feature) and its coefficient on the feature per fold; a fold whose training rows have
+    the feature 0 throughout takes the base member's u (`base`), the same model without it."""
     numeric = c2_ability.numeric_frame(level1, columns=()).assign(**{LINEAGE: feature})
     u, coefs = np.full(len(level1), np.nan), []
     by_pair = {}
     for fold, pick in zip(outer, selection, strict=True):
+        if not np.any(feature[fold.train_idx] != 0):  # the spec's empty_feature rule
+            u[fold.test_idx] = base[fold.test_idx]
+            continue
         pair = (pick["drift_var_per_day"], pick["scale"])
         if pair not in by_pair:
             by_pair[pair] = numeric.assign(**{c2_ability.RATING: members[pair].to_numpy()})
@@ -611,7 +623,7 @@ def lineage_member(level1, feature, members, outer, selection, log=print):
             | {"coef": float(model.coef_[LINEAGE])}
             | {"rating coef": float(model.coef_[c2_ability.RATING])}
         )
-    log(f"  lineage member: {len(outer)} folds")
+    log(f"  lineage member: {len(coefs)} of {len(outer)} folds fitted with the feature")
     return u, coefs
 
 
@@ -784,7 +796,8 @@ def compute_study(inputs: Inputs, spec: dict, scheme, plan: Plan = FULL, log=pri
             feature = _lineage_feature(level1, inputs.pedigree, prior_starts, prior, log=log)
             study.counts[f"feature_seconds[{key}]"] = round(time.monotonic() - started)
             study.counts[f"feature_nonzero[{key}]"] = int((feature != 0).sum())
-            u[key], coefs = lineage_member(level1, feature, members, outer, selection, log)
+            u[key], coefs = lineage_member(level1, feature, members, outer, selection, u[BASE], log)
+            study.counts[f"folds_with_the_feature[{key}]"] = len(coefs)
         except Exception as exc:  # the variant's every record fails, never dropped
             failed[key] = f"{type(exc).__name__}: {exc}"
             study.attempt(
