@@ -106,6 +106,7 @@ from horsetrack.core.eval.holdout import _git_sha, split_off
 from horsetrack.core.eval.registry import RunRecord, default_registry, summary_dir, write_summary
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.eval.tail import tail_curve
+from horsetrack.countries.japan.models import exotic
 from horsetrack.countries.japan.models import interactions as ix
 from horsetrack.countries.japan.models.ability import AbilityModel, _softmax, _stages
 from horsetrack.countries.japan.models.meta import MetaSpec
@@ -122,6 +123,7 @@ from horsetrack.countries.japan.studies.ability import (
 from horsetrack.countries.japan.studies.calibration import (
     Study,
     Variant,
+    _bounds,
     _markdown_table,
     _metric,
     bootstrap_settings,
@@ -1024,6 +1026,307 @@ def _tail(p: pd.Series, scored: Scored, spec: dict, name: str) -> tuple[list, di
             | {"return per ¥100": 100 * r.realised, "lower": 100 * r.lo, "upper": 100 * r.hi}
         )
     return metrics, {"tail": table}
+
+
+# --------------------------------------------------------------------------- Place and Wide (#574)
+
+PLACE_WIDE = (exotic.PLACE, exotic.WIDE)
+POOL_LABEL = {exotic.PLACE: "place", exotic.WIDE: "wide"}
+LL_FLOOR = 1e-15  # a combination probability's clip in the pool log loss
+
+
+def member_pool_probs(
+    rows: pd.DataFrame, p_win: pd.Series, ordering: exotic.Ordering, pool: str
+) -> pd.DataFrame:
+    """A member's Win probabilities through C5's `ordering` to one pool's combinations (#574):
+    race_id, combination (the store's text) and p, one row per combination of each race's
+    starters. `rows` has race_id, horse_no and (but for WIN) field_size, the runners when sales
+    opened, one row per starter; `p_win` one probability per row on rows' index. WIN is `p_win`
+    itself; PLACE and WIDE are `ordering.joint_probs` of the race at its field at sale, and a
+    race the pool was not sold to (jra.yaml `places_paid`: PLACE from 5, WIDE from 4) has no
+    rows. ValueError for another pool or a starter without a probability."""
+    if pool not in (exotic.WIN, *PLACE_WIDE):
+        raise ValueError(f"pool must be WIN, PLACE or {exotic.WIDE}, got {pool!r}")
+    p = pd.Series(p_win).reindex(rows.index)
+    if p.isna().any():
+        raise ValueError(f"{int(p.isna().sum())} starters have no Win probability")
+    pools = load_source(COUNTRY, SOURCE).pools
+    columns = ["race_id", "horse_no"] + ([] if pool == exotic.WIN else ["field_size"])
+    race_ids, combinations, probs = [], [], []
+    for race_id, race in rows[columns].assign(p=p).groupby("race_id", sort=False):
+        numbers = [int(h) for h in race["horse_no"]]
+        pr = race["p"].to_numpy(dtype=float)
+        if pool == exotic.WIN:
+            out = {str(h): float(v) for h, v in zip(numbers, pr, strict=True)}
+        else:
+            field = int(race["field_size"].iloc[0])
+            if pools[pool].places_for(field) == 0:
+                continue
+            out = ordering.joint_probs(pr, pool, horses=numbers, field_at_sale=field)
+        race_ids += [race_id] * len(out)
+        combinations += list(out)
+        probs += list(out.values())
+    return pd.DataFrame(
+        {
+            "race_id": pd.Series(race_ids, dtype=object),
+            "combination": pd.Series(combinations, dtype=object),
+            "p": pd.Series(probs, dtype=float),
+        }
+    )
+
+
+def _pool_outcomes(rows: pd.DataFrame, pool: str) -> set[tuple[str, str]]:
+    """The (race_id, combination) pairs `pool` pays by the rows' placings
+    (`exotic.winning_combinations`: dead heats, and the places by the field at sale)."""
+    out = set()
+    for race_id, race in rows.groupby("race_id", sort=False):
+        finish = dict(zip((int(h) for h in race["horse_no"]), race["finish_pos"], strict=True))
+        field = int(race["field_size"].iloc[0])
+        won = exotic.winning_combinations(finish, pool, field_at_sale=field)
+        out |= {(race_id, c) for c in won}
+    return out
+
+
+def _pool_paid(dividends: pd.DataFrame, pool: str, races: set) -> pd.DataFrame:
+    """race_id, combination and pays, the pool's dividend rows of `races` per unit stake
+    (dividend / `exotic.UNIT_STAKE`; a refund row, the stake). ValueError for a combination
+    twice or a dividend that is not finite."""
+    rows = dividends.loc[dividends["pool"].eq(pool) & dividends["race_id"].isin(races)]
+    refund = rows["is_refund"].eq(True).to_numpy(dtype=bool, na_value=False)
+    amount = pd.to_numeric(rows["dividend"]).to_numpy(dtype=float)
+    pays = np.where(refund, 1.0, amount / exotic.UNIT_STAKE)
+    out = pd.DataFrame(
+        {
+            "race_id": rows["race_id"].astype(object).to_numpy(),
+            "combination": rows["combination"].astype(str).to_numpy(),
+            "pays": pays,
+        }
+    )
+    if not np.isfinite(pays).all():
+        raise ValueError(f"a {pool} dividend row has no finite dividend")
+    if out.duplicated(["race_id", "combination"]).any():
+        raise ValueError(f"a {pool} combination has two dividend rows in one race")
+    return out
+
+
+def _pool_tail(
+    probs: pd.DataFrame,
+    board: pd.DataFrame,
+    paid: pd.DataFrame,
+    meeting: pd.Series,
+    spec: dict,
+    pool: str,
+    name: str,
+) -> tuple[list, dict]:
+    """The tail curve of a flat bet on every combination of `board` (the pool's priced final
+    odds in the scored races) that `probs` holds, claim p x odds, settled at `paid` (0 without a
+    row); the top band is the development return. A race with a bet but no dividend row in the
+    pool raises (unsettled, e.g. an interrupted store refresh, never a race every combination
+    lost), so the variant is a failed record."""
+    key = ["race_id", "combination"]
+    bets = board.merge(probs, on=key, how="inner", validate="one_to_one")
+    unsettled = pd.Series(sorted(set(bets["race_id"]) - set(paid["race_id"])), dtype=object)
+    if len(unsettled):
+        raise ValueError(
+            f"{len(unsettled)} scored races have no {pool} dividend row (unsettled, e.g. "
+            f"{', '.join(map(str, unsettled.head(3)))}): refresh the store's dividends"
+        )
+    bets = bets.merge(paid, on=key, how="left", validate="one_to_one")
+    frame = pd.DataFrame(
+        {
+            "claim": bets["p"].to_numpy(dtype=float) * bets["odds"].to_numpy(dtype=float),
+            "ret": bets["pays"].fillna(0.0).to_numpy(dtype=float),  # at the recorded dividend
+            "meeting_id": meeting.reindex(bets["race_id"]).to_numpy(),
+        }
+    )
+    boot = spec["bootstrap"]
+    curve = tail_curve(
+        frame,
+        claim_col="claim",
+        return_col="ret",
+        cluster_col="meeting_id",
+        quantiles=TAIL_QUANTILES,
+        n_boot=boot["n_boot"],
+        level=boot["level"],
+        seed=boot["seed"],
+    )
+    metrics, table = [], []
+    for r in curve.itertuples(index=False):
+        band = f"claim_q[{r.q_lo:g},{r.q_hi:g}]"
+        if r.n_bets:
+            metrics += [
+                _metric(
+                    "all_folds",
+                    f"return_per_100[{band}]",
+                    100 * r.realised,
+                    r.n_bets,
+                    100 * r.lo,
+                    100 * r.hi,
+                ),
+                _metric("all_folds", f"mean_claim[{band}]", r.mean_claim, r.n_bets),
+            ]
+        table.append(
+            {"forecast": name, "pool": pool, "band": band, "claims from": r.claim_lo}
+            | {"to": r.claim_hi, "bets": r.n_bets, "meetings": r.n_clusters}
+            | {"mean claim": r.mean_claim, "return per ¥100": 100 * r.realised}
+            | {"lower": 100 * r.lo, "upper": 100 * r.hi}
+        )
+    top = curve.iloc[-1]
+    n = int(top["n_bets"])
+    metrics += [
+        _metric(
+            "development",
+            "return_per_100",
+            100 * top["realised"],
+            n,
+            100 * top["lo"],
+            100 * top["hi"],
+        ),
+        _metric("development", "n_meetings", top["n_clusters"], n),
+        _metric(
+            "all_folds", "priced_combinations_without_a_probability", len(board) - len(bets), 1
+        ),
+    ]
+    return metrics, {"place_wide_tail": table}
+
+
+def _pool_ll(probs: pd.DataFrame, outcomes: set) -> pd.Series:
+    """Per race, the Bernoulli log likelihood of every combination's outcome (paid or not)
+    summed over the race's combinations, p clipped to [LL_FLOOR, 1 - LL_FLOOR]."""
+    p = probs["p"].to_numpy(dtype=float).clip(LL_FLOOR, 1 - LL_FLOOR)
+    keys = zip(probs["race_id"], probs["combination"], strict=True)
+    paid = np.fromiter((k in outcomes for k in keys), dtype=bool, count=len(probs))
+    ll = np.where(paid, np.log(p), np.log1p(-p))
+    return pd.Series(ll).groupby(probs["race_id"].to_numpy()).sum()
+
+
+def _pool_delta_ll(
+    member: pd.DataFrame,
+    comparator: pd.DataFrame,
+    outcomes: set,
+    rows: pd.DataFrame,
+    spec: dict,
+    pool: str,
+    name: str,
+) -> tuple[list, dict]:
+    """The paired per-race gain in the pool's log likelihood of `member`'s combination
+    probabilities over `comparator`'s (positive: the member better), per fold and over all
+    folds with meeting bounds."""
+    g = _pool_ll(member, outcomes) - _pool_ll(comparator, outcomes)
+    iv = _bounds(g, rows.groupby("race_id")["meeting_id"].first(), spec)
+    fold_of = rows.groupby("race_id")["fold"].first().reindex(g.index).to_numpy()
+    metrics = [
+        _metric(fold, "delta_ll", part.mean(), len(part)) for fold, part in g.groupby(fold_of)
+    ]
+    metrics.append(_metric("all_folds", "delta_ll", iv.mean, len(g), iv.lo, iv.hi))
+    row = {"comparison": name, "pool": pool, "races": len(g), "meetings": iv.n_clusters}
+    return metrics, {
+        "place_wide_comparisons": [row | {"ΔLL": iv.mean} | {"lower": iv.lo, "upper": iv.hi}]
+    }
+
+
+def _pool_block(member: str, pool: str, ordering: exotic.Ordering, spec: dict) -> dict:
+    """The leaderboard block (docs/specs/leaderboard.md) of a member's tail in a pool."""
+    return {
+        "kind": "member",
+        "pool": pool,
+        "rule": f"#93's C2 member {member} (its stage-2 meta with ln q_final) through C5's "
+        f"{ordering.family} ordering: a flat {pool} bet on every priced combination in the top "
+        f"claim band (p x final odds, from the {TAIL_QUANTILES[-1]:g} quantile)",
+        "selection": "look_ahead",
+        "payout_rate": None,
+        "ci_level": spec["bootstrap"]["level"],
+        "n_unit": "bets",
+    }
+
+
+def score_place_wide(
+    rows: pd.DataFrame,
+    p: dict[str, pd.Series],
+    ordering: exotic.Ordering,
+    odds: pd.DataFrame,
+    dividends: pd.DataFrame,
+    spec: dict,
+    *,
+    comparator: str,
+    fold_scheme: str,
+) -> Study:
+    """Each member's out-of-fold Win probabilities through C5's `ordering` to Place and Wide,
+    scored at the final prices (#574). Pure: reads no store, writes nothing.
+
+    `rows`: the scored starters (race_id, horse_no, field_size at sale, finish_pos, meeting_id,
+    fold); `p`: member -> its stage-2 Win probability per row; `odds`: the final odds (race_id,
+    pool, combination, odds); `dividends`: DIVIDEND_COLUMNS rows. Rows of another pool or race
+    are ignored, and a final odds row that is not a positive number is no price. Per member and
+    pool, `tail:<pool>:<member>` is a ranked leaderboard row (`_pool_block`): the top
+    TAIL_QUANTILES band of a flat bet on every priced combination, claim p x final odds,
+    settled at its dividend / 100 (`_pool_tail`: a race with a bet and no dividend row in the
+    pool fails it); and, but for the comparator, `delta_ll:<pool>:<member>_vs_<comparator>` is
+    the paired per-race gain in the Bernoulli log likelihood of every combination's outcome
+    (`_pool_ll`, the outcomes from finish_pos by `exotic.winning_combinations`), meeting bounds.
+    A member whose probabilities fail fails its variants only."""
+    if comparator not in p:
+        raise ValueError(f"the comparator {comparator!r} is not a member of p")
+    races = set(rows["race_id"])
+    study = Study(counts={"place_wide_scored_races": len(races)})
+    comp = {"model": "models/exotic.py", "study": "studies/interactions.py"}
+    comp |= {"ordering": ordering.family}
+    params = {"ordering_params": ordering.params, "quantiles": list(TAIL_QUANTILES)}
+    params |= {"stake": "flat, unit", "ll_floor": LL_FLOOR}
+    meeting = rows.groupby("race_id")["meeting_id"].first()
+    for pool in PLACE_WIDE:
+        label = POOL_LABEL[pool]
+        in_pool = odds.loc[odds["pool"].eq(pool) & odds["race_id"].isin(races)]
+        price = pd.to_numeric(in_pool["odds"], errors="coerce").to_numpy(dtype=float)
+        priced = np.isfinite(price) & (price > 0)
+        board = pd.DataFrame(
+            {
+                "race_id": in_pool["race_id"].astype(object).to_numpy()[priced],
+                "combination": in_pool["combination"].astype(str).to_numpy()[priced],
+                "odds": price[priced],
+            }
+        )
+        study.counts |= {
+            f"{label}_priced_combinations": len(board),
+            f"{label}_unpriced_odds_rows": int((~priced).sum()),
+            f"{label}_scored_races_without_final_odds": len(races - set(board["race_id"])),
+        }
+        paid = _try(lambda pool=pool: _pool_paid(dividends, pool, races))
+        outcomes = _try(lambda pool=pool: _pool_outcomes(rows, pool))
+        probs = {
+            m: _try(lambda m=m, pool=pool: member_pool_probs(rows, p[m], ordering, pool)) for m in p
+        }
+        for member in p:
+            components = comp | {"member": member, "pool": pool}
+            name = f"tail:{label}:{member}"
+            study.attempt(
+                Variant(
+                    _hypothesis(member),
+                    name,
+                    fold_scheme,
+                    components | {"score": "tail_return"},
+                    params | {"leaderboard": _pool_block(member, pool, ordering, spec)},
+                ),
+                lambda q=probs[member], b=board, d=paid, pl=pool, nm=name: _pool_tail(
+                    q.get(), b, d.get(), meeting, spec, pl, nm
+                ),
+            )
+            if member == comparator:
+                continue
+            name = f"delta_ll:{label}:{member}_vs_{comparator}"
+            study.attempt(
+                Variant(
+                    _hypothesis(member),
+                    name,
+                    fold_scheme,
+                    components | {"score": "paired_pool_log_loss", "comparator": comparator},
+                    params,
+                ),
+                lambda q=probs[member], c=probs[comparator], o=outcomes, pl=pool, nm=name: (
+                    _pool_delta_ll(q.get(), c.get(), o.get(), rows, spec, pl, nm)
+                ),
+            )
+    return study
 
 
 # --------------------------------------------------------------------------- the pure study
