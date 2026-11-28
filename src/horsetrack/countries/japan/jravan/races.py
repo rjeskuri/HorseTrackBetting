@@ -4,13 +4,14 @@
 store writes (`countries/japan/jra/netkeiba/parse_results.py`); `meetings_from_races` derives the
 meetings. `build_races` reads `raw/jravan/stored/RACE/RA/<YYYY>.jvd` one year at a time, keeps one
 version per race (`records.latest_versions` on the layout's key items) and the JRA venues (01-10),
-and writes `processed/jravan/races.parquet` and `meetings.parquet` in the store's column order,
-types and sort keys. The NAR and overseas races (#377) go to `processed/jravan/form_races.parquet`
-in the `races` schema, under their own `jurisdiction` and form ids (`keys.form_race_id`, `venue`
-the JV-Data code), with no meetings: horse form only, read by `horse_runs` and by no betting
-reader. A venue without a jurisdiction is written nowhere. The code values each mapping uses are
-the constants below (the code-table text stays in the licensed workbook); a code a mapping lacks
-becomes null and is counted per code in the report (JRA races only). A blank or all-zero code is
+and writes `processed/jravan/races.parquet` (one row group per race day, #502) and
+`meetings.parquet` in the store's column order, types and sort keys. The NAR and overseas races
+(#377) go to `processed/jravan/form_races.parquet` in the `races` schema (also one row group per
+race day), under their own `jurisdiction` and form ids (`keys.form_race_id`, `venue` the JV-Data
+code), with no meetings: horse form only, read by `horse_runs` and by no betting reader. A venue
+without a jurisdiction is written nowhere. The code values each mapping uses are the constants
+below (the code-table text stays in the licensed workbook); a code a mapping lacks becomes null
+and is counted per code in the report (JRA races only). A blank or all-zero code is
 JV-Data's "unset": a null value (its `*_raw` column too), counted as unmapped only on a race that
 was run. See docs/specs/jravan.md.
 """
@@ -234,7 +235,9 @@ def _sorted(frame: pd.DataFrame, table: str) -> pd.DataFrame:
 def _write(frame: pd.DataFrame, table: str, out: Path, name: str | None = None) -> None:
     """`frame` in the schema of store table `table`, to `<out>/<name or table>.parquet`."""
     arrow = pa.Table.from_pandas(frame, schema=arrow_schema(table), preserve_index=False)
-    records.write_parquet(arrow.replace_schema_metadata(None), out / f"{name or table}.parquet")
+    path = out / f"{name or table}.parquet"
+    # races and form_races: one row group per race day, as the price tables (#502)
+    records.write_parquet(arrow.replace_schema_metadata(None), path, by_day=table == "races")
 
 
 def _unique(races: pd.DataFrame) -> None:

@@ -7,14 +7,15 @@ margin names, beaten-lengths sum and pound conversion). `build_runners` reads
 `raw/jravan/stored/RACE/SE/<YYYY>.jvd` one year at a time, keeps one version per runner
 (`records.latest_versions` on the layout's key items) and the JRA venues (01-10), writes
 `processed/jravan/runners.parquet` in the store's column order, types and sort key, then sets
-`finish_time_s` on `races.parquet` (from `races.build_races`) to each race's winner's time. The
-NAR and overseas runners (#377) go to `processed/jravan/form_runners.parquet` in the `runners`
-schema under their races' form ids and own `jurisdiction`, their winner's time to
-`form_races.parquet`: horse form only, read by `horse_runs` (never their `win_odds`) and by no
-betting reader. The code values each mapping uses are the constants below (the code-table text
-stays in the licensed workbook); a code a mapping lacks becomes null and is counted per code in
-the report (JRA runners only). A blank or all-zero margin code is JV-Data's "unset": null and
-never counted. See docs/specs/jravan.md.
+`finish_time_s` on `races.parquet` (from `races.build_races`) to each race's winner's time; both
+files keep one row group per race day (#502). The NAR and overseas runners (#377) go to
+`processed/jravan/form_runners.parquet` in the `runners` schema under their races' form ids and
+own `jurisdiction`, their winner's time to `form_races.parquet` (both one row group per race day
+too): horse form only, read by `horse_runs` (never their `win_odds`) and by no betting reader.
+The code values each mapping uses are the constants below (the code-table text stays in the
+licensed workbook); a code a mapping lacks becomes null and is counted per code in the report
+(JRA runners only). A blank or all-zero margin code is JV-Data's "unset": null and never
+counted. See docs/specs/jravan.md.
 """
 
 from __future__ import annotations
@@ -299,7 +300,7 @@ def fill_winners_time(runners: pd.DataFrame, path: Path) -> int:
     times = [None if t is None or pd.isna(t) else float(t) for t in times]
     at = table.schema.get_field_index("finish_time_s")
     table = table.set_column(at, table.schema.field(at), pa.array(times, type=pa.float64()))
-    records.write_parquet(table.replace_schema_metadata(None), path)
+    records.write_parquet(table.replace_schema_metadata(None), path, by_day=True)
     return sum(t is not None for t in times)
 
 
@@ -373,10 +374,10 @@ def build_runners(
         del cols, frame
     runners = _sorted(tables, schema, sort_by)
     del tables
-    records.write_parquet(runners, out / "runners.parquet")
+    records.write_parquet(runners, out / "runners.parquet", by_day=True)
     timed = fill_winners_time(runners.select(TIMED).to_pandas(), races_path)
     form_runners = _sorted(form_tables, schema, sort_by)
-    records.write_parquet(form_runners, out / f"{FORM_RUNNERS}.parquet")
+    records.write_parquet(form_runners, out / f"{FORM_RUNNERS}.parquet", by_day=True)
     form_races_path = out / f"{races.FORM_RACES}.parquet"
     if form_races_path.is_file():  # a store built before #377 has none
         fill_winners_time(form_runners.select(TIMED).to_pandas(), form_races_path)

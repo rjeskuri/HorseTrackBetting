@@ -13,7 +13,8 @@ The library (synthetic tests: tests/countries/japan/test_avoidance.py):
 - `trio_as_trifectas`, `quinella_as_exactas`, `same_bracket_to_quinellas`: the same event in
   another pool. `settle` settles tickets against one race's dividend rows.
 - `RaceView(race_id, board, selection)`: `view_at` is the board at t (odds_timeseries through
-  `read_asof`); a view of the final price on history carries LOOK_AHEAD.
+  the model boundary, `feature_boundary.feature_view`, #417); a view of the final price on
+  history carries LOOK_AHEAD.
 - `express_set` (L1): a set priced under the threshold goes to the direct pool, at or above it to
   the ordered synthetic. `compare`: the paired per-race difference over the races both sides
   cover, with #69's `paired_bootstrap`. `neutral_ratio` (L5): the ordered pool's payout rate over
@@ -56,7 +57,15 @@ from horsetrack.core.eval.holdout import _git_sha, is_holdout_day, split_off
 from horsetrack.core.eval.registry import RunRecord, default_registry
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.pricing import clean_odds
-from horsetrack.core.store.asof import load_availability, read_asof
+from horsetrack.core.store.asof import Availability, load_availability
+from horsetrack.countries.japan.feature_boundary import (
+    PUBLICATION_PROXY,
+    RESULTS_DERIVED,
+    TIMESTAMP_FALLBACK,
+    approximations,
+    availability_fallback,
+    feature_view,
+)
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
 from horsetrack.countries.japan.odds_log import POOL_TOTAL
 from horsetrack.countries.japan.studies import calibration
@@ -226,12 +235,17 @@ def settle(tickets: Iterable[Ticket], dividends: pd.DataFrame, race_id: str) -> 
 
 
 def view_at(con, race_id: str, at_utc: datetime, *, rules, selection: str = BOARD_AT_T) -> RaceView:
-    """The board at t: odds_timeseries rows available at `at_utc` under `rules` (`read_asof`:
-    no dividend, refund or final-capture column), `race_id`'s only, the latest snapshot per
-    (pool, combination) among them."""
+    """The board at t: odds_timeseries rows available at `at_utc` under `rules`, read through the
+    model boundary (`feature_boundary.feature_view`: the identifiers BOARD_KEYS the table has and
+    the approved features BOARD_FEATURES only, so no label and no unclassified column),
+    `race_id`'s only, the latest snapshot per (pool, combination) among them. The timestamps of
+    BOARD_KEYS are optional: a board without `post_utc`, say, is read without it."""
     if "look-ahead" in selection:
         raise ValueError(f"the board at t is not look-ahead: {selection!r}")
-    rows = read_asof(con, BOARD_TABLE, at_utc, rules=rules)
+    table = '"' + BOARD_TABLE.replace('"', '""') + '"'
+    present = {d[0] for d in con.execute(f"SELECT * FROM {table} LIMIT 0").description}
+    keys = [k for k in BOARD_KEYS if k in present or k not in BOARD_STAMPS]
+    rows = feature_view(con, BOARD_TABLE, at_utc, features=BOARD_FEATURES, keys=keys, rules=rules)
     rows = rows.loc[rows["race_id"].eq(race_id)]
     order = [c for c in ("snapshot_utc", "fetched_utc") if c in rows.columns]
     rows = rows.sort_values(order, kind="stable") if order else rows
@@ -423,6 +437,20 @@ BOARD_COLUMNS = [
     "fetched_utc",
     "post_utc",
 ]
+# The board through the model boundary (#417): its identifiers, returned as they are, and the
+# approved features at t it reads (feature_boundary.approved_features of odds_timeseries).
+BOARD_KEYS = ["race_id", "pool", "combination", "snapshot_utc", "fetched_utc", "post_utc"]
+# the keys a board may lack (view_at reads the ones it has); race_id, pool and combination it must
+BOARD_STAMPS = frozenset({"snapshot_utc", "fetched_utc", "post_utc"})
+BOARD_FEATURES = ["odds"]
+# The card values that pick the races and the starters. They are race and starter filters read
+# from the store's card (read_store_table), not through feature_view: runners.is_scratched is an
+# approved feature at t (model_inputs.yaml, scratches_at_t), races.status is no feature at all.
+# The report names the approximation each carries (feature_boundary.approximations).
+CARD_FILTERS = (
+    ("runners", "is_scratched", "the starters: runners not is_scratched"),
+    ("races", "status", "the races: status 'run'"),
+)
 
 
 # --------------------------------------------------------------------------- inputs and spec
@@ -625,6 +653,19 @@ class StudyData:
     logged: dict[str, list[str]] = field(default_factory=dict)  # pool -> races
     view_at_t: Callable[[str], RaceView] | None = None
     board_files: list[Path] = field(default_factory=list)
+    # the availability rules `view_at_t` reads the board under; None: the shipped rules
+    board_rules: Mapping[str, Availability] | None = None
+
+
+@dataclass
+class BoardStudy(Study):
+    """A study with what the rule its board at t was read under says of the board: its timestamp
+    fallback, `(column, stand-in)` of feature_boundary.availability_fallback (None for a rule
+    without one), and per BOARD_FEATURES column its documented approximations
+    (feature_boundary.approximations under that rule; empty: none recorded)."""
+
+    board_fallback: tuple[str, str] | None = None
+    board_tags: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 def _store_file(name: str) -> Path:
@@ -688,8 +729,10 @@ def read_development(minutes: int) -> StudyData:
     dataset = ds.dataset(_store_file("dividends"), format="parquet")
     dividends = dataset.to_table(columns=DIVIDEND_COLUMNS, filter=scope).to_pandas()
     logged, files = logged_boards(set(run))
-    view = board_view(files, load_availability(COUNTRY), minutes)
-    return StudyData(races, frames["runners"], dividends, logged, view, sorted(set(files.values())))
+    rules = load_availability(COUNTRY)
+    view = board_view(files, rules, minutes)
+    board_files = sorted(set(files.values()))
+    return StudyData(races, frames["runners"], dividends, logged, view, board_files, rules)
 
 
 def _digest(files: Sequence[Path]) -> str:
@@ -1126,9 +1169,24 @@ def _score(
 
 def compute_study(data: StudyData, spec: dict) -> Study:
     """Every variant of the frozen `spec` on `data`, in `variant_names` order. No I/O beyond the
-    board-at-t reads of `data.view_at_t`."""
+    board-at-t reads of `data.view_at_t`. The board's fallback and its features' approximation
+    tags come from the rules the board was read under (`data.board_rules`, else the shipped
+    ones); a ValueError, before any variant is scored, when that fallback's primary column is
+    not one of BOARD_KEYS: the board view drops it, so its races could never be counted."""
     ctx = _Context(data, spec)
-    study = Study(
+    on_fallback: set[str] = set()
+    rules = load_availability(COUNTRY) if data.board_rules is None else data.board_rules
+    fallback = availability_fallback(BOARD_TABLE, rules=rules)
+    if fallback is not None and fallback[0] not in BOARD_KEYS:
+        raise ValueError(
+            f"{BOARD_TABLE}: the rule falls back from {fallback[0]!r} to {fallback[1]!r}, but the "
+            f"board view keeps only {BOARD_KEYS} and {BOARD_FEATURES}, so a capture without "
+            f"{fallback[0]!r} could not be counted"
+        )
+    data = replace(data, view_at_t=_noting_fallback(data.view_at_t, fallback, on_fallback))
+    study = BoardStudy(
+        board_fallback=fallback,
+        board_tags=approximations(BOARD_TABLE, BOARD_FEATURES, rules=rules),
         counts={
             "races_read": len(data.races),
             "run_races": len(ctx.race_ids),
@@ -1137,7 +1195,7 @@ def compute_study(data: StudyData, spec: dict) -> Study:
             "dividend_rows": len(ctx.dividends),
             "refund_rows": int(ctx.dividends["is_refund"].astype(bool).sum()),
         }
-        | {f"races_with_a_logged_{p}_board": len(ctx.logged(p)) for p in ("WIN", *SYNTHETIC)}
+        | {f"races_with_a_logged_{p}_board": len(ctx.logged(p)) for p in ("WIN", *SYNTHETIC)},
     )
     l1 = spec["rules"]["L1"]
     for pool, threshold in ((p, x) for p in SYNTHETIC for x in l1["thresholds"][p]):
@@ -1247,7 +1305,31 @@ def compute_study(data: StudyData, spec: dict) -> Study:
                 f"{pool} at the base rate",
                 lambda pool=pool: ctx.paired(_same_race(ctx, pool), CALENDAR),
             )
+    if fallback is not None:
+        study.counts[_fallback_count(fallback)] = len(on_fallback)
     return study
+
+
+def _fallback_count(fallback: tuple[str, str]) -> str:
+    return f"races_with_a_board_at_t_capture_at_{fallback[1]}"
+
+
+def _noting_fallback(view, fallback: tuple[str, str] | None, races: set[str]):
+    """`view` (race -> its board at t), adding to `races` each race whose board at t holds a
+    capture with a null `fallback[0]`: in the views at its `fallback[1]` timestamp instead
+    (feature_boundary.availability_fallback)."""
+    if view is None or fallback is None:
+        return view
+    column = fallback[0]
+
+    def noted(race_id: str) -> RaceView:
+        seen = view(race_id)
+        board = seen.board
+        if column in board.columns and board[column].isna().any():
+            races.add(race_id)
+        return seen
+
+    return noted
 
 
 # --------------------------------------------------------------------------- report and runner
@@ -1282,6 +1364,47 @@ SECTIONS = (
 )
 
 
+_APPROXIMATION_NOTES = {
+    RESULTS_DERIVED: "taken from the results page, in the views from 00:00 JST of the race date, "
+    "so a race-day scratch or abandonment shows before it happened (docs/specs/as-of.md, "
+    "'Accepted leak: results-derived card columns')",
+    PUBLICATION_PROXY: "in the view from an anchor + offset standing in for its unrecorded "
+    "publication time (docs/specs/as-of.md, 'Gated columns')",
+}
+
+
+def _approximation_lines(study: Study) -> list[str]:
+    """One line per column the study reads that carries a documented approximation
+    (feature_boundary.approximations), with its table and its tags: the card filters' under the
+    shipped rules, the board's features' under the rule the study read its board at t under
+    (`BoardStudy.board_tags`; the shipped rules for a study without them). The board's features
+    again when that rule has a timestamp fallback (`BoardStudy.board_fallback`), with the races
+    whose board at t used it."""
+    board_tags = getattr(study, "board_tags", None) or approximations(BOARD_TABLE, BOARD_FEATURES)
+    used = [
+        *((t, c, use, approximations(t, [c])[c]) for t, c, use in CARD_FILTERS),
+        *((BOARD_TABLE, c, "the board at t", board_tags[c]) for c in BOARD_FEATURES),
+    ]
+    lines = []
+    for table, column, use, tagged in used:
+        tags = sorted(tagged)
+        if tags:
+            notes = "; ".join(_APPROXIMATION_NOTES[tag] for tag in tags)
+            lines.append(f"- `{table}.{column}` ({use}): {', '.join(tags)}: {notes}")
+    fallback = getattr(study, "board_fallback", None)
+    if fallback is not None:
+        column, stand_in = fallback
+        n = study.counts.get(_fallback_count(fallback))
+        races = "not counted" if n is None else f"{n} races whose board at t holds one"
+        named = ", ".join(f"`{BOARD_TABLE}.{c}`" for c in BOARD_FEATURES)
+        lines.append(
+            f"- {named} (the board at t): {TIMESTAMP_FALLBACK}: a capture without `{column}` is "
+            f"on the board at its `{stand_in}` instead, which may be earlier than it was fetched "
+            f"(docs/specs/as-of.md, 'Fallback (column rules)'); {races}"
+        )
+    return lines or ["- none: every column the study reads carries no documented approximation"]
+
+
 def render_report(study: Study, spec: dict, about: dict) -> str:
     """The full report: aggregate tables only (the dropped races go to the companion CSV)."""
     lines = [
@@ -1301,6 +1424,10 @@ def render_report(study: Study, spec: dict, about: dict) -> str:
         "## Owner decisions used",
         "",
         *(f"- {key}: {value}" for key, value in spec["decisions"].items()),
+        "",
+        "## Documented approximations",
+        "",
+        *_approximation_lines(study),
         "",
         "## Data",
         "",
