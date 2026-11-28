@@ -93,6 +93,7 @@ from horsetrack.countries.japan.studies.board_vs_final import (
     jrdb_board,
     jrdb_boards,
     leaderboard_rows,
+    release_lags,
     run_records,
     write_outputs,
 )
@@ -665,15 +666,19 @@ def test_a_fetched_board_without_a_decision_time_is_read_as_of_now():
     assert seen == want and len(want) == 5 + 5 + 5
 
 
+@pytest.mark.parametrize("minutes", release_lags(BOARD_CONFIG), ids=lambda m: f"lag{m}")
 @pytest.mark.parametrize("release", [None, "lag"], ids=["absent", "lag"])
-def test_the_lag_rule_stays_the_default_and_returns_the_fetch_time(release):
+def test_the_lag_rule_stays_the_default_and_returns_the_fetch_time(release, minutes):
     """Without `release`, or with "lag", release_utc is odds time + release_lag_min as before,
     whatever the fetch time (even one in the future, or null); `fetched_utc` is the row's own
-    fetch time (NaT where unrecorded)."""
+    fetch time (NaT where unrecorded). Each lag of the configured `release_lags_min` (#602: the
+    config lists the lags, `jrdb_board` takes one as `release_lag_min`) is checked."""
     configured = load_country_yaml("japan", "board_vs_final")["board"]
     assert "release" not in configured  # the frozen family's config is not edited
-    rules = dict(configured) if release is None else {**configured, "release": release}
-    minutes = configured["release_lag_min"]
+    assert minutes in release_lags(configured)
+    rules = {**configured, "release_lag_min": minutes}
+    if release is not None:
+        rules["release"] = release
     fetched = {
         "jra:2025-06-01:TOK:01": pd.Timestamp("2030-01-01T00:00:00Z"),  # not yet fetched, but lag
         "jra:2025-06-08:KYO:01": pd.Timestamp("2025-06-07T23:51:07Z"),
