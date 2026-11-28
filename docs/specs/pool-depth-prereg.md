@@ -236,3 +236,13 @@ first run, at `5af150b`, **scored** (registry run
 `7363def84fd94c5482d56a1a404bb43ea6956ffdbba2461b5eff931ed22537ec`, private report
 `pool-depth-exotics-japan-7363def84fd94c54.md`), with a peak resident set of about 1.65 GB
 (`/usr/bin/time -l`), under the 2.5 GB bound. Every figure: withheld (D21).
+
+## The depth table for the leaderboard (#491, 2026-11-28; not part of the frozen spec)
+
+Each scored depth run, of `pool_depth` and of `pool_depth_exotics`, also writes its long cell
+table (`depth_table`'s columns) as CSV beside its private report, replacing the spec's previous
+one: `pool-depth-japan-table.csv` and `pool-depth-exotics-japan-table.csv` under the run's
+out_dir (`$HORSETRACK_DATA_DIR/reports/` by default), through `write_report` with sources
+`('jravan',)` (`write_depth_table`). A failed run leaves the previous table. The leaderboard reads
+both (`read_depth_tables`) and shows each row's cell capacity beside it (`docs/specs/leaderboard.md`,
+"Capacity"); every figure stays private (D21).

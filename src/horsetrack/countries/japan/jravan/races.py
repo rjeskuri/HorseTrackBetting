@@ -5,9 +5,13 @@ store writes (`countries/japan/jra/netkeiba/parse_results.py`); `meetings_from_r
 meetings. `build_races` reads `raw/jravan/stored/RACE/RA/<YYYY>.jvd` one year at a time, keeps one
 version per race (`records.latest_versions` on the layout's key items) and the JRA venues (01-10),
 and writes `processed/jravan/races.parquet` (one row group per race day, #502) and
-`meetings.parquet` in the store's column order, types and sort keys. The code values each mapping
-uses are the constants below (the code-table text stays in the licensed workbook); a code a
-mapping lacks becomes null and is counted per code in the report. A blank or all-zero code is
+`meetings.parquet` in the store's column order, types and sort keys. The NAR and overseas races
+(#377) go to `processed/jravan/form_races.parquet` in the `races` schema (also one row group per
+race day), under their own `jurisdiction` and form ids (`keys.form_race_id`, `venue` the JV-Data
+code), with no meetings: horse form only, read by `horse_runs` and by no betting reader. A venue
+without a jurisdiction is written nowhere. The code values each mapping uses are the constants
+below (the code-table text stays in the licensed workbook); a code a mapping lacks becomes null
+and is counted per code in the report (JRA races only). A blank or all-zero code is
 JV-Data's "unset": a null value (its `*_raw` column too), counted as unmapped only on a race that
 was run. See docs/specs/jravan.md.
 """
@@ -32,6 +36,7 @@ from horsetrack.countries.japan.jravan import keys, records, spec
 
 SOURCE = records.SOURCE
 JURISDICTION = "jra"
+FORM_RACES = "form_races"  # the NAR and overseas races, horse form only (#377)
 SEASON_START_MONTH = 1  # the jra build's calendar-year seasons
 
 # RA items (the `records.decode` keys)
@@ -85,7 +90,7 @@ RAIL_SETTINGS = frozenset({"A", "B", "C", "D"})
 UNMAPPED_COLUMNS = ("race_class", "weight_type", "surface", "going")
 YEAR_COUNTS = (
     "records", "versions_dropped", "deletions", "races_written", "non_jra_nar",
-    "non_jra_overseas", "non_jra_unknown", "unmapped",
+    "non_jra_overseas", "non_jra_unknown", "unmapped", "form_without_id",
 )  # fmt: skip
 
 
@@ -113,13 +118,19 @@ def _integers(raw: np.ndarray) -> list[int | None]:
     return [None if np.isnan(v) else int(v) for v in records.integer(raw)]
 
 
-def _map(cols: Mapping[str, np.ndarray]) -> tuple[pd.DataFrame, dict[str, collections.Counter]]:
-    """The `races` rows of `cols` and, per store column, the unmapped codes."""
+def _map(
+    cols: Mapping[str, np.ndarray], *, form: bool = False
+) -> tuple[pd.DataFrame, dict[str, collections.Counter]]:
+    """The `races` rows of `cols` and, per store column, the unmapped codes; with `form`, the NAR
+    and overseas races under their form ids and own jurisdiction."""
     text = {name: records.text(cols[name]) for name in ITEMS if name not in (PRIZE, LAPS)}
     n = len(text[YEAR])
     unmapped = {column: collections.Counter() for column in UNMAPPED_COLUMNS}
+    to_race_id, to_meeting_id = (
+        (keys.form_race_id, keys.form_meeting_id) if form else (keys.race_id, keys.meeting_id)
+    )
     race_ids = [
-        keys.race_id(y, md, v, r)
+        to_race_id(y, md, v, r)
         for y, md, v, r in zip(text[YEAR], text[MMDD], text[VENUE], text[RACE_NO], strict=True)
     ]
     parts = [rid.split(":") if rid else [None] * 4 for rid in race_ids]
@@ -157,9 +168,9 @@ def _map(cols: Mapping[str, np.ndarray]) -> tuple[pd.DataFrame, dict[str, collec
             count("going", going_code)
         course = text[COURSE][i]
         day = race_dates[i]
-        rows["jurisdiction"].append(JURISDICTION)
+        rows["jurisdiction"].append(parts[i][0] if form else JURISDICTION)
         rows["race_id"].append(race_ids[i])
-        rows["meeting_id"].append(keys.meeting_id(text[YEAR][i], text[MMDD][i], text[VENUE][i]))
+        rows["meeting_id"].append(to_meeting_id(text[YEAR][i], text[MMDD][i], text[VENUE][i]))
         rows["race_date"].append(day)
         rows["venue"].append(parts[i][2])
         rows["race_no"].append(int(parts[i][3]) if parts[i][3] else None)
@@ -221,11 +232,18 @@ def _sorted(frame: pd.DataFrame, table: str) -> pd.DataFrame:
     return frame.sort_values(order, kind="stable").reset_index(drop=True)
 
 
-def _write(frame: pd.DataFrame, table: str, out: Path) -> None:
+def _write(frame: pd.DataFrame, table: str, out: Path, name: str | None = None) -> None:
+    """`frame` in the schema of store table `table`, to `<out>/<name or table>.parquet`."""
     arrow = pa.Table.from_pandas(frame, schema=arrow_schema(table), preserve_index=False)
-    path = out / f"{table}.parquet"
-    # races: one row group per race day, as the price tables (#502)
+    path = out / f"{name or table}.parquet"
+    # races and form_races: one row group per race day, as the price tables (#502)
     records.write_parquet(arrow.replace_schema_metadata(None), path, by_day=table == "races")
+
+
+def _unique(races: pd.DataFrame) -> None:
+    duplicated = races["race_id"].duplicated()
+    if duplicated.any():
+        raise ValueError(f"{int(duplicated.sum())} RA races share a race_id with another race")
 
 
 def _read_year(path: Path, layout: spec.RecordSpec) -> dict[str, np.ndarray]:
@@ -249,15 +267,16 @@ def _year_files(folder: Path, years: list[int] | None) -> dict[int, Path]:
 def build_races(
     *, years: list[int] | None = None, raw: Path | None = None, out: Path | None = None
 ) -> records.BuildReport:
-    """Build `races.parquet` and `meetings.parquet` from the RA files of `years` (default: every
-    year file), one year at a time; the report holds counts and codes only."""
+    """Build `races.parquet` and `meetings.parquet` (JRA) and `form_races.parquet` (NAR and
+    overseas, form only) from the RA files of `years` (default: every year file), one year at a
+    time; the report holds counts and codes only, of the JRA races."""
     raw = Path(raw) if raw is not None else paths.raw_dir(SOURCE)
     out = Path(out) if out is not None else paths.processed_dir(SOURCE)
     layout = spec.record_spec("RA")
     key = [item.name for item in layout.items if item.is_key]
     by_year: dict[int, dict[str, int]] = {}
     unmapped = {column: collections.Counter() for column in UNMAPPED_COLUMNS}
-    frames = []
+    frames, form_frames = [], []
     for year, path in _year_files(raw / "stored" / "RACE" / "RA", years).items():
         cols = _read_year(path, layout)
         counts = dict.fromkeys(YEAR_COUNTS, 0)
@@ -275,7 +294,8 @@ def build_races(
         counts["non_jra_overseas"] = where["overseas"]
         counts["non_jra_unknown"] = where[None]
         rows = np.flatnonzero(index.index.isin(kept.index))
-        jra = rows[[keys.jurisdiction(v) == "jra" for v in index[VENUE].to_numpy()[rows]]]
+        where_kept = [keys.jurisdiction(v) for v in index[VENUE].to_numpy()[rows]]
+        jra = rows[[w == JURISDICTION for w in where_kept]]
         frame, codes = _map({name: array[jra] for name, array in cols.items()})
         frame = frame[frame["race_id"].notna()]
         counts["races_written"] = len(frame)
@@ -283,16 +303,23 @@ def build_races(
         for column, counter in codes.items():
             unmapped[column].update(counter)
         frames.append(frame)
-    races = (
-        pd.concat(frames, ignore_index=True)
-        if frames
-        else pd.DataFrame({c: [] for c in TABLES["races"].columns})
-    )
-    duplicated = races["race_id"].duplicated()
-    if duplicated.any():
-        raise ValueError(f"{int(duplicated.sum())} RA races share a race_id with another race")
+        form = rows[[w in keys.FORM_JURISDICTIONS for w in where_kept]]
+        if len(form):
+            form_frame = _map({name: array[form] for name, array in cols.items()}, form=True)[0]
+            form_frame = form_frame[form_frame["race_id"].notna()]
+            counts["form_without_id"] = len(form) - len(form_frame)  # bad date or race number
+            form_frames.append(form_frame)
+    empty = arrow_schema("races").empty_table().to_pandas()  # typed, so an empty file writes
+    races = pd.concat(frames, ignore_index=True) if frames else empty
+    form_races = pd.concat(form_frames, ignore_index=True) if form_frames else empty
+    _unique(races)
+    _unique(form_races)
     _write(_sorted(races, "races"), "races", out)
     _write(_sorted(meetings_from_races(races), "meetings"), "meetings", out)
+    if len(form_races):
+        _write(_sorted(form_races, "races"), "races", out, FORM_RACES)
+    else:  # no NAR or overseas race: no form file, and none left from an earlier build
+        (out / f"{FORM_RACES}.parquet").unlink(missing_ok=True)
     totals = {k: sum(c[k] for c in by_year.values()) for k in YEAR_COUNTS}
     return records.BuildReport(
         name="races",
@@ -316,7 +343,8 @@ def races_command(
     typer.echo(
         f"RA: {c['years']} years, {c['records']} records, {c['races_written']} races written, "
         f"{c['versions_dropped']} versions dropped, {c['deletions']} deletions, "
-        f"{c['non_jra_nar'] + c['non_jra_overseas'] + c['non_jra_unknown']} non-JRA races"
+        f"{c['non_jra_nar'] + c['non_jra_overseas'] + c['non_jra_unknown']} non-JRA races, "
+        f"{c['form_without_id']} NAR/overseas races without a form id"
     )
     for column, codes in report.unmapped.items():
         if codes:

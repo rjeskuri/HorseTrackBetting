@@ -3,8 +3,10 @@
 A JV-Data race key is 開催年 (YYYY), 開催月日 (MMDD), 競馬場コード (2 digits), 開催回 and
 開催日目 (2 digits each) and レース番号 (2 digits), as decoded text. The race id is the jra
 store's (`jra.netkeiba.common.store_race_id`): `jra:<YYYY-MM-DD>:<VENUE>:<NN>`, the venue's short
-code looked up by number in `config/jra.yaml`. Times in JV-Data are JST wall clock (UTC+9, no DST);
-the store keeps UTC instants.
+code looked up by number in `config/jra.yaml`; `race_id` and `meeting_id` are JRA-only. A NAR or
+overseas race, kept as horse form only (#377), has the form id `form_race_id`:
+`<jurisdiction>:<YYYY-MM-DD>:<code>:<NN>`, the venue code as JV-Data writes it. Times in JV-Data
+are JST wall clock (UTC+9, no DST); the store keeps UTC instants.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from horsetrack.core.config import load_source
 from horsetrack.countries.japan.jra.netkeiba.common import COUNTRY, SOURCE, store_race_id
 
 JST = timezone(timedelta(hours=9), "JST")
+FORM_JURISDICTIONS = ("nar", "overseas")  # kept as horse form only, never a betting row (#377)
 
 
 @cache
@@ -42,9 +45,11 @@ def _race_day(year: str, mmdd: str) -> date | None:
         return None
 
 
-def _race_no(race_no: str) -> int | None:
+def _race_no(race_no: str, *, zero: bool = False) -> int | None:
+    """The two-digit race number; '00' only with `zero` (a form race: JV-Data writes it for some
+    overseas races)."""
     digits = _digits(race_no, 2)
-    return int(digits) if digits is not None and int(digits) > 0 else None
+    return int(digits) if digits is not None and (zero or int(digits) > 0) else None
 
 
 def meeting_id(year: str, mmdd: str, venue_code: str) -> str | None:
@@ -65,6 +70,26 @@ def race_id(year: str, mmdd: str, venue_code: str, race_no: str) -> str | None:
     if day is None or venue is None or number is None:
         return None
     return store_race_id(day, venue, number)
+
+
+def form_meeting_id(year: str, mmdd: str, venue_code: str) -> str | None:
+    """`<jurisdiction>:<YYYY-MM-DD>:<code>` for a NAR or overseas venue, the JV-Data venue code as
+    written; None for a JRA venue, a venue without a jurisdiction or an invalid date."""
+    where = jurisdiction(venue_code)
+    day = _race_day(year, mmdd)
+    if where not in FORM_JURISDICTIONS or day is None:
+        return None
+    return f"{where}:{day.isoformat()}:{venue_code}"
+
+
+def form_race_id(year: str, mmdd: str, venue_code: str, race_no: str) -> str | None:
+    """`<jurisdiction>:<YYYY-MM-DD>:<code>:<NN>`, a NAR or overseas race's form id, race number
+    '00' included (JV-Data writes it for some overseas races); None for a JRA venue, a venue
+    without a jurisdiction, an invalid date or a race number that is not two digits."""
+    meeting, number = form_meeting_id(year, mmdd, venue_code), _race_no(race_no, zero=True)
+    if meeting is None or number is None:
+        return None
+    return f"{meeting}:{number:02d}"
 
 
 def source_race_key(year: str, venue_code: str, kai: str, nichi: str, race_no: str) -> str | None:
