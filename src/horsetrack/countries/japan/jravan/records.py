@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from horsetrack.core import paths
@@ -329,14 +330,47 @@ class BuildReport:
         return json.dumps(asdict(self), sort_keys=True, ensure_ascii=False, indent=2) + "\n"
 
 
-def write_parquet(table: pa.Table, path: Path) -> None:
+def day_slices(table: pa.Table, column: str = "race_date") -> list[pa.Table]:
+    """`table` cut into one slice per race day (`column`), days ascending and the rows without a
+    day last, each day's rows in table order. The slices are zero-copy runs of `table` when its
+    days already ascend (the builders' sorts lead with `race_id`, whose second part is the day);
+    otherwise `table` is first stably sorted by `column`, which keeps each day's own order."""
+    days = _day_numbers(table[column])
+    if (days[1:] < days[:-1]).any():
+        table = table.sort_by([(column, "ascending")])  # stable, nulls at the end
+        days = _day_numbers(table[column])
+    edges = [0, *(np.flatnonzero(days[1:] != days[:-1]) + 1).tolist(), table.num_rows]
+    return [table.slice(lo, hi - lo) for lo, hi in zip(edges, edges[1:], strict=False) if hi > lo]
+
+
+def _day_numbers(days: pa.ChunkedArray) -> np.ndarray:
+    """Each row's day as its date32 day number, a missing day after every day."""
+    return pc.fill_null(days.cast(pa.int32()), np.iinfo(np.int32).max).to_numpy()
+
+
+def write_days(writer: pq.ParquetWriter, table: pa.Table) -> None:
+    """`table` through `writer` as one row group per race day (`day_slices`, #502): each group's
+    race_date statistics then record its one day, so a reader that prunes row groups by them
+    (`models.v0.store.read_store_table`) never decodes another day's rows, a holdout day's
+    included."""
+    for part in day_slices(table):
+        writer.write_table(part, row_group_size=part.num_rows)
+
+
+def write_parquet(table: pa.Table, path: Path, *, by_day: bool = False) -> None:
     """`table` to `path` through a tmp file in the same folder and `os.replace`; the same table
-    always gives the same bytes (no wall-clock metadata)."""
+    always gives the same bytes (no wall-clock metadata). With `by_day` (`races` and `runners`,
+    #502), one row group per race day (`write_days`); otherwise the writer's default row
+    groups."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:12]}.tmp")
     try:
-        pq.write_table(table, tmp, compression="zstd")
+        if by_day and table.num_rows:
+            with pq.ParquetWriter(tmp, table.schema, compression="zstd") as writer:
+                write_days(writer, table)
+        else:
+            pq.write_table(table, tmp, compression="zstd")
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)

@@ -14,9 +14,24 @@ Rules (docs/specs/board-feed.md, "The shadow feed"):
   feed's `t20_odds` rule; the final from `final_board`), one ahead is projected from the current
   figure with the drift cells of `models.nowcast` (docs/specs/board-feed.md, "The odds ladder").
   Display only: values, flags and the shadow log do not read it.
+- `p_model` (ticket #506), per race: {pool: {combination: probability}} of the board as of now.
+  WIN is `models.win.predict(q, board.context())` with q the board's 1/O_WIN normalised; every
+  other pool is `model_probabilities(p, models.ordering, brackets=..., starters=...)`, brackets by
+  JRA's draw of the largest horse number on the board (scratched included). Scratched runners are
+  off the board, so they have no key and the rest renormalise; the places Place and Wide pay are
+  those of the start of sales, `starters` any runner priced on the board plus, from the race's
+  earliest WIN capture in the logs read: when it is before logger.yaml's `day_before.probe_until`
+  (Tokyo) on the eve, the log covers the opening (#358) and the runners not SCR there count (one
+  priced there and scratched later counts, one already SCR there does not); at or after it (a
+  logger first run in the race date's 07:00 window), or with no `probe_until`, the log missed the
+  opening and every runner it shows counts, SCR there or on the board included (the scratch
+  taken as after the opening). Without an ordering fit only WIN; without models None. On the
+  page it never reaches a value or a flag; shadow-day (#564) logs the same p_model of its
+  decision board through `_p_model` and `_starters`.
 - `cache`: a mapping the caller keeps between builds. A race's values are recomputed only when its
-  board (capture time and figures) or its bucket changed; flags read the clock on every build. The
-  log readers live in the same mapping, so a rebuild parses only the members appended since.
+  board (capture time and figures) or its bucket changed, its p_model only when its board did;
+  flags read the clock on every build. The log readers live in the same mapping, so a rebuild
+  parses only the members appended since.
 """
 
 from __future__ import annotations
@@ -25,13 +40,22 @@ import logging
 import math
 from bisect import bisect_left
 from collections.abc import Callable, MutableMapping
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from horsetrack.core.config import load_country_yaml
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board import snapshot
-from horsetrack.countries.japan.board.feed import _LOG_SUFFIX, _race_no, _venues_logged, utc_now
+from horsetrack.countries.japan.board.feed import (
+    _JST,
+    _LOG_SUFFIX,
+    _race_no,
+    _venues_logged,
+    utc_now,
+)
 from horsetrack.countries.japan.board.flags import FlagRules, avoid_flags
 from horsetrack.countries.japan.board.snapshot import (
     PLACE,
@@ -46,9 +70,14 @@ from horsetrack.countries.japan.board.snapshot import (
     post_times_for,
 )
 from horsetrack.countries.japan.models.v0.nowcast import FLOOR, band_of
-from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels, shadow_values
+from horsetrack.countries.japan.models.v0.ordering import OrderingFit
+from horsetrack.countries.japan.models.v0.shadow_values import (
+    ShadowModels,
+    model_probabilities,
+    point_seed,
+    shadow_values,
+)
 from horsetrack.countries.japan.research.win5 import live_pool_ev
-from horsetrack.countries.japan.shadow.day import point_seed
 
 log = logging.getLogger(__name__)
 
@@ -74,8 +103,10 @@ class _DayRows:
     """The rows a board as of now needs, per race: the latest row per board key available by the
     last now, plus every row available after it (a replay's later captures). For the odds ladder
     (#499) it also keeps, of the rows available by now, the latest captured at or before each
-    checkpoint post - k per board key and the rows of the captures showing a final price. A clock
-    that goes back, or a change of post times, reads the logs again from the start."""
+    checkpoint post - k per board key and the rows of the captures showing a final price. For the
+    places paid (#506) it keeps, per race, its earliest WIN capture available by now, the runners
+    not SCR on it and every runner on it (`_starters` reads them). A clock that goes back, or a
+    change of post times, reads the logs again from the start."""
 
     def __init__(self, race_date: date, day_dir: Path | None = None) -> None:
         self.race_date, self.day_dir = race_date, day_dir
@@ -93,6 +124,8 @@ class _DayRows:
         self.refs: dict[str, dict[int, dict[tuple, tuple[datetime, int, dict]]]] = {}
         self.final_snaps: dict[str, set[datetime]] = {}  # captures holding a final row
         self.finals: dict[str, list[dict[str, Any]]] = {}  # their rows, once available
+        # race_id -> (its earliest WIN capture, the runners not SCR on it, every runner on it)
+        self.opening: dict[str, tuple[datetime, set[int], set[int]]] = {}
 
     def _offer(self, race_id: str, entry: Entry) -> None:
         slot = self.latest.setdefault(race_id, {})
@@ -101,6 +134,23 @@ class _DayRows:
         if current is None or entry[:2] >= current[:2]:
             slot[key] = entry
         self._note(race_id, key, entry)
+        self._open(race_id, key, entry[2])
+
+    def _open(self, race_id: str, key: tuple, row: dict[str, Any]) -> None:
+        """The field at the opening: a WIN price row on the race's earliest capture so far."""
+        if key[0] != WIN or key[1] == odds_log.POOL_TOTAL:
+            return
+        snap = odds_log._instant(row.get("snapshot_utc"))
+        if snap is None:
+            return
+        current = self.opening.get(race_id)
+        if current is None or snap < current[0]:
+            current = self.opening[race_id] = (snap, set(), set())
+        elif snap > current[0]:
+            return
+        current[2].add(key[1])
+        if row.get("status_raw") != snapshot.SCRATCHED:
+            current[1].add(key[1])
 
     def _note(self, race_id: str, key: tuple, entry: Entry) -> None:
         """The ladder's bookkeeping for a row now available."""
@@ -221,6 +271,103 @@ def _values(
     if cache is not None:
         cache[slot] = (key, values)
     return values
+
+
+# ---------------------------------------------------------------- model probabilities (#506)
+
+
+def _brackets(drawn: int) -> dict[int, int] | None:
+    """JRA's draw of horses 1..drawn into the 8 brackets, in number order: N // 8 horses each and
+    one more in the last N % 8 brackets (9-16: brackets 1..16-N take one, the rest two; 17: bracket
+    8 takes three; 18: brackets 7 and 8). None with 8 or fewer (no bracket quinella) or above 18."""
+    if not 9 <= drawn <= 18:
+        return None
+    base, extra = divmod(drawn, 8)
+    out, horse = {}, 1
+    for bracket in range(1, 9):
+        for _ in range(base + (bracket > 8 - extra)):
+            out[horse] = bracket
+            horse += 1
+    return out
+
+
+def _probe_until(race_date: date) -> datetime | None:
+    """logger.yaml's `day_before.probe_until` (Tokyo) on the day before `race_date`, in UTC: a log
+    whose earliest WIN capture of a race is before it covers the opening of sales (#358). None
+    without a `day_before` block or a `probe_until` in it."""
+    day_before = load_country_yaml("japan", "logger").get("day_before")
+    until = day_before.get("probe_until") if isinstance(day_before, dict) else None
+    if until is None:
+        return None
+    at = time.fromisoformat(str(until))
+    return datetime.combine(race_date - timedelta(days=1), at, _JST).astimezone(timezone.utc)
+
+
+def _starters(
+    board: RaceBoard,
+    opening: tuple[datetime, set[int], set[int]] | None,
+    probe_until: datetime | None,
+) -> int:
+    """The runners in the field at the opening of sales (docs/specs/board-feed.md, "Places"). A
+    runner priced on the board counts. `opening` is the race's earliest WIN capture with its runners
+    not SCR and all its runners (`_DayRows.opening`; None before one is read): before `probe_until`
+    the log covers the opening and its runners not SCR count; otherwise (or without `probe_until`)
+    it missed it, so every runner it lists counts and the board's SCR runners too."""
+    counted = set(board.win)
+    if opening is None:
+        return len(counted)
+    first, fielded, listed = opening
+    if probe_until is not None and first < probe_until:
+        return len(counted | fielded)
+    return len(counted | listed | board.scratched)  # each scratch taken as after the opening
+
+
+def _p_model(
+    board: RaceBoard,
+    models: ShadowModels,
+    cache: MutableMapping | None,
+    starters: int,
+) -> dict[str, dict[str, float]] | None:
+    """The board's p_model (docs/specs/board-feed.md), from the cache while the board and the
+    starters are the ones last computed for the race; None when it cannot be formed. `starters`:
+    the field at the opening of sales (`_starters`), which fixes the places paid."""
+    runners = sorted(board.win)
+    if not runners:
+        return None
+    fielded = set(board.win) | set(board.place) | set(board.scratched)
+    drawn = max(fielded | {h for pair in board.wide for h in pair})  # drawn before any scratch
+    key = (
+        board.race_id,
+        _iso(board.capture_utc),
+        tuple(sorted(models.ids.items())),
+        tuple(sorted(board.win.items())),
+        drawn,
+        starters,
+    )
+    slot = ("p_model", board.race_id)
+    if cache is not None:
+        hit = cache.get(slot)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+    try:
+        inv = np.array([1.0 / board.win[h] for h in runners])
+        p = np.asarray(models.win.predict(inv / inv.sum(), board.context()), dtype=float)
+        if p.shape != (len(runners),):
+            raise ValueError(f"win.predict returned shape {p.shape}, expected ({len(runners)},)")
+        # ordered finishes need the fit's discounts: another ordering model gives WIN only
+        ordering = models.ordering if isinstance(models.ordering, OrderingFit) else None
+        found = model_probabilities(
+            dict(zip(runners, p.tolist(), strict=True)),
+            ordering,
+            brackets=_brackets(drawn),
+            starters=starters,
+        )
+    except Exception:  # the race shows without probabilities; tried again on the next build
+        log.exception("%s: model probabilities failed; shown without", board.race_id)
+        return None
+    if cache is not None:
+        cache[slot] = (key, found)
+    return found
 
 
 # ---------------------------------------------------------------- the odds ladder (#499)
@@ -386,6 +533,7 @@ def build_shadow(
             cache[key] = day_rows
     post_times = {venue: post_times_for(race_date, venue, day_dir=day_dir) for venue in logged}
     day_rows.update(logged, now_utc, post_times)
+    probe_until = _probe_until(race_date)
 
     races = []
     for venue in logged:
@@ -406,6 +554,10 @@ def build_shadow(
             if models is not None and bucket is not None:
                 values = _values(board, bucket, models, n_draws, seed, cache)
             flags = avoid_flags(board, rules=flag_rules, now_utc=now_utc)
+            p_model = None
+            if models is not None:
+                starters = _starters(board, day_rows.opening.get(race_id), probe_until)
+                p_model = _p_model(board, models, cache, starters)
             races.append(
                 {
                     "race_id": race_id,
@@ -418,6 +570,7 @@ def build_shadow(
                     "pools": _pools(
                         board, flags, values, _ladders(board, day_rows, post, now_utc, models)
                     ),
+                    "p_model": p_model,
                 }
             )
     return {

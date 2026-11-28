@@ -28,7 +28,9 @@ store alone, and their figures are below.
   `tests/countries/japan/test_condlogit.py` and `test_meta.py`), and `countries/japan/studies/meta.py` (the run).
   The meeting-clustered bounds, the report's rule and rules-out sections and the level-2 window table were added at
   `647879c`, after the outcomes were read (review findings on PR #308; see Hypothesis). To reproduce, run
-  `uv run python -m horsetrack.countries.japan.studies.meta --run --members ~/Projects/HKTrack/outputs/oof/m-v1-20261115-6102e309.parquet`.
+  `uv run python -m horsetrack.countries.japan.studies.meta --run --members ~/Projects/HKTrack/outputs/oof/m-v1-20261115-6102e309.parquet --allow-short-history`.
+  The flag waives D9 only for that file, by its sha256 (`studies.meta.APPROVED_MEMBER_DIGEST`, `b0c5a8298e0befe8...`),
+  so the replay also runs from a fresh registry; any other member file keeps the 5-season check.
 - Store: `processed/jra/runners.parquet@6f3cec95347e0132`, `processed/jra/races.parquet@9cce511831074b64`. Members:
   `HKTrack:outputs/oof/m-v1-20261115-6102e309.parquet@b0c5a8298e0befe8`, read by column (keys and the three member
   columns only). HKTrack was read, never written or run.
@@ -257,3 +259,18 @@ What each form is:
   `meeting_clustered:` records), so no follow-up ticket is needed. #276 is the counterpart for #77's β.
 - D9 at level 2 (the 5-season minimum) and level 1 (the season refit): answered (b) on #87, 2026-11-25. The
   replication run is a documented failure to meet D9; the D9-compliant run is #91/#98.
+
+## On the leaderboard (2026-11-27)
+
+Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
+adoption verdicts. Nothing is adopted or rejected: every option, model and member will be a row on the planned
+`horsetrack japan leaderboard` (#452; this revision does not have the command yet), ranked by its shrunk return per
+¥100 at the final price, and a row with no measured return will be listed after the ranking, never dropped. Where
+this report says "not adopted", "rules out" or "rejected", read a measured position. This section reopens and
+re-runs nothing.
+
+- Registry family: `japan-c4-meta-final-win`.
+- As task 4 (#451, planned) specifies, it will be listed as a model with no return yet. Its member-based records are
+  withheld (D21): the public leaderboard will show the family's id only, with no figure.
+- "Nothing is adopted" above now reads as a measured position, not a verdict. The run stays on the record as a
+  documented failure to meet D9, as the owner's answer (b) on #87 records.

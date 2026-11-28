@@ -1011,3 +1011,408 @@ def test_rows_round_trip_through_json():
 
     with pytest.raises(RowRefused):  # a tampered file is refused like a bad row
         from_json(text.replace('"comparator"', '"bogus"'))
+
+
+# ------------------------------------------------------------------------- descriptive rows (#451)
+# A descriptive row (``descriptive=True``, default False) is a measurement shown on the board but
+# given no D16 rank: WIN5's pool-level day value is a share of the pool paid back to all bettors,
+# not a return per ¥100 on a ticket (docs/experiments/win5-carryover-japan.md, "On the
+# leaderboard"). ``shrink`` gives it no shrunk value and leaves it out of its pool's estimate;
+# ``rank`` gives it rank None, after the ranked rows and before the unmeasured ones, by family id
+# then option id. An unmeasured descriptive row has no value to show and sorts with the unmeasured
+# rows.
+
+
+def desc(option_id: str, ret: float | None = None, se: float | None = None, **extra):
+    return make_row(option_id, ret, se, descriptive=True, **extra)
+
+
+def test_a_row_is_not_descriptive_unless_marked():
+    assert LeaderboardRow(**GOOD).descriptive is False
+    assert LeaderboardRow(**(GOOD | {"descriptive": True})).descriptive is True
+    assert make_row("plain", 80.0, 5.0).descriptive is False
+
+
+DESCRIPTIVE_POOLS = [
+    # (ranked rows [(id, return, se)], descriptive rows [(id, return, se)]) in pool WIN5; a
+    # descriptive row far from the rest and precise would drag the pool estimate if it counted.
+    pytest.param(
+        [("w-a", 72.0, 4.0), ("w-b", 81.0, 6.0), ("w-c", 90.0, 3.0)],
+        [("d-hi", 300.0, 1.0)],
+        id="three-ranked-one-descriptive",
+    ),
+    pytest.param(
+        [("w-a", 60.0, 2.5), ("w-b", 95.0, 9.0)],
+        [("d-lo", 5.0, 0.5), ("d-mid", 88.0, 4.0)],
+        id="two-ranked-two-descriptive",
+    ),
+    pytest.param(
+        [("w-only", 77.0, 5.0)],
+        [("d-a", 140.0, 2.0), ("d-b", 20.0, 3.0)],
+        id="a-pool-of-one-once-descriptive-rows-are-out",
+    ),
+    pytest.param([], [("d-a", 105.0, 1.5), ("d-b", 93.0, 2.0)], id="descriptive-only"),
+]
+
+
+@pytest.mark.parametrize(("ranked", "descriptive"), DESCRIPTIVE_POOLS)
+def test_shrink_leaves_descriptive_rows_out_of_the_pool(ranked, descriptive):
+    plain = [make_row(oid, x, se, pool="WIN5") for oid, x, se in ranked]
+    marked = [desc(oid, x, se, pool="WIN5", shrunk_per_100=999.0) for oid, x, se in descriptive]
+    other = [make_row("p-1", 70.0, 3.0, pool="PLACE"), make_row("p-2", 84.0, 2.0, pool="PLACE")]
+    rows = [*marked[:1], *plain, *other, *marked[1:]]
+
+    out = shrink(rows)
+
+    assert [r.option_id for r in out] == [r.option_id for r in rows]
+    # expected over the non-descriptive rows alone, from the ticket's formulas
+    want = expected_shrunk([*plain, *other]) | {r.option_id: None for r in marked}
+    assert_shrunk(out, want)
+    got = by_id(out)
+    for oid, x, _ in descriptive:
+        assert got[oid].descriptive is True
+        assert got[oid].return_per_100 == pytest.approx(x), "the value itself is kept"
+    if len(ranked) == 1:
+        assert got[ranked[0][0]].shrunk_per_100 == pytest.approx(ranked[0][1]), "a pool of one"
+
+
+def test_descriptive_rows_follow_the_ranked_rows_unranked_before_the_unmeasured():
+    rows = [
+        make_row("u-b", family="fam-b"),
+        desc("d-z", 140.0, 2.0, family="fam-a", pool="WIN5"),
+        make_row("m-low", 55.0, pool=None),
+        desc("d-a", 101.0, pool=None, family="fam-b"),
+        make_row("m-high", 92.0, pool=None),
+        desc("d-m", 30.0, 1.0, family="fam-a", pool="WIN5", shrunk_per_100=500.0),
+        make_row("u-a", family="fam-a"),
+        desc("d-unmeasured", family="fam-a"),
+        make_row("m-mid", 70.0, pool=None),
+    ]
+    expected = [
+        (1, "m-high"),
+        (2, "m-mid"),
+        (3, "m-low"),
+        (None, "d-m"),
+        (None, "d-z"),
+        (None, "d-a"),
+        (None, "d-unmeasured"),
+        (None, "u-a"),
+        (None, "u-b"),
+    ]
+
+    assert ranked_ids(rank(rows)) == expected
+    assert ranked_ids(rank(list(reversed(rows)))) == expected
+    assert ranked_ids(rank(shrink(rows))) == expected
+
+
+@pytest.mark.parametrize("public", [False, True])
+def test_descriptive_rows_render_with_their_value_and_no_rank(public):
+    ranked = three_win_rows()
+    marked = desc(
+        "d-win5", 105.0, pool="WIN", ci_lo=102.0, ci_level=0.95, n=4, n_unit="days", variants=7
+    )
+    rows = [marked, *ranked, make_row("u-none", family="fam-z")]
+    if public:
+        rows.append(desc("d-secret", 131.79, 2.0, pool="WIN", sources=("jrdb",)))
+
+    text = render_markdown(rows, title=TITLE, public=public)
+
+    want = expected_shrunk(ranked)
+    order = sorted((r.option_id for r in ranked), key=lambda oid: -want[oid])
+    for position, oid in enumerate(order, start=1):
+        line = table_line(text, oid)
+        assert cells(line)[0] == str(position)
+        assert f"{want[oid]:.2f}" in line, "shrunk over the non-descriptive rows alone"
+    line = table_line(text, "d-win5")
+    assert not any(ch.isdigit() for ch in cells(line)[0]), "a descriptive row has no rank"
+    assert "105.00" in line and "102.00" in line
+    assert "4" in cells(line) or "4 days" in cells(line)
+    # owner, 2026-11-28: the descriptive row sits in its own section after the ranked table,
+    # which keeps the ranked rows and then the unmeasured ones
+    ranked_table, desc_table = split_tables(text)
+    assert set(body_by_option(ranked_table)) == {*order, "u-none"}
+    assert desc_table is not None and set(body_by_option(desc_table)) == {"d-win5"}
+    positions = [text.index(table_line(text, oid)) for oid in [*order, "u-none", "d-win5"]]
+    assert positions == sorted(positions), "ranked, then unmeasured, then the descriptive section"
+    assert text.splitlines().index(table_line(text, "d-win5")) > heading_index(
+        text, DESCRIPTIVE_HEADING
+    )
+    head = text[: text.index("| ")]
+    assert "descriptive" in head.lower(), "the header says descriptive rows are not ranked"
+    if public:
+        before, section = withheld_section(text)
+        assert "d-secret" not in before and "d-secret" in section
+        assert "131.79" not in text
+
+
+def test_public_view_keeps_public_descriptive_rows_unshrunk():
+    ranked = three_win_rows()
+    rows = [
+        *ranked,
+        desc("d-pub", 150.0, 2.0, pool="WIN"),
+        desc("d-secret", 160.0, 2.0, pool="WIN", sources=("jrdb",)),
+        make_row("w-secret", 99.0, 3.0, sources=("jra-van",)),
+    ]
+
+    out = by_id(public_view(rows))
+
+    assert set(out) == {*(r.option_id for r in ranked), "d-pub"}
+    assert out["d-pub"].descriptive is True
+    assert out["d-pub"].shrunk_per_100 is None
+    assert out["d-pub"].return_per_100 == pytest.approx(150.0)
+    assert_shrunk([out[r.option_id] for r in ranked], expected_shrunk(ranked))
+
+
+def test_the_descriptive_flag_round_trips_through_json():
+    rows = [
+        desc("d-1", 105.0, pool="WIN5", ci_lo=102.0, ci_level=0.95, n=4, n_unit="days"),
+        make_row("r-1", 80.0, 5.0),
+    ]
+
+    text = to_json(rows)
+    back = from_json(text)
+
+    assert back == rows
+    assert [r.descriptive for r in back] == [True, False]
+    assert [item["descriptive"] for item in json.loads(text)] == [True, False]
+    assert from_json(to_json(shrink(rows))) == shrink(rows)
+    older = json.loads(to_json([rows[1]]))
+    del older[0]["descriptive"]  # a file written before the flag existed
+    assert from_json(json.dumps(older))[0].descriptive is False
+
+
+# ------------------------------------------------------- descriptive section (#451, owner 11-28)
+# The owner's instruction (ticket comment, 2026-11-28): ``render_markdown`` and the private
+# writer put descriptive rows in their own section, ``## Descriptive, not ranked``, whose value
+# column header is "Pool value per ¥100 (descriptive)", never in the ranked table, whose value
+# column header is "Return per ¥100 staked". The ranked table keeps the ranked rows and the
+# unmeasured non-descriptive rows; the descriptive table lists every descriptive row shown, with
+# its value, CI and n and no rank. Public: a withheld descriptive row is in neither table, only in
+# ``## Withheld (D21)``, which stays last.
+
+RANKED_HEADER = "Return per ¥100 staked"
+DESCRIPTIVE_HEADER = "Pool value per ¥100 (descriptive)"
+DESCRIPTIVE_HEADING = "## Descriptive, not ranked"
+
+
+def md_tables(text: str) -> list[dict]:
+    """Each Markdown table in order: its line index, the heading above it (or None), its header
+    cells and its body rows as cell lists (the alignment line dropped)."""
+    lines = text.splitlines()
+    tables: list[dict] = []
+    heading = None
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("#"):
+            heading = line.strip()
+        if line.lstrip().startswith("|"):
+            start = i
+            block = []
+            while i < len(lines) and lines[i].lstrip().startswith("|"):
+                block.append(cells(lines[i]))
+                i += 1
+            body = [b for b in block[1:] if not all(re.fullmatch(r":?-+:?", c) for c in b)]
+            tables.append({"at": start, "heading": heading, "header": block[0], "body": body})
+            continue
+        i += 1
+    return tables
+
+
+def heading_index(text: str, heading: str) -> int:
+    found = [i for i, ln in enumerate(text.splitlines()) if ln.strip() == heading]
+    assert len(found) == 1, f"expected one {heading!r} heading, got {len(found)}"
+    return found[0]
+
+
+def split_tables(text: str) -> tuple[dict, dict | None]:
+    """(the ranked table, the descriptive section's table or None)."""
+    tables = md_tables(text)
+    ranked = [t for t in tables if RANKED_HEADER in t["header"]]
+    assert len(ranked) == 1, f"expected one table headed {RANKED_HEADER!r}, got {len(ranked)}"
+    descriptive = [t for t in tables if DESCRIPTIVE_HEADER in t["header"]]
+    assert len(descriptive) <= 1
+    for t in tables:
+        assert DESCRIPTIVE_HEADER not in t["header"] or RANKED_HEADER not in t["header"]
+    return ranked[0], (descriptive[0] if descriptive else None)
+
+
+def body_by_option(table: dict) -> dict[str, list[str]]:
+    """option id -> the row's cells, the option id read from the Option column."""
+    col = table["header"].index("Option")
+    return {row[col]: row for row in table["body"]}
+
+
+def assert_sections(text: str, rows: list[LeaderboardRow], *, public: bool) -> None:
+    """The layout over ``rows`` as given (before shrinkage), with expectations derived here."""
+    shown = [r for r in rows if not (public and r.withheld)]
+    withheld = [r for r in rows if public and r.withheld]
+    plain = [r for r in shown if not r.descriptive]
+    marked = [r for r in shown if r.descriptive]
+    want = expected_shrunk(plain)
+
+    ranked, desc_table = split_tables(text)
+    assert ranked["header"].count(RANKED_HEADER) == 1
+    assert DESCRIPTIVE_HEADER not in ranked["header"]
+
+    # the ranked table: the non-descriptive rows only, ranked ones numbered by shrunk value
+    got = body_by_option(ranked)
+    assert set(got) == {r.option_id for r in plain}, "the ranked table holds no descriptive row"
+    assert len(ranked["body"]) == len(plain)
+    measured = [r for r in plain if r.measured]
+    order = sorted(
+        measured,
+        key=lambda r: (
+            -(want[r.option_id] if want[r.option_id] is not None else r.return_per_100),
+            -r.return_per_100,
+            r.option_id,
+        ),
+    )
+    rank_col = ranked["header"].index("Rank")
+    value_col = ranked["header"].index(RANKED_HEADER)
+    for position, r in enumerate(order, start=1):
+        assert got[r.option_id][rank_col] == str(position), r.option_id
+        assert got[r.option_id][value_col] == f"{r.return_per_100:.2f}", r.option_id
+    for r in plain:
+        if not r.measured:
+            assert not any(ch.isdigit() for ch in got[r.option_id][rank_col]), r.option_id
+    ranked_order = [row[ranked["header"].index("Option")] for row in ranked["body"]]
+    assert ranked_order[: len(order)] == [r.option_id for r in order]
+
+    # the descriptive section: every descriptive row shown, unranked, with value, CI and n
+    if marked:
+        at = heading_index(text, DESCRIPTIVE_HEADING)
+        assert at > ranked["at"], "the descriptive section follows the ranked table"
+        assert desc_table is not None, f"no table headed {DESCRIPTIVE_HEADER!r}"
+        assert desc_table["heading"] == DESCRIPTIVE_HEADING
+        assert desc_table["at"] > at
+        assert RANKED_HEADER not in desc_table["header"]
+        dgot = body_by_option(desc_table)
+        assert set(dgot) == {r.option_id for r in marked}
+        assert len(desc_table["body"]) == len(marked)
+        dvalue = desc_table["header"].index(DESCRIPTIVE_HEADER)
+        dorder = [row[desc_table["header"].index("Option")] for row in desc_table["body"]]
+        measured_marked = sorted(
+            (r for r in marked if r.measured), key=lambda r: (r.family_id, r.option_id)
+        )
+        assert [o for o in dorder if by_id(marked)[o].measured] == [
+            r.option_id for r in measured_marked
+        ], "descriptive rows by family id then option id"
+        for r in marked:
+            line = dgot[r.option_id]
+            if "Rank" in desc_table["header"]:
+                rank_cell = line[desc_table["header"].index("Rank")]
+                assert not any(ch.isdigit() for ch in rank_cell), "a descriptive row has no rank"
+            if r.measured:
+                assert line[dvalue] == f"{r.return_per_100:.2f}", r.option_id
+            joined = " | ".join(line)
+            for bound in (r.ci_lo, r.ci_hi):
+                if bound is not None:
+                    assert f"{bound:.2f}" in joined, (r.option_id, bound)
+            if r.n is not None:
+                assert any(c in (str(r.n), f"{r.n} {r.n_unit}") for c in line), r.option_id
+    elif desc_table is not None:
+        assert desc_table["body"] == [] or all(
+            not any(r.option_id in " ".join(b) for r in rows) for b in desc_table["body"]
+        )
+
+    if public:
+        before, section = withheld_section(text)
+        lines = text.splitlines()
+        w_at = next(i for i, ln in enumerate(lines) if ln.strip().lower() == "## withheld (d21)")
+        assert all(t["at"] < w_at for t in md_tables(text)), "the withheld section stays last"
+        if marked:
+            assert heading_index(text, DESCRIPTIVE_HEADING) < w_at
+        for r in withheld:
+            assert r.option_id not in before and r.option_id in section
+
+
+SECTION_CASES = [
+    pytest.param(
+        [
+            *three_win_rows(),
+            desc("d-win5", 105.0, pool="WIN", ci_lo=102.0, ci_level=0.95, n=4, n_unit="days"),
+            make_row("u-none", family="fam-z"),
+        ],
+        id="one-descriptive-beside-three-ranked",
+    ),
+    pytest.param(
+        [
+            make_row("p-1", 64.5, 3.0, pool="PLACE", family="fam-p", n=310, n_unit="bets"),
+            make_row("p-2", 88.25, 2.0, pool="PLACE", family="fam-p"),
+            make_row("e-1", 71.0, pool="EXACTA", family="fam-e"),
+            desc(
+                "d-carry-1",
+                212.4,
+                pool="WIN5",
+                family="fam-w",
+                ci_lo=180.6,
+                ci_hi=240.1,
+                ci_level=0.9,
+                n=17,
+                n_unit="days",
+            ),
+            desc("d-base", 63.3, 1.5, pool="WIN5", family="fam-c", ci_lo=60.9, ci_level=0.95),
+            desc("d-carry-0", 41.8, pool="WIN5", family="fam-w", n=233, n_unit="days"),
+            desc("d-empty", family="fam-w"),
+            make_row("u-a", family="fam-a"),
+            make_row("u-b", family="fam-b", pool=None),
+        ],
+        id="three-families-of-descriptive-with-an-unmeasured-one",
+    ),
+    pytest.param(
+        [
+            make_row("solo", 93.0, 4.0, pool="WIDE"),
+            desc("d-only", 333.33, pool="WIN5", family="fam-d", ci_hi=350.0, ci_level=0.95),
+        ],
+        id="a-descriptive-row-above-every-ranked-value",
+    ),
+    pytest.param(
+        [
+            make_row("k-1", 55.0, 6.0, pool="TRIO"),
+            make_row("k-2", 120.5, 9.0, pool="TRIO"),
+            make_row("k-3", 82.0, 2.0, pool="TRIO"),
+            make_row("u-x", family="fam-x"),
+        ],
+        id="no-descriptive-row",
+    ),
+]
+
+
+@pytest.mark.parametrize("public", [False, True])
+@pytest.mark.parametrize("rows", SECTION_CASES)
+def test_descriptive_rows_render_in_their_own_section_never_in_the_ranked_table(rows, public):
+    extra = [
+        desc("d-secret", 131.79, 2.0, pool="WIN5", family="fam-s", sources=("jrdb",), n=5432),
+        make_row("r-secret", 97.31, 3.0, pool="WIN", sources=("JRA-VAN",)),
+    ]
+    rows = [*rows, *extra] if public else rows
+
+    text = render_markdown(rows, title=TITLE, public=public)
+
+    assert_sections(text, rows, public=public)
+    if public:
+        for figure in ("131.79", "97.31", "5432", "5,432"):
+            assert figure not in text, "a withheld figure reached the public text"
+
+
+def test_the_private_writer_puts_descriptive_rows_in_their_own_section(repo, tmp_path):
+    rows = [
+        make_row("w-1", 76.0, 4.0, family="fam-a"),
+        make_row("w-2", 91.5, 3.0, family="fam-a"),
+        make_row("w-licensed", 84.0, 5.0, family="fam-l", sources=("jrdb",)),
+        desc("d-day", 118.6, pool="WIN5", family="fam-w", ci_lo=99.4, ci_level=0.95, n=9),
+        desc("d-licensed", 47.7, pool="WIN5", family="fam-k", sources=("jrdb",), n=61),
+        make_row("u-1", family="fam-u"),
+    ]
+    before = tree(repo)
+    target = tmp_path / "data" / "reports" / "leaderboard-japan.md"
+
+    assert write_leaderboard(target, rows, title=TITLE, public=False) == target
+
+    text = target.read_text(encoding="utf-8")
+    assert_sections(text, rows, public=False)
+    _, desc_table = split_tables(text)
+    assert set(body_by_option(desc_table)) == {"d-day", "d-licensed"}, "private shows them all"
+    assert "47.70" in text and "84.00" in text
+    assert tree(repo) == before

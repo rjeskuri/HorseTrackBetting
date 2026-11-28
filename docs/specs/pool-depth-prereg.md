@@ -117,6 +117,9 @@ quantiles above. It replaces #283's measure from the logged odds, which had no l
 TIERCE (too many combinations for exact quantiles in memory on this machine; a streaming exact
 quantile is a follow-up) and BRACKET_QUINELLA (needs the horse-to-bracket map).
 
+Note (2026-11-28, not part of the frozen spec): #490 measures both pools in their own family,
+`japan-pool-depth-exotics-v1` ("Exotics" below).
+
 ## After the run (2026-11-27; not part of the frozen spec)
 
 Every run is listed, with its status and registry id, in `docs/experiments/pool-depth-japan.md`;
@@ -182,3 +185,64 @@ rule and nothing else.
   pool_depth_coplacer_v2`), one RunRecord in the family (hypothesis `P432`, ticket 432, sources
   `('jravan',)`), failures included; its private report is
   `pool-depth-coplacer-japan-<first 16 hex of its run id>.md` under `$HORSETRACK_DATA_DIR/reports/`.
+
+## Exotics: TIERCE and BRACKET_QUINELLA (#490, 2026-11-28)
+
+Status: **FROZEN on 2026-11-28**, before its run. Family id: **`japan-pool-depth-exotics-v1`**,
+spec sha256 **`531658f78e2513daaa4a5fd61cee9924dec3eb529afcd343216ec71d56a0ec8c`**, committed at
+`src/horsetrack/countries/japan/config/pool_depth_exotics.yaml` and frozen with `horsetrack japan
+pool-depth freeze --spec pool_depth_exotics`.
+
+Why: `japan-pool-depth-v1` left both pools out of its cells ("Not in the cells" above). This
+family registers the `depth` variant for them alone and changes nothing in v1 or v2.
+
+- Pools: TIERCE (the trifecta) and BRACKET_QUINELLA, both single-winner pools: every combination
+  has the capacity stake of "Definitions" above, s = (e - k)VW / ((1 + k)V - (1 + e)W).
+- Everything else is v1's: the days (2014-06-07 to the store's last development day, development
+  days only, confirmed records only), W and V, class groups, the abandoned races left out, the
+  edges 0.05, 0.10 and 0.20, share lost one half, the quantiles 0.10 to 0.90 (numpy's linear
+  interpolation; an unbounded capacity sorts last) and the flat stakes 1,000, 10,000 and 30,000
+  yen.
+- Odds bands (chosen by analogy with v1's, before any read of these pools): TIERCE edges 30, 100,
+  300, 1,000, 3,000, 10,000 and 30,000; BRACKET_QUINELLA edges 5, 10, 20, 50, 100 and 300 (v1's
+  quinella edges).
+- Cells: pool x class group x odds band, newcomer and maiden included: per cell its combinations
+  and races, the quantiles of W, of V (each race once) and of the capacity at each edge, and the
+  share of its combinations whose capacity reaches each flat stake. Not registered: the
+  pool-size tertile cells and the totals at t.
+- The quantile is exact, not a sketch: `research.pool_depth.StreamingQuantile` keeps each distinct
+  value once with its count and reads numpy's linear quantile from the cumulative counts. The run
+  reads the store a year at a time and keeps, per cell, the distinct (V, W) vote pairs of each
+  month with their counts (a race's combinations share V, and W repeats within a race); W, V and
+  every capacity quantile are computed from those pairs, so memory follows the distinct pairs, not
+  the combinations. Peak resident memory must stay under 2.5 GB.
+- The bracket map: per race, each starter's 枠番 from the jravan `runners` table (`bracket`,
+  development days only); a runner marked `is_scratched` (取消 WV or 除外 WX) or without a bracket
+  is in no bracket, and a race giving one horse two brackets fails the run. A bracket pair "a,b"
+  (a <= b, as the store writes 組番) is sold when both brackets hold a starter, a same-bracket pair
+  when its bracket holds two or more; a pair not sold gives no row even where the final board
+  prices it. The private report counts the priced pairs, the sold ones, and the races priced
+  without a bracket map.
+- One run, the depth variant (`horsetrack japan pool-depth run --spec pool_depth_exotics`), one
+  RunRecord in the family (hypothesis `P490`, ticket 490, sources `('jravan',)`, fold scheme
+  `development-days`), failures included; recorded **failed** when no combination has a final
+  price. Metrics: per cell the median capacity at e = 0.10. Its private report is
+  `pool-depth-exotics-japan-<first 16 hex of its run id>.md` under `$HORSETRACK_DATA_DIR/reports/`;
+  the public report (`docs/experiments/pool-depth-japan.md`) lists the run and withholds every
+  figure (D21).
+
+After the run (2026-11-28; not part of the frozen spec): frozen at `5af150b` before any run; the
+first run, at `5af150b`, **scored** (registry run
+`7363def84fd94c5482d56a1a404bb43ea6956ffdbba2461b5eff931ed22537ec`, private report
+`pool-depth-exotics-japan-7363def84fd94c54.md`), with a peak resident set of about 1.65 GB
+(`/usr/bin/time -l`), under the 2.5 GB bound. Every figure: withheld (D21).
+
+## The depth table for the leaderboard (#491, 2026-11-28; not part of the frozen spec)
+
+Each scored depth run, of `pool_depth` and of `pool_depth_exotics`, also writes its long cell
+table (`depth_table`'s columns) as CSV beside its private report, replacing the spec's previous
+one: `pool-depth-japan-table.csv` and `pool-depth-exotics-japan-table.csv` under the run's
+out_dir (`$HORSETRACK_DATA_DIR/reports/` by default), through `write_report` with sources
+`('jravan',)` (`write_depth_table`). A failed run leaves the previous table. The leaderboard reads
+both (`read_depth_tables`) and shows each row's cell capacity beside it (`docs/specs/leaderboard.md`,
+"Capacity"); every figure stays private (D21).

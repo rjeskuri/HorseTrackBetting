@@ -384,3 +384,175 @@ is exactly 0.
 - **The primary label is unchanged,** pending the owner's decision on whether an incomplete race should keep its
   timed-runner mean, be dropped, or be labelled another way. On this store that choice changes no number.
 - Nothing is adopted (D16). The holdout was not opened, and no holdout day was read.
+
+## On the leaderboard (2026-11-27)
+
+Under the reframe (epic #447; D16 to D18 as amended 2026-11-27 in #448), the results above are measured results, not
+adoption verdicts. Nothing is adopted or rejected: every option, model and member will be a row on the planned
+`horsetrack japan leaderboard` (#452; this revision does not have the command yet), ranked by its shrunk return per
+¥100 at the final price, and a row with no measured return will be listed after the ranking, never dropped. Where
+this report says "not adopted", "rules out" or "rejected", read a measured position. This section reopens and
+re-runs nothing.
+
+- Registry families: `japan-speed-top3-c3` (#305) and `japan-speed-top3-c3-timing` (#416, the complete-timing
+  sensitivity).
+- Both measure a time forecast, not a return, so, as task 4 (#451, planned) specifies, both will be listed with no
+  return yet. The forecast's marginal against the final price is E39's test, open as #97.
+- "Nothing is adopted" and what this report rules out now read as measured positions on the time forecast. The open
+  questions for the owner above are unchanged.
+
+## Carry-over variant prior for a day's first races (#328)
+
+Ticket #328 (epic #73, follow-up of #305). At T-2, 26% of #305's scored races (9,517 of 37,047) had no result of their
+own day, track and surface before t. There #96's same-day variant is its N(0, tau²) prior and #305's gain is 0 by
+construction. This study gives the variant a carry-over prior on those races, in the owner's three kinds (#328,
+2026-11-28), each its own pre-registered variant:
+- **(a) previous_day**: the same track and surface's posterior variant on its latest earlier race day with a result
+  available before t, decayed toward N(0, tau²) with a half-life of 7 days.
+- **(b) other_surface**: the same day's posterior variant on the other surface (turf for dirt, dirt for turf) at the
+  same track, from its results available before t, coupled with weight 0.5.
+- **(c) both**: (a) and (b) combined by their information over the base prior.
+
+The prior is `countries/japan/models/speed_prior.py` (`CarryOverPrior`); the study is
+`countries/japan/studies/speed_prior_run.py`. #96's `SpeedModel` is unchanged, and so is its fit, which never reads an
+injected prior.
+
+- Registry family `japan-speed-top3-c3-prior`, spec sha256
+  `2f451f09a852781e10ddacde9a86f511afceb8d811a60753ce96a580c8fbf241`, frozen before the store was read. It is #305's
+  spec (estimand, race exclusions, availability, keys, error models, T-2, folds, bootstrap, decisions) with the three
+  priors and their parameters, the prior definitions, the two baselines and results seen as the primary split.
+- Code at `b39ffb9`. To reproduce, run `uv run python -m horsetrack.countries.japan.studies.speed_prior_run --run`.
+- Store: the same builds as #305 and #416 (`processed/jra/races.parquet@9cce511831074b64`,
+  `processed/jra/runners.parquet@6f3cec95347e0132`), read column-scoped. JRA results only; no JRDB, no JRA-VAN (D21).
+- The full report, with every cell, margin and results-seen row of every variant, is under the data directory at
+  `reports/speed-prior-japan-2f451f09a852.md`. The records are in
+  `docs/experiments/registry/japan/japan-speed-top3-c3-prior.md`.
+- 24 records, none failed (2 error models × 3 priors × 2 predictions × 2 baselines). The run took 397 s at a peak RSS
+  of 527 MB.
+- #305's baselines are recomputed in the same fold loop, from the same fits: par only and #305's `variant_on`
+  reproduce #305's RMSEs (t5 1.242 s and 1.009 s; normal 1.256 s and 1.012 s). Every comparison is paired, on the
+  same 37,047 races in 3,215 meetings over the same 45 folds.
+
+### Hypothesis
+
+The null is the starting point: **no carry-over prior lowers the time RMSE below #305's `variant_on` on the races with
+no same-day result before t** (gain = RMSE(#305 variant on) − RMSE(prior, variant on) ≤ 0 on results seen 0).
+- A kind's claim rests on the one-sided 95% lower bound of that gain being above 0 (D7, meeting clusters). The overall
+  gain is reported beside it.
+- Expected before the run: the gain shrinks toward 0 as the day's own results come in, because they dominate the
+  prior.
+- The parameters were fixed before any scored read; no measured persistence of the variant existed in the ledger:
+  - half-life 7 days, one race week: a Sunday reads its Saturday at ρ = 0.91, and a Saturday reads the previous
+    Sunday at ρ = 0.55;
+  - surface weight 0.5, the midpoint of the allowed [0, 1]. The turf and dirt variants share the day's weather, wind
+    and temperature, but moisture moves them in opposite directions (wet dirt rides faster, soft turf slower), so the
+    sign of the coupling was uncertain before the run.
+
+### Variants tried
+
+The races with no same-day result first. Gain over #305's `variant_on` (s), with the one-sided 95% bounds lo and hi
+(10,000 meeting-clustered paired replicates, seed 328). On these races #305's `variant_on` is the par (RMSE 1.158 s
+under t5, 1.166 s under normal), so the gain over par only is the same figure.
+
+| Prior | Error model | Races (results seen 0) | Gain (s) | lo | hi |
+| --- | --- | --- | --- | --- | --- |
+| previous_day | t5 | 9,517 | **+0.149** | +0.138 | +0.161 |
+| previous_day | normal | 9,517 | **+0.150** | +0.138 | +0.163 |
+| both | t5 | 9,517 | **+0.137** | +0.126 | +0.149 |
+| both | normal | 9,517 | **+0.139** | +0.127 | +0.152 |
+| other_surface | t5 | 9,517 | −0.027 | −0.031 | −0.022 |
+| other_surface | normal | 9,517 | −0.027 | −0.032 | −0.022 |
+
+The variant-on and variant-off predictions agree on these races (nothing of the day's own is in), so each row covers
+both.
+
+Every race, all 24 variants. Gain over #305's `variant_on` and over par only, each with its bounds:
+
+| Prior | Error model | Prediction | Gain over #305 variant on | lo | hi | Gain over par only | lo | hi |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| previous_day | t5 | variant on | +0.046 | +0.040 | +0.052 | +0.279 | +0.269 | +0.289 |
+| previous_day | t5 | variant off | −0.080 | −0.090 | −0.069 | +0.154 | +0.143 | +0.164 |
+| other_surface | t5 | variant on | −0.021 | −0.024 | −0.019 | +0.212 | +0.204 | +0.220 |
+| other_surface | t5 | variant off | −0.293 | −0.307 | −0.281 | −0.060 | −0.067 | −0.054 |
+| both | t5 | variant on | +0.033 | +0.026 | +0.040 | +0.266 | +0.256 | +0.276 |
+| both | t5 | variant off | −0.109 | −0.122 | −0.097 | +0.124 | +0.113 | +0.135 |
+| previous_day | normal | variant on | +0.053 | +0.049 | +0.058 | +0.298 | +0.286 | +0.310 |
+| previous_day | normal | variant off | −0.087 | −0.100 | −0.075 | +0.157 | +0.146 | +0.169 |
+| other_surface | normal | variant on | −0.016 | −0.018 | −0.014 | +0.229 | +0.219 | +0.239 |
+| other_surface | normal | variant off | −0.307 | −0.323 | −0.293 | −0.063 | −0.070 | −0.056 |
+| both | normal | variant on | +0.044 | +0.039 | +0.049 | +0.289 | +0.278 | +0.301 |
+| both | normal | variant off | −0.117 | −0.131 | −0.104 | +0.127 | +0.116 | +0.139 |
+
+- "Variant off" is the prior alone, with no same-day result read. Against #305's `variant_on`, which reads them, it
+  loses overall, as it must once the day's own results are in; against par only, (a) and (c) alone gain +0.12 to
+  +0.16 s.
+- #305's best, `t5:variant_on`, has RMSE 1.009 s; with the previous-day prior it is 0.964 s (normal: 1.012 s to
+  0.958 s).
+
+By results seen before t (t5, variant on, gain over #305's `variant_on`, bounds in brackets):
+
+| Results seen | Races | previous_day | other_surface | both |
+| --- | --- | --- | --- | --- |
+| 0 | 9,517 | +0.149 (+0.138, +0.161) | −0.027 (−0.031, −0.022) | +0.137 (+0.126, +0.149) |
+| 1 | 5,364 | +0.048 (+0.037, +0.059) | −0.028 (−0.035, −0.021) | +0.033 (+0.021, +0.045) |
+| 2 | 5,941 | +0.009 (+0.000, +0.017) | −0.020 (−0.024, −0.015) | −0.004 (−0.013, +0.006) |
+| 3 | 5,709 | −0.009 (−0.017, −0.002) | −0.018 (−0.023, −0.014) | −0.023 (−0.032, −0.014) |
+| 4 | 5,279 | −0.019 (−0.030, −0.010) | −0.017 (−0.022, −0.013) | −0.032 (−0.044, −0.022) |
+| 5 | 3,343 | −0.007 (−0.016, +0.002) | −0.012 (−0.016, −0.009) | −0.018 (−0.029, −0.008) |
+| 6 or more | 1,894 | −0.021 (−0.044, −0.002) | −0.010 (−0.014, −0.006) | −0.032 (−0.058, −0.009) |
+
+- Under the normal error the previous-day prior's losses from 3 results on are smaller (+0.003 at 3, −0.008 at 4,
+  −0.001 at 5, −0.005 at 6 or more; only the bounds at 4 exclude 0). A plausible reason, not tested here: the t5
+  posterior's reweighting starts from the prior's mean, so a confidently wrong prior is slower to give way.
+- By surface (t5, variant on, every race): previous_day +0.050 s on dirt and +0.044 s on turf; other_surface −0.013 s
+  and −0.028 s; both +0.041 s and +0.028 s. Every margin and cell is in the full report.
+
+### Alternatives rejected and why
+
+- **Fitting the half-life and the surface weight on the folds.** The owner's kinds are pre-registered variants with
+  fixed parameters, frozen before any scored read. A fitted value is a new family, not a rerun of this one.
+- **A negative surface weight.** The prior's contract keeps w in [0, 1], the owner's (b) as specified. The result
+  suggests the coupling is negative or going-dependent; that is a follow-up, not a change to this family.
+- **The fit's own in-sample variants for a previous day that is a training day.** The prior takes every previous
+  day's residuals against the fold's par, the same rule on training, embargo and test days, all published before the
+  test window. The fit's in-sample variant (#97's `in_sample_variant`) would treat training days differently from the
+  embargo week.
+- **A prior in the fit.** #96's ruling holds: an injected prior with a non-zero mean would shift the pars of every
+  cell linked to that day.
+
+### What this rules out
+
+- **The null for (a) and (c) on the first races.** With no same-day result before t, the previous-day prior lowers the
+  time RMSE by +0.149 s (t5; lower bound +0.138) against #305's `variant_on`, which there is the par: 1.158 s to
+  1.008 s. Carrying both priors gives +0.137 s (+0.126). Under the normal error the figures are +0.150 s and +0.139 s.
+- **Overall, the previous-day prior improves #305's variant**, by +0.046 s (t5, +0.040 to +0.052) and +0.053 s
+  (normal), the gain coming from the races with zero or one same-day result.
+- **(b) as specified loses everywhere.** At weight 0.5 the other surface's variant moves the first races the wrong
+  way: −0.027 s on the first races and −0.021 s overall (t5), bounds below 0 in every results-seen row. Together with
+  the a-priori reasoning above, it points to a coupling below 0 on part of the days. Adding (b) to (a) costs 0.012 s on
+  the first races.
+- **The prior holds the variant back once the day's results are in.** From three own results on, every kind's t5
+  point estimate is slightly below #305's (−0.007 to −0.032 s; the bounds exclude 0 in all but previous_day at 5).
+  A likely reason, not tested here: over one night (ρ = 0.91) the prior SD stays close to the previous day's
+  posterior SD, so the prior is too tight when the going has changed overnight.
+- It is a time forecast. It says nothing about win probabilities or the final price; that is E39's marginal test
+  (#97, then C4). Nothing is adopted (D16). The holdout was not opened, and no holdout day was read.
+
+### Leaderboard rows
+
+The 24 variants are rows `japan-speed-top3-c3-prior/<error model>:<prior>:<prediction>_vs_<baseline>`, for example
+`japan-speed-top3-c3-prior/t5:previous_day:variant_on_vs_variant_on`. Like #305's and #416's they measure a time
+forecast, not a return per ¥100, so they are listed with no return and are not ranked. `leaderboard_backfill` gives an
+unlisted family the kind `other`; #305's family is a `member` through `LEGACY_KINDS`, and listing this one there too
+waits on the backfill tests' kinds table (#639, a follow-up below).
+
+### Follow-ups
+
+Filed as `status:proposed` tickets naming epic #73, not blocking #328:
+- #637: a surface coupling that may be negative or depends on the going (for instance estimated on each fold's
+  training days, or split by the moisture prior of #90 and #230), in a new family.
+- #638: the previous-day prior with its decay estimated on the training folds, or a prior SD inflated as the day's own
+  results come in, so that it gives way from three results on, in a new family.
+- #639: list `japan-speed-top3-c3-prior` as a `member` in `leaderboard_backfill.LEGACY_KINDS`, with the backfill tests'
+  kinds table.
+- #640: E39's marginal test (#97) can carry the previous-day prior as a variant of the speed member.

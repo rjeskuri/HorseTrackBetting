@@ -9,16 +9,24 @@ or it is more than max_board_age_s older than the decision time. A point with a 
 log is not decided again, so a restart writes no duplicate. The day ends once the last race's last
 point is due (16:45 Asia/Tokyo without post times), and the log is then sealed.
 
-Memory: per race, each undecided grid point keeps the latest row per board key available by its
-decision time, plus the latest row per key overall (to re-time a moved post); a decided point drops
-its rows. No outcome is read: no results, dividends or store table.
+Model probabilities (#564): every record is `record_version` 2 and carries `p_model`, the shadow
+feed's p_model of the decision board (`shadow_feed._p_model`, starters by `_starters`), null
+without models or without one for its pool. The pools with no price forecast (EXOTIC_POOLS) get
+records of their own from each pool's latest capture available by the decision time (no
+max_board_age_s: tier-2 pools are captured once per grid point; `board_age_s` says how old):
+every QUINELLA and BRACKET_QUINELLA combination with a p_model and the EXOTIC_TOP_N most likely
+of FORECAST, TRIO and TIERCE, each with `board_odds` and `value_model` = p_model x board_odds.
+
+Memory: per race, each undecided grid point keeps the latest row per board key and per exotic
+combination available by its decision time, plus the latest row per key overall (to re-time a
+moved post), and the race's earliest WIN capture's field (for the starters); a decided point
+drops its rows. No outcome is read: no results, dividends or store table.
 
 Seam for the command, looked up at call time: `utc_now` (the only clock).
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 import time
@@ -37,6 +45,7 @@ from horsetrack.core.config import load_source
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board import snapshot
 from horsetrack.countries.japan.board.flags import FlagRules, avoid_flags, load_flag_rules
+from horsetrack.countries.japan.board.shadow_feed import _p_model, _probe_until, _starters
 from horsetrack.countries.japan.board.snapshot import (
     PLACE,
     WIDE,
@@ -50,8 +59,23 @@ from horsetrack.countries.japan.board.snapshot import (
 from horsetrack.countries.japan.logger.pull_vm import vm_day_dir
 from horsetrack.countries.japan.models.v0.loader import load_shadow_models
 from horsetrack.countries.japan.models.v0.ordering import _git_sha
-from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels, shadow_values
-from horsetrack.countries.japan.shadow.log import NO_BOARD, LogSealed, ShadowLog, shadow_log_path
+from horsetrack.countries.japan.models.v0.shadow_values import (
+    BRACKET_QUINELLA,
+    FORECAST,
+    QUINELLA,
+    TIERCE,
+    TRIO,
+    ShadowModels,
+    point_seed,
+    shadow_values,
+)
+from horsetrack.countries.japan.shadow.log import (
+    NO_BOARD,
+    RECORD_VERSION,
+    LogSealed,
+    ShadowLog,
+    shadow_log_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +87,11 @@ LOG_SUFFIX = ".jsonl.gz"
 ANY = "*"  # pool and combination of a no_board record: it stands for the whole point
 VALUE_FIELDS = ("value_mean", "value_q05", "value_q95", "value_at_low", "value_at_high")
 EXIT_ERROR = 1
+# The pools with no price forecast (#564): logged as p_model x the decision-time odds
+EXOTIC_POOLS = frozenset({QUINELLA, FORECAST, TRIO, TIERCE, BRACKET_QUINELLA})
+TOPPED = frozenset({FORECAST, TRIO, TIERCE})  # logged as their EXOTIC_TOP_N most likely
+EXOTIC_TOP_N = 15
+POOL_TOTAL = odds_log.POOL_TOTAL
 
 
 def utc_now() -> datetime:
@@ -90,9 +119,26 @@ def _offer(slot: Slot, key: tuple, entry: tuple[datetime, int, dict[str, Any]]) 
         slot[key] = entry
 
 
+def _row_key(row: dict[str, Any]) -> tuple | None:
+    """The row's board key (`snapshot._key`), else (pool, combination text) of an exotic pool's
+    price row, else None."""
+    key = snapshot._key(row)
+    if key is not None:
+        return key
+    pool, combination = row.get("pool"), row.get("combination")
+    if pool in EXOTIC_POOLS and isinstance(combination, str) and combination != POOL_TOTAL:
+        return pool, combination
+    return None
+
+
+def _is_exotic(key: tuple) -> bool:
+    return key[0] in EXOTIC_POOLS and key[1] != POOL_TOTAL
+
+
 class _Race:
-    """The rows one race's undecided grid points need: per tau, the latest row per board key
-    available by its decision time; `newest`, the latest row per key overall."""
+    """The rows one race's undecided grid points need: per tau, the latest row per board key and
+    per exotic combination available by its decision time; `newest`, the latest row per key
+    overall; `opening`, its earliest WIN capture as `shadow_feed._starters` reads it."""
 
     def __init__(self, race_id: str) -> None:
         self.race_id = race_id
@@ -100,6 +146,23 @@ class _Race:
         self.slots: dict[int, tuple[datetime, Slot]] = {}  # tau -> (decision, slot)
         self.newest: Slot = {}
         self.done: set[int] = set()
+        # (its earliest WIN capture, the runners not SCR on it, every runner on it)
+        self.opening: tuple[datetime, set[int], set[int]] | None = None
+
+    def _open(self, key: tuple, row: dict[str, Any]) -> None:
+        """The field at the opening, as shadow_feed's `_DayRows._open` keeps it."""
+        if key[0] != WIN or key[1] == POOL_TOTAL:
+            return
+        snap = odds_log._instant(row.get("snapshot_utc"))
+        if snap is None:
+            return
+        if self.opening is None or snap < self.opening[0]:
+            self.opening = (snap, set(), set())
+        elif snap > self.opening[0]:
+            return
+        self.opening[2].add(key[1])
+        if row.get("status_raw") != snapshot.SCRATCHED:
+            self.opening[1].add(key[1])
 
     def schedule(self, post: datetime, grid: tuple[int, ...]) -> None:
         """Set or move the post; each undecided point's rows are re-chosen for its decision time."""
@@ -123,10 +186,11 @@ class _Race:
             self.slots[tau] = (decision, slot)
 
     def add(self, row: dict[str, Any], seq: int) -> None:
-        key = snapshot._key(row)
+        key = _row_key(row)
         available = snapshot._available(row)
         if key is None or available is None:
             return
+        self._open(key, row)
         entry = (available, seq, row)
         _offer(self.newest, key, entry)
         for decision, slot in self.slots.values():
@@ -135,8 +199,37 @@ class _Race:
 
     def board(self, tau: int) -> RaceBoard | None:
         decision, slot = self.slots[tau]
-        rows = [row for _, _, row in sorted(slot.values(), key=lambda e: e[1])]
+        entries = sorted((e for k, e in slot.items() if not _is_exotic(k)), key=lambda e: e[1])
+        rows = [row for _, _, row in entries]
         return board_at(rows, self.race_id, decision, post_utc=self.post)
+
+    def exotics(self, tau: int) -> dict[str, tuple[datetime, dict[str, float]]]:
+        """Per exotic pool, its latest capture available by the point's decision time (the rows
+        sharing the latest snapshot_utc): (the earliest availability of its rows, {combination:
+        odds} of its priced rows)."""
+        latest: dict[str, tuple[datetime, list[tuple[datetime, str, dict]]]] = {}
+        for key, (available, _, row) in self.slots[tau][1].items():
+            if not _is_exotic(key):
+                continue
+            snap = odds_log._instant(row.get("snapshot_utc"))
+            if snap is None:
+                continue
+            current = latest.get(key[0])
+            if current is None or snap > current[0]:
+                current = latest[key[0]] = (snap, [])
+            elif snap < current[0]:
+                continue
+            current[1].append((available, key[1], row))
+        out = {}
+        for pool, (_, entries) in latest.items():
+            prices = {}
+            for _, combination, row in entries:
+                odds = float(row["odds"]) if snapshot._priced(row) else math.nan
+                if math.isfinite(odds) and odds > 0:
+                    prices[combination] = odds
+            if prices:
+                out[pool] = (min(available for available, _, _ in entries), prices)
+        return out
 
     def decided(self, tau: int) -> None:
         self.done.add(tau)
@@ -157,11 +250,10 @@ def _finite(value: float | None) -> float | None:
     return None if value is None or not math.isfinite(value) else float(value)
 
 
-def point_seed(seed: int, race_id: str, tau: int) -> int:
-    """The draws' seed of one (race, tau): a stable hash of (seed, race_id, tau), the same on every
-    run and machine, so a record's values can be recomputed from its board."""
-    digest = hashlib.sha256(f"{int(seed)}|{race_id}|{int(tau)}".encode()).digest()
-    return int.from_bytes(digest[:8], "big")
+def _probability(value: float | None) -> float | None:
+    """A probability the log can hold: NaN and infinity become null, rounding past [0, 1] is
+    clipped."""
+    return None if value is None or not math.isfinite(value) else min(1.0, max(0.0, float(value)))
 
 
 def _board_keys(board: RaceBoard) -> list[tuple[str, str, float, float | None]]:
@@ -182,6 +274,7 @@ class _Settings:
     n_draws: int
     seed: int
     git_sha: str
+    probe_until: datetime | None  # shadow_feed._probe_until of the day: the opening's coverage
 
 
 def _common(race_id: str, tau: int, decision: datetime, written: datetime, s: _Settings) -> dict:
@@ -193,7 +286,49 @@ def _common(race_id: str, tau: int, decision: datetime, written: datetime, s: _S
         "written_utc": _iso(written),
         "mode": "live" if lag <= s.max_lag_s else "replay",
         "git_sha": s.git_sha,
+        "record_version": RECORD_VERSION,
     }
+
+
+def _race_p_model(race: _Race, board: RaceBoard, decision: datetime, s: _Settings) -> dict | None:
+    """The decision board's p_model as the shadow feed forms it; None without models or when it
+    cannot be formed (`_p_model` logs why)."""
+    if s.models is None:
+        return None
+    opening = race.opening if race.opening is not None and race.opening[0] <= decision else None
+    return _p_model(board, s.models, None, _starters(board, opening, s.probe_until))
+
+
+def _exotic_records(
+    race: _Race, tau: int, decision: datetime, p_model: dict, common: dict, ids: dict
+) -> list[dict[str, Any]]:
+    """The exotic pools' records of one point: each pool's capture by the decision time, the
+    combinations with a p_model, every one of QUINELLA and BRACKET_QUINELLA, the EXOTIC_TOP_N most
+    likely of the others."""
+    records = []
+    for pool, (captured, prices) in sorted(race.exotics(tau).items()):
+        probs = p_model.get(pool) or {}
+        chosen = [(c, _probability(probs.get(c))) for c in prices]
+        chosen = [(c, p) for c, p in chosen if p is not None]
+        if pool in TOPPED:
+            chosen = sorted(chosen, key=lambda e: (-e[1], e[0]))[:EXOTIC_TOP_N]
+        for combination, p in chosen:
+            odds = prices[combination]
+            records.append(
+                {
+                    **common,
+                    "pool": pool,
+                    "combination": combination,
+                    "board_capture_utc": _iso(captured),
+                    "board_age_s": (decision - captured).total_seconds(),
+                    "status": "ok",
+                    "models": dict(ids),
+                    "p_model": p,
+                    "board_odds": odds,
+                    "value_model": p * odds,
+                }
+            )
+    return records
 
 
 def _point_records(
@@ -213,6 +348,7 @@ def _point_records(
             "status": NO_BOARD,
             "models": None,
             "board_age_s": age,
+            "p_model": None,
         }
         return [record], True
 
@@ -234,9 +370,12 @@ def _point_records(
         except Exception:
             logger.exception("%s T-%d: shadow values failed; logged without", race.race_id, tau)
             models = None
+    p_model = _race_p_model(race, board, decision, s) or {}
     records = []
     for pool, combination, low, high in _board_keys(board):
         value = values.get((pool, combination))
+        # a p_model sits beside the fit ids it came from: none on a record logged without models
+        prob = None if models is None else _probability(p_model.get(pool, {}).get(combination))
         record = {
             **common,
             "pool": pool,
@@ -250,8 +389,14 @@ def _point_records(
             "flags": list(flags.get((pool, combination), ())),
             "n_draws": None if models is None else s.n_draws,
             "seed": None if models is None else seed,
+            "p_model": prob,
         }
         records.append(record)
+    if p_model and s.models is not None:  # p_model is only ever formed with models
+        try:
+            records += _exotic_records(race, tau, decision, p_model, common, s.models.ids)
+        except Exception:
+            logger.exception("%s T-%d: exotic records failed; logged without", race.race_id, tau)
     return records, False
 
 
@@ -314,6 +459,7 @@ def run_shadow_day(
         n_draws,
         seed,
         _git_sha() or "unknown",
+        _probe_until(race_date),
     )
     shadow = log
     tails: dict[str, odds_log.LogTail] = {}
