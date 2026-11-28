@@ -18,8 +18,14 @@
  * race's `p_model` as a percent. The pools
  * without a price forecast (NO_FORECAST: no nowcast, #400) show value = Model p x the odds now
  * and say so; the tier-2 sections show their capture's age. The shadow feed (#121) is joined on
- * (race_id, pool, combination) and never highlights or colours a row by value or probability
- * (a selection rule is the owner's, D19). The race follows the URL hash as on the board page.
+ * (race_id, pool, combination) and never highlights or colours a row by value or probability.
+ * The one highlight is the owner's own selection rule (D19, #714): the race's top three best bets
+ * of /best-bets (the leaderboard's shrunk return per ¥100 at the current checkpoint's predicted
+ * final board) carry a rank badge, strong at ¥100 or more and muted below, and the page states
+ * the rule beside them (BEST_RULE). renderBestBets draws the selected venue's best-bets tab: its
+ * next race's best bets with their figures, the ticket's odds from /feed and its Model % from
+ * /shadow-feed (shown, never selecting), the rule in plain English, the duplicate rows and the
+ * rows no matcher reads. The race follows the URL hash as on the board page.
  * Values are gross return per 1 yen at the final price: information only, nothing here is a bet.
  * On a WIN5 day (#135) a line above the board, the element with data-win5, shows the shadow feed's
  * `win5`: the whole WIN5 pool's gross return per 1 yen with the carryover (two decimals), the
@@ -259,13 +265,187 @@
     return same;
   }
 
+  /* ------------------------------------------------------------ best bets (#714) */
+
+  var BADGES = 3;  // the race's top three best bets carry a badge
+  var BEST_RULE = "Badges 1–3 mark this race's top three best bets, the owner's selection rule " +
+    "(D19): the leaderboard's rows at the current checkpoint (T-10, T-5, T-2) read on the " +
+    "nowcast's predicted final board, with at least 100 bets and 20 meetings, ranked by shrunk " +
+    "return per ¥100. Provisional before T-2, frozen at T-2. Bright: a shrunk return of ¥100 or " +
+    "more; muted: below ¥100. Model p plays no part.";
+  var BADGE_CLASS = { strong: "best-rank best-strong", muted: "best-rank best-muted" };
+
+  function bestBetsOf(best) {
+    var bets = own(best, "best_bets");
+    return Array.isArray(bets) ? bets.filter(function (b) { return b && typeof b === "object"; })
+      : [];
+  }
+
+  function bestRaceId(best) {
+    var race = own(best, "race");
+    var id = own(race, "race_id");
+    return id === null || id === undefined ? null : String(id);
+  }
+
+  function tone(bet) {
+    var shrunk = num(own(bet, "shrunk_per_100"));
+    return shrunk !== null && shrunk >= 100 ? "strong" : "muted";
+  }
+
+  /* "pool|combination" -> bet, of the first BADGES bets of `best` when it is of race `raceId`. */
+  function badgedBets(best, raceId) {
+    var out = Object.create(null);
+    if (bestRaceId(best) === null || bestRaceId(best) !== String(raceId)) return out;
+    bestBetsOf(best).slice(0, BADGES).forEach(function (b) {
+      out[String(b.pool) + "|" + String(b.combination)] = b;
+    });
+    return out;
+  }
+
+  function badge(bet) {
+    var rank = num(own(bet, "rank"));
+    var t = tone(bet);
+    return '<span class="' + BADGE_CLASS[t] + '" data-best-rank="' + esc(rank) +
+      '" data-highlight="' + t + '" title="Best bet ' + esc(rank) + '">' + esc(rank) + "</span>";
+  }
+
+  /* One decimal, '-' for none. */
+  function one(value) {
+    var n = num(value);
+    return n === null ? DASH : n.toFixed(1);
+  }
+
+  /* The plain feed's row of (race, pool, combination), or null. */
+  function plainLine(feed, raceId, code, combination) {
+    var found = null;
+    ((feed && Array.isArray(feed.venues)) ? feed.venues : []).forEach(function (v) {
+      (v && Array.isArray(v.races) ? v.races : []).forEach(function (r) {
+        if (found || !r || String(r.race_id) !== raceId) return;
+        var body = own(r.pools, code);
+        (body && Array.isArray(body.rows) ? body.rows : []).forEach(function (l) {
+          if (!found && l && String(l.combination) === combination) found = l;
+        });
+      });
+    });
+    return found;
+  }
+
+  /* The current odds of a plain row with one decimal ('low–high' for a range), '-' without. */
+  function currentOdds(line) {
+    var odds = line && line.status !== "SCR" ? num(line.odds) : null;
+    if (odds === null) return DASH;
+    var hi = num(own(line, "odds_hi"));
+    return odds.toFixed(1) + (hi === null ? "" : "–" + hi.toFixed(1));
+  }
+
+  var POOL_NAMES = { WIN: "Win", PLACE: "Place", QUINELLA: "Quinella", QUINELLA_PLACE: "Wide",
+    FORECAST: "Exacta", TRIO: "Trio", TIERCE: "Trifecta", BRACKET_QUINELLA: "Bracket quinella" };
+
+  /* The ticket: the pool and each horse number with its name when the card gave one. */
+  function ticketText(bet) {
+    var code = String(own(bet, "pool"));
+    var horses = own(bet, "horses");
+    var said = Array.isArray(horses) && horses.length ? horses.map(function (h) {
+      var name = own(h, "name");
+      return String(own(h, "no")) + (typeof name === "string" && name ? " " + name : "");
+    }).join(" – ") : String(own(bet, "combination")).split(",").join("-");
+    return (has.call(POOL_NAMES, code) ? POOL_NAMES[code] : code) + " " + said;
+  }
+
+  function item(label, col, shown, cls) {
+    return '<div class="best-item"><dt>' + label + '</dt><dd data-col="' + col + '" class="' +
+      (cls || "num") + '">' + esc(shown) + "</dd></div>";
+  }
+
+  function betHtml(bet, feed, raceId, race) {
+    var code = String(own(bet, "pool")), combination = String(own(bet, "combination"));
+    var p = num(own(pModelOf(race, code), combination));
+    var dups = own(bet, "duplicates");
+    dups = Array.isArray(dups) ? dups.filter(function (d) { return d && typeof d === "object"; })
+      : [];
+    var t = tone(bet);
+    var out = '<li class="best-bet" data-best-bet="' + esc(own(bet, "rank")) +
+      '" data-best-pool="' + esc(code) + '" data-best-combination="' + esc(combination) + '">' +
+      '<div class="best-head"><span class="' + BADGE_CLASS[t] + '" data-highlight="' + t + '">' +
+      esc(own(bet, "rank")) + '</span><b class="mono" data-col="ticket">' + esc(ticketText(bet)) +
+      "</b></div><dl class=\"best-figures\">" +
+      item("Shrunk / ¥100", "shrunk", one(own(bet, "shrunk_per_100"))) +
+      item("Raw / ¥100", "raw", one(own(bet, "return_per_100"))) +
+      item("CI", "ci", one(own(bet, "ci_lo")) + " to " + one(own(bet, "ci_hi"))) +
+      item("Bets", "bets", own(bet, "n") === null ? DASH : String(own(bet, "n"))) +
+      item("Meetings", "meetings",
+        own(bet, "n_meetings") === null ? DASH : String(own(bet, "n_meetings"))) +
+      item("Variants", "variants", String(own(bet, "variants_searched"))) +
+      item("Odds now", "odds", currentOdds(plainLine(feed, raceId, code, combination))) +
+      item("Model p", "p-model", percentText(p)) +
+      "</dl>" + '<p class="small" data-col="rule">' + esc(own(bet, "description")) + "</p>";
+    if (dups.length) {
+      out += '<p class="small muted">Also bought by:</p><ul class="best-dups small mono">' +
+        dups.map(function (d) {
+          return '<li data-duplicate="' + esc(own(d, "option_id")) + '">' +
+            esc(own(d, "option_id")) + " · " + esc(one(own(d, "shrunk_per_100"))) + "</li>";
+        }).join("") + "</ul>";
+    }
+    return out + "</li>";
+  }
+
+  /* The best-bets tab of one venue: `best` is one /best-bets?venue= payload. */
+  function renderBestBets(best, feed, shadowFeed, opts) {
+    opts = opts || {};
+    var venue = String(own(best, "venue") || "");
+    var raceId = bestRaceId(best);
+    var out = '<section class="best" data-best-venue="' + esc(venue) + '"><div class="pool-head">' +
+      "<h2>Best bets · " + esc(venue) + "</h2></div>";
+    if (raceId === null) {
+      return out + '<p class="muted small">No race left at this venue today.</p></section>';
+    }
+    var race = own(shadowRaces(shadowFeed), raceId);
+    var postMs = board.instantMs(own(own(best, "race"), "post_utc"));
+    var k = num(own(best, "checkpoint_min"));
+    var state = own(best, "frozen") === true ? "frozen at T-2"
+      : "provisional" + (k === null ? "" : " at T-" + k);
+    var no = num(own(own(best, "race"), "race_no"));
+    out += '<div data-best-race="' + esc(raceId) + '"><p class="meta mono">' +
+      "<span>" + esc(no === null ? raceId : no + "R") + "</span>" +
+      (postMs === null ? "" : "<span>Post " + esc(new Date(postMs + 9 * 3600 * 1000)
+        .toISOString().slice(11, 16)) + " JST</span>") +
+      "<span>" + esc(state) + "</span></p>" +
+      '<p class="legend" data-best-rule>' + esc(BEST_RULE) + "</p>";
+    var bets = bestBetsOf(best);
+    var note = own(best, "note");
+    if (!bets.length) {
+      out += '<p class="muted small">No best bet on this board' +
+        (typeof note === "string" && note ? ": " + esc(note) : "") + ".</p>";
+    } else {
+      out += '<ol class="best-list">' + bets.map(function (b) {
+        return betHtml(b, feed, raceId, race);
+      }).join("") + "</ol>";
+    }
+    out += "</div>";
+    var unmatched = own(best, "unmatched");
+    unmatched = Array.isArray(unmatched) ? unmatched.filter(function (u) {
+      return u && typeof u === "object";
+    }) : [];
+    if (unmatched.length) {
+      out += '<details class="small"><summary>Rows without a matcher (' + unmatched.length +
+        ')</summary><ul class="best-dups mono">' + unmatched.map(function (u) {
+          return '<li data-unmatched="' + esc(own(u, "option_id")) + '">' +
+            esc(own(u, "option_id")) + " · " + esc(one(own(u, "shrunk_per_100"))) + "</li>";
+        }).join("") + "</ul></details>";
+    }
+    return out + "</section>";
+  }
+
   /* The HTML of the shadow page for one race of one venue: the board's header and one section per
    * bet type, each row with ladder, Model p, value, bucket and flag cells. /feed is the schedule
-   * authority: its post times set the header, the countdown, the strip and the next-race choice. */
+   * authority: its post times set the header, the countdown, the strip and the next-race choice.
+   * opts.bestBets (optional): a /best-bets payload; its top three badge their rows when it is of
+   * the race drawn. */
   function renderShadow(feed, shadowFeed, opts) {
     opts = opts || {};
     var races = shadowRaces(shadowFeed);
     var same = sameSchedules(feed, races);
+    var badged = false;
     function shadowRace(raceId) {
       return has.call(races, String(raceId)) ? races[String(raceId)] : null;
     }
@@ -276,11 +456,14 @@
         var entry = own(own(own(race, "pools"), code), String(line.combination));
         var p = num(own(pModelOf(race, code), String(line.combination)));
         var value = NO_FORECAST[code] ? productText(p, line) : valueText(code, entry);
+        var bet = own(badgedBets(opts.bestBets, raceId), code + "|" + String(line.combination));
+        if (bet) badged = true;
         return ladderCells(entry, line, same[String(raceId)] === true) +
           '<td data-col="p-model" class="num">' + esc(percentText(p)) + "</td>" +
           '<td data-col="value" class="num val">' + esc(value) + "</td>" +
           '<td data-col="bucket" class="mono small">' + esc(race ? bucketText(race) : DASH) +
-          "</td>" + '<td data-col="flags" class="flags">' + flagChips(entry) + "</td>";
+          "</td>" + '<td data-col="flags" class="flags">' + (bet ? badge(bet) + " " : "") +
+          flagChips(entry) + "</td>";
       },
     };
     function sections(race, nowMs) {
@@ -296,14 +479,34 @@
         return section;
       });
     }
-    return win5Line(shadowFeed) +
-      board.renderBoard(feed, { now: opts.now, venue: opts.venue, race: opts.race,
-        columns: columns, sections: sections });
+    var drawn = board.renderBoard(feed, { now: opts.now, venue: opts.venue, race: opts.race,
+      columns: columns, sections: sections });
+    var rule = badged ? '<p class="legend best-rule" data-best-rule>' + esc(BEST_RULE) + "</p>"
+      : "";
+    return win5Line(shadowFeed) + rule + drawn;
   }
 
   /* ------------------------------------------------------------ the browser glue */
 
-  var state = { feed: null, feedTag: null, shadow: null, shadowTag: null, venue: null };
+  var state = { feed: null, feedTag: null, shadow: null, shadowTag: null, venue: null,
+    best: null, bestTag: null };
+
+  /* The venue drawn: the hash's or the chosen one, else the plain feed's first; null without a
+   * feed. */
+  function selectedVenue() {
+    if (!state.feed) return null;
+    var venues = Array.isArray(state.feed.venues) ? state.feed.venues : [];
+    var asked = board.selection(state.feed, state.venue).venue;
+    var known = venues.some(function (v) { return v && v.venue === asked; });
+    if (known) return asked;
+    return venues.length && venues[0] ? venues[0].venue : null;
+  }
+
+  /* One GET of the venue's best bets; a 200 replaces them. */
+  function fetchBest(venue) {
+    if (venue === null || venue === undefined) return Promise.resolve(0);
+    return fetchFeed("best-bets?venue=" + encodeURIComponent(venue), "bestTag", "best");
+  }
 
   function setStatus(text, cls) {
     if (typeof document === "undefined") return;
@@ -336,8 +539,15 @@
     var pick = board.selection(state.feed, state.venue);
     state.venue = pick.venue;
     var race = drawnRace(root), scroll = poolScroll(root);
+    var venue = selectedVenue();
+    var best = state.best && own(state.best, "venue") === venue ? state.best : null;
     root.innerHTML = renderShadow(state.feed, state.shadow,
-      { now: Date.now(), venue: pick.venue, race: pick.race });
+      { now: Date.now(), venue: pick.venue, race: pick.race, bestBets: best });
+    var tab = document.getElementById("best");
+    if (tab) {
+      tab.innerHTML = best ? renderBestBets(best, state.feed, state.shadow, { now: Date.now() })
+        : '<p class="muted small">No best bets for this venue yet.</p>';
+    }
     if (race !== null && drawnRace(root) === race) {  // the same race redrawn: keep each pool
       var pools = root.querySelectorAll ? root.querySelectorAll("[data-pool]") : [];
       Array.prototype.forEach.call(pools, function (e) {
@@ -364,14 +574,23 @@
       .catch(function () { return 0; });
   }
 
-  /* One GET of each feed; a 200 replaces that feed, a 304 or an error keeps the last one. */
+  /* One GET of each feed and of the selected venue's best bets (once a plain feed names the
+   * venue: on the first load right after it); a 200 replaces that feed, a 304 or an error keeps
+   * the last one. */
   function poll() {
+    var venue = selectedVenue();
     return Promise.all([
+      fetchBest(venue),
       fetchFeed("feed", "feedTag", "feed"),
       fetchFeed("shadow-feed", "shadowTag", "shadow"),
     ]).then(function (codes) {
+      if (venue === null && state.feed) return fetchBest(selectedVenue()).then(function () {
+        return codes;
+      });
+      return codes;
+    }).then(function (codes) {
       draw();
-      var plain = codes[0], shadow = codes[1];
+      var plain = codes[1], shadow = codes[2];
       if (plain !== 200 && plain !== 304) {
         setStatus(plain === 503 ? "waiting for the first capture"
           : plain === 0 ? "no connection" : "feed error " + plain, "stale");
@@ -391,6 +610,7 @@
     board.chooseVenue(state.feed, state.venue, Date.now());
     draw();
     board.toTop();
+    fetchBest(selectedVenue()).then(function (code) { if (code === 200) draw(); });
   }
 
   /* A strip link, a step link or back: draw the race the hash names, from its top. */
@@ -408,7 +628,7 @@
     })();
   }
 
-  var api = { renderShadow: renderShadow, poll: poll };
+  var api = { renderShadow: renderShadow, renderBestBets: renderBestBets, poll: poll };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof document !== "undefined" && typeof fetch === "function" &&
       document.getElementById("shadow")) {

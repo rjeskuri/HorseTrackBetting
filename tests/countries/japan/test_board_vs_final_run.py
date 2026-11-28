@@ -75,6 +75,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from horsetrack.core import env, paths
+from horsetrack.core.config import load_country_yaml
 from horsetrack.core.eval import registry as registry_mod
 from horsetrack.core.eval.registry import Registry
 from horsetrack.core.eval.reports import LicensedOutputInRepo
@@ -98,7 +99,9 @@ from horsetrack.countries.japan.studies.board_vs_final import (
 )
 
 FINAL, BOARD = "q_final", "q_board"
-ALL_KEYS = {("E2", WIN), ("E45", PLACE), ("E45", WIDE), ("E45", TRIO)}
+LAGS = tuple(load_country_yaml("japan", "board_vs_final")["board"].get("release_lags_min", (0, 10)))
+TABLES = {("E2", WIN), ("E45", PLACE), ("E45", WIDE), ("E45", TRIO)}
+ALL_KEYS = {(h, pool, lag) for h, pool in TABLES for lag in LAGS}  # #602: a table per lag
 STATUSES = (SCORED, NO_RECORD, NOT_PAID, MISMATCH)
 
 
@@ -643,14 +646,22 @@ def test_a_run_without_its_tables_keeps_the_last_outputs_and_exits_non_zero(
     assert records and {r.status for r in records} == {"failed"}
     assert all(r.ticket == 103 and "jrdb" in r.sources for r in records)
     fitted = Counter(
-        (r.hypothesis_id, r.components["pool"], r.components["fit_price"]) for r in records
+        (
+            r.hypothesis_id,
+            r.components["pool"],
+            float(r.components["release_lag_min"]),
+            r.components["fit_price"],
+        )
+        for r in records
     )
-    assert {(h, pool) for h, pool, _ in fitted} == ALL_KEYS, "every table not produced is failed"
-    want = {(h, pool, price): 1 for h, pool in ALL_KEYS for price in (FINAL, BOARD)}
-    assert dict(fitted) == want, "a failed record per table and price fitted on"
+    assert {key[:3] for key in fitted} == ALL_KEYS, "every table not produced is failed, per lag"
+    want = {(h, pool, lag, price): 1 for h, pool, lag in ALL_KEYS for price in (FINAL, BOARD)}
+    assert dict(fitted) == want, "a failed record per lag, table and price fitted on"
+    assert len({(r.hypothesis_id, r.variant) for r in records}) == len(records), "variants differ"
     ids = run_ids(registry_path)
     assert len(ids) == len(records) == len(set(ids)) == result["records_appended"]
     assert set(result["record_ids"].values()) == set(ids)
+    assert len(result["record_ids"]) == len(records), "a run id by variant, none shared across lags"
 
     # The same run again: nothing appended, the held records' ids returned, outputs untouched.
     held = registry_path.read_bytes()
@@ -774,10 +785,16 @@ def test_a_store_missing_a_fingerprinted_file_still_records_the_failure(
     assert {r.status for r in records} == {"failed"}
     assert all(r.ticket == 103 and "jrdb" in r.sources for r in records)
     fitted = Counter(
-        (r.hypothesis_id, r.components["pool"], r.components["fit_price"]) for r in records
+        (
+            r.hypothesis_id,
+            r.components["pool"],
+            float(r.components["release_lag_min"]),
+            r.components["fit_price"],
+        )
+        for r in records
     )
-    want = {(h, pool, price): 1 for h, pool in ALL_KEYS for price in (FINAL, BOARD)}
-    assert dict(fitted) == want, "a failed record per table and price fitted on"
+    want = {(h, pool, lag, price): 1 for h, pool, lag in ALL_KEYS for price in (FINAL, BOARD)}
+    assert dict(fitted) == want, "a failed record per lag, table and price fitted on"
     assert result["records_appended"] == len(records) == len(run_ids(registry_path))
 
     for record in records:
@@ -951,3 +968,25 @@ def test_a_run_with_reports_symlinked_within_the_data_dir_writes_into_its_target
     )
     assert registry.frozen_spec_hash(bvf.FAMILY_ID) == result["spec_hash"]
     assert registry.records(bvf.FAMILY_ID), "the run's records are appended"
+
+
+# ---------------------------------------------------------------------------------------------
+# #602: the release lags are frozen as counted variants of a new family version
+# ---------------------------------------------------------------------------------------------
+
+
+def test_the_freeze_registers_every_lag_in_a_new_family(data_dir, tmp_path, capsys):
+    code, result = run_cli(["--freeze"], capsys)
+
+    assert code == 0
+    assert result["family_id"] == bvf.FAMILY_ID == "japan-board-vs-final-e2-e45-v3"
+    registry = Registry(
+        data_dir / "registry" / "japan.jsonl", holdout_log=tmp_path / "no-holdout-log.jsonl"
+    )
+    registry.verify()
+    spec = registry.frozen_spec(bvf.FAMILY_ID)
+    assert registry.frozen_spec_hash(bvf.FAMILY_ID) == result["spec_hash"]
+    assert spec["board"]["release_lags_min"] == list(LAGS)
+    assert len(LAGS) >= 2 and len(set(LAGS)) == len(LAGS)
+    assert registry.frozen_spec_hash("japan-board-vs-final-e2-e45-v2") is None, "v2 not re-frozen"
+    assert registry.records(bvf.FAMILY_ID) == [], "freezing reads no outcome and records no run"
