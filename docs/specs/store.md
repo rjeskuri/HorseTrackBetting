@@ -244,6 +244,14 @@ with `research.win5.read_history()`. `research.win5.payout_mismatches(table)` na
 WIN5 takeout (boosts applied) within 10 yen per winning ticket; days before 2014-06-07 are skipped.
 Holdout days are in the table; no analysis reads them (`score_study` drops them).
 
+The command appends (#325): it reads the table already there, adds the days of the run that are new
+(`research.win5.append_history`; a day whose figures differ from the table's stops the run, the
+table untouched) and writes it back, so each run on a new WIN5 day grows the sample. Holdout days
+(`is_holdout_day`) are not fetched or added. It prints `added_days`, the days per carryover bin of
+`config/win5_study.yaml` (`bin_<lo>_<hi>=<n>`, `research.win5.bin_counts`, the scorer's own
+binning) and `holdout_days`; the sample is only grown here, a re-score is a new pre-registered
+family.
+
 A year list (`raw/jra/win5_year`) counts as final only when its cached copy was fetched after the
 year ended (1 January JST of the next year); an earlier copy, and the current year's, is fetched
 again. `research.win5.carryover_chain_breaks(table)` names the days that break the carryover chain
