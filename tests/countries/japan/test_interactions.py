@@ -41,6 +41,18 @@ Contract pinned here (`horsetrack.countries.japan.models.interactions`):
   horse's runs up to and including that run, never a later one: a run's own trainer is on its
   card, the next run's is not.
 
+- `studies.interactions.member_pool_probs(rows, p_win, ordering, pool) -> pd.DataFrame` (#574):
+  a member's per-starter Win probabilities through C5's ordering (`models.exotic.Ordering`) to
+  one pool's combination probabilities. `rows` has one row per starter (race_id, horse_no,
+  field_size: the runners when sales opened, `races.field_size`), `p_win` one probability per
+  row on rows' index (summing to 1 within each race), `pool` one of `models.exotic`'s WIN, PLACE,
+  WIDE. The frame has race_id, combination (the store's text: "7" for WIN and PLACE, "3,7"
+  ascending for WIDE) and p, one row per combination of each race's starters. WIN gives p_win;
+  PLACE's p per race sums to the places paid by field_size (jra.yaml: 2 for 5-7, 3 for 8 and
+  more, so a late scratch from 8 to 7 still pays 3), and a race whose PLACE was not sold (4 or
+  fewer) has no PLACE rows; WIDE's pairs sum to 3 (any two of the first three, sold from 4).
+  Each p equals `ordering.joint_probs` of the race and lies in [0, 1].
+
 Not pinned: the CI's method and level; what tau means for a structured or low-rank block
 (only that it is a sane interval); the low-rank rank; the form of z(d); unseen cells; missing ids;
 the trainer debut prior (no signature names it); a second change after a stable one and a return
@@ -54,12 +66,14 @@ derived by hand and by brute force, never from the code under test. Every RNG is
 # block is written in its final order and I001 is waived so lint passes before and after.
 from __future__ import annotations  # noqa: I001
 
+import itertools
 import math
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from horsetrack.countries.japan.models import exotic
 from horsetrack.countries.japan.models.ability import AbilityModel
 from horsetrack.countries.japan.models.interactions import (
     InteractionBlock,
@@ -69,6 +83,7 @@ from horsetrack.countries.japan.models.interactions import (
     n_half,
     transfer_step,
 )
+from horsetrack.countries.japan.studies import interactions as study
 
 # isort: split
 from ability_synth import softmax_within
@@ -595,3 +610,131 @@ def test_one_factor_trainer_track_term_learns_east_west():
         for w in ("w1", "w2", "w3", "w4"):
             dd = (at(e, "tokyo") - at(w, "tokyo")) - (at(e, "kyoto") - at(w, "kyoto"))
             assert dd > 0.8, (e, w, dd)
+
+
+# ---------------------------------------------------------------------------------------------
+# #574 DoD: each member's abilities through C5's ordering to Place and Wide
+# ---------------------------------------------------------------------------------------------
+
+QC_SMALL = {"a2": 0.1, "b2": -0.02, "h2": 0.05, "e2": -0.05}
+QC_SMALL |= {"a3": 0.15, "b3": -0.03, "h3": 0.04, "e3": -0.04}
+PW_ORDERINGS = {
+    "harville": lambda: exotic.Ordering("harville"),
+    "henery": lambda: exotic.Ordering("henery"),
+    "quadratic_context": lambda: exotic.Ordering("quadratic_context", dict(QC_SMALL)),
+}
+# (runners when sales opened, starters): Place not sold at 4; two places 5-7; three from 8; a
+# late scratch from 8 to 7 still pays three.
+PW_FIELDS = [(4, 4), (5, 5), (6, 6), (7, 7), (8, 8), (12, 12), (18, 18), (8, 7)]
+
+
+def places_by_hand(field_size: int) -> int:
+    return 0 if field_size < 5 else 2 if field_size < 8 else 3
+
+
+def pw_card(seed: int) -> tuple[pd.DataFrame, pd.Series]:
+    """One race per PW_FIELDS entry, horse numbers drawn from 1-18 (gaps, as after scratches),
+    Win probabilities from seeded strengths; rows shuffled on a non-default index."""
+    rng = np.random.default_rng(seed)
+    parts = []
+    for k, (field, starters) in enumerate(PW_FIELDS):
+        numbers = np.sort(rng.choice(np.arange(1, 19), size=starters, replace=False))
+        w = np.exp(rng.normal(0.0, 1.2, starters))
+        parts.append(
+            pd.DataFrame(
+                {
+                    "race_id": f"jra:2021-05-{k + 1:02d}:05:11",
+                    "horse_no": numbers.astype(int),
+                    "field_size": field,
+                    "p": w / w.sum(),
+                }
+            )
+        )
+    frame = pd.concat(parts, ignore_index=True)
+    frame = frame.iloc[rng.permutation(len(frame))]
+    frame.index = pd.Index(700 + 3 * np.arange(len(frame)))
+    return frame.drop(columns="p"), frame["p"]
+
+
+def harville_top3(p: np.ndarray) -> dict[tuple[int, int, int], float]:
+    """P(i, j, k the first three in that order) under Harville, by brute force."""
+    return {
+        (i, j, k): p[i] * p[j] / (1 - p[i]) * p[k] / (1 - p[i] - p[j])
+        for i, j, k in itertools.permutations(range(len(p)), 3)
+    }
+
+
+def keyed(out: pd.DataFrame, race_id: str) -> dict[str, float]:
+    part = out.loc[out["race_id"].eq(race_id)]
+    assert part["combination"].is_unique, race_id
+    return dict(zip(part["combination"].astype(str), part["p"].astype(float), strict=True))
+
+
+@pytest.mark.parametrize("family", sorted(PW_ORDERINGS))
+def test_member_place_wide_probabilities_sum_correctly(family):
+    """Eight races (4 to 18 runners at sale, one late scratch) through each C5 ordering family:
+    WIN reproduces the member's probabilities; PLACE sums to the places paid by the field at
+    sale (no rows for a field of 4) and WIDE's pairs to 3, every p in [0, 1], each starter's
+    Place at least its Win and its Wide pairs summing to twice its top-three probability. Every
+    value equals the ordering's own joint_probs, and under Harville a brute-force sum over ordered
+    first threes, so a member's abilities move every figure."""
+    rows, p_win = pw_card(5740 + len(family))
+    ordering = PW_ORDERINGS[family]()
+    tol = 1e-6 if family == "henery" else 1e-9
+    got = {
+        pool: study.member_pool_probs(rows, p_win, ordering, pool)
+        for pool in (exotic.WIN, exotic.PLACE, exotic.WIDE)
+    }
+    for pool, out in got.items():
+        assert isinstance(out, pd.DataFrame), pool
+        assert {"race_id", "combination", "p"} <= set(out.columns), (pool, list(out.columns))
+        p = out["p"].to_numpy(dtype=float)
+        assert np.isfinite(p).all() and (p >= -tol).all() and (p <= 1 + tol).all(), pool
+        assert set(out["race_id"]) <= set(rows["race_id"]), pool
+
+    for race_id, race in rows.groupby("race_id"):
+        numbers = race["horse_no"].astype(int).tolist()
+        field = int(race["field_size"].iloc[0])
+        p = p_win.reindex(race.index).to_numpy(dtype=float)
+        single = [str(h) for h in numbers]
+        pairs = [f"{a},{b}" for a, b in itertools.combinations(sorted(numbers), 2)]
+
+        win = keyed(got[exotic.WIN], race_id)
+        assert sorted(win) == sorted(single), race_id
+        np.testing.assert_allclose([win[str(h)] for h in numbers], p, atol=1e-9)
+
+        place = keyed(got[exotic.PLACE], race_id)
+        places = places_by_hand(field)
+        if places == 0:
+            assert place == {}, (race_id, "PLACE is not sold to a field of 4")
+        else:
+            assert sorted(place) == sorted(single), race_id
+            assert sum(place.values()) == pytest.approx(places, abs=1e-6), (race_id, field)
+            for h, ph in zip(numbers, p, strict=True):
+                assert place[str(h)] >= ph - tol, (race_id, h)
+            want = ordering.joint_probs(p, exotic.PLACE, horses=numbers, field_at_sale=field)
+            for c, v in want.items():
+                assert place[c] == pytest.approx(v, abs=tol), (race_id, c)
+
+        wide = keyed(got[exotic.WIDE], race_id)
+        assert sorted(wide) == sorted(pairs), race_id
+        assert sum(wide.values()) == pytest.approx(3.0, abs=1e-6), race_id
+        want = ordering.joint_probs(p, exotic.WIDE, horses=numbers, field_at_sale=field)
+        for c, v in want.items():
+            assert wide[c] == pytest.approx(v, abs=tol), (race_id, c)
+        t = ordering.trifecta(p)
+        in_top3 = t.sum(axis=(1, 2)) + t.sum(axis=(0, 2)) + t.sum(axis=(0, 1))
+        for i, h in enumerate(numbers):
+            with_h = sum(v for c, v in wide.items() if str(h) in c.split(","))
+            assert with_h == pytest.approx(2 * in_top3[i], abs=1e-6), (race_id, h)
+
+        if family == "harville":
+            brute = harville_top3(p)
+            for i, h in enumerate(numbers):
+                if places:
+                    hand = sum(v for top, v in brute.items() if i in top[:places])
+                    assert place[str(h)] == pytest.approx(hand, abs=1e-9), (race_id, h)
+            for a, b in itertools.combinations(range(len(numbers)), 2):
+                hand = sum(v for top, v in brute.items() if a in top and b in top)
+                key = ",".join(str(x) for x in sorted((numbers[a], numbers[b])))
+                assert wide[key] == pytest.approx(hand, abs=1e-9), (race_id, key)
