@@ -139,12 +139,18 @@ def odds_race_list(
     return page(list_header(day, meeting) + _table(rows, columns=2))
 
 
-def card_race_list(day: date, meeting: str, times: Mapping[int, str]) -> bytes:
+def card_race_list(
+    day: date,
+    meeting: str,
+    times: Mapping[int, str],
+    links: Mapping[int, str] | None = None,
+) -> bytes:
     """出馬表 race list: one row per race, its race-number image, its time cell as given
-    (a clock like 9時55分, or text such as 発走済) and a link to its card."""
+    (a clock like 9時55分, or text such as 発走済) and a link to its card: `links[n]`, the cname
+    of race n's card page (ticket #426), or an invented one when not given."""
     rows = []
     for race_no, time in times.items():
-        cname = f"pw01dde{race_no:02d}{day:%Y%m%d}/{race_no:02X}"
+        cname = (links or {}).get(race_no) or f"pw01dde{race_no:02d}{day:%Y%m%d}/{race_no:02X}"
         number = href_link(CARD_PATH, cname, f'<img alt="{race_no}レース" src="s.png">')
         rows.append(
             f'<tr><th class="race_num" scope="row">{number}</th><td class="time">{time}</td>'

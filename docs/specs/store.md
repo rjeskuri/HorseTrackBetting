@@ -153,8 +153,10 @@ table's file. The speed study's `studies/speed_run.read_inputs`, through
 `core.eval.holdout.read_development(handle, country, ...)`, which scans the handle with
 `pyarrow.parquet.read_table`. `countries/japan/models/v0/store.read_store_table` builds the same
 predicate with `core.eval.holdout.file_development_filter` on the handle and scans a `ds.dataset`
-of the file's path on a one-file read-only filesystem served from that handle, so its read is a
-dataset scan with the predicate as its filter. Either way the predicate first narrows the
+of the file's path on a one-file read-only filesystem whose file is that handle (read by byte
+range, never as a buffer of the whole file), so its read is a dataset scan with the predicate as
+its filter, its rows in file order, and without pre-buffering (each column chunk read on its own,
+so no coalesced read spans a row group the scan skips). Either way the predicate first narrows the
 requested range to the file's own first and last race_date: from each row group's footer
 statistics, or, for a row group written without them, by one Acero plan over those row groups
 together (a scan of race_date, a projection and a min/max aggregate of the in-range days with a
@@ -174,7 +176,12 @@ narrower: Parquet prunes a row group only from its min/max statistics, so a row 
 both rows the scan needs and rows it excludes (a development and a holdout day, say 2026-12-02
 and 2026-12-03) is still read and decoded, and its excluded rows are dropped by the scan's
 filter before a table is built. A multi-day group after the holdout start is not necessarily
-such a group: 2026-12-03 and 12-04 are both holdout days. Every store table
+such a group: 2026-12-03 and 12-04 are both holdout days. The jravan builders write
+`final_odds`, `pool_votes`, `races` and `runners` with one row group per race day (#502:
+`jravan.records.write_days`, each group's race_date statistics one day with no null), so
+`read_store_table` there skips every holdout day's group from the footer alone and decodes no
+byte of it (D14); a store built before #502 (a group per year) reads as described above until it
+is rebuilt. Every store table
 is Parquet; the other files under `$HORSETRACK_DATA_DIR` (the ingest manifest, JSONL logs, the
 raw page cache) have no row-group statistics and are not development reads. `LockedHoldout.open`
 remains the only way to holdout rows.
@@ -244,6 +251,14 @@ with `research.win5.read_history()`. `research.win5.payout_mismatches(table)` na
 WIN5 takeout (boosts applied) within 10 yen per winning ticket; days before 2014-06-07 are skipped.
 Holdout days are in the table; no analysis reads them (`score_study` drops them).
 
+The command appends (#325): it reads the table already there, adds the days of the run that are new
+(`research.win5.append_history`; a day whose figures differ from the table's stops the run, the
+table untouched) and writes it back, so each run on a new WIN5 day grows the sample. Holdout days
+(`is_holdout_day`) are not fetched or added. It prints `added_days`, the days per carryover bin of
+`config/win5_study.yaml` (`bin_<lo>_<hi>=<n>`, `research.win5.bin_counts`, the scorer's own
+binning) and `holdout_days`; the sample is only grown here, a re-score is a new pre-registered
+family.
+
 A year list (`raw/jra/win5_year`) counts as final only when its cached copy was fetched after the
 year ended (1 January JST of the next year); an earlier copy, and the current year's, is fetched
 again. `research.win5.carryover_chain_breaks(table)` names the days that break the carryover chain
@@ -266,6 +281,10 @@ store's.
   source's: `meetings`, `races`, `runners`, `dividends`, `horses`, `horse_pedigree`. JRA venues
   only (JV-Data venue codes 01-10). Where JV-Data has no value the column is null, never a guess
   (e.g. `rating`, `gear_raw` and `brand_raw` on runners).
+- **Form tables** (#377): `form_races` and `form_runners` hold the NAR and overseas races and
+  runners of the export in the `races` and `runners` schemas, `jurisdiction` `nar` or `overseas`
+  and ids `<jurisdiction>:<YYYY-MM-DD>:<JV-Data venue code>:<NN>`. Horse form only: the jravan
+  `horse_runs` reads them (`win_odds` null) and no betting reader names them (D20).
 - **Jravan-only tables** are outside `schemas.TABLES`: `final_odds`, `pool_votes` (final odds and
   pool votes per combination), `jockeys`, `trainers` (the masters), `breeding_horses`, `produce`
   and `lineages` (bloodlines), and `workouts` (the HC and WC workouts, #229). Each is a Parquet file in `processed/jravan/` whose schema is
