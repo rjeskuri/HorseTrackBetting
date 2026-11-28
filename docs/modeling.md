@@ -81,7 +81,7 @@ flowchart TB
     subgraph L2["C2: per-horse ability and interactions"]
         ABIL["Dynamic rating #91 japan/models/rating.py;<br/>top-3 Plackett-Luce ability, pooled jockey, trainer, sire<br/>#92 japan/models/ability.py<br/>built, not adopted"]
         INTR["Interactions: jockey, trainer and track #93,<br/>competition #94<br/>planned"]
-        LIN["Lineage prior: sire × surface × band, damsire at ¼<br/>#95 japan/models/lineage.py<br/>built; E37 run planned"]
+        LIN["Lineage prior: sire × surface × band, damsire at 0 or ¼<br/>#95 japan/models/lineage.py;<br/>E37 run #538 japan/studies/lineage.py<br/>scored, not adopted"]
     end
     subgraph L3["C3: speed and par"]
         SPEED["Par and expected top-3 time #96 japan/models/speed.py;<br/>horse relative speed p_speed #97 japan/models/speed_horse.py,<br/>E39 at the final price #347 japan/studies/p_speed.py<br/>built, not adopted"]
@@ -162,7 +162,7 @@ flowchart LR
     PAR --> PSPD
     RAT --> PL
     INT -.-> PL
-    LIN -.->|"debut and thin-history prior, E37"| PL
+    LIN -.->|"debut and thin-history prior, E37 #538"| PL
     LIN -.->|"aptitude prior"| INT
     MKT -.->|"offset"| META
     HCP -.-> META
