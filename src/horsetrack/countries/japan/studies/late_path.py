@@ -5,10 +5,12 @@ return more at the same final odds. Everything here is pure but `path_files`'s d
 the study that reads the data is `studies.late_path_study` (`horsetrack japan late-path-study`).
 
 E23, ex post
-- `late_change(captures, close_utc=, window_min=)`: per horse, O_to / O_from - 1, O_from its last
-  capture at or before close - window (inclusive), O_to its last capture strictly before the
-  close; a capture at or after the close is the final board and never enters. NaN when either end
-  is missing, 0 when both ends are the same capture.
+- `late_change(captures, close_utc=, window_min=, to=)`: per horse, O_to / O_from - 1, O_from its
+  last capture at or before close - window (inclusive). With `to="interim"` (the default) O_to is
+  its last capture strictly before the close, and a capture at or after the close is the final
+  board and never enters; with `to="final"` (the paper's ending, owner on #102, 2026-11-28) O_to
+  is its last capture at or after the close, its final odds. NaN when either end is missing, 0
+  when both ends are the same capture; any other `to` is a ValueError.
 - `paper_regression(frame)`: OLS of won * odds_final on [1, odds_final, late_change] (the paper's
   base spec, the final odds linearly); a runner without a late change is left out. `se` is the
   cluster sandwich (CR0, no small-sample factor) over races, or over `clusters` when given.
@@ -73,6 +75,7 @@ from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START
 
 COUNTRY = "japan"
 PATH_SOURCES = {"jravan": "jravan", "jra-logs": "jra"}  # a path source and its processed folder
+ENDS = ("interim", "final")  # late_change's endings: the last board before the close, the final
 FEATURES = ("path_change", "c1_drift")
 PATH_WINDOW_MIN = 5.0  # E24's observed path: the paper's 5-minute window, ending at t
 N_DRAWS = 200
@@ -83,8 +86,12 @@ CROSS_FIT = 5
 # ---------------------------------------------------------------- E23, ex post
 
 
-def late_change(captures: pd.DataFrame, *, close_utc: datetime, window_min: float) -> pd.Series:
+def late_change(
+    captures: pd.DataFrame, *, close_utc: datetime, window_min: float, to: str = "interim"
+) -> pd.Series:
     """O_to / O_from - 1 per horse of one race's captures (horse_id, fetched_utc, odds)."""
+    if to not in ENDS:
+        raise ValueError(f"no late-change ending {to!r}; one of {list(ENDS)}")
     close = pd.Timestamp(close_utc)
     rows = captures.assign(_t=pd.to_datetime(captures["fetched_utc"], utc=True))
     rows = rows.sort_values("_t", kind="stable")
@@ -95,7 +102,7 @@ def late_change(captures: pd.DataFrame, *, close_utc: datetime, window_min: floa
         return latest["odds"].astype(float).reindex(horses)
 
     o_from = last(rows["_t"] <= close - pd.Timedelta(minutes=float(window_min)))
-    o_to = last(rows["_t"] < close)
+    o_to = last(rows["_t"] < close if to == "interim" else rows["_t"] >= close)
     return (o_to / o_from - 1.0).rename("late_change")
 
 

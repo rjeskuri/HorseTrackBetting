@@ -10,6 +10,9 @@ The ex-post window: `late_change(captures, *, close_utc, window_min) -> pd.Serie
 - The Series is indexed by horse_id and lists every horse of `captures`: NaN when the horse has no
   capture at or before close - window or no capture before the close. When the last interim
   capture is the reference capture itself, the change is 0.
+- `to="final"` (the paper's ending; `to="interim"`, the default, is the one above): O_from is the
+  same reference and O_to the horse's last capture at or after close_utc, its final odds. NaN when
+  the horse has no capture at or after the close, or no reference. Any other `to` is a ValueError.
 
 E23, the paper's regression: `paper_regression(frame) -> RegressionResult(delta, se)`
 - `frame` has one row per runner: `race_id`, `won` (bool), `odds_final` (decimal, stake
@@ -64,6 +67,11 @@ The study: `path_files(source) -> list[tuple[str, Path]]`
   `processed/jra/odds_timeseries/<day>.parquet`; any other source is a ValueError. Holdout days
   (D14, `is_holdout_day`) and days before 2014-06-07 (D10: no pre-reform price) are never listed.
 
+The pre-registered spec, `config/late_path.yaml` (owner's answer on #102, 2026-11-28)
+- No field is pending (`late_path_study.pending_fields` is empty): E24's features and E22's
+  p_model read `status: approved`. `e23.ends` lists both endings of the late change, `interim`
+  and `final`, every one a `to` that `late_change` accepts, and `e23.primary_end` is `interim`.
+
 Expected values are derived here from first principles (the stated formulas, numpy least squares
 and the planted parameters), never from the module under test. All data are synthetic and in
 memory or under tmp; HORSETRACK_DATA_DIR points at a tmp dir.
@@ -80,12 +88,12 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from horsetrack.core import paths
+from horsetrack.core import config, paths
 from horsetrack.core.eval.bootstrap import Interval
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.countries.japan.logger.compact import SCHEMA
 from horsetrack.countries.japan.models.nowcast import Draws, Nowcast
-from horsetrack.countries.japan.studies import late_path
+from horsetrack.countries.japan.studies import late_path, late_path_study
 
 UTC = timezone.utc
 COUNTRY = "japan"
@@ -205,6 +213,82 @@ def test_late_change_windows_and_missing_ends():
                     assert pd.isna(got), (window, horse, got)
                 else:
                     assert got == pytest.approx(value, abs=1e-12), (window, horse)
+
+
+# ---------------------------------------------------------------- the ex-post window to the final
+
+
+def assert_changes(result: pd.Series, expected: dict[str, float], label) -> None:
+    assert set(result.index) == set(expected), label
+    for horse, value in expected.items():
+        got = result.loc[horse]
+        if math.isnan(value):
+            assert pd.isna(got), (label, horse, got)
+        else:
+            assert got == pytest.approx(value, abs=1e-12), (label, horse, got)
+
+
+def test_late_change_to_final_runs_from_the_reference_to_the_final_odds():
+    """The paper's ending (owner, #102): the same T-5 reference, and the change runs to the final
+    odds after the close. The default and to="interim" are today's change to the T-1.5 capture."""
+    path = {
+        "1": [(-7, 4.0), (-5, 3.6), (-3, 3.2), (-1.5, 2.7), (2, 9.9)],
+        "2": [(-7, 12.0), (-5, 15.0), (-3, 16.5), (-1.5, 18.0), (2, 1.1)],
+        "3": [(-7, 30.0), (-5, 25.0), (-3, 26.0), (-1.5, 25.0), (2, 99.0)],
+    }
+    captures = captures_frame(path, CLOSE)
+    final = late_path.late_change(captures, close_utc=CLOSE, window_min=5, to="final")
+    assert_changes(final, {"1": 9.9 / 3.6 - 1, "2": 1.1 / 15.0 - 1, "3": 99.0 / 25.0 - 1}, "final")
+    interim = {"1": 2.7 / 3.6 - 1, "2": 18.0 / 15.0 - 1, "3": 0.0}
+    for kw in ({}, {"to": "interim"}):
+        result = late_path.late_change(captures, close_utc=CLOSE, window_min=5, **kw)
+        assert_changes(result, interim, kw)
+
+
+def test_late_change_ends_by_window_and_missing_ends():
+    """Per horse, window (5, 10, 20) and ending: the reference is the last capture at or before
+    close - window (inclusive) for both endings; the interim end is the last capture strictly
+    before the close, the final end the last capture at or after it (a capture at the close is a
+    final; of two after the close, the later). No reference, or no capture at or after the close
+    for the final, gives NaN. Shuffled rows give the same result."""
+    path = {
+        # a reference exactly on close - window at every window; one capture, at the close
+        "A": [(-25, 10.0), (-20, 9.0), (-12, 8.0), (-10, 7.5), (-6, 6.0), (-5, 5.5), (-2, 5.0),
+              (0, 4.0)],
+        "B": [(-21, 2.8), (-11, 3.3), (-6, 3.0), (-1, 2.4), (0, 2.2), (4, 2.6)],  # two finals
+        "C": [(-8, 20.0), (-1, 22.0), (3, 30.0)],  # first priced inside the 10 and 20 windows
+        "D": [(3, 7.0)],  # only the final: no reference
+        "E": [(-30, 6.0), (-12, 6.6), (-4, 6.3)],  # nothing at or after the close: no final
+        "F": [(-22, 5.0), (2, 4.0)],  # nothing between the reference and the close
+    }  # fmt: skip
+    nan = math.nan
+    table = {
+        ("interim", 5): {"A": 5.0 / 5.5 - 1, "B": 2.4 / 3.0 - 1, "C": 22.0 / 20.0 - 1, "D": nan,
+                         "E": 6.3 / 6.6 - 1, "F": 0.0},
+        ("interim", 10): {"A": 5.0 / 7.5 - 1, "B": 2.4 / 3.3 - 1, "C": nan, "D": nan,
+                          "E": 6.3 / 6.6 - 1, "F": 0.0},
+        ("interim", 20): {"A": 5.0 / 9.0 - 1, "B": 2.4 / 2.8 - 1, "C": nan, "D": nan,
+                          "E": 6.3 / 6.0 - 1, "F": 0.0},
+        ("final", 5): {"A": 4.0 / 5.5 - 1, "B": 2.6 / 3.0 - 1, "C": 30.0 / 20.0 - 1, "D": nan,
+                       "E": nan, "F": 4.0 / 5.0 - 1},
+        ("final", 10): {"A": 4.0 / 7.5 - 1, "B": 2.6 / 3.3 - 1, "C": nan, "D": nan, "E": nan,
+                        "F": 4.0 / 5.0 - 1},
+        ("final", 20): {"A": 4.0 / 9.0 - 1, "B": 2.6 / 2.8 - 1, "C": nan, "D": nan, "E": nan,
+                        "F": 4.0 / 5.0 - 1},
+    }  # fmt: skip
+    frame = captures_frame(path, CLOSE)
+    shuffled = frame.sample(frac=1.0, random_state=5).reset_index(drop=True)
+    for (to, window), expected in table.items():
+        for captures in (frame, shuffled):
+            result = late_path.late_change(captures, close_utc=CLOSE, window_min=window, to=to)
+            assert_changes(result, expected, (to, window))
+
+
+@pytest.mark.parametrize("to", ["closing", "last", "", "post"])
+def test_late_change_refuses_an_unknown_ending(to):
+    captures = captures_frame({"1": [(-7, 4.0), (-5, 3.6), (-1.5, 2.7), (2, 9.9)]}, CLOSE)
+    with pytest.raises(ValueError):
+        late_path.late_change(captures, close_utc=CLOSE, window_min=5, to=to)
 
 
 # ---------------------------------------------------------------- E23: the paper's regression
@@ -699,3 +783,28 @@ def test_path_files_lists_development_days_of_the_source(data_dir, source, folde
         assert path == base / f"{day}.parquet"
     with pytest.raises(ValueError):
         late_path.path_files("netkeiba")
+
+
+# ---------------------------------------------------------------- the pre-registered spec
+
+
+def test_late_path_spec_is_approved_and_names_both_e23_endings():
+    """The owner's answer on #102 (2026-11-28): no field is pending, so the full run may go; E24's
+    features and E22's p_model are approved as proposed; E23 reports the late change to the last
+    interim (primary) and to the final odds, at 5 (primary), 10 and 20 minutes."""
+    plan = config.load_country_yaml(COUNTRY, "late_path")
+    assert late_path_study.pending_fields(plan) == []
+    features, p_model = plan["e24"]["features"], plan["e22"]["p_model"]
+    assert features["status"] == "approved" and p_model["status"] == "approved"
+    assert list(features["columns"]) == ["path_change", "c1_drift"]
+    assert p_model["source"] == "c2_rating_oof"
+
+    e23 = plan["e23"]
+    assert sorted(e23["ends"]) == ["final", "interim"]
+    assert e23["primary_end"] == "interim"
+    assert sorted(e23["windows_min"]) == [5, 10, 20] and e23["primary_window_min"] == 5
+    captures = captures_frame({"1": [(-7, 4.0), (-5, 3.6), (-1.5, 2.7), (2, 9.9)]}, CLOSE)
+    expected = {"interim": 2.7 / 3.6 - 1, "final": 9.9 / 3.6 - 1}
+    for end in e23["ends"]:  # every ending the spec names is one late_change computes
+        got = late_path.late_change(captures, close_utc=CLOSE, window_min=5, to=end)
+        assert got.loc["1"] == pytest.approx(expected[end], abs=1e-12), end

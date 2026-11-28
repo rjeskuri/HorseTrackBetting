@@ -2,8 +2,10 @@
 
 The pure pieces are `studies.late_path`. The design is pre-registered in `config/late_path.yaml`,
 with D2's grid (`config/decision.yaml`), D9's folds (`config/folds.yaml`) and D7's bootstrap
-(`config/scoring.yaml`), all in the family's spec and its hash. Two of its fields are pending the
-owner's approval (E24's features, E22's p_model): until they are approved only a `--trial` runs.
+(`config/scoring.yaml`), all in the family's spec and its hash. Its owner decisions (E24's
+features, E22's p_model) carry a `status`; while one is pending owner approval only a `--trial`
+runs. The owner approved both on #102 (2026-11-28) and asked E23 to also end the late change at
+the final odds, as the paper does (the spec's `e23.ends`).
 
 Data: the path source's day files (`late_path.path_files`: "jravan", the JRA-VAN 0B41 series, or
 "jra-logs", our compacted logs), WIN rows only and by column, one day at a time. D10: days from
@@ -13,19 +15,21 @@ row carries a WIN dividend that is not a refund (a dead heat has two); a race wi
 and dropped, counted. Grades are the source's races table's race_class (C1's effects).
 
 Pass 1, every development day: each race's starters, final odds and winners, the late change at
-each E23 window (`late_change`, the close at the scheduled post time), and C1's WIN cases and
-pool totals (`models.nowcast.extract`). D9's walk-forward over the development days
+each E23 ending and window (`late_change`, the close at the scheduled post time), and C1's WIN
+cases and pool totals (`models.nowcast.extract`). D9's walk-forward over the development days
 (`models.nowcast.fold_days`); D4's calibrated market is fitted on each fold's training days and
 predicts its test days: q_final, so only test days are scored. Pass 2, the test days only: each
 fold's C1 is fitted on its training days, then `ex_ante_features` is read at every D2 tau for every
 race of the fold's test days (each test day's file is read a second time).
 
 Comparisons, one registry record each, failures included:
-- E23 `paper_regression` on every development day's starters at each window, with race-, day-
-  and meeting-clustered SEs, beside the paper's versions (the spec's `paper`);
-- E23 `offset:late_change_vs_final` and E24 `offset:ex_ante_vs_final` (per tau): `offset_test`
-  on the scored races, the path coefficients walk-forward over the scored quarters, one-sided
-  bounds resampling race days (the ticket) and meetings (D7);
+- E23 `paper_regression:late_change_to_<end>_w<w>` at each ending (`e23.ends`) and window, on
+  every development day's starters, with race-, day- and meeting-clustered SEs, beside the
+  paper's versions (the spec's `paper`); the headline is the primary ending and window;
+- E23 `offset:late_change_to_<end>_w<w>_vs_final` at each ending and window, and E24
+  `offset:ex_ante_vs_final` (one record, a metric per tau): `offset_test` on the scored races,
+  the path coefficients walk-forward over the scored quarters, one-sided bounds resampling race
+  days (the ticket) and meetings (D7);
 - E22 `alpha_by_tau` on the scored races' (race, tau) cases, p_model from the spec's source.
 
 The report and a JSON dump go through `write_report` under the data directory (for the jravan
@@ -84,11 +88,11 @@ COLUMNS = [
     "dividend",
     "is_refund",
 ]
+KEYS = ["race_id", "horse_id"]  # a runner of the path source: the race and its horse number
 REGRESSION = "e23:paper_regression"
-E23_OFFSET = "e23:offset:late_change_vs_final"
+E23_OFFSET = "e23:offset"
 E24_OFFSET = "e24:offset:ex_ante_vs_final"
 E22 = "e22:alpha_by_tau_vs_fixed_blend"
-VARIANTS = {REGRESSION: "E23", E23_OFFSET: "E23", E24_OFFSET: "E24", E22: "E22"}
 Z95 = NormalDist().inv_cdf(0.975)
 COMPONENTS = {
     "path": "countries/japan/studies/late_path.py",
@@ -99,6 +103,36 @@ COMPONENTS = {
 
 def family_id(source: str) -> str:
     return f"{FAMILY}-{source}"
+
+
+def change_column(end: str, window: float) -> str:
+    """The runners' column of the late change to `end` (`late_path.ENDS`) over `window` minutes."""
+    return f"late_change_to_{end}_w{float(window):g}"
+
+
+def e23_cells(plan: dict) -> list[tuple[str, float]]:
+    """E23's (ending, window) cells in the spec's order, each ending one `late_change` takes."""
+    e23 = plan["e23"]
+    unknown = [end for end in e23["ends"] if end not in lp.ENDS]
+    if unknown or e23["primary_end"] not in e23["ends"]:
+        raise ValueError(f"E23 endings {list(e23['ends'])} must be among {list(lp.ENDS)}")
+    return [(end, float(w)) for end in e23["ends"] for w in e23["windows_min"]]
+
+
+def e23_variant(kind: str, end: str, window: float) -> str:
+    """E23's registry variant of the regression or the offset test at one (ending, window)."""
+    name = f"{kind}:{change_column(end, window)}"
+    return name + "_vs_final" if kind == E23_OFFSET else name
+
+
+def variant_names(plan: dict) -> dict[str, str]:
+    """Each comparison's registry variant and its E id: E23's regression and offset test at
+    every (ending, window), then E24's offset test and E22."""
+    out = {}
+    for kind in (REGRESSION, E23_OFFSET):
+        for end, w in e23_cells(plan):
+            out[e23_variant(kind, end, w)] = "E23"
+    return out | {E24_OFFSET: "E24", E22: "E22"}
 
 
 def pending_fields(plan: dict, prefix: str = "") -> list[str]:
@@ -131,7 +165,7 @@ def build_spec(source: str, plan: dict, grid, scheme, bootstrap: dict) -> dict:
         "grid": {"minutes": list(grid.minutes), "primary": grid.primary},
         "fold_scheme": dataclasses.asdict(scheme),
         "bootstrap": bootstrap,
-        "comparisons": VARIANTS,
+        "comparisons": variant_names(plan),
         "adoption": "none (D16): nothing is adopted and the holdout is never opened",
     }
 
@@ -181,24 +215,34 @@ def data_builds(source: str, files: list[tuple[str, Path]], plan: dict) -> dict[
     return builds
 
 
+def _object_keys(frame: pd.DataFrame) -> pd.DataFrame:
+    """`frame` with its race_id and horse_id as plain objects, so a merge on them reads the same
+    under pandas 3's Arrow-backed strings as under pandas 2."""
+    return frame.astype({key: object for key in KEYS if key in frame})
+
+
 def starters(win: pd.DataFrame) -> pd.DataFrame:
     """Each race's starters: the final odds, and whether the runner won."""
     final = win[win["is_final_capture"] & (win["combination"] != nc.POOL_ROW) & (win["odds"] > 0)]
     refund = final["is_refund"].astype("boolean").fillna(False).to_numpy(dtype=bool)
-    return pd.DataFrame(
-        {
-            "race_id": final["race_id"].to_numpy(),
-            "horse_id": final["combination"].to_numpy(),
-            "odds_final": final["odds"].to_numpy(dtype=float),
-            "won": final["dividend"].notna().to_numpy() & ~refund,
-        }
+    return _object_keys(
+        pd.DataFrame(
+            {
+                "race_id": final["race_id"].to_numpy(),
+                "horse_id": final["combination"].to_numpy(),
+                "odds_final": final["odds"].to_numpy(dtype=float),
+                "won": final["dividend"].notna().to_numpy() & ~refund,
+            }
+        )
     )
 
 
-def late_changes(win: pd.DataFrame, windows: list[float]) -> pd.DataFrame:
-    """`late_change` per runner at each window, the close at the race's scheduled post time."""
+def late_changes(win: pd.DataFrame, cells: list[tuple[str, float]]) -> pd.DataFrame:
+    """`late_change` per runner at each (ending, window), the close at the race's scheduled post
+    time."""
     prices = win.loc[win["combination"] != nc.POOL_ROW, ["race_id", "combination", "snapshot_utc",
                                                           "post_utc", "odds"]]  # fmt: skip
+    columns = [change_column(end, w) for end, w in cells]
     parts = []
     for race_id, g in prices.groupby("race_id", sort=False):
         post = g["post_utc"].dropna()
@@ -206,18 +250,19 @@ def late_changes(win: pd.DataFrame, windows: list[float]) -> pd.DataFrame:
             continue
         captures = g.rename(columns={"combination": "horse_id", "snapshot_utc": "fetched_utc"})
         changes = {
-            f"late_change_{w:g}": lp.late_change(captures, close_utc=post.iloc[0], window_min=w)
-            for w in windows
+            change_column(end, w): lp.late_change(
+                captures, close_utc=post.iloc[0], window_min=w, to=end
+            )
+            for end, w in cells
         }
         parts.append(pd.DataFrame(changes).reset_index().assign(race_id=race_id))
     if not parts:
-        return pd.DataFrame(
-            columns=["race_id", "horse_id", *(f"late_change_{w:g}" for w in windows)]
-        )
-    return pd.concat(parts, ignore_index=True)
+        empty = dict.fromkeys(KEYS, object) | dict.fromkeys(columns, float)
+        return pd.DataFrame({c: pd.Series(dtype=t) for c, t in empty.items()})
+    return _object_keys(pd.concat(parts, ignore_index=True))
 
 
-def read_paths(files, windows, grades, log, started):
+def read_paths(files, cells, grades, log, started):
     """Pass 1: starters with their late changes, and C1's WIN cases and pool totals."""
     runner_parts, case_parts, growth_parts, case_chunks, growth_chunks = [], [], [], [], []
     counts: dict[str, int] = defaultdict(int)
@@ -228,9 +273,7 @@ def read_paths(files, windows, grades, log, started):
         growth_parts.append(day_growth)
         for key, value in c.items():
             counts[f"c1_{key}"] += value
-        rows = starters(win).merge(
-            late_changes(win, windows), on=["race_id", "horse_id"], how="left"
-        )
+        rows = starters(win).merge(late_changes(win, cells), on=["race_id", "horse_id"], how="left")
         del win
         winners = rows.groupby("race_id")["won"].transform("sum")
         counts["races_read"] += rows["race_id"].nunique()
@@ -278,34 +321,40 @@ def _label(fold) -> str:
 # ---------------------------------------------------------------- the comparisons
 
 
-def e23_regression(runners: pd.DataFrame, plan: dict, clusters: dict) -> tuple[list, dict]:
+def _is_headline(plan: dict, end: str, window: float) -> bool:
+    e23 = plan["e23"]
+    return end == e23["primary_end"] and window == float(e23["primary_window_min"])
+
+
+def e23_regression(
+    runners: pd.DataFrame, plan: dict, clusters: dict, end: str, w: float
+) -> tuple[list, dict]:
+    """The paper's regression at one (ending, window), by every SE unit, and its coverage."""
     low, high = sorted(plan["paper"]["range"])
+    cell = {"end": end, "window_min": w, "headline": _is_headline(plan, end, w)}
     metrics, rows, coverage = [], [], []
-    for w in plan["e23"]["windows_min"]:
-        change = runners[f"late_change_{w:g}"]
-        frame = runners[["race_id", "won", "odds_final"]].assign(late_change=change)
-        for unit, cl in (
-            ("race", None),
-            ("day", clusters["day"]),
-            ("meeting", clusters["meeting"]),
-        ):
-            r = lp.paper_regression(frame, clusters=cl)
-            lo, hi = r.delta - Z95 * r.se, r.delta + Z95 * r.se
-            metrics.append(_metric(f"pooled:{unit}", f"delta:w{w:g}", r.delta, r.n_runners, lo, hi))
-            rows.append(
-                {"window_min": w, "se_unit": unit, "delta": r.delta, "se": r.se}
-                | {"ci95_lo": lo, "ci95_hi": hi, "overlaps_paper_range": hi >= low and lo <= high}
-                | {"n_runners": r.n_runners, "n_races": r.n_races, "n_clusters": r.n_clusters}
-            )
-        year = runners["day"].str[:4]
-        for y, g in change.groupby(year):
-            coverage.append(
-                {"window_min": w, "year": y, "starters": len(g)}
-                | {
-                    "with_late_change": int(g.notna().sum()),
-                    "nonzero": int((g.fillna(0) != 0).sum()),
-                }
-            )
+    change = runners[change_column(end, w)]
+    frame = runners[["race_id", "won", "odds_final"]].assign(late_change=change)
+    for unit, cl in (
+        ("race", None),
+        ("day", clusters["day"]),
+        ("meeting", clusters["meeting"]),
+    ):
+        r = lp.paper_regression(frame, clusters=cl)
+        lo, hi = r.delta - Z95 * r.se, r.delta + Z95 * r.se
+        metrics.append(_metric(f"pooled:{unit}", "delta", r.delta, r.n_runners, lo, hi))
+        rows.append(
+            cell
+            | {"se_unit": unit, "delta": r.delta, "se": r.se}
+            | {"ci95_lo": lo, "ci95_hi": hi, "overlaps_paper_range": hi >= low and lo <= high}
+            | {"n_runners": r.n_runners, "n_races": r.n_races, "n_clusters": r.n_clusters}
+        )
+    year = runners["day"].str[:4]
+    for y, g in change.groupby(year):
+        coverage.append(
+            {"end": end, "window_min": w, "year": y, "starters": len(g)}
+            | {"with_late_change": int(g.notna().sum()), "nonzero": int((g.fillna(0) != 0).sum())}
+        )
     return metrics, {"e23_regression": rows, "e23_coverage": coverage}
 
 
@@ -336,15 +385,15 @@ def _offset(frame, cols, clusters, bootstrap, label, name) -> tuple[list, list]:
     return metrics, rows
 
 
-def e23_offset(scored, plan, clusters, bootstrap, label) -> tuple[list, dict]:
-    metrics, rows = [], []
-    for w in plan["e23"]["windows_min"]:
-        change = scored[f"late_change_{w:g}"]
-        frame = scored[["race_id", "won", "q_final"]].assign(late_change=change.fillna(0.0))
-        m, r = _offset(frame, ["late_change"], clusters, bootstrap, label, f"w{w:g}")
-        metrics += m
-        rows += [row | {"starters_at_0": int(change.isna().sum())} for row in r]
-    return metrics, {"e23_offset": rows}
+def e23_offset(scored, plan, clusters, bootstrap, label, end: str, w: float) -> tuple[list, dict]:
+    """ln q_final + the late change at one (ending, window) against ln q_final."""
+    change = scored[change_column(end, w)]
+    frame = scored[["race_id", "won", "q_final"]].assign(late_change=change.fillna(0.0))
+    metrics, rows = _offset(frame, ["late_change"], clusters, bootstrap, label, f"{end}:w{w:g}")
+    cell = {"end": end, "window_min": w, "headline": _is_headline(plan, end, w)}
+    return metrics, {
+        "e23_offset": [cell | row | {"starters_at_0": int(change.isna().sum())} for row in rows]
+    }
 
 
 def ex_ante_rows(files, folds, cases, growth, grid, plan, grades, log, started) -> pd.DataFrame:
@@ -388,7 +437,7 @@ def e24_offset(scored, features, grid, plan, clusters, bootstrap, label) -> tupl
         raise ValueError(f"E24 features {unknown} are not ex_ante_features columns")
     metrics, rows = [], []
     for tau in grid.minutes:
-        at_tau = features.loc[features["tau_min"] == float(tau), ["race_id", "horse_id", *cols]]
+        at_tau = _object_keys(features.loc[features["tau_min"] == float(tau), [*KEYS, *cols]])
         frame = scored[["race_id", "horse_id", "won", "q_final"]].merge(
             at_tau, on=["race_id", "horse_id"], how="left", validate="one_to_one"
         )
@@ -416,26 +465,32 @@ def read_p_model(plan: dict, folder: str, races: np.ndarray) -> pd.DataFrame:
         columns=["race_id", "horse_id", "horse_no"],
         filters=[("race_id", "in", list(races))],
     ).to_pandas()
-    joined = rating.merge(numbers, on=["race_id", "horse_id"], how="inner", validate="one_to_one")
-    return pd.DataFrame(
-        {
-            "race_id": joined["race_id"].to_numpy(),
-            "horse_id": joined["horse_no"].astype(int).astype(str).to_numpy(),
-            "p_model": np.exp(joined["logp"].to_numpy(dtype=float)),
-        }
+    joined = _object_keys(rating).merge(
+        _object_keys(numbers), on=KEYS, how="inner", validate="one_to_one"
+    )
+    return _object_keys(
+        pd.DataFrame(
+            {
+                "race_id": joined["race_id"].to_numpy(),
+                "horse_id": joined["horse_no"].astype(int).astype(str).to_numpy(),
+                "p_model": np.exp(joined["logp"].to_numpy(dtype=float)),
+            }
+        )
     )
 
 
 def e22(cases, scored, grid, plan, folder) -> tuple[list, dict]:
     test = cases.select_days(sorted(scored["day"].unique()))
-    rows = pd.DataFrame(
-        {
-            "race_id": np.repeat(test.race_id, test.k),
-            "tau_min": np.repeat(test.tau, test.k),
-            "horse_id": test.combination,
-            "q_tau": test.s_t,
-        }
-    ).merge(scored[["race_id", "horse_id", "won"]], on=["race_id", "horse_id"], how="inner")
+    rows = _object_keys(
+        pd.DataFrame(
+            {
+                "race_id": np.repeat(test.race_id, test.k),
+                "tau_min": np.repeat(test.tau, test.k),
+                "horse_id": test.combination,
+                "q_tau": test.s_t,
+            }
+        )
+    ).merge(scored[[*KEYS, "won"]], on=KEYS, how="inner")
     p_model = read_p_model(plan, folder, scored["race_id"].unique())
     rows = rows.merge(p_model, on=["race_id", "horse_id"], how="left")
     whole = rows["p_model"].notna().groupby(rows["race_id"]).transform("all")
@@ -489,7 +544,7 @@ def _record(variant: Variant, *, family, source, git_sha, builds, spec_hash, tri
 
 SECTIONS = (
     ("e23_regression", "E23: the paper's regression (ex post, every development day)"),
-    ("e23_coverage", "E23: starters with a late change, by year and window"),
+    ("e23_coverage", "E23: starters with a late change, by ending, window and year"),
     ("e23_offset", "E23: ln q_final + late_change against ln q_final (ex post, scored quarters)"),
     ("e24_offset", "E24: ln q_final + the features at t against ln q_final (ex ante, per tau)"),
     ("e24_counts", "E24: cases without features"),
@@ -499,13 +554,22 @@ SECTIONS = (
 
 
 def render_report(study: Study, plan: dict, about: dict, folds: list[dict]) -> str:
+    e23 = plan["e23"]
+    headline = [r for r in study.tables.get("e23_regression", []) if r["headline"]]
     lines = [f"# The late-money path: E23, E24 and E22 ({COUNTRY}, #{TICKET})", ""]
     lines += [*(f"- {key}: {value}" for key, value in about.items()), ""]
     lines += [
         "The two windows are distinct. E23's (ex post) runs from each runner's last board at or "
-        "before close - w to its last board strictly before the close (the scheduled post time), "
-        "after every decision time. E24's (ex ante) runs from t - 5 min to the decision time t "
-        "= post - tau, and reads nothing after t; C1 is fitted on earlier days only.",
+        "before close - w to its last board strictly before the close (the scheduled post time; "
+        "ending `interim`), or to its last board at or after the close, its final odds (ending "
+        "`final`, the paper's), after every decision time. E24's (ex ante) runs from t - 5 min "
+        "to the decision time t = post - tau, and reads nothing after t; C1 is fitted on earlier "
+        "days only.",
+        "",
+        f"## Headline: E23 at ending `{e23['primary_end']}`, "
+        f"{float(e23['primary_window_min']):g} min",
+        "",
+        _markdown_table(headline) if headline else "_Not computed._",
         "",
         "Gains are per race in nats (the final's winner log loss minus the final + path's): "
         "positive means the path helps. `lo` / `hi` are one-sided 95% bounds; the path "
@@ -576,13 +640,21 @@ def run_study(
     files = [(d, p) for d, p in lp.path_files(source) if end is None or d <= end.isoformat()]
     builds = data_builds(source, files, plan)
     walk = "walk_forward:" + json.dumps(dataclasses.asdict(scheme), sort_keys=True)
-    windows = [float(w) for w in plan["e23"]["windows_min"]]
+    cells = e23_cells(plan)
+    windows = sorted({w for _, w in cells})
     params = {"windows_min": windows, "taus": list(grid.minutes), "primary_tau": grid.primary}
     variants = {
-        name: Variant(hyp, name, "in_sample:development_days" if name == REGRESSION else walk,
-                      dict(COMPONENTS), params)
-        for name, hyp in VARIANTS.items()
-    }  # fmt: skip
+        name: Variant(hyp, name, walk, dict(COMPONENTS), params)
+        for name, hyp in variant_names(plan).items()
+    }
+    for end, w in cells:  # each E23 cell's record names its ending and window
+        cell = {"end": end, "window_min": w, "headline": _is_headline(plan, end, w)}
+        for kind in (REGRESSION, E23_OFFSET):
+            name = e23_variant(kind, end, w)
+            fold_scheme = "in_sample:development_days" if kind == REGRESSION else walk
+            variants[name] = dataclasses.replace(
+                variants[name], fold_scheme=fold_scheme, params=params | cell
+            )
     record = {"family": family, "source": source, "git_sha": git_sha, "builds": builds,
               "spec_hash": spec_hash, "trial": trial}  # fmt: skip
     started = time.monotonic()
@@ -590,7 +662,7 @@ def run_study(
     log(f"reading {len(files)} development days of {source}")
     try:
         grades = read_grades(folder)
-        runners, cases, growth, counts = read_paths(files, windows, grades, log, started)
+        runners, cases, growth, counts = read_paths(files, cells, grades, log, started)
         days = sorted(runners["day"].unique())
         folds = nc.fold_days(days, scheme)
         if not folds:
@@ -599,7 +671,8 @@ def run_study(
     except Exception as exc:  # every comparison is a failed record, then the error is raised
         error = f"{type(exc).__name__}: {exc}"
         for v in variants.values():
-            registry.append(_record(dataclasses.replace(v, error=error), **record))
+            run_id = registry.append(_record(dataclasses.replace(v, error=error), **record))
+            log(f"  failed record {run_id[:16]} {v.name}")
         write_summary(registry, summary_dir(COUNTRY))
         raise
     label_of_day = {d: _label(fold) for _, test, fold in folds for d in test}
@@ -617,10 +690,16 @@ def run_study(
     }
     log(f"{len(runners)} starters on {len(days)} days, {len(folds)} folds ({_progress(started)})")
 
-    study.attempt(variants[REGRESSION], lambda: e23_regression(runners, plan, clusters))
-    study.attempt(
-        variants[E23_OFFSET], lambda: e23_offset(scored, plan, clusters, bootstrap, label)
-    )
+    for end, w in cells:
+        study.attempt(
+            variants[e23_variant(REGRESSION, end, w)],
+            lambda end=end, w=w: e23_regression(runners, plan, clusters, end, w),
+        )
+    for end, w in cells:
+        study.attempt(
+            variants[e23_variant(E23_OFFSET, end, w)],
+            lambda end=end, w=w: e23_offset(scored, plan, clusters, bootstrap, label, end, w),
+        )
     log(f"E23 done ({_progress(started)})")
 
     def e24() -> tuple[list, dict]:
@@ -659,17 +738,17 @@ def run_study(
         out_dir / f"{stem}.json", json.dumps(dump, indent=1, default=str), sources=(source,)
     )
     existing = registry.records(family)
-    appended = 0
+    run_ids = {}  # the ids registry.append returns, never recomputed here
     for record in records:
         if record not in existing:
-            registry.append(record)
-            appended += 1
+            run_ids[record.variant] = registry.append(record)
     write_summary(registry, summary_dir(COUNTRY))
     return {
         "report_path": str(report),
         "family_id": family,
         "spec_hash": spec_hash,
-        "records_appended": appended,
+        "records_appended": len(run_ids),
+        "run_ids": run_ids,
         "failed_variants": [v.name for v in study.variants if v.error],
         "registry_path": str(registry.path),
     }
