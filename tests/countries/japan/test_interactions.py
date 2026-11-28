@@ -43,7 +43,9 @@ Contract pinned here (`horsetrack.countries.japan.models.interactions`):
 
 Not pinned: the CI's method and level; what tau means for a structured or low-rank block
 (only that it is a sane interval); the low-rank rank; the form of z(d); unseen cells; missing ids;
-the trainer debut prior (no signature names it); a second change after a stable one and a return
+the trainer debut prior's own signature (the segment cut of #573 is pinned in
+test_debut_prior_segments.py; the named test below pins that its debut label reads prior runs
+only); a second change after a stable one and a return
 to an earlier trainer (`transfer_step`); out-of-fold ΔLL at the final price through #87's
 meta-model, the registry records (including the record of a dropped block with its cell count),
 the leaderboard rows and the report, which read the local stores. Expected values are planted or
@@ -595,3 +597,65 @@ def test_one_factor_trainer_track_term_learns_east_west():
         for w in ("w1", "w2", "w3", "w4"):
             dd = (at(e, "tokyo") - at(w, "tokyo")) - (at(e, "kyoto") - at(w, "kyoto"))
             assert dd > 0.8, (e, w, dd)
+
+
+def test_debut_prior_segments_use_prior_runs_only():
+    """#573: a runner's debut label, and the race segment built on it, read the horse's runs
+    strictly before the race: never the race itself, never a later run. Expected labels are read
+    off the hand-made card (`debut_prior_synth.HAND_DEBUT`), not computed by the module."""
+    from debut_prior_synth import (
+        HAND_DEBUT,
+        HAND_SEGMENT,
+        T0,
+        hand_history,
+        hand_label,
+    )
+
+    from horsetrack.countries.japan.studies.debut_prior import debut_labels, label_segments
+
+    frame = hand_history(seed=1)
+    labels = debut_labels(frame)
+    assert labels.index.equals(frame.index)
+    assert labels.dtype == bool
+    for (race, horse), expected in HAND_DEBUT.items():
+        assert bool(labels[hand_label(frame, race, horse)]) is expected, (race, horse)
+
+    # a later run never changes an earlier race's label or segment: cut the card at every post
+    # time and compare each prefix's labels with the full card's on the same rows
+    full = label_segments(frame)
+    for cut in sorted(frame["race_utc"].unique()):
+        prefix = frame.loc[frame["race_utc"] <= cut]
+        assert debut_labels(prefix).equals(labels.loc[prefix.index]), cut
+        part = label_segments(prefix)
+        assert part["segment"].equals(full.loc[prefix.index, "segment"]), cut
+        assert part["debut"].equals(full.loc[prefix.index, "debut"]), cut
+
+    # a horse's earlier run does count: drop horse A's first run and its second becomes the debut
+    first = hand_label(frame, "r1", "A")
+    second = hand_label(frame, "r2", "A")
+    assert not labels[second]
+    trimmed = frame.drop(index=first)
+    assert bool(debut_labels(trimmed)[second]) is True
+    assert bool(debut_labels(trimmed)[hand_label(frame, "r3", "A")]) is False
+
+    # only that horse's own runs count: another horse's earlier run, even in the same class or
+    # at the same time, does not make a debut a non-debut
+    assert bool(labels[hand_label(frame, "r4", "G")]) is True  # G debuts beside D and C, who ran
+    assert bool(labels[hand_label(frame, "r5", "H")]) is True  # H debuts at r4's post time
+
+    # the segment of a race: its class, and `debut` when any starter's label is a debut
+    for race, expected in HAND_SEGMENT.items():
+        rows = full.loc[frame["race_id"] == f"jra:{race}", "segment"]
+        assert set(rows) == {expected}, (race, set(rows))
+
+    # a run at the same post time as the horse's other run is not an earlier run (the tie rule
+    # of `cell_sizes`): both are debuts; a run one minute later is not
+    tie = pd.DataFrame(
+        {
+            "race_id": ["jra:x1", "jra:x2", "jra:x3"],
+            "race_utc": [T0, T0, T0 + pd.Timedelta(minutes=1)],
+            "horse_id": ["h:X", "h:X", "h:X"],
+            "race_class": ["MAIDEN"] * 3,
+        }
+    )
+    assert debut_labels(tie).tolist() == [True, True, False]
