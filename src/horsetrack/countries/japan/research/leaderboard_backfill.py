@@ -24,6 +24,9 @@ The leaderboard is a view: nothing here re-runs a study or appends a record (the
   one-sided 95% bounds as recorded, n in races, segment the variant's last '|' part,
   look-ahead); a variant without one (rho only, an empty cell's markers, B3's mean_return, the
   breakage and log-score runs) is the core's unmeasured row, kind 'cell'.
+- ``japan-family-p-selection-v1`` (#88's machinery, run by #462): per rule one Win rule row
+  selected at t, 100 x (1 + the walk-forward ``roi_win_dividend``), n in bets, no CI; a stage-1
+  record, a failed rule and a dropped variant are its unmeasured rule row.
 
 Every other legacy family is unmeasured and takes its kind from ``LEGACY_KINDS``; #438's debut and
 maiden 'combined:' variants are models, their 'member:' variants members. Withheld rows
@@ -45,6 +48,7 @@ from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord
 FAMILY_L = "japan-family-l-exotic-pool-choice"
 COPLACER = "japan-coplacer-place-e15"
 WIN5 = "win5-carryover-v1"
+FAMILY_P = "japan-family-p-selection-v1"
 
 # The day the payout rates are read on: the rates in force when the backfill was specified.
 RATE_DAY = date(2026, 11, 23)
@@ -358,10 +362,44 @@ def _exacta_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
     ]
 
 
+# --------------------------------------------------------------------------- Family P (#88, #462)
+
+_P_FOLD = "all_folds"  # studies.selection's fold label of a walk-forward measurement
+_P_ROI = "roi_win_dividend"
+
+
+def _family_p_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
+    """A Family P rule as one Win rule row selected at t: 100 x (1 + its walk-forward
+    ``roi_win_dividend``, one unit on each selected bet at the final dividend), n in bets, no CI
+    (the omega model's interval is a posterior of the expected return, not of this mean). A
+    stage-1 record, a failed rule and a dropped variant are its unmeasured rule row."""
+    segment = record.params.get("segment")
+    named = isinstance(segment, dict) and segment
+    base = dict(
+        option_id=f"{record.family_id}/{record.variant}",
+        family_id=record.family_id,
+        ticket=record.ticket,
+        kind="rule",
+        pool="WIN",
+        segment="&".join(f"{k}:{v}" for k, v in segment.items()) if named else "all",
+        rule=record.variant,
+        selection="decision_time",
+        sources=tuple(record.sources),
+        variants_searched=size,
+        status=record.status,
+        payout_rate=payout_rate("WIN"),
+    )
+    roi = next((m for m in record.metrics if (m.fold, m.metric) == (_P_FOLD, _P_ROI)), None)
+    if roi is None:
+        return [LeaderboardRow(**base)]
+    return [LeaderboardRow(**base, return_per_100=_scale(1.0 + roi.value), n=roi.n, n_unit="bets")]
+
+
 LEGACY_ADAPTERS: Mapping[str, Adapter] = {
     FAMILY_L: _family_l_rows,
     COPLACER: _coplacer_rows,
     WIN5: _win5_rows,
+    FAMILY_P: _family_p_rows,
 }
 
 
