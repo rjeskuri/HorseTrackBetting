@@ -34,6 +34,16 @@ signature):
 - Without models every projected checkpoint is null (observed ones stay); a pool the nowcast has
   no cells for gets null ahead while its observed checkpoints stay.
 - The ladder is display only: the values, flags and shadow log are unchanged (their own tests).
+- Ticket #627: an observed point (k > 0, and the final) also carries `projected`: the odds the
+  previous rung projected for it, or null. The previous rung of T-10 is T-20, of T-5 T-10, of T-2
+  T-5 and of the final T-2; T-20's is the board at post - 30. The projection is the one of the
+  ahead checkpoints applied to the row of the combination captured at or before the previous
+  rung's cutoff (post - 30, 20, 10, 5, 2; the latest by `snapshot_utc`, among the rows available
+  by now): project(row's odds, tau = minutes from that row's fetch (`fetched_utc`, else
+  `snapshot_utc`) to the post, k). It is null when there is no such row, it is unpriced, there are
+  no models or the nowcast cannot project it. A point still ahead keeps exactly {"odds",
+  "observed"}. The figure comes from the log alone, so a rebuild (a restart, a fresh cache) gives
+  the same ones.
 
 The nowcasts are built here from known cells (no fit file), and every expected odds figure is
 derived here from the logged rows and those cells, tau_now from each row's own fetch time. Most
@@ -185,6 +195,14 @@ def _key(row: dict) -> tuple[str, str]:
     return row["pool"], row["combination"]
 
 
+PREVIOUS = {20: 30, 10: 20, 5: 10, 2: 5, 0: 2}  # the rung whose projection an observed k shows
+
+
+def core(point: dict | None) -> dict | None:
+    """The odds and observed flag of a ladder point, without its #627 `projected`."""
+    return None if point is None else {"odds": point["odds"], "observed": point["observed"]}
+
+
 def ref_available(row: dict) -> datetime:
     """When a row could first be known: its fetch time, else its capture time."""
     return instant(row.get("fetched_utc") or row["snapshot_utc"])
@@ -208,6 +226,16 @@ def ref_ladders(
         if r.get("source_update_utc") is None and FINAL_TEXT in (r.get("status_raw") or "")
     }
     out: dict[tuple[str, str], dict[str, dict | None]] = {}
+
+    def earlier(history: list[dict], pool: str, k: int) -> float | None:
+        """What the previous rung projected for the observed checkpoint k (#627)."""
+        cutoff = race.post - timedelta(minutes=PREVIOUS[k])
+        before = [r for r in history if instant(r["snapshot_utc"]) <= cutoff]
+        if not before or mu is None or pool in no_cells or not _priced(before[-1]):
+            return None
+        tau = max(0.0, (race.post - ref_available(before[-1])) / timedelta(minutes=1))
+        return ref_projected(mu, pool, before[-1]["odds"], tau, k, missing)
+
     for key in sorted({_key(r) for r in mine if ref_available(r) <= now}):
         history = [r for r in mine if _key(r) == key and ref_available(r) <= now]
         pool = key[0]
@@ -219,13 +247,21 @@ def ref_ladders(
             if k == 0:
                 finals = [r for r in history if instant(r["snapshot_utc"]) in final_snaps]
                 if finals:
-                    ladder["0"] = {"odds": finals[0]["odds"], "observed": True}
+                    ladder["0"] = {
+                        "odds": finals[0]["odds"],
+                        "observed": True,
+                        "projected": earlier(history, pool, 0),
+                    }
                     continue
             elif now >= cutoff:
                 before = [r for r in history if instant(r["snapshot_utc"]) <= cutoff]
                 ref = before[-1] if before else None
                 ok = ref is not None and _priced(ref)
-                ladder[str(k)] = {"odds": ref["odds"], "observed": True} if ok else None
+                ladder[str(k)] = (
+                    {"odds": ref["odds"], "observed": True, "projected": earlier(history, pool, k)}
+                    if ok
+                    else None
+                )
                 continue
             odds = None
             if mu is not None and pool not in no_cells and _priced(current):
@@ -290,7 +326,7 @@ def by_id(feed: dict) -> dict[str, dict]:
 
 def assert_ladders(got_race: dict, want: dict, where: str) -> dict[str, int]:
     """Every entry's ladder against the reference; counts of observed, projected, null, floored."""
-    counts = {"observed": 0, "projected": 0, "null": 0, "floored": 0}
+    counts = {"observed": 0, "projected": 0, "null": 0, "floored": 0, "earlier": 0}
     pools = got_race["pools"]
     for (pool, combination), ladder in want.items():
         entry = pools[pool][combination]
@@ -308,8 +344,16 @@ def assert_ladders(got_race: dict, want: dict, where: str) -> dict[str, int]:
             assert isinstance(got, dict) and got.get("observed") is expected["observed"], at
             if expected["observed"]:
                 assert got["odds"] == expected["odds"], at
+                assert set(got) == {"odds", "observed", "projected"}, at  # #627
+                if expected["projected"] is None:
+                    assert got["projected"] is None, at
+                else:
+                    assert got["projected"] == pytest.approx(expected["projected"], abs=TOL), at
+                    assert got["projected"] >= 1.0, at
+                    counts["earlier"] += 1
                 counts["observed"] += 1
             else:
+                assert set(got) == {"odds", "observed"}, at  # a point ahead keeps its shape
                 assert got["odds"] == pytest.approx(expected["odds"], abs=TOL), at
                 assert got["odds"] >= 1.0, at
                 counts["projected"] += 1
@@ -329,7 +373,7 @@ def test_every_entry_has_its_ladder(mu):
 
     got = by_id(feed)
     assert set(got) == {r.race_id for r in races}
-    totals = {"observed": 0, "projected": 0, "null": 0, "floored": 0}
+    totals = {"observed": 0, "projected": 0, "null": 0, "floored": 0, "earlier": 0}
     for r in races:
         want = ref_ladders(day.rows, r, T0, mu)
         assert {(p, c) for p in POOLS for c in got[r.race_id]["pools"][p]} == set(want), r.race_id
@@ -338,6 +382,8 @@ def test_every_entry_has_its_ladder(mu):
     # the fixture exercises every kind of cell
     assert totals["observed"] > 50 and totals["projected"] > 100 and totals["null"] > 0, totals
     assert totals["floored"] > 0, totals
+    # #627: many observed points carry the previous rung's projection, and some have none
+    assert totals["earlier"] > 40 and totals["earlier"] < totals["observed"], totals
 
 
 def test_observed_and_projected_follow_the_board_read():
@@ -409,9 +455,9 @@ def test_the_projection_of_a_known_cell():
             assert shown[k] is not None and shown[k]["observed"] is False, (r.race_id, k, shown)
             assert shown[k]["odds"] == pytest.approx(odds, abs=TOL), (r.race_id, k, shown)
     for r in (mid, near):
-        assert ladder(r, "2")["20"] == {"odds": 5.2, "observed": True}, r.race_id
-    assert ladder(near, "2")["10"] == {"odds": 5.2, "observed": True}
-    assert ladder(near, "2")["5"] == {"odds": 5.2, "observed": True}
+        assert core(ladder(r, "2")["20"]) == {"odds": 5.2, "observed": True}, r.race_id
+    assert core(ladder(near, "2")["10"]) == {"odds": 5.2, "observed": True}
+    assert core(ladder(near, "2")["5"]) == {"odds": 5.2, "observed": True}
     # runner 1 (1.6, band 0, mu -0.8 at every tau): flat to T-2, the final floored at 1.0
     for r in (far, mid, near):
         shown = ladder(r, "1")
@@ -431,7 +477,7 @@ def test_the_final_is_observed_once_the_final_board_exists():
     counts = assert_ladders(got, want, gone.race_id)
     assert counts["projected"] == 0 and counts["observed"] == 5 * len(want), counts
     win_final = got["pools"][WIN]["1"]["ladder"]["0"]
-    assert win_final == {"odds": round(gone.base[0] * 0.94, 2), "observed": True}
+    assert core(win_final) == {"odds": round(gone.base[0] * 0.94, 2), "observed": True}
     # before the final capture (just after the post) the final is still projected
     before = by_id(build(gone.post + timedelta(seconds=30), models_of(nowcast_of(mu_a))))
     assert before[gone.race_id]["pools"][WIN]["1"]["ladder"]["0"]["observed"] is False
@@ -598,9 +644,9 @@ def test_the_projection_starts_from_the_fetch_of_the_price_it_uses():
 
     # the observed checkpoints keep the stamp rule among the rows fetched by now
     win1 = {r: got[r.race_id]["pools"][WIN]["1"]["ladder"] for r in (near, unseen, lagged)}
-    assert win1[near]["5"] == {"odds": round(EIGHT2[0] * 0.92, 2), "observed": True}
-    assert win1[unseen]["10"] == {"odds": EIGHT[0], "observed": True}
-    assert win1[lagged]["10"] == {"odds": round(EIGHT[0] * 1.06, 2), "observed": True}
+    assert core(win1[near]["5"]) == {"odds": round(EIGHT2[0] * 0.92, 2), "observed": True}
+    assert core(win1[unseen]["10"]) == {"odds": EIGHT[0], "observed": True}
+    assert core(win1[lagged]["10"]) == {"odds": round(EIGHT[0] * 1.06, 2), "observed": True}
 
 
 # ---------------------------------------------------------------- a nowcast with a missing cell
@@ -650,3 +696,225 @@ def test_a_missing_grid_cell_blanks_only_the_checkpoints_that_need_it():
         assert ladder["10"] is None and ladder["5"] is None, (combination, ladder)
     for combination, ladder in win_ladders(feed, mid).items():  # tau 45 needs only 30 and 60
         assert all(ladder[k] is not None for k in ("20", "2", "0")), (combination, ladder)
+
+
+# ---------------------------------------------------------------- the earlier projection (#627)
+
+# WIN cell means by band and grid tau for the hand-worked race below; any band or tau not listed
+# (bands 0, 4, 5, 6) has mean 0, every other pool -0.1.
+H_MU = {
+    1: {60: 0.50, 30: 0.40, 16: 0.26, 5: 0.15, 2: 0.08, 1: 0.05},  # 2 <= O < 5
+    2: {60: -0.30, 30: -0.24, 16: -0.18, 5: -0.09, 2: -0.04, 1: -0.02},  # 5 <= O < 10
+    3: {60: 0.90, 30: 0.70, 16: 0.50, 5: 0.30, 2: 0.12, 1: 0.06},  # 10 <= O < 20
+}
+SEVEN = (4.0, 7.5, 13.0, 31.0, 64.0, 120.0, 210.0, 330.0)
+
+
+def h_mu(pool: str, tau: int, band: int) -> float:
+    return H_MU.get(band, {}).get(tau, 0.0) if pool == WIN else -0.1
+
+
+def capture_edited(day: SyntheticDay, r: Race, snap, fetched, factor: float, *, drop=(),
+                   unpriced=()) -> None:  # fmt: skip
+    """A capture of `r` stamped `snap`, fetched `fetched`, without the WIN runners in `drop` and
+    with the WIN runners in `unpriced` scratched (no odds)."""
+    rows = []
+    for row in capture_rows(r, snap, factor):
+        row["fetched_utc"] = fetched.astimezone(UTC).isoformat()
+        if row["pool"] == WIN and int(row["combination"]) in drop:
+            continue
+        if row["pool"] == WIN and int(row["combination"]) in unpriced:
+            row["odds"], row["status_raw"] = None, "SCR"
+        rows.append(row)
+    odds_log.append_capture(log_path(DAY, r.venue), rows)
+    day.rows.extend(rows)
+
+
+def test_an_observed_checkpoint_carries_the_previous_rungs_projection():
+    """SAP 6 posted 3 minutes before now, its final board captured. WIN runners (base 4.0, 7.5,
+    13.0), captures (factor): post - 35 (1.5), post - 26 (1.0), post - 12 (2.6, fetched at post -
+    11), post - 6 (1.3), post - 3 (0.6), the final at post + 1 (0.5). Runner 2 is scratched on
+    the post - 26 capture, runner 3 is on none before post - 12. So T-20 .. T-2 read the captures
+    at post - 26, 12, 6 and 3, and each projection is made from the previous rung's row and its
+    fetch: T-20 from post - 35 (tau 35), T-10 from post - 26 (tau 26), T-5 from post - 12 (tau
+    11, not 12), T-2 from post - 6, the final from post - 3. Worked by hand from H_MU."""
+    r = race("SAP", 6, -3.0, SEVEN)
+    day = SyntheticDay(DAY, [r])
+
+    def at(minutes: float) -> datetime:
+        return r.post - timedelta(minutes=minutes)
+
+    capture_edited(day, r, at(35), at(35), 1.5, drop=(3,))
+    capture_edited(day, r, at(26), at(26), 1.0, drop=(3,), unpriced=(2,))
+    capture_edited(day, r, at(12), at(11), 2.6)
+    capture_edited(day, r, at(6), at(6), 1.3)
+    capture_edited(day, r, at(3), at(3), 0.6)
+    capture_final(day, r, r.post + timedelta(minutes=1), 0.5)
+
+    feed = build(T0, models_of(nowcast_of(h_mu)))
+    (got,) = feed["races"]
+    win = got["pools"][WIN]
+
+    def rung(runner: str, key: str) -> dict | None:
+        return win[runner]["ladder"][key]
+
+    def seen_as(odds: float, projected: float | None) -> dict:
+        want = {"odds": odds, "observed": True}
+        return {
+            **want,
+            "projected": None if projected is None else pytest.approx(projected, abs=TOL),
+        }
+
+    f = {k: round(SEVEN[0] * x, 2) for k, x in (("20", 1.0), ("10", 2.6), ("5", 1.3), ("2", 0.6))}
+    f["0"] = round(SEVEN[0] * 0.5, 2)
+    assert rung("1", "20") == seen_as(f["20"], 5.69109)
+    assert rung("1", "10") == seen_as(f["10"], 4.69404)
+    assert rung("1", "5") == seen_as(f["5"], 11.59874)  # tau 11 (the fetch), not 12 (11.81156)
+    assert rung("1", "2") == seen_as(f["2"], 4.90609)
+    assert rung("1", "0") == seen_as(f["0"], 2.66127)  # the final carries the T-2 projection
+
+    # runner 2: unpriced at post - 26, so T-20 has no figure and T-10 no earlier projection
+    assert rung("2", "20") is None
+    assert rung("2", "10") == seen_as(round(SEVEN[1] * 2.6, 2), None)
+    assert rung("2", "5") == seen_as(round(SEVEN[1] * 1.3, 2), 21.74764)
+    assert rung("2", "2") == seen_as(round(SEVEN[1] * 0.6, 2), 9.19891)
+    assert rung("2", "0") == seen_as(round(SEVEN[1] * 0.5, 2), 4.98987)
+
+    # runner 3: no row at post - 26 or before: nothing for T-20, T-10 has no earlier projection
+    assert rung("3", "20") is None
+    assert rung("3", "10") == seen_as(round(SEVEN[2] * 2.6, 2), None)
+    assert rung("3", "5") == seen_as(round(SEVEN[2] * 1.3, 2), 33.8)  # band 4: mean 0, no drift
+    assert rung("3", "2") == seen_as(round(SEVEN[2] * 0.6, 2), 20.60421)
+    assert rung("3", "0") == seen_as(round(SEVEN[2] * 0.5, 2), 7.37029)
+
+    # the independent reference agrees on every entry of every pool
+    want = ref_ladders(day.rows, r, T0, h_mu)
+    counts = assert_ladders(got, want, r.race_id)
+    assert counts["projected"] == 0 and counts["earlier"] > 100, counts
+
+
+def test_a_checkpoint_ahead_and_the_earlier_projection_follow_the_clock():
+    """NAK 5 read at three times: while T-10 is the next checkpoint T-20 is observed with its
+    projection from the post - 30 board (none: first capture post - 25), and when T-10 passes it
+    shows the T-20 projection made from the post - 25 capture. Points ahead keep their shape."""
+    r = race("NAK", 5, 12.5, EIGHT)
+    day = SyntheticDay(DAY, [r])
+    for i, off in enumerate((40, 25, 12.5, 9, 4, 1.5)):
+        day.capture(r, r.post - timedelta(minutes=off), FACTORS[i])
+    models = models_of(nowcast_of(mu_a))
+    cache: dict = {}
+    for now in (r.post - timedelta(minutes=12.5), r.post - timedelta(minutes=8),
+                r.post - timedelta(minutes=1.5)):  # fmt: skip
+        (got,) = build(now, models, cache=cache)["races"]
+        want = ref_ladders(day.rows, r, now, mu_a)
+        counts = assert_ladders(got, want, now.isoformat())
+        assert counts["earlier"] >= 20 and counts["projected"] >= 20, (now, counts)
+        for entry in got["pools"][WIN].values():
+            twenty = entry["ladder"]["20"]
+            assert twenty["observed"] is True and twenty["projected"] is not None, (now, twenty)
+            for k, point in entry["ladder"].items():
+                if point is not None and not point["observed"]:
+                    assert set(point) == {"odds", "observed"}, (now, k, point)
+
+
+# ---------------------------------------------------------------- without a projection to show
+
+
+def test_without_models_every_observed_checkpoint_has_a_null_projection():
+    day, races = synthetic_day()
+    got = by_id(build(T0, None))
+    observed = 0
+    for r in races:
+        for pool in POOLS:
+            for entry in got[r.race_id]["pools"][pool].values():
+                for point in entry["ladder"].values():
+                    if point is None:
+                        continue
+                    assert set(point) == {"odds", "observed"} | (
+                        {"projected"} if point["observed"] else set()
+                    ), point
+                    if point["observed"]:
+                        assert point["projected"] is None, (r.race_id, point)
+                        observed += 1
+    assert observed > 100
+
+
+def test_a_pool_without_cells_has_null_projections_on_observed_checkpoints():
+    """Wide has no cells in the nowcast: its observed points carry projected null, while WIN's
+    carry figures."""
+    day, races = synthetic_day()
+    got = by_id(build(T0, models_of(nowcast_of(mu_a, pools=(WIN, PLACE)))))
+    wide = win = 0
+    for r in races:
+        for pool in (WIDE, WIN):
+            for entry in got[r.race_id]["pools"][pool].values():
+                for point in entry["ladder"].values():
+                    if point is not None and point["observed"]:
+                        assert "projected" in point, (r.race_id, pool, point)
+                        if pool == WIDE:
+                            assert point["projected"] is None, (r.race_id, point)
+                            wide += 1
+                        else:
+                            win += point["projected"] is not None
+    assert wide > 30 and win > 20, (wide, win)
+
+
+def test_a_missing_cell_blanks_only_the_earlier_projection_that_needs_it():
+    """No WIN cell at T-5: an earlier projection whose tau or k lies between 2 and 16 (or at 5)
+    needs it and is null; one that reads only other cells (KYO 3's T-20 from tau 31 to k = 20)
+    still shows. The reference decides each point from the cells it reads."""
+    day, races = synthetic_day()
+    no5 = frozenset({(WIN, 5)})
+    got = by_id(build(T0, models_of(nowcast_of(mu_a, missing=no5))))
+    nulls = shown = 0
+    for r in races:
+        want = ref_ladders(day.rows, r, T0, mu_a, missing=no5)
+        counts = assert_ladders(got[r.race_id], want, r.race_id)
+        shown += counts["earlier"]
+        for entry in got[r.race_id]["pools"][WIN].values():
+            nulls += sum(
+                p is not None and p["observed"] and p["projected"] is None
+                for p in entry["ladder"].values()
+            )
+    assert nulls > 10 and shown > 40, (nulls, shown)
+    win_shown = sum(
+        p is not None and p["observed"] and p["projected"] is not None
+        for r in races
+        for entry in got[r.race_id]["pools"][WIN].values()
+        for p in entry["ladder"].values()
+    )
+    assert 0 < win_shown < nulls, (win_shown, nulls)
+
+
+# ---------------------------------------------------------------- the log alone
+
+
+def ladders_of(feed: dict) -> dict:
+    return {
+        (r["race_id"], pool, combination): entry["ladder"]
+        for r in feed["races"]
+        for pool in POOLS
+        for combination, entry in r["pools"][pool].items()
+    }
+
+
+def test_a_rebuild_after_a_restart_gives_the_same_projections():
+    """The projections come from the log: a build that has followed the clock with a cache, a
+    fresh cache (a restarted server) and a build with no cache at all agree on every ladder."""
+    day, races = synthetic_day()
+    models = models_of(nowcast_of(mu_a))
+    cache: dict = {}
+    for back in (60, 20, 8, 3):  # the server follows the clock up to now
+        build(T0 - timedelta(minutes=back), models, cache=cache)
+    followed = ladders_of(build(T0, models, cache=cache))
+    restarted = ladders_of(build(T0, models, cache={}))
+    stateless = ladders_of(build(T0, models))
+    assert followed == restarted == stateless
+    with_projection = sum(
+        p is not None and p["observed"] and p["projected"] is not None
+        for ladder in followed.values()
+        for p in ladder.values()
+    )
+    assert with_projection > 40
+    for r in races:  # and they are the reference's
+        assert_ladders(by_id(build(T0, models))[r.race_id], ref_ladders(day.rows, r, T0, mu_a), "")
