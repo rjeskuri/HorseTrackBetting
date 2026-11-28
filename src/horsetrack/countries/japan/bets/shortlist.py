@@ -13,16 +13,17 @@ from datetime import date
 
 import pandas as pd
 
-from horsetrack.core.eval.leaderboard import LeaderboardRow, RankedRow, rank
+from horsetrack.core.eval.leaderboard import LeaderboardRow, RankedRow, rank, shrink
 from horsetrack.countries.japan.bets.log import CapCheck, Limits
 
 LOOK_AHEAD = "look_ahead"
 
 
 def shortlist(rows: Sequence[LeaderboardRow], *, top: int) -> list[RankedRow]:
-    """The ``top`` best ranked rows of ``rank(rows)``, in rank order; unmeasured and descriptive
-    rows are unranked and never on it."""
-    return [r for r in rank(rows) if r.rank is not None][: max(top, 0)]
+    """The ``top`` best ranked rows of ``rank(shrink(rows))``, in rank order: the shrinkage runs
+    over every row, as the private leaderboard's does, before the list is cut. Unmeasured and
+    descriptive rows are unranked and never on it."""
+    return [r for r in rank(shrink(rows)) if r.rank is not None][: max(top, 0)]
 
 
 def _yen(amount: float) -> str:
@@ -56,11 +57,15 @@ def _block(item: RankedRow, played: pd.DataFrame | None) -> str:
     row = item.row
     tag = "  [look-ahead]" if row.selection == LOOK_AHEAD else ""
     head = f"{item.rank:>3}. {row.option_id}  {row.pool or '-'}  {row.segment}  {row.rule}{tag}"
-    if row.ci_lo is None or row.ci_hi is None:
-        ci = "CI n/a"
-    else:
-        level = "" if row.ci_level is None else f"{row.ci_level:.0%} "
+    level = "" if row.ci_level is None else f"{row.ci_level * 100:g}% "
+    if row.ci_lo is not None and row.ci_hi is not None:
         ci = f"{level}CI [{row.ci_lo:.1f}, {row.ci_hi:.1f}]"
+    elif row.ci_lo is not None:
+        ci = f"{level}CI ≥ {row.ci_lo:.1f}"
+    elif row.ci_hi is not None:
+        ci = f"{level}CI ≤ {row.ci_hi:.1f}"
+    else:
+        ci = "CI n/a"
     figures = (
         f"selection {row.selection.replace('_', '-')}; "
         f"shrunk return per ¥100 {_figure(row.shrunk_per_100)}; {ci}; "

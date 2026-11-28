@@ -471,14 +471,16 @@ class Registry:
             os.fsync(handle.fileno())
 
 
-def default_registry(country: str) -> Registry:
-    """The registry of ``country`` under the data directory, linked to its #71 holdout log."""
+def default_registry(country: str, *, create: bool = True) -> Registry:
+    """The registry of ``country`` under the data directory, linked to its #71 holdout log.
+    ``create=False`` leaves the registry folder uncreated (a reader of a fresh data root)."""
     if not (isinstance(country, str) and _COUNTRY.fullmatch(country)):
         raise ValueError(f"not a country name: {country!r}")
     if not (DEFAULT_COUNTRIES_DIR / country).is_dir():
         raise ValueError(f"no country folder for {country!r} under {DEFAULT_COUNTRIES_DIR}")
     path = paths.data_dir() / "registry" / f"{country}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
     return Registry(path, holdout_log=DEFAULT_COUNTRIES_DIR / country / LOG_NAME)
 
 

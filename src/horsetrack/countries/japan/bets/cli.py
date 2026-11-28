@@ -22,6 +22,7 @@ import pandas as pd
 import typer
 
 from horsetrack.core import env
+from horsetrack.core.eval.registry import default_registry
 from horsetrack.core.eval.reports import is_inside
 from horsetrack.countries.japan.bets.log import (
     BetLog,
@@ -245,7 +246,9 @@ def shortlist_command(
             remaining_yen=limits.day_cap_yen - staked,
             off_flat=False,
         )
-        ranked = shortlist(leaderboard_build.build_rows(), top=top)
+        # a reader: the registry folder of a fresh data root is not created
+        rows = leaderboard_build.build_rows(registry=default_registry("japan", create=False))
+        ranked = shortlist(rows, top=top)
         settled = _all_settled(day)
         played = played_by_option(settled) if len(settled) else None
     except _ERRORS as exc:
