@@ -13,7 +13,10 @@ Reading the candidate files keeps every cell on the record:
 
 - Files: every ``*.json`` (one JSON array) and ``*.jsonl`` (one cell per line) of the directory,
   in name order. A file, line or entry that does not parse or is not a JSON object is skipped and
-  counted, with the reason (no value) printed by the command.
+  counted, with the reason (no value) printed by the command. Of a data-fingerprinted series
+  (``<series>-data-<hex>``, one file per run and never overwritten: #562's cross-pool v2), only
+  the newest file is read, or those named with ``--cells-file``; the others are superseded and
+  named on stderr.
 - A cell's base is '<family_id>/<cell_id>'. One without a 'cell_id' takes its 'option' less a
   leading '<family_id>:' (#431's exacta-ceiling export names its cells so); one without a
   family id, or without both, is skipped and counted.
@@ -53,11 +56,12 @@ import dataclasses
 import hashlib
 import json
 import math
+import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NoReturn
+from typing import Annotated, NoReturn
 
 import typer
 
@@ -85,6 +89,9 @@ VARIANT_SELECTIONS = {"t2": "decision_time", "lookahead": "look_ahead"}
 # (1 - level) and level quantiles at scoring.yaml's level, D7's 95% one-sided.
 CELL_CI_LEVEL = 0.95
 DIGEST_HEX = 10  # the hex digits of a cell's content suffix
+# A file of a data-fingerprinted series (#562's cross-pool v2: one file per run, never
+# overwritten): only the series' newest, or one named explicitly, is read.
+DATA_NAMED = re.compile(r"(?P<series>.+)-data-[0-9a-f]{8,}")
 
 # #430's candidate-cell keys; 'selection', 'sources' and 'ticket' are optional.
 SCHEMA = (
@@ -114,6 +121,7 @@ class _Cells:
     copies: int = 0
     replaced: int = 0  # distinct cells that gave way to a registry row
     skipped: list[str] = field(default_factory=list)
+    superseded: list[str] = field(default_factory=list)  # files a newer one of its series replaces
 
 
 @dataclass(frozen=True)
@@ -262,14 +270,39 @@ def _option_ids(cells: list[_Cell]) -> list[str]:
     return ids
 
 
-def _read_cells(directory: Path, taken: frozenset[str] = frozenset()) -> _Cells:
-    """The directory's cells, less those that give way to ``taken``, the registry's option ids."""
+def _current(files: list[Path], named: frozenset[str]) -> tuple[list[Path], list[str]]:
+    """The files read, and the names of those superseded: of each series of data-fingerprinted
+    files (``<series>-data-<hex fingerprint>``, #562's cross-pool v2), the ones ``named``, else
+    the newest (modification time, then name). A file outside a series is always read."""
+    series: dict[str, list[Path]] = {}
+    for path in files:
+        if (match := DATA_NAMED.fullmatch(path.stem)) is not None:
+            series.setdefault(match["series"], []).append(path)
+    superseded: set[Path] = set()
+    for group in series.values():
+        keep = [p for p in group if p.name in named]
+        keep = keep or [max(group, key=lambda p: (p.stat().st_mtime_ns, p.name))]
+        superseded |= set(group) - set(keep)
+    return [p for p in files if p not in superseded], sorted(p.name for p in superseded)
+
+
+def _read_cells(
+    directory: Path, taken: frozenset[str] = frozenset(), named: frozenset[str] = frozenset()
+) -> _Cells:
+    """The directory's cells, less those that give way to ``taken``, the registry's option ids;
+    of a data-fingerprinted series, only the newest file or those ``named`` (``_current``)."""
     found = _Cells()
     if not directory.is_dir():
+        if named:
+            raise FileNotFoundError(f"no candidate-cell dir for {', '.join(sorted(named))}")
         return found
     distinct: dict[str, _Cell] = {}
     files = sorted(p for p in directory.iterdir() if p.suffix in (".json", ".jsonl"))
-    for path in (p for p in files if p.is_file()):
+    files = [p for p in files if p.is_file()]
+    if missing := named - {p.name for p in files}:
+        raise FileNotFoundError(f"no candidate-cell file {', '.join(sorted(missing))}")
+    files, found.superseded = _current(files, named)
+    for path in files:
         entries, problems = _entries(path)
         found.skipped += problems
         for where, cell in entries:
@@ -322,14 +355,14 @@ class _ReadOnce(Registry):
 
 
 def _build(
-    registry: Registry | None, candidate_dir: Path | None
+    registry: Registry | None, candidate_dir: Path | None, named: frozenset[str] = frozenset()
 ) -> tuple[list[LeaderboardRow], _Cells]:
     """The rows, and the candidate read (with how many cells a registry row replaced)."""
     registry = _ReadOnce(default_registry("japan") if registry is None else registry)
     if candidate_dir is None:
         candidate_dir = paths.reports_dir() / CANDIDATE_DIR
     rows = legacy_rows(registry)
-    cells = _read_cells(Path(candidate_dir), frozenset(row.option_id for row in rows))
+    cells = _read_cells(Path(candidate_dir), frozenset(row.option_id for row in rows), named)
     # rows_from_registry gives every row of a family that family's size, so the size is asked
     # again only for a candidate family with no row (none, or holdout runs only).
     sizes = {row.family_id: row.variants_searched for row in rows}
@@ -341,13 +374,17 @@ def _build(
 
 
 def build_rows(
-    *, registry: Registry | None = None, candidate_dir: Path | None = None
+    *,
+    registry: Registry | None = None,
+    candidate_dir: Path | None = None,
+    cells_files: Sequence[str] = (),
 ) -> list[LeaderboardRow]:
     """``legacy_rows(registry)`` and every candidate row the registry does not give (by its base or
     its option id, module docstring), its variants searched its family's size in the registry (1
     without a run); defaults ``default_registry('japan')`` and
-    ``$HORSETRACK_DATA_DIR/reports/candidate-cells/``."""
-    return _build(registry, candidate_dir)[0]
+    ``$HORSETRACK_DATA_DIR/reports/candidate-cells/``. ``cells_files`` names the files of a
+    data-fingerprinted series to read in place of its newest (``FileNotFoundError`` if absent)."""
+    return _build(registry, candidate_dir, frozenset(cells_files))[0]
 
 
 def _write_json(path: Path, rows: list[LeaderboardRow]) -> Path:
@@ -368,13 +405,21 @@ def leaderboard_command(
     public: bool = typer.Option(
         False, "--public", help="Also write docs/leaderboard/japan.md, the public rows only (D21)."
     ),
+    cells_file: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--cells-file",
+            help="A data-fingerprinted candidate-cell file (by name) to read in place of its "
+            "series' newest; repeatable.",
+        ),
+    ] = None,
 ) -> None:
     """Write the Japan leaderboard of every registry family and variant and every candidate cell:
     leaderboard-japan.md and .json under the reports dir; with --public also
     docs/leaderboard/japan.md. Prints the counts only on stdout, the diagnostics on stderr, never
     a figure."""
     try:
-        rows, cells = _build(None, None)
+        rows, cells = _build(None, None, frozenset(cells_file or ()))
         reports = paths.reports_dir()
         write_leaderboard(reports / PRIVATE_MD, rows, title=TITLE, public=False)
         _write_json(reports / PRIVATE_JSON, rows)
@@ -397,6 +442,8 @@ def leaderboard_command(
     )
     for reason in cells.skipped:
         typer.echo(f"  skipped {reason}", err=True)
+    for name in cells.superseded:
+        typer.echo(f"  superseded {name}: a newer file of its series is read", err=True)
     typer.echo(f"wrote {PRIVATE_MD} and {PRIVATE_JSON} under the reports dir", err=True)
     if public:
         typer.echo(f"wrote {'/'.join(PUBLIC_DOC)}", err=True)
