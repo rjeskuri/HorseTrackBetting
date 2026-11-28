@@ -127,8 +127,10 @@ from __future__ import annotations
 
 import importlib
 import math
+from collections import Counter
 from datetime import date, timedelta
-from itertools import combinations, permutations
+from functools import cache
+from itertools import combinations, permutations, product
 
 import numpy as np
 import pandas as pd
@@ -2108,3 +2110,344 @@ def test_pool_blend_refuses_a_scratch_that_is_not_a_horse_number(bad):
     for given in ([8, value], [value, 8], (8, value)):
         with pytest.raises(ValueError):
             exotic().pool_blend(p_model, q_pool, a=0.5, b=0.5, scratched=given)
+
+
+# ---------------------------------------------------------------------------------------------
+# Bracket quinella (枠連, ticket #513)
+#
+# Contract pinned here:
+# - `BRACKET_QUINELLA = "BRACKET_QUINELLA"` is in `POOLS` and enabled in jra.yaml (kind
+#   `unordered_top2_bracket`). A combination is "x,y": the brackets of the first two finishers,
+#   x <= y, the horses' own order dropped. "x,x" is the same-bracket pair (ゾロ目): it is a
+#   combination only for a bracket with two or more runners in the field.
+# - The horse -> bracket map is an argument, `brackets`:
+#   * `pool_probs(t, pool, *, horses=None, field_at_sale=None, brackets=None)` and
+#     `Ordering.joint_probs(p_win, pool, *, horses=None, field_at_sale=None, brackets=None)`:
+#     `brackets` maps horse number -> bracket number (positive whole number; numpy integers are
+#     one, a bool, float, str or None is not). Every runner in the field needs a bracket (a
+#     ValueError if one has none); entries for horses not in the field (scratched) are ignored.
+#     The keys are every pair x < y of brackets with a runner, plus "x,x" for each bracket with at
+#     least two runners; the values sum to 1.
+#   * `pool_array(t, pool, *, field_at_sale=None, brackets=None)`: `brackets` is a sequence of
+#     the bracket of each runner position (the order of t's axes), one per runner (a ValueError
+#     for another length). The result is the symmetric K x K array, K = max(brackets), index
+#     bracket - 1: [x-1, y-1] = [y-1, x-1] = P({bracket of first, bracket of second} = {x, y}) for
+#     x != y, and [x-1, x-1] = P(both of the first two are in bracket x), counted once. So the
+#     upper triangle with the diagonal sums to 1.
+#   * `winning_combinations(finish, pool, *, field_at_sale=None, brackets=None)`: as QUINELLA with
+#     each horse replaced by its bracket and the pair written "x,y" with x <= y; every combination
+#     of every tie-break of the dead heats, each once; fewer than two finishers pay nothing.
+#     `brackets` must cover every starter in `finish`, even one that does not place.
+#   * The pool without `brackets` (or with a bad map) is a ValueError in all four. The other
+#     pools ignore `brackets`.
+# Not pinned: whether the pool is sold to a field (jra.yaml's comment says 9 or more runners).
+# ---------------------------------------------------------------------------------------------
+
+BQ = "BRACKET_QUINELLA"
+
+
+def draw_brackets(n: int) -> dict[int, int]:
+    """JRA's bracket draw for n runners, 9 to 18 (docs/specs/board-feed.md): brackets 1..16-n take
+    one horse each and the rest two, in number order (9 to 16); 17: bracket 8 takes three; 18:
+    brackets 7 and 8 take three."""
+    sizes = [1] * (16 - n) + [2] * (n - 8) if n <= 16 else [2] * (24 - n) + [3] * (n - 16)
+    assert len(sizes) == 8 and sum(sizes) == n
+    out: dict[int, int] = {}
+    horse = 1
+    for bracket, size in enumerate(sizes, start=1):
+        for _ in range(size):
+            out[horse] = bracket
+            horse += 1
+    return out
+
+
+def harville_t(p) -> np.ndarray:
+    return trifecta_array(harville_closed_form(p), len(p))
+
+
+def random_t(n: int, seed: int) -> np.ndarray:
+    """An arbitrary joint distribution over ordered triples of distinct runners (not Harville)."""
+    w = np.random.default_rng(seed).random((n, n, n)) + 0.05
+    for i, j, k in product(range(n), repeat=3):
+        if i == j or i == k or j == k:
+            w[i, j, k] = 0.0
+    return w / w.sum()
+
+
+@cache
+def bracket_fields() -> dict[str, tuple[np.ndarray, tuple[int, ...], dict[int, int]]]:
+    """name -> (t, horse number of each position, horse -> bracket)."""
+    p11 = np.random.default_rng(11).dirichlet(np.full(11, 2.0))
+    p18 = np.random.default_rng(18).dirichlet(np.full(18, 2.0))
+    return {
+        # 5 single-runner brackets then 3 brackets of two
+        "n11_draw": (harville_t(p11), tuple(range(1, 12)), draw_brackets(11)),
+        # brackets of two, then two of three
+        "n18_draw": (harville_t(p18), tuple(range(1, 19)), draw_brackets(18)),
+        # Not number order, two-digit numbers; horse 6 is scratched but still on the card, so
+        # bracket 3 holds one runner in the field; brackets 5 holds two (10 and 12).
+        "unsorted_with_a_scratch": (
+            harville_t(P6_FAV4),
+            (12, 3, 7, 1, 10, 5),
+            {1: 1, 3: 2, 5: 3, 6: 3, 7: 4, 10: 5, 12: 5},
+        ),
+        # A joint that is no softmax of Win chances: only the marginal sums can be right.
+        "random_joint_n9": (random_t(9, 5), tuple(range(1, 10)), draw_brackets(9)),
+        # Not JRA's draw: two brackets, numbers 2 and 5 (any map is a valid card).
+        "two_brackets": (
+            harville_t(P8),
+            tuple(range(1, 9)),
+            {h: 2 if h % 2 else 5 for h in range(1, 9)},
+        ),
+        "one_bracket": (harville_t(P5), tuple(range(1, 6)), dict.fromkeys(range(1, 6), 4)),
+    }
+
+
+def expected_bracket_keys(numbers, brackets) -> set[str]:
+    runners = Counter(brackets[h] for h in numbers)
+    pairs = {key(x, y) for x, y in combinations(sorted(runners), 2)}
+    return pairs | {key(x, x) for x, count in runners.items() if count >= 2}
+
+
+def brute_bracket_probs(t, numbers, brackets) -> dict[str, float]:
+    """Enumerate every ordered first three; the first two's brackets name the combination."""
+    out = dict.fromkeys(expected_bracket_keys(numbers, brackets), 0.0)
+    for i, j, k in product(range(t.shape[0]), repeat=3):
+        if t[i, j, k] == 0.0:
+            continue
+        x, y = sorted((brackets[numbers[i]], brackets[numbers[j]]))
+        out[key(x, y)] += t[i, j, k]
+    return out
+
+
+@pytest.mark.parametrize("case", list(bracket_fields()))
+def test_bracket_probabilities_match_brute_force_enumeration(case):
+    t, numbers, brackets = bracket_fields()[case]
+    expected = brute_bracket_probs(t, numbers, brackets)
+    got = exotic().pool_probs(t, BQ, horses=numbers, brackets=brackets)
+    assert set(got) == set(expected)  # same-bracket keys exactly where a bracket has 2+ runners
+    assert max_abs_diff(got, expected) < 1e-12
+    assert sum(got.values()) == pytest.approx(1.0, abs=1e-12)
+    assert all(v > 0 for v in got.values())
+
+
+def test_bracket_probabilities_by_hand_for_three_runners():
+    # Horses 1 and 2 share bracket 1, horse 3 is alone in bracket 2. Harville, p = .5 / .3 / .2:
+    # the first two are {1, 2} with .5 * .3 / .5 + .3 * .5 / .7; every other result puts horse 3
+    # in the first two, which is the pair of bracket 1 and 2.
+    t = harville_t(np.array([0.5, 0.3, 0.2]))
+    got = exotic().pool_probs(t, BQ, brackets={1: 1, 2: 1, 3: 2})
+    same = 0.3 + 0.15 / 0.7
+    assert set(got) == {"1,1", "1,2"}  # bracket 2 holds one runner: no "2,2"
+    assert got["1,1"] == pytest.approx(same, abs=1e-12)
+    assert got["1,2"] == pytest.approx(1 - same, abs=1e-12)
+    # The same race with every horse in a bracket of its own is the quinella.
+    own = exotic().pool_probs(t, BQ, brackets={1: 1, 2: 2, 3: 3})
+    quinella = exotic().pool_probs(t, QUINELLA)
+    assert set(own) == set(quinella)
+    assert max_abs_diff(own, quinella) < 1e-12
+
+
+def test_same_bracket_pairs_exist_only_for_brackets_with_two_runners():
+    t, numbers, brackets = bracket_fields()["n11_draw"]
+    got = exotic().pool_probs(t, BQ, brackets=brackets)
+    # brackets 1-5 hold one horse each; 6, 7 and 8 hold two
+    assert {c for c in got if c[0] == c[2]} == {"6,6", "7,7", "8,8"}
+    assert len(got) == 8 * 7 // 2 + 3
+    # A bracket with two runners on the card and one in the field has no same-bracket pair.
+    t, numbers, brackets = bracket_fields()["unsorted_with_a_scratch"]
+    got = exotic().pool_probs(t, BQ, horses=numbers, brackets=brackets)
+    assert {c for c in got if c[0] == c[2]} == {"5,5"}
+    assert "3,3" not in got and {"3,5", "1,3"} <= set(got)
+    # and one bracket for everyone: all the money is on its pair
+    t, numbers, brackets = bracket_fields()["one_bracket"]
+    assert exotic().pool_probs(t, BQ, brackets=brackets) == {"4,4": pytest.approx(1.0)}
+
+
+def test_bracket_probabilities_ignore_card_entries_for_horses_not_in_the_field():
+    t, numbers, brackets = bracket_fields()["n11_draw"]
+    plain = exotic().pool_probs(t, BQ, brackets=brackets)
+    # horses 20 and 21 were drawn and scratched: they are on the card, not in the field
+    padded = exotic().pool_probs(t, BQ, brackets={**brackets, 20: 8, 21: 1})
+    assert max_abs_diff(padded, plain) < 1e-12
+    # numpy integers are bracket numbers
+    typed = {np.int64(h): np.int64(b) for h, b in brackets.items()}
+    assert max_abs_diff(exotic().pool_probs(t, BQ, brackets=typed), plain) < 1e-12
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_ordering_prices_the_bracket_quinella_from_its_quinella(family):
+    # Bracket pair probabilities are the quinella's, summed over the horse pairs of each bracket
+    # pair (the quinella is an existing pool, already tested against closed forms above).
+    brackets = draw_brackets(10)
+    ordering = make_ordering(family)
+    quinella = ordering.joint_probs(P10, QUINELLA)
+    expected: dict[str, float] = {}
+    for pair, value in quinella.items():
+        i, j = horses(pair)
+        x, y = sorted((brackets[i], brackets[j]))
+        expected[key(x, y)] = expected.get(key(x, y), 0.0) + value
+    got = ordering.joint_probs(P10, BQ, brackets=brackets)
+    assert set(got) == set(expected) == expected_bracket_keys(range(1, 11), brackets)
+    assert max_abs_diff(got, expected) < 1e-12
+    assert sum(got.values()) == pytest.approx(1.0, abs=1e-9)
+    # a different draw moves the values: brackets are not decoration
+    other = ordering.joint_probs(P10, BQ, brackets={h: 1 + (h - 1) // 3 for h in range(1, 11)})
+    assert set(other) != set(got)
+
+
+@pytest.mark.parametrize("case", list(bracket_fields()))
+def test_bracket_pool_array_is_the_symmetric_bracket_by_bracket_table(case):
+    t, numbers, brackets = bracket_fields()[case]
+    by_position = [brackets[h] for h in numbers]
+    expected = brute_bracket_probs(t, numbers, brackets)
+    arr = exotic().pool_array(t, BQ, brackets=by_position)
+    size = max(by_position)
+    assert arr.shape == (size, size)
+    np.testing.assert_allclose(arr, arr.T, atol=1e-14)
+    assert np.triu(arr).sum() == pytest.approx(1.0, abs=1e-12)  # the diagonal counted once
+    for x, y in product(range(1, size + 1), repeat=2):
+        want = expected.get(key(min(x, y), max(x, y)), 0.0)
+        assert arr[x - 1, y - 1] == pytest.approx(want, abs=1e-12), (x, y)
+
+
+BAD_BRACKETS = {
+    "missing_a_runner": lambda b: {h: v for h, v in b.items() if h != 5},
+    "empty": lambda b: {},
+    "zero": lambda b: {**b, 5: 0},
+    "negative": lambda b: {**b, 5: -2},
+    "fraction": lambda b: {**b, 5: 2.5},
+    "bool": lambda b: {**b, 5: True},
+    "text": lambda b: {**b, 5: "5"},
+    "none": lambda b: {**b, 5: None},
+}
+
+
+@pytest.mark.parametrize("bad", list(BAD_BRACKETS))
+def test_bracket_pool_refuses_a_bracket_map_that_does_not_describe_the_field(bad):
+    t, numbers, brackets = bracket_fields()["n11_draw"]
+    broken = BAD_BRACKETS[bad](brackets)
+    with pytest.raises(ValueError):
+        exotic().pool_probs(t, BQ, brackets=broken)
+    with pytest.raises(ValueError):
+        exotic().Ordering("harville").joint_probs(
+            P10, BQ, brackets=BAD_BRACKETS[bad](draw_brackets(10))
+        )
+    finish = _field({3: 1, 8: 2}, 11)
+    with pytest.raises(ValueError):
+        exotic().winning_combinations(finish, BQ, brackets=broken)
+
+
+def test_bracket_pool_needs_the_bracket_map():
+    t, numbers, brackets = bracket_fields()["n11_draw"]
+    by_position = [brackets[h] for h in numbers]
+    with pytest.raises(ValueError):
+        exotic().pool_probs(t, BQ)
+    with pytest.raises(ValueError):
+        exotic().pool_array(t, BQ)
+    with pytest.raises(ValueError):
+        exotic().Ordering("harville").joint_probs(P10, BQ)
+    with pytest.raises(ValueError):
+        exotic().winning_combinations(_field({3: 1, 8: 2}, 11), BQ)
+    # a position sequence of the wrong length, or with a bracket that is not one
+    for bad in (
+        by_position[:-1],
+        by_position + [8],
+        [*by_position[:-1], 0],
+        [*by_position[:-1], 1.5],
+    ):
+        with pytest.raises(ValueError):
+            exotic().pool_array(t, BQ, brackets=bad)
+
+
+def test_other_pools_ignore_the_bracket_map():
+    t, numbers, brackets = bracket_fields()["n11_draw"]
+    for pool in (WIN, PLACE, QUINELLA, WIDE, EXACTA, TRIO):
+        assert exotic().pool_probs(t, pool, brackets=brackets) == exotic().pool_probs(t, pool)
+    np.testing.assert_array_equal(
+        exotic().pool_array(t, QUINELLA, brackets=[brackets[h] for h in numbers]),
+        exotic().pool_array(t, QUINELLA),
+    )
+
+
+def test_the_bracket_quinella_is_a_pool_of_the_exotic_layer_and_enabled_in_jra_yaml():
+    assert exotic().BRACKET_QUINELLA == BQ
+    assert BQ in exotic().POOLS
+    assert set(exotic().POOLS) >= set(ALL_POOLS)
+    pool = config.load_source("japan", "jra").pools[BQ]
+    assert pool.enabled is True
+    assert pool.kind == "unordered_top2_bracket"
+    # an unknown pool is still refused
+    with pytest.raises(ValueError):
+        exotic().pool_probs(
+            harville_t(P5), "BRACKET_EXACTA", brackets=dict.fromkeys(range(1, 6), 1)
+        )
+
+
+# -- settlement ---------------------------------------------------------------------------------
+
+B9 = draw_brackets(9)  # horses 1-7 in brackets 1-7, horses 8 and 9 in bracket 8
+
+BRACKET_SETTLEMENTS = {
+    "no_tie": (_field({3: 1, 8: 2}, 9), ["3,8"]),
+    "order_of_the_pair_is_dropped": (_field({8: 1, 3: 2}, 9), ["3,8"]),
+    "same_bracket_pair_wins": (_field({8: 1, 9: 2}, 9), ["8,8"]),
+    "same_bracket_pair_wins_reversed": (_field({9: 1, 8: 2}, 9), ["8,8"]),
+    "third_place_is_not_part_of_it": (_field({8: 1, 3: 2, 9: 3}, 9), ["3,8"]),
+    # dead heat for second: the winner pairs with either
+    "dead_heat_second": (_field({8: 1, 9: 2, 4: 2}, 9), ["4,8", "8,8"]),
+    "dead_heat_first": (_field({1: 1, 8: 1}, 9), ["1,8"]),
+    "dead_heat_first_in_one_bracket": (_field({8: 1, 9: 1, 2: 3}, 9), ["8,8"]),
+    "three_way_dead_heat_first": (_field({1: 1, 8: 1, 9: 1}, 9), ["1,8", "8,8"]),
+    # two horses of one bracket dead-heating for second pay their bracket pair once
+    "dead_heat_second_in_one_bracket": (_field({1: 1, 8: 2, 9: 2}, 9), ["1,8"]),
+    "dead_heat_third_changes_nothing": (_field({2: 1, 5: 2, 6: 3, 7: 3}, 9), ["2,5"]),
+}
+
+
+@pytest.mark.parametrize("case", list(BRACKET_SETTLEMENTS))
+def test_winning_bracket_combinations(case):
+    finish, expected = BRACKET_SETTLEMENTS[case]
+    got = exotic().winning_combinations(finish, BQ, brackets=B9)
+    assert len(got) == len(set(got)), got
+    assert sorted(got) == sorted(expected)
+
+
+def test_a_bracket_quinella_with_fewer_than_two_finishers_pays_nothing():
+    finish = dict.fromkeys(range(1, 10))
+    finish[3] = 1
+    assert exotic().winning_combinations(finish, BQ, brackets=B9) == []
+    assert exotic().winning_combinations({h: None for h in range(1, 10)}, BQ, brackets=B9) == []
+
+
+def test_winning_bracket_combinations_are_the_quinellas_by_bracket():
+    # 14 runners, random results with ties (competition ranking: 1, 2, 2, 4, ...), against the
+    # bracket pair of each QUINELLA winning pair (the existing, hand-tested dead-heat rules).
+    brackets = draw_brackets(14)
+    rng = np.random.default_rng(14)
+    seen_same, seen_tie = False, False
+    for _ in range(60):
+        raw = rng.integers(1, 6, size=14)
+        finish = {h: int(1 + (raw < raw[h - 1]).sum()) for h in range(1, 15)}
+        quinella = exotic().winning_combinations(finish, QUINELLA)
+        expected = {key(*sorted(brackets[h] for h in horses(pair))) for pair in quinella}
+        got = exotic().winning_combinations(finish, BQ, brackets=brackets)
+        assert len(got) == len(set(got))
+        assert set(got) == expected, finish
+        seen_same |= any(c[0] == c[2] for c in got)
+        seen_tie |= len(quinella) > 1
+    assert seen_same and seen_tie  # the draw exercised both a same-bracket pair and a dead heat
+
+
+def test_bracket_probabilities_are_the_exacta_mass_of_each_settled_combination():
+    # The probability of a bracket combination is the mass of the ordered first two that
+    # `winning_combinations` settles on it: the pricing and the settlement agree.
+    t, numbers, brackets = bracket_fields()["n11_draw"]
+    mass: dict[str, float] = {}
+    for i, j in permutations(range(len(numbers)), 2):
+        exacta_ij = sum(t[i, j, k] for k in range(len(numbers)))
+        finish = _field({numbers[i]: 1, numbers[j]: 2}, len(numbers))
+        (winner,) = exotic().winning_combinations(finish, BQ, brackets=brackets)
+        mass[winner] = mass.get(winner, 0.0) + exacta_ij
+    got = exotic().pool_probs(t, BQ, horses=numbers, brackets=brackets)
+    assert max_abs_diff(got, mass) < 1e-12

@@ -185,6 +185,59 @@ order: FORECAST and TIERCE in finishing order, the other pools in any order).
 - A (pool, tau) with nothing scored has no entry. The module reads no file and opens no holdout:
   a holdout day stays behind `LockedHoldout.open`.
 
+## The ladder log
+
+Code: `src/horsetrack/countries/japan/shadow/ladder_log.py` (#628), written by `shadow-day`
+(`run_shadow_day(..., ladder_log=...)`; the command always writes it). It keeps the shadow page's
+odds ladder (#499, docs/specs/board-feed.md, "The odds ladder") so the live nowcast can be scored
+on the day's file alone. It is display data: it never feeds a value, a flag or the shadow log, and
+the shadow log's records are the same with or without it.
+
+Path: `$HORSETRACK_DATA_DIR/shadow/japan/<YYYY-MM-DD>.ladder.jsonl` (`ladder_log_path(day)`), beside
+the shadow log. `LadderLog(path, day=...)` shares `ShadowLog`'s lines, chain, seal, `day_status`,
+`read()` (`HoldoutSealed` on a holdout day), `logged_keys()` and `verify()` (`by_tau` counts by
+`checkpoint_min`) through `shadow.log.ChainedLog`; it is a separate file because the shadow log's
+key already uses tau 5 and 2 for the decision grid. The key of a record is
+`(race_id, pool, combination, checkpoint_min)`.
+
+What `shadow-day` writes, for each race with a post time:
+
+- At each checkpoint k in (20, 10, 5, 2), once it is due at post - k + `grace_s`: one record per
+  WIN runner, PLACE runner and Wide pair on the board of the rows captured at or before post - k
+  (the latest row per key by `snapshot_utc`, `_DayRows.refs`' rule, of the rows read so far).
+  `odds` is that row's low figure, `fetched_utc` its fetch time, and `projected` maps every later
+  checkpoint j < k and `"0"` (the final) to `shadow_feed._projector(models)(pool, odds, tau, j)`,
+  tau the minutes from that fetch to the post (null without a nowcast or a cell it needs).
+- A checkpoint whose board is missing, or older than its limit, is one record with `pool` and
+  `combination` `*` and `status` `no_board`. The age is post - k minus the board's
+  `capture_utc` (the earliest fetch of its rows). The limits are shadow-day's `max_board_age_s`
+  (#625): a tau's own limit when it has one, else linear in tau between the nearest limited taus
+  below and above (the shipped limits give T-20 about 214 s and T-10 about 115 s).
+- Once the race's final board is in (`snapshot.final_board` of its captures showing a final): one
+  record per key of it with `checkpoint_min` 0, `status` `ok`, `odds` the final low figure,
+  `fetched_utc` the final board's `at_utc` and `projected` `{}`. A pool whose final capture comes
+  later gets its records then.
+- A restart writes only the checkpoints and final keys not yet in the file, also after the shadow
+  log is sealed. The run seals the ladder log once the shadow log is sealed and every race has its
+  four checkpoints and a final for WIN and every pool its checkpoints showed; when a final never
+  comes it is sealed at 17:30 Asia/Tokyo without it. A rerun of a sealed day writes nothing. A
+  failure of the ladder log is logged and the shadow log goes on without it.
+
+| key | type | notes |
+| --- | --- | --- |
+| `race_id`, `pool`, `combination` | text | as the shadow log; `*` on a no_board record |
+| `checkpoint_min` | integer | 20, 10, 5, 2, or 0 for a final |
+| `status` | text | `ok` or `no_board` |
+| `odds` | number > 0 or null | the observed (or final) low figure; null only on no_board |
+| `fetched_utc` | ISO UTC text or null | the observed row's fetch time; the final board's `at_utc` |
+| `board_age_s` | number or null | the checkpoint board's age; null on a final and a missing board |
+| `projected` | mapping | `{"<j>": odds or null}` for each later checkpoint and `"0"`; `{}` on no_board and final |
+| `nowcast_id` | text or null | `models.ids["nowcast"]` of the run; null without models |
+| `mode` | text | `live` when written within `max_lag_s` of post - k (of the final's `at_utc`), else `replay` |
+| `post_utc`, `written_utc` | ISO UTC text | the race's post; when the record was written |
+| `git_sha` | text | the commit shadow-day ran |
+| `day_status` | text | set by the log, as the shadow log |
+
 ## What the chain detects
 
 Detected, as `ShadowLogTampered`:
