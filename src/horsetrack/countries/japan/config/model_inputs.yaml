@@ -498,12 +498,14 @@ inputs:
     layers: [C4]
     role: feature_at_t
     supplies:
-      - {source: jravan, table: records/MING/DM, column: _record}
-      - {source: jravan, table: records/MING/TM, column: _record}
+      - {source: jravan, table: mining_predictions, column: value, filter: {kind: DM}}
+      - {source: jravan, table: mining_predictions, column: value, filter: {kind: TM}}
     tickets: [406]
     note: >-
       JV-Data DM (time-type) and TM (match-type) data-mining predictions, published before the
-      race; dumped but not mapped, so no publication time is known.
+      race; mapped into the jravan mining_predictions table (#406). Available at t once the kept
+      record's created_utc <= t (rule C, the owner's answer on #406, 2026-11-28); created_utc is
+      the kept record's creation stamp, not a known publication time.
   win_sales:
     layers: [C4]
     role: conditioner
