@@ -77,7 +77,7 @@ import math
 import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any
@@ -100,6 +100,7 @@ from horsetrack.core.eval.registry import (
     Registry,
     RunRecord,
     _canonical,
+    _record_data,
     _sha256,
     _spec_hash,
     default_registry,
@@ -993,8 +994,9 @@ def _record(run: _Run, variant: str, params: dict, builds: dict, metrics, status
 
 
 def _run_id(record: RunRecord) -> str:
-    """The id the registry gives the record (the sha256 of its canonical form)."""
-    return _sha256(_canonical(asdict(record)))
+    """The id the registry gives the record (the sha256 of its canonical form, as its line
+    holds it)."""
+    return _sha256(_canonical(_record_data(record)))
 
 
 def _append(registry: Registry, record: RunRecord) -> str:

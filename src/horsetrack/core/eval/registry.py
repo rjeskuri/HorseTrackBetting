@@ -11,7 +11,9 @@ A run's id is the sha256 hex of its record's canonical JSON: the same run twice 
 family's pre-registered spec is frozen with ``freeze_family``; the freeze is a line of its own,
 not a run. ``write_summary`` writes the committed, aggregate-only view, one file per family: E id,
 variant, status and per-fold metric, value, CI and n, with the values of licensed-source runs
-withheld.
+withheld. A record's ``notes`` (run metadata, such as why a measurement could not be made) are
+outside its variant identity and the summary; a record without notes is written without the key,
+so its line and id are those it had before ``notes`` existed.
 """
 
 from __future__ import annotations
@@ -112,6 +114,7 @@ class RunRecord:
     status: str
     holdout_open: str | None = None
     owner_signoff: int | None = None
+    notes: dict[str, str] | None = None  # run metadata, outside the variant identity
 
 
 def _canonical(value: Any) -> str:
@@ -128,6 +131,16 @@ def _spec_hash(spec: dict) -> str:
     return hashlib.sha256(
         json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _record_data(record: RunRecord) -> dict:
+    """The record as its line holds it: ``asdict`` without ``notes`` when they are None, so a
+    record without notes has the id it had before the field existed, and an older line reads back
+    with notes None."""
+    data = asdict(record)
+    if data["notes"] is None:
+        del data["notes"]
+    return data
 
 
 def _record_from(data: dict) -> RunRecord:
@@ -224,8 +237,10 @@ def _problem(r: RunRecord) -> str | None:
         return "an adopted run needs owner_signoff, the ticket where the owner signed adoption"
     if r.holdout_open is not None and not isinstance(r.holdout_open, str):
         return f"holdout_open must be a line hash (str), got {r.holdout_open!r}"
+    if r.notes is not None and not _names(r.notes):
+        return f"notes must be None or map names to strings, got {r.notes!r}"
     try:
-        if _record_from(json.loads(_canonical(asdict(r)))) != r:
+        if _record_from(json.loads(_canonical(_record_data(r)))) != r:
             return "the record would not read back unchanged (tuples or non-str keys in params?)"
     except (TypeError, ValueError) as exc:
         return f"the record is not plain JSON: {exc}"
@@ -345,7 +360,7 @@ class Registry:
         if _licensed(record) and is_inside(self._path, env.repo_root()):
             raise LicensedOutputInRepo(f"the registry {self._path} is inside the repository")
 
-        data = asdict(record)
+        data = _record_data(record)
         run_id = _sha256(_canonical(data))
 
         def entry(chain: _Chain) -> dict:
@@ -375,7 +390,7 @@ class Registry:
         of runs, failed ones included; a change to params, components, fold_scheme, sources or a
         build's identity, or an added, removed or renamed build, is a new variant even under the
         same label. A later decision, retry or rerun (another status, owner_signoff, metrics,
-        holdout_open, git_sha or ticket, or a refresh of the same builds) is another run in
+        holdout_open, notes, git_sha or ticket, or a refresh of the same builds) is another run in
         ``records()``, not another variant.
         """
         return len(
