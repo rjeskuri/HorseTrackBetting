@@ -18,6 +18,14 @@ one that does not fit is tried again in a later round of its stretch, and one wi
 capture when its stretch ends counts in VenueSummary.tier2_skipped. A failed tier-2 capture is
 logged and never touches tier 1 (a CircuitOpen still ends the day: the host blocked us).
 
+Race cards (ticket #426, logger.yaml `cards`, JRA only): each race's 出馬表 once per grid point of
+`cards.grid_min`, stretches as tier 2's (the day-before window's rounds included), a venue's due
+races in one `capture_cards` call written with `write_cards`. They spend only what is left of a
+round's budget after tier 1, the results polls and tier 2, so the odds captures are the same with
+the block as without. A grid point is tried once; a failed card capture is logged and is no
+venue's failure (a CircuitOpen still ends the day). A site without `capture_cards` or a store
+without `write_cards` (one from before #426): no cards.
+
 Results (ticket #225, logger.yaml `results`, JRA only): each venue with post times polls the
 site's `published_results` from its first post to its last post + until_min, at most every
 every_s, and writes each race the first time a poll shows its official result, at the instant that
@@ -76,7 +84,12 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from horsetrack.core.ingest.fetcher import CircuitOpen, FetchError
-from horsetrack.countries.japan.jra.capture import MeetingCapture, NotListed, WrongMeeting
+from horsetrack.countries.japan.jra.capture import (
+    CardCapture,
+    MeetingCapture,
+    NotListed,
+    WrongMeeting,
+)
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +120,8 @@ class Site(Protocol):
 
     def sales_open(self) -> bool: ...  # with `day_before`: the race date's sales are open
 
+    def capture_cards(self, venue: str, races: list[int]) -> CardCapture: ...  # with `cards`
+
 
 class Store(Protocol):
     def write(self, venue: str, capture: MeetingCapture) -> int: ...  # rows written
@@ -122,6 +137,8 @@ class Store(Protocol):
         seen_utc: datetime,
         unpublished_utc: datetime | None,
     ) -> None: ...
+
+    def write_cards(self, venue: str, capture: CardCapture) -> int: ...  # with `cards`: rows
 
 
 @dataclass
@@ -370,6 +387,7 @@ class _Venue:
     wrong_in_row: int = 0
     tier2_tried: set[tuple[int, int]] = field(default_factory=set)  # (race, grid value)
     tier2_got: set[tuple[int, int]] = field(default_factory=set)  # tried and written
+    cards_tried: set[tuple[int, int]] = field(default_factory=set)  # (race, card grid value)
     published: set[int] = field(default_factory=set)  # races whose result this run has logged
     results_polled: datetime | None = None  # when the latest results poll started
     results_ok: datetime | None = None  # when the latest successful results poll returned
@@ -412,7 +430,7 @@ def source_config(config: Mapping[str, Any], source: str) -> dict[str, Any]:
     block = config.get(source)
     if not isinstance(block, Mapping):
         raise ValueError(f"logger.yaml has no {source!r} block")
-    for key in ("tier2", "results", "day_before"):
+    for key in ("tier2", "results", "day_before", "cards"):
         out.pop(key, None)
     return {**out, **block}
 
@@ -493,6 +511,14 @@ class _Day:
             log.warning("results polling off: the site or store has no results methods")
             self.results = None
         self.grid = sorted(set(self.tier2["grid_min"]), reverse=True) if self.tier2 else []
+        self.cards = config.get("cards")
+        able = callable(getattr(site, "capture_cards", None)) and callable(
+            getattr(store, "write_cards", None)
+        )
+        if self.cards and not able:  # a site or store from before #426: no cards
+            log.warning("race cards off: the site or store has no card methods")
+            self.cards = None
+        self.card_grid = sorted(set(self.cards["grid_min"]), reverse=True) if self.cards else []
         self.first = _windows(race_date, config)[0][0]  # W, the race date's first window
         self.day_before = config.get("day_before")
         if self.day_before and not callable(getattr(site, "sales_open", None)):
@@ -667,9 +693,11 @@ class _Day:
                     v = self.venues[job.venue]
                     if self._running(v, self.now()):
                         self._capture(v, job, start, schedule)
-            polled = self._results_round()
+            spent = sum(job.requests for job in jobs) + self._results_round()
             if self.tier2 and active:
-                self._tier2_round(start, sum(job.requests for job in jobs) + polled)
+                spent += self._tier2_round(start, spent)
+            if self.cards and active:
+                self._cards_round(start, spent)
             # while odds are logged, results polls ride on the rounds; after, they set the pace
             wake = self._next_round(start) if self._active(self.now()) else self._results_wake()
             if wake is None:
@@ -781,30 +809,48 @@ class _Day:
 
     # ------------------------------------------------ tier 2
 
-    def _grid_point(self, post: datetime, t: datetime) -> int | None:
-        """The grid value whose stretch [post - g, post - next smaller g) holds `t`, or None."""
-        for i, g in enumerate(self.grid):
-            nxt = self.grid[i + 1] if i + 1 < len(self.grid) else 0
+    def _grid_point(self, post: datetime, t: datetime, grid: Sequence[int]) -> int | None:
+        """The value of `grid` (descending) whose stretch [post - g, post - next smaller g) holds
+        `t`, or None."""
+        for i, g in enumerate(grid):
+            nxt = grid[i + 1] if i + 1 < len(grid) else 0
             if post - timedelta(minutes=g) <= t < post - timedelta(minutes=nxt):
                 return g
         return None
 
-    def _tier2_round(self, start: datetime, spent: float) -> None:
-        """The grid points due at `start`, in what tier 1 left of the round's budget (`spent`: its
-        planned cost); a capture that would run past the next round's start is left for later."""
+    def _tier2_round(self, start: datetime, spent: float) -> float:
+        """The tier-2 grid points due at `start`, in what tier 1 left of the round's budget
+        (`spent`: its planned cost); the planned cost of the captures run."""
+        tried = {code: v.tier2_tried for code, v in self.venues.items()}
+        return self._grid_round(
+            start, spent, self.grid, tried, self.tier2["requests"], self._capture_tier2
+        )
+
+    def _grid_round(
+        self,
+        start: datetime,
+        spent: float,
+        grid: Sequence[int],
+        tried: Mapping[str, set[tuple[int, int]]],
+        requests: Mapping[str, Any],
+        capture: Callable[[_Venue, list[tuple[int, int]]], None],
+    ) -> float:
+        """The points of `grid` due at `start` and not `tried`, in what is left of the round's
+        budget after `spent`, a venue's in one `capture(v, points)`; a capture that would run past
+        the next round's start is left for later. Returns the planned cost of the captures run."""
         every = self._every(start)
         if every is None:
-            return
+            return 0.0
         rps = self.site.requests_per_second
         left = every * rps - spent
-        nav, per = self.tier2["requests"]["navigation"], self.tier2["requests"]["per_race"]
+        nav, per = requests["navigation"], requests["per_race"]
         due = []
         for v in self.venues.values():
             if v.state.stopped is not None:
                 continue
             for race, post in v.state.post_times.items():
-                g = self._grid_point(post, start)
-                if g is not None and (race, g) not in v.tier2_tried:
+                g = self._grid_point(post, start, grid)
+                if g is not None and (race, g) not in tried[v.state.code]:
                     due.append((post - timedelta(minutes=g), v.state.code, race, g))
         picked: dict[str, list[tuple[int, int]]] = {}
         for _, code, race, g in sorted(due):  # by due time: the stretch ending soonest
@@ -813,10 +859,13 @@ class _Day:
                 picked.setdefault(code, []).append((race, g))
                 left -= cost
         deadline = self._next_round(start)
+        sent = 0.0
         for code, points in picked.items():
             v, cost = self.venues[code], nav + per * len(points)
             if v.state.stopped is None and self.now() + timedelta(seconds=cost / rps) <= deadline:
-                self._capture_tier2(v, points)
+                capture(v, points)
+                sent += cost
+        return sent
 
     def _capture_tier2(self, v: _Venue, points: list[tuple[int, int]]) -> None:
         v.tier2_tried.update(points)
@@ -832,6 +881,29 @@ class _Day:
         v.tier2_got.update(points)
         self.summary.requests += capture.requests
         self._count_tier2(v)
+
+    # ------------------------------------------------ race cards (ticket #426)
+
+    def _cards_round(self, start: datetime, spent: float) -> None:
+        """The card grid points due at `start`, in what the odds left of the round's budget
+        (`spent`: tier 1's, the results polls' and tier 2's)."""
+        tried = {code: v.cards_tried for code, v in self.venues.items()}
+        self._grid_round(
+            start, spent, self.card_grid, tried, self.cards["requests"], self._capture_cards
+        )
+
+    def _capture_cards(self, v: _Venue, points: list[tuple[int, int]]) -> None:
+        v.cards_tried.update(points)
+        races = sorted(race for race, _ in points)
+        try:
+            capture = self.site.capture_cards(v.state.code, races)
+            self.store.write_cards(v.state.code, capture)
+        except CircuitOpen:
+            raise
+        except Exception as exc:  # parser errors included: cards never touch the odds
+            log.warning("%s card capture of races %s failed: %r", v.state.code, races, exc)
+            return
+        self.summary.requests += capture.requests
 
     def _count_tier2(self, v: _Venue) -> None:
         if self.tier2:

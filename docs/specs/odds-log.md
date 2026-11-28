@@ -118,3 +118,31 @@ has a `results` block.
 - `read_unpublished(path)` returns `{race_number: aware UTC datetime or None}`, one entry per race
   of `read_published`; a sidecar written before the bound (no `unpublished_utc` key) reads every
   race as None, and a missing file reads as empty.
+
+## Card log (ticket #426)
+
+Path: `<VENUE>.cards.jsonl.gz` beside the log, one per meeting, written by `log-day` (JRA only)
+when logger.yaml has a `cards` block: each race's 出馬表 (JRADB pw01dde) once per grid point of
+`cards.grid_min` (minutes before post, stretched as tier 2's), from what the odds leave of each
+round's budget (`logger/schedule.py`).
+
+- Append-only, in the log's format: one gzip member per capture (`odds_log.append_capture`), read
+  back with `iter_members`. A later capture never rewrites an earlier one, so every capture of a
+  race stays, each with its own fetch time; the odds log is never written.
+- A capture (`jra.capture.capture_cards`) reads the 出馬表 menu, the card race list, then the card
+  page each asked race's row links (2 + races requests). A card page of another meeting or race is
+  refused (WrongMeeting) and the capture writes nothing.
+- One row per race and one per runner of each card read: `official_card.parse`'s `races` and
+  `racecard_runners` rows (docs/specs/store.md), plus:
+
+| key | type | notes |
+| --- | --- | --- |
+| `table` | text | `races` or `racecard_runners`: the store table the row's columns are |
+| `fetched_utc` | ISO UTC text | when the row's card page was fetched (RawPage.fetched_utc) |
+| `snapshot_utc` | ISO UTC text | when the capture started, shared by every row of the member |
+
+- A runner row's `card_scraped_utc` equals its `fetched_utc`; `is_scratched` and the race row's
+  `field_size` (runners not scratched) are as the page showed them at that fetch.
+- Card pages themselves are not kept under `raw/` (`raw_pages` covers the odds pages only); the
+  rows keep every field the parser reads.
+- No as-of view reads the card log yet: its availability rule is the owner's question (#426).
