@@ -1182,3 +1182,119 @@ def test_a_malformed_block_under_an_empty_adapter_names_the_problem(tmp_path, bl
     assert any(word.lower() in broken.note.lower() for word in words), broken.note
     # the adapter, not the convention, gives this family's rows
     assert not rows["A31-empty/fine"].measured
+
+
+# --------------------------------------------------------------------------- ticket #606
+
+
+def _several_family_records(opened: str) -> list[RunRecord]:
+    """Four families: many variants, reruns, a failed run, and holdout runs."""
+    win = {"leaderboard": WIN_BLOCK}
+    place = {"leaderboard": PLACE_BLOCK}
+    records: list[RunRecord] = []
+    for family_id, labels in (("R1-a", "abc"), ("R2-b", "de"), ("R3-c", "f"), ("R4-d", "ghi")):
+        for index, label in enumerate(labels):
+            records.append(
+                make_record(
+                    family_id=family_id,
+                    variant=label,
+                    params=win if index % 2 == 0 else place,
+                    metrics=(dev("return_per_100", 80.0 + index, 70.0, 90.0, 100 + index),),
+                )
+            )
+            # a rerun of the same variant at another sha: another run, not another variant
+            records.append(
+                make_record(
+                    family_id=family_id,
+                    variant=label,
+                    git_sha=OTHER_SHA,
+                    params=win if index % 2 == 0 else place,
+                    metrics=(dev("return_per_100", 81.0 + index, 71.0, 91.0, 100 + index),),
+                )
+            )
+    records.append(make_record(family_id="R1-a", variant="broken", status="failed"))
+    records.append(
+        make_record(
+            family_id="R2-b",
+            variant="held",
+            params=win,
+            metrics=(dev("return_per_100", 130.0, 110.0, 150.0, 50),),
+            holdout_open=opened,
+        )
+    )
+    return records
+
+
+def test_rows_from_registry_reads_the_registry_once(tmp_path, monkeypatch):
+    reg = open_registry(tmp_path)
+    append_all(reg, _several_family_records(holdout_open_hash(reg)))
+
+    reads: list[int] = []
+    real_parse = registry_module._parse
+
+    def counting_parse(data):
+        reads.append(len(data))
+        return real_parse(data)
+
+    monkeypatch.setattr(registry_module, "_parse", counting_parse)
+
+    reads.clear()  # setup appends parse the chain too; count only the call
+    rows = rows_from_registry(reg)
+
+    assert {r.family_id for r in rows} == {"R1-a", "R2-b", "R3-c", "R4-d"}
+    assert len(reads) == 1, f"the registry was read and verified {len(reads)} times"
+
+    # per call, not once per process: a second call reads once more
+    rows_from_registry(reg)
+    assert len(reads) == 2
+
+
+def test_family_sizes_match_registry_family_size(tmp_path):
+    reg = open_registry(tmp_path)
+    opened = holdout_open_hash(reg)
+    win = {"leaderboard": WIN_BLOCK}
+    metrics = (dev("return_per_100", 85.0, 75.0, 95.0, 300),)
+
+    def run(family_id, variant, **kw):
+        kw.setdefault("params", win)
+        kw.setdefault("metrics", metrics)
+        return make_record(family_id=family_id, variant=variant, **kw)
+
+    append_all(
+        reg,
+        [
+            # S1: six variants
+            run("S1-multi", "v"),
+            run("S1-multi", "v", git_sha=OTHER_SHA, ticket=451),  # rerun
+            run("S1-multi", "v", params={**win, "k": 2}),  # params differ
+            run("S1-multi", "v", components={"model": "logit-2.0"}),  # components differ
+            run("S1-multi", "v", data_builds={"results": "other-table"}),  # data build differs
+            run("S1-multi", "v", data_builds={"results": "tbl@r1"}),  # table identity 'tbl'
+            run("S1-multi", "v", data_builds={"results": "tbl@r2"}),  # a refresh: same variant
+            run("S1-multi", "w", status="failed", metrics=()),  # failed run still counts
+            run("S1-multi", "h", holdout_open=opened),  # holdout run counts, gives no row
+            # S2: two variants, one rerun three times
+            run("S2-pair", "a"),
+            run("S2-pair", "a", git_sha=OTHER_SHA),
+            run("S2-pair", "a", status="scored", ticket=999),
+            run("S2-pair", "b", fold_scheme="walk-forward-3"),
+            # S3: one variant measured plus one holdout-only variant
+            run("S3-hold", "m"),
+            run("S3-hold", "n", holdout_open=opened),
+            # S4: a single run
+            run("S4-single", "only"),
+        ],
+    )
+
+    # written out here, and read from the registry's own rule before the call under test
+    expected = {"S1-multi": 7, "S2-pair": 2, "S3-hold": 2, "S4-single": 1}
+    assert {f: reg.family_size(f) for f in expected} == expected
+
+    rows = rows_from_registry(reg)
+
+    assert {r.family_id for r in rows} == set(expected)
+    for row in rows:
+        assert row.variants_searched == expected[row.family_id], row.option_id
+        assert row.variants_searched == reg.family_size(row.family_id), row.option_id
+    # the holdout-only variants give no row although they count toward the size
+    assert not any(variant_of(r) in {"h", "n"} for r in rows)
