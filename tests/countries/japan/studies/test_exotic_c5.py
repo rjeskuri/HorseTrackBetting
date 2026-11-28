@@ -77,6 +77,23 @@ summary); no other record names a withheld source. The private report goes throu
 withheld and carries no figure built on it. The run writes nothing inside the repository and
 never opens the holdout. CLI: ``horsetrack japan exotic-c5``.
 
+Place and Wide's second de-vig (review of PR #668; DoD box 2, outline 7, the reframe on #99 of
+2026-11-27): ``PER_TICKET = "per_ticket"``, the chance a paid ticket c pays taken as its own
+implied share min(1, R * 100 / (D_c + 5)) (R the race's payout rate, boosts in; D_c its dividend
+per 100 yen), beside the statute's min(1, P x_c). It is its own family, ``PER_TICKET_FAMILY_ID``
+(not ``FAMILY_ID``, a safe summary stem), because ``FAMILY_ID`` is frozen with ``default_spec()``,
+which stays byte-identical (its sha256 is pinned below). ``build_per_ticket_spec(scheme,
+bootstrap) -> dict`` (the keys ``build_spec`` has, read by ``compute_study``) and
+``default_per_ticket_spec()`` (Japan's scheme, ``bootstrap_settings()``): pools PLACE and
+QUINELLA_PLACE only, ``place_wide_devigs == ["per_ticket"]``, both floor treatments, every
+ordering, input and blend, no E44 pool; E43 and E16 as in the first family.
+``run_study(..., family=PER_TICKET_FAMILY_ID)`` (default ``FAMILY_ID``; an unknown family is a
+``ValueError`` before any read) freezes that spec under that family before either seam reads a
+row and appends its records there; with the default registry it writes that family's own
+committed summary file and index line, never another family's file or the first family's public
+report. CLI: ``horsetrack japan exotic-c5 --family <PER_TICKET_FAMILY_ID>``, whose JSON names the
+family it ran.
+
 Every table is synthetic (``exotic_c5_world``); expected values come from first principles there
 and here (Harville by enumeration, the implied share by formula, alpha by a bounded scalar
 minimisation), or from the dependencies the ticket names (``core.eval.bootstrap``,
@@ -88,8 +105,10 @@ minimisation), or from the dependencies the ticket names (``core.eval.bootstrap`
 from __future__ import annotations  # noqa: I001
 
 import dataclasses
+import itertools
 import json
 import math
+import re
 import shutil
 import uuid
 from collections.abc import Sequence
@@ -111,6 +130,7 @@ from horsetrack.core.eval import registry as registry_module
 from horsetrack.core.eval.bootstrap import paired_bootstrap
 from horsetrack.core.eval.folds import FoldScheme, load_country_scheme, walk_forward
 from horsetrack.core.eval.holdout import is_holdout_day
+from horsetrack.core.eval.leaderboard import rows_from_registry
 from horsetrack.core.eval.registry import (
     FamilyAlreadyFrozen,
     Registry,
@@ -1182,3 +1202,499 @@ def test_jrdb_fed_results_are_written_outside_the_tree(run_a, run_b, tmp_path, m
 def test_the_japan_command_is_registered():
     result = CliRunner().invoke(app, ["japan", "exotic-c5", "--help"])
     assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------------------------
+# 9. Place and Wide's per-ticket de-vig: a second family of its own (review of PR #668)
+# ---------------------------------------------------------------------------------------------
+
+# The first family's frozen spec: docs/specs/exotic-c5-prereg.md and docs/experiments/
+# exotic-c5-japan.md name it, and the private registry holds it. A changed default_spec() would
+# make every rerun of the first family a FamilyAlreadyFrozen.
+FIRST_SPEC_SHA256 = "cdaa71d90e9888d9e9498d3e91dbd4c99a37c0b64d73ff658f6f6758dfbef76e"
+PER_TICKET = "per_ticket"
+OTHER_FAMILY = "japan-stand-in-family"  # another ticket's committed family
+SUMMARY = "docs/experiments/registry/japan"
+INDEX_LINE = re.compile(r"- \[([^\]]+)\]\(([^)]+)\.md\)")
+
+
+def statute_chances(dividends: dict[str, float], rate: float, *, cap: bool = True) -> dict:
+    """P x_c per paid combination (04 §1.2): a ticket on c pays (W_c + L / P) R / W_c per yen, so
+    with r_c = (D_c + 5) / (100 R), W_c / L = 1 / (P (r_c - 1)) and x_c = (W_c / L) / (1 + sum
+    W / L); capped at 1."""
+    n = len(dividends)
+    on_vs_lost = {c: 1.0 / (n * ((d + 5.0) / (100.0 * rate) - 1.0)) for c, d in dividends.items()}
+    total = math.fsum(on_vs_lost.values())
+    out = {c: n * w / (1.0 + total) for c, w in on_vs_lost.items()}
+    return {c: min(1.0, v) for c, v in out.items()} if cap else out
+
+
+def per_ticket_chances(dividends: dict[str, float], rate: float) -> dict:
+    """Each paid combination's own implied share, R * 100 / (D_c + 5), capped at 1."""
+    return {c: min(1.0, rate * 100.0 / (d + 5.0)) for c, d in dividends.items()}
+
+
+CHANCES = {"statute": statute_chances, PER_TICKET: per_ticket_chances}
+
+
+def multi_base_ll(t, pool: str, devig: str) -> float:
+    chance = CHANCES[devig](t.dividends[pool], t.rates[pool])
+    return -float(np.mean([math.log(chance[c]) for c in t.winners[pool]]))
+
+
+def multi_deltas(world: World, race_ids, pool: str, p_of, devig: str) -> pd.Series:
+    """Per race: the de-vig baseline's log loss minus the Harville C5 model's, at 1/k over the
+    race-pool's k paid combinations."""
+    out = {}
+    for r in race_ids:
+        t = world.truth[r]
+        out[r] = multi_base_ll(t, pool, devig) - model_ll(
+            p_of(r, t), pool, t.winners[pool], t.places
+        )
+    return pd.Series(out, dtype=float)
+
+
+def multi_q_p(world: World, race_ids, pool: str, devig: str) -> list[tuple]:
+    """Per race: the de-vig's chance and the normalised market's Harville probability of each
+    paid combination."""
+    out = []
+    for r in race_ids:
+        t = world.truth[r]
+        chance = CHANCES[devig](t.dividends[pool], t.rates[pool])
+        probs = pool_probabilities(t.p_norm, places=t.places)[pool]
+        out.append(
+            (
+                np.array([chance[c] for c in t.winners[pool]]),
+                np.array([probs[c] for c in t.winners[pool]]),
+            )
+        )
+    return out
+
+
+def multi_blend_loss(alpha: float, races: list[tuple]) -> float:
+    return float(np.mean([-np.mean(np.log(alpha * q + (1.0 - alpha) * p)) for q, p in races]))
+
+
+def multi_reference_alpha(races: list[tuple]) -> float:
+    res = minimize_scalar(lambda a: multi_blend_loss(a, races), bounds=(0.0, 1.0),
+                          method="bounded", options={"xatol": 1e-12})  # fmt: skip
+    return float(res.x)
+
+
+def top_pick_returns(t, pool: str) -> list[float]:
+    """The return of ¥100 on the normalised market's most probable combination (Harville), at
+    its paid dividend (0 when it lost): one value, or one per combination tied with it within
+    rounding (two runners at the same odds), since a tie-break on floats is not pinned here."""
+    probs = pool_probabilities(t.p_norm, places=t.places)[pool]
+    best = max(probs.values())
+    return sorted({t.dividends[pool].get(c, 0.0) for c, v in probs.items() if v > best - 1e-9})
+
+
+def assert_return_matches(row, options: dict[str, list[float]], world: World, boot: dict):
+    """The row's mean, bounds and n are those of one reading of the tied picks' returns."""
+    assert row.n == len(options)
+    assert sum(len(v) > 1 for v in options.values()) <= 2, "too many tied top picks"
+    readings = [
+        pd.Series(dict(zip(options, values, strict=True)), dtype=float)
+        for values in itertools.product(*options.values())
+    ]
+    for per_race in readings:
+        if abs(per_race.mean() - row.return_per_100) > 1e-9:
+            continue
+        iv = bounds(per_race, world, boot)
+        if abs(iv.lo - row.ci_lo) <= 1e-9 and abs(iv.hi - row.ci_hi) <= 1e-9:
+            return
+    pytest.fail(f"{row.option_id}: {row.return_per_100} [{row.ci_lo}, {row.ci_hi}] matches no "
+                f"reading of {[round(s.mean(), 6) for s in readings]}")  # fmt: skip
+
+
+def _stand_in_repo(repo: Path) -> None:
+    """The committed tree a per-ticket run meets: the first family's summary file and public
+    report, another family's file, and the index of both."""
+    summary = repo / SUMMARY
+    summary.mkdir(parents=True)
+    first = exotic_c5.FAMILY_ID
+    (summary / f"{first}.md").write_bytes(b"# stand-in: the first family's committed summary\n")
+    (summary / f"{OTHER_FAMILY}.md").write_bytes(b"# stand-in: another ticket's family\n")
+    index = [
+        "# Experiment registry index",
+        "",
+        "Written by `horsetrack.core.eval.registry.write_summary`; do not edit by hand. One file",
+        "per family, each holding that family's runs.",
+        "",
+        f"- [{first}]({first}.md)",
+        f"- [{OTHER_FAMILY}]({OTHER_FAMILY}.md)",
+    ]
+    (summary / "README.md").write_text("\n".join(index) + "\n", encoding="utf-8")
+    report = repo / exotic_c5.PUBLIC_REPORT
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_bytes(b"# stand-in: the first family's public report\n")
+
+
+def _files(root: Path) -> dict[str, bytes]:
+    files = [p for p in sorted(root.rglob("*")) if p.is_file()]
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in files}
+
+
+@dataclass
+class TicketRun:
+    world: World
+    cli: object
+    registry: Registry
+    records: list[RunRecord]  # the per-ticket family's
+    planted: RunRecord  # the first family's record the registry held before the run
+    repo: Path
+    stand_in: dict[str, bytes]  # the committed tree before the run
+    committed: dict[str, bytes]  # and after it
+    out_dir: Path
+    store: FakeStore
+    form: FakeForm
+
+
+def _ticket_run(root: Path, world: World, planted: RunRecord) -> TicketRun:
+    """`horsetrack japan exotic-c5 --family <per-ticket>` with the default registry (the first
+    family already frozen there with its spec and holding a record) and the repository root a
+    stand-in under tmp, so the committed outputs are written where the test reads them."""
+    family = exotic_c5.PER_TICKET_FAMILY_ID
+    root.mkdir(parents=True, exist_ok=True)
+    data, repo, out = root / "data", root / "repo", root / "reports"
+    data.mkdir()
+    _stand_in_repo(repo)
+    stand_in = _files(repo)
+    store, form = FakeStore(world), FakeForm(world)
+
+    def folder(country):
+        return repo / "docs" / "experiments" / "registry" / country
+
+    before = _snapshot()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("HORSETRACK_DATA_DIR", str(data))
+        mp.setattr(env, "repo_root", lambda: repo)
+        mp.setattr(registry_module, "summary_dir", folder)
+        mp.setattr(exotic_c5, "summary_dir", folder, raising=False)
+        mp.setattr(holdout.LockedHoldout, "open", _refuse_holdout)
+        mp.setattr(exotic_c5, "load_store", store)
+        mp.setattr(exotic_c5, "load_form", form)
+        try:
+            registry = registry_module.default_registry("japan")
+            registry.freeze_family(exotic_c5.FAMILY_ID, exotic_c5.default_spec())
+            registry.append(planted)
+            args = ["japan", "exotic-c5", "--family", family, "--from", FIRST_DAY.isoformat(),
+                    "--to", LAST_DAY.isoformat(), "--out", str(out)]  # fmt: skip
+            cli = CliRunner().invoke(app, args)
+        finally:
+            changed = _restore(before)
+    assert not changed, "the run wrote the repository's ledger, docs or a holdout log"
+    assert cli.exit_code == 0, (cli.output, cli.exception)
+    return TicketRun(world, cli, registry, registry.records(family), planted, repo, stand_in,
+                     _files(repo), out, store, form)  # fmt: skip
+
+
+def _planted(run: Run) -> RunRecord:
+    return next(r for r in run.records if r.status == "scored" and not is_licensed_record(r))
+
+
+@pytest.fixture(scope="module")
+def pt_a(world, run_a, tmp_path_factory) -> TicketRun:
+    return _ticket_run(tmp_path_factory.mktemp("per-ticket-a"), world, _planted(run_a))
+
+
+@pytest.fixture(scope="module")
+def pt_b(run_a, tmp_path_factory) -> TicketRun:
+    """pt_a's store; only the JRDB-fed member's probabilities differ."""
+    other = make_world(RUN_MEETINGS, seed=RUN_SEED, form_seed=RUN_SEED + 17)
+    return _ticket_run(tmp_path_factory.mktemp("per-ticket-b"), other, _planted(run_a))
+
+
+def test_per_ticket_family_has_its_own_spec_and_the_first_stays_frozen(tmp_path):
+    family = exotic_c5.PER_TICKET_FAMILY_ID
+    assert exotic_c5.PER_TICKET == PER_TICKET
+    assert isinstance(family, str) and registry_module.summary_stem(family) == family
+    assert family.casefold() != exotic_c5.FAMILY_ID.casefold()
+
+    spec = exotic_c5.default_per_ticket_spec()
+    json.dumps(spec)  # plain JSON, as the registry requires
+    assert spec == exotic_c5.default_per_ticket_spec()
+    scheme = load_country_scheme("japan")
+    assert spec == exotic_c5.build_per_ticket_spec(scheme, exotic_c5.bootstrap_settings())
+    assert spec["family_id"] == family and spec["ticket"] == 459
+    assert spec["fold_scheme"] == dataclasses.asdict(scheme)
+    d7 = load_country_yaml("japan", "scoring")["bootstrap"]
+    assert spec["bootstrap"]["level"] == d7["level"] and spec["bootstrap"]["n_boot"] == d7["n_boot"]
+    assert isinstance(spec["bootstrap"]["seed"], int)
+    assert sorted(spec["pools"]) == sorted([PLACE, WIDE])  # Place and Wide only
+    for key, values in {
+        "place_wide_devigs": [PER_TICKET],
+        "floor_treatments": ["drop", "bound"],
+        "orderings": list(exotic_c5.ORDERINGS),
+        "inputs": list(exotic_c5.INPUTS),
+        "blends": list(exotic_c5.BLENDS),
+        "e44_pools": [],  # E44 is Trio and Trifecta: the first family's
+    }.items():
+        assert spec[key] == values, key
+    small = exotic_c5.build_per_ticket_spec(SMALL_SCHEME, SMALL_BOOT)
+    assert small["fold_scheme"] == dataclasses.asdict(SMALL_SCHEME)
+    assert small["bootstrap"] == SMALL_BOOT and small != spec
+
+    # The first family's spec is the one frozen: byte-identical, so its rerun freezes as a no-op;
+    # the second family freezes beside it in the same registry.
+    first = exotic_c5.default_spec()
+    assert first["place_wide_devigs"] == ["statute"]
+    registry = _registry(tmp_path)
+    assert registry.freeze_family(exotic_c5.FAMILY_ID, first) == FIRST_SPEC_SHA256
+    second = registry.freeze_family(family, spec)
+    assert second != FIRST_SPEC_SHA256
+    rerun = registry.freeze_family(exotic_c5.FAMILY_ID, exotic_c5.default_spec())  # no raise
+    assert rerun == FIRST_SPEC_SHA256
+    assert registry.frozen_spec_hash(family) == second
+    assert registry.frozen_spec(family) == json.loads(json.dumps(spec))
+
+
+def test_per_ticket_spec_is_frozen_before_any_outcome_is_read(tmp_path, monkeypatch, world):
+    family = exotic_c5.PER_TICKET_FAMILY_ID
+    spec = exotic_c5.default_per_ticket_spec()
+    registry = _registry(tmp_path)
+    # The first family is frozen here with another spec: the per-ticket run neither reads nor
+    # refreezes it.
+    registry.freeze_family(exotic_c5.FAMILY_ID, {**exotic_c5.default_spec(), "planted": True})
+    first = registry.frozen_spec_hash(exotic_c5.FAMILY_ID)
+    seen = []
+
+    def seam(name):
+        def call(days):
+            seen.append((name, registry.frozen_spec(family), list(registry.records(family))))
+            raise _StopHere
+
+        return call
+
+    monkeypatch.setattr(holdout.LockedHoldout, "open", _refuse_holdout)
+    monkeypatch.setattr(exotic_c5, "load_store", seam("store"))
+    monkeypatch.setattr(exotic_c5, "load_form", seam("form"))
+    with pytest.raises(_StopHere):
+        exotic_c5.run_study(date_from=FIRST_DAY, date_to=LAST_DAY, out_dir=tmp_path / "out",
+                            registry=registry, family=family)  # fmt: skip
+    assert seen, "neither seam was called"
+    for name, frozen, records in seen:
+        assert frozen == json.loads(json.dumps(spec)), f"{name} was read before the freeze"
+        assert records == [], f"{name} was read after a record was appended"
+    assert registry.frozen_spec_hash(exotic_c5.FAMILY_ID) == first
+
+    # Frozen with another spec, or an unknown family: refused before any read, nothing appended.
+    refused = _registry(tmp_path / "refused")
+    refused.freeze_family(family, {**spec, "changed_after_the_freeze": True})
+    store, form = FakeStore(world), FakeForm(world)
+    monkeypatch.setattr(exotic_c5, "load_store", store)
+    monkeypatch.setattr(exotic_c5, "load_form", form)
+    out = tmp_path / "refused-out"
+    with pytest.raises(FamilyAlreadyFrozen):
+        exotic_c5.run_study(date_from=FIRST_DAY, date_to=LAST_DAY, out_dir=out, registry=refused,
+                            family=family)  # fmt: skip
+    unknown = _registry(tmp_path / "unknown")
+    with pytest.raises(ValueError):
+        exotic_c5.run_study(date_from=FIRST_DAY, date_to=LAST_DAY, out_dir=out, registry=unknown,
+                            family="japan-c5-no-such-family")  # fmt: skip
+    assert store.calls == 0 and form.calls == 0
+    assert refused.records() == [] and unknown.records() == []
+    assert unknown.frozen_spec("japan-c5-no-such-family") is None
+    assert not out.exists() or not any(p.is_file() for p in out.rglob("*"))
+
+
+def test_place_wide_baselines_match_the_first_principles_reference(run_a, pt_a, scored):
+    """Both de-vigs (the first family's statute, the second's per-ticket) against the reference:
+    per paid combination min(1, P x_c) or min(1, R * 100 / (D_c + 5)), scored at 1/k; Place's
+    places by the field at sale; 'drop' leaves out the floor-bound race-pools."""
+    world = pt_a.world
+    ids = _scored_ids(scored)
+    supers = [r for r in ids if world.truth[r].race_date in SUPER_DAYS]
+    capped = 0
+    for r in ids:
+        t = world.truth[r]
+        finish = {h: k + 1 for k, h in enumerate(t.order)}
+        for pool in (PLACE, WIDE):
+            paid = exotic.winning_combinations(finish, pool, field_at_sale=len(t.horses))
+            assert sorted(paid) == sorted(t.winners[pool]) == sorted(t.dividends[pool]), (r, pool)
+            raw = statute_chances(t.dividends[pool], t.rates[pool], cap=False)
+            capped += any(v > 1.0 for v in raw.values())
+    assert capped > 0, "the statute's cap at 1 binds on no race-pool"
+    assert len({len(world.truth[r].winners[PLACE]) for r in ids}) == 2  # two and three places
+
+    inputs = {
+        exotic_c5.NORMALISED: lambda r, t: t.p_norm,
+        exotic_c5.FORM: lambda r, t: normalised(t.p_form),
+    }
+    families = {
+        "statute": (run_a.records, exotic_c5.default_spec()["bootstrap"]),
+        PER_TICKET: (pt_a.records, exotic_c5.default_per_ticket_spec()["bootstrap"]),
+    }
+    values = {}
+    for devig, (records, boot) in families.items():
+        for pool in (PLACE, WIDE):
+            kept = {
+                "bound": ids,
+                "drop": [r for r in ids if not floor_bound(world.truth[r].dividends[pool])],
+            }
+            for name, p_of in inputs.items():
+                per_race = multi_deltas(world, ids, pool, p_of, devig)
+                for floor, races in kept.items():
+                    want = {"pool": pool, "input": name, "ordering": "harville"}
+                    want |= {"blend": NO_BLEND, "devig": devig, "floor": floor}
+                    rec = one(records, "E43", **want)
+                    assert rec.status == "scored", want
+                    assert_metric_matches(metric(rec, DELTA), per_race[races], world, boot)
+                    values[(devig, pool, name, floor)] = per_race[races].mean()
+                    sp = one(records, "E16", **want)
+                    sp_races = [r for r in races if r in supers]
+                    assert_metric_matches(metric(sp, DELTA), per_race[sp_races], world, boot)
+    # de-vig, pool, input and floor each move the figure: no constant passes
+    assert len({round(v, 9) for v in values.values()}) == len(values)
+
+    # The per-ticket linear blend: alpha per fold minimises the training races' log loss of
+    # alpha q + (1 - alpha) P_C5, q the per-ticket chance; each fold's alpha on its test races.
+    boot = families[PER_TICKET][1]
+    labels = [f.test_start.isoformat() for f in scored]
+    for pool in (PLACE, WIDE):
+        rec = one(pt_a.records, "E43", pool=pool, input=exotic_c5.NORMALISED, ordering="harville",
+                  blend=LINEAR, devig=PER_TICKET, floor="bound")  # fmt: skip
+        assert rec.status == "scored", pool
+        alphas = {m.fold: m.value for m in rec.metrics if m.metric == "alpha"}
+        assert sorted(alphas) == sorted(labels), (pool, alphas)
+        per_race = {}
+        for f, label in zip(scored, labels, strict=True):
+            a = alphas[label]
+            train = multi_q_p(world, f.train_ids, pool, PER_TICKET)
+            ref = multi_reference_alpha(train)
+            assert 0.0 <= a <= 1.0 and a == pytest.approx(ref, abs=2e-3), (pool, label, a, ref)
+            assert multi_blend_loss(a, train) <= multi_blend_loss(ref, train) + 1e-9
+            test = multi_q_p(world, f.test_ids, pool, PER_TICKET)
+            for r, (q, p) in zip(f.test_ids, test, strict=True):
+                blended = -float(np.mean(np.log(a * q + (1.0 - a) * p)))
+                per_race[r] = multi_base_ll(world.truth[r], pool, PER_TICKET) - blended
+        assert_metric_matches(metric(rec, DELTA), pd.Series(per_race, dtype=float), world, boot)
+
+
+def test_every_per_ticket_variant_is_a_registry_record_and_a_ranked_row(pt_a, scored):
+    family = exotic_c5.PER_TICKET_FAMILY_ID
+    spec = exotic_c5.default_per_ticket_spec()
+    registry, records = pt_a.registry, pt_a.records
+    assert records, "no per-ticket record was appended"
+    # Its own family, frozen with its own spec; the first family's freeze and records untouched.
+    assert registry.frozen_spec(family) == json.loads(json.dumps(spec))
+    assert registry.frozen_spec_hash(exotic_c5.FAMILY_ID) == FIRST_SPEC_SHA256
+    assert registry.records(exotic_c5.FAMILY_ID) == [pt_a.planted]
+    assert {r.family_id for r in registry.records()} == {exotic_c5.FAMILY_ID, family}
+    assert registry.family_size(family) == len(records)  # one record a variant
+    assert {r.ticket for r in records} == {459}
+    assert {r.hypothesis_id for r in records} == {"E43", "E16"}
+    want = _expected_e43_keys(spec)
+    assert want and {k[0] for k in want} == {PLACE, WIDE} and {k[4] for k in want} == {PER_TICKET}
+    assert _keys_of(records, "E43") == want
+    assert _keys_of(records, "E16") == want
+    log_linear = [r for r in records if r.params.get("blend") == LOG_LINEAR]
+    assert log_linear, "pool_blend's log-linear form is not recorded"
+    for r in records:
+        json.dumps(r.params)
+        assert r.params.get("pool") in (PLACE, WIDE), r.params
+        if r.params.get("blend") == LOG_LINEAR:
+            assert r.status == "failed", r.params  # not runnable yet: no full final boards
+            assert not any(m.metric == DELTA for m in r.metrics)
+        else:
+            assert r.status == "scored", (r.hypothesis_id, r.params)
+        if r.params.get("input") == exotic_c5.FORM:
+            assert "jrdb" in r.sources and is_licensed_record(r), r.params
+        else:
+            assert not is_licensed_record(r), (r.params, r.sources, r.data_builds)
+
+    # Each no-blend variant is a measured leaderboard row (E16 its super_premium segment).
+    rows = {row.option_id: row for row in rows_from_registry(registry)}
+    for r in records:
+        if r.params.get("blend") != NO_BLEND:
+            continue
+        option = f"{family}/{r.variant}" + ("[super_premium]" if r.hypothesis_id == "E16" else "")
+        row = rows.get(option)
+        assert row is not None and row.return_per_100 is not None, option
+        assert row.ci_lo is not None and row.ci_hi is not None and row.ci_lo <= row.ci_hi, option
+        assert row.pool == r.params["pool"], option
+        assert row.licensed == (r.params.get("input") == exotic_c5.FORM), option
+    # Its value: ¥100 on the most probable combination, at the paid dividend (0 when it lost).
+    world, ids = pt_a.world, _scored_ids(scored)
+    boot = spec["bootstrap"]
+    got = {}
+    for pool in (PLACE, WIDE):
+        kept = {
+            "bound": ids,
+            "drop": [r for r in ids if not floor_bound(world.truth[r].dividends[pool])],
+        }
+        for floor, races in kept.items():
+            rec = one(records, "E43", pool=pool, input=exotic_c5.NORMALISED, ordering="harville",
+                      blend=NO_BLEND, devig=PER_TICKET, floor=floor)  # fmt: skip
+            row = rows[f"{family}/{rec.variant}"]
+            options = {r: top_pick_returns(world.truth[r], pool) for r in races}
+            assert_return_matches(row, options, world, boot)
+            got[(pool, floor)] = row.return_per_100
+    assert len({round(v, 9) for v in got.values()}) == len(got)
+
+    # Development days only, every one with races; the holdout is never opened.
+    dev_days = {t.race_date for t in world.truth.values()} - set(HELD)
+    for seam in (pt_a.store, pt_a.form):
+        asked = set(seam.asked)
+        assert asked, "the seam was never called"
+        assert not any(is_holdout_day("japan", d) for d in asked), "a holdout day was asked for"
+        assert all(FIRST_DAY <= d <= LAST_DAY for d in asked), "a day outside the span"
+        assert dev_days <= asked, "a development day with races was not read"
+    assert HOLDOUT_OPENED == []
+
+
+def test_per_ticket_jrdb_fed_results_stay_out_of_the_tree(pt_a, pt_b):
+    family = exotic_c5.PER_TICKET_FAMILY_ID
+
+    def identity(r):
+        return (r.hypothesis_id, json.dumps(r.params, sort_keys=True), r.status)
+
+    def public(run):
+        return sorted(
+            (identity(r), tuple(dataclasses.astuple(m) for m in r.metrics))
+            for r in run.records
+            if not is_licensed_record(r)
+        )
+
+    # Only the JRDB-fed member differs between the two runs: its figures move, nothing public does.
+    assert public(pt_a) and public(pt_a) == public(pt_b)
+    form_a = {identity(r): r.metrics for r in pt_a.records if is_licensed_record(r)}
+    form_b = {identity(r): r.metrics for r in pt_b.records if is_licensed_record(r)}
+    assert form_a and set(form_a) == set(form_b)
+    assert any(form_a[k] != form_b[k] for k in form_a), "the member change moved no figure"
+
+    # The committed outputs: the family's own summary file and index line, the same bytes in both
+    # runs; the first family's summary and public report, and another family's file, untouched.
+    assert pt_a.committed == pt_b.committed
+    own = pt_a.committed.get(f"{SUMMARY}/{registry_module.summary_stem(family)}.md")
+    assert own is not None, "the family's committed summary file was not written"
+    text = own.decode("utf-8")
+    assert family in text and registry_module.WITHHELD_LABEL in text
+    for r in pt_a.records:
+        assert f"| {r.hypothesis_id} | {r.variant} |" in text, r.variant
+    for path, raw in pt_a.stand_in.items():
+        if path != f"{SUMMARY}/README.md":
+            assert pt_a.committed.get(path) == raw, f"{path} was rewritten"
+    index = pt_a.committed[f"{SUMMARY}/README.md"].decode("utf-8")
+    listed = {m[1] for line in index.splitlines() if (m := INDEX_LINE.fullmatch(line))}
+    assert listed == {exotic_c5.FAMILY_ID, OTHER_FAMILY, family}
+
+    # The private report holds the member's results, outside the repository and its stand-in.
+    files = [p for p in pt_a.out_dir.rglob("*") if p.is_file()]
+    assert files, "no private report"
+    for p in files:
+        assert not p.resolve().is_relative_to(REPO.resolve())
+        assert not p.resolve().is_relative_to(pt_a.repo.resolve())
+    assert any(exotic_c5.FORM in p.read_text(encoding="utf-8", errors="ignore") for p in files)
+
+
+def test_the_command_runs_the_per_ticket_family(pt_a):
+    shown = CliRunner().invoke(app, ["japan", "exotic-c5", "--help"])
+    assert shown.exit_code == 0, shown.output
+    assert "--family" in shown.output
+    stdout = pt_a.cli.stdout
+    printed = json.loads(stdout[stdout.index("{") : stdout.rindex("}") + 1])
+    assert printed["family_id"] == exotic_c5.PER_TICKET_FAMILY_ID
+    assert printed["spec_hash"] == pt_a.registry.frozen_spec_hash(exotic_c5.PER_TICKET_FAMILY_ID)
+    assert printed["variants"] == len(pt_a.records)

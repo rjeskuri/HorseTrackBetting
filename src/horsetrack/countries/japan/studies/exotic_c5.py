@@ -29,12 +29,19 @@ loss at 1/k per winning combination (#69).
   per ¥100 of a flat ¥100 on the model's most probable combination, settled at the paid dividends
   (`docs/specs/leaderboard.md`'s convention), so each pool's result is a ranked row.
 
-`run_study` checks the output folder, freezes `default_spec()` in the run registry before either
-seam reads a row, reads development days only (`is_holdout_day`; the holdout is never opened),
-scores, appends one registry record per variant (failures included) and writes the private report
-through `write_report`. With the default registry it also writes this family's committed summary
-and the public report (`render_public_report`), which hold no licensed figure. The pure part is
-`compute_study`. Pre-registration: `docs/specs/exotic-c5-prereg.md`.
+- The second family, `PER_TICKET_FAMILY_ID` (`build_per_ticket_spec`; the owner's reframe on #99
+  of 2026-11-27 registers each candidate de-vig, the review of PR #668): Place and Wide alone
+  against `PER_TICKET`, each paid ticket's own implied share min(1, R*100/(D_c+5)), with every
+  input, ordering, blend and floor treatment; its public report sets each variant beside its
+  statute twin of the first family (`statute_twins`). The first family's spec is unchanged.
+
+`run_study` checks the family and the output folder, freezes the family's spec in the run
+registry before either seam reads a row, reads development days only (`is_holdout_day`; the
+holdout is never opened), scores, appends one registry record per variant (failures included)
+and writes the private report through `write_report`. With the default registry it also writes
+the family's committed summary and its public report (`render_public_report`), which hold no
+licensed figure. The pure part is `compute_study`. Pre-registration (both families):
+`docs/specs/exotic-c5-prereg.md`.
 
 Memory and time: one ordering family at a time; per race one trifecta per input and fold
 parameters, kept only while that family is scored; the blend's alpha is fitted on at most
@@ -67,7 +74,13 @@ from horsetrack.core import env, paths
 from horsetrack.core.eval.bootstrap import Interval, paired_bootstrap
 from horsetrack.core.eval.folds import Fold, FoldScheme, load_country_scheme, walk_forward
 from horsetrack.core.eval.holdout import _git_sha, is_holdout_day
-from horsetrack.core.eval.registry import RunRecord, default_registry, summary_dir, write_summary
+from horsetrack.core.eval.registry import (
+    RunRecord,
+    default_registry,
+    is_licensed_record,
+    summary_dir,
+    write_summary,
+)
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.pricing import clean_odds
 from horsetrack.countries.japan import takeout
@@ -100,7 +113,10 @@ ORDERINGS = exotic.FAMILIES
 NORMALISED, CALIBRATED, FORM = "normalised", "calibrated", "stage2:q:form"
 INPUTS = (NORMALISED, CALIBRATED, FORM)
 E44_POOLS = (TRIO, TIERCE)
-PLACE_WIDE_DEVIGS = ("statute",)
+STATUTE, PER_TICKET = "statute", "per_ticket"
+PLACE_WIDE_DEVIGS = (STATUTE,)  # the first family's (frozen in default_spec)
+DEVIGS = (STATUTE, PER_TICKET)  # every Place and Wide de-vig compute_study knows
+PER_TICKET_FAMILY_ID = "japan-c5-exotic-dividends-per-ticket"
 FLOOR_TREATMENTS = ("drop", "bound")
 NO_BLEND, LINEAR, LOG_LINEAR = "none", "linear", "log_linear"
 BLENDS = (NO_BLEND, LINEAR, LOG_LINEAR)
@@ -119,6 +135,7 @@ SUPER = "super_premium"
 FAILED_ORDERING = "races_ordering_failed"
 MEMBER_FILE = c4.MEMBER_FILE
 PUBLIC_REPORT = Path("docs") / "experiments" / "exotic-c5-japan.md"
+PER_TICKET_PUBLIC_REPORT = Path("docs") / "experiments" / "exotic-c5-per-ticket-japan.md"
 SPEC_DOC = "docs/specs/exotic-c5-prereg.md"
 LOG_LINEAR_ERROR = (
     "not runnable yet: exotic.pool_blend's log-linear pool needs the full final board of the "
@@ -144,7 +161,8 @@ TAG = {
     NO_BLEND: "none",
     LINEAR: "lin",
     LOG_LINEAR: "loglin",
-    "statute": "stat",
+    STATUTE: "stat",
+    PER_TICKET: "tick",
 }
 RACE_COLUMNS = ["race_id", "race_date", "meeting_id", "race_class_raw", "field_size", "status"]
 RUNNER_COLUMNS = [
@@ -303,19 +321,76 @@ def default_spec() -> dict:
     return build_spec(load_country_scheme(COUNTRY), bootstrap_settings())
 
 
+def build_per_ticket_spec(scheme: FoldScheme, bootstrap: Mapping) -> dict:
+    """The second family's spec (plain JSON, `build_spec`'s keys): Place and Wide against the
+    per-ticket de-vig, every ordering, input, blend and floor treatment, no E44. The owner's
+    reframe on #99 (2026-11-27) registers each candidate Place and Wide de-vig as a variant; the
+    first family's spec is frozen, so this de-vig is a family of its own (review of PR #668)."""
+    spec = build_spec(scheme, bootstrap)
+    chance = (
+        "the chance a paid ticket c pays is its own implied share min(1, R*100/(D_c+5)) (R the "
+        "race's payout rate, takeout.race_takeout, boosts and race_class_raw in; D_c its dividend "
+        "per 100 yen, the 5-yen mean breakage back): the money on c against what c pays, as in a "
+        "pool with one winner; P times #99 question 3(b)'s equal split R*100/(P (D_c+5))"
+    )
+    spec.update(
+        family_id=PER_TICKET_FAMILY_ID,
+        hypotheses={
+            "E43": "C5 (an input's Win probabilities through an ordering, optionally blended with "
+            "the pool) beats the per-ticket dividend baseline in log loss on the paid "
+            "combinations of Place and Wide, per pool: mean ΔLL (dividends minus model) above 0",
+            "E16": "the E43 table on the race-pools that paid the super_premium rate (80%)",
+        },
+        null="the per-ticket dividends are at least as good as C5 in Place and in Wide (ΔLL <= "
+        "0): C5 adds nothing to the pools' own prices",
+        pools=list(MULTI),
+        e44_pools=[],
+        place_wide_devigs=[PER_TICKET],
+        e44=f"none in this family: E44 (Trio and Trifecta) is {FAMILY_ID}'s",
+        decisions=DECISIONS
+        | {
+            "#99 reframe": "each candidate Place and Wide de-vig is a registered variant (owner, "
+            f"2026-11-27): {FAMILY_ID} holds the statute's, this family the per-ticket share, "
+            "with the first family's spec unchanged (review of PR #668)"
+        },
+    )
+    spec["baseline"] = {**spec["baseline"], "place_wide": {PER_TICKET: chance}}
+    spec["leaderboard"] = {
+        **spec["leaderboard"],
+        "devig": "the bet and its return do not depend on the de-vig: each no-blend row's return "
+        f"equals its statute twin's in {FAMILY_ID}",
+    }
+    return spec
+
+
+def default_per_ticket_spec() -> dict:
+    """The spec `run_study(family=PER_TICKET_FAMILY_ID)` freezes."""
+    return build_per_ticket_spec(load_country_scheme(COUNTRY), bootstrap_settings())
+
+
+def family_spec(family: str) -> dict:
+    """The spec `run_study` freezes for `family`; ValueError for a family it does not run."""
+    if family == FAMILY_ID:
+        return default_spec()
+    if family == PER_TICKET_FAMILY_ID:
+        return default_per_ticket_spec()
+    raise ValueError(f"unknown family {family!r}: {FAMILY_ID} or {PER_TICKET_FAMILY_ID}")
+
+
 # --------------------------------------------------------------------------- the store, prepared
 
 
 @dataclass(frozen=True)
 class _Paid:
     """One race-pool's paid combinations: positions into the race's starters, dividends, the
-    dividend baseline's chance of each, and whether the 110-yen floor bound it."""
+    dividend baseline's chance of each and its log loss (per Place and Wide de-vig; None for a
+    single-winner pool), and whether the 110-yen floor bound it."""
 
     keys: tuple[tuple[int, ...], ...]
     index: tuple[np.ndarray, ...]
     dividends: np.ndarray
-    base: np.ndarray
-    base_ll: float
+    base: dict[str | None, np.ndarray]
+    base_ll: dict[str | None, float]
     floor: bool
 
     def payout(self, key: tuple[int, ...]) -> float:
@@ -524,6 +599,7 @@ def _attach_paid(data: _Data, dividends: pd.DataFrame, spec: dict) -> None:
     )
     rpos, refund = rpos[keep], refund[keep]
     shares, floors, failed = _race_pool_shares(frame)
+    devigs = [d for d in spec["place_wide_devigs"] if d in DEVIGS]  # another fails its variants
     combos = frame["combination"].to_numpy()
     values = frame["dividend"].to_numpy()
     pools = frame["pool"].to_numpy()
@@ -561,21 +637,36 @@ def _attach_paid(data: _Data, dividends: pd.DataFrame, spec: dict) -> None:
         if keys is None or len(set(keys)) < len(keys):
             left["not_in_field"] += 1
             continue
-        x = shares[rows]
-        base = np.minimum(1.0, len(rows) * x) if pool in MULTI else x
+        paid = values[rows].astype(float)
+        if pool in MULTI:
+            base = {d: _ticket_chances(d, shares[rows], paid, data.ids[pos], pool,
+                                       data.labels[pos]) for d in devigs}  # fmt: skip
+        else:
+            base = {None: shares[rows]}
         index = tuple(np.array([k[a] for k in keys], dtype=np.int64) for a in range(SIZE[pool]))
         data.paid[pos][pool] = _Paid(
             keys=tuple(keys),
             index=index,
-            dividends=values[rows].astype(float),
+            dividends=paid,
             base=base,
-            base_ll=float(-np.log(base).mean()),
+            base_ll={d: float(-np.log(b).mean()) for d, b in base.items()},
             floor=bool(floors[rows].any()),
         )
     counts["race_pools_paid"] = len(groups)
     for why, k in left.items():
         counts[f"race_pools_left_out_{why}"] = k
     counts["race_pools_scoreable"] = sum(len(p) for p in data.paid)
+
+
+def _ticket_chances(devig: str, shares: np.ndarray, dividends: np.ndarray, race_id: str,
+                    pool: str, label: str | None) -> np.ndarray:  # fmt: skip
+    """The chance each paid ticket of a Place or Wide race-pool pays, under a de-vig of the
+    spec's baseline.place_wide: P times its statute share, or its own implied share
+    R*100/(D_c+5) at the race's payout rate; either capped at 1."""
+    if devig == STATUTE:
+        return np.minimum(1.0, len(shares) * shares)
+    rate = takeout.race_takeout(str(race_id), pool, race_class_raw=label).payout_rate
+    return np.minimum(1.0, rate * exotic.UNIT_STAKE / (dividends + exotic.MEAN_BREAKAGE))
 
 
 def _attach_form(data: _Data, form: pd.DataFrame) -> None:
@@ -915,7 +1006,7 @@ class _Scorer:
 
     # -- one grid point -------------------------------------------------------------------
 
-    def point(self, name: str, family: str | None, pool: str, blend: str,
+    def point(self, name: str, family: str | None, pool: str, blend: str, devig: str | None,
               floor: str | None) -> _Point:  # fmt: skip
         out = _Point()
         drop = floor == "drop"
@@ -942,7 +1033,7 @@ class _Scorer:
                     v = None if x is None else self.values(name, family, k, int(i))
                     if v is None or isinstance(v.get(pool), Exception):
                         continue
-                    qs.append(x.base)
+                    qs.append(x.base[devig])
                     ps.append(v[pool][0])
                 if not qs:
                     out.folds_without_fit += 1
@@ -958,13 +1049,14 @@ class _Scorer:
                     if out.first_error is None and isinstance(got, Exception):
                         out.first_error = f"{type(got).__name__}: {got}"
                     continue
-                p = got[0] if blend == NO_BLEND else alpha * x.base + (1.0 - alpha) * got[0]
+                q, base_ll = x.base[devig], x.base_ll[devig]
+                p = got[0] if blend == NO_BLEND else alpha * q + (1.0 - alpha) * got[0]
                 ll = float(-np.log(p).mean())
                 out.ids.append(self.data.ids[i])
                 out.pos.append(i)
-                out.delta.append(x.base_ll - ll)
+                out.delta.append(base_ll - ll)
                 out.model_ll.append(ll)
-                out.base_ll.append(x.base_ll)
+                out.base_ll.append(base_ll)
                 out.ret.append(got[1])
         if not out.ids:
             why = f"; {out.failures} race(s) failed, first: {out.first_error}"
@@ -1135,13 +1227,13 @@ def _grid_point(study: Study, scorer: _Scorer, scheme: str, level: float, name: 
             pool, _rule(pool, name, family, floor, "super_premium race-pools"), level
         )
     error = scorer.input_error(name)
-    if error is None and devig not in (None, *PLACE_WIDE_DEVIGS):
+    if error is None and devig not in (None, *DEVIGS):
         error = f"unknown Place and Wide de-vig {devig!r}"
     if error is not None:
         study.variants += [dataclasses.replace(v, error=error) for v in (e43, e16)]
         return
     try:
-        got = scorer.point(name, family, pool, blend, floor)
+        got = scorer.point(name, family, pool, blend, devig, floor)
     except Exception as exc:
         study.variants += [
             dataclasses.replace(v, error=f"{type(exc).__name__}: {exc}") for v in (e43, e16)
@@ -1370,6 +1462,27 @@ class C5Result:
     report_path: str | None = None
     public_path: str | None = None
     seconds: float = 0.0
+    twins: dict[str, dict] = field(default_factory=dict)  # per-ticket variant: its statute twin's
+
+
+def statute_twins(registry, study: Study) -> dict[str, dict]:
+    """For each per-ticket E43 and E16 variant of `study`, its statute twin's ΔLL and bounds: the
+    first family's latest scored record with the same hypothesis, pool, input, ordering, blend
+    and floor treatment and the statute de-vig. Publishable inputs only (D21)."""
+    keys = ("pool", "input", "ordering", "blend", "floor")
+    found = {}
+    for r in registry.records(FAMILY_ID):
+        if r.status != "scored" or is_licensed_record(r) or r.params.get("devig") != STATUTE:
+            continue
+        for m in r.metrics:
+            if m.metric == DELTA and m.fold == ALL_FOLDS:
+                found[(r.hypothesis_id, *(r.params.get(k) for k in keys))] = m
+    out = {}
+    for v in study.variants:
+        m = found.get((v.hypothesis_id, *(v.params.get(k) for k in keys)))
+        if v.params.get("devig") == PER_TICKET and not _licensed(v) and m is not None:
+            out[v.name] = {"statute ΔLL": m.value, "statute lower": m.lo, "statute upper": m.hi}
+    return out
 
 
 def _run_id(record: RunRecord) -> str:
@@ -1383,12 +1496,13 @@ def _licensed(variant: Variant) -> bool:
     return variant.params.get("input") == FORM
 
 
-def _record(variant: Variant, git_sha: str, builds: dict, form_builds: dict) -> RunRecord:
+def _record(variant: Variant, family: str, git_sha: str, builds: dict,
+            form_builds: dict) -> RunRecord:  # fmt: skip
     licensed = _licensed(variant)
     params = dict(variant.params) | ({"error": variant.error} if variant.error else {})
     return RunRecord(
         hypothesis_id=variant.hypothesis_id,
-        family_id=FAMILY_ID,
+        family_id=family,
         variant=variant.name,
         ticket=TICKET,
         git_sha=git_sha,
@@ -1402,18 +1516,18 @@ def _record(variant: Variant, git_sha: str, builds: dict, form_builds: dict) -> 
     )
 
 
-def write_committed_summary(registry) -> None:
-    """This family's summary file and the committed index with its line, by `write_summary` over
-    this family alone (#92's rule: no other family's file is written)."""
+def write_committed_summary(registry, family: str = FAMILY_ID) -> None:
+    """`family`'s summary file and the committed index with its line, by `write_summary` over
+    that family alone (#92's rule: no other family's file is written)."""
     directory = summary_dir(COUNTRY)
-    mine = c2_ability._Families(registry, {FAMILY_ID})
+    mine = c2_ability._Families(registry, {family})
     if not mine.records():
         return
     with tempfile.TemporaryDirectory() as scratch:
         write_summary(mine, scratch)
         write_report(
-            directory / f"{FAMILY_ID}.md",
-            Path(scratch, f"{FAMILY_ID}.md").read_text("utf-8"),
+            directory / f"{family}.md",
+            Path(scratch, f"{family}.md").read_text("utf-8"),
             sources=(),
         )
         fresh = Path(scratch, "README.md").read_text("utf-8").splitlines()
@@ -1428,18 +1542,21 @@ def write_committed_summary(registry) -> None:
 
 def run_study(*, date_from: date = PRICE_ERA_START, date_to: date | None = None,
               out_dir: Path | None = None, registry=None, members: Path | None = None,
+              family: str = FAMILY_ID,
               log: Callable[[str], None] = lambda _: None) -> C5Result:  # fmt: skip
-    """Run the pre-registered family on Japan's development days (module docstring). Raises
-    `paths.DataDirInsideRepo` for an `out_dir` inside the repository and `FamilyAlreadyFrozen`
-    when the family is frozen with another spec, both before any row is read."""
+    """Run a pre-registered family (`FAMILY_ID`, or `PER_TICKET_FAMILY_ID`: Place and Wide
+    against the per-ticket de-vig) on Japan's development days (module docstring). Raises
+    `ValueError` for another family, `paths.DataDirInsideRepo` for an `out_dir` inside the
+    repository and `FamilyAlreadyFrozen` when the family is frozen with another spec, all before
+    any row is read."""
+    spec = family_spec(family)
     out_dir = (
         paths.reports_dir() if out_dir is None else paths.outside_repo(Path(out_dir), what="out")
     )
     date_to = date.today() if date_to is None else date_to
     committed = registry is None
     registry = default_registry(COUNTRY) if registry is None else registry
-    spec = default_spec()
-    spec_hash = registry.freeze_family(FAMILY_ID, spec)  # before either seam reads a row
+    spec_hash = registry.freeze_family(family, spec)  # before either seam reads a row
     git_sha = _git_sha()
     started = clock.monotonic()
     days = development_days(date_from, date_to)
@@ -1460,9 +1577,11 @@ def run_study(*, date_from: date = PRICE_ERA_START, date_to: date | None = None,
     log(f"scored {len(study.variants)} variants ({seconds:.0f} s)")
 
     result = C5Result(spec, spec_hash, git_sha, study, run, builds, seconds=seconds)
-    held = {_run_id(dataclasses.replace(r, git_sha="")): r for r in registry.records(FAMILY_ID)}
+    if family == PER_TICKET_FAMILY_ID:
+        result.twins = statute_twins(registry, study)
+    held = {_run_id(dataclasses.replace(r, git_sha="")): r for r in registry.records(family)}
     for variant in study.variants:
-        record = _record(variant, git_sha, builds, form_builds)
+        record = _record(variant, family, git_sha, builds, form_builds)
         same = held.get(_run_id(dataclasses.replace(record, git_sha="")))
         result.run_ids[variant.name + "@" + variant.hypothesis_id] = (
             registry.append(record) if same is None else _run_id(same)
@@ -1470,7 +1589,7 @@ def run_study(*, date_from: date = PRICE_ERA_START, date_to: date | None = None,
     tag = hashlib.sha256(json.dumps([run, builds, form_builds], sort_keys=True).encode())
     stem = f"exotic-c5-{COUNTRY}-{spec_hash[:12]}-{tag.hexdigest()[:8]}"
     about = {
-        "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
+        "family": f"`{family}`, spec sha256 `{spec_hash}`",
         "git": git_sha,
         "run": json.dumps(run),
         "store": ", ".join(builds.values()),
@@ -1488,8 +1607,9 @@ def run_study(*, date_from: date = PRICE_ERA_START, date_to: date | None = None,
         sources=FORM_SOURCES,
     )  # fmt: skip
     if committed:
-        write_committed_summary(registry)
-        public = env.repo_root() / PUBLIC_REPORT
+        write_committed_summary(registry, family)
+        report = PUBLIC_REPORT if family == FAMILY_ID else PER_TICKET_PUBLIC_REPORT
+        public = env.repo_root() / report
         result.public_path = str(write_report(public, render_public_report(result), sources=()))
     return result
 
@@ -1534,8 +1654,10 @@ def render_report(result: C5Result, about: Mapping) -> str:
     return "\n".join(lines)
 
 
-def _public_rows(study: Study, key: str) -> list[dict]:
-    return [r for r in study.tables.get(key, []) if r.get("input") != FORM]
+def _public_rows(study: Study, key: str, twins: Mapping[str, dict]) -> list[dict]:
+    """The table's publishable rows, each with its statute twin's ΔLL when `twins` has one."""
+    rows = [r for r in study.tables.get(key, []) if r.get("input") != FORM]
+    return [r | twins.get(r.get("variant"), {}) for r in rows]
 
 
 def _fmt(value) -> str:
@@ -1556,8 +1678,14 @@ def _reading(rows: list[dict]) -> list[str]:
             if hi < 0
             else "no difference excluded (the bounds straddle 0)"
         )
+        twin = (
+            f"; its statute twin's ΔLL {_fmt(r['statute ΔLL'])} [{_fmt(r['statute lower'])}, "
+            f"{_fmt(r['statute upper'])}]"
+            if "statute ΔLL" in r
+            else ""
+        )
         out.append(
-            f"- `{r['variant']}`: ΔLL {_fmt(r['ΔLL'])} [{_fmt(lo)}, {_fmt(hi)}]: {verdict}; "
+            f"- `{r['variant']}`: ΔLL {_fmt(r['ΔLL'])} [{_fmt(lo)}, {_fmt(hi)}]: {verdict}{twin}; "
             f"return per ¥100 {_fmt(r.get('return per ¥100'))} "
             f"[{_fmt(r.get('return lower'))}, {_fmt(r.get('return upper'))}]"
         )
@@ -1565,13 +1693,16 @@ def _reading(rows: list[dict]) -> list[str]:
 
 
 FOLLOW_UPS = (
-    "Run the log-linear pool (`exotic.pool_blend`) once #4/#21's odds logs hold full final "
+    "#671: run the log-linear pool (`exotic.pool_blend`) once #4/#21's odds logs hold full final "
     "boards of the exotic pools, and settle the leaderboard bet at the full board's "
     "expected value rather than the most probable combination.",
-    "Score C5 at the decision time (D2: T-2) on logged boards instead of the final Win price, "
-    "so its leaderboard rows are decision-time selections, not look-ahead.",
-    "Feed C5 the D9-compliant meta-model once #91's and #98's members land (stage2:q:form is "
-    "#87's documented D9 shortfall).",
+    "#672: score C5 at the decision time (D2: T-2) on logged boards instead of the final Win "
+    "price, so its leaderboard rows are decision-time selections, not look-ahead.",
+    "#673: feed C5 the D9-compliant meta-model once #91's and #98's members land (stage2:q:form "
+    "is #87's documented D9 shortfall).",
+    "#674: append a run's registry records in one batch (`Registry.append` re-verifies the hash "
+    "chain on every record, so a run of hundreds of variants spends most of its wall time "
+    "appending).",
 )
 
 ALTERNATIVES = (
@@ -1581,7 +1712,10 @@ ALTERNATIVES = (
     "The equal split R*100/(P*(D_c+5)) for several winning combinations (#99 question 3(b)) as a "
     "second Place and Wide de-vig: the owner chose the statute's de-vig (answer 3(a)) for every "
     "race-pool with several winning combinations; Place's and Wide's censoring at the floor is "
-    "registered instead as the 'drop' and 'bound' variants (#459 comment of 2026-11-27).",
+    "registered instead as the 'drop' and 'bound' variants (#459 comment of 2026-11-27). Under "
+    "the reframe (each candidate de-vig a variant) its ticket chance, R*100/(D_c+5), is "
+    f"registered since as the second family, `{PER_TICKET_FAMILY_ID}` "
+    f"(`{PER_TICKET_PUBLIC_REPORT.as_posix()}`).",
     "Fitting alpha on every training race of every fold: Henery's quadrature on every training "
     "race of 28 expanding folds is hours of compute for one parameter per fold; the spec caps "
     f"the fit at {BLEND_MAX_TRAIN} hash-sampled training races per fold.",
@@ -1590,50 +1724,98 @@ ALTERNATIVES = (
 )
 
 
+PER_TICKET_ALTERNATIVES = (
+    f"Adding the per-ticket de-vig to {FAMILY_ID}'s grid: that spec was frozen before its run "
+    "read a row, and a changed spec is a new family, so the second de-vig is a family of its own "
+    "and the first family's spec and records stand.",
+    "Running Win, Quinella, Exacta, Trio, Trifecta and E44 here too: a pool that pays one "
+    "combination per result has one share, R*100/(D+5), under either de-vig, so their records "
+    "would repeat the first family's.",
+    "A de-vig read from the Place and Wide pools' own final board or votes (the chance the money "
+    "gives each ticket): not computable from the paid dividends, which are all the store holds; "
+    "it needs #4/#21's logs of the full final boards.",
+    "A per-pool scale on either de-vig fitted on the training races: a parameter fitted on "
+    "outcomes makes the baseline a model; both de-vigs here are fixed formulas of the dividends.",
+)
+
+INTROS = {
+    FAMILY_ID: "Ticket #459 (epic #73; 08 §4 E43, E44, E16; owner answers 1-7 on #99 of "
+    "2026-11-26, the reframe of 2026-11-27). C5 (`models/exotic.py`, #99) turns an input's Win "
+    "probabilities into every pool's combination probabilities through an ordering; each pool's "
+    "result is scored against the pool's own paid dividends (the dividend-implied share of its "
+    "money, statute de-vig for several winning combinations) by the log loss at 1/k per paid "
+    "combination, out of fold on D9's walk-forward quarters. ",
+    PER_TICKET_FAMILY_ID: "Ticket #459's second family (epic #73; 08 §4 E43, E16; the review of "
+    "PR #668 under the owner's reframe on #99 of 2026-11-27: each candidate Place and Wide de-vig "
+    f"is a registered variant). The first family, `{FAMILY_ID}` "
+    f"(`{PUBLIC_REPORT.as_posix()}`), scored Place and Wide against one baseline, the chance a "
+    "paid ticket pays taken as P × its statute money share. This family scores the same C5 grid "
+    "on Place and Wide against a second baseline computable from the paid dividends alone: each "
+    "paid ticket's own implied share, min(1, R·100/(D_c + 5)) (R the race's payout rate, boosts "
+    "in; D_c its dividend per 100 yen), the money on it against what it pays, as in a pool with "
+    "one winner (P × #99 question 3(b)'s equal split). Same races, folds, inputs, orderings, "
+    "blends and floor treatments, by the log loss at 1/k per paid combination; only the "
+    "baseline differs. So a no-blend variant's ΔLL minus its statute twin's (the `statute` "
+    "columns, from the first family's registry records) is the statute baseline's log loss "
+    "minus this one's, and the leaderboard bet, which never reads the baseline, returns what "
+    "its twin returns. ",
+}
+TITLES = {
+    FAMILY_ID: "C5 against the pools' own dividends",
+    PER_TICKET_FAMILY_ID: "C5 against the Place and Wide dividends, per-ticket de-vig",
+}
+TWIN_COLUMNS = ("statute ΔLL", "statute lower", "statute upper")
+
+
 def render_public_report(result: C5Result) -> str:
-    """The public experiment report (docs/experiment-report.md's sections): the publishable
-    pair's figures (normalised and calibrated, from the store alone) and every stage2:q:form
-    variant by name and status only (D21). Nothing here depends on the member's values."""
+    """The public experiment report (docs/experiment-report.md's sections) of the result's
+    family: the publishable pair's figures (normalised and calibrated, from the store alone; for
+    the per-ticket family beside each statute twin's ΔLL) and every stage2:q:form variant by name
+    and status only (D21). Nothing here depends on the member's values."""
     study, spec = result.study, result.spec
-    e43, e16, e44 = (_public_rows(study, k) for k in ("e43", "e16", "e44"))
+    fid = spec["family_id"]
+    e43, e16, e44 = (_public_rows(study, k, result.twins) for k in ("e43", "e16", "e44"))
     form = [v for v in study.variants if _licensed(v)]
     public = [v for v in study.variants if not _licensed(v)]
     failed = [v for v in public if v.error]
     cols43 = [
         *("variant", "races", "meetings", "model LL", "dividend LL", "ΔLL", "lower", "upper"),
+        *(TWIN_COLUMNS if result.twins else ()),
         *("alpha (median of folds)", "return per ¥100", "return lower", "return upper"),
     ]
     cols44 = ["variant", "races", "meetings", "win gain", "win lower", "win upper"]
     for pool in spec["e44_pools"]:
         cols44 += [f"{pool} gain", f"{pool} lower", f"{pool} upper", f"{pool} ratio"]
+    flag = "" if fid == FAMILY_ID else f" --family {fid}"
 
     def table(rows: list[dict], cols: list[str]) -> str:
         shown = [{c: r.get(c) for c in cols} for r in rows]
         return _markdown_table(shown) if shown else "_none scored_"
 
-    lines = [
-        "# Experiment report: C5 against the pools' own dividends (Japan, #459)",
+    e44_section = [
+        "### E44: joint gain against Win gain (calibrated against normalised)",
         "",
-        "Ticket #459 (epic #73; 08 §4 E43, E44, E16; owner answers 1-7 on #99 of 2026-11-26, the "
-        "reframe of 2026-11-27). C5 (`models/exotic.py`, #99) turns an input's Win probabilities "
-        "into every pool's combination probabilities through an ordering; each pool's result is "
-        "scored against the pool's own paid dividends (the dividend-implied share of its money, "
-        "statute de-vig for several winning combinations) by the log loss at 1/k per paid "
-        "combination, out of fold on D9's walk-forward quarters. **Nothing is adopted** "
+        table(e44, cols44),
+        "",
+    ]
+    lines = [
+        f"# Experiment report: {TITLES[fid]} (Japan, #459)",
+        "",
+        INTROS[fid] + "**Nothing is adopted** "
         "(D16-D19): every variant is a ranked row. The holdout is not opened and no holdout day "
         f"is read. **{FORM} is JRDB-fed (D21)**: its variants ran and are withheld; this report "
         "gives no figure, count or sign built on it. The figures below are the publishable "
         "pair's, normalised 1/odds and D4's calibrated market, from the store's results and "
         "dividends alone.",
         "",
-        f"- Registry family `{FAMILY_ID}`, spec sha256 `{result.spec_hash}`, frozen before the "
+        f"- Registry family `{fid}`, spec sha256 `{result.spec_hash}`, frozen before the "
         f"run read any store row; the pre-registration is `{SPEC_DOC}`.",
         f"- Code: `countries/japan/studies/exotic_c5.py` at `{result.git_sha[:12]}`. Reproduce: "
-        "`uv run horsetrack japan exotic-c5 --members <HKTrack>/outputs/oof/"
+        f"`uv run horsetrack japan exotic-c5{flag} --members <HKTrack>/outputs/oof/"
         f"{MEMBER_FILE}`.",
         f"- Run window: {result.run['date_from']} to {result.run['date_to']}, development days "
         "only.",
-        f"- Records: `docs/experiments/registry/{COUNTRY}/{FAMILY_ID}.md` (the {FORM} records "
+        f"- Records: `docs/experiments/registry/{COUNTRY}/{fid}.md` (the {FORM} records "
         "withheld). The private report, with every table, is under `$HORSETRACK_DATA_DIR/"
         "reports/` (`exotic-c5-japan-<spec hash>-<run digest>.md`).",
         "",
@@ -1652,7 +1834,13 @@ def render_public_report(result: C5Result) -> str:
         "model's, in nats per race-pool (positive: C5 better); lower and upper are D7's "
         "one-sided 95% meeting-bootstrap bounds. The return is a flat ¥100 on the model's most "
         "probable combination per race-pool at the paid dividends (look-ahead: the inputs are "
-        "the final Win prices), with the same bounds.",
+        "the final Win prices), with the same bounds."
+        + (
+            " The statute columns are the statute twin's ΔLL and bounds, the first family's "
+            "record of the same variant (empty where it holds none)."
+            if result.twins
+            else ""
+        ),
         "",
         "### E43: per pool, against the dividends (every scored race-pool)",
         "",
@@ -1662,10 +1850,7 @@ def render_public_report(result: C5Result) -> str:
         "",
         table(e16, [c for c in cols43 if c != "alpha (median of folds)"]),
         "",
-        "### E44: joint gain against Win gain (calibrated against normalised)",
-        "",
-        table(e44, cols44),
-        "",
+        *(e44_section if spec["e44_pools"] else []),
         f"### {FORM}: ran, withheld (D21)",
         "",
         f"{len(form)} variants read the member; each is a registry record whose figures are "
@@ -1687,7 +1872,7 @@ def render_public_report(result: C5Result) -> str:
         "",
         "## Alternatives rejected and why",
         "",
-        *(f"- {x}" for x in ALTERNATIVES),
+        *(f"- {x}" for x in (ALTERNATIVES if fid == FAMILY_ID else PER_TICKET_ALTERNATIVES)),
         "",
         "## What this rules out",
         "",
@@ -1698,14 +1883,14 @@ def render_public_report(result: C5Result) -> str:
         "",
         "## Leaderboard rows",
         "",
-        f"Every record is a row of `horsetrack japan leaderboard` under `{FAMILY_ID}/<variant>`: "
+        f"Every record is a row of `horsetrack japan leaderboard` under `{fid}/<variant>`: "
         "each no-blend E43 variant a measured row (its `return_per_100`), each no-blend E16 "
         f"variant a `[{SUPER}]` segment row, every other variant (the linear and log-linear "
         f"blends, E44, failures) unmeasured and unranked. The {FORM} rows are withheld: listed by "
         "option id only. Ranks are the leaderboard's (regenerated by the command).",
         "",
         *(
-            f"- `{FAMILY_ID}/{v.name}`"
+            f"- `{fid}/{v.name}`"
             + (f"[{SUPER}]" if v.hypothesis_id == "E16" and "leaderboard" in v.params else "")
             + (" (withheld, D21)" if _licensed(v) else "")
             + ("" if "leaderboard" in v.params and not v.error else " (unmeasured)")
@@ -1714,7 +1899,8 @@ def render_public_report(result: C5Result) -> str:
         "",
         "## Follow-ups filed",
         "",
-        "Proposed (`status:proposed` under epic #73):",
+        "Proposed (`status:proposed` under epic #73; not linked as its sub-issues, since #73 is at "
+        "GitHub's cap of 100):",
         "",
         *(f"- {x}" for x in FOLLOW_UPS),
         "",
@@ -1739,6 +1925,14 @@ def exotic_c5_command(
         Path | None,
         typer.Option("--members", help=f"#87's member file (HKTrack's outputs/oof/{MEMBER_FILE})."),
     ] = None,
+    family: Annotated[
+        str,
+        typer.Option(
+            "--family",
+            help=f"The family to run: {FAMILY_ID} (every pool, the statute de-vig, E44) or "
+            f"{PER_TICKET_FAMILY_ID} (Place and Wide against the per-ticket de-vig).",
+        ),
+    ] = FAMILY_ID,
 ) -> None:
     """Score C5 against the pools' own dividends (#459): E43 and E16 per pool, E44, every
     ordering, input and blend a registry record; private report outside the repository."""
@@ -1747,13 +1941,14 @@ def exotic_c5_command(
         date_to=None if date_to is None else date.fromisoformat(date_to),
         out_dir=out,
         members=members,
+        family=family,
         log=lambda line: typer.echo(line, err=True),
     )
     failed = [v.name + "@" + v.hypothesis_id for v in result.study.variants if v.error]
     typer.echo(
         json.dumps(
             {
-                "family_id": FAMILY_ID,
+                "family_id": result.spec["family_id"],
                 "spec_hash": result.spec_hash,
                 "report_path": result.report_path,
                 "public_path": result.public_path,
