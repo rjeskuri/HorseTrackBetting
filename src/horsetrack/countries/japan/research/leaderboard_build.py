@@ -2,12 +2,12 @@
 
 ``build_rows`` joins #451's ``legacy_rows`` (every family and variant of the Japan registry) with
 ``candidate_rows``, the cells the studies write in #430's schema under
-``$HORSETRACK_DATA_DIR/reports/candidate-cells/``; a registry row wins over a candidate row with
-the same option id. ``horsetrack japan leaderboard`` writes every row through
-``core.eval.leaderboard``: ``leaderboard-japan.md`` and ``leaderboard-japan.json`` under the
-reports dir and, with ``--public``, ``docs/leaderboard/japan.md`` with the withheld rows listed by
-id only (D21). Its stdout holds the four counts and nothing else; its diagnostics go to stderr;
-neither holds a figure.
+``$HORSETRACK_DATA_DIR/reports/candidate-cells/``; a registry row wins over every candidate cell of
+its option id, as a base or as a named id (below). ``horsetrack japan leaderboard`` writes every
+row through ``core.eval.leaderboard``: ``leaderboard-japan.md`` and ``leaderboard-japan.json``
+under the reports dir and, with ``--public``, ``docs/leaderboard/japan.md`` with the withheld rows
+listed by id only (D21). Its stdout holds the four counts and nothing else; its diagnostics go to
+stderr; neither holds a figure.
 
 Reading the candidate files keeps every cell on the record:
 
@@ -19,9 +19,13 @@ Reading the candidate files keeps every cell on the record:
   family id, or without both, is skipped and counted.
 - An exact copy of a cell already read (a superseded copy of a file) gives no second row and is
   counted.
+- Registry precedence comes first: every distinct cell whose base is a registry row's option id
+  gives way to that row, whatever its pool or content (two ``debut-members`` runs exporting a
+  registered variant give no extra row). Only the remaining cells are named, and a remaining cell
+  whose option id is a registry id also gives way; both count as given by the registry.
 - Option ids (D21) are a function of each cell's own identity, never of file or entry order nor
   of another cell's figures, so the public withheld list cannot reveal how a study ranked its
-  cells. All cells are read first, then named: a base only one distinct cell has is its option
+  cells. All cells are read first, then named: a base only one remaining cell has is its option
   id; every cell of a base that recurs (the pool scan's cell ids name the segment, not the pool)
   is '<base>[pool:<pool>]'. A cell its pool does not tell apart (another cell of the base has the
   same pool, it names none, or another cell's id is spelled the same) takes
@@ -108,6 +112,7 @@ class _Cells:
     rows: list[LeaderboardRow] = field(default_factory=list)
     read: int = 0
     copies: int = 0
+    replaced: int = 0  # distinct cells that gave way to a registry row
     skipped: list[str] = field(default_factory=list)
 
 
@@ -257,7 +262,8 @@ def _option_ids(cells: list[_Cell]) -> list[str]:
     return ids
 
 
-def _read_cells(directory: Path) -> _Cells:
+def _read_cells(directory: Path, taken: frozenset[str] = frozenset()) -> _Cells:
+    """The directory's cells, less those that give way to ``taken``, the registry's option ids."""
     found = _Cells()
     if not directory.is_dir():
         return found
@@ -282,8 +288,13 @@ def _read_cells(directory: Path) -> _Cells:
                 continue
             pool = _text(cell.get("pool"))
             distinct[canonical] = _Cell(cell, family, cell_id, pool, canonical, path.stem)
-    cells = list(distinct.values())
+    # registry precedence on the base, before the remaining cells are named
+    cells = [c for c in distinct.values() if c.base not in taken]
+    found.replaced = len(distinct) - len(cells)
     for c, option_id in zip(cells, _option_ids(cells), strict=True):
+        if option_id in taken:
+            found.replaced += 1
+            continue
         found.rows.append(_row(c.cell, option_id, c.family, c.cell_id, c.stem))
     return found
 
@@ -312,34 +323,30 @@ class _ReadOnce(Registry):
 
 def _build(
     registry: Registry | None, candidate_dir: Path | None
-) -> tuple[list[LeaderboardRow], _Cells, int]:
-    """The rows, the candidate read, and how many candidate rows a registry row replaced."""
+) -> tuple[list[LeaderboardRow], _Cells]:
+    """The rows, and the candidate read (with how many cells a registry row replaced)."""
     registry = _ReadOnce(default_registry("japan") if registry is None else registry)
     if candidate_dir is None:
         candidate_dir = paths.reports_dir() / CANDIDATE_DIR
     rows = legacy_rows(registry)
-    cells = _read_cells(Path(candidate_dir))
-    taken = {row.option_id for row in rows}
+    cells = _read_cells(Path(candidate_dir), frozenset(row.option_id for row in rows))
     # rows_from_registry gives every row of a family that family's size, so the size is asked
     # again only for a candidate family with no row (none, or holdout runs only).
     sizes = {row.family_id: row.variants_searched for row in rows}
-    replaced = 0
     for row in cells.rows:
-        if row.option_id in taken:
-            replaced += 1
-            continue
         if row.family_id not in sizes:
             sizes[row.family_id] = max(1, registry.family_size(row.family_id))
         rows.append(dataclasses.replace(row, variants_searched=sizes[row.family_id]))
-    return rows, cells, replaced
+    return rows, cells
 
 
 def build_rows(
     *, registry: Registry | None = None, candidate_dir: Path | None = None
 ) -> list[LeaderboardRow]:
-    """``legacy_rows(registry)`` and every candidate row whose option id the registry does not
-    give, its variants searched its family's size in the registry (1 without a run); defaults
-    ``default_registry('japan')`` and ``$HORSETRACK_DATA_DIR/reports/candidate-cells/``."""
+    """``legacy_rows(registry)`` and every candidate row the registry does not give (by its base or
+    its option id, module docstring), its variants searched its family's size in the registry (1
+    without a run); defaults ``default_registry('japan')`` and
+    ``$HORSETRACK_DATA_DIR/reports/candidate-cells/``."""
     return _build(registry, candidate_dir)[0]
 
 
@@ -367,7 +374,7 @@ def leaderboard_command(
     docs/leaderboard/japan.md. Prints the counts only on stdout, the diagnostics on stderr, never
     a figure."""
     try:
-        rows, cells, replaced = _build(None, None)
+        rows, cells = _build(None, None)
         reports = paths.reports_dir()
         write_leaderboard(reports / PRIVATE_MD, rows, title=TITLE, public=False)
         _write_json(reports / PRIVATE_JSON, rows)
@@ -384,8 +391,8 @@ def leaderboard_command(
         f"withheld: {withheld}"
     )
     typer.echo(
-        f"candidate cells: {cells.read} read, {cells.copies} exact copies, {replaced} given by "
-        f"the registry, {len(cells.skipped)} skipped",
+        f"candidate cells: {cells.read} read, {cells.copies} exact copies, "
+        f"{cells.replaced} given by the registry, {len(cells.skipped)} skipped",
         err=True,
     )
     for reason in cells.skipped:

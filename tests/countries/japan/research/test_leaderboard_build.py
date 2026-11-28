@@ -27,6 +27,11 @@ Contract pinned here, module ``horsetrack.countries.japan.research.leaderboard_b
   ``legacy_rows(registry)`` as they are, plus every candidate row whose option id the registry
   does not give (a registry row wins on the same id, measured or not); a candidate row's
   variants searched is its family's size in that registry, 1 when the family has no run.
+  Registry precedence applies to the base before the cells are named: every candidate cell whose
+  ``'<family_id>/<cell_id>'`` is a registry row's option id gives way to that row, whatever its
+  pool or content (two ``debut-members`` runs exporting a registered variant give no extra row),
+  and only the remaining cells are named as above; a remaining cell whose id is a registry id
+  also gives way. Both count as given by the registry in the command's stderr summary.
   Defaults ``default_registry('japan')`` and ``$HORSETRACK_DATA_DIR/reports/candidate-cells/``;
   a missing directory gives no candidate row.
 - ``horsetrack japan leaderboard [--public]``: from ``build_rows()``, writes
@@ -711,6 +716,200 @@ def test_a_registry_row_wins_over_a_candidate_row_with_the_same_id(reg, tmp_path
     assert rows[kept_id].return_per_100 == pytest.approx(73.0)
     assert rows[kept_id].variants_searched == 2  # the family's two variants in the registry
     rank(list(rows.values()))
+
+
+# Registry precedence on the base id: #438's debut-members study, run for two date ranges, leaves
+# two candidate files, each naming its cells by the registered variant (debut_members.py).
+DEBUT_MEMBERS = "japan-debut-maiden-members-v2"
+PEDIGREE = "member:pedigree_prior:DEBUT"
+COMBINED_MAIDEN = "combined:MAIDEN"
+BODY_WEIGHT = "member:body_weight:DEBUT"  # exported by both runs; no run of it in the registry
+
+
+def debut_run(variant: str) -> RunRecord:
+    """A #438 run (made-up values): no leaderboard block, so its row is the registry's unmeasured
+    '<family>/<variant>'."""
+    return record(
+        hypothesis_id="E37" if "pedigree" in variant else "E34",
+        family_id=DEBUT_MEMBERS,
+        variant=variant,
+        ticket=438,
+        sources=("jra", "jravan", "jrdb"),
+        metrics=(dev("delta_ll", 0.0021, 0.0004, 0.0038, 900),),
+    )
+
+
+def debut_export(variant: str, races: int, delta_ll: float, weight: float) -> dict:
+    """A cell as ``horsetrack japan debut-members`` writes it (debut_members.py): the study, its
+    family and the variant as cell_id over the variant's ranked row; no pool, return or sources.
+    Every figure is made up."""
+    return {
+        "study": "debut-members",
+        "family_id": DEBUT_MEMBERS,
+        "cell_id": variant,
+        "variant": variant,
+        "class": variant.rsplit(":", 1)[1],
+        "races": races,
+        "meetings": races // 3,
+        "delta_ll": delta_ll,
+        "delta_ll_lo": delta_ll - 0.0015,
+        "delta_ll_hi": delta_ll + 0.0015,
+        "encompassing_weight": weight,
+        "encompassing_lo": weight - 0.31,
+        "encompassing_hi": weight + 0.31,
+        "n5_top_band_realised": 0.68,
+        "n5_top_band_lo": 0.41,
+        "n5_top_band_bets": 37,
+        "n5_excluded_races": 2,
+    }
+
+
+# The two runs' exports: the same variants, other figures (other date ranges).
+EARLY_RUN = [
+    debut_export(PEDIGREE, 912, 0.0021, 0.42),
+    debut_export(COMBINED_MAIDEN, 2210, 0.0034, 0.57),
+    debut_export(BODY_WEIGHT, 905, -0.0003, 0.08),
+]
+LATE_RUN = [
+    debut_export(PEDIGREE, 1388, 0.0017, 0.36),
+    debut_export(COMBINED_MAIDEN, 3301, 0.0029, 0.61),
+    debut_export(BODY_WEIGHT, 1371, 0.0006, 0.12),
+]
+EARLY_FILE = "debut-members-japan-5e1f0a9b2c3d-0a1b2c3d4e5f.json"
+LATE_FILE = "debut-members-japan-5e1f0a9b2c3d-9f8e7d6c5b4a.json"
+# Pool-scan cells: a registered segment in two pools, a candidate-only segment in two pools, and
+# a segment whose WIN cell's pool id is a registry id while its bare base is not.
+MAIDEN_SEGMENT = "class:maiden|band:5-10"
+OPEN_SEGMENT = "class:open|band:2-5"
+ALL_SEGMENT = "class:all|band:all"
+PRECEDENCE_SCAN = [
+    cell(cell_id=MAIDEN_SEGMENT, pool="WIN", n_bets=3101, mean_return=0.84),
+    cell(cell_id=MAIDEN_SEGMENT, pool="PLACE", n_bets=3102, mean_return=0.88),
+    cell(cell_id=OPEN_SEGMENT, pool="WIN", n_bets=3201, mean_return=0.86, sources=["netkeiba"]),
+    cell(cell_id=OPEN_SEGMENT, pool="PLACE", n_bets=3202, mean_return=0.93, sources=["netkeiba"]),
+    cell(cell_id=ALL_SEGMENT, pool="WIN", n_bets=3301, mean_return=0.79),
+    cell(cell_id=ALL_SEGMENT, pool="PLACE", n_bets=3302, mean_return=0.83),
+]
+PRECEDENCE_REGISTRY_IDS = {
+    f"{DEBUT_MEMBERS}/{PEDIGREE}",
+    f"{DEBUT_MEMBERS}/{COMBINED_MAIDEN}",
+    f"{POOL_SCAN}/{MAIDEN_SEGMENT}",
+    f"{POOL_SCAN}/{ALL_SEGMENT}[pool:WIN]",
+}
+# The candidate-only rows named as before: by pool, and the two body-weight exports apart.
+PRECEDENCE_POOL_IDS = {
+    f"{POOL_SCAN}/{OPEN_SEGMENT}[pool:WIN]": 86.0,
+    f"{POOL_SCAN}/{OPEN_SEGMENT}[pool:PLACE]": 93.0,
+    f"{POOL_SCAN}/{ALL_SEGMENT}[pool:PLACE]": 83.0,  # its WIN cell gave way to the registry row
+}
+BODY_WEIGHT_BASE = f"{DEBUT_MEMBERS}/{BODY_WEIGHT}"
+
+
+def seed_precedence_registry(registry: Registry) -> None:
+    registry.append(debut_run(PEDIGREE))
+    registry.append(debut_run(COMBINED_MAIDEN))
+    registry.append(
+        convention(
+            MAIDEN_SEGMENT, [dev("return_per_100", 91.0, 88.0, 94.0, 1500)], family=POOL_SCAN
+        )
+    )
+    registry.append(
+        convention(
+            ALL_SEGMENT, [dev("return_per_100[pool:WIN]", 76.0, 72.0, 80.0, 1800)], family=POOL_SCAN
+        )
+    )
+
+
+def assert_registry_precedence(rows: dict[str, LeaderboardRow], registry: Registry) -> None:
+    legacy = {r.option_id: r for r in legacy_rows(registry)}
+    assert set(legacy) == PRECEDENCE_REGISTRY_IDS
+    # every registry row is there as the registry gives it
+    assert {i: rows.get(i) for i in legacy} == legacy
+    # a registered base has one row, the registry's: no export or pool cell of it beside it
+    for base in (f"{DEBUT_MEMBERS}/{PEDIGREE}", f"{DEBUT_MEMBERS}/{COMBINED_MAIDEN}"):
+        assert [i for i in rows if i.startswith(base)] == [base], (
+            f"a candidate cell of the registered {base} gave a row beside the registry's"
+        )
+    maiden = f"{POOL_SCAN}/{MAIDEN_SEGMENT}"
+    assert [i for i in rows if i.startswith(maiden)] == [maiden], (
+        "a pool cell of a registered base gave a row beside the registry's"
+    )
+    # the candidate-only cells are all kept, named as before
+    body = sorted(i for i in rows if i.startswith(BODY_WEIGHT_BASE))
+    assert len(body) == 2, f"the two body-weight exports are not two rows: {body}"
+    assert all(i.startswith(f"{BODY_WEIGHT_BASE}[") for i in body), body
+    pooled = {i: rows[i].return_per_100 for i in PRECEDENCE_POOL_IDS if i in rows}
+    assert pooled == pytest.approx(PRECEDENCE_POOL_IDS)
+    # the registry's rows and the candidate-only rows, nothing else
+    assert set(rows) == PRECEDENCE_REGISTRY_IDS | set(PRECEDENCE_POOL_IDS) | set(body)
+    assert len(rows) == len(legacy) + len(PRECEDENCE_POOL_IDS) + 2
+
+
+def test_a_registry_row_wins_over_every_candidate_cell_of_its_base(reg, tmp_path):
+    seed_precedence_registry(reg)
+    cells_dir = tmp_path / "cells"
+    write_cells(cells_dir, EARLY_FILE, EARLY_RUN)
+    write_cells(cells_dir, LATE_FILE, LATE_RUN)
+    write_cells(cells_dir, "pool-scan.json", PRECEDENCE_SCAN)
+
+    rows = unique(build().build_rows(registry=reg, candidate_dir=cells_dir))
+
+    assert_registry_precedence(rows, reg)
+    rank(list(rows.values()))
+
+
+def test_registry_precedence_on_the_base_does_not_depend_on_order(reg, tmp_path):
+    seed_precedence_registry(reg)
+    shuffled = [*EARLY_RUN, *LATE_RUN, *PRECEDENCE_SCAN]
+    random.Random(452).shuffle(shuffled)
+    arrangements = {
+        "as-written": {
+            EARLY_FILE: EARLY_RUN,
+            LATE_FILE: LATE_RUN,
+            "pool-scan.json": PRECEDENCE_SCAN,
+        },
+        # the runs' files swapped (the late run reads first), every file's entries reversed
+        "reversed": {
+            EARLY_FILE: LATE_RUN[::-1],
+            LATE_FILE: EARLY_RUN[::-1],
+            "a-pool-scan.jsonl": PRECEDENCE_SCAN[::-1],
+        },
+        "one-shuffled-file": {"only.jsonl": shuffled},
+    }
+
+    built = {}
+    for name, files in arrangements.items():
+        for file_name, cells in files.items():
+            write_cells(tmp_path / name, file_name, cells, lines=file_name.endswith(".jsonl"))
+        built[name] = unique(build().build_rows(registry=reg, candidate_dir=tmp_path / name))
+
+    for name, rows in built.items():
+        assert_registry_precedence(rows, reg)
+        assert rows == built["as-written"], f"the rows change with the order ({name})"
+
+
+def test_the_command_counts_each_export_of_a_registered_member_once(data, tmp_path, stand_in_repo):
+    registry = open_registry(data / "registry" / "japan.jsonl", tmp_path)
+    registry.append(convention("flat:all", [dev("return_per_100", 78.5, 74.0, 83.0, 2400)]))
+    registry.append(debut_run(PEDIGREE))
+    registry.append(debut_run(COMBINED_MAIDEN))
+    cells_dir = data / "reports" / "candidate-cells"
+    write_cells(cells_dir, EARLY_FILE, EARLY_RUN)
+    write_cells(cells_dir, LATE_FILE, LATE_RUN)
+    write_cells(cells_dir, "cells.json", [cell(QUINELLA_CELL)])
+
+    result = invoke()
+
+    assert result.exit_code == 0, result.output
+    out, err = streams(result, tmp_path)
+    # 3 registry rows, the two body-weight exports and the quinella cell; measured: flat:all and
+    # the quinella cell; withheld: the two members (JRDB, JRA-VAN) and the two unsourced exports
+    assert stdout_counts(out) == {"rows": 6, "measured": 2, "unmeasured": 4, "withheld": 4}
+    # the summary's count of cells the registry gave: both exports of both registered variants
+    clauses = re.split(r"[,;\n]", err)
+    given = [c for c in clauses if re.search(r"\bregistry\b", c, re.I) and re.search(r"\d", c)]
+    assert len(given) == 1, f"stderr has no single count of cells the registry gave: {err!r}"
+    assert re.findall(r"\d+", given[0]) == ["4"], given[0]
 
 
 # --------------------------------------------------------------------------- option ids (D21)
