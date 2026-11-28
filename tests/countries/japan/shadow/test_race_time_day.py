@@ -83,8 +83,11 @@ Every race, fit, sidecar and clock is synthetic; the fake sleep only moves the f
 from __future__ import annotations  # noqa: I001
 
 import copy
+import gzip
+import hashlib
 import json
 import re
+import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1572,3 +1575,174 @@ def test_a_turf_rail_comes_from_the_cached_going_pages_when_track_condition_has_
             assert utc(rec["inputs"]["rail"]["available_utc"]) == available, race_id
     check = verify_replay(read_log(), model=going_model, model_version=MV)
     assert list(check.problems) == [] and list(check.legacy) == []
+
+
+# --------------------------------------------------------------------------- round 7: going cache
+
+# Review findings day:322 and day:315, through `_proven_rails(card, race_date, read_at)` on the raw
+# cache and manifest as core.ingest leaves them (no `_going_page_rails` monkeypatch):
+# - a refetch of a going page hard-links the replaced body to `<name>.prev` (fetcher
+#   `_keep_previous`) and overwrites the current one; both bodies are candidates, each judged by
+#   its own 発表 instant against min(cutoff, read), so a publication overwritten after a race's
+#   cutoff still proves that race's rail and the later body still waits for its own time;
+# - `fetch-going` resets the task to `pending` before the refetch, its sha256 and body kept: a
+#   pending row with a cached body (or a `.prev`) still gives its rail, under the same bound; a
+#   pending row with no sha256 and no body gives nothing and breaks nothing.
+
+GOING_HELPERS = Path(__file__).resolve().parents[1] / "going_pages.py"
+MEETINGS = {"TOK": "1回東京5日", "KYO": "1回京都5日"}
+FAR = datetime(2025, 2, 18, 0, 0, tzinfo=UTC)  # a replay's read, after every cutoff
+
+
+def _going_helpers():
+    """tests/countries/japan/going_pages.py (the synthetic going page builder and the manifest
+    schema), loaded by path: this directory is not on its import path."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_going_pages_414", GOING_HELPERS)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+GP = _going_helpers()
+
+
+def going_body(venue: str, published_utc: datetime, rail: str) -> bytes:
+    """A synthetic cp932 going page of the venue's DAY meeting printing rail `rail`, published
+    (発表) at `published_utc`."""
+    jst = published_utc.astimezone(JST).replace(tzinfo=None)
+    return GP.going_page(DAY, MEETINGS[venue], jst, f"{rail}コース")
+
+
+def cache_going(key, venue, status, *, current=None, prev=None, sha="current") -> None:
+    """One going page in the raw cache and the manifest: `current` and `prev` are (published_utc,
+    rail) or None (no such file); the `.prev` sits beside the body as fetcher `_keep_previous`
+    leaves it. `sha` is the manifest's sha256: of the "current" or the "prev" body, or the text
+    given ("" or None for a task never fetched)."""
+    path = paths.raw_page_path("jra", "going", DAY.year, key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bodies = {}
+    for name, spec, target in (
+        ("current", current, path),
+        ("prev", prev, path.with_name(path.name + ".prev")),
+    ):
+        if spec is not None:
+            bodies[name] = going_body(venue, *spec)
+            target.write_bytes(gzip.compress(bodies[name], mtime=0))
+    digest = hashlib.sha256(bodies[sha]).hexdigest() if sha in bodies else sha
+    fetched = None if digest in (None, "") else (current or prev)[0] + timedelta(minutes=3)
+    url = f"https://synthetic.example.test/going/{key}"
+    manifest = paths.manifest_path("jra")
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(manifest)
+    with conn:
+        conn.execute(GP.MANIFEST_SCHEMA)
+        conn.execute(
+            "INSERT OR REPLACE INTO fetch_queue (jurisdiction, page_type, key, url, year, status,"
+            " mutable, final_url, sha256, fetched_utc, attempts) VALUES (?, ?, ?, ?, ?, ?, 1, ?,"
+            " ?, ?, 1)",
+            ("jra", "going", key, url, DAY.year, status, url, digest,
+             None if fetched is None else fetched.isoformat()),
+        )  # fmt: skip
+    conn.close()
+
+
+B_0930, C_1030 = (at(0, 30), "B"), (at(1, 30), "C")  # (published_utc, rail): 09:30 and 10:30 JST
+KYO_B = ("k1", "KYO", "fetched", {"current": (at(0, 25), "B")})
+# case: (going pages (key, venue, manifest status, cache_going kwargs), read instant,
+#        want per turf race: (rail, available_utc), None for unknown)
+CACHE_CASES = {
+    ".prev: a 09:30 B overwritten by a 10:30 C": (
+        (("t1", "TOK", "fetched", {"current": C_1030, "prev": B_0930}), KYO_B),
+        FAR,
+        {TOK1: ("B", at(0, 30)), TOK3: ("C", at(1, 30)), KYO2: ("B", at(0, 25)),
+         KYO4: ("B", at(0, 25))},
+    ),
+    ".prev: bounded by the read": (
+        (("t1", "TOK", "fetched", {"current": C_1030, "prev": B_0930}), KYO_B),
+        at(1, 0),
+        {TOK1: ("B", at(0, 30)), TOK3: ("B", at(0, 30)), KYO2: ("B", at(0, 25)),
+         KYO4: ("B", at(0, 25))},
+    ),
+    ".prev: the later body published after the cutoff": (
+        (("t1", "TOK", "fetched", {"current": (at(2, 20), "B"), "prev": (at(1, 5), "C")}),),
+        FAR,
+        {TOK1: None, TOK3: ("C", at(1, 5)), KYO2: None, KYO4: None},
+    ),
+    "pending: the cached body still counts, a never-fetched row gives nothing": (
+        (
+            ("t1", "TOK", "pending", {"current": B_0930}),
+            ("t2", "TOK", "pending", {"sha": None}),
+            ("k1", "KYO", "pending", {"current": (at(0, 40), "C")}),
+            ("k2", "KYO", "pending", {"sha": ""}),
+        ),
+        FAR,
+        {TOK1: ("B", at(0, 30)), TOK3: ("B", at(0, 30)), KYO2: ("C", at(0, 40)),
+         KYO4: ("C", at(0, 40))},
+    ),
+    "pending: the cached body after the cutoff, its .prev before it": (
+        (("t1", "TOK", "pending", {"current": C_1030, "prev": B_0930}), KYO_B),
+        FAR,
+        {TOK1: ("B", at(0, 30)), TOK3: ("C", at(1, 30)), KYO2: ("B", at(0, 25)),
+         KYO4: ("B", at(0, 25))},
+    ),
+    "pending mid-refresh: the manifest still names the .prev body": (
+        (("t1", "TOK", "pending", {"current": C_1030, "prev": B_0930, "sha": "prev"}),),
+        at(1, 20),
+        {TOK1: ("B", at(0, 30)), TOK3: ("B", at(0, 30)), KYO2: None, KYO4: None},
+    ),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("case", list(CACHE_CASES))
+def test_going_page_rails_count_the_prev_body_and_a_pending_refresh(case):
+    """Findings day:322 and day:315: each turf race takes the latest rail of its venue among the
+    current and `.prev` bodies of every going page in the manifest, fetched or pending (a pending
+    row without a sha256 or a body gives none), whose 発表 instant is at or before min(post -
+    primary, read); dirt and a race with none stay ("unknown", NaT)."""
+    pages, read_at, want = CACHE_CASES[case]
+    for key, venue, status, kwargs in pages:
+        cache_going(key, venue, status, **kwargs)
+    card = going_card()
+    rails, times = race_time_day._proven_rails(card, DAY, pd.Timestamp(read_at))
+    got = {r: (rail, t) for r, rail, t in zip(card["race_id"], rails, times, strict=True)}
+    for race_id, proven in {**want, TOK2: None}.items():
+        rail, available = got[race_id]
+        if proven is None:
+            assert rail == "unknown" and pd.isna(available), (race_id, rail, available)
+        else:
+            assert rail == proven[0], (race_id, rail, available)
+            assert pd.Timestamp(available) == pd.Timestamp(proven[1]), (race_id, rail, available)
+
+
+def test_a_replay_forecasts_with_the_rail_a_refetch_moved_to_prev(going_model):
+    """Finding day:322 through the recorder: Tokyo's 09:30 B page was overwritten by a 10:30 C
+    update and survives only as `.prev`; a replay forecasts Tokyo R1 (cutoff 00:58 UTC, 09:58
+    JST) with the B cell and Tokyo R3 with the C cell, each carrying its rail's publication time,
+    and the log verifies."""
+    cache_going("t1", "TOK", "fetched", current=C_1030, prev=B_0930)
+    cache_going(*KYO_B[:3], **KYO_B[3])
+    got = race_time_day.run_race_time_day(
+        DAY,
+        model=going_model,
+        model_version=MV,
+        races=going_card,
+        now=FakeTime(FAR).now,
+        sleep=no_sleep,
+        replay=True,
+    )
+    recs = {r["race_id"]: r for r in got.records}
+    cells = {rid(v, no): cell for v, no, cell, _ in GOING_CARD}
+    for race_id, (rail, available) in {
+        TOK1: ("B", at(0, 30)),
+        TOK3: ("C", at(1, 30)),
+        KYO2: ("B", at(0, 25)),
+    }.items():
+        rec = recs[race_id]
+        assert rec["status"] == "ok", (race_id, rec)
+        par = going_model.par(**keys_of(with_rail_cell(cells[race_id], rail)))
+        assert rec["par_s"] == pytest.approx(par, abs=1e-9), (race_id, rail)
+        assert rec["inputs"]["rail"]["value"] == rail, race_id
+        assert utc(rec["inputs"]["rail"]["available_utc"]) == available, race_id
+    assert verify_replay(read_log(), model=going_model, model_version=MV).problems == []

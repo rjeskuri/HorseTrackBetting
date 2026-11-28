@@ -45,10 +45,13 @@ Seams for the command, looked up at call time: `utc_now`, `sleep`, `load_speed_m
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
+import sqlite3
 import time
+import zlib
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -61,7 +64,9 @@ import typer
 
 from horsetrack.core import paths
 from horsetrack.core.eval.holdout import is_holdout_day
+from horsetrack.core.ingest import fetcher
 from horsetrack.core.ingest.adapters import get_adapter
+from horsetrack.core.ingest.types import RawPage
 from horsetrack.core.store import build, parse_worker
 from horsetrack.core.store.tables import read_table, table_path
 from horsetrack.countries.japan import odds_log
@@ -302,30 +307,74 @@ def _course_rails(race_date: date) -> pd.DataFrame:
     return rows.sort_values(["available_utc", "ingested_utc"], kind="mergesort")
 
 
+def _going_manifest(going_type: str) -> list[dict[str, Any]]:
+    """The manifest's going page rows with a sha256 (a cached body), in key order: fetched or
+    abandoned as `build.read_manifest` returns them, and pending too, since `fetch-going` resets a
+    task to pending before refetching it while its body and sha256 stay. Opened read-only and
+    closed at once, as `read_manifest` does; FileNotFoundError without a manifest."""
+    path = paths.manifest_path(SOURCE)
+    if not path.exists():
+        raise FileNotFoundError(f"no manifest at {path}")
+    statuses = (*build.MANIFEST_STATUSES, "pending")
+    marks = ", ".join("?" * len(statuses))
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=30.0)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT page_type, key, year, url, final_url, sha256, fetched_utc FROM fetch_queue"
+            f" WHERE jurisdiction = ? AND page_type = ? AND status IN ({marks})"
+            " AND sha256 IS NOT NULL AND sha256 <> '' ORDER BY key",
+            (SOURCE, going_type, *statuses),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _previous_going_page(job: parse_worker.ParseJob) -> RawPage | None:
+    """The body a refetch replaced, hard-linked beside the cached one as `<name>.prev` (fetcher
+    `_keep_previous`), or None when missing, empty or corrupt. Not checked against the manifest's
+    sha256, which names the newer body once the refetch lands: its own 発表 time dates it (the
+    caller's cutoff gate keeps a late one out), and it carries no fetch time."""
+    path = paths.raw_page_path(job.source, job.page_type, int(job.year), job.key)
+    try:
+        with gzip.open(path.with_name(path.name + fetcher._PREVIOUS_SUFFIX), "rb") as fh:
+            body = fh.read()
+    except (OSError, EOFError, zlib.error):
+        return None
+    if not body:
+        return None
+    return RawPage(job.source, job.page_type, job.key, job.url or "", body, None, {})
+
+
 def _going_page_rails(race_date: date) -> pd.DataFrame:
     """The day's turf rails printed on the cached going pages (馬場情報, #253): venue, rail and
-    available_utc (the page's 発表 time, never its fetch time), ordered by availability. Read from
-    the raw cache as the store build reads them (manifest rows of the adapter's going page type,
-    `parse_going`); no network. Empty without a manifest or a going page; a page that cannot be
-    read or parsed is left out."""
+    available_utc (the page's 発表 time, never its fetch time), ordered by availability. Every
+    going page row of the manifest with a sha256, fetched, abandoned or pending a refresh
+    (`_going_manifest`), gives up to two publications, each with its own 発表 time: its cached
+    body, read as the store build reads it (`parse_worker.read_raw_page`, which skips a body that
+    is not the manifest's), and the `.prev` body a refetch replaced (`_previous_going_page`). No
+    network. Empty without a manifest or a going page; a body that cannot be read or parsed is
+    left out."""
     empty = pd.DataFrame(columns=["venue", "rail", "available_utc"])
     adapter = get_adapter(SOURCE)
     going_type = getattr(adapter, "going_page_type", None)
+    if going_type is None:
+        return empty
     try:
-        manifest = build.read_manifest(SOURCE)
+        manifest = _going_manifest(going_type)
     except FileNotFoundError:
         return empty
     parts = []
     for row in manifest:
-        if going_type is None or row["page_type"] != going_type:
-            continue
-        page = parse_worker.read_raw_page(build._job(SOURCE, row, ""))
-        if page is None:
-            continue
-        try:
-            parts.append(adapter.parse_going(page))
-        except Exception:  # an error page or a redesign: proves nothing
-            continue
+        job = build._job(SOURCE, row, "")
+        for page in (_previous_going_page(job), parse_worker.read_raw_page(job)):
+            if page is None:
+                continue
+            try:
+                parts.append(adapter.parse_going(page))
+            except Exception:  # an error page or a redesign: proves nothing
+                continue
     if not parts:
         return empty
     rows = pd.concat(parts, ignore_index=True)
