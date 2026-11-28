@@ -11,7 +11,10 @@ must be `spec.length - 2` bytes (else `RecordLengthError`) and start with `spec.
 `RecordTypeError`); both are `ValueError`s carrying the 1-based `record` number.
 
 `iter_file` streams a file in chunks of whole records, so a multi-GB file decodes in bounded
-memory. `text`, `integer` and `scaled` convert each distinct value once and keep the input shape.
+memory; `iter_lines` yields the same chunks undecoded, for `decode_lines` to decode a selection of
+them, `check_types` checks their record type alone, and `leaf_bytes` gives a leaf's byte range, to
+read one item before the width check. `text`,
+`integer` and `scaled` convert each distinct value once and keep the input shape.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ import json
 import os
 import re
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -28,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from horsetrack.core import paths
@@ -59,7 +63,8 @@ class RecordLengthError(ValueError):
 
 
 class RecordTypeError(ValueError):
-    """A record of the layout's width that does not start with the layout's record type."""
+    """A record that does not start with the layout's record type (of the layout's width when
+    raised by `decode`, which checks the width first; of any width by `check_types`)."""
 
     def __init__(self, record_type: str, record: int, found: str) -> None:
         super().__init__(
@@ -133,19 +138,37 @@ def leaf_axes(spec: RecordSpec) -> dict[str, int]:
     return {leaf.key: (leaf.repeat > 1) + (leaf.sub_repeat > 1) for leaf in _leaves(spec)}
 
 
+def leaf_bytes(spec: RecordSpec, key: str) -> slice:
+    """The 0-based byte range of the `decode` key `key` in a record (a repeated leaf is a
+    `ValueError`, an unknown key a `KeyError`)."""
+    for leaf in _leaves(spec):
+        if leaf.key == key:
+            if leaf.repeat > 1 or leaf.sub_repeat > 1:
+                raise ValueError(f"{spec.record_type} item {key!r} is repeated")
+            start = leaf.base + leaf.offset
+            return slice(start, start + leaf.length)
+    raise KeyError(f"{spec.record_type} has no item {key!r}")
+
+
 def _lines(data: bytes) -> list[bytes]:
     lines = (line[:-1] if line.endswith(b"\r") else line for line in data.split(b"\n"))
     return [line for line in lines if line]
 
 
-def _decode_lines(lines: list[bytes], spec: RecordSpec, first: int = 1) -> Arrays:
-    """`lines` (records without separators), the first of them record number `first`."""
+def _decode_lines(
+    lines: list[bytes], spec: RecordSpec, first: int = 1, numbers: Sequence[int] | None = None
+) -> Arrays:
+    """`lines` (records without separators), numbered from `first`, or each by `numbers`."""
+
+    def number(i: int) -> int:
+        return first + i if numbers is None else int(numbers[i])
+
     width = spec.length - SEPARATOR_BYTES
     lengths = np.fromiter(map(len, lines), dtype=np.int64, count=len(lines))
     wrong = np.flatnonzero(lengths != width)
     if wrong.size:
         i = int(wrong[0])
-        raise RecordLengthError(spec.record_type, first + i, int(lengths[i]), width)
+        raise RecordLengthError(spec.record_type, number(i), int(lengths[i]), width)
     n = len(lines)
     matrix = np.frombuffer(b"".join(lines), dtype=np.uint8).reshape(n, width)
     prefix = np.frombuffer(spec.record_type.encode("ascii"), dtype=np.uint8)
@@ -153,7 +176,7 @@ def _decode_lines(lines: list[bytes], spec: RecordSpec, first: int = 1) -> Array
     if other.size:
         i = int(other[0])
         found = bytes(matrix[i, : prefix.size]).decode("ascii", errors="replace")
-        raise RecordTypeError(spec.record_type, first + i, found)
+        raise RecordTypeError(spec.record_type, number(i), found)
     out: Arrays = {}
     for leaf in _leaves(spec):
         block = matrix[:, leaf.base : leaf.base + leaf.repeat * leaf.stride]
@@ -169,9 +192,39 @@ def decode(data: bytes, spec: RecordSpec) -> Arrays:
     return _decode_lines(_lines(data), spec)
 
 
+def decode_lines(
+    lines: list[bytes], spec: RecordSpec, numbers: Sequence[int] | None = None
+) -> Arrays:
+    """`decode` of `lines` (records without separators, as `iter_lines` yields them); the errors
+    carry each line's 1-based record number from `numbers` (default 1, 2, ...)."""
+    if numbers is not None and len(numbers) != len(lines):
+        raise ValueError(f"{len(numbers)} record numbers for {len(lines)} lines")
+    return _decode_lines(lines, spec, numbers=numbers)
+
+
+def check_types(lines: list[bytes], spec: RecordSpec, first: int = 1) -> None:
+    """Raise `RecordTypeError` for the first of `lines` (numbered from `first`) that does not start
+    with `spec.record_type`, whatever its width; `found` is what it starts with (all of it when
+    shorter than the type). `decode` checks the width first; this checks nothing else."""
+    prefix = spec.record_type.encode("ascii")
+    for i, line in enumerate(lines):
+        if not line.startswith(prefix):
+            found = line[: len(prefix)].decode("ascii", errors="replace")
+            raise RecordTypeError(spec.record_type, first + i, found)
+
+
 def iter_file(path: Path, spec: RecordSpec, *, chunk_records: int = 20_000) -> Iterator[Arrays]:
     """`decode`-shaped dicts of at most `chunk_records` records each (fewer when that many would
     exceed `CHUNK_BYTES`), in file order, read lazily; record numbers in errors count the file."""
+    for first, lines in iter_lines(path, spec, chunk_records=chunk_records):
+        yield _decode_lines(lines, spec, first)
+
+
+def iter_lines(
+    path: Path, spec: RecordSpec, *, chunk_records: int = 20_000
+) -> Iterator[tuple[int, list[bytes]]]:
+    """`iter_file`'s chunks undecoded: each chunk's records as lines without separators (empty
+    lines skipped, nothing checked), with the file's 1-based record number of its first line."""
     if chunk_records < 1:
         raise ValueError(f"chunk_records must be at least 1, got {chunk_records}")
     per_chunk = max(1, min(chunk_records, CHUNK_BYTES // spec.length))
@@ -187,11 +240,11 @@ def iter_file(path: Path, spec: RecordSpec, *, chunk_records: int = 20_000) -> I
             pending.extend(p for p in parts if p)
             while len(pending) >= per_chunk:
                 batch, pending = pending[:per_chunk], pending[per_chunk:]
-                yield _decode_lines(batch, spec, first)
+                yield first, batch
                 first += len(batch)
     pending.extend(_lines(tail))
     if pending:
-        yield _decode_lines(pending, spec, first)
+        yield first, pending
 
 
 # ------------------------------------------------------------------------------------------------
@@ -277,14 +330,47 @@ class BuildReport:
         return json.dumps(asdict(self), sort_keys=True, ensure_ascii=False, indent=2) + "\n"
 
 
-def write_parquet(table: pa.Table, path: Path) -> None:
+def day_slices(table: pa.Table, column: str = "race_date") -> list[pa.Table]:
+    """`table` cut into one slice per race day (`column`), days ascending and the rows without a
+    day last, each day's rows in table order. The slices are zero-copy runs of `table` when its
+    days already ascend (the builders' sorts lead with `race_id`, whose second part is the day);
+    otherwise `table` is first stably sorted by `column`, which keeps each day's own order."""
+    days = _day_numbers(table[column])
+    if (days[1:] < days[:-1]).any():
+        table = table.sort_by([(column, "ascending")])  # stable, nulls at the end
+        days = _day_numbers(table[column])
+    edges = [0, *(np.flatnonzero(days[1:] != days[:-1]) + 1).tolist(), table.num_rows]
+    return [table.slice(lo, hi - lo) for lo, hi in zip(edges, edges[1:], strict=False) if hi > lo]
+
+
+def _day_numbers(days: pa.ChunkedArray) -> np.ndarray:
+    """Each row's day as its date32 day number, a missing day after every day."""
+    return pc.fill_null(days.cast(pa.int32()), np.iinfo(np.int32).max).to_numpy()
+
+
+def write_days(writer: pq.ParquetWriter, table: pa.Table) -> None:
+    """`table` through `writer` as one row group per race day (`day_slices`, #502): each group's
+    race_date statistics then record its one day, so a reader that prunes row groups by them
+    (`models.v0.store.read_store_table`) never decodes another day's rows, a holdout day's
+    included."""
+    for part in day_slices(table):
+        writer.write_table(part, row_group_size=part.num_rows)
+
+
+def write_parquet(table: pa.Table, path: Path, *, by_day: bool = False) -> None:
     """`table` to `path` through a tmp file in the same folder and `os.replace`; the same table
-    always gives the same bytes (no wall-clock metadata)."""
+    always gives the same bytes (no wall-clock metadata). With `by_day` (`races` and `runners`,
+    #502), one row group per race day (`write_days`); otherwise the writer's default row
+    groups."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:12]}.tmp")
     try:
-        pq.write_table(table, tmp, compression="zstd")
+        if by_day and table.num_rows:
+            with pq.ParquetWriter(tmp, table.schema, compression="zstd") as writer:
+                write_days(writer, table)
+        else:
+            pq.write_table(table, tmp, compression="zstd")
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)

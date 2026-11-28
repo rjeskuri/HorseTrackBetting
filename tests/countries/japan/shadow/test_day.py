@@ -19,7 +19,8 @@ models, log, flag_rules, n_draws, seed) -> ShadowSummary` (the ticket's signatur
   value_at_high from `shadow_values(board, tau_min=tau, models, n_draws, seed=<derived>)`;
   `n_draws` and `seed` (the seed derived from (seed, race_id, tau), one per race and tau, the same
   for every pool) on each valued record; flags = the sorted list of `avoid_flags(board, rules,
-  now_utc=decision)` for that key ([] when none); models = `models.ids`.
+  now_utc=decision)` for that key ([] when none); models = `models.ids`; `record_version` 2 and
+  `p_model` (#564, pinned in test_shadow_day_p_model.py).
 - Without models, records still carry status "ok", board odds and flags, with null values and
   null models.
 - The day ends once the last race's T-1 point is due (or at 16:45 Asia/Tokyo when there are no
@@ -36,6 +37,15 @@ today in Asia/Tokyo; it is also the run's `now`). It loads `load_shadow_models()
 `load_flag_rules()` and `ShadowLog(shadow_log_path(date), day=date)`, prints a few lines and logs
 details to `logs_dir('japan')/shadow-day-<date>.log`; exit 0 on a clean run.
 
+Per-tau board-age limits (#625): `max_board_age_s` is a mapping tau -> seconds, by default (None)
+read from nowcast_v0.yaml's `max_board_age_s` through `core.config.load_country_yaml('japan',
+'nowcast_v0')`, the source the v0 nowcast fit uses. A point is no_board when its board is more than
+its tau's limit old (a board exactly at the limit is ok); its no_board record carries the age in
+`board_age_s`. A grid tau of decision.yaml with no limit (in the config, or in a mapping passed
+in) raises ValueError at start-up, before any record is written; the `shadow-day` command, which
+passes no limit, then exits 1 and writes no shadow log. A float is still taken as one limit for
+every tau (a test override; the existing callers pass 120.0).
+
 Every row and fit is synthetic. The clock is fake: `sleep` moves it and appends the captures the
 synthetic logger would have written by then; nothing really waits.
 """
@@ -50,6 +60,7 @@ import logging
 import math
 import os
 import re
+import shutil
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -57,8 +68,10 @@ from itertools import combinations
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
+from horsetrack.core import config as core_config
 from horsetrack.core import paths
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board.flags import FlagRules, avoid_flags
@@ -656,7 +669,7 @@ def gapped(models: ShadowModels, missing: set) -> ShadowModels:
     return dataclasses.replace(models, nowcast=dataclasses.replace(models.nowcast, sigma0=sigma0))
 
 
-RECORD_KEYS = {  # the shadow log's record format as it is today: no field is added by #233
+RECORD_KEYS = {  # the record format: no field is added by #233; #564 adds the last two
     "race_id",
     "tau_min",
     "decision_utc",
@@ -675,6 +688,8 @@ RECORD_KEYS = {  # the shadow log's record format as it is today: no field is ad
     "n_draws",
     "seed",
     "day_status",
+    "record_version",
+    "p_model",
 }
 POOL_PATTERNS = {  # the pool as the config and the log name it, not as a part of another name
     WIN: r"(?<![A-Z_])WIN(?![A-Z_])",
@@ -1027,3 +1042,331 @@ def test_the_default_date_is_today_in_tokyo(monkeypatch, now, expected):
     assert result.exit_code == 0, ANSI.sub("", result.output)
     logs = sorted(p.name for p in paths.logs_dir("japan").glob("shadow-day-*.log"))
     assert logs == [f"shadow-day-{expected.isoformat()}.log"]
+
+
+# ---------------------------------------------------------------- timing against the post (#421)
+#
+# Contract added by #421: a record is `live` only when it is written within max_lag_s of its
+# decision time AND strictly before the post scheduled at the decision. `ShadowSummary.on_time`
+# (new, last field, default 0) = the records appended by this run (no_board ones included) that are
+# `live` and whose written_utc is strictly before the LATEST known post of their race at the time
+# the summary is built (the post times are re-read on every poll), so a post moved earlier after
+# the write cannot leave a record counted on time.
+
+
+def expected_mode(record: dict, post: datetime, max_lag: float) -> str:
+    decision, written = instant(record["decision_utc"]), instant(record["written_utc"])
+    within_lag = (written - decision).total_seconds() <= max_lag
+    return "live" if within_lag and written < post else "replay"
+
+
+# (written relative to the post in seconds, max_lag_s, the T-1 point's mode)
+TIMING_CASES = [
+    (-30, 120.0, "live"),  # before the post, T-1 lag 30 s
+    (-1, 120.0, "live"),  # one second before the post, T-1 lag 59 s
+    (0, 120.0, "replay"),  # exactly at the post
+    (1, 120.0, "replay"),
+    (60, 120.0, "replay"),  # the ticket's case: T-1 lag 120 s is within the lag, post + 60 s is not
+    (60, 600.0, "replay"),  # a generous lag does not make a post-time write live
+    (-30, 20.0, "replay"),  # still late by the lag rule: T-1 lag 30 s > 20 s
+]
+
+
+@pytest.mark.parametrize("offset, max_lag, t1_mode", TIMING_CASES)
+def test_a_record_written_at_or_after_its_post_is_never_live(models, offset, max_lag, t1_mode):
+    race = race_one()
+    world = World([race])
+    clock = Clock(world, race.post + timedelta(seconds=offset))
+
+    summary = run(clock, models=models, once=True, max_lag_s=max_lag)
+
+    records = open_log().read()
+    assert summary.records == len(records) == total_keys([race])
+    points = decided(records)
+    assert {tau for (_, tau) in points} == set(GRID)
+    for record in records:
+        assert instant(record["written_utc"]) == clock.now()
+        assert record["mode"] == expected_mode(record, race.post, max_lag), record
+    assert {r["mode"] for r in points[(race.race_id, 1)]} == {t1_mode}
+    live = sum(r["mode"] == "live" for r in records)
+    assert summary.on_time == live
+    if offset >= 0:
+        assert live == 0 and summary.on_time == 0
+
+
+class MovingPostClock(Clock):
+    """A Clock that rewrites race one's post time sidecar at its first sleep, i.e. after the first
+    batch of points was written (race one's six points are all due when the run starts)."""
+
+    def __init__(self, *args, new_post: datetime, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.new_post = new_post
+        self.moved = False
+
+    def sleep(self, seconds: float) -> None:
+        if not self.moved:
+            self.moved = True
+            sidecar = log_path("TOK").with_name("TOK.races.json")
+            posts = {1: self.new_post, 2: POST2}
+            odds_log.write_post_times(sidecar, posts, self.t)
+        super().sleep(seconds)
+
+
+# (new post of race one relative to its original post, in seconds)
+MOVE_CASES = [None, -300, -10, 300]
+
+
+@pytest.mark.parametrize("move", MOVE_CASES)
+def test_a_post_moved_after_the_write_changes_what_counts_on_time(models, move):
+    one, two = race_one(), race_two()
+    world = World([one, two])
+    start = one.post - timedelta(seconds=30)
+    new_post = one.post + timedelta(seconds=move if move is not None else 0)
+    clock = MovingPostClock(world, start, new_post=new_post)
+
+    summary = run(clock, models=models)
+
+    assert clock.moved and summary.sealed
+    records = open_log().read()
+    assert summary.records == len(records) == total_keys([one, two])
+    latest = {one.race_id: new_post, two.race_id: two.post}
+    live_one = [r for r in records if r["race_id"] == one.race_id and r["mode"] == "live"]
+    live_two = [r for r in records if r["race_id"] == two.race_id and r["mode"] == "live"]
+    assert live_one and live_two  # race one's T-1 and T-2 are live at the write; so are race two's
+    assert all(instant(r["written_utc"]) < one.post for r in live_one)
+
+    on_time = [
+        r
+        for r in records
+        if r["mode"] == "live" and instant(r["written_utc"]) < latest[r["race_id"]]
+    ]
+    assert summary.on_time == len(on_time)
+    if move is not None and move <= -30:
+        # the post now lies at or before the write: race one's records no longer count
+        assert summary.on_time == len(live_two) < len(live_two) + len(live_one)
+    else:
+        assert summary.on_time == len(live_one) + len(live_two)
+    # the records themselves are sealed as written: moving a post rewrites nothing
+    assert {r["mode"] for r in live_one} == {"live"}
+
+
+# ---------------------------------------------------------------- per-tau board-age limits (#625)
+
+
+@dataclass(frozen=True)
+class AgedRace(Race):
+    """A race with one capture per grid point, `ages[tau]` seconds before that point's decision
+    time; each age is under the gap to the next larger tau, so the capture is that point's board."""
+
+    ages: tuple[tuple[int, float], ...] = ()
+
+    def capture_times(self) -> list[datetime]:
+        return sorted(self.decision(tau) - timedelta(seconds=age) for tau, age in self.ages)
+
+
+def aged_race(ages: dict[int, float]) -> AgedRace:
+    return AgedRace("TOK", 1, POST1, BASE[1], ages=tuple(sorted(ages.items())))
+
+
+@pytest.fixture
+def config_copy(tmp_path, monkeypatch):
+    """A copy of the shipped country configs that `core.config.load_country_yaml` reads; the
+    returned edit(name, change) rewrites countries/japan/config/<name>.yaml with change(raw)."""
+    root = tmp_path / "countries"
+    for folder in sorted(core_config._COUNTRIES.glob("*/config")):
+        shutil.copytree(folder, root / folder.parent.name / "config")
+
+    def edit(name: str, change) -> None:
+        path = root / "japan" / "config" / f"{name}.yaml"
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        change(raw)
+        path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+        core_config.load_country_yaml.cache_clear()
+
+    monkeypatch.setattr(core_config, "_COUNTRIES", root)
+    core_config.load_country_yaml.cache_clear()
+    core_config.load_source.cache_clear()
+    yield edit
+    core_config.load_country_yaml.cache_clear()
+    core_config.load_source.cache_clear()
+
+
+def set_limits(limits: dict[int, float]):
+    def change(raw: dict) -> None:
+        raw["max_board_age_s"] = dict(limits)
+
+    return change
+
+
+def assert_board_ages(world: World, race: AgedRace, ages: dict, stale: set[int]) -> list[dict]:
+    """Every grid point of `race` decided once: no_board (with its age) at the taus in `stale`, one
+    ok record per key on the aged capture elsewhere."""
+    records = open_log().read()
+    points = decided(records)
+    assert set(points) == {(race.race_id, tau) for tau in GRID}
+    for tau in GRID:
+        decision = race.decision(tau)
+        captured = decision - timedelta(seconds=ages[tau])
+        assert world.board(race, tau).capture_utc == captured  # the fixture is what it says
+        got = points[(race.race_id, tau)]
+        if tau in stale:
+            assert len(got) == 1, f"T-{tau}: a no_board point has {len(got)} records"
+            (record,) = got
+            assert record["status"] == "no_board", f"T-{tau} age {ages[tau]}"
+            assert record["board_capture_utc"] is None
+            assert record["board_age_s"] == pytest.approx(ages[tau])
+        else:
+            assert {r["status"] for r in got} == {"ok"}, f"T-{tau} age {ages[tau]}"
+            keys = Counter((r["pool"], r["combination"]) for r in got)
+            assert set(keys) == race.keys() and set(keys.values()) == {1}, f"T-{tau}"
+            assert {instant(r["board_capture_utc"]) for r in got} == {captured}
+    return records
+
+
+# (board age at each tau, the taus whose point is no_board) under the shipped nowcast_v0.yaml
+# limits (60: 600, 30: 300, 16: 180, 5: 60, 2: 45, 1: 30).
+SHIPPED_LIMIT_CASES = {
+    "the first live day's T-60/T-30 ages are within their limits": (
+        {60: 300, 30: 240, 16: 170, 5: 50, 2: 40, 1: 20},
+        set(),
+    ),
+    "a 700 s board at T-60 and a 50 s board at T-2": (
+        {60: 700, 30: 20, 16: 20, 5: 20, 2: 50, 1: 20},
+        {60, 2},
+    ),
+    "every tau just over its limit": ({60: 700, 30: 301, 16: 181, 5: 61, 2: 50, 1: 31}, set(GRID)),
+    "every tau exactly at its limit": ({60: 600, 30: 300, 16: 180, 5: 60, 2: 45, 1: 30}, set()),
+    "mixed": ({60: 300, 30: 310, 16: 100, 5: 61, 2: 44, 1: 31}, {30, 5, 1}),
+}
+
+
+@pytest.mark.parametrize(
+    "ages, stale", list(SHIPPED_LIMIT_CASES.values()), ids=list(SHIPPED_LIMIT_CASES)
+)
+def test_each_tau_applies_its_own_board_age_limit_from_the_shipped_config(ages, stale):
+    race = aged_race(ages)
+    world = World([race])
+
+    summary = run(Clock(world, LATE), models=None, once=True, max_board_age_s=None)
+
+    records = assert_board_ages(world, race, ages, stale)
+    assert summary.no_board == len(stale)
+    assert summary.records == len(records)
+    assert summary.sealed is True
+
+
+# (nowcast_v0.yaml's max_board_age_s, the taus whose point is no_board), first live day's ages
+FIRST_DAY_AGES = {60: 300, 30: 240, 16: 170, 5: 50, 2: 40, 1: 20}
+EDITED_LIMIT_CASES = {
+    "a tighter T-60 and T-1": (
+        {60: 200, 30: 1000, 16: 1000, 5: 1000, 2: 1000, 1: 10},
+        {60, 1},
+    ),
+    "a tighter T-30 and T-2": ({60: 1000, 30: 239, 16: 1000, 5: 1000, 2: 39, 1: 1000}, {30, 2}),
+    "every limit loose": ({tau: 5000 for tau in GRID}, set()),
+}
+
+
+@pytest.mark.parametrize(
+    "limits, stale", list(EDITED_LIMIT_CASES.values()), ids=list(EDITED_LIMIT_CASES)
+)
+def test_the_default_limits_are_read_from_nowcast_v0_yaml(config_copy, limits, stale):
+    config_copy("nowcast_v0", set_limits(limits))
+    race = aged_race(FIRST_DAY_AGES)
+    world = World([race])
+
+    summary = run(Clock(world, LATE), models=None, once=True, max_board_age_s=None)
+
+    assert_board_ages(world, race, FIRST_DAY_AGES, stale)
+    assert summary.no_board == len(stale)
+
+
+MAPPING_CASES = {
+    "100 s everywhere but T-16": {**{tau: 100.0 for tau in GRID}, 16: 200.0},
+    "only T-1 loose": {**{tau: 0.0 for tau in GRID}, 1: 31.0},
+    "loose early, tight late": {60: 900.0, 30: 900.0, 16: 900.0, 5: 60.0, 2: 1.0, 1: 1.0},
+}
+MIXED_AGES = {60: 300, 30: 310, 16: 100, 5: 61, 2: 44, 1: 31}
+
+
+@pytest.mark.parametrize("limits", list(MAPPING_CASES.values()), ids=list(MAPPING_CASES))
+def test_a_mapping_passed_in_overrides_the_config_per_tau(limits):
+    race = aged_race(MIXED_AGES)
+    world = World([race])
+
+    summary = run(Clock(world, LATE), models=None, once=True, max_board_age_s=limits)
+
+    stale = {tau for tau in GRID if MIXED_AGES[tau] > limits[tau]}
+    assert_board_ages(world, race, MIXED_AGES, stale)
+    assert summary.no_board == len(stale)
+
+
+def _drop_limit(tau: int):
+    def change(raw: dict) -> None:
+        raw["max_board_age_s"] = {t: s for t, s in raw["max_board_age_s"].items() if int(t) != tau}
+
+    return change
+
+
+def _add_grid_tau(tau: int):
+    def change(raw: dict) -> None:
+        raw["grid_min"] = sorted({*raw["grid_min"], tau}, reverse=True)
+
+    return change
+
+
+MISSING_LIMIT_CASES = {
+    "a mapping passed in without T-2": (None, {t: 600.0 for t in GRID if t != 2}),
+    "nowcast_v0.yaml without T-1": (("nowcast_v0", _drop_limit(1)), None),
+    "nowcast_v0.yaml without T-60": (("nowcast_v0", _drop_limit(60)), None),
+    "decision.yaml with a T-10 nowcast_v0.yaml has no limit for": (
+        ("decision", _add_grid_tau(10)),
+        None,
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "edit, limits", list(MISSING_LIMIT_CASES.values()), ids=list(MISSING_LIMIT_CASES)
+)
+def test_a_grid_tau_without_a_limit_refuses_to_start_and_writes_nothing(config_copy, edit, limits):
+    if edit is not None:
+        config_copy(*edit)
+    world = World([race_one(), race_two()])  # every point is due and has a fresh board
+
+    with pytest.raises(ValueError):
+        run(Clock(world, LATE), models=None, once=True, max_board_age_s=limits)
+
+    path = shadow_log_path(DAY)
+    assert not path.exists() or open_log().read() == []
+    assert open_log().verify().sealed is False
+
+
+def test_the_cli_applies_the_per_tau_limits(monkeypatch):
+    race = aged_race(MIXED_AGES)
+    world = World([race])
+    world.write_until(LATE)
+    monkeypatch.setattr(shadow_day, "utc_now", lambda: LATE)
+    from horsetrack.cli import app
+
+    result = CliRunner().invoke(app, ["japan", "shadow-day", "--date", DAY.isoformat(), "--once"])
+
+    assert result.exit_code == 0, ANSI.sub("", result.output)
+    stale = SHIPPED_LIMIT_CASES["mixed"][1]
+    assert_board_ages(world, race, MIXED_AGES, stale)
+    assert open_log().verify().no_board == len(stale)
+
+
+@pytest.mark.parametrize("dropped", [60, 2])
+def test_the_cli_refuses_a_grid_tau_without_a_limit(monkeypatch, config_copy, dropped):
+    config_copy("nowcast_v0", _drop_limit(dropped))
+    world = World([race_one(), race_two()])
+    world.write_until(LATE)
+    monkeypatch.setattr(shadow_day, "utc_now", lambda: LATE)
+    from horsetrack.cli import app
+
+    result = CliRunner().invoke(app, ["japan", "shadow-day", "--date", DAY.isoformat(), "--once"])
+
+    assert result.exit_code == 1, ANSI.sub("", result.output)
+    path = shadow_log_path(DAY)
+    assert not path.exists() or open_log().read() == []

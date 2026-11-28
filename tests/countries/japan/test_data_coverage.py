@@ -96,7 +96,7 @@ from horsetrack.core import env, paths
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.reports import LicensedOutputInRepo, is_withheld, write_report
 from horsetrack.core.store import schemas
-from horsetrack.countries.japan.jravan import bloodlines, dump, masters, odds, votes
+from horsetrack.countries.japan.jravan import bloodlines, career_counts, dump, masters, odds, votes
 from horsetrack.countries.japan.logger import compact
 from horsetrack.countries.japan.research import coverage as cv
 
@@ -115,11 +115,12 @@ JRAVAN_ONLY = {
     "breeding_horses": bloodlines.BREEDING_HORSES_SCHEMA.names,
     "produce": bloodlines.PRODUCE_SCHEMA.names,
     "lineages": bloodlines.LINEAGES_SCHEMA.names,
+    "career_counts": career_counts.CAREER_COUNTS_SCHEMA.names,  # #407
 }
 # the schemas.TABLES tables the jravan builders write (races.py, runners.py, dividends.py,
-# masters.py)
+# masters.py, horse_runs.py)
 JRAVAN_STORE_TABLES = frozenset(
-    {"races", "meetings", "runners", "dividends", "horses", "horse_pedigree"}
+    {"races", "meetings", "runners", "dividends", "horses", "horse_pedigree", "horse_runs"}
 )
 DUMP_TABLE = re.compile(r"records/([A-Z]{4})/([0-9A-Z]{2})")
 VENUE = "QQV"  # a made-up venue code, so a race id never matches a real one

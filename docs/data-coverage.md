@@ -154,11 +154,12 @@ The high end of the lo-hi range the Place and Wide (QUINELLA_PLACE) boards show 
 
 Layers C2; role `feature_at_t`; tickets #403, #377, #404.
 
-A horse's earlier runs, read from runners (#128). Both stores hold JRA races only; `horse_runs` (every run of a horse) is built for neither source (#403), and the NAR and overseas runs are left out (#377).
+A horse's earlier runs, read from runners (#128). Both stores hold JRA races only; `horse_runs` (every run of a horse) is built from the jravan races and runners (#403) and not for the jra store, and the NAR and overseas runs are left out (#377).
 
 - jra `runners.finish_pos`: 2010-01-05 to 2026-11-23, 824,386 rows; no gap year
 - jravan `runners.finish_pos`: withheld (D21)
 - jra `horse_runs.placing_raw`: 0 rows; gap: no rows (#403, #377, #404)
+- jravan `horse_runs.placing_raw`: withheld (D21)
 
 ## margins
 
@@ -287,9 +288,9 @@ The lineage (#95); netkeiba's pedigree card names no sire line.
 
 Layers C2; role `feature_at_t`; tickets #407.
 
-JV-Data CK (each runner's placings so far, by surface, distance, going and venue, and its jockey's and trainer's), dumped but not mapped into a table.
+JV-Data CK (each runner's placings so far, by surface, distance, going and venue, and its jockey's and trainer's), mapped into the long jravan table (#407); `first` stands for its six placing-count columns.
 
-- jravan `records/SNPN/CK._record`: withheld (D21)
+- jravan `career_counts.first`: withheld (D21)
 
 ## finish_time
 
