@@ -42,7 +42,6 @@ import dataclasses
 import hashlib
 import json
 import os
-from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Annotated
@@ -59,6 +58,7 @@ from horsetrack.core.eval.registry import (
     Registry,
     RunRecord,
     _canonical,
+    _record_data,
     _sha256,
     default_registry,
     summary_dir,
@@ -281,7 +281,7 @@ def _success_run_id(registry: Registry, fit_id: str, builds: dict, wide_fit_id: 
             and record.data_builds == builds
             and record.params.get("wide_fit_id") == wide_fit_id
         ):
-            return _sha256(_canonical(asdict(record)))  # as Registry.append names a run
+            return _sha256(_canonical(_record_data(record)))  # as Registry.append names a run
     return None
 
 
