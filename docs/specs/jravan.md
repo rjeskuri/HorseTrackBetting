@@ -36,6 +36,7 @@ command run by hand. The same inputs give the same bytes.
 | `dividends` | `dividends.py` | `dividends` | store table | that of `dividends` |
 | `final-odds` | `odds.py` | `final_odds` | jravan-only | `label_only` |
 | `votes` | `votes.py` | `pool_votes` | jravan-only | `label_only` |
+| `career-counts` | `career_counts.py` | `career_counts` | jravan-only | `offset` on `race_date`, `offset_min: 0` (#407); versions made after the race date dropped |
 | `timeseries` | `timeseries.py` | `odds_timeseries/<YYYY-MM-DD>.parquet` | the odds log's schema | that of `odds_timeseries` |
 | `masters` | `masters.py` | `horses`, `horse_pedigree`; `jockeys`, `trainers` | store tables; jravan-only | `horses` refused, `horse_pedigree` `static`; `current_value` with `in_view` |
 | `bloodlines` | `bloodlines.py` | `breeding_horses`, `produce`, `lineages` | jravan-only | `static` |
@@ -783,17 +784,73 @@ availability rule for `runners.is_scratched`, `races.field_size`, `races.status`
 `meetings.status` is in docs/specs/as-of.md ("Accepted leak: results-derived card columns").
 
 Pre-race card versions can be kept by reading them before the race, each with the time it was
-read; nothing does today:
+read; the race-day card log does so since #426:
 
 - The JRA official 出馬表 on race day is the feed for it. `jra/official_card.py` parses a race's
   出馬表 page (JRADB `pw01dde`) into `races` and `racecard_runners` rows, the scratches as printed
-  (`is_scratched`) and each runner row stamped `card_scraped_utc`, the page's fetch time. The
-  logger does not fetch that page: `log-day` reads the 出馬表 menu and the card race list for the
-  post times only (`jra/capture.py`, `read_post_times`), nothing calls `official_card.parse`, and
-  no store table holds its rows. The logger would need to fetch each race's 出馬表 page from that
-  race list before the off, as often as a late scratch matters, and write the parsed rows with
-  their fetch time into a table whose availability rule is the owner's.
+  (`is_scratched`) and each runner row stamped `card_scraped_utc`, the page's fetch time. Since
+  #426, `log-day` fetches each race's 出馬表 page at the `cards` grid points before the off
+  (`jra/capture.py`, `capture_cards`) and appends the parsed rows with their fetch time to
+  `<VENUE>.cards.jsonl.gz` (docs/specs/odds-log.md, "Card log (ticket #426)", which holds the
+  owner's availability rule). No store table or as-of view reads them yet.
 - JV-Link's regular (non-setup) RACE reads during race week deliver versions `1` and `2` while
   they are current. The export is a bulk read of the stored data (#196), and the Windows VM logs
   nothing between exports (no repository code runs there); keeping them would need a race-week
   reader on the VM and a folder of its own under `raw/jravan/`.
+
+## CK: career counts (#407)
+
+`horsetrack.countries.japan.jravan.career_counts` writes `processed/jravan/career_counts.parquet`
+from JV-Data CK (出走別着度数): per runner of a race, its placings so far under each condition, and
+its jockey's and trainer's this year and in total, as of that race. It is not in `schemas.TABLES`;
+its availability rule is the owner's (answer B on #407, 2026-11-28): `offset` on `race_date`,
+`offset_min: 0` in `config/availability.yaml`, so a view shows a race's rows from 00:00 JST of its
+race date (the card's rule), and the build drops any key whose kept version was made after the
+race date (a version made later could hold the race's own result), counting it in
+`created_after_race`. The table carries `horse_id`, not `horse_no` (CK has no 馬番); a join to the jravan `runners` table is
+on (`race_id`, `horse_id`).
+
+- `build_career_counts(*, raw=None, out=None, chunk_records=20_000) -> BuildReport` reads
+  `<raw>/stored/SNPN/CK/all.jvd` (one multi-GB file; no file is a `FileNotFoundError`) in two
+  steps, in bounded memory. One pass streams it through `records.iter_lines`: each record's type is
+  checked, then its race date is read from its 開催年 and 開催月日 bytes alone, and a record on a
+  holdout day is read no further, whatever its width, and counted only as `holdout_skipped`. Every
+  other record must be the layout's width (`RecordLengthError` with the file's record number); one
+  without a valid race date (`undated`) or outside the JRA venues 01-10 (`non_jra`) is dropped, and
+  the rest are spilled, undecoded, to one temporary file per race month beside the output (removed
+  when the build ends). Each month is then decoded alone: one version per key
+  (`records.latest_versions` on 開催年, 開催月日, 競馬場コード, 開催回, 開催日目, レース番号 and
+  血統登録番号; a key whose latest version is a deletion has no rows and counts in `deletions`,
+  whatever its date). A key whose kept version's データ作成年月日 is after its race date (開催年 +
+  開催月日) has no rows either and counts in `created_after_race`; a version made on the race date
+  is kept, and an earlier version never stands in for a later one. A blank or invalid
+  データ作成年月日 on a kept version cannot be shown to be on or before the race date, so it is
+  dropped and counted in `created_after_race` too. The kept records are sorted, and written as one
+  row group through a `ParquetWriter` (zstd) into a tmp file, then `os.replace`. Rows are sorted
+  by `race_id, horse_id, subject, period, condition` (plain string order); the same records, in any
+  order and at any chunk size, give the same bytes.
+- What bounds the build's memory: the streaming pass holds one chunk of `chunk_records` raw
+  records (and that chunk split by month) at a time; each spill file holds one race month, and the
+  decode reads, decodes and writes one month at a time (its raw bytes, decoded columns and Arrow
+  table, released before the next), so the peak follows the largest race month and the chunk
+  size, not the size of the CK file. The `ParquetWriter` keeps only the written row groups'
+  metadata.
+- `CAREER_COUNTS_SCHEMA`: `race_id` (`keys.race_id`), `race_date`, `horse_id` (血統登録番号; CK
+  has no 馬番), `subject` (`horse`, `jockey`, `trainer`), `subject_id`, `period` (`career`,
+  `this_year`), `condition`, and `first`, `second`, `third`, `fourth`, `fifth`, `unplaced` (int64,
+  null when not a number).
+- The rows come from the layout, never a list: a leaf whose name ends in `着回数` with six repeats
+  is a placing-counts item (1st to 5th and out of the first five), its `condition` the name
+  without `着回数` and a trailing `・` or `･` (`芝直・着回数` -> `芝直`). A top-level item is a
+  `horse` row (`subject_id` 血統登録番号, `period` `career`); a sub-item of the group whose name
+  holds `騎手` a `jockey` row (`subject_id` the top-level 騎手コード), of the one holding `調教師` a
+  `trainer` row (調教師コード); the group's first occurrence is `this_year` (本年), the second
+  `career` (累計). The owner's and breeder's groups and 脚質傾向 write no row.
+
+`horsetrack japan jravan career-counts` runs the build and writes `reports/jravan-career_counts.json`
+through `write_build_report`, counts only: `records`, `holdout_skipped`, `undated`, `non_jra`,
+`versions_dropped`, `deletions`, `created_after_race`, `kept` (runners with rows) and `rows`, and
+`rows` per race year; every record read counts once, `records = holdout_skipped + undated +
+non_jra + versions_dropped + deletions + created_after_race + kept`.
+The report holds no wall time or peak memory. The run's figures, its wall time and peak memory
+included, are withheld (D21) and stay out of the repository.

@@ -42,7 +42,7 @@ race day, named by its local (JST) date. `ShadowLog(path, day=...)` refuses a fi
 | `decision_utc` | ISO UTC text | when the pick was decided; `Z` or `+00:00` |
 | `board_capture_utc` | ISO UTC text or null | the board the pick used; null only when `status` is `no_board`; never after `decision_utc` |
 | `written_utc` | ISO UTC text | when the logger wrote the record |
-| `mode` | text | `live` or `replay` |
+| `mode` | text | `live`: written within the logger's max lag of `decision_utc` and before the post scheduled at the decision; otherwise `replay`. A record written at or after its post is never `live`; a record is never relabelled when the post later moves |
 | `status` | text | `ok`, or `no_board` when no board was captured in time |
 | `models` | mapping or null | the fit ids the pick used (`win`, `ordering`, `nowcast`, ...) |
 | `git_sha` | text | the commit the logger ran |
