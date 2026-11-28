@@ -190,3 +190,13 @@ tables:
     kind: static
   lineages:
     kind: static
+  # The CK placing counts (#407, JV-Data CK: each runner's, jockey's and trainer's placings as of
+  # the race's card): from 00:00 JST of the race date, the card's rule (the owner's answer B on
+  # #407, 2026-11-28). The other half of that answer is the build's: a key whose kept version's
+  # データ作成年月日 is after its race date (or blank) is dropped and counted in
+  # created_after_race, never kept. No label columns.
+  career_counts:
+    kind: offset
+    anchor: race_date
+    tz: Asia/Tokyo
+    offset_min: 0
