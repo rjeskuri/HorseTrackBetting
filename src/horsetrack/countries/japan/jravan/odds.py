@@ -15,7 +15,8 @@ one implied decimal place, null when it is not a positive number, the low price'
 `build_final_odds` reads `<raw>/stored/RACE/<O1..O6>/<YYYY>.jvd` one year at a time, streaming
 each file in chunks (`records.iter_file`), keeps one version per race and record type
 (`records.latest_versions`) and JRA venues only, sorts the year by `race_id, pool, combination`
-and writes it as one row group of `<out>/final_odds.parquet`, through a tmp file and `os.replace`.
+and writes it as one row group per race day of `<out>/final_odds.parquet` (`records.write_days`,
+#502), through a tmp file and `os.replace`.
 Its availability rule is `label_only` (owner decision, #376; docs/specs/as-of.md): it is a label
 or a conditioner, never a feature at t.
 """
@@ -299,8 +300,8 @@ def _read_file(path: Path, layout: spec.RecordSpec) -> tuple[pa.Table, np.ndarra
 
 
 def _write(target: Path, years: list[int], read_year) -> dict[int, dict[str, int]]:
-    """One row group per year with rows, in `years` order, through a tmp file and `os.replace`;
-    the rows per pool of each year written."""
+    """One row group per race day of each year with rows, in `years` order, through a tmp file
+    and `os.replace`; the rows per pool of each year written."""
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex[:12]}.tmp")
     rows: dict[int, dict[str, int]] = {}
@@ -318,7 +319,7 @@ def _write(target: Path, years: list[int], read_year) -> dict[int, dict[str, int
                 table = table.add_column(
                     0, "jurisdiction", pa.array([JURISDICTION] * table.num_rows, pa.string())
                 ).cast(FINAL_ODDS_SCHEMA)
-                writer.write_table(table, row_group_size=table.num_rows)
+                records.write_days(writer, table)
                 counts = pc.value_counts(table["pool"]).to_pylist()
                 rows[year] = {c["values"]: int(c["counts"]) for c in counts}
                 del table
@@ -334,7 +335,7 @@ def build_final_odds(
     """Read the export's O1-O6 year files (`raw` the export root, default `paths.raw_dir('jravan')`;
     `years` None for every year file of every type, a type without a file for a year adds nothing)
     and write `<out>/final_odds.parquet` (default `paths.processed_dir('jravan')`), one row group
-    per year. Returns the counts, no record content."""
+    per race day. Returns the counts, no record content."""
     root = Path(raw) if raw is not None else paths.raw_dir(SOURCE)
     target = (Path(out) if out is not None else paths.processed_dir(SOURCE)) / FILENAME
     files = {rt: _year_files(root / "stored" / "RACE" / rt) for rt in RECORD_TYPES}
