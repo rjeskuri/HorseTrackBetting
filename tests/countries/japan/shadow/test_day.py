@@ -1027,3 +1027,109 @@ def test_the_default_date_is_today_in_tokyo(monkeypatch, now, expected):
     assert result.exit_code == 0, ANSI.sub("", result.output)
     logs = sorted(p.name for p in paths.logs_dir("japan").glob("shadow-day-*.log"))
     assert logs == [f"shadow-day-{expected.isoformat()}.log"]
+
+
+# ---------------------------------------------------------------- timing against the post (#421)
+#
+# Contract added by #421: a record is `live` only when it is written within max_lag_s of its
+# decision time AND strictly before the post scheduled at the decision. `ShadowSummary.on_time`
+# (new, last field, default 0) = the records appended by this run (no_board ones included) that are
+# `live` and whose written_utc is strictly before the LATEST known post of their race at the time
+# the summary is built (the post times are re-read on every poll), so a post moved earlier after
+# the write cannot leave a record counted on time.
+
+
+def expected_mode(record: dict, post: datetime, max_lag: float) -> str:
+    decision, written = instant(record["decision_utc"]), instant(record["written_utc"])
+    within_lag = (written - decision).total_seconds() <= max_lag
+    return "live" if within_lag and written < post else "replay"
+
+
+# (written relative to the post in seconds, max_lag_s, the T-1 point's mode)
+TIMING_CASES = [
+    (-30, 120.0, "live"),  # before the post, T-1 lag 30 s
+    (-1, 120.0, "live"),  # one second before the post, T-1 lag 59 s
+    (0, 120.0, "replay"),  # exactly at the post
+    (1, 120.0, "replay"),
+    (60, 120.0, "replay"),  # the ticket's case: T-1 lag 120 s is within the lag, post + 60 s is not
+    (60, 600.0, "replay"),  # a generous lag does not make a post-time write live
+    (-30, 20.0, "replay"),  # still late by the lag rule: T-1 lag 30 s > 20 s
+]
+
+
+@pytest.mark.parametrize("offset, max_lag, t1_mode", TIMING_CASES)
+def test_a_record_written_at_or_after_its_post_is_never_live(models, offset, max_lag, t1_mode):
+    race = race_one()
+    world = World([race])
+    clock = Clock(world, race.post + timedelta(seconds=offset))
+
+    summary = run(clock, models=models, once=True, max_lag_s=max_lag)
+
+    records = open_log().read()
+    assert summary.records == len(records) == total_keys([race])
+    points = decided(records)
+    assert {tau for (_, tau) in points} == set(GRID)
+    for record in records:
+        assert instant(record["written_utc"]) == clock.now()
+        assert record["mode"] == expected_mode(record, race.post, max_lag), record
+    assert {r["mode"] for r in points[(race.race_id, 1)]} == {t1_mode}
+    live = sum(r["mode"] == "live" for r in records)
+    assert summary.on_time == live
+    if offset >= 0:
+        assert live == 0 and summary.on_time == 0
+
+
+class MovingPostClock(Clock):
+    """A Clock that rewrites race one's post time sidecar at its first sleep, i.e. after the first
+    batch of points was written (race one's six points are all due when the run starts)."""
+
+    def __init__(self, *args, new_post: datetime, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.new_post = new_post
+        self.moved = False
+
+    def sleep(self, seconds: float) -> None:
+        if not self.moved:
+            self.moved = True
+            sidecar = log_path("TOK").with_name("TOK.races.json")
+            posts = {1: self.new_post, 2: POST2}
+            odds_log.write_post_times(sidecar, posts, self.t)
+        super().sleep(seconds)
+
+
+# (new post of race one relative to its original post, in seconds)
+MOVE_CASES = [None, -300, -10, 300]
+
+
+@pytest.mark.parametrize("move", MOVE_CASES)
+def test_a_post_moved_after_the_write_changes_what_counts_on_time(models, move):
+    one, two = race_one(), race_two()
+    world = World([one, two])
+    start = one.post - timedelta(seconds=30)
+    new_post = one.post + timedelta(seconds=move if move is not None else 0)
+    clock = MovingPostClock(world, start, new_post=new_post)
+
+    summary = run(clock, models=models)
+
+    assert clock.moved and summary.sealed
+    records = open_log().read()
+    assert summary.records == len(records) == total_keys([one, two])
+    latest = {one.race_id: new_post, two.race_id: two.post}
+    live_one = [r for r in records if r["race_id"] == one.race_id and r["mode"] == "live"]
+    live_two = [r for r in records if r["race_id"] == two.race_id and r["mode"] == "live"]
+    assert live_one and live_two  # race one's T-1 and T-2 are live at the write; so are race two's
+    assert all(instant(r["written_utc"]) < one.post for r in live_one)
+
+    on_time = [
+        r
+        for r in records
+        if r["mode"] == "live" and instant(r["written_utc"]) < latest[r["race_id"]]
+    ]
+    assert summary.on_time == len(on_time)
+    if move is not None and move <= -30:
+        # the post now lies at or before the write: race one's records no longer count
+        assert summary.on_time == len(live_two) < len(live_two) + len(live_one)
+    else:
+        assert summary.on_time == len(live_one) + len(live_two)
+    # the records themselves are sealed as written: moving a post rewrites nothing
+    assert {r["mode"] for r in live_one} == {"live"}
