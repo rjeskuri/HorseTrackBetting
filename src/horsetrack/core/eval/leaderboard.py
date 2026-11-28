@@ -45,6 +45,16 @@ writer passes every row's sources to ``write_report`` and itself refuses a path 
 repository when any row is withheld, so a row marked licensed under a public source name is
 refused too.
 
+Capacity (#491). A row may name its stake-capacity cell beside its pool (``class_group``,
+``odds_band``) and carry that cell's capacity, ``capacity``: (edge, quantile, stake in yen)
+triples, the stake at which our own money eats the study's share of that edge (+inf where it
+never does), or a ``capacity_note`` saying why it carries none. A country's builder fills them
+(Japan: ``leaderboard_build.with_capacity``, from #432's depth table). The private text shows the
+median stake at each edge in the Capacity column; the public text shows ``withheld (D21)`` there
+for every row that carries one, since the figures come from a licensed source, and the row's
+note otherwise. The capacity withholds no row. In the JSON an infinite stake is the string
+"inf" (``allow_nan=False``).
+
 From the registry (``rows_from_registry``, #450). The run registry is the leaderboard's source:
 every non-holdout run gives measured rows from the convention of ``docs/specs/leaderboard.md``,
 an adapter's rows, or one unmeasured row, failures included; each option's latest row in append
@@ -66,7 +76,13 @@ from pathlib import Path
 from scipy.stats import norm
 
 from horsetrack.core import env
-from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord, is_licensed_record
+from horsetrack.core.eval.registry import (
+    FoldMetric,
+    Registry,
+    RunRecord,
+    is_licensed_record,
+    variant_count,
+)
 from horsetrack.core.eval.reports import (
     LicensedOutputInRepo,
     is_inside,
@@ -80,6 +96,8 @@ N_UNITS = ("bets", "races", "days")
 
 _WRITER = "horsetrack.core.eval.leaderboard"
 _NONE = "—"
+_WITHHELD = "withheld (D21)"  # a capacity figure in the public text (D21)
+_INF = "inf"  # an infinite capacity stake in the JSON
 _FLOATS = (
     "return_per_100",
     "ci_lo",
@@ -129,6 +147,10 @@ class LeaderboardRow:
     licensed: bool = False
     note: str | None = None
     descriptive: bool = False
+    class_group: str | None = None
+    odds_band: str | None = None
+    capacity: tuple[tuple[float, float, float], ...] = ()
+    capacity_note: str | None = None
 
     def __post_init__(self) -> None:
         problem = self._problem()
@@ -181,7 +203,13 @@ class LeaderboardRow:
             return "note must be a string or None"
         if not isinstance(self.descriptive, bool):
             return f"descriptive must be a bool, got {self.descriptive!r}"
-        return None
+        for name in ("class_group", "odds_band"):
+            value = getattr(self, name)
+            if value is not None and not _is_text(value):
+                return f"{name} must be a non-blank string or None, got {value!r}"
+        if self.capacity_note is not None and not isinstance(self.capacity_note, str):
+            return "capacity_note must be a string or None"
+        return _capacity_problem(self.capacity)
 
     @property
     def withheld(self) -> bool:
@@ -191,6 +219,14 @@ class LeaderboardRow:
     @property
     def measured(self) -> bool:
         return self.return_per_100 is not None
+
+    def capacity_at(self, edge: float, quantile: float = 0.5) -> float | None:
+        """The capacity stake in yen at ``edge`` and ``quantile`` (matched as floats), or None
+        when the row carries none there."""
+        for e, q, stake in self.capacity:
+            if math.isclose(e, edge, abs_tol=1e-12) and math.isclose(q, quantile, abs_tol=1e-12):
+                return stake
+        return None
 
     def se(self) -> float | None:
         """se_per_100; else from both one-sided bounds; else from one bound and the return."""
@@ -205,6 +241,24 @@ class LeaderboardRow:
         if bound is None or self.return_per_100 is None:
             return None
         return abs(self.return_per_100 - bound) / z
+
+
+def _capacity_problem(capacity: object) -> str | None:
+    if not isinstance(capacity, tuple):
+        return f"capacity must be a tuple of (edge, quantile, stake), got {capacity!r}"
+    for entry in capacity:
+        if not (isinstance(entry, tuple) and len(entry) == 3):
+            return f"a capacity entry must be (edge, quantile, stake), got {entry!r}"
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in entry):
+            return f"a capacity entry must hold numbers, got {entry!r}"
+        edge, quantile, stake = entry
+        if not (math.isfinite(edge) and edge > 0):
+            return f"a capacity edge must be a positive finite number, got {edge!r}"
+        if not (math.isfinite(quantile) and 0 <= quantile <= 1):
+            return f"a capacity quantile must lie in [0, 1], got {quantile!r}"
+        if math.isnan(stake) or stake < 0:
+            return f"a capacity stake must be a non-negative number or inf, got {stake!r}"
+    return None
 
 
 @dataclass(frozen=True)
@@ -360,8 +414,11 @@ _COLUMNS = (
     "n",
     "Variants searched",
     "Sources",
+    "Capacity (median ¥ per edge)",
 )
-_ALIGN = ("---:", "---", "---", "---", "---", "---", "---:", "---", "---:", "---:", "---:", "---")
+_ALIGN = (
+    "---:", "---", "---", "---", "---", "---", "---:", "---", "---:", "---:", "---:", "---", "---",
+)  # fmt: skip
 # The descriptive section's table: no Shrunk column (a descriptive row is never shrunk), and a
 # Rank column that always shows ``_NONE``, so each row reads as unranked.
 _DESCRIPTIVE_HEADING = "## Descriptive, not ranked"
@@ -377,8 +434,26 @@ _DESCRIPTIVE_COLUMNS = (
     "n",
     "Variants searched",
     "Sources",
+    "Capacity (median ¥ per edge)",
 )
 _DESCRIPTIVE_ALIGN = _ALIGN[:8] + _ALIGN[9:]  # _ALIGN without Shrunk's
+
+
+def _yen(stake: float) -> str:
+    return "unbounded" if math.isinf(stake) else f"¥{stake:,.0f}"
+
+
+def _capacity(row: LeaderboardRow, *, public: bool) -> str:
+    """The median capacity stake at each edge the row carries, ``withheld (D21)`` in public; the
+    row's capacity note when it carries none."""
+    if row.capacity:
+        if public:
+            return _WITHHELD
+        medians = [(e, row.capacity_at(e)) for e in sorted({e for e, _, _ in row.capacity})]
+        return "; ".join(
+            f"{e * 100:g}%: {_NONE if stake is None else _yen(stake)}" for e, stake in medians
+        )
+    return _cell(row.capacity_note or "")
 
 
 def _table_line(cells: Iterable[str]) -> str:
@@ -387,7 +462,8 @@ def _table_line(cells: Iterable[str]) -> str:
 
 def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool) -> str:
     """The leaderboard as Markdown: shrunk and ranked over every row, or, when ``public``, over
-    the public view alone, with the withheld rows listed by option id and family only.
+    the public view alone, with the withheld rows listed by option id and family only; the
+    Capacity column is ``_capacity``'s.
 
     The ranked table holds the rows that are not descriptive (ranked, then unmeasured); the
     descriptive rows follow in their own section, unranked, in ``rank``'s order (measured by
@@ -414,6 +490,11 @@ def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool)
         f"Variants searched in total: {_variants_total(rows)} (each family's variants searched, "
         "its largest count across its rows, added over every family, withheld families "
         "included).",
+        "",
+        "Capacity: in the row's pool, class group and odds band, the median stake at which our "
+        "own money would eat the pool-depth study's share of each edge, from the final votes "
+        "(a licensed source, so withheld (D21) in the public version); a row without one says "
+        "why.",
         "",
     ]
     if public:
@@ -444,6 +525,7 @@ def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool)
                     _n(row),
                     str(row.variants_searched),
                     _cell(", ".join(row.sources)),
+                    _capacity(row, public=public),
                 )
             )
         )
@@ -466,6 +548,7 @@ def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool)
                         _n(row),
                         str(row.variants_searched),
                         _cell(", ".join(row.sources)),
+                        _capacity(row, public=public),
                     )
                 )
             )
@@ -476,9 +559,24 @@ def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool)
     return "\n".join(lines) + "\n"
 
 
+def _json_row(row: LeaderboardRow) -> dict:
+    data = dataclasses.asdict(row)
+    data["capacity"] = [[e, q, _INF if math.isinf(s) else s] for e, q, s in row.capacity]
+    return data
+
+
 def to_json(rows: Iterable[LeaderboardRow]) -> str:
-    return json.dumps(
-        [dataclasses.asdict(r) for r in rows], ensure_ascii=False, allow_nan=False, indent=2
+    return json.dumps([_json_row(r) for r in rows], ensure_ascii=False, allow_nan=False, indent=2)
+
+
+def _read_capacity(value: object) -> object:
+    """``capacity`` as ``to_json`` writes it, back to triples; anything else is left for the row's
+    own check to refuse."""
+    if not isinstance(value, list):
+        return value
+    return tuple(
+        tuple(math.inf if v == _INF else v for v in entry) if isinstance(entry, list) else entry
+        for entry in value
     )
 
 
@@ -497,6 +595,8 @@ def from_json(text: str) -> list[LeaderboardRow]:
         fields = dict(item)
         if isinstance(fields.get("sources"), list):
             fields["sources"] = tuple(fields["sources"])
+        if "capacity" in fields:
+            fields["capacity"] = _read_capacity(fields["capacity"])
         try:
             rows.append(LeaderboardRow(**fields))
         except TypeError as exc:  # a missing or unknown field
@@ -690,13 +790,16 @@ def rows_from_registry(
     ``is_licensed_record`` (an adapter's row also keeps its own True).
     """
     adapters = adapters or {}
+    # one read of the registry; a family's size counts every run of it, holdout runs included
+    all_runs: dict[str, list[RunRecord]] = {}
     families: dict[str, list[RunRecord]] = {}
     for record in registry.records():
+        all_runs.setdefault(record.family_id, []).append(record)
         if record.holdout_open is None:
             families.setdefault(record.family_id, []).append(record)
     latest: dict[str, LeaderboardRow] = {}
     for family_id, runs in families.items():
-        size = registry.family_size(family_id)
+        size = variant_count(all_runs[family_id])
         adapter = adapters.get(family_id)
         for record in runs:
             made, problem = _record_rows(record, size, adapter)

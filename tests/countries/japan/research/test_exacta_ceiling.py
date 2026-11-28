@@ -1360,3 +1360,27 @@ def test_the_record_command_writes_the_ledger_file_or_exits_1(isolated, tmp_path
     assert refused.stderr.strip()
     assert cells.read_bytes() == SENTINEL
     assert _lines(isolated["data"] / "registry" / "japan.jsonl") == [], "the default registry grew"
+
+
+# ---------------------------------------------------------------------------------------------
+# 11. The run ids are the registry's own (#88: RunRecord.notes)
+# ---------------------------------------------------------------------------------------------
+
+
+def _run_line_ids(path: Path) -> list[str]:
+    return [e["run_id"] for e in map(json.loads, _lines(path)) if e["kind"] == "run"]
+
+
+def test_a_run_returns_the_run_ids_its_registry_wrote(isolated, tmp_path, monkeypatch):
+    """#88 adds ``RunRecord.notes``, a line without notes is written without the key, so a record
+    without notes keeps the id it had before the field: ``result.run_ids`` are the ids the
+    registry's lines carry, in order, on a first run and on an identical rerun (nothing new)."""
+    races, meta, asked = _record_store()
+    out, registry = tmp_path / "reports", _registry(tmp_path)
+    first = _ceiling_run(monkeypatch, out, registry, races, meta, sha=PROBE_SHA, asked=asked)
+    written = _run_line_ids(registry.path)
+    assert len(written) == len(first.run_ids) > 2 * len(MEMBERS)  # both families + descriptives
+    assert list(first.run_ids) == written, "a run id is not the id its registry line carries"
+    again = _ceiling_run(monkeypatch, out, registry, races, meta, sha=PROBE_SHA, asked=asked)
+    assert _run_line_ids(registry.path) == written, "an identical rerun appended a record"
+    assert list(again.run_ids) == written, "a rerun's run ids are not the registry's"

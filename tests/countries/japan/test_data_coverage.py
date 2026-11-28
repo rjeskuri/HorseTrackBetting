@@ -96,7 +96,7 @@ from horsetrack.core import env, paths
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.reports import LicensedOutputInRepo, is_withheld, write_report
 from horsetrack.core.store import schemas
-from horsetrack.countries.japan.jravan import bloodlines, dump, masters, odds, votes
+from horsetrack.countries.japan.jravan import bloodlines, career_counts, dump, masters, odds, votes
 from horsetrack.countries.japan.logger import compact
 from horsetrack.countries.japan.research import coverage as cv
 
@@ -115,6 +115,7 @@ JRAVAN_ONLY = {
     "breeding_horses": bloodlines.BREEDING_HORSES_SCHEMA.names,
     "produce": bloodlines.PRODUCE_SCHEMA.names,
     "lineages": bloodlines.LINEAGES_SCHEMA.names,
+    "career_counts": career_counts.CAREER_COUNTS_SCHEMA.names,  # #407
 }
 # the schemas.TABLES tables the jravan builders write (races.py, runners.py, dividends.py,
 # masters.py, horse_runs.py)

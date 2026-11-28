@@ -55,6 +55,17 @@ final price) is recorded failed. Every report built on the store goes through
 under a name carrying the run's id. `render_public_report` writes the public text, which holds no
 figure from the data; the command merges the runs the committed report already lists into it by
 run id.
+
+TIERCE and BRACKET_QUINELLA (#490) are the spec EXOTICS (config/pool_depth_exotics.yaml, its own
+family), `run_depth(spec_name=EXOTICS)`: the same cells, streamed into `_StreamCells`, which keeps
+per cell the distinct (V, W) vote pairs of each month with their counts and reads every quantile
+exactly from them (`StreamingQuantile`), so memory follows the distinct pairs, not the trifecta's
+combinations. A bracket pair's horses come from the jravan runners (`bracket_map`, starters only),
+and a pair not sold gives no row (`depth_rows(..., brackets=)`).
+
+For the leaderboard (#491), each scored depth run of either spec also writes its cell table as
+CSV under its out_dir (`write_depth_table`, `TABLE_FILES`, sources ('jravan',)), replacing that
+spec's previous one; `read_depth_tables` reads them back for `leaderboard_build.with_capacity`.
 """
 
 from __future__ import annotations
@@ -66,7 +77,7 @@ import math
 import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any
@@ -89,6 +100,7 @@ from horsetrack.core.eval.registry import (
     Registry,
     RunRecord,
     _canonical,
+    _record_data,
     _sha256,
     _spec_hash,
     default_registry,
@@ -105,8 +117,12 @@ SOURCE = "jravan"
 SOURCES = (SOURCE,)
 SPEC_NAME = "pool_depth"
 COPLACER_V2 = "pool_depth_coplacer_v2"  # the co-placer variant re-registered on the core rule
+EXOTICS = "pool_depth_exotics"  # TIERCE and BRACKET_QUINELLA, streamed (#490)
 TICKET = 432
 HYPOTHESIS_ID = "P432"
+RECORDED_AS = {EXOTICS: (490, "P490")}  # a spec's (ticket, hypothesis id), if not #432's
+TIERCE, BRACKET_QUINELLA = "TIERCE", "BRACKET_QUINELLA"
+EXOTIC_POOLS = (TIERCE, BRACKET_QUINELLA)
 FOLD_SCHEME = "development-days"
 WITHHELD = "withheld (D21)"
 POOL_ROW = "__pool__"
@@ -120,6 +136,7 @@ VARIANT_DEPTH, VARIANT_COPLACER, VARIANT_EXACTA = "depth", "co-placer", "exacta-
 SPECS = {
     SPEC_NAME: (VARIANT_DEPTH, VARIANT_COPLACER, VARIANT_EXACTA),
     COPLACER_V2: (VARIANT_COPLACER,),
+    EXOTICS: (VARIANT_DEPTH,),
 }
 # place_wide.co_placer.rule -> the rule's code: `jra` 1 + (rV - sum W) / (P W_i) per yen (frozen
 # in japan-pool-depth-v1), `core` r(1 + (V - sum W) / (P W_i)) (core.pricing, japan-pool-depth-
@@ -130,6 +147,12 @@ STEMS = {
     VARIANT_DEPTH: "pool-depth-japan",
     VARIANT_COPLACER: "pool-depth-coplacer-japan",
     VARIANT_EXACTA: "exacta-impact-history-japan",
+}
+EXOTICS_STEM = "pool-depth-exotics-japan"  # the exotics family's depth reports
+# each depth spec's latest scored table, beside its reports, for the leaderboard (#491)
+TABLE_FILES = {
+    SPEC_NAME: f"{STEMS[VARIANT_DEPTH]}-table.csv",
+    EXOTICS: f"{EXOTICS_STEM}-table.csv",
 }
 UNIT, STEP, FLOOR = 100, 10, 110  # yen per ticket, breakage, the Plus-10 minimum
 CONFIRMED = ("4", "5")  # データ区分 確定 and 確定(月曜): the final records (2 is the day before's)
@@ -276,6 +299,82 @@ def _quantiles(values: np.ndarray, quantiles: Sequence[float]) -> np.ndarray:
     with np.errstate(invalid="ignore"):
         inner = np.where(np.isinf(b), np.inf, a + (b - a) * (h - lo))
     return np.where(hi == lo, a, inner)
+
+
+def _distinct(values: np.ndarray, counts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The distinct values, ascending, and the summed counts of each."""
+    order = np.argsort(values, kind="stable")
+    values, counts = values[order], counts[order]
+    if values.size == 0:
+        return values, counts
+    start = np.flatnonzero(np.r_[True, values[1:] != values[:-1]])
+    return values[start], np.add.reduceat(counts, start)
+
+
+class StreamingQuantile:
+    """An exact quantile fed a chunk at a time (#490). It keeps each distinct value once with its
+    count, so its memory follows the distinct values, not the values taken: the money on a
+    combination and the pool are whole 100-yen votes, and a cell of the trifecta repeats them
+    many times over. `add(values, counts=None)`: a 1-d float array (NaN ignored, +inf kept) and
+    optional non-negative integer multiplicities (0 drops a value); `count`, the values taken;
+    `quantiles(qs)`, numpy's linear quantile of every value taken, from the cumulative counts,
+    +inf sorting last and giving inf wherever the interpolation reaches one (as `_quantiles`);
+    all NaN when nothing was taken."""
+
+    _MERGE_AT = 1 << 16  # pending values held before they are merged into the count map
+
+    def __init__(self) -> None:
+        self._values = np.empty(0, dtype=float)
+        self._counts = np.empty(0, dtype=np.int64)
+        self._pending: list[tuple[np.ndarray, np.ndarray]] = []
+        self._held = 0
+
+    def add(self, values: Any, counts: Any = None) -> None:
+        v = np.asarray(values, dtype=float).ravel()
+        if counts is None:
+            c = np.ones(v.size, dtype=np.int64)
+        else:
+            raw = np.asarray(counts).ravel()
+            if raw.shape != v.shape:
+                raise ValueError(f"counts has {raw.size} entries for {v.size} values")
+            c = raw.astype(np.int64)
+            if (c != raw).any() or (c < 0).any():
+                raise ValueError("counts must be non-negative integers")
+        keep = ~np.isnan(v) & (c > 0)
+        if keep.any():
+            self._pending.append((v[keep], c[keep]))
+            self._held += int(keep.sum())
+            if self._held >= max(self._MERGE_AT, self._values.size):
+                self._merge()
+
+    def _merge(self) -> None:
+        if self._pending:
+            values = np.concatenate([self._values, *(p[0] for p in self._pending)])
+            counts = np.concatenate([self._counts, *(p[1] for p in self._pending)])
+            self._pending, self._held = [], 0
+            self._values, self._counts = _distinct(values, counts)
+
+    @property
+    def count(self) -> int:
+        return int(self._counts.sum()) + sum(int(c.sum()) for _, c in self._pending)
+
+    def quantiles(self, qs: Sequence[float]) -> np.ndarray:
+        self._merge()
+        qs = np.asarray(qs, dtype=float)
+        n = int(self._counts.sum())
+        if n == 0:
+            return np.full(qs.size, np.nan)
+        cumulative = np.cumsum(self._counts)
+        h = (n - 1) * qs
+        lo, hi = np.floor(h).astype(np.int64), np.ceil(h).astype(np.int64)
+        a = self._values[np.searchsorted(cumulative, lo, side="right")]
+        b = self._values[np.searchsorted(cumulative, hi, side="right")]
+        t = h - lo
+        with np.errstate(invalid="ignore"):
+            diff = b - a
+            lerp = np.where(t >= 0.5, b - diff * (1 - t), a + diff * t)  # numpy's _lerp
+            inner = np.where(np.isinf(b), np.inf, lerp)
+        return np.where(hi == lo, a, inner)
 
 
 # --------------------------------------------------------------------------- reading the store
@@ -521,6 +620,56 @@ def _race_groups(races: pd.DataFrame, exclude_status: Sequence[str]) -> pd.DataF
     )
 
 
+def bracket_map(runners: pd.DataFrame) -> pd.DataFrame:
+    """race_id, horse_no and bracket (枠番) of each starter of the jravan `runners` rows, other
+    columns ignored: a runner marked `is_scratched` (取消 or 除外, where the column is there) or
+    without a horse number or bracket is in no bracket. ValueError when a race gives one horse
+    two brackets."""
+    _columns(runners, "runners", ["race_id", "horse_no", "bracket"])
+    keep = runners["horse_no"].notna().to_numpy(dtype=bool) & runners["bracket"].notna().to_numpy(
+        dtype=bool
+    )
+    if "is_scratched" in runners.columns:
+        keep &= ~runners["is_scratched"].astype("boolean").fillna(False).to_numpy(dtype=bool)
+    out = pd.DataFrame(
+        {
+            "race_id": runners.loc[keep, "race_id"].astype(object).to_numpy(),
+            "horse_no": runners.loc[keep, "horse_no"].to_numpy(dtype=np.int64),
+            "bracket": runners.loc[keep, "bracket"].to_numpy(dtype=np.int64),
+        }
+    ).drop_duplicates()
+    if out.duplicated(["race_id", "horse_no"]).any():
+        raise ValueError("a race gives one horse two brackets")
+    return out.sort_values(["race_id", "horse_no"], kind="stable").reset_index(drop=True)
+
+
+def _bracket_pairs(rows: pd.DataFrame, brackets: pd.DataFrame) -> pd.DataFrame:
+    """The BRACKET_QUINELLA rows of `rows` that are sold, each with `horses`, the horse numbers of
+    its two brackets ascending, joined with ","; the other pools' rows unchanged (`horses`
+    None). A pair is sold when both brackets hold a starter, a same-bracket pair when its bracket
+    holds two or more."""
+    is_bq = rows["pool"].to_numpy() == BRACKET_QUINELLA
+    out = rows.assign(horses=None)
+    if not is_bq.any():
+        return out
+    held: dict[tuple[str, int], list[int]] = {}
+    for race, horse, bracket in zip(
+        brackets["race_id"], brackets["horse_no"], brackets["bracket"], strict=True
+    ):
+        held.setdefault((race, int(bracket)), []).append(int(horse))
+    horses = []
+    for race, combination in zip(
+        rows.loc[is_bq, "race_id"], rows.loc[is_bq, "combination"], strict=True
+    ):
+        a, b = (int(x) for x in str(combination).split(","))
+        first, second = held.get((race, a)), held.get((race, b))
+        sold = first is not None and second is not None and (a != b or len(first) >= 2)
+        horses.append(",".join(map(str, sorted({*first, *second}))) if sold else None)
+    out.loc[is_bq, "horses"] = pd.Series(horses, index=out.index[is_bq], dtype=object)
+    sold = ~is_bq | out["horses"].notna().to_numpy(dtype=bool)
+    return out.loc[sold].reset_index(drop=True)
+
+
 def depth_rows(
     votes: pd.DataFrame,
     board: pd.DataFrame,
@@ -528,12 +677,15 @@ def depth_rows(
     *,
     band_edges: Mapping[str, Sequence[float]],
     exclude_status: Sequence[str] = ("abandoned",),
+    brackets: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """One row per combination with a final price of the pools `band_edges` names: race_id, pool,
     combination, class_group, band (its final odds on the pool's edges), odds, combo_yen (its
     votes x 100) and pool_yen (the race's `__pool__` money that pays, in yen). A combination
     without votes, or a race without its pool row or race row, gives no row; so does a race whose
-    status is in `exclude_status`."""
+    status is in `exclude_status`. With `brackets` (a `bracket_map`), the rows also carry
+    `horses`: a BRACKET_QUINELLA pair's horses (`_bracket_pairs`; a pair not sold gives no row,
+    priced or not), None for the other pools."""
     _columns(votes, "votes", [*KEYS, "votes", "refund_votes"])
     _columns(board, "board", [*KEYS, "odds"])
     pools = list(band_edges)
@@ -562,7 +714,8 @@ def depth_rows(
             band[mine] = pool_scan._bands(rows["odds"].to_numpy()[mine], band_edges[pool])
     rows = rows.assign(band=band)
     columns = [*KEYS, "class_group", "band", "odds", "combo_yen", "pool_yen"]
-    return rows[columns].reset_index(drop=True)
+    rows = rows[columns].reset_index(drop=True)
+    return rows if brackets is None else _bracket_pairs(rows, brackets)
 
 
 def _edges(edges: Sequence[float]) -> list[float]:
@@ -758,21 +911,25 @@ def load_spec(name: str = SPEC_NAME) -> tuple[str, dict[str, Any]]:
     family = spec.get("family_id")
     if not isinstance(family, str) or not family.strip():
         raise ValueError(f"config/{name}.yaml names no family_id")
-    if spec["place_wide"]["co_placer"]["rule"] not in RULES:
-        raise ValueError(f"place_wide.co_placer.rule must be one of {sorted(RULES)}")
     _edges(spec["edges"])
     _check_share(spec["share_lost"])
     _quantile_list(spec["quantiles"])
     bands = spec["odds_bands"]
-    if not set(pool_scan.POOLS) <= set(bands):
-        raise ValueError(f"odds_bands must name every pool of {pool_scan.POOLS}")
+    if name == EXOTICS:  # TIERCE and BRACKET_QUINELLA alone, depth only
+        if set(bands) != set(EXOTIC_POOLS):
+            raise ValueError(f"odds_bands must name exactly the pools {EXOTIC_POOLS}")
+    else:
+        if spec["place_wide"]["co_placer"]["rule"] not in RULES:
+            raise ValueError(f"place_wide.co_placer.rule must be one of {sorted(RULES)}")
+        if not set(pool_scan.POOLS) <= set(bands):
+            raise ValueError(f"odds_bands must name every pool of {pool_scan.POOLS}")
+        impact = spec["exacta_impact"]
+        if tuple(impact["pool_bin_edges"]) != exacta_impact.POOL_BIN_EDGES:
+            raise ValueError("exacta_impact.pool_bin_edges must be exacta_impact.POOL_BIN_EDGES")
     for edges in bands.values():
         pool_scan._band_labels(edges)
     if spec["class_groups"] != pool_scan.CLASS_GROUPS:
         raise ValueError("class_groups must be research/pool_scan.CLASS_GROUPS")
-    impact = spec["exacta_impact"]
-    if tuple(impact["pool_bin_edges"]) != exacta_impact.POOL_BIN_EDGES:
-        raise ValueError("exacta_impact.pool_bin_edges must be exacta_impact.POOL_BIN_EDGES")
     if date.fromisoformat(spec["date_from"]) < PRICE_ERA_START:
         raise ValueError("date_from must not be before 2014-06-07 (D10)")
     return family, spec
@@ -784,6 +941,7 @@ class _Run:
     family_id: str
     spec: dict[str, Any]
     spec_hash: str
+    spec_name: str = SPEC_NAME
 
 
 def _preflight(
@@ -807,7 +965,7 @@ def _preflight(
     _check_span(date_from, date_from if date_to is None else date_to)
     if is_inside(Path(out_dir), env.repo_root()):
         raise LicensedOutputInRepo(f"{out_dir} is inside the repository: the report is licensed")
-    return _Run(registry, family, spec, spec_hash)
+    return _Run(registry, family, spec, spec_hash, spec_name)
 
 
 def _commit() -> str:
@@ -818,11 +976,12 @@ def _commit() -> str:
 
 
 def _record(run: _Run, variant: str, params: dict, builds: dict, metrics, status) -> RunRecord:
+    ticket, hypothesis = RECORDED_AS.get(run.spec_name, (TICKET, HYPOTHESIS_ID))
     return RunRecord(
-        hypothesis_id=HYPOTHESIS_ID,
+        hypothesis_id=hypothesis,
         family_id=run.family_id,
         variant=variant,
-        ticket=TICKET,
+        ticket=ticket,
         git_sha=_commit(),
         data_builds=builds,
         sources=SOURCES,
@@ -835,8 +994,9 @@ def _record(run: _Run, variant: str, params: dict, builds: dict, metrics, status
 
 
 def _run_id(record: RunRecord) -> str:
-    """The id the registry gives the record (the sha256 of its canonical form)."""
-    return _sha256(_canonical(asdict(record)))
+    """The id the registry gives the record (the sha256 of its canonical form, as its line
+    holds it)."""
+    return _sha256(_canonical(_record_data(record)))
 
 
 def _append(registry: Registry, record: RunRecord) -> str:
@@ -1028,14 +1188,20 @@ def run_depth(
     date_to: date | None,
     out_dir: Path | str,
     registry: Registry | None = None,
+    spec_name: str = SPEC_NAME,
 ) -> DepthResult:
     """The depth variant on development days from date_from to date_to (None: the store's last
     development day): `depth_table` of the run's `depth_rows` with the spec's odds bands, edges
     and quantiles (Place and Wide depth only), the pool-size tertile cells, the flat-stake shares
     and the pool totals at t, written to the run's private report under `out_dir` and recorded as
     one RunRecord ("failed" when the table has no cell, no combination having a final price, or
-    when it raised). NotPreRegistered unless the registry has the shipped spec frozen."""
-    run = _preflight(registry, date_from, date_to, out_dir)
+    when it raised). NotPreRegistered unless the registry has the spec `spec_name` frozen. Under
+    EXOTICS (#490), the TIERCE and BRACKET_QUINELLA cells alone, streamed (`_run_exotics`)."""
+    if VARIANT_DEPTH not in SPECS.get(spec_name, ()):
+        raise ValueError(f"the spec {spec_name!r} registers no {VARIANT_DEPTH} variant")
+    run = _preflight(registry, date_from, date_to, out_dir, spec_name)
+    if spec_name == EXOTICS:
+        return _run_exotics(run, date_from, date_to, out_dir)
     spec = run.spec
 
     def body(inputs: _Inputs, date_to: date):
@@ -1068,7 +1234,215 @@ def run_depth(
     run_id, _, report, result = _recorded(
         run, VARIANT_DEPTH, (date_from, date_to), out_dir, STEMS[VARIANT_DEPTH], body
     )
-    return replace(result, report_path=report, run_id=run_id)
+    return _with_table(replace(result, report_path=report, run_id=run_id), out_dir, spec_name)
+
+
+def write_depth_table(
+    table: pd.DataFrame, directory: Path | str, *, spec_name: str = SPEC_NAME
+) -> Path:
+    """The depth table of a spec's run as CSV under `directory`, replacing the spec's previous
+    one, through `write_report` (sources ('jravan',)): refused inside the repository, nothing
+    written."""
+    if spec_name not in TABLE_FILES:
+        raise ValueError(f"spec must be one of {sorted(TABLE_FILES)}, not {spec_name!r}")
+    path = Path(directory) / TABLE_FILES[spec_name]
+    return write_report(path, table.to_csv(index=False), sources=SOURCES)
+
+
+def read_depth_tables(directory: Path | str) -> pd.DataFrame | None:
+    """Every spec's depth table under `directory` (`write_depth_table`), concatenated, NaN
+    capacities kept; None when the directory holds none or does not exist. Creates nothing."""
+    tables = []
+    for name in TABLE_FILES.values():
+        path = Path(directory) / name
+        if path.is_file():
+            table = pd.read_csv(
+                path,
+                dtype={c: str for c in CELL},
+                keep_default_na=False,
+                na_values=[""],
+                float_precision="round_trip",
+            )
+            if len(table):
+                tables.append(table)
+    return pd.concat(tables, ignore_index=True) if tables else None
+
+
+def _with_table(result: DepthResult, out_dir: Path | str, spec_name: str) -> DepthResult:
+    """A scored run's table written for the leaderboard (`write_depth_table`); a failed run (no
+    cell) leaves the previous table in place."""
+    if result.status == "scored":
+        write_depth_table(result.table, out_dir, spec_name=spec_name)
+    return result
+
+
+# --------------------------------------------------------------------------- the exotics run (#490)
+
+_W_BITS = 31  # a (V, W) pair's key: V votes << 31 | W votes
+
+
+class _StreamCells:
+    """The depth cells of a streamed run, pool x class group x odds band: per cell the distinct
+    (V, W) vote pairs of each chunk with their counts (a race's combinations share V, and the
+    trifecta repeats W many times in a race), and the races it holds; the pool's money per race.
+    Every quantile is exact (`StreamingQuantile` over the pairs' counts)."""
+
+    def __init__(self, races: pd.DataFrame, band_edges: Mapping[str, Sequence[float]]):
+        self.races = pd.Index(races["race_id"])
+        self.pools = list(band_edges)
+        self.labels = {p: pool_scan._band_labels(e) for p, e in band_edges.items()}
+        self.groups = list(dict.fromkeys(pool_scan.CLASS_GROUPS.values()))
+        self.pool_votes = {p: np.full(len(self.races), -1, dtype=np.int64) for p in band_edges}
+        self.parts: dict[tuple[str, str, str], list[tuple[np.ndarray, ...]]] = {}
+
+    def add(self, rows: pd.DataFrame) -> None:
+        if rows.empty:
+            return
+        race = self.races.get_indexer(rows["race_id"])
+        v = np.rint(rows["pool_yen"].to_numpy(dtype=float) / UNIT).astype(np.int64)
+        w = np.rint(rows["combo_yen"].to_numpy(dtype=float) / UNIT).astype(np.int64)
+        if (
+            (race < 0).any()
+            or (v < 0).any()
+            or (w < 0).any()
+            or (v >= 2**32).any()
+            or (w >= 2**_W_BITS).any()
+        ):
+            raise ValueError("a row has an unknown race or votes out of range")
+        keys = (v << _W_BITS) | w
+        cells = rows.groupby(["pool", "class_group", "band"], sort=False, observed=True).indices
+        for cell, index in cells.items():
+            pairs, counts = np.unique(keys[index], return_counts=True)
+            self.parts.setdefault(cell, []).append(
+                (pairs, counts.astype(np.int32), np.unique(race[index]).astype(np.int32))
+            )
+            self.pool_votes[cell[0]][race[index]] = v[index]
+
+    def counts(self) -> pd.DataFrame:
+        """Per pool x class group, its combinations and races."""
+        out: dict[tuple[str, str], list] = {}
+        for (pool, group, _), parts in self.parts.items():
+            n, races = out.setdefault((pool, group), [0, []])
+            out[(pool, group)][0] = n + sum(int(p[1].sum()) for p in parts)
+            races.extend(p[2] for p in parts)
+        rows = [
+            {"pool": p, "class_group": g, "n_combinations": n,
+             "n_races": int(np.unique(np.concatenate(r)).size)}
+            for (p, g), (n, r) in sorted(out.items(), key=lambda kv: self._order(*kv[0]))
+        ]  # fmt: skip
+        return pd.DataFrame(rows, columns=["pool", "class_group", "n_combinations", "n_races"])
+
+    def _order(self, pool: str, group: str, band: str = "") -> tuple[int, int, int]:
+        labels = self.labels[pool]
+        return (self.pools.index(pool), self.groups.index(group),
+                labels.index(band) if band in labels else -1)  # fmt: skip
+
+    def table(self, *, edges, quantiles, share_lost: float, stakes=()) -> pd.DataFrame:
+        """`depth_table`'s long table of the cells, exactly: the same columns and values."""
+        edges, quantiles = _edges(edges), _quantile_list(quantiles)
+        share = _check_share(share_lost)
+        stakes = [_finite("stake", s) for s in stakes]
+        caps = [capacity_column(e) for e in edges]
+        fits = [fits_column(e, s) for e in edges for s in stakes]
+        columns = [*CELL, "quantile", "n_combinations", "n_races", "combo_yen", "pool_yen", *caps,
+                   *fits]  # fmt: skip
+        out = []
+        for cell in sorted(self.parts, key=lambda c: self._order(*c)):
+            parts = self.parts[cell]
+            keys = np.concatenate([p[0] for p in parts])
+            counts = np.concatenate([p[1] for p in parts]).astype(np.int64)
+            races = np.unique(np.concatenate([p[2] for p in parts]))
+            pool_yen = UNIT * (keys >> _W_BITS).astype(float)
+            combo_yen = UNIT * (keys & (2**_W_BITS - 1)).astype(float)
+            del keys
+            values = {
+                "combo_yen": _counted_quantiles(combo_yen, counts, quantiles),
+                "pool_yen": _quantiles(UNIT * self.pool_votes[cell[0]][races].astype(float),
+                                       quantiles),
+            }  # fmt: skip
+            for e, name in zip(edges, caps, strict=True):
+                found = _capacities(pool_yen, combo_yen, e, share)
+                values[name] = _counted_quantiles(found, counts, quantiles)
+                ok = ~np.isnan(found)
+                total = int(counts[ok].sum())
+                for s in stakes:
+                    share_fit = int(counts[ok & (found >= s)].sum()) / total if total else np.nan
+                    values[fits_column(e, s)] = np.full(len(quantiles), share_fit)
+                del found
+            n = int(counts.sum())
+            for i, q in enumerate(quantiles):
+                out.append(
+                    {**dict(zip(CELL, cell, strict=True)), "quantile": q, "n_combinations": n,
+                     "n_races": int(races.size),
+                     **{name: float(array[i]) for name, array in values.items()}}
+                )  # fmt: skip
+        return pd.DataFrame(out, columns=columns)
+
+
+def _counted_quantiles(values: np.ndarray, counts: np.ndarray, quantiles) -> np.ndarray:
+    stream = StreamingQuantile()
+    stream.add(values, counts)
+    return stream.quantiles(quantiles)
+
+
+def _read_brackets(start: date, end: date, inputs: _Inputs) -> pd.DataFrame:
+    """The `bracket_map` of the development races in start..end, from the jravan runners."""
+    columns = ["race_id", "race_date", "horse_no", "bracket", "is_scratched"]
+    runners = _scan("runners", columns, start, end).to_pandas()
+    inputs.add("runners", runners)
+    return bracket_map(runners)
+
+
+def _run_exotics(run: _Run, date_from: date, date_to: date | None, out_dir) -> DepthResult:
+    """The depth variant of EXOTICS: per month of each year read, `depth_rows` of TIERCE and
+    BRACKET_QUINELLA with the year's bracket map, streamed into `_StreamCells`; the cells, the
+    flat-stake shares and the bracket check go to the private report, one RunRecord ("failed"
+    when the table has no cell, or when it raised)."""
+    spec = run.spec
+    bands = spec["odds_bands"]
+
+    def body(inputs: _Inputs, date_to: date):
+        races = _read_races(date_from, date_to, inputs)
+        cells = _StreamCells(races.loc[~races["status"].isin(spec["exclude_status"])], bands)
+        check: dict[str, int] = {}
+        pairs = {"priced_pairs": 0, "sold_pairs": 0, "races_without_a_bracket_map": 0}
+        year, brackets = None, None
+        for a, _, votes, board in _chunks(date_from, date_to, list(bands), inputs):
+            if a.year != year:
+                year = a.year
+                span = max(date_from, date(year, 1, 1)), min(date_to, date(year, 12, 31))
+                brackets = _read_brackets(*span, inputs)
+            for key, n in _pool_check(votes, board).items():
+                check[key] = check.get(key, 0) + n
+            rows = depth_rows(votes, board, races, band_edges=bands,
+                              exclude_status=spec["exclude_status"])  # fmt: skip
+            is_bq = rows["pool"].to_numpy() == BRACKET_QUINELLA
+            bq = rows.loc[is_bq]
+            sold = _bracket_pairs(bq, brackets)  # as depth_rows(..., brackets=) gives them
+            pairs["priced_pairs"] += len(bq)
+            pairs["sold_pairs"] += len(sold)
+            pairs["races_without_a_bracket_map"] += int(
+                (~pd.Index(bq["race_id"].unique()).isin(brackets["race_id"])).sum()
+            )
+            cells.add(rows.loc[~is_bq] if is_bq.any() else rows)
+            cells.add(sold)
+            del rows, bq, sold
+        table = cells.table(
+            edges=spec["edges"],
+            quantiles=spec["quantiles"],
+            share_lost=spec["share_lost"],
+            stakes=spec["flat_stakes_yen"],
+        )
+        status = "scored" if len(table) else "failed"  # no priced combination: no cell
+        result = DepthResult(table, Path(), run.family_id, run.spec_hash, "", date_from, date_to,
+                             status=status)  # fmt: skip
+        text = _exotics_report(result, spec, check, pairs, cells.counts())
+        return _depth_metrics(table, spec), status, text, result
+
+    run_id, _, report, result = _recorded(
+        run, VARIANT_DEPTH, (date_from, date_to), out_dir, EXOTICS_STEM, body
+    )
+    return _with_table(replace(result, report_path=report, run_id=run_id), out_dir, EXOTICS)
 
 
 def _totals_by_class(
@@ -1446,6 +1820,68 @@ def _depth_report(
     return "\n".join(lines)
 
 
+def _exotics_report(
+    result: DepthResult,
+    spec: Mapping[str, Any],
+    check: Mapping[str, int],
+    pairs: Mapping[str, int],
+    counts: pd.DataFrame,
+) -> str:
+    table = result.table
+    caps = [capacity_column(e) for e in spec["edges"]]
+    fits = [fits_column(e, s) for e in spec["edges"] for s in spec["flat_stakes_yen"]]
+    base = ["pool", "class_group", "band", "quantile", "n_combinations", "n_races"]
+    lines = [
+        "# Trifecta and bracket-quinella depth and stake capacity, Japan (N3, #490): private "
+        "report",
+        "",
+        *_about(
+            result.family_id, result.spec_hash, VARIANT_DEPTH, result.date_from, result.date_to
+        ),  # fmt: skip
+        f"Status: **{result.status}** (failed when no combination has a final price: no cell).",
+        "",
+        "Exact quantiles, streamed: per cell each distinct (V, W) pair of a month once, with its "
+        "count (`StreamingQuantile`).",
+        "",
+        "## The pool's definition",
+        "",
+        "V is the `__pool__` row's (votes - refund_votes) x 100, W the combination's votes x 100. "
+        "The `__pool__` rows of `pool_votes` and `final_odds` compared:",
+        "",
+        *_markdown(pd.DataFrame([check])),
+        "## The bracket map",
+        "",
+        "Bracket pairs priced on the final board, those sold (both brackets hold a starter of the "
+        "jravan runners, a same-bracket pair two or more), and the races priced without a bracket "
+        "map:",
+        "",
+        *_markdown(pd.DataFrame([pairs])),
+        "## Combinations and races per pool",
+        "",
+        *_markdown(counts),
+        "## Money, pool and capacity per pool x class group x odds band",
+        "",
+        "combo_yen and pool_yen in yen; capacity in yen at each edge, share lost "
+        f"{spec['share_lost']}; inf: the edge is never eaten that far.",
+        "",
+    ]
+    for pool in spec["odds_bands"]:
+        part = table.loc[table["pool"] == pool, [*base, "combo_yen", "pool_yen", *caps]]
+        lines += [f"### {pool}", "", *_markdown(part)]
+    lines += [
+        "## The flat stake beside the capacity",
+        "",
+        "Per cell, the share of combinations whose capacity at edge e is at least the stake "
+        f"(`fits_<e>_<stake>`, stakes {spec['flat_stakes_yen']} yen).",
+        "",
+    ]
+    once = table.drop_duplicates(["pool", "class_group", "band"])
+    for pool in spec["odds_bands"]:
+        part = once.loc[once["pool"] == pool, ["pool", "class_group", "band", *fits]]
+        lines += [f"### {pool}", "", *_markdown(part)]
+    return "\n".join(lines)
+
+
 def _coplacer_report(result, rows, spec, run, date_from, date_to, gate) -> str:
     caps = [capacity_column(e) for e in spec["edges"]]
     fits = [fits_column(e, s) for e in spec["edges"] for s in spec["flat_stakes_yen"]]
@@ -1635,16 +2071,47 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
             "- The exacta (#350): 100 yen on one combination moves its dividend by "
             "(V + s) / V x W / (W + s) - 1, with W the combination's final money.",
             "",
+            "## Trifecta and bracket quinella (#490)",
+            "",
+            f"Family `{load_spec(EXOTICS)[0]}` (config/pool_depth_exotics.yaml, frozen before its "
+            'run; docs/specs/pool-depth-prereg.md, "Exotics"): the depth variant for TIERCE '
+            "(the trifecta) and BRACKET_QUINELLA alone, with the cells, definitions, edges, "
+            "quantiles and flat stakes above. Both are single-winner pools, so every combination "
+            "has the capacity stake of the identity above. The quantiles are exact and streamed: "
+            "per cell, each distinct (V, W) pair is kept once with its count, and a quantile is "
+            "read from the cumulative counts by numpy's linear rule, so memory follows the "
+            "distinct pairs rather than the trifecta's combinations; the store is read a year at "
+            "a time. A bracket pair's horses are the starters the jravan runners put in its two "
+            "brackets (枠番; a scratched horse, 取消 or 除外, is in no bracket); a pair is sold "
+            "when both brackets hold a starter, a same-bracket pair when its bracket holds two "
+            "or more, and a pair not sold gives no row even where the board prices it. Figures: "
+            f"{WITHHELD}.",
+            "",
+            "- Combinations, by counting: 18 starters give 18 x 17 x 16 = 4,896 trifecta "
+            "combinations against 816 for the trio; the bracket quinella has at most 36 pairs (28 "
+            "of two brackets and 8 of one).",
+            "- An invented nine-horse field by JRA's draw: brackets 1 to 7 hold horses 1 to 7 and "
+            "bracket 8 holds 8 and 9. The pair 7-8 names horses 7, 8 and 9 (it pays on 7-8 or "
+            "7-9 in the first two), 8-8 names 8 and 9, and 1-1 is not sold.",
+            "- An invented cell of three combinations, W = 100, 100 and 300 yen: the count map "
+            "holds (100, 2) and (300, 1), and the median is the second of three, 100 yen.",
+            "",
             "## Variants tried",
             "",
             *listed,
             "",
             "## Alternatives rejected and why",
             "",
-            "- TIERCE and BRACKET_QUINELLA: not in the cells. The trifecta has several times "
-            "the trio's combinations, too many for exact quantiles in memory on this machine; "
-            "the bracket quinella needs the horse-to-bracket map.",
-            "- Quantile sketches: rejected for exact quantiles over the six pools.",
+            "- TIERCE and BRACKET_QUINELLA: not in `japan-pool-depth-v1`'s cells. The trifecta "
+            "has several times the trio's combinations, too many for exact quantiles held in "
+            "memory on this machine; the bracket quinella needs the horse-to-bracket map. Both "
+            "are measured by the exotics family (#490), with a streaming exact quantile and the "
+            "runners' bracket map.",
+            "- Quantile sketches: rejected for exact quantiles over the six pools, and for the "
+            "streaming count map of distinct values over TIERCE and BRACKET_QUINELLA.",
+            "- The pool-size tertile cells and the totals at t for TIERCE and BRACKET_QUINELLA: "
+            "not registered by the exotics family; the totals at t are of the time series' "
+            "pools only.",
             "- Capacity with breakage and the 110-yen floor: rejected; breakage makes the stake "
             "a step function of the price, and the continuous stake is the stated quantity.",
             "- The gross pool for V: rejected; refunded votes do not pay.",
@@ -1667,7 +2134,8 @@ def render_public_report(result: DepthResult, *, variants: Sequence[VariantRun] 
             "Filed as proposed tickets:",
             "",
             *coplacer_follow_up,
-            "- #490: the trifecta (TIERCE) and bracket-quinella depth, with a streaming quantile.",
+            "- #490, the trifecta (TIERCE) and bracket-quinella depth with a streaming quantile: "
+            f"family `{load_spec(EXOTICS)[0]}`, its runs listed above.",
             "- #491: the capacity beside each leaderboard row.",
             "",
             "Publishable figures need the logged public days (#130).",
@@ -1716,13 +2184,13 @@ def run_command(
     spec_name: Annotated[str, typer.Option("--spec", help=SPEC_HELP)] = SPEC_NAME,
 ) -> None:
     """Run the variants the spec registers (SPECS: pool_depth the three, pool_depth_coplacer_v2
-    the co-placer one) on every development day from the spec's date_from to the store's last
-    development day, record each run, rewrite the public report from every run of the study's
-    families merged by run id into the runs it already lists (`family_runs`), and update the
-    spec's family's file and index entry in the committed summary, keeping every other
-    family's. The freeze is checked before the store is touched; the last development day is
-    looked up inside each recorded attempt. Prints run identities and file names only; exits 1
-    when a run failed."""
+    the co-placer one, pool_depth_exotics the depth one) on every development day from the spec's
+    date_from to the store's last development day, record each run, rewrite the public report
+    from every run of the study's families merged by run id into the runs it already lists
+    (`family_runs`), and update the spec's family's file and index entry in the committed
+    summary, keeping every other family's. The freeze is checked before the store is touched;
+    the last development day is looked up inside each recorded attempt. Prints run identities
+    and file names only; exits 1 when a run failed."""
     try:
         family, spec = load_spec(spec_name)
     except ValueError as exc:
@@ -1737,7 +2205,7 @@ def run_command(
         typer.echo(f"not run: {exc}", err=True)
         raise typer.Exit(1) from None
     runners = {
-        VARIANT_DEPTH: run_depth,
+        VARIANT_DEPTH: functools.partial(run_depth, spec_name=spec_name),
         VARIANT_COPLACER: functools.partial(run_coplacer, spec_name=spec_name),
         VARIANT_EXACTA: run_exacta_impact,
     }
@@ -1822,7 +2290,8 @@ def _private_report(folder: Path | None, run: VariantRun, first: bool) -> str | 
     reports by the spec hash), `<stem>-<first 12 hex of the spec hash>.md`; else None."""
     if folder is None or run.variant not in STEMS:
         return None
-    stem = STEMS[run.variant]
+    exotics = run.variant == VARIANT_DEPTH and run.family_id == load_spec(EXOTICS)[0]
+    stem = EXOTICS_STEM if exotics else STEMS[run.variant]
     names = [f"{stem}-{run.run_id[:16]}.md"]
     if first and run.spec_hash:
         names.append(f"{stem}-{run.spec_hash[:12]}.md")
