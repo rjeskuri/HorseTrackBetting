@@ -1333,13 +1333,17 @@ def _real_cells(directory: Path) -> dict[str, set[tuple[str | None, str]]]:
     return cells_by
 
 
-def _missing_cells(cells_by: dict[str, set[tuple[str | None, str]]], ids: set[str]) -> list[str]:
-    """The ids the real cells should have and the rows lack: the bare id for a cell_id that does
-    not recur, '[pool:<pool>]' for each pool of one cell when the cell_id recurs with another
-    pool, and a suffixed id for every distinct cell of a recurring cell_id."""
+def _missing_cells(
+    cells_by: dict[str, set[tuple[str | None, str]]], ids: set[str], registered: set[str]
+) -> list[str]:
+    """The ids the real cells should have and the rows lack. A base that is a registry row's
+    option id (``registered``, the ids ``legacy_rows`` gives) is covered by that row alone, however
+    many cells or pools it has. Every other base: the bare id for a cell_id that does not recur,
+    '[pool:<pool>]' for each pool of one cell when the cell_id recurs with another pool, and a
+    suffixed id for every distinct cell of a recurring cell_id."""
     missing = []
     for base, found in sorted(cells_by.items()):
-        if len(found) == 1:
+        if base in registered or len(found) == 1:
             missing += [] if base in ids else [base]
             continue
         pools = [pool for pool, _ in found]
@@ -1355,6 +1359,64 @@ def _missing_cells(cells_by: dict[str, set[tuple[str | None, str]]], ids: set[st
     return missing
 
 
+class _ReadOnce(Registry):
+    """``registry`` read once: ``legacy_rows`` asks each family's size, and a plain ``Registry``
+    reads the whole file for each (minutes on the real registry)."""
+
+    def __init__(self, registry: Registry) -> None:
+        super().__init__(registry.path, holdout_log=registry.holdout_log)
+        self._runs = registry.records()
+
+    def records(self, family_id: str | None = None) -> list[RunRecord]:
+        return [r for r in self._runs if family_id is None or r.family_id == family_id]
+
+
+def test_the_real_registry_check_counts_a_registry_row_as_covering_its_base(reg, tmp_path):
+    # the local test's input in small: two debut-members runs export each registered variant twice
+    # (other date ranges), a registered pool-scan base sits in two pools, beside candidate-only
+    # bases of each kind (two exports, two pools, one cell)
+    seed_precedence_registry(reg)
+    cells_dir = tmp_path / "cells"
+    write_cells(cells_dir, EARLY_FILE, EARLY_RUN)
+    write_cells(cells_dir, LATE_FILE, LATE_RUN)
+    write_cells(cells_dir, "pool-scan.json", PRECEDENCE_SCAN)
+    write_cells(cells_dir, "spread.json", [cell(QUINELLA_CELL)])
+    # the local test's check, in its order: the registry's ids and the cells before the build
+    registered = {row.option_id for row in legacy_rows(_ReadOnce(reg))}
+    cells = _real_cells(cells_dir)
+
+    ids = set(unique(build().build_rows(registry=reg, candidate_dir=cells_dir)))
+
+    registered_bases = {
+        f"{DEBUT_MEMBERS}/{PEDIGREE}",
+        f"{DEBUT_MEMBERS}/{COMBINED_MAIDEN}",
+        f"{POOL_SCAN}/{MAIDEN_SEGMENT}",
+    }
+    assert {b: len(cells[b]) for b in registered_bases} == dict.fromkeys(registered_bases, 2)
+    assert registered == PRECEDENCE_REGISTRY_IDS >= registered_bases
+    assert _missing_cells(cells, ids, registered) == []
+    # without the registry's ids every registered base reads as missing cells: the finding
+    unregistered = _missing_cells(cells, ids, set())
+    assert {g.split("[", 1)[0] for g in unregistered} == registered_bases, unregistered
+    # a registered base still needs the registry's row itself
+    for base in sorted(registered_bases):
+        assert _missing_cells(cells, ids - {base}, registered) == [base]
+
+    # a candidate-only cell missing from the rows is still caught, of every kind: either
+    # body-weight export (suffixed rows are counted), either pool of the open segment, the one cell
+    body = sorted(i for i in ids if i.startswith(f"{BODY_WEIGHT_BASE}["))
+    assert len(body) == 2, body
+    for option_id in body:
+        gaps = _missing_cells(cells, ids - {option_id}, registered)
+        assert gaps and all(g.startswith(f"{BODY_WEIGHT_BASE}[") for g in gaps), (option_id, gaps)
+    open_base = f"{POOL_SCAN}/{OPEN_SEGMENT}"
+    for option_id in (f"{open_base}[pool:WIN]", f"{open_base}[pool:PLACE]", QUINELLA_ID):
+        assert option_id in ids
+        gaps = _missing_cells(cells, ids - {option_id}, registered)
+        assert option_id in gaps, (option_id, gaps)
+        assert all(g.startswith(option_id.split("[", 1)[0]) for g in gaps), (option_id, gaps)
+
+
 @pytest.mark.local
 def test_the_real_registry_builds():
     try:
@@ -1364,8 +1426,9 @@ def test_the_real_registry_builds():
     if not real.is_file():
         pytest.skip(f"no real Japan registry at {real}")
     # read before the build: a run appended meanwhile only adds rows the build also sees
-    registry = Registry(real, holdout_log=REAL_COUNTRIES / "japan" / "holdout_log.jsonl")
+    registry = _ReadOnce(Registry(real, holdout_log=REAL_COUNTRIES / "japan" / "holdout_log.jsonl"))
     families = {r.family_id for r in registry.records() if r.holdout_open is None}
+    registered = {row.option_id for row in legacy_rows(registry)}
     cells = _real_cells(paths.reports_dir() / "candidate-cells")
 
     rows = build().build_rows()
@@ -1375,7 +1438,7 @@ def test_the_real_registry_builds():
     rank(rows)
     missing_families = sorted(families - {r.family_id for r in rows})
     assert not missing_families, f"families missing from the board: {missing_families[:10]}"
-    missing_cells = _missing_cells(cells, set(by_id))
+    missing_cells = _missing_cells(cells, set(by_id), registered)
     assert not missing_cells, f"{len(missing_cells)} candidate cells missing: {missing_cells[:10]}"
     render_markdown(rows, title="Japan leaderboard", public=True)
     render_markdown(rows, title="Japan leaderboard", public=False)
