@@ -36,7 +36,7 @@ command run by hand. The same inputs give the same bytes.
 | `dividends` | `dividends.py` | `dividends` | store table | that of `dividends` |
 | `final-odds` | `odds.py` | `final_odds` | jravan-only | `label_only` |
 | `votes` | `votes.py` | `pool_votes` | jravan-only | `label_only` |
-| `career-counts` | `career_counts.py` | `career_counts` | jravan-only | `offset` on `race_date`, 0 min (#407); versions made after the race date dropped |
+| `career-counts` | `career_counts.py` | `career_counts` | jravan-only | `offset` on `race_date`, `offset_min: 0` (#407); versions made after the race date dropped |
 | `timeseries` | `timeseries.py` | `odds_timeseries/<YYYY-MM-DD>.parquet` | the odds log's schema | that of `odds_timeseries` |
 | `masters` | `masters.py` | `horses`, `horse_pedigree`; `jockeys`, `trainers` | store tables; jravan-only | `horses` refused, `horse_pedigree` `static`; `current_value` with `in_view` |
 | `bloodlines` | `bloodlines.py` | `breeding_horses`, `produce`, `lineages` | jravan-only | `static` |
@@ -770,11 +770,11 @@ read; nothing does today:
 `horsetrack.countries.japan.jravan.career_counts` writes `processed/jravan/career_counts.parquet`
 from JV-Data CK (出走別着度数): per runner of a race, its placings so far under each condition, and
 its jockey's and trainer's this year and in total, as of that race. It is not in `schemas.TABLES`;
-its availability rule is the owner's (answer B on #407, 2026-11-28): `offset` on `race_date`, 0
-min in `config/availability.yaml`, so a view shows a race's rows from 00:00 JST of its race date
-(the card's rule), and the build drops any key whose kept version was made after the race date (a
-version made later could hold the race's own result), counting it in `created_after_race`. The
-table carries `horse_id`, not `horse_no` (CK has no 馬番); a join to the jravan `runners` table is
+its availability rule is the owner's (answer B on #407, 2026-11-28): `offset` on `race_date`,
+`offset_min: 0` in `config/availability.yaml`, so a view shows a race's rows from 00:00 JST of its
+race date (the card's rule), and the build drops any key whose kept version was made after the
+race date (a version made later could hold the race's own result), counting it in
+`created_after_race`. The table carries `horse_id`, not `horse_no` (CK has no 馬番); a join to the jravan `runners` table is
 on (`race_id`, `horse_id`).
 
 - `build_career_counts(*, raw=None, out=None, chunk_records=20_000) -> BuildReport` reads
@@ -796,6 +796,12 @@ on (`race_id`, `horse_id`).
   row group through a `ParquetWriter` (zstd) into a tmp file, then `os.replace`. Rows are sorted
   by `race_id, horse_id, subject, period, condition` (plain string order); the same records, in any
   order and at any chunk size, give the same bytes.
+- What bounds the build's memory: the streaming pass holds one chunk of `chunk_records` raw
+  records (and that chunk split by month) at a time; each spill file holds one race month, and the
+  decode reads, decodes and writes one month at a time (its raw bytes, decoded columns and Arrow
+  table, released before the next), so the peak follows the largest race month and the chunk
+  size, not the size of the CK file. The `ParquetWriter` keeps only the written row groups'
+  metadata.
 - `CAREER_COUNTS_SCHEMA`: `race_id` (`keys.race_id`), `race_date`, `horse_id` (血統登録番号; CK
   has no 馬番), `subject` (`horse`, `jockey`, `trainer`), `subject_id`, `period` (`career`,
   `this_year`), `condition`, and `first`, `second`, `third`, `fourth`, `fifth`, `unplaced` (int64,
@@ -813,4 +819,5 @@ through `write_build_report`, counts only: `records`, `holdout_skipped`, `undate
 `versions_dropped`, `deletions`, `created_after_race`, `kept` (runners with rows) and `rows`, and
 `rows` per race year; every record read counts once, `records = holdout_skipped + undated +
 non_jra + versions_dropped + deletions + created_after_race + kept`.
-Its figures, wall time and peak memory are withheld (D21).
+The report holds no wall time or peak memory. The run's figures, its wall time and peak memory
+included, are withheld (D21) and stay out of the repository.
