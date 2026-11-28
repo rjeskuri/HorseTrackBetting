@@ -29,6 +29,9 @@ The leaderboard is a view: nothing here re-runs a study or appends a record (the
   segment 'all', selection the run's ``predicted_final@T-k``; measured from its development
   'return_per_100[<rule>]' (already per ¥100, its one-sided bounds, n in races) and
   'n_meetings[<rule>]', unmeasured (its reason in ``note``) without one.
+- every #716 member-filter family ('japan-716-member-filter-*', one run per checkpoint): read as
+  #713's, one row per combination of params['rules'] (rule the combination id
+  '<rule>|<member>|k<k>', pool the #713 rule's), unmeasured without a qualifying ticket.
 
 Every other legacy family is unmeasured and takes its kind from ``LEGACY_KINDS``; #438's debut and
 maiden 'combined:' variants are models, their 'member:' variants members. Withheld rows
@@ -41,7 +44,7 @@ import dataclasses
 import math
 from collections.abc import Mapping
 from datetime import date
-from functools import cache
+from functools import cache, partial
 
 from horsetrack.core import config
 from horsetrack.core.eval.leaderboard import (
@@ -386,7 +389,9 @@ def _pool_rate(pool: object) -> float | None:
         return None
 
 
-def _predicted_final_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
+def _predicted_final_rows(
+    record: RunRecord, size: int, *, no_bet: str = "no bet on the projected boards"
+) -> list[LeaderboardRow]:
     """One rule row per rule the run names (module docstring); none for a malformed run."""
     selection, rules = record.params.get("selection"), record.params.get("rules")
     level = record.params.get("ci_level")
@@ -402,7 +407,7 @@ def _predicted_final_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
         unmeasured = info.get("unmeasured")
         note = None
         if metric is None:
-            note = unmeasured if isinstance(unmeasured, str) else "no bet on the projected boards"
+            note = unmeasured if isinstance(unmeasured, str) else no_bet
         rows.append(
             LeaderboardRow(
                 option_id=f"{record.family_id}/{rule_id}@{selection.split('@', 1)[1]}",
@@ -430,6 +435,13 @@ def _predicted_final_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
     return rows
 
 
+# #716's member-filter families: one combination of a #713 rule, a member and k per params rule.
+_MEMBER_FILTER_PREFIX = "japan-716-member-filter-"
+_member_filter_rows = partial(
+    _predicted_final_rows, no_bet="no qualifying ticket on the projected boards"
+)
+
+
 LEGACY_ADAPTERS: Mapping[str, Adapter] = {
     FAMILY_L: _family_l_rows,
     COPLACER: _coplacer_rows,
@@ -448,6 +460,8 @@ class _Adapters(Mapping):
             return _exacta_rows
         if isinstance(family_id, str) and family_id.startswith(_PREDICTED_FINAL_PREFIX):
             return _predicted_final_rows
+        if isinstance(family_id, str) and family_id.startswith(_MEMBER_FILTER_PREFIX):
+            return _member_filter_rows
         raise KeyError(family_id)
 
     def __iter__(self):
