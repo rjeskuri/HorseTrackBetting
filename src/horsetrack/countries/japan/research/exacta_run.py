@@ -90,6 +90,7 @@ COUNTRY = "japan"
 FIRST_DAY = date(2014, 6, 7)
 SOURCES = ("jra",)
 MAX_TEST_ID = f"{study.E1_ID}-max-test"
+E2_REGISTRY_ID = study.E2_ID  # E2's registry id (#525, already "/"-free), for exacta_rules
 SCORED_FAMILIES = (study.E1_ID, study.E1_B1_ID, study.E1_B3_ID, study.C_ID)
 PER_FOLD_FAMILIES = (study.B3_PER_FOLD_ID, study.C_PER_FOLD_ID)  # #284, scored by score-per-fold
 BREAKAGE_ID = "japan-131-exacta-breakage"
