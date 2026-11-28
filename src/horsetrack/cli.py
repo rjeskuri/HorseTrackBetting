@@ -58,6 +58,7 @@ from horsetrack.countries.japan.research.win5_study import win5_study_app
 from horsetrack.countries.japan.shadow.day import shadow_day_command
 from horsetrack.countries.japan.studies.ability import ability_study_command
 from horsetrack.countries.japan.studies.debut_members import debut_members_command
+from horsetrack.countries.japan.studies.lineage import lineage_study_command
 from horsetrack.countries.japan.studies.nowcast import nowcast_study_command
 
 app = typer.Typer(no_args_is_help=True)
@@ -84,6 +85,7 @@ japan.command("nowcast-study")(nowcast_study_command)
 japan.command("nowcast-fit")(nowcast_fit_command)
 japan.command("ability-study")(ability_study_command)
 japan.command("debut-members")(debut_members_command)
+japan.command("lineage-study")(lineage_study_command)
 japan.command("coverage")(coverage_command)
 japan.command("joined-coverage")(joined_coverage_command)
 japan.command("leaderboard")(leaderboard_command)
