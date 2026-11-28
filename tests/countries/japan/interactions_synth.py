@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 from ability_synth import centred, field, labels, pl_positions
 
+from horsetrack.core.eval.folds import Fold
+
 FIRST_POST = pd.Timestamp("2024-01-06 01:00", tz="UTC")
 RACES_PER_DAY = 24
 X_COEF = 0.7
@@ -327,3 +329,96 @@ def sequence_frame(sequences: dict[str, str], seed: int) -> tuple[pd.DataFrame, 
     labelled = zip(frame.index, frame["key"], frame["run"], strict=True)
     where = {(key, run): label for label, key, run in labelled}
     return frame.drop(columns=["key", "run"]), where
+
+
+# ---------------------------------------------------------------------------------------------
+# The study's level-1 frame and outer folds (#571: the all-blocks member out of fold)
+# ---------------------------------------------------------------------------------------------
+
+# mixed_frame's card under the study's column names (`studies.interactions._numeric`'s inputs):
+# jockey_key, trainer_key, race_date, debut and debut_flag (a horse's first run in the frame),
+# and transfer. Every third horse moves to the next trainer from its MOVE_AT-th run on and stays,
+# so with the study's STABLE_RUNS = 2 its transfer step is on from run MOVE_AT + 1 (by hand: the
+# new trainer has had it for two consecutive runs there). x1 stands in for #91's rating. Three
+# outer folds of three race days each test days 8-10, 11-13 and 14-16; each trains on every
+# earlier day. Days 0-7 are in no fold's test rows.
+MOVE_AT = 25
+# #93's single-block members (studies.interactions.MEMBERS at e8ac3b6) and, by hand from them
+# and #571, the content of the member that fits every block together: each block as (cols, kind)
+# and the extra features. Horse x trainer is not a block (aliased with the horse, #93).
+SINGLE_BLOCK_MEMBERS = (
+    "base",
+    "horse_x_jockey",
+    "trainer_x_track",
+    "horse_aptitude",
+    "trainer_debut",
+    "transfer_step",
+)
+ALL_BLOCKS_CONTENT = (
+    {
+        (("horse_id", "jockey_key"), "variance_component"),
+        (("trainer_key", "venue"), "variance_component"),
+        (("trainer_key", "venue"), "low_rank"),
+        (("horse_id", "distance_m", "surface"), "structured"),
+        (("horse_id", "venue"), "low_rank"),
+        (("trainer_key", "debut_flag"), "variance_component"),
+    },
+    {"debut", "transfer"},
+)
+STUDY_FOLD_DAYS = ((8, 10), (11, 13), (14, 16))
+STUDY_PAIR = (1e-4, 1.0)  # the (drift_var_per_day, scale) every fold's pick names
+
+
+def study_frame(seed: int) -> pd.DataFrame:
+    """race_id, race_date, race_utc, horse_id, finish_pos, x1, jockey_key, trainer_key, venue,
+    distance_m, surface, debut, debut_flag, transfer; in race order on a RangeIndex."""
+    frame, _ = mixed_frame(seed)
+    run = frame.groupby("horse_id").cumcount().to_numpy()
+    number = frame["horse_id"].str[2:].astype(int).to_numpy()
+    trainer = number % 6
+    movers = number % 3 == 0
+    trainer = np.where(movers & (run >= MOVE_AT), (trainer + 1) % 6, trainer)
+    frame = frame.rename(columns={"jockey_id": "jockey_key"}).drop(columns="trainer_id")
+    frame["trainer_key"] = np.array([f"t:{i}" for i in trainer], dtype=object)
+    frame["finish_pos"] = frame["finish_pos"].astype(float)
+    frame["distance_m"] = frame["distance_m"].astype(float)
+    frame["race_date"] = frame["race_utc"].dt.tz_convert(None).dt.normalize()
+    frame["debut"] = (run == 0).astype(float)
+    frame["debut_flag"] = pd.Series(np.where(run == 0, "debut", None), dtype=object)
+    frame["transfer"] = (movers & (run >= MOVE_AT + 1)).astype(float)
+    return frame.reset_index(drop=True)
+
+
+def study_folds(frame: pd.DataFrame):
+    """STUDY_FOLD_DAYS as `core.eval.folds.Fold`s, positions into frame."""
+    first = pd.Timestamp(frame["race_date"].min())
+    day = ((frame["race_date"] - first) // pd.Timedelta(days=1)).to_numpy()
+    folds = []
+    for lo, hi in STUDY_FOLD_DAYS:
+        folds.append(
+            Fold(
+                train_idx=np.flatnonzero(day < lo),
+                test_idx=np.flatnonzero((day >= lo) & (day <= hi)),
+                train_end=(first + pd.Timedelta(days=lo - 1)).date(),
+                test_start=(first + pd.Timedelta(days=lo)).date(),
+                test_end=(first + pd.Timedelta(days=hi)).date(),
+            )
+        )
+    return folds
+
+
+def member_content(members: dict, name: str) -> tuple[set, set]:
+    """A study member's blocks as {(cols, kind)} and its extra features as a set, from a
+    MEMBERS-shaped mapping (member -> (blocks, extra features))."""
+    blocks, features = members[name]
+    return {(tuple(b.cols), b.kind) for b in blocks}, set(features)
+
+
+def all_blocks_member(members: dict) -> str:
+    """The one member of `members` whose content is ALL_BLOCKS_CONTENT, found by its content,
+    never its name; #93's single-block members stay as they were."""
+    assert set(SINGLE_BLOCK_MEMBERS) <= set(members), sorted(members)
+    found = [m for m in members if member_content(members, m) == ALL_BLOCKS_CONTENT]
+    assert len(found) == 1, f"no single member fits every #93 block together: {sorted(members)}"
+    assert found[0] not in SINGLE_BLOCK_MEMBERS, found
+    return found[0]

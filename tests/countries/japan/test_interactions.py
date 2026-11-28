@@ -60,6 +60,22 @@ to an earlier trainer (`transfer_step`); out-of-fold ΔLL at the final price thr
 meta-model, the registry records (including the record of a dropped block with its cell count),
 the leaderboard rows and the report, which read the local stores. Expected values are planted or
 derived by hand and by brute force, never from the code under test. Every RNG is seeded.
+
+#571 (the C2 member with every block, for #98's meld; `studies.interactions`):
+- `MEMBERS` holds, beside #93's single-block members, one member whose blocks are every #93
+  block together (horse x jockey, trainer x track with its one-factor east/west term, the
+  structured aptitude with its horse x track term, the trainer debut prior) and whose extra
+  features are the debut indicator and the transfer step; it is found by that content
+  (`interactions_synth.ALL_BLOCKS_CONTENT`), never its name.
+- `level1_members(frame, rating, outer, picks, revision=..., intervals=False)` predicts it on
+  exactly the outer folds' test rows #93's members are predicted on (NaN elsewhere), each fold's
+  rows by a fit on that fold's training rows only: on the first and the last fold, within 1e-4
+  of the base model (#92's AbilityModel(k=3) on the rating, jockey and trainer, plus the
+  member's extra features) with its blocks added by `models.interactions.fit_with_blocks` on the
+  fold's training rows (a cold fit; the study's warm start moves u by about 1e-6). Every fold's
+  `taus` row carries the member's tau of each block and coefficient of each extra feature, and
+  `fits` names `revision` for it.
+- `level1_export(frame, u, outer)` (the per-runner file #98's meld reads) carries its u.
 """
 
 # Ruff reads the module under test as third-party until it exists, then as first-party; the
@@ -94,14 +110,18 @@ from interactions_synth import (
     OPTIMA,
     SPARSE_ROLES,
     SPARSE_VENUES,
+    STUDY_PAIR,
     TT_TRAIN_RACES,
     VENUES,
     after,
     alias_frame,
+    all_blocks_member,
     aptitude_frame,
     east_west_frame,
     mixed_frame,
     sequence_frame,
+    study_folds,
+    study_frame,
     trainer_track_frame,
 )
 
@@ -610,6 +630,92 @@ def test_one_factor_trainer_track_term_learns_east_west():
         for w in ("w1", "w2", "w3", "w4"):
             dd = (at(e, "tokyo") - at(w, "tokyo")) - (at(e, "kyoto") - at(w, "kyoto"))
             assert dd > 0.8, (e, w, dd)
+
+
+# ---------------------------------------------------------------------------------------------
+# #571 DoD: the all-blocks member has out-of-fold predictions on the same folds as #93's members
+# ---------------------------------------------------------------------------------------------
+
+STUDY_REVISION = "57" * 20  # the git revision the fits are stamped with
+
+
+def test_all_blocks_member_predicts_out_of_fold():
+    """On a 400-race synthetic card with three outer folds (days 0-7 in no fold's test rows):
+    the study has one member fitting every #93 block together with the debut and transfer
+    features; level1_members predicts it on exactly the rows it predicts #93's members on, NaN
+    on the rest, with no member failing; each fold's u is the prediction of a fit on that fold's
+    training rows only (a cold reference fit of the base plus every block on the first and the
+    last fold, within 1e-4), so no row is predicted by a fit that saw it; the u is its own (not
+    any single-block member's);
+    each fold's taus row has the member's tau for every block and coefficient for each feature;
+    and the level-1 export #98 reads carries its u, row for row, with each row's fold."""
+    member = all_blocks_member(study.MEMBERS)
+    blocks, features = study.MEMBERS[member]
+
+    frame = study_frame(9571)
+    folds = study_folds(frame)
+    labels = [f.test_start.isoformat() for f in folds]
+    drift, scale = STUDY_PAIR
+    picks = [{"fold": label, "drift_var_per_day": drift, "scale": scale} for label in labels]
+    out = study.level1_members(
+        frame,
+        {STUDY_PAIR: frame["x1"]},
+        folds,
+        picks,
+        revision=STUDY_REVISION,
+        intervals=False,
+        log=lambda message: None,
+    )
+    assert out.errors == {}, out.errors
+    assert member in out.u, sorted(out.u)
+
+    oof = np.zeros(len(frame), dtype=bool)
+    for f in folds:
+        oof[f.test_idx] = True
+    assert 0 < oof.sum() < len(frame)
+    u = np.asarray(out.u[member], dtype=float)
+    for m in study.MEMBERS:
+        np.testing.assert_array_equal(np.isfinite(out.u[m]), oof, err_msg=m)
+    for m in study.MEMBERS:
+        if m != member:
+            gap = np.abs(u[oof] - np.asarray(out.u[m], dtype=float)[oof]).max()
+            assert gap > 1e-3, (m, gap)
+
+    with_rating = frame.assign(rating=frame["x1"])
+    for f, label in ((folds[0], labels[0]), (folds[-1], labels[-1])):  # cold start; warm start
+        base = AbilityModel(
+            k=3,
+            discounts=(1.0, 0.5, 0.25),
+            entity_cols=("jockey_key", "trainer_key"),
+            features=["rating", *features],
+        )
+        reference = fit_with_blocks(with_rating.iloc[f.train_idx], base, blocks)
+        want = reference.predict(with_rating.iloc[f.test_idx])["u"].to_numpy(dtype=float)
+        np.testing.assert_allclose(u[f.test_idx], want, rtol=0, atol=1e-4, err_msg=label)
+
+    for label in labels:
+        row = next(t for t in out.taus if t["fold"] == label)
+        for b in blocks:
+            tau = row[f"{member}:tau[{b.name}]"]
+            assert math.isfinite(tau) and tau >= 0, (label, b.name, tau)
+        for feat in features:
+            assert math.isfinite(row[f"{member}:coef[{feat}]"]), (label, feat)
+        assert out.fits[label][member] == STUDY_REVISION, label
+        assert out.fits[label][member] == out.fits[label]["base"], label
+
+    export = study.level1_export(frame, out.u, folds)
+    column = f"u_{member}"
+    assert column in export.columns, sorted(export.columns)
+    assert len(export) == int(oof.sum())
+    keyed = export.set_index(["race_id", "horse_id"])
+    assert keyed.index.is_unique
+    want_keys = pd.MultiIndex.from_frame(frame.loc[oof, ["race_id", "horse_id"]])
+    keyed = keyed.reindex(want_keys)
+    np.testing.assert_allclose(keyed[column].to_numpy(dtype=float), u[oof], rtol=0, atol=1e-12)
+    fold_of = np.empty(len(frame), dtype=object)
+    for f, label in zip(folds, labels, strict=True):
+        fold_of[f.test_idx] = label
+    assert keyed["oof_fold"].astype(str).tolist() == list(fold_of[oof])
 
 
 # ---------------------------------------------------------------------------------------------

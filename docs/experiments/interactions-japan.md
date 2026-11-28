@@ -421,3 +421,49 @@ Filed under epic #73 as `status:proposed`:
 - #572: 08 §3.3's pedigree prior on the aptitude's (b_h, e_h), with #95's lineage (after #95).
 - #573: the trainer debut prior on debut and maiden races at the final price, by class.
 - #574: Place and Wide: the block members through C5's ordering against their own final prices.
+
+## #571: the all-blocks member (family v3; pre-registered, results pending the local run)
+
+Ticket #571 (follow-up of #93, for #98's meld). One C2 member, `all_blocks`, carries every block and extra feature of
+#93's members fitted together, so the meta-model can weigh C2 as a whole instead of six members that each repeat the
+base. **No result is reported here yet:** the real run reads the local store and is run on the owner's machine
+(`uv run horsetrack japan interaction-study`); this section is the pre-registration and what that run will produce.
+Nothing is adopted (D16, D19): the member is a ranked member row.
+
+- **Family and spec.** Registry family `japan-c2-interactions-final-win-v3` supersedes v2. Its spec
+  (`studies.interactions.build_spec`) is v2's (`v2_spec`, which rebuilds v2's frozen spec byte for byte, sha256
+  `2dde55836222c16552431d0037f0aabf4fbc55e814e79d139d5d7aa90e24d2e0`) with `family_id`, `ticket` (571), `supersedes`,
+  the hypothesis E571, the member's blocks and extra features, its `level1.all_blocks` description and its leaderboard
+  option added; every other section (the base, the six members, level 2, the tail, the folds, D7's bootstrap) is v2's.
+  At this commit it hashes to `e91949f24e8d38e3cc6ec4374ec64978167084236807e616f58b2831a2d97ceb`; the launch freezes
+  it with `freeze_family` before any outcome is read, and v2's frozen spec and its 56 records are not touched (no
+  record is appended to v2).
+- **Hypothesis (E571, frozen).** "Every #93 block fitted together in one member (horse × jockey; trainer × track with
+  its one-factor east/west term; the structured aptitude with its rank-one horse × track term; the trainer debut prior
+  with the debut indicator; the transfer step): measured standalone against the base and at the final price against
+  the base's and the market-only stage-2 meta, with its tail." **Null**, the starting point: no gain over the base
+  standalone or at the final price, and a tail at the takeout. v2's single-block gains are each member's alone; whether
+  they add when fitted together is what the member measures, not something assumed.
+- **Method.** The base (`AbilityModel(k=3)` on #91's rating, jockey and trainer, plus the debut indicator and the
+  transfer step) with the six blocks `horse_x_jockey`, `trainer_x_track`, `trainer_x_track_factor`,
+  `distance_aptitude`, `horse_x_track` and `trainer_debut`, one `fit_with_blocks` fit per outer fold with every τ² by
+  empirical Bayes together, on the same D9 quarters, rating pairs and out-of-fold rows as #93's members. Each block
+  keeps its own exact or block-Jacobi path (the choice is per term, by its size). The fixed point and MAP start from
+  the member's own previous fold, the first fold from 0. τ's bounds are on the last outer fold's fit, keyed by member
+  and block (the member shares its blocks' names with #93's members).
+- **Level-1 reuse.** A v3 launch without a checkpoint of its own copies v2's
+  (`interactions-japan-level1-e2cb2f08123f.npz`, never changed) to v3's key and resumes it: v2's six members keep
+  their out-of-fold u, τ, fitting revisions (`56d0669`, `b5a726c`) and three failed horse_aptitude fits, and only
+  the all-blocks member is fitted, on every fold, at the launch's revision. The run is mixed again; every record
+  names its member-folds' revisions (`params.fit_revisions`), and the failed fits are v3 records too.
+- **What the run will produce.** In v3: the member's τ per block and coefficient per feature per fold, with the last
+  fold's bounds (`tau:all_blocks`); its stage-2 meta and its meeting-clustered bounds (`stage2:q:all_blocks`,
+  `meeting_clustered:stage2:q:all_blocks`); its standalone paired ΔLL against the base (`level1:all_blocks_vs_base`); its
+  ΔLL at the final price against the base's stage-2 meta (`marginal:stage2:all_blocks_vs_base`) and against the
+  market-only meta (`marginal:stage2:all_blocks_vs_market_only`), each with D7's meeting bounds; and its tail at the
+  final price by claim band (`tail:stage2:all_blocks`), whose top band is the leaderboard row
+  `japan:WIN:final:c2-interactions:all_blocks:stage2:claim-top-1pct`. v2's six members and the market-only meta are
+  re-scored beside it in v3 (their level 2 unchanged). The export #98's meld reads gains the column `u_all_blocks`,
+  per level-1 out-of-fold runner from 2015-Q1, beside each member's u and its `oof_fold`.
+- **Results:** pending the local run; the row and its ΔLLs with their bounds are added here by that run's PR, from
+  v3's records.
