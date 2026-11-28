@@ -148,4 +148,16 @@ captures and the results polls are the same with the cards as without.
   `field_size` (runners not scratched) are as the page showed them at that fetch.
 - Card pages themselves are not kept under `raw/` (`raw_pages` covers the odds pages only); the
   rows keep every field the parser reads.
-- No as-of view reads the card log yet: its availability rule is the owner's question (#426).
+- Availability at a decision time t is the owner's decision on #426 (2026-11-28), which closes
+  #309's question; an owner decision, not an implementation ruling:
+  - A card-log row is available at t once `fetched_utc <= t`. Each capture counts from its own
+    fetch time, the latest capture at or before t wins, and there is no extra lag.
+  - `runners.is_scratched` and `races.field_size` come from the latest capture at or before t.
+    `races.status` and `meetings.status` stay on the accepted leak (docs/specs/as-of.md,
+    "Accepted leak: results-derived card columns"), since the card does not show an abandonment
+    reliably.
+  - With no capture at or before t (a day before this logger, or a missed grid point), the two
+    columns keep the accepted leak: the results-derived values under the `race_date` 00:00 JST
+    rule. They are not marked unknown.
+- No as-of view reads the card log yet: a follow-up ticket wires the rule above into the views,
+  and until then the views carry the accepted leak for all four columns.
