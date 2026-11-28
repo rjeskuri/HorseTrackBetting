@@ -14,19 +14,31 @@ dividends are pushed to the 110-yen floor (`dividend_floor_bound` territory).
 
 The references here are written out loop by loop: Harville / discounted Harville from its
 definition, pool marginals by enumeration, the implied share by its formula.
+
+`member_store` is a separate kind of world, for the real `exotic_c5.load_form`: a long JRA store
+(the 10th and 24th of each month, two races of six priced starters, one winner drawn from the
+normalised price) written under the current data dir, and #87's member file over it (the keys of
+`studies.meta.MEMBER_KEYS` and its three member columns, each the normalised price times its own
+log-normal noise, `fold_season` the race's calendar year). The member values come from the prices
+and a noise stream of their own, never from the finishing order, so `longshots_win` changes
+outcomes alone.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from itertools import combinations
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
+from horsetrack.core import paths
 from horsetrack.countries.japan import takeout
 
 WIN, PLACE, QUINELLA, WIDE = "WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE"
@@ -360,3 +372,116 @@ def replace_races(world: World, other: World, race_ids: Sequence[str]) -> World:
         form=swap(world.form, other.form),
         truth=truth,
     )
+
+
+# --------------------------------------------------------------------------- a member file
+
+MEMBER_COLUMNS = ("p_fundamental_oof", "p_lgbm_no_jrdb_oof", "p_clogit_no_jrdb_oof")
+MEMBER_ODDS = (2.4, 3.8, 6.5, 11.0, 19.0, 42.0)
+MEMBER_VENUE = "QQW"  # matches no real venue
+MEMBER_RUNNERS = 6
+_MEMBER_RUNNER_SCHEMA = pa.schema(
+    [
+        ("race_id", pa.string()),
+        ("race_date", pa.date32()),
+        ("horse_id", pa.string()),
+        ("horse_no", pa.int64()),
+        ("win_odds", pa.float64()),
+        ("finish_pos", pa.int64()),
+        ("is_scratched", pa.bool_()),
+    ]
+)
+_MEMBER_RACE_SCHEMA = pa.schema(
+    [
+        ("race_id", pa.string()),
+        ("race_date", pa.date32()),
+        ("meeting_id", pa.string()),
+        ("status", pa.string()),
+    ]
+)
+
+
+@dataclass(frozen=True)
+class MemberStore:
+    races: pd.DataFrame  # race_id, race_date (datetime.date), meeting_id, status
+    runners: pd.DataFrame  # race_id, race_date, horse_id, horse_no, win_odds, finish_pos, ...
+    members: pd.DataFrame  # race_id, horse_id, race_date, fold_season, MEMBER_COLUMNS
+
+
+def member_store(first: date, last: date, member_from: date, *, seed: int) -> MemberStore:
+    """Race days the 10th and 24th of each month in [first, last]; member rows from
+    `member_from` on (a store day before it gives every member row a level-1 cutoff)."""
+    rng, noise = np.random.default_rng(seed), np.random.default_rng(seed + 1)
+    days = [
+        date(year, month, dom)
+        for year in range(first.year, last.year + 1)
+        for month in range(1, 13)
+        for dom in (10, 24)
+        if first <= date(year, month, dom) <= last
+    ]
+    races, runners = [], []
+    for day in days:
+        for n in (1, 2):
+            race_id = f"jra:{day.isoformat()}:{MEMBER_VENUE}:{n:02d}"
+            meeting = f"{day.isoformat()}:{MEMBER_VENUE}"
+            races.append({"race_id": race_id, "race_date": day, "meeting_id": meeting})
+            odds = rng.permutation(np.array(MEMBER_ODDS))
+            inv = 1.0 / odds
+            winner = int(rng.choice(MEMBER_RUNNERS, p=inv / inv.sum()))
+            order = [winner] + [i for i in rng.permutation(MEMBER_RUNNERS) if i != winner]
+            finish = {runner: place + 1 for place, runner in enumerate(order)}
+            for i in range(MEMBER_RUNNERS):
+                runners.append(
+                    {
+                        "race_id": race_id,
+                        "race_date": day,
+                        "horse_id": f"m{day:%Y%m%d}{n}{i}",
+                        "horse_no": i + 1,
+                        "win_odds": float(odds[i]),
+                        "finish_pos": finish[i],
+                        "is_scratched": False,
+                    }
+                )
+    race_frame = pd.DataFrame(races).assign(status="run")
+    runner_frame = pd.DataFrame(runners)
+    held = runner_frame.loc[[d >= member_from for d in runner_frame["race_date"]]]
+    inv = pd.Series(1.0 / held["win_odds"].to_numpy(), index=held.index)
+    q = (inv / inv.groupby(held["race_id"]).transform("sum")).to_numpy()
+    when = pd.Series(pd.to_datetime([pd.Timestamp(d) for d in held["race_date"]]))
+    members = pd.DataFrame(
+        {
+            "race_id": held["race_id"].to_numpy(),
+            "horse_id": held["horse_id"].to_numpy(),
+            "race_date": when.to_numpy(),
+            "fold_season": when.dt.year.astype(str).to_numpy(),
+        }
+    )
+    for col in MEMBER_COLUMNS:
+        members[col] = q * np.exp(noise.normal(0.0, 0.3, len(members)))
+    return MemberStore(races=race_frame, runners=runner_frame, members=members)
+
+
+def longshots_win(store: MemberStore, start: date, end: date) -> MemberStore:
+    """The store with every race on a day in [start, end] won by its longest price (the order by
+    price, longest first); prices, the member file and every other race unchanged."""
+    runners = store.runners
+    on = np.array([start <= d <= end for d in runners["race_date"]], dtype=bool)
+    rank = runners.groupby("race_id")["win_odds"].rank(ascending=False, method="first")
+    finish = np.where(on, rank.to_numpy(dtype=int), runners["finish_pos"].to_numpy(dtype=int))
+    return replace(store, runners=runners.assign(finish_pos=finish))
+
+
+def write_member_store(store: MemberStore, members_path: Path) -> Path:
+    """The store's runners and races under `paths.processed_dir('jra')` of the current data dir,
+    and the member file at `members_path` (returned)."""
+    out = paths.processed_dir("jra")
+    out.mkdir(parents=True, exist_ok=True)
+    for name, frame, schema in (
+        ("runners", store.runners, _MEMBER_RUNNER_SCHEMA),
+        ("races", store.races, _MEMBER_RACE_SCHEMA),
+    ):
+        table = pa.Table.from_pandas(frame[schema.names], schema=schema, preserve_index=False)
+        pq.write_table(table, out / f"{name}.parquet")
+    members_path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pandas(store.members, preserve_index=False), members_path)
+    return members_path

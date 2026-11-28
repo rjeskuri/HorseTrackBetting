@@ -105,6 +105,7 @@ minimisation), or from the dependencies the ticket names (``core.eval.bootstrap`
 from __future__ import annotations  # noqa: I001
 
 import dataclasses
+import hashlib
 import itertools
 import json
 import math
@@ -157,10 +158,13 @@ from exotic_c5_world import (
     World,
     floor_bound,
     implied_share,
+    longshots_win,
     make_world,
+    member_store,
     normalised,
     pool_probabilities,
     replace_races,
+    write_member_store,
 )
 
 REPO = env.repo_root()
@@ -1698,3 +1702,65 @@ def test_the_command_runs_the_per_ticket_family(pt_a):
     assert printed["family_id"] == exotic_c5.PER_TICKET_FAMILY_ID
     assert printed["spec_hash"] == pt_a.registry.frozen_spec_hash(exotic_c5.PER_TICKET_FAMILY_ID)
     assert printed["variants"] == len(pt_a.records)
+
+
+# ---------------------------------------------------------------------------------------------
+# 10. The real stage2:q:form seam on a member file (review of PR #668 at 59d5eb3)
+# ---------------------------------------------------------------------------------------------
+
+# Every other test replaces `load_form`; this one runs it, so a change in #87's or #418's API
+# (`studies.meta`, `models.stacking`) that breaks the member's rebuild fails here, not as a run
+# that records every FORM variant failed.
+MEMBER_STORE_FROM, MEMBER_STORE_TO = date(2016, 1, 10), date(2024, 6, 24)
+MEMBER_FROM = date(2017, 1, 10)  # seven member seasons before 2024: D9's five met at level 2
+FORM_Q1 = (date(2024, 1, 1), date(2024, 3, 31))  # the first scored quarter (from 2024-01-01)
+FORM_Q2 = (date(2024, 4, 1), date(2024, 6, 30))  # trains on 2024-Q1's outcomes
+
+
+def test_load_form_rebuilds_the_form_member_out_of_fold_from_a_member_file(tmp_path):
+    """The real `load_form` on a synthetic store (the tmp data dir) and member file (outside the
+    repository): p_form for every starter of the asked days, keyed by race and horse number, a
+    probability per race that follows the member; and out of fold: other 2024-Q1 outcomes move no
+    2024-Q1 p_form but move 2024-Q2's, whose fold trains on them."""
+    natural = member_store(MEMBER_STORE_FROM, MEMBER_STORE_TO, MEMBER_FROM, seed=459)
+    members = tmp_path / "hktrack" / "outputs" / "oof" / "members.parquet"
+    scored_days = sorted({d for d in natural.runners["race_date"] if d >= FORM_Q1[0]})
+    asked = [d for d in scored_days if d != date(2024, 5, 10)]  # one scored day not asked for
+    write_member_store(natural, members)
+    form, builds = exotic_c5.load_form(asked, members)
+
+    assert list(form.columns) == ["race_id", "horse_no", "p_form"]
+    runners = natural.runners
+    on = runners.loc[np.array([d in set(asked) for d in runners["race_date"]], dtype=bool)]
+    want = set(zip(on["race_id"], on["horse_no"].astype(int), strict=True))
+    got = list(zip(form["race_id"], form["horse_no"].astype(int), strict=True))
+    assert len(got) == len(set(got)), "a starter has two p_form rows"
+    assert set(got) == want, "a starter of an asked day has no p_form, or one of another day has"
+    day_of = dict(zip(natural.races["race_id"], natural.races["race_date"], strict=True))
+    assert not any(is_holdout_day("japan", day_of[r]) for r in set(form["race_id"]))
+
+    p = form["p_form"].to_numpy(dtype=float)
+    assert np.isfinite(p).all() and ((p > 0) & (p < 1)).all()
+    np.testing.assert_allclose(form.groupby("race_id")["p_form"].sum().to_numpy(), 1.0, atol=1e-9)
+    # keyed by horse number: the member follows the normalised price, so p_form does too
+    keyed = on.assign(horse_no=on["horse_no"].astype(int)).merge(
+        form.assign(horse_no=form["horse_no"].astype(int)), on=["race_id", "horse_no"]
+    )
+    inv = 1.0 / keyed["win_odds"]
+    q = (inv / inv.groupby(keyed["race_id"]).transform("sum")).to_numpy(dtype=float)
+    assert np.corrcoef(q, keyed["p_form"].to_numpy(dtype=float))[0, 1] > 0.8
+    digest = hashlib.sha256(members.read_bytes()).hexdigest()[:16]
+    assert any(digest in str(v) for v in builds.values()), "the build does not name the file"
+
+    write_member_store(longshots_win(natural, *FORM_Q1), members)  # the same member file
+    again, _ = exotic_c5.load_form(asked, members)
+    both = form.merge(again, on=["race_id", "horse_no"], suffixes=("", "_after"), validate="1:1")
+    assert len(both) == len(form) == len(again)
+    when = [day_of[r] for r in both["race_id"]]
+    q1 = np.array([FORM_Q1[0] <= d <= FORM_Q1[1] for d in when], dtype=bool)
+    q2 = np.array([FORM_Q2[0] <= d <= FORM_Q2[1] for d in when], dtype=bool)
+    assert q1.any() and q2.any()
+    before, after = both["p_form"].to_numpy(), both["p_form_after"].to_numpy()
+    np.testing.assert_allclose(after[q1], before[q1], rtol=0, atol=1e-12)
+    moved = after[q2] - before[q2]
+    assert np.abs(moved).max() > 1e-6, "2024-Q2's p_form ignores the outcomes its fold trains on"

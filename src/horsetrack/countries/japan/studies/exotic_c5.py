@@ -1401,7 +1401,9 @@ def load_form(days: Sequence[date], members: Path | None = None) -> tuple[pd.Dat
     """#87's stage2:q:form out-of-fold P(win) on `days`, rebuilt by #87's own code
     (`studies.meta`): the store frame of development rows, HKTrack's member file (`members`,
     read-only, outside the repository), D9's folds from 2024-01-01, stage 2 on the form member
-    and ln q, ridge 0. Returns (race_id, horse_no, p_form) and the member build."""
+    and ln q, ridge 0. Returns (race_id, horse_no, p_form) and the member build. #418's level-2
+    guard (`studies.meta.check_level2`, D9's seasons) runs before any fit, as in #87's own run
+    without its opt-in: `models.stacking`'s `IneligibleFold` or `InvalidProvenance` refuses."""
     if members is None:
         raise FileNotFoundError(
             f"no stage2:q:form member file: pass --members (HKTrack's outputs/oof/{MEMBER_FILE})"
@@ -1412,12 +1414,13 @@ def load_form(days: Sequence[date], members: Path | None = None) -> tuple[pd.Dat
     del runners, races
     folds = walk_forward(frame["race_date"], scheme=load_country_scheme(COUNTRY))
     scored = [f for f in folds if f.test_start >= c4.SCORED_FROM]
-    rows, _ = c4.member_frame(frame, c4.read_members(path))
-    rows = rows.assign(ln_q=np.log(rows["q"].to_numpy()))
-    rfolds = c4.restrict(scored, rows.index.to_numpy(), len(frame))
-    rows = rows.reset_index(drop=True)
+    held = c4.read_members(path)
+    level2 = c4.check_level2(frame, scored, held, c4.race_calendar(), min_seasons=c4.D9_MIN_SEASONS)
+    rows, _ = c4.member_frame(level2, frame, held)
+    del held
+    rows = rows.assign(ln_q=np.log(rows["q"].to_numpy())).reset_index(drop=True)
     spec = MetaSpec(["form"], quadratic=False, segment_cols=[], form="stage2", ridge=0.0)
-    oof, _ = c4._meta_oof(rows, rfolds, spec, "ln_q")
+    oof, _ = c4._meta_oof(rows, level2.folds, spec, "ln_q")
     found = oof.notna().to_numpy()
     out = pd.DataFrame(
         {
