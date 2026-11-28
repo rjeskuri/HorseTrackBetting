@@ -220,3 +220,9 @@ JRA-VAN's 坂路 (HC) and ウッド (WC) workout times, `processed/jravan/workou
 | Claim | Label | Evidence (source, n, date) | Retest by |
 |---|---|---|---|
 | Buying ¥100 on each fav_first exacta combination of a race moves the dividend negligibly, so family L (`japan-282-exacta-fav-first-avoidance-v2`) settles its kept set, skipped set and comparator at the final dividend with no own impact. | assumption | Spec section 7's own-impact assumption, carried to family L (v1 frozen 2026-11-27, superseded by v2 frozen 2026-11-28, #282); no logged exacta pool total exists yet to check it (the 2026-11-21 and 2026-11-22 logs hold no `FORECAST` row). | Re-check against the logged exacta pool totals once development days with `FORECAST` boards exist (the own-impact run of #283). |
+
+## Japan (JRA): places paid at the start of sales (#566)
+
+| Claim | Label | Evidence (source, n, date) | Retest by |
+|---|---|---|---|
+| A runner shown as scratched (SCR) on a logged board was scratched after sales opened, so the shadow log (`values_version` 2) values Place and Wide with the places set by the runners priced plus the ones scratched on the board (8 drawn and one out: three places), not by the runners still priced. JRA fixes the places paid and whether Wide is sold by the runners at the start of sales; a runner withdrawn before sales opened would leave a smaller field and fewer places, and the board cannot tell the two cases apart. | assumption | The rule is JRA's place-payout rule (`japan/config/jra.yaml` pools, `places_for`); the timing of each scratch is not recorded on the board, and no logged board has been checked against the sales-open starters. Ticket #566, spec `docs/specs/shadow-log.md`. | Compare the logged `starters` with the starters of the paid results (the dividend rows' place count) once the shadow logs have race days with scratches. |
