@@ -2792,6 +2792,70 @@ def test_a_member_of_fewer_than_two_meetings_has_no_bootstrap_bounds_but_keeps_i
     assert reg.family_size(RULE_ID) == 16
 
 
+def headline_never_qualifies(races: list[dict]) -> list[dict]:
+    """Every race gets a "popular" race card (race 12, C1): no race is in the headline scope, so
+    the eight headline members bet in zero meetings while the "all" members bet in all six."""
+    return [dict(r, race_no=12, race_class="C1") for r in races]
+
+
+def no_race_logged(races: list[dict]) -> list[dict]:
+    return []
+
+
+def every_race_excluded(races: list[dict]) -> list[dict]:
+    """Races are loaded, but each is excluded (a boost may be withheld): nothing is scored."""
+    return [dict(r, boost_may_be_withheld=True) for r in races]
+
+
+ZERO_SCENARIOS = {"headline_never_qualifies": headline_never_qualifies,
+                  "no_race_logged": no_race_logged,
+                  "every_race_excluded": every_race_excluded}  # fmt: skip
+
+
+@pytest.mark.parametrize("scenario", sorted(ZERO_SCENARIOS))
+def test_a_member_of_zero_meetings_has_no_bounds_and_says_why(tmp_path, scenario):
+    """Owner fix-now (2026-11-28, :458): a member that bets in no meeting at all (no race of its
+    scope qualifies, or nothing is scored) gets unavailable bounds with a non-blank reason and the
+    ``roi_bounds:unavailable:<reason>`` registry marker, as the fewer-than-two-meetings member
+    does; never blank bounds with no reason. Members that do bet in two or more meetings keep
+    their bounds and no reason."""
+    races = ZERO_SCENARIOS[scenario](make_races(281, DAYS))
+    expected = expected_members(races) if races else {}
+    reg = new_registry(tmp_path)
+    result = er.score_e2(races, registry=reg, git_sha="abc1234", lambda2=LAMBDA2,
+                         data_builds=BUILDS, n_boot=50)  # fmt: skip
+    members = by_member(result)
+    if scenario == "headline_never_qualifies":
+        assert result["n_meetings"] == 6
+        zero = {k for k in members if k[2] == "headline"}
+        assert all(expected[k]["stake"] == 0 and expected[k]["n_meetings"] == 0 for k in zero)
+        many = {k for k in members if k[2] == "all"}
+        assert all(expected[k]["n_meetings"] == 6 for k in many)
+    else:
+        assert result["n_races"] == 0
+        zero, many = set(members), set()
+    records = {record_member(r): r for r in reg.records(RULE_ID)}
+    assert set(records) == set(members)
+    for key in zero:
+        got, metrics = members[key], metric_map(records[key])
+        assert got["n_meetings"] == 0 and got["stake"] == 0, key
+        assert unavailable(got["lo"]) and unavailable(got["hi"]), (key, got["lo"], got["hi"])
+        assert unavailable(got["roi"]), (key, got["roi"])  # no stake, no return
+        reason = bounds_reason(got)
+        assert isinstance(reason, str) and reason.strip(), (key, got)
+        markers = [name for name in metrics if name.startswith(BOUNDS_MARKER)]
+        assert markers == [f"{BOUNDS_MARKER}{reason}"], (key, markers, reason)
+        assert metrics[markers[0]].lo is None and metrics[markers[0]].hi is None, key
+    for key in many:
+        got, metrics = members[key], metric_map(records[key])
+        assert math.isfinite(got["lo"]) and math.isfinite(got["hi"]), key
+        assert bounds_reason(got) is None, key
+        assert not [name for name in metrics if name.startswith(BOUNDS_MARKER)], key
+    # the reason is a result, never a param: the family stays 16
+    assert len({tuple(sorted(r.params)) for r in records.values()}) == 1
+    assert reg.family_size(RULE_ID) == 16
+
+
 NUMBER = re.compile(r"-?\d+(\.\d+)?")
 
 

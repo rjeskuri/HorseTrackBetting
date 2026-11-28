@@ -23,10 +23,10 @@ the boards at t.
   such a hit has no impact-adjusted ROI. A ticket naming a horse scratched after t (the store's
   runners, else the final Win board) is refunded: it stays in stake, its stake comes back in both
   payouts, and the own impact counts the live tickets only. A member staked in fewer than two
-  meetings keeps its ROI but has no bootstrap bounds (``bounds_reason``; the registry's
-  ``roi_bounds:unavailable:<reason>`` marker, #131's exacta_run rule). A race without a decision
-  time (no post time), without boards at t, or whose log has no final FORECAST pool total, is not
-  scored.
+  meetings keeps its ROI (none when staked in none) but has no bootstrap bounds
+  (``bounds_reason``; the registry's ``roi_bounds:unavailable:<reason>`` marker, #131's exacta_run
+  rule). A race without a decision time (no post time), without boards at t, or whose log has no
+  final FORECAST pool total, is not scored.
 - Shrinkage (spec section 7): ``core.eval.segment_roi`` on each member's own bets alone (one
   ticket held by several nested members is evidence once per fit), fixed effects the final-board
   exacta odds bands of ``EXACTA_ODDS_BANDS`` (< 10, 10-30, 30-100, >= 100) and one constant
@@ -464,6 +464,10 @@ def score_e2(
                     hi = study.rho_interval(*args, alternative="less", **kw)
                     lo = study.rho_interval(*args, alternative="greater", **kw)
                     m.update(roi=hi.rho, lo=lo.bound, hi=hi.bound)
+        if m["n_meetings"] == 0:
+            # staked in no meeting (no race of its scope, or nothing scored): no return and no
+            # bounds, with the one-meeting member's reason and marker
+            m["bounds_reason"] = exacta_run.FEW_MEETINGS
         members.append(m)
         n = m["n_races"]
         shrink = m["shrinkage"]
@@ -472,6 +476,9 @@ def score_e2(
             metrics += exacta_run._metrics(
                 "development", [("roi", m["roi"], m["lo"], m["hi"], None)], n
             )
+        elif m["bounds_reason"]:
+            metrics.append(exacta_run._unavailable_metric("development", "roi_bounds",
+                                                          m["bounds_reason"], n))  # fmt: skip
         if m["stake"] > 0:
             metrics.append(FoldMetric("development", "roi_published", m["roi_published"], None,
                                       None, n))  # fmt: skip
