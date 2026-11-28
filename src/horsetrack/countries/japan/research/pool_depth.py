@@ -62,6 +62,10 @@ per cell the distinct (V, W) vote pairs of each month with their counts and read
 exactly from them (`StreamingQuantile`), so memory follows the distinct pairs, not the trifecta's
 combinations. A bracket pair's horses come from the jravan runners (`bracket_map`, starters only),
 and a pair not sold gives no row (`depth_rows(..., brackets=)`).
+
+For the leaderboard (#491), each scored depth run of either spec also writes its cell table as
+CSV under its out_dir (`write_depth_table`, `TABLE_FILES`, sources ('jravan',)), replacing that
+spec's previous one; `read_depth_tables` reads them back for `leaderboard_build.with_capacity`.
 """
 
 from __future__ import annotations
@@ -145,6 +149,11 @@ STEMS = {
     VARIANT_EXACTA: "exacta-impact-history-japan",
 }
 EXOTICS_STEM = "pool-depth-exotics-japan"  # the exotics family's depth reports
+# each depth spec's latest scored table, beside its reports, for the leaderboard (#491)
+TABLE_FILES = {
+    SPEC_NAME: f"{STEMS[VARIANT_DEPTH]}-table.csv",
+    EXOTICS: f"{EXOTICS_STEM}-table.csv",
+}
 UNIT, STEP, FLOOR = 100, 10, 110  # yen per ticket, breakage, the Plus-10 minimum
 CONFIRMED = ("4", "5")  # データ区分 確定 and 確定(月曜): the final records (2 is the day before's)
 BATCH_ROWS = 65_536
@@ -1225,7 +1234,46 @@ def run_depth(
     run_id, _, report, result = _recorded(
         run, VARIANT_DEPTH, (date_from, date_to), out_dir, STEMS[VARIANT_DEPTH], body
     )
-    return replace(result, report_path=report, run_id=run_id)
+    return _with_table(replace(result, report_path=report, run_id=run_id), out_dir, spec_name)
+
+
+def write_depth_table(
+    table: pd.DataFrame, directory: Path | str, *, spec_name: str = SPEC_NAME
+) -> Path:
+    """The depth table of a spec's run as CSV under `directory`, replacing the spec's previous
+    one, through `write_report` (sources ('jravan',)): refused inside the repository, nothing
+    written."""
+    if spec_name not in TABLE_FILES:
+        raise ValueError(f"spec must be one of {sorted(TABLE_FILES)}, not {spec_name!r}")
+    path = Path(directory) / TABLE_FILES[spec_name]
+    return write_report(path, table.to_csv(index=False), sources=SOURCES)
+
+
+def read_depth_tables(directory: Path | str) -> pd.DataFrame | None:
+    """Every spec's depth table under `directory` (`write_depth_table`), concatenated, NaN
+    capacities kept; None when the directory holds none or does not exist. Creates nothing."""
+    tables = []
+    for name in TABLE_FILES.values():
+        path = Path(directory) / name
+        if path.is_file():
+            table = pd.read_csv(
+                path,
+                dtype={c: str for c in CELL},
+                keep_default_na=False,
+                na_values=[""],
+                float_precision="round_trip",
+            )
+            if len(table):
+                tables.append(table)
+    return pd.concat(tables, ignore_index=True) if tables else None
+
+
+def _with_table(result: DepthResult, out_dir: Path | str, spec_name: str) -> DepthResult:
+    """A scored run's table written for the leaderboard (`write_depth_table`); a failed run (no
+    cell) leaves the previous table in place."""
+    if result.status == "scored":
+        write_depth_table(result.table, out_dir, spec_name=spec_name)
+    return result
 
 
 # --------------------------------------------------------------------------- the exotics run (#490)
@@ -1394,7 +1442,7 @@ def _run_exotics(run: _Run, date_from: date, date_to: date | None, out_dir) -> D
     run_id, _, report, result = _recorded(
         run, VARIANT_DEPTH, (date_from, date_to), out_dir, EXOTICS_STEM, body
     )
-    return replace(result, report_path=report, run_id=run_id)
+    return _with_table(replace(result, report_path=report, run_id=run_id), out_dir, EXOTICS)
 
 
 def _totals_by_class(
