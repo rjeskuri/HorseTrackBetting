@@ -33,8 +33,11 @@ through `write_report`. `compute_study` is pure.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import json
+import logging
+import signal
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -60,6 +63,9 @@ from horsetrack.countries.japan.studies import speed_run
 from horsetrack.countries.japan.studies.calibration import Study, Variant, _markdown_table, _metric
 
 COUNTRY = "japan"
+LOG = logging.getLogger(__name__)
+MAX_MINUTES = 90.0  # the deadline of a whole run (build, score, variants); past it the run fails
+RUN_FAILED = "run:failed"  # the one record of a run that raised or passed its deadline
 TICKET = 219
 FAMILY_ID = "japan-handicap-speed-96-final-win-v2"
 V1_FAMILY_ID = "japan-handicap-speed-96-final-win"  # superseded, kept in the registry
@@ -416,8 +422,48 @@ def render_report(study: Study, spec: dict, about: dict) -> str:
                       _markdown_table(variants), ""])  # fmt: skip
 
 
-def run_study(out_dir: Path | None = None, *, rebuild: bool = False) -> dict:
-    """Freeze the spec, build the #96 table when absent (or `rebuild`), score, record, report."""
+class StudyTimeout(BaseException):
+    """The run's deadline passed. A BaseException so that no per-variant `attempt` records it as
+    that variant's failure and carries on."""
+
+
+@contextlib.contextmanager
+def _deadline(minutes: float):
+    """Raise `StudyTimeout` in the main thread after `minutes`, wherever the run is (a fit looping
+    in Python is interrupted too). Unix only."""
+
+    def fire(signum, frame):
+        raise StudyTimeout(f"no result after {minutes:g} minutes")
+
+    previous = signal.signal(signal.SIGALRM, fire)
+    signal.setitimer(signal.ITIMER_REAL, minutes * 60)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _inputs_and_study(spec: dict, rebuild: bool, new_dir: Path, old_dir: Path) -> Study:
+    if rebuild or not factors.table_complete(new_dir, FIRST_DAY, LAST_DAY, speed_at_start_day=True):
+        LOG.info("building %s", new_dir)
+        factors.build_handicap_table(FIRST_DAY, LAST_DAY, out_dir=new_dir, speed_at_start_day=True)
+    LOG.info("reading outcomes, v0 and the two tables")
+    outcomes, meetings = read_outcomes()
+    v0, v0_train_end = read_v0()
+    inputs = Inputs(
+        {V96: read_scores(new_dir), INTERIM: read_scores(old_dir)},
+        outcomes, meetings, v0, v0_train_end,
+    )  # fmt: skip
+    LOG.info("scoring the variants")
+    return compute_study(inputs, spec)
+
+
+def run_study(
+    out_dir: Path | None = None, *, rebuild: bool = False, max_minutes: float = MAX_MINUTES
+) -> dict:
+    """Freeze the spec, build the #96 table when absent (or `rebuild`), score, record, report.
+    A run that fails or passes `max_minutes` appends one failed record (`RUN_FAILED`) and raises."""
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     scheme, boot = load_country_scheme(COUNTRY), bootstrap_settings()
     spec = build_spec(boot, scheme)
@@ -428,19 +474,24 @@ def run_study(out_dir: Path | None = None, *, rebuild: bool = False) -> dict:
     new_dir, old_dir = table_dir(), interim_dir()
     if new_dir.resolve() == old_dir.resolve():
         raise ValueError("the #96 table and #129's interim table are one directory")
-    if rebuild or not factors.table_complete(new_dir, FIRST_DAY, LAST_DAY, speed_at_start_day=True):
-        factors.build_handicap_table(FIRST_DAY, LAST_DAY, out_dir=new_dir, speed_at_start_day=True)
-    outcomes, meetings = read_outcomes()
-    v0, v0_train_end = read_v0()
-    inputs = Inputs(
-        {V96: read_scores(new_dir), INTERIM: read_scores(old_dir)},
-        outcomes, meetings, v0, v0_train_end,
-    )  # fmt: skip
-    study = compute_study(inputs, spec)
-    del inputs
-
-    builds = store_builds({"96": new_dir, "129": old_dir})
     fold_scheme = speed_run.scheme_label(scheme)
+    try:
+        with _deadline(max_minutes):
+            study = _inputs_and_study(spec, rebuild, new_dir, old_dir)
+    except (Exception, StudyTimeout) as exc:
+        failed = RunRecord(
+            hypothesis_id=HYPOTHESIS_ID, family_id=FAMILY_ID, variant=RUN_FAILED, ticket=TICKET,
+            git_sha=git_sha, data_builds=store_builds({"96": new_dir, "129": old_dir}),
+            sources=(SOURCE,), fold_scheme=fold_scheme,
+            components={"run": "table build, out-of-fold scoring and the six variants"},
+            params={"error": f"{type(exc).__name__}: {exc}", "bootstrap": boot,
+                    "max_minutes": max_minutes},
+            metrics=[], status="failed",
+        )  # fmt: skip
+        if failed not in registry.records(FAMILY_ID):
+            registry.append(failed)
+        raise
+    builds = store_builds({"96": new_dir, "129": old_dir})
     run_ids = {}
     for v in study.variants:
         params = v.params | ({"error": v.error} if v.error else {}) | {"bootstrap": boot}
@@ -482,8 +533,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--run", action="store_true", required=True, help="run the study")
     parser.add_argument("--out", type=Path, default=None, help="report directory, outside the repo")
     parser.add_argument("--rebuild", action="store_true", help="rebuild the #96 table")
+    parser.add_argument("--max-minutes", type=float, default=MAX_MINUTES, help="deadline of a run")
     args = parser.parse_args(argv)
-    print(json.dumps(run_study(args.out, rebuild=args.rebuild), indent=2, default=str))
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    result = run_study(args.out, rebuild=args.rebuild, max_minutes=args.max_minutes)
+    print(json.dumps(result, indent=2, default=str))
     return 0
 
 

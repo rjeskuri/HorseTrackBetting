@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import operator
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -75,6 +76,7 @@ from horsetrack.countries.japan.models.v0.calibration import _group_softmax, _nl
 from horsetrack.countries.japan.studies import speed_run
 
 COUNTRY = "japan"
+LOG = logging.getLogger(__name__)
 STYLES = ("front", "stalker", "midpack", "closer")  # 逃げ / 先行 / 差し / 追込
 CLASS_LEVELS = {"DEBUT": 0, "MAIDEN": 0, "C1": 1, "C2": 2, "C3": 3, "OP": 4, "L": 5, "G3": 6,
                 "G2": 7, "G1": 8}  # fmt: skip
@@ -583,6 +585,7 @@ def _draw_bias(out: pl.DataFrame, *, train_end: date) -> pl.DataFrame:
 # ---------------------------------------------------------------------------------------------
 
 GRAD_TOL = 1e-6  # on the mean gradient per race
+FIT_MAXITER = 100  # a fit that has not converged by then is refused, not left to spin
 HESSIAN_CHUNK_ROWS = 50_000
 
 
@@ -684,7 +687,10 @@ def _fit_rows(x, won, codes, dates, rows, features, alpha) -> HandicapScore:
 
     def fun(beta):
         value, grad, _ = _nll(beta, z, y, w, w_rows, starts, sizes, 1)
-        return value + 0.5 * alpha * beta @ beta, grad + alpha * beta
+        value, grad = value + 0.5 * alpha * beta @ beta, grad + alpha * beta
+        if not (np.isfinite(value) and np.isfinite(grad).all()):
+            raise RuntimeError("the handicap score fit reached a non-finite objective")
+        return value, grad
 
     def hess(beta):
         _, _, p = _nll(beta, z, y, w, w_rows, starts, sizes, 1)
@@ -698,11 +704,15 @@ def _fit_rows(x, won, codes, dates, rows, features, alpha) -> HandicapScore:
             h += (zp * w_rows[r0:r1, None]).T @ zc
             m = np.add.reduceat(zp, starts[a:b] - r0, axis=0)
             h -= (m * w[a:b, None]).T @ m
+        if not np.isfinite(h).all():
+            raise RuntimeError("the handicap score fit reached a non-finite Hessian")
         return h
 
+    # gtol is the acceptance bound itself: asking for more than the arithmetic gives (the 1e-9 this
+    # had) leaves trust-exact's subproblem looping on a NaN radius at the float limit (#219).
     result = minimize(
         fun, np.zeros(z.shape[1]), jac=True, hess=hess, method="trust-exact",
-        options={"gtol": 1e-9},
+        options={"gtol": GRAD_TOL * n_races, "maxiter": FIT_MAXITER},
     )  # fmt: skip
     converged = result.success or np.max(np.abs(result.jac), initial=0.0) < GRAD_TOL * n_races
     if not converged or not np.all(np.isfinite(result.x)):
@@ -755,6 +765,7 @@ def _oof_rows(x, won, codes, dates, keys: pl.DataFrame, folds, features, alpha) 
                 pl.Series("handicap_score", score).fill_nan(None),
             )
         )
+        LOG.info("score fold %d of %d done", k + 1, len(folds))
     if not parts:
         return pl.DataFrame(
             schema={
@@ -845,9 +856,27 @@ def build_handicap_table(
         _write(frame, path)
         written[day] = path
         del frame
+    return score_table(
+        written, date_from, date_to, scheme=scheme, speed_at_start_day=speed_at_start_day
+    )
+
+
+def score_table(
+    written: dict[date, Path],
+    date_from: date,
+    date_to: date,
+    *,
+    scheme: FoldScheme | None = None,
+    speed_at_start_day: bool = False,
+) -> dict[date, Path]:
+    """The score pass of `build_handicap_table` on the day files it has written (`written`, day ->
+    path under one directory): fill each file's out-of-fold `handicap_score` and write `COMPLETE`.
+    Reads only the files' factors, so an interrupted score pass is finished by calling this on the
+    directory's files, provided they hold every race day of the range and were built in the mode
+    `speed_at_start_day` names."""
     if not written:
         return written
-
+    out_dir = next(iter(written.values())).parent
     scores = _oof_over(written, date_from, date_to, scheme or load_country_scheme(COUNTRY))
     for path in written.values():
         part = pl.read_parquet(path).drop("handicap_score")
