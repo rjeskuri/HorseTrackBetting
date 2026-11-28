@@ -53,6 +53,7 @@ from horsetrack.countries.japan.research.exacta_ceiling import exacta_ceiling_ap
 from horsetrack.countries.japan.research.exacta_impact import exacta_impact_command
 from horsetrack.countries.japan.research.exacta_rules import exacta_rules_command
 from horsetrack.countries.japan.research.joined_coverage import joined_coverage_command
+from horsetrack.countries.japan.research.ladder_nowcast import ladder_nowcast_app
 from horsetrack.countries.japan.research.leaderboard_build import leaderboard_command
 from horsetrack.countries.japan.research.pool_depth import pool_depth_app
 from horsetrack.countries.japan.research.spread_scan import spread_scan_app
@@ -99,6 +100,7 @@ japan.command("coverage")(coverage_command)
 japan.command("joined-coverage")(joined_coverage_command)
 japan.command("leaderboard")(leaderboard_command)
 japan.add_typer(spread_scan_app, name="spread-scan")
+japan.add_typer(ladder_nowcast_app, name="ladder-nowcast")
 japan.add_typer(bets_app, name="bets")
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
 japan.add_typer(jrdb, name="jrdb")
