@@ -109,7 +109,8 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   still has its columns, all null. `jrdb_pre_race` also has `tyb_fetched_utc` (#603), a UTC
   timestamp: when the row's TYB archive was fetched, read from the downloader's
   `raw/jrdb/manifest.json` (`fetched_utc` of the entry whose `file` is the archive; a year pack's
-  members share the pack's time). Null when the manifest, the entry or its time is missing or
+  members share the pack's time; a `.txt` with no entry of its own takes that of the `.zip` of the
+  same stem beside it, which `jrdb fetch` unpacked it from). Null when the manifest, the entry or its time is missing or
   unparseable; never the file's mtime.
 - **track_condition** (#90): JRA's going measurements as published, `venue, race_date, surface`
   (`turf`, `dirt`), `going` (the code, as on races), `rail` (the turf course in use, `A` to `D`;

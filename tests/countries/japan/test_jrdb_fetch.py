@@ -33,6 +33,10 @@ Storage     raw/jrdb/<FAM>/<FAM><yymmdd>.zip, the bytes as served. Unpacking: ev
             core.ingest gz cache copy of an archive). `tables.collect` reads the result, each
             delivery once, and no family folder the build reads ends up holding only .lzh (which
             would stop the build).
+Build       (#603) `horsetrack japan jrdb build` run on what the fetch stored gives every
+            `jrdb_pre_race` row of a fetched TYB day the fetched_utc the manifest records for that
+            day's file (`tyb_fetched_utc`, never null), whichever file of the day (the zip or its
+            unpacked member) the build reads the delivery from.
 Manifest    raw/jrdb/manifest.json, one JSON object. Each fetched archive appends one entry to
             "files": {file (relative to raw/jrdb), url_path, size, sha256, fetched_utc,
             published_utc}. fetched_utc is the request time, ISO 8601 ending +00:00;
@@ -123,11 +127,17 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import httpx
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from typer.testing import CliRunner, Result
 
 from horsetrack.cli import app
+from horsetrack.core import paths
 from horsetrack.core.ingest.fetcher import Fetcher
+from horsetrack.core.store import schemas
+from horsetrack.core.store import tables as store_tables
 from horsetrack.countries.japan.jrdb import tables
 
 MODULE = "horsetrack.countries.japan.jrdb.fetch"
@@ -969,6 +979,138 @@ def test_zip_member_names_cannot_write_outside_the_family_folder(world: World) -
     written = files_under(world.tmp) - {"repo/.env", "bin/security"}
     outside = {p for p in written if not p.startswith("data/raw/jrdb/KYI/")}
     assert outside <= {"data/raw/jrdb/manifest.json"}, outside
+
+
+# ---------------------------------------------------------------- the build reads the fetch time
+
+# A synthetic data dir for `jrdb build`: an invented fixed-width layout (not JRDB's) for every
+# family the build reads (the race key's five parts, the horse number, for TYB one value, the
+# terminator), and a store of Tokyo races (venue number 05, kai 5) on two days.
+_KEY_PARTS = (("venue_code", 2), ("year", 2), ("kai", 1), ("nichi", 1), ("race_no", 2))
+_SPEC_FAMILIES = ("KYI", "CYB", "JOA", "TYB", "SED", "SKB")
+SUNDAY = RACE_DAY + timedelta(days=1)
+
+
+@dataclass(frozen=True)
+class StoreRace:
+    day: date
+    nichi: int
+    no: int
+    horses: int
+
+    @property
+    def race_id(self) -> str:
+        return f"jra:{self.day.isoformat()}:TOK:{self.no:02d}"
+
+    @property
+    def race_key(self) -> str:  # venue 2, year 2, kai 1, nichi 1 (hex), race 2
+        return f"05{self.day:%y}5{self.nichi:x}{self.no:02d}"
+
+    @property
+    def source_key(self) -> str:  # year 4, venue 2, kai 2, nichi 2, race 2
+        return f"{self.day:%Y}0505{self.nichi:02d}{self.no:02d}"
+
+    def horse_id(self, h: int) -> str:
+        return f"2023{self.nichi}{self.no:02d}{h:03d}"
+
+    def paddock(self, h: int) -> str:
+        return f"{h * 1.5 + 10 * self.no + self.nichi:5.1f}"
+
+
+STORE_RACES = {
+    RACE_DAY: (StoreRace(RACE_DAY, 1, 1, 4), StoreRace(RACE_DAY, 1, 2, 3)),
+    SUNDAY: (StoreRace(SUNDAY, 2, 1, 5),),
+}
+
+
+def write_build_inputs(data: Path) -> None:
+    specs = data / "jrdb" / "specs"
+    specs.mkdir(parents=True, exist_ok=True)
+    for family in _SPEC_FAMILIES:
+        fields = [(name, length, "skip") for name, length in _KEY_PARTS] + [("horse_no", 2, "num")]
+        if family == "TYB":
+            fields.append(("paddock_index", 5, "num"))
+        fields.append(("eol", 2, "skip"))
+        rows = ["# synthetic: an invented layout for tests, not a JRDB spec"]
+        rows.append("name,start,length,kind,added,label")
+        start = 1
+        for name, length, kind in fields:
+            rows.append(f"{name},{start},{length},{kind},2020-01-01,synthetic {name}")
+            start += length
+        (specs / f"{family.lower()}.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    races, runners = [], []
+    for race in (r for day in STORE_RACES.values() for r in day):
+        keys = {"jurisdiction": "jra", "race_id": race.race_id, "race_date": race.day,
+                "meeting_id": f"jra:{race.day.isoformat()}:TOK", "venue": "TOK",
+                "race_no": race.no}  # fmt: skip
+        races.append({**keys, "status": "declared", "source_race_key": race.source_key})
+        runners += [
+            {**keys, "horse_id": race.horse_id(h), "horse_no": h, "is_scratched": False}
+            for h in range(1, race.horses + 1)
+        ]
+    for name, rows_ in (("races", races), ("runners", runners)):
+        spec = schemas.TABLES[name]
+        schema = pa.schema([(c, store_tables.ARROW_TYPES[k]) for c, k in spec.columns.items()])
+        columns = {c: [r.get(c) for r in rows_] for c in spec.columns}
+        path = paths.processed_dir("jra") / f"{name}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table(columns, schema=schema), path)
+
+
+def tyb_records(day: date) -> bytes:
+    lines = [
+        f"{race.race_key}{h:2d}{race.paddock(h)}\r\n"
+        for race in STORE_RACES[day]
+        for h in range(1, race.horses + 1)
+    ]
+    return "".join(lines).encode("ascii")
+
+
+@pytest.mark.parametrize(
+    "days",
+    [pytest.param((RACE_DAY,), id="one day"), pytest.param((RACE_DAY, SUNDAY), id="two days")],
+)
+def test_the_fetch_time_of_a_fetched_tyb_day_reaches_the_build(
+    world: World, days: tuple[date, ...]
+) -> None:
+    """#603: `jrdb build` on what the fetch stored (the TYB zip and its unpacked .txt member) gives
+    each TYB runner of a fetched day the fetched_utc the manifest records for that day's file, not
+    null; with two days fetched in two runs, each day's rows carry their own run's time."""
+    write_build_inputs(world.data)
+    for day in days:
+        members = {f"{stem('TYB', day)}.txt": tyb_records(day)}
+        world.site.publish("TYB", day, members=members)
+    for day in days:
+        world.clock.set_utc(eve_of(day))
+        fetched = world.fetch("--date", day.isoformat(), "--families", "TYB")
+        assert fetched.exit_code == 0, fetched.output
+
+    built = CliRunner().invoke(app, ["japan", "jrdb", "build"])
+
+    assert built.exit_code == 0, built.output
+    assert "ERROR" not in built.output, built.output
+    entries = {e["file"]: e for e in world.manifest()["files"]}
+    want: dict[tuple[str, int], tuple[pd.Timestamp, float]] = {}
+    for day in days:
+        entry = entries[f"TYB/{stem('TYB', day)}.zip"]
+        (hit,) = world.hits_on(zip_path("TYB", day))
+        assert_utc_near(entry["fetched_utc"], hit.utc)
+        when = pd.Timestamp(datetime.fromisoformat(entry["fetched_utc"]))
+        for race in STORE_RACES[day]:
+            for h in range(1, race.horses + 1):
+                want[(race.race_id, h)] = (when, float(race.paddock(h)))
+    assert len({when for when, _ in want.values()}) == len(days)  # each day its own time
+    frame = pd.read_parquet(paths.processed_dir("jra") / "jrdb_pre_race.parquet")
+    got = {
+        (row.race_id, int(row.horse_no)): (row.tyb_fetched_utc, row.tyb_paddock_index)
+        for row in frame.itertuples(index=False)
+    }
+    assert set(got) == set(want)  # every fetched TYB runner is a row, and nothing else
+    for key, (when, paddock) in want.items():
+        seen, seen_paddock = got[key]
+        assert seen_paddock == paddock, key
+        assert not pd.isna(seen), f"{key}: tyb_fetched_utc is null; the manifest records {when}"
+        assert pd.Timestamp(seen).tz_convert("UTC") == when, (key, seen, when)
 
 
 # ---------------------------------------------------------------- missing files

@@ -17,12 +17,14 @@ A family that was not delivered still has its columns, all null; a ``date``-kind
 date32 column either way. Rows are stored in the table's sort order (race_id, horse_no).
 
 ``jrdb_pre_race`` ends with ``tyb_fetched_utc`` (ticket #603), a UTC timestamp: when the TYB
-delivery behind the row was fetched, the ``fetched_utc`` that the downloader (outside this repo)
-wrote for the delivery's archive in ``raw/jrdb/manifest.json`` (``{"files": [{"file":
-"TYB/TYB261128.zip", "fetched_utc": "..."}]}``, ``file`` relative to raw/jrdb; a member of a year
-pack takes its pack's time). It is null when there is no manifest, no entry for the archive, or
-the entry's time is missing or unparseable, and for a runner TYB does not print; the file's mtime
-is never a fallback. ``jrdb_post_race`` has no such column.
+delivery behind the row was fetched, the ``fetched_utc`` that the downloader (HKTrack's, or
+``jrdb fetch``) wrote for the delivery's archive in ``raw/jrdb/manifest.json`` (``{"files":
+[{"file": "TYB/TYB261128.zip", "fetched_utc": "..."}]}``, ``file`` relative to raw/jrdb; a member
+of a year pack takes its pack's time; a .txt with no entry of its own takes the entry of the .zip
+of the same stem beside it, which ``jrdb fetch`` unpacked it from). It is null when there is no
+manifest, no entry for the archive (nor, for a .txt, its sibling .zip), or the entry's time is
+missing or unparseable, and for a runner TYB does not print; the file's mtime is never a
+fallback. ``jrdb_post_race`` has no such column.
 
 ``run`` reads every archive under ``paths.raw_dir("jrdb") / <FAM>/`` and writes both tables to
 ``paths.processed_dir("jra")`` and ``paths.reports_dir() / "jrdb-build.json"`` (per table the
@@ -47,7 +49,7 @@ import re
 import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
 import pandas as pd
@@ -242,12 +244,23 @@ def fetch_times() -> dict[str, pd.Timestamp]:
     return out
 
 
+def _fetched_at(archive: str, fetched: Mapping[str, pd.Timestamp]) -> pd.Timestamp:
+    """``archive``'s instant in ``fetched``; a .txt with none of its own takes the .zip's of the
+    same stem in its folder (``jrdb fetch`` unpacks a zip's members beside it), else NaT."""
+    if archive in fetched:
+        return fetched[archive]
+    path = PurePosixPath(archive)
+    if path.suffix.lower() == ".txt":
+        return fetched.get(str(path.with_suffix(".zip")), pd.NaT)
+    return pd.NaT
+
+
 def parse_deliveries(
     deliveries: list[Delivery], fetched: Mapping[str, pd.Timestamp] | None = None
 ) -> pd.DataFrame:
     """The deliveries' records as one frame, in delivery-name order. With ``fetched`` (archive ->
-    instant, see ``fetch_times``) each row also carries its archive's ``fetched_utc``, null for an
-    archive not in it."""
+    instant, see ``fetch_times``) each row also carries its archive's ``fetched_utc``
+    (``_fetched_at``: an unpacked .txt takes its sibling .zip's), null for an archive not in it."""
     frames = []
     for d in deliveries:
         try:
@@ -255,7 +268,7 @@ def parse_deliveries(
         except parse.RecordLengthError as exc:
             raise ValueError(f"{d.archive} {d.name}: {exc}") from exc
         if fetched is not None:
-            when = fetched.get(d.archive, pd.NaT)
+            when = _fetched_at(d.archive, fetched)
             frame["fetched_utc"] = pd.Series(when, index=frame.index, dtype="datetime64[us, UTC]")
         frames.append(frame)
     return pd.concat(frames, ignore_index=True)
