@@ -10,7 +10,8 @@ stopped=<reason>`, with `<date> ` in front when the date is given; max_gap_t20_s
 seconds, `-` when the venue has no post time; with tier 2 on (ticket #130) the line ends
 ` tier2_skipped=N`, the venue's tier-2 grid points not captured; with the source given (ticket
 #38) it ends ` source=<key>` (`jra`, `nar`). A venue that logged 0 rows, stopped other than
-'ended', or whose max_gap_t20_s is over 120 also gets
+'ended', or whose max_gap_t20_s is over 120, and every venue of a day with a block (#387: a
+403/429 this run or in the block marker it resumed from; DaySummary.blocks), also gets
 `ALERT [<date> ]<venue> [source=<key> ]<reasons>`.
 """
 
@@ -58,7 +59,9 @@ def _venue_of(race_id: str) -> str | None:
     return parts[2] if len(parts) == 4 else None
 
 
-def _alert_reasons(v: VenueSummary, gap_s: int | None) -> list[str]:
+def _alert_reasons(
+    v: VenueSummary, gap_s: int | None, blocks: list[int | None] | None = None
+) -> list[str]:
     reasons = []
     if v.rows == 0:
         reasons.append("logged 0 rows")
@@ -66,6 +69,9 @@ def _alert_reasons(v: VenueSummary, gap_s: int | None) -> list[str]:
         reasons.append(f"stopped early: {v.stopped or 'no stop reason'}")
     if gap_s is not None and gap_s > MAX_GAP_S:
         reasons.append(f"max_gap_t20_s={gap_s} over {MAX_GAP_S}")
+    if blocks:
+        statuses = ",".join(str(s) for s in blocks if s is not None)
+        reasons.append(f"blocked {len(blocks)}x" + (f" (HTTP {statuses})" if statuses else ""))
     return reasons
 
 
@@ -94,7 +100,7 @@ def health_lines(
             + (f" tier2_skipped={v.tier2_skipped}" if v.tier2_skipped is not None else "")
             + tail
         )
-        reasons = _alert_reasons(v, gap_s)
+        reasons = _alert_reasons(v, gap_s, summary.blocks)
         if reasons:
             lines.append(f"ALERT {head}{venue}{tail} {'; '.join(reasons)}")
     return lines
