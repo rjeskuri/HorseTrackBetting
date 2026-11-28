@@ -18,6 +18,9 @@ from horsetrack.countries.japan.jravan.bloodlines import (
 from horsetrack.countries.japan.jravan.card_versions import (
     card_versions_command as jravan_card_versions_command,
 )
+from horsetrack.countries.japan.jravan.career_counts import (
+    career_counts_command as jravan_career_counts_command,
+)
 from horsetrack.countries.japan.jravan.check import check_command as jravan_check_command
 from horsetrack.countries.japan.jravan.dividends import (
     dividends_command as jravan_dividends_command,
@@ -57,8 +60,12 @@ from horsetrack.countries.japan.research.spread_scan import spread_scan_app
 from horsetrack.countries.japan.research.win5_backfill import win5_history_command
 from horsetrack.countries.japan.research.win5_study import win5_study_app
 from horsetrack.countries.japan.shadow.day import shadow_day_command
+from horsetrack.countries.japan.studies import interactions
 from horsetrack.countries.japan.studies.ability import ability_study_command
+from horsetrack.countries.japan.studies.competition import competition_study_command
 from horsetrack.countries.japan.studies.debut_members import debut_members_command
+from horsetrack.countries.japan.studies.late_path_study import late_path_study_command
+from horsetrack.countries.japan.studies.lineage import lineage_study_command
 from horsetrack.countries.japan.studies.nowcast import nowcast_study_command
 
 app = typer.Typer(no_args_is_help=True)
@@ -82,9 +89,13 @@ japan.command("exacta-rules")(exacta_rules_command)
 japan.add_typer(exacta_ceiling_app, name="exacta-ceiling")
 japan.add_typer(pool_depth_app, name="pool-depth")
 japan.command("nowcast-study")(nowcast_study_command)
+japan.command("late-path-study")(late_path_study_command)
 japan.command("nowcast-fit")(nowcast_fit_command)
 japan.command("ability-study")(ability_study_command)
+japan.command("competition-study")(competition_study_command)
 japan.command("debut-members")(debut_members_command)
+japan.command("interaction-study")(interactions.interaction_study_command)
+japan.command("lineage-study")(lineage_study_command)
 japan.command("coverage")(coverage_command)
 japan.command("joined-coverage")(joined_coverage_command)
 japan.command("leaderboard")(leaderboard_command)
@@ -98,6 +109,7 @@ jravan = typer.Typer(no_args_is_help=True, help="JRA-VAN DataLab (JV-Data) comma
 japan.add_typer(jravan, name="jravan")
 jravan.command("bloodlines")(jravan_bloodlines_command)
 jravan.command("card-versions")(jravan_card_versions_command)
+jravan.command("career-counts")(jravan_career_counts_command)
 jravan.command("check")(jravan_check_command)
 jravan.command("dividends")(jravan_dividends_command)
 jravan.command("dump")(jravan_dump_command)
