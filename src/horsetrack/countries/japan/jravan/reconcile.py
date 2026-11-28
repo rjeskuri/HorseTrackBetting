@@ -13,10 +13,11 @@ pushed into the scan. Per year it counts:
   after rounding to the tenth;
 - dividends per pool by (race_id, pool, combination), and of the matched rows the equal ones;
 - matched races whose runners match one to one with every Win odds equal (`win_odds_agree`), and
-  whose dividend rows match one to one with every dividend equal (`payouts_agree`); a race with a
-  repeated runner key in either store agrees on neither, even when every value matches (#394: a
-  race whose runners cannot be keyed one to one is not counted as agreeing), and one with an
-  unnumbered runner in either store does not agree on Win odds;
+  whose dividend rows match one to one with every dividend equal (`payouts_agree`, from the
+  dividend rows only); a race with a repeated runner key in either store does not agree on Win
+  odds, even when every value matches (#394: a race whose runners cannot be keyed one to one is
+  not counted as agreeing), and nor does one with an unnumbered runner in either store; a
+  repeated runner key leaves `payouts_agree` alone (owner's choice, 2026-11-28);
 - rows whose key occurs more than once in one store (`<table>.<source>_duplicate`); they are still
   matched row by row;
 - runners with a null `horse_no` (`runners.<source>_unnumbered`, #394): they have no key, so they
@@ -114,7 +115,7 @@ class Reconciliation:
                     f"{_of(o, 'races.win_odds_agree', both)}"
                 )
                 lines.append(
-                    "  every payout agrees (and no repeated runner key): "
+                    "  every payout agrees (dividend rows only): "
                     f"{_of(o, 'races.payouts_agree', both)}"
                 )
         for pool in _pools(o):
@@ -149,8 +150,8 @@ class Reconciliation:
             "`<table>.<source>_duplicate` counts the rows whose key repeats in that store; "
             "`runners.<source>_unnumbered` the runners with no horse number there (not matched). "
             "A race with a repeated runner key in either store does not count as agreeing on Win "
-            "odds or payouts even when every value matches, and one with an unnumbered runner does "
-            "not count as agreeing on Win odds. "
+            "odds even when every value matches, and nor does one with an unnumbered runner; "
+            "payout agreement comes from the dividend rows only. "
             "`<check>.<status>` breaks a one-store or repeated-key count down by the race's "
             "`status` in that store's races (`no_race`: not in that store's races).",
             "",
@@ -261,7 +262,7 @@ def _compare_year(lo: date, hi: date) -> tuple[Counter[str], dict[str, set[str]]
     pay_bad = set(dividends.loc[dividends["_merge"] != "both", "race_id"])
     paired = dividends[dividends["_merge"] == "both"]
     pay_bad |= set(paired.loc[~_equal(paired, "dividend"), "race_id"])
-    _agree("races.payouts_agree", matched_ids, pay_bad | repeated_ids, counts, fail)
+    _agree("races.payouts_agree", matched_ids, pay_bad, counts, fail)
     return counts, bad
 
 

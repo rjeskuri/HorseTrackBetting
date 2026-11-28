@@ -23,7 +23,8 @@ Contract pinned here (the coder follows it), module `horsetrack.countries.japan.
   - `races.win_odds_agree`: matched races whose runners match one to one on `horse_no` (no
     runner in one store only) and whose every runner's `win_odds` agree.
     `races.payouts_agree`: matched races whose dividend rows match one to one on (pool,
-    combination) and whose every `dividend` is equal.
+    combination) and whose every `dividend` is equal; the runners (a repeated or missing runner
+    key) play no part in it.
   - `runners.both`, `runners.jravan_only`, `runners.jra_only`: runners by (race_id, horse_no).
   - `runners.equal.<f>`, f in horse_id, finish_pos, is_scratched, finish_time_s, win_odds,
     win_fav_rank, jockey_code, horse_wt_kg: matched runners whose `f` is equal. `win_odds` is
@@ -930,9 +931,9 @@ def test_the_report_holds_counts_and_rates_and_is_refused_inside_the_repo(
 # does not. A runner of an abandoned race that was never drawn has a null `horse_no`: such a row is
 # counted as `runners.<source>_unnumbered` (by the race's status, like the other counts) and does
 # not enter the (race_id, horse_no) merge, nor the `_duplicate` count. A matched race whose runners
-# have a repeated key, or an unnumbered runner, in either store does not agree on Win odds; one
-# with a repeated key does not agree on payouts either. Every expected count is derived from the
-# plan each test writes.
+# have a repeated key, or an unnumbered runner, in either store does not agree on Win odds. The
+# payouts agreement is read from the dividend rows alone: runners never enter it (owner, #394).
+# Every expected count is derived from the plan each test writes.
 
 ABANDONED = {"jravan": {"status": "abandoned"}}
 
@@ -1009,10 +1010,12 @@ def test_unnumbered_runners_are_counted_apart_and_fail_the_win_odds_agreement(da
     assert "runners.jravan_unnumbered" in rec.to_markdown()
 
 
-def test_a_repeated_runner_key_is_counted_and_fails_both_agreements(data: Path) -> None:
+def test_a_repeated_runner_key_is_counted_and_fails_the_win_odds_agreement_only(data: Path) -> None:
     stores = Stores()
     d17, d21 = date(2017, 4, 1), date(2021, 5, 1)
-    # 2017: a repeated key in jravan (R1) and in an abandoned race there (R3), one in jra (R4)
+    # 2017: a repeated key in jravan (R1) and in an abandoned race there (R3), one in jra (R4).
+    # Every race carries the same dividend rows in both stores (the default), the abandoned R3
+    # included, so the dividend rows alone leave all four matched races agreeing on payouts.
     stores.add(d17, "TOK", 1, n=6)
     repeat_number(stores, "jravan", d17, "TOK", 1, 5, "2017100150")
     stores.add(d17, "TOK", 2, n=6)  # clean
@@ -1036,12 +1039,12 @@ def test_a_repeated_runner_key_is_counted_and_fails_both_agreements(data: Path) 
             "runners.jravan_duplicate": 4, "runners.jravan_duplicate.run": 2,
             "runners.jravan_duplicate.abandoned": 2, "runners.jra_duplicate": 2,
             "runners.jra_duplicate.run": 2, "races.win_odds_agree": 1,
-            "races.payouts_agree": 1,
+            "races.payouts_agree": 4,
         },
         2021: {
             "races.both": 3, "runners.both": 20, "runners.jravan_duplicate": 3,
             "runners.jravan_duplicate.run": 3, "runners.jra_duplicate": 0,
-            "races.win_odds_agree": 2, "races.payouts_agree": 2,
+            "races.win_odds_agree": 2, "races.payouts_agree": 3,
         },
     }  # fmt: skip
     for year, counts in want.items():
@@ -1049,8 +1052,10 @@ def test_a_repeated_runner_key_is_counted_and_fails_both_agreements(data: Path) 
             assert count(rec, year, key) == n, (year, key)
         for source in SOURCES:
             assert count(rec, year, f"runners.{source}_unnumbered") == 0, (year, source)
+        # a repeated runner key fails the Win odds agreement, never the payouts one
+        assert count(rec, year, "races.payouts_agree") > count(rec, year, "races.win_odds_agree")
     assert total(rec, "runners.jravan_duplicate") == 7
-    assert (total(rec, "races.win_odds_agree"), total(rec, "races.payouts_agree")) == (3, 3)
+    assert (total(rec, "races.win_odds_agree"), total(rec, "races.payouts_agree")) == (3, 7)
     assert_overall_is_the_sum(rec)
 
 

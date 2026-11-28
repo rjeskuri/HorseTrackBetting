@@ -667,10 +667,12 @@ at a time, and changes neither store:
   race's `status` in that store.
 - A runner with a null `horse_no` (jravan's undrawn runners of abandoned races) has no key: it
   stays out of the runner merge and of `runners.<source>_duplicate`, and is counted as
-  `runners.<source>_unnumbered`. A matched race with a repeated runner key in either store
-  agrees on neither Win odds nor payouts, even when every value matches (a race whose runners
-  cannot be keyed one to one is not counted as agreeing); one with an unnumbered runner in either
-  store does not agree on Win odds. The printed lines and the report legend say so.
+  `runners.<source>_unnumbered`. A matched race with a repeated runner key in either store does
+  not agree on Win odds, even when every value matches (a race whose runners cannot be keyed one
+  to one is not counted as agreeing), and nor does one with an unnumbered runner in either store.
+  `races.payouts_agree` is computed from the dividend rows only: a repeated runner key does not
+  change it (the owner's choice, 2026-11-28), and the key still shows in
+  `runners.<source>_duplicate`. The printed lines and the report legend say so.
 - An existing `runners.parquet` keeps the abandoned races' undrawn runners at horse number 99, so
   `reconcile` run straight after this change still reports those duplicates. Run a full
   `horsetrack japan jravan runners` rebuild first; only then does `reconcile` reflect the null
