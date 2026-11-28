@@ -70,6 +70,7 @@ from horsetrack.countries.japan.studies.exotic_c5 import exotic_c5_command
 from horsetrack.countries.japan.studies.late_path_study import late_path_study_command
 from horsetrack.countries.japan.studies.lineage import lineage_study_command
 from horsetrack.countries.japan.studies.nowcast import nowcast_study_command
+from horsetrack.countries.japan.studies.selection_run import selection_run_command
 
 app = typer.Typer(no_args_is_help=True)
 japan = typer.Typer(no_args_is_help=True, help="Japan commands.")
@@ -95,6 +96,7 @@ japan.command("nowcast-study")(nowcast_study_command)
 japan.command("late-path-study")(late_path_study_command)
 japan.command("nowcast-fit")(nowcast_fit_command)
 japan.command("ability-study")(ability_study_command)
+japan.command("selection-run")(selection_run_command)
 japan.command("competition-study")(competition_study_command)
 japan.command("debut-members")(debut_members_command)
 japan.command("exotic-c5")(exotic_c5_command)

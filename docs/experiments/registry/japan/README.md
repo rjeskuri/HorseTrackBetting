@@ -51,6 +51,7 @@ per family, each holding that family's runs.
 - [japan-debut-maiden-members-v2](japan-debut-maiden-members-v2.md)
 - [japan-entropy-gradient-tail-conditioned](japan-entropy-gradient-tail-conditioned.md)
 - [japan-family-l-exotic-pool-choice](japan-family-l-exotic-pool-choice.md)
+- [japan-family-p-selection-v1](japan-family-p-selection-v1.md)
 - [japan-form-bands-t2-win](japan-form-bands-t2-win.md)
 - [japan-form-bands-t2-win-v2](japan-form-bands-t2-win-v2.md)
 - [japan-form-bands-t2-win-v3](japan-form-bands-t2-win-v3.md)
