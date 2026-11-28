@@ -21,9 +21,9 @@ min_poll_interval_s: 20
 # the race date (the day-before sales are open; the time is read off the site, never assumed). A
 # later start before the first window reads it once. From the open every race of every venue is
 # captured every `every_s` (one round, budget every_s x the rate), overnight included, until the
-# first window; from there the windows below keep each race at 300 s or finer until it is hot
-# (T-20), every round from then on: so every race at least every 5 minutes until its T-15 and at
-# the 20 s grain from T-15. No open by probe_until: nothing more is sent until the first window,
+# first window; from there the windows below and hot_races keep each race at 300 s or finer until
+# it is hot (T-20) and at the hot grain (every_s, 60 s since #387) from then on: so every race at
+# least every 5 minutes until its T-15 and every minute from T-20. No open by probe_until: nothing more is sent until the first window,
 # and the race date runs as without this block. JRA only: NAR never inherits it.
 day_before: {probe_from: "17:00", probe_until: "21:00", probe_every_s: 60, every_s: 300}
 # A round starts every `every_s` from `from`; its budget is every_s x the host's requests per
@@ -35,10 +35,21 @@ windows:
 stop: "16:45"
 # A venue whose post times are known is logged until its last post + this, even past `stop`.
 after_last_race_min: 10
-# A race is hot from post - within_min to post + after_post_min; hot races come first, nearest
-# post first. Spare budget runs each venue's full cycle (every race) race by race, one cycle
-# starting at most every all_every_s.
-hot_races: {within_min: 20, after_post_min: 5, all_every_s: 300}
+# A race is hot from post - within_min to post + after_post_min. #387 (the owner, 2026-11-29: the
+# models read 1-minute boards): each hot race is captured at least every `every_s` and every other
+# race whose post is ahead at least every `floor_s` (from the window in force), each race by its
+# own deadline; a round takes the races its next round would be late for, then those the next
+# round might miss. A race never captured is the full cycle's: spare budget runs each venue's
+# cycle race by race, one cycle starting at most every all_every_s. (NAR's schedule, without
+# every_s and floor_s, takes every hot race every round, nearest post first, then the cycles.)
+hot_races: {within_min: 20, after_post_min: 5, all_every_s: 300, every_s: 60, floor_s: 300}
+# #387: the JRA rate of a day by its venue count, once the venues are known (a fresh Fetcher at
+# that rate). The entry with the greatest min_venues not over the day's venues applies; a day no
+# entry applies to keeps jra.yaml's rate (1 request a second). The three-venue rate is the lowest,
+# on a 0.05 grid, at which #358's race-day simulation (requests spaced at the rate, no jitter)
+# holds both the floor and the hot grain for every race; two venues hold them at jra.yaml's rate.
+venue_rates:
+  - {min_venues: 3, requests_per_second: 1.25}
 # What a capture costs: `navigation` once (the odds menu and the race list), `per_race` per race
 # (the 単勝・複勝, 馬連, ワイド and 枠連 pages).
 requests: {navigation: 2, per_race: 4}
@@ -53,10 +64,11 @@ tier2:
   # the odds menu and the race list, then one page per pool of each race
   requests: {navigation: 2, per_race: 3}
 # Race cards (ticket #426): each race's 出馬表 (JRADB pw01dde) once per grid point (minutes before
-# post, stretches as tier 2's), within a round's budget: after tier 1's hot races, the results
-# polls and tier 2, before tier 1's spare full-cycle refreshes of races not hot (a refresh left out
-# waits for the venue's next cycle); every capture appended, with its fetch time, to
-# <VENUE>.cards.jsonl.gz beside the odds log. T-120 and T-60 see the morning's scratches and the
+# post, stretches as tier 2's), within a round's budget: with hot_races.every_s and floor_s (#387)
+# only from what tier 1, the results polls and tier 2 leave of the round, so no odds capture
+# gives way (a schedule without them: before tier 1's spare full-cycle refreshes of races not
+# hot, a refresh left out waiting for the venue's next cycle); every capture appended, with its
+# fetch time, to <VENUE>.cards.jsonl.gz beside the odds log. T-120 and T-60 see the morning's scratches and the
 # weigh-in (about T-65), T-30, T-10 and T-3 a late scratch. Without this block: no cards. JRA only:
 # NAR never inherits it.
 cards:
@@ -65,10 +77,16 @@ cards:
   requests: {navigation: 2, per_race: 1}
 # A venue answering for another meeting this many captures in a row stops (that venue only).
 max_wrong_meeting: 3
-# After a 403/429 (or any open circuit): null stops the host for the rest of the day and the
-# block marker keeps a restart from sending anything; N resumes once after N minutes (on a fresh
-# Fetcher at `resume_requests_per_second` where that is given, as NAR's below). Owner's call.
-on_block: {cooldown_min: null}
+# After a 403/429 (or any open circuit). #387 (the owner, 2026-11-29: a block must not end the
+# day's logging), `ladder: true`: every block appends its marker line and pauses cooldown_min
+# minutes, then the day goes on on a fresh Fetcher at `resume_requests_per_second`: after the
+# first block with the full schedule, after the second and every later one with the floor only
+# (every race every floor_s, hot races too). No block ends the day: a host that keeps refusing
+# gets one request a pause until the day's end. A restart that finds today's lines waits out the
+# pause after the latest, then logs at the level they give; the health line alerts every venue
+# of a day with a block. Without the ladder (NAR's below): cooldown_min null stops the host for
+# the day, N resumes once after N minutes, and a marker line keeps a restart from sending.
+on_block: {cooldown_min: 15, resume_requests_per_second: 1.0, ladder: true}
 # Result publication (ticket #225): each venue's レース結果 race list is polled at most every every_s
 # from its first post to its last post + until_min (past the odds' end), and each race's first
 # sighting of its official result is kept in <VENUE>.results.json beside the odds log. every_s 60

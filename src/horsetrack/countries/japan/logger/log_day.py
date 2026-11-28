@@ -26,9 +26,11 @@ its own site, Fetcher (so its own per-host rate and circuit breaker), schedule
 (`schedule.run_sources`). NAR's snapshots go to `odds_snapshots/nar/<date>/<VENUE>.jsonl.gz`.
 `--venues` codes go to the source whose yaml lists them (jra.yaml, nar.yaml); a source none of
 whose venues is named sends nothing. Every health line ends ` source=<key>`, and an ALERT reads
-`ALERT <date> <venue> source=<key> <reasons>`. A block on one host stops that source only, after
+`ALERT <date> <venue> source=<key> <reasons>`. A block on one host touches that source only, after
 its schedule's `on_block` (NAR: a 15-minute pause, then once on a fresh Fetcher at
-`resume_requests_per_second`; see `schedule`). An error escaping one source's day stops that
+`resume_requests_per_second`; JRA since #387: the back-off ladder, under which no block ends the
+day; see `schedule`). JRA's day runs on a fresh Fetcher at logger.yaml's `venue_rates` rate once
+its venues are known (#387: three venues). An error escaping one source's day stops that
 source only: an `ERROR source=<key> ...` line on stderr at once, and the other sources log their
 day and get their health lines and markers.
 
@@ -46,7 +48,9 @@ The start exits 0 at once, sending nothing and waiting for nothing, when another
 the lock, or when every source has nothing to do on its race date (above): that date's `stop`
 (that source's schedule) has passed, which for JRA happens only between today's stop and
 tomorrow's probe start; the block marker (`jra-block.txt` for JRA) has the date's line for the
-source's host; or the no-meeting marker `jra-no-meeting.txt` or the day-done marker
+source's host (under JRA's ladder, #387, only until the pause after its latest line is over;
+run_day then logs the day at the level the lines give); or the no-meeting marker
+`jra-no-meeting.txt` or the day-done marker
 `jra-day-done.txt` (`nar-...` for NAR) has a line for the date. A source with nothing to do is
 left out of a start that runs the others. The markers are read under the lock. Otherwise the day
 runs as above. Once a source's day is over, the start appends `<race date> at=<UTC instant>` to
@@ -54,9 +58,11 @@ its no-meeting marker when its one discovery found no venue (a blocked discovery
 the block line instead), or to its day-done marker when that discovery found a venue and every
 venue stopped as `ended`. A venue stopped by a block or by answers for another meeting leaves the
 day open, as does a run that raised or was terminated, so the next start resumes the day (a start
-in the night reads the オッズ menu once and resumes the day-before window). So after a block, on a
-day without racing, or once the day's run has finished, every later start for that race date
-sends nothing for that source. Only `--unattended` writes these markers: an attended log-day may
+in the night reads the オッズ menu once and resumes the day-before window). So after a block
+(NAR's; JRA's only during its pause), on a day without racing, or once the day's run has
+finished, every later start for that race date sends nothing for that source. A day with a
+block is no day without racing: no no-meeting line. Only `--unattended` writes these markers: an
+attended log-day may
 cover other venues, pools or another date, so it never marks a day for the agent.
 
 Seams, looked up at call time: `utc_now` (the only clock), `sleep` (the only wait) and
@@ -104,7 +110,9 @@ from horsetrack.countries.japan.logger.health import health_lines
 from horsetrack.countries.japan.logger.schedule import (
     SOURCES,
     Source,
+    backs_off,
     blocked,
+    pause_end,
     run_sources,
     source_config,
 )
@@ -404,7 +412,7 @@ def _default_date(key: str, schedule: dict[str, Any]) -> date:
         return today
     over = now >= _local(schedule["stop"], today)
     if not over:
-        over = _nothing_to_do(today, key, paths.logs_dir("japan")) is not None
+        over = _nothing_to_do(today, key, paths.logs_dir("japan"), schedule) is not None
     return today + timedelta(days=1) if over else today
 
 
@@ -511,9 +519,14 @@ def _plan(run: _SourceRun) -> list[str]:
             f" {_number(db['every_s'])} s, then the windows, until each race's T-{FINE_FROM_MIN}"
         ]
         last = max(config["windows"], key=lambda w: _local(w["from"], run.race_date))
+        grain = (  # #387: the hot grain and the floor, in the finest window's rounds
+            f"at least every {_number(hot['every_s'])} s (the others every"
+            f" {_number(hot['floor_s'])} s)" if hot.get("every_s") and hot.get("floor_s")
+            else "every round"
+        )  # fmt: skip
         fine = (
-            f"; from T-{FINE_FROM_MIN} (hot from T-{hot['within_min']}) each race every round,"
-            f" every {_number(last['every_s'])} s from {last['from']}"
+            f"; from T-{FINE_FROM_MIN} (hot from T-{hot['within_min']}) each race {grain},"
+            f" in rounds every {_number(last['every_s'])} s from {last['from']}"
         )
     tier2 = config.get("tier2")
     tier2_line = (
@@ -521,16 +534,24 @@ def _plan(run: _SourceRun) -> list[str]:
          " from what tier 1 leaves of each round"] if tier2 else []
     )  # fmt: skip
     cards = config.get("cards")
+    placed = (  # #387's grain: no tier-1 capture gives way to the cards
+        "from what tier 1, the results polls and tier 2 leave of each round"
+        if hot.get("every_s") is not None or hot.get("floor_s") is not None
+        else "after the hot races, results and tier 2, before spare full-cycle refreshes"
+    )
     cards_line = (
         [f"race cards: each race's card at T-{',T-'.join(map(str, cards['grid_min']))} min,"
-         " after the hot races, results and tier 2, before spare full-cycle refreshes"]
-        if cards else []
+         f" {placed}"] if cards else []
     )  # fmt: skip
     results = config.get("results")
     results_line = (
         [f"results: every {results['every_s']} s from first post to last post +"
          f" {results['until_min']} min, first sighting per race"] if results else []
     )  # fmt: skip
+    by_venues = "".join(  # #387: venue_rates
+        f"; {e['min_venues']}+ venues: {_number(float(e['requests_per_second']))} req/s"
+        for e in sorted(config.get("venue_rates") or [], key=lambda e: int(e["min_venues"]))
+    )
     return [
         f"time zone: {TIMEZONE} (window and stop times are local)",
         *day_before,
@@ -543,7 +564,7 @@ def _plan(run: _SourceRun) -> list[str]:
         *tier2_line,
         *cards_line,
         *results_line,
-        f"rate: {_number(_rate(run.key, host))} req/s to {host}"
+        f"rate: {_number(_rate(run.key, host))} req/s to {host}{by_venues}"
         " (a round's budget is every_s x the rate)",
         f"venues: {given}",
     ]
@@ -668,9 +689,10 @@ def _run(runs: Sequence[_SourceRun], *, markers: bool = False) -> int:
 
 def _mark_day(race_date: date, source: str, summary, logs: Path, returned: datetime) -> None:
     """The unattended markers of one source whose venues were discovered, once its day is over."""
-    # No venue and no stop reason: discovery answered with none (a block stops the day as
-    # circuit_open, an error page raises).
-    if not summary.venues and not summary.stopped:
+    # No venue, no stop reason and no block: discovery answered with none (a block stops the
+    # day as circuit_open, or under #387's ladder is counted in summary.blocks; an error page
+    # raises).
+    if not summary.venues and not summary.stopped and not summary.blocks:
         no_meeting = _no_meeting_marker(logs, source)
         _mark(no_meeting, race_date, returned)
         typer.echo(f"no meeting on {race_date.isoformat()}: noted in {no_meeting}")
@@ -690,12 +712,20 @@ def _attended(runs: Sequence[_SourceRun]) -> int:
         return _run(runs)
 
 
-def _nothing_to_do(race_date: date, source: str, logs: Path) -> str | None:
+def _nothing_to_do(
+    race_date: date, source: str, logs: Path, schedule: dict[str, Any]
+) -> str | None:
     """Why an unattended start sends nothing for this source on its race date, read under the
-    lock; None when it has a day to log."""
-    host = _host(source)
-    if blocked(_block_marker(logs, source), host, race_date):
-        return f"{host} blocked on {race_date} ({_block_marker(logs, source).name})"
+    lock; None when it has a day to log. Under #387's ladder a block line holds a start only
+    until the pause after the latest one is over."""
+    host, marker = _host(source), _block_marker(logs, source)
+    on_block = schedule["on_block"]
+    if backs_off(on_block):
+        until = pause_end(marker, host, race_date, on_block)
+        if until is not None and utc_now() < until:
+            return f"{host} blocked on {race_date}, paused until {until} ({marker.name})"
+    elif blocked(marker, host, race_date):
+        return f"{host} blocked on {race_date} ({marker.name})"
     no_meeting, day_done = _no_meeting_marker(logs, source), _day_done_marker(logs, source)
     if _marked(no_meeting, race_date):
         return f"no meeting on {race_date} ({no_meeting.name})"
@@ -727,7 +757,7 @@ def _unattended(runs: Sequence[_SourceRun]) -> int:
             # Under the lock, so a marker the previous holder wrote before letting go is seen.
             todo = []
             for run in pending:
-                reason = _nothing_to_do(run.race_date, run.key, logs)
+                reason = _nothing_to_do(run.race_date, run.key, logs, run.config)
                 if reason is None:
                     todo.append(run)
                 else:
