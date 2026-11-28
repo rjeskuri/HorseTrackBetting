@@ -13,9 +13,15 @@ pushed into the scan. Per year it counts:
   after rounding to the tenth;
 - dividends per pool by (race_id, pool, combination), and of the matched rows the equal ones;
 - matched races whose runners match one to one with every Win odds equal (`win_odds_agree`), and
-  whose dividend rows match one to one with every dividend equal (`payouts_agree`);
+  whose dividend rows match one to one with every dividend equal (`payouts_agree`, from the
+  dividend rows only); a race with a repeated runner key in either store does not agree on Win
+  odds, even when every value matches (#394: a race whose runners cannot be keyed one to one is
+  not counted as agreeing), and nor does one with an unnumbered runner in either store; a
+  repeated runner key leaves `payouts_agree` alone (owner's choice, 2026-11-28);
 - rows whose key occurs more than once in one store (`<table>.<source>_duplicate`); they are still
-  matched row by row.
+  matched row by row;
+- runners with a null `horse_no` (`runners.<source>_unnumbered`, #394): they have no key, so they
+  stay out of the merge and the `_duplicate` count.
 
 Each one-store and repeated-key count is also broken down by the race's `status` in that store's
 `races` (`<check>.<status>`; `no_race` when that store's races lack the race), so the report shows
@@ -104,8 +110,14 @@ class Reconciliation:
             for f in fields:
                 lines.append(f"  {f} equal: {_of(o, f'{table}.equal.{f}', both)}")
             if table == "races":
-                lines.append(f"  every Win odds agree: {_of(o, 'races.win_odds_agree', both)}")
-                lines.append(f"  every payout agrees: {_of(o, 'races.payouts_agree', both)}")
+                lines.append(
+                    "  every Win odds agree (and no repeated or unnumbered runner key): "
+                    f"{_of(o, 'races.win_odds_agree', both)}"
+                )
+                lines.append(
+                    "  every payout agrees (dividend rows only): "
+                    f"{_of(o, 'races.payouts_agree', both)}"
+                )
         for pool in _pools(o):
             p = f"dividends.{pool}."
             equal = _of(o, p + "equal", p + "both")
@@ -115,6 +127,8 @@ class Reconciliation:
             for table in ("races", "runners", "dividends")
         )
         lines.append(f"rows whose key repeats in one store: {repeats}")
+        unnumbered = ", ".join(_with_status(o, f"runners.{s}_unnumbered", s) for s in SOURCES)
+        lines.append(f"runners with no horse number, not matched: {unnumbered}")
         return "\n".join(lines)
 
     def to_markdown(self) -> str:
@@ -133,7 +147,11 @@ class Reconciliation:
             "agree rates: over the matched count of the table (races, runners, or the pool's "
             "dividends). Equal means both values equal or both null; `post_time_local` compares "
             "as minutes of the day, `finish_time_s` and `win_odds` at the tenth. "
-            "`<table>.<source>_duplicate` counts the rows whose key repeats in that store. "
+            "`<table>.<source>_duplicate` counts the rows whose key repeats in that store; "
+            "`runners.<source>_unnumbered` the runners with no horse number there (not matched). "
+            "A race with a repeated runner key in either store does not count as agreeing on Win "
+            "odds even when every value matches, and nor does one with an unnumbered runner; "
+            "payout agreement comes from the dividend rows only. "
             "`<check>.<status>` breaks a one-store or repeated-key count down by the race's "
             "`status` in that store's races (`no_race`: not in that store's races).",
             "",
@@ -211,14 +229,26 @@ def _compare_year(lo: date, hi: date) -> tuple[Counter[str], dict[str, set[str]]
     matched_ids = set(matched["race_id"])
 
     frames = _read("runners", RUNNER_KEY + list(RUNNER_FIELDS), lo, hi)
+    unnumbered_ids: set[str] = set()
+    for s in SOURCES:  # a runner with no horse number has no key: counted apart, never merged
+        blank = frames[s]["horse_no"].isna()
+        rows = frames[s].loc[blank, "race_id"]
+        counts[f"runners.{s}_unnumbered"] += len(rows)
+        _by_status(f"runners.{s}_unnumbered", rows, status[s], counts)
+        fail(f"runners.{s}_unnumbered", rows)
+        unnumbered_ids |= set(rows)
+        frames[s] = frames[s][~blank]
     runners = _merge("runners", frames, RUNNER_KEY, counts, fail, status)
     _presence("runners.", runners, counts, fail, status)
     both = runners[runners["_merge"] == "both"]
     for f in RUNNER_FIELDS:
         _equal_count(f"runners.equal.{f}", both, f, counts, fail)
+    repeated_ids = {r for s in SOURCES for r in bad.get(f"runners.{s}_duplicate", ())}
     odds_bad = set(runners.loc[runners["_merge"] != "both", "race_id"])
     odds_bad |= set(both.loc[~_equal(both, "win_odds"), "race_id"])
-    _agree("races.win_odds_agree", matched_ids, odds_bad, counts, fail)
+    _agree(
+        "races.win_odds_agree", matched_ids, odds_bad | unnumbered_ids | repeated_ids, counts, fail
+    )
 
     ids = sorted(set(races["race_id"]))
     frames = {s: _read_dividends(s, ids) for s in SOURCES}
@@ -353,6 +383,8 @@ def _ordered_keys(counts: Mapping[str, int]) -> list[str]:
         if table == "races":
             keys += ["races.win_odds_agree", "races.payouts_agree"]
         keys += [f"{table}.{s}_duplicate" for s in SOURCES]
+        if table == "runners":
+            keys += [f"runners.{s}_unnumbered" for s in SOURCES]
     for pool in _pools(counts):
         keys += [f"dividends.{pool}.{c}" for c in (*PRESENCE.values(), "equal")]
     keys += [f"dividends.{s}_duplicate" for s in SOURCES]
@@ -362,8 +394,8 @@ def _ordered_keys(counts: Mapping[str, int]) -> list[str]:
 
 
 def _breakdown(counts: Mapping[str, int], key: str) -> list[str]:
-    """The `<key>.<status>` keys of a one-store or repeated-key count."""
-    if not key.endswith(("_only", "_duplicate")):
+    """The `<key>.<status>` keys of a one-store, repeated-key or unnumbered count."""
+    if not key.endswith(("_only", "_duplicate", "_unnumbered")):
         return []
     return sorted(
         k for k in counts if k.startswith(key + ".") and k.count(".") == key.count(".") + 1
