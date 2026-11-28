@@ -30,6 +30,7 @@ from horsetrack.countries.japan.jravan.horse_runs import (
     horse_runs_command as jravan_horse_runs_command,
 )
 from horsetrack.countries.japan.jravan.masters import masters_command as jravan_masters_command
+from horsetrack.countries.japan.jravan.mining import mining_command as jravan_mining_command
 from horsetrack.countries.japan.jravan.odds import final_odds_command as jravan_final_odds_command
 from horsetrack.countries.japan.jravan.races import races_command as jravan_races_command
 from horsetrack.countries.japan.jravan.reconcile import (
@@ -118,6 +119,7 @@ jravan.command("dump")(jravan_dump_command)
 jravan.command("final-odds")(jravan_final_odds_command)
 jravan.command("horse-runs")(jravan_horse_runs_command)
 jravan.command("masters")(jravan_masters_command)
+jravan.command("mining")(jravan_mining_command)
 jravan.command("races")(jravan_races_command)
 jravan.command("reconcile")(jravan_reconcile_command)
 jravan.command("runners")(jravan_runners_command)

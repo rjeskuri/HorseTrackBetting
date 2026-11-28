@@ -2,7 +2,7 @@
 
 Contract pinned here (the coder follows it), module `horsetrack.countries.japan.jravan.dump`:
 - `MAPPED: frozenset[tuple[str, str]]`, the (dataspec, record type) pairs other tickets map:
-  RACE RA, SE, HR, H1, H6, O1-O6; DIFN UM, KS, CH; BLDN HN, SK, BT.
+  RACE RA, SE, HR, H1, H6, O1-O6; DIFN UM, KS, CH; BLDN HN, SK, BT; MING DM, TM (#406).
 - `run(*, types=None, years=None, raw=None, out=None) -> records.BuildReport`. `raw` defaults to
   `paths.raw_dir("jravan")`, `out` to `paths.interim_dir("jravan") / "records"`; the layouts come
   from `spec.spec_path()`. Only `raw/stored/<DS>/<RT>/*.jvd` is read (never `timeseries/` or any
@@ -402,6 +402,7 @@ def test_mapped_families_are_skipped_unless_named(data: Path, tmp_path: Path) ->
         {("RACE", rt) for rt in ("RA", "SE", "HR", "H1", "H6", "O1", "O2", "O3", "O4", "O5", "O6")}
         | {("DIFN", rt) for rt in ("UM", "KS", "CH")}
         | {("BLDN", rt) for rt in ("HN", "SK", "BT")}
+        | {("MING", rt) for rt in ("DM", "TM")}  # #406
     )
     root = raw_of(data)
     wb.write_jvd(root / "stored/RACE/RA/2002.jvd", [ra("20020105"), ra("20020106")])

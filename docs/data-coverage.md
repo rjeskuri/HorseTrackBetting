@@ -154,7 +154,7 @@ The high end of the lo-hi range the Place and Wide (QUINELLA_PLACE) boards show 
 
 Layers C2; role `feature_at_t`; tickets #403, #377, #404.
 
-A horse's earlier runs, read from runners (#128). Both stores hold JRA races only; `horse_runs` (every run of a horse) is built from the jravan races and runners (#403) and not for the jra store, and the NAR and overseas runs are left out (#377).
+A horse's earlier runs, read from runners (#128). Both stores' runners hold JRA races only; `horse_runs` (every run of a horse) is built from the jravan races and runners (#403) and not for the jra store, and includes the NAR and overseas runs under their own jurisdiction, win_odds null (#377).
 
 - jra `runners.finish_pos`: 2010-01-05 to 2026-11-23, 824,386 rows; no gap year
 - jravan `runners.finish_pos`: withheld (D21)
@@ -458,10 +458,10 @@ The JRDB pre-race and post-race tables (#57), matched to the store's runners; pr
 
 Layers C4; role `feature_at_t`; tickets #406.
 
-JV-Data DM (time-type) and TM (match-type) data-mining predictions, published before the race; dumped but not mapped, so no publication time is known.
+JV-Data DM (time-type) and TM (match-type) data-mining predictions, published before the race; mapped into the jravan mining_predictions table (#406). Available at t once the kept record's created_utc <= t (rule C, the owner's answer on #406, 2026-11-28); created_utc is the kept record's creation stamp, not a known publication time.
 
-- jravan `records/MING/DM._record`: withheld (D21)
-- jravan `records/MING/TM._record`: withheld (D21)
+- jravan `mining_predictions.value` where kind = DM: withheld (D21)
+- jravan `mining_predictions.value` where kind = TM: withheld (D21)
 
 ## win_sales
 
