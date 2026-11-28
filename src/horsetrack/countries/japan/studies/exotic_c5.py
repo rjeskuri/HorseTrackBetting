@@ -1041,13 +1041,22 @@ def _rule(pool: str, name: str, family: str | None, floor: str | None, segment: 
 
 def compute_study(races: pd.DataFrame, runners: pd.DataFrame, dividends: pd.DataFrame,
                   spec: dict, *, form: pd.DataFrame | None = None,
-                  form_error: str | None = None) -> Study:  # fmt: skip
+                  form_error: str | None = None,
+                  log: Callable[[str], None] | None = None) -> Study:  # fmt: skip
     """Every variant of `spec`'s grid on store-shaped tables (the module docstring and the
     tests' contract): E43 and E16 per pool, input, ordering, blend (and Place and Wide de-vig and
     floor treatment), the log-linear blend as failed records, and E44 per ordering and model
     input. `form` holds stage2:q:form (race_id, horse_no, p_form); None, or `form_error`, fails
-    every variant that needs it. Pure: no I/O."""
+    every variant that needs it. `log` gets one progress line per stage, with no figure. Pure:
+    no I/O."""
+    started = clock.monotonic()
+
+    def note(what: str) -> None:
+        if log is not None:
+            log(f"{what} ({clock.monotonic() - started:.0f} s)")
+
     data = _prepare(races, runners, dividends, spec, form)
+    note("prepared the races")
     study = Study(counts=dict(data.counts))
     study.tables["form_coverage"] = [data.form_counts] if data.form_counts else []
     scorer = _Scorer(data, spec, form_error)
@@ -1076,6 +1085,7 @@ def compute_study(races: pd.DataFrame, runners: pd.DataFrame, dividends: pd.Data
                 if name != NORMALISED:
                     _e44(study, scorer, scheme, family, name)
         scorer.memo.clear()
+        note(f"scored ordering {family or 'none (Win)'}")
     if LOG_LINEAR in spec["blends"]:
         for name in spec["inputs"]:
             for pool in spec["pools"]:
@@ -1442,7 +1452,9 @@ def run_study(*, date_from: date = PRICE_ERA_START, date_to: date | None = None,
     except Exception as exc:  # every stage2:q:form variant is a failed record; the rest run
         form, form_builds, form_error = None, {}, f"{type(exc).__name__}: {exc}"
     log(f"read the member ({clock.monotonic() - started:.0f} s)")
-    study = compute_study(races, runners, dividends, spec, form=form, form_error=form_error)
+    study = compute_study(
+        races, runners, dividends, spec, form=form, form_error=form_error, log=log
+    )
     del races, runners, dividends, form
     seconds = clock.monotonic() - started
     log(f"scored {len(study.variants)} variants ({seconds:.0f} s)")
