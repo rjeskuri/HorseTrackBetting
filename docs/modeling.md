@@ -93,7 +93,7 @@ flowchart TB
     end
     subgraph L5["C5: Place, Wide and exotics"]
         ORD["Discounted Harville ordering<br/>#115 japan/models/v0/ordering.py<br/>v0"]
-        EXO["Exotics against the pool's own prices #99<br/>planned"]
+        EXO["Exotic layer: four orderings, dividend baseline #99<br/>japan/models/exotic.py;<br/>scored against the pools' dividends #459<br/>japan/studies/exotic_c5.py<br/>built, not adopted"]
     end
     subgraph L6["C6: decision layer, shadow only"]
         SV["Shadow value over nowcast draws<br/>#118 japan/models/v0/shadow_values.py<br/>v0"]
@@ -191,26 +191,28 @@ flowchart TD
     TOP3["Chance of every top-3 finishing order"]
     PLACE["Place: chance of finishing in the paid places,<br/>top 3, or top 2 in small fields"]
     WIDE["Wide: chance that both runners of a pair<br/>finish in the top 3"]
-    EXO["Quinella, Exacta, Trio and Trifecta chances<br/>#99 planned"]
+    EXO["Quinella, Exacta, Trio and Trifecta chances:<br/>Harville, Henery, quadratic context, discounted Harville<br/>#99 japan/models/exotic.py"]
     BRK["Place and Wide values at the low and the<br/>high end of the bracket the pool shows<br/>#118 japan/models/v0/shadow_values.py"]
-    POOL["Primary baseline: the pool's own final prices (D5)<br/>exotic dividend share #99 planned,<br/>Place and Wide de-vig: owner decision open"]
+    POOL["Primary baseline: the pool's own final prices (D5)<br/>exotic.dividend_shares, statute de-vig #99;<br/>Place and Wide: P x the statute share,<br/>floor-bound race-pools dropped or kept #459"]
     DERIV["Secondary baseline: the same ordering fed<br/>the calibrated market alone (D5)<br/>#115 ordering, #114 calibrated market"]
-    SCORE["Top-3 order log loss and placed-set score<br/>against the pool's baseline (D6)<br/>planned: Place and Wide log loss per pool #99,<br/>the D6 top-3 order and placed-set scores no ticket yet"]
-    BLEND["Exotic blend: start from the pool's prices,<br/>the model claims only a shrunk residual<br/>#99 planned"]
+    SCORE["Log loss per pool at 1/k per paid combination<br/>against the pool's dividends (D6): E43 per pool,<br/>E16 on super_premium race-pools, E44 joint vs Win gain<br/>#459 japan/studies/exotic_c5.py;<br/>the D6 top-3 order and placed-set scores no ticket yet"]
+    BLEND["Blend with the pool: alpha q + (1 - alpha) P_C5<br/>on the paid combination, alpha per pool and fold #459;<br/>the log-linear pool_blend #99 waits for full final boards"]
     FORM["Box, wheel and formation search<br/>#139 japan/betting/formations.py"]
     WIN --> ORD
     ORD --> TOP3
     TOP3 --> PLACE
     TOP3 --> WIDE
-    TOP3 -.-> EXO
+    TOP3 --> EXO
     PLACE --> BRK
     WIDE --> BRK
-    PLACE -.-> SCORE
-    WIDE -.-> SCORE
-    POOL -.-> SCORE
+    PLACE --> SCORE
+    WIDE --> SCORE
+    EXO --> SCORE
+    POOL --> SCORE
     DERIV -.-> SCORE
-    EXO -.-> BLEND
-    POOL -.-> BLEND
+    EXO --> BLEND
+    POOL --> BLEND
+    BLEND --> SCORE
     BLEND -.-> FORM
 ```
 
