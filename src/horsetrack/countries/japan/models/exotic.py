@@ -26,12 +26,16 @@ own dividends (ticket #99, epic #73; research 08 §3.2 C5, §4 E43, E44).
 
 Pool codes are jra.yaml's. A combination is the store's `dividends.combination` string: horse
 numbers joined by ",", in finishing order for FORECAST and TIERCE, ascending for QUINELLA,
-QUINELLA_PLACE and TRIO; WIN and PLACE name one horse.
+QUINELLA_PLACE and TRIO; WIN and PLACE name one horse. BRACKET_QUINELLA's is the brackets of the
+first two finishers, "x,y" with x <= y ("x,x" for two horses of one bracket, a combination only for
+a bracket with two or more runners); it needs the card's horse -> bracket map, `brackets`, which
+the other pools ignore (#513).
 """
 
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from functools import cache
 from itertools import combinations, groupby, permutations, product
@@ -49,7 +53,8 @@ from horsetrack.countries.japan.models.v0 import ordering as v0_ordering
 
 WIN, PLACE, QUINELLA, WIDE = "WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE"
 EXACTA, TRIO, TRIFECTA = "FORECAST", "TRIO", "TIERCE"
-POOLS = (WIN, PLACE, QUINELLA, WIDE, EXACTA, TRIO, TRIFECTA)
+BRACKET_QUINELLA = "BRACKET_QUINELLA"
+POOLS = (WIN, PLACE, BRACKET_QUINELLA, QUINELLA, WIDE, EXACTA, TRIO, TRIFECTA)
 
 UNIT_STAKE = 100.0  # yen: dividends are quoted per 100 yen
 MEAN_BREAKAGE = 5.0  # yen per winning 100-yen ticket: dividends are floored to 10 yen (04 §1.3)
@@ -252,7 +257,7 @@ def _places_paid(pool: str, field_at_sale: int) -> int:
     and three from 8, Wide three from 4), not by those that started; the others' are fixed."""
     if pool in (PLACE, WIDE):
         return _jra_pools()[pool].places_for(field_at_sale)
-    return {WIN: 1, QUINELLA: 2, EXACTA: 2, TRIO: 3, TRIFECTA: 3}[pool]
+    return {WIN: 1, BRACKET_QUINELLA: 2, QUINELLA: 2, EXACTA: 2, TRIO: 3, TRIFECTA: 3}[pool]
 
 
 def _field_size(field_at_sale: object, runners: int) -> int:
@@ -297,8 +302,35 @@ def _key(horses: Sequence[int]) -> str:
     return ",".join(str(int(h)) for h in horses)
 
 
-def _combinations_of(top: Sequence[int], pool: str) -> list[str]:
-    """The combinations a strict finishing order `top` (first places only) pays in `pool`."""
+def _bracket_number(value: object) -> int:
+    """A bracket number. ValueError for one that is not a positive whole number (a numpy integer
+    is one; a bool, a float, a string or None is not)."""
+    if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
+        raise ValueError(f"a bracket must be a positive whole number, got {value!r}")
+    return int(value)
+
+
+def _bracket_map(brackets: Mapping[int, int] | None, numbers: Collection[int]) -> dict[int, int]:
+    """The bracket of each horse number in `numbers`, from the card's horse -> bracket map
+    (entries for other horses are ignored). ValueError for no map, or a horse without a bracket
+    or with one that is not a positive whole number."""
+    if brackets is None:
+        raise ValueError(f"{BRACKET_QUINELLA} needs the horse -> bracket map (`brackets`)")
+    lookup = {int(h): b for h, b in brackets.items() if isinstance(h, Integral)}
+    missing = sorted(set(numbers) - lookup.keys())
+    if missing:
+        raise ValueError(f"no bracket for horse numbers {missing}")
+    return {h: _bracket_number(lookup[h]) for h in numbers}
+
+
+def _combinations_of(
+    top: Sequence[int], pool: str, bracket_of: Mapping[int, int] | None = None
+) -> list[str]:
+    """The combinations a strict finishing order `top` (first places only) pays in `pool`;
+    `bracket_of` is each horse's bracket, for BRACKET_QUINELLA."""
+    if pool == BRACKET_QUINELLA:
+        assert bracket_of is not None
+        return [_key(sorted(bracket_of[h] for h in top[:2]))]
     if pool == WIN:
         return [_key(top[:1])]
     if pool == PLACE:
@@ -315,7 +347,11 @@ def _combinations_of(top: Sequence[int], pool: str) -> list[str]:
 
 
 def winning_combinations(
-    finish: Mapping[int, int], pool: str, *, field_at_sale: int | None = None
+    finish: Mapping[int, int],
+    pool: str,
+    *,
+    field_at_sale: int | None = None,
+    brackets: Mapping[int, int] | None = None,
 ) -> list[str]:
     """The combinations `pool` pays for a result, each once.
 
@@ -330,12 +366,17 @@ def winning_combinations(
     however many finish; no other pool depends on it. A pool not offered to the field pays
     nothing. With fewer finishers than its places, a sold PLACE pays every finisher and a sold
     QUINELLA_PLACE every pair of finishers (none with one); the other pools pay nothing (TRIO and
-    TIERCE need three finishers, QUINELLA and FORECAST two). ValueError for an
-    unknown pool, a position that is not a whole number from 1 (a whole float, 2.0, is one), or a
-    `field_at_sale` smaller than the runners in `finish`.
+    TIERCE need three finishers, QUINELLA, BRACKET_QUINELLA and FORECAST two). BRACKET_QUINELLA is
+    QUINELLA with each horse replaced by its bracket, "x,y" with x <= y, so two horses of one
+    bracket first and second pay "x,x"; `brackets` (horse number -> bracket) must hold every
+    starter in `finish`, and the other pools ignore it. ValueError for an
+    unknown pool, a position that is not a whole number from 1 (a whole float, 2.0, is one), a
+    `field_at_sale` smaller than the runners in `finish`, or for BRACKET_QUINELLA, a missing map
+    or a starter without a bracket.
     """
     _check_pool(pool)
     positions = {int(h): _position(pos) for h, pos in finish.items()}
+    bracket_of = _bracket_map(brackets, positions) if pool == BRACKET_QUINELLA else None
     places = _places_paid(pool, _field_size(field_at_sale, len(finish)))
     if places == 0:
         return []
@@ -348,7 +389,7 @@ def winning_combinations(
     out: dict[str, None] = {}
     for tie_break in product(*(permutations(g) for g in groups)):
         top = [h for group in tie_break for h in group][:places]
-        for combination in _combinations_of(top, pool):
+        for combination in _combinations_of(top, pool, bracket_of):
             out.setdefault(combination, None)
     return list(out)
 
@@ -455,13 +496,15 @@ class Ordering:
         *,
         horses: Sequence[int] | None = None,
         field_at_sale: int | None = None,
+        brackets: Mapping[int, int] | None = None,
     ) -> dict[str, float]:
         """Every combination of `pool` and its probability, keyed by horse number: p_win[i] is
-        horse horses[i] (None: i + 1). `field_at_sale` fixes Place's places, as in `pool_array`.
+        horse horses[i] (None: i + 1). `field_at_sale` fixes Place's places, as in `pool_array`;
+        `brackets` is BRACKET_QUINELLA's horse -> bracket map, as in `pool_probs`.
         """
         _check_pool(pool)
         t = self.trifecta(p_win)
-        return pool_probs(t, pool, horses=horses, field_at_sale=field_at_sale)
+        return pool_probs(t, pool, horses=horses, field_at_sale=field_at_sale, brackets=brackets)
 
     # -- fitting ------------------------------------------------------------------------------
 
@@ -489,14 +532,31 @@ def pool_probs(
     *,
     horses: Sequence[int] | None = None,
     field_at_sale: int | None = None,
+    brackets: Mapping[int, int] | None = None,
 ) -> dict[str, float]:
     """A pool's combinations and probabilities from a trifecta array whose index i is horse
     horses[i] (None: i + 1), keyed by horse number: ascending for QUINELLA, QUINELLA_PLACE and
     TRIO, in finishing order for FORECAST and TIERCE. `field_at_sale`: as in `pool_array`.
-    ValueError for horse numbers that are not one positive, distinct number per runner."""
+    BRACKET_QUINELLA is keyed by bracket, "x,y" with x <= y: every pair of brackets with a runner
+    and "x,x" for each bracket with two or more; `brackets` maps horse number -> bracket and must
+    hold every runner (entries for other horses are ignored), and the other pools ignore it.
+    ValueError for horse numbers that are not one positive, distinct number per runner, and for
+    BRACKET_QUINELLA, a missing map or a runner without a valid bracket."""
     _check_pool(pool)
-    arr = pool_array(t, pool, field_at_sale=field_at_sale)
     numbers = _horse_numbers(horses, t.shape[0])
+    if pool == BRACKET_QUINELLA:
+        bracket_of = _bracket_map(brackets, numbers)
+        arr = pool_array(
+            t, pool, field_at_sale=field_at_sale, brackets=[bracket_of[h] for h in numbers]
+        )
+        runners = sorted(Counter(bracket_of.values()).items())
+        out = {}
+        for a, (x, _) in enumerate(runners):
+            for y, count in runners[a:]:
+                if x != y or count >= 2:
+                    out[_key([x, y])] = float(arr[x - 1, y - 1])
+        return out
+    arr = pool_array(t, pool, field_at_sale=field_at_sale)
     # Positions in horse-number order, so an unordered pool's combinations list ascending numbers.
     by_number = sorted(range(len(numbers)), key=numbers.__getitem__)
     if pool in (WIN, PLACE):
@@ -506,14 +566,39 @@ def pool_probs(
     return {_key([numbers[i] for i in c]): float(arr[c]) for c in choose(by_number, size)}
 
 
-def pool_array(t: np.ndarray, pool: str, *, field_at_sale: int | None = None) -> np.ndarray:
+def pool_array(
+    t: np.ndarray,
+    pool: str,
+    *,
+    field_at_sale: int | None = None,
+    brackets: Sequence[int] | None = None,
+) -> np.ndarray:
     """A pool's probabilities as an array indexed by runner position: WIN and PLACE n, FORECAST
     [first, second], QUINELLA and QUINELLA_PLACE symmetric n x n, TRIO symmetric n x n x n,
     TIERCE the trifecta itself. Every one is a marginal of `t`. PLACE pays the places of
     `field_at_sale`, the runners when sales opened (None: the n in `t`); ValueError for one
-    smaller than n, in every pool, and for PLACE when it was not sold to that field."""
+    smaller than n, in every pool, and for PLACE when it was not sold to that field.
+    BRACKET_QUINELLA is the symmetric K x K array, K the highest bracket, index bracket - 1, from
+    `brackets`, the bracket of each runner position: [x - 1, y - 1] and [y - 1, x - 1] each hold
+    P(the first two are in brackets x and y) for x != y, and [x - 1, x - 1] holds P(both are in
+    x), counted once, so the upper triangle sums to 1. ValueError for no `brackets` there, a
+    length that is not n, or one that is not a positive whole number; other pools ignore it."""
     _check_pool(pool)
     field = _field_size(field_at_sale, t.shape[0])
+    if pool == BRACKET_QUINELLA:
+        if brackets is None:
+            raise ValueError(f"{BRACKET_QUINELLA} needs the bracket of each runner (`brackets`)")
+        by_position = [_bracket_number(b) for b in brackets]
+        n = t.shape[0]
+        if len(by_position) != n:
+            raise ValueError(f"{len(by_position)} brackets for {n} runners")
+        member = np.zeros((n, max(by_position)))
+        member[np.arange(n), np.asarray(by_position) - 1] = 1.0
+        ordered = member.T @ t.sum(axis=2) @ member  # [x, y]: first in x, second in y
+        out = ordered + ordered.T
+        idx = np.arange(len(out))
+        out[idx, idx] = ordered[idx, idx]  # a same-bracket pair is one combination, not two
+        return out
     if pool == WIN:
         return t.sum(axis=(1, 2))
     if pool == PLACE:
