@@ -1,11 +1,14 @@
 """Serve the board page and its live feed on localhost (ticket #41), and the shadow page and its
 feed beside them (ticket #121).
 
-Six paths only: `/` (the page at `page_path`, read on every request), `/board.js` (the page's
+Seven paths only: `/` (the page at `page_path`, read on every request), `/board.js` (the page's
 script, `board.js` beside `page_path`, ticket #42), `/feed` (`build_board` of the day as JSON,
 docs/specs/board-feed.md) with an ETag, so the page's poll costs a 304 when nothing changed;
-`/shadow` and `/shadow.js` (`shadow.html` and `shadow.js` beside `page_path`, ticket #122) and
-`/shadow-feed` (`build_shadow` of the day, with the same ETag, gzip and throttle as /feed).
+`/shadow` and `/shadow.js` (`shadow.html` and `shadow.js` beside `page_path`, ticket #122),
+`/shadow-feed` (`build_shadow` of the day, with the same ETag, gzip and throttle as /feed) and
+`/best-bets?venue=<VENUE>` (ticket #714: `best_bets.build_best_bets` of that venue's next race as
+of `feed.utc_now`, from the private leaderboard JSON `leaderboard-japan.json` under the reports
+dir, read at start and again when it changes; rebuilt at most every `min_rebuild_s` per venue).
 Anything else is 404: no listings, no other files. Every response carries
 Cache-Control no-store, X-Robots-Tag noindex nofollow, Referrer-Policy no-referrer,
 X-Content-Type-Options nosniff and X-Frame-Options DENY.
@@ -62,6 +65,7 @@ import typer
 
 from horsetrack.core import paths
 from horsetrack.countries.japan.board import feed as board_feed
+from horsetrack.countries.japan.board.best_bets import LeaderboardFile, build_best_bets
 from horsetrack.countries.japan.board.feed import build_board
 from horsetrack.countries.japan.board.flags import FlagRules, load_flag_rules
 from horsetrack.countries.japan.board.shadow_feed import build_shadow
@@ -71,6 +75,7 @@ from horsetrack.countries.japan.board.tunnel import parse_tunnel_url as parse_tu
 from horsetrack.countries.japan.logger.pull_vm import vm_day_dir
 from horsetrack.countries.japan.models.v0.loader import load_shadow_models
 from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels
+from horsetrack.countries.japan.research.leaderboard_build import PRIVATE_JSON
 
 log = logging.getLogger(__name__)
 
@@ -209,6 +214,55 @@ class ShadowFeed(Feed):
         return shadow
 
 
+_VENUE = re.compile(r"[A-Z]{2,4}")  # a JRA venue code (TOK, KYO, ...)
+
+
+class BestBets:
+    """Each venue's best bets as JSON bytes, rebuilt at most every `min_rebuild_s` per venue (its
+    race, checkpoint and freeze follow the clock). The leaderboard file is read again when it
+    changes; the log readers persist between builds. A build that fails keeps the last body."""
+
+    def __init__(
+        self,
+        race_date: date,
+        min_rebuild_s: float,
+        models: ShadowModels | None,
+        day_dir: Path | None = None,
+    ):
+        self.race_date, self.min_rebuild_s, self.day_dir = race_date, min_rebuild_s, day_dir
+        self.models = models
+        self._leaderboard: LeaderboardFile | None = None  # resolved at the first request
+        self._lock = threading.Lock()
+        self._cache: dict = {}
+        self._bodies: dict[str, tuple[float, bytes]] = {}
+
+    def current(self, venue: str) -> bytes | None:
+        """The venue's body; None before any build of it succeeded."""
+        with self._lock:
+            now = time.monotonic()
+            last = self._bodies.get(venue)
+            if last is not None and now - last[0] < self.min_rebuild_s:
+                return last[1]
+            try:
+                if self._leaderboard is None:
+                    self._leaderboard = LeaderboardFile(paths.reports_dir() / PRIVATE_JSON)
+                built = build_best_bets(
+                    self.race_date,
+                    venue=venue,
+                    leaderboard=self._leaderboard.rows(),
+                    models=self.models,
+                    now=board_feed.utc_now,
+                    day_dir=self.day_dir,
+                    cache=self._cache,
+                )
+            except Exception:  # keep the last good body; try again on the next request
+                log.exception("best bets for %s %s: build failed", self.race_date, venue)
+                return None if last is None else last[1]
+            body = json.dumps(built, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            self._bodies[venue] = (now, body)
+            return body
+
+
 def _etag_matches(header: str | None, etag: str) -> bool:
     # a proxy that re-compresses hands the tag back weak: W/"..."
     asked = {t.strip().removeprefix("W/") for t in (header or "").split(",")}
@@ -266,12 +320,17 @@ def _redact(text: str, token: str | None) -> str:
 
 
 def _make_handler(
-    page_path: Path, feed: Feed, shadow_feed: ShadowFeed, token: str | None = None
+    page_path: Path,
+    feed: Feed,
+    shadow_feed: ShadowFeed,
+    best_bets: BestBets,
+    token: str | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     pages = {"/": page_path, "/shadow": page_path.with_name("shadow.html")}
     scripts = {"/board.js": "board.js", "/shadow.js": "shadow.js"}
     feeds = {"/feed": feed, "/shadow-feed": shadow_feed}
-    known = {*pages, *scripts, *feeds}
+    best_path = "/best-bets"
+    known = {*pages, *scripts, *feeds, best_path}
     secret = None if token is None else token.encode("ascii")
 
     class Handler(BaseHTTPRequestHandler):
@@ -349,6 +408,18 @@ def _make_handler(
                 if gzipped:
                     extra["Content-Encoding"] = "gzip"
                 return self._send(200, body, "application/json; charset=utf-8", extra)
+            if path == best_path:
+                asked = [v for k, v in parse_qsl(query) if k == "venue"]
+                if len(asked) != 1 or not _VENUE.fullmatch(asked[0]):
+                    return self._send(400, b"venue=<VENUE> needed\n", "text/plain; charset=utf-8")
+                body = best_bets.current(asked[0])
+                if body is None:
+                    return self._send(503, b"no best bets yet\n", "text/plain; charset=utf-8")
+                gzipped = self._wants_gzip()
+                extra = {"Vary": "Accept-Encoding"}
+                if gzipped:
+                    body, extra["Content-Encoding"] = gzip.compress(body, 6), "gzip"
+                return self._send(200, body, "application/json; charset=utf-8", extra)
             return self._not_found()
 
         do_HEAD = do_GET  # noqa: N815 (http.server API)
@@ -376,13 +447,15 @@ def make_server(
     `models` the shadow feed's values are null; `flag_rules` defaults to the shipped rules. Both
     feeds read the odds logs from `day_dir` when given (a pulled VM folder), else the Mac's own.
     With `token` (URL-safe characters) every path needs it, as `?t=` or the cookie that sets;
-    anything else is an empty 404."""
+    anything else is an empty 404. `/best-bets` reads the private leaderboard JSON under the
+    reports dir (`leaderboard_build.PRIVATE_JSON`), resolved at its first request."""
     if token is not None and not _TOKEN_CHARS.fullmatch(token):
         raise ValueError("token: a non-empty string of [A-Za-z0-9_-], or None for no token")
     feed = Feed(race_date, min_rebuild_s, day_dir)
     rules = load_flag_rules() if flag_rules is None else flag_rules
     shadow_feed = ShadowFeed(race_date, min_rebuild_s, models, rules, day_dir)
-    handler = _make_handler(Path(page_path), feed, shadow_feed, token)
+    best_bets = BestBets(race_date, min_rebuild_s, models, day_dir)
+    handler = _make_handler(Path(page_path), feed, shadow_feed, best_bets, token)
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
     return server
