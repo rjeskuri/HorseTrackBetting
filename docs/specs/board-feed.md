@@ -133,7 +133,7 @@ Code: `src/horsetrack/countries/japan/board/shadow_feed.py` (ticket #121), serve
 above is unchanged and stays free of probabilities and values; the shadow values travel only here.
 
 `build_shadow(race_date, *, venues=None, now=utc_now, models, flag_rules, n_draws=400, seed=0,
-cache=None) -> dict`
+cache=None, day_dir=None, member_inputs=None) -> dict`
 
 ```
 {race_date, generated_utc,
@@ -142,7 +142,9 @@ cache=None) -> dict`
           pools: {WIN:            {"7":   {value_mean, value_q05, value_q95, flags, ladder}},
                   PLACE:          {"7":   {value_at_low, value_at_high, flags, ladder}},
                   QUINELLA_PLACE: {"3,7": {value_at_low, value_at_high, flags, ladder}}},
-          p_model: {POOL: {combination: probability}} | null}],
+          p_model: {POOL: {combination: probability}} | null,
+          p_member: {"7": probability} | null,                     (only with a member, #717)
+          member: {segment, k, status, marked: ["7"]} | null}],    (only with a member, #717)
  win5: {race_date, capture_utc, investment, carryover, pool_ev} | null}
 ```
 
@@ -173,6 +175,7 @@ cache=None) -> dict`
   never become a race in `races`. The shadow page draws it as one line (`data-win5`) above the
   board; the plain feed and board page stay free of it.
 - `p_model` (ticket #506): see "Model probabilities" below.
+- `p_member` and `member` (ticket #717): see "The horse member" below.
 - No key names a stake, a bet, Kelly, an amount or a wager.
 
 ### Model probabilities
@@ -231,6 +234,36 @@ each shadow record (docs/specs/shadow-log.md, "Shadow-day records").
 - Recompute: cached with the values (`cache`), recomputed only when the board (capture time, WIN
   figures, largest number, starters) or the model ids changed.
 
+### The horse member
+
+`p_member` and `member` (ticket #717): the leaderboard's horse member beside the market's Model p,
+which is the v0 calibrated market. The member is #438's debut/maiden combined member
+(`studies/debut_members.py`: u = ln q + sum w x over the standardised member columns, softmax
+within the race), fitted per segment, DEBUT or MAIDEN, on development days before the fit day
+(`models/v0/member.py`, `fit_member`; holdout days are never read). The v0 pointer names one fit
+and one k per segment (`"member": {"DEBUT": {"fit": file, "k": number}, "MAIDEN": {...}}`,
+models/v0/loader.py); k is the p/q threshold the leaderboard ranks best.
+
+- Keys: present on every race when the models carry a member, absent otherwise (the race keeps
+  #506's keys exactly).
+- Segment: the race's `race_class` on the meeting's stored card (`snapshot.card_race_classes`).
+  A race of another class, with a null class, without a card, or of a segment the pointer does not
+  name has `p_member` and `member` null.
+- Inputs: `member_inputs(race_id)` gives the race's race-day member inputs, `{horse number:
+  {member column: value}}` (#438's `feature_columns` names; a column left out or NaN is missing),
+  or None when the day has none for the race; left out, no race has inputs.
+- Figures: `p_member` is `{horse: P(win)}` over the runners on the board as of now (scratched
+  runners have no key), the fit's prediction at `q = (1/O_WIN) / sum(1/O_WIN)`, summing to 1; it
+  is q exactly where the member says nothing (every runner with the same inputs, or none).
+  `member` is `{"segment", "k", "status": null, "marked"}`, `marked` the horses (texts) whose
+  `p_member / q` is at least k.
+- No JRDB data: without that day's JRDB rows (no inputs for the race, or no runner with a
+  `workouts_jrdb__*` value) `p_member` is null and `member.status` is `no JRDB data` with
+  `marked` empty: no figure. A failed prediction is logged and shows `member failed` the same way.
+- Display only: no value, flag, `p_model`, the feed's `models` or the shadow log reads it.
+- Recompute: cached per race (`cache`), recomputed when the board (capture time, WIN figures), the
+  fit, k or the race's inputs changed.
+
 ### The shadow page
 
 `board/web/shadow.js` (#122, #506) draws one race at a time, with one section (`data-pool`) per
@@ -255,8 +288,16 @@ bet type whatever the plain feed holds, in this order: Win, Place, Quinella, Wid
   says `no price forecast`.
 - Capture age: each tier-2 section states its capture's age at now in whole minutes
   (`data-capture-age`), or that nothing is captured yet.
-- Never coloured or highlighted by value or probability. The one highlight is the owner's own
-  selection rule, the best-bets badges ("Best bets" below).
+- Horse model % (#717): in a race whose shadow race has a `member`, the Win section adds a
+  `Horse model %` column (`data-col="horse-model"`) right after Model p: `p_member[horse]` as a
+  percent with one decimal, `-` without one. Each horse in `member.marked` carries one mark (an
+  element with `data-member-mark`, drawn as a triangle, its title `p/q ≥ k`), and the section head
+  names the segment and k. With `member.status` set the section says it (`no JRDB data`) and the
+  column shows no figure and no mark. Races without a member show no such column. The rows keep
+  the board's order.
+- Never coloured or highlighted by value or probability. The two exceptions are the owner's own
+  asks: the p/q mark above (#717) and the best-bets badges, the owner's selection rule ("Best
+  bets" below).
 
 ### The odds ladder
 

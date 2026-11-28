@@ -190,7 +190,8 @@
       esc(formatMove(pct)) + "</td>";
   }
 
-  /* columns (optional): {head: extra <th> markup, cells(raceId, code, line): extra <td> markup}.
+  /* columns (optional): {head: extra <th> markup, or head(raceId, code) giving it per pool,
+   * cells(raceId, code, line): extra <td> markup}.
    * rows (optional): the lines to draw, in that order; else the pool's rows, favourite first.
    * note (optional): extra markup in the pool head. */
   function renderPool(code, body, raceId, columns, rows, note) {
@@ -203,7 +204,9 @@
       "</span>" + (note || "") + "</div>" +
       '<table><thead><tr><th scope="col">' + (multi ? "Horses" : "Horse") + "</th>" +
       '<th scope="col" class="num">Odds</th><th scope="col" class="num">Since morning</th>' +
-      '<th scope="col" class="num">Since T-20</th>' + (columns ? columns.head : "") +
+      '<th scope="col" class="num">Since T-20</th>' +
+      (!columns ? "" : typeof columns.head === "function" ? columns.head(raceId, code)
+        : columns.head) +
       "</tr></thead><tbody>";
     rows.forEach(function (line) {
       var scr = line.status === "SCR";
