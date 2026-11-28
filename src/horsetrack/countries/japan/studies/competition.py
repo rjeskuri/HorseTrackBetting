@@ -19,8 +19,9 @@ with D7's meeting bounds, and its tail return at the final price (N5: the top cl
 `core.eval.tail.tail_curve`, a flat Win bet on every scored runner), with a leaderboard block. The
 REFF record splits the pooled member's stage-2 residual against the market-only meta by quantile
 band of R_eff (`fold_comparability`: #94's `race_comparability` on each fold's graph of the races
-before the fold's first day, 00:00 JST) and an unconnected bucket (`reff_buckets`; 05 H12, the
-precision weighting itself is #98's E41).
+in the REFF_WINDOW_DAYS before the fold's first day, 00:00 JST) and an unconnected bucket
+(`reff_buckets`; 05 H12, the precision weighting itself is #98's E41). A failure of the R_eff stage
+fails the REFF record alone: the four variants still score.
 
 The sire is JRA-VAN's, so every figure is withheld (D21): the report goes under the data dir
 through `write_report`, the records carry the source `jravan` and the committed summary withholds
@@ -34,7 +35,7 @@ import dataclasses
 import hashlib
 import json
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -92,6 +93,9 @@ BUCKET_COLUMNS = ["bucket", "races", "meetings", "reff_lo", "reff_hi"]
 BUCKET_COLUMNS += ["residual", "lower", "upper"]
 UNCONNECTED = "unconnected"
 JST = "Asia/Tokyo"
+# Each fold's comparison graph holds the year of results before the fold: about 11k horses, a
+# factorisation bounded on the store's 86.5k horses since 2010 (spec["reff"]["window"]).
+REFF_WINDOW_DAYS = 365
 
 
 def _stage2(member: str) -> MetaSpec:
@@ -168,12 +172,20 @@ def build_spec(scheme, bootstrap: dict) -> dict:
             "each of m co-winners (the store frame has no dead-heat dividend) and 0 otherwise, "
             "meeting clusters",
         },
+        "reff_window_days": REFF_WINDOW_DAYS,
         "reff": {
             "quantiles": list(REFF_QUANTILES),
             "graph": "per scored fold: models.competition.comparison_graph of every rated "
-            "starter (studies.rating.read_results) of the races before 00:00 Asia/Tokyo of the "
-            "fold's first day, race_comparability of the fold's test rows (+inf: an unconnected "
-            "pair or a horse the graph never saw)",
+            "starter (studies.rating.read_results) of the races from 00:00 Asia/Tokyo "
+            "reff_window_days days before the fold's first day to before 00:00 Asia/Tokyo of "
+            "that day, race_comparability of the fold's test rows (+inf: an unconnected pair or "
+            "a horse the graph never saw in the window)",
+            "window": "one racing year. The graph of every earlier race (86.5k horses since "
+            "2010) does not factorise in bounded time and memory on the development machine; a "
+            "year's graph (about 11k horses) factorises in about a minute under 1.1 GB and "
+            "connects about seven in eight of the test races the whole history connects (the "
+            "rest hold a horse unseen for a year: they count as unconnected); half a year "
+            "connects about half of them",
             "residual": "per scored race: the winner log loss of the base member's stage-2 meta "
             "less the market-only meta's (positive: the member's meta is worse)",
             "buckets": "the finite R_eff in quantile bands (np.quantile edges, lo <= R < hi, "
@@ -207,14 +219,21 @@ def _jst_midnight(day) -> pd.Timestamp:
     return pd.Timestamp(day).tz_localize(JST).tz_convert("UTC")
 
 
-def fold_comparability(results: pd.DataFrame, rows: pd.DataFrame, folds) -> pd.Series:
+def fold_comparability(
+    results: pd.DataFrame, rows: pd.DataFrame, folds, *, window_days: int | None = None
+) -> pd.Series:
     """Per race_id of the folds' test rows: #94's race_comparability on the comparison graph of
-    the results before 00:00 Asia/Tokyo of the fold's first day."""
+    the results before 00:00 Asia/Tokyo of the fold's first day, from 00:00 Asia/Tokyo
+    `window_days` days earlier (None: every earlier result)."""
     parts = []
     for fold in folds:
         test = rows.iloc[fold.test_idx][["race_id", "horse_id"]]
         if len(test):
-            graph = competition.comparison_graph(results, before_utc=_jst_midnight(fold.test_start))
+            kept = results
+            if window_days is not None:
+                opens = _jst_midnight(fold.test_start - timedelta(days=window_days))
+                kept = results.loc[results["race_utc"] >= opens]
+            graph = competition.comparison_graph(kept, before_utc=_jst_midnight(fold.test_start))
             parts.append(competition.race_comparability(test, graph))
     return pd.concat(parts) if parts else pd.Series(dtype=float, name="race_comparability")
 
@@ -301,14 +320,15 @@ def _tail(p: pd.Series, scored: Scored, spec: dict, name: str) -> tuple[list, di
 def score_variants(
     rows: pd.DataFrame,
     folds,
-    reff: pd.Series,
+    reff: pd.Series | Exception,
     spec: dict,
     *,
     fold_scheme: str = "walk_forward",
     errors: dict[str, str] | None = None,
 ) -> Study:
     """One Variant per VARIANTS name and the REFF Variant over the scored races; see the module
-    docstring. `errors`: a variant's level-1 failure, named in its failed Variant."""
+    docstring. `errors`: a variant's level-1 failure, named in its failed Variant. `reff` may be
+    the R_eff stage's exception: it fails the REFF Variant alone."""
     errors = errors or {}
     scored = Scored.of(rows, folds)
     sr = scored.rows
@@ -355,6 +375,8 @@ def score_variants(
         )
 
     def buckets() -> tuple[list, dict]:
+        if isinstance(reff, Exception):
+            raise reff
         p = _meta_oof(rows, folds, _stage2(POOLED), "ln_q")[0]
         residual = _ll(p, sr) - _ll(market.get(), sr)
         table = reff_buckets(reff, residual, scored.clusters, spec)
@@ -473,8 +495,12 @@ def compute_study(inputs: ability.Inputs, spec: dict, scheme, log=print) -> Stud
     rfolds = restrict(folds2, rows.index.to_numpy(), len(price))
     rfolds = [f for f in rfolds if len(f.test_idx)]
     rows = rows.reset_index(drop=True)
-    log(f"comparison graphs for {len(rfolds)} scored folds")
-    reff = fold_comparability(inputs.results, rows, rfolds)
+    window = spec["reff_window_days"]
+    log(f"comparison graphs ({window} days) for {len(rfolds)} scored folds")
+    try:
+        reff = fold_comparability(inputs.results, rows, rfolds, window_days=window)
+    except Exception as exc:  # fails the REFF record alone (score_variants), never the variants
+        reff = exc.with_traceback(None)  # the stage's frames (its graph, its LU) are freed
     study = score_variants(rows, rfolds, reff, spec, fold_scheme=fold_scheme, errors=errors)
     study.counts = counts | member_counts | study.counts
     study.counts["variant_level1_failures"] = len(errors)

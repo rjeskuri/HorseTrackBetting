@@ -131,6 +131,88 @@ def random_results(seed: int, first: date, last: date) -> pd.DataFrame:
     return out
 
 
+# --------------------------------------------------------------------------- compute_study's inputs
+
+SPARSE_DAYS = (date(2010, 9, 4), date(2011, 1, 8))  # #92's level-1 quarters start at 2011-Q1
+DENSE_FIRST, DENSE_LAST = date(2014, 7, 5), date(2016, 6, 26)
+PRICED_FROM = date(2015, 1, 1)  # #92's LEVEL1_FROM: level 1 is out of fold from here
+ACTIVE = 60  # horses in training at a time
+
+
+def study_frames(seed: int, members: list[str]) -> dict:
+    """compute_study's inputs at a small scale. One race of eight on each SPARSE_DAYS day, then
+    each weekend day from DENSE_FIRST to DENSE_LAST two venues x two races of 6-9 runners drawn
+    from the ACTIVE newest horses of a pool that grows by two horses every four weeks (so a short
+    window leaves idle horses unconnected, and any window the quarter's debutants). Every race has
+    one winner, drawn from softmax(strength + 0.6 base + 0.4 signal). Returns 'level1' (race_id,
+    race_date, meeting_id, horse_id, finish_pos, won), 'results' (`studies.rating.read_results`'
+    columns), 'price' (the priced starters of the races from PRICED_FROM, one non-winner unpriced
+    in every fourth race; win_odds = 0.8 / softmax(strength) rounded to 0.1, at least 1.1; q
+    normalised over the priced starters; dead_heat False; sorted by date and race on a
+    RangeIndex) and 'u': per member, a level-1 utility per level1 row (members[0] is the base;
+    the others add the signal and noise in their own measure), NaN before PRICED_FROM."""
+    rng = np.random.default_rng(seed)
+    races = [(d, "v1", 1, 8, 0) for d in SPARSE_DAYS]
+    day = DENSE_FIRST
+    while day <= DENSE_LAST:
+        newest = ACTIVE + 2 * ((day - DENSE_FIRST).days // 28)
+        for d in (day, day + timedelta(days=1)):
+            for venue in ("v1", "v2"):
+                races += [(d, venue, r, int(rng.integers(6, 10)), newest) for r in (1, 2)]
+        day += timedelta(days=7)
+    weights = [(0.0, 0.0)] + [((0.5, 0.0, 0.3, 0.8)[k % 4], 0.5) for k in range(len(members) - 1)]
+    parts = []
+    for k, (d, venue, race_no, n, newest) in enumerate(races):
+        horses = rng.choice(np.arange(max(newest - ACTIVE, 0), max(newest, ACTIVE)), n, False)
+        strength, base = rng.normal(0.0, 1.0, n), rng.normal(0.0, 1.0, n)
+        signal = rng.normal(0.0, 0.8, n)
+        winner = int(np.argmax(strength + 0.6 * base + 0.4 * signal + rng.gumbel(size=n)))
+        pos = np.empty(n, dtype=int)
+        pos[winner] = 1
+        pos[np.arange(n) != winner] = rng.permutation(n - 1) + 2
+        market = np.exp(strength - strength.max())
+        odds = np.maximum(1.1, np.round(0.8 / (market / market.sum()), 1))
+        priced = np.ones(n, dtype=bool)
+        if k % 4 == 3:
+            priced[(winner + 1) % n] = False
+        frame = pd.DataFrame(
+            {
+                "race_id": f"jra:{d:%Y%m%d}:{venue}:{race_no:02d}",
+                "race_date": pd.Timestamp(d),
+                "race_no": race_no,
+                "race_utc": post_stamp(d, race_no),
+                "meeting_id": f"{d:%Y%m%d}:{venue}",
+                "horse_id": [f"jra:h{h:04d}" for h in horses],
+                "finish_pos": pos,
+                "won": pos == 1,
+                "win_odds": odds,
+                "priced": priced,
+            }
+        )
+        for name, (w, sd) in zip(members, weights, strict=True):
+            frame[f"u:{name}"] = base + w * signal + rng.normal(0.0, sd, n)
+        parts.append(frame)
+    every = pd.concat(parts, ignore_index=True)
+    every["race_utc"] = pd.to_datetime(every["race_utc"], utc=True)
+    level1 = every[["race_id", "race_date", "meeting_id", "horse_id", "finish_pos", "won"]].copy()
+    results = every[
+        ["race_id", "race_date", "race_no", "race_utc", "horse_id", "finish_pos"]
+    ].copy()
+    late = every["race_date"].ge(pd.Timestamp(PRICED_FROM)).to_numpy()
+    u = {name: np.where(late, every[f"u:{name}"].to_numpy(dtype=float), np.nan) for name in members}
+    price = every.loc[late & every["priced"].to_numpy(), ["race_id", "race_date", "horse_id"]]
+    price = price.assign(
+        win_odds=every["win_odds"],
+        won=every["won"],
+        dead_heat=False,
+        meeting_id=every["meeting_id"],
+    )
+    inv = 1.0 / price["win_odds"]
+    price["q"] = inv / inv.groupby(price["race_id"]).transform("sum")
+    price = price.sort_values(["race_date", "race_id"], kind="stable").reset_index(drop=True)
+    return {"level1": level1, "results": results, "price": price, "u": u}
+
+
 # --------------------------------------------------------------------------- the store
 
 DEV_FIRST, DEV_LAST = date(2013, 1, 5), date(2015, 12, 27)

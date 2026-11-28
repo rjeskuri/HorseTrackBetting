@@ -14,20 +14,23 @@ completed run appends: unique, naming each VARIANTS name and REFF. `N5_QUANTILES
 
 The spec. `build_spec(scheme, bootstrap) -> dict`: plain JSON, frozen by `freeze_family` before
 any outcome is read: `spec["family_id"] == FAMILY_ID`, `spec["variants"] == {name: list(terms)}`,
-`spec["bootstrap"] == bootstrap` (the only part of a spec the scoring below reads); it names #92's
-family (`ability.FAMILY_ID`, the base model) and holds both quantile lists.
+`spec["bootstrap"] == bootstrap` (the part of a spec the scoring below reads); it names #92's
+family (`ability.FAMILY_ID`, the base model) and holds both quantile lists and
+`spec["reff_window_days"]`, a positive int: the frozen width of each fold's comparison graph.
 
 Field terms. `field_features(frame, rating) -> pd.DataFrame`, the TERMS columns on frame's index:
 #94's `interaction_columns` of `rating` (a before-the-race rating per frame row, `models.rating`'s
 mu_before) over the other runners of each race_id. It reads race_id and `rating` only: no outcome
 of the race moves it.
 
-Comparability. `fold_comparability(results, rows, folds) -> pd.Series` by race_id: per fold, #94's
-`race_comparability` of the fold's test rows (`rows.iloc[fold.test_idx]`: race_id, horse_id) on
-`comparison_graph(results, before_utc=00:00 Asia/Tokyo of fold.test_start)`, so only races before
-the fold's first day enter its graph (a JST day boundary: safe on `studies.rating.read_results`'
-midnight + race_no stamps, #94); +inf for an unconnected pair or a horse the graph never saw; one
-value per race of the folds' test rows.
+Comparability. `fold_comparability(results, rows, folds, *, window_days=None) -> pd.Series` by
+race_id: per fold, #94's `race_comparability` of the fold's test rows (`rows.iloc[fold.test_idx]`:
+race_id, horse_id) on `comparison_graph(results, before_utc=00:00 Asia/Tokyo of fold.test_start)`,
+so only races before the fold's first day enter its graph (a JST day boundary: safe on
+`studies.rating.read_results`' midnight + race_no stamps, #94); +inf for an unconnected pair or a
+horse the graph never saw; one value per race of the folds' test rows. With `window_days` set, the
+graph holds only the results with race_utc in [00:00 JST of test_start - window_days days, 00:00
+JST of test_start): bounded on the real store's 824k runner rows. None: every earlier race.
 
 Buckets. `reff_buckets(reff, residual, clusters, spec) -> pd.DataFrame` (the three Series by
 race_id). Over the races with a residual and a non-NaN R_eff: the finite R_eff in quantile bands at
@@ -61,16 +64,22 @@ failed) is a failed Variant; every other variant still scores.
 
 The run. `load_inputs(log=print)` returns an object with `level1`, `results` and `price` frames,
 development days only. `compute_study(inputs, spec, scheme, log=print) -> Study`; every store read
-is in `load_inputs`. `run_study(*, out_dir=None, log=print) -> dict` (spec_hash, report_path):
-freezes `build_spec`'s spec in `default_registry("japan")` before `load_inputs` runs; appends one
-record per Variant (family FAMILY_ID, ticket 531, sources SOURCES; a failed Variant is a failed
-record with its error) or, when `load_inputs` or `compute_study` raises, one failed record per
-PLANNED entry, then re-raises; writes the private report (each variant's metrics with their bounds,
-a failed variant's error, the reff_buckets table) through `write_report` under out_dir, refused
-inside the repository; regenerates the committed registry summary, which shows no figure. The
-holdout is never opened. `competition_study_command` is `horsetrack japan competition-study`.
+is in `load_inputs`. Its R_eff stage is `fold_comparability(inputs.results, rows, scored folds,
+window_days=spec["reff_window_days"])` on the level-2 rows' priced starters; a failure there (a
+MemoryError on the real graph) fails the REFF Variant alone, with its error, and the four
+variants score as they would without it. Pinned with #92's level 1 stood in for
+(`studies.rating.member_grid`, `ability.select_pairs`, `level1_grid`, `select_discounts`,
+`level1_members` and this module's `variant_members`), on small synthetic frames.
+`run_study(*, out_dir=None, log=print) -> dict` (spec_hash, report_path): freezes `build_spec`'s
+spec in `default_registry("japan")` before `load_inputs` runs; appends one record per Variant
+(family FAMILY_ID, ticket 531, sources SOURCES; a failed Variant is a failed record with its error)
+or, when `load_inputs` or `compute_study` raises, one failed record per PLANNED entry, then
+re-raises; writes the private report (each variant's metrics with their bounds, a failed variant's
+error, the reff_buckets table) through `write_report` under out_dir, refused inside the repository;
+regenerates the committed registry summary, which shows no figure. The holdout is never opened.
+`competition_study_command` is `horsetrack japan competition-study`.
 
-Not pinned: the level-1 fits (#92's machinery, `compute_study`), per-fold points, other metrics,
+Not pinned: the level-1 fits (#92's machinery), the window's value, per-fold points, other metrics,
 the report's layout and artifact names, the experiment report and ledger row (prose, for the
 reviewer), a lone runner's field terms, dead-heat settlement. Expected values come from first
 principles (hand-worked resistances, a Newton fit of the power of q, direct loops) or from library
@@ -114,6 +123,7 @@ from horsetrack.countries.japan.models.meta import MetaSpec
 from horsetrack.countries.japan.research.leaderboard_build import build_rows
 from horsetrack.countries.japan.studies import ability
 from horsetrack.countries.japan.studies import competition as cs
+from horsetrack.countries.japan.studies import rating as c2_rating
 from horsetrack.countries.japan.studies.calibration import Study, Variant
 from horsetrack.countries.japan.studies.meta import Scored, _meta_oof
 
@@ -124,6 +134,7 @@ from competition_synth import (
     post_stamp,
     random_results,
     softmax_within,
+    study_frames,
     write_store,
 )
 
@@ -256,6 +267,15 @@ def test_the_four_variants_are_preregistered_in_a_frozen_spec(tmp_path):
     assert registry.frozen_spec(cs.FAMILY_ID) == spec
     assert registry.freeze_family(cs.FAMILY_ID, cs.build_spec(SCHEME, BOOT)) == digest
     assert set(names) >= set(cs.VARIANTS)
+
+
+def test_the_reff_window_is_a_frozen_positive_number_of_days():
+    for scheme in (SCHEME, dataclasses.replace(SCHEME, embargo_days=14)):
+        spec = cs.build_spec(scheme, BOOT)
+        window = spec["reff_window_days"]
+        assert isinstance(window, int) and not isinstance(window, bool), repr(window)
+        assert window > 0, window
+        assert json.loads(json.dumps(spec))["reff_window_days"] == window
 
 
 # --------------------------------------------------------------------------- field terms
@@ -472,6 +492,131 @@ def test_fold_comparability_reads_only_the_races_before_each_fold():
         moved = cs.fold_comparability(before, rows, folds)
         assert np.isfinite(moved.reindex(mine)).all(), "joined before the fold: every race finite"
         assert not np.array_equal(moved.reindex(mine).to_numpy(), got.reindex(mine).to_numpy())
+
+
+# The window's hand case: HAND with two older races. With a 91-day window F1's graph opens at
+# 2014-12-31 00:00 JST, so o2 (00:01 JST that day) enters it and o1 (the day before) does not;
+# F2's opens at 2015-04-01 00:00 JST: x1 (00:05 JST) and F1's test races enter, p1-p4 do not.
+WINDOW = 91
+HAND_OLD = [
+    ("o1", date(2014, 12, 30), 1, "AD", None),
+    ("o2", date(2014, 12, 31), 1, "AC", None),
+    *HAND,
+]
+# Worked by hand. F1: the triangle A, B, C at 1 an edge (o2, p1, p2), D, E, F at 1/2, G-H 1; A and
+# D apart (o1 is out). F2: A-D 2 (x1, t4), A-C 3/2 (t1, t2), A-B and B-C 1/2 (t2), D-E 1 (t3), G-H
+# 1 (t5), A-Z 1 (t6); F and Y never ran in the window.
+EXPECTED_WINDOW = {
+    "x1": INF,
+    "t1": 2 / 3,  # 1 in parallel with 1 + 1
+    "t2": 2 / 3,
+    "t3": 4 / 3,
+    "t4": INF,  # unbounded, o1 would join A and D
+    "t5": 1.0,
+    "t6": INF,
+    "y1": INF,
+    "u1": 1.0,  # t5 alone: p4 is older than the window
+    "u2": INF,
+    "u3": INF,  # F ran only in p3
+    "u4": 8 / 7,  # B-C 2 in parallel with B-A 2 + A-C 2/3
+    "v1": 1.0,
+}
+
+
+def test_a_windowed_fold_graph_holds_only_the_races_of_its_window():
+    results = results_of(HAND_OLD)
+    tested = [rid for rid, *_, fold in HAND_OLD if fold is not None]
+    rows = results.loc[results["race_id"].isin(tested), ["race_id", "horse_id", "race_date"]]
+    rows = rows.reset_index(drop=True)
+    folds = folds_over(rows, [F1, F2])
+
+    got = cs.fold_comparability(results, rows, folds, window_days=WINDOW)
+
+    assert set(got.index) == set(EXPECTED_WINDOW)
+    for rid, want in EXPECTED_WINDOW.items():
+        if math.isinf(want):
+            assert math.isinf(got[rid]) and got[rid] > 0, (rid, got[rid])
+        else:
+            assert got[rid] == pytest.approx(want, abs=1e-9), rid
+    unbounded = cs.fold_comparability(results, rows, folds)
+    assert np.isfinite(unbounded["t4"]) and unbounded["u1"] == pytest.approx(0.5, abs=1e-9)
+
+
+def windowed_reference(results, rows, folds, window: int) -> pd.Series:
+    """#94's library on each fold's window: the results from 00:00 JST of test_start - window
+    days, cut at 00:00 JST of test_start."""
+    parts = []
+    for fold in folds:
+        test = rows.iloc[fold.test_idx][["race_id", "horse_id"]]
+        if len(test):
+            opens = jst_midnight(fold.test_start - timedelta(days=window))
+            kept = results.loc[results["race_utc"] >= opens]
+            graph = competition.comparison_graph(kept, before_utc=jst_midnight(fold.test_start))
+            parts.append(competition.race_comparability(test, graph))
+    return pd.concat(parts)
+
+
+def window_case(seed: int):
+    results = random_results(seed, date(2014, 7, 5), date(2015, 12, 26))
+    starts = [date(2015, 4, 1), date(2015, 7, 1), date(2015, 10, 1)]
+    rows = results.loc[results["race_date"] >= pd.Timestamp(starts[0])]
+    rows = rows[["race_id", "horse_id", "race_date"]].reset_index(drop=True)
+    return results, rows, folds_over(rows, starts)
+
+
+def test_a_windowed_fold_comparability_is_the_library_on_the_windows_races():
+    results, rows, folds = window_case(5319)
+    unbounded = cs.fold_comparability(results, rows, folds)
+
+    again = cs.fold_comparability(results, rows, folds, window_days=None)
+
+    np.testing.assert_array_equal(again.reindex(unbounded.index).to_numpy(), unbounded.to_numpy())
+    differs = set()
+    for window in (14, 35, 91, 400):
+        got = cs.fold_comparability(results, rows, folds, window_days=window)
+        want = windowed_reference(results, rows, folds, window)
+        assert set(got.index) == set(want.index), window
+        np.testing.assert_allclose(
+            got.reindex(want.index).to_numpy(), want.to_numpy(), rtol=1e-9, err_msg=str(window)
+        )
+        assert np.isfinite(want).any(), window
+        if not np.array_equal(want.reindex(unbounded.index).to_numpy(), unbounded.to_numpy()):
+            differs.add(window)
+    assert {14, 35} <= differs, "a short window reads fewer races than the whole history"
+
+
+def test_races_outside_a_folds_window_never_move_it_and_races_inside_do():
+    results, rows, folds = window_case(5321)
+    window = 35
+    got = cs.fold_comparability(results, rows, folds, window_days=window)
+    races = [rows.iloc[f.test_idx]["race_id"].unique() for f in folds]
+
+    def again(day: date, horses, prefix: str) -> pd.Series:
+        extra = pd.concat([results, link_chain(horses, day, prefix)], ignore_index=True)
+        return cs.fold_comparability(extra, rows, folds, window_days=window)
+
+    for k, fold in enumerate(folds):
+        horses = list(pd.unique(rows.iloc[fold.test_idx]["horse_id"]))
+        opens = fold.test_start - timedelta(days=window)  # the window's first day
+        # The day before the window opens (00:01 to 01:40 JST): this fold and every later one is
+        # unmoved.
+        later = np.concatenate(races[k:])
+        older = again(opens - timedelta(days=1), horses, "old")
+        np.testing.assert_array_equal(
+            older.reindex(later).to_numpy(), got.reindex(later).to_numpy()
+        )
+        # The fold's first day: this fold and every earlier one is unmoved.
+        earlier = np.concatenate(races[: k + 1])
+        first = again(fold.test_start, horses, "late")
+        np.testing.assert_array_equal(
+            first.reindex(earlier).to_numpy(), got.reindex(earlier).to_numpy()
+        )
+        # The window's first day (from 00:01 JST, before 09:00 JST: a JST boundary, not UTC's) and
+        # the day before the fold both enter it: every race of the fold is then joined.
+        for day, prefix in ((opens, "edge"), (fold.test_start - timedelta(days=1), "pre")):
+            moved = again(day, horses, prefix).reindex(races[k])
+            assert np.isfinite(moved).all(), (fold.test_start, prefix)
+            assert not np.array_equal(moved.to_numpy(), got.reindex(races[k]).to_numpy()), prefix
 
 
 # --------------------------------------------------------------------------- R_eff buckets
@@ -1023,6 +1168,196 @@ def test_load_inputs_reads_development_days_only(tmp_path):
     assert set(frames["results"]["race_id"]) == ids["development"], "every earlier race"
     assert set(frames["price"]["race_id"]) == ids["price_era"]
     assert set(frames["level1"]["race_id"]) >= ids["price_era"]
+
+
+# --------------------------------------------------------------------------- the R_eff stage
+
+SHORT, LONG = 14, 3650  # two windows: two weekends, and the whole synthetic history
+PAIR = (0.004, 1.0)  # the stand-in level 1's one rating pair (drift, scale)
+OUT_OF_MEMORY = "synthetic: the comparison graph's factorisation ran out of memory"
+
+
+def out_of_memory(*args, **kwargs):
+    raise MemoryError(OUT_OF_MEMORY)
+
+
+def stub_level1(mp, frames: dict) -> None:
+    """#92's level 1 stood in for: one rating pair, fixed discounts, and the members' u from
+    `study_frames`. Everything after level 1 in compute_study runs as written."""
+    u = frames["u"]
+
+    def member_grid(results, frame, *args, **kwargs):
+        states = pd.DataFrame({"mu_before": 0.0, "sigma_before": 1.0}, index=frame.index)
+        return {PAIR: pd.Series(0.0, index=frame.index)}, {PAIR[0]: states}
+
+    def select_pairs(frame, members, outer, *args, **kwargs):
+        return [
+            {"fold": f.test_start.isoformat(), "drift_var_per_day": PAIR[0], "scale": PAIR[1]}
+            for f in outer
+        ]
+
+    def select_discounts(frame, grid, outer, picks, *args, **kwargs):
+        return [p | {"pooled w2": 0.5, "pooled w3": 0.25} for p in picks]
+
+    def level1_members(frame, *args, **kwargs):
+        n = len(frame)
+        return {ability.POOLED: u[ability.POOLED].copy()}, np.full(n, np.nan), np.full(n, None)
+
+    def variant_members(*args, **kwargs):
+        return {name: u[name].copy() for name in cs.VARIANTS}, {}
+
+    mp.setattr(c2_rating, "member_grid", member_grid)
+    mp.setattr(ability, "select_pairs", select_pairs)
+    mp.setattr(ability, "level1_grid", lambda *args, **kwargs: object())
+    mp.setattr(ability, "select_discounts", select_discounts)
+    mp.setattr(ability, "level1_members", level1_members)
+    mp.setattr(cs, "variant_members", variant_members)
+
+
+@pytest.fixture(scope="module")
+def study_run():
+    """compute_study on `study_frames` with level 1 stood in for, at each window; and the
+    references: the scored folds over the priced starters, their rows and each member's u."""
+    frames = study_frames(5320, [ability.POOLED, *cs.VARIANTS])
+    inputs = ability.Inputs(
+        level1=frames["level1"], results=frames["results"], price=frames["price"], counts={}
+    )
+    spec = cs.build_spec(SCHEME, BOOT)
+    runs = {}
+    with pytest.MonkeyPatch.context() as mp:
+        stub_level1(mp, frames)
+        for window in (SHORT, LONG):
+            at = spec | {"reff_window_days": window}
+            runs[window] = cs.compute_study(inputs, at, SCHEME, log=quiet)
+    price = frames["price"]
+    folds = [f for f in walk_forward(price["race_date"], scheme=SCHEME) if len(f.test_idx)]
+    assert len(folds) >= 3
+    keys = frames["level1"][["race_id", "horse_id"]].assign(**frames["u"])
+    u = price[["race_id", "horse_id"]].merge(keys, on=["race_id", "horse_id"], how="left")
+    u.index = price.index
+    sr = price.iloc[np.concatenate([f.test_idx for f in folds])]
+    clusters = sr["meeting_id"].groupby(sr["race_id"].to_numpy()).first()
+    return {
+        "frames": frames,
+        "inputs": inputs,
+        "spec": spec,
+        "runs": runs,
+        "folds": folds,
+        "scored": sr,
+        "clusters": clusters,
+        "u": u,
+    }
+
+
+def bands_of(reff: pd.Series, clusters: pd.Series) -> list[dict]:
+    """First principles: each finite quantile band of R_eff in order, then the unconnected bucket
+    (races, meetings, reff_lo, reff_hi)."""
+    reff = reff.dropna()
+    r = reff.to_numpy(dtype=float)
+    finite = np.isfinite(r)
+    qs = np.r_[0.0, list(cs.REFF_QUANTILES), 1.0]
+    edges = np.quantile(r[finite], qs)
+    out = []
+    for k in range(len(qs) - 1):
+        lo, hi = edges[k], edges[k + 1]
+        inside = finite & (r >= lo) & ((r <= hi) if k == len(qs) - 2 else (r < hi))
+        races = reff.index[inside]
+        out.append({"races": len(races), "meetings": clusters.reindex(races).nunique()})
+        out[-1] |= {"reff_lo": lo, "reff_hi": hi}
+    races = reff.index[~finite]
+    out.append({"races": len(races), "meetings": clusters.reindex(races).nunique()})
+    return out
+
+
+def test_compute_study_scores_the_variants_and_reads_reff_over_the_specs_window(study_run):
+    sr, clusters, u = study_run["scored"], study_run["clusters"], study_run["u"]
+    wanted = {}
+    for window, study in study_run["runs"].items():
+        by_name = variants_by_name(study)
+        # The wiring of the level-2 rows: each variant's member alone against the pooled member
+        # alone, from first principles (ln p renormalised over each race's priced starters).
+        for name in cs.VARIANTS:
+            assert by_name[name].error is None, (window, name, by_name[name].error)
+            per_race = winner_loss(np.exp(u[ability.POOLED]), sr) - winner_loss(np.exp(u[name]), sr)
+            iv = bounds(per_race, clusters)
+            m = one(by_name[name].metrics, "all_folds", "delta_ll_standalone")
+            assert m.n == len(per_race) == sr["race_id"].nunique(), (window, name)
+            assert m.value == pytest.approx(per_race.mean(), abs=1e-9), (window, name)
+            assert (m.lo, m.hi) == pytest.approx((iv.lo, iv.hi), abs=1e-9), (window, name)
+        # The R_eff stage reads each scored fold's graph over the spec's window.
+        assert by_name[cs.REFF].error is None, (window, by_name[cs.REFF].error)
+        reff = windowed_reference(
+            study_run["frames"]["results"], study_run["frames"]["price"], study_run["folds"], window
+        )
+        assert set(reff.index) == set(sr["race_id"])
+        wanted[window] = bands_of(reff, clusters)
+        table = pd.DataFrame(study.tables["reff_buckets"])
+        flagged = table.loc[table["bucket"].eq(cs.UNCONNECTED)]
+        finite = table.loc[~table["bucket"].eq(cs.UNCONNECTED)].sort_values(
+            "reff_lo", kind="stable"
+        )
+        got = [*finite.to_dict("records"), *flagged.to_dict("records")]
+        assert len(got) == len(wanted[window]) == len(cs.REFF_QUANTILES) + 2, window
+        for row, want in zip(got, wanted[window], strict=True):
+            assert int(row["races"]) == want["races"], (window, row)
+            assert int(row["meetings"]) == want["meetings"], (window, row)
+            if "reff_lo" in want:
+                assert float(row["reff_lo"]) == pytest.approx(want["reff_lo"], rel=1e-9), row
+                assert float(row["reff_hi"]) == pytest.approx(want["reff_hi"], rel=1e-9), row
+    short, long = wanted[SHORT], wanted[LONG]
+    assert short[-1]["races"] > long[-1]["races"] > 0, "a short window leaves more strangers"
+    assert short[0]["races"] > 0 and short[0]["reff_lo"] != long[0]["reff_lo"]
+
+
+def test_a_failure_in_the_reff_stage_fails_the_reff_variant_alone(monkeypatch, study_run):
+    stub_level1(monkeypatch, study_run["frames"])
+    monkeypatch.setattr(cs, "fold_comparability", out_of_memory)
+    spec = study_run["spec"] | {"reff_window_days": SHORT}
+
+    try:
+        study = cs.compute_study(study_run["inputs"], spec, SCHEME, log=quiet)
+    except MemoryError as exc:
+        pytest.fail(f"the R_eff stage's failure escaped compute_study: {exc!r}")
+
+    by_name = variants_by_name(study)
+    whole = variants_by_name(study_run["runs"][SHORT])
+    for name in cs.VARIANTS:
+        assert by_name[name].error is None, (name, by_name[name].error)
+        assert by_name[name].metrics, name
+        assert by_name[name].metrics == whole[name].metrics, name
+    failed = by_name[cs.REFF]
+    assert isinstance(failed.error, str), failed
+    assert "MemoryError" in failed.error and OUT_OF_MEMORY in failed.error, failed.error
+    assert not failed.metrics
+    assert not study.tables.get("reff_buckets")
+
+
+def test_run_study_records_the_variants_when_the_reff_stage_fails(tmp_path, monkeypatch, study_run):
+    fake_store(tmp_path / "data")
+    stub_level1(monkeypatch, study_run["frames"])
+    monkeypatch.setattr(cs, "load_inputs", lambda log=print: study_run["inputs"])
+    monkeypatch.setattr(cs, "load_country_scheme", lambda country: SCHEME)
+    monkeypatch.setattr(cs, "bootstrap_settings", lambda: dict(BOOT))
+    monkeypatch.setattr(cs, "fold_comparability", out_of_memory)
+
+    try:
+        result = cs.run_study(out_dir=tmp_path / "reports", log=quiet)
+    except MemoryError as exc:
+        pytest.fail(f"the R_eff stage's failure aborted the run: {exc!r}")
+
+    records = default_registry("japan").records(cs.FAMILY_ID)
+    statuses = {r.variant: r.status for r in records}
+    assert len(records) == len(statuses) == len(cs.VARIANTS) + 1
+    assert statuses == {**dict.fromkeys(cs.VARIANTS, "scored"), cs.REFF: "failed"}
+    whole = variants_by_name(study_run["runs"][SHORT])
+    for r in records:
+        if r.variant in cs.VARIANTS:
+            assert list(r.metrics) == list(whole[r.variant].metrics), r.variant
+    failed = next(r for r in records if r.variant == cs.REFF)
+    text = json.dumps(dataclasses.asdict(failed))
+    assert "MemoryError" in text and OUT_OF_MEMORY in text
+    report = Path(result["report_path"]).read_text(encoding="utf-8")
+    assert OUT_OF_MEMORY in report
 
 
 # --------------------------------------------------------------------------- the leaderboard

@@ -21,7 +21,13 @@ change from assumption to single-run.
   variant (failures included) with the sources `jra` and `jravan`, and regenerates the committed summary
   `docs/experiments/registry/japan/japan-c2-competition-final-win.md`, which shows every record as withheld.
 - Run cost: level 1 is #92's run as is (see Method), so expect about #92's time on this Mac (about 2 h 25 min,
-  peak resident memory about 1.8 GB), plus four fits per outer fold and one comparison graph per scored fold.
+  peak resident memory about 1.8 GB), plus four fits per outer fold. The R_eff stage then adds one comparison
+  graph and one sparse LU per scored fold (28 folds, 2020-Q1 to 2026-Q4) over a 365-day window. Measured at two
+  cuts with the Mac at a load average of about 22: the factorisation took 32 to 64 s at a peak resident memory of
+  about 1.0 GB, and the test races' resistances took 0.23 to 0.64 s a race, so about 4 to 10 min a fold. Expect
+  about 2 to 5 h for the stage, so about 5 to 8 h for the whole run. Without the window the stage does not
+  finish: at the 2020-01-01 cut, one factorisation of every earlier race was still running after 15 min at
+  3.1 GB and growing.
 
 ## Hypothesis
 
@@ -67,12 +73,24 @@ per-race winner ΔLL. For R_eff, a residual that rises across the R_eff bands, w
   the final odds, the bands at quantiles 0.5, 0.8, 0.9, 0.95 and 0.99 (#438's), and meeting clusters. The return is
   the top band's: the final odds for a winner (divided by m for each of m co-winners, because the store frame holds
   no dead-heat dividend) and 0 otherwise.
-- **R_eff (05 H12):** for each scored fold, #94's `comparison_graph` is built from the results before 00:00
-  Asia/Tokyo of the fold's first day, and `race_comparability` gives each of the fold's test races the mean
-  effective resistance over its runner pairs (+inf when a pair is unconnected or a horse is unseen). The residual is
-  the per-race winner log loss of the pooled member's stage-2 meta minus the market-only meta's. It is reported by
-  R_eff quintile band (`np.quantile` edges, `core.eval.tail`'s band rule) and in one unconnected bucket, each with
-  its mean and meeting-bootstrap bounds. The precision weighting itself is #98's E41.
+- **R_eff (05 H12):** for each scored fold, #94's `comparison_graph` is built from the results of the 365 days
+  before the fold's first day (`reff_window_days`: from 00:00 Asia/Tokyo 365 days before that day, up to 00:00
+  Asia/Tokyo of that day). `race_comparability` then gives each of the fold's test races the mean effective
+  resistance over its runner pairs (+inf when a pair is unconnected or a horse is unseen in the window). The
+  residual is the per-race winner log loss of the pooled member's stage-2 meta minus the market-only meta's. It is
+  reported by R_eff quintile band (`np.quantile` edges, `core.eval.tail`'s band rule) and in one unconnected
+  bucket, each with its mean and meeting-bootstrap bounds. The precision weighting itself is #98's E41.
+- **The window (frozen in the spec).** The store holds 86.5k horses from 2010. A graph of every earlier race
+  reaches 53k horses and 3.0M edges at the 2020-01-01 cut and 84k horses and 4.8M edges at the 2026-07-01 cut,
+  and its factorisation does not finish in bounded time or memory on this Mac. A 365-day graph holds about 11k
+  horses and 0.3M edges at either cut: at 2026-07-01 it has 11,443 horses, 295,427 edges and a giant component of
+  11,122, and at 2026-10-01 it has 10,905 horses, 295,370 edges and a giant component of 9,339. Its LU has about
+  24M nonzeros, takes 32 to 64 s and peaks at about 1.0 GB. That is below the 22.5k horses of #94's store-scale check. The
+  window costs coverage: it connects 415 of the 912 races in 2020-Q1 and 476 of the 888 in 2026-Q3, against 486
+  and 539 for the whole history, so about seven in eight of the races the history connects. The remaining races
+  hold a horse unseen for a year and go to the unconnected bucket. These counts were measured on the store's
+  race_id, race_date, race_no, status, horse_id and is_scratched only (no outcome, no price, no holdout day).
+  The run reads the same columns plus finish_pos, which #94's graph does not use.
 
 ## Variants tried
 
@@ -88,9 +106,10 @@ run yet, so none has a figure or CI. The split for all of them is D9's walk-forw
 | `field_all` | E33 | all three | As above |
 | `reff_by_bucket` | E41 | none (the pooled member) | The stage-2 residual against the market-only meta by R_eff band and unconnected bucket, with bounds |
 
-A variant whose level-1 fit fails is a failed record carrying its error, and the other variants still score. A run
-that aborts in `load_inputs` or `compute_study` appends a failed record for every planned variant, writes no
-report, and re-raises.
+A variant whose level-1 fit fails is a failed record carrying its error, and the other variants still score. A
+failure in the R_eff stage (a `MemoryError` in a fold's factorisation, say) fails `reff_by_bucket` alone, with its
+error, and the four variants still score. A run that aborts in `load_inputs` or before the R_eff stage of
+`compute_study` appends a failed record for every planned variant, writes no report, and re-raises.
 
 ## Alternatives rejected and why
 
@@ -107,6 +126,16 @@ report, and re-raises.
 - **Intraday cuts of the comparison graph:** `studies.rating.read_results` stamps races at midnight JST plus race_no
   minutes, so only a cut at a JST day boundary is point-in-time safe (#94). Each fold's graph is cut at 00:00 JST of
   its first day.
+- **Every earlier race in each fold's graph:** this is the cleanest R_eff, but its factorisation does not finish
+  on the store (see Method, the window).
+- **A shorter window (182 or 273 days):** this is cheaper. At 182 days the factorisation took 7.5 s and the
+  resistances 0.07 s a race, and at 273 days 17 s and 0.17 s a race. But the shorter windows connect fewer races:
+  182 days connects 215 and 304 of the races above (about half of what the history connects), and 273 days
+  connects 352 and 407. A season's layoff then makes a race unconnected, so the bands would hold mostly the
+  busiest fields. A year keeps a horse's last season in its graph.
+- **A 730-day window:** it connects 477 and 520 of the races above (97% of what the history connects). It has
+  twice the year's edges (0.58M) and 16k horses, so its factorisation was not tried after the year's took up to
+  a minute.
 - **Precision-weighting the meta by R_eff:** that is #98's E41. This study only reports the residual by bucket.
 
 ## What this rules out
