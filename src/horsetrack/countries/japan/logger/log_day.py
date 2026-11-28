@@ -534,10 +534,14 @@ def _plan(run: _SourceRun) -> list[str]:
          " from what tier 1 leaves of each round"] if tier2 else []
     )  # fmt: skip
     cards = config.get("cards")
+    placed = (  # #387's grain: no tier-1 capture gives way to the cards
+        "from what tier 1, the results polls and tier 2 leave of each round"
+        if hot.get("every_s") is not None or hot.get("floor_s") is not None
+        else "after the hot races, results and tier 2, before spare full-cycle refreshes"
+    )
     cards_line = (
         [f"race cards: each race's card at T-{',T-'.join(map(str, cards['grid_min']))} min,"
-         " after the hot races, results and tier 2, before spare full-cycle refreshes"]
-        if cards else []
+         f" {placed}"] if cards else []
     )  # fmt: skip
     results = config.get("results")
     results_line = (

@@ -127,7 +127,11 @@ when logger.yaml has a `cards` block: each race's 出馬表 (JRADB pw01dde) once
 (`logger/schedule.py`): after tier 1's hot races, the results polls and tier 2, before tier 1's
 spare full-cycle refreshes of races that are not hot. A refresh left out for the cards waits for
 the venue's next full cycle or for the race to turn hot; the hot-race captures, the tier-2
-captures and the results polls are the same with the cards as without.
+captures and the results polls are the same with the cards as without. With #387's deadline
+planner (logger.yaml `hot_races.every_s` and `floor_s`, JRA's schedule) no tier-1 capture gives
+way: the cards take only what tier 1, the results polls, the post-time reads and tier 2 leave of a
+round, and only when they end before the next round starts, so every odds call is the same with
+the cards as without.
 
 - Append-only, in the log's format: one gzip member per capture (`odds_log.append_capture`), read
   back with `iter_members`. A later capture never rewrites an earlier one, so every capture of a
