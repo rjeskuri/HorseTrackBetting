@@ -11,7 +11,18 @@ Contract pinned here, module ``horsetrack.countries.japan.research.leaderboard_b
   n_meetings the cell's, selection the cell's 'selection' (default 'unknown'), sources the cell's
   'sources' (default ('jravan',): a cell without the key is withheld), ticket the cell's
   'ticket' (default None), no shrunk value (``shrink`` sets it, never a reader). An empty cell
-  (mean_return null) is an unmeasured row, never dropped.
+  (mean_return null) is an unmeasured row, never dropped. Without a 'selection' key, a 'variant'
+  of 't2' reads as 'decision_time' and 'lookahead' as 'look_ahead' (#503's spread-scan export);
+  any other or missing variant stays 'unknown'. A cell with finite 'ci_lo' and 'ci_hi' (per unit
+  staked, each a one-sided bound at 0.95: the spread scan's 5% and 95% bootstrap quantiles) gives
+  the row ci_lo and ci_hi 100 x them at ci_level 0.95, the leaderboard's one-sided convention
+  (docs/specs/leaderboard.md); otherwise no CI.
+- Option ids (D21): an option id is a function of the cell's own identity, never of the order of
+  entries or files, nor of another cell's figures. A cell_id that does not recur within its
+  family keeps the bare ``'<family_id>/<cell_id>'``; every cell whose (family_id, cell_id)
+  recurs with another pool gets ``'<family_id>/<cell_id>[pool:<pool>]'``, the first included; a
+  collision the pool does not resolve (same family, cell_id and pool, other content) gets a
+  suffix derived from the cell's own content, never an entry-order index.
 - ``build_rows(*, registry=None, candidate_dir=None) -> list[LeaderboardRow]``: #451's
   ``legacy_rows(registry)`` as they are, plus every candidate row whose option id the registry
   does not give (a registry row wins on the same id, measured or not); a candidate row's
@@ -22,9 +33,10 @@ Contract pinned here, module ``horsetrack.countries.japan.research.leaderboard_b
   ``<reports dir>/leaderboard-japan.md`` (``write_leaderboard``, public=False) and
   ``leaderboard-japan.json`` (``to_json``); with ``--public`` also
   ``<env.repo_root()>/docs/leaderboard/japan.md`` (``write_leaderboard``, public=True), the path
-  resolved through ``env.repo_root()`` when the command runs. It prints the counts of rows,
-  measured, unmeasured and withheld rows, each once next to its label ('8 rows' or 'rows: 8'),
-  and never a figure.
+  resolved through ``env.repo_root()`` when the command runs. Its stdout holds the counts of
+  rows, measured, unmeasured and withheld rows, each once next to its label ('8 rows' or
+  'rows: 8'), and nothing else; its diagnostics (cells read, copies, skips and their reasons,
+  files written) go to stderr. Neither stream holds a figure.
 
 Every registry is a temp file under ``tmp_path``; every figure is made up. The command tests point
 ``env.repo_root`` at a stand-in repository and check the real ``docs/leaderboard/japan.md`` is
@@ -37,6 +49,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import re
 from pathlib import Path
 
@@ -330,8 +343,7 @@ _COUNT_STYLES = (r"(\d+)\s+{label}\b", r"\b{label}\b\s*[:=]?\s*(\d+)")
 COUNT_LABELS = ("rows", "measured", "unmeasured", "withheld")
 
 
-def printed_counts(output: str) -> dict[str, int] | None:
-    """The four counts, each printed once next to its label in one consistent style."""
+def _counts_in(output: str) -> tuple[str, dict[str, int]] | None:
     for style in _COUNT_STYLES:
         found = {}
         for label in COUNT_LABELS:
@@ -340,8 +352,34 @@ def printed_counts(output: str) -> dict[str, int] | None:
                 break
             found[label] = int(values.pop())
         else:
-            return found
+            return style, found
     return None
+
+
+def printed_counts(output: str) -> dict[str, int] | None:
+    """The four counts, each printed once next to its label in one consistent style."""
+    found = _counts_in(output)
+    return None if found is None else found[1]
+
+
+def stdout_counts(stdout: str) -> dict[str, int]:
+    """The four counts of a stdout that holds them and nothing else but separators."""
+    found = _counts_in(stdout)
+    assert found is not None, f"stdout does not hold the four counts: {stdout!r}"
+    style, counts = found
+    rest = stdout
+    for label in COUNT_LABELS:
+        rest = re.sub(style.format(label=label), "", rest, flags=re.IGNORECASE)
+    assert re.fullmatch(r"[\s,;:=]*", rest), (
+        f"stdout holds more than the four counts (diagnostics go to stderr): {stdout!r}"
+    )
+    return counts
+
+
+def assert_no_figure(text: str, figures: set[str]) -> None:
+    assert not re.search(r"\d\.\d|\d,\d{3}\b", text), f"a figure reached the output: {text!r}"
+    leaked = figures & set(re.findall(r"\d+", text))
+    assert not leaked, f"figures {sorted(leaked)} reached the output: {text!r}"
 
 
 def without_paths(output: str, tmp_path: Path) -> str:
@@ -352,11 +390,22 @@ def without_paths(output: str, tmp_path: Path) -> str:
 
 
 def invoke(*args: str):
+    """The command through typer's runner, stdout and stderr kept apart: typer 0.29's own runner
+    always keeps them apart (``result.stdout``, ``result.stderr``; ``result.output`` holds both),
+    a click-based runner only with ``mix_stderr=False``."""
+    import inspect
+
     from typer.testing import CliRunner
 
     from horsetrack.cli import app
 
-    return CliRunner().invoke(app, ["japan", "leaderboard", *args])
+    apart = {"mix_stderr": False} if "mix_stderr" in inspect.signature(CliRunner).parameters else {}
+    return CliRunner(**apart).invoke(app, ["japan", "leaderboard", *args])
+
+
+def streams(result, tmp_path: Path) -> tuple[str, str]:
+    """The run's stdout and stderr, the temp paths masked."""
+    return without_paths(result.stdout, tmp_path), without_paths(result.stderr, tmp_path)
 
 
 # --------------------------------------------------------------------------- build_rows
@@ -664,6 +713,232 @@ def test_a_registry_row_wins_over_a_candidate_row_with_the_same_id(reg, tmp_path
     rank(list(rows.values()))
 
 
+# --------------------------------------------------------------------------- option ids (D21)
+
+OTHER_SCAN = "japan-other-synthetic-scan"
+MAIDEN = "class:maiden|band:5-10"  # in three pools
+OPEN = "class:open|band:2-5"  # in two pools
+DEBUT = "class:debut|band:20-50"  # in one pool only
+SHORT = "class:maiden|band:2-5"  # twice in WIN (other content), once in PLACE
+
+
+def scan_cell(cell_id: str, pool: str, n_bets: int, mean: float, edge: float, **kw) -> dict:
+    """A pool-scan cell; its n_bets is unique, so it names the cell in the tests' mappings."""
+    return cell(cell_id=cell_id, pool=pool, n_bets=n_bets, mean_return=mean, shrunk_edge=edge, **kw)
+
+
+# Pools ranked within a segment by a made-up shrunk edge, as #430's writer sorts them.
+SCAN = [
+    scan_cell(MAIDEN, "WIN", 1101, 0.91, 0.031),
+    scan_cell(MAIDEN, "PLACE", 1102, 0.83, -0.012),
+    scan_cell(MAIDEN, "QUINELLA_PLACE", 1103, 0.77, -0.054),
+    scan_cell(OPEN, "PLACE", 1202, 0.94, 0.022, sources=["netkeiba"]),
+    scan_cell(OPEN, "WIN", 1201, 0.88, -0.008, sources=["netkeiba"]),
+    scan_cell(DEBUT, "WIN", 1301, 1.05, 0.044),
+    scan_cell(SHORT, "PLACE", 1403, 0.86, 0.017),
+    scan_cell(SHORT, "WIN", 1401, 0.81, -0.021),
+    scan_cell(SHORT, "WIN", 1402, 0.79, -0.033),
+    scan_cell(MAIDEN, "WIN", 1501, 0.74, -0.061, family_id=OTHER_SCAN),
+]
+BY_POOL = {
+    1101: f"{POOL_SCAN}/{MAIDEN}[pool:WIN]",
+    1102: f"{POOL_SCAN}/{MAIDEN}[pool:PLACE]",
+    1103: f"{POOL_SCAN}/{MAIDEN}[pool:QUINELLA_PLACE]",
+    1201: f"{POOL_SCAN}/{OPEN}[pool:WIN]",
+    1202: f"{POOL_SCAN}/{OPEN}[pool:PLACE]",
+    1301: f"{POOL_SCAN}/{DEBUT}",  # does not recur: the bare id
+    1403: f"{POOL_SCAN}/{SHORT}[pool:PLACE]",  # its pool resolves it
+    1501: f"{OTHER_SCAN}/{MAIDEN}",  # once in its own family: the bare id
+}
+
+
+def ids_by_cell(directory: Path, files: dict[str, list[dict]]) -> dict[int, str]:
+    """Each cell's option id, by its n_bets, from the candidate files ``files`` written fresh."""
+    for name, cells in files.items():
+        write_cells(directory, name, cells, lines=name.endswith(".jsonl"))
+    rows = unique(build().candidate_rows(directory))
+    mapping = {row.n: row.option_id for row in rows.values()}
+    assert len(mapping) == len(rows), "two rows share an n_bets: a cell gave two rows"
+    return mapping
+
+
+def test_option_ids_do_not_depend_on_entry_or_file_order(data, tmp_path):
+    copy = dict(SCAN[1])  # an exact copy of a cell (a superseded file): no second row
+    first, second = SCAN[:5], [*SCAN[5:], copy]
+    shuffled = [*SCAN, copy]
+    random.Random(452).shuffle(shuffled)
+    arrangements = {
+        "as-written": {"a-scan.json": first, "b-scan.jsonl": second},
+        # every file's entries reversed and the names flipped, so the second file reads first
+        "reversed": {"z-scan.json": first[::-1], "m-scan.jsonl": second[::-1]},
+        "swapped": {"a-scan.json": second, "b-scan.jsonl": first},
+        "one-shuffled-file": {"only.json": shuffled},
+    }
+
+    mappings = {name: ids_by_cell(tmp_path / name, files) for name, files in arrangements.items()}
+
+    expected = mappings["as-written"]
+    assert set(expected) == {c["n_bets"] for c in SCAN}
+    for name, mapping in mappings.items():
+        assert mapping == expected, f"the option ids change with the order ({name})"
+    assert {n: expected[n] for n in BY_POOL} == BY_POOL
+    # a cell_id recurring with another pool never keeps a bare id, the first cell included
+    assert f"{POOL_SCAN}/{MAIDEN}" not in expected.values()
+    assert f"{POOL_SCAN}/{OPEN}" not in expected.values()
+    assert f"{POOL_SCAN}/{SHORT}" not in expected.values()
+    # the public withheld list names the same ids whatever order the scan wrote its pools in
+    lists = set()
+    for name in arrangements:
+        rows = build().candidate_rows(tmp_path / name)
+        lists.add(frozenset(withheld_list(render_markdown(rows, title="t", public=True))))
+    assert len(lists) == 1
+    assert lists.pop() == {i for n, i in expected.items() if n not in (1201, 1202)}
+
+
+def test_a_cell_id_in_three_pools_gives_three_pool_ids(data, tmp_path):
+    three = [scan_cell("class:all|band:all", pool, 2100 + i, 0.8 + i / 100, 0.01 * i)
+             for i, pool in enumerate(("WIN", "PLACE", "QUINELLA_PLACE"))]  # fmt: skip
+    base = f"{POOL_SCAN}/class:all|band:all"
+    expected = {
+        2100: f"{base}[pool:WIN]",
+        2101: f"{base}[pool:PLACE]",
+        2102: f"{base}[pool:QUINELLA_PLACE]",
+    }
+
+    for name, order in (("forward", three), ("backward", three[::-1])):
+        mapping = ids_by_cell(tmp_path / name, {"scan.json": order})
+        assert mapping == expected, name
+        assert base not in mapping.values(), name
+
+
+def test_a_same_pool_collision_gets_ids_from_the_cells_own_content(data, tmp_path):
+    base = f"{POOL_SCAN}/{SHORT}"
+    x = scan_cell(SHORT, "WIN", 1401, 0.81, -0.021)
+    # partners with fewer and more bets, lower and higher returns than x
+    partners = [
+        scan_cell(SHORT, "WIN", 1402, 0.79, -0.033),
+        scan_cell(SHORT, "WIN", 1399, 0.93, 0.012),
+        scan_cell(SHORT, "WIN", 1650, 0.64, -0.118),
+        scan_cell(SHORT, "WIN", 1210, 1.12, 0.051),
+    ]
+
+    pairs = {}
+    for k, partner in enumerate(partners):
+        n = partner["n_bets"]
+        pairs[n, "x-first"] = ids_by_cell(tmp_path / f"{k}-a", {"scan.json": [x, partner]})
+        pairs[n, "x-last"] = ids_by_cell(tmp_path / f"{k}-b", {"scan.json": [partner, x]})
+        pairs[n, "two-files"] = ids_by_cell(
+            tmp_path / f"{k}-c", {"b-scan.json": [x], "a-scan.json": [partner]}
+        )
+
+    x_ids = {mapping[1401] for mapping in pairs.values()}
+    assert len(x_ids) == 1, f"x's id depends on the order or on its partner: {sorted(x_ids)}"
+    x_id = x_ids.pop()
+    for (n, how), mapping in pairs.items():
+        assert mapping[n] == pairs[n, "x-first"][n], f"partner {n}'s id changes with order ({how})"
+        assert mapping[n] != x_id
+        assert mapping[n].startswith(base) and mapping[n] != base, mapping[n]
+    assert x_id.startswith(base) and x_id != base, x_id
+    assert len({pairs[p["n_bets"], "x-first"][p["n_bets"]] for p in partners}) == len(partners)
+
+
+# --------------------------------------------------------------------------- spread-scan cells
+
+# The CI level a spread-scan cell's bounds carry: each bound is one-sided at 0.95 (its 5% and 95%
+# bootstrap quantiles, docs/specs/spread-scan-prereg.md), and a leaderboard row's ci_level is the
+# level of each one-sided bound (docs/specs/leaderboard.md, D7 style).
+SPREAD_CI_LEVEL = 0.95
+
+# A synthetic cell in #503's export shape (spread_scan.py, the keys of its candidate cells).
+SPREAD_CELL = {
+    "study": "spread-scan",
+    "family_id": "japan-n8-spread-scan-quinella",
+    "cell_id": "spread-scan:t2:quinella:box1-4:class:maiden",
+    "pool": "QUINELLA",
+    "class_group": "maiden",
+    "odds_band": None,
+    "payout_rate": 0.775,
+    "n_bets": 812,
+    "n_race_days": 233,
+    "n_meetings": 97,
+    "mean_return": 0.7431,
+    "se_mean_return": 0.0412,
+    "shrunk_edge": -0.2213,
+    "mean_odds": 3.2,
+    "spread_id": "quinella:box1-4",
+    "variant": "t2",
+    "segment": "class:maiden",
+    "rank": 7,
+    "n_tickets": 4872,
+    "ci_lo": 0.6783,
+    "ci_hi": 0.8117,
+    "p_return_above_100": 0.0,
+}
+LOOKAHEAD = {
+    "cell_id": "spread-scan:lookahead:quinella:box1-4:class:maiden",
+    "variant": "lookahead",
+    "mean_return": 0.7804,
+    "se_mean_return": 0.0377,
+    "ci_lo": 0.7012,
+    "ci_hi": 0.8655,
+}
+
+SPREAD_CASES = [
+    pytest.param({}, "decision_time", (67.83, 81.17), id="t2-reads-decision-time"),
+    pytest.param(LOOKAHEAD, "look_ahead", (70.12, 86.55), id="lookahead-reads-look-ahead"),
+    pytest.param(
+        {
+            "variant": "E2:debut-first-start",
+            "ci_lo": 0.5521,
+            "ci_hi": 0.9034,
+            "mean_return": 0.7302,
+        },
+        "unknown",
+        (55.21, 90.34),
+        id="another-variant-is-unknown",
+    ),
+    pytest.param({"variant": _MISSING}, "unknown", (67.83, 81.17), id="no-variant-is-unknown"),
+    pytest.param({"variant": None}, "unknown", (67.83, 81.17), id="a-null-variant-is-unknown"),
+    pytest.param(
+        {"selection": "card_only"}, "card_only", (67.83, 81.17), id="a-selection-key-wins-over-t2"
+    ),
+    pytest.param(
+        {**LOOKAHEAD, "selection": "decision_time"},
+        "decision_time",
+        (70.12, 86.55),
+        id="a-selection-key-wins-over-lookahead",
+    ),
+    pytest.param({"ci_hi": _MISSING}, "decision_time", None, id="no-ci-hi-no-ci"),
+    pytest.param({"ci_lo": None}, "decision_time", None, id="a-null-ci-lo-no-ci"),
+    pytest.param({"ci_lo": float("nan")}, "decision_time", None, id="a-nan-ci-lo-no-ci"),
+    pytest.param({"ci_hi": float("inf")}, "decision_time", None, id="an-infinite-ci-hi-no-ci"),
+    pytest.param({"ci_lo": "0.6783"}, "decision_time", None, id="a-text-ci-lo-no-ci"),
+]
+
+
+@pytest.mark.parametrize(("overrides", "selection", "ci"), SPREAD_CASES)
+def test_spread_scan_cells_read_their_selection_and_ci(data, tmp_path, overrides, selection, ci):
+    given = {k: v for k, v in {**SPREAD_CELL, **overrides}.items() if v is not _MISSING}
+    cells_dir = tmp_path / "cells"
+    write_cells(cells_dir, "spread-scan.json", [given])  # NaN and Infinity as Python writes them
+
+    rows = build().candidate_rows(cells_dir)
+
+    assert [r.option_id for r in rows] == [f"{given['family_id']}/{given['cell_id']}"]
+    row = rows[0]
+    assert row.selection == selection
+    assert row.return_per_100 == pytest.approx(100 * given["mean_return"])
+    assert row.se_per_100 == pytest.approx(100 * given["se_mean_return"])
+    assert (row.n, row.n_meetings, row.pool) == (812, 97, "QUINELLA")
+    if ci is None:
+        assert (row.ci_lo, row.ci_hi, row.ci_level) == (None, None, None)
+    else:
+        assert (row.ci_lo, row.ci_hi) == pytest.approx(ci)
+        assert row.ci_level == pytest.approx(SPREAD_CI_LEVEL)
+    assert row.withheld, "a spread-scan cell names no sources: withheld (D21)"
+    render_markdown(rows, title="Japan leaderboard", public=False)
+
+
 # --------------------------------------------------------------------------- the command
 
 
@@ -740,11 +1015,29 @@ def test_the_command_writes_the_private_reports_under_the_data_dir(data, tmp_pat
         EMPTY_ID,
     }
 
-    out = without_paths(result.output, tmp_path)
-    assert printed_counts(out) == {"rows": 8, "measured": 5, "unmeasured": 3, "withheld": 2}, out
-    assert not re.search(r"\d\.\d|\d,\d{3}\b", out), f"a figure reached the output: {out!r}"
-    leaked = SEEDED_FIGURES & set(re.findall(r"\d+", out))
-    assert not leaked, f"figures {sorted(leaked)} reached the output: {out!r}"
+    out, err = streams(result, tmp_path)
+    assert stdout_counts(out) == {"rows": 8, "measured": 5, "unmeasured": 3, "withheld": 2}
+    assert_no_figure(out, SEEDED_FIGURES)
+    assert_no_figure(err, SEEDED_FIGURES)
+
+
+def test_the_command_sends_its_diagnostics_to_stderr(data, tmp_path, stand_in_repo):
+    seed_command_data(data, tmp_path)
+    cells_dir = data / "reports" / "candidate-cells"
+    (cells_dir / "broken.json").write_text('[{"study": "N1", ', encoding="utf-8")
+    write_cells(cells_dir, "superseded.jsonl", [cell()], lines=True)  # an exact copy
+    (cells_dir / "odd.jsonl").write_text('"not a cell"\n', encoding="utf-8")
+
+    result = invoke("--public")
+
+    assert result.exit_code == 0, result.output
+    out, err = streams(result, tmp_path)
+    # the files that gave no row change no count, and stdout holds the counts alone
+    assert stdout_counts(out) == {"rows": 8, "measured": 5, "unmeasured": 3, "withheld": 2}
+    assert "broken.json" in err and "odd.jsonl" in err, f"the skips are not on stderr: {err!r}"
+    assert "broken.json" not in out and "odd.jsonl" not in out
+    assert_no_figure(out, SEEDED_FIGURES)
+    assert_no_figure(err, SEEDED_FIGURES)
 
 
 def test_public_output_holds_no_withheld_figure(data, tmp_path, stand_in_repo):
@@ -777,8 +1070,11 @@ def test_public_output_holds_no_withheld_figure(data, tmp_path, stand_in_repo):
     assert set(unique(rows)) == SEEDED_IDS | {withheld_id}
     assert public == render_markdown(rows, title=title_of(public), public=True)
 
-    out = without_paths(result.output, tmp_path)
-    assert "98765" not in out and not re.search(r"\d\.\d", out), out
+    out, err = streams(result, tmp_path)
+    assert stdout_counts(out) == {"rows": 9, "measured": 6, "unmeasured": 3, "withheld": 3}
+    figures = SEEDED_FIGURES | {"98765", "123", "77"}
+    assert_no_figure(out, figures)
+    assert_no_figure(err, figures)
 
 
 # --------------------------------------------------------------------------- the committed file
@@ -813,11 +1109,12 @@ def test_the_committed_public_leaderboard_holds_public_rows_only():
 # --------------------------------------------------------------------------- the real registry
 
 
-def _real_cell_ids(directory: Path) -> set[str]:
-    """'<family_id>/<cell_id>' of every cell of the real candidate files that names both."""
-    ids: set[str] = set()
+def _real_cells(directory: Path) -> dict[str, set[tuple[str | None, str]]]:
+    """Per '<family_id>/<cell_id>' of the real candidate files' cells that name both, its
+    distinct cells (exact copies once) as (pool, canonical JSON)."""
+    cells_by: dict[str, set[tuple[str | None, str]]] = {}
     if not directory.is_dir():
-        return ids
+        return cells_by
     for path in sorted(directory.iterdir()):
         if path.suffix == ".json":
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -829,10 +1126,34 @@ def _real_cell_ids(directory: Path) -> set[str]:
             continue
         for c in cells:
             if isinstance(c, dict):
-                family, cell_id = c.get("family_id"), c.get("cell_id")
+                family, cell_id, pool = c.get("family_id"), c.get("cell_id"), c.get("pool")
                 if isinstance(family, str) and isinstance(cell_id, str):
-                    ids.add(f"{family}/{cell_id}")
-    return ids
+                    pool = pool if isinstance(pool, str) and pool.strip() else None
+                    key = (pool, json.dumps(c, sort_keys=True))
+                    cells_by.setdefault(f"{family}/{cell_id}", set()).add(key)
+    return cells_by
+
+
+def _missing_cells(cells_by: dict[str, set[tuple[str | None, str]]], ids: set[str]) -> list[str]:
+    """The ids the real cells should have and the rows lack: the bare id for a cell_id that does
+    not recur, '[pool:<pool>]' for each pool of one cell when the cell_id recurs with another
+    pool, and a suffixed id for every distinct cell of a recurring cell_id."""
+    missing = []
+    for base, found in sorted(cells_by.items()):
+        if len(found) == 1:
+            missing += [] if base in ids else [base]
+            continue
+        pools = [pool for pool, _ in found]
+        if len(set(pools)) > 1:
+            missing += [
+                f"{base}[pool:{p}]"
+                for p in sorted({p for p in pools if p is not None and pools.count(p) == 1})
+                if f"{base}[pool:{p}]" not in ids
+            ]
+        suffixed = {i for i in ids if i.startswith(f"{base}[")}
+        if len(suffixed) < len(found):
+            missing.append(f"{base}[...] ({len(found)} cells, {len(suffixed)} rows)")
+    return missing
 
 
 @pytest.mark.local
@@ -846,7 +1167,7 @@ def test_the_real_registry_builds():
     # read before the build: a run appended meanwhile only adds rows the build also sees
     registry = Registry(real, holdout_log=REAL_COUNTRIES / "japan" / "holdout_log.jsonl")
     families = {r.family_id for r in registry.records() if r.holdout_open is None}
-    cells = _real_cell_ids(paths.reports_dir() / "candidate-cells")
+    cells = _real_cells(paths.reports_dir() / "candidate-cells")
 
     rows = build().build_rows()
 
@@ -855,7 +1176,7 @@ def test_the_real_registry_builds():
     rank(rows)
     missing_families = sorted(families - {r.family_id for r in rows})
     assert not missing_families, f"families missing from the board: {missing_families[:10]}"
-    missing_cells = sorted(cells - set(by_id))
+    missing_cells = _missing_cells(cells, set(by_id))
     assert not missing_cells, f"{len(missing_cells)} candidate cells missing: {missing_cells[:10]}"
     render_markdown(rows, title="Japan leaderboard", public=True)
     render_markdown(rows, title="Japan leaderboard", public=False)
