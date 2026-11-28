@@ -25,10 +25,14 @@ Before anything is scored or written, `run_study` refuses:
   instant at or before the race's decision instant (`post_utc` minus the n minutes of
   `decision_time` "T-n") on every row holding a value, and on every row it stamps: a missing value
   stamped after t (a board update blanking a price) is a late observation, with or without a
-  source; only a missing value with no stamp is genuinely missing (never selected). So a
-  post-race table joined onto runners (the Win payout's `combination`, say), or a value published
+  source; only a missing value with no stamp is genuinely missing (never selected). Each column's
+  own source must be able to supply it: one declared from a card table (races, runners) that the
+  table does not hold, but a store table outside the view at t does (`core.store.schemas`: the
+  dividends and the other results, gated after t, or a label-only or current-value table), is
+  refused (#578). So a post-race table joined onto runners (the Win payout's `combination` or
+  `pool`, say), whether declared from that table or stamped as the card, or a value published
   after t, is refused by its declaration whatever its name; an input declared from an admitted
-  source and stamped by t is trusted as declared.
+  source that can hold it and stamped by t is trusted as declared.
 - a row on a holdout day (`core.eval.holdout.is_holdout_day`), or a spec or frame it cannot run
   (ValueError).
 
@@ -63,7 +67,13 @@ None an open end, a missing value never selected) among the rows the walk-forwar
 the population log loss is scored on; training-only rows are never read for selection.
 
 A measurement that cannot be made is NaN in its entry, which carries the reason as "error"; no
-failure stops another rule or stage. Survivors (passed stage 1 and found superior by StepM) are a
+failure stops another rule, stage, fold or race (#578). A race holding a starter the calibrated
+market gives no probability (no final price) loses its own benchmark, fits and scores only:
+`stages["benchmark_unmeasured"]` maps it to the reason, and a rule whose segment holds it says so
+in its log-loss "error". A fold whose claim cannot be fitted loses that fold only, named with its
+reason in the rule's log-loss "error". A gain whose clustered interval cannot be computed (a race
+without its `cluster_unit`) keeps the gain and the coefficients, its bounds NaN, `passed` False and
+the reason as the entry's "error". Survivors (passed stage 1 and found superior by StepM) are a
 diagnostic. Every rule's rung is S0, D19's default; rules move only through the leaderboard
 (#449) and the owner. The holdout passed in is never opened.
 
@@ -75,7 +85,9 @@ level `predictive_roi_100_level`) and, in `notes`, each failed stage's reason ('
 not appended again, unless it is a rule's end record and no longer the rule's latest (a retry
 that reproduces a run after a later failure, say): then it is appended again as the latest, with
 a 'rerun' note numbering it, outside the variant identity. A rerun whose frame cannot score a
-variant the family holds scored is refused before any record.
+variant the family holds scored keeps every other measurement and record (#578): that rule carries
+its reason, and the max-statistic stage, which tests every scored variant of the family and never a
+subset, is not run: its "error" names the rule, and no rule is superior.
 `sources` defaults to licensed sources (fails closed, D21): pass the sources `data` was built from.
 """
 
@@ -102,6 +114,7 @@ from horsetrack.core.eval.scoring import gain, per_race_log_loss
 from horsetrack.core.eval.segment_roi import fit_segment_roi
 from horsetrack.core.eval.snooping import spa, stepm
 from horsetrack.core.store.asof import load_availability
+from horsetrack.core.store.schemas import TABLES
 from horsetrack.countries.japan.models.condlogit import fit_conditional_logit
 from horsetrack.countries.japan.models.v0.calibration import fit_win_calibration
 from horsetrack.countries.japan.studies.calibration import bootstrap_settings, devig_normalised
@@ -109,6 +122,7 @@ from horsetrack.countries.japan.studies.calibration import bootstrap_settings, d
 COUNTRY = "japan"
 TICKET = 88
 CLAIMS = ("beta", "alpha", "omega")
+LISTED = 10  # race ids a rule's reason lists; stages["benchmark_unmeasured"] holds every one
 DIRECTIONS = ("above", "below")
 BENCHMARK = "calibrated_market"
 NULLS = {"beta": 1.0, "omega": 0.0}  # each claim's coefficient under no segment effect
@@ -308,8 +322,27 @@ def _decision_minutes(decision_time: object) -> int:
     return int(match.group(1))
 
 
-def _input_problem(data: pd.DataFrame, col: str, t: pd.Series) -> str | None:
-    """Why the declared input `col` breaks the selection-input contract, or None."""
+def _outside_view(spec: FamilySpec) -> dict[str, list[str]]:
+    """Each column of a store table (`core.store.schemas`) whose rows no view at the decision
+    instant holds (they enter at post_utc + offset with offset > -n for "T-n", or never: the
+    dividends and the other results, a label-only or current-value table), with those tables."""
+    t = pd.Timedelta(minutes=-_decision_minutes(spec.decision_time))  # t relative to the post
+    out: dict[str, list[str]] = {}
+    for name, rule in load_availability(COUNTRY).items():
+        after_t = rule.anchor == POST and rule.offset is not None and rule.offset > t
+        if name in TABLES and (after_t or not rule.enters_view):
+            for col in TABLES[name].columns:
+                out.setdefault(col, []).append(name)
+    return out
+
+
+def _input_problem(
+    data: pd.DataFrame, col: str, t: pd.Series, outside: dict[str, list[str]]
+) -> str | None:
+    """Why the declared input `col` breaks the selection-input contract, or None. A card table
+    (races, runners) declared as the source of a column that only tables outside the view at t
+    hold (`_outside_view`) cannot have supplied it: a post-race table joined on and stamped as
+    the card."""
     source_col, stamp_col = col + SOURCE_SUFFIX, col + AVAILABLE_SUFFIX
     undeclared = [c for c in (source_col, stamp_col) if c not in data.columns]
     if undeclared:
@@ -321,6 +354,14 @@ def _input_problem(data: pd.DataFrame, col: str, t: pd.Series) -> str | None:
         return f"from {sorted({str(s) for s in source[other]})}, not one of {ADMITTED_SOURCES}"
     if (present & source.isna()).any():
         return f"{int((present & source.isna()).sum())} value(s) with no source"
+    if col in outside:
+        cards = sorted({str(s) for s in source.dropna().unique()} & set(TABLES))
+        foreign = [name for name in cards if col not in TABLES[name].columns]
+        if foreign:
+            return (
+                f"declared from {foreign}, which hold(s) no {col!r}: a column of "
+                f"{outside[col]}, whose rows no view at the decision time holds"
+            )
     if not isinstance(stamp.dtype, pd.DatetimeTZDtype):
         return f"{stamp_col} is not a timezone-aware instant ({stamp.dtype})"
     # A value unstamped, or a stamp (a blank value's too) after t or on a race without a post, is
@@ -340,10 +381,11 @@ def _check_declared(spec: FamilySpec, data: pd.DataFrame) -> None:
     if POST not in data.columns or not isinstance(data[POST].dtype, pd.DatetimeTZDtype):
         raise ValueError(f"data needs {POST}, each race's post as a timezone-aware UTC instant")
     t = data[POST] - pd.Timedelta(minutes=_decision_minutes(spec.decision_time))
+    outside = _outside_view(spec)
     problems: dict[str, dict[str, str]] = {}
     for rule in spec.rules:
         for col in dict.fromkeys([*rule.segment, *rule.selection_cols]):
-            why = _input_problem(data, col, t)
+            why = _input_problem(data, col, t, outside)
             if why is not None:
                 problems.setdefault(rule.rule_id, {})[col] = why
     if problems:
@@ -512,7 +554,24 @@ class _Claim:
     rows: list = dataclasses.field(default_factory=list)
     probs: list = dataclasses.field(default_factory=list)
     fits: dict = dataclasses.field(default_factory=dict)  # fold -> (coef, n_train, n_test races)
-    error: str | None = None
+    error: str | None = None  # the claim cannot be scored at all
+    unfit: dict = dataclasses.field(default_factory=dict)  # fold -> why it could not be fitted
+    left_out: set = dataclasses.field(default_factory=set)  # segment races without a benchmark
+
+    def reasons(self) -> list[str]:
+        """What the claim lost (a fold not fitted, a race without a benchmark), each with why."""
+        out = [
+            f"the {fold} fold could not be fitted and is not scored ({why})"
+            for fold, why in self.unfit.items()
+        ]
+        if self.left_out:
+            races = sorted(self.left_out)
+            shown = ", ".join(races[:LISTED]) + (", ..." if len(races) > LISTED else "")
+            out.append(
+                f"{len(races)} race(s) of the segment have no calibrated-market benchmark (a "
+                f"starter without a final price) and are left out of its fits and scores: {shown}"
+            )
+        return out
 
 
 def _new_claim(frame: pd.DataFrame, rule: RuleSpec, codes: np.ndarray) -> _Claim:
@@ -525,13 +584,16 @@ def _new_claim(frame: pd.DataFrame, rule: RuleSpec, codes: np.ndarray) -> _Claim
     return _Claim(member=member, holds=any_in.to_numpy(dtype=bool))
 
 
-def _fit_fold(claim: _Claim, rule: RuleSpec, fold, ln_p, race_ids, won, codes) -> None:
+def _fit_fold(claim: _Claim, rule: RuleSpec, fold, ln_p, usable, race_ids, won, codes) -> None:
     """The claim's departure from the fold's benchmark: fitted on the segment's training races,
-    predicted on its test races (ln_p: the fold's benchmark ln p_cal on train and test rows)."""
-    test = fold.test_idx[claim.holds[fold.test_idx]]
+    predicted on its test races (ln_p: the fold's benchmark ln p_cal on train and test rows), each
+    a race with a benchmark (`usable`); the claim keeps the fold only once it is fitted."""
+    rows = np.concatenate([fold.train_idx, fold.test_idx])
+    claim.left_out.update(str(r) for r in race_ids[rows[claim.holds[rows] & ~usable[rows]]])
+    test = fold.test_idx[claim.holds[fold.test_idx] & usable[fold.test_idx]]
     if not len(test):
         return
-    train = fold.train_idx[claim.holds[fold.train_idx]]
+    train = fold.train_idx[claim.holds[fold.train_idx] & usable[fold.train_idx]]
     if not len(train):
         raise ValueError(f"no training race of the {fold.test_start} fold is in the segment")
     if rule.claim == "beta":
@@ -540,9 +602,10 @@ def _fit_fold(claim: _Claim, rule: RuleSpec, fold, ln_p, race_ids, won, codes) -
         x_train, x_test = claim.member[train].astype(float), claim.member[test].astype(float)
     fit = fit_conditional_logit(x_train[:, None], race_ids[train], won[train], offset=ln_p[train])
     delta = float(fit.coef[0])
-    claim.rows.append(test)
-    claim.probs.append(_softmax(ln_p[test] + delta * x_test, codes[test]))
+    probs = _softmax(ln_p[test] + delta * x_test, codes[test])
     n_test = len(np.unique(codes[test]))
+    claim.rows.append(test)
+    claim.probs.append(probs)
     claim.fits[fold.test_start.isoformat()] = (NULLS[rule.claim] + delta, fit.n_races, n_test)
 
 
@@ -591,8 +654,8 @@ def run_study(
 
     Raises, before anything is scored or written: TypeError or ValueError for malformed
     `sources`, `FamilyNotFrozen`, `AlphaMemberUnnamed`, `LookAheadSelection`, or ValueError for a
-    spec or frame the study cannot run (a row on a holdout day included). Raises ValueError
-    before the first record when the frame cannot score a variant the family holds scored.
+    spec or frame the study cannot run (a row on a holdout day included). A frame that cannot
+    score a variant the family holds scored is reported, not refused (module docstring).
     `holdout` is held, never opened.
     """
     if not isinstance(spec, FamilySpec):
@@ -697,6 +760,7 @@ def run_study(
         except Exception as exc:  # every failure is a registry record, never dropped
             claims[rid] = _Claim(np.zeros(0, bool), np.zeros(0, bool), error=f"{exc!r}")
     bench_rows, bench_probs, bench_fits = [], [], {}
+    unmeasured: dict[str, str] = {}  # race id -> why its benchmark cannot be measured
     ln_p = np.full(len(frame), np.nan)
     for fold in folds:
         if not len(fold.test_idx):
@@ -704,16 +768,28 @@ def run_study(
         model = fit_win_calibration(market.iloc[fold.train_idx])
         rows = np.concatenate([fold.train_idx, fold.test_idx])
         ln_p[rows] = np.log(model.predict_many(q[rows], race_ids[rows]))
-        bench_rows.append(fold.test_idx)
-        bench_probs.append(np.exp(ln_p[fold.test_idx]))
+        # A race holding a starter the calibrated market gives no probability (no final price)
+        # has no benchmark: it loses its own scores and fits only.
+        missing = rows[~np.isfinite(ln_p[rows])]
+        usable = ~np.isin(codes, codes[missing])
+        for race, n in pd.Series(race_ids[missing]).value_counts(sort=False).items():
+            unmeasured.setdefault(
+                str(race),
+                f"no calibrated-market probability for {n} starter(s) (no usable {FINAL_ODDS}): "
+                "the race's benchmark cannot be measured, so it is left out of the benchmark's "
+                "scores and of every claim's fits and scores",
+            )
+        test = fold.test_idx[usable[fold.test_idx]]
+        bench_rows.append(test)
+        bench_probs.append(np.exp(ln_p[test]))
         bench_fits[fold.test_start.isoformat()] = model.fit_id
         for rid, rule in rules.items():
             claim = claims[rid]
             if claim.error is None:
                 try:
-                    _fit_fold(claim, rule, fold, ln_p, race_ids, won, codes)
-                except Exception as exc:
-                    claim.error = f"{exc!r}"
+                    _fit_fold(claim, rule, fold, ln_p, usable, race_ids, won, codes)
+                except Exception as exc:  # this fold only: the claim's other folds stand
+                    claim.unfit[fold.test_start.isoformat()] = f"{exc!r}"
         ln_p[rows] = np.nan
     if bench_rows:
         scored = np.concatenate(bench_rows)
@@ -724,34 +800,53 @@ def run_study(
     log_loss, losses, metrics = {}, {}, {}
     for rid, rule in rules.items():
         claim = claims[rid]
+        reasons = claim.reasons()
         try:
             if claim.error is not None:
                 raise RuntimeError(claim.error)
             if not claim.rows:
-                raise ValueError("no walk-forward fold scores a race of the segment")
+                lost = f" ({'; '.join(reasons)})" if reasons else ""
+                raise ValueError(f"no walk-forward fold scores a race of the segment{lost}")
             ll = _race_ll(np.concatenate(claim.probs), frame, np.concatenate(claim.rows))
             g = gain(ll, bench)
+            mean = float(g.per_race.to_numpy(dtype=float).mean())
+            if not np.isfinite(mean):
+                raise ValueError(f"the gain is not finite: {mean}")
+        except Exception as exc:  # every failure is a registry record, never dropped
+            log_loss[rid] = {"claim": rule.claim, "passed": False, "error": f"{exc!r}"}
+            metrics[rid] = []
+            continue
+        # The interval alone may be uncomputable (a race without its cluster, say): the gain and
+        # the coefficients stand, and the reason is the entry's "error".
+        try:
             iv = paired_bootstrap(
                 g.per_race, races["cluster"], n_boot=boot["n_boot"], level=boot["level"], seed=seed
             )
             if not np.isfinite([iv.mean, iv.lo, iv.hi]).all():
                 raise ValueError(f"the gain's bootstrap interval is not finite: {iv}")
-        except Exception as exc:  # every failure is a registry record, never dropped
-            log_loss[rid] = {"claim": rule.claim, "passed": False, "error": f"{exc!r}"}
-            metrics[rid] = []
-            continue
+            mean, lo, hi, n_clusters = iv.mean, iv.lo, iv.hi, iv.n_clusters
+        except Exception as exc:
+            cluster_of = races["cluster"].reindex(g.per_race.index)
+            lo = hi = float("nan")
+            n_clusters = int(cluster_of.nunique())
+            unclustered = int(cluster_of.isna().sum())
+            without = f" ({unclustered} scored race(s) without a {unit})" if unclustered else ""
+            reasons.append(
+                f"the gain's {unit}-clustered bootstrap interval cannot be computed{without}: "
+                f"{exc!r}"
+            )
         coef = _pooled(claim.fits)
         right_way = _points_the_rule_way(coef, rule)
         log_loss[rid] = {
             "claim": rule.claim,
             "benchmark": BENCHMARK,
-            "passed": bool(iv.lo > 0 and right_way),
-            "delta_ll": iv.mean,
-            "lo": iv.lo,
-            "hi": iv.hi,
+            "passed": bool(lo > 0 and right_way),
+            "delta_ll": mean,
+            "lo": lo,
+            "hi": hi,
             "level": boot["level"],
             "n_races": g.n_common,
-            "n_clusters": iv.n_clusters,
+            "n_clusters": n_clusters,
             "coef_name": COEF_NAMES[rule.claim],
             "coef_null": NULLS[rule.claim],
             "coef": coef,
@@ -759,9 +854,12 @@ def run_study(
             "points_the_rule_way": right_way,
             "coef_by_fold": {fold: c for fold, (c, _, _) in claim.fits.items()},
         }
+        if reasons:
+            log_loss[rid]["error"] = "; ".join(reasons)
         name = COEF_NAMES[rule.claim]
+        bounds = (lo, hi) if np.isfinite([lo, hi]).all() else (None, None)
         metrics[rid] = _metric(
-            "all_folds", "delta_ll_vs_calibrated_market", iv.mean, g.n_common, iv.lo, iv.hi
+            "all_folds", "delta_ll_vs_calibrated_market", mean, g.n_common, *bounds
         )
         metrics[rid] += _metric("all_folds", name, coef, g.n_common)
         for fold, (c, n_train, _) in claim.fits.items():
@@ -770,18 +868,19 @@ def run_study(
         column.loc[g.per_race.index] = ll.loc[g.per_race.index]
         losses[rid] = column
 
-    # Nothing is written yet. SPA and StepM test every variant the family holds scored, so a
-    # rerun that cannot score one is refused here, not after its first records.
+    # SPA and StepM test every variant the family holds scored, so a rerun that cannot score one
+    # runs no max-statistic test on the rest; every other measurement stands.
     held = registry.records(spec.family_id)
     lost = sorted({r.variant for r in held if r.status != "failed"} - set(losses))
+    incomplete = None
     if lost:
         why = {
             v: log_loss[v]["error"] if v in log_loss else "not a rule of this spec" for v in lost
         }
-        raise ValueError(
-            f"family {spec.family_id!r}: the registry holds {lost} scored, and this frame "
-            f"cannot score them ({why}); the max-statistic stage tests every scored variant of "
-            "the family, so the run is refused before it writes a record"
+        incomplete = (
+            f"SPA and StepM were not run: the registry holds {lost} scored in family "
+            f"{spec.family_id!r}, and this frame cannot score them ({why}); the max-statistic "
+            "stage tests every scored variant of the family, never a subset"
         )
     # The dropped variants first (one record each, unless the family already holds that variant,
     # so the family size never counts one twice), then each rule's stage-1 record.
@@ -805,7 +904,9 @@ def run_study(
         "superior": [],
         "settings": dict(spec.max_stat),
     }
-    if tested:
+    if incomplete is not None:
+        max_stat["error"] = incomplete
+    elif tested:
         common = {
             "clusters": races["cluster"],
             "order": races["date"],
@@ -938,6 +1039,7 @@ def run_study(
             "omega": omega,
             "roi": roi,
             "benchmark_fits": bench_fits,
+            "benchmark_unmeasured": unmeasured,
         },
         survivors=survivors,
         p_beats_takeout={rid: float(omega[rid]["p_beats_takeout"]) for rid in rules},
