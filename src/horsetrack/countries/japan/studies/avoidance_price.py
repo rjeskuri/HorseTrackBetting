@@ -800,25 +800,9 @@ def _board_horses(combination) -> list[int]:
     return [int(p) for p in parts] if all(p.isdigit() for p in parts) else []
 
 
-def _scratched_at_t(board: pd.DataFrame) -> frozenset[int]:
-    """The board-at-t rule (docs/specs/board-at-t.md, `board.snapshot`): a runner whose latest WIN
-    or PLACE row at t is SCR is scratched by t, whatever an older row of another pool says."""
-    if "status_raw" not in board:
-        return frozenset()
-    rows = zip(board["pool"], board["combination"], board["status_raw"], strict=True)
-    return frozenset(
-        h
-        for pool, combination, status in rows
-        if pool in (snapshot.WIN, snapshot.PLACE)
-        and isinstance(status, str)
-        and status == snapshot.SCRATCHED
-        for h in _board_horses(combination)
-    )
-
-
 def _board_runners(view: RaceView) -> frozenset[int]:
     """Every horse priced in the WIN or PLACE pool of the view's board (the board at t has no
-    price for a runner scratched by t, in any pool: `_scratched_at_t`)."""
+    price for a runner scratched by t, in any pool: `_Ctx._board_at_t`)."""
     board = view.board
     rows = board.loc[board["pool"].isin(TAILED) & board["combination"].ne(POOL_TOTAL)]
     priced = ~np.isnan(clean_odds(rows["odds"].to_numpy()))
@@ -866,17 +850,20 @@ class _Ctx(_Context):
         self.fold_of = _fold_labels(self.races, FoldScheme.from_mapping(forward["scheme"]))
 
     def _board_at_t(self, race_id: str) -> RaceView:
+        """The board at t of this study's pools, with no price in any pool for a runner whose
+        latest WIN or PLACE row at t is SCR (docs/specs/board-at-t.md; `view_at`'s `scratched`),
+        whatever an older row of another pool says."""
         if self.data.view_at_t is None:
             raise ValueError("no board-at-t reader")
         view = self.data.view_at_t(race_id)
         board = view.board
         kept = board.loc[board["pool"].isin(BOARD_POOLS), ["pool", "combination", "odds"]]
         kept = kept.reset_index(drop=True)
-        out = _scratched_at_t(board)
+        out = view.scratched
         if out:  # no price in any pool at t, Wide pairs included
             names = [bool(out & set(_board_horses(c))) for c in kept["combination"]]
             kept.loc[np.asarray(names, dtype=bool), "odds"] = np.nan
-        return RaceView(race_id, kept, view.selection)
+        return RaceView(race_id, kept, view.selection, out)
 
     @functools.cached_property
     def paying(self) -> dict:

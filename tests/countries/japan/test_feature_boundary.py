@@ -430,6 +430,7 @@ UNCLASSIFIED = [
     ("runners", "jockey_name"),
     ("races", "race_name"),
     ("races", "prize"),
+    ("odds_timeseries", "status_raw"),
 ]
 
 
@@ -487,17 +488,11 @@ APPROVED = [
         {"split_times_s", "finish_time_s", "result_published_utc", "result_unpublished_utc",
          "race_name", "prize", "rating_hi", "jurisdiction"},
     ),
-    (  # status_raw: a capture's status (a time text, `SCR`) is known at its capture time
+    (
         "jra",
         "odds_timeseries",
-        {"odds", "odds_hi", "investment", "minutes_to_post", "status_raw"},
-        {"dividend", "is_refund", "is_final_capture", "venue", "fetched_utc"},
-    ),
-    (
-        "jravan",
-        "odds_timeseries",
-        {"odds", "odds_hi", "investment", "minutes_to_post", "status_raw"},
-        {"dividend", "is_refund", "is_final_capture", "venue", "fetched_utc"},
+        {"odds", "odds_hi", "investment", "minutes_to_post"},
+        {"dividend", "is_refund", "is_final_capture", "status_raw", "venue", "fetched_utc"},
     ),
     (
         "jra",

@@ -2667,8 +2667,9 @@ def test_unreadable_votes_leave_the_prediction_unavailable(study):
     assert cells and not any(value for value, _ in cells.values()), cells
 
 
-def raw_board_at_t(outcome: Outcome, race_id: str) -> pd.DataFrame:
-    """The race's odds_timeseries rows at t in the outcome's store, through #81's view_at."""
+def raw_view_at_t(outcome: Outcome, race_id: str) -> RaceView:
+    """The race's view at t in the outcome's store, through #81's view_at: its odds_timeseries
+    rows at t (`board`) and its runners scratched by t (`scratched`)."""
     day = race_id.split(":")[1]
     path = outcome.base / "data" / "processed" / "jra" / "odds_timeseries" / f"{day}.parquet"
     con = duckdb.connect(":memory:")
@@ -2677,7 +2678,7 @@ def raw_board_at_t(outcome: Outcome, race_id: str) -> pd.DataFrame:
         con.execute('CREATE TABLE "odds_timeseries" AS SELECT * FROM _rows')
         con.unregister("_rows")
         t = post_of(race_id) - timedelta(minutes=DECISION_MIN)
-        return view_at(con, race_id, t, rules=load_availability("japan")).board
+        return view_at(con, race_id, t, rules=load_availability("japan"))
     finally:
         con.close()
 
@@ -2727,11 +2728,13 @@ def test_a_scratch_at_t_clears_the_runner_from_every_pool(study):
     # pairs still carry the T-20 prices
     assert horse not in race.finish and min(race.at_t, key=race.at_t.get) != horse
     assert all(place_of(o)[0] > 1.1 for o in race.at_t.values())
-    board = raw_board_at_t(x, STALE_RACE)
+    assert raw_view_at_t(a, STALE_RACE).scratched == frozenset()  # A: nobody scratched by t
+    view = raw_view_at_t(x, STALE_RACE)
+    board = view.board
     rows = {(p, c): r for p, c, r in zip(board["pool"], board["combination"],
                                          board.to_dict("records"), strict=True)}  # fmt: skip
     win_row, place_row = rows[("WIN", str(horse))], rows[("PLACE", str(horse))]
-    assert win_row["status_raw"] == SCRATCHED and pd.isna(win_row["odds"])
+    assert view.scratched == frozenset({horse}) and pd.isna(win_row["odds"])
     assert math.isclose(place_row["odds"], place_of(race.at_t[horse])[0])
     pairs = [
         r for (p, c), r in rows.items() if p == "QUINELLA_PLACE" and str(horse) in c.split(",")

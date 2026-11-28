@@ -59,15 +59,11 @@ inputs:
     supplies:
       - {source: jra, table: runners, column: is_scratched}
       - {source: jravan, table: runners, column: is_scratched}
-      - {source: jra, table: odds_timeseries, column: status_raw}
-      - {source: jravan, table: odds_timeseries, column: status_raw}
     tickets: [401, 309, 404]
     note: >-
       Both stores take the flag from the final result, so a race-day scratch is in the views from
       00:00 JST (the accepted leak, docs/specs/as-of.md, #309); the pre-race card versions would
-      give the value as of each version (#401). The board's per-capture status (`status_raw`,
-      `SCR` on a scratched runner's WIN and PLACE rows, docs/specs/board-at-t.md) is known at each
-      capture's time.
+      give the value as of each version (#401).
   exclusions:
     layers: [C0]
     role: feature_at_t
