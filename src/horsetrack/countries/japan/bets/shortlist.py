@@ -57,15 +57,17 @@ def _block(item: RankedRow, played: pd.DataFrame | None) -> str:
     row = item.row
     tag = "  [look-ahead]" if row.selection == LOOK_AHEAD else ""
     head = f"{item.rank:>3}. {row.option_id}  {row.pool or '-'}  {row.segment}  {row.rule}{tag}"
-    level = "" if row.ci_level is None else f"{row.ci_level * 100:g}% "
+    # as the private leaderboard: each bound is one-sided at the level, not a two-sided interval
     if row.ci_lo is not None and row.ci_hi is not None:
-        ci = f"{level}CI [{row.ci_lo:.1f}, {row.ci_hi:.1f}]"
+        ci, sided = f"CI [{row.ci_lo:.1f}, {row.ci_hi:.1f}]", "each bound one-sided"
     elif row.ci_lo is not None:
-        ci = f"{level}CI ≥ {row.ci_lo:.1f}"
+        ci, sided = f"CI ≥ {row.ci_lo:.1f}", "one-sided"
     elif row.ci_hi is not None:
-        ci = f"{level}CI ≤ {row.ci_hi:.1f}"
+        ci, sided = f"CI ≤ {row.ci_hi:.1f}", "one-sided"
     else:
-        ci = "CI n/a"
+        ci, sided = "CI n/a", None
+    if sided is not None and row.ci_level is not None:
+        ci = f"{ci} ({sided} {row.ci_level * 100:g}%)"
     figures = (
         f"selection {row.selection.replace('_', '-')}; "
         f"shrunk return per ¥100 {_figure(row.shrunk_per_100)}; {ci}; "
