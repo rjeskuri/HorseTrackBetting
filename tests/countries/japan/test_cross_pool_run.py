@@ -87,6 +87,25 @@ Restart (the owner's code-only fixes; the frozen spec hash is unchanged) adds:
   cross-pool record nothing is written. The CLI's `--run` and `--trial` call it in place of
   `write_summary` over the whole registry.
 
+Ticket #562 (the v2 family, artifacts named by a data fingerprint) adds:
+
+- `FAMILY_ID_V2 = "japan-cross-pool-t2-v2"`, a second family of the same study. `build_spec`,
+  `freeze_spec` and `run_cross_pool` take a keyword `family` (default `FAMILY_ID`, so every call
+  above is v1's and v1's spec hash, records, report and cell names are unchanged); with
+  `family=FAMILY_ID_V2` the spec's `family_id` is v2's, its hash differs from v1's, and the run
+  needs v2's own freeze (v1's freeze is not enough: `FamilyNotFrozen`, nothing appended, no store
+  file opened).
+- A v2 run's `CrossPoolResult.data_fingerprint` is a lowercase hex string (8+ characters) derived
+  from the data the run read (the store's builds and its day list; no file contents need be
+  read): the same store gives the same fingerprint whatever the out dir, a store with more days
+  in the span another. The private report is `out_dir/<name>.md`, its name starting
+  `cross-pool-japan-` and holding the spec hash's first 12 characters and the fingerprint; the
+  cell file is `out_dir/candidate-cells/<name>.json`, its name holding both too.
+- A v2 run whose report or cell file already exists raises `FileExistsError` (or a subclass)
+  before any store file is opened: it appends nothing to the registry, writes neither file and
+  leaves the existing one's bytes as they were. An exact rerun (same spec, same data) is such a
+  run.
+
 Expected values are derived here from first principles or from the dependencies the brief names
 (`models.condlogit`, `models.v0.calibration`, `core.eval.folds`), never from the module under test.
 Every store, board, result and dividend is synthetic and built in the test; HORSETRACK_DATA_DIR
@@ -101,6 +120,7 @@ import builtins
 import dataclasses
 import glob
 import hashlib
+import inspect
 import io
 import itertools
 import json
@@ -2536,3 +2556,230 @@ def test_the_cli_summary_writes_only_the_run_s_own_family(tmp_path, monkeypatch,
     assert len(calls) == 1 and calls[0]["registry"] is local
     fresh = {own: local.records(own)}
     assert_only_cross_pool_pages(summary, before, committed, fresh, tmp_path / "expected")
+
+
+# ---------------------------------------------------------------- #562: the v2 family
+
+V2_FAMILY = "japan-cross-pool-t2-v2"
+# v1 as frozen for #435's run (its public page's reproduce line: --from 2014-06-07 --to 2026-11-27
+# --seed 435), and the hash the registry froze for it: build_spec on these arguments and the
+# committed config, as docs/experiments/cross-pool-japan.md cites it.
+V1_FROZEN = {"date_from": date(2014, 6, 7), "date_to": date(2026, 11, 27), "seed": 435}
+V1_SPEC_HASH = "626789a2580faf32784bdf721854c69d86a303d5f1dbe7a18a247732bd736ecb"
+V1_PUBLIC_PAGE = env.repo_root() / "docs" / "experiments" / "cross-pool-japan.md"
+GROWN_FROM = date(2027, 1, 1)  # the older store lacks the span's day files from this day on
+V2_SPAN = {"date_from": SPAN_START, "date_to": STORE_TO, "seed": SEED}
+
+
+def test_v1_spec_hash_is_unchanged(tmp_path):
+    """v1's frozen spec: build_spec and freeze_spec with no family (v1's) on its frozen arguments
+    and the committed config still give the hash its registry froze, and v1's committed page still
+    cites it (a v2 run does not rewrite v1's page)."""
+    assert FAMILY_ID == "japan-cross-pool-t2-v1"
+    spec = build_spec(**V1_FROZEN)
+    assert spec["family_id"] == FAMILY_ID
+    assert spec_hash(spec) == V1_SPEC_HASH
+    registry = temp_registry(tmp_path)
+    assert freeze_spec(**V1_FROZEN, registry=registry) == V1_SPEC_HASH
+    assert registry.frozen_spec_hash(FAMILY_ID) == V1_SPEC_HASH
+    assert V1_SPEC_HASH in V1_PUBLIC_PAGE.read_text(encoding="utf-8")
+
+
+def require_v2() -> None:
+    """The v2 family exists and the spec, freeze and run take a `family`."""
+    assert getattr(cross_pool_run, "FAMILY_ID_V2", None) == V2_FAMILY, "no v2 family"
+    for name in ("build_spec", "freeze_spec", "run_cross_pool"):
+        params = inspect.signature(getattr(cross_pool_run, name)).parameters
+        assert "family" in params, f"{name} takes no family"
+
+
+def test_v2_runs_only_after_its_own_freeze(store, tmp_path, monkeypatch):
+    """v2's spec is its own (its family id, another hash than v1's), and a v2 run is refused until
+    v2 itself is frozen: v1's freeze is not enough, the refusal opens no store file, appends
+    nothing and writes nothing."""
+    require_v2()
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(store.data))
+    monkeypatch.setattr(cross_pool_run, "load_country_scheme", lambda country: SHORT)
+    v1 = build_spec(**V2_SPAN)
+    v2 = build_spec(**V2_SPAN, family=V2_FAMILY)
+    assert build_spec(**V2_SPAN, family=FAMILY_ID) == v1
+    assert v1["family_id"] == FAMILY_ID and v2["family_id"] == V2_FAMILY
+    assert spec_hash(v2) != spec_hash(v1)
+    for change in ({"seed": SEED + 1}, {"date_to": date(2026, 12, 31)}):  # still its arguments'
+        assert spec_hash(build_spec(**{**V2_SPAN, **change}, family=V2_FAMILY)) != spec_hash(v2)
+
+    registry = temp_registry(tmp_path / "reg")
+    assert freeze_spec(**V2_SPAN, registry=registry) == spec_hash(v1)  # v1 alone
+    before = registry.path.read_bytes()
+    out = tmp_path / "out"
+    opened: list[Path] = []
+    with pytest.MonkeyPatch.context() as mp:
+        install_file_spy(mp, under(store.processed), opened)
+        with pytest.raises(FamilyNotFrozen):
+            run_cross_pool(**V2_SPAN, out_dir=out, registry=registry, family=V2_FAMILY)
+    assert opened == []
+    assert registry.path.read_bytes() == before
+    assert registry.frozen_spec_hash(V2_FAMILY) is None and registry.records() == []
+    assert not out.exists() or not [p for p in out.rglob("*") if p.is_file()]
+
+    assert freeze_spec(**V2_SPAN, registry=registry, family=V2_FAMILY) == spec_hash(v2)
+    assert registry.frozen_spec_hash(V2_FAMILY) == spec_hash(v2)
+    assert registry.frozen_spec_hash(FAMILY_ID) == spec_hash(v1)
+
+
+def _run_v2_twice(store: SimpleNamespace, root: Path) -> SimpleNamespace:
+    """v2 frozen (beside v1's freeze) and run twice into one out dir: first on a copy of the store
+    without the span's January day files (the older store), then on the whole store (the store
+    grown by a month)."""
+    older = root / "older"
+    shutil.copytree(store.processed, older / "processed" / "jravan")
+    folder = older / "processed" / "jravan" / "odds_timeseries"
+    lo, hi = GROWN_FROM.isoformat(), STORE_TO.isoformat()
+    dropped = [p for p in folder.glob("*.parquet") if lo <= p.stem <= hi]
+    assert dropped
+    for path in dropped:
+        path.unlink()
+    registry = temp_registry(root / "reg")
+    out = root / "out"
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cross_pool_run, "load_country_scheme", lambda country: SHORT)
+        v1_hash = freeze_spec(**V2_SPAN, registry=registry)
+        v2_hash = freeze_spec(**V2_SPAN, registry=registry, family=V2_FAMILY)
+        mp.setenv("HORSETRACK_DATA_DIR", str(older))
+        first = run_cross_pool(**V2_SPAN, out_dir=out, registry=registry, family=V2_FAMILY)
+        first_bytes = {Path(p): Path(p).read_bytes() for p in (first.report_path, first.cells_path)}
+        mp.setenv("HORSETRACK_DATA_DIR", str(store.data))
+        second = run_cross_pool(**V2_SPAN, out_dir=out, registry=registry, family=V2_FAMILY)
+    return SimpleNamespace(
+        root=root,
+        out=out,
+        registry=registry,
+        v1_hash=v1_hash,
+        v2_hash=v2_hash,
+        first=first,
+        second=second,
+        first_bytes=first_bytes,
+    )
+
+
+@pytest.fixture(scope="module")
+def v2_runs(store, tmp_path_factory) -> Callable[[], SimpleNamespace]:
+    """The two v2 runs, made once on first use (inside a test, after `require_v2`)."""
+    cache: dict[str, SimpleNamespace] = {}
+
+    def get() -> SimpleNamespace:
+        if "runs" not in cache:
+            cache["runs"] = _run_v2_twice(store, tmp_path_factory.mktemp("v2"))
+        return cache["runs"]
+
+    return get
+
+
+def scored_days(days: list[date]) -> list[date]:
+    """The scored days of the SHORT folds over these development days (core.eval.folds)."""
+    dates = [d for d in days for _ in range(len(VENUES) * RACES_PER_VENUE)]
+    folds = walk_forward(pd.Series(dates), scheme=SHORT)
+    return sorted({dates[i] for f in folds for i in f.test_idx})
+
+
+def test_reruns_on_new_data_keep_both_artifacts(store, v2_runs):
+    """The frozen v2 spec run on the older store, then on the grown one, into one out dir: two
+    data fingerprints, two reports and two cell files, each named by the spec hash and its run's
+    fingerprint and holding its own run's cells; the first run's files keep their bytes. v2's
+    freeze precedes its records; v1 keeps its frozen hash and gains no record."""
+    require_v2()
+    runs = v2_runs()
+    first, second, out = runs.first, runs.second, runs.out
+    assert runs.v2_hash != runs.v1_hash
+    for result in (first, second):
+        assert result.family_id == V2_FAMILY
+        assert result.spec_hash == runs.v2_hash
+        fp = result.data_fingerprint
+        assert isinstance(fp, str) and re.fullmatch(r"[0-9a-f]{8,}", fp), fp
+        report, cells = Path(result.report_path), Path(result.cells_path)
+        assert report.parent == out and report.suffix == ".md", report
+        assert report.name.startswith("cross-pool-japan-"), report.name
+        assert cells.parent == out / "candidate-cells" and cells.suffix == ".json", cells
+        for name in (report.name, cells.name):
+            assert result.spec_hash[:12] in name and fp in name, name
+        assert report.read_text(encoding="utf-8").strip()
+        on_disk = _strict(cells.read_text(encoding="utf-8"))
+        assert on_disk == json.loads(json.dumps(result.cells))
+        assert on_disk and {c["family_id"] for c in on_disk} == {V2_FAMILY}
+        assert result.family_size == len(EXPECTED_VARIANTS)  # a refresh is no new variant
+    assert first.data_fingerprint != second.data_fingerprint
+
+    # Two of each, side by side; the first run's bytes as it wrote them.
+    reports = {Path(first.report_path), Path(second.report_path)}
+    cell_files = {Path(first.cells_path), Path(second.cells_path)}
+    assert len(reports) == len(cell_files) == 2
+    assert set(out.glob("*.md")) == reports
+    assert set((out / "candidate-cells").glob("*.json")) == cell_files
+    for path, data in runs.first_bytes.items():
+        assert path.read_bytes() == data, path
+
+    # Each cell file is its own run's: a top1 cell bets every scored race, so a pool's widest
+    # cell spans the scored days of the store that run read.
+    older = scored_days([d for d in store.dev_days if d < GROWN_FROM])
+    assert 0 < len(older) < len(store.test_days)
+    for result, days in ((first, older), (second, store.test_days)):
+        cells = _strict(Path(result.cells_path).read_text(encoding="utf-8"))
+        for pool in POOLS:
+            assert max(c["n_race_days"] for c in cells if c["pool"] == pool) == len(days), pool
+
+    # The registry: v2 frozen before its first record, ten records (five per run), v1 untouched.
+    lines = [json.loads(line) for line in runs.registry.path.read_text().splitlines()]
+    kinds = [
+        x["kind"]
+        for x in lines
+        if (x.get("family_id") or x.get("record", {}).get("family_id")) == V2_FAMILY
+    ]
+    assert kinds == ["freeze"] + ["run"] * (2 * len(EXPECTED_VARIANTS)), kinds
+    assert len(runs.registry.records(V2_FAMILY)) == 2 * len(EXPECTED_VARIANTS)
+    assert runs.registry.frozen_spec_hash(FAMILY_ID) == runs.v1_hash
+    assert runs.registry.records(FAMILY_ID) == []
+
+
+def test_an_artifact_overwrite_is_refused(store, v2_runs, monkeypatch):
+    """A v2 run whose report or cell file already exists is refused with FileExistsError before
+    any store file is opened: no registry line, neither file written, the existing bytes kept.
+    An exact rerun (same spec, same data, same out dir) is refused; so is a run into a fresh out
+    dir that holds only the report, or only the cell file, at the run's names."""
+    require_v2()
+    runs = v2_runs()
+    grown = runs.second
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(store.data))
+    monkeypatch.setattr(cross_pool_run, "load_country_scheme", lambda country: SHORT)
+
+    def refused(out: Path) -> None:
+        before = runs.registry.path.read_bytes()
+        opened: list[Path] = []
+        with pytest.MonkeyPatch.context() as mp:
+            install_file_spy(mp, under(store.processed), opened)
+            with pytest.raises(FileExistsError):
+                run_cross_pool(**V2_SPAN, out_dir=out, registry=runs.registry, family=V2_FAMILY)
+        assert opened == [], opened
+        assert runs.registry.path.read_bytes() == before
+
+    def files(root: Path) -> dict[Path, bytes]:
+        return {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+    # The exact rerun on the grown store, into the out dir that already holds its files.
+    snapshot = files(runs.out)
+    assert Path(grown.report_path) in snapshot and Path(grown.cells_path) in snapshot
+    refused(runs.out)
+    assert files(runs.out) == snapshot
+
+    # Either artifact alone at the run's target, in a fresh out dir.
+    earlier = b"an earlier run's artifact\n"
+    for planted in ("report", "cells"):
+        out = runs.root / f"planted-{planted}"
+        report = out / Path(grown.report_path).name
+        cells = out / "candidate-cells" / Path(grown.cells_path).name
+        target, other = (report, cells) if planted == "report" else (cells, report)
+        target.parent.mkdir(parents=True)
+        target.write_bytes(earlier)
+        refused(out)
+        assert target.read_bytes() == earlier, planted
+        assert not other.exists(), (planted, other)
+        assert files(out) == {target: earlier}, planted
