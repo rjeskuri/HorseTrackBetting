@@ -40,6 +40,7 @@ from horsetrack.countries.japan.jravan.timeseries import (
     timeseries_command as jravan_timeseries_command,
 )
 from horsetrack.countries.japan.jravan.votes import votes_command as jravan_votes_command
+from horsetrack.countries.japan.jrdb.fetch import fetch_command as jrdb_fetch_command
 from horsetrack.countries.japan.jrdb.tables import build_command as jrdb_build_command
 from horsetrack.countries.japan.logger.compact import compact
 from horsetrack.countries.japan.logger.compare import compare_logs_command
@@ -97,6 +98,7 @@ japan.add_typer(bets_app, name="bets")
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
 japan.add_typer(jrdb, name="jrdb")
 jrdb.command("build")(jrdb_build_command)
+jrdb.command("fetch")(jrdb_fetch_command)
 jravan = typer.Typer(no_args_is_help=True, help="JRA-VAN DataLab (JV-Data) commands.")
 japan.add_typer(jravan, name="jravan")
 jravan.command("bloodlines")(jravan_bloodlines_command)
