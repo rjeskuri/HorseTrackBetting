@@ -80,7 +80,7 @@ flowchart TB
     end
     subgraph L2["C2: per-horse ability and interactions"]
         ABIL["Dynamic rating #91 japan/models/rating.py;<br/>top-3 Plackett-Luce ability, pooled jockey, trainer, sire<br/>#92 japan/models/ability.py<br/>built, not adopted"]
-        INTR["Interactions: jockey, trainer and track #93,<br/>competition #94<br/>planned"]
+        INTR["Interactions: horse × jockey, trainer × track, horse aptitude,<br/>trainer debut prior, transfer step #93 japan/models/interactions.py<br/>built, ranked; competition #94: planned"]
         LIN["Lineage prior: sire × surface × band, damsire at 0 or ¼<br/>#95 japan/models/lineage.py;<br/>E37 run #538 japan/studies/lineage.py<br/>scored, not adopted"]
     end
     subgraph L3["C3: speed and par"]
@@ -147,7 +147,7 @@ flowchart LR
     GOING["Going: cushion, moisture, rail setting<br/>#136 japan/jra/going.py<br/>store ingest #90, features #230: planned"]
     BIAS["Within-day track bias<br/>#138, #224 japan/handicap/track_bias.py"]
     RAT["Dynamic rating #91<br/>japan/models/rating.py"]
-    INT["Interactions: jockey, trainer, track #93,<br/>competition #94<br/>planned"]
+    INT["Interactions: jockey, trainer, track #93<br/>japan/models/interactions.py;<br/>competition #94: planned"]
     LIN["Lineage prior: sire × surface × band,<br/>damsire at ¼ #95 japan/models/lineage.py"]
     PL["Plackett-Luce ability on the top 3, pooled jockey,<br/>trainer and sire #92 japan/models/ability.py"]
     PAR["Par and expected top-3 time #96<br/>japan/models/speed.py"]
