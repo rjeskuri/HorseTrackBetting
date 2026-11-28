@@ -309,6 +309,14 @@ def test_paid_dividend_applies_takeout_and_breakage(pool, share, rate, expected)
     assert F.paid_dividend(pool, share, rate=rate) == expected
 
 
+@pytest.mark.parametrize(("share", "rate"), [(0.05, 0.775), (0.3, 0.775), (0.12, 0.85)])
+def test_paid_dividend_refuses_wide_which_pays_three_pairs(share, rate):
+    # Every Wide result pays three pairs, each its stake back plus a third of the losers' money:
+    # one pair's share alone does not give its dividend (core.pricing.stake_back_share_dividend).
+    with pytest.raises(ValueError):
+        F.paid_dividend("QUINELLA_PLACE", share, rate=rate)
+
+
 def test_six_trifectas_against_one_trio():
     """The research's L1 comparison, by hand. The six orders of {1,2,3} have p .05 .04 .03 .02
     .01 .01 (sum .16 = the trio's p) and pay 2000 3000 4000 5000 9000 12000 per 100: returns 100

@@ -4,7 +4,11 @@ A row is one option the project has measured or will measure (a rule, a comparat
 model, a member) in a pool and a segment: its expected return per ¥100 staked at the final price,
 the CI beside it (each bound one-sided at ``ci_level``, D7 style) and the number of variants its
 family searched. Nothing is dropped: an option with no measured return (a failed or pending run)
-is a row too, and ranks after every measured row, unranked.
+is a row too, and ranks after every measured row, unranked. A descriptive row (``descriptive``,
+#451) is a measurement that is not a return per ¥100 staked on a ticket, such as WIN5's pool-level
+day value: it takes no part in its pool's shrinkage and gets no rank, and the Markdown texts show
+it with its value and bounds in its own section, "Descriptive, not ranked", after the ranked
+table and never in it.
 
 Shrinkage (``shrink``). Within each pool, over the k rows with a return ``x_i`` and a standard
 error ``se_i`` (given, or recovered from the one-sided bounds by ``LeaderboardRow.se``),
@@ -19,7 +23,7 @@ C is evaluated as 2 sum_{i<j} w_i w_j / sum(w) and Q around the pool's most prec
 quantities, free of the cancellation that zeroes C as written when one se is far below the rest.
 
 A pool of one keeps its raw return. A row without a pool or a positive se gets no shrunk value
-and ranks on its raw return.
+and ranks on its raw return. A descriptive row gets no shrunk value and is left out of its pool.
 
 Rows of one pool overlap: a segment's bets are also bets of the pool's 'all' row, and the variants
 of a family share races. DerSimonian-Laird assumes independent estimates, so here tau^2 is a
@@ -41,6 +45,11 @@ writer passes every row's sources to ``write_report`` and itself refuses a path 
 repository when any row is withheld, so a row marked licensed under a public source name is
 refused too.
 
+From the registry (``rows_from_registry``, #450). The run registry is the leaderboard's source:
+every non-holdout run gives measured rows from the convention of ``docs/specs/leaderboard.md``,
+an adapter's rows, or one unmeasured row, failures included; each option's latest row in append
+order is its row.
+
 Generic, with no country input, like ``segment_roi`` and ``snooping``.
 """
 
@@ -49,13 +58,15 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
-from collections.abc import Iterable
+import re
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from scipy.stats import norm
 
 from horsetrack.core import env
+from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord, is_licensed_record
 from horsetrack.core.eval.reports import (
     LicensedOutputInRepo,
     is_inside,
@@ -117,6 +128,7 @@ class LeaderboardRow:
     shrunk_per_100: float | None = None
     licensed: bool = False
     note: str | None = None
+    descriptive: bool = False
 
     def __post_init__(self) -> None:
         problem = self._problem()
@@ -167,6 +179,8 @@ class LeaderboardRow:
             return f"licensed must be a bool, got {self.licensed!r}"
         if self.note is not None and not isinstance(self.note, str):
             return "note must be a string or None"
+        if not isinstance(self.descriptive, bool):
+            return f"descriptive must be a bool, got {self.descriptive!r}"
         return None
 
     @property
@@ -231,13 +245,15 @@ def _dersimonian_laird(xs: list[float], variances: list[float]) -> list[float]:
 
 def shrink(rows: Iterable[LeaderboardRow]) -> list[LeaderboardRow]:
     """Copies of ``rows``, in order, with ``shrunk_per_100`` set per pool (any incoming value is
-    ignored); rows without a return, a pool or a positive se get None."""
+    ignored); descriptive rows, and rows without a return, a pool or a positive se, get None and
+    are left out of their pool's estimate."""
     rows = list(rows)
     pools: dict[str, list[int]] = {}
     variances: dict[int, float] = {}
     for i, row in enumerate(rows):
         se = row.se()
-        if row.measured and row.pool is not None and se is not None and se > 0:
+        rankable = row.measured and not row.descriptive and row.pool is not None
+        if rankable and se is not None and se > 0:
             pools.setdefault(row.pool, []).append(i)
             variances[i] = se * se
     shrunk: list[float | None] = [None] * len(rows)
@@ -263,7 +279,8 @@ def _refuse_duplicates(rows: list[LeaderboardRow]) -> None:
 
 def rank(rows: Iterable[LeaderboardRow]) -> list[RankedRow]:
     """Measured rows by their shrunk value (else raw) descending, ties by raw return descending
-    then option id, ranked 1..k; then unmeasured rows, unranked, by family id then option id.
+    then option id, ranked 1..k; then measured descriptive rows, unranked, by family id then
+    option id; then unmeasured rows (descriptive or not), unranked, by family id then option id.
     The shrunk value on each row is used as it is: ``rank`` does not shrink."""
     rows = list(rows)
     _refuse_duplicates(rows)
@@ -272,12 +289,14 @@ def rank(rows: Iterable[LeaderboardRow]) -> list[RankedRow]:
         value = row.shrunk_per_100 if row.shrunk_per_100 is not None else row.return_per_100
         return (-value, -row.return_per_100, row.option_id)
 
-    measured = sorted((r for r in rows if r.measured), key=key)
-    unmeasured = sorted(
-        (r for r in rows if not r.measured), key=lambda r: (r.family_id, r.option_id)
-    )
-    return [RankedRow(i, r) for i, r in enumerate(measured, start=1)] + [
-        RankedRow(None, r) for r in unmeasured
+    def by_family(row: LeaderboardRow) -> tuple[str, str]:
+        return (row.family_id, row.option_id)
+
+    ranked = sorted((r for r in rows if r.measured and not r.descriptive), key=key)
+    descriptive = sorted((r for r in rows if r.measured and r.descriptive), key=by_family)
+    unmeasured = sorted((r for r in rows if not r.measured), key=by_family)
+    return [RankedRow(i, r) for i, r in enumerate(ranked, start=1)] + [
+        RankedRow(None, r) for r in (*descriptive, *unmeasured)
     ]
 
 
@@ -335,7 +354,7 @@ _COLUMNS = (
     "Pool",
     "Segment",
     "Selection",
-    "Return per ¥100",
+    "Return per ¥100 staked",
     "CI",
     "Shrunk",
     "n",
@@ -343,6 +362,23 @@ _COLUMNS = (
     "Sources",
 )
 _ALIGN = ("---:", "---", "---", "---", "---", "---", "---:", "---", "---:", "---:", "---:", "---")
+# The descriptive section's table: no Shrunk column (a descriptive row is never shrunk), and a
+# Rank column that always shows ``_NONE``, so each row reads as unranked.
+_DESCRIPTIVE_HEADING = "## Descriptive, not ranked"
+_DESCRIPTIVE_COLUMNS = (
+    "Rank",
+    "Option",
+    "Kind",
+    "Pool",
+    "Segment",
+    "Selection",
+    "Pool value per ¥100 (descriptive)",
+    "CI",
+    "n",
+    "Variants searched",
+    "Sources",
+)
+_DESCRIPTIVE_ALIGN = _ALIGN[:8] + _ALIGN[9:]  # _ALIGN without Shrunk's
 
 
 def _table_line(cells: Iterable[str]) -> str:
@@ -351,7 +387,11 @@ def _table_line(cells: Iterable[str]) -> str:
 
 def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool) -> str:
     """The leaderboard as Markdown: shrunk and ranked over every row, or, when ``public``, over
-    the public view alone, with the withheld rows listed by option id and family only."""
+    the public view alone, with the withheld rows listed by option id and family only.
+
+    The ranked table holds the rows that are not descriptive (ranked, then unmeasured); the
+    descriptive rows follow in their own section, unranked, in ``rank``'s order (measured by
+    family id then option id, then unmeasured); the public withheld list comes last."""
     rows = list(rows)
     _refuse_duplicates(rows)
     shown = public_view(rows) if public else shrink(rows)
@@ -362,8 +402,11 @@ def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool)
         "",
         "Rows rank by expected return per ¥100 staked at the final price, shrunk toward their "
         "pool's own mean (DerSimonian-Laird) or raw where a row has no standard error, highest "
-        "first; rows with no measured return follow, unranked. Each CI bound is one-sided at the "
-        "level shown.",
+        "first; rows with no measured return come last, unranked. Descriptive rows (a "
+        "measurement that is not a return per ¥100 staked on a ticket, such as a pool-level "
+        "value) are not ranked: they are left out of the shrinkage and shown with their value "
+        "and bounds in their own section after the ranked table. Each CI bound is one-sided at "
+        "the level shown.",
         "",
         # Over every row, withheld ones included, public or not, by the ticket's decision (#449,
         # Context): a public-only total would understate the search. No other figure of a
@@ -380,9 +423,12 @@ def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool)
             "over the public rows alone.",
             "",
         ]
+    ordered = rank(shown)
     lines += [_table_line(_COLUMNS), _table_line(_ALIGN)]
-    for ranked in rank(shown):
+    for ranked in ordered:
         row = ranked.row
+        if row.descriptive:
+            continue
         lines.append(
             _table_line(
                 (
@@ -401,6 +447,28 @@ def render_markdown(rows: Iterable[LeaderboardRow], *, title: str, public: bool)
                 )
             )
         )
+    descriptive = [ranked.row for ranked in ordered if ranked.row.descriptive]
+    if descriptive:
+        lines += ["", _DESCRIPTIVE_HEADING, ""]
+        lines += [_table_line(_DESCRIPTIVE_COLUMNS), _table_line(_DESCRIPTIVE_ALIGN)]
+        for row in descriptive:
+            lines.append(
+                _table_line(
+                    (
+                        _NONE,
+                        _cell(row.option_id),
+                        row.kind,
+                        _cell(row.pool or ""),
+                        _cell(row.segment),
+                        row.selection,
+                        _figure(row.return_per_100),
+                        _ci(row),
+                        _n(row),
+                        str(row.variants_searched),
+                        _cell(", ".join(row.sources)),
+                    )
+                )
+            )
     if public:
         withheld = sorted((r for r in rows if r.withheld), key=lambda r: (r.family_id, r.option_id))
         lines += ["", "## Withheld (D21)", ""]
@@ -454,3 +522,184 @@ def write_leaderboard(
                 "row (D21); write it under $HORSETRACK_DATA_DIR"
             )
     return write_report(path, text, sources=sources)
+
+
+# --------------------------------------------------------------------------- from the registry
+
+Adapter = Callable[[RunRecord, int], list[LeaderboardRow]]
+
+BLOCK_FIELDS = ("kind", "pool", "rule", "selection", "payout_rate", "ci_level", "n_unit")
+_DEVELOPMENT = "development"
+_ALL = "all"
+_CONVENTION_METRIC = re.compile(r"(return_per_100|se_per_100|n_meetings)(?:\[(.+)\])?")
+
+
+def _finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _block_problem(block: object) -> str | None:
+    """Why ``params['leaderboard']`` does not follow the convention, or None."""
+    if not isinstance(block, Mapping):
+        return (
+            f"params['leaderboard'] must be a mapping of {BLOCK_FIELDS}, got {type(block).__name__}"
+        )
+    missing = [name for name in BLOCK_FIELDS if name not in block]
+    if missing:
+        return f"params['leaderboard'] lacks {missing}"
+    unknown = sorted(str(name) for name in block if name not in BLOCK_FIELDS)
+    if unknown:
+        return f"params['leaderboard'] has unknown fields {unknown}"
+    if block["kind"] not in KINDS:
+        return f"kind {block['kind']!r} is not one of {KINDS}"
+    if block["pool"] is not None and not _is_text(block["pool"]):
+        return f"pool must be a non-blank string or None, got {block['pool']!r}"
+    if not _is_text(block["rule"]):
+        return f"rule must be a non-blank string, got {block['rule']!r}"
+    if block["selection"] not in SELECTIONS:
+        return f"selection {block['selection']!r} is not one of {SELECTIONS}"
+    if block["payout_rate"] is not None and not _finite_number(block["payout_rate"]):
+        return f"payout_rate must be a finite number or None, got {block['payout_rate']!r}"
+    level = block["ci_level"]
+    if not (_finite_number(level) and 0.5 < level < 1):
+        return f"ci_level must be a number strictly between 0.5 and 1, got {level!r}"
+    if block["n_unit"] not in N_UNITS:
+        return f"n_unit {block['n_unit']!r} is not one of {N_UNITS}"
+    return None
+
+
+def _development_metrics(record: RunRecord) -> dict[str, dict[str, FoldMetric]]:
+    """The record's development-fold convention metrics, by name then segment."""
+    found: dict[str, dict[str, FoldMetric]] = {}
+    for metric in record.metrics:
+        match = _CONVENTION_METRIC.fullmatch(metric.metric)
+        if metric.fold == _DEVELOPMENT and match is not None:
+            found.setdefault(match[1], {})[match[2] or _ALL] = metric
+    return found
+
+
+def _option_id(record: RunRecord, segment: str) -> str:
+    base = f"{record.family_id}/{record.variant}"
+    return base if segment == _ALL else f"{base}[{segment}]"
+
+
+def _meetings(metric: FoldMetric | None, segment: str) -> int | None:
+    if metric is None:
+        return None
+    if not (_finite_number(metric.value) and float(metric.value).is_integer()):
+        raise RowRefused(f"n_meetings[{segment}] is not a whole number: {metric.value}")
+    return int(metric.value)
+
+
+def _convention_rows(record: RunRecord, block: Mapping, size: int) -> list[LeaderboardRow]:
+    found = _development_metrics(record)
+    se = found.get("se_per_100", {})
+    meetings = found.get("n_meetings", {})
+    licensed = is_licensed_record(record)
+    return [
+        LeaderboardRow(
+            option_id=_option_id(record, segment),
+            family_id=record.family_id,
+            ticket=record.ticket,
+            kind=block["kind"],
+            pool=block["pool"],
+            segment=segment,
+            rule=block["rule"],
+            selection=block["selection"],
+            sources=tuple(record.sources),
+            variants_searched=size,
+            status=record.status,
+            return_per_100=metric.value,
+            ci_lo=metric.lo,
+            ci_hi=metric.hi,
+            ci_level=block["ci_level"],
+            se_per_100=se[segment].value if segment in se else None,
+            n=metric.n,
+            n_unit=block["n_unit"],
+            n_meetings=_meetings(meetings.get(segment), segment),
+            payout_rate=block["payout_rate"],
+            licensed=licensed,
+        )
+        for segment, metric in found.get("return_per_100", {}).items()
+    ]
+
+
+def _record_rows(
+    record: RunRecord, size: int, adapter: Adapter | None
+) -> tuple[list[LeaderboardRow], str | None]:
+    """The record's rows (the adapter's, else the convention's) and why it has none, if known.
+    An adapter's rows are marked licensed when the record is, keeping an adapter's own mark."""
+    try:
+        has_block = "leaderboard" in record.params
+        block = record.params.get("leaderboard")
+        problem = _block_problem(block) if has_block else None
+        if adapter is not None:
+            licensed = is_licensed_record(record)
+            made = [
+                dataclasses.replace(row, licensed=row.licensed or licensed)
+                for row in adapter(record, size)
+            ]
+            return made, None if made else problem
+        if not has_block or problem is not None:
+            return [], problem
+        return _convention_rows(record, block, size), None
+    except RowRefused as exc:
+        return [], str(exc)
+
+
+def _unmeasured_row(record: RunRecord, size: int, note: str | None) -> LeaderboardRow:
+    block = record.params.get("leaderboard")
+    block = block if isinstance(block, Mapping) else {}
+    kind = block.get("kind")
+    pool = block.get("pool")
+    return LeaderboardRow(
+        option_id=_option_id(record, _ALL),
+        family_id=record.family_id,
+        ticket=record.ticket,
+        kind=kind if kind in KINDS else "other",
+        pool=pool if _is_text(pool) else None,
+        segment=_ALL,
+        rule=record.variant,
+        selection="unknown",
+        sources=tuple(record.sources),
+        variants_searched=size,
+        status=record.status,
+        licensed=is_licensed_record(record),
+        note=note,
+    )
+
+
+def rows_from_registry(
+    registry: Registry, *, adapters: Mapping[str, Adapter] | None = None
+) -> list[LeaderboardRow]:
+    """Every (family, variant) of ``registry`` as leaderboard rows, unshrunk; read through
+    ``Registry.records()``, never written.
+
+    A run with ``holdout_open`` set gives no row, so a variant run only on the holdout has none.
+    Each other run gives its rows: an adapter's when ``adapters`` holds its family (called with
+    the run and the family size), else one measured row per development-fold ``return_per_100``
+    metric under a well-formed ``params['leaderboard']`` block (``docs/specs/leaderboard.md``).
+    A run that gives no row (failed, no development return, a malformed block, an adapter that
+    returns none) gives one unmeasured row, the '<family>/<variant>' option, with the reason in
+    ``note`` when its block is malformed. Rows resolve per option id: each option's latest row in
+    append order is its row, adapter or not, so a rerun replaces only the options it gives (its
+    unmeasured row replaces '<family>/<variant>' alone) and an option a later run does not give
+    keeps its earlier row. Every
+    row carries the family size as its variants searched, the run's ticket, sources and status
+    (old 'rejected' and 'adopted' runs read like 'scored'), and ``licensed`` as
+    ``is_licensed_record`` (an adapter's row also keeps its own True).
+    """
+    adapters = adapters or {}
+    families: dict[str, list[RunRecord]] = {}
+    for record in registry.records():
+        if record.holdout_open is None:
+            families.setdefault(record.family_id, []).append(record)
+    latest: dict[str, LeaderboardRow] = {}
+    for family_id, runs in families.items():
+        size = registry.family_size(family_id)
+        adapter = adapters.get(family_id)
+        for record in runs:
+            made, problem = _record_rows(record, size, adapter)
+            for row in made or [_unmeasured_row(record, size, problem)]:
+                latest[row.option_id] = row
+    return list(latest.values())
