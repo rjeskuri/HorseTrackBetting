@@ -18,7 +18,10 @@ runs in bounded memory in two steps:
    spilled, undecoded, into one temporary file per race month next to the output.
 2. Each month, in order, is decoded on its own: one version per key (`records.latest_versions` on
    the race key and 血統登録番号, a key whose latest version is a deletion has no rows; a key's
-   versions share a race date, so they share a month), its records sorted by race id and horse id,
+   versions share a race date, so they share a month); a key whose kept version's データ作成年月日
+   is after its race date, or blank or invalid, has no rows either and counts in
+   `created_after_race` (the owner's answer B on #407: such a version could hold the race's own
+   result; an earlier version does not stand in for it); its records sorted by race id and horse id,
    and its rows written as one row group. Race ids start with the date, so the file is sorted by
    `race_id, horse_id, subject, period, condition` (plain string order) throughout, and the same
    records, in any order and at any chunk size, give the same bytes.
@@ -77,8 +80,8 @@ GROUP_PERIODS = (THIS_YEAR, CAREER)  # 本年, then 累計
 SUBJECTS = (HORSE, *(s for _, s, _ in SUBJECT_GROUPS))
 
 REPORT_KEYS = (
-    "records", "holdout_skipped", "undated", "non_jra", "versions_dropped", "deletions", "kept",
-    "rows",
+    "records", "holdout_skipped", "undated", "non_jra", "versions_dropped", "deletions",
+    "created_after_race", "kept", "rows",
 )  # fmt: skip
 
 CAREER_COUNTS_SCHEMA = pa.schema(
@@ -306,6 +309,15 @@ def _spill(
 # Step 2: one month -> its rows
 
 
+def _made_by_race_day(created: str | None, race_id: str) -> bool:
+    """The kept version's データ作成年月日 is on or before the race date (the owner's answer B on
+    #407): a version made later could hold the race's own result. A blank or invalid date cannot
+    be shown to be on or before it, so it fails too."""
+    # a blank is None, or NaN under pandas 3's string dtype
+    made = _day(created.encode("ascii", errors="replace")) if isinstance(created, str) else None
+    return made is not None and made <= date.fromisoformat(race_id.split(":")[1])
+
+
 def _month(
     path: Path,
     layout: spec.RecordSpec,
@@ -321,10 +333,14 @@ def _month(
     counts["versions_dropped"] += len(frame) - distinct
     counts["deletions"] += distinct - len(latest)
     rows = []
-    for i, *key in zip(latest.index, *(latest[k] for k in VERSION_KEY), strict=True):
+    versions = zip(latest.index, latest[CREATED], *(latest[k] for k in VERSION_KEY), strict=True)
+    for i, created, *key in versions:
         race_id = keys.race_id(key[0], key[1], key[2], key[5])
         if race_id is None:  # a JRA venue with an invalid race number
             counts["non_jra"] += 1
+            continue
+        if not _made_by_race_day(created, race_id):
+            counts["created_after_race"] += 1
             continue
         rows.append((race_id, key[6] or "", tuple(k or "" for k in key), int(i)))
     if not rows:
@@ -394,7 +410,8 @@ def career_counts_command() -> None:
     typer.echo(
         f"career-counts: {c['rows']} rows, {c['kept']} runners, {len(report.by_year)} years; "
         f"{c['records']} records, {c['versions_dropped']} versions dropped, "
-        f"{c['deletions']} deletions, {c['non_jra']} non-JRA, "
+        f"{c['deletions']} deletions, {c['created_after_race']} created after the race, "
+        f"{c['non_jra']} non-JRA, "
         f"{c['holdout_skipped']} on holdout days"
     )
     typer.echo(f"report: {written}")

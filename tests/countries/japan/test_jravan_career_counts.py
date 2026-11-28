@@ -50,6 +50,23 @@ What a row is (names as `spec.record_spec` returns them, keys as `records.decode
     row.
 - Rows are sorted by `race_id, horse_id, subject, period, condition` (plain string order).
 
+Availability (the owner's answer B on #407, 2026-11-28, binding):
+- A key whose kept (latest) version has `データ作成年月日` after its race date (開催年 + 開催月日)
+  has no rows: that version could include the race's own result. It is counted in
+  `counts['created_after_race']`, never dropped silently. A version created on the race date is
+  kept. It is the kept version that is checked: an earlier version created on or before the race
+  date does not come back in its place. A key whose kept version is a deletion counts in
+  `deletions` (it has no row to drop), whatever its date.
+- Every record read is counted once: `records == holdout_skipped + undated + non_jra +
+  versions_dropped + deletions + created_after_race + kept`.
+- `config/availability.yaml` holds `career_counts: {kind: offset, anchor: race_date, tz:
+  Asia/Tokyo, offset_min: 0}` (the card's rule, 00:00 JST of the race date), read through
+  `core.store.asof.load_availability('japan')`; a view over the built parquet shows a race's rows
+  from 00:00 JST of its race date and not before.
+- `config/model_inputs.yaml`'s `career_counts` input supplies `{source: jravan, table:
+  career_counts, column: <a column of the table>}`, no longer the dump `records/SNPN/CK`, and
+  `docs/data-coverage.md` (the committed view, regenerated) lists that supply withheld (D21).
+
 Every layout here is made up in the workbook's shape (`jravan_workbook.write_workbook`): the item
 names follow the workbook's naming, but every width, repeat, order and so every position is
 invented (D21: the real workbook and export are licensed and stay under `$HORSETRACK_DATA_DIR`),
@@ -66,9 +83,12 @@ import shutil
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
+import duckdb
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -77,6 +97,8 @@ from typer.testing import CliRunner
 from horsetrack.cli import app
 from horsetrack.core import env, paths
 from horsetrack.core.eval.holdout import is_holdout_day
+from horsetrack.core.store.asof import asof_join, load_availability, read_asof
+from horsetrack.countries.japan.research import coverage as cv
 
 # isort: split
 # (its own block: the sibling helper module, then the module this ticket creates)
@@ -444,7 +466,7 @@ D1, D2, D3 = date(2025, 5, 25), date(2024, 12, 28), date(2025, 6, 1)
 KEPT = (
     Runner(D1, TOK, 11, "2021100001", seed=1),
     Runner(D1, TOK, 11, "2021100002", jockey="01002", trainer="01102", seed=8,
-           created=D1 + timedelta(days=1)),  # the later of its two versions
+           created=D1),  # the later of its two versions, made on the race date: kept
     Runner(D3, KYO, 1, "2021100001", jockey="01003", seed=3),  # the same horse, a later race
     Runner(D2, NAK, 11, "2020100005", jockey="00999", trainer="01105", seed=5,
            blank=frozenset({("調教師本年・累計成績情報/障害着回数", 1),
@@ -463,15 +485,26 @@ DROPPED = (
     # not JRA venues
     Runner(D1, NAR_VENUE, 5, "2021100006", seed=6),
     Runner(D1, OVERSEAS_VENUE, 11, "2021100007", seed=10),
+    # a runner whose latest version was made the day after its race (#407, answer B): no rows,
+    # and its earlier version, made before the race, does not come back
+    Runner(D1, TOK, 11, "2021100003", seed=12, created=D1 + timedelta(days=1)),
+    Runner(D1, TOK, 11, "2021100003", seed=11, created=D1 - timedelta(days=2)),
 )  # fmt: skip
+# the main export's counts: 12 records; 2 non-JRA; 3 versions dropped (one each for 2021100002,
+# 2021100004 and 2021100003); 1 deletion; 1 key made after its race; 5 runners kept
+MAIN_COUNTS = {"records": 12, "holdout_skipped": 0, "undated": 0, "non_jra": 2,
+               "versions_dropped": 3, "deletions": 1, "created_after_race": 1,
+               "kept": 5}  # fmt: skip
+PARTS = ("holdout_skipped", "undated", "non_jra", "versions_dropped", "deletions",
+         "created_after_race", "kept")  # fmt: skip
 
 
 def runners_for(layout: CKLayout) -> list[Runner]:
     """The main export in file order; blanks the layout lacks are left out."""
     names = {(c.name, 0) for c in layout.horse}
     names |= {(f"{b.name}/{c.name}", o) for b in layout.blocks for c in b.counts for o in (0, 1)}
-    order = (KEPT[0], DROPPED[1], KEPT[1], DROPPED[0], KEPT[2], DROPPED[3], DROPPED[2], KEPT[3],
-             KEPT[4], DROPPED[4])  # fmt: skip
+    order = (KEPT[0], DROPPED[1], DROPPED[5], KEPT[1], DROPPED[0], KEPT[2], DROPPED[3], DROPPED[2],
+             KEPT[3], DROPPED[6], KEPT[4], DROPPED[4])  # fmt: skip
     return [replace(r, blank=frozenset(b for b in r.blank if b in names)) for r in order]
 
 
@@ -501,6 +534,8 @@ def test_ck_records_give_one_row_per_subject_period_and_condition(
     assert report.name == "career_counts"
     assert report.counts["rows"] == len(want)
     assert report.counts["holdout_skipped"] == 0
+    assert {k: report.counts[k] for k in MAIN_COUNTS} == MAIN_COUNTS
+    assert report.counts["records"] == sum(report.counts[k] for k in PARTS)
 
 
 def test_the_rows_cover_every_count_item_of_the_layout_and_no_other(
@@ -528,7 +563,7 @@ def test_one_version_per_runner_the_latest_kept_and_deletions_dropped(
     layout = LAYOUT_A
     path = install(data, layout)
     r = KEPT[0]
-    newest = Runner(r.day, r.venue, r.race_no, r.horse_id, seed=21, created=r.day + timedelta(3))
+    newest = Runner(r.day, r.venue, r.race_no, r.horse_id, seed=21, created=r.day)
     older = [Runner(r.day, r.venue, r.race_no, r.horse_id, seed=s, created=r.day - timedelta(s))
              for s in (1, 2, 5)]  # fmt: skip
     gone = Runner(r.day, r.venue, r.race_no, "2021100004", seed=4)
@@ -551,6 +586,85 @@ def test_only_jra_venues_are_kept(data: Path, tmp_path: Path) -> None:
     got = table_rows(built(tmp_path))
     assert {row[0] for row in got} == {r.race_id for r in jra}
     assert got == expected_rows(layout, jra)
+
+
+# ------------------------------------------------------------------------------------------------
+# A kept version made after its race date has no rows, and is counted (#407, the owner's answer B)
+
+# (race date, データ作成年月日 minus the race date in days): kept when the version was made on or
+# before the race date. The days cross a month, a year and a leap day; a version made a year later
+# on an earlier month and day (-5 + 365) is still after the race.
+MADE = (
+    (date(2025, 5, 25), 0),
+    (date(2025, 5, 25), 1),
+    (date(2025, 5, 25), -1),
+    (date(2024, 12, 28), 5),  # made 2025-01-02
+    (date(2024, 12, 28), -30),
+    (date(2025, 2, 28), 1),  # made 2025-03-01
+    (date(2025, 3, 1), -1),  # made 2025-02-28
+    (date(2024, 2, 29), 0),
+    (date(2023, 7, 9), -189),  # made 2023-01-01
+    (date(2023, 7, 9), 360),  # made 2024-07-03: an earlier month and day, a later year
+    (date(2023, 7, 9), 366),
+)
+
+
+def test_a_key_whose_kept_version_was_made_after_its_race_date_has_no_rows(
+    data: Path, tmp_path: Path, layout: CKLayout
+) -> None:
+    path = install(data, layout)
+    venues = list(VENUES)
+    runners = [
+        Runner(day, venues[i % len(venues)], 1 + i % 12, f"20211{i:05d}", jockey=f"0{1000 + i}",
+               seed=200 + i, created=day + timedelta(days=shift))
+        for i, (day, shift) in enumerate(MADE)
+    ]  # fmt: skip
+    kept = [r for r in runners if r.made <= r.day]
+    late = [r for r in runners if r.made > r.day]
+    assert len(kept) == 6 and len(late) == 5  # the plan has both kinds
+    put(path, layout, runners[::-1])
+
+    report = career_counts.build_career_counts(out=tmp_path)
+    got = table_rows(built(tmp_path))
+    assert got == expected_rows(layout, kept)
+    assert not {r.horse_id for r in late} & {row[2] for row in got}
+    assert report.counts["created_after_race"] == len(late)
+    assert report.counts["kept"] == len(kept)
+    assert report.counts["rows"] == len(got)
+    assert report.counts["records"] == len(runners) == sum(report.counts[k] for k in PARTS)
+
+
+def test_it_is_the_kept_version_that_is_checked(data: Path, tmp_path: Path) -> None:
+    """An earlier version made before the race never stands in for a kept version made after it;
+    a key whose kept version was made on the race date keeps that version's counts."""
+    layout = LAYOUT_A
+    path = install(data, layout)
+    day = date(2025, 6, 1)
+
+    def v(horse: str, seed: int, shift: int, kubun: str = "1") -> Runner:
+        return Runner(day, KYO, 5, horse, seed=seed, kubun=kubun,
+                      created=day + timedelta(days=shift))  # fmt: skip
+
+    late_over_early = [v("2022100001", 51, -3), v("2022100001", 52, 1)]
+    both_late = [v("2022100002", 53, 2), v("2022100002", 54, 3)]
+    on_the_day = [v("2022100003", 55, -2), v("2022100003", 56, 0)]
+    late_then_deleted = [v("2022100004", 57, 1), v("2022100004", 58, 4, kubun="0")]
+    plain_early = [v("2022100005", 59, -1)]
+    order = [late_over_early[1], on_the_day[1], both_late[0], late_then_deleted[1],
+             late_over_early[0], plain_early[0], both_late[1], on_the_day[0],
+             late_then_deleted[0]]  # fmt: skip
+    put(path, layout, order)
+
+    want = expected_rows(layout, [on_the_day[1], plain_early[0]])
+    for chunk in (1, 4, 20_000):  # a key's versions in the same chunk or in different ones
+        report = career_counts.build_career_counts(out=tmp_path / f"c{chunk}", chunk_records=chunk)
+        assert table_rows(built(tmp_path / f"c{chunk}")) == want, chunk
+        c = report.counts
+        assert (c["created_after_race"], c["deletions"], c["kept"]) == (2, 1, 2), chunk
+        assert c["versions_dropped"] == 4, chunk
+        assert c["records"] == len(order) == sum(c[k] for k in PARTS), chunk
+    first = (tmp_path / "c1" / FILENAME).read_bytes()
+    assert first == (tmp_path / "c20000" / FILENAME).read_bytes()
 
 
 # ------------------------------------------------------------------------------------------------
@@ -715,6 +829,7 @@ def test_the_command_writes_the_table_and_a_counts_only_report(
     parsed = json.loads(text)
     assert parsed["name"] == "career_counts"
     assert parsed["counts"]["rows"] == len(want)
+    assert parsed["counts"]["created_after_race"] == MAIN_COUNTS["created_after_race"]
     assert_counts_only(text)
     assert_counts_only(result.output)
 
@@ -735,3 +850,135 @@ def test_the_command_fails_without_a_ck_file(data: Path) -> None:
     assert result.exit_code == 1, result.output
     assert "ERROR" in result.output
     assert not (data / "processed" / SOURCE / FILENAME).exists()
+
+
+# ------------------------------------------------------------------------------------------------
+# The availability rule: as of the race's card, 00:00 JST of the race date (#407, answer B)
+
+UTC = timezone.utc
+US = timedelta(microseconds=1)
+JST = ZoneInfo("Asia/Tokyo")
+ROW_KEY = ["race_id", "horse_id", "subject", "period", "condition"]
+PLACE_COLUMNS = COLUMNS[7:]
+
+
+def jst_midnight(day: date) -> datetime:
+    return datetime.combine(day, time(0), tzinfo=JST).astimezone(UTC)
+
+
+def plain(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value.item() if hasattr(value, "item") else value
+
+
+def view_rows(frame: pd.DataFrame) -> list[tuple]:
+    """(race_id, horse_id, subject, subject_id, period, condition, *counts) of each view row."""
+    names = ["race_id", "horse_id", "subject", "subject_id", "period", "condition",
+             *PLACE_COLUMNS]  # fmt: skip
+    return sorted(tuple(plain(v) for v in row) for row in frame[names].itertuples(index=False))
+
+
+def as_view(rows: Iterable[Row]) -> list[tuple]:
+    return sorted((r[0], *r[2:]) for r in rows)
+
+
+def test_the_shipped_rule_opens_a_race_s_counts_at_00_00_jst_of_its_race_date(
+    data: Path, tmp_path: Path
+) -> None:
+    rule = load_availability("japan")["career_counts"]
+    assert rule.kind == "offset"
+    assert (rule.anchor, rule.tz, rule.offset) == ("race_date", "Asia/Tokyo", timedelta(0))
+    assert (tuple(rule.label_columns), tuple(rule.label_prefixes)) == ((), ())
+    assert rule.in_view is False
+
+    layout = LAYOUT_B
+    path = install(data, layout)
+    sat, sun, later = date(2025, 5, 24), date(2025, 5, 25), date(2025, 6, 1)
+    runners = [
+        Runner(sat, TOK, 1, "2022100011", seed=61),
+        Runner(sat, KYO, 7, "2022100012", jockey="01007", seed=62, created=sat),
+        Runner(sun, TOK, 11, "2022100011", seed=63),
+        Runner(sun, TOK, 11, "2022100013", trainer="01109", seed=64),
+        Runner(later, KOK, 12, "2022100012", seed=65),
+    ]
+    late = Runner(sun, TOK, 11, "2022100014", seed=66, created=sun + timedelta(days=1))
+    put(path, layout, [*runners, late])
+    career_counts.build_career_counts(out=tmp_path)
+    table_path = tmp_path / FILENAME
+
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute(f"CREATE VIEW career_counts AS SELECT * FROM read_parquet('{table_path}')")
+        rules = load_availability("japan")
+        far = datetime(2100, 1, 1, tzinfo=UTC)
+        probes = [datetime(2000, 1, 1, tzinfo=UTC), far]
+        for day in (sat, sun, later):
+            probes += [jst_midnight(day) - US, jst_midnight(day)]
+        for t in probes:
+            view = read_asof(con, "career_counts", t, rules=rules)
+            assert list(view.columns) == COLUMNS, t
+            shown = [r for r in runners if jst_midnight(r.day) <= t]
+            assert view_rows(view) == as_view(expected_rows(layout, shown)), t.isoformat()
+            assert late.horse_id not in set(view["horse_id"]), t.isoformat()
+        # 00:00 JST is 15:00 UTC of the day before
+        assert jst_midnight(sun) == datetime(2025, 5, 24, 15, tzinfo=UTC)
+
+        # joined at t: a runner's counts at 00:00 JST of its race date, nulls a microsecond before
+        want = {tuple(r[i] for i in (0, 2, 3, 5, 6)): r[7:]
+                for r in expected_rows(layout, runners)}  # fmt: skip
+        picks = [k for k in sorted(want) if k[2] in ("horse", "jockey")][::7][:6]
+        assert len({k[0] for k in picks}) >= 2, picks
+        day_of = {r.race_id: r.day for r in runners}
+        times = []
+        for i, k in enumerate(picks):
+            opens = jst_midnight(day_of[k[0]])
+            times.append(opens - US if i % 2 else opens)
+        keys = pd.DataFrame(picks, columns=ROW_KEY)
+        keys["t_utc"] = pd.to_datetime(times, utc=True)
+        got = asof_join(keys, "career_counts", on=ROW_KEY, rules=rules, con=con)
+        for i, k in enumerate(picks):
+            values = tuple(plain(got[c].iloc[i]) for c in PLACE_COLUMNS)
+            assert values == ((None,) * PLACES if i % 2 else want[k]), (k, times[i])
+    finally:
+        con.close()
+
+
+# ------------------------------------------------------------------------------------------------
+# The coverage audit's career_counts input reads the table (#374), its figures withheld (D21)
+
+COVERAGE_DOC = Path(__file__).resolve().parents[3] / "docs" / "data-coverage.md"
+WITHHELD = "withheld (D21)"
+
+
+def test_the_career_counts_input_reads_the_jravan_table_not_the_dump() -> None:
+    inputs = {inp.name: inp for inp in cv.load_inputs()}
+    supplies = inputs["career_counts"].supplies
+    named = [(s.source, s.table, s.column) for s in supplies]
+    assert supplies, named
+    assert all((s.source, s.table) == (SOURCE, career_counts.NAME) for s in supplies), named
+    assert all(s.column in COLUMNS for s in supplies), named
+    assert not [s for s in supplies if s.table.startswith("records/")], named
+
+
+def test_the_committed_coverage_doc_lists_the_table_withheld() -> None:
+    text = COVERAGE_DOC.read_text(encoding="utf-8")
+    match = re.search(r"^## career_counts\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    assert match, "docs/data-coverage.md has no career_counts section"
+    section = match.group(1)
+    assert "records/SNPN/CK" not in section, "the doc still lists the CK dump"
+    lines = [line for line in section.splitlines() if line.startswith("- ")]
+    inputs = {inp.name: inp for inp in cv.load_inputs()}
+
+    def where(s) -> str:
+        return f" where {', '.join(f'{k} = {v}' for k, v in s.filter.items())}" if s.filter else ""
+
+    want = [f"- {s.source} `{s.table}.{s.column}`{where(s)}: {WITHHELD}"
+            for s in inputs["career_counts"].supplies]  # fmt: skip
+    assert lines == want, lines
+    assert all(f"{SOURCE} `{career_counts.NAME}." in line for line in lines), lines

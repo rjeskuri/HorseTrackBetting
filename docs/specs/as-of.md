@@ -260,6 +260,7 @@ checks the file against those answers.
 | `breeding_horses` (jravan) | `static` | always: pedigree is known at any t (#376) | none |
 | `produce` (jravan) | `static` | always: pedigree is known at any t (#376) | none |
 | `lineages` (jravan) | `static` | always: pedigree is known at any t (#376) | none |
+| `career_counts` (jravan) | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min, the card's rule (the owner's answer B on #407, 2026-11-28); the build drops a key whose kept version's データ作成年月日 is after its race date, or blank, and counts it in `created_after_race` | none |
 
 - Nothing else is banned. JRDB tables are inputs to private models only (D21: no JRDB-derived
   figure in the public repository).

@@ -36,7 +36,7 @@ command run by hand. The same inputs give the same bytes.
 | `dividends` | `dividends.py` | `dividends` | store table | that of `dividends` |
 | `final-odds` | `odds.py` | `final_odds` | jravan-only | `label_only` |
 | `votes` | `votes.py` | `pool_votes` | jravan-only | `label_only` |
-| `career-counts` | `career_counts.py` | `career_counts` | jravan-only | the owner's, asked on #407 |
+| `career-counts` | `career_counts.py` | `career_counts` | jravan-only | `offset` on `race_date`, 0 min (#407); versions made after the race date dropped |
 | `timeseries` | `timeseries.py` | `odds_timeseries/<YYYY-MM-DD>.parquet` | the odds log's schema | that of `odds_timeseries` |
 | `masters` | `masters.py` | `horses`, `horse_pedigree`; `jockeys`, `trainers` | store tables; jravan-only | `horses` refused, `horse_pedigree` `static`; `current_value` with `in_view` |
 | `bloodlines` | `bloodlines.py` | `breeding_horses`, `produce`, `lineages` | jravan-only | `static` |
@@ -770,8 +770,12 @@ read; nothing does today:
 `horsetrack.countries.japan.jravan.career_counts` writes `processed/jravan/career_counts.parquet`
 from JV-Data CK (出走別着度数): per runner of a race, its placings so far under each condition, and
 its jockey's and trainer's this year and in total, as of that race. It is not in `schemas.TABLES`;
-its availability rule is the owner's (asked on #407), and until `config/availability.yaml` holds
-one no view serves it.
+its availability rule is the owner's (answer B on #407, 2026-11-28): `offset` on `race_date`, 0
+min in `config/availability.yaml`, so a view shows a race's rows from 00:00 JST of its race date
+(the card's rule), and the build drops any key whose kept version was made after the race date (a
+version made later could hold the race's own result), counting it in `created_after_race`. The
+table carries `horse_id`, not `horse_no` (CK has no 馬番); a join to the jravan `runners` table is
+on (`race_id`, `horse_id`).
 
 - `build_career_counts(*, raw=None, out=None, chunk_records=20_000) -> BuildReport` reads
   `<raw>/stored/SNPN/CK/all.jvd` (one multi-GB file; no file is a `FileNotFoundError`) in two
@@ -783,7 +787,12 @@ one no view serves it.
   the rest are spilled, undecoded, to one temporary file per race month beside the output (removed
   when the build ends). Each month is then decoded alone: one version per key
   (`records.latest_versions` on 開催年, 開催月日, 競馬場コード, 開催回, 開催日目, レース番号 and
-  血統登録番号; a key whose latest version is a deletion has no rows), sorted, and written as one
+  血統登録番号; a key whose latest version is a deletion has no rows and counts in `deletions`,
+  whatever its date). A key whose kept version's データ作成年月日 is after its race date (開催年 +
+  開催月日) has no rows either and counts in `created_after_race`; a version made on the race date
+  is kept, and an earlier version never stands in for a later one. A blank or invalid
+  データ作成年月日 on a kept version cannot be shown to be on or before the race date, so it is
+  dropped and counted in `created_after_race` too. The kept records are sorted, and written as one
   row group through a `ParquetWriter` (zstd) into a tmp file, then `os.replace`. Rows are sorted
   by `race_id, horse_id, subject, period, condition` (plain string order); the same records, in any
   order and at any chunk size, give the same bytes.
@@ -801,5 +810,7 @@ one no view serves it.
 
 `horsetrack japan jravan career-counts` runs the build and writes `reports/jravan-career_counts.json`
 through `write_build_report`, counts only: `records`, `holdout_skipped`, `undated`, `non_jra`,
-`versions_dropped`, `deletions`, `kept` (runners with rows) and `rows`, and `rows` per race year.
+`versions_dropped`, `deletions`, `created_after_race`, `kept` (runners with rows) and `rows`, and
+`rows` per race year; every record read counts once, `records = holdout_skipped + undated +
+non_jra + versions_dropped + deletions + created_after_race + kept`.
 Its figures, wall time and peak memory are withheld (D21).
