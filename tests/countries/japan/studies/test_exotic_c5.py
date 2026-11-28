@@ -1,0 +1,1184 @@
+"""The C5 exotic layer run against the pools' own dividends (ticket #459, epic #73; 08 E43, E44,
+E16; owner answers 1-7 on #99 of 2026-11-26, the reframe of 2026-11-27, the 'drop'/'bound' comment
+on #459 of 2026-11-27).
+
+Contract pinned here for ``horsetrack.countries.japan.studies.exotic_c5`` (the coder implements
+what these tests call):
+
+Constants. ``COUNTRY = "japan"``, ``TICKET = 459``, ``FAMILY_ID`` (one new family, a safe summary
+stem; every record of the run is in it). ``POOLS`` holds every pool of ``exotic.POOLS``;
+``ORDERINGS`` every family of ``exotic.FAMILIES``. ``NORMALISED = "normalised"`` (1/odds normalised
+per race), ``CALIBRATED = "calibrated"`` (D4's spline, ``models.v0.calibration.
+fit_win_calibration`` at its default knots, refitted on each fold's training rows), ``FORM =
+"stage2:q:form"`` (#87's member, JRDB-fed); ``INPUTS = (NORMALISED, CALIBRATED, FORM)``.
+``E44_POOLS = (TRIO, TIERCE)``; ``FLOOR_TREATMENTS = ("drop", "bound")``; ``PLACE_WIDE_DEVIGS`` a
+non-empty tuple of de-vig names; ``BLENDS = ("none", "linear", "log_linear")``.
+
+Spec. ``build_spec(scheme: FoldScheme, bootstrap: Mapping) -> dict``, plain JSON, carrying
+``family_id``, ``ticket``, ``fold_scheme`` (``dataclasses.asdict(scheme)``), ``bootstrap``
+(``n_boot``, ``level``, ``seed`` read by every bound) and the variant grid as lists, read by
+``compute_study``: ``pools``, ``orderings``, ``inputs``, ``blends``, ``e44_pools``,
+``place_wide_devigs``, ``floor_treatments`` (a test may shorten a list to run less).
+``default_spec()`` is ``build_spec`` on ``load_country_scheme("japan")`` and D7's bootstrap
+(config/scoring.yaml: cluster unit, level, n_boot; an integer seed), the full grid: what
+``run_study`` freezes.
+
+The pure study. ``compute_study(races, runners, dividends, spec, *, form=None) ->
+studies.calibration.Study``: store-shaped tables (races: race_id, race_date (datetime.date),
+meeting_id, venue, race_no, race_class_raw, field_size, status; runners: race_id, race_date,
+meeting_id, venue, race_no, horse_id, horse_no, win_odds, finish_pos, dead_heat, is_scratched;
+dividends: race_id, pool, combination, dividend, is_refund) and ``form`` (race_id, horse_no,
+p_form) or None. Folds are ``walk_forward`` on the race dates under ``spec["fold_scheme"]``; a
+scored race is one in a fold's test window whose pool pays. Each variant has ``hypothesis_id``,
+``params`` (plain JSON), ``metrics`` (``FoldMetric``) and ``error`` (None, or why it failed):
+
+- E43 (``hypothesis_id == "E43"``), one variant per grid point: params ``pool``, ``input``,
+  ``ordering`` (WIN may carry None: its Win marginal is the input itself), ``blend`` ("none" or
+  "linear"), and for PLACE and QUINELLA_PLACE also ``devig`` and ``floor``. Per scored race the
+  log loss is -(1/k) sum ln p(c) over its k winning combinations. The model p is P_C5: the input's
+  Win probabilities (renormalised per race) through the ordering (``Ordering.fit`` on the fold's
+  training rows; fold k's parameters on fold k's test races) by horse number, Place's places by
+  ``field_size``. The baseline is ``exotic.dividend_shares`` on the race-pool's dividends at the
+  race's own payout rate (boosts and ``race_class_raw`` in). Metric ``delta_ll_vs_dividends`` on
+  fold ``all_folds``: the mean over scored races of (baseline log loss - model log loss), its lo
+  and hi ``core.eval.bootstrap.paired_bootstrap`` over meeting_id clusters at
+  ``spec["bootstrap"]``, n the scored races. ``blend == "linear"``: p = alpha q + (1 - alpha) P_C5
+  on each winning combination, alpha in [0, 1] minimising the mean log loss over the fold's
+  training races (dates up to its ``train_end``) of that pool, input and ordering; one ``alpha``
+  metric per fold, fold label ``test_start.isoformat()``. PLACE and QUINELLA_PLACE: 'drop' leaves
+  out the race-pools ``exotic.dividend_floor_bound`` flags; 'bound' scores every race-pool.
+- ``blend == "log_linear"`` (``exotic.pool_blend``) is recorded and fails: not runnable yet.
+- E16 (``"E16"``): the E43 grid again (same pool, input, ordering, blend, devig, floor) on the
+  race-pools that paid the super_premium rate (``super_premium_subset``) alone.
+- E44 (``"E44"``): for each ordering and each input but NORMALISED, params ``ordering``,
+  ``input`` (the model) and ``market == NORMALISED``; metrics on ``all_folds``: ``win_gain``
+  (per race the market's Win log loss minus the model's), ``joint_gain[<pool>]`` for each pool of
+  ``spec["e44_pools"]`` (the market's pool log loss minus the model's, both through the same
+  ordering: one fit per fold serving both inputs), each with D7 bounds and n (the same races), and
+  ``gain_ratio[<pool>]`` = joint_gain / win_gain, a point estimate (lo and hi None).
+
+``super_premium_subset(frame, pool) -> DataFrame``: the rows of a frame with race_id (and
+race_class_raw, which an age-restricted boost needs) whose race-pool paid exactly the
+super_premium rate (``takeout.race_takeout(...).boost == "super_premium"``): ultra_premium,
+premium and unboosted race-pools are left out; order and index kept.
+
+The run. Seams the tests replace: ``load_store(days) -> (races, runners, dividends, builds)``
+and ``load_form(days) -> (form, builds)``, given ``datetime.date`` days; either may be called once
+or per chunk. ``run_study(*, date_from, date_to, out_dir, registry=None) -> result``: refuses an
+``out_dir`` inside the repository (``LicensedOutputInRepo`` or ``DataDirInsideRepo``) before any
+read; freezes ``default_spec()`` under ``FAMILY_ID`` before either seam is called
+(``FamilyAlreadyFrozen`` on another spec stops it before any read, with nothing appended); asks
+the seams for development days only (``is_holdout_day`` False, in [date_from, date_to]), every
+such day; appends one record per variant (ticket 459, status "failed" for a variant with an
+error, else "scored"); when ``load_form`` raises, every FORM variant is a failed record and the
+rest run. Records of a FORM variant name ``jrdb`` among their sources (licensed, withheld by the
+summary); no other record names a withheld source. The private report goes through
+``write_report`` under ``out_dir``. ``render_public_report(result) -> str`` names FORM as
+withheld and carries no figure built on it. The run writes nothing inside the repository and
+never opens the holdout. CLI: ``horsetrack japan exotic-c5``.
+
+Every table is synthetic (``exotic_c5_world``); expected values come from first principles there
+and here (Harville by enumeration, the implied share by formula, alpha by a bounded scalar
+minimisation), or from the dependencies the ticket names (``core.eval.bootstrap``,
+``core.eval.folds``, ``models.v0.calibration``), never from the module under test.
+"""
+
+# Ruff reads the module under test as third-party until it exists, then as first-party; the
+# block is written in its final order and I001 is waived so lint passes before and after.
+from __future__ import annotations  # noqa: I001
+
+import dataclasses
+import json
+import math
+import shutil
+import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+from scipy.optimize import minimize_scalar
+from typer.testing import CliRunner
+
+from horsetrack.cli import app
+from horsetrack.core import env
+from horsetrack.core.config import load_country_yaml
+from horsetrack.core.eval import holdout
+from horsetrack.core.eval import registry as registry_module
+from horsetrack.core.eval.bootstrap import paired_bootstrap
+from horsetrack.core.eval.folds import FoldScheme, load_country_scheme, walk_forward
+from horsetrack.core.eval.holdout import is_holdout_day
+from horsetrack.core.eval.registry import (
+    FamilyAlreadyFrozen,
+    Registry,
+    RunRecord,
+    is_licensed_record,
+    write_summary,
+)
+from horsetrack.core.eval.reports import LicensedOutputInRepo
+from horsetrack.core.paths import DataDirInsideRepo
+from horsetrack.countries.japan.models import exotic
+from horsetrack.countries.japan.models.v0.calibration import fit_win_calibration
+from horsetrack.countries.japan.studies import exotic_c5
+
+# isort: split
+from exotic_c5_world import (
+    PLACE,
+    POOLS,
+    SINGLE,
+    TRIFECTA,
+    TRIO,
+    WIDE,
+    WIN,
+    Meeting,
+    World,
+    floor_bound,
+    implied_share,
+    make_world,
+    normalised,
+    pool_probabilities,
+    replace_races,
+)
+
+REPO = env.repo_root()
+GUARDED = [
+    REPO / "docs" / "ledger.md",
+    REPO / "docs" / "experiments",
+    REPO / "docs" / "leaderboard",
+    *sorted((REPO / "src" / "horsetrack" / "countries").glob("*/holdout_log.jsonl")),
+]
+FIRST_DAY = date(2014, 6, 7)
+LAST_DAY = date(2026, 12, 31)
+STORE_BUILDS = {
+    "jra_races": "processed/jra/races.parquet@" + "a" * 16,
+    "jra_runners": "processed/jra/runners.parquet@" + "b" * 16,
+    "jra_dividends": "processed/jra/dividends.parquet@" + "c" * 16,
+}
+FORM_BUILDS = {"meta_form_oof": "c4/stage2-q-form.parquet@" + "d" * 16}
+GRID_KEYS = ("pool", "input", "ordering", "blend", "devig", "floor")
+DELTA = "delta_ll_vs_dividends"
+NO_BLEND, LINEAR, LOG_LINEAR = "none", "linear", "log_linear"
+SUPER_DAYS = (date(2020, 9, 21), date(2020, 12, 13))  # super_premium on every pool, every venue
+ULTRA_DAY = date(2024, 9, 16)  # ultra_premium: 80% + 5%, not super_premium
+SMALL_SCHEME = FoldScheme(
+    unit="quarter",
+    test_length=1,
+    step=1,
+    min_train=2,
+    window="expanding",
+    embargo_days=7,
+    anchor_month=1,
+)
+SMALL_BOOT = {"cluster_unit": "meeting", "sided": "one-sided", "level": 0.95, "n_boot": 400,
+              "seed": 4590}  # fmt: skip
+
+
+# ---------------------------------------------------------------------------------------------
+# Worlds
+# ---------------------------------------------------------------------------------------------
+
+
+def _second_saturday(year: int, month: int) -> date:
+    first = date(year, month, 1)
+    return first + timedelta(days=(5 - first.weekday()) % 7 + 7)
+
+
+def _late_2026_days() -> tuple[list[date], list[date]]:
+    """The first weekend days from 2026-11-28 that are development days, and holdout days."""
+    days = [date(2026, 11, 28) + timedelta(days=k) for k in range(35)]
+    weekend = [d for d in days if d.weekday() >= 5]
+    dev = [d for d in weekend if not is_holdout_day("japan", d)][:2]
+    held = [d for d in weekend if is_holdout_day("japan", d)][:2]
+    assert len(dev) == 2 and len(held) == 2, (dev, held)
+    return dev, held
+
+
+DEV_LATE, HELD = _late_2026_days()
+VENUES = ("TOK", "NAK", "KYO", "HSN", "CKY", "NII")
+TRAIN_MEETINGS = [
+    Meeting(_second_saturday(2014 + (q + 2) // 4, 3 * ((q + 2) % 4) + 2), VENUES[q % len(VENUES)])
+    for q in range(22)  # one meeting a quarter, 2014-Q3 to 2019-Q4: training only
+]
+TEST_MEETINGS = [
+    Meeting(date(2020, 9, 12), "NAK", hot=(1,)),
+    Meeting(SUPER_DAYS[0], "NAK", hot=(2,)),
+    Meeting(date(2020, 12, 5), "HSN"),
+    Meeting(SUPER_DAYS[1], "HSN", hot=(3,)),
+    Meeting(date(2024, 8, 3), "NII", hot=(1,)),
+    Meeting(ULTRA_DAY, "NAK", hot=(2,)),
+    Meeting(date(2026, 11, 21), "TOK"),
+    *(Meeting(d, "TOK", hot=(1,)) for d in DEV_LATE),
+]
+HOLDOUT_MEETINGS = [Meeting(d, "TOK", hot=(2,)) for d in HELD]  # in the store, never to be read
+RUN_MEETINGS = TRAIN_MEETINGS + TEST_MEETINGS + HOLDOUT_MEETINGS
+RUN_SEED = 45901
+
+
+def _dev_races(world: World) -> pd.DataFrame:
+    races = world.races
+    held = races["race_date"].map(lambda d: is_holdout_day("japan", d)).astype(bool)
+    return races.loc[~held.to_numpy()].reset_index(drop=True)
+
+
+@dataclass
+class FoldInfo:
+    train_end: date
+    test_start: date
+    train_ids: list[str]
+    test_ids: list[str]
+
+
+def fold_info(races: pd.DataFrame, scheme: FoldScheme) -> list[FoldInfo]:
+    """The walk-forward folds of the races (one row each), with their race ids."""
+    races = races.reset_index(drop=True)
+    ids = races["race_id"].to_numpy(dtype=object)
+    return [
+        FoldInfo(f.train_end, f.test_start, list(ids[f.train_idx]), list(ids[f.test_idx]))
+        for f in walk_forward(races["race_date"], scheme=scheme)
+    ]
+
+
+def clusters_of(world: World) -> pd.Series:
+    return pd.Series({r: t.meeting_id for r, t in world.truth.items()})
+
+
+# ---------------------------------------------------------------------------------------------
+# References
+# ---------------------------------------------------------------------------------------------
+
+
+def model_ll(p: dict[int, float], pool: str, winners: Sequence[str], places: int,
+             lambdas=(1.0, 1.0)) -> float:  # fmt: skip
+    probs = pool_probabilities(p, lambdas, places=places)[pool]
+    return -float(np.mean([math.log(probs[c]) for c in winners]))
+
+
+def dividend_ll(truth, pool: str) -> float:
+    """The single-winner baseline: -ln of the implied share R * 100 / (D + 5)."""
+    (combo,) = truth.winners[pool]
+    return -math.log(implied_share(truth.dividends[pool][combo], truth.rates[pool]))
+
+
+def e43_deltas(world: World, race_ids, pool: str, p_of) -> pd.Series:
+    """Per race: the dividend baseline's log loss minus the Harville C5 model's."""
+    out = {}
+    for r in race_ids:
+        t = world.truth[r]
+        out[r] = dividend_ll(t, pool) - model_ll(p_of(r, t), pool, t.winners[pool], t.places)
+    return pd.Series(out, dtype=float)
+
+
+def bounds(per_race: pd.Series, world: World, boot: dict):
+    return paired_bootstrap(
+        per_race,
+        clusters_of(world),
+        n_boot=boot["n_boot"],
+        level=boot["level"],
+        seed=boot["seed"],
+    )
+
+
+def assert_metric_matches(m, per_race: pd.Series, world: World, boot: dict, *, tol=1e-9):
+    iv = bounds(per_race, world, boot)
+    assert m.n == len(per_race), (m, len(per_race))
+    assert m.value == pytest.approx(per_race.mean(), abs=tol)
+    assert m.lo is not None and m.hi is not None
+    assert m.lo == pytest.approx(iv.lo, abs=tol)
+    assert m.hi == pytest.approx(iv.hi, abs=tol)
+
+
+def reference_alpha(q: np.ndarray, p: np.ndarray) -> float:
+    res = minimize_scalar(
+        lambda a: -np.mean(np.log(a * q + (1.0 - a) * p)),
+        bounds=(0.0, 1.0),
+        method="bounded",
+        options={"xatol": 1e-12},
+    )
+    return float(res.x)
+
+
+def blend_objective(alpha: float, q: np.ndarray, p: np.ndarray) -> float:
+    return float(-np.mean(np.log(alpha * q + (1.0 - alpha) * p)))
+
+
+def single_q_p(world: World, race_ids, pool: str) -> tuple[np.ndarray, np.ndarray]:
+    """The implied share and the normalised-market Harville probability of each race's winning
+    combination in a single-winner pool."""
+    q, p = [], []
+    for r in race_ids:
+        t = world.truth[r]
+        (c,) = t.winners[pool]
+        q.append(implied_share(t.dividends[pool][c], t.rates[pool]))
+        p.append(pool_probabilities(t.p_norm, places=t.places)[pool][c])
+    return np.array(q), np.array(p)
+
+
+def calibrated_p(world: World, folds: list[FoldInfo]) -> dict[str, dict[int, float]]:
+    """D4's spline fitted on each fold's training rows, applied to its test races."""
+    runners = world.runners
+    out = {}
+    for f in folds:
+        train = runners[runners["race_id"].isin(f.train_ids)]
+        rows = pd.DataFrame(
+            {
+                "race_id": train["race_id"].to_numpy(dtype=object),
+                "race_date": train["race_date"].to_numpy(dtype=object),
+                "win_odds": train["win_odds"].to_numpy(dtype=float),
+                "won": (train["finish_pos"].to_numpy(dtype=float) == 1.0),
+            }
+        )
+        model = fit_win_calibration(rows)
+        for r in f.test_ids:
+            t = world.truth[r]
+            q = np.array([t.p_norm[h] for h in t.horses])
+            p = model.predict_many(q, np.array([r] * len(q), dtype=object))
+            out[r] = dict(zip(t.horses, (float(x) for x in p), strict=True))
+    return out
+
+
+# ---------------------------------------------------------------------------------------------
+# Record and variant lookups
+# ---------------------------------------------------------------------------------------------
+
+
+def select(items, hypothesis: str, **want) -> list:
+    found = [
+        x
+        for x in items
+        if x.hypothesis_id == hypothesis and all(x.params.get(k) == v for k, v in want.items())
+    ]
+    if want.get("pool") == WIN and "ordering" not in want:
+        found = [x for x in found if x.params.get("ordering") in (None, "harville")]
+    return found
+
+
+def one(items, hypothesis: str, **want):
+    found = select(items, hypothesis, **want)
+    assert len(found) == 1, (hypothesis, want, [x.params for x in found])
+    return found[0]
+
+
+def metric(item, name: str, fold: str = "all_folds"):
+    found = [m for m in item.metrics if m.metric == name and m.fold == fold]
+    assert len(found) == 1, (name, fold, [(m.fold, m.metric) for m in item.metrics])
+    return found[0]
+
+
+def grid_key(params: dict) -> tuple:
+    return tuple(params.get(k) for k in GRID_KEYS)
+
+
+# ---------------------------------------------------------------------------------------------
+# The run's fakes and guards
+# ---------------------------------------------------------------------------------------------
+
+
+class FakeStore:
+    """The store seam: the world's tables on the days asked for (only those), and every day
+    asked for."""
+
+    def __init__(self, world: World) -> None:
+        self.world = world
+        self.asked: list[date] = []
+        self.calls = 0
+
+    def __call__(self, days):
+        self.calls += 1
+        asked = list(days)
+        for day in asked:
+            assert isinstance(day, date) and not isinstance(day, datetime), day
+        self.asked += asked
+        wanted = set(asked)
+        races = self.world.races[self.world.races["race_date"].isin(wanted)]
+        ids = set(races["race_id"])
+        runners = self.world.runners[self.world.runners["race_id"].isin(ids)]
+        dividends = self.world.dividends[self.world.dividends["race_id"].isin(ids)]
+        return (
+            races.reset_index(drop=True),
+            runners.reset_index(drop=True),
+            dividends.reset_index(drop=True),
+            dict(STORE_BUILDS),
+        )
+
+
+class FakeForm:
+    """The stage2:q:form seam (#87's member probabilities, JRDB-fed)."""
+
+    def __init__(self, world: World, *, fails: bool = False) -> None:
+        self.world = world
+        self.fails = fails
+        self.asked: list[date] = []
+        self.calls = 0
+
+    def __call__(self, days):
+        self.calls += 1
+        asked = list(days)
+        for day in asked:
+            assert isinstance(day, date) and not isinstance(day, datetime), day
+        self.asked += asked
+        if self.fails:
+            raise FileNotFoundError("planted: the stage2:q:form member file is missing")
+        wanted = set(asked)
+        ids = set(self.world.races.loc[self.world.races["race_date"].isin(wanted), "race_id"])
+        form = self.world.form[self.world.form["race_id"].isin(ids)]
+        return form.reset_index(drop=True), dict(FORM_BUILDS)
+
+
+def _snapshot() -> dict[Path, bytes]:
+    found = {}
+    for target in GUARDED:
+        if not target.exists():
+            continue
+        files = [target] if target.is_file() else sorted(target.rglob("*"))
+        found.update({f: f.read_bytes() for f in files if f.is_file()})
+    return found
+
+
+def _restore(before: dict[Path, bytes]) -> bool:
+    """Put the guarded files back; True if anything had changed."""
+    after = _snapshot()
+    if after == before:
+        return False
+    for path in set(after) - set(before):
+        path.unlink()
+    for path, raw in before.items():
+        path.write_bytes(raw)
+    return True
+
+
+@pytest.fixture(autouse=True)
+def guarded(tmp_path, monkeypatch):
+    """The data directory is under tmp_path; a test fails (and the files are restored) if it
+    changed the ledger, the committed experiments or leaderboard, or a holdout log."""
+    monkeypatch.setenv("HORSETRACK_DATA_DIR", str(tmp_path / "data"))
+    before = _snapshot()
+    yield
+    if _restore(before):
+        pytest.fail("the test wrote the repository's ledger, docs or a holdout log (restored)")
+
+
+HOLDOUT_OPENED: list[tuple] = []
+
+
+def _refuse_holdout(*args, **kwargs):
+    HOLDOUT_OPENED.append((args, kwargs))
+    raise AssertionError("the holdout was opened")
+
+
+def _planted_henery_failure(p):
+    raise ValueError("planted: the Henery quadrature failed")
+
+
+@dataclass
+class Run:
+    world: World
+    result: object
+    registry: Registry
+    records: list[RunRecord]
+    out_dir: Path
+    summary: Path
+    store: FakeStore
+    form: FakeForm
+
+
+def _registry(root: Path) -> Registry:
+    return Registry(root / "registry" / "japan.jsonl", holdout_log=root / "holdout_log.jsonl")
+
+
+def _run(root: Path, world: World, *, form_fails=False, henery_fails=False) -> Run:
+    root.mkdir(parents=True, exist_ok=True)
+    data, summary, out = root / "data", root / "summary" / "japan", root / "reports"
+    data.mkdir()
+    summary.mkdir(parents=True)
+    store, form = FakeStore(world), FakeForm(world, fails=form_fails)
+    registry = _registry(root)
+    before = _snapshot()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("HORSETRACK_DATA_DIR", str(data))
+        mp.setattr(registry_module, "summary_dir", lambda country: summary)
+        mp.setattr(exotic_c5, "summary_dir", lambda country: summary, raising=False)
+        mp.setattr(holdout.LockedHoldout, "open", _refuse_holdout)
+        mp.setattr(exotic_c5, "load_store", store)
+        mp.setattr(exotic_c5, "load_form", form)
+        if henery_fails:
+            mp.setattr(exotic, "_henery_trifecta", _planted_henery_failure)
+        try:
+            result = exotic_c5.run_study(
+                date_from=FIRST_DAY, date_to=LAST_DAY, out_dir=out, registry=registry
+            )
+        finally:
+            changed = _restore(before)
+    assert not changed, "the run wrote the repository's ledger, docs or a holdout log"
+    return Run(world, result, registry, registry.records(), out, summary, store, form)
+
+
+@pytest.fixture(scope="module")
+def world() -> World:
+    return make_world(RUN_MEETINGS, seed=RUN_SEED)
+
+
+@pytest.fixture(scope="module")
+def run_a(world, tmp_path_factory) -> Run:
+    return _run(tmp_path_factory.mktemp("run-a"), world)
+
+
+@pytest.fixture(scope="module")
+def run_b(tmp_path_factory) -> Run:
+    """The same store as run_a; only the JRDB-fed member's probabilities differ."""
+    other = make_world(RUN_MEETINGS, seed=RUN_SEED, form_seed=RUN_SEED + 17)
+    return _run(tmp_path_factory.mktemp("run-b"), other)
+
+
+@pytest.fixture(scope="module")
+def run_broken(world, tmp_path_factory) -> Run:
+    """The Henery quadrature fails on every race and the member file is missing."""
+    return _run(tmp_path_factory.mktemp("run-broken"), world, form_fails=True, henery_fails=True)
+
+
+@pytest.fixture(scope="module")
+def scored(world) -> list[FoldInfo]:
+    """The run's folds under the country's scheme, development races only."""
+    return fold_info(_dev_races(world), load_country_scheme("japan"))
+
+
+def _scored_ids(folds: list[FoldInfo]) -> list[str]:
+    return [r for f in folds for r in f.test_ids]
+
+
+# ---------------------------------------------------------------------------------------------
+# 1. The spec is frozen before any outcome is read
+# ---------------------------------------------------------------------------------------------
+
+
+class _StopHere(BaseException):  # not an Exception: a run that records failures cannot swallow it
+    pass
+
+
+def test_spec_is_frozen_before_any_outcome_is_read(tmp_path, monkeypatch, world):
+    spec = exotic_c5.default_spec()
+    json.dumps(spec)  # plain JSON, as the registry requires
+    assert spec == exotic_c5.default_spec()
+    assert spec["family_id"] == exotic_c5.FAMILY_ID and spec["ticket"] == exotic_c5.TICKET == 459
+    assert spec["fold_scheme"] == dataclasses.asdict(load_country_scheme("japan"))
+    d7 = load_country_yaml("japan", "scoring")["bootstrap"]
+    assert spec["bootstrap"]["level"] == d7["level"] and spec["bootstrap"]["n_boot"] == d7["n_boot"]
+    assert isinstance(spec["bootstrap"]["seed"], int)
+    for key, values in {
+        "pools": exotic_c5.POOLS,
+        "orderings": exotic_c5.ORDERINGS,
+        "inputs": exotic_c5.INPUTS,
+        "blends": exotic_c5.BLENDS,
+        "e44_pools": exotic_c5.E44_POOLS,
+        "place_wide_devigs": exotic_c5.PLACE_WIDE_DEVIGS,
+        "floor_treatments": exotic_c5.FLOOR_TREATMENTS,
+    }.items():
+        assert spec[key] == list(values), key
+    other = exotic_c5.build_spec(SMALL_SCHEME, SMALL_BOOT)
+    assert other["fold_scheme"] == dataclasses.asdict(SMALL_SCHEME) and other != spec
+
+    # A fresh registry: the seams see the family frozen with the default spec, and no record.
+    seen = []
+    registry = _registry(tmp_path)
+
+    def seam(name):
+        def call(days):
+            seen.append(
+                (
+                    name,
+                    registry.frozen_spec(exotic_c5.FAMILY_ID),
+                    list(registry.records(exotic_c5.FAMILY_ID)),
+                )
+            )
+            raise _StopHere
+
+        return call
+
+    monkeypatch.setattr(holdout.LockedHoldout, "open", _refuse_holdout)
+    monkeypatch.setattr(exotic_c5, "load_store", seam("store"))
+    monkeypatch.setattr(exotic_c5, "load_form", seam("form"))
+    with pytest.raises(_StopHere):
+        exotic_c5.run_study(
+            date_from=FIRST_DAY, date_to=LAST_DAY, out_dir=tmp_path / "out", registry=registry
+        )
+    assert seen, "neither seam was called"
+    for name, frozen, records in seen:
+        assert frozen == json.loads(json.dumps(spec)), f"{name} was read before the freeze"
+        assert records == [], f"{name} was read after a record was appended"
+
+    # Frozen with another spec: refused before any read, nothing appended or written.
+    refused = _registry(tmp_path / "refused")
+    refused.freeze_family(exotic_c5.FAMILY_ID, {**spec, "changed_after_the_freeze": True})
+    store, form = FakeStore(world), FakeForm(world)
+    monkeypatch.setattr(exotic_c5, "load_store", store)
+    monkeypatch.setattr(exotic_c5, "load_form", form)
+    out = tmp_path / "refused-out"
+    with pytest.raises(FamilyAlreadyFrozen):
+        exotic_c5.run_study(date_from=FIRST_DAY, date_to=LAST_DAY, out_dir=out, registry=refused)
+    assert store.calls == 0 and form.calls == 0
+    assert refused.records() == []
+    assert not out.exists() or not any(p.is_file() for p in out.rglob("*"))
+
+
+# ---------------------------------------------------------------------------------------------
+# 2. E43: paired log loss per pool against the dividends, with D7 bounds
+# ---------------------------------------------------------------------------------------------
+
+
+def test_paired_log_loss_per_pool_matches_the_dividend_baseline_reference(run_a, scored):
+    """Every single-winner pool, the publishable inputs and the JRDB-fed one, through Harville."""
+    world, records = run_a.world, run_a.records
+    boot = exotic_c5.default_spec()["bootstrap"]
+    ids = _scored_ids(scored)
+    assert len(ids) == 27 and len(scored) == 4
+    cal = calibrated_p(world, scored)
+    inputs = {
+        exotic_c5.NORMALISED: lambda r, t: t.p_norm,
+        exotic_c5.FORM: lambda r, t: normalised(t.p_form),
+        exotic_c5.CALIBRATED: lambda r, t: cal[r],
+    }
+    values = {}
+    for pool in SINGLE:
+        for name, p_of in inputs.items():
+            if name == exotic_c5.CALIBRATED and pool not in (WIN, TRIO):
+                continue
+            want = {"pool": pool, "input": name, "blend": NO_BLEND}
+            if pool != WIN:
+                want["ordering"] = "harville"
+            rec = one(records, "E43", **want)
+            assert rec.status == "scored", (pool, name)
+            per_race = e43_deltas(world, ids, pool, p_of)
+            tol = 1e-6 if name == exotic_c5.CALIBRATED else 1e-9
+            assert_metric_matches(metric(rec, DELTA), per_race, world, boot, tol=tol)
+            values[(pool, name)] = per_race.mean()
+    # the inputs and the pools are told apart: no constant passes
+    assert len({round(v, 9) for v in values.values()}) == len(values)
+
+
+def test_every_scored_e43_and_e16_record_carries_bounds(run_a):
+    for rec in run_a.records:
+        if rec.hypothesis_id in ("E43", "E16") and rec.status == "scored":
+            m = metric(rec, DELTA)
+            assert m.lo is not None and m.hi is not None and m.lo <= m.hi, rec.params
+            assert m.n > 0
+
+
+def test_place_wide_drop_leaves_out_floor_bound_race_pools_and_bound_keeps_them(run_a, scored):
+    world, records = run_a.world, run_a.records
+    ids = _scored_ids(scored)
+    devigs = exotic_c5.default_spec()["place_wide_devigs"]
+    assert devigs
+    for pool in (PLACE, WIDE):
+        flagged = sum(floor_bound(world.truth[r].dividends[pool]) for r in ids)
+        assert 0 < flagged < len(ids), (pool, flagged)
+        for devig in devigs:
+            got = {}
+            for floor in ("drop", "bound"):
+                want = {"pool": pool, "input": exotic_c5.NORMALISED, "ordering": "harville"}
+                want |= {"blend": NO_BLEND, "devig": devig, "floor": floor}
+                rec = one(records, "E43", **want)
+                assert rec.status == "scored", (pool, devig, floor)
+                got[floor] = metric(rec, DELTA)
+            assert got["bound"].n == len(ids), (pool, devig)
+            assert got["drop"].n == len(ids) - flagged, (pool, devig)
+
+
+# ---------------------------------------------------------------------------------------------
+# 3. The linear blend: alpha fitted per pool on each fold's training races
+# ---------------------------------------------------------------------------------------------
+
+BLEND_MEETINGS = [
+    Meeting(date(2021 + q // 4, 3 * (q % 4) + 2, 6 + 7 * k), venue, races=4)
+    for q in range(6)
+    for k, venue in enumerate(("TOK", "KYO"))
+]
+BLEND_MU = {TRIO: (0.6, -0.5, 0.4, -0.3, 0.5, 0.0), WIN: (-0.4, 0.3, -0.2, 0.5, -0.5, 0.1)}
+
+
+def _quarter_ratio(mus, *, sigma=1.0):
+    """Planted share over the market's Harville probability, lognormal around a mean that moves
+    by quarter (8 races a quarter), so each fold's training optimum differs."""
+
+    def ratio(index, pool, rng):
+        mu = mus.get(pool, (0.0,) * 6)[min(index // 8, 5)]
+        return float(np.exp(rng.normal(mu, sigma)))
+
+    return ratio
+
+
+def _constant_ratio(values):
+    def ratio(index, pool, rng):
+        rng.normal()  # keep the stream in step with the other worlds
+        return values.get(pool, 1.0)
+
+    return ratio
+
+
+def _blend_spec(pools=(WIN, TRIO)) -> dict:
+    spec = exotic_c5.build_spec(SMALL_SCHEME, SMALL_BOOT)
+    spec.update(pools=list(pools), orderings=["harville"], inputs=[exotic_c5.NORMALISED],
+                blends=[NO_BLEND, LINEAR], e44_pools=[])  # fmt: skip
+    return spec
+
+
+def _alphas(study, pool) -> dict[str, float]:
+    var = one(study.variants, "E43", pool=pool, input=exotic_c5.NORMALISED, blend=LINEAR,
+              **({} if pool == WIN else {"ordering": "harville"}))  # fmt: skip
+    assert var.error is None, var.error
+    return {m.fold: m.value for m in var.metrics if m.metric == "alpha"}
+
+
+def _blend_variant(study, pool):
+    return one(study.variants, "E43", pool=pool, input=exotic_c5.NORMALISED, blend=LINEAR,
+               **({} if pool == WIN else {"ordering": "harville"}))  # fmt: skip
+
+
+def test_blend_alpha_is_fitted_on_training_races_only():
+    base = make_world(BLEND_MEETINGS, seed=4591, ratio=_quarter_ratio(BLEND_MU))
+    folds = fold_info(base.races, SMALL_SCHEME)
+    assert len(folds) == 3
+    labels = [f.test_start.isoformat() for f in folds]
+    spec = _blend_spec()
+    study = exotic_c5.compute_study(*base.store(), spec)
+
+    got = {pool: _alphas(study, pool) for pool in (WIN, TRIO)}
+    for pool in (WIN, TRIO):
+        assert sorted(got[pool]) == sorted(labels), (pool, got[pool])
+        for f, label in zip(folds, labels, strict=True):
+            alpha = got[pool][label]
+            assert 0.0 <= alpha <= 1.0
+            q, p = single_q_p(base, f.train_ids, pool)
+            ref = reference_alpha(q, p)
+            assert 0.02 < ref < 0.98, (pool, label, ref)  # the planted optimum is interior
+            assert alpha == pytest.approx(ref, abs=2e-3), (pool, label)
+            assert blend_objective(alpha, q, p) <= blend_objective(ref, q, p) + 1e-9
+        # the blend's own score uses each fold's alpha on that fold's test races
+        per_race = {}
+        for f, label in zip(folds, labels, strict=True):
+            a = got[pool][label]
+            q, p = single_q_p(base, f.test_ids, pool)
+            for r, qi, pi in zip(f.test_ids, q, p, strict=True):
+                per_race[r] = dividend_ll(base.truth[r], pool) + math.log(a * qi + (1 - a) * pi)
+        assert_metric_matches(
+            metric(_blend_variant(study, pool), DELTA),
+            pd.Series(per_race, dtype=float),
+            base,
+            SMALL_BOOT,
+        )
+    assert len({round(a, 3) for a in got[TRIO].values()}) > 1  # one alpha per fold
+    assert any(abs(got[WIN][k] - got[TRIO][k]) > 1e-3 for k in labels)  # one alpha per pool
+
+    # New outcomes and dividends on the last fold's test races: no fold trains on them, so every
+    # alpha stays, while the blend's score (which tests them) moves.
+    other = make_world(BLEND_MEETINGS, seed=4592, ratio=_quarter_ratio(BLEND_MU))
+    late = replace_races(base, other, folds[-1].test_ids)
+    late_study = exotic_c5.compute_study(*late.store(), spec)
+    for pool in (WIN, TRIO):
+        moved = _alphas(late_study, pool)
+        for label in labels:
+            assert moved[label] == pytest.approx(got[pool][label], abs=1e-9), (pool, label)
+        before = metric(_blend_variant(study, pool), DELTA).value
+        after = metric(_blend_variant(late_study, pool), DELTA).value
+        assert abs(after - before) > 1e-6, pool
+
+    # New outcomes on the first fold's test races: that fold's alpha stays; the later folds,
+    # which train on those races, move.
+    early = replace_races(base, other, folds[0].test_ids)
+    early_study = exotic_c5.compute_study(*early.store(), spec)
+    for pool in (WIN, TRIO):
+        moved = _alphas(early_study, pool)
+        assert moved[labels[0]] == pytest.approx(got[pool][labels[0]], abs=1e-9), pool
+        for f, label in zip(folds[1:], labels[1:], strict=True):
+            q, p = single_q_p(early, f.train_ids, pool)
+            assert moved[label] == pytest.approx(reference_alpha(q, p), abs=2e-3), (pool, label)
+        assert any(abs(moved[k] - got[pool][k]) > 1e-3 for k in labels[1:]), pool
+
+    # alpha is held to [0, 1]: a pool whose dividends always beat the model sits at 1, one whose
+    # dividends always lose sits at 0.
+    edge = make_world(BLEND_MEETINGS, seed=4591, ratio=_constant_ratio({TRIO: 3.0, WIN: 0.4}))
+    edge_study = exotic_c5.compute_study(*edge.store(), spec)
+    for pool, bound in ((TRIO, 1.0), (WIN, 0.0)):
+        for label, alpha in _alphas(edge_study, pool).items():
+            assert 0.0 <= alpha <= 1.0
+            assert alpha == pytest.approx(bound, abs=1e-4), (pool, label, alpha)
+
+
+# ---------------------------------------------------------------------------------------------
+# 4. E44: one ordering fitted once, serving both inputs
+# ---------------------------------------------------------------------------------------------
+
+REAL_ORDERING = exotic.Ordering
+
+
+@dataclass
+class _Fit:
+    windows: list[tuple[date, date]]
+    params: list[dict[str, float]]
+
+
+FITS: list[_Fit] = []
+
+
+def _frac(x: float) -> float:
+    return x - math.floor(x)
+
+
+class PlantedDH(REAL_ORDERING):
+    """discounted_harville whose `fit` plants lambdas from the training rows' own p_win (so a
+    fit on another input or another fold gives other lambdas) and logs every fit."""
+
+    def fit(self, frame, folds):
+        if self.family != "discounted_harville":
+            return super().fit(frame, folds)
+        params = []
+        for fold in folds:
+            rows = frame.iloc[np.asarray(fold.train_idx, dtype=int)]
+            p = rows["p_win"].to_numpy(dtype=float)
+            s = math.fsum(p * p) / len(p)
+            params.append({"lambda2": 0.55 + 0.9 * _frac(s * 9173.0),
+                           "lambda3": 0.5 + 0.9 * _frac(s * 6151.0)})  # fmt: skip
+        fitted = REAL_ORDERING(self.family, self.params)
+        fitted.fold_params = params
+        FITS.append(_Fit([(f.test_start, f.test_end) for f in folds], params))
+        return fitted
+
+
+def _e44_reference(world: World, fit: _Fit, race_ids, pools) -> dict[str, pd.Series]:
+    """Per race: the market's (normalised) log loss minus the model's (form), in Win and in each
+    pool through the fit's lambdas of the race's fold, the same lambdas for both."""
+    win, joint = {}, {pool: {} for pool in pools}
+    for r in race_ids:
+        t = world.truth[r]
+        k = next(i for i, (lo, hi) in enumerate(fit.windows) if lo <= t.race_date <= hi)
+        lam = (fit.params[k]["lambda2"], fit.params[k]["lambda3"])
+        form = normalised(t.p_form)
+        win[r] = math.log(form[t.order[0]]) - math.log(t.p_norm[t.order[0]])
+        for pool in pools:
+            joint[pool][r] = model_ll(t.p_norm, pool, t.winners[pool], t.places, lam) - model_ll(
+                form, pool, t.winners[pool], t.places, lam
+            )
+    return {"win": pd.Series(win, dtype=float)} | {
+        pool: pd.Series(v, dtype=float) for pool, v in joint.items()
+    }
+
+
+def _matches(var, ref: dict[str, pd.Series], world: World, boot: dict, pools) -> bool:
+    try:
+        assert_metric_matches(metric(var, "win_gain"), ref["win"], world, boot)
+        for pool in pools:
+            assert_metric_matches(metric(var, f"joint_gain[{pool}]"), ref[pool], world, boot)
+    except AssertionError:
+        return False
+    return True
+
+
+def test_e44_uses_one_ordering_for_both_inputs(monkeypatch):
+    world = make_world(BLEND_MEETINGS, seed=4593)
+    folds = fold_info(world.races, SMALL_SCHEME)
+    pools = [TRIO, TRIFECTA]
+    spec = exotic_c5.build_spec(SMALL_SCHEME, SMALL_BOOT)
+    spec.update(pools=pools, orderings=["discounted_harville"],
+                inputs=[exotic_c5.NORMALISED, exotic_c5.FORM], blends=[NO_BLEND],
+                e44_pools=pools)  # fmt: skip
+    FITS.clear()
+    monkeypatch.setattr(exotic, "Ordering", PlantedDH)
+    monkeypatch.setattr(exotic_c5, "Ordering", PlantedDH, raising=False)
+
+    study = exotic_c5.compute_study(*world.store(), spec, form=world.form)
+
+    var = one(study.variants, "E44", ordering="discounted_harville", input=exotic_c5.FORM)
+    assert var.error is None, var.error
+    assert var.params.get("market") == exotic_c5.NORMALISED
+    assert FITS, "the ordering was never fitted through Ordering.fit"
+    ids = _scored_ids(folds)
+    candidates = [f for f in FITS if len(f.windows) == len(folds)]
+    served = [f for f in candidates if _matches(var, _e44_reference(world, f, ids, pools),
+                                                world, SMALL_BOOT, pools)]  # fmt: skip
+    assert served, "E44 is not one fit's lambdas applied to both inputs, fold by fold"
+    fit = served[0]
+    assert len({tuple(p.values()) for p in fit.params}) == len(folds)  # per fold, not one set
+    win = metric(var, "win_gain")
+    for pool in pools:
+        joint = metric(var, f"joint_gain[{pool}]")
+        ratio = metric(var, f"gain_ratio[{pool}]")
+        assert joint.n == win.n == len(ids)
+        assert ratio.value == pytest.approx(joint.value / win.value, rel=1e-12)
+        assert ratio.lo is None and ratio.hi is None  # a point estimate (owner answer 1(b))
+    # Each input's own fit plants other lambdas (they are a function of the rows' p_win), so a
+    # run that fitted the ordering on each input in turn matches no single fit above.
+
+
+def test_e44_through_harville_matches_the_reference_on_the_run(run_a, scored):
+    world, records = run_a.world, run_a.records
+    boot = exotic_c5.default_spec()["bootstrap"]
+    ids = _scored_ids(scored)
+    rec = one(records, "E44", ordering="harville", input=exotic_c5.FORM)
+    assert rec.status == "scored" and rec.params.get("market") == exotic_c5.NORMALISED
+    harville = _Fit([(date(2000, 1, 1), date(2100, 1, 1))], [{"lambda2": 1.0, "lambda3": 1.0}])
+    ref = _e44_reference(world, harville, ids, list(exotic_c5.E44_POOLS))
+    assert _matches(rec, ref, world, boot, exotic_c5.E44_POOLS)
+    win = metric(rec, "win_gain")
+    for pool in exotic_c5.E44_POOLS:
+        ratio = metric(rec, f"gain_ratio[{pool}]")
+        assert ratio.value == pytest.approx(metric(rec, f"joint_gain[{pool}]").value / win.value)
+        assert ratio.lo is None and ratio.hi is None
+
+
+# ---------------------------------------------------------------------------------------------
+# 5. E16: the E43 table on super_premium race-pools only
+# ---------------------------------------------------------------------------------------------
+
+BOOSTED = [  # race_id, race_class_raw, pools that paid exactly super_premium (hand-labelled from
+    # config/takeout_boosts.yaml)
+    ("jra:2020-09-21:NAK:11", "3歳以上1勝クラス", set(POOLS)),
+    ("jra:2020-12-13:HSN:03", "3歳以上2勝クラス", set(POOLS)),
+    ("jra:2024-09-16:NAK:02", "3歳以上1勝クラス", set()),  # ultra_premium, every pool
+    ("jra:2024-11-24:TOK:11", "3歳以上オープン", set()),  # the GI race: ultra_premium
+    ("jra:2024-11-24:TOK:10", "3歳以上2勝クラス", set(POOLS)),  # same day, super_premium
+    ("jra:2022-12-28:NAK:05", "3歳以上1勝クラス", set(POOLS) - {WIN, WIDE}),  # premium stacks
+    ("jra:2019-12-28:NAK:04", "2歳未勝利", set(POOLS) - {WIN}),  # the 2-year-old Win premium
+    ("jra:2019-12-28:NAK:09", "3歳以上2勝クラス", set(POOLS)),  # not 2-year-olds: super only
+    ("jra:2015-05-30:TOK:03", "3歳以上1勝クラス", set()),  # premium on QUINELLA only
+    ("jra:2020-09-12:NAK:01", "3歳以上1勝クラス", set()),  # no boost
+]
+
+
+def test_super_premium_subset_keeps_super_premium_races_only(run_a, scored):
+    rows = [
+        {"race_id": race_id, "race_class_raw": raw, "horse_no": h, "tag": f"{race_id}#{h}"}
+        for race_id, raw, _ in BOOSTED
+        for h in (1, 2)
+    ]
+    frame = pd.DataFrame(rows, index=pd.RangeIndex(100, 100 + len(rows)))
+    paid_super = {race_id: pools for race_id, _, pools in BOOSTED}
+    for pool in POOLS:
+        kept = exotic_c5.super_premium_subset(frame, pool)
+        mask = np.array([pool in paid_super[r] for r in frame["race_id"]], dtype=bool)
+        want = frame.loc[mask]
+        assert 0 < len(want) < len(frame), pool
+        assert list(kept["tag"]) == list(want["tag"]), pool
+        assert list(kept.index) == list(want.index), pool
+        assert list(kept.columns) == list(frame.columns)
+
+    # E16 on the run: the E43 deltas of the super_premium race-pools alone (the ultra_premium day
+    # and every unboosted day left out).
+    world, records = run_a.world, run_a.records
+    boot = exotic_c5.default_spec()["bootstrap"]
+    ids = _scored_ids(scored)
+    supers = [r for r in ids if world.truth[r].race_date in SUPER_DAYS]
+    assert len(supers) == 6 and any(world.truth[r].race_date == ULTRA_DAY for r in ids)
+    for pool in SINGLE:
+        for name, p_of in {
+            exotic_c5.NORMALISED: lambda r, t: t.p_norm,
+            exotic_c5.FORM: lambda r, t: normalised(t.p_form),
+        }.items():
+            want = {"pool": pool, "input": name, "blend": NO_BLEND}
+            if pool != WIN:
+                want["ordering"] = "harville"
+            rec = one(records, "E16", **want)
+            assert rec.status == "scored", want
+            per_race = e43_deltas(world, supers, pool, p_of)
+            assert_metric_matches(metric(rec, DELTA), per_race, world, boot)
+            full = metric(one(records, "E43", **want), DELTA)
+            assert full.n == len(ids) > metric(rec, DELTA).n
+
+
+# ---------------------------------------------------------------------------------------------
+# 6. Every variant is a registry record, failures included
+# ---------------------------------------------------------------------------------------------
+
+
+def _expected_e43_keys(spec: dict) -> set[tuple]:
+    keys = set()
+    for pool in spec["pools"]:
+        for name in spec["inputs"]:
+            orderings = [None] if pool == WIN else spec["orderings"]
+            for ordering in orderings:
+                for blend in (NO_BLEND, LINEAR):
+                    if pool in (PLACE, WIDE):
+                        for devig in spec["place_wide_devigs"]:
+                            for floor in spec["floor_treatments"]:
+                                keys.add((pool, name, ordering, blend, devig, floor))
+                    else:
+                        keys.add((pool, name, ordering, blend, None, None))
+    return keys
+
+
+def _keys_of(records, hypothesis: str) -> set[tuple]:
+    out = set()
+    for r in records:
+        if r.hypothesis_id == hypothesis and r.params.get("blend") != LOG_LINEAR:
+            key = grid_key(r.params)
+            if key[0] == WIN:
+                key = (key[0], key[1], None, *key[3:])  # WIN: the ordering may be recorded or not
+            out.add(key)
+    return out
+
+
+def _expected_failed(r: RunRecord) -> bool:
+    p = r.params
+    if p.get("blend") == LOG_LINEAR or p.get("input") == exotic_c5.FORM:
+        return True
+    return p.get("ordering") == "henery" and p.get("pool") != WIN
+
+
+def _assert_complete(run: Run) -> None:
+    spec = exotic_c5.default_spec()
+    records = run.records
+    assert records, "no record was appended"
+    assert {r.family_id for r in records} == {exotic_c5.FAMILY_ID}
+    assert {r.ticket for r in records} == {459}
+    assert {r.hypothesis_id for r in records} == {"E43", "E16", "E44"}
+    assert run.registry.frozen_spec(exotic_c5.FAMILY_ID) == json.loads(json.dumps(spec))
+    assert run.registry.family_size(exotic_c5.FAMILY_ID) == len(records)  # one record a variant
+    for r in records:
+        json.dumps(r.params)
+    want = _expected_e43_keys(spec)
+    assert want <= _keys_of(records, "E43"), sorted(want - _keys_of(records, "E43"), key=str)[:5]
+    assert want <= _keys_of(records, "E16"), sorted(want - _keys_of(records, "E16"), key=str)[:5]
+    e44 = {(r.params.get("ordering"), r.params.get("input")) for r in records
+           if r.hypothesis_id == "E44"}  # fmt: skip
+    for ordering in spec["orderings"]:
+        for name in (exotic_c5.CALIBRATED, exotic_c5.FORM):
+            assert (ordering, name) in e44, (ordering, name)
+    log_linear = [r for r in records if r.params.get("blend") == LOG_LINEAR]
+    assert log_linear, "pool_blend's log-linear form is not recorded"
+    for r in log_linear:
+        assert r.status == "failed", r.params  # not runnable yet: no full final boards
+        assert not any(m.metric == DELTA for m in r.metrics)
+
+
+def test_every_variant_appends_a_registry_record(run_a, run_broken):
+    _assert_complete(run_a)
+    for r in run_a.records:
+        if r.params.get("blend") != LOG_LINEAR:
+            assert r.status == "scored", (r.hypothesis_id, r.params)
+        if r.status == "scored" and r.hypothesis_id == "E44":
+            for pool in exotic_c5.E44_POOLS:
+                for name in ("win_gain", f"joint_gain[{pool}]", f"gain_ratio[{pool}]"):
+                    metric(r, name)
+
+    # A failing family and a missing member file: the grid is still complete, each of those
+    # variants a failed record, every other variant scored.
+    _assert_complete(run_broken)
+    failed = 0
+    for r in run_broken.records:
+        if r.params.get("pool") == WIN and r.params.get("ordering") == "henery":
+            if r.params.get("input") == exotic_c5.FORM:
+                assert r.status == "failed"
+            continue
+        want = "failed" if _expected_failed(r) else "scored"
+        assert r.status == want, (r.hypothesis_id, r.params, r.status)
+        failed += r.status == "failed"
+    assert failed > len(run_broken.records) // 3
+    # the freeze line comes before every record line
+    lines = [json.loads(x) for x in run_broken.registry.path.read_text().splitlines()]
+    kinds = [x["kind"] for x in lines]
+    assert kinds[0] == "freeze" and kinds.count("freeze") == 1
+
+
+# ---------------------------------------------------------------------------------------------
+# 7. No holdout day is read; JRDB-fed results stay out of the repository (D21)
+# ---------------------------------------------------------------------------------------------
+
+
+def test_no_holdout_day_reaches_the_seams_or_the_scores(run_a, scored):
+    world = run_a.world
+    held_races = [r for r, t in world.truth.items() if is_holdout_day("japan", t.race_date)]
+    assert len(held_races) == 6, "the store holds races on holdout days"
+    dev_days = {t.race_date for t in world.truth.values()} - set(HELD)
+    for seam in (run_a.store, run_a.form):
+        asked = set(seam.asked)
+        assert asked, "the seam was never called"
+        assert not any(is_holdout_day("japan", d) for d in asked), "a holdout day was asked for"
+        assert all(FIRST_DAY <= d <= LAST_DAY for d in asked), "a day outside the span"
+        assert dev_days <= asked, "a development day with races was not read"
+    assert HOLDOUT_OPENED == []
+    rec = one(run_a.records, "E43", pool=TRIO, input=exotic_c5.NORMALISED, ordering="harville",
+              blend=NO_BLEND)  # fmt: skip
+    assert metric(rec, DELTA).n == len(_scored_ids(scored)) == 27
+
+
+def test_jrdb_fed_results_are_written_outside_the_tree(run_a, run_b, tmp_path, monkeypatch, world):
+    form_records = [r for r in run_a.records if r.params.get("input") == exotic_c5.FORM]
+    public_records = [r for r in run_a.records if r.params.get("input") != exotic_c5.FORM]
+    assert form_records and public_records
+    for r in form_records:
+        assert "jrdb" in r.sources and is_licensed_record(r), r.params
+    for r in public_records:
+        assert not is_licensed_record(r), (r.params, r.sources, r.data_builds)
+
+    # Only the JRDB-fed member differs between the two runs: its figures move, nothing public does.
+    def identity(r):
+        return (r.hypothesis_id, json.dumps(r.params, sort_keys=True), r.status)
+
+    def public(run):
+        return sorted(
+            (identity(r), tuple(dataclasses.astuple(m) for m in r.metrics))
+            for r in run.records
+            if not is_licensed_record(r)
+        )
+
+    assert public(run_a) == public(run_b)
+    form_a = {identity(r): r.metrics for r in form_records}
+    form_b = {identity(r): r.metrics for r in run_b.records if is_licensed_record(r)}
+    assert set(form_a) == set(form_b)
+    assert any(form_a[k] != form_b[k] for k in form_a), "the member change moved no figure"
+
+    # The committed aggregate (the registry summary) and the public report do not change with it.
+    texts = []
+    for run in (run_a, run_b):
+        out = tmp_path / f"summary-{len(texts)}"
+        write_summary(run.registry, out)
+        texts.append(
+            {p.name: p.read_text(encoding="utf-8") for p in sorted(out.glob("*.md"))}
+            | {
+                f"own/{p.name}": p.read_text(encoding="utf-8")
+                for p in sorted(run.summary.rglob("*"))
+                if p.is_file()
+            }
+        )
+    assert texts[0] == texts[1]
+    page = texts[0][f"{exotic_c5.FAMILY_ID}.md"]
+    assert registry_module.WITHHELD_LABEL in page
+    report_a = exotic_c5.render_public_report(run_a.result)
+    report_b = exotic_c5.render_public_report(run_b.result)
+    assert isinstance(report_a, str) and report_a == report_b
+    assert "withheld" in report_a.lower() and exotic_c5.FORM in report_a
+
+    # The private report holds the member's results, outside the repository.
+    files = [p for p in run_a.out_dir.rglob("*") if p.is_file()]
+    assert files, "no private report"
+    assert not any(p.resolve().is_relative_to(REPO.resolve()) for p in files)
+    assert any(exotic_c5.FORM in p.read_text(encoding="utf-8", errors="ignore") for p in files)
+
+    # An out_dir inside the repository is refused before anything is read.
+    inside = REPO / f".exotic-c5-test-{uuid.uuid4().hex[:8]}"
+    store, form = FakeStore(world), FakeForm(world)
+    registry = _registry(tmp_path / "inside")
+    monkeypatch.setattr(exotic_c5, "load_store", store)
+    monkeypatch.setattr(exotic_c5, "load_form", form)
+    monkeypatch.setattr(holdout.LockedHoldout, "open", _refuse_holdout)
+    try:
+        with pytest.raises((LicensedOutputInRepo, DataDirInsideRepo)):
+            exotic_c5.run_study(
+                date_from=FIRST_DAY, date_to=LAST_DAY, out_dir=inside, registry=registry
+            )
+        assert store.calls == 0 and form.calls == 0
+        assert registry.records() == []
+        assert not inside.exists(), "a file was created inside the repository"
+    finally:
+        if inside.exists():
+            shutil.rmtree(inside)
+
+
+# ---------------------------------------------------------------------------------------------
+# 8. The command
+# ---------------------------------------------------------------------------------------------
+
+
+def test_the_japan_command_is_registered():
+    result = CliRunner().invoke(app, ["japan", "exotic-c5", "--help"])
+    assert result.exit_code == 0, result.output
