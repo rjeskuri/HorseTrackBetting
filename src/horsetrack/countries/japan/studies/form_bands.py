@@ -72,7 +72,13 @@ from horsetrack.core.config import load_country_yaml
 from horsetrack.core.eval.bootstrap import paired_bootstrap
 from horsetrack.core.eval.folds import Fold, FoldScheme, load_country_scheme, walk_forward
 from horsetrack.core.eval.holdout import _git_sha, is_holdout_day
-from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord, default_registry
+from horsetrack.core.eval.registry import (
+    FoldMetric,
+    Registry,
+    RunRecord,
+    _record_data,
+    default_registry,
+)
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.eval.snooping import spa, stepm
 from horsetrack.core.pricing import clean_odds
@@ -526,9 +532,9 @@ def _metrics(result: dict, run: MeldRun, folds: Sequence[Fold]) -> tuple[FoldMet
 
 
 def _run_id(record: RunRecord) -> str:
-    """The registry's run id: the sha256 of the record's canonical JSON."""
+    """The registry's run id: the sha256 of the record's canonical JSON (as its line holds it)."""
     canonical = json.dumps(
-        dataclasses.asdict(record),
+        _record_data(record),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
