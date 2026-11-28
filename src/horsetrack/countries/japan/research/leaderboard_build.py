@@ -42,6 +42,13 @@ Reading the candidate files keeps every cell on the record:
   cell without a finite 'mean_return' is an unmeasured row. Keys of #430's schema a cell lacks
   are named in the row's ``note``. Status is 'candidate': no run.
 
+Capacity (#491): every row goes through ``with_capacity`` with #432's depth tables under the
+reports dir (``pool_depth.read_depth_tables``). A candidate row names its depth cell by its
+'pool', 'class_group' and 'odds_band'; a row in a cell with a capacity carries it at every edge
+and quantile of the table, and every other row carries a ``capacity_note`` saying why it has
+none (``NO_TABLE``, ``NO_CELL_NAMED``, ``CO_PLACER``, ``NO_CELL``, ``NO_FIGURE``). The figures
+are JRA-VAN: the private texts show them, the public one shows ``withheld (D21)``.
+
 The registry is read and its hash chain verified once per build (``_ReadOnce``): #451's
 ``rows_from_registry`` asks each family's size, and every ``Registry.family_size`` would read the
 whole file again.
@@ -53,12 +60,14 @@ import dataclasses
 import hashlib
 import json
 import math
+import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
 
+import pandas as pd
 import typer
 
 from horsetrack.core import env, paths
@@ -70,6 +79,7 @@ from horsetrack.core.eval.leaderboard import (
 )
 from horsetrack.core.eval.registry import Registry, RunRecord, default_registry
 from horsetrack.core.eval.reports import LicensedOutputInRepo, is_inside, write_report
+from horsetrack.countries.japan.research import pool_depth
 from horsetrack.countries.japan.research.leaderboard_backfill import legacy_rows
 
 TITLE = "Japan leaderboard"
@@ -85,6 +95,14 @@ VARIANT_SELECTIONS = {"t2": "decision_time", "lookahead": "look_ahead"}
 # (1 - level) and level quantiles at scoring.yaml's level, D7's 95% one-sided.
 CELL_CI_LEVEL = 0.95
 DIGEST_HEX = 10  # the hex digits of a cell's content suffix
+
+# Why a row carries no capacity (#491), short: each is a cell of every such row's line. No figure.
+NO_TABLE = "no depth table yet (pool-depth run)"  # none under the reports dir
+NO_CELL_NAMED = "no depth cell: names no class group or odds band"
+CO_PLACER = "co-placer pool: no single-winner capacity"
+NO_CELL = "the depth table has no such cell"
+NO_FIGURE = "the depth cell has no capacity figure"
+_CAPACITY = re.compile(r"capacity_(.+)")
 
 # #430's candidate-cell keys; 'selection', 'sources' and 'ticket' are optional.
 SCHEMA = (
@@ -198,6 +216,8 @@ def _row(cell: Mapping, option_id: str, family: str, cell_id: str, stem: str) ->
         ticket=ticket if isinstance(ticket, int) and not isinstance(ticket, bool) else None,
         kind="cell",
         pool=_text(cell.get("pool")),
+        class_group=_text(cell.get("class_group")),
+        odds_band=_text(cell.get("odds_band")),
         segment=cell_id,
         rule=f"{study}: flat bets in {cell_id}",
         selection=_selection(cell),
@@ -321,13 +341,76 @@ class _ReadOnce(Registry):
         return list(self._runs if family_id is None else self._by_family.get(family_id, ()))
 
 
+_Key = tuple[str, str, str]
+
+
+def _capacity_cells(depth: pd.DataFrame) -> dict[_Key, list[tuple[float, float, float]]]:
+    """Per (pool, class_group, band) of the depth table, its (edge, quantile, stake) entries,
+    NaN capacities left out (a cell whose capacities are all NaN maps to none)."""
+    edges = {}
+    for column in depth.columns:
+        match = _CAPACITY.fullmatch(str(column))
+        if match is not None:
+            try:
+                edges[column] = float(match[1])
+            except ValueError:
+                continue
+    keys = zip(*(depth[c].astype(str).to_numpy() for c in pool_depth.CELL), strict=True)
+    quantiles = depth["quantile"].to_numpy(dtype=float)
+    values = {column: depth[column].to_numpy(dtype=float) for column in edges}
+    cells: dict[_Key, list[tuple[float, float, float]]] = {}
+    for i, key in enumerate(keys):
+        entries = cells.setdefault(tuple(key), [])
+        for column, edge in edges.items():
+            stake = float(values[column][i])
+            if not math.isnan(stake):
+                entries.append((edge, float(quantiles[i]), stake))
+    return cells
+
+
+def _capacity_of(
+    row: LeaderboardRow, cells: dict[_Key, list[tuple[float, float, float]]] | None
+) -> LeaderboardRow:
+    note = None
+    entries: list[tuple[float, float, float]] = []
+    if cells is None:
+        note = NO_TABLE
+    elif row.pool is None or row.class_group is None or row.odds_band is None:
+        note = NO_CELL_NAMED
+    elif row.pool in pool_depth.CO_PLACER:
+        note = CO_PLACER
+    elif (row.pool, row.class_group, row.odds_band) not in cells:
+        note = NO_CELL
+    else:
+        entries = cells[(row.pool, row.class_group, row.odds_band)]
+        note = None if entries else NO_FIGURE
+    found: dict[tuple[float, float], float] = {}
+    for e, q, s in entries:  # one stake per (edge, quantile): the table's first
+        found.setdefault((e, q), s)
+    capacity = tuple((e, q, found[(e, q)]) for e, q in sorted(found))
+    return dataclasses.replace(row, capacity=capacity, capacity_note=note)
+
+
+def with_capacity(
+    rows: Iterable[LeaderboardRow], depth: pd.DataFrame | None
+) -> list[LeaderboardRow]:
+    """The rows in their order, each joined to its cell (pool, class_group, odds_band) of #432's
+    long depth table ``depth`` (``pool_depth.depth_table``'s columns; None: no table): a cell
+    with capacities gives the row every (edge, quantile, stake) of the table; every other row
+    carries none and a ``capacity_note`` saying why (module docstring). Nothing else changes."""
+    cells = None if depth is None or depth.empty else _capacity_cells(depth)
+    return [_capacity_of(row, cells) for row in rows]
+
+
 def _build(
-    registry: Registry | None, candidate_dir: Path | None
+    registry: Registry | None, candidate_dir: Path | None, depth_dir: Path | None = None
 ) -> tuple[list[LeaderboardRow], _Cells]:
     """The rows, and the candidate read (with how many cells a registry row replaced)."""
     registry = _ReadOnce(default_registry("japan") if registry is None else registry)
     if candidate_dir is None:
         candidate_dir = paths.reports_dir() / CANDIDATE_DIR
+    if depth_dir is None:
+        depth_dir = paths.reports_dir()
     rows = legacy_rows(registry)
     cells = _read_cells(Path(candidate_dir), frozenset(row.option_id for row in rows))
     # rows_from_registry gives every row of a family that family's size, so the size is asked
@@ -337,17 +420,21 @@ def _build(
         if row.family_id not in sizes:
             sizes[row.family_id] = max(1, registry.family_size(row.family_id))
         rows.append(dataclasses.replace(row, variants_searched=sizes[row.family_id]))
-    return rows, cells
+    return with_capacity(rows, pool_depth.read_depth_tables(depth_dir)), cells
 
 
 def build_rows(
-    *, registry: Registry | None = None, candidate_dir: Path | None = None
+    *,
+    registry: Registry | None = None,
+    candidate_dir: Path | None = None,
+    depth_dir: Path | None = None,
 ) -> list[LeaderboardRow]:
     """``legacy_rows(registry)`` and every candidate row the registry does not give (by its base or
     its option id, module docstring), its variants searched its family's size in the registry (1
-    without a run); defaults ``default_registry('japan')`` and
-    ``$HORSETRACK_DATA_DIR/reports/candidate-cells/``."""
-    return _build(registry, candidate_dir)[0]
+    without a run), each through ``with_capacity`` with the depth tables under ``depth_dir``;
+    defaults ``default_registry('japan')``, ``$HORSETRACK_DATA_DIR/reports/candidate-cells/`` and
+    ``$HORSETRACK_DATA_DIR/reports/``."""
+    return _build(registry, candidate_dir, depth_dir)[0]
 
 
 def _write_json(path: Path, rows: list[LeaderboardRow]) -> Path:
