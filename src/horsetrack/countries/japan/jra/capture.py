@@ -23,13 +23,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from horsetrack.core import paths
 from horsetrack.core.config import load_country_yaml, load_source
 from horsetrack.core.ingest.fetcher import Fetcher, FetchError
 from horsetrack.core.ingest.types import FetchTask, RawPage
 from horsetrack.countries.japan.jra import exotic_pages as ep
+from horsetrack.countries.japan.jra import official_card
 from horsetrack.countries.japan.jra import official_pages as op
 
 log = logging.getLogger(__name__)
@@ -56,6 +57,17 @@ class NotListed(RuntimeError):
 @dataclass(frozen=True)
 class MeetingCapture:
     rows: list[dict[str, Any]]  # official_pages.odds_rows dicts, all with this snapshot_utc
+    snapshot_utc: datetime
+    requests: int  # HTTP requests this capture sent
+
+
+@dataclass(frozen=True)
+class CardCapture:
+    """The race cards (出馬表) one capture read (ticket #426): official_card.parse's rows, each
+    with its card page's `fetched_utc` and the capture's `snapshot_utc`."""
+
+    races: list[dict[str, Any]]  # "races" rows, one per card read
+    runners: list[dict[str, Any]]  # "racecard_runners" rows
     snapshot_utc: datetime
     requests: int  # HTTP requests this capture sent
 
@@ -146,6 +158,53 @@ def read_post_times(fetcher: Fetcher, race_date: date, venue: str) -> dict[int, 
     (2 requests)."""
     _, race_list = _race_list(fetcher, CARD_MENU, "official_card_racelist", race_date, venue)
     return op.post_times(race_list, race_date)
+
+
+def capture_cards(
+    fetcher: Fetcher,
+    race_date: date,
+    venue: str,
+    *,
+    races: Sequence[int] | None = None,
+    now: Callable[[], datetime] = utc_now,
+) -> CardCapture:
+    """The race cards (出馬表, ticket #426) of every race of the meeting (or `races` only), in
+    race-list order: the 出馬表 menu, the card race list, then the card page each race's row links
+    (2 + races requests). Each page is read by `official_card.parse`, its rows stamped with the
+    page's fetch time (`fetched_utc`) and the capture's `snapshot_utc` (`now()`, before the first
+    request). Raises NotListed, WrongMeeting (a card page of another meeting or race) or
+    ValueError (an error page). A race whose row links no card page is skipped with a warning."""
+    snapshot_utc = now()
+    start = fetcher.requests_sent
+    _, race_list = _race_list(fetcher, CARD_MENU, "official_card_racelist", race_date, venue)
+    races_out: list[dict[str, Any]] = []
+    runners_out: list[dict[str, Any]] = []
+    for number, row in op.race_rows(race_list):
+        if races is not None and number not in races:
+            continue
+        link = _card_link(row)
+        if link is None:
+            log.warning("%s %s race %d: no card page linked", race_date, venue, number)
+            continue
+        page = fetcher.fetch(task("official_card", link, race_date.year))
+        what = f"card page {link.cname}"
+        doc = op.soup(page.body)
+        _check(doc, race_date, venue, what)
+        _check_race(op.race_number(doc), number, what)
+        parsed = official_card.parse(page)
+        at = {"fetched_utc": page.fetched_utc, "snapshot_utc": snapshot_utc}
+        races_out += [{**r, **at} for r in parsed["races"]]
+        runners_out += [{**r, **at} for r in parsed["racecard_runners"]]
+    return CardCapture(races_out, runners_out, snapshot_utc, fetcher.requests_sent - start)
+
+
+def _card_link(row: Tag) -> op.Link | None:
+    """The card page (出馬表, pw01dde) a card race list row links; None when it links none."""
+    for a in row.find_all("a"):
+        link = op.link_of(a)
+        if link is not None and link.path == CARD_MENU.path and link.cname.startswith("pw01dde"):
+            return link
+    return None
 
 
 def published_results(fetcher: Fetcher, race_date: date, venue: str) -> set[int]:

@@ -100,6 +100,7 @@ per family, each holding that family's runs.
 - [japan-pool-depth-exotics-v1](japan-pool-depth-exotics-v1.md)
 - [japan-pool-depth-v1](japan-pool-depth-v1.md)
 - [japan-same-day-bias-final-win](japan-same-day-bias-final-win.md)
+- [japan-shadow-calibration-v1](japan-shadow-calibration-v1.md)
 - [japan-speed-top3-c3](japan-speed-top3-c3.md)
 - [japan-speed-top3-c3-prior](japan-speed-top3-c3-prior.md)
 - [japan-speed-top3-c3-timing](japan-speed-top3-c3-timing.md)

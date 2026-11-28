@@ -351,12 +351,20 @@ Four columns that are neither label nor gated columns are derived from the resul
 The owner's answer on #80 (2026-11-25) keeps all four in the views under the `race_date` 00:00
 JST rule of their table, as an owner choice, not an implementation ruling. So a scratch or an
 abandonment that happens on race day is visible in every view from 00:00 JST of the race date,
-before it happened: a known, accepted leak. `races.post_utc` exists since #227, but whether these
-four columns can change on race day after 00:00 JST, and so need a post-based rule, still awaits
-an owner decision; until then they stay under the race-date rule, and a feature or model that
-reads them carries this leak. The JRA-VAN export cannot lift it: it holds each race's and runner's
-final version only, no pre-race card (#401; docs/specs/jravan.md, "Card versions (#401)", which
-names the feed that could carry the card forward).
+before it happened: a known, accepted leak. The JRA-VAN export cannot lift it: it holds each
+race's and runner's final version only, no pre-race card (#401; docs/specs/jravan.md, "Card
+versions (#401)").
+
+The forward feed is the card log of race-day 出馬表 captures (#426; docs/specs/odds-log.md, "Card
+log (ticket #426)"). The owner's decision on #426 (2026-11-28, an owner decision, not an
+implementation ruling) sets its rule. Once a view reads the card log, `runners.is_scratched` and
+`races.field_size` at t come from the latest capture with `fetched_utc <= t`, each capture
+counting from its own fetch time with no extra lag; where there is no capture at or before t (a
+day before the logger, a missed grid point), they fall back to the results-derived values above
+under the race-date rule. `races.status` and `meetings.status` stay on the accepted leak, since
+the card does not show an abandonment reliably. No view reads the card log yet (a follow-up ticket
+wires it), so until then all four columns stay under the race-date rule, and a feature or model
+that reads them carries this leak.
 
 Since #417 each table's rule lists these columns under `results_derived` (`meetings: [status]`,
 `races: [field_size, status]`, `runners: [is_scratched]`), so the model boundary can tag them
@@ -448,4 +456,7 @@ has a join of its own.
   accepted: `runners.is_scratched`, `races.field_size`, `races.status` and `meetings.status` come
   from the results page and are in the views from 00:00 JST of the race date, so a race-day
   scratch or abandonment shows before it happened (owner decision, 2026-11-25; see Accepted leak:
-  results-derived card columns). Whether they get a post-based rule awaits an owner decision.
+  results-derived card columns). Once a view reads the card log, `is_scratched` and `field_size`
+  come from the latest race-day card capture at or before t, falling back to this leak where
+  there is none, and the two status columns keep the leak (owner decision on #426, 2026-11-28);
+  no view reads the card log yet.

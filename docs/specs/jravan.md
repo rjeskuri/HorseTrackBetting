@@ -141,6 +141,12 @@ so each family maps fields instead of slicing bytes:
   malformed part.
 - `jurisdiction(venue_code)`: `'jra'` for 01-10, `'nar'` for any other two-digit number,
   `'overseas'` for any other non-blank code, None for `'00'` or blank.
+- `form_race_id(year, mmdd, venue_code, race_no)` (#377): `<jurisdiction>:<YYYY-MM-DD>:<code>:<NN>`
+  for a NAR or overseas venue, the code as JV-Data writes it (`overseas:2025-10-05:A4:09`);
+  `form_meeting_id` the same without the race. Race number `00`, which JV-Data writes for some
+  overseas races, is a race of its own (`overseas:2025-10-05:A4:00`); `race_id` keeps refusing it.
+  None for a JRA venue, one without a jurisdiction, an invalid date or a race number that is not
+  two digits.
 - `announced_utc(year, race_mmdd, mmddhhmm)`: a JST minute (UTC+9, no DST) as an aware UTC
   datetime; a month after the race's month is in the year before (a December announcement for a
   January race). None for `00000000`, blank or an invalid time.
@@ -157,7 +163,8 @@ so each family maps fields instead of slicing bytes:
   (sorted by `race_id`, one row group per race day) and `meetings.parquet` (by `race_date`,
   `venue`) in the store's columns and types. The same inputs give the same bytes. The report, `<reports dir>/jravan-races.json`,
   holds per year `records`, `versions_dropped`, `deletions`, `races_written`, `non_jra_nar`,
-  `non_jra_overseas`, `non_jra_unknown` and `unmapped` (a count), and `unmapped` as store column
+  `non_jra_overseas`, `non_jra_unknown`, `unmapped` (a count) and `form_without_id` (the kept NAR
+  and overseas races with no form id, so in no table), and `unmapped` as store column
   (`race_class`, `weight_type`, `surface`, `going`) -> code -> count over the races written.
 - Columns use the jra store's vocabulary (`jra/netkeiba/parse_results.py`): ids and keys from
   `keys.py`; `season` the calendar-year label; `race_class` from the youngest-age condition code,
@@ -169,6 +176,12 @@ so each family maps fields instead of slicing bytes:
   `finish_time_s` and the `result_*_utc` columns are null. Each mapping's code values are
   constants in `races.py`; a code a mapping lacks is null and counted. A blank or all-zero
   code is JV-Data's "unset": null (its `*_raw` column too), counted only on a race that was run.
+- NAR and overseas races (#377), kept the same way, go to `processed/jravan/form_races.parquet`
+  in the `races` schema (no meetings): `jurisdiction` `nar` or `overseas`, ids from
+  `keys.form_race_id` (`nar:2025-06-01:30:01`), `venue` the JV-Data code. Horse form only; their
+  codes stay out of the report's `unmapped`, and a venue without a jurisdiction is written nowhere.
+  A build with no NAR or overseas race writes no `form_races.parquet` (and removes an earlier one);
+  the same holds for `form_runners.parquet`.
 - Meetings: one row per `meeting_id`, `run` when any race ran, else `abandoned`; `day_night` and
   `surface_mix` null.
 
@@ -198,8 +211,9 @@ post time a null `post_time_local`.
   file is a `FileNotFoundError` before anything is read (build the races first). The same inputs
   give the same bytes, and a second fill changes nothing. The report,
   `<reports dir>/jravan-runners.json`, holds per year `records`, `versions_dropped`, `deletions`,
-  `runners_written`, `non_jra_nar`, `non_jra_overseas`, `non_jra_unknown` and `unmapped` (a
-  count), in `counts` the totals and `races_timed`, and `unmapped` as field (`placing`, `sex`,
+  `runners_written`, `non_jra_nar`, `non_jra_overseas`, `non_jra_unknown`, `unmapped` (a count)
+  and `form_without_id` (the kept NAR and overseas runners whose race got no form id), in
+  `counts` the totals and `races_timed`, and `unmapped` as field (`placing`, `sex`,
   `dead_heat`, `margin`) -> code -> count over the runners written.
 - Columns use the jra store's vocabulary (`jra/netkeiba/parse_results.py`, whose placing codes,
   scratched codes, margin names, beaten-lengths sum and pound conversion the mapping reuses): the
@@ -220,6 +234,10 @@ post time a null `post_time_local`.
   code a mapping lacks is null and counted.
 - Runners of abandoned races (RA data kubun 9) are written, without a place; their undrawn
   runners carry 馬番 99 as printed.
+- NAR and overseas runners (#377) go to `processed/jravan/form_runners.parquet` in the `runners`
+  schema under their races' form ids, and their winners' times to `form_races.parquet` when it is
+  there. Horse form only: the jravan `horse_runs` adds them with `win_odds` null (the price is
+  never scanned), and no betting reader names them.
 
 The run on the export: `horsetrack japan jravan runners`, run 2026-11-26. Every count, span,
 share, rate, wall time and peak memory of it is withheld (D21), in two files under
@@ -765,16 +783,15 @@ availability rule for `runners.is_scratched`, `races.field_size`, `races.status`
 `meetings.status` is in docs/specs/as-of.md ("Accepted leak: results-derived card columns").
 
 Pre-race card versions can be kept by reading them before the race, each with the time it was
-read; nothing does today:
+read; the race-day card log does so since #426:
 
 - The JRA official 出馬表 on race day is the feed for it. `jra/official_card.py` parses a race's
   出馬表 page (JRADB `pw01dde`) into `races` and `racecard_runners` rows, the scratches as printed
-  (`is_scratched`) and each runner row stamped `card_scraped_utc`, the page's fetch time. The
-  logger does not fetch that page: `log-day` reads the 出馬表 menu and the card race list for the
-  post times only (`jra/capture.py`, `read_post_times`), nothing calls `official_card.parse`, and
-  no store table holds its rows. The logger would need to fetch each race's 出馬表 page from that
-  race list before the off, as often as a late scratch matters, and write the parsed rows with
-  their fetch time into a table whose availability rule is the owner's.
+  (`is_scratched`) and each runner row stamped `card_scraped_utc`, the page's fetch time. Since
+  #426, `log-day` fetches each race's 出馬表 page at the `cards` grid points before the off
+  (`jra/capture.py`, `capture_cards`) and appends the parsed rows with their fetch time to
+  `<VENUE>.cards.jsonl.gz` (docs/specs/odds-log.md, "Card log (ticket #426)", which holds the
+  owner's availability rule). No store table or as-of view reads them yet.
 - JV-Link's regular (non-setup) RACE reads during race week deliver versions `1` and `2` while
   they are current. The export is a bulk read of the stored data (#196), and the Windows VM logs
   nothing between exports (no repository code runs there); keeping them would need a race-week
