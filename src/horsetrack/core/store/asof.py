@@ -16,6 +16,11 @@ A view rule may also list `derived` columns (a UTC instant from a local DATE and
 "H:MM" string, such as a race's `post_utc`) and `gates` (columns kept in the frame but null until
 an anchor time + offset); an `offset` rule's anchor, and a gate's, may be read through `via`, from
 another table's row matching on keys. A `via` time counts only once that row is available itself.
+
+A view rule may also list `results_derived` columns: view columns whose values come from the
+results page yet are in the view under the table's own rule (the accepted leak of
+docs/specs/as-of.md). The views return them unchanged; the list only makes the leak
+machine-readable, for the model boundary (`countries/japan/feature_boundary.py`, #417).
 """
 
 from __future__ import annotations
@@ -53,7 +58,14 @@ _KEYS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "static": (frozenset(), frozenset()),
 }
 # the YAML keys only the view kinds take (and current_value with in_view, all but read_label)
-_VIEW_KEYS = ("label_columns", "label_prefixes", "derived", "gated_columns", "read_label")
+_VIEW_KEYS = (
+    "label_columns",
+    "label_prefixes",
+    "derived",
+    "gated_columns",
+    "read_label",
+    "results_derived",
+)
 _TZ = "TIMESTAMP WITH TIME ZONE"
 _DATE = "DATE"
 _TEXT = "VARCHAR"
@@ -162,6 +174,10 @@ class Availability:
     # the current values enter every view at any t, as a static table's rows do, with no history:
     # their look-ahead is accepted (current_value rules only)
     in_view: bool = False
+    # view columns taken from the results page, in the view under the table's rule: the accepted
+    # leak of docs/specs/as-of.md, listed so it stays identifiable (column, offset and static
+    # rules, and current_value with in_view)
+    results_derived: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -233,6 +249,15 @@ class Availability:
             raise ValueError(f"{self.table}: gates must be a tuple of Gate: {gates!r}")
         if (derived or gates) and not self.enters_view:
             raise ValueError(f"{self.table}: a {self.kind!r} rule takes no derived or gates")
+        leaked = self.results_derived
+        _names(self.table, "results_derived", leaked)
+        if leaked and not self.enters_view:
+            raise ValueError(f"{self.table}: a {self.kind!r} rule takes no results_derived")
+        if len(set(leaked)) != len(leaked):
+            raise ValueError(f"{self.table}: a results_derived column is listed twice: {leaked}")
+        bad = [c for c in leaked if self.is_label(c)]
+        if bad:
+            raise ValueError(f"{self.table}: results_derived columns {bad} are label columns")
         if self.label_readable and self.kind not in _VIEW_KINDS:  # in_view is never a label
             raise ValueError(f"{self.table}: a {self.kind!r} rule takes no label_readable")
         names = [d.name for d in derived]
@@ -302,6 +327,7 @@ def _entry(table: str, raw: Any) -> Availability:
         "derived": _derived(table, raw.get("derived", {})),
         "gates": _gates(table, raw.get("gated_columns", [])),
         "label_readable": readable,
+        "results_derived": _labels(table, "results_derived", raw.get("results_derived", [])),
     }
     if kind == "column":
         column = _name(table, "column", raw["column"])
