@@ -23,10 +23,13 @@ what these tests call):
     `params['pool']` the pool's code. A pool whose `core.eval.segment_roi.fit_segment_roi` raises
     gets a `failed` record and the other pools are still scored; run_scan does not raise for it;
   - writes through `core.eval.reports.write_report`, with a withheld source (jravan) among the
-    sources, the private report `out_dir / f'pool-scan-japan-{spec_hash}.md'` (the frozen hash)
-    and the candidate-cell file `out_dir / 'candidate-cells' / 'pool-scan.json'`. An `out_dir`
-    inside the repository raises `LicensedOutputInRepo` and writes no file there. Nothing else is
-    written inside the repository (these tests also keep `write_summary` out of it).
+    sources, the private report `ScanResult.report_path`, in `out_dir`, its name
+    `pool-scan-japan-<...>.md` holding the frozen spec hash, and the candidate-cell file
+    `ScanResult.candidates_path`, a `pool-scan*.json` in `out_dir / 'candidate-cells'` (review
+    round 7: the names also tell runs apart, so a rerun never replaces an earlier run's files; no
+    naming scheme is pinned). An `out_dir` inside the repository raises `LicensedOutputInRepo` and
+    writes no file there. Nothing else is written inside the repository (these tests also keep
+    `write_summary` out of it).
 - `ScanResult.rows: list[dict]`: every cell of every pool, one row per (pool, cell_id), in rank
   order: rows with a `shrunk_edge` first, by `shrunk_edge` descending (the shrunk expected return
   per unit at the final price, takeout included, minus 1), then the rows without one. The
@@ -120,6 +123,22 @@ Review round 5 of PR #496:
   payout rate, and the same of each bound. No column name or format is pinned: the figures are
   found by value, to the precision printed.
 
+Review round 7 of PR #496:
+
+- D14, what reaches Python: on the annual layout (one row group per table mixing development and
+  holdout days, the dividends group's race_id max a holdout race), no holdout race id is returned
+  to Python by any Parquet row-group statistic (`pyarrow._parquet.Statistics` min, max, min_raw,
+  max_raw, however reached), and none appears in the result, the private report, the candidate
+  file or the registry.
+- Settlement above the board: a capped final-board quote can pay a dividend above its stored odds.
+  The fit keeps the full settled return: two stores that differ only in such dividends differ in
+  the shrunk reading (omega_full, its expected return) by at least half the raw excess the
+  dividends add, and by no more than all of it.
+- Reruns keep the run of record's files: a second `run_scan` into the same `out_dir` on a shorter
+  range writes its report and candidate file at other paths and leaves the first run's
+  byte-identical. Each candidate cell carries its run's first and last day (ISO dates) and seed
+  among its values, and so does the private report (no key name pinned).
+
 The stores are synthetic and built here (`write_store`): five runners per race, every pool's board
 priced so that each combination's realised wins over a unit of races match its implied
 probability exactly (counts per unit below), so every cell's flat return is known in closed form:
@@ -132,7 +151,11 @@ data is read except by the `local` test, which skips without the real store.
 # Ruff reads the module under test as third-party until it exists, then as first-party.
 from __future__ import annotations  # noqa: I001
 
+import contextlib
 import copy
+import ctypes
+import dataclasses
+import gc
 import itertools
 import json
 import math
@@ -352,6 +375,9 @@ class Race:
     # one-winner pools whose dead heats split the pool (JRA's rule): each of the k paying
     # combinations pays its board odds / k; elsewhere a paying combination pays its board odds
     split: tuple[str, ...] = ()
+    # one-winner pools whose final-board quotes are capped (review round 7): each paying
+    # combination pays ABOVE_BOARD[pool] x its stored board odds
+    above_board: tuple[str, ...] = ()
 
     @property
     def race_id(self) -> str:
@@ -401,11 +427,13 @@ def paying(pool: str, race: Race) -> list[int]:
 
 def dividend_odds(pool: str, race: Race) -> dict[int, float]:
     """Each paying combination's dividend per unit staked: its board odds, or, in a pool of
-    `race.split` with k > 1 paying combinations (a dead heat), its board odds / k."""
+    `race.split` with k > 1 paying combinations (a dead heat), its board odds / k; in a pool of
+    `race.above_board` (a capped quote), ABOVE_BOARD[pool] x that."""
     _, price, _ = board_for(pool, race)
     payers = paying(pool, race)
     k = len(payers) if pool in race.split else 1
-    return {i: price[i] / k for i in payers}
+    factor = ABOVE_BOARD[pool] if pool in race.above_board else 1.0
+    return {i: price[i] / k * factor for i in payers}
 
 
 def race_return(pool: str, race: Race) -> float:
@@ -1151,12 +1179,92 @@ def annual_races() -> tuple[list[Race], list[date], list[date]]:
     return races, dev, held
 
 
-def test_an_annual_row_group_holding_a_holdout_day_keeps_its_development_races(
-    tmp_path, monkeypatch
-):
-    data = data_dir(tmp_path, monkeypatch)
+# Review round 7 (D14): what reaches Python. The owner's boundary accepts Arrow decoding a mixed
+# row group in C++ before the scan's filter, never a holdout value returned to Python. A Parquet
+# row group's footer statistics are such a route: the dividends group of the annual layout ends
+# on a holdout race, so its race_id max is that race's id. Every accessor of
+# `pyarrow._parquet.Statistics` that returns a value is instrumented (on the type, so every route
+# to a statistic is seen: `read_metadata`, `ParquetFile`, a dataset fragment's row groups,
+# `to_dict`, the repr).
+STATISTIC_VALUES = ("min", "max", "min_raw", "max_raw")
+
+
+@contextlib.contextmanager
+def statistics_seen():
+    """Record (accessor, value) for every value a Parquet row-group statistic returns to Python
+    while the block runs. `Statistics` is an immutable extension type, so its accessors are
+    swapped in the type's own dict and the type's attribute cache is reset, then restored."""
+    from pyarrow import _parquet
+
+    kind = _parquet.Statistics
+    (own,) = (d for d in gc.get_referents(kind.__dict__) if isinstance(d, dict))
+    saved = {name: own[name] for name in STATISTIC_VALUES}
+    seen: list[tuple[str, object]] = []
+
+    def recorded(name, descriptor):
+        def get(stats):
+            value = descriptor.__get__(stats, kind)
+            seen.append((name, value))
+            return value
+
+        return property(get)
+
+    def reset() -> None:
+        ctypes.pythonapi.PyType_Modified(ctypes.py_object(kind))
+
+    try:
+        own.update({name: recorded(name, d) for name, d in saved.items()})
+        reset()
+        yield seen
+    finally:
+        own.update(saved)
+        reset()
+
+
+def holdout_ids_in(value: object, held: Iterable[date]) -> list[str]:
+    """The holdout race ids (any race on a day of `held`) that `value`, a string or bytes or
+    anything printed, names."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    text = value if isinstance(value, str) else repr(value)
+    return [f"jra:{day.isoformat()}:" for day in held if f"jra:{day.isoformat()}:" in text]
+
+
+@dataclass(frozen=True)
+class AnnualRun:
+    """The scan of the annual layout, shared by its two tests; `seen` holds every value a
+    row-group statistic returned to Python while the scan ran (`statistics_seen`)."""
+
+    result: object
+    races: tuple[Race, ...]
+    dev: tuple[date, ...]
+    held: tuple[date, ...]
+    data: Path
+    registry: Registry
+    calls: dict
+    seen: tuple[tuple[str, object], ...]
+
+
+@pytest.fixture(scope="module")
+def annual_run(tmp_path_factory: pytest.TempPathFactory) -> AnnualRun:
+    root = tmp_path_factory.mktemp("annual")
+    data = (root / "data").resolve()
+    data.mkdir()
     races, dev, held = annual_races()
-    write_store(data, races)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(DATA_VAR, str(data))
+        write_store(data, races)
+        registry, _ = frozen_registry(root)
+        calls = guard(mp)
+        with statistics_seen() as seen:
+            result = scan(data, registry, date_from=date(2026, 1, 1), date_to=ANNUAL_TO)
+    return AnnualRun(
+        result, tuple(races), tuple(dev), tuple(held), data, registry, calls, tuple(seen)
+    )
+
+
+def test_an_annual_row_group_holding_a_holdout_day_keeps_its_development_races(annual_run):
+    races, dev, held, data = annual_run.races, annual_run.dev, annual_run.held, annual_run.data
     folder = data / "processed" / "jravan"
     # one row group per table, each holding development and holdout rows
     held_ids = {r.race_id for r in races if r.day in held}
@@ -1167,11 +1275,8 @@ def test_an_annual_row_group_holding_a_holdout_day_keeps_its_development_races(
         assert held_ids <= ids and ids - held_ids, name
     lo, hi = row_group_days(board_path(data))[0]
     assert lo == dev[0] and hi == held[-1] and spans_holdout(lo, hi)
-    registry, _ = frozen_registry(tmp_path)
-    calls = guard(monkeypatch)
 
-    result = scan(data, registry, date_from=date(2026, 1, 1), date_to=ANNUAL_TO)
-
+    result = annual_run.result
     scored = [r for r in races if r.day in dev]
     # every development race of the year's row group is scored in every pool, settled at its
     # dividend; no holdout race is
@@ -1184,7 +1289,49 @@ def test_an_annual_row_group_holding_a_holdout_day_keeps_its_development_races(
         assert cells[f"venue:{HELD_VENUE}"]["n_bets"] == 0, pool
         want = sum(race_return(pool, r) for r in scored) / n
         assert cells["all"]["mean_return"] == pytest.approx(want, rel=1e-9), pool
-    assert calls["holdout_open"] == []
+    assert annual_run.calls["holdout_open"] == []
+
+
+def test_no_holdout_race_id_reaches_python_on_the_annual_layout(annual_run):
+    held = annual_run.held
+    held_ids = {r.race_id for r in annual_run.races if r.day in held}
+    # the finding's layout: one dividends row group, holding development and holdout races, whose
+    # race_id max is a holdout race (read here by the test, outside the instrument)
+    dividends = annual_run.data / "processed" / "jravan" / "dividends.parquet"
+    meta = pq.ParquetFile(dividends).metadata
+    column = meta.schema.to_arrow_schema().get_field_index("race_id")
+    assert meta.num_row_groups == 1
+    stats = meta.row_group(0).column(column).statistics
+    assert stats.max in held_ids and stats.min not in held_ids
+
+    # the instrument sees a footer read, by either route, and is gone after its block
+    with statistics_seen() as probe:
+        footer = pq.read_metadata(dividends).row_group(0).column(column).statistics.to_dict()
+        fragment = next(iter(ds.dataset(dividends, format="parquet").get_fragments()))
+        assert footer["max"] == fragment.row_groups[0].statistics["race_id"]["max"]
+    leaks = [name for name, value in probe if holdout_ids_in(value, held)]
+    assert set(leaks) == {"max"} and len(leaks) >= 2, leaks  # both reads of the race_id max
+    count = len(probe)
+    assert pq.read_metadata(dividends).row_group(0).column(column).statistics.max in held_ids
+    assert len(probe) == count
+
+    # during the scan, no statistic returned a holdout race id to Python
+    seen = annual_run.seen
+    leaked = sorted({(name, str(value)) for name, value in seen if holdout_ids_in(value, held)})
+    assert leaked == [], (
+        "row-group statistics returned holdout race ids to Python (D14: no holdout value reaches "
+        f"Python): {leaked}"
+    )
+    # and nothing the run returns or writes names a holdout race
+    result = annual_run.result
+    outputs = {
+        "result": json.dumps(dataclasses.asdict(result), default=repr),
+        "private report": result.report_path.read_text(encoding="utf-8"),
+        "candidate file": result.candidates_path.read_text(encoding="utf-8"),
+        "registry": annual_run.registry.path.read_text(encoding="utf-8"),
+    }
+    for name, text in outputs.items():
+        assert holdout_ids_in(text, held) == [], f"the {name} names a holdout race"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1310,9 +1457,20 @@ def test_a_failed_pool_still_writes_a_registry_record(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------------------------
 
 
+def assert_output_names(result, out_dir: Path, spec_hash: str) -> None:
+    """The report in `out_dir`, named pool-scan-japan-<...>.md with the spec hash, the candidate
+    file a pool-scan*.json in `out_dir / 'candidate-cells'` (review round 7: no fixed name)."""
+    report, candidates = Path(result.report_path), Path(result.candidates_path)
+    assert report.parent.resolve() == Path(out_dir).resolve(), report
+    assert report.name.startswith("pool-scan-japan-") and report.suffix == ".md", report.name
+    assert spec_hash in report.name, report.name
+    assert candidates.parent.resolve() == (Path(out_dir) / "candidate-cells").resolve()
+    assert candidates.name.startswith("pool-scan") and candidates.suffix == ".json"
+
+
 def test_reports_go_through_write_report_outside_the_repo(planted, tmp_path, monkeypatch):
-    report = planted.out_dir / f"pool-scan-japan-{planted.spec_hash}.md"
-    candidates = planted.out_dir / "candidate-cells" / "pool-scan.json"
+    assert_output_names(planted.result, planted.out_dir, planted.spec_hash)
+    report, candidates = planted.result.report_path, planted.result.candidates_path
     for path in (report, candidates):
         assert path.is_file(), f"missing {path}"
         assert path.resolve().is_relative_to(planted.data)
@@ -1339,6 +1497,64 @@ def test_reports_go_through_write_report_outside_the_repo(planted, tmp_path, mon
         assert landed == [], f"files landed inside the repository: {landed}"
     finally:
         shutil.rmtree(target, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 7: a rerun keeps the files the run of record links, and each file names its run
+# ---------------------------------------------------------------------------------------------
+
+
+def values_in(value: object) -> list[object]:
+    """Every scalar inside a parsed JSON value (dict values, list items), recursively."""
+    if isinstance(value, dict):
+        return [v for item in value.values() for v in values_in(item)]
+    if isinstance(value, list):
+        return [v for item in value for v in values_in(item)]
+    return [value]
+
+
+def assert_names_its_run(result) -> None:
+    """Every cell of the run's candidate file, and its private report, carry the run's first and
+    last day (ISO dates) and its seed."""
+    first, last = result.start.isoformat(), result.end.isoformat()
+    cells = _strict_json(Path(result.candidates_path).read_text(encoding="utf-8"))
+    assert isinstance(cells, list) and len(cells) == len(result.rows) > 0
+    for cell in cells:
+        held = values_in(cell)
+        texts = [v for v in held if isinstance(v, str)]
+        for day in (first, last):
+            assert any(day in v for v in texts), (cell["cell_id"], day)
+        seeds = [v for v in held if (_is_int(v) and v == result.seed) or v == str(result.seed)]
+        assert seeds, (cell["cell_id"], result.seed)
+    text = Path(result.report_path).read_text(encoding="utf-8")
+    assert first in text and last in text and str(result.seed) in text
+
+
+def test_a_rerun_keeps_the_earlier_runs_files(narrowing_runs):
+    # the run of record's range, then a shorter one into the same folder (narrowing_runs)
+    first, second = narrowing_runs.full, narrowing_runs.narrow
+    out_dir, calls, kept = narrowing_runs.out_dir, narrowing_runs.calls, narrowing_runs.kept
+    spec_hash = narrowing_runs.spec_hash
+    assert first.start < second.start <= second.end == first.end
+
+    for path, content in kept.items():
+        assert Path(path).is_file(), f"the rerun removed {path}"
+        assert Path(path).read_bytes() == content, f"the rerun replaced {Path(path).name}"
+    assert Path(second.report_path) != Path(first.report_path)
+    assert Path(second.candidates_path) != Path(first.candidates_path)
+    for result in (first, second):
+        assert_output_names(result, out_dir, spec_hash)
+        for path in (result.report_path, result.candidates_path):
+            assert Path(path).is_file(), path
+            sources = [s for p, s in calls["write_report"] if p.resolve() == Path(path).resolve()]
+            assert sources and all(reports.is_withheld(s) for s in sources), (path, sources)
+        assert_names_its_run(result)
+    # each run's candidate file is its own: the shorter run scored fewer bets
+    n_bets = [
+        {(c["pool"], c["cell_id"]): c["n_bets"] for c in _strict_json(Path(p).read_text("utf-8"))}
+        for p in (first.candidates_path, second.candidates_path)
+    ]
+    assert n_bets[1][("WIN", "all")] < n_bets[0][("WIN", "all")]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1398,7 +1614,7 @@ def prints_series(rows: list[list[str]], want: list[float]) -> bool:
 
 
 def test_the_private_ranking_gives_expected_return_per_100_yen_with_its_bounds(planted):
-    text = (planted.out_dir / f"pool-scan-japan-{planted.spec_hash}.md").read_text("utf-8")
+    text = planted.result.report_path.read_text("utf-8")
     rows = {(r["pool"], r["cell_id"]): r for r in planted.result.rows}
     planted_key = ("WIN", "class:newcomer")
     assert rows[planted_key]["omega"] is not None
@@ -1471,7 +1687,7 @@ def test_public_report_carries_no_figures(planted):
     assert ids
     for run_id in ids:
         assert run_id in text, f"run {run_id} is not named"
-    assert f"pool-scan-japan-{planted.spec_hash}.md" in text
+    assert planted.result.report_path.name in text
     assert str(planted.data) not in text, "the public report names the private data directory"
 
 
@@ -1502,7 +1718,7 @@ def _strict_json(text: str):
 
 
 def test_candidate_cells_follow_the_schema(planted):
-    path = planted.out_dir / "candidate-cells" / "pool-scan.json"
+    path = planted.result.candidates_path
     cells = _strict_json(path.read_text(encoding="utf-8"))
     rows = planted.result.rows
     assert isinstance(cells, list) and len(cells) == len(rows) > 0
@@ -1812,6 +2028,83 @@ def test_a_dead_heat_paid_below_the_board_lowers_the_shrunk_reading(tmp_path, mo
 
 
 # ---------------------------------------------------------------------------------------------
+# Review round 7: a capped quote paid above the board raises the shrunk reading
+# ---------------------------------------------------------------------------------------------
+
+# The JRA-VAN store keeps capped final-board quotes, so a winning combination can pay more than its
+# stored odds. The dead-heat layout without the dead heats: every newcomer race is fair at its
+# board odds (one paying combination per race in each one-winner pool, whole units). In the
+# board-price store each pays its board odds: the newcomer cells return the payout rate (rho 1).
+# In the capped store each pays ABOVE_BOARD[pool] x its board odds (rho = that factor, varied by
+# pool, each below 1 / the pool's highest implied probability, 0.375 in WIN). The boards and the
+# paid flags are the same in both stores; only the dividends differ.
+ABOVE_BOARD = {"WIN": 2.0, "QUINELLA": 3.0, "FORECAST": 2.5, "TRIO": 1.5}
+
+
+def above_board_races(*, capped: bool) -> list[Race]:
+    races = [
+        replace(
+            race,
+            win_boost=1.0,
+            above_board=DEAD_HEAT_POOLS if capped and race.race_class == "DEBUT" else (),
+        )
+        for race in dead_heat_races(split=False)
+    ]
+    newcomers = [r for r in races if r.race_class == "DEBUT"]
+    for pool in DEAD_HEAT_POOLS:
+        for race in newcomers:
+            assert len(paying(pool, race)) == 1, (pool, race.race_id)
+            _, price, _ = board_for(pool, race)
+            factor = ABOVE_BOARD[pool] if capped else 1.0
+            for i, odds in dividend_odds(pool, race).items():
+                assert odds == pytest.approx(price[i] * factor)
+    return races
+
+
+def test_a_capped_quote_paid_above_the_board_raises_the_shrunk_reading(tmp_path, monkeypatch):
+    guard(monkeypatch)
+    stores, results = {}, {}
+    for kind in ("board", "capped"):
+        data = data_dir(tmp_path / kind, monkeypatch)
+        stores[kind] = above_board_races(capped=kind == "capped")
+        write_store(data, stores[kind])
+        registry, _ = frozen_registry(tmp_path / kind)
+        results[kind] = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    for pool in DEAD_HEAT_POOLS:
+        rate, factor = RATES[pool], ABOVE_BOARD[pool]
+        cell = {
+            kind: next(r for r in pool_rows(result.rows, pool) if r["cell_id"] == "class:newcomer")
+            for kind, result in results.items()
+        }
+        for kind, races in stores.items():
+            newcomers = [r for r in races if r.race_class == "DEBUT"]
+            n = len(newcomers) * len(COMBOS[pool])
+            assert cell[kind]["n_bets"] == n, (pool, kind)
+            # the raw reading is the settled one, every yen of the dividend included
+            want = sum(race_return(pool, r) for r in newcomers) / n
+            assert cell[kind]["mean_return"] == pytest.approx(want, rel=1e-9), (pool, kind)
+        assert cell["board"]["mean_return"] == pytest.approx(rate), pool
+        assert cell["capped"]["mean_return"] == pytest.approx(factor * rate), pool
+
+        board, capped = cell["board"], cell["capped"]
+        for r in (board, capped):
+            assert r["omega"] is not None and r["shrunk_edge"] is not None, pool
+        # at the board prices the newcomers are priced like the pool: omega near 1
+        assert abs(board["omega"] - 1) <= 0.1, (pool, board["omega"])
+        # the capped dividends add (factor - 1) to the raw rho; the shrunk omega keeps at least
+        # half of that and never more than all of it. A fit that settles a hit at no more than
+        # its board odds reads the board store's omega in both stores.
+        lift = capped["omega"] - board["omega"]
+        assert lift >= 0.5 * (factor - 1), (pool, board["omega"], capped["omega"])
+        assert capped["omega"] <= factor * (1 + 0.05), (pool, capped["omega"])
+        # and so does the ranked expected return, 1 + shrunk_edge = omega x rate
+        gain = capped["shrunk_edge"] - board["shrunk_edge"]
+        assert gain >= 0.5 * (factor - 1) * rate, (pool, gain)
+        assert capped["omega_lo"] > board["omega_lo"], pool
+
+
+# ---------------------------------------------------------------------------------------------
 # Review of PR #496 (spec v2, 'zero_return_band'; round 2, R2): a sparse Place or Wide band with
 # bets and no winner keeps its baseline's uncertainty
 # ---------------------------------------------------------------------------------------------
@@ -2116,16 +2409,42 @@ def narrowing_races() -> tuple[list[date], list[Race]]:
     return days, races
 
 
-def test_a_narrower_rerun_on_the_same_registry_still_runs_spa_and_stepm(tmp_path, monkeypatch):
-    data = data_dir(tmp_path, monkeypatch)
+@dataclass(frozen=True)
+class NarrowingRuns:
+    """A run on narrowing_races, then a narrower rerun on the same registry into the same output
+    folder (the command's default, `paths.reports_dir()`); `kept` holds the first run's report
+    and candidate file as they were before the rerun. Shared by the SPA test and the rerun test."""
+
+    full: object
+    narrow: object
+    registry: Registry
+    spec_hash: str
+    out_dir: Path
+    calls: dict
+    kept: dict[Path, bytes]
+
+
+@pytest.fixture(scope="module")
+def narrowing_runs(tmp_path_factory: pytest.TempPathFactory) -> NarrowingRuns:
+    root = tmp_path_factory.mktemp("narrowing")
+    data = (root / "data").resolve()
+    data.mkdir()
     days, races = narrowing_races()
-    write_store(data, races)
-    registry, _ = frozen_registry(tmp_path)
-    guard(monkeypatch)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(DATA_VAR, str(data))
+        write_store(data, races)
+        registry, spec_hash = frozen_registry(root)
+        calls = guard(mp)
+        out_dir = paths.reports_dir()
+        assert out_dir.resolve() == (data / "reports").resolve()
+        full = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+        kept = {Path(p): Path(p).read_bytes() for p in (full.report_path, full.candidates_path)}
+        narrow = scan(data, registry, date_from=days[NARROW_FROM], date_to=date(2019, 12, 31))
+    return NarrowingRuns(full, narrow, registry, spec_hash, out_dir, calls, kept)
 
-    full = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
-    narrow = scan(data, registry, date_from=days[NARROW_FROM], date_to=date(2019, 12, 31))
 
+def test_a_narrower_rerun_on_the_same_registry_still_runs_spa_and_stepm(narrowing_runs):
+    full, narrow, registry = narrowing_runs.full, narrowing_runs.narrow, narrowing_runs.registry
     for pool in POOLS:
         before = {r["cell_id"]: r for r in pool_rows(full.rows, pool)}
         after = {r["cell_id"]: r for r in pool_rows(narrow.rows, pool)}
@@ -2181,7 +2500,7 @@ def test_family_size_and_variants_searched_are_reported_apart(tmp_path, monkeypa
     assert result.variants_searched == searched
     assert {r["family_size"] for r in result.rows} == {size}
     assert {r["variants_searched"] for r in result.rows} == {searched}
-    path = data / "reports" / "candidate-cells" / "pool-scan.json"
+    path = result.candidates_path
     cells = _strict_json(path.read_text(encoding="utf-8"))
     assert {c["variants_searched"] for c in cells} == {searched}
     for pool in POOLS:

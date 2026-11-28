@@ -53,11 +53,16 @@ odds and takeout) of which ``won`` won, ``0 <= won <= count``. The likelihood is
 and already aggregates them by cell and implied probability, so a grouped row fits exactly as its
 bets one row each; ``p_beats_takeout`` and ``predictive_roi`` weigh each row by its count.
 
-Settled wins (#430). With ``fractional_won`` (grouped input only) ``won`` may be any real from 0 to
-``count``: each hit counts for the dividend that settled it over its board odds, below 1 when a
-dead heat splits the pool, so that ``omega * (1 - t)`` stays the expected return per unit stake at
-the dividend that pays. The likelihood is then the Bernoulli kernel with fractional successes (a
-quasi-likelihood); with whole wins it is the Bernoulli likelihood above, unchanged.
+Settled wins (#430). With ``fractional_won`` (grouped input only) ``won`` may be any real of at
+least 0, above ``count`` included: each hit counts for the dividend that settled it over its board
+odds, below 1 when a dead heat splits the pool and above 1 when a capped board quote paid more, so
+that ``omega * (1 - t)`` stays the expected return per unit stake at the dividend that pays. The
+likelihood is then the Bernoulli kernel with fractional successes (a quasi-likelihood): per cell
+and implied probability, the settled wins and, as losers, the bets less the settled wins, floored
+at 0 (a group that settled more than its bets adds its wins and no loser term, which keeps the
+kernel concave; the rest of its cell bounds it, as for a group whose bets all won). Wherever every
+such group settles at most its bets, as with whole wins, it is the Bernoulli likelihood above,
+unchanged.
 """
 
 from __future__ import annotations
@@ -105,13 +110,11 @@ class _Likelihood:
         self.design = design
         n_cells = design.shape[0]
         self.wins = np.bincount(cell, weights=won, minlength=n_cells).astype(float)
-        lost = count - won
-        lose = lost > 0
-        losers = (
-            pd.DataFrame({"cell": cell[lose], "q": q[lose], "n": lost[lose]})
-            .groupby(["cell", "q"])["n"]
-            .sum()
-        )
+        # per cell and implied probability, the bets less their (settled) wins, floored at 0: with
+        # whole wins no row is below 0, so this is the sum of each row's losers
+        losers = pd.DataFrame({"cell": cell, "q": q, "n": count - won}).groupby(["cell", "q"])["n"]
+        losers = losers.sum()
+        losers = losers[losers > 0]
         self.lose_cell = losers.index.get_level_values("cell").to_numpy()
         self.lose_q = losers.index.get_level_values("q").to_numpy()
         self.lose_n = losers.to_numpy(dtype=float)
@@ -376,10 +379,12 @@ def _validate(
     won = pd.to_numeric(bets["won"], errors="coerce").to_numpy(dtype=float)
     if not (np.isfinite(count) & (count == np.round(count)) & (count >= 1)).all():
         raise ValueError(f"{count_col} must be a positive integer")
-    whole = np.ones(len(won), dtype=bool) if fractional_won else won == np.round(won)
-    if not (np.isfinite(won) & whole & (won >= 0) & (won <= count)).all():
-        kind = "a number" if fractional_won else "an integer"
-        raise ValueError(f"won must be {kind} from 0 to {count_col}")
+    if fractional_won:  # settled wins: a capped quote can settle a hit above its board odds
+        if not (np.isfinite(won) & (won >= 0)).all():
+            raise ValueError("won must be a number of at least 0")
+        return
+    if not (np.isfinite(won) & (won == np.round(won)) & (won >= 0) & (won <= count)).all():
+        raise ValueError(f"won must be an integer from 0 to {count_col}")
 
 
 def fit_segment_roi(
