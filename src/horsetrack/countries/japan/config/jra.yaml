@@ -69,7 +69,7 @@ pools:
     dividend_step: 10
     min_dividend: 110
     payout_rule: stake_back_share
-    enabled: false        # sold only with 9+ runners; needs the horse -> bracket map
+    enabled: true         # sold only with 9+ runners; priced from the card's horse -> bracket map
   QUINELLA:
     labels: ["馬連", "QUINELLA"]
     takeout: 0.225

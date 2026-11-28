@@ -180,7 +180,9 @@ cache=None) -> dict`
 `p_model` (ticket #506): per race, `{pool: {combination: probability}}` of the board as of `now()`,
 keyed by the odds log's combination texts, so it joins the plain feed's rows (tier 1 and tier 2).
 Display only: it is not in `pools`, whose entries keep exactly their value fields, and it never
-reaches a value, a flag, the shadow log or `verify()`.
+reaches a value or a flag. The feed never writes it to the shadow log; shadow-day (#564) logs the
+same p_model, formed by the same code (`_p_model`, `_starters`) on its own decision board, with
+each shadow record (docs/specs/shadow-log.md, "Shadow-day records").
 
 - WIN: the calibrated Win model on the board's current WIN odds, `q = (1/O_WIN) / sum(1/O_WIN)`
   over the board's runners and `p = models.win.predict(q, board.context())` (not an average over
@@ -286,6 +288,20 @@ no value, flag, row order, shadow log record or `verify()`.
   log-normal drift (the mean would add `sigma^2 / 2`; the median is the forecast a reader can hold
   half above and half below), floored at 1.0 and rounded to two decimals. It is a forecast of the
   crowd's drift, not a value and not a signal.
+- Earlier projection (#627): an observed point (k > 0, and the final) also carries `projected`,
+  `{"odds": x, "observed": true, "projected": y | null}`: what the previous rung projected for
+  it. The previous rung of T-10 is T-20, of T-5 T-10, of T-2 T-5 and of the final T-2; T-20's is
+  the board at post - 30. `y = project(pool, O_j, tau_j, k)`, the projection above applied to the
+  latest row of the combination captured at or before the previous rung's cutoff (post - 30, 20,
+  10, 5, 2; among the rows available by `now`, the observed-checkpoint rule), `tau_j` the minutes
+  from that row's availability (`fetched_utc`, else `snapshot_utc`) to the post. Null when there
+  is no such row, it is unpriced, there is no post time or models, the pool has no cells, or a
+  cell the projection needs is missing. A point still ahead keeps exactly `{odds, observed}`.
+  Stateless: formed from the log alone (the cutoff rows are kept as the rows are read), so a
+  rebuild after a restart gives the same figures. Display only: no value, flag or shadow log
+  record reads it. The page shows it muted in parentheses after the real figure, `5.8 (≈6.4)`;
+  the real figure alone when it is null or absent, when the plain feed's reference replaces the
+  point, or, on a shadow race with a different schedule from `/feed`, for its observed Final.
 - Pools: the low figure throughout (Place and Wide). Projections exist for the nowcast's pools,
   WIN, PLACE and QUINELLA_PLACE; a pool the nowcast has no cells for, a nowcast without cells
   (a fake), no models or no post time gives null for every checkpoint ahead, the observed ones

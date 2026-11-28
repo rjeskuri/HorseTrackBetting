@@ -76,6 +76,14 @@ def floor_bound(odds: Any, floor: float) -> bool:
     return bool((arr[ok] <= floor + _EPS).any())
 
 
+def stake_back_share_gross(share: Any, lost: Any, *, rate: float, winners: int) -> Any:
+    """The stake-back-share identity before truncation and floor, element-wise on arrays:
+    rate x (1 + lost / (winners x share)) per unit staked, `lost` the losers' share of the pool
+    (1 less the winning combinations' shares) and `winners` the P paying combinations. The rate
+    covers the returned stake too: (W + D / P) x R in units of the winning stake W."""
+    return rate * (1.0 + lost / (winners * share))
+
+
 def stake_back_share_dividend(
     share: float,
     co_shares: Sequence[float],
@@ -95,7 +103,7 @@ def stake_back_share_dividend(
     lost = 1.0 - share
     for c in co_shares:
         lost -= c
-    raw = unit * rate * (1.0 + lost / ((1 + len(co_shares)) * share))
+    raw = stake_back_share_gross(share, lost, rate=unit * rate, winners=1 + len(co_shares))
     paid = float(math.floor(raw / dividend_step + _EPS) * dividend_step)
     return paid if min_dividend is None else max(float(min_dividend), paid)
 

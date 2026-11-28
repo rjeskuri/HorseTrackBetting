@@ -25,8 +25,9 @@ Rules (docs/specs/board-feed.md, "The shadow feed"):
   priced there and scratched later counts, one already SCR there does not); at or after it (a
   logger first run in the race date's 07:00 window), or with no `probe_until`, the log missed the
   opening and every runner it shows counts, SCR there or on the board included (the scratch
-  taken as after the opening). Without an ordering fit only WIN; without models None. Display
-  only: it never reaches a value, a flag or the shadow log.
+  taken as after the opening). Without an ordering fit only WIN; without models None. On the
+  page it never reaches a value or a flag; shadow-day (#564) logs the same p_model of its
+  decision board through `_p_model` and `_starters`.
 - `cache`: a mapping the caller keeps between builds. A race's values are recomputed only when its
   board (capture time and figures) or its bucket changed, its p_model only when its board did;
   flags read the clock on every build. The log readers live in the same mapping, so a rebuild
@@ -73,10 +74,10 @@ from horsetrack.countries.japan.models.v0.ordering import OrderingFit
 from horsetrack.countries.japan.models.v0.shadow_values import (
     ShadowModels,
     model_probabilities,
+    point_seed,
     shadow_values,
 )
 from horsetrack.countries.japan.research.win5 import live_pool_ev
-from horsetrack.countries.japan.shadow.day import point_seed
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +86,9 @@ RANGE_FIELDS = ("value_at_low", "value_at_high")
 
 Entry = tuple[datetime, int, dict[str, Any]]  # (available, seq, row)
 LADDER_MINUTES = (20, 10, 5, 2)  # the ladder's checkpoints before the post; 0 is the final
+# the rung whose projection an observed checkpoint shows beside its real odds (#627); T-20's is
+# the board at post - 30
+PREVIOUS_RUNG = {20: 30, 10: 20, 5: 10, 2: 5, 0: 2}
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -102,7 +106,8 @@ class _DayRows:
     """The rows a board as of now needs, per race: the latest row per board key available by the
     last now, plus every row available after it (a replay's later captures). For the odds ladder
     (#499) it also keeps, of the rows available by now, the latest captured at or before each
-    checkpoint post - k per board key and the rows of the captures showing a final price. For the
+    checkpoint post - k (and post - 30, the rung before T-20, #627) per board key and the rows of
+    the captures showing a final price. For the
     places paid (#506) it keeps, per race, its earliest WIN capture available by now, the runners
     not SCR on it and every runner on it (`_starters` reads them). A clock that goes back, or a
     change of post times, reads the logs again from the start."""
@@ -163,7 +168,7 @@ class _DayRows:
         if post is None:
             return
         refs = self.refs.setdefault(race_id, {})
-        for k in LADDER_MINUTES:
+        for k in (30, *LADDER_MINUTES):
             if snap > post - timedelta(minutes=k):
                 continue
             slot = refs.setdefault(k, {})
@@ -443,8 +448,11 @@ def _ladders(
     now_utc: datetime,
     models: ShadowModels | None,
 ) -> dict[tuple[str, str], dict[int, dict | None]]:
-    """(pool, combination) -> {20, 10, 5, 2, 0: {"odds", "observed"} or None} (docs/specs/
-    board-feed.md, "The odds ladder"). Display only: nothing here feeds a value or a flag."""
+    """(pool, combination) -> {20, 10, 5, 2, 0: {"odds", "observed"[, "projected"]} or None}
+    (docs/specs/board-feed.md, "The odds ladder"). An observed point also carries `projected`
+    (#627): what the previous rung (post - 30 for T-20, else the checkpoint before) projected for
+    it, from that rung's row of the combination and its fetch, or None. Display only: nothing
+    here feeds a value or a flag."""
     race_id = board.race_id
     final = None
     if day_rows.finals.get(race_id):
@@ -455,6 +463,17 @@ def _ladders(
     figures = {WIN: board.win, PLACE: board.place, WIDE: board.wide}
     finals = {} if final is None else {WIN: final.win, PLACE: final.place, WIDE: final.wide}
     out: dict[tuple[str, str], dict[int, dict | None]] = {}
+
+    def earlier(pool: str, key: tuple, k: int) -> float | None:
+        """What the previous rung projected for the observed checkpoint k, from its row."""
+        ref = refs.get(PREVIOUS_RUNG[k], {}).get(key)
+        row = None if ref is None else ref[2]
+        available = None if row is None else snapshot._available(row)
+        if post is None or available is None or not snapshot._priced(row):
+            return None
+        tau = max(0.0, (post - available) / timedelta(minutes=1))
+        return project(pool, float(row["odds"]), tau, k)
+
     for pool, shown in figures.items():
         for runners, figure in shown.items():
             combination = f"{runners[0]},{runners[1]}" if pool == WIDE else str(runners)
@@ -471,13 +490,25 @@ def _ladders(
                 if k == 0:
                     seen = _low(finals.get(pool, {}).get(runners))
                     if seen is not None:
-                        ladder[0] = {"odds": seen, "observed": True}
+                        ladder[0] = {
+                            "odds": seen,
+                            "observed": True,
+                            "projected": earlier(pool, key, 0),
+                        }
                         continue
                 elif post is not None and now_utc >= post - timedelta(minutes=k):
                     ref = refs.get(k, {}).get(key)
                     row = None if ref is None else ref[2]
                     priced = row is not None and snapshot._priced(row)
-                    ladder[k] = {"odds": float(row["odds"]), "observed": True} if priced else None
+                    ladder[k] = (
+                        {
+                            "odds": float(row["odds"]),
+                            "observed": True,
+                            "projected": earlier(pool, key, k),
+                        }
+                        if priced
+                        else None
+                    )
                     continue
                 odds = None if odds_now is None else project(pool, odds_now, tau_now, k)
                 ladder[k] = None if odds is None else {"odds": odds, "observed": False}

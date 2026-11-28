@@ -11,8 +11,9 @@ Contract pinned here (the coder follows it), module `horsetrack.countries.japan.
   file for a year adds nothing), with the layouts `spec.record_spec(<type>)`; keeps one version
   per race and record type and JRA venues only; writes `<out>/final_odds.parquet` (`out` a
   folder, default `paths.processed_dir('jravan')`) with `FINAL_ODDS_SCHEMA`, one row group per
-  race year (ascending), sorted by `race_id, pool, combination` (plain string order), the same
-  bytes for the same inputs, through a tmp file and `os.replace`.
+  race day (ascending; each group's `race_date` statistics record that one day, #502), sorted by
+  `race_id, pool, combination` (plain string order), the same bytes for the same inputs, through
+  a tmp file and `os.replace`.
 - `FINAL_ODDS_SCHEMA`: equal to `EXPECTED_SCHEMA` below. `final_odds` is not in
   `schemas.TABLES`. Its availability rule is `label_only` (#376, the owner's request of
   2026-11-26: a label or a conditioner, never a feature at t): `read_asof` and `asof_join` on a
@@ -817,20 +818,25 @@ def test_build_writes_final_odds_year_by_year_in_race_order(data: Path, tmp_path
     path = data.resolve() / "processed" / SOURCE / FILENAME
     assert path.is_file()
     assert pq.read_schema(path) == EXPECTED_SCHEMA
+    # One row group per race day (#502), in day order: 2001-06-10, 2023-01-05, 2023-12-28,
+    # 2024-06-01, 2024-06-02.
+    whole = expected[2001] + expected[2023] + expected[2024]
+    days = sorted({r[2] for r in whole})
+    assert len(days) == 5
     file = pq.ParquetFile(path)
-    assert file.metadata.num_row_groups == 3
-    for i, year in enumerate((2001, 2023, 2024)):
-        assert full_rows(file.read_row_group(i)) == expected[year], year
-    assert full_rows(pq.read_table(path)) == expected[2001] + expected[2023] + expected[2024]
+    assert file.metadata.num_row_groups == len(days)
+    for i, day in enumerate(days):
+        assert full_rows(file.read_row_group(i)) == [r for r in whole if r[2] == day], day
+    assert full_rows(pq.read_table(path)) == whole
     # Column- and row-scoped reads.
     scoped = pq.read_table(path, columns=["race_id", "odds"], filters=[("pool", "=", "TIERCE")])
     assert scoped.column_names == ["race_id", "odds"]
     assert scoped.num_rows == 2 * 5  # five JRA races in 2023-2024, a slot and a pool row each
     assert sorted(p.name for p in path.parent.iterdir()) == [FILENAME]
 
-    # One year only.
+    # One year only: its two race days, a group each.
     odds.build_final_odds(years=[2023])
-    assert pq.ParquetFile(path).metadata.num_row_groups == 1
+    assert pq.ParquetFile(path).metadata.num_row_groups == 2
     assert full_rows(pq.read_table(path)) == expected[2023]
 
     # Another export and another output folder; the store's file is left alone.
@@ -1031,8 +1037,17 @@ def test_a_real_year_of_each_odds_type_maps(tmp_path: Path) -> None:
     odds.build_final_odds(years=[REAL_YEAR], raw=raw, out=out)
     path = out / FILENAME
     assert pq.read_schema(path) == EXPECTED_SCHEMA
-    assert pq.ParquetFile(path).metadata.num_row_groups == 1
     table = pq.read_table(path)
+    # One row group per race day (#502): each group's statistics record one day, days ascending.
+    meta = pq.ParquetFile(path).metadata
+    at = EXPECTED_SCHEMA.get_field_index("race_date")
+    group_days = []
+    for g in range(meta.num_row_groups):
+        stats = meta.row_group(g).column(at).statistics
+        assert stats is not None and stats.has_min_max, f"row group {g} has no race_date min/max"
+        assert stats.min == stats.max, f"row group {g} holds {stats.min} to {stats.max}"
+        group_days.append(stats.min)
+    assert group_days == sorted(set(table.column("race_date").to_pylist()))
     got = {name: table.column(name).to_numpy(zero_copy_only=False) for name in table.column_names}
     assert len(got["race_id"]) > 0
     assert set(got["pool"]) == set(CODES)

@@ -4,13 +4,16 @@
 chained to the one before it by sha256, and a seal line once the day is closed. The log sets each
 record's ``day_status`` from the holdout rule (#71). A holdout day's records are written and
 verified here but never read back: settlement and calibration reach them through
-``LockedHoldout.open`` (#101). The format is in docs/specs/shadow-log.md.
+``LockedHoldout.open`` (#101). Records are versioned (#564): ``record_version`` 2 carries
+``p_model``; a record without the field is version 1 and has no ``p_model``. The format is in
+docs/specs/shadow-log.md.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from collections import Counter
 from dataclasses import dataclass
@@ -41,6 +44,8 @@ REQUIRED = (
 MODES = ("live", "replay")
 STATUSES = ("ok", NO_BOARD)
 STAKE_LIKE = ("stake", "bet", "kelly", "amount", "wager")
+RECORD_VERSION = 2  # the version a record carrying p_model states (#564); absent means 1
+RECORD_VERSIONS = (1, RECORD_VERSION)
 
 Key = tuple[str, str, str, int]
 
@@ -128,6 +133,36 @@ def _instant(value: Any) -> datetime | None:
     return stamp if stamp.utcoffset() is not None else None
 
 
+def record_version(record: dict[str, Any]) -> int:
+    """The record's ``record_version``; 1 for a record without one (written before #564)."""
+    return record.get("record_version", 1)
+
+
+def _number(value: Any) -> bool:
+    """A finite int or float, not a bool."""
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _version_refusal(record: dict[str, Any]) -> str | None:
+    """Why the record's version, ``p_model`` or ``value_model`` is refused, or None."""
+    if "record_version" in record and (
+        type(record["record_version"]) is not int or record["record_version"] not in RECORD_VERSIONS
+    ):
+        return f"has a record_version other than {' or '.join(map(str, RECORD_VERSIONS))}"
+    version = record_version(record)
+    if version == RECORD_VERSION and "p_model" not in record:
+        return f"is version {RECORD_VERSION} but lacks p_model"
+    if version == 1 and "p_model" in record:
+        return "has a p_model but is version 1"
+    p_model = record.get("p_model")
+    if p_model is not None and not (_number(p_model) and 0 <= p_model <= 1):
+        return "has a p_model that is neither null nor a number in [0, 1]"
+    value = record.get("value_model")
+    if value is not None and not (_number(value) and value >= 0):
+        return "has a value_model that is neither null nor a finite number >= 0"
+    return None
+
+
 def _stake_like_key(value: Any) -> str | None:
     """The first key, at any depth, that names a stake, bet, kelly, amount or wager."""
     if isinstance(value, dict):
@@ -165,6 +200,9 @@ def _refusal(record: Any) -> str | None:
         return f"has a status other than {' or '.join(STATUSES)}"
     if record["models"] is not None and not isinstance(record["models"], dict):
         return "has models that are neither fit ids nor null"
+    reason = _version_refusal(record)
+    if reason is not None:
+        return reason
     decision = _instant(record["decision_utc"])
     if decision is None:
         return "has a decision_utc that is not ISO text with a UTC offset"
@@ -186,18 +224,19 @@ def _refusal(record: Any) -> str | None:
     return None
 
 
-def _stored_key(record: Any) -> Key | None:
+def _stored_key(record: Any, key_fields: tuple[str, ...] = KEY_FIELDS) -> Key | None:
     """The key of a record line read back, or None when it is not one this log writes."""
     if not isinstance(record, dict) or record.get("day_status") not in (HOLDOUT, DEVELOPMENT):
         return None
-    key = tuple(record.get(name) for name in KEY_FIELDS)
+    key = tuple(record.get(name) for name in key_fields)
     if not all(isinstance(part, str) for part in key[:3]) or type(key[3]) is not int:
         return None
     return key
 
 
-def _parse(raw: bytes, path: Path) -> _State:
-    """The verified content of a log file; ShadowLogTampered on any break in the chain."""
+def _parse(raw: bytes, path: Path, key_fields: tuple[str, ...] = KEY_FIELDS) -> _State:
+    """The verified content of a log file; ShadowLogTampered on any break in the chain.
+    `key_fields`: the four fields that key a record, each key at most once in the file."""
     if raw and not raw.endswith(b"\n"):
         raise ShadowLogTampered(f"{path}: the last line is cut off")
     lines = raw[:-1].split(b"\n") if raw else []
@@ -220,7 +259,7 @@ def _parse(raw: bytes, path: Path) -> _State:
         if type(seq) is not int or seq != FIRST_SEQ + n - 1:
             raise ShadowLogTampered(f"{where}: seq out of order")
         if set(obj) == {"seq", "prev_sha256", "record"}:
-            key = _stored_key(obj["record"])
+            key = _stored_key(obj["record"], key_fields)
             if key is None or key in keys:
                 raise ShadowLogTampered(f"{where}: a malformed or repeated record")
             keys.add(key)
@@ -246,13 +285,17 @@ def _parse(raw: bytes, path: Path) -> _State:
 # ---------------------------------------------------------------- the log
 
 
-class ShadowLog:
-    """One race day's shadow log. Every call reads and verifies the whole file first."""
+class ChainedLog:
+    """One race day's hash-chained, sealed log; every call reads and verifies the whole file
+    first. A subclass names its file suffix, its four key fields and its record check."""
+
+    SUFFIX = ".jsonl"
+    KEY_FIELDS: tuple[str, ...] = KEY_FIELDS
 
     def __init__(self, path: Path, *, day: date) -> None:
         _check_day(day)
         path = Path(path)
-        if path.name != f"{day.isoformat()}.jsonl":
+        if path.name != f"{day.isoformat()}{self.SUFFIX}":
             raise ValueError(f"{path.name} is not the log of {day.isoformat()}")
         self._path = path
         self._day = day
@@ -262,7 +305,11 @@ class ShadowLog:
             raw = self._path.read_bytes()
         except FileNotFoundError:
             raw = b""
-        return _parse(raw, self._path)
+        return _parse(raw, self._path, self.KEY_FIELDS)
+
+    def _refusal(self, record: Any) -> str | None:
+        """Why ``record`` is refused, or None."""
+        return _refusal(record)
 
     def _status(self, state: _State) -> str:
         """Fails closed: holdout when the rule says so now or any record was logged as holdout."""
@@ -291,9 +338,9 @@ class ShadowLog:
         seq, prev = state.next_seq, state.last_sha
         lines = []
         for i, record in enumerate(batch, 1):
-            reason = _refusal(record)
+            reason = self._refusal(record)
             if reason is None:
-                key = tuple(record[name] for name in KEY_FIELDS)
+                key = tuple(record[name] for name in self.KEY_FIELDS)
                 if key in seen:
                     reason = f"repeats the logged key {key}"
             if reason is None:
@@ -329,7 +376,8 @@ class ShadowLog:
         return _sha(line)
 
     def logged_keys(self) -> set[Key]:
-        """The (race_id, pool, combination, tau_min) keys in the file, on any day."""
+        """The KEY_FIELDS keys in the file ((race_id, pool, combination, tau_min) for the shadow
+        log), on any day."""
         return set(self._load().keys)
 
     def read(self) -> list[dict]:
@@ -344,7 +392,7 @@ class ShadowLog:
     def verify(self) -> LogSummary:
         """Check the chain and return counts only."""
         state = self._load()
-        by_tau = Counter(record["tau_min"] for record in state.records)
+        by_tau = Counter(record[self.KEY_FIELDS[3]] for record in state.records)
         return LogSummary(
             n_records=len(state.records),
             by_tau=dict(sorted(by_tau.items())),
@@ -352,3 +400,7 @@ class ShadowLog:
             sealed=state.sealed,
             day_status=self._status(state),
         )
+
+
+class ShadowLog(ChainedLog):
+    """One race day's shadow log. Every call reads and verifies the whole file first."""
