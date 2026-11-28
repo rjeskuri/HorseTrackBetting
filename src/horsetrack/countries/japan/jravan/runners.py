@@ -377,7 +377,10 @@ def build_runners(
     records.write_parquet(runners, out / "runners.parquet", by_day=True)
     timed = fill_winners_time(runners.select(TIMED).to_pandas(), races_path)
     form_runners = _sorted(form_tables, schema, sort_by)
-    records.write_parquet(form_runners, out / f"{FORM_RUNNERS}.parquet", by_day=True)
+    if form_runners.num_rows:
+        records.write_parquet(form_runners, out / f"{FORM_RUNNERS}.parquet", by_day=True)
+    else:  # no NAR or overseas runner: no form file, and none left from an earlier build
+        (out / f"{FORM_RUNNERS}.parquet").unlink(missing_ok=True)
     form_races_path = out / f"{races.FORM_RACES}.parquet"
     if form_races_path.is_file():  # a store built before #377 has none
         fill_winners_time(form_runners.select(TIMED).to_pandas(), form_races_path)

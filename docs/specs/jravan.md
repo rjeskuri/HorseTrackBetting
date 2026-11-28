@@ -180,6 +180,8 @@ so each family maps fields instead of slicing bytes:
   in the `races` schema (no meetings): `jurisdiction` `nar` or `overseas`, ids from
   `keys.form_race_id` (`nar:2025-06-01:30:01`), `venue` the JV-Data code. Horse form only; their
   codes stay out of the report's `unmapped`, and a venue without a jurisdiction is written nowhere.
+  A build with no NAR or overseas race writes no `form_races.parquet` (and removes an earlier one);
+  the same holds for `form_runners.parquet`.
 - Meetings: one row per `meeting_id`, `run` when any race ran, else `abandoned`; `day_night` and
   `surface_mix` null.
 

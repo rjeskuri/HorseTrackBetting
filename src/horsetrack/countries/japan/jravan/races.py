@@ -316,7 +316,10 @@ def build_races(
     _unique(form_races)
     _write(_sorted(races, "races"), "races", out)
     _write(_sorted(meetings_from_races(races), "meetings"), "meetings", out)
-    _write(_sorted(form_races, "races"), "races", out, FORM_RACES)
+    if len(form_races):
+        _write(_sorted(form_races, "races"), "races", out, FORM_RACES)
+    else:  # no NAR or overseas race: no form file, and none left from an earlier build
+        (out / f"{FORM_RACES}.parquet").unlink(missing_ok=True)
     totals = {k: sum(c[k] for c in by_year.values()) for k in YEAR_COUNTS}
     return records.BuildReport(
         name="races",
