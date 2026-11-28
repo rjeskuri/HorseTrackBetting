@@ -118,3 +118,46 @@ has a `results` block.
 - `read_unpublished(path)` returns `{race_number: aware UTC datetime or None}`, one entry per race
   of `read_published`; a sidecar written before the bound (no `unpublished_utc` key) reads every
   race as None, and a missing file reads as empty.
+
+## Card log (ticket #426)
+
+Path: `<VENUE>.cards.jsonl.gz` beside the log, one per meeting, written by `log-day` (JRA only)
+when logger.yaml has a `cards` block: each race's 出馬表 (JRADB pw01dde) once per grid point of
+`cards.grid_min` (minutes before post, stretched as tier 2's), within each round's budget
+(`logger/schedule.py`): after tier 1's hot races, the results polls and tier 2, before tier 1's
+spare full-cycle refreshes of races that are not hot. A refresh left out for the cards waits for
+the venue's next full cycle or for the race to turn hot; the hot-race captures, the tier-2
+captures and the results polls are the same with the cards as without.
+
+- Append-only, in the log's format: one gzip member per capture (`odds_log.append_capture`), read
+  back with `iter_members`. A later capture never rewrites an earlier one, so every capture of a
+  race stays, each with its own fetch time; the odds log is never written.
+- A capture (`jra.capture.capture_cards`) reads the 出馬表 menu, the card race list, then the card
+  page each asked race's row links (2 + races requests). A card page of another meeting or race is
+  refused (WrongMeeting) and the capture writes nothing.
+- One row per race and one per runner of each card read: `official_card.parse`'s `races` and
+  `racecard_runners` rows (docs/specs/store.md), plus:
+
+| key | type | notes |
+| --- | --- | --- |
+| `table` | text | `races` or `racecard_runners`: the store table the row's columns are |
+| `fetched_utc` | ISO UTC text | when the row's card page was fetched (RawPage.fetched_utc) |
+| `snapshot_utc` | ISO UTC text | when the capture started, shared by every row of the member |
+
+- A runner row's `card_scraped_utc` equals its `fetched_utc`; `is_scratched` and the race row's
+  `field_size` (runners not scratched) are as the page showed them at that fetch.
+- Card pages themselves are not kept under `raw/` (`raw_pages` covers the odds pages only); the
+  rows keep every field the parser reads.
+- Availability at a decision time t is the owner's decision on #426 (2026-11-28), which closes
+  #309's question; an owner decision, not an implementation ruling:
+  - A card-log row is available at t once `fetched_utc <= t`. Each capture counts from its own
+    fetch time, the latest capture at or before t wins, and there is no extra lag.
+  - `runners.is_scratched` and `races.field_size` come from the latest capture at or before t.
+    `races.status` and `meetings.status` stay on the accepted leak (docs/specs/as-of.md,
+    "Accepted leak: results-derived card columns"), since the card does not show an abandonment
+    reliably.
+  - With no capture at or before t (a day before this logger, or a missed grid point), the two
+    columns keep the accepted leak: the results-derived values under the `race_date` 00:00 JST
+    rule. They are not marked unknown.
+- No as-of view reads the card log yet: a follow-up ticket wires the rule above into the views,
+  and until then the views carry the accepted leak for all four columns.

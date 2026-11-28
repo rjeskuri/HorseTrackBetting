@@ -6,6 +6,6 @@ cd "$(dirname "$0")/.."
 
 uv run ruff check .
 uv run ruff format --check .
-uv run pytest -q
+uv run pytest -q -n 4
 
 echo VERIFY OK
