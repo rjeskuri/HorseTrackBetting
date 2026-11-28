@@ -268,3 +268,43 @@ mean_odds`.
   what ran, the family, the spec hash, the family size, the run ids, the private report's path
   and the planned settlement pools (which of them were available is only in the private report);
   every figure withheld (D21).
+
+## v2: artifacts named by the data (ticket #562)
+
+Status: **PRE-REGISTERED** by Claude under ticket #562, on the same rules as #435's (no owner
+sign-off; the freeze is the gate). Everything above stays as frozen for `japan-cross-pool-t2-v1`:
+its spec hash, records, private report, cells and public page are unchanged.
+
+Family id: **`japan-cross-pool-t2-v2`**. The same study as v1 (hypothesis E25 and its null, the
+decision time, features, the five variants, folds, span rules and holdout, exclusions, metric and
+bounds, settlement, N5, the candidate-cell schema and ranking), with these changes only:
+
+- Spec: `cross_pool_run.build_spec(..., family=FAMILY_ID_V2)`, v1's spec under v2's id with
+  `ticket` 562, its own `status`, a `v2` entry (below), the cell file's name, and `trials`
+  pointing at v1's trial family (v2 has no trial). Its hash differs from v1's, and a v2 run needs
+  v2's own freeze (`--freeze --family v2`); v1's freeze is not enough (`FamilyNotFrozen`, before
+  any store file is opened). With `--from 2014-06-07 --to 2026-11-27 --seed 435` the v2 spec's
+  sha256 is `86697c3987cebd7a3b1f59bfbad772e36b8a4d18ddbffad455ca62ef82274dc4`.
+- Data fingerprint: the first 16 hex of the sha256 of the canonical JSON of the run's data builds
+  (the records' `data_builds`: the span's development day files by day and size, each table by
+  size and modification time) and its development day list, from `listdir` and `stat` only.
+  It does not depend on where the data dir or the out dir is.
+- Artifacts: the private report `$HORSETRACK_DATA_DIR/reports/cross-pool-japan-<spec
+  hash[:12]>-data-<fingerprint>.md` and the cells
+  `$HORSETRACK_DATA_DIR/reports/candidate-cells/cross-pool-japan-<spec
+  hash[:12]>-data-<fingerprint>.json`, both through `write_report`. A rerun on a grown store has
+  another fingerprint and writes new files beside the earlier run's.
+- No overwrite: a run whose report or cell file already exists raises `FileExistsError` after the
+  store's listing and stat but before any store file is opened, and appends nothing (a refusal,
+  not a run). An exact rerun (same spec, same data) is such a run. The check is repeated just
+  before the files are written.
+- Records: one per variant per run, failures included, as for v1, with `ticket` 562. A refresh of
+  the same variants on a grown store is another run of the same variants (another data build),
+  not a new variant of the family.
+- Leaderboard: `research/leaderboard_build.py` reads, of each series of data-fingerprinted cell
+  files (`<series>-data-<hex>`), only the newest (by modification time, then name), or the files
+  named with `horsetrack japan leaderboard --cells-file NAME`; the others are superseded and named
+  on stderr, so the reruns' cells do not all enter the leaderboard.
+- Pages: after `--run --family v2`, the public `docs/experiments/cross-pool-japan-v2.md` (every
+  figure withheld, D21); v1's `docs/experiments/cross-pool-japan.md` is never rewritten by a v2
+  run. The CLI regenerates this study's registry summary pages only (`write_committed_summary`).
