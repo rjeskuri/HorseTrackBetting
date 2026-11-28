@@ -509,6 +509,17 @@ def member_frame(level2, frame: pd.DataFrame, members: pd.DataFrame) -> tuple[pd
     return meta, counts
 
 
+def restrict(folds: list[Fold], positions: np.ndarray, n: int) -> list[Fold]:
+    """The folds as positions into the rows at `positions` (ascending positions of n rows)."""
+    where = np.full(n, -1)
+    where[positions] = np.arange(len(positions))
+    out = []
+    for fold in folds:
+        train, test = where[fold.train_idx], where[fold.test_idx]
+        out.append(dataclasses.replace(fold, train_idx=train[train >= 0], test_idx=test[test >= 0]))
+    return out
+
+
 # --------------------------------------------------------------------------- the pure study
 
 

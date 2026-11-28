@@ -1,0 +1,74 @@
+# The pool-depth and stake-capacity study's pre-registered spec (ticket #432, N3;
+# docs/specs/pool-depth-prereg.md), read by `horsetrack japan pool-depth freeze|run`
+# (countries/japan/research/pool_depth.py).
+#
+# Owner reframe on #432, 2026-11-27: Claude pre-registers this spec and freezes it before the run,
+# with no owner sign-off; both Place/Wide treatments are registered variants. `freeze` freezes this
+# file, as loaded, in the japan registry (append-only: a freeze cannot be undone). Any edit after
+# the freeze is another spec, which `run` refuses: a changed study is a new family_id, frozen again
+# before it runs.
+#
+# Keys:
+#   family_id:       the registry family the study is frozen and run under.
+#   date_from:       the first race day read (D10: no price row before 2014-06-07); the run ends on
+#                    the last race day in the store. Development days only.
+#   edges:           the edges e of the capacity stake: the stake s at which our own money on a
+#                    combination leaves (1 + e)(V + s)W / (V(W + s)) = 1 + e(1 - share_lost).
+#   share_lost:      the part of the edge our own impact may eat.
+#   quantiles:       the quantiles reported per cell (numpy's linear interpolation).
+#   odds_bands:      per pool, the ascending edges of its final-odds bands (pool_scan.odds_band;
+#                    Place and Wide band on the low end of the final range).
+#   class_groups:    races.race_class -> class group (as research/pool_scan.CLASS_GROUPS).
+#   exclude_status:  races with these races.status values give no row (an abandoned race refunds
+#                    every ticket, so no money on it pays).
+#   pool_size_cells: the second cell set: per pool, the tertiles of the final pool over the run's
+#                    races, crossed with the odds band.
+#   flat_stakes_yen: the flat stakes set beside the capacity: per cell and edge, the share of
+#                    combinations whose capacity is at least each stake (staking is flat, capped at
+#                    30,000 yen per race day, owner 2026-11-27).
+#   minutes_before:  t for the pool totals at t (WIN, PLACE, QUINELLA), in minutes before the post.
+#   place_wide:      the two registered treatments of PLACE and QUINELLA_PLACE, whose dividend is
+#                    not the single-winner identity: `depth-only` (money and pool quantiles, no
+#                    capacity) and `co-placer` (the capacity of each paying combination given the
+#                    race's realised co-placers, by `co_placer.rule`; a run whose rule reproduces
+#                    fewer than `co_placer.min_rule_match` of the paid dividends is recorded failed).
+#   exacta_impact:   #350's measure: the own impact of `stake` yen on one FORECAST combination,
+#                    by the final pool's size (research/exacta_impact.own_impact and its
+#                    POOL_BIN_EDGES, takeout `takeout`).
+family_id: japan-pool-depth-v1
+date_from: "2014-06-07"
+edges: [0.05, 0.1, 0.2]
+share_lost: 0.5
+quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+odds_bands:
+  WIN: [2, 3, 5, 10, 20, 50]
+  PLACE: [1.2, 1.5, 2, 3, 5, 10]
+  QUINELLA: [5, 10, 20, 50, 100, 300]
+  QUINELLA_PLACE: [2, 3, 5, 10, 20, 50, 100]
+  FORECAST: [10, 20, 50, 100, 300, 1000]
+  TRIO: [10, 30, 100, 300, 1000, 3000]
+class_groups:
+  DEBUT: newcomer
+  MAIDEN: maiden
+  C1: conditions
+  C2: conditions
+  C3: conditions
+  OP: open
+  L: open
+  G1: graded
+  G2: graded
+  G3: graded
+exclude_status: [abandoned]
+pool_size_cells: tertiles
+flat_stakes_yen: [1000, 10000, 30000]
+minutes_before: 2.0
+place_wide:
+  variants: [depth-only, co-placer]
+  co_placer:
+    rule: jra-stake-back-share
+    min_rule_match: 0.95
+exacta_impact:
+  pool: FORECAST
+  stake: 100
+  takeout: 0.25
+  pool_bin_edges: [0, 500000, 1000000, 2000000, 5000000, 10000000, 20000000, 50000000]

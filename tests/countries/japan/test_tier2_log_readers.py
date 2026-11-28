@@ -5,13 +5,25 @@ go into the same `<VENUE>.jsonl.gz` as tier 1 (WIN, PLACE, QUINELLA, QUINELLA_PL
 rule: "Stream large pages; never hold a day's trifecta boards in memory" (the owner's 16 GB Mac).
 
 Contract pinned here (the coder follows it):
-- The live board (`board.feed.build_board`, and the server's `/feed` built from it) shows tier 1
-  only: over a log holding tier-2 and WIN5 rows besides tier 1, its output is exactly its output
-  over the tier-1 rows alone. No tier-2 pool and no WIN5 row reaches the feed; a race with only
-  tier-2 rows is not on the board; a tier-2 capture does not move `last_capture_utc`.
+- The live board (`board.feed.build_board`, and the server's `/feed` built from it) carries tier 1
+  as before and, since ticket #506 (the shadow page's exotic boards), each tier-2 pool from its
+  latest grid capture: over a log holding tier-2 and WIN5 rows besides tier 1, its output less
+  the tier-2 pools is exactly its output over the tier-1 rows alone (tier 1 unchanged, a tier-2
+  capture does not move `last_capture_utc`, a race with only tier-2 rows is not on the board, no
+  WIN5 row reaches the feed). A tier-2 pool of a race on the board, once captured at or before
+  now, is `pools[POOL] = {"investment", "capture_utc", "rows"}`: `capture_utc` the pool's latest
+  capture time (`snapshot_utc`, ISO UTC) at or before now, `rows` one per combination of that
+  capture with its `combination`, `odds`, `odds_hi` (null) and `status` (its `status_raw`), and
+  `investment` the latest `__pool__` figure, as for tier 1. A pool not yet captured is absent.
+  The tier-2 rows carry no probability or value (the feed's rule).
+- A runner scratched in WIN or PLACE (the plain feed's carry, docs/specs/board-feed.md) is
+  scratched on every FORECAST, TRIO and TIERCE row holding its number (status SCR, null odds),
+  once the SCR row is captured at or before now. BRACKET_QUINELLA combinations are bracket
+  numbers, not runners: the carry does not touch them.
 - Bounded memory: `build_board` over a venue-day holding 24 tier-2 captures of 18-runner races
-  (4,896 3連単 prices each, ~145k tier-2 rows) does not materialise the tier-2 rows: its peak RSS
-  rises by less than FEED_LIMIT_BYTES (a child process measures its own peak: child_memory.py).
+  (4,896 3連単 prices each, ~145k tier-2 rows) keeps only each race's latest capture per pool:
+  its peak RSS rises by less than FEED_LIMIT_BYTES (a child process measures its own peak:
+  child_memory.py), and every tier-2 pool shows its race's last grid point.
 - `logger.compact.compact_day` keeps tier-2 and WIN5 rows in the day's Parquet, one row per logged
   row as for tier 1 (Ruling: tier-2 studies need decision-time prices, so the Parquet carries them;
   the live board is the reader that drops them). Over the same venue-day its peak RSS rises by less
@@ -25,6 +37,7 @@ would be several GB there. All logs are synthetic, written under tmp_path.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from datetime import date, datetime, timedelta, timezone
@@ -183,7 +196,7 @@ def tier1_only(members: list[list[dict]]) -> list[list[dict]]:
     return [[row for row in rows if row["pool"] in TIER1] for rows in members]
 
 
-# ---------------------------------------------------------------- the board shows tier 1 only
+# ---------------------------------------------------------------- the board: tier 1 and tier 2
 
 POSTS = {1: jst(10, 5), 2: jst(10, 35), 7: jst(13, 5)}  # race 7: tier-2 rows only
 
@@ -217,12 +230,75 @@ def set_data(monkeypatch, data: Path) -> None:
     monkeypatch.setenv(paths.DATA_DIR_VAR, str(data))
 
 
+def instant(text: str) -> datetime:
+    return datetime.fromisoformat(text)
+
+
+def latest_tier2(members: list[list[dict]], race_id: str, pool: str, now: datetime):
+    """The pool's latest capture as of now, worked out from the rows written: {capture_utc,
+    investment, rows: {combination: (odds, odds_hi, status)}}; None before its first capture."""
+    rows = [
+        row
+        for member in members
+        for row in member
+        if row["race_id"] == race_id and row["pool"] == pool and instant(row["snapshot_utc"]) <= now
+    ]
+    prices = [row for row in rows if row["combination"] != POOL]
+    if not prices:
+        return None
+    at = max(instant(row["snapshot_utc"]) for row in prices)
+    current = {
+        row["combination"]: (row["odds"], row.get("odds_hi"), row["status_raw"])
+        for row in prices
+        if instant(row["snapshot_utc"]) == at
+    }
+    totals = [row for row in rows if row["combination"] == POOL and row.get("investment")]
+    latest = max(totals, key=lambda row: instant(row["snapshot_utc"]), default=None)
+    return {
+        "capture_utc": at,
+        "investment": None if latest is None else latest["investment"],
+        "rows": current,
+    }
+
+
+def tier2_of(race: dict) -> dict[str, dict]:
+    """The race's tier-2 pools in latest_tier2's form, read from the feed."""
+    out = {}
+    for pool in TIER2:
+        body = race["pools"].get(pool)
+        if body is None:
+            continue
+        combos = [row["combination"] for row in body["rows"]]
+        assert len(combos) == len(set(combos)), (race["race_id"], pool, "a combination twice")
+        capture = body.get("capture_utc")
+        out[pool] = {
+            "capture_utc": None if capture is None else instant(capture),
+            "investment": body.get("investment"),
+            "rows": {
+                row["combination"]: (row["odds"], row["odds_hi"], row["status"])
+                for row in body["rows"]
+            },
+        }
+    return out
+
+
+def without_tier2(board: dict) -> dict:
+    out = copy.deepcopy(board)
+    for venue in out["venues"]:
+        for race in venue["races"]:
+            for pool in TIER2:
+                race["pools"].pop(pool, None)
+    return out
+
+
 @pytest.mark.parametrize(
     "now",
     [jst(9, 10), jst(9, 50), jst(10, 4), jst(10, 30), jst(23, 0)],
     ids=["morning", "race1-before-t20", "race1-after-t20", "race2-after-t20", "day-end"],
 )
-def test_the_board_over_a_mixed_log_is_the_board_over_its_tier1_rows(tmp_path, monkeypatch, now):
+def test_the_board_over_a_mixed_log_is_the_tier1_board_plus_the_latest_tier2_captures(
+    tmp_path, monkeypatch, now
+):
     from horsetrack.countries.japan.board import feed
 
     members = mixed_day()
@@ -234,14 +310,23 @@ def test_the_board_over_a_mixed_log_is_the_board_over_its_tier1_rows(tmp_path, m
     set_data(monkeypatch, tmp_path / "tier1")
     alone = feed.build_board(DAY, now=lambda: now)
 
-    assert mixed == alone
+    assert without_tier2(mixed) == alone  # tier 1 exactly as before
     races = mixed["venues"][0]["races"]
+    shown = 0
     for race in races:
-        assert not set(race["pools"]) & NOT_ON_BOARD, race["race_id"]
+        assert "WIN5" not in race["pools"], race["race_id"]
+        want = {}
+        for pool in TIER2:
+            latest = latest_tier2(members, race["race_id"], pool, now)
+            if latest is not None:
+                want[pool] = latest
+        assert tier2_of(race) == want, (race["race_id"], sorted(tier2_of(race)), sorted(want))
+        shown += len(want)
+    assert shown, "the fixture shows no tier-2 pool at this time"
 
 
-def test_the_board_names_tier1_pools_races_and_captures_only(tmp_path, monkeypatch):
-    """Absolute checks, so an empty board cannot pass the comparison above."""
+def test_the_board_names_every_pool_and_the_tier2_capture_times(tmp_path, monkeypatch):
+    """Absolute checks, so a board built the same wrong way twice cannot pass the comparison."""
     from horsetrack.countries.japan.board import feed
 
     set_data(monkeypatch, tmp_path / "mixed")
@@ -254,41 +339,143 @@ def test_the_board_names_tier1_pools_races_and_captures_only(tmp_path, monkeypat
     assert [race["race_no"] for race in races] == [1, 2]  # race 7 has tier-2 rows only
     for race in races:
         no, post = race["race_no"], POSTS[race["race_no"]]
-        assert set(race["pools"]) == set(TIER1)
+        assert set(race["pools"]) == set(TIER1) | set(TIER2), sorted(race["pools"])
         # the last tier-1 capture is the shared member at post - 2; tier 2 ran on to post + 1
         last = datetime.fromisoformat(race["last_capture_utc"])
         assert last == post - timedelta(minutes=2)
         win = {row["combination"]: row["odds"] for row in race["pools"]["WIN"]["rows"]}
-        # step 9 (the shared member) holds WIN 1-4 (its first 8 rows: WIN and PLACE of 1-4)
         assert win == {
             **{str(n): round(2.0 + n * 1.5 + 9 * 0.3, 1) for n in range(1, 5)},
             **{str(n): round(2.0 + n * 1.5 + 4 * 0.3, 1) for n in range(5, 7)},
         }
         assert len(race["pools"]["QUINELLA"]["rows"]) == 15  # C(6, 2)
         assert race["pools"]["WIN"]["investment"] == 1_000_000.0 * 5 + no  # step 4 totals
+        # tier 2: the capture at post + 1 (step 7), every combination of an 18-runner race
+        for i, pool in enumerate(TIER2):
+            body = race["pools"][pool]
+            assert datetime.fromisoformat(body["capture_utc"]) == post + timedelta(minutes=1)
+            assert len(body["rows"]) == PER_POOL[pool], (no, pool, len(body["rows"]))
+            assert body["investment"] == 5_000_000.0 * (i + 2) * 8 + no, (no, pool)
+            assert all(row["odds_hi"] is None for row in body["rows"]), (no, pool)
+        odds = {
+            (pool, row["combination"]): row["odds"]
+            for pool in TIER2
+            for row in race["pools"][pool]["rows"]
+        }
+        assert odds[("TIERCE", "18,1,7")] == round(60.0 + 18 * 11 + 1 * 7 + 7 * 3 + 7, 1)
+        assert odds[("TIERCE", "1,18,7")] == round(60.0 + 1 * 11 + 18 * 7 + 7 * 3 + 7, 1)
+        assert odds[("TRIO", "2,9,17")] == round(20.0 + 2 * 5 + 9 * 3 + 17 + 7, 1)
+        assert odds[("FORECAST", "12,3")] == round(8.0 + 12 * 4 + 3 * 2 + 7, 1)
+        assert odds[("BRACKET_QUINELLA", "8,8")] == round(4.0 + 8 * 3 + 8 + 7, 1)
+        assert odds[("BRACKET_QUINELLA", "1,5")] == round(4.0 + 1 * 3 + 5 + 7, 1)
     text = json.dumps(board, ensure_ascii=False)
-    for pool in NOT_ON_BOARD:
-        assert f'"{pool}"' not in text
+    assert '"WIN5"' not in text
 
 
-def test_the_served_feed_over_a_mixed_log_is_the_tier1_feed(tmp_path, monkeypatch):
+def test_the_served_feed_carries_the_tier2_pools(tmp_path, monkeypatch):
     from horsetrack.countries.japan.board import feed, server
 
     members = mixed_day()
-    write_members(tmp_path / "tier1", "TOK", tier1_only(members), POSTS)
-    set_data(monkeypatch, tmp_path / "tier1")
+    set_data(monkeypatch, tmp_path / "mixed")
+    write_members(tmp_path / "mixed", "TOK", members, POSTS)
     want = feed.build_board(
         DAY, now=lambda: jst(23, 59)
     )  # the day is past: the real clock is later
 
-    set_data(monkeypatch, tmp_path / "mixed")
-    write_members(tmp_path / "mixed", "TOK", members, POSTS)
     body, etag = server.Feed(DAY, min_rebuild_s=0).current()
 
     assert body is not None and etag is not None
     got = json.loads(body)
     got.pop("generated_utc"), want.pop("generated_utc")
     assert got == json.loads(json.dumps(want, ensure_ascii=False))
+    for race in got["venues"][0]["races"]:
+        assert set(TIER2) <= set(race["pools"]), (race["race_id"], sorted(race["pools"]))
+        assert len(race["pools"]["TIERCE"]["rows"]) == PER_POOL["TIERCE"]
+
+
+# ---------------------------------------------------------------- a scratch in tier 2
+
+SMALL = 6  # runners
+
+
+def small_tier2(venue: str, no: int, at: datetime) -> list[dict]:
+    """One tier-2 capture of a 6-runner race. Bracket pairs are numbered like runners (each runner
+    its own bracket), so a scratched runner's number also names a bracket."""
+    r = rid(venue, no)
+    field = range(1, SMALL + 1)
+    rows = [
+        priced(r, "BRACKET_QUINELLA", f"{a},{b}", round(3.0 + a + 2 * b, 1), at)
+        for a, b in combinations_with_replacement(field, 2)
+    ]
+    rows += [
+        priced(r, "FORECAST", f"{a},{b}", round(6.0 + a * 3 + b, 1), at)
+        for a, b in permutations(field, 2)
+    ]
+    rows += [
+        priced(r, "TRIO", f"{a},{b},{c}", round(10.0 + a * 4 + b * 2 + c, 1), at)
+        for a, b, c in combinations(field, 3)
+    ]
+    rows += [
+        priced(r, "TIERCE", f"{a},{b},{c}", round(30.0 + a * 9 + b * 5 + c * 2, 1), at)
+        for a, b, c in permutations(field, 3)
+    ]
+    return rows + [total(r, pool, 2_000_000.0 * (i + 1), at) for i, pool in enumerate(TIER2)]
+
+
+def test_a_scratch_carries_onto_the_runners_tier2_combinations_not_onto_brackets(
+    tmp_path, monkeypatch
+):
+    from horsetrack.countries.japan.board import feed
+
+    venue, no, out = "NAK", 3, 4
+    r = rid(venue, no)
+    scratch_at = jst(10, 0)
+    later = [
+        priced(r, row["pool"], "4", None, scratch_at)  # SCR, no odds
+        if row["pool"] in ("WIN", "PLACE") and row["combination"] == str(out)
+        else row
+        for row in tier1_capture(venue, no, scratch_at, 1, SMALL)
+    ]
+    tier2 = small_tier2(venue, no, jst(9, 30))  # captured before the scratch
+    members = [tier1_capture(venue, no, jst(9, 0), 0, SMALL), tier2, later]
+    set_data(monkeypatch, tmp_path / "data")
+    write_members(tmp_path / "data", venue, members, {no: jst(10, 30)})
+    logged = {(row["pool"], row["combination"]): row for row in tier2 if row["combination"] != POOL}
+
+    after = feed.build_board(DAY, now=lambda: jst(10, 10))
+    before = feed.build_board(DAY, now=lambda: jst(9, 55))
+
+    (race,) = after["venues"][0]["races"]
+    seen = {"scratched": 0, "bracket_with_4": 0}
+    for pool in TIER2:
+        rows = {row["combination"]: row for row in race["pools"][pool]["rows"]}
+        assert set(rows) == {c for p, c in logged if p == pool}, pool
+        for combination, row in rows.items():
+            source = logged[(pool, combination)]
+            holds_out = str(out) in combination.split(",")
+            if pool != "BRACKET_QUINELLA" and holds_out:
+                assert (row["status"], row["odds"], row["odds_hi"]) == ("SCR", None, None), (
+                    pool,
+                    combination,
+                    row,
+                )
+                seen["scratched"] += 1
+            else:
+                assert row["status"] == source["status_raw"], (pool, combination, row)
+                assert row["odds"] == source["odds"], (pool, combination, row)
+                seen["bracket_with_4"] += pool == "BRACKET_QUINELLA" and holds_out
+    assert seen["scratched"] == 10 + 10 + 60  # FORECAST 2 x 5, TRIO C(5, 2), TIERCE 3 x 5 x 4
+    assert seen["bracket_with_4"] == 6  # 1-4, 2-4, 3-4, 4-4, 4-5, 4-6 stay priced
+
+    # before the SCR row is captured, every tier-2 row is priced as logged
+    (race,) = before["venues"][0]["races"]
+    for pool in TIER2:
+        for row in race["pools"][pool]["rows"]:
+            source = logged[(pool, row["combination"])]
+            assert (row["status"], row["odds"]) == (source["status_raw"], source["odds"]), (
+                pool,
+                row,
+            )
 
 
 # ---------------------------------------------------------------- compact keeps tier 2
@@ -355,6 +542,11 @@ MEM_POSTS = {no: jst(10, 5) + timedelta(minutes=35 * (no - 1)) for no in range(1
 # Measured on this day (macOS, CPython 3): `read_rows` then build, as at 8ff0e73, rises 328 MB;
 # streaming `iter_members` and keeping tier-1 rows only rises 77 MB (iter_members alone ~62 MB:
 # a member's bytes, text, lines and dicts, two members overlapping at the generator's hand-over).
+# Since #506 the board also carries each race's latest tier-2 capture (6 x 6,054 = 36,324 rows).
+# Measured on this day (macOS, prototypes outside the tree): the tier-1 board plus a second
+# streaming pass keeping only the latest capture per (race, pool) as 4-key dicts rises 91 MB;
+# keeping every tier-2 capture as 4-key dicts rises 130 MB, and as the parsed log dicts (tier 2
+# added to the tier-1 histories) 259 MB. The limit is unchanged: it still sits between them.
 FEED_LIMIT_BYTES = 150 * 1000 * 1000
 # Measured: 8ff0e73 (`read_rows`, then one record dict per row) rises 553 MB; a prototype that
 # turns each member into an Arrow table, concatenates, sorts and writes rises 159 MB.
@@ -396,6 +588,12 @@ if mode == "feed":
         "pools": sorted({p for r in races for p in r["pools"]}),
         "races": [r["race_no"] for r in races],
         "lines": sum(len(p["rows"]) for r in races for p in r["pools"].values()),
+        "tier2": sorted(
+            [r["race_no"], p, b.get("capture_utc"), len(b["rows"])]
+            for r in races
+            for p, b in r["pools"].items()
+            if p in ("BRACKET_QUINELLA", "FORECAST", "TRIO", "TIERCE")
+        ),
     }
 else:
     import pyarrow.parquet as pq
@@ -415,12 +613,22 @@ def run_child(data: Path, *args: str) -> dict[str, Any]:
     return child_memory.run_child(CHILD, *args, env={**os.environ, paths.DATA_DIR_VAR: str(data)})
 
 
-def test_the_board_over_a_day_of_trifecta_captures_does_not_hold_them(heavy_day):
+def test_the_board_over_a_day_of_trifecta_captures_holds_only_the_latest_one(heavy_day):
     out = run_child(heavy_day, "feed", DAY.isoformat(), iso(jst(23, 0)))
 
-    assert out["pools"] == sorted(TIER1)
+    assert out["pools"] == sorted(TIER1 + TIER2)
     assert out["races"] == list(range(1, MEM_RACES + 1))
-    assert out["lines"] == MEM_RACES * (2 * 18 + 2 * 153)
+    assert out["lines"] == MEM_RACES * (2 * 18 + 2 * 153) + MEM_RACES * sum(PER_POOL.values())
+    last = MEM_GRID[-1]  # every race's last grid point, post - 5
+    shown = [(no, pool, None if at is None else instant(at), n) for no, pool, at, n in out["tier2"]]
+    assert sorted(shown, key=str) == sorted(
+        (
+            (no, pool, post - timedelta(minutes=last), PER_POOL[pool])
+            for no, post in MEM_POSTS.items()
+            for pool in TIER2
+        ),
+        key=str,
+    )
     assert out["rise"] < FEED_LIMIT_BYTES, (
         f"build_board rose {out['rise'] / 1e6:.0f} MB over {MEM_TIER2_ROWS:,} tier-2 rows"
     )
