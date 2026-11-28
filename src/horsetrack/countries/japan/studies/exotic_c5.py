@@ -108,7 +108,9 @@ FAMILY_ID = "japan-c5-exotic-dividends"
 SEED = TICKET  # the bootstrap's seed: reproducibility only, scoring.yaml signs none
 WIN, PLACE, QUINELLA, WIDE = exotic.WIN, exotic.PLACE, exotic.QUINELLA, exotic.WIDE
 EXACTA, TRIO, TIERCE = exotic.EXACTA, exotic.TRIO, exotic.TRIFECTA
-POOLS = exotic.POOLS
+# Pinned to the frozen spec's pools, in its order: not exotic.POOLS, which grows. The bracket
+# quinella (#513) is a later C5 family's pool.
+POOLS = (WIN, PLACE, QUINELLA, WIDE, EXACTA, TRIO, TIERCE)
 ORDERINGS = exotic.FAMILIES
 NORMALISED, CALIBRATED, FORM = "normalised", "calibrated", "stage2:q:form"
 INPUTS = (NORMALISED, CALIBRATED, FORM)
