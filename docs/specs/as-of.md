@@ -260,6 +260,7 @@ checks the file against those answers.
 | `breeding_horses` (jravan) | `static` | always: pedigree is known at any t (#376) | none |
 | `produce` (jravan) | `static` | always: pedigree is known at any t (#376) | none |
 | `lineages` (jravan) | `static` | always: pedigree is known at any t (#376) | none |
+| `exclusions` (jravan) | `offset` | `race_date` 00:00 JST (`tz` Asia/Tokyo) + 0 min, the card's rule; `published_date` gates nothing (the owner's answer on #405, 2026-11-28) | none |
 
 - Nothing else is banned. JRDB tables are inputs to private models only (D21: no JRDB-derived
   figure in the public repository).

@@ -18,7 +18,11 @@ Contract pinned here (the coder follows it), module `horsetrack.countries.japan.
   `records.write_build_report` (`<reports dir>/jravan-exclusions.json`, outside the repo, D21).
 - `model_inputs.yaml`'s `exclusions` input names a jravan `exclusions` supply (no longer the
   dumped `records/RACE/JG`), and the committed `docs/data-coverage.md` shows it withheld (D21).
-  Its availability rule is the owner's question (#405) and is not pinned here.
+- Availability (the owner's answer on #405, 2026-11-28, option A): the table is known from
+  00:00 JST of its race date, the card's rule; `read_asof(con, 'exclusions', t,
+  rules=load_availability('japan'))` over the built parquet shows a row from that instant on and
+  never before, whatever its `published_date` (the shipped rule itself is pinned in
+  tests/countries/japan/test_availability.py).
 
 The JG items each column comes from (names as `spec.record_spec` returns them):
 - one row per JG record kept (every entry the record type lists, excluded or not, so a consumer
@@ -43,9 +47,18 @@ The JG items each column comes from (names as `spec.record_spec` returns them):
   gives no row and is counted only in `counts['holdout_skipped']` (not in `records` nor any other
   count; its codes are never translated nor counted as unmapped).
 - Same-date tie (orchestrator's ruling, PR #471): when an entry's provision and its deletion carry
-  the same データ作成年月日, the deletion wins whatever the file order.
-- Coverage (orchestrator's ruling, PR #471): the `exclusions` input's jravan supply is the column
-  `exclusion_kind` (null for an entry not excluded), so the audit counts excluded entries only.
+  the same データ作成年月日, the deletion wins whatever the file order. Between live revisions
+  (データ区分 not 0) of an entry with the same データ作成年月日, the one later in the source file
+  wins, whatever its codes or horse name (review, PR #471).
+- Scope (the owner's answer on #405, 2026-11-28, option A): the table keeps every JG entry, with
+  `entry_kind` and `exclusion_kind`; consumers filter for exclusions.
+- Coverage (review, PR #471): the audit of the `exclusions` input (`coverage.coverage` over the
+  real model_inputs.yaml entry) measures the excluded entries (出走区分 excluded_at_close or
+  excluded_on_redeclaration, each with its 除外状態区分), not every entry: summed over the
+  input's supplies, a year's rows are its excluded entries; a race whose entries are all declared,
+  redeclared or scratched adds none; and a year where every excluded entry has its exclusion kind
+  is no gap, however rare the exclusions. How (a filter, a derived column, several supplies) is
+  the coder's.
 
 Every layout here is made up in the workbook's shape (`jravan_workbook.write_workbook`): the item
 names are the workbook's, the widths of the horse name and the entry order, a reserve item and so
@@ -61,9 +74,11 @@ import re
 import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
+import duckdb
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -75,6 +90,7 @@ from horsetrack.cli import app
 from horsetrack.core import paths
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.reports import is_withheld
+from horsetrack.core.store.asof import load_availability, read_asof
 from horsetrack.countries.japan.research import coverage as cv
 
 # isort: split
@@ -531,6 +547,56 @@ def test_a_deletion_dated_as_its_provision_wins_whatever_the_order(data: Path) -
     assert len(set(outputs)) == 1
 
 
+def test_a_same_date_live_revision_later_in_the_file_wins(data: Path) -> None:
+    # Every revision below carries the same データ作成年月日, all in 2024's TOK race 11. Each case
+    # is one entry (its own horse): its revisions in file order, and the row expected, None for no
+    # row. The later live revision wins whatever its codes or name sort to; a deletion dated the
+    # same wins wherever it stands.
+    def rev(horse: str, entry: str, exclusion: str, name: str = "オナジヒ", kubun: str = "1") -> Jg:
+        return Jg(horse=horse, name=name, entry=entry, exclusion=exclusion, kubun=kubun,
+                  created="20240606")  # fmt: skip
+
+    cases: list[tuple[list[Jg], Row | None]] = [
+        # The exclusion kind corrected from 2 (lost_ballot) to 1 (no_ballot) later in the file.
+        ([rev("2021109001", "2", "2"), rev("2021109001", "2", "1")],
+         row(T11, "2021109001", "オナジヒ", 1, "excluded_at_close", "no_ballot", D0606)),
+        # The other way round: 1 then 2.
+        ([rev("2021109002", "2", "1"), rev("2021109002", "2", "2")],
+         row(T11, "2021109002", "オナジヒ", 1, "excluded_at_close", "lost_ballot", D0606)),
+        # The entry kind corrected from 5 to 2.
+        ([rev("2021109003", "5", "1"), rev("2021109003", "2", "1")],
+         row(T11, "2021109003", "オナジヒ", 1, "excluded_at_close", "no_ballot", D0606)),
+        # Excluded at close, then declared after all (2 -> 1, the reason cleared).
+        ([rev("2021109004", "2", "2"), rev("2021109004", "1", "0")],
+         row(T11, "2021109004", "オナジヒ", 1, "declared", None, D0606)),
+        # The horse name corrected, the codes unchanged: the later name, whatever its sort order.
+        ([rev("2021109005", "2", "1", name="ンマ"), rev("2021109005", "2", "1", name="アオバ")],
+         row(T11, "2021109005", "アオバ", 1, "excluded_at_close", "no_ballot", D0606)),
+        # Three revisions: the last one stands.
+        ([rev("2021109006", "2", "2"), rev("2021109006", "5", "1"), rev("2021109006", "2", "2")],
+         row(T11, "2021109006", "オナジヒ", 1, "excluded_at_close", "lost_ballot", D0606)),
+        # A deletion dated the same: no row, first, between or last.
+        ([rev("2021109007", "2", "2", kubun="0"), rev("2021109007", "2", "1"),
+          rev("2021109007", "5", "2")], None),
+        ([rev("2021109008", "2", "1"), rev("2021109008", "2", "2", kubun="0"),
+          rev("2021109008", "5", "2")], None),
+        ([rev("2021109009", "5", "2"), rev("2021109009", "2", "1"),
+          rev("2021109009", "2", "1", kubun="0")], None),
+    ]  # fmt: skip
+    expected = sorted((want for _, want in cases if want is not None), key=lambda r: r[1])
+
+    # The cases one after another in the file, in reverse case order, then interleaved (each
+    # entry's revisions keep their relative order): the same rows.
+    sequential = [rec for revisions, _ in cases for rec in revisions]
+    backwards = [rec for revisions, _ in cases[::-1] for rec in revisions]
+    width = max(len(revisions) for revisions, _ in cases)
+    interleaved = [revs[i] for i in range(width) for revs, _ in cases if i < len(revs)]
+    for recs in (sequential, backwards, interleaved):
+        write_year(data, 2024, recs)
+        exclusions.build_exclusions()
+        assert store_rows(data) == expected
+
+
 # ------------------------------------------------------------------------------------------------
 # Holdout (D14): a holdout day's records are never read into the table
 
@@ -688,19 +754,171 @@ def test_the_command_writes_the_table_and_a_private_report(data: Path) -> None:
 
 
 # ------------------------------------------------------------------------------------------------
-# The coverage audit names the table (#374), its figures withheld (D21)
+# The as-of views: known from 00:00 JST of the race date (the owner's answer on #405, 2026-11-28)
+
+UTC = timezone.utc
+US = timedelta(microseconds=1)
+JST = ZoneInfo("Asia/Tokyo")
+
+
+def jst_midnight(day: date) -> datetime:
+    return datetime.combine(day, time(0), tzinfo=JST).astimezone(UTC)
+
+
+def test_a_row_enters_the_views_at_midnight_jst_of_its_race_date(data: Path) -> None:
+    # Published days before the race (and one with no publication date): the race date decides.
+    write_year(
+        data, 2023,
+        [Jg(horse="2020100001", entry="2", exclusion="2", year="2023", mmdd="1228", venue="06",
+            race="11", created="20231222")],
+    )  # fmt: skip
+    write_year(
+        data, 2024,
+        [
+            Jg(horse="2021100001", entry="2", exclusion="1", created="20240601"),
+            Jg(horse="2021100002", entry="1", exclusion="0", created="00000000"),
+            Jg(horse="2021100003", entry="5", exclusion="2", mmdd="0609", venue="04", race="03",
+               created="20240606"),
+            Jg(horse="2021100004", entry="1", exclusion="0", mmdd="0609", venue="04", race="03",
+               created="20240607"),
+        ],
+    )  # fmt: skip
+    exclusions.build_exclusions()
+    built = store_rows(data)
+    assert len(built) == 5
+    opens = {(r[0], r[1]): jst_midnight(date.fromisoformat(r[0].split(":")[1])) for r in built}
+    published = {r[6] for r in built if r[6] is not None}
+    assert opens[("jra:2024-06-08:TOK:11", "2021100001")] == datetime(2024, 6, 7, 15, tzinfo=UTC)
+
+    rules = load_availability("japan")
+    con = duckdb.connect(":memory:")
+    try:
+        path = str(store_path(data)).replace("'", "''")
+        con.execute(f"CREATE VIEW \"{TABLE}\" AS SELECT * FROM read_parquet('{path}')")
+
+        def seen(t: datetime) -> set[tuple[str, str]]:
+            view = read_asof(con, TABLE, t, rules=rules)
+            assert set(COLUMNS) <= set(view.columns), t
+            return set(zip(view["race_id"], view["horse_id"], strict=True))
+
+        probes = [datetime(2020, 1, 1, tzinfo=UTC), datetime(2030, 1, 1, tzinfo=UTC)]
+        probes += [jst_midnight(d) for d in published]  # a publication day opens nothing
+        for at in set(opens.values()):
+            probes += [at - US, at, at + timedelta(hours=12)]
+        for t in probes:
+            assert seen(t) == {k for k, at in opens.items() if at <= t}, t.isoformat()
+        # Both sides of one race date's boundary, written out.
+        t11 = {("jra:2024-06-08:TOK:11", "2021100001"), ("jra:2024-06-08:TOK:11", "2021100002")}
+        before = datetime(2024, 6, 7, 15, tzinfo=UTC) - US
+        assert seen(before) == {("jra:2023-12-28:NAK:11", "2020100001")}
+        assert seen(before + US) == {("jra:2023-12-28:NAK:11", "2020100001"), *t11}
+    finally:
+        con.close()
+
+
+# ------------------------------------------------------------------------------------------------
+# The coverage audit names the table (#374), its figures withheld (D21), and measures the
+# excluded entries
+
+
+def exclusion_supplies() -> list[cv.Supply]:
+    inputs = {inp.name: inp for inp in cv.load_inputs()}
+    return list(inputs["exclusions"].supplies)
 
 
 def test_the_exclusions_input_names_the_jravan_exclusions_table() -> None:
-    inputs = {inp.name: inp for inp in cv.load_inputs()}
-    supplies = inputs["exclusions"].supplies
-    pairs = [(s.source, s.table, s.column) for s in supplies]
-    jravan = [s for s in supplies if (s.source, s.table) == (SOURCE, TABLE)]
-    assert jravan, pairs
-    # Only excluded entries count: exclusion_kind is null for an entry not excluded.
-    assert [s.column for s in jravan] == ["exclusion_kind"], pairs
-    assert not any(s.table.startswith("records/") for s in supplies), pairs
-    assert all(is_withheld((s.source, s.table)) for s in jravan)
+    supplies = exclusion_supplies()
+    pairs = [(s.source, s.table, s.column, s.filter) for s in supplies]
+    assert supplies, pairs
+    assert all((s.source, s.table) == (SOURCE, TABLE) for s in supplies), pairs
+    assert all(is_withheld((s.source, s.table)) for s in supplies)
+    names = set(exclusions.EXCLUSIONS_SCHEMA.names)
+    assert all({s.column, *s.filter} <= names for s in supplies), pairs
+
+
+def entries(race: dict, kinds: Sequence[tuple[str, str]], first: int) -> list[Jg]:
+    """One record per (出走区分, 除外状態区分) of `kinds` in `race`, horses numbered from
+    `first`."""
+    return [
+        Jg(horse=f"20171{first + i:05d}", order=i + 1, entry=e, exclusion=x, **race)
+        for i, (e, x) in enumerate(kinds)
+    ]
+
+
+def test_coverage_counts_the_excluded_entries_only(data: Path) -> None:
+    # Exclusions are rare: a few excluded entries among many declared ones, every excluded entry
+    # with its exclusion kind. Races of declared, redeclared and scratched entries only come first
+    # and last in each year.
+    declared = [("1", "0")] * 9 + [("4", "0"), ("6", "0"), ("9", "0")]
+
+    def race(day: str, venue: str, no: str) -> dict:
+        return {"year": day[:4], "mmdd": day[4:], "venue": venue, "race": no,
+                "created": f"{day[:4]}0101"}  # fmt: skip
+
+    recs_2019 = [
+        *entries(race("20190202", "05", "01"), declared, 1),  # no exclusion
+        *entries(
+            race("20190310", "06", "05"), [*declared, ("2", "1"), ("5", "2"), ("2", "2")], 100
+        ),
+        *entries(race("20191221", "09", "11"), declared[:8], 200),  # no exclusion
+    ]
+    recs_2020 = [
+        *entries(race("20200105", "08", "03"), [*declared, ("2", "2"), ("5", "1")], 300),
+        *entries(race("20200607", "05", "07"), declared * 2, 400),  # no exclusion
+        *entries(race("20201101", "05", "11"), declared, 500),  # no exclusion
+    ]
+    write_year(data, 2019, recs_2019)
+    write_year(data, 2020, recs_2020)
+    exclusions.build_exclusions()
+    # Scope A: the table keeps every entry.
+    assert len(store_rows(data)) == len(recs_2019) + len(recs_2020)
+
+    excluded = {2019: 3, 2020: 2}
+    supplies = exclusion_supplies()
+    cov = cv.coverage([inp for inp in cv.load_inputs() if inp.name == "exclusions"])
+    got = [e for e in cov.supplies if e.input == "exclusions"]
+    assert [e.supply for e in got] == supplies
+    by_year: dict[int, int] = {}
+    for e in got:
+        assert e.found, e
+        for year, n in e.rows_by_year.items():
+            by_year[year] = by_year.get(year, 0) + n
+    # Summed over the input's supplies, a year's rows are its excluded entries.
+    assert by_year == excluded, [(e.supply, e.rows_by_year) for e in got]
+    assert sum(e.rows for e in got) == sum(excluded.values())
+    # The span is the excluded entries' races, not the races of declared entries only.
+    firsts = [e.first_date for e in got if e.first_date is not None]
+    lasts = [e.last_date for e in got if e.last_date is not None]
+    assert (min(firsts), max(lasts)) == (date(2019, 3, 10), date(2020, 1, 5))
+    # Every excluded entry has its exclusion kind: complete, no gap year.
+    for e in got:
+        assert e.gap_years == (), (e.supply, e.share_by_year)
+        assert all(share == 1.0 for share in e.share_by_year.values()), (e.supply, e.share_by_year)
+
+
+def test_a_year_of_declared_entries_only_adds_no_exclusion_rows(data: Path) -> None:
+    # One race with exclusions, then years of races whose entries are all declared, redeclared
+    # or scratched: those years add no rows, so the span ends at the excluded entries' race.
+    declared = [("1", "0"), ("4", "0"), ("1", "0"), ("6", "0"), ("9", "0"), ("1", "0")]
+    write_year(
+        data, 2018,
+        entries({"year": "2018", "mmdd": "0520", "venue": "07", "race": "04",
+                 "created": "20180517"}, [*declared, ("2", "1"), ("5", "2")], 1),
+    )  # fmt: skip
+    for year in (2019, 2020):
+        write_year(
+            data, year,
+            entries({"year": str(year), "mmdd": "0915", "venue": "10", "race": "09",
+                     "created": f"{year}0912"}, declared * 3, 100),
+        )  # fmt: skip
+    exclusions.build_exclusions()
+    cov = cv.coverage([inp for inp in cv.load_inputs() if inp.name == "exclusions"])
+    got = [e for e in cov.supplies if e.input == "exclusions"]
+    assert got
+    assert sum(e.rows for e in got) == 2
+    assert {y for e in got for y in e.rows_by_year} == {2018}
+    assert all(e.last_date in (None, date(2018, 5, 20)) for e in got), [e.last_date for e in got]
+    assert all(e.gap_years == () for e in got), [e.gap_years for e in got]
 
 
 def test_the_committed_coverage_doc_lists_the_table_withheld() -> None:
@@ -711,7 +929,8 @@ def test_the_committed_coverage_doc_lists_the_table_withheld() -> None:
     assert "records/RACE/JG" not in body
     lines = [line for line in body.splitlines() if "jravan" in line and f"{TABLE}." in line]
     assert lines, "docs/data-coverage.md does not list the jravan exclusions supply"
-    assert all(f"{TABLE}.exclusion_kind" in line for line in lines), lines
+    for s in exclusion_supplies():
+        assert any(f"{TABLE}.{s.column}" in line for line in lines), (s, lines)
     assert all(WITHHELD in line and not re.search(r"\d{4}-\d{2}-\d{2}|\d+ rows", line)
                for line in lines), lines  # fmt: skip
 

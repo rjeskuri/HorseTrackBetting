@@ -7,17 +7,20 @@ a record on a holdout day (`is_holdout_day('japan', race_date)`, D14) is read no
 counted only in `holdout_skipped`. The others are decoded; the builder keeps one version per entry
 (`records.latest_versions` on the race key, 血統登録番号 and 出馬投票受付順番; an entry whose
 latest record is a deletion has no row, and a deletion dated as its provision wins whatever the
-file order), drops a record `keys.race_id` rejects (counted in `no_race_id`), keeps the records of
-JRA venues, and writes `<out>/exclusions.parquet` through `records.write_parquet`,
-sorted by `race_id`, `horse_id` (plain string order), then `entry_order`, so the same inputs give
-the same bytes whatever the order of the records in the files.
+file order; between live revisions with the same データ作成年月日, the later one in the file wins),
+drops a record `keys.race_id` rejects (counted in `no_race_id`), keeps the records of JRA venues,
+and writes `<out>/exclusions.parquet` through `records.write_parquet`, sorted by `race_id`,
+`horse_id` (plain string order), then `entry_order`, so the same inputs give the same bytes
+whatever the order of the records in the files, except a reordering of one entry's live revisions
+dated the same (the source's file order decides between those).
 
 One row per entry the record type lists, excluded or not (a consumer filters on the kinds):
 `entry_kind` is 出走区分 and `exclusion_kind` 除外状態区分, translated by `ENTRY_KINDS` and
 `EXCLUSION_KINDS`. An unset code (blank or 0) is null; a code outside the translation is null and
 counted in the report's `unmapped`. `published_date` is データ作成年月日, null when unset. The
-table is not a store table and has no availability rule yet (the owner's question, #405), so the
-as-of views refuse it. The report holds counts only. See docs/specs/jravan.md.
+table is not a store table; its availability rule is the card's, known from 00:00 JST of the race
+date (the owner's answer on #405, 2026-11-28; config/availability.yaml). The report holds counts
+only, and the command prints none (D21). See docs/specs/jravan.md.
 """
 
 from __future__ import annotations
@@ -168,12 +171,9 @@ def _read_year(path: Path, layout: spec.RecordSpec) -> tuple[pd.DataFrame, int]:
 
 def _deletions_last(frame: pd.DataFrame) -> pd.DataFrame:
     """`frame` stably reordered so that, among versions of an entry with the same データ作成年月日,
-    a deletion comes last (and so wins in `records.latest_versions`) and the others follow their
-    content, not the file order."""
-    content = [KUBUN, HORSE_NAME, ENTRY, EXCLUSION]
-    order = pd.DataFrame({k: [v or "" for v in frame[k]] for k in content})
-    order["_deleted"] = frame[KUBUN].to_numpy() == "0"
-    return frame.iloc[order.sort_values(["_deleted", *content], kind="stable").index.to_numpy()]
+    a deletion comes last (and so wins in `records.latest_versions`); the live revisions keep the
+    file order, so the later one wins."""
+    return frame.iloc[np.argsort(frame[KUBUN].to_numpy() == "0", kind="stable")]
 
 
 def _rows(
@@ -303,13 +303,7 @@ def exclusions_command(
         written = records.write_build_report(report)
     except (paths.DataDirNotSet, ValueError, LookupError, OSError) as exc:
         _die(f"jravan exclusions failed: {type(exc).__name__}: {exc}")
-    c = report.counts
-    unmapped = sum(sum(codes.values()) for codes in report.unmapped.values())
-    typer.echo(
-        f"exclusions: {c['rows']} rows, {len(report.by_year)} years; {c['records']} records, "
-        f"{c['versions_dropped']} versions dropped, {c['deletions']} deletions, "
-        f"{c['non_jra']} non-JRA, {unmapped} unmapped codes"
-    )
+    typer.echo("exclusions: built; the counts are in the private report (D21)")
     typer.echo(f"report: {written}")
 
 
