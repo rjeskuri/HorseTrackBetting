@@ -36,8 +36,10 @@ Reading the candidate files keeps every cell on the record:
   digits collide).
 - Sources fail closed (D21): 'sources' missing, null, empty or not a list of non-blank names reads
   as ('jravan',), so the row is withheld.
-- Selection: the cell's 'selection' when it has the key; without it, #503's spread-scan 'variant'
-  't2' reads as 'decision_time' and 'lookahead' as 'look_ahead'; anything else is 'unknown'.
+- Selection: the cell's 'selection' when it has the key (an invalid one reads 'unknown'); without
+  it, the family's label in ``FAMILY_SELECTIONS`` (#712, from each family's frozen spec), then
+  #503's spread-scan 'variant' ('t2' reads as 'decision_time', 'lookahead' as 'look_ahead');
+  anything else is 'unknown'.
 - CI: finite 'ci_lo' and 'ci_hi' (per unit staked, as #503 writes its 5% and 95% bootstrap
   quantiles) give the row 100 x them at ``CELL_CI_LEVEL``, each bound one-sided (D7,
   ``docs/specs/leaderboard.md``); otherwise, or with ci_lo above ci_hi, no CI.
@@ -97,6 +99,22 @@ STATUS = "candidate"
 UNSOURCED = ("jravan",)  # a cell that names no source is taken as licensed (D21, fail closed)
 # #503's spread-scan 'variant' as a selection, for a cell without a 'selection' key.
 VARIANT_SELECTIONS = {"t2": "decision_time", "lookahead": "look_ahead"}
+# The selection of the candidate-cell families whose cells carry no 'selection' key (#712), by exact
+# family id: a later version is labelled when its own spec is read.
+FAMILY_SELECTIONS = {
+    # #435, docs/specs/cross-pool-prereg.md ("Settlement at the final dividend", "Candidate cells"):
+    # a retrospective diagnostic at the closing prices, so no selection is a bet placeable at t; the
+    # "t2" is the feature time, not the selection's board. The trial family runs the v1 spec.
+    "japan-cross-pool-t2-trial": "look_ahead",
+    "japan-cross-pool-t2-v1": "look_ahead",
+    "japan-cross-pool-t2-v2": "look_ahead",
+    # #429/#430's frozen specs (selection_hygiene in the registry): odds band, favourite strength
+    # and pool size are read from the final board, look-ahead for selection (#88).
+    "japan-n1-pool-scan-v3": "look_ahead",
+    "japan-n1-pool-scan-v4": "look_ahead",
+    "japan-n1-pool-scan-v5": "look_ahead",
+    "japan-n1-pool-scan-v6": "look_ahead",
+}
 # The level of each one-sided bound a cell's ci_lo and ci_hi carry: #503 writes its bootstrap's
 # (1 - level) and level quantiles at scoring.yaml's level, D7's 95% one-sided.
 CELL_CI_LEVEL = 0.95
@@ -198,10 +216,12 @@ def _cell_id(cell: Mapping, family: str) -> str | None:
     return option
 
 
-def _selection(cell: Mapping) -> str:
+def _selection(cell: Mapping, family: str) -> str:
     if "selection" in cell:
         selection = cell["selection"]
         return selection if isinstance(selection, str) and selection in SELECTIONS else "unknown"
+    if family in FAMILY_SELECTIONS:
+        return FAMILY_SELECTIONS[family]
     variant = cell.get("variant")
     return VARIANT_SELECTIONS.get(variant, "unknown") if isinstance(variant, str) else "unknown"
 
@@ -232,7 +252,7 @@ def _row(cell: Mapping, option_id: str, family: str, cell_id: str, stem: str) ->
         odds_band=_text(cell.get("odds_band")),
         segment=cell_id,
         rule=f"{study}: flat bets in {cell_id}",
-        selection=_selection(cell),
+        selection=_selection(cell, family),
         sources=sources,
         variants_searched=1,
         status=STATUS,

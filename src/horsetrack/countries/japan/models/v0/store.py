@@ -13,10 +13,12 @@ dataset scan with the predicate as its filter, its rows in file order. No holdou
 materialized. The scan skips each row group whose race_date statistics rule the predicate out,
 and reads the column chunks of the others one by one (no pre-buffering, whose coalesced reads
 could span a skipped group): a group holding one day (min == max, no null), as the jravan
-builders write `final_odds`, `pool_votes`, `races` and `runners` (#502), is never opened when its
-day is a holdout day or outside the range, so a development read decodes no byte of a holdout day
-there (D14). A group mixing days (a store not yet rebuilt, a group per year), or without
-statistics, is still read from disk and its holdout rows are dropped by the scan's filter. A read
+builders write `final_odds`, `pool_votes`, `races` and `runners` (#502) and the core build writes
+the jra store's `meetings`, `races`, `runners` and `win_sales` (#510, a group per run of one day
+in the table's order), is never opened when its day is a holdout day or outside the range, so a
+development read decodes no byte of a holdout day there (D14). A group mixing days (a store not
+yet rebuilt; `horse_runs`, follow-up #678), or without statistics, is still read from disk and
+its holdout rows are dropped by the scan's filter. A read
 that touches prices may not start before D10's price era (2014-06-07), whichever the source: the
 requested start is checked, before any clamping.
 
