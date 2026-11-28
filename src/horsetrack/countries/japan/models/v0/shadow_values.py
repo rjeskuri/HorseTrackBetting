@@ -11,8 +11,9 @@ board's runners and p = win.predict(q, board.context()).
   is kept); value_q05 / value_q95 are the 5% and 95% points of p_i O_i over the draws.
 - PLACE runner i: P = ordering.place_probs(p, places); value_at_low = mean_m P_i low_i and
   value_at_high = mean_m P_i high_i. A Wide pair works the same way with
-  ordering.pair_probs(p, places) at the Wide places. Places come from the jra config; 0 places,
-  or no ordering model, leaves both values None.
+  ordering.pair_probs(p, places) at the Wide places. Places come from the jra config for the
+  runners at the start of sales (`starters`, default the runners priced); 0 places, or no
+  ordering model, leaves both values None.
 - A pool whose nowcast raises KeyError (no fit for its (pool, tau) cell) gets its rows with every
   value None and `reason` set; the other pools keep their values. Without WIN draws there is no
   p, so every pool's rows are null. `reason` is for the caller's logs and is not part of the
@@ -144,11 +145,30 @@ def _key(a: int, b: int) -> str:
 
 
 def shadow_values(
-    board: RaceBoard, *, tau_min: int, models: ShadowModels, n_draws: int, seed: int
+    board: RaceBoard,
+    *,
+    tau_min: int,
+    models: ShadowModels,
+    n_draws: int,
+    seed: int,
+    starters: int | None = None,
 ) -> list[ShadowValue]:
-    """One ShadowValue per WIN runner, PLACE runner and Wide pair on `board`."""
+    """One ShadowValue per WIN runner, PLACE runner and Wide pair on `board`.
+
+    `starters` is the runners at the start of sales (default `board.starters`, the runners with a
+    WIN price now). JRA fixes the places Place and Wide pay, and whether Wide is sold, then, so a
+    runner scratched after sales opened leaves them unchanged: 8 drawn and one out is still three
+    places over the seven left. Only those places come from it; the shocks, the Win model's inputs
+    and the rows are those of the runners on the board. It cannot be fewer than the runners
+    priced.
+    """
     if n_draws < 1:
         raise ValueError(f"n_draws must be positive, got {n_draws}")
+    starters = board.starters if starters is None else int(starters)
+    if starters < len(board.win):
+        raise ValueError(
+            f"{starters} starters at the start of sales, but {len(board.win)} runners are priced"
+        )
     runners = sorted(board.win)
     shocks = _shocks(runners, n_draws, seed)
     context = board.context()
@@ -216,7 +236,7 @@ def shadow_values(
 
     position = {h: j for j, h in enumerate(runners)}
     for pool, (keys, figures) in keyed.items():
-        places = pools[pool].places_for(board.starters)
+        places = pools[pool].places_for(starters)
         if models.ordering is None or places == 0 or not keys:
             out.extend(row(pool, c, f) for c, f in zip(keys, figures, strict=True))
             continue

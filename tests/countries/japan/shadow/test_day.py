@@ -656,7 +656,7 @@ def gapped(models: ShadowModels, missing: set) -> ShadowModels:
     return dataclasses.replace(models, nowcast=dataclasses.replace(models.nowcast, sigma0=sigma0))
 
 
-RECORD_KEYS = {  # the shadow log's record format as it is today: no field is added by #233
+RECORD_KEYS = {  # the shadow log's record format before #566: #233 adds no field to it
     "race_id",
     "tau_min",
     "decision_utc",
@@ -676,6 +676,8 @@ RECORD_KEYS = {  # the shadow log's record format as it is today: no field is ad
     "seed",
     "day_status",
 }
+# the version 2 format of a valued point (#566): the same fields, plus exactly these two
+RECORD_KEYS_V2 = RECORD_KEYS | {"values_version", "starters"}
 POOL_PATTERNS = {  # the pool as the config and the log name it, not as a part of another name
     WIN: r"(?<![A-Z_])WIN(?![A-Z_])",
     PLACE: r"(?<![A-Z_])PLACE(?![A-Z_])",
@@ -736,7 +738,15 @@ def test_a_pool_without_a_fit_keeps_the_other_pools_values_and_the_log_seals(
         healthy = None  # the point's values from a run with every fit, once its seed is known
         for record in group:
             assert record["status"] == "ok"
-            assert set(record) == RECORD_KEYS  # no new field, a reason included
+            # #233 adds no field (a reason included) beyond version 2's, and no unknown key
+            if record["models"] is None:  # no pool has a fit: logged without models, no values
+                assert (WIN, None) in missing and (PLACE, None) in missing
+                assert (WIDE, None) in missing
+                assert set(record) == RECORD_KEYS
+            else:
+                assert set(record) == RECORD_KEYS_V2
+                assert record["values_version"] == 2
+                assert record["starters"] == len(race.base)
             assert (record["board_odds"], record["board_odds_hi"]) == figures(
                 board, record["pool"], record["combination"]
             )
@@ -1027,3 +1037,120 @@ def test_the_default_date_is_today_in_tokyo(monkeypatch, now, expected):
     assert result.exit_code == 0, ANSI.sub("", result.output)
     logs = sorted(p.name for p in paths.logs_dir("japan").glob("shadow-day-*.log"))
     assert logs == [f"shadow-day-{expected.isoformat()}.log"]
+
+
+# ---------------------------------------------------------------- places from the starters (#566)
+#
+# Each `ok` record of a valued point states the runners at the start of sales the values used:
+# `starters` (an integer: the runners priced on the board plus the ones scratched on it, a scratch
+# on the board being taken as after sales opened) and `values_version` (the integer 2; a record
+# written before #566 has neither key and is read as version 1). PLACE and Wide values come from
+# `shadow_values(..., starters=starters)`. A point logged without models, and a no_board point,
+# have no values and are not asked to carry either key.
+
+VALUES_VERSION = 2
+SCRATCH_AFTER = timedelta(minutes=20)  # race two's horse 8 shows SCR from post - 20 minutes on
+
+
+class ScratchWorld(World):
+    """Race two (8 drawn) loses horse 8 on every capture from `scratch_at` on: its WIN and PLACE
+    rows show SCR with no price and its Wide pairs are no longer listed."""
+
+    def __init__(self, races: list[Race], scratch_at: datetime, out: int = 8):
+        super().__init__(races)
+        self.scratch_at = scratch_at
+        self.out = out
+        target = races[1].race_id
+        pending = []
+        for (at, venue), rows in self.pending:
+            if at >= scratch_at:
+                changed = []
+                for row in rows:
+                    if row["race_id"] != target or str(self.out) not in row["combination"].split(
+                        ","
+                    ):
+                        changed.append(row)
+                    elif row["pool"] in (WIN, PLACE):
+                        gone = {k: v for k, v in row.items() if k != "odds_hi"}
+                        changed.append({**gone, "odds": None, "status_raw": "SCR"})
+                rows = changed
+            pending.append(((at, venue), rows))
+        self.pending = pending
+        self.rows = [row for _, rows in pending for row in rows]
+
+
+def test_a_scratch_after_sales_open_keeps_the_places_paid(models):
+    races = [race_one(), race_two()]
+    scratch_at = races[1].post - SCRATCH_AFTER
+    world = ScratchWorld(races, scratch_at)
+    summary = run(Clock(world, EARLY), models=models)
+    assert summary.sealed
+    records = open_log().read()
+    scratched_taus = {
+        tau for tau in GRID if races[1].decision(tau) > scratch_at + timedelta(seconds=45)
+    }
+    assert scratched_taus >= {5, 2, 1}  # the cases below really do see the scratch
+    two = races[1].race_id
+    checked_scratch = 0
+    for record in records:
+        assert record["status"] == "ok"
+        race = world.race(record["race_id"])
+        board = world.board(race, record["tau_min"])
+        assert board is not None
+        assert type(record["values_version"]) is int and record["values_version"] == VALUES_VERSION
+        assert type(record["starters"]) is int
+        assert record["starters"] == len(set(board.win) | set(board.scratched))
+        assert record["starters"] == len(race.base)  # 6 drawn in race one, 8 in race two
+    by_point = decided(records)
+    for tau in sorted(scratched_taus):
+        board = world.board(races[1], tau)
+        assert board.scratched == {8} and board.starters == 7
+        points = {(r["pool"], r["combination"]): r for r in by_point[(two, tau)]}
+        assert not [k for k in points if "8" in k[1].split(",")]  # the scratched runner has no key
+        seed = shadow_day.point_seed(SEED, two, tau)
+        three = {
+            (v.pool, v.combination): v
+            for v in shadow_values(
+                board, tau_min=tau, models=models, n_draws=N_DRAWS, seed=seed, starters=8
+            )
+        }
+        two_places = {
+            (v.pool, v.combination): v
+            for v in shadow_values(board, tau_min=tau, models=models, n_draws=N_DRAWS, seed=seed)
+        }
+        place_keys = [k for k in points if k[0] == PLACE]
+        assert len(place_keys) == 7
+        for k in place_keys:
+            for f in VALUE_FIELDS:
+                assert close(points[k][f], getattr(three[k], f)), (tau, k, f)
+            # three places are worth more than the two the priced runners would give
+            assert points[k]["value_at_low"] > two_places[k].value_at_low
+        checked_scratch += len(place_keys)
+    assert checked_scratch == 7 * len(scratched_taus)
+    # before the scratch the board holds all 8: the same count
+    for tau in set(GRID) - scratched_taus:
+        board = world.board(races[1], tau)
+        if not board.scratched:
+            assert {r["starters"] for r in by_point[(two, tau)]} == {8}
+
+
+@pytest.mark.parametrize("out", [8, 3])
+def test_the_starters_logged_count_the_runners_scratched_on_the_board(models, out):
+    races = [race_one(), race_two()]
+    world = ScratchWorld(races, races[1].post - timedelta(minutes=90), out=out)
+    run(Clock(world, EARLY), models=models)
+    records = open_log().read()
+    seen = {r["starters"] for r in records if r["race_id"] == races[1].race_id}
+    assert seen == {8}
+    assert {r["starters"] for r in records if r["race_id"] == races[0].race_id} == {6}
+    assert {r["values_version"] for r in records} == {VALUES_VERSION}
+
+
+def test_a_point_without_models_is_still_a_valid_log(models):
+    """No values, so no starters are asked for; the log verifies and no key is invented."""
+    world = World([race_one(), race_two()])
+    run(Clock(world, EARLY), models=None)
+    records = open_log().read()
+    assert records and all(r["models"] is None for r in records)
+    assert all(r["value_mean"] is None for r in records)
+    assert open_log().verify().sealed

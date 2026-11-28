@@ -716,3 +716,67 @@ def test_verify_reports_counts_by_tau_and_status(rule, held, spec):
 
     ShadowLog(path, day=day).seal(sealed_utc=datetime(2026, 11, 28, 9, 0, tzinfo=UTC))
     assert ShadowLog(path, day=day).verify() == LogSummary(**counts, sealed=True)
+
+
+# ---------------------------------------------------------------- versioned values (#566)
+#
+# A record's values are versioned by two plain keys the log keeps as given: `values_version` (2
+# from #566 on) and `starters` (the runners at the start of sales the values used). A record
+# written before has neither and is version 1: it keeps verifying, and it stays in a file that
+# later records are appended to.
+
+
+def _line(obj: dict) -> bytes:
+    return json.dumps(obj, ensure_ascii=True, separators=(",", ":")).encode()
+
+
+def old_format_file(records: list[dict]) -> bytes:
+    """A log file as the writer before #566 wrote it: no version, no starters, chained by sha256."""
+    out, prev = [], ZERO
+    for seq, record in enumerate(records, 1):
+        line = _line({"seq": seq, "prev_sha256": prev, "record": as_logged(record)})
+        out.append(line + b"\n")
+        prev = sha(line)
+    return b"".join(out)
+
+
+def test_an_old_format_log_still_verifies_and_takes_new_records():
+    old = [rec(1, tau=2), rec(1, tau=5, combination="3")]
+    log, path = open_log()
+    path.parent.mkdir(parents=True)
+    path.write_bytes(old_format_file(old))
+    assert all("values_version" not in r and "starters" not in r for r in old)
+    assert log.verify() == LogSummary(
+        n_records=2, by_tau={2: 1, 5: 1}, no_board=0, sealed=False, day_status="development"
+    )
+
+    new = [
+        rec(2, tau=2, values_version=2, starters=8),
+        rec(2, tau=2, combination="3", values_version=2, starters=8, pool="PLACE"),
+    ]
+    assert log.append(new) == 2
+    summary = ShadowLog(path, day=DEV_DAY).verify()
+    assert (summary.n_records, summary.by_tau) == (4, {2: 3, 5: 1})
+    read = ShadowLog(path, day=DEV_DAY).read()
+    assert read == [as_logged(r) for r in old + new]  # stored as given, old and new side by side
+    assert [r.get("values_version") for r in read] == [None, None, 2, 2]
+    assert [r.get("starters") for r in read] == [None, None, 8, 8]
+    log.seal(sealed_utc=SEALED_AT)
+    assert ShadowLog(path, day=DEV_DAY).verify().sealed
+
+
+@pytest.mark.parametrize("starters", [5, 8, 16])
+def test_a_new_record_keeps_its_version_and_starters_and_they_are_covered_by_the_chain(starters):
+    log, path = open_log()
+    log.append([rec(1, tau=2, values_version=2, starters=starters)])
+    log.append([rec(2, tau=2)])
+    raw = path.read_bytes()
+    assert ShadowLog(path, day=DEV_DAY).read()[0]["starters"] == starters
+    assert ShadowLog(path, day=DEV_DAY).read()[0]["values_version"] == 2
+    mark = f'"starters":{starters}'.encode()
+    assert raw.count(mark) == 1
+    for forged in (starters + 1, starters - 1):
+        assert_tampered(log, path, raw.replace(mark, f'"starters":{forged}'.encode()))
+    assert_tampered(log, path, raw.replace(b'"values_version":2', b'"values_version":1'))
+    path.write_bytes(raw)
+    assert log.verify().n_records == 2  # the untouched file verifies
