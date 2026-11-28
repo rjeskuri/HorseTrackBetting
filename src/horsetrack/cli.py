@@ -49,6 +49,7 @@ from horsetrack.countries.japan.research.coverage import coverage_command
 from horsetrack.countries.japan.research.exacta_ceiling import exacta_ceiling_app
 from horsetrack.countries.japan.research.exacta_impact import exacta_impact_command
 from horsetrack.countries.japan.research.exacta_rules import exacta_rules_command
+from horsetrack.countries.japan.research.joined_coverage import joined_coverage_command
 from horsetrack.countries.japan.research.leaderboard_build import leaderboard_command
 from horsetrack.countries.japan.research.pool_depth import pool_depth_app
 from horsetrack.countries.japan.research.spread_scan import spread_scan_app
@@ -86,6 +87,7 @@ japan.command("ability-study")(ability_study_command)
 japan.command("debut-members")(debut_members_command)
 japan.command("exotic-c5")(exotic_c5_command)
 japan.command("coverage")(coverage_command)
+japan.command("joined-coverage")(joined_coverage_command)
 japan.command("leaderboard")(leaderboard_command)
 japan.add_typer(spread_scan_app, name="spread-scan")
 japan.add_typer(bets_app, name="bets")
