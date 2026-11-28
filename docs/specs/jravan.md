@@ -116,9 +116,16 @@ so each family maps fields instead of slicing bytes:
 - `latest_versions(frame, key, *, created='データ作成年月日', kubun='データ区分')`: one row per
   key, the latest creation date (a tie goes to the later row); a key whose kept row is a deletion
   (`kubun` `'0'`) is dropped. Kept rows stay in input order with their index labels.
-- Output helpers every family uses: `write_parquet(table, path)` writes through a tmp file in the
-  same folder and `os.replace` (zstd, no wall-clock metadata, so the same table gives the same
-  bytes); `BuildReport(name, counts, by_year, unmapped, failures)` with `to_json()` (sorted keys,
+- Row groups by day (#502): `day_slices(table)` cuts a table into one zero-copy slice per
+  `race_date`, days ascending, the rows without a day last, each day's rows in table order (a
+  table whose days do not already ascend is first stably sorted by `race_date`);
+  `write_days(writer, table)` writes each slice as its own row group, so its race_date statistics
+  record that one day. `final_odds`, `pool_votes`, `races` and `runners` are written so, and
+  `read_store_table` skips a holdout day's group from the footer (docs/specs/store.md).
+- Output helpers every family uses: `write_parquet(table, path, *, by_day=False)` writes through
+  a tmp file in the same folder and `os.replace` (zstd, no wall-clock metadata, so the same table
+  gives the same bytes; with `by_day`, as `races` and `runners` ask, through `write_days`, else
+  the writer's default row groups); `BuildReport(name, counts, by_year, unmapped, failures)` with `to_json()` (sorted keys,
   counts and codes only, no record content); `write_build_report(report)` writes
   `<reports dir>/jravan-<name>.json` through `core.eval.reports.write_report` with
   `sources=('jravan',)`, which refuses a path inside the repository.
@@ -147,8 +154,8 @@ so each family maps fields instead of slicing bytes:
 - `build_races(*, years=None, raw=None, out=None)` reads `stored/RACE/RA/<YYYY>.jvd` one year at
   a time (only the items it maps), keeps one version per race (`records.latest_versions` on the
   layout's key items), keeps the JRA venues (01-10) and writes `processed/jravan/races.parquet`
-  (sorted by `race_id`) and `meetings.parquet` (by `race_date`, `venue`) in the store's columns
-  and types. The same inputs give the same bytes. The report, `<reports dir>/jravan-races.json`,
+  (sorted by `race_id`, one row group per race day) and `meetings.parquet` (by `race_date`,
+  `venue`) in the store's columns and types. The same inputs give the same bytes. The report, `<reports dir>/jravan-races.json`,
   holds per year `records`, `versions_dropped`, `deletions`, `races_written`, `non_jra_nar`,
   `non_jra_overseas`, `non_jra_unknown` and `unmapped` (a count), and `unmapped` as store column
   (`race_class`, `weight_type`, `surface`, `going`) -> code -> count over the races written.
@@ -184,9 +191,10 @@ post time a null `post_time_local`.
   at a time (only the items it maps), keeps one version per runner (`records.latest_versions` on
   the layout's key items: the race key, 馬番 and 血統登録番号), keeps the JRA venues (01-10) and
   writes `processed/jravan/runners.parquet` in the store's columns and types, sorted by
-  (`race_id`, `horse_no`, `horse_id`). It then sets `finish_time_s` in `<out>/races.parquet` to
-  the time of each race's `finish_pos` 1 runner (the lower horse number on a dead heat, null for a
-  race without one) and rewrites that file whole, every other column unchanged; a missing races
+  (`race_id`, `horse_no`, `horse_id`), one row group per race day. It then sets `finish_time_s`
+  in `<out>/races.parquet` to the time of each race's `finish_pos` 1 runner (the lower horse
+  number on a dead heat, null for a race without one) and rewrites that file whole, every other
+  column and its row group per race day unchanged; a missing races
   file is a `FileNotFoundError` before anything is read (build the races first). The same inputs
   give the same bytes, and a second fill changes nothing. The report,
   `<reports dir>/jravan-runners.json`, holds per year `records`, `versions_dropped`, `deletions`,
@@ -242,7 +250,8 @@ row for row:
   (the group's 馬番 or 組番 split into its 1, 2 or 3 equal-width legs, joined with `,`, leading
   zeros dropped; FORECAST and TIERCE in finishing order, the others ascending), `dividend` (払戻金,
   yen per 100 as printed) and `is_refund` false. Within a race the pools come in that order, then
-  the record's slot order (dead heats give several slots). 人気順 is not used.
+  the record's slot order (dead heats give several slots), then the pool's refund rows (below).
+  人気順 is not used.
 - A slot is a row only when every leg and the payout are positive integers: blank slots, zeros
   (an unsold pool prints zeros and a blank payout) and zero or blank payouts write nothing, so a
   pool not yet sold in a year has no rows, never zeros.
@@ -256,7 +265,13 @@ The pool flags, each `1` when set, per pool (単勝 複勝 枠連 馬連 ワイ�
 - 返還フラグ (refund): some tickets were refunded, typically a horse scratched after sales opened.
   It writes no row of its own; the pool's paid combinations are still rows.
 - 返還馬番情報 (one `1` per refunded horse number), 返還枠番情報 and 返還同枠情報 (brackets) write
-  no row.
+  refund rows (#443): in each horse-number pool (WIN, PLACE, QUINELLA, QUINELLA_PLACE, FORECAST,
+  TRIO, TIERCE) every combination over the horse numbers 1..登録頭数 holding a refunded horse is a
+  row with `is_refund` true and a null `dividend`, in the paid rows' text (FORECAST and TIERCE
+  every ordered permutation); in BRACKET_QUINELLA every bracket pair holding a 返還枠番 bracket,
+  and b,b for each 返還同枠 bracket. They follow the pool's paid rows and are written whatever the
+  pool's 返還フラグ; a pool flagged 不成立 or 特払 writes none, and a combination that also paid
+  stays its paid row only.
 
 `horsetrack japan jravan dividends [--year YYYY ...]` runs the build and writes
 `reports/jravan-dividends.json` through `write_build_report`: per 開催年 (`by_year`) and in total
@@ -285,7 +300,8 @@ exotics (D5, C5). It is a jravan-only table, not in `schemas.TABLES`.
   type (`latest_versions` on 開催年, 開催月日, 競馬場コード, 開催回, 開催日目, レース番号; a race whose
   latest record of a type is a deletion has no rows of that type). Each year is sorted by
   `race_id, pool, combination` (plain string order, so a pool row sorts after its slots) and
-  written as one row group through a `ParquetWriter` (zstd) into a tmp file, then `os.replace`;
+  written as one row group per race day (`records.write_days`, #502) through a `ParquetWriter`
+  (zstd) into a tmp file, then `os.replace`;
   the same inputs give the same bytes. A year file holding a race of another year is a
   `ValueError`.
 - `odds_rows(record_type, cols)` maps decoded O1-O6 arrays to long rows (the 0B41/0B42
@@ -364,9 +380,9 @@ raise `LabelOnlyTable` and `read_label` returns it whole.
   競馬場コード, 開催回, 開催日目, レース番号; a race whose latest record of a type is a deletion
   has no rows of that type), the second turns the kept records of JRA venues into rows, so no
   more than one chunk is decoded at a time. Each year's rows, H1 and H6 together, are sorted by
-  `race_id, pool, combination` (plain string order) and written as exactly one row group through
-  a `ParquetWriter` (zstd) into a tmp file, then `os.replace`; the same inputs give the same
-  bytes, whatever the chunk size.
+  `race_id, pool, combination` (plain string order) and written as exactly one row group per race
+  day (`records.write_days`, #502) through a `ParquetWriter` (zstd) into a tmp file, then
+  `os.replace`; the same inputs give the same bytes, whatever the chunk size.
 - `votes_rows(record_type, cols)` maps decoded H1 or H6 arrays to rows (`POOL_VOTES_SCHEMA`):
   `jurisdiction` `jra`, `race_id` (`keys.race_id`), `race_date`, `venue` and `race_no` from the
   race id, `pool` and `combination`, `votes`, `refund_votes`, `fav_rank` (int64) and
