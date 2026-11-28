@@ -39,6 +39,9 @@ owner accepted the proposed defaults, each conservative relative to JRA's public
     every view at any t, the look-ahead documented in docs/specs/as-of.md); `breeding_horses`,
     `produce` and `lineages` static (known at any t). None has label columns. `horses` stays
     current_value without `in_view`, refused (#80).
+13. mining_predictions (#406, JV-Data DM and TM, JRA-VAN-only like #376's): column on created_utc
+    (rule C, the owner's answer on #406, 2026-11-28: a record is known at t once created_utc <= t),
+    no fallback, no label columns.
 
 The expected rules below are written from that answer, never read back from the config. The
 leakage tests run the shipped rules over small synthetic tables built from the store's column
@@ -69,7 +72,7 @@ from horsetrack.core.store.asof import (
     read_label,
 )
 from horsetrack.core.store.tables import ARROW_TYPES
-from horsetrack.countries.japan.jravan import bloodlines, masters, odds, votes
+from horsetrack.countries.japan.jravan import bloodlines, masters, mining, odds, votes
 from horsetrack.countries.japan.logger.compact import SCHEMA as ODDS_SCHEMA
 
 UTC = timezone.utc
@@ -107,7 +110,8 @@ VIEW_EXTRA = {"races": frozenset({"post_utc"})}
 POST_RESULTS = ("dividends", "sectionals", "incidents", "running_comments")
 ODDS_LABELS = frozenset({"dividend", "is_refund", "is_final_capture"})
 PEDIGREE_LABELS = frozenset({"source_race_id", "scraped_utc"})
-# the JRA-VAN-only tables (#376): parquet under processed/jravan, not store tables
+# the JRA-VAN-only tables (#376, + mining_predictions #406): parquet under processed/jravan, not
+# store tables
 JRAVAN_SCHEMAS = {
     "final_odds": odds.FINAL_ODDS_SCHEMA,
     "pool_votes": votes.POOL_VOTES_SCHEMA,
@@ -116,6 +120,7 @@ JRAVAN_SCHEMAS = {
     "breeding_horses": bloodlines.BREEDING_HORSES_SCHEMA,
     "produce": bloodlines.PRODUCE_SCHEMA,
     "lineages": bloodlines.LINEAGES_SCHEMA,
+    "mining_predictions": mining.MINING_PREDICTIONS_SCHEMA,
 }
 
 
@@ -158,6 +163,9 @@ OWNER: dict[str, dict] = {
     "breeding_horses": {"kind": "static"},
     "produce": {"kind": "static"},
     "lineages": {"kind": "static"},
+    # JV-Data DM and TM mining predictions: rule C, known at t once created_utc <= t, no fallback
+    # (the owner's answer on #406, 2026-11-28; tests/countries/japan/test_jravan_mining.py).
+    "mining_predictions": {"kind": "column", "column": "created_utc"},
 }
 VIEW_TABLES = [t for t, o in OWNER.items() if o["kind"] == "offset"]
 LABEL_ONLY = [t for t, o in OWNER.items() if o["kind"] == "label_only"]
@@ -182,7 +190,7 @@ def rules():
 
 def test_the_shipped_config_has_one_rule_per_table_and_nothing_else(rules):
     assert len(schemas.TABLES) == 14  # 12, + track_condition (#90), + win_sales (#278)
-    assert len(JRAVAN_SCHEMAS) == 7
+    assert len(JRAVAN_SCHEMAS) == 8  # 7 (#376), + mining_predictions (#406)
     assert not set(JRAVAN_SCHEMAS) & set(schemas.TABLES)  # #376 leaves them out of the store
     assert set(OWNER) == set(schemas.TABLES) | {"odds_timeseries"} | set(JRAVAN_SCHEMAS)
     assert set(rules) == set(OWNER)

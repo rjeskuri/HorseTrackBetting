@@ -29,9 +29,11 @@ Contract pinned here (the coder follows it), module `horsetrack.countries.japan.
 - `dump.MAPPED` gains `("MING", "DM")` and `("MING", "TM")` (test_jravan_dump.py), and
   `model_inputs.yaml`'s `mining_predictions` names this table (test_data_coverage.py accepts it
   as a jravan-only table).
-- `mining_predictions` is not in `schemas.TABLES` and, until the owner's availability rule lands
-  in `config/availability.yaml`, has no rule: `read_asof` and `asof_join` refuse it
-  (`NoAvailabilityRule`). When the owner adds the rule, that test changes with it.
+- `mining_predictions` is not in `schemas.TABLES`. Its rule in `config/availability.yaml` is the
+  owner's (rule C, his answer on #406, 2026-11-28): `kind: column` on `created_utc`, no fallback
+  and no label columns, so a DM or TM row is in `read_asof` and `asof_join` at t once its kept
+  record's `created_utc <= t`, never before; a record created after the post is never in a view
+  before that race.
 
 The workbook items each column comes from (`records.decode` keys; names as `spec.record_spec`
 returns them):
@@ -86,7 +88,6 @@ from horsetrack.core import env, paths
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.store import schemas, tables
 from horsetrack.core.store.asof import (
-    NoAvailabilityRule,
     asof_join,
     load_availability,
     read_asof,
@@ -810,32 +811,181 @@ def test_an_out_folder_inside_the_repository_is_refused(
 # Availability, the model inputs and the coverage doc
 
 
-def test_the_table_has_no_rule_yet_so_the_views_refuse_it(data: Path) -> None:
-    """No member reads the table before the owner's availability rule (DoD); the rule is the
-    owner's, so until it lands the table has none and the views refuse it."""
-    write_build_races(data)
-    mining.build_mining_predictions()
-    path = store_path(data)
-    assert path.is_file()
-
+def test_the_owner_rule_keys_the_table_on_its_creation_stamp() -> None:
+    """The owner's rule C (#406, 2026-11-28): a row is known once its created_utc has passed; no
+    other stamp stands in for it and no column is held back as a label."""
     assert NAME not in schemas.TABLES
     with pytest.raises(ValueError, match="not a store table"):
         tables.read_table(SOURCE, NAME)
     rules = load_availability("japan")
+    assert NAME in rules, "config/availability.yaml has no rule for mining_predictions"
+    rule = rules[NAME]
+    assert (rule.kind, rule.column, rule.fallback) == ("column", "created_utc", None)
+    assert rule.enters_view
+    assert rule.label_columns == () and rule.label_prefixes == ()
+    assert rule.gates == () and rule.derived == () and rule.via is None
+    assert not rule.label_readable
+
+
+# Races for the views, all on 2024-06-08 (so a race-date rule would show them all from 00:00 JST
+# of that day, 2024-06-07 15:00 UTC). KYO 11: DM made the evening before, TM the morning of the
+# race. KYO 12, post 16:20 JST (as the card would print it): both kinds made after the post.
+A11, A12 = "jra:2024-06-08:KYO:11", "jra:2024-06-08:KYO:12"
+POST_A12 = jst(2024, 6, 8, 16, 20)
+DM_A11, TM_A11 = jst(2024, 6, 7, 18, 0), jst(2024, 6, 8, 9, 30)
+DM_A12, TM_A12 = jst(2024, 6, 8, 16, 45), jst(2024, 6, 9, 10, 0)
+STAMPS = {"DM": (DM_A11, DM_A12), "TM": (TM_A11, TM_A12)}
+
+
+def asof_races() -> dict[str, list[Rec]]:
+    def kyo(rt: str, race: str, kubun: str, created: str, hhmm: str, slots: list[Slot]) -> Rec:
+        return Rec(rt=rt, mmdd="0608", venue="08", race=race, kubun=kubun, created=created,
+                   hhmm=hhmm, slots=slots)  # fmt: skip
+
+    return {
+        "DM": [
+            kyo("DM", "11", "1", "20240607", "1800", [
+                ("01", "010000", "00010", "00020"),  # 60.0
+                ("02", "", "", ""),  # nothing set: a row of nulls
+                ("03", "010530", "", "00030"),  # 65.3, one error unset
+            ]),
+            kyo("DM", "12", "7", "20240608", "1645", [("04", "011500", "00050", "00050")]),
+        ],
+        "TM": [
+            kyo("TM", "11", "2", "20240608", "0930", [("01", "00800"), ("02", ""),
+                                                      ("03", "00000")]),
+            kyo("TM", "12", "7", "20240609", "1000", [("04", "00610"), ("05", "00620")]),
+        ],
+    }  # fmt: skip
+
+
+# (race_id, kind, horse_no) -> (value, error_plus_s, error_minus_s, rank, data_kubun, created_utc)
+Shown = tuple["float | None", "float | None", "float | None", "int | None", "str | None",
+              "datetime | None"]  # fmt: skip
+ASOF_ROWS: dict[tuple[str, str, int], Shown] = {
+    (A11, "DM", 1): (60.0, 0.1, 0.2, 1, "1", DM_A11),
+    (A11, "DM", 2): (None, None, None, None, "1", DM_A11),
+    (A11, "DM", 3): (65.3, None, 0.3, 2, "1", DM_A11),
+    (A11, "TM", 1): (80.0, None, None, 1, "2", TM_A11),
+    (A11, "TM", 2): (None, None, None, None, "2", TM_A11),
+    (A11, "TM", 3): (0.0, None, None, 2, "2", TM_A11),
+    (A12, "DM", 4): (75.0, 0.5, 0.5, 1, "7", DM_A12),
+    (A12, "TM", 4): (61.0, None, None, 2, "7", TM_A12),
+    (A12, "TM", 5): (62.0, None, None, 1, "7", TM_A12),
+}
+WITHHELD: Shown = (None, None, None, None, None, None)
+
+
+def known_at(t: datetime) -> dict[tuple[str, str, int], Shown]:
+    """The rows rule C shows at t, from the hand-written stamps above."""
+    return {k: v for k, v in ASOF_ROWS.items() if v[5] <= t}
+
+
+def plain(v: object) -> object:
+    """A frame value as plain Python: None for any null."""
+    if v is None or isinstance(v, str):
+        return v
+    return None if pd.isna(v) else v
+
+
+def shown_of(r: Mapping[str, object]) -> Shown:
+    def num(v: object) -> float | None:
+        v = plain(v)
+        return None if v is None else round(float(v), 2)
+
+    rank, kubun, created = (plain(r[c]) for c in ("rank", "data_kubun", "created_utc"))
+    return (
+        num(r["value"]), num(r["error_plus_s"]), num(r["error_minus_s"]),
+        None if rank is None else int(rank),
+        None if kubun is None else str(kubun),
+        None if created is None else pd.Timestamp(created).tz_convert("UTC").to_pydatetime(),
+    )  # fmt: skip
+
+
+def view_rows(frame: pd.DataFrame) -> dict[tuple[str, str, int], Shown]:
+    """read_asof's rows by (race_id, kind, horse_no), after checking every column is there."""
+    assert list(frame.columns) == COLUMNS
+    out: dict[tuple[str, str, int], Shown] = {}
+    for r in frame.to_dict("records"):
+        key = (str(r["race_id"]), str(r["kind"]), int(r["horse_no"]))
+        assert key not in out, key
+        out[key] = shown_of(r)
+    return out
+
+
+@pytest.fixture
+def mining_con(data: Path):
+    """The built table from asof_races, as a view on a jravan connection."""
+    for rt, recs in asof_races().items():
+        write_year(data, rt, 2024, recs)
+    mining.build_mining_predictions()
     con = tables.connect(SOURCE)
-    con.execute(f"CREATE VIEW {NAME} AS SELECT * FROM read_parquet('{path}')")
-    assert con.execute(f"SELECT count(*) FROM {NAME}").fetchone()[0] == len(ROWS_2009 + ROWS_2024)
-    times = [
-        datetime(2000, 1, 1, tzinfo=UTC),
-        datetime(2024, 6, 1, 3, 0, tzinfo=UTC),
-        datetime(2030, 1, 1, tzinfo=UTC),
-    ]
-    for t in times:
-        with pytest.raises(NoAvailabilityRule):
-            read_asof(con, NAME, t, rules=rules)
-    keys = pd.DataFrame({"race_id": [K24A, K24C, T09], "t_utc": pd.to_datetime(times, utc=True)})
-    with pytest.raises(NoAvailabilityRule):
-        asof_join(keys, NAME, on=["race_id"], rules=rules, con=con)
+    con.execute(f"CREATE VIEW {NAME} AS SELECT * FROM read_parquet('{store_path(data)}')")
+    assert con.execute(f"SELECT count(*) FROM {NAME}").fetchone()[0] == len(ASOF_ROWS)
+    return con
+
+
+def joined(con, keys: list[tuple[str, str, int]], times: list[datetime]) -> list[Shown]:
+    """asof_join of one key row per (key, t), the rows' shown values in the keys' order."""
+    frame = pd.DataFrame({
+        "race_id": [k[0] for k in keys],
+        "kind": [k[1] for k in keys],
+        "horse_no": np.array([k[2] for k in keys], dtype=np.int64),
+        "t_utc": pd.to_datetime(times, utc=True),
+    })  # fmt: skip
+    got = asof_join(frame, NAME, on=["race_id", "kind", "horse_no"],
+                    rules=load_availability("japan"), con=con)  # fmt: skip
+    assert len(got) == len(keys)
+    assert [str(v) for v in got["race_id"]] == [k[0] for k in keys]
+    assert [int(v) for v in got["horse_no"]] == [k[2] for k in keys]
+    return [shown_of(r) for r in got.to_dict("records")]
+
+
+TICK = timedelta(microseconds=1)
+
+
+@pytest.mark.parametrize("kind", ["DM", "TM"])
+def test_each_kind_is_withheld_before_its_creation_stamp_and_shown_from_it(
+    mining_con, kind: str
+) -> None:
+    rules = load_availability("japan")
+    probes = [t for s in STAMPS[kind] for t in (s - TICK, s, s + timedelta(minutes=1))]
+    for stamp in STAMPS[kind]:
+        mine = {k for k, v in ASOF_ROWS.items() if k[1] == kind and v[5] == stamp}
+        assert mine
+        before = view_rows(read_asof(mining_con, NAME, stamp - TICK, rules=rules))
+        assert not mine & set(before), (kind, stamp)
+        at = view_rows(read_asof(mining_con, NAME, stamp, rules=rules))
+        assert {k: at.get(k) for k in mine} == {k: ASOF_ROWS[k] for k in mine}, (kind, stamp)
+    for t in probes:
+        assert view_rows(read_asof(mining_con, NAME, t, rules=rules)) == known_at(t), t
+
+    # asof_join: each runner of this kind at every probe, withheld (all null) before its stamp
+    keys = [k for k in ASOF_ROWS if k[1] == kind]
+    pairs = [(k, t) for t in probes for k in keys]
+    got = joined(mining_con, [k for k, _ in pairs], [t for _, t in pairs])
+    want = [ASOF_ROWS[k] if ASOF_ROWS[k][5] <= t else WITHHELD for k, t in pairs]
+    assert got == want
+    assert WITHHELD in want and any(w != WITHHELD for w in want)
+
+
+def test_a_record_made_after_the_post_is_never_shown_before_that_race(mining_con) -> None:
+    rules = load_availability("japan")
+    late = {k for k in ASOF_ROWS if k[0] == A12}
+    assert all(ASOF_ROWS[k][5] > POST_A12 for k in late)
+    before_post = [jst(2024, 6, 8, 0, 0), POST_A12 - timedelta(hours=1), POST_A12 - TICK]
+    for t in [*before_post, POST_A12]:
+        rows = view_rows(read_asof(mining_con, NAME, t, rules=rules))
+        assert not late & set(rows), t
+        assert rows == known_at(t), t  # the other race's rows made before t are there
+    keys = sorted(late)
+    got = joined(mining_con, keys * len(before_post), [t for t in before_post for _ in keys])
+    assert got == [WITHHELD] * (len(keys) * len(before_post))
+    # From the last stamp on, every row, values intact.
+    for t in (TM_A12, datetime(2030, 1, 1, tzinfo=UTC)):
+        assert view_rows(read_asof(mining_con, NAME, t, rules=rules)) == ASOF_ROWS, t
+    early = datetime(2000, 1, 1, tzinfo=UTC)
+    assert view_rows(read_asof(mining_con, NAME, early, rules=rules)) == {}
 
 
 def test_model_inputs_name_the_mining_predictions_table() -> None:
