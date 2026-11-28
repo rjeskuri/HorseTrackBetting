@@ -3,7 +3,8 @@
  *
  * renderShadow draws board.js's renderBoard with extra cells per row: the odds ladder (#499: T-20,
  * T-10, T-5, T-2 and the final from the shadow entry's `ladder`, observed odds as figures coloured
- * by their move since T-20, the nowcast's projection of a checkpoint still ahead as '≈x.x'; without
+ * by their move since T-20 and, when the point has one (#627), the projection made one rung earlier
+ * muted beside them as '(≈x.x)', the nowcast's projection of a checkpoint still ahead as '≈x.x'; without
  * a ladder, or when the shadow race's post time is not /feed's (the schedule authority), the plain
  * row's t20/t10/t5/t2_odds and '-' ahead), the value (WIN: mean with its 5-95%
  * band; other pools: the value at the low and the high odds), the bucket label and the flag chips.
@@ -200,31 +201,41 @@
     return LADDER.map(function (c) {
       var point = hasLadder ? own(ladder, c[1]) : null;
       if (!point || typeof point !== "object" || num(own(point, "odds")) === null) point = null;
-      else point = { odds: num(point.odds), observed: point.observed === true };
+      else {
+        var earlier = own(point, "projected");
+        point = { odds: num(point.odds), observed: point.observed === true };
+        if (point.observed && num(earlier) !== null) point.projected = num(earlier);
+      }
       if (point !== null && !sameSchedule && !(c[1] === "0" && point.observed)) point = null;
+      /* the T-2 projection of an observed Final belongs to the shadow race's own schedule */
+      if (point !== null && !sameSchedule) delete point.projected;
       if (point !== null && point.observed) return point;
       var ref = c[2] === null ? null : num(own(line, c[2]));
       return ref !== null ? { odds: ref, observed: true } : point;
     });
   }
 
-  /* Observed odds with one decimal, coloured up / down against an observed T-20; projected ones
-   * as '≈' and the odds, muted; '-' for none. */
+  /* Observed odds with one decimal, coloured up / down against an observed T-20, and when the
+   * point has the projection made one rung earlier (#627) a muted '(≈x.x)' after it in the same
+   * cell; projected ones as '≈' and the odds, muted; '-' for none. */
   function ladderCells(entry, line, sameSchedule) {
     var points = ladderOf(entry, line, sameSchedule);
     var t20 = points[0] && points[0].observed ? points[0].odds : null;
     return points.map(function (p, i) {
-      var cls = "num lad", shown = DASH;
+      var cls = "num lad", shown = esc(DASH);
       if (p !== null && p.observed) {
-        shown = p.odds.toFixed(1);
+        shown = esc(p.odds.toFixed(1));
         if (i > 0 && t20 !== null && p.odds !== t20) {
           cls += " mv " + (p.odds > t20 ? "up" : "down");
         }
+        if (p.projected !== undefined) {
+          shown += ' <span class="projected">(≈' + esc(p.projected.toFixed(1)) + ")</span>";
+        }
       } else if (p !== null) {
-        shown = "≈" + p.odds.toFixed(1);
+        shown = esc("≈" + p.odds.toFixed(1));
         cls += " projected";
       }
-      return '<td data-col="' + LADDER[i][0] + '" class="' + cls + '">' + esc(shown) + "</td>";
+      return '<td data-col="' + LADDER[i][0] + '" class="' + cls + '">' + shown + "</td>";
     }).join("");
   }
 
