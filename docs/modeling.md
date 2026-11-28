@@ -21,10 +21,12 @@ How to read the diagrams:
   is one a ticket plans. Diagrams 5 and 6 show the order of steps, in a process and in a race day:
   there a solid arrow is a step in that order, and a dotted arrow leads into a step that is planned,
   not yet available, or still waiting on an owner decision.
-- Nothing here is adopted. Every model and rule stays in shadow until the owner adopts it through
-  diagram 5, and no code places a bet.
+- Nothing here is adopted or rejected (D16 as amended 2026-11-27, epic #447). Every option, model
+  and member is a row on the country's leaderboard, ranked by its return at the final price
+  (diagram 5); the top-ranked options are shadowed and played by hand with small flat stakes, and no
+  code places a bet.
 
-Status as of 2026-11-25. When a ticket in a diagram lands, move its box from planned to built and
+Status as of 2026-11-27. When a ticket in a diagram lands, move its box from planned to built and
 name its module.
 
 ## 1. The decision in one picture
@@ -37,9 +39,10 @@ flowchart LR
     PROB["Outcome half: chance of the outcome given the final price<br/>C2 to C4; v0 is the calibrated market<br/>#114 japan/models/v0/calibration.py"]
     PRICE["Price half: draws of the final pools from the board at t<br/>C1; v0 nowcast<br/>#116 japan/models/v0/nowcast.py"]
     MIX["Average of p · O_final over the draws (D1)<br/>#118 japan/models/v0/shadow_values.py"]
-    TEST{"E[p · O_final | info_t] #gt; 1 ?"}
-    YES["Worth a bet in principle.<br/>Today: logged in shadow, never staked<br/>#119 japan/shadow/log.py"]
-    NO["No value: avoid, the default rung (D19)"]
+    TEST{"Measured: E[p · O_final | info_t] #gt; 1 ?"}
+    YES["Claimed value: logged in shadow<br/>#119 japan/shadow/log.py"]
+    NO["No claimed value: recorded as measured,<br/>not a bar to play"]
+    RANK["Play is set by the leaderboard rank, not by this test:<br/>a top-ranked option is played by hand (D16, D19),<br/>a loss-avoidance option even with every return negative (D18);<br/>any other option is the avoid rung<br/>leaderboard #449 planned, diagram 5"]
     HIST --> PROB
     LOGS --> PRICE
     INFO --> PROB
@@ -50,10 +53,13 @@ flowchart LR
     MIX --> TEST
     TEST -->|"yes"| YES
     TEST -->|"no"| NO
+    YES -.-> RANK
+    NO -.-> RANK
 ```
 
-A bet pays the final odds, which nobody knows until betting closes, so a bet is worth making only
-when its chance of winning times the final price is, on average, more than the stake. The chance
+A bet pays the final odds, which nobody knows until betting closes, so a bet has positive value only
+when its chance of winning times the final price is, on average, more than the stake. That test is a
+measurement; whether an option is played is set by its rank on the leaderboard (diagram 5). The chance
 comes from models trained on years of results at the price that actually paid; the final price
 comes from a forecast, the nowcast, of how the odds will move between now and the close. For each
 simulated final price the chance is worked out again and multiplied by that price, and only then
@@ -70,10 +76,12 @@ flowchart TB
     end
     subgraph L1["C1: final-price nowcast"]
         NC0["Drift by pool, odds band and horizon<br/>#116 japan/models/v0/nowcast.py<br/>v0"]
-        NC1["Structural nowcast φ_t × s_late, scored for Win (Place diagnostic)<br/>#85 japan/models/nowcast.py; board quality by horizon #86<br/>built, not adopted"]
+        NC1["Structural nowcast φ_t × s_late, scored for Win and Place (Place by JRA's rule, measured against final votes in #410's v5; which reads stand is withheld, D21)<br/>#85 japan/models/nowcast.py; board quality by horizon #86<br/>built, not adopted"]
     end
     subgraph L2["C2: per-horse ability and interactions"]
-        ABIL["Dynamic rating #91, Plackett-Luce ability #92,<br/>jockey, trainer and track #93,<br/>competition #94, lineage #95<br/>planned"]
+        ABIL["Dynamic rating #91 japan/models/rating.py;<br/>top-3 Plackett-Luce ability, pooled jockey, trainer, sire<br/>#92 japan/models/ability.py<br/>built, not adopted"]
+        INTR["Interactions: jockey, trainer and track #93,<br/>competition #94<br/>planned"]
+        LIN["Lineage prior: sire × surface × band, damsire at ¼<br/>#95 japan/models/lineage.py<br/>built; E37 run planned"]
     end
     subgraph L3["C3: speed and par"]
         SPEED["Par and expected top-3 time #96,<br/>horse relative speed p_speed #97<br/>planned"]
@@ -90,11 +98,13 @@ flowchart TB
     subgraph L6["C6: decision layer, shadow only"]
         SV["Shadow value over nowcast draws<br/>#118 japan/models/v0/shadow_values.py<br/>v0"]
         SLOG["Shadow log at each grid point<br/>#119 japan/shadow/log.py<br/>#120 japan/shadow/day.py<br/>built"]
-        STAKE["Value with our own stake #100,<br/>staking rungs on paper #101<br/>planned"]
+        STAKE["Shadow EV with our own stake #100<br/>japan/models/decision.py<br/>built"]
+        SDEC["Shadow decisions logged and scored #101<br/>planned"]
     end
     BOARD --> NC0
     NC0 -.->|"replaced by"| NC1
     ASOF -.-> ABIL
+    INTR -.-> ABIL
     ASOF -.-> SPEED
     CAL --> RES
     CAL --> ORD
@@ -109,13 +119,14 @@ flowchart TB
     SV -.-> STAKE
     NC1 -.-> STAKE
     EXO -.-> STAKE
+    STAKE -.-> SDEC
 
     classDef v0 fill:#dbeafe,stroke:#1d4ed8,color:#0b1f4d
     classDef built fill:#dcfce7,stroke:#15803d,color:#052e16
     classDef planned fill:#f3f4f6,stroke:#6b7280,stroke-dasharray: 5 5,color:#111827
     class NC0,CAL,RES,ORD,SV v0
-    class ASOF,BOARD,SLOG,NC1 built
-    class ABIL,SPEED,META,EXO,STAKE planned
+    class ASOF,BOARD,SLOG,NC1,ABIL,STAKE built
+    class INTR,SPEED,META,EXO,SDEC planned
 ```
 
 The work is split into seven layers, and each is tested both on its own and for what it adds
@@ -135,9 +146,10 @@ flowchart LR
     WRK["Workout features, JRDB, private only<br/>#137 japan/handicap/workouts.py"]
     GOING["Going: cushion, moisture, rail setting<br/>#136 japan/jra/going.py<br/>store ingest #90, features #230: planned"]
     BIAS["Within-day track bias<br/>#138, #224 japan/handicap/track_bias.py"]
-    RAT["Dynamic rating #91<br/>planned"]
-    INT["Interactions: jockey, trainer, track #93,<br/>competition #94, lineage #95<br/>planned"]
-    PL["Plackett-Luce ability on the top 3 #92<br/>planned"]
+    RAT["Dynamic rating #91<br/>japan/models/rating.py"]
+    INT["Interactions: jockey, trainer, track #93,<br/>competition #94<br/>planned"]
+    LIN["Lineage prior: sire × surface × band,<br/>damsire at ¼ #95 japan/models/lineage.py"]
+    PL["Plackett-Luce ability on the top 3, pooled jockey,<br/>trainer and sire #92 japan/models/ability.py"]
     PAR["Par and expected top-3 time #96<br/>planned"]
     PSPD["Horse relative speed, p_speed #97<br/>planned"]
     MKT["Calibrated-market baseline (D4)<br/>#114 japan/models/v0/calibration.py"]
@@ -148,8 +160,10 @@ flowchart LR
     GOING -.->|"rail setting #253"| BIAS
     GOING -.->|"variant prior"| PAR
     PAR -.-> PSPD
-    RAT -.-> PL
+    RAT --> PL
     INT -.-> PL
+    LIN -.->|"debut and thin-history prior, E37"| PL
+    LIN -.->|"aptitude prior"| INT
     MKT -.->|"offset"| META
     HCP -.-> META
     WRK -.-> META
@@ -160,8 +174,10 @@ flowchart LR
 
 The meta-model is where everything known about the horses meets the market's own view, the final
 price. Each box on the left is a member or a set of features, and an arrow means its output is an
-input of the box it points to; today only the past-performance lines feeding the handicap factors
-run in code, and every other flow is planned. The meta-model starts from the calibrated market and
+input of the box it points to; today the past-performance lines feeding the handicap factors and
+the dynamic rating feeding the Plackett-Luce ability (#92's study) run in code, and every other
+flow is planned. The ability model's sire comes from the JRA-VAN pedigree, so its results are
+withheld (D21). The meta-model starts from the calibrated market and
 gives a member weight only when it improves on the final price, so a member that adds nothing ends
 up with no weight. Members built on the licensed JRDB data, such as the workout features, run only
 in private models on the owner's machine and never publish a figure (D21).
@@ -206,50 +222,65 @@ which other horses also place, so v0 gives a value at both ends of that range. E
 pools is judged first against the pool's own final prices and only second against the Win-derived
 ordering (D5, D6).
 
-## 5. How a claim earns adoption
+## 5. How an option is ranked
 
 ```mermaid
 flowchart TD
-    PRE["Pre-register the family of claims,<br/>frozen by hash before any scoring<br/>#74 core/eval/registry.py"]
+    PRE["Pre-register the study: Claude freezes its spec<br/>by hash before any scored read, no sign-off wait<br/>#74 core/eval/registry.py"]
     REG["Registry: every run is a record,<br/>failures too, hash-chained<br/>#74 core/eval/registry.py"]
     OOF["Walk-forward out-of-fold fits<br/>on development days (D9, D14)<br/>#70 core/eval/folds.py"]
-    BOOT["Log-loss gain over the final price,<br/>meeting bootstrap (D7)<br/>#69 core/eval/scoring.py, core/eval/bootstrap.py"]
-    SNOOP["SPA and StepM over the whole family (D17)<br/>#75 core/eval/snooping.py<br/>segment shrinkage #78 core/eval/segment_roi.py"]
-    HOLD["Holdout opening: by the owner, once per<br/>family, at its power target (D15)<br/>#71, #126 core/eval/holdout.py"]
-    D16["D16 on the holdout: gain interval above 0,<br/>encompassing weight above 0, and the<br/>full-stack gain for a stack member<br/>encompassing test #87 planned"]
-    subgraph TRACKS["Betting rules: two tracks (D18)"]
-        LA["Loss-avoidance, Family L: loses less than<br/>a stated alternative on the same races,<br/>never claims a profit<br/>#81, #82, #83 planned<br/>evidence standard, holdout use included:<br/>owner decision open"]
-        PE["Positive-edge, Family P: realised return<br/>above 0 at final dividends on the holdout<br/>#88 planned"]
-    end
-    OWN["Owner adoption decision,<br/>with an experiment report and the model card"]
-    RUNG["Staking rung (D19): avoid, shadow, flat minimum,<br/>flat small, shrunk fractional Kelly<br/>avoid flags #117 japan/board/flags.py<br/>shadow calibration slope #101 planned"]
+    RET["Return per ¥100 at the final dividend,<br/>takeout and breakage included,<br/>with its meeting-bootstrap CI (D7)<br/>#69 core/eval/bootstrap.py;<br/>read from every record: #450 planned"]
+    SHRINK["Shrinkage of the ranking (D17):<br/>hierarchical within a study #78 core/eval/segment_roi.py,<br/>per pool across studies #449 planned"]
+    LB["Leaderboard: every option, model and member a row,<br/>failed variants too, with its CI and the<br/>number of variants searched (D16)<br/>#449 core/eval/leaderboard.py planned;<br/>horsetrack japan leaderboard and<br/>docs/leaderboard/japan.md #452 planned"]
+    SEL{"Top-ranked row: is every selection input<br/>available at the decision time t it is played at<br/>(D2 grid, T-2 primary; as-of views, board at t)?<br/>#455 planned"}
+    PROXY["Look-ahead row (a selection input from after t,<br/>such as the final price or a later board): played<br/>only through its board-at-t proxy, labelled as such,<br/>else left off the shortlist (D16, D19)<br/>labels #455 planned"]
+    PLAY["Top-ranked options: shadowed, and played by hand<br/>with flat stakes, at most ¥30,000 per race day (D19)<br/>shadow log #119 japan/shadow/log.py;<br/>the day's shortlist #455 planned"]
+    BETS["Bet log, every hand-placed bet, logged and<br/>counted toward the day cap, holdout days too<br/>#453 japan/bets/ planned"]
+    DAY{"Holdout day? (D14)<br/>is_holdout_day #71 core/eval/holdout.py;<br/>wired into settlement #454 planned"}
+    SETTLE["Development day: settled against<br/>the final dividends<br/>#454 planned"]
+    DEFER["Holdout day: not settled at routine settlement;<br/>settled only at the owner's opening (D15,<br/>LockedHoldout.open), its results kept out of<br/>the development ranking (D14)<br/>#454 planned, core/eval/holdout.py"]
+    HOLD["Holdout opening by the owner (D15), once per family<br/>at its power target: checks whether the ranking<br/>holds up, adopts or rejects nothing<br/>#71, #126 core/eval/holdout.py"]
+    DIAG["Reported diagnostics, gating nothing:<br/>log-loss gain over the final price #69 core/eval/scoring.py,<br/>encompassing weight #87 planned,<br/>SPA and StepM #75 core/eval/snooping.py,<br/>tail-return curve #433 core/eval/tail.py"]
     PRE --> REG
     REG --> OOF
-    OOF --> BOOT
-    BOOT --> SNOOP
-    SNOOP --> HOLD
-    SNOOP -.->|"paired, one-sided on the same races;<br/>evidence standard open, #81, #82, #83"| LA
-    HOLD --> D16
-    D16 -.->|"plus holdout return"| PE
-    D16 --> OWN
-    LA -.->|"evidence standard open"| OWN
-    PE -.-> OWN
-    OWN --> RUNG
+    OOF --> RET
+    OOF --> DIAG
+    RET --> SHRINK
+    SHRINK -.-> LB
+    DIAG -.->|"beside the row"| LB
+    LB -.-> SEL
+    SEL -.->|"yes: decision-time"| PLAY
+    SEL -.->|"no: look-ahead"| PROXY
+    PROXY -.->|"proxy at t"| PLAY
+    PLAY -.-> BETS
+    BETS -.-> DAY
+    DAY -.->|"no"| SETTLE
+    DAY -.->|"yes"| DEFER
+    SETTLE -.->|"settled bets feed back as rows"| LB
+    DEFER -.->|"opened with the family's block"| HOLD
+    LB -.->|"ranking checked"| HOLD
 ```
 
-A model or a betting rule is adopted only by the owner, and only after it survives a fixed
-sequence of tests written down before the data is looked at. Every attempt is recorded, failures
-included, so the number of things tried is always known and the tests can allow for it. Models are
-fitted and scored on development days; the locked holdout days are opened by the owner once per
-pre-registered family, and a model must beat the final price there with an interval above zero.
-Betting rules are pre-registered families too, so they face the same family-wide tests (D17).
-Rules that only avoid losses are compared with a stated alternative on the same races, by a
-one-sided paired difference, and never claim a profit (D18). How much evidence that takes before the
-owner can adopt one, including whether it is measured on the holdout, is still an open owner
-decision (the Family L evidence standard, #81, #82, #83), so the diagram draws no holdout step for
-them. Rules that claim a profit must also make money at the final dividends on the holdout, on top
-of the log-loss evidence (D18). Whatever the owner adopts starts at the avoid rung and
-climbs one rung at a time, each on its own entry evidence (D19).
+Nothing is adopted or rejected (D16 as amended 2026-11-27, epic #447): every option the project
+measures, a race type, pool, combination or rule, and every model and member, becomes a row on one
+leaderboard per country, failures included. Claude writes each study's plan down and freezes it
+before the data is scored, and every run is recorded, so the number of variants searched is always
+known and printed beside each row. Each option is fitted and scored on development days and
+measured by its return per ¥100 at the dividend that actually paid, with a bootstrap interval over
+meetings. Because many options are searched, each return is shrunk toward its pool's own average
+before ranking, so a lucky small sample does not top the list (D17). The top-ranked options are
+shadowed and played by hand with small flat stakes, at most ¥30,000 per race day. An option is
+played at a decision time t only when every input its selection reads was available at t (the as-of
+views and the board at t); a look-ahead row, whose selection reads the final price or a board later
+than t, is played only through its board-at-t proxy, labelled as such, or left off the shortlist.
+Every bet is logged and counts toward the cap; a development-day bet is settled against the final
+dividends, so real bets feed back as data, while a holdout-day bet is settled only when the
+owner opens the holdout and stays out of the development ranking (D14, D15, D19). A
+loss-avoidance rule and its stated alternative are each a row, with their paired difference beside
+them (D18). The owner opens the locked holdout once per family at its power target, to check
+whether the ranking holds up, not to pass or fail anything (D15). The log-loss gain over the final
+price, the encompassing weight and the family-wide SPA and StepM tests are still reported beside
+the rows, as diagnostics that gate nothing.
 
 ## 6. Timeline of a race day
 

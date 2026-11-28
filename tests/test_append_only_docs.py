@@ -18,9 +18,12 @@ Merge tests run real ``git`` in a tmp repo. Every value is synthetic.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import subprocess
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -83,28 +86,44 @@ def family_files(directory: Path) -> dict[str, Path]:
     return {p.stem: p for p in directory.glob("*.md") if p.name != "README.md"}
 
 
-def index_links(directory: Path) -> list[str]:
-    """Family names the index links, in the order of its list lines."""
+def index_entries(directory: Path) -> list[tuple[str, str]]:
+    """(label, linked file stem) of each index list line, in order."""
     text = (directory / "README.md").read_text(encoding="utf-8")
-    links = []
+    entries = []
     for line in text.splitlines():
         if line.lstrip().startswith(("-", "*")):
-            match = re.search(r"\]\(([^)]+)\)", line)
+            match = re.fullmatch(r"\s*[-*] \[([^\]]+)\]\(([^)]+)\)\s*", line)
             assert match, f"index list line without a link: {line!r}"
-            assert match.group(1).endswith(".md"), line
-            links.append(match.group(1)[: -len(".md")])
-    return links
+            assert match.group(2).endswith(".md"), line
+            entries.append((match.group(1), match.group(2)[: -len(".md")]))
+    return entries
+
+
+def index_links(directory: Path) -> list[str]:
+    """Family file stems the index links, in the order of its list lines."""
+    return [stem for _, stem in index_entries(directory)]
 
 
 def registry_dir_problems(directory: Path) -> list[str]:
-    """What is wrong with a registry directory: the index/file set check and the file shape."""
+    """What is wrong with a registry directory: the index/file set check and the file shape.
+    Each index line pairs a family's label (its id) with its file, whose stem is the id with
+    each ``/`` of a legacy id mapped to ``--`` (an ordinary id is its own stem); every file is
+    linked once, and its single ``## `` heading is the label its index line gives."""
     problems = []
     files = family_files(directory)
-    links = index_links(directory)
+    entries = index_entries(directory)
+    links = [stem for _, stem in entries]
+    labels = [label for label, _ in entries]
     if len(links) != len(set(links)):
         problems.append(f"index links a family twice: {links}")
+    if len(labels) != len(set(labels)):
+        problems.append(f"index lists a label twice: {labels}")
     if set(links) != set(files):
         problems.append(f"index links {sorted(set(links))} but files are {sorted(files)}")
+    for label, stem in entries:
+        if stem != label.replace("/", "--"):
+            problems.append(f"index labels {stem}.md as {label!r}, which names another file")
+    label_of = {stem: label for label, stem in entries}
     for stem, path in files.items():
         lines = path.read_text(encoding="utf-8").splitlines()
         if not lines or lines[0] != PREAMBLE_TITLE:
@@ -112,7 +131,7 @@ def registry_dir_problems(directory: Path) -> list[str]:
         if not any("do not edit by hand" in line for line in lines[:8]):
             problems.append(f"{path.name} lacks the do-not-edit preamble")
         sections = [line for line in lines if line.startswith("## ")]
-        if sections != [f"## {stem}"]:
+        if sections != [f"## {label_of.get(stem, stem)}"]:
             problems.append(f"{path.name} sections are {sections}")
     return problems
 
@@ -265,6 +284,115 @@ def test_write_summary_writes_one_file_per_family_and_an_index(tmp_path):
     assert "z1" not in alpha and "m1" not in alpha
     zeta = family_files(out)["fam-zeta"].read_text(encoding="utf-8")
     assert "z1" in zeta and "a1" not in zeta
+
+
+def seal_lines(path: Path, entries: list[dict]) -> None:
+    """Append ``entries`` as the registry writes its lines (canonical JSON chained by ``prev``,
+    sealed by ``seal``), bypassing ``append``'s checks: how records written before #525 sit in a
+    real log. Copied from tests/core/eval/test_registry.py."""
+
+    def canonical(value) -> str:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        )
+
+    data = path.read_bytes() if path.exists() else b""
+    head = hashlib.sha256(data[:-1].split(b"\n")[-1]).hexdigest() if data else "0" * 64
+    with open(path, "ab") as handle:
+        for i, entry in enumerate(entries):
+            body = {**entry, "prev": head, "utc": f"2026-11-2{i % 7}T08:00:00+00:00"}
+            body["seal"] = hashlib.sha256(canonical(body).encode("ascii")).hexdigest()
+            line = canonical(body).encode("ascii")
+            handle.write(line + b"\n")
+            head = hashlib.sha256(line).hexdigest()
+
+
+def legacy_run(record: RunRecord) -> dict:
+    data = asdict(record)
+    text = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return {
+        "kind": "run",
+        "run_id": hashlib.sha256(text.encode("ascii")).hexdigest(),
+        "record": data,
+    }
+
+
+# Legacy '/' ids and the file write_summary names each by; ordinary ids alongside.
+LEGACY_IDS = {
+    "japan/131-exacta-category-v1": "japan--131-exacta-category-v1",
+    "japan/131-exacta-category-v1/max-test": "japan--131-exacta-category-v1--max-test",
+}
+ORDINARY_IDS = ["fam-alpha", "japan-131-exacta-category-v2"]
+
+
+def render_with_legacy(tmp_path: Path, dest: Path) -> None:
+    """The real writer's summary of a registry holding ordinary records and legacy '/' ones."""
+    root = tmp_path / "registries" / "legacy"
+    root.mkdir(parents=True, exist_ok=True)
+    registry = Registry(root / "japan.jsonl", holdout_log=root / "holdout_log.jsonl")
+    registry.append(run_record(ORDINARY_IDS[0], "o-0", 0.21))
+    seal_lines(
+        root / "japan.jsonl",
+        [legacy_run(run_record(f, f"l-{i}", 0.3 + i)) for i, f in enumerate(LEGACY_IDS)],
+    )
+    registry.append(run_record(ORDINARY_IDS[1], "o-1", 0.41))
+    registry.verify()
+    dest.mkdir(parents=True, exist_ok=True)
+    write_summary(registry, dest)
+
+
+def test_a_summary_with_legacy_slash_families_passes_the_directory_check(tmp_path):
+    out = tmp_path / "out"
+    render_with_legacy(tmp_path, out)
+
+    assert set(family_files(out)) == {*LEGACY_IDS.values(), *ORDINARY_IDS}
+    assert registry_dir_problems(out) == []
+    expected = sorted([*((f, s) for f, s in LEGACY_IDS.items()), *((f, f) for f in ORDINARY_IDS)])
+    assert index_entries(out) == expected
+
+
+def _replace(path: Path, old: str, new: str, count: int = 1) -> None:
+    text = path.read_text(encoding="utf-8")
+    assert old in text, f"{old!r} not in {path.name}"
+    path.write_text(text.replace(old, new, count), encoding="utf-8")
+
+
+LEGACY_FAMILY, LEGACY_STEM = next(iter(LEGACY_IDS.items()))
+LEGACY_LINE = f"- [{LEGACY_FAMILY}]({LEGACY_STEM}.md)"
+BROKEN_DIRECTORIES = {
+    # a legacy file headed by its stem, not the id its index line gives
+    "legacy heading is the stem": lambda d: _replace(
+        d / f"{LEGACY_STEM}.md", f"## {LEGACY_FAMILY}", f"## {LEGACY_STEM}"
+    ),
+    # the index labels the legacy file with an id whose file is another
+    "legacy label names another file": lambda d: (
+        _replace(d / "README.md", f"[{LEGACY_FAMILY}]", "[japan/131-other-v1]"),
+        _replace(d / f"{LEGACY_STEM}.md", f"## {LEGACY_FAMILY}", "## japan/131-other-v1"),
+    ),
+    # an ordinary family headed by another id
+    "ordinary heading differs": lambda d: _replace(d / "fam-alpha.md", "## fam-alpha", "## fam-x"),
+    # an ordinary family labelled and headed by an id that is not its file stem
+    "ordinary label is not its stem": lambda d: (
+        _replace(d / "README.md", "[fam-alpha]", "[fam-x]"),
+        _replace(d / "fam-alpha.md", "## fam-alpha", "## fam-x"),
+    ),
+    "legacy file not linked": lambda d: _replace(d / "README.md", LEGACY_LINE + "\n", ""),
+    "index links a missing file": lambda d: _replace(
+        d / "README.md", LEGACY_LINE, f"{LEGACY_LINE}\n- [japan/999-gone](japan--999-gone.md)"
+    ),
+    "legacy file linked twice": lambda d: _replace(
+        d / "README.md", LEGACY_LINE, f"{LEGACY_LINE}\n{LEGACY_LINE}"
+    ),
+}
+
+
+@pytest.mark.parametrize("broken", sorted(BROKEN_DIRECTORIES))
+def test_the_directory_check_still_catches_a_broken_legacy_or_ordinary_family(tmp_path, broken):
+    out = tmp_path / "out"
+    render_with_legacy(tmp_path, out)
+    assert registry_dir_problems(out) == []
+    BROKEN_DIRECTORIES[broken](out)
+    assert registry_dir_problems(out) != [], f"the check missed: {broken}"
 
 
 def test_a_family_file_does_not_change_when_another_family_is_added(tmp_path):

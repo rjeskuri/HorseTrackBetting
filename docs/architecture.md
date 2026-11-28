@@ -88,7 +88,7 @@ flowchart LR
   reg[("registry/ and reports/")]
   board["board page"]
   spage["shadow page"]
-  phone["phone via tunnel (#124)"]
+  phone["phone via tunnel (#505)"]
   summ["docs/experiments/<br>registry summary"]
   logd --> odds
   scr --> raw --> proc
@@ -102,10 +102,8 @@ flowchart LR
   odds -->|"results sidecars"| scr
   odds -->|"nowcast fit"| fits
   mdl --> shd --> shlog
-  board -.-> phone
-  spage -.-> phone
-  classDef planned stroke-dasharray: 5 5,fill:#f4f4f4,color:#666
-  class phone planned
+  board --> phone
+  spage --> phone
 ```
 
 | Folder or box | Written by | Read by |
@@ -125,7 +123,7 @@ flowchart LR
 | `reports/` | `core/eval/reports.py` (`write_report`), `core/store/checks.py` | the owner |
 | `features/`, `jrdb/`, `fixtures/` | `countries/japan/handicap/` feature sets; JRDB specs; real pages for `local` tests | the fits; `countries/japan/jrdb/parse.py`; the `local` tests |
 | board page, shadow page | `countries/japan/board/server.py` (`board-serve`, bound to localhost), `countries/japan/board/web/` | the owner's browser |
-| phone via tunnel | planned, #124 | |
+| phone via tunnel | `countries/japan/board/tunnel.py` (`board-serve --tunnel`: a cloudflared quick tunnel, every path behind a per-run access token in `board/access-token`; docs/specs/board-feed.md) | the owner's phone |
 
 ## 2. Race-day data flow
 
@@ -187,7 +185,7 @@ flowchart TD
   slog[("sealed shadow log")]
   sfeed["shadow feed"]
   spage["shadow page"]
-  tun["tunnel to the phone (#124)"]
+  tun["tunnel to the phone (#505)"]
   olog --> bat
   olog --> feed --> bpage
   bat --> now --> sv
@@ -200,10 +198,10 @@ flowchart TD
   sv -->|"board-serve"| sfeed
   flags --> sfeed
   sfeed --> spage
-  bpage -.-> tun
-  spage -.-> tun
+  bpage --> tun
+  spage --> tun
   classDef planned stroke-dasharray: 5 5,fill:#f4f4f4,color:#666
-  class pick,tun planned
+  class pick planned
 ```
 
 | Box | Code |
@@ -217,7 +215,7 @@ flowchart TD
 | pick rule | planned, #100 (the shadow decider) and #101 (settling and staking on paper) |
 | sealed shadow log | `countries/japan/shadow/log.py`, written by `shadow-day` in `countries/japan/shadow/day.py`; spec `docs/specs/shadow-log.md` |
 | shadow feed, shadow page | `countries/japan/board/shadow_feed.py`, `countries/japan/board/server.py`, `countries/japan/board/web/shadow.html`, `countries/japan/board/web/shadow.js` |
-| tunnel to the phone | planned, #124 |
+| tunnel to the phone | `countries/japan/board/tunnel.py`, started by `board-serve --tunnel` (`countries/japan/board/server.py` gates every path with the run's access token); spec `docs/specs/board-feed.md` |
 
 Two processes compute shadow values from the same odds log and fits: `shadow-day` seals them into the
 shadow log, and `board-serve` recomputes them for the shadow feed, which never reads the log. Both read
@@ -278,7 +276,7 @@ flowchart TD
 | store tables | `core/store/schemas.py`, `core/store/tables.py`; one set per source key (`jra`, `nar`, `hkjc`, `jravan`; `docs/specs/store.md`) |
 | store checks, rebuild check | `core/store/checks.py`, `scripts/check_store_rebuild.py` |
 | as-of views | `core/store/asof.py`, `countries/japan/config/availability.yaml` (owner decisions); spec `docs/specs/as-of.md` |
-| handicap features | `countries/japan/handicap/pp.py`, `countries/japan/handicap/factors.py`, `countries/japan/handicap/workouts.py`, `countries/japan/handicap/track_bias.py` |
+| handicap features | `countries/japan/handicap/pp.py`, `countries/japan/handicap/factors.py`, `countries/japan/handicap/workouts.py`, `countries/japan/handicap/workouts_jravan.py`, `countries/japan/handicap/track_bias.py` |
 | model fits | `countries/japan/models/v0/` (scoped reader `countries/japan/models/v0/store.py`), `countries/japan/studies/calibration.py` |
 
 The as-of views exist, but the features and fits do not read through them yet; the dashed arrows are
@@ -302,7 +300,7 @@ flowchart TD
   folds["walk-forward folds"]
   study["pre-registered study"]
   score["scoring and<br>paired bootstrap"]
-  snoop["SPA / StepM,<br>segment shrinkage"]
+  snoop["SPA / StepM,<br>segment shrinkage,<br>tail-return curve"]
   reg[("run registry")]
   rep["experiment report"]
   ledger["ledger"]
@@ -333,7 +331,7 @@ flowchart TD
 | walk-forward folds | `core/eval/folds.py` |
 | pre-registered study | e.g. `countries/japan/studies/calibration.py` |
 | scoring and paired bootstrap | `core/eval/scoring.py`, `core/eval/bootstrap.py` |
-| SPA / StepM, segment shrinkage | `core/eval/snooping.py`, `core/eval/segment_roi.py` (D17) |
+| SPA / StepM, segment shrinkage, tail-return curve | `core/eval/snooping.py`, `core/eval/segment_roi.py` (D17); `core/eval/tail.py` (realised return by claim quantile band, meeting bootstrap, D7) |
 | run registry | `core/eval/registry.py`; summary `docs/experiments/registry/japan/` |
 | experiment report | template `docs/experiment-report.md`; reports in `docs/experiments/`; licensed-source outputs through `core/eval/reports.py` into the data dir |
 | ledger | `docs/ledger.md` |
