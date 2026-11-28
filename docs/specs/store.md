@@ -106,7 +106,11 @@ grain, the key and the meaning. The sort key is the order rows are stored in.
   matched_by`. The per-family data columns (`<family>_<column>`, from each family's spec under
   `<data dir>/jrdb/specs`) are written by `horsetrack japan jrdb build`
   (`countries/japan/jrdb/tables.py`), which also writes `jurisdiction`; a family not delivered
-  still has its columns, all null.
+  still has its columns, all null. `jrdb_pre_race` also has `tyb_fetched_utc` (#603), a UTC
+  timestamp: when the row's TYB archive was fetched, read from the downloader's
+  `raw/jrdb/manifest.json` (`fetched_utc` of the entry whose `file` is the archive; a year pack's
+  members share the pack's time). Null when the manifest, the entry or its time is missing or
+  unparseable; never the file's mtime.
 - **track_condition** (#90): JRA's going measurements as published, `venue, race_date, surface`
   (`turf`, `dirt`), `going` (the code, as on races), `rail` (the turf course in use, `A` to `D`;
   null on dirt and when not printed), `cushion` (turf only), `moisture_goal, moisture_4c` (%),
