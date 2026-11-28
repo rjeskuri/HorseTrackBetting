@@ -262,6 +262,7 @@ class _Chain:
     runs: list[RunRecord] = field(default_factory=list)
     run_ids: set[str] = field(default_factory=set)
     freezes: dict[str, str] = field(default_factory=dict)
+    specs: dict[str, dict] = field(default_factory=dict)
 
 
 def _open_line(raw: bytes, number: int) -> dict:
@@ -303,6 +304,7 @@ def _parse(data: bytes) -> _Chain:
                 if spec_hash != _spec_hash(entry["spec"]) or family in chain.freezes:
                     raise ValueError("freeze")
                 chain.freezes[family] = spec_hash
+                chain.specs[family] = entry["spec"]
             else:
                 raise ValueError("kind")
         except (KeyError, TypeError, ValueError) as exc:
@@ -432,6 +434,11 @@ class Registry:
 
     def frozen_spec_hash(self, family_id: str) -> str | None:
         return self._read().freezes.get(family_id)
+
+    def frozen_spec(self, family_id: str) -> dict | None:
+        """The family's frozen spec as stored (a fresh copy), or None when it is not frozen."""
+        spec = self._read().specs.get(family_id)
+        return None if spec is None else json.loads(_canonical(spec))
 
     def verify(self) -> None:
         """Raise ``RegistryTampered`` unless the file is the chain the registry wrote."""
