@@ -5,24 +5,41 @@ Each poll tails every venue's log (`odds_log.LogTail`: only members appended sin
 are parsed) and re-reads the post times (#113). A grid point (race, tau) is due once
 now >= post - tau + grace_s and is decided once, on `board_at(rows, race_id, post - tau)`: one
 record per WIN runner, PLACE runner and Wide pair, or one `no_board` record when there is no board
-or it is more than max_board_age_s older than the decision time. A point with a key already in the
-log is not decided again, so a restart writes no duplicate. The day ends once the last race's last
-point is due (16:45 Asia/Tokyo without post times), and the log is then sealed.
+or it is more than its tau's board-age limit older than the decision time (#625: max_board_age_s,
+tau -> seconds, by default nowcast_v0.yaml's `max_board_age_s`, the limits the v0 nowcast fit
+uses; a grid tau of decision.yaml without a limit refuses to start, before anything is written).
+A point with a key already in the log is not decided again, so a restart writes no duplicate. The
+day ends once the last race's last point is due (16:45 Asia/Tokyo without post times), and the log
+is then sealed.
 
-Memory: per race, each undecided grid point keeps the latest row per board key available by its
-decision time, plus the latest row per key overall (to re-time a moved post); a decided point drops
-its rows. No outcome is read: no results, dividends or store table.
+Ladder log (#628): given `ladder_log`, the run also writes the day's ladder log
+(`shadow.ladder_log.LadderDay`: each ladder checkpoint's observed odds and projections, each key's
+final). The shadow log is written and sealed exactly as without it; the run then goes on polling
+until every race's final is in the ladder log, or 17:30 Asia/Tokyo, and seals it. A failure of
+the ladder log is logged and the run continues without it.
+
+Model probabilities (#564): every record is `record_version` 2 and carries `p_model`, the shadow
+feed's p_model of the decision board (`shadow_feed._p_model`, starters by `_starters`), null
+without models or without one for its pool. The pools with no price forecast (EXOTIC_POOLS) get
+records of their own from each pool's latest capture available by the decision time (no
+max_board_age_s: tier-2 pools are captured once per grid point; `board_age_s` says how old):
+every QUINELLA and BRACKET_QUINELLA combination with a p_model and the EXOTIC_TOP_N most likely
+of FORECAST, TRIO and TIERCE, each with `board_odds` and `value_model` = p_model x board_odds.
+
+Memory: per race, each undecided grid point keeps the latest row per board key and per exotic
+combination available by its decision time, plus the latest row per key overall (to re-time a
+moved post), and the race's earliest WIN capture's field (for the starters); a decided point
+drops its rows. No outcome is read: no results, dividends or store table.
 
 Seam for the command, looked up at call time: `utc_now` (the only clock).
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as clock_time
@@ -33,10 +50,11 @@ from zoneinfo import ZoneInfo
 import typer
 
 from horsetrack.core import paths
-from horsetrack.core.config import load_source
+from horsetrack.core.config import load_country_yaml, load_source
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board import snapshot
 from horsetrack.countries.japan.board.flags import FlagRules, avoid_flags, load_flag_rules
+from horsetrack.countries.japan.board.shadow_feed import _p_model, _probe_until, _starters
 from horsetrack.countries.japan.board.snapshot import (
     PLACE,
     WIDE,
@@ -50,8 +68,24 @@ from horsetrack.countries.japan.board.snapshot import (
 from horsetrack.countries.japan.logger.pull_vm import vm_day_dir
 from horsetrack.countries.japan.models.v0.loader import load_shadow_models
 from horsetrack.countries.japan.models.v0.ordering import _git_sha
-from horsetrack.countries.japan.models.v0.shadow_values import ShadowModels, shadow_values
-from horsetrack.countries.japan.shadow.log import NO_BOARD, LogSealed, ShadowLog, shadow_log_path
+from horsetrack.countries.japan.models.v0.shadow_values import (
+    BRACKET_QUINELLA,
+    FORECAST,
+    QUINELLA,
+    TIERCE,
+    TRIO,
+    ShadowModels,
+    point_seed,
+    shadow_values,
+)
+from horsetrack.countries.japan.shadow.ladder_log import LadderDay, LadderLog, ladder_log_path
+from horsetrack.countries.japan.shadow.log import (
+    NO_BOARD,
+    RECORD_VERSION,
+    LogSealed,
+    ShadowLog,
+    shadow_log_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +93,16 @@ SOURCE = "jra"
 TIMEZONE = "Asia/Tokyo"
 JST = ZoneInfo(TIMEZONE)
 END_WITHOUT_POSTS = clock_time(16, 45)  # local: the day's end when no post time is known
+LADDER_END = clock_time(17, 30)  # local: the ladder log is sealed by then, finals in or not
 LOG_SUFFIX = ".jsonl.gz"
 ANY = "*"  # pool and combination of a no_board record: it stands for the whole point
 VALUE_FIELDS = ("value_mean", "value_q05", "value_q95", "value_at_low", "value_at_high")
 EXIT_ERROR = 1
+# The pools with no price forecast (#564): logged as p_model x the decision-time odds
+EXOTIC_POOLS = frozenset({QUINELLA, FORECAST, TRIO, TIERCE, BRACKET_QUINELLA})
+TOPPED = frozenset({FORECAST, TRIO, TIERCE})  # logged as their EXOTIC_TOP_N most likely
+EXOTIC_TOP_N = 15
+POOL_TOTAL = odds_log.POOL_TOTAL
 
 
 def utc_now() -> datetime:
@@ -90,9 +130,26 @@ def _offer(slot: Slot, key: tuple, entry: tuple[datetime, int, dict[str, Any]]) 
         slot[key] = entry
 
 
+def _row_key(row: dict[str, Any]) -> tuple | None:
+    """The row's board key (`snapshot._key`), else (pool, combination text) of an exotic pool's
+    price row, else None."""
+    key = snapshot._key(row)
+    if key is not None:
+        return key
+    pool, combination = row.get("pool"), row.get("combination")
+    if pool in EXOTIC_POOLS and isinstance(combination, str) and combination != POOL_TOTAL:
+        return pool, combination
+    return None
+
+
+def _is_exotic(key: tuple) -> bool:
+    return key[0] in EXOTIC_POOLS and key[1] != POOL_TOTAL
+
+
 class _Race:
-    """The rows one race's undecided grid points need: per tau, the latest row per board key
-    available by its decision time; `newest`, the latest row per key overall."""
+    """The rows one race's undecided grid points need: per tau, the latest row per board key and
+    per exotic combination available by its decision time; `newest`, the latest row per key
+    overall; `opening`, its earliest WIN capture as `shadow_feed._starters` reads it."""
 
     def __init__(self, race_id: str) -> None:
         self.race_id = race_id
@@ -100,6 +157,23 @@ class _Race:
         self.slots: dict[int, tuple[datetime, Slot]] = {}  # tau -> (decision, slot)
         self.newest: Slot = {}
         self.done: set[int] = set()
+        # (its earliest WIN capture, the runners not SCR on it, every runner on it)
+        self.opening: tuple[datetime, set[int], set[int]] | None = None
+
+    def _open(self, key: tuple, row: dict[str, Any]) -> None:
+        """The field at the opening, as shadow_feed's `_DayRows._open` keeps it."""
+        if key[0] != WIN or key[1] == POOL_TOTAL:
+            return
+        snap = odds_log._instant(row.get("snapshot_utc"))
+        if snap is None:
+            return
+        if self.opening is None or snap < self.opening[0]:
+            self.opening = (snap, set(), set())
+        elif snap > self.opening[0]:
+            return
+        self.opening[2].add(key[1])
+        if row.get("status_raw") != snapshot.SCRATCHED:
+            self.opening[1].add(key[1])
 
     def schedule(self, post: datetime, grid: tuple[int, ...]) -> None:
         """Set or move the post; each undecided point's rows are re-chosen for its decision time."""
@@ -123,10 +197,11 @@ class _Race:
             self.slots[tau] = (decision, slot)
 
     def add(self, row: dict[str, Any], seq: int) -> None:
-        key = snapshot._key(row)
+        key = _row_key(row)
         available = snapshot._available(row)
         if key is None or available is None:
             return
+        self._open(key, row)
         entry = (available, seq, row)
         _offer(self.newest, key, entry)
         for decision, slot in self.slots.values():
@@ -135,8 +210,37 @@ class _Race:
 
     def board(self, tau: int) -> RaceBoard | None:
         decision, slot = self.slots[tau]
-        rows = [row for _, _, row in sorted(slot.values(), key=lambda e: e[1])]
+        entries = sorted((e for k, e in slot.items() if not _is_exotic(k)), key=lambda e: e[1])
+        rows = [row for _, _, row in entries]
         return board_at(rows, self.race_id, decision, post_utc=self.post)
+
+    def exotics(self, tau: int) -> dict[str, tuple[datetime, dict[str, float]]]:
+        """Per exotic pool, its latest capture available by the point's decision time (the rows
+        sharing the latest snapshot_utc): (the earliest availability of its rows, {combination:
+        odds} of its priced rows)."""
+        latest: dict[str, tuple[datetime, list[tuple[datetime, str, dict]]]] = {}
+        for key, (available, _, row) in self.slots[tau][1].items():
+            if not _is_exotic(key):
+                continue
+            snap = odds_log._instant(row.get("snapshot_utc"))
+            if snap is None:
+                continue
+            current = latest.get(key[0])
+            if current is None or snap > current[0]:
+                current = latest[key[0]] = (snap, [])
+            elif snap < current[0]:
+                continue
+            current[1].append((available, key[1], row))
+        out = {}
+        for pool, (_, entries) in latest.items():
+            prices = {}
+            for _, combination, row in entries:
+                odds = float(row["odds"]) if snapshot._priced(row) else math.nan
+                if math.isfinite(odds) and odds > 0:
+                    prices[combination] = odds
+            if prices:
+                out[pool] = (min(available for available, _, _ in entries), prices)
+        return out
 
     def decided(self, tau: int) -> None:
         self.done.add(tau)
@@ -157,11 +261,10 @@ def _finite(value: float | None) -> float | None:
     return None if value is None or not math.isfinite(value) else float(value)
 
 
-def point_seed(seed: int, race_id: str, tau: int) -> int:
-    """The draws' seed of one (race, tau): a stable hash of (seed, race_id, tau), the same on every
-    run and machine, so a record's values can be recomputed from its board."""
-    digest = hashlib.sha256(f"{int(seed)}|{race_id}|{int(tau)}".encode()).digest()
-    return int.from_bytes(digest[:8], "big")
+def _probability(value: float | None) -> float | None:
+    """A probability the log can hold: NaN and infinity become null, rounding past [0, 1] is
+    clipped."""
+    return None if value is None or not math.isfinite(value) else min(1.0, max(0.0, float(value)))
 
 
 def _board_keys(board: RaceBoard) -> list[tuple[str, str, float, float | None]]:
@@ -175,13 +278,14 @@ def _board_keys(board: RaceBoard) -> list[tuple[str, str, float, float | None]]:
 @dataclass(frozen=True)
 class _Settings:
     grace_s: float
-    max_board_age_s: float
+    max_board_age_s: Mapping[int, float]  # tau -> the oldest board accepted, in seconds
     max_lag_s: float
     models: ShadowModels | None
     flag_rules: FlagRules
     n_draws: int
     seed: int
     git_sha: str
+    probe_until: datetime | None  # shadow_feed._probe_until of the day: the opening's coverage
 
 
 def _common(race_id: str, tau: int, decision: datetime, written: datetime, s: _Settings) -> dict:
@@ -193,7 +297,49 @@ def _common(race_id: str, tau: int, decision: datetime, written: datetime, s: _S
         "written_utc": _iso(written),
         "mode": "live" if lag <= s.max_lag_s else "replay",
         "git_sha": s.git_sha,
+        "record_version": RECORD_VERSION,
     }
+
+
+def _race_p_model(race: _Race, board: RaceBoard, decision: datetime, s: _Settings) -> dict | None:
+    """The decision board's p_model as the shadow feed forms it; None without models or when it
+    cannot be formed (`_p_model` logs why)."""
+    if s.models is None:
+        return None
+    opening = race.opening if race.opening is not None and race.opening[0] <= decision else None
+    return _p_model(board, s.models, None, _starters(board, opening, s.probe_until))
+
+
+def _exotic_records(
+    race: _Race, tau: int, decision: datetime, p_model: dict, common: dict, ids: dict
+) -> list[dict[str, Any]]:
+    """The exotic pools' records of one point: each pool's capture by the decision time, the
+    combinations with a p_model, every one of QUINELLA and BRACKET_QUINELLA, the EXOTIC_TOP_N most
+    likely of the others."""
+    records = []
+    for pool, (captured, prices) in sorted(race.exotics(tau).items()):
+        probs = p_model.get(pool) or {}
+        chosen = [(c, _probability(probs.get(c))) for c in prices]
+        chosen = [(c, p) for c, p in chosen if p is not None]
+        if pool in TOPPED:
+            chosen = sorted(chosen, key=lambda e: (-e[1], e[0]))[:EXOTIC_TOP_N]
+        for combination, p in chosen:
+            odds = prices[combination]
+            records.append(
+                {
+                    **common,
+                    "pool": pool,
+                    "combination": combination,
+                    "board_capture_utc": _iso(captured),
+                    "board_age_s": (decision - captured).total_seconds(),
+                    "status": "ok",
+                    "models": dict(ids),
+                    "p_model": p,
+                    "board_odds": odds,
+                    "value_model": p * odds,
+                }
+            )
+    return records
 
 
 def _point_records(
@@ -204,7 +350,7 @@ def _point_records(
     board = race.board(tau)
     common = _common(race.race_id, tau, decision, written, s)
     age = None if board is None else (decision - board.capture_utc).total_seconds()
-    if board is None or age > s.max_board_age_s:
+    if board is None or age > s.max_board_age_s[tau]:
         record = {
             **common,
             "pool": ANY,
@@ -213,6 +359,7 @@ def _point_records(
             "status": NO_BOARD,
             "models": None,
             "board_age_s": age,
+            "p_model": None,
         }
         return [record], True
 
@@ -234,9 +381,12 @@ def _point_records(
         except Exception:
             logger.exception("%s T-%d: shadow values failed; logged without", race.race_id, tau)
             models = None
+    p_model = _race_p_model(race, board, decision, s) or {}
     records = []
     for pool, combination, low, high in _board_keys(board):
         value = values.get((pool, combination))
+        # a p_model sits beside the fit ids it came from: none on a record logged without models
+        prob = None if models is None else _probability(p_model.get(pool, {}).get(combination))
         record = {
             **common,
             "pool": pool,
@@ -250,8 +400,14 @@ def _point_records(
             "flags": list(flags.get((pool, combination), ())),
             "n_draws": None if models is None else s.n_draws,
             "seed": None if models is None else seed,
+            "p_model": prob,
         }
         records.append(record)
+    if p_model and s.models is not None:  # p_model is only ever formed with models
+        try:
+            records += _exotic_records(race, tau, decision, p_model, common, s.models.ids)
+        except Exception:
+            logger.exception("%s T-%d: exotic records failed; logged without", race.race_id, tau)
     return records, False
 
 
@@ -282,6 +438,23 @@ def _day_end(race_date: date, races: dict[str, _Race], grid: tuple[int, ...], gr
     return max(posts) - timedelta(minutes=min(grid)) + timedelta(seconds=grace_s)
 
 
+def _board_age_limits(
+    limits: Mapping[int, float] | float | None, grid: tuple[int, ...]
+) -> dict[int, float]:
+    """The board-age limit of every grid tau: nowcast_v0.yaml's `max_board_age_s` when None, the
+    same limit for every tau when a number. Raises ValueError when a grid tau has no limit."""
+    if limits is None:
+        limits = load_country_yaml("japan", "nowcast_v0").get("max_board_age_s") or {}
+    if isinstance(limits, Mapping):
+        by_tau = {int(tau): float(seconds) for tau, seconds in limits.items()}
+    else:
+        by_tau = {tau: float(limits) for tau in grid}
+    missing = [tau for tau in grid if tau not in by_tau]
+    if missing:
+        raise ValueError(f"max_board_age_s has no limit for grid tau {missing}")
+    return by_tau
+
+
 def run_shadow_day(
     race_date: date,
     *,
@@ -290,7 +463,7 @@ def run_shadow_day(
     sleep: Callable[[float], None] = time.sleep,
     poll_s: float = 10.0,
     grace_s: float = 15.0,
-    max_board_age_s: float = 120.0,
+    max_board_age_s: Mapping[int, float] | float | None = None,
     max_lag_s: float = 120.0,
     once: bool = False,
     models: ShadowModels | None,
@@ -299,21 +472,27 @@ def run_shadow_day(
     n_draws: int = 400,
     seed: int = 0,
     day_dir: Path | None = None,
+    ladder_log: LadderLog | None = None,
 ) -> ShadowSummary:
     """Log every grid point of the day as it falls due, then seal the log. `once` decides every
     point due now and returns, sealing only when the day's last point is due. The odds logs are read
-    from `day_dir` when given (a pulled VM folder), else the Mac's own day folder."""
+    from `day_dir` when given (a pulled VM folder), else the Mac's own day folder.
+    `max_board_age_s`: tau -> seconds, one limit for every tau, or None for nowcast_v0.yaml's; a
+    grid tau without a limit raises ValueError before anything is written. `ladder_log`: also
+    write the day's ladder log (#628), sealed once every race's checkpoints and final are in it,
+    or at 17:30 Asia/Tokyo; None writes no ladder log."""
     clock = now if now is not None else utc_now
     grid = tuple(sorted(load_decision_grid().minutes, reverse=True))
     settings = _Settings(
         grace_s,
-        max_board_age_s,
+        _board_age_limits(max_board_age_s, grid),
         max_lag_s,
         models,
         flag_rules,
         n_draws,
         seed,
         _git_sha() or "unknown",
+        _probe_until(race_date),
     )
     shadow = log
     tails: dict[str, odds_log.LogTail] = {}
@@ -321,6 +500,26 @@ def run_shadow_day(
     seq = 0
     records = no_board = 0
     done = {(key[0], key[3]) for key in shadow.logged_keys()}
+    ladder: LadderDay | None = None
+    if ladder_log is not None:
+        try:
+            if not ladder_log.verify().sealed:
+                ladder = LadderDay(
+                    ladder_log,
+                    models=models,
+                    grace_s=grace_s,
+                    max_board_age_s=settings.max_board_age_s,
+                    max_lag_s=max_lag_s,
+                    git_sha=settings.git_sha,
+                )
+        except Exception:
+            logger.exception("shadow-day %s: the ladder log cannot be read; not written", race_date)
+    ladder_end = datetime.combine(race_date, LADDER_END, JST).astimezone(timezone.utc)
+
+    def ladder_failed(what: str) -> None:
+        nonlocal ladder
+        logger.exception("shadow-day %s: the ladder log %s failed; stopped", race_date, what)
+        ladder = None
 
     def refresh() -> None:
         """New venues' logs, the post times, then the rows appended since the last poll."""
@@ -333,8 +532,13 @@ def run_shadow_day(
                 race = races.setdefault(race_id, _Race(race_id))
                 race.done |= {tau for tau in grid if (race_id, tau) in done}
                 race.schedule(post, grid)
+                if ladder is not None:
+                    ladder.schedule(race_id, post)
         for tail in tails.values():
-            for row in tail.poll():
+            rows = tail.poll()
+            if ladder is not None:
+                ladder.add(rows)
+            for row in rows:
                 race_id = row.get("race_id")
                 if not isinstance(race_id, str):
                     continue
@@ -352,7 +556,8 @@ def run_shadow_day(
     def sealed_summary() -> ShadowSummary:
         return ShadowSummary(records, no_board, scheduled(), True)
 
-    if shadow.verify().sealed:
+    shadow_open = not shadow.verify().sealed
+    if not shadow_open and ladder is None:
         refresh()
         logger.info("shadow-day %s: the log is already sealed; nothing written", race_date)
         return sealed_summary()
@@ -363,7 +568,7 @@ def run_shadow_day(
         due = [
             (race, tau)
             for race in races.values()
-            if race.post is not None
+            if shadow_open and race.post is not None
             for tau in list(race.slots)
             if t >= race.slots[tau][0] + timedelta(seconds=grace_s)
         ]
@@ -393,7 +598,13 @@ def run_shadow_day(
                 empty,
                 _iso(written),
             )
-        if t >= _day_end(race_date, races, grid, grace_s):
+        if ladder is not None:
+            try:
+                ladder.step(t, clock)
+            except Exception:
+                ladder_failed("write")
+        day_end = _day_end(race_date, races, grid, grace_s)
+        if shadow_open and t >= day_end:
             sealed_at = clock()
             try:
                 shadow.seal(sealed_utc=sealed_at)
@@ -403,10 +614,24 @@ def run_shadow_day(
             logger.info(
                 "shadow-day %s: sealed at %s, %d records", race_date, _iso(sealed_at), records
             )
-            return ShadowSummary(records, no_board, scheduled(), True)
+            shadow_open = False
+        if not shadow_open:
+            end = max(ladder_end, day_end)
+            if ladder is None:
+                return sealed_summary()
+            if ladder.complete() or t >= end:
+                try:
+                    ladder.log.seal(sealed_utc=clock())
+                    logger.info("shadow-day %s: ladder log sealed", race_date)
+                except Exception:
+                    ladder_failed("seal")
+                return sealed_summary()
         if once:
-            return ShadowSummary(records, no_board, scheduled(), False)
-        sleep(poll_s)
+            return ShadowSummary(records, no_board, scheduled(), not shadow_open)
+        if shadow_open:
+            sleep(poll_s)
+        else:  # only the ladder's finals are still to come: poll until its end at the latest
+            sleep(min(poll_s, max(0.0, (end - t).total_seconds())))
 
 
 def odds_log_path(race_date: date, venue: str, day_dir: Path | None = None) -> Path:
@@ -495,10 +720,12 @@ def shadow_day_command(
             log=ShadowLog(path, day=day),
             flag_rules=load_flag_rules(),
             day_dir=day_dir,
+            ladder_log=LadderLog(ladder_log_path(day), day=day),
         )
         typer.echo(
             f"done: records={summary.records} no_board={summary.no_board}"
             f" races={summary.races} sealed={summary.sealed} shadow log: {path}"
+            f" ladder log: {ladder_log_path(day)}"
         )
     except Exception as exc:
         logger.exception("shadow-day %s failed", day)

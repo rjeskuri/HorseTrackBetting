@@ -2,10 +2,14 @@
 # and the store tables that supply them, read by `horsetrack japan coverage` (#374,
 # research/coverage.py), which writes docs/data-coverage.md and a private report.
 #
-# This is an inventory of what exists, not a feature-inclusion decision: whether a model may read
-# an input, from which date and at which time is the owner's (the availability rules in
-# availability.yaml, D10, D14, the frozen specs). `d10: true` restates D10 for an input that is a
-# price, a pool or a dividend: its rows before 2014-06-07 enter no component.
+# It is also what the model boundary approves (#417, countries/japan/feature_boundary.py): a
+# column enters a model feature frame only when a `feature_at_t` input here supplies it
+# {source, table, column} and the availability rules (availability.yaml) let its table into the
+# views and keep it out of the label columns. A column no entry here names is refused there as
+# unclassified, so adding a supply here, or a role change, is a feature-inclusion change. When an
+# input enters and at which time stays with availability.yaml, D10, D14 and the frozen specs.
+# `d10: true` restates D10 for an input that is a price, a pool or a dividend: its rows before
+# 2014-06-07 enter no component.
 #
 # Per input:
 #   layers   the layers that use it, C0 to C6
@@ -183,9 +187,10 @@ inputs:
       - {source: jravan, table: horse_runs, column: placing_raw}
     tickets: [403, 377, 404]
     note: >-
-      A horse's earlier runs, read from runners (#128). Both stores hold JRA races only;
-      `horse_runs` (every run of a horse) is built from the jravan races and runners (#403)
-      and not for the jra store, and the NAR and overseas runs are left out (#377).
+      A horse's earlier runs, read from runners (#128). Both stores' runners hold JRA races
+      only; `horse_runs` (every run of a horse) is built from the jravan races and runners
+      (#403) and not for the jra store, and includes the NAR and overseas runs under their own
+      jurisdiction, win_odds null (#377).
   margins:
     layers: [C2]
     role: feature_at_t
