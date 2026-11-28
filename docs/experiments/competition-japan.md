@@ -7,10 +7,37 @@ leaderboard. It also splits the member's stage-2 error against the market by the
 (R_eff). **Nothing is adopted** (D16), and the holdout is not opened. **Every figure is withheld (D21):** the sire
 in #92's model comes from the JRA-VAN pedigree, so every result is built on JRA-VAN data.
 
-**Status: not run yet.** The run needs the copied stores (needs-local). This report describes what is
-pre-registered and how to run it. It holds no count, span, score, return, bound or sign. The run of record will add
-its family's spec hash, git commit, data builds, record ids and private report path here, and its ledger row will
-change from assumption to single-run.
+**Run of record: 2026-11-28, at git `910ff3a`.** The study ran once on the copied stores, from a clean tree at
+`910ff3ae30d25199290acd9b7b7372ca9c7f1132` (branch `t/531-run-the-competition-terms-stud`; the squash merge carries
+another hash), with `uv run horsetrack japan competition-study`. It appended five registry records, all scored, and
+wrote its private report. This report says what ran, which records hold it and where the figures live. It holds no
+count, span, score, return, bound, sign, direction or rank of any result: the figures are in the private report and
+the private registry, and are withheld (D21).
+
+- Family `japan-c2-competition-final-win`, spec sha256
+  `476eebce5491970a63372420170cac4dc54714259f7621b6c72fcf2feb9f2164`, frozen in the registry when the run started
+  (2026-11-28 11:09 UTC), before `load_inputs` read any row. It is the family's only freeze.
+- Data builds (each record's `data_builds`): `processed/jra/races.parquet@9cce511831074b64`,
+  `processed/jra/runners.parquet@6f3cec95347e0132` and `processed/jravan/horse_pedigree.parquet@891fea934fadd013`,
+  #92's v2 builds, plus the run's own artifacts `reports/japan@competition-japan-476eebce5491-9a3f58d49fb3`. Every
+  record carries the sources `jra` and `jravan`. The holdout was not opened: no record carries a holdout opening,
+  and no line was added to `holdout_log.jsonl`.
+- Records (the run ids' 16-hex prefixes):
+
+  | Variant | E | Record | Status |
+  | --- | --- | --- | --- |
+  | `field_mean` | E33 | `ebc0be168433b3dd` | scored |
+  | `field_max` | E33 | `bf304ee2a6ca82f7` | scored |
+  | `field_x_rating` | E33 | `9bdb320739304dd7` | scored |
+  | `field_all` | E33 | `93c5403a254ce72f` | scored |
+  | `reff_by_bucket` | E41 | `a9889dfc1f316821` | scored |
+
+  No variant failed, so no record carries an error.
+- Private report: `reports/competition-japan-476eebce5491-9a3f58d49fb3.md` under `$HORSETRACK_DATA_DIR`, with its
+  figures as JSON beside it (same stem, `.json`), written through `write_report`.
+- Committed summary: the run regenerated `docs/experiments/registry/japan/japan-c2-competition-final-win.md` and its
+  index line in `docs/experiments/registry/japan/README.md` through `write_summary`. It shows each record's status
+  and every value as withheld (licensed source).
 
 - Registry family `japan-c2-competition-final-win` (its own family, not #92's). `run_study` freezes the spec
   (`studies.competition.build_spec`) in the run registry before `load_inputs` reads any row. A spec that differs
@@ -20,14 +47,15 @@ change from assumption to single-run.
   (Markdown and JSON) under `$HORSETRACK_DATA_DIR/reports/` through `write_report`, appends one registry record per
   variant (failures included) with the sources `jra` and `jravan`, and regenerates the committed summary
   `docs/experiments/registry/japan/japan-c2-competition-final-win.md`, which shows every record as withheld.
-- Run cost: level 1 is #92's run as is (see Method), so expect about #92's time on this Mac (about 2 h 25 min,
-  peak resident memory about 1.8 GB), plus four fits per outer fold. The R_eff stage then adds one comparison
-  graph and one sparse LU per scored fold (28 folds, 2020-Q1 to 2026-Q4) over a 365-day window. Measured at two
-  cuts with the Mac at a load average of about 22: the factorisation took 32 to 64 s at a peak resident memory of
-  about 1.0 GB, and the test races' resistances took 0.23 to 0.64 s a race, so about 4 to 10 min a fold. Expect
-  about 2 to 5 h for the stage, so about 5 to 8 h for the whole run. Without the window the stage does not
-  finish: at the 2020-01-01 cut, one factorisation of every earlier race was still running after 15 min at
-  3.1 GB and growing.
+- Run cost, measured on this Mac with `/usr/bin/time -l` (the run at `nice -n 10`): 14,700 s wall (4 h 05 min,
+  2026-11-28 20:09 to 2026-11-29 00:14 JST), 11,669 s user and 2,373 s sys, and a peak resident memory of about
+  1.2 GB (1,207,255,040 bytes). From the log's progress lines, to about 10 min: the reads and level 1 (#92's grid)
+  ran to about 23:05 JST, the variants' fits on the 48 outer folds to about 23:35, and the R_eff stage (one
+  365-day comparison graph and one sparse LU per scored fold, 28 folds) to the end, about 40 min. The estimate
+  before the run was about 5 to 8 h, 2 to 5 h of it the R_eff stage. The run overlapped another session's fit for
+  about 15 min, under a memory guard that pauses the study when free memory falls under 15%. The guard never
+  fired: free memory stayed at or above 27%. Without the window the R_eff stage does not finish: at the 2020-01-01
+  cut, one factorisation of every earlier race was still running after 15 min at 3.1 GB and growing.
 
 ## Hypothesis
 
@@ -90,13 +118,14 @@ per-race winner ΔLL. For R_eff, a residual that rises across the R_eff bands, w
   and 539 for the whole history, so about seven in eight of the races the history connects. The remaining races
   hold a horse unseen for a year and go to the unconnected bucket. These counts were measured on the store's
   race_id, race_date, race_no, status, horse_id and is_scratched only (no outcome, no price, no holdout day).
-  The run reads the same columns plus finish_pos, which #94's graph does not use.
+  The run of record read the same columns plus finish_pos, which #94's graph does not use.
 
 ## Variants tried
 
-The variants are pre-registered, and each will be one registry record in `japan-c2-competition-final-win`. None has
-run yet, so none has a figure or CI. The split for all of them is D9's walk-forward quarters on development days
-(scored from 2020-Q1), and the holdout is never read.
+The variants were pre-registered, and each is one registry record in `japan-c2-competition-final-win`. All five
+scored in the run of record (records above). Their figures and CIs are in the private report and the private
+registry, and are withheld (D21). The split for all of them was D9's walk-forward quarters on development days
+(scored from 2020-Q1), and the holdout was not read.
 
 | Variant | E | Terms added to #92's pooled member | Holds |
 | --- | --- | --- | --- |
@@ -106,8 +135,8 @@ run yet, so none has a figure or CI. The split for all of them is D9's walk-forw
 | `field_all` | E33 | all three | As above |
 | `reff_by_bucket` | E41 | none (the pooled member) | The stage-2 residual against the market-only meta by R_eff band and unconnected bucket, with bounds |
 
-A variant whose level-1 fit fails is a failed record carrying its error, and the other variants still score. A
-failure in the R_eff stage (a `MemoryError` in a fold's factorisation, say) fails `reff_by_bucket` alone, with its
+No variant failed in the run of record. By design, a variant whose level-1 fit fails is a failed record carrying
+its error, and the other variants still score. A failure in the R_eff stage (a `MemoryError` in a fold's factorisation, say) fails `reff_by_bucket` alone, with its
 error, and the four variants still score. A run that aborts in `load_inputs` or before the R_eff stage of
 `compute_study` appends a failed record for every planned variant, writes no report, and re-raises.
 
@@ -140,29 +169,30 @@ error, and the four variants still score. A run that aborts in `load_inputs` or 
 
 ## What this rules out
 
-Nothing yet, because the study has not run. Once it has run, the figures stay withheld (D21): the repository will
-state no size or direction of any result, and the private report will hold each variant's ΔLL, return per ¥100 and
-bounds. The result will be a measurement on one store build (single-run in the ledger), not a verdict: nothing is
-adopted or rejected, and a weak variant ranks low.
+The figures are withheld (D21), so what the run rules out is stated in the private report only: the repository
+states no size, sign or direction of any result. The private report
+(`reports/competition-japan-476eebce5491-9a3f58d49fb3.md` under `$HORSETRACK_DATA_DIR`) and the private registry
+records above hold each variant's ΔLL, return per ¥100 and bounds, and the R_eff residual by band. The result is a measurement on one store build (single-run in the ledger),
+not a verdict: nothing is adopted or rejected, and a weak variant ranks low.
 
 ## Leaderboard rows
 
-Once run, the study adds these member rows (kind `member`, pool `WIN`, selection `look_ahead`, because the claim reads
-the final price), each ranked by its N5 top-band return per ¥100. They are withheld rows, so the public leaderboard
-shows their option ids only, with no rank or figure (D21):
+The run of record added these member rows (kind `member`, pool `WIN`, selection `look_ahead`, because the claim
+reads the final price), each ranked by its N5 top-band return per ¥100. They are withheld rows, so the public
+leaderboard shows their option ids only, with no rank or figure (D21). The private leaderboard built from the
+registry after the run (`uv run horsetrack japan leaderboard`, written under `$HORSETRACK_DATA_DIR/reports/`) holds
+all four as member rows; this PR does not regenerate the public `docs/leaderboard/japan.md`.
 
 - `japan-c2-competition-final-win/field_mean`
 - `japan-c2-competition-final-win/field_max`
 - `japan-c2-competition-final-win/field_x_rating`
 - `japan-c2-competition-final-win/field_all`
 
-`japan-c2-competition-final-win/reff_by_bucket` has no return, so it is listed unranked. A failed variant is listed
-unranked too.
+`japan-c2-competition-final-win/reff_by_bucket` has no return, so it is listed unranked, as it is in the private
+leaderboard. A failed variant would be listed unranked too; none failed.
 
 ## Follow-ups filed
 
 None by this PR. Proposed, for the orchestrator to file under epic #73 as `status:proposed`:
 
-- Run `uv run horsetrack japan competition-study` on the stores (needs-local), then add the run of record to this
-  report and move the ledger rows to single-run.
 - Feed the R_eff export (`race_comparability` per race) and this residual table into #98's E41.
