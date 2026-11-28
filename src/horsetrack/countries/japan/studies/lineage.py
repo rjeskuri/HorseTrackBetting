@@ -26,10 +26,13 @@ on its normalised names and refuses a table carrying any UKC (JRDB) column;
 `read_netkeiba_pedigree` reads the store's file through it.
 
 The run (`run_study`; the spec `build_spec`, frozen before any outcome is read). Family
-`japan-c2-lineage-e37-netkeiba`: JRA results, the netkeiba pedigree and the JRA final prices
-only, so its figures may be public. Level 1 is #92's (`studies.ability`: the same frame, folds,
-rating member, discount and pair selection) with the netkeiba sire name in place of the JRA-VAN
-sire (the base member). Each lineage variant (tau_cell x damsire_weight, the band scheme of #438)
+`japan-c2-lineage-e37-netkeiba-v2` (v1's run stopped on a 3-sire block; its records stay): JRA
+results, the netkeiba pedigree and the JRA final prices only, so its figures may be public.
+Level 1 is #92's (`studies.ability`: the same frame, folds, rating member, discount and pair
+selection) with the netkeiba sire name in place of the JRA-VAN sire (the base member); a fit
+carries sire effects only when its training rows hold MIN_SIRES sires, and a quarter's prior is
+fitted only once MIN_SIRES stallions have a progeny run. Each lineage variant (tau_cell x
+damsire_weight, the band scheme of #438)
 adds its `lineage_feature` as an unpenalised feature at the base member's selection per fold.
 Level 2 is #92's: the store frame, D4's baseline out of fold, the stage-2 meta of each member and
 the market-only stage-2 meta, on the D9 folds of the netkeiba coverage window. Every comparison
@@ -101,8 +104,12 @@ OUT_COLUMNS = ["segment", "races", "meetings", "delta_ll", "lower", "upper"]
 
 COUNTRY = "japan"
 TICKET = 538
-FAMILY_ID = "japan-c2-lineage-e37-netkeiba"
+FAMILY_ID = "japan-c2-lineage-e37-netkeiba-v2"
 TRIAL_FAMILY_ID = f"{FAMILY_ID}-trial"  # a trial's records; a trial never freezes FAMILY_ID
+SUPERSEDES = "japan-c2-lineage-e37-netkeiba"  # v1: its run failed on a 3-sire block (2014-Q1)
+FAMILIES = (FAMILY_ID, TRIAL_FAMILY_ID, SUPERSEDES, f"{SUPERSEDES}-trial")  # in the summary
+MIN_SIRES = 50  # a fit's sire effects, and a quarter's prior, need this many sires (v2)
+SIRE_RULE = {"sire_id": MIN_SIRES}
 SOURCES = ("jra",)  # JRA results and prices and the netkeiba pedigree: no JRDB, no JRA-VAN
 BOOTSTRAP_SEED = 538  # reproducibility only; scoring.yaml signs no seed
 THIN_STARTS = c2_ability.THIN_STARTS  # fewer prior starts than this: the feature is on
@@ -352,6 +359,10 @@ def build_spec(scheme, bootstrap: dict, plan: Plan = FULL) -> dict:
     """The family's pre-registered spec, frozen in the registry before any outcome is read."""
     return {
         "family_id": FAMILY_ID,
+        "supersedes": f"{SUPERSEDES}: its run stopped when #92's empirical Bayes did not "
+        "converge on a sire block of 3 netkeiba sires from 7 runs (the base member's fit for "
+        "2014-Q1); its records stay. v2 adds the sire_block and prior_from rules, which read "
+        "counts of ids only, and changes nothing else",
         "ticket": TICKET,
         "hypotheses": {
             "E37": "a sire x surface x distance-band lineage prior (the damsire at a weight) fed "
@@ -396,6 +407,10 @@ def build_spec(scheme, bootstrap: dict, plan: Plan = FULL) -> dict:
             "sire": f"the netkeiba {PEDIGREE_FILE} sire_name_norm of runners.horse_id (keyed on "
             "names: its id columns are empty); a horse without a row has no sire level; a table "
             "carrying a UKC (JRDB) column is refused; no JRA-VAN column is read",
+            "sire_block": f"a fit (base or lineage member) carries sire effects only when its "
+            f"training rows hold at least {MIN_SIRES} distinct netkeiba sires "
+            "(studies.ability.fit_entities: a count of ids, no outcome); a fit with fewer has "
+            "jockey and trainer effects only",
             "base_member": "#92's pooled member (models.ability.AbilityModel k = 3: rating + "
             "jockey, trainer and sire effects shrunk by empirical Bayes) with the netkeiba sire; "
             "#91's rating pair and the discounts selected per outer fold on its inner folds by "
@@ -418,6 +433,10 @@ def build_spec(scheme, bootstrap: dict, plan: Plan = FULL) -> dict:
             "as_of": "one prior per D9 quarter (starts from results_from), fitted on the level-1 "
             "runs before 00:00 UTC of the quarter's first day; every row reads its quarter's "
             "prior (studies.lineage.lineage_feature)",
+            "prior_from": f"a quarter's prior is fitted only when the level-1 runs before its "
+            f"start hold progeny runs on turf or dirt of at least {MIN_SIRES} distinct stallions "
+            "(the prior's parameters; a count of ids, no outcome); a row of an earlier quarter "
+            "has feature 0",
             "feature": f"the prior mean at the row's horse, surface and band when the horse has "
             f"fewer than {THIN_STARTS} prior starts (its level-1 runs on earlier race days; a "
             "debut has 0, a run without a placing counts), else 0",
@@ -544,6 +563,20 @@ def coverage(level1: pd.DataFrame, starts: list[date]) -> tuple[date | None, lis
     return first, table
 
 
+def prior_from(level1: pd.DataFrame, starts: list[date]) -> list[date]:
+    """The quarter starts whose earlier level-1 runs hold progeny runs on turf or dirt (a cell)
+    of at least MIN_SIRES distinct stallions (level1's netkeiba sire_id): the starts a prior is
+    fitted at."""
+    sire = pd.Series(level1["sire_id"].to_numpy(dtype=object), index=level1.index)
+    cell = sire.notna() & level1["surface"].notna() & level1["dist_band"].notna()
+    days = pd.to_datetime(level1.loc[cell, "race_date"])
+    first = days.groupby(sire[cell].to_numpy()).min().sort_values()
+    if len(first) < MIN_SIRES:
+        return []
+    enough = first.iloc[MIN_SIRES - 1].date()  # the day the MIN_SIRES-th stallion first ran
+    return [s for s in starts if s > enough]
+
+
 def base_members(level1, grid, outer, selection) -> np.ndarray:
     """The base member's u on the outer folds' test rows at each fold's selection."""
     u = np.full(len(level1), np.nan)
@@ -564,13 +597,14 @@ def lineage_member(level1, feature, members, outer, selection, log=print):
         pair = (pick["drift_var_per_day"], pick["scale"])
         if pair not in by_pair:
             by_pair[pair] = numeric.assign(**{c2_ability.RATING: members[pair].to_numpy()})
-        data = by_pair[pair]
+        train = by_pair[pair].iloc[fold.train_idx]
         model = AbilityModel(
             k=3,
             discounts=(1.0, pick["pooled w2"], pick["pooled w3"]),
-            entity_cols=c2_ability.ENTITIES,
+            entity_cols=c2_ability.fit_entities(train, SIRE_RULE),
             features=[c2_ability.RATING, LINEAGE],
-        ).fit(data.iloc[fold.train_idx])
+        ).fit(train)
+        data = by_pair[pair]
         u[fold.test_idx] = model.predict(data.iloc[fold.test_idx])["u"].to_numpy()
         coefs.append(
             {"fold": fold.test_start.isoformat(), "train rows": len(fold.train_idx)}
@@ -683,13 +717,26 @@ def compute_study(inputs: Inputs, spec: dict, scheme, plan: Plan = FULL, log=pri
     study.tables["coverage"] = cover
     if window is None:
         raise ValueError("no quarter meets the netkeiba coverage rule")
-    study.counts |= {"window_from": window.isoformat(), "prior_quarters": len(starts)}
+    prior_starts = prior_from(level1, starts)
+    if not prior_starts:
+        raise ValueError(f"no quarter start has {MIN_SIRES} stallions with a progeny run")
+    study.counts |= {"window_from": window.isoformat(), "prior_quarters": len(prior_starts)}
+    study.counts |= {"prior_from": prior_starts[0].isoformat()}
     quarters = c2_ability.level1_quarters(level1["race_date"], scheme)
     quarters = [q for q in quarters if q.test_start >= plan.inner_from]
     outer = [q for q in quarters if q.test_start >= plan.level1_from]
     if quarters[0].test_start != plan.inner_from or outer[0].test_start != plan.level1_from:
         raise ValueError("the level-1 quarters do not start at the plan's dates")
     study.counts |= {"level1_quarters": len(quarters), "level1_outer_folds": len(outer)}
+    sired = [
+        q.test_start
+        for q in quarters
+        if "sire_id" in c2_ability.fit_entities(level1.iloc[q.train_idx], SIRE_RULE)
+    ]
+    study.counts |= {
+        "level1_quarters_without_a_sire_block": len(quarters) - len(sired),
+        "level1_sire_block_from": sired[0].isoformat() if sired else "never",
+    }
 
     log(f"rating grid over {len(inputs.results)} starters")
     grid_members, _ = c2_rating.member_grid(inputs.results, level1)
@@ -700,7 +747,7 @@ def compute_study(inputs: Inputs, spec: dict, scheme, plan: Plan = FULL, log=pri
     log(f"level-1 base grid: pairs {list(needed)}, {len(plan.discount_grid)} discounts")
     grid = c2_ability.level1_grid(
         level1, members, quarters, needed, log=log, models=("pooled",),
-        discount_grid=plan.discount_grid,
+        discount_grid=plan.discount_grid, min_levels=SIRE_RULE,
     )  # fmt: skip
     study.counts |= {"level1_base_fits": grid.fits, "level1_grid_seconds": round(grid.seconds)}
     selection = c2_ability.select_discounts(
@@ -734,7 +781,7 @@ def compute_study(inputs: Inputs, spec: dict, scheme, plan: Plan = FULL, log=pri
         started = time.monotonic()
         vparams = params | {"prior": dict(prior)}
         try:
-            feature = _lineage_feature(level1, inputs.pedigree, starts, prior, log=log)
+            feature = _lineage_feature(level1, inputs.pedigree, prior_starts, prior, log=log)
             study.counts[f"feature_seconds[{key}]"] = round(time.monotonic() - started)
             study.counts[f"feature_nonzero[{key}]"] = int((feature != 0).sum())
             u[key], coefs = lineage_member(level1, feature, members, outer, selection, log)
@@ -940,7 +987,7 @@ def run_study(*, trial: bool = False, out_dir: Path | None = None, log=print) ->
     builds = {**store_builds(), **pedigree_build()}
     stem = artifact_stem(spec_hash, builds, trial)
     started = time.monotonic()
-    families = (FAMILY_ID, TRIAL_FAMILY_ID)
+    families = FAMILIES  # v1's records stay in the committed summary
     try:
         inputs = load_inputs(plan, log=log)
         study = compute_study(inputs, spec, scheme, plan, log=log)

@@ -472,6 +472,14 @@ def numeric_frame(frame: pd.DataFrame, columns=RATES) -> pd.DataFrame:
     )
 
 
+def fit_entities(train: pd.DataFrame, min_levels: dict[str, int] | None = None) -> tuple:
+    """The ENTITIES a fit on `train` carries: each one, unless `min_levels` names it and the
+    training rows hold fewer distinct (non-missing) levels of it than that (a count of ids, no
+    outcome)."""
+    rule = min_levels or {}
+    return tuple(c for c in ENTITIES if c not in rule or train[c].nunique() >= rule[c])
+
+
 def level1_grid(
     frame: pd.DataFrame,
     members: dict,
@@ -481,10 +489,12 @@ def level1_grid(
     *,
     models: tuple[str, ...] = ("pooled", "rates"),
     discount_grid: tuple = DISCOUNT_GRID,
+    min_levels: dict[str, int] | None = None,
 ) -> Grid:
     """For each rating pair in `needed` and each quarter up to its index there: the pooled and
     (when `models` holds it) the rates AbilityModel at every `discount_grid` entry, fitted on
-    the quarter's training rows and predicting its test rows."""
+    the quarter's training rows and predicting its test rows; the pooled model's entities are
+    `fit_entities(train, min_levels)` (all of ENTITIES by default)."""
     n = len(frame)
     grid = Grid(u={}, se={}, quarters=dict(needed))
     started = time.monotonic()
@@ -498,8 +508,9 @@ def level1_grid(
                 grid.u[("rates", pair, w)] = np.full(n, np.nan)
         for qi, quarter in enumerate(quarters[: last + 1]):
             train, test = data.iloc[quarter.train_idx], data.iloc[quarter.test_idx]
+            entities = fit_entities(train, min_levels)
             for w in discount_grid:
-                pooled = AbilityModel(k=3, discounts=w, entity_cols=ENTITIES, features=[RATING])
+                pooled = AbilityModel(k=3, discounts=w, entity_cols=entities, features=[RATING])
                 out = pooled.fit(train).predict(test)
                 grid.u[("pooled", pair, w)][quarter.test_idx] = out["u"].to_numpy()
                 grid.se[("pooled", pair, w)][quarter.test_idx] = out["se_u"].to_numpy()
