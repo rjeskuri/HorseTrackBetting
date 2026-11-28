@@ -12,9 +12,10 @@ The library (synthetic tests: tests/countries/japan/test_avoidance.py):
   yen): a ticket on a paying row pays dividend * stake / unit; on an `is_refund` row, its stake.
 - `trio_as_trifectas`, `quinella_as_exactas`, `same_bracket_to_quinellas`: the same event in
   another pool. `settle` settles tickets against one race's dividend rows.
-- `RaceView(race_id, board, selection)`: `view_at` is the board at t (odds_timeseries through
-  the model boundary, `feature_boundary.feature_view`, #417); a view of the final price on
-  history carries LOOK_AHEAD.
+- `RaceView(race_id, board, selection, scratched=frozenset())`: `view_at` is the board at t
+  (odds_timeseries through the model boundary, `feature_boundary.feature_view`, #417) with the
+  runners scratched by t (status_raw, a filter read outside the boundary); a view of the final
+  price on history carries LOOK_AHEAD.
 - `express_set` (L1): a set priced under the threshold goes to the direct pool, at or above it to
   the ordered synthetic. `compare`: the paired per-race difference over the races both sides
   cover, with #69's `paired_bootstrap`. `neutral_ratio` (L5): the ordered pool's payout rate over
@@ -57,7 +58,8 @@ from horsetrack.core.eval.holdout import _git_sha, is_holdout_day, split_off
 from horsetrack.core.eval.registry import RunRecord, default_registry
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.pricing import clean_odds
-from horsetrack.core.store.asof import Availability, load_availability
+from horsetrack.core.store.asof import Availability, load_availability, read_asof
+from horsetrack.countries.japan.board import snapshot
 from horsetrack.countries.japan.feature_boundary import (
     PUBLICATION_PROXY,
     RESULTS_DERIVED,
@@ -121,11 +123,13 @@ class Ticket:
 @dataclass(frozen=True, eq=False)
 class RaceView:
     """What a strategy sees of one race: its board (pool, combination, odds decimal with the
-    stake) and how that board was selected (LOOK_AHEAD, the board at t, ...)."""
+    stake), how that board was selected (LOOK_AHEAD, the board at t, ...) and the horse numbers
+    scratched by then (`view_at`'s board-at-t scratch filter; none unless given)."""
 
     race_id: str
     board: pd.DataFrame
     selection: str
+    scratched: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True, eq=False)
@@ -234,23 +238,45 @@ def settle(tickets: Iterable[Ticket], dividends: pd.DataFrame, race_id: str) -> 
 # --------------------------------------------------------------------------- boards and L1
 
 
+def _latest(rows: pd.DataFrame, race_id: str) -> pd.DataFrame:
+    """`race_id`'s rows, the latest per (pool, combination): the last by snapshot_utc, then
+    fetched_utc (of those the rows have)."""
+    rows = rows.loc[rows["race_id"].eq(race_id)]
+    order = [c for c in ("snapshot_utc", "fetched_utc") if c in rows.columns]
+    rows = rows.sort_values(order, kind="stable") if order else rows
+    return rows.drop_duplicates(["pool", "combination"], keep="last").reset_index(drop=True)
+
+
 def view_at(con, race_id: str, at_utc: datetime, *, rules, selection: str = BOARD_AT_T) -> RaceView:
     """The board at t: odds_timeseries rows available at `at_utc` under `rules`, read through the
     model boundary (`feature_boundary.feature_view`: the identifiers BOARD_KEYS the table has and
     the approved features BOARD_FEATURES only, so no label and no unclassified column),
     `race_id`'s only, the latest snapshot per (pool, combination) among them. The timestamps of
-    BOARD_KEYS are optional: a board without `post_utc`, say, is read without it."""
+    BOARD_KEYS are optional: a board without `post_utc`, say, is read without it.
+
+    `scratched` is the board-at-t scratch filter (docs/specs/board-at-t.md): `race_id`'s horses
+    whose latest WIN capture, or latest PLACE capture, available at `at_utc` has `status_raw`
+    `board.snapshot.SCRATCHED`. It is a filter, not a feature: status_raw is in no inventory
+    supply (feature inclusion is the owner's, docs/specs/as-of.md, "Adopting the boundary"), so
+    it is read outside `feature_view`, as #81 reads runners.is_scratched (CARD_FILTERS). The same
+    `read_asof` under the same `rules` and the same latest-per-(pool, combination) order as the
+    board, projected to the board's identifiers and status_raw (read_asof never selects a label
+    column); a table without status_raw scratches nobody."""
     if "look-ahead" in selection:
         raise ValueError(f"the board at t is not look-ahead: {selection!r}")
     table = '"' + BOARD_TABLE.replace('"', '""') + '"'
     present = {d[0] for d in con.execute(f"SELECT * FROM {table} LIMIT 0").description}
     keys = [k for k in BOARD_KEYS if k in present or k not in BOARD_STAMPS]
     rows = feature_view(con, BOARD_TABLE, at_utc, features=BOARD_FEATURES, keys=keys, rules=rules)
-    rows = rows.loc[rows["race_id"].eq(race_id)]
-    order = [c for c in ("snapshot_utc", "fetched_utc") if c in rows.columns]
-    rows = rows.sort_values(order, kind="stable") if order else rows
-    latest = rows.drop_duplicates(["pool", "combination"], keep="last").reset_index(drop=True)
-    return RaceView(race_id, latest, selection)
+    latest = _latest(rows, race_id)
+    scratched: frozenset[int] = frozenset()
+    if SCRATCH_STATUS in present:
+        status = read_asof(con, BOARD_TABLE, at_utc, rules=rules)[[*keys, SCRATCH_STATUS]]
+        status = _latest(status, race_id)
+        scr = status[SCRATCH_STATUS].eq(snapshot.SCRATCHED).to_numpy(dtype=bool, na_value=False)
+        out = scr & status["pool"].isin(SCRATCH_POOLS).to_numpy(dtype=bool)
+        scratched = frozenset(int(c) for c in status["combination"][out] if str(c).isdigit())
+    return RaceView(race_id, latest, selection, scratched)
 
 
 def _price(board: pd.DataFrame, pool: str, combination: str) -> float:
@@ -443,6 +469,10 @@ BOARD_KEYS = ["race_id", "pool", "combination", "snapshot_utc", "fetched_utc", "
 # the keys a board may lack (view_at reads the ones it has); race_id, pool and combination it must
 BOARD_STAMPS = frozenset({"snapshot_utc", "fetched_utc", "post_utc"})
 BOARD_FEATURES = ["odds"]
+# The board-at-t scratch filter (docs/specs/board-at-t.md), read by view_at outside feature_view:
+# a runner whose latest WIN or PLACE capture at t has this column `SCR`. A filter, not a feature.
+SCRATCH_STATUS = "status_raw"
+SCRATCH_POOLS = (snapshot.WIN, snapshot.PLACE)
 # The card values that pick the races and the starters. They are race and starter filters read
 # from the store's card (read_store_table), not through feature_view: runners.is_scratched is an
 # approved feature at t (model_inputs.yaml, scratches_at_t), races.status is no feature at all.
@@ -690,18 +720,29 @@ def logged_boards(race_ids: set[str]) -> tuple[dict[str, list[str]], dict[str, P
     return {pool: sorted(races) for pool, races in logged.items()}, files
 
 
-def board_view(files: Mapping[str, Path], rules, minutes: int) -> Callable[[str], RaceView]:
-    """race -> its board at t = post_utc (of its latest capture) - `minutes`, through `view_at`."""
+def board_view(
+    files: Mapping[str, Path],
+    rules,
+    minutes: int,
+    *,
+    post_time: Callable[[str], datetime | None] | None = None,
+) -> Callable[[str], RaceView]:
+    """race -> its board at t = post_utc (of its latest capture carrying one) - `minutes`, through
+    `view_at`. When no capture carries a post_utc, `post_time(race_id)` gives the post when given
+    (a scheduled post time); with neither the board is empty."""
     selection = f"{BOARD_AT_T} (T-{minutes})"
 
     def view(race_id: str) -> RaceView:
         rows = pq.read_table(files[race_id], filters=[("race_id", "==", race_id)])
         posts = rows.select(["snapshot_utc", "post_utc"]).to_pandas().dropna()
-        if posts.empty:
+        if not posts.empty:
+            post = posts.sort_values("snapshot_utc")["post_utc"].iloc[-1].to_pydatetime()
+        else:
+            post = post_time(race_id) if post_time is not None else None
+        if post is None:
             return RaceView(
                 race_id, pd.DataFrame(columns=["pool", "combination", "odds"]), selection
             )
-        post = posts.sort_values("snapshot_utc")["post_utc"].iloc[-1].to_pydatetime()
         con = duckdb.connect(":memory:")
         try:
             con.register(BOARD_TABLE, rows)
@@ -714,23 +755,30 @@ def board_view(files: Mapping[str, Path], rules, minutes: int) -> Callable[[str]
     return view
 
 
-def read_development(minutes: int) -> StudyData:
+def read_development(
+    minutes: int,
+    *,
+    pools: Sequence[str] = STUDY_POOLS,
+    race_columns: Sequence[str] = RACE_COLUMNS,
+    post_time: Callable[[str], datetime | None] | None = None,
+) -> StudyData:
     """Column- and date-scoped store reads from 2014-06-07, holdout days dropped, then
-    `split_off`'s development rows; dividends of the study's pools for those races only."""
+    `split_off`'s development rows; dividends of `pools` for those races only. `post_time` is
+    `board_view`'s fallback for a race whose captures carry no post_utc."""
     frames = {}
-    for name, columns in (("races", RACE_COLUMNS), ("runners", RUNNER_COLUMNS)):
+    for name, columns in (("races", race_columns), ("runners", RUNNER_COLUMNS)):
         table = read_store_table(
             name, columns=columns, start=PRICE_ERA_START, end=date.max, touches_price=True
         )
         frames[name], _ = split_off(table.to_pandas(date_as_object=False), "race_date", COUNTRY)
     races = frames["races"]
     run = races.loc[races["status"].eq("run"), "race_id"].tolist()
-    scope = ds.field("pool").isin(list(STUDY_POOLS)) & ds.field("race_id").isin(run)
+    scope = ds.field("pool").isin(list(pools)) & ds.field("race_id").isin(run)
     dataset = ds.dataset(_store_file("dividends"), format="parquet")
     dividends = dataset.to_table(columns=DIVIDEND_COLUMNS, filter=scope).to_pandas()
     logged, files = logged_boards(set(run))
     rules = load_availability(COUNTRY)
-    view = board_view(files, rules, minutes)
+    view = board_view(files, rules, minutes, post_time=post_time)
     board_files = sorted(set(files.values()))
     return StudyData(races, frames["runners"], dividends, logged, view, board_files, rules)
 
@@ -763,9 +811,9 @@ Paired = tuple[list[str], dict[str, tuple[float, float]], dict[str, str]]
 
 
 class _Context:
-    """The run races, their meetings, starters and dividends, and the frozen spec."""
+    """The run races, their meetings, starters and dividends of `pools`, and the frozen spec."""
 
-    def __init__(self, data: StudyData, spec: dict) -> None:
+    def __init__(self, data: StudyData, spec: dict, pools: Sequence[str] = STUDY_POOLS) -> None:
         self.data, self.spec = data, spec
         self.races = data.races.loc[data.races["status"].eq("run")]
         self.race_ids = sorted(self.races["race_id"])
@@ -774,7 +822,7 @@ class _Context:
         scratched = runners["is_scratched"].eq(True).to_numpy(dtype=bool, na_value=False)
         self.starters = runners.loc[~scratched]
         div = data.dividends
-        self.dividends = div.loc[div["race_id"].isin(known) & div["pool"].isin(STUDY_POOLS)]
+        self.dividends = div.loc[div["race_id"].isin(known) & div["pool"].isin(pools)]
         self.clusters = self.races.set_index("race_id")["meeting_id"]
         self.n_starters = self.starters.groupby("race_id").size()
         self.at_t = f"{BOARD_AT_T} (T-{spec['decision_time_min']})"
@@ -1447,12 +1495,19 @@ def render_report(study: Study, spec: dict, about: dict) -> str:
     return "\n".join(lines)
 
 
-def _record(variant: Variant, git_sha: str, builds: dict[str, str]) -> RunRecord:
+def _record(
+    variant: Variant,
+    git_sha: str,
+    builds: dict[str, str],
+    *,
+    family_id: str = FAMILY_ID,
+    ticket: int = TICKET,
+) -> RunRecord:
     return RunRecord(
         hypothesis_id=variant.hypothesis_id,
-        family_id=FAMILY_ID,
+        family_id=family_id,
         variant=variant.name,
-        ticket=TICKET,
+        ticket=ticket,
         git_sha=git_sha,
         data_builds=builds,
         sources=(SOURCE,),

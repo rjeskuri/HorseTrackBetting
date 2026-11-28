@@ -406,8 +406,13 @@ inventory, under the availability rules.
 ### Adopting the boundary
 
 The avoidance study (`studies/avoidance.py`, #81) is the migrated caller: `view_at` reads the
-board through `feature_view` (identifiers `race_id`, `pool`, `combination`, and those of
-`snapshot_utc`, `fetched_utc`, `post_utc` the table has; feature `odds`), and its report lists
+board's `odds` through `feature_view` (identifiers `race_id`, `pool`, `combination`, and those of
+`snapshot_utc`, `fetched_utc`, `post_utc` the table has; feature `odds`), and reads
+`odds_timeseries.status_raw` outside it as the scratch-at-t filter of
+[board-at-t.md](board-at-t.md) (`RaceView.scratched`: the runners whose latest WIN or PLACE
+capture at t is `SCR`, through `read_asof` under the board's rules and in its
+latest-per-(pool, combination) order), a documented non-feature path like
+`runners.is_scratched`, with no inventory entry (#82 clears those runners' prices). #81's report lists
 `runners.is_scratched` and `races.status`, the race and starter filters it reads from the store's
 card, under "Documented approximations" with their `RESULTS_DERIVED` tag, and `odds` with the
 tags and the `TIMESTAMP_FALLBACK` of the board rule its board reader uses (`StudyData.board_rules`,
@@ -415,10 +420,10 @@ the shipped rules when unset) and the count of races whose board at t holds a ca
 fallback. `compute_study` carries the fallback (column and stand-in), the tags and the count in
 its result, and the report renders the disclosure from the result alone: a board rule without a
 fallback (a column rule without one, or an offset rule) gives no fallback line, and a fallback
-whose primary column the board view drops is a `ValueError` before any variant is scored. The two filters are read as before from the store's card, outside
+whose primary column the board view drops is a `ValueError` before any variant is scored. The two card filters are read as before from the store's card, outside
 `feature_view`: `runners.is_scratched` is an approved feature at t (the inventory's
 `scratches_at_t`), `races.status` is no feature at all, and the inventory gains no entry for it
-(feature inclusion is the owner's).
+or for `status_raw` (feature inclusion is the owner's).
 
 Every other caller of `read_asof` or `asof_join` that builds a model or study frame (today
 `studies/board_quality.py`; `studies/speed_run.py` and the other studies read the store

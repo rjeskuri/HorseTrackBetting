@@ -2139,7 +2139,10 @@ def test_a_refresh_rerun_is_new_runs_of_the_same_variants(tmp_path, monkeypatch)
         )
 
 
-_SUMMARY_ROW = re.compile(r"\| P503 \| (t2|lookahead) \| (\w+) \| .*\|")
+WITHHELD_LABEL = "withheld (licensed source)"
+# A P503 run row: E id, variant, then the status cell, captured whole. The runs read JRA-VAN, so
+# that cell must hold the withheld label and no status (#82).
+_SUMMARY_ROW = re.compile(r"\| P503 \| (t2|lookahead) \| ([^|]+?) \| .*\|")
 
 
 def summary_rows(path: Path) -> Counter:
@@ -2194,8 +2197,11 @@ def test_the_run_command_never_drops_a_row_a_family_summary_publishes(tmp_path, 
         for family, path in family_files().items():
             assert path.is_file(), family
             assert by_variant(summary_rows(path)) == Counter(
-                {(v, "scored"): n_runs for v in VARIANTS}
-            ), f"{family}: after {n_runs} run(s) the file lists every run of the registry"
+                {(v, WITHHELD_LABEL): n_runs for v in VARIANTS}
+            ), (
+                f"{family}: after {n_runs} run(s) the file lists every run of the registry, "
+                "each with the withheld label in place of its status"
+            )
     published = {family: summary_rows(path) for family, path in family_files().items()}
 
     # 3. a fresh data directory: its registry lacks the two published runs of each family
@@ -2210,6 +2216,185 @@ def test_the_run_command_never_drops_a_row_a_family_summary_publishes(tmp_path, 
         assert not dropped, (
             f"{family}.md dropped {sum(dropped.values())} published row(s) its local registry "
             "does not hold"
+        )
+    listed = summary.joinpath("README.md").read_text("utf-8")
+    for family in ss.FAMILIES:
+        assert f"({family}.md)" in listed, f"the index dropped {family}"
+    after = _tree(committed_dir) if committed_dir.is_dir() else {}
+    assert after == committed_before, "the committed summary was touched"
+
+
+# --- review fixes, round 7 (PR #460, #82): the family files main ships --------------------------
+# Main's `write_summary` wrote a licensed run's row with its status before the withheld label;
+# the six committed `docs/experiments/registry/japan/japan-n8-spread-scan-*.md` files hold their
+# P503 rows in that form. #82 masks the status. The run command's keep-check must take a row in
+# main's form as the same row as its masked form: a registry holding the runs a shipped file lists
+# rewrites it, one holding fewer (as a multiset) still keeps it.
+
+SHIPPED_ROW = "| {e} | {variant} | {status} | " + WITHHELD_LABEL + " | | | | |"  # main's form
+SCAN_CLI = ["japan", "spread-scan", "run", "--from", "2019-01-01", "--to", "2019-12-31"]
+SCAN_CLI += ["--n-boot", "50"]
+
+
+def summary_sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An empty summary folder outside the repository standing in for `summary_dir('japan')`,
+    with `guard` on and every `write_report` into the repository refused."""
+    summary = tmp_path / "summary" / "registry" / "japan"
+    summary.mkdir(parents=True)
+    monkeypatch.setattr(ss, "summary_dir", lambda country: summary, raising=False)
+    monkeypatch.setattr(registry_module, "summary_dir", lambda country: summary)
+    guard(monkeypatch)
+    for module in (reports, ss, registry_module):
+        real = getattr(module, "write_report", None)
+        if real is None:
+            continue
+
+        def outside(path, text, *, sources, repo_root=None, _real=real):
+            if reports.is_inside(Path(path), REPO_ROOT):
+                raise Forbidden(f"write_report({path}) is inside the repository")
+            return _real(path, text, sources=sources, repo_root=repo_root)
+
+        monkeypatch.setattr(module, "write_report", outside)
+    return summary
+
+
+def recorded_runs(data: Path) -> list[dict]:
+    """The run records of the data directory's japan registry, read from its file."""
+    path = data / "registry" / "japan.jsonl"
+    assert path.is_file(), f"the command recorded no registry at {path}"
+    lines = [json.loads(line) for line in path.read_text("utf-8").splitlines() if line]
+    return [entry["record"] for entry in lines if entry["kind"] == "run"]
+
+
+def ship_as_main_did(summary: Path, runs: list[dict]) -> dict[str, bytes]:
+    """Rewrite each family file into the form main ships: its run rows replaced by one row per
+    recorded run of the family, the status the registry recorded before the withheld label.
+    Returns each family's file bytes."""
+    shipped = {}
+    for family in ss.FAMILIES:
+        path = summary / f"{family}.md"
+        head = [line for line in path.read_text("utf-8").splitlines() if "| P503 |" not in line]
+        rows = [
+            SHIPPED_ROW.format(e=r["hypothesis_id"], variant=r["variant"], status=r["status"])
+            for r in runs
+            if r["family_id"] == family
+        ]
+        path.write_text("\n".join([*head, *rows]) + "\n", "utf-8")
+        statuses = {status for _, status in by_variant(summary_rows(path))}
+        assert rows and statuses == {r["status"] for r in runs}, (family, statuses)
+        shipped[family] = path.read_bytes()
+    return shipped
+
+
+def masked_by_variant(runs: list[dict], family: str) -> Counter:
+    """What the family file must list: one withheld row per recorded run, no status."""
+    return Counter((r["variant"], WITHHELD_LABEL) for r in runs if r["family_id"] == family)
+
+
+def test_the_run_command_rewrites_the_family_files_main_ships_when_its_registry_holds_their_runs(
+    tmp_path, monkeypatch
+):
+    from typer.testing import CliRunner
+
+    from horsetrack.cli import app
+
+    committed_dir = REPO_ROOT / "docs" / "experiments" / "registry" / "japan"
+    committed_before = _tree(committed_dir) if committed_dir.is_dir() else {}
+    summary = summary_sandbox(tmp_path, monkeypatch)
+    runner = CliRunner()
+    data = tiny_store(tmp_path / "a")
+    monkeypatch.setenv(DATA_VAR, str(data))
+    frozen = runner.invoke(app, ["japan", "spread-scan", "freeze"])
+    assert frozen.exit_code == 0, frozen.output
+
+    # a failed run (its candidate-cell write fails), then a scored one
+    sandboxed = ss.write_report
+
+    def failing(path, text, *, sources, repo_root=None):
+        if Path(path).parent.name == "candidate-cells":
+            raise WriteFailed(f"the candidate-cell write failed: {path}")
+        return sandboxed(path, text, sources=sources, repo_root=repo_root)
+
+    monkeypatch.setattr(ss, "write_report", failing)
+    failed = runner.invoke(app, [*SCAN_CLI, "--seed", str(SEED)])
+    assert isinstance(failed.exception, WriteFailed), (failed.output, failed.exception)
+    monkeypatch.setattr(ss, "write_report", sandboxed)
+    done = runner.invoke(app, [*SCAN_CLI, "--seed", str(SEED)])
+    assert done.exit_code == 0, (done.output, done.exception)
+    runs = recorded_runs(data)
+    assert {r["status"] for r in runs} == {"failed", "scored"}, "one failed and one scored run"
+
+    # the summary as main ships it, listing exactly the runs this registry holds
+    ship_as_main_did(summary, runs)
+    done = runner.invoke(app, [*SCAN_CLI, "--seed", str(SEED + 1)])
+    assert done.exit_code == 0, (
+        "the registry holds every run the shipped files list, so no file is kept",
+        done.output,
+        done.exception,
+    )
+    runs = recorded_runs(data)
+    for family in ss.FAMILIES:
+        expected = masked_by_variant(runs, family)
+        assert expected == Counter({(v, WITHHELD_LABEL): 3 for v in VARIANTS}), family
+        assert by_variant(summary_rows(summary / f"{family}.md")) == expected, (
+            f"{family}.md: rewritten with one withheld row per recorded run, no status shown"
+        )
+    listed = summary.joinpath("README.md").read_text("utf-8")
+    for family in ss.FAMILIES:
+        assert f"({family}.md)" in listed, f"the index dropped {family}"
+    after = _tree(committed_dir) if committed_dir.is_dir() else {}
+    assert after == committed_before, "the committed summary was touched"
+
+
+def test_a_family_file_main_ships_is_kept_until_the_registry_holds_as_many_runs_as_it_lists(
+    tmp_path, monkeypatch
+):
+    from typer.testing import CliRunner
+
+    from horsetrack.cli import app
+
+    committed_dir = REPO_ROOT / "docs" / "experiments" / "registry" / "japan"
+    committed_before = _tree(committed_dir) if committed_dir.is_dir() else {}
+    summary = summary_sandbox(tmp_path, monkeypatch)
+    runner = CliRunner()
+
+    # data directory a: two scored runs, shipped in main's form (two rows per variant)
+    monkeypatch.setenv(DATA_VAR, str(tiny_store(tmp_path / "a")))
+    frozen = runner.invoke(app, ["japan", "spread-scan", "freeze"])
+    assert frozen.exit_code == 0, frozen.output
+    for seed in (SEED, SEED + 1):
+        done = runner.invoke(app, [*SCAN_CLI, "--seed", str(seed)])
+        assert done.exit_code == 0, (done.output, done.exception)
+    shipped = ship_as_main_did(summary, recorded_runs(tmp_path / "a" / "data"))
+
+    # data directory b, one run: it holds one run per variant, the files list two
+    data_b = tiny_store(tmp_path / "b")
+    monkeypatch.setenv(DATA_VAR, str(data_b))
+    frozen = runner.invoke(app, ["japan", "spread-scan", "freeze"])
+    assert frozen.exit_code == 0, frozen.output
+    done = runner.invoke(app, [*SCAN_CLI, "--seed", str(SEED)])
+    assert not isinstance(done.exception, PROGRAMMING_ERRORS), (done.output, done.exception)
+    assert done.exit_code != 0, "a run whose summary keeps a published row it cannot write fails"
+    for family, data_bytes in shipped.items():
+        assert summary.joinpath(f"{family}.md").read_bytes() == data_bytes, (
+            f"{family}.md: two published rows per variant against one recorded run each is a "
+            "dropped row; the file stays as it was"
+        )
+        assert f"{family}.md" in done.output, f"the command does not name the kept {family}.md"
+
+    # b's second run: it now holds as many runs per variant as the files list
+    done = runner.invoke(app, [*SCAN_CLI, "--seed", str(SEED + 1)])
+    assert done.exit_code == 0, (
+        "the registry holds as many runs per variant as the shipped files list",
+        done.output,
+        done.exception,
+    )
+    runs = recorded_runs(data_b)
+    for family in ss.FAMILIES:
+        expected = masked_by_variant(runs, family)
+        assert expected == Counter({(v, WITHHELD_LABEL): 2 for v in VARIANTS}), family
+        assert by_variant(summary_rows(summary / f"{family}.md")) == expected, (
+            f"{family}.md: rewritten with one withheld row per recorded run, no status shown"
         )
     listed = summary.joinpath("README.md").read_text("utf-8")
     for family in ss.FAMILIES:

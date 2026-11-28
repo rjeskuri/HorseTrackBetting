@@ -10,10 +10,11 @@ opened to read or to append, under an exclusive lock, so concurrent writers cann
 A run's id is the sha256 hex of its record's canonical JSON: the same run twice is refused. A
 family's pre-registered spec is frozen with ``freeze_family``; the freeze is a line of its own,
 not a run. ``write_summary`` writes the committed, aggregate-only view, one file per family: E id,
-variant, status and per-fold metric, value, CI and n, with the values of licensed-source runs
-withheld. A record's ``notes`` (run metadata, such as why a measurement could not be made) are
-outside its variant identity and the summary; a record without notes is written without the key,
-so its line and id are those it had before ``notes`` existed.
+variant, status and per-fold metric, value, CI and n, with the status and values of
+licensed-source runs withheld. ``masked_row`` maps a licensed-source row written before #82, its
+status shown, to that masked form. A record's ``notes`` (run metadata, such as why a measurement
+could not be made) are outside its variant identity and the summary; a record without notes is
+written without the key, so its line and id are those it had before ``notes`` existed.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ __all__ = [
     "RunRecord",
     "default_registry",
     "is_licensed_record",
+    "masked_row",
     "summary_dir",
     "summary_stem",
     "write_summary",
@@ -524,6 +526,26 @@ def _cell(value: str) -> str:
     return " ".join(value.split()).replace("|", "\\|")
 
 
+_UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")  # a cell border: `_cell` escapes a pipe as `\|`
+
+
+def masked_row(line: str) -> str:
+    """``line`` as ``write_summary`` writes it now: a licensed-source run's row in the form
+    written before #82 (``| E id | variant | status | withheld (licensed source) | | | | |``)
+    becomes its masked form (``| E id | variant | withheld (licensed source) | | | | | |``);
+    every other line, public rows included, comes back unchanged. Lets a caller compare a
+    published summary file with a fresh one row for row."""
+    cells = _UNESCAPED_PIPE.split(line)
+    if len(cells) != 10 or cells[0] or cells[-1]:
+        return line
+    hypothesis_id, variant, status = (cell.strip() for cell in cells[1:4])
+    if status not in STATUSES:
+        return line
+    if line != f"| {hypothesis_id} | {variant} | {status} | {WITHHELD_LABEL} | | | | |":
+        return line
+    return f"| {hypothesis_id} | {variant} | {WITHHELD_LABEL} | | | | | |"
+
+
 def _number(value: float | None) -> str:
     return "-" if value is None else f"{value:.6g}"
 
@@ -545,10 +567,11 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
     the index of the families. A legacy family id written before #525 has each ``/`` mapped to
     ``--`` in its file name; its heading and index entry show the original id. ``ValueError``,
     before any file is written, when a mapped name is still unsafe or ``README``, or two families
-    would share a file (ignoring case). A licensed-source run shows only its identity and
-    ``withheld (licensed source)``. A family's file depends on that family's records alone: its
-    public runs in append order, then its licensed-source runs in identity order, so the file
-    is the same whatever order those were appended in (a study may append them ranked)."""
+    would share a file (ignoring case). A licensed-source run shows only its identity (E id,
+    variant) and ``withheld (licensed source)`` in place of its status and values. A family's
+    file depends on that family's records alone: its public runs in append order, then its
+    licensed-source runs in identity order, so the file is the same whatever order those were
+    appended in (a study may append them ranked)."""
     families: dict[str, list[RunRecord]] = {}
     for record in registry.records():
         families.setdefault(record.family_id, []).append(record)
@@ -573,10 +596,11 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
             "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for r in _summary_order(records):
-            who = f"| {_cell(r.hypothesis_id)} | {_cell(r.variant)} | {_cell(r.status)} |"
-            if _licensed(r):
-                lines.append(f"{who} {WITHHELD_LABEL} | | | | |")
+            if _licensed(r):  # its status too: a failed licensed check tells its result
+                who = f"| {_cell(r.hypothesis_id)} | {_cell(r.variant)} |"
+                lines.append(f"{who} {WITHHELD_LABEL} | | | | | |")
                 continue
+            who = f"| {_cell(r.hypothesis_id)} | {_cell(r.variant)} | {_cell(r.status)} |"
             if not r.metrics:
                 lines.append(f"{who} - | - | - | - | - |")
             for m in r.metrics:

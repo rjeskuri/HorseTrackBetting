@@ -1,0 +1,38 @@
+# The floor, tail and favourite avoidance study's pre-registered inputs (ticket #82, Family L rules
+# L2, L3 and L7; read by countries/japan/studies/avoidance_price.py, owner_inputs). Every value is
+# the owner's, answered on #82 on 2026-11-26, and is frozen in the run registry (family
+# japan-family-l-floor-tail-favourite-v3, after the first family and -v2) before any race is read:
+# the freeze line is the record (owner reframe 2026-11-27), so this file carries no sign-off key.
+# Changing a value needs a new family, not a code change.
+
+# L3 (E12): the Win/Place tail cut-offs in decimal odds, #77's convention (fractional 50/1 and
+# 100/1). A runner whose WIN odds on the board are strictly above x is in the tail; a Place ticket is
+# judged by its runner's WIN odds. Each value is its own variant (D17).
+l3_tail_odds: [51.0, 101.0]
+
+# L7 (E3): #77's quintile cut points of the per-race normalised entropy, copied at full precision
+# from config/calibration.yaml (entropy_cut_points; family japan-crowd-calibration-final-win). They
+# bin both the final Win odds (history) and the Win board at t; a race at or above the last is in
+# the flattest quintile.
+l7_entropy_cut_points: [0.6952092433071905, 0.7467255002267639, 0.7851488760086348, 0.8215443360884407]
+
+# L2 and L3's base strategy: one unit on every runner (WIN, PLACE) and every combination of the
+# starters in each exotic pool; where L2 reads a ticket's own price at t, the tickets priced on that
+# board.
+sets: every_set
+
+# Equal shortest Win prices (L7's favourite and top-3 box, the 100-vs-110 favourite): the lower
+# horse number first.
+favourite_ties: lower_horse_no
+
+# L7's favourite exotic boxes in handicaps: the box of the three shortest Win prices in each of
+# QUINELLA_PLACE, QUINELLA, FORECAST, TRIO and TIERCE (each pool its own variant).
+l7_favourite_boxes: top3_box
+
+# L7 is paired on all races; a race the rule skips returns its stake.
+l7_skipped_race: stake_back
+
+# The 100-vs-110 check's inputs: the per-runner Place votes and the Place pool's sales of the settled
+# race, from the JRA-VAN H1 votes (the jravan pool_votes table, #368). Its figures are JRA-VAN's and
+# are withheld under D21: a private report under the data directory, never the repository.
+plus10_inputs: jravan_pool_votes

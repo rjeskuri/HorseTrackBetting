@@ -9,6 +9,12 @@ test_feature_boundary.py):
   config classifies never reaches `RaceView.board`, while the board at t keeps its prices. Every
   board column is an approved feature of odds_timeseries (`approved_features`) or one of the
   board's identifiers (race_id, pool, combination, snapshot_utc, fetched_utc, post_utc).
+  `status_raw` is no such feature (main's inventory leaves it unclassified; feature inclusion is
+  the owner's, docs/specs/as-of.md, "Adopting the boundary"), so it is not on the board: the
+  board-at-t scratch rule (docs/specs/board-at-t.md) reads it outside `feature_view`, as a
+  documented filter, into `RaceView.scratched` (a frozenset of horse numbers, empty by default):
+  the runners whose latest WIN capture, or latest PLACE capture, available at t (the board's
+  as-of rules and its latest-per-(pool, combination) order) has `status_raw` `SCR`.
 - `render_report(study, spec, about)` identifies the study's predictors that carry a documented
   approximation (`feature_boundary.approximations`): the starters come from runners.is_scratched
   and the races from races.status, both results-derived card values (docs/specs/as-of.md,
@@ -80,9 +86,12 @@ CAPTURES = [
 AT_T = {("TRIO", "2,9,14"): 21.0, ("WIN", "9"): 3.2, ("WIN", "3"): 7.7}  # RACE's board at T
 
 
-def _board_con(new=None, captures=CAPTURES, *, drop=(), posts=None) -> duckdb.DuckDBPyConnection:
+def _board_con(
+    new=None, captures=CAPTURES, *, drop=(), posts=None, status=None
+) -> duckdb.DuckDBPyConnection:
     """An in-memory odds_timeseries of `captures` (race -> post from `posts`, default POST),
-    without the columns in `drop`."""
+    without the columns in `drop`; each capture's `status_raw` is `status(snapshot, odds)`, or
+    blank without `status`."""
     posts = posts or {}
     frame = pd.DataFrame(
         [
@@ -99,7 +108,7 @@ def _board_con(new=None, captures=CAPTURES, *, drop=(), posts=None) -> duckdb.Du
                 "odds": odds,
                 "odds_hi": NAN,
                 "investment": 1000.0,
-                "status_raw": "",
+                "status_raw": "" if status is None else status(snap, odds),
                 "is_final_capture": final,
                 "dividend": 8900.0,
                 "is_refund": False,
@@ -155,6 +164,105 @@ def test_every_board_column_is_an_approved_feature_or_an_identifier(rules):
     columns = set(view.board.columns)
     assert {"pool", "combination", "odds"} <= columns
     assert columns <= approved | IDENTIFIERS, sorted(columns - approved - IDENTIFIERS)
+
+
+def _status(snap: datetime, odds) -> str:
+    """A capture's status text: `SCR` for a scratch (no price), else the page's JST time text."""
+    if odds is None:
+        return "SCR"
+    local = snap + timedelta(hours=9)
+    return f"{local.hour}時{local.minute:02d}分現在"
+
+
+# RACE's WIN 3, priced at 05:40, is scratched at 05:52; WIN 12 is scratched at 05:57, after T
+SCRATCHES = [
+    (RACE, "WIN", "3", at(5, 52), at(5, 52, 2), None, False),
+    (RACE, "WIN", "12", at(5, 57), at(5, 57, 2), None, False),
+]
+
+
+def _expected_scratched(captures, race: str, t: datetime) -> frozenset[int]:
+    """From first principles (docs/specs/board-at-t.md): the horses whose latest WIN capture, or
+    latest PLACE capture, available at t (`_expected_latest`) has status `SCR` (`_status`)."""
+    return frozenset(
+        int(combination)
+        for (pool, combination), row in _expected_latest(captures, race, t).items()
+        if pool in ("WIN", "PLACE") and _status(row[3], row[5]) == "SCR"
+    )
+
+
+@pytest.mark.parametrize("t", [at(5, 51), T, at(6, 0)], ids=["05:51", "05:55", "06:00"])
+def test_the_scratches_at_t_are_read_outside_the_board(rules, t):
+    """status_raw is no approved feature (feature inclusion is the owner's, docs/specs/as-of.md,
+    "Adopting the boundary"), so the board at t does not carry it; the board-at-t scratch rule
+    (docs/specs/board-at-t.md) reads it through a documented filter instead: `view.scratched`
+    holds the runners whose latest WIN or PLACE capture available at t is `SCR`. WIN 3 is
+    scratched from its 05:52 fetch on, WIN 12 from 05:57 (after T); before, a priced capture's
+    status is a time text."""
+    from horsetrack.countries.japan.feature_boundary import approved_features
+
+    assert "status_raw" not in approved_features("odds_timeseries", source="jra", rules=rules)
+    captures = [*CAPTURES, *SCRATCHES]
+    con = _board_con(captures=captures, status=_status)
+    try:
+        view = avoidance.view_at(con, RACE, t, rules=rules)
+    finally:
+        con.close()
+    assert "status_raw" not in view.board.columns, "status_raw is on the board at t"
+    for column in ODDS_LABELS:
+        assert column not in view.board.columns, f"{column} is on the board at t"
+    assert not view.board.duplicated(["pool", "combination"]).any()
+    expected = _expected_scratched(captures, RACE, t)
+    # the fixture is what the case says: none before 05:52, WIN 3 at T, WIN 12 too by 06:00
+    assert expected == {at(5, 51): set(), T: {3}, at(6, 0): {3, 12}}[t]
+    assert isinstance(view.scratched, frozenset), type(view.scratched)
+    assert all(isinstance(h, int) for h in view.scratched), view.scratched
+    assert view.scratched == expected
+    # a view built without scratches has none
+    assert avoidance.RaceView(RACE, view.board, view.selection).scratched == frozenset()
+
+
+# Each line varies one input of the rule: (race, pool, combination, snapshot, fetched, odds, final)
+SCRATCH_CASES = [
+    # PLACE 5 is SCR while WIN 5 is still priced: a PLACE scratch counts
+    (RACE, "WIN", "5", at(5, 44), at(5, 44, 2), 9.4, False),
+    (RACE, "PLACE", "5", at(5, 46), at(5, 46, 2), None, False),
+    # WIN 8 is SCR at 05:42, then priced again at 05:48: its latest capture is no scratch
+    (RACE, "WIN", "8", at(5, 42), at(5, 42, 2), None, False),
+    (RACE, "WIN", "8", at(5, 48), at(5, 48, 2), 15.0, False),
+    # WIN 6's SCR capture is taken at 05:53 but fetched at 05:56:10, after T
+    (RACE, "WIN", "6", at(5, 45), at(5, 45, 2), 11.0, False),
+    (RACE, "WIN", "6", at(5, 53), at(5, 56, 10), None, False),
+    # WIN 11's SCR capture has no fetched_utc: available at its snapshot (the board's fallback)
+    (RACE, "WIN", "11", at(5, 41), at(5, 41, 2), 30.0, False),
+    (RACE, "WIN", "11", at(5, 52), None, None, False),
+    # a TRIO row is SCR: not a WIN or PLACE row, so it scratches none of 1, 4, 7
+    (RACE, "TRIO", "1,4,7", at(5, 47), at(5, 47, 2), None, False),
+    # the other race's WIN 10 is SCR: not this race's
+    (OTHER, "WIN", "10", at(5, 43), at(5, 43, 2), None, False),
+]
+
+
+@pytest.mark.parametrize(
+    "t", [at(5, 43), at(5, 47), T, at(5, 58)], ids=["05:43", "05:47", "05:55", "05:58"]
+)
+def test_the_scratched_set_follows_the_latest_win_or_place_capture_at_t(rules, t):
+    """`view.scratched` follows the board's as-of rules and its latest-per-(pool, combination)
+    order: a later priced capture lifts an earlier SCR, a capture fetched after t is not there
+    yet, one without fetched_utc is there at its snapshot, a PLACE SCR counts as a WIN one does,
+    and a row of another pool or another race scratches nobody."""
+    captures = [*CAPTURES, *SCRATCHES, *SCRATCH_CASES]
+    con = _board_con(captures=captures, status=_status)
+    try:
+        view = avoidance.view_at(con, RACE, t, rules=rules)
+    finally:
+        con.close()
+    expected = _expected_scratched(captures, RACE, t)
+    # the fixture is what the lines say
+    case = {at(5, 43): {8}, at(5, 47): {5, 8}, T: {3, 5, 11}, at(5, 58): {3, 5, 6, 11, 12}}
+    assert expected == case[t]
+    assert view.scratched == expected
+    assert "status_raw" not in view.board.columns
 
 
 def test_the_report_names_the_results_derived_predictors():
