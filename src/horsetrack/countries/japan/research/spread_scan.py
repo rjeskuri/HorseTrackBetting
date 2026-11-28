@@ -30,7 +30,7 @@ import re
 import tempfile
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import date
 from functools import cache
 from pathlib import Path
@@ -51,6 +51,7 @@ from horsetrack.core.eval.registry import (
     Registry,
     RunRecord,
     _canonical,
+    _record_data,
     _sha256,
     _spec_hash,
     default_registry,
@@ -889,7 +890,7 @@ def _append(registry: Registry, records: list[RunRecord]) -> dict[str, str]:
     for record in records:
         key = f"{record.family_id}/{record.variant}"
         if record in registry.records(record.family_id):
-            ids[key] = _sha256(_canonical(asdict(record)))
+            ids[key] = _sha256(_canonical(_record_data(record)))
         else:
             ids[key] = registry.append(record)
     return ids

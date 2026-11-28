@@ -4,7 +4,7 @@ Contract pinned here (`horsetrack.countries.japan.handicap.factors`):
 
 - `handicap_factors(race_id, *, as_of, train_end=None) -> polars.DataFrame`: one row per declared
   (not scratched) runner of the race, keys `race_id`, `horse_no`, `horse_id`. History comes from
-  #128's `pp_lines(race_id, as_of=as_of)` (default n = 10 lines). The in-fold pieces (the class par
+  #128's `pp_lines(race_id, as_of=as_of)` (default n = 10 lines). The in-fold pieces (#96's par
   of the speed figure and the draw bias) are fitted on the non-holdout race days on or before
   `train_end`, which defaults to the as-of cut: the last race day before the race whose result is
   published before `as_of` (#128's ruling: at the end of its local race day). A `train_end` after
@@ -18,10 +18,20 @@ Contract pinned here (`horsetrack.countries.japan.handicap.factors`):
 
 Rulings (reversible choices this file pins; the per-test comments compute each value by hand):
 
-- Ruling: speed figure of a past start = class par - the runner's finish_time_s (seconds faster
-  than par; higher is better). Class par = median (mean of the middle two for an even count) of
-  races.finish_time_s over the races with the same (venue, surface, distance_m, race_class) on the
-  in-fold days; no par or no time -> no figure. No day variant until #96.
+- Ruling (#219, replaces #129's interim class par): speed figure of a past start = #96's expected
+  top-3 time of that start's race - the runner's finish_time_s (seconds faster than expected; higher
+  is better). The expected time is `SpeedModel.expected_top3_time` (models/speed.py) of
+  `SpeedSpec(PAR_KEYS, VARIANT_KEYS, same_day_variant=True, t_df=5.0)` (#305's primary error model),
+  fitted on the race table `speed_run.build_race_table(..., estimand="mean_placed_1_3")` of the
+  in-fold days (HISTORY_START .. train_end): the race's top-3 time is the mean of the runners placed
+  1-3 (a runner placed 1 or 2 once, those placed 3rd as one slot) and the cell is the six keys
+  (venue, surface, distance, course layout, rail, class), not the old four. A start on an in-fold
+  day has the variant's prior (0), so its expected time is the par. A start on a day after
+  train_end (up to the cut) has its race's day variant: the model observes the results of the days
+  after train_end up to the cut, and the figure reads the variant at the race's post time - 2
+  minutes (D2's primary decision time), so only races of its (day, venue, surface) resulted before
+  then count, never its own race and never a later one. No result after the cut is read. A start
+  whose race is not in the table, whose cell has no par, or without a finish time has no figure.
 - Ruling: `speed_best` = max figure, `speed_last` = the newest start that has a figure,
   `speed_mean3` = mean of the newest 3 figures, `speed_n` = figures among the PP lines (0 for a
   debutant, never null).
@@ -65,8 +75,10 @@ Data: synthetic only (tests/countries/japan/handicap/handicap_store.py), written
 # block is written in its final order and I001 is waived so lint passes before and after.
 from __future__ import annotations  # noqa: I001
 
+import random
 from datetime import date, datetime, timedelta
 
+import pandas as pd
 import polars as pl
 import pytest
 from polars.testing import assert_frame_equal
@@ -75,6 +87,8 @@ from handicap_store import R, Store, T, at_jst, patch_holdout, perturb, random_s
 from handicap_store import weekend_days
 from horsetrack.countries.japan.handicap import factors
 from horsetrack.countries.japan.handicap.factors import handicap_factors
+from horsetrack.countries.japan.models.speed import SpeedModel, SpeedSpec
+from horsetrack.countries.japan.studies.speed_run import PAR_KEYS, VARIANT_KEYS, build_race_table
 
 TARGET = rid(T, "TOK", 11)
 AS_OF = at_jst(T, 15)  # race day, mid-afternoon; the cut is T - 1
@@ -151,7 +165,7 @@ def test_one_row_per_declared_runner_with_every_factor_column(tmp_path, monkeypa
 
 
 # ---------------------------------------------------------------------------------------------
-# 1. Speed: figures against the class par from the in-fold days
+# 1. Speed: figures against #96's expected top-3 time, fitted on the in-fold days
 # ---------------------------------------------------------------------------------------------
 
 
@@ -160,21 +174,23 @@ def speed_store() -> Store:
     tok = {"venue": "TOK", "surface": "turf", "distance": 1600, "cls": "C2"}  # K1
     nak = {"venue": "NAK", "surface": "turf", "distance": 2000, "cls": "C1"}  # K2
     dirt = {"venue": "TOK", "surface": "dirt", "distance": 1400, "cls": "C1"}  # K3
-    # par-only races (no tracked horse)
-    s.race(date(2025, 2, 1), [], winner_time=94.6, fill_to=4, **tok)
-    s.race(date(2025, 2, 8), [], winner_time=93.0, fill_to=4, **tok)
-    s.race(date(2025, 1, 12), [], winner_time=122.0, fill_to=4, **nak)
-    s.race(date(2025, 1, 19), [], winner_time=121.6, fill_to=4, **nak)
-    s.race(date(2025, 3, 1), [], winner_time=86.0, fill_to=4, **dirt)
-    s.race(date(2025, 3, 8), [], winner_time=85.4, fill_to=4, **dirt)
+    # In every race the placed runners' times are the winner's + 0.2 s per place behind (the
+    # fixture's default), so a race with winner time w has top-3 time (w + w+0.2 + w+0.4)/3 = w+0.2.
+    # par-only races (no tracked horse); K2 and K3 repeat one top-3 time, so their fitted par is it
+    # whatever the error model; K1's top-3 times are symmetric about their centre, so the par is it
+    s.race(date(2025, 1, 12), [], winner_time=121.4, fill_to=4, **nak)  # top-3 121.6
+    s.race(date(2025, 1, 19), [], winner_time=121.4, fill_to=4, **nak)  # 121.6
+    s.race(date(2025, 3, 1), [], winner_time=85.4, fill_to=4, **dirt)  # 85.6
+    s.race(date(2025, 3, 8), [], winner_time=85.4, fill_to=4, **dirt)  # 85.6
+    s.race(date(2025, 5, 18), [], winner_time=94.8, fill_to=4, **tok)  # 95.0
     # A: four starts, newest first S1 .. S4
-    s.race(date(2025, 3, 30), [R("h:a", pos=4, time=95.0)], winner_time=94.0, fill_to=6, **tok)
-    s.race(date(2025, 4, 20), [R("h:a", pos=3, time=85.6)], winner_time=85.0, fill_to=6, **dirt)
-    s.race(date(2025, 5, 11), [R("h:a", pos=1, time=121.0)], fill_to=6, **nak)
-    s.race(date(2025, 6, 1), [R("h:a", pos=2, time=94.4)], winner_time=94.2, fill_to=6, **tok)
-    # C: an older start with a figure, then a newer one it did not finish
-    s.race(date(2025, 5, 25), [R("h:c", pos=3, time=69.5)], venue="HSN", distance=1200,
-           winner_time=69.0, fill_to=6)  # fmt: skip
+    s.race(date(2025, 3, 30), [R("h:a", pos=6)], winner_time=94.0, fill_to=6, **tok)  # 94.2
+    s.race(date(2025, 4, 20), [R("h:a", pos=4)], winner_time=85.4, fill_to=6, **dirt)  # 85.6
+    s.race(date(2025, 5, 11), [R("h:a", pos=1)], winner_time=121.4, fill_to=6, **nak)  # 121.6
+    s.race(date(2025, 6, 1), [R("h:a", pos=3)], winner_time=94.4, fill_to=6, **tok)  # 94.6
+    # C: an older start with a figure (alone in its cell), then a newer one it did not finish
+    s.race(date(2025, 5, 25), [R("h:c", pos=3)], venue="HSN", distance=1200, winner_time=69.0,
+           fill_to=6)  # fmt: skip
     s.race(date(2025, 6, 8), [R("h:c")], venue="KYO", distance=1800, winner_time=108.0,
            fill_to=6)  # fmt: skip
     # bait: a K1 race earlier on T, one the day after (with A in it), and the target's own result
@@ -184,23 +200,25 @@ def speed_store() -> Store:
     return s
 
 
-# Default (cut 06-14). Par sets: K1 {94.6, 93.0, 94.0, 94.2} -> 94.1; K2 {122.0, 121.6, 121.0}
-# -> 121.6; K3 {86.0, 85.4, 85.0} -> 85.4; HSN 1200 {69.0} -> 69.0.
-#   A: S1 94.1-94.4 = -0.3, S2 121.6-121.0 = 0.6, S3 85.4-85.6 = -0.2, S4 94.1-95.0 = -0.9
-#      best 0.6, last -0.3, mean3 (-0.3+0.6-0.2)/3, n 4
-#   C: newest start unfinished (no figure); 69.0-69.5 = -0.5 -> best = last = mean3 = -0.5, n 1
-# train_end 2025-03-31: K1 {94.6, 93.0, 94.0} -> 94.0; K2 {122.0, 121.6} -> 121.8;
-# K3 {86.0, 85.4} -> 85.7; HSN 1200 none.
-#   A: S1 94.0-94.4 = -0.4, S2 121.8-121.0 = 0.8, S3 85.7-85.6 = 0.1, S4 94.0-95.0 = -1.0
-#      best 0.8, last -0.4, mean3 (-0.4+0.8+0.1)/3, n 4; C: no figure
+# Default (cut 06-14). Pars: K1 top-3 times {94.2 (03-30), 95.0 (05-18), 94.6 (06-01)}, symmetric
+# about 94.6 -> 94.6; K2 {121.6 x3} -> 121.6; K3 {85.6 x3} -> 85.6; HSN 1200 {69.2} -> 69.2. A's
+# times are the winner's + 0.2 per place behind: 06-01 pos 3 94.8, 05-11 pos 1 121.4, 04-20 pos 4
+# 86.0, 03-30 pos 6 95.0.
+#   A: S1 94.6-94.8 = -0.2, S2 121.6-121.4 = 0.2, S3 85.6-86.0 = -0.4, S4 94.6-95.0 = -0.4
+#      best 0.2, last -0.2, mean3 (-0.2+0.2-0.4)/3, n 4
+#   C: newest start unfinished (no figure); pos 3 at 69.4: 69.2-69.4 = -0.2 -> best = last = mean3
+# train_end 2025-03-31: K1 {94.2} -> 94.2, so S4 94.2-95.0 = -0.8 and S1 (06-01, a day after
+# train_end; no earlier TOK turf race that day, so the variant is its prior) 94.2-94.8 = -0.6;
+# K2 {121.6 x2} and K3 {85.6 x2} are unchanged; HSN 1200 has no in-fold race, so C has no figure.
+#      A: best 0.2, last -0.6, mean3 (-0.6+0.2-0.4)/3, n 4
 SPEED_CASES = {
     None: {
-        "h:a": {"speed_best": 0.6, "speed_last": -0.3, "speed_mean3": 0.1 / 3, "speed_n": 4},
-        "h:c": {"speed_best": -0.5, "speed_last": -0.5, "speed_mean3": -0.5, "speed_n": 1},
+        "h:a": {"speed_best": 0.2, "speed_last": -0.2, "speed_mean3": -0.4 / 3, "speed_n": 4},
+        "h:c": {"speed_best": -0.2, "speed_last": -0.2, "speed_mean3": -0.2, "speed_n": 1},
         "h:b": {"speed_best": None, "speed_last": None, "speed_mean3": None, "speed_n": 0},
     },
     date(2025, 3, 31): {
-        "h:a": {"speed_best": 0.8, "speed_last": -0.4, "speed_mean3": 0.5 / 3, "speed_n": 4},
+        "h:a": {"speed_best": 0.2, "speed_last": -0.6, "speed_mean3": -0.8 / 3, "speed_n": 4},
         "h:c": {"speed_best": None, "speed_last": None, "speed_mean3": None, "speed_n": 0},
         "h:b": {"speed_best": None, "speed_last": None, "speed_mean3": None, "speed_n": 0},
     },
@@ -208,7 +226,7 @@ SPEED_CASES = {
 
 
 @pytest.mark.parametrize("train_end", list(SPEED_CASES), ids=["as-of-cut", "train-end-0331"])
-def test_speed_figures_against_the_in_fold_class_par(tmp_path, monkeypatch, train_end):
+def test_speed_figures_against_96s_expected_time(tmp_path, monkeypatch, train_end):
     write(speed_store(), tmp_path, monkeypatch)
     kwargs = {} if train_end is None else {"train_end": train_end}
     frame = handicap_factors(TARGET, as_of=AS_OF, **kwargs)
@@ -227,6 +245,198 @@ def test_train_end_defaults_to_the_cut_and_may_not_pass_it(tmp_path, monkeypatch
         handicap_factors(TARGET, as_of=at_jst(T - timedelta(1), 23), train_end=T - timedelta(1))
     with pytest.raises(ValueError):
         handicap_factors(TARGET, as_of=datetime(2025, 6, 15, 15, 0))
+
+
+def cells_store() -> Store:
+    """TOK turf 1600 C2 in three #96 cells that differ only in course layout or rail: each cell
+    has two par-only races and one tracked start, all of one top-3 time (winner's + 0.2)."""
+    s = Store()
+    cells = [  # (course, rail, winner time, [par-only days], tracked horse, place, day)
+        ("outer", None, 94.0, [date(2025, 1, 4), date(2025, 1, 11)], "h:x1", 1, date(2025, 2, 1)),
+        ("inner", None, 95.0, [date(2025, 1, 18), date(2025, 1, 25)], "h:x2", 4, date(2025, 2, 8)),
+        ("outer", "B", 96.0, [date(2025, 2, 15), date(2025, 2, 22)], "h:x3", 6, date(2025, 3, 1)),
+    ]
+    for course, rail, w, days, horse, pos, day in cells:
+        for d in days:
+            s.race(d, [], course=course, rail=rail, winner_time=w, fill_to=4)
+        s.race(day, [R(horse, pos=pos)], course=course, rail=rail, winner_time=w, fill_to=6)
+    s.race(T, [R("h:x1", pos=1), R("h:x2", pos=2), R("h:x3", pos=3)], race_no=11)
+    return s
+
+
+# Top-3 times (winner's + 0.2): outer 94.2, inner 95.2, outer on rail B 96.2. A start's time is the
+# winner's + 0.2 per place behind: x1 won (94.0), x2 4th (95.6), x3 6th (97.0). Figures against its
+# own cell's par: 94.2 - 94.0, 95.2 - 95.6, 96.2 - 97.0. A par pooled over layouts or rails would
+# be the median of nine, 95.2, and give 1.2 / -0.4 / -1.8 or similar: not these.
+CELL_FIGURES = {"h:x1": 0.2, "h:x2": -0.4, "h:x3": -0.8}
+
+
+def test_the_par_cell_is_96s_six_keys_so_layout_and_rail_split_it(tmp_path, monkeypatch):
+    write(cells_store(), tmp_path, monkeypatch)
+    frame = handicap_factors(TARGET, as_of=AS_OF)
+    for horse_id, fig in CELL_FIGURES.items():
+        want = {"speed_best": fig, "speed_last": fig, "speed_mean3": fig, "speed_n": 1}
+        assert_values(frame, horse_id, want)
+
+
+# The reference: #96's model fitted on the store's in-fold races by hand, as the ruling says.
+
+
+def reference_figures(
+    s: Store, horse_id: str, *, cut: date, train_end: date, variant: bool = True
+) -> list[float | None]:
+    """The horse's newest 10 starts to the cut, newest first: #96's expected top-3 time of the
+    start's race (par from the races up to train_end; the day variant from the races after it up to
+    the cut, read 2 minutes before post) minus the finish time; None without one."""
+    table, _ = build_race_table(
+        pd.DataFrame(s.races), pd.DataFrame(s.runners), estimand="mean_placed_1_3"
+    )
+    spec = SpeedSpec(PAR_KEYS, VARIANT_KEYS, same_day_variant=variant, t_df=5.0)
+    model = SpeedModel(spec).fit(table[table["race_date"] <= train_end])
+    later = table[(table["race_date"] > train_end) & (table["race_date"] <= cut)]
+    if len(later):
+        model.observe(later)
+    races = {r["race_id"]: r for r in table.to_dict("records")}
+    starts = [
+        r
+        for r in s.runners
+        if r["horse_id"] == horse_id and not r["is_scratched"] and r["race_date"] <= cut
+    ]
+    starts.sort(key=lambda r: (r["race_date"], r["race_id"]), reverse=True)
+    figs: list[float | None] = []
+    for r in starts[:10]:
+        race = races.get(r["race_id"])
+        if race is None or r["finish_time_s"] is None:
+            figs.append(None)
+            continue
+        try:
+            expected = model.expected_top3_time(
+                race, at_utc=race["post_utc"] - pd.Timedelta(minutes=2)
+            )
+        except KeyError:  # a cell the fit never saw
+            figs.append(None)
+            continue
+        figs.append(expected - r["finish_time_s"])
+    return figs
+
+
+def speed_aggregates(figs: list[float | None]) -> dict:
+    got = [f for f in figs if f is not None]
+    return {
+        "speed_best": max(got, default=None),
+        "speed_last": got[0] if got else None,
+        "speed_mean3": sum(got[:3]) / len(got[:3]) if got else None,
+        "speed_n": len(got),
+    }
+
+
+NOISY_CELLS = [
+    ({"venue": "TOK", "surface": "turf", "distance": 1600, "cls": "C2"}, 95.0),
+    ({"venue": "TOK", "surface": "dirt", "distance": 1400, "cls": "C1"}, 83.0),
+    ({"venue": "NAK", "surface": "turf", "distance": 2000, "cls": "C1"}, 121.0),
+]
+
+
+def noisy_store() -> Store:
+    """Weekend days with six races each over three cells (two races per day, venue and surface),
+    a going shift per day and venue, and noisy winner times; 14 horses start seven races each."""
+    rng = random.Random(5)
+    s = Store()
+    horses = [f"h:{i:02d}" for i in range(14)]
+    for day in weekend_days(date(2025, 3, 1), date(2025, 6, 8)):
+        going = {v: rng.uniform(-1.0, 1.0) for v in ("TOK", "NAK")}
+        for k in range(6):
+            race, base = NOISY_CELLS[k % 3]
+            winner = round(base + going[race["venue"]] + rng.uniform(-0.4, 0.4), 1)
+            field, order = rng.sample(horses, 7), rng.sample(range(1, 8), 7)
+            s.race(day, [R(h, pos=p) for h, p in zip(field, order, strict=True)],
+                   race_no=k + 1, winner_time=winner, **race)  # fmt: skip
+    s.race(T, [R(h, pos=i + 1) for i, h in enumerate(horses[:7])], race_no=11)
+    return s
+
+
+@pytest.mark.parametrize(
+    "train_end", [None, date(2025, 4, 27)], ids=["as-of-cut", "train-end-0427"]
+)
+def test_speed_figures_follow_the_fitted_96_model(tmp_path, monkeypatch, train_end):
+    """Broad: seven horses with ten starts each over noisy cells and days, every aggregate
+    against #96's model fitted by hand. With a train_end before the cut the starts after it carry
+    their day's variant; the case is checked to be one where the variant matters."""
+    s = noisy_store()
+    write(s, tmp_path, monkeypatch)
+    cut = T - timedelta(days=1)
+    kwargs = {} if train_end is None else {"train_end": train_end}
+    frame = handicap_factors(TARGET, as_of=AS_OF, **kwargs)
+    horses = sorted({r["horse_id"] for r in s.runners if r["race_id"] == TARGET})
+    assert len(horses) == 7
+    moved = 0.0
+    for horse_id in horses:
+        figs = reference_figures(s, horse_id, cut=cut, train_end=train_end or cut)
+        want = speed_aggregates(figs)
+        assert want["speed_n"] == 10
+        assert_values(frame, horse_id, want)
+        assert_values(frame, horse_id, {f"{c}_missing": want[c] is None for c in SPEED})
+        flat = reference_figures(s, horse_id, cut=cut, train_end=train_end or cut, variant=False)
+        moved = max(moved, max(abs(a - b) for a, b in zip(figs, flat, strict=True)))
+    if train_end is not None:
+        assert moved > 0.05  # the fixture's day variants are not nil
+
+
+def variant_store(*, early: float = 0.0, own: float = 0.0, late: float = 0.0) -> Store:
+    """TOK turf 1600 C2: in-fold races (to 03-23, two a day, a going shift per day) fix the par and
+    the variance; then on 05-10 three races of that cell, an early one, the start of h:v (3rd, at
+    95.4) and a late one, with winner times 95.0 + early / own / late."""
+    rng = random.Random(9)
+    s = Store()
+    for day in weekend_days(date(2025, 2, 1), date(2025, 3, 23)):
+        shift = rng.uniform(-1.0, 1.0)
+        for no in (2, 3):
+            w = round(95.0 + shift + rng.uniform(-0.3, 0.3), 1)
+            s.race(day, [], race_no=no, winner_time=w, fill_to=7)
+    day = date(2025, 5, 10)
+    s.race(day, [], race_no=1, winner_time=95.0 + early, fill_to=7)  # posts 09:25
+    s.race(
+        day, [R("h:v", pos=3, time=95.4)], race_no=11, winner_time=95.0 + own, fill_to=7
+    )  # 14:35
+    s.race(day, [], race_no=12, winner_time=95.0 + late, fill_to=7)  # posts 15:00
+    s.race(T, [R("h:v", pos=1)], race_no=11)
+    return s
+
+
+FOLD_END = date(2025, 3, 31)
+
+
+def v_last(tmp_path, monkeypatch, sub: str, **shifts) -> float:
+    s = variant_store(**shifts)
+    write(s, tmp_path, monkeypatch, sub=sub)
+    frame = handicap_factors(TARGET, as_of=AS_OF, train_end=FOLD_END)
+    got = row(frame, "h:v")["speed_last"]
+    ref = reference_figures(s, "h:v", cut=T - timedelta(days=1), train_end=FOLD_END)
+    assert got == pytest.approx(ref[0], abs=1e-6), (shifts, got, ref)
+    return got
+
+
+def test_a_start_after_train_end_carries_its_days_earlier_results(tmp_path, monkeypatch):
+    """The figure of h:v's start on 05-10 is par + the day's variant - 95.4; the variant is read
+    from the race 5 hours before it: a slow early race raises the figure, a fast one lowers it,
+    each equal to #96's model."""
+    fast = v_last(tmp_path, monkeypatch, "fast", early=-1.5)
+    flat = v_last(tmp_path, monkeypatch, "flat", early=0.0)
+    slow = v_last(tmp_path, monkeypatch, "slow", early=1.5)
+    assert fast < flat < slow
+    assert slow - fast > 0.3
+
+
+def test_a_figure_never_reads_its_own_race_or_a_later_one(tmp_path, monkeypatch):
+    """Changing the times of the other runners of the start's own race (it resulted after the
+    decision time) or of a race 25 minutes after it leaves the figure as it was."""
+    base = v_last(tmp_path, monkeypatch, "base")
+    own = v_last(tmp_path, monkeypatch, "own", own=4.0)
+    late = v_last(tmp_path, monkeypatch, "late", late=-4.0)
+    both = v_last(tmp_path, monkeypatch, "both", own=-6.0, late=5.0)
+    assert own == pytest.approx(base, abs=1e-9)
+    assert late == pytest.approx(base, abs=1e-9)
+    assert both == pytest.approx(base, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -334,15 +544,16 @@ def test_running_style_and_todays_pace_scenario(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------------------------
 
 
-# Each start in its own (venue, surface, distance, class): par = its winner's time, so a figure
-# is -0.2 s per place behind the winner. (day, class, place, distance), newest first.
+# Each start alone in its #96 cell (and its day and track): the par is its race's top-3 time, the
+# winner's + 0.2 s, so a figure is 0.2 s less per place behind the winner, 0.2 for the winner.
+# (day, class, place, distance), newest first.
 CLASS_STARTS = {
-    # G: C3 2nd (-0.2), C1 1st (0.0), OP 3rd (-0.4), MAIDEN 1st (0.0)
+    # G: C3 2nd (0.0), C1 1st (0.2), OP 3rd (-0.2), MAIDEN 1st (0.2)
     "h:g": ("TOK", [(date(2025, 6, 1), "C3", 2, 1200), (date(2025, 5, 18), "C1", 1, 1400),
                     (date(2025, 5, 4), "OP", 3, 1800), (date(2025, 4, 20), "MAIDEN", 1, 2000)]),
-    # H: C1 2nd (-0.2), MAIDEN 1st (0.0)
+    # H: C1 2nd (0.0), MAIDEN 1st (0.2)
     "h:h": ("NAK", [(date(2025, 6, 7), "C1", 2, 1200), (date(2025, 5, 24), "MAIDEN", 1, 1400)]),
-    # I: G1 5th (-0.8), an unclassed start it did not finish, DEBUT 1st (0.0), C1 1st (0.0)
+    # I: G1 5th (-0.6), an unclassed start it did not finish, DEBUT 1st (0.2), C1 1st (0.2)
     "h:i": ("KYO", [(date(2025, 6, 8), "G1", 5, 1200), (date(2025, 5, 25), None, None, 1400),
                     (date(2025, 5, 11), "DEBUT", 1, 1800), (date(2025, 4, 27), "C1", 1, 2000)]),
 }  # fmt: skip
@@ -360,14 +571,16 @@ def class_store() -> Store:
 def test_class_move_and_best_figure_at_todays_class(tmp_path, monkeypatch):
     write(class_store(), tmp_path, monkeypatch)
     frame = handicap_factors(TARGET, as_of=AS_OF)  # today: C2, level 2
-    # G: 2 - (3+1+4)/3; best at level >= 2 among C3 (-0.2) and OP (-0.4)
+    # Each start is alone in its #96 cell (and its day and track), so its par is its race's top-3
+    # time, the winner's + 0.2 s, and the figure of place p is 0.2 - 0.2 (p - 1) = 0.4 - 0.2 p.
+    # G: 2 - (3+1+4)/3; best at level >= 2 among C3 (2nd, 0.0) and OP (3rd, -0.2)
     assert_values(frame, "h:g", {"class_today": 2, "class_change": 2 - 8 / 3,
-                                 "speed_best_at_class": -0.2})  # fmt: skip
+                                 "speed_best_at_class": 0.0})  # fmt: skip
     # H: 2 - (1+0)/2; no start at level >= 2
     assert_values(frame, "h:h", {"class_change": 1.5, "speed_best_at_class": None,
                                  "speed_best_at_class_missing": True})  # fmt: skip
-    # I: newest three with a level: G1 8, DEBUT 0, C1 1 -> 2 - 3; best at >= 2: G1's -0.8
-    assert_values(frame, "h:i", {"class_change": -1.0, "speed_best_at_class": -0.8})
+    # I: newest three with a level: G1 8, DEBUT 0, C1 1 -> 2 - 3; best at >= 2: G1 5th, -0.6
+    assert_values(frame, "h:i", {"class_change": -1.0, "speed_best_at_class": -0.6})
     assert_values(frame, "h:b", {"class_today": 2, "class_change": None,
                                  "class_change_missing": True,
                                  "speed_best_at_class": None})  # fmt: skip
@@ -396,7 +609,9 @@ def test_class_level_of_todays_race(tmp_path, monkeypatch):
 
 def form_store() -> Store:
     s = Store()
-    starts = {  # newest first: (day, place); each in its own par key, figure -0.2 per place
+    # newest first: (day, place); each alone in its #96 cell, so the figure is 0.2 - 0.2 per place
+    # behind the winner; the slope below is the same as with the figures listed (shift-invariant)
+    starts = {
         "h:k": ("TOK", [(date(2025, 6, 1), 2), (date(2025, 5, 18), 4), (date(2025, 3, 2), 1),
                         (date(2025, 2, 10), 1)]),
         "h:l": ("NAK", [(date(2025, 3, 17), 1)]),
@@ -442,7 +657,8 @@ def test_form_cycle(tmp_path, monkeypatch):
 
 def fit_store() -> Store:
     s = Store()
-    # P, newest first (figure -0.2 per place behind; each start in its own par key):
+    # P, newest first (figure -0.2 per place behind, 0.2 for the winner; each start alone in its #96
+    # cell, so every figure is the 0.2 higher than listed, and the shrunk differences are the same):
     #   P1 TOK turf 1800 outer GOOD TO YIELDING 3rd -0.4
     #   P2 NAK dirt 1600 outer SOFT             1st  0.0
     #   P3 TOK turf 2000 inner HEAVY            6th -1.0
@@ -631,6 +847,21 @@ def test_no_future_result_changes_any_factor(tmp_path, monkeypatch, case):
     changed = with_a_future_race(perturb(s, lambda d: d > cut, keep_card=TARGET), cut)
     write(changed, tmp_path, monkeypatch, sub="changed")
     assert_frame_equal(handicap_factors(TARGET, as_of=as_of), base)
+
+
+@pytest.mark.parametrize("case", list(LEAK_AS_OF))
+def test_speed_figures_ignore_every_result_after_the_cut(tmp_path, monkeypatch, case):
+    """Same cells and days before and after the cut (#96's fit and variant): perturbing every
+    result after it, and adding a record-time race the day after, moves no speed column."""
+    as_of, cut = LEAK_AS_OF[case]
+    s = noisy_store()
+    write(s, tmp_path, monkeypatch)
+    base = handicap_factors(TARGET, as_of=as_of)
+    changed = with_a_future_race(perturb(s, lambda d: d > cut, keep_card=TARGET), cut)
+    write(changed, tmp_path, monkeypatch, sub="changed")
+    cols = [*SPEED, *[f"{c}_missing" for c in SPEED]]
+    assert base["speed_n"].min() > 0
+    assert_frame_equal(handicap_factors(TARGET, as_of=as_of).select(cols), base.select(cols))
 
 
 def test_the_leakage_check_can_fail(tmp_path, monkeypatch):
