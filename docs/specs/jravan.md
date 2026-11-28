@@ -233,8 +233,16 @@ post time a null `post_time_local`.
   and `win_fav_rank` (zero null) in store units; `sex` H, M, G; `age` as printed. `brand_raw`,
   `rating` and `gear_raw` are null. Each mapping's code values are constants in `runners.py`; a
   code a mapping lacks is null and counted.
-- Runners of abandoned races (RA data kubun 9) are written, without a place; their undrawn
-  runners carry 馬番 99 as printed.
+- Abandoned races (RA data kubun 9, `races.status` `abandoned`) are kept, and so are their
+  runners, written without a place. A runner that was never drawn is printed with 馬番 99; its
+  `horse_no` and `draw` are null (#394), only for 99, so no number is shared and `(race_id,
+  horse_no)` is unique where `horse_no` is set (`check_unique_horse_no` already skips nulls). The
+  table's sort key (`race_id`, `horse_no`, `horse_id`) puts the unnumbered runners last in their
+  race, by horse id. A reader keyed on `(race_id, horse_no)` drops or counts those rows apart
+  (`reconcile` counts them as `runners.<source>_unnumbered`); `horse_runs` keeps them as runs
+  with a null `draw`. A `runners.parquet` built before #394 still holds 99 there: rebuild it
+  (`horsetrack japan jravan runners`, full range, with every year's SE file present; see the
+  `reconcile` section) before relying on the null.
 - NAR and overseas runners (#377) go to `processed/jravan/form_runners.parquet` in the `runners`
   schema under their races' form ids, and their winners' times to `form_races.parquet` when it is
   there. Horse form only: the jravan `horse_runs` adds them with `win_odds` null (the price is
@@ -690,8 +698,23 @@ at a time, and changes neither store:
   `combination`). Over the matched rows it counts the equal fields (`RACE_FIELDS`,
   `RUNNER_FIELDS`; post times as minutes of the day, `finish_time_s` and `win_odds` at the
   tenth), the races whose Win odds all agree and those whose payouts all agree, and the rows whose
-  key repeats within a store. One-store and repeated-key counts are broken down by the race's
-  `status` in that store.
+  key repeats within a store. One-store, repeated-key and unnumbered counts are broken down by the
+  race's `status` in that store.
+- A runner with a null `horse_no` (jravan's undrawn runners of abandoned races) has no key: it
+  stays out of the runner merge and of `runners.<source>_duplicate`, and is counted as
+  `runners.<source>_unnumbered`. A matched race with a repeated runner key in either store does
+  not agree on Win odds, even when every value matches (a race whose runners cannot be keyed one
+  to one is not counted as agreeing), and nor does one with an unnumbered runner in either store.
+  `races.payouts_agree` is computed from the dividend rows only: a repeated runner key does not
+  change it (the owner's choice, 2026-11-28), and the key still shows in
+  `runners.<source>_duplicate`. The printed lines and the report legend say so.
+- An existing `runners.parquet` keeps the abandoned races' undrawn runners at horse number 99, so
+  `reconcile` run straight after this change still reports those duplicates. Run a full
+  `horsetrack japan jravan runners` rebuild first; only then does `reconcile` reflect the null
+  `horse_no`. Before it, check that the raw SE export has a year file for every year in the
+  existing store: the command reads the year files present (or only the `--year` ones) and
+  replaces `runners.parquet` in full, so a missing year loses its runners and its races' winner
+  times in `races.parquet` (`finish_time_s` is reset from the rebuilt runners), with no error.
 - The command prints the overall counts and rates; the detail by year, with up to 20 failing race
   ids per check, goes to `reports/jravan-reconcile.md` through `write_report`
   (`sources=('jravan', 'jra')`), which refuses the repository. Its figures come from a licensed
