@@ -88,6 +88,12 @@ LEGACY_KINDS: dict[str, str] = {
             "japan-speed-top3-c3-timing",
             "japan-debut-maiden-members-v1",
             "japan-debut-maiden-members-v2",
+            "japan-c2-lineage-e37-netkeiba",  # #538, E37's lineage members (netkeiba pedigree)
+            "japan-c2-lineage-e37-netkeiba-trial",
+            "japan-c2-lineage-e37-netkeiba-v2",
+            "japan-c2-lineage-e37-netkeiba-v2-trial",
+            "japan-c2-lineage-e37-netkeiba-v3",
+            "japan-c2-lineage-e37-netkeiba-v3-trial",
         ),
         "member",
     ),

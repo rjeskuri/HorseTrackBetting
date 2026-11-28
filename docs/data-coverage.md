@@ -288,9 +288,9 @@ The lineage (#95); netkeiba's pedigree card names no sire line.
 
 Layers C2; role `feature_at_t`; tickets #407.
 
-JV-Data CK (each runner's placings so far, by surface, distance, going and venue, and its jockey's and trainer's), dumped but not mapped into a table.
+JV-Data CK (each runner's placings so far, by surface, distance, going and venue, and its jockey's and trainer's), mapped into the long jravan table (#407); `first` stands for its six placing-count columns.
 
-- jravan `records/SNPN/CK._record`: withheld (D21)
+- jravan `career_counts.first`: withheld (D21)
 
 ## finish_time
 

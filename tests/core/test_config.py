@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from horsetrack.core.config import Pool, SourceConfig, load_country_yaml, load_source
 
-ENABLED = {"WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE"}
+ENABLED = {"WIN", "PLACE", "BRACKET_QUINELLA", "QUINELLA", "QUINELLA_PLACE"}
 
 # Venue facts, written out independently of the YAML: code -> (netkeiba number, printed name).
 VENUES = {
@@ -74,7 +74,7 @@ def test_load_jra_source_config(jra, raw):
     assert raw["hosts"]["db"] == "https://db.netkeiba.com"
     assert raw["hosts"]["race"] == "https://race.netkeiba.com"
 
-    # the four pools are enabled, nothing else is; each pool knows its own code
+    # the five pools are enabled, nothing else is; each pool knows its own code
     assert {code for code, pool in jra.pools.items() if pool.enabled} == ENABLED
     for code, pool in jra.pools.items():
         assert pool.code == code
@@ -92,6 +92,14 @@ def test_load_jra_source_config(jra, raw):
     [
         ("WIN", {"単勝", "WIN"}, 1, "win", "stake_back_share", 0.20),
         ("PLACE", {"複勝", "PLACE"}, 1, "place", "stake_back_share", 0.20),
+        (
+            "BRACKET_QUINELLA",
+            {"枠連", "BRACKET QUINELLA"},
+            2,
+            "unordered_top2_bracket",
+            "stake_back_share",
+            0.225,
+        ),
         ("QUINELLA", {"馬連", "QUINELLA"}, 2, "unordered_top2", "stake_back_share", 0.225),
         ("QUINELLA_PLACE", {"ワイド", "WIDE"}, 2, "any2_of_top3", "stake_back_share", 0.225),
     ],
