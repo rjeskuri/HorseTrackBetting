@@ -620,13 +620,19 @@ def build_spec(owner: dict, scheme: FoldScheme, bootstrap: dict, floor: float) -
 # --------------------------------------------------------------------------- development rows
 
 
-def read_development() -> tuple[pd.DataFrame, pd.DataFrame]:
+def read_development(*, source: str = SOURCE) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Development runners and races of the price era: column- and date-scoped store reads that
-    drop holdout days, then `split_off`'s development rows. The holdout is never opened."""
+    drop holdout days, then `split_off`'s development rows. The holdout is never opened. `source`
+    names the store copy (#404: 'jravan' reads the JRA-VAN copy)."""
     frames = []
     for name, columns in (("runners", RUNNER_COLUMNS), ("races", RACE_COLUMNS)):
         table = read_store_table(
-            name, columns=columns, start=PRICE_ERA_START, end=date.max, touches_price=True
+            name,
+            columns=columns,
+            start=PRICE_ERA_START,
+            end=date.max,
+            touches_price=True,
+            source=source,
         )
         development, _ = split_off(table.to_pandas(date_as_object=False), "race_date", COUNTRY)
         frames.append(development)
@@ -667,15 +673,15 @@ def check_cut_points(cuts: Sequence[float]) -> None:
         )
 
 
-def store_builds() -> dict[str, str]:
-    """Each store table read, as '<path>@<sha256 prefix>' of its file."""
+def store_builds(source: str = SOURCE) -> dict[str, str]:
+    """Each table read from the store copy `source`, as '<path>@<sha256 prefix>' of its file."""
     builds = {}
     for name in ("runners", "races"):
         digest = hashlib.sha256()
-        with open(paths.processed_dir(SOURCE) / f"{name}.parquet", "rb") as fh:
+        with open(paths.processed_dir(source) / f"{name}.parquet", "rb") as fh:
             for chunk in iter(lambda: fh.read(1 << 20), b""):
                 digest.update(chunk)
-        builds[f"{SOURCE}_{name}"] = f"processed/{SOURCE}/{name}.parquet@{digest.hexdigest()[:16]}"
+        builds[f"{source}_{name}"] = f"processed/{source}/{name}.parquet@{digest.hexdigest()[:16]}"
     return builds
 
 

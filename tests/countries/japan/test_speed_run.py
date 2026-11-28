@@ -1406,9 +1406,11 @@ def test_run_study_appends_a_rerun_at_a_new_commit_and_not_an_identical_record(
     now = {"sha": "a" * 40, "gain": 0.5}
     summaries = []
     monkeypatch.setattr(study, "default_registry", lambda country: registry)
-    monkeypatch.setattr(study, "read_inputs", lambda: (races, runners))
+    monkeypatch.setattr(study, "read_inputs", lambda *, source, start: (races, runners))
     monkeypatch.setattr(
-        study, "store_builds", lambda: {"jra_races": "processed/jra/races.parquet@synthetic"}
+        study,
+        "store_builds",
+        lambda source: {f"{source}_races": f"processed/{source}/races.parquet@synthetic"},
     )
     monkeypatch.setattr(
         study,
