@@ -20,8 +20,8 @@ One row per slot of マイニング予想 whose 馬番 is a positive integer: `k
 kind over the rows with a value (DM ascending, TM descending, ties sharing the lowest rank);
 `data_kubun` and `created_utc` (データ作成年月日 + データ作成時分 JST, as UTC; null when either is
 invalid) of the record kept. The table is not a
-store table and has no availability rule until the owner sets one, so the as-of views refuse it.
-See docs/specs/jravan.md.
+store table; its availability rule (config/availability.yaml, the owner's rule C on #406) shows a
+row at t once its `created_utc <= t`. See docs/specs/jravan.md.
 """
 
 from __future__ import annotations

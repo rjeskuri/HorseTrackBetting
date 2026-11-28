@@ -161,7 +161,8 @@ tables:
     column: published_utc
 
   # The JRA-VAN-only tables (processed/jravan/, not in schemas.TABLES), each rule the owner's
-  # request on #376 (2026-11-26). None has label columns.
+  # request on #376 (2026-11-26), and mining_predictions his answer on #406 (2026-11-28). None
+  # has label columns.
   # Final odds and pool votes: labels or conditioners only, never features at t (owner, #376,
   # 2026-11-26).
   final_odds:
@@ -186,3 +187,10 @@ tables:
     kind: static
   lineages:
     kind: static
+  # JV-Data DM (time-type) and TM (match-type) data-mining predictions (#406): rule C, the
+  # owner's answer on #406 (2026-11-28). A row is known at t once its kept record's creation
+  # stamp has passed (created_utc <= t), so a record created after the post is never in a view
+  # before that race. No fallback: a row with a null created_utc is in no view.
+  mining_predictions:
+    kind: column
+    column: created_utc

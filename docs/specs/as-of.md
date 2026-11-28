@@ -260,6 +260,7 @@ checks the file against those answers.
 | `breeding_horses` (jravan) | `static` | always: pedigree is known at any t (#376) | none |
 | `produce` (jravan) | `static` | always: pedigree is known at any t (#376) | none |
 | `lineages` (jravan) | `static` | always: pedigree is known at any t (#376) | none |
+| `mining_predictions` (jravan) | `column` | `created_utc`, the kept DM or TM record's creation stamp, no fallback (rule C, the owner's answer on #406, 2026-11-28) | none |
 
 - Nothing else is banned. JRDB tables are inputs to private models only (D21: no JRDB-derived
   figure in the public repository).

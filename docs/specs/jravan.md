@@ -39,7 +39,7 @@ command run by hand. The same inputs give the same bytes.
 | `timeseries` | `timeseries.py` | `odds_timeseries/<YYYY-MM-DD>.parquet` | the odds log's schema | that of `odds_timeseries` |
 | `masters` | `masters.py` | `horses`, `horse_pedigree`; `jockeys`, `trainers` | store tables; jravan-only | `horses` refused, `horse_pedigree` `static`; `current_value` with `in_view` |
 | `bloodlines` | `bloodlines.py` | `breeding_horses`, `produce`, `lineages` | jravan-only | `static` |
-| `mining` | `mining.py` | `mining_predictions` | jravan-only | none yet (the owner's, pending): the as-of views refuse it |
+| `mining` | `mining.py` | `mining_predictions` | jravan-only | `column` on `created_utc` (the owner's rule C, #406) |
 | `workouts` | `handicap/workouts_jravan.py` | `workouts` | jravan-only | none: its readers apply the module's own publication rule (#229), and the as-of views refuse it |
 | `dump` | `dump.py` | `interim/jravan/records/` | not tables | none |
 | `reconcile` | `reconcile.py` | `reports/jravan-reconcile.md` | not a table | n/a |
@@ -611,8 +611,10 @@ ids and lineages with their resolution.
 `horsetrack.countries.japan.jravan.mining`; `horsetrack japan jravan mining [--year YYYY ...]`
 writes `processed/jravan/mining_predictions.parquet`: JV-Data's time-type (DM) and match-type
 (TM) data-mining predictions per runner, candidate C4 members. It is not in `schemas.TABLES`, so
-`read_table` refuses it, and it has no availability rule until the owner sets one, so
-`read_asof` and `asof_join` raise `NoAvailabilityRule`: no member reads it yet. `created_utc` is
+`read_table` refuses it. Its availability rule is the owner's rule C (his answer on #406,
+2026-11-28): `kind: column` on `created_utc`, no fallback and no label columns, so `read_asof`
+and `asof_join` show a row at t once its kept record's `created_utc <= t`, and a record created
+after the post is never in a view before that race. `created_utc` is
 the kept record's creation stamp, not a known publication time; which versions the export holds
 is withheld (D21).
 

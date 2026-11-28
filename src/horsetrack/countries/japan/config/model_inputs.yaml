@@ -497,9 +497,9 @@ inputs:
     tickets: [406]
     note: >-
       JV-Data DM (time-type) and TM (match-type) data-mining predictions, published before the
-      race; mapped into the jravan mining_predictions table (#406). Its availability rule is
-      pending the owner, so the as-of views refuse it; created_utc is the kept record's creation
-      stamp, not a known publication time.
+      race; mapped into the jravan mining_predictions table (#406). Available at t once the kept
+      record's created_utc <= t (rule C, the owner's answer on #406, 2026-11-28); created_utc is
+      the kept record's creation stamp, not a known publication time.
   win_sales:
     layers: [C4]
     role: conditioner
