@@ -30,6 +30,7 @@ per family, each holding that family's runs.
 - [japan-c2-ability-final-win](japan-c2-ability-final-win.md)
 - [japan-c2-ability-final-win-v2](japan-c2-ability-final-win-v2.md)
 - [japan-c2-rating-final-win](japan-c2-rating-final-win.md)
+- [japan-c3-p-speed-final-win](japan-c3-p-speed-final-win.md)
 - [japan-c4-meta-final-win](japan-c4-meta-final-win.md)
 - [japan-calibrated-market-final-win](japan-calibrated-market-final-win.md)
 - [japan-coplacer-place-e15](japan-coplacer-place-e15.md)
