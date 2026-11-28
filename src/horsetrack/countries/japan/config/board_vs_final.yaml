@@ -6,22 +6,26 @@
 # refuses (a changed study is a new family_id).
 #
 # board: the release-time rule of JRDB's TYB board (`jrdb_board`'s `rules`).
-#   release_lag_min: minutes from TYB's odds time (`tyb_odds_time`, HHMM on the JST clock of the
-#                    race date) to the board's release. An assumption, not a measured fact: the
-#                    store keeps no JRDB release log, so the board counts as known only this long
-#                    after the clock it was taken at. A board released after its race's off is not
-#                    used.
+#   release_lags_min: the lags, in minutes, from TYB's odds time (`tyb_odds_time`, HHMM on the JST
+#                    clock of the race date) to the board's release. An assumption, not a
+#                    measured fact: the store keeps no JRDB release log, so the board counts as
+#                    known only this long after the clock it was taken at. A board released
+#                    after its race's off is not used. Each lag is a counted variant (#602): the
+#                    study runs once per lag, so the E2/E45 cross-application does not rest on
+#                    one assumed lag; 0 reads the board as released at its odds time, 10 is the
+#                    lag #103 assumed.
 #   tz:              the zone of the odds-time clock.
 # cluster_unit: the bootstrap's resampling unit (D7's meeting, venue x day; the `meeting_id`
 #   column).
 # bootstrap_seed: the bootstrap's seed (reproducibility only; scoring.yaml sets the level and the
 #   replicates).
-# family_id: v2 corrects E45's place rule (Place's places and Wide's sale from each race's paid
+# family_id: v2 corrected E45's place rule (Place's places and Wide's sale from each race's paid
 #   combinations, not from the field of starters); v1 (places by the starters) stays in the
-#   registry as recorded, superseded.
-family_id: japan-board-vs-final-e2-e45-v2
+#   registry as recorded, superseded. v3 registers the release lags as counted variants (#602);
+#   v2 (the single lag 10) stays in the registry as recorded, superseded.
+family_id: japan-board-vs-final-e2-e45-v3
 board:
-  release_lag_min: 10
+  release_lags_min: [0, 10]
   tz: Asia/Tokyo
 cluster_unit: meeting
 bootstrap_seed: 103
