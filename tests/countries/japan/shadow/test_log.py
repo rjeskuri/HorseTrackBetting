@@ -716,3 +716,165 @@ def test_verify_reports_counts_by_tau_and_status(rule, held, spec):
 
     ShadowLog(path, day=day).seal(sealed_utc=datetime(2026, 11, 28, 9, 0, tzinfo=UTC))
     assert ShadowLog(path, day=day).verify() == LogSummary(**counts, sealed=True)
+
+
+# ---------------------------------------------------------------- record versions (#564)
+#
+# Contract (ticket #564): ``shadow_log.RECORD_VERSION`` is 2, the version a record carrying
+# ``p_model`` states in its ``record_version`` field. ``record_version(record)`` is that field,
+# and 1 for a record without it (every record written before #564, and the formation records).
+# A version-1 record reads back as having no ``p_model`` (``record.get("p_model") is None``).
+# The log refuses (RecordRefused, nothing written) a ``record_version`` that is not the integer 1
+# or 2, a version-2 record without a ``p_model`` key (null is allowed: no model), a ``p_model``
+# that is neither null nor a number in [0, 1], and a ``value_model`` that is neither null nor a
+# finite number >= 0. Records are still stored as given: nothing is added to an old record.
+
+
+def rec_v2(race_no=11, *, p_model=0.31, **extra):
+    """A version-2 record: the v1 shape plus record_version and p_model."""
+    return rec(race_no, **{"record_version": 2, "p_model": p_model, **extra})
+
+
+def exotic_v2(race_no=11, *, pool="TIERCE", combination="3,7,1", p=0.012, odds=96.5, **extra):
+    """A version-2 record of a pool with no price forecast: p_model, decision odds, their value."""
+    fields = {
+        "pool": pool,
+        "combination": combination,
+        "record_version": 2,
+        "p_model": p,
+        "board_odds": odds,
+        "value_model": p * odds,
+        "value_mean": None,
+        "value_q05": None,
+        "value_q95": None,
+    }
+    return rec(race_no, **{**fields, **extra})
+
+
+def old_log_bytes(records: list[dict], *, sealed: bool) -> bytes:
+    """A log file as the pre-#564 logger wrote it, built here from the spec's line format: each
+    record as given plus day_status, chained by sha256, then the seal line when sealed."""
+    lines, prev = [], ZERO
+    for seq, record in enumerate(records, 1):
+        obj = {"seq": seq, "prev_sha256": prev, "record": {**record, "day_status": "development"}}
+        line = json.dumps(obj, ensure_ascii=True, separators=(",", ":")).encode()
+        lines.append(line)
+        prev = sha(line)
+    if sealed:
+        seal = {"n_records": len(records), "sealed_utc": SEALED_AT.isoformat()}
+        obj = {"seq": len(records) + 1, "prev_sha256": prev, "seal": seal}
+        lines.append(json.dumps(obj, ensure_ascii=True, separators=(",", ":")).encode())
+    return join_lines(lines)
+
+
+P_MODELS = [0.0, 1.0, 0.123456789, 0.5, None]
+
+
+@pytest.mark.parametrize("p_model", P_MODELS, ids=str)
+def test_records_round_trip_with_and_without_p_model(p_model):
+    assert shadow_log.RECORD_VERSION == 2
+    log, path = open_log()
+    old = [rec(1, combination="4"), rec(1, combination="5", pool="PLACE", tau=5)]
+    new = [
+        rec_v2(1, combination="6", p_model=p_model),
+        rec_v2(2, combination="1", pool="QUINELLA_PLACE", p_model=p_model, tau=16),
+        exotic_v2(2, combination="1,2,3", p=0.0 if p_model is None else p_model / 3, odds=41.0),
+        rec_v2(3, pool="*", combination="*", tau=1, status="no_board", models=None, p_model=None),
+    ]
+    given = [dict(r) for r in old + new]
+
+    assert log.append(old) == 2
+    assert log.append(new) == 4
+    got = ShadowLog(path, day=DEV_DAY).read()
+
+    assert got == [as_logged(r) for r in old + new], "records are stored as given"
+    assert old + new == given, "append changed the caller's records"
+    assert [shadow_log.record_version(r) for r in got] == [1, 1, 2, 2, 2, 2]
+    for r in got[:2]:
+        assert r.get("p_model") is None and "record_version" not in r, "an old record gained keys"
+    assert [r["p_model"] for r in got[2:4]] == [p_model, p_model]
+    assert got[4]["value_model"] == pytest.approx(got[4]["p_model"] * 41.0)
+    assert got[5]["p_model"] is None
+    summary = log.verify()
+    assert (summary.n_records, summary.no_board, summary.by_tau) == (
+        6,
+        1,
+        {1: 1, 2: 3, 5: 1, 16: 1},
+    )
+
+
+OLD_DAYS = {  # name -> (sealed, old records)
+    "unsealed, three records": (False, [rec(1), rec(2, tau=5), rec(3, status="no_board")]),
+    "sealed, two records": (True, [rec(4, pool="PLACE"), rec(5, tau=30)]),
+}
+
+
+@pytest.mark.parametrize(("sealed", "records"), list(OLD_DAYS.values()), ids=list(OLD_DAYS))
+def test_a_log_written_before_record_versions_still_verifies(sealed, records):
+    log, path = open_log()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = old_log_bytes(records, sealed=sealed)
+    path.write_bytes(raw)
+
+    summary = log.verify()
+    assert summary.n_records == len(records) and summary.sealed is sealed
+    assert summary.no_board == sum(r["status"] == "no_board" for r in records)
+    got = log.read()
+    assert got == [as_logged(r) for r in records]
+    assert [shadow_log.record_version(r) for r in got] == [1] * len(records)
+    assert all(r.get("p_model") is None for r in got)
+
+    if sealed:
+        with pytest.raises(LogSealed):
+            log.append([rec_v2(9)])
+        assert path.read_bytes() == raw
+        return
+    # a new logger carries on the old file: the mixed log verifies and reads both versions
+    new = [rec_v2(7, p_model=0.42), exotic_v2(7, pool="TRIO", combination="1,4,9", p=0.05)]
+    assert ShadowLog(path, day=DEV_DAY).append(new) == 2
+    assert path.read_bytes().startswith(raw), "the old lines were rewritten"
+    log.seal(sealed_utc=SEALED_AT)
+    summary = ShadowLog(path, day=DEV_DAY).verify()
+    assert summary.n_records == len(records) + 2 and summary.sealed
+    got = ShadowLog(path, day=DEV_DAY).read()
+    assert [shadow_log.record_version(r) for r in got] == [1] * len(records) + [2, 2]
+    assert [r.get("p_model") for r in got] == [None] * len(records) + [0.42, 0.05]
+
+
+BAD_VERSIONS = {  # name -> the bad record
+    "version 3": rec_v2(record_version=3),
+    "version 0": rec_v2(record_version=0),
+    "version as text": rec_v2(record_version="2"),
+    "version as a float": rec_v2(record_version=2.0),
+    "version true": rec_v2(record_version=True),
+    "version null": rec_v2(record_version=None),
+    "version 2 without p_model": {k: v for k, v in rec_v2().items() if k != "p_model"},
+    "p_model above 1": rec_v2(p_model=1.0001),
+    "p_model below 0": rec_v2(p_model=-0.01),
+    "p_model as text": rec_v2(p_model="0.3"),
+    "p_model true": rec_v2(p_model=True),
+    "p_model a list": rec_v2(p_model=[0.3]),
+    "p_model a mapping": rec_v2(p_model={"WIN": 0.3}),
+    "value_model negative": exotic_v2(value_model=-0.5),
+    "value_model as text": exotic_v2(value_model="1.2"),
+    "value_model true": exotic_v2(value_model=True),
+}
+
+
+@pytest.mark.parametrize("bad", list(BAD_VERSIONS.values()), ids=list(BAD_VERSIONS))
+def test_a_bad_record_version_or_p_model_is_refused(bad):
+    log, path = open_log()
+    log.append([rec(1)])
+    assert_refused(log, path, [rec_v2(2), bad])
+    # the same batch without the bad record goes in; the edges of the ranges are accepted
+    edges = [
+        rec_v2(2),
+        rec_v2(3, p_model=0.0),
+        rec_v2(4, p_model=1.0),
+        rec_v2(5, p_model=None),
+        exotic_v2(6, value_model=0.0),
+        exotic_v2(7, value_model=None),
+        rec(8, record_version=1),
+    ]
+    assert log.append(edges) == len(edges)
+    assert [shadow_log.record_version(r) for r in log.read()] == [1, 2, 2, 2, 2, 2, 2, 1]

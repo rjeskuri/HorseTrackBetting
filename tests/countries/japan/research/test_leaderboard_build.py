@@ -168,6 +168,12 @@ def legacy_rows(registry: Registry) -> list[LeaderboardRow]:
     return rows(registry)
 
 
+def legacy_rows_as_built(registry: Registry) -> list[LeaderboardRow]:
+    """#451's legacy rows as ``build_rows`` gives them with no depth table under the data dir:
+    each with its capacity reason (#491's ``with_capacity``), every other field as it is."""
+    return build().with_capacity(legacy_rows(registry), None)
+
+
 def snapshot_logs() -> dict[Path, bytes]:
     return {p: p.read_bytes() for p in REAL_COUNTRIES.glob("*/holdout_log.jsonl")}
 
@@ -468,7 +474,7 @@ def test_build_rows_lists_every_variant_and_every_candidate_cell(reg, tmp_path):
     }
     assert set(rows) == registry_ids | {TICKET_ID, QUINELLA_ID}
     # the registry's rows are #451's legacy rows as they are
-    legacy = {r.option_id: r for r in legacy_rows(reg)}
+    legacy = {r.option_id: r for r in legacy_rows_as_built(reg)}
     assert set(legacy) == registry_ids
     assert {i: rows[i] for i in legacy} == legacy
     # spot checks written out: the adapters, the legacy kinds and the convention all apply
@@ -707,7 +713,7 @@ def test_a_registry_row_wins_over_a_candidate_row_with_the_same_id(reg, tmp_path
     failed_id = f"{POOL_SCAN}/PLACE|class:open|band:2-5"
     kept_id = f"{POOL_SCAN}/WIN|class:open|band:10-20"
     assert set(rows) == {TICKET_ID, failed_id, kept_id}
-    legacy = {r.option_id: r for r in legacy_rows(reg)}
+    legacy = {r.option_id: r for r in legacy_rows_as_built(reg)}
     assert rows[TICKET_ID] == legacy[TICKET_ID]
     assert rows[TICKET_ID].return_per_100 == pytest.approx(91.0)
     assert (rows[TICKET_ID].n, rows[TICKET_ID].rule) == (1500, "flat Win bets")
@@ -821,7 +827,7 @@ def seed_precedence_registry(registry: Registry) -> None:
 
 
 def assert_registry_precedence(rows: dict[str, LeaderboardRow], registry: Registry) -> None:
-    legacy = {r.option_id: r for r in legacy_rows(registry)}
+    legacy = {r.option_id: r for r in legacy_rows_as_built(registry)}
     assert set(legacy) == PRECEDENCE_REGISTRY_IDS
     # every registry row is there as the registry gives it
     assert {i: rows.get(i) for i in legacy} == legacy
