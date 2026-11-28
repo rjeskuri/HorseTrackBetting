@@ -266,6 +266,10 @@ store's.
   source's: `meetings`, `races`, `runners`, `dividends`, `horses`, `horse_pedigree`. JRA venues
   only (JV-Data venue codes 01-10). Where JV-Data has no value the column is null, never a guess
   (e.g. `rating`, `gear_raw` and `brand_raw` on runners).
+- **Form tables** (#377): `form_races` and `form_runners` hold the NAR and overseas races and
+  runners of the export in the `races` and `runners` schemas, `jurisdiction` `nar` or `overseas`
+  and ids `<jurisdiction>:<YYYY-MM-DD>:<JV-Data venue code>:<NN>`. Horse form only: the jravan
+  `horse_runs` reads them (`win_odds` null) and no betting reader names them (D20).
 - **Jravan-only tables** are outside `schemas.TABLES`: `final_odds`, `pool_votes` (final odds and
   pool votes per combination), `jockeys`, `trainers` (the masters), `breeding_horses`, `produce`
   and `lineages` (bloodlines), and `workouts` (the HC and WC workouts, #229). Each is a Parquet file in `processed/jravan/` whose schema is

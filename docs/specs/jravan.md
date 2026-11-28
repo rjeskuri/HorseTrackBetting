@@ -134,6 +134,10 @@ so each family maps fields instead of slicing bytes:
   malformed part.
 - `jurisdiction(venue_code)`: `'jra'` for 01-10, `'nar'` for any other two-digit number,
   `'overseas'` for any other non-blank code, None for `'00'` or blank.
+- `form_race_id(year, mmdd, venue_code, race_no)` (#377): `<jurisdiction>:<YYYY-MM-DD>:<code>:<NN>`
+  for a NAR or overseas venue, the code as JV-Data writes it (`overseas:2025-10-05:A4:09`);
+  `form_meeting_id` the same without the race. None for a JRA venue, one without a jurisdiction,
+  an invalid date or race number.
 - `announced_utc(year, race_mmdd, mmddhhmm)`: a JST minute (UTC+9, no DST) as an aware UTC
   datetime; a month after the race's month is in the year before (a December announcement for a
   January race). None for `00000000`, blank or an invalid time.
@@ -162,6 +166,10 @@ so each family maps fields instead of slicing bytes:
   `finish_time_s` and the `result_*_utc` columns are null. Each mapping's code values are
   constants in `races.py`; a code a mapping lacks is null and counted. A blank or all-zero
   code is JV-Data's "unset": null (its `*_raw` column too), counted only on a race that was run.
+- NAR and overseas races (#377), kept the same way, go to `processed/jravan/form_races.parquet`
+  in the `races` schema (no meetings): `jurisdiction` `nar` or `overseas`, ids from
+  `keys.form_race_id` (`nar:2025-06-01:30:01`), `venue` the JV-Data code. Horse form only; their
+  codes stay out of the report's `unmapped`, and a venue without a jurisdiction is written nowhere.
 - Meetings: one row per `meeting_id`, `run` when any race ran, else `abandoned`; `day_night` and
   `surface_mix` null.
 
@@ -212,6 +220,10 @@ post time a null `post_time_local`.
   code a mapping lacks is null and counted.
 - Runners of abandoned races (RA data kubun 9) are written, without a place; their undrawn
   runners carry 馬番 99 as printed.
+- NAR and overseas runners (#377) go to `processed/jravan/form_runners.parquet` in the `runners`
+  schema under their races' form ids, and their winners' times to `form_races.parquet` when it is
+  there. Horse form only: the jravan `horse_runs` adds them with `win_odds` null (the price is
+  never scanned), and no betting reader names them.
 
 The run on the export: `horsetrack japan jravan runners`, run 2026-11-26. Every count, span,
 share, rate, wall time and peak memory of it is withheld (D21), in two files under
