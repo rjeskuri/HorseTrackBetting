@@ -1,8 +1,8 @@
 """CI parallelism (ticket #600): the verify job stays well under its timeout.
 
 The suite runs in parallel with pytest-xdist from scripts/verify.sh, the dependency is declared and
-locked, and the verify job's timeout is back to at most 20 minutes. These tests read the config
-files; they never run the suite.
+locked, and the verify job's timeout is at most 30 minutes (#600 set 20; the owner raised it to 30
+in #697 while many PRs are in flight). These tests read the config files; they never run the suite.
 """
 
 import re
@@ -17,7 +17,7 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
-MAX_TIMEOUT_MINUTES = 20
+MAX_TIMEOUT_MINUTES = 30
 
 
 def _pytest_commands() -> list[list[str]]:
@@ -69,7 +69,7 @@ def test_dev_dependency_group_lists_pytest_xdist():
     assert "pytest-xdist" in names, f"pytest-xdist is missing from [dependency-groups] dev: {dev}"
 
 
-def test_ci_verify_job_timeout_is_at_most_20_minutes():
+def test_ci_verify_job_timeout_is_at_most_30_minutes():
     workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())
     job = workflow["jobs"]["verify"]
     assert "timeout-minutes" in job, "the verify job has no timeout-minutes"
