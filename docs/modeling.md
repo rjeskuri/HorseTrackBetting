@@ -76,11 +76,12 @@ flowchart TB
     end
     subgraph L1["C1: final-price nowcast"]
         NC0["Drift by pool, odds band and horizon<br/>#116 japan/models/v0/nowcast.py<br/>v0"]
-        NC1["Structural nowcast φ_t × s_late, scored for Win (Place diagnostic)<br/>#85 japan/models/nowcast.py; board quality by horizon #86<br/>built, not adopted"]
+        NC1["Structural nowcast φ_t × s_late, scored for Win and Place (Place by JRA's rule, measured against final votes in #410's v5; which reads stand is withheld, D21)<br/>#85 japan/models/nowcast.py; board quality by horizon #86<br/>built, not adopted"]
     end
     subgraph L2["C2: per-horse ability and interactions"]
         ABIL["Dynamic rating #91 japan/models/rating.py;<br/>top-3 Plackett-Luce ability, pooled jockey, trainer, sire<br/>#92 japan/models/ability.py<br/>built, not adopted"]
-        INTR["Interactions: jockey, trainer and track #93,<br/>competition #94, lineage #95<br/>planned"]
+        INTR["Interactions: jockey, trainer and track #93,<br/>competition #94<br/>planned"]
+        LIN["Lineage prior: sire × surface × band, damsire at ¼<br/>#95 japan/models/lineage.py<br/>built; E37 run planned"]
     end
     subgraph L3["C3: speed and par"]
         SPEED["Par and expected top-3 time #96,<br/>horse relative speed p_speed #97<br/>planned"]
@@ -97,7 +98,8 @@ flowchart TB
     subgraph L6["C6: decision layer, shadow only"]
         SV["Shadow value over nowcast draws<br/>#118 japan/models/v0/shadow_values.py<br/>v0"]
         SLOG["Shadow log at each grid point<br/>#119 japan/shadow/log.py<br/>#120 japan/shadow/day.py<br/>built"]
-        STAKE["Value with our own stake #100,<br/>staking rungs on paper #101<br/>planned"]
+        STAKE["Shadow EV with our own stake #100<br/>japan/models/decision.py<br/>built"]
+        SDEC["Shadow decisions logged and scored #101<br/>planned"]
     end
     BOARD --> NC0
     NC0 -.->|"replaced by"| NC1
@@ -117,13 +119,14 @@ flowchart TB
     SV -.-> STAKE
     NC1 -.-> STAKE
     EXO -.-> STAKE
+    STAKE -.-> SDEC
 
     classDef v0 fill:#dbeafe,stroke:#1d4ed8,color:#0b1f4d
     classDef built fill:#dcfce7,stroke:#15803d,color:#052e16
     classDef planned fill:#f3f4f6,stroke:#6b7280,stroke-dasharray: 5 5,color:#111827
     class NC0,CAL,RES,ORD,SV v0
-    class ASOF,BOARD,SLOG,NC1,ABIL built
-    class INTR,SPEED,META,EXO,STAKE planned
+    class ASOF,BOARD,SLOG,NC1,ABIL,STAKE built
+    class INTR,SPEED,META,EXO,SDEC planned
 ```
 
 The work is split into seven layers, and each is tested both on its own and for what it adds
@@ -144,7 +147,8 @@ flowchart LR
     GOING["Going: cushion, moisture, rail setting<br/>#136 japan/jra/going.py<br/>store ingest #90, features #230: planned"]
     BIAS["Within-day track bias<br/>#138, #224 japan/handicap/track_bias.py"]
     RAT["Dynamic rating #91<br/>japan/models/rating.py"]
-    INT["Interactions: jockey, trainer, track #93,<br/>competition #94, lineage #95<br/>planned"]
+    INT["Interactions: jockey, trainer, track #93,<br/>competition #94<br/>planned"]
+    LIN["Lineage prior: sire × surface × band,<br/>damsire at ¼ #95 japan/models/lineage.py"]
     PL["Plackett-Luce ability on the top 3, pooled jockey,<br/>trainer and sire #92 japan/models/ability.py"]
     PAR["Par and expected top-3 time #96<br/>planned"]
     PSPD["Horse relative speed, p_speed #97<br/>planned"]
@@ -158,6 +162,8 @@ flowchart LR
     PAR -.-> PSPD
     RAT --> PL
     INT -.-> PL
+    LIN -.->|"debut and thin-history prior, E37"| PL
+    LIN -.->|"aptitude prior"| INT
     MKT -.->|"offset"| META
     HCP -.-> META
     WRK -.-> META

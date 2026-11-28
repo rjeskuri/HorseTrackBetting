@@ -7,10 +7,18 @@
  * a ladder, or when the shadow race's post time is not /feed's (the schedule authority), the plain
  * row's t20/t10/t5/t2_odds and '-' ahead), the value (WIN: mean with its 5-95%
  * band; other pools: the value at the low and the high odds), the bucket label and the flag chips.
- * Rows come from the plain feed only, one race per page, in board.js's order: favourite first by
- * the crowd's current odds (#498, the owner's display choice). The shadow feed (#121) is joined on
- * (race_id, pool, combination) and never sorts, highlights or colours a row by shadow value (a
- * selection rule is the owner's, D19). The race follows the URL hash as on the board page.
+ * One race per page, one section per bet type whatever the plain feed holds (#506, SECTIONS):
+ * Win, Place, Quinella, Wide, Exacta, Trio, Trifecta, Bracket quinella. Their rows come from the
+ * plain feed in board.js's order, favourite first by the crowd's current odds (#498, the owner's
+ * display choice), except Exacta, Trio and Trifecta: the shadow race's 15 most likely
+ * combinations by `p_model`, most likely first, each joined to the plain row of its odds ('-'
+ * without one), leaving out first every combination /feed shows scratched (a runner SCR on its
+ * WIN or PLACE row, or the combination's own row SCR). Every row has a Model p cell, the shadow
+ * race's `p_model` as a percent. The pools
+ * without a price forecast (NO_FORECAST: no nowcast, #400) show value = Model p x the odds now
+ * and say so; the tier-2 sections show their capture's age. The shadow feed (#121) is joined on
+ * (race_id, pool, combination) and never highlights or colours a row by value or probability
+ * (a selection rule is the owner's, D19). The race follows the URL hash as on the board page.
  * Values are gross return per 1 yen at the final price: information only, nothing here is a bet.
  * On a WIN5 day (#135) a line above the board, the element with data-win5, shows the shadow feed's
  * `win5`: the whole WIN5 pool's gross return per 1 yen with the carryover (two decimals), the
@@ -27,6 +35,15 @@
   var POLL_MS = 5000;
   var DASH = "-";
   var has = Object.prototype.hasOwnProperty;
+  var SECTIONS = ["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE", "FORECAST", "TRIO", "TIERCE",
+    "BRACKET_QUINELLA"];
+  var TOP = 15;  // rows of a ranked section
+  var RANKED = { FORECAST: true, TRIO: true, TIERCE: true };
+  var NO_FORECAST = { QUINELLA: true, BRACKET_QUINELLA: true, FORECAST: true, TRIO: true,
+    TIERCE: true };
+  var LATEST_ONLY = { BRACKET_QUINELLA: true, FORECAST: true, TRIO: true, TIERCE: true };
+  var NO_FORECAST_NOTE = '<span class="muted small">no price forecast: value is Model p × the ' +
+    "odds now</span>";
 
   function own(obj, key) {
     return obj && typeof obj === "object" && has.call(obj, key) ? obj[key] : null;
@@ -51,6 +68,67 @@
     var r = [own(entry, "value_at_low"), own(entry, "value_at_high")];
     if (allNull(r)) return DASH;
     return figure(r[0]) + "–" + figure(r[1]);
+  }
+
+  /* A pool without a price forecast: Model p x the plain row's odds now, two decimals; '-'
+   * without both (a scratched row has no odds). */
+  function productText(p, line) {
+    var odds = line.status === "SCR" ? null : num(line.odds);
+    return p === null || odds === null ? DASH : (p * odds).toFixed(2);
+  }
+
+  /* 0.1234 -> '12.3%'; '-' for none. */
+  function percentText(p) {
+    return p === null ? DASH : (p * 100).toFixed(1) + "%";
+  }
+
+  /* The shadow race's p_model of one pool, {combination: probability}, or null. */
+  function pModelOf(race, code) {
+    var p = own(own(race, "p_model"), code);
+    return p && typeof p === "object" ? p : null;
+  }
+
+  /* The runners the plain feed marks scratched, {horse number text: true}: a current SCR row on
+   * WIN or on PLACE, either is enough. */
+  function scratchedRunners(pools) {
+    var out = Object.create(null);
+    ["WIN", "PLACE"].forEach(function (code) {
+      var body = own(pools, code);
+      (body && Array.isArray(body.rows) ? body.rows : []).forEach(function (l) {
+        if (l && typeof l === "object" && l.status === "SCR") out[String(l.combination)] = true;
+      });
+    });
+    return out;
+  }
+
+  /* A ranked section's rows: the TOP combinations of `p` by probability, most likely first (ties
+   * in the feed's order), each the plain row of the same combination or a row without odds. The
+   * two feeds are polled apart, so `p` can predate a scratch /feed already shows: a combination
+   * with a runner in `scratched`, or whose own plain row is SCR, is left out before the TOP. */
+  function topRows(p, body, scratched) {
+    if (!p) return [];
+    var lines = Object.create(null);
+    (body && Array.isArray(body.rows) ? body.rows : []).forEach(function (l) {
+      if (l && typeof l === "object") lines[String(l.combination)] = l;
+    });
+    var probs = Object.create(null);
+    var keys = Object.keys(p).filter(function (c) {
+      probs[c] = num(p[c]);
+      if (probs[c] === null || (c in lines && lines[c].status === "SCR")) return false;
+      return !c.split(",").some(function (h) { return scratched[h] === true; });
+    });
+    keys.sort(function (a, b) { return probs[b] - probs[a]; });
+    return keys.slice(0, TOP).map(function (c) {
+      return c in lines ? lines[c] : { combination: c, odds: null, odds_hi: null, status: null };
+    });
+  }
+
+  /* The age of a tier-2 pool's capture at nowMs, in whole minutes. */
+  function captureAgeNote(body, nowMs) {
+    var at = board.instantMs(own(body, "capture_utc"));
+    var said = at === null ? "not captured yet"
+      : "captured " + Math.max(0, Math.floor((nowMs - at) / 60000)) + " min ago";
+    return '<span class="muted small mono" data-capture-age>' + esc(said) + "</span>";
   }
 
   function flagLabel(code) { return String(code).replace(/_/g, " "); }
@@ -147,8 +225,8 @@
 
   var HEAD = LADDER.map(function (c) { return '<th scope="col" class="num">' + c[3] + "</th>"; })
     .join("") +
-    '<th scope="col" class="num">Value</th><th scope="col">Read at</th>' +
-    '<th scope="col">Flags</th>';
+    '<th scope="col" class="num">Model p</th><th scope="col" class="num">Value</th>' +
+    '<th scope="col">Read at</th><th scope="col">Flags</th>';
 
   /* race_id -> whether the shadow race has the plain feed's post time (the same instant, or a
    * null post time on both feeds: the same unknown schedule). */
@@ -170,27 +248,46 @@
     return same;
   }
 
-  /* The HTML of the shadow page for one race of one venue: the board plus ladder, value, bucket
-   * and flag cells. /feed is the schedule authority: the plain feed is drawn as is, and its post
-   * times set the header, the countdown, the strip and the next-race choice. */
+  /* The HTML of the shadow page for one race of one venue: the board's header and one section per
+   * bet type, each row with ladder, Model p, value, bucket and flag cells. /feed is the schedule
+   * authority: its post times set the header, the countdown, the strip and the next-race choice. */
   function renderShadow(feed, shadowFeed, opts) {
     opts = opts || {};
     var races = shadowRaces(shadowFeed);
     var same = sameSchedules(feed, races);
+    function shadowRace(raceId) {
+      return has.call(races, String(raceId)) ? races[String(raceId)] : null;
+    }
     var columns = {
       head: HEAD,
       cells: function (raceId, code, line) {
-        var race = has.call(races, String(raceId)) ? races[String(raceId)] : null;
+        var race = shadowRace(raceId);
         var entry = own(own(own(race, "pools"), code), String(line.combination));
+        var p = num(own(pModelOf(race, code), String(line.combination)));
+        var value = NO_FORECAST[code] ? productText(p, line) : valueText(code, entry);
         return ladderCells(entry, line, same[String(raceId)] === true) +
-          '<td data-col="value" class="num val">' + esc(valueText(code, entry)) + "</td>" +
+          '<td data-col="p-model" class="num">' + esc(percentText(p)) + "</td>" +
+          '<td data-col="value" class="num val">' + esc(value) + "</td>" +
           '<td data-col="bucket" class="mono small">' + esc(race ? bucketText(race) : DASH) +
           "</td>" + '<td data-col="flags" class="flags">' + flagChips(entry) + "</td>";
       },
     };
+    function sections(race, nowMs) {
+      var scratched = scratchedRunners(race.pools);
+      return SECTIONS.map(function (code) {
+        var body = own(race.pools, code);
+        var section = { code: code, body: body,
+          note: (NO_FORECAST[code] ? NO_FORECAST_NOTE : "") +
+            (LATEST_ONLY[code] ? captureAgeNote(body, nowMs) : "") };
+        if (RANKED[code]) {
+          section.rows = topRows(pModelOf(shadowRace(race.race_id), code), body, scratched);
+        }
+        return section;
+      });
+    }
     return win5Line(shadowFeed) +
-      board.renderBoard(feed,
-        { now: opts.now, venue: opts.venue, race: opts.race, columns: columns });
+      board.renderBoard(feed, { now: opts.now, venue: opts.venue, race: opts.race,
+        columns: columns, sections: sections });
   }
 
   /* ------------------------------------------------------------ the browser glue */
