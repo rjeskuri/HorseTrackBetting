@@ -86,7 +86,7 @@ import random
 import re
 import shutil
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -1384,6 +1384,63 @@ def test_figure_check_ignores_hex_identities():
     assert figure_leaks("the pool held 89,100 yen", [decimal, 45678.0]) == []
 
 
+def assert_no_figure_leaks(text: str, values) -> None:
+    """The public report's figure check, shared by the plain and exotics tests: none of the
+    table's `values` (non-finite ones skipped) is printed in `text` as a token of its own."""
+    values = np.asarray(values, dtype=float)
+    leaks = figure_leaks(text, values[np.isfinite(values)])
+    assert not leaks, f"the figures {leaks} are in the public report"
+
+
+def assert_figure_check_is_sound(result, values) -> None:
+    """The check cannot fail on an identity and cannot miss a figure, at the report level.
+    Every run id, spec hash and report stem of `result`'s report is replaced by a hex identity
+    holding a whole figure of the table (the #749 failure: `...1495e2ab7211100...`), and the
+    check passes; the same report with that figure, or a decimal one, printed on a line of its
+    own fails it."""
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    whole = sorted({float(v) for v in values if renderings(float(v)) and v == int(v)})
+    assert whole, "the table has no whole figure the check looks for"
+    decimals = sorted({float(v) for v in values if renderings(float(v)) and v != int(v)})
+    for figure in {*whole[:3], *whole[-3:]}:
+        digits = f"{figure:.0f}"
+        identity = ("e" + digits + "d" * 64)[:64]
+        assert re.fullmatch(r"[0-9a-f]{64}", identity) and digits in identity[:16]
+        text = depth.render_public_report(
+            replace(
+                result,
+                run_id=identity,
+                spec_hash=identity,
+                report_path=Path(f"pool-depth-{identity[:16]}.md"),
+            )
+        )
+        assert digits in text, "the identity is not in the report: the case does not test the check"
+        assert_no_figure_leaks(text, values)  # the figure inside an identity is no leak
+        for printed in (f"{figure:.0f}", f"{figure:,.0f}"):
+            with pytest.raises(AssertionError, match=re.escape(printed)):
+                assert_no_figure_leaks(f"{text}\nthe pool held ¥{printed} yen", values)
+    text = depth.render_public_report(result)
+    for figure in {*decimals[:2], *decimals[-2:]}:
+        printed = f"{figure:,.2f}"
+        with pytest.raises(AssertionError, match=re.escape(printed)):
+            assert_no_figure_leaks(f"{text}\n| stake | {printed} |", values)
+
+
+def test_the_figure_check_holds_against_identities_and_real_figures(tmp_path, data_dir):
+    """#749, DoD 'the figure checks cannot fail because a run id or spec hash contains a
+    figure's digits, and still fail on a real figure': the plain depth report's check passes
+    with a run id holding a table figure and fails when that figure is printed."""
+    registry, spec = frozen_registry(tmp_path)
+    write_store(data_dir, run_races(JUNE, range(9)))
+    result = depth.run_depth(
+        date_from=date(2019, 6, 1), date_to=date(2019, 6, 30), out_dir=data_dir / "reports",
+        registry=registry,
+    )  # fmt: skip
+    columns = ["combo_yen", "pool_yen", *(f"capacity_{float(e):g}" for e in spec["edges"])]
+    assert_figure_check_is_sound(result, result.table[columns].to_numpy(dtype=float).ravel())
+
+
 def test_public_report_carries_no_figures(tmp_path, data_dir):
     """D21: the public report holds the identity and worked arithmetic, never a figure from the
     data. Two runs over different data (other days, other money, more races, the same cells)
@@ -1413,9 +1470,7 @@ def test_public_report_carries_no_figures(tmp_path, data_dir):
 
     figure_columns = ["combo_yen", "pool_yen", *(f"capacity_{float(e):g}" for e in spec["edges"])]
     for result in (result_a, result_b):
-        values = result.table[figure_columns].to_numpy(dtype=float).ravel()
-        leaks = figure_leaks(text_a, values[np.isfinite(values)])
-        assert not leaks, f"the figures {leaks} are in the public report"
+        assert_no_figure_leaks(text_a, result.table[figure_columns].to_numpy(dtype=float).ravel())
 
 
 # --- review round 1: the co-placer rule, the readers, the run identities and the command --------
