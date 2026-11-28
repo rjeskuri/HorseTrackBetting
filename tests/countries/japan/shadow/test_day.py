@@ -19,7 +19,8 @@ models, log, flag_rules, n_draws, seed) -> ShadowSummary` (the ticket's signatur
   value_at_high from `shadow_values(board, tau_min=tau, models, n_draws, seed=<derived>)`;
   `n_draws` and `seed` (the seed derived from (seed, race_id, tau), one per race and tau, the same
   for every pool) on each valued record; flags = the sorted list of `avoid_flags(board, rules,
-  now_utc=decision)` for that key ([] when none); models = `models.ids`.
+  now_utc=decision)` for that key ([] when none); models = `models.ids`; `record_version` 2 and
+  `p_model` (#564, pinned in test_shadow_day_p_model.py).
 - Without models, records still carry status "ok", board odds and flags, with null values and
   null models.
 - The day ends once the last race's T-1 point is due (or at 16:45 Asia/Tokyo when there are no
@@ -656,7 +657,7 @@ def gapped(models: ShadowModels, missing: set) -> ShadowModels:
     return dataclasses.replace(models, nowcast=dataclasses.replace(models.nowcast, sigma0=sigma0))
 
 
-RECORD_KEYS = {  # the shadow log's record format as it is today: no field is added by #233
+RECORD_KEYS = {  # the record format: no field is added by #233; #564 adds the last two
     "race_id",
     "tau_min",
     "decision_utc",
@@ -675,6 +676,8 @@ RECORD_KEYS = {  # the shadow log's record format as it is today: no field is ad
     "n_draws",
     "seed",
     "day_status",
+    "record_version",
+    "p_model",
 }
 POOL_PATTERNS = {  # the pool as the config and the log name it, not as a part of another name
     WIN: r"(?<![A-Z_])WIN(?![A-Z_])",
