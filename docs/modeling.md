@@ -170,7 +170,7 @@ flowchart LR
     RAT -->|"meld #98"| META
     PL -->|"meld #98"| META
     INT -->|"meld #98"| META
-    PSPD -.-> META
+    PSPD -.->|"meld export #753"| META
 ```
 
 The meta-model is where everything known about the horses meets the market's own view, the final
@@ -179,9 +179,11 @@ input of the box it points to; today the past-performance lines feeding the hand
 the dynamic rating feeding the Plackett-Luce ability (#92's study) and the par feeding the horse
 speed model (#97, scored at the final price by #347's study) run in code, and so do the meld's
 members (#98: the rating, the ability model and the six interaction members, each out of fold,
-melded at the final price by `studies/meld.py`); every other flow is planned (competition,
-lineage and p_speed have no out-of-fold export for the meld yet). The ability model's sire comes from the JRA-VAN pedigree, so its results are
-withheld (D21). The meta-model starts from the calibrated market and
+melded at the final price by `studies/meld.py`); every other flow is planned. Competition,
+lineage and p_speed have no out-of-fold export for the meld yet, so #98's run melds none of them
+and measures E41 without R_eff; the exports are #751, #752 and #753, R_eff is #754, and #755
+reruns the meld with them. The ability model's sire comes from the JRA-VAN pedigree, so its
+results are withheld (D21). The meta-model starts from the calibrated market and
 gives a member weight only when it improves on the final price, so a member that adds nothing ends
 up with no weight. Members built on the licensed JRDB data, such as the workout features, run only
 in private models on the owner's machine and never publish a figure (D21).

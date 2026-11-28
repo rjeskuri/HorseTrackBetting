@@ -6,7 +6,10 @@ se_u; JRA-VAN's sire, so licensed) and #93's six interaction members (ln of the 
 within the file's race: the base without the sire and its five blocks), read column- and
 date-scoped from their exports under the data dir (`MEMBER_FILES`, each named by its sha256 in the
 spec). #94's competition terms, #95's lineage members, #97's p_speed and E41's R_eff have no
-out-of-fold export: each is a failed record saying so (`NOT_RUN`).
+out-of-fold export: each is a failed record saying so (`NOT_RUN`), so this family measures none
+of them and E41 only for the sigma precision weight. Their exports are #751 (competition), #752
+(lineage), #753 (p_speed) and #754 (R_eff per race and E41's R_eff variants); #755 reruns the
+meld with them as a v2 family, since this family's spec is frozen.
 
 Level 2 is `studies.meta.store_frame`'s priced starters of development race days (holdout days
 dropped by `read_store_table` and `split_off`; the holdout is never opened), each with `fold`, the
@@ -134,13 +137,17 @@ POPULATIONS = {
     "from2020": (date(2020, 1, 1), tuple(MEMBERS)),
     "from2015": (date(2015, 1, 1), tuple(m for m in MEMBERS if m != "rating")),
 }
-NOT_RUN = {
+NOT_RUN = {  # in the frozen spec: the tracking tickets go in these comments, not the strings
+    # the out-of-fold export is #751; #755 reruns the meld with it
     "not_run:competition": "#94's competition terms (#531's study) export no out-of-fold member "
     "per runner, only its report: a member needs an export of its stage-1 u with oof_fold",
+    # the out-of-fold export is #752; #755 reruns the meld with it
     "not_run:lineage": "#95's lineage members (#538's E37 study) export no out-of-fold member per "
     "runner; its level-1 grid takes about 1.5 hours to refit",
+    # the out-of-fold export is #753; #755 reruns the meld with it
     "not_run:p_speed": "#97's p_speed (studies.p_speed) exports no out-of-fold member per runner; "
     "its HorseSpeed fit is the slowest of the stack",
+    # R_eff per race and E41's R_eff variants are #754; #755 runs them in the meld's v2
     "e41:reff": "E41's R_eff weighting needs #94's race_comparability per scored race from each "
     "fold's comparison graph (models.competition), which no study exports",
 }

@@ -8,12 +8,19 @@ member) shares one set of meeting draws, every member has an encompassing coeffi
 correlations and the Heskes ambiguity. **Nothing is adopted** (D19: every variant is a ranked row), and the holdout
 is not opened.
 
+**Not measured here.** #94's competition terms, #95's lineage members and #97's p_speed are not in the meld, and
+E41's R_eff weighting is not run: none has an out-of-fold export per runner or race, so each is a failed record, and
+E41 is measured only for the σ precision weight. The exports are #751 (competition), #752 (lineage), #753 (p_speed)
+and #754 (R_eff and E41's R_eff variants); #755 reruns the meld with them as a v2 family, since this family's spec
+is frozen.
+
 **Licensed figures are withheld (D21).** #92's ability model reads the JRA-VAN sire, so every record that uses it
 (the full meld, its ablations but one, every marginal gain, E41, E42, the correlations and the ambiguity) carries the
 source `jravan`: the committed summary shows no value for it, and this report names it by option id only. The rating
 and the interaction members read the JRA results store alone, so their standalone and encompassing records and the
 meld without the ability member are public, and their figures are below. The populations' race sets do not depend on
-JRA-VAN data: the ability and interaction exports hold the same 572,772 (race, horse, oof_fold) rows.
+JRA-VAN data: the ability export holds exactly the (race, horse, oof_fold) keys of the jra-only interaction export's
+572,772 rows.
 
 - Registry family `japan-c4-meld-final-win`, spec sha256
   `86c86e1970c123fc1b0724ac9559280d05d719d01352d236de8a221b66e4c3dc`, frozen by `run_study` before it read any row.
@@ -129,7 +136,8 @@ cell's in-sample α; the members' within-race correlations and the ambiguity, ea
 
 Not run (failed records, each with its reason): `not_run:competition` (#94's terms), `not_run:lineage` (#95's
 members), `not_run:p_speed` (#97) and `e41:reff` (E41's R_eff weighting): none of these has an out-of-fold export per
-runner for the meld.
+runner for the meld. Tracked by #751 (competition), #752 (lineage), #753 (p_speed) and #754 (R_eff per race and
+E41's R_eff variants); #755 reruns the meld with them.
 
 ## Alternatives rejected and why
 
@@ -143,19 +151,24 @@ runner for the meld.
 - **Segment slopes for E42.** With race-level 0/1 gates and no race in both cells, segment slopes and gate cells span
   the same design; the gates are run.
 - **A choice of κ.** Each κ is its own ranked variant (D19); none is selected.
-- **Neural or tree metas.** Not excluded (the owner's reframe); a proposed follow-up, expected to rank low.
+- **Neural or tree metas.** Not excluded (the owner's reframe); proposed as #757, expected to rank low.
 
 ## What this rules out
 
 At the final Win price, on 22,959 races from 2020-Q2, each jra-only interaction member's stage-2 meta beats the
 market-only meta by about +0.0003 nats per race (every lower bound at or above +0.00013) with a negative weight beside
-ln q, as #93 found for its base; the six melded together do no better (+0.00019, bounds −0.00004 and +0.00043): the
-members are near copies of one another, so the meld spends parameters for no new information. On the 5,729 races
-from 2025-Q2 the rating and each interaction member also beat the market-only meta, again with negative weights. No
+ln q, as #93 found for its base; the six melded together do no better (+0.00019, bounds −0.00004 and +0.00043). Their
+standalone gains and weights are nearly equal (ix_base's and ix_horse_x_jockey's agree in every printed digit), which
+reads as near copies of one another: the meld spends parameters for no new information. On the 5,729 races from
+2025-Q2 the rating and each interaction member also beat the market-only meta, again with negative weights. No public
 variant's top claim band returns above 100 per ¥100: every public upper bound is below 100 except the rating's
-(105.04, on 784 bets), and the market-only band itself returns 75.71 (from 2020-Q2) and 83.02 (from 2025-Q2). The
-gains come with negative member weights beside ln q, so they read as a correction of the price's calibration through
-the member, not a view that pays against the price. Nothing is adopted; each row ranks on the leaderboard.
+(105.04, on 784 bets), and the market-only band itself returns 75.71 (from 2020-Q2) and 83.02 (from 2025-Q2). These
+public gains come with negative member weights beside ln q, so they read as a correction of the price's calibration
+through the member, not a view that pays against the price. Nothing is adopted; each row ranks on the leaderboard.
+
+It rules out nothing about the members that were not melded (#94's competition terms, #95's lineage members, #97's
+p_speed) or about E41's R_eff weighting: none was run, for want of an out-of-fold export, so the ticket's E41 is
+measured for its σ half only. #751 to #754 export them and #755 reruns the meld with them.
 
 ## Leaderboard rows
 
@@ -169,15 +182,22 @@ ability` 182, `from2020:standalone:ix_trainer_debut` 184, `from2020:standalone:i
 `from2020:standalone:ix_base` 189, `from2020:standalone:ix_horse_aptitude` 190, `from2020:standalone:ix_horse_x_jockey`
 191, `from2020:meld:all minus ability` 192, `from2020:standalone:ix_trainer_x_track` 193, `from2015:market_only` 195.
 Public and unmeasured (no return): the 13 encompassing rows of the rating and the interaction members, and the four
-not-run records. Withheld (D21), by option id only: in `from2020`, `standalone:ability`, `meld:all`, `meld:all minus
-rating` and `meld:all minus ix_<block>` for each of the six blocks, `e41:rating:c[0.25]`, `e41:rating:c[1]`,
-`e41:rating:c[4]`, `e41:ability:c[0.25]`, `e41:ability:c[1]`, `e41:ability:c[4]`, `e42:gates[debut]`,
-`e42:gates[handicap]`, `e42:gates[debut,handicap]`, `marginal:<member>` for the eight members,
+not-run records (#751 to #755). Withheld (D21), by option id only: in `from2020`, `standalone:ability`,
+`meld:all`, `meld:all minus rating` and `meld:all minus ix_<block>` for each of the six blocks, `e41:rating:c[0.25]`,
+`e41:rating:c[1]`, `e41:rating:c[4]`, `e41:ability:c[0.25]`, `e41:ability:c[1]`, `e41:ability:c[4]`,
+`e42:gates[debut]`, `e42:gates[handicap]`, `e42:gates[debut,handicap]`, `marginal:<member>` for the eight members,
 `encompassing:ability`, `correlations` and `ambiguity`; in `from2015`, the same without the rating's variants.
 
 ## Follow-ups filed
 
-None filed by this PR; proposed for the owner to file (status:proposed under epic #73): out-of-fold member exports
-for #94's competition terms, #95's lineage members and #97's p_speed, so a rerun can meld them; E41's R_eff weighting
-from #94's race comparability; a `MetaAdapter` for a `MeldFit`, so C6 can read the meld; and a neural or tree meta
-as a ranked variant.
+Filed as `status:proposed` tasks of epic #73 (unlinked: the epic is at GitHub's 100 sub-issue cap):
+
+- #751: export #94's competition member out of fold, per runner, for the meld.
+- #752: export #95's lineage members out of fold, per runner, for the meld.
+- #753: export #97's p_speed member out of fold, per runner, for the meld.
+- #754: export R_eff per race from #94's comparison graph, out of fold, and add E41's R_eff precision variants.
+- #755: rerun the meld as family `japan-c4-meld-final-win-v2` with #751 to #754's members and R_eff, and an E41
+  variant whose precision weight is centred within race (this run's weight shrinks an uncertain runner toward
+  ln p = 0, not toward the market).
+- #756: let `MetaAdapter` take a `MeldFit`, so C6 can read the meld.
+- #757: rank a neural or tree meta on the meld's members as a variant.
