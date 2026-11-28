@@ -5,6 +5,11 @@ Contract pinned here (the coder follows it):
 * `check(paths, read) -> list[Violation]`; each Violation has `path` (exactly as given to check),
   `rule` and `detail` (a str). The rule ids are the names below, one per rule (a)-(f) of #16.
 * Size: 256 KB is 256 * 1024 bytes, measured as `len(read(path))`; exactly that size passes.
+  Two exemptions, from the size rule only (every content and name rule still applies to them):
+  `uv.lock`, and (#452, owner 2026-11-28) a `.md` file directly under `docs/leaderboard/`
+  (`docs/leaderboard/<name>.md`, e.g. `docs/leaderboard/japan.md`). The leaderboard match is on
+  the path exactly as given to `check`, case-sensitive like git paths: nothing nested, no other
+  extension or letter case, no other folder of that name; every other path keeps the size rule.
 * A matched secret shows in a detail and in the printed output only as its first 4 characters
   then `***`.
 * `main()` lists the files with `git ls-files` in the current directory (the repo root), reads
@@ -332,6 +337,101 @@ def test_a_large_file_is_refused_but_uv_lock_is_allowed(cpt):
     leaky = {"uv.lock": lock + f'token = "{secret}"\n'.encode()}
     found = by_path(run(cpt, leaky))
     assert found.get("uv.lock") == {SECRET}
+
+
+LEADERBOARD = "docs/" + "leaderboard/"
+
+
+def leaderboard_md(size: int, extra: str = "") -> bytes:
+    """A made-up leaderboard page of exactly `size` bytes, with `extra` right after its title."""
+    head = "# Leaderboard\n\n" + extra + "\n\n| rank | option | kind |\n|---|---|---|\n"
+    rows = "".join(f"| {i} | synthetic-{i % 97}/cell-{i} | cell |\n" for i in range(size // 30 + 1))
+    body = (head + rows).encode()
+    assert len(body) >= size and extra.encode() in body[:size]
+    return body[:size]
+
+
+def test_the_leaderboard_markdown_is_exempt_from_the_size_rule(cpt, tmp_path):
+    just_over = leaderboard_md(LIMIT + 1)
+    full = leaderboard_md(LIMIT * 7)  # about the size of a full public leaderboard
+    exempt = {LEADERBOARD + "japan.md": just_over, LEADERBOARD + "hongkong.md": full}
+    near_misses = (
+        "docs/huge.md",
+        "docs/leaderboard.md",
+        LEADERBOARD + "japan.json",
+        LEADERBOARD + "japan.bin",
+        LEADERBOARD + "nested/japan.md",
+        LEADERBOARD + "japan/2026.md",
+        "docs/leaderboardx/japan.md",
+        "xdocs/leaderboard/japan.md",
+        "docs/Leaderboard/japan.md",
+        "src/" + LEADERBOARD + "japan.md",
+        LEADERBOARD + "japan.MD",
+        LEADERBOARD + "japan.mdx",
+        LEADERBOARD + "japan.md.bak",
+    )
+    # The same bodies as the exempt pages, so only the path decides.
+    refused = {p: (just_over, full)[i % 2] for i, p in enumerate(near_misses)}
+    assert_refused_exactly(cpt, {**exempt, **refused}, set(refused), SIZE)
+
+    # At and under the limit, every one of those paths passes.
+    small = {p: leaderboard_md(LIMIT - (i % 2)) for i, p in enumerate([*exempt, *near_misses])}
+    assert run(cpt, small) == []
+
+    # The command: a tracked oversize leaderboard page passes, a nested one is refused.
+    tracked = {
+        "README.md": b"# demo\n",
+        LEADERBOARD + "japan.md": full,
+        LEADERBOARD + "japan/2026.md": just_over,
+    }
+    proc = run_script(tracked_repo(tmp_path, tracked, {}))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    assert len(lines) == 1, lines
+    assert lines[0].startswith(LEADERBOARD + "japan/2026.md: " + SIZE + ": "), lines
+    assert LEADERBOARD + "japan.md" not in proc.stdout
+
+
+def test_the_leaderboard_exemption_keeps_every_other_rule(cpt):
+    toks = tokens()
+    email = "alice.smith" + AT + "example.com"
+    artifact = "https://" + CLAUDE_AI + "artifact/" + UUID.replace("-", "")
+    key = key_header("RSA ") + "\n" + KEY_BODY
+    cases = [
+        (LEADERBOARD + "japan.md", toks["aws"], {SECRET}),
+        (LEADERBOARD + "hongkong.md", toks["ghp"], {SECRET}),
+        (LEADERBOARD + "japan.md", toks["xoxb"], {SECRET}),
+        (LEADERBOARD + "japan.md", key, {SECRET}),
+        (LEADERBOARD + "japan.md", f"cd {MAC_HOME}alice/Projects/x", {PERSONAL}),
+        (LEADERBOARD + "hongkong.md", f"{LINUX_HOME}bob/data/", {PERSONAL}),
+        (LEADERBOARD + "japan.md", email, {PERSONAL}),
+        (LEADERBOARD + "hongkong.md", artifact, {PERSONAL}),
+        (LEADERBOARD + "japan.md", toks["aws"] + " and " + email, {SECRET, PERSONAL}),
+        # Not exempt: the size rule still applies beside the content rule.
+        (LEADERBOARD + "japan/2026.md", toks["aws"], {SIZE, SECRET}),
+        (LEADERBOARD + "japan.json", email, {SIZE, PERSONAL}),
+    ]
+    for path, extra, rules in cases:
+        for size in (LIMIT + 1, LIMIT * 3):
+            found = by_path(run(cpt, {path: leaderboard_md(size, extra)}))
+            assert dict(found) == {path: rules}, (path, size, dict(found))
+
+    # Names under docs/leaderboard/ keep their name rules; only .md names there skip the size
+    # rule, and a leaderboard path under another root keeps its own rules.
+    over = leaderboard_md(LIMIT + 1)
+    names = {
+        LEADERBOARD + "KYI150712.txt": (b"x\n", {JRDB}),
+        LEADERBOARD + "SED250105.txt": (b"x\n" * LIMIT, {JRDB, SIZE}),
+        LEADERBOARD + "2025" + JVD: (RECORD, {JRAVAN}),
+        LEADERBOARD + "japan" + JVD.upper(): (RECORD * (LIMIT // len(RECORD) + 1), {JRAVAN, SIZE}),
+        LEADERBOARD + JV_DATA + "4901.pdf": (b"%PDF-1.7\n", {JRAVAN}),
+        LEADERBOARD + JV_DATA + "_full.xlsx": (b"PK\x03\x04" + b"\0" * LIMIT, {JRAVAN, SIZE}),
+        "data/" + LEADERBOARD + "japan.md": (over, {DATA, SIZE}),
+        "tests/fixtures/" + LEADERBOARD + "japan.md": (over, {FIXTURE, SIZE}),
+        LEADERBOARD + "japan.md": (over, set()),
+    }
+    found = by_path(run(cpt, {p: body for p, (body, _) in names.items()}))
+    assert dict(found) == {p: rules for p, (_, rules) in names.items() if rules}, dict(found)
 
 
 def test_a_jrdb_style_file_name_is_refused(cpt):

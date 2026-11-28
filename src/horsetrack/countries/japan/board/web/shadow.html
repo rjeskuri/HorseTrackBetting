@@ -65,6 +65,8 @@ p{margin:0} button{font:inherit;color:inherit}
 .rbtn i{font-style:normal;font-size:.62rem;font-family:var(--mono);letter-spacing:.05em;color:var(--strip-dim)}
 .rbtn.next{outline:2px solid var(--strip-ink);outline-offset:1px}
 .rbtn.off{opacity:.45}
+.rbtn.sel{background:var(--accent);border-color:var(--accent);opacity:1}
+.rbtn.sel b,.rbtn.sel span,.rbtn.sel i{color:var(--bg)}
 
 /* races and pools: values share one plain style, whatever their size */
 .races{display:flex;flex-direction:column;gap:12px}
@@ -72,6 +74,9 @@ p{margin:0} button{font:inherit;color:inherit}
 .race.next{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
 .race.off{opacity:.8}
 .race-head{display:flex;flex-direction:column;gap:4px}
+.race-title{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.step{flex:0 0 4rem;font-size:.8rem;color:var(--accent);text-decoration:none;text-align:center;padding:6px 4px;border:1px solid var(--rule);border-radius:5px}
+span.step{border-color:transparent}
 .meta{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;font-size:.82rem;color:var(--muted)}
 .pool{display:flex;flex-direction:column;gap:4px;overflow-x:auto}
 .pool-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--rule);padding-bottom:3px}
@@ -83,6 +88,7 @@ tbody tr:last-child{border-bottom:0}
 .num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
 .combo{font-weight:600}
 .mv.up{color:var(--up)} .mv.down{color:var(--down)}
+.projected{color:var(--muted);font-style:italic}
 td.flags .chip{margin-right:3px}
 tr.scratched{color:var(--muted)}
 tr.scratched .combo{text-decoration:line-through}
@@ -106,7 +112,9 @@ tr.scratched .combo{text-decoration:line-through}
   <p id="banner" class="banner">Shadow values from the v0 models: each figure is the expected gross return per ¥1 at the final price. No real money is involved, and nothing on this page is a bet.</p>
 </div>
 <main class="wrap">
-  <p class="legend">Odds now, and how they moved since the first morning capture, since 20 minutes and since 2 minutes before post. <span class="up">+ odds lengthened</span>, <span class="down">- odds shortened</span>, "-" when there is nothing to compare. Value: for Win the mean with its 5–95% band in brackets; for Place and Wide the value at the low and at the high end of the odds range. "Read at" is the minutes before post the value was read at (for example @T-5). Rows keep the board's order. Times are Japan time.</p>
+  <p class="legend">Odds now, and how they moved since the first morning capture and since 20 minutes before post. <span class="up">+ odds lengthened</span>, <span class="down">- odds shortened</span>, "-" when there is nothing to compare. Value: for Win the mean with its 5–95% band in brackets; for Place and Wide the value at the low and at the high end of the odds range. "Read at" is the minutes before post the value was read at (for example @T-5). One race at a time; rows run favourite first by the current odds, as on the board (Exacta, Trio and Trifecta by Model p, below), never by value. Times are Japan time.</p>
+  <p class="legend">Odds ladder: T-20, T-10, T-5, T-2 and Final are the odds at 20, 10, 5 and 2 minutes before post and the final price (Place and Wide: the low figure). A checkpoint already passed shows the odds captured then, <span class="up">higher</span> or <span class="down">lower</span> than at T-20. A checkpoint still ahead shows <span class="projected">≈x.x</span>: a forecast of the crowd's drift from the v0 nowcast, from the odds now. It is not a value and not a signal to bet. "-" when there is no figure.</p>
+  <p class="legend">Every race shows each bet type: Win, Place, Quinella, Wide, Exacta, Trio, Trifecta and Bracket quinella. Model p is the v0 models' chance of the combination, from the calibrated Win model and the ordering model, on the board as it stands now. Exacta, Trio and Trifecta list the 15 combinations with the highest Model p, highest first, with their odds from the latest capture ("-" when it has none); the other bet types list every combination, favourite first. Quinella, Bracket quinella, Exacta, Trio and Trifecta have no price forecast: their value is Model p × the odds now, the gross return per ¥1 if the odds stood. The capture age says how old those odds are.</p>
   <p id="flag-legend" class="legend flag-legend">Flags are candidate avoid rules (#82), not adopted:
     <span class="chip" data-flag="floor">floor</span>
     <span class="chip" data-flag="tail">tail</span>
