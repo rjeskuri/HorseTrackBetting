@@ -1,7 +1,7 @@
 # C6 in shadow, v2: calibration on more meetings, an out-of-sample nowcast and E20 per pair, pre-registration (ticket #617)
 
-Status: **PROPOSED**. It is frozen with `--freeze` before any scored read; the freeze commit and
-the spec sha256 are recorded here when it is.
+Status: **FROZEN** on 2026-11-28 at commit `f7a41c7`, before any scored read (it was PROPOSED
+until then). Spec sha256 `c00ae1caa6179359e927727117c9786badbb726f6fc5551ef921f7e14a2c6056`.
 
 Family: `japan-shadow-calibration-v2`, the rerun of #101's `japan-shadow-calibration-v1`
 ([shadow-calibration-prereg.md](shadow-calibration-prereg.md)). The spec is
