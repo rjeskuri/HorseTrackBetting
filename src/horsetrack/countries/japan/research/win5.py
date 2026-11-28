@@ -14,7 +14,11 @@
   `parse_results_page` (one table, columns named by its header) and `parse_day_page` (netkeiba's
   per-day WIN5 page, labelled cells; a dead-heat day lists several winning combinations).
   `build_history` merges them; `write_history` keeps the table at
-  `processed_dir('jra') / 'win5.parquet'`, never in the tree.
+  `processed_dir('jra') / 'win5.parquet'`, never in the tree. `append_history` grows an existing
+  table with new days (the run-by-run growth of the sample, #325): it keeps every old day, adds the
+  new ones and refuses a day whose figures changed. `bin_counts` reports the development days per
+  carryover bin of a study spec, by the scorer's own binning and without reading a holdout day's
+  outcomes.
 - Live: `live_pool_ev` reads the WIN5 `__pool__` rows of the odds log (docs/specs/odds-log.md).
 - The study (docs/specs/win5-carryover-study.md, spec config/win5_study.yaml): `score_study` scores
   the frozen spec (D18) on development days only (D14): `day_value`, the pool-level return on
@@ -361,7 +365,8 @@ def build_history(rows: Iterable[dict[str, Any]]) -> pd.DataFrame:
     for row in rows:
         row = dict(row)
         hit = row["winning_tickets"] > 0
-        row.setdefault("payout_yen", row["dividend_yen"] * row["winning_tickets"] if hit else 0)
+        if "payout_yen" not in row:  # not evaluated for a row that has it (a dividend may be None)
+            row["payout_yen"] = row["dividend_yen"] * row["winning_tickets"] if hit else 0
         row.setdefault("winning_combinations", 1 if hit else 0)
         clean = {key: row[key] for key in FIGURES}
         clean["race_date"] = _as_date(clean["race_date"])
@@ -383,6 +388,34 @@ def build_history(rows: Iterable[dict[str, Any]]) -> pd.DataFrame:
     return table[list(COLUMNS)]
 
 
+def _table_rows(table: pd.DataFrame) -> list[dict[str, Any]]:
+    """The rows of a history table as plain figures (Python ints, None for no dividend)."""
+    rows = []
+    for record in table.to_dict("records"):
+        row: dict[str, Any] = {"race_date": _as_date(record["race_date"])}
+        for key in FIGURES:
+            if key != "race_date":
+                value = record[key]
+                row[key] = None if value is None or pd.isna(value) else int(value)
+        rows.append(row)
+    return rows
+
+
+def append_history(
+    existing: pd.DataFrame | None, rows: Iterable[dict[str, Any]]
+) -> tuple[pd.DataFrame, list[date]]:
+    """Grow a history table (#325): `build_history` over the rows of `existing` and the new ones,
+    so every old day stays whether or not `rows` has it, and a day given with other figures than
+    the table holds raises ValueError naming it. Returns the table and the days that were not in
+    `existing`, ascending. `existing` is not changed."""
+    old = _table_rows(existing) if existing is not None else []
+    have = {r["race_date"] for r in old}
+    new = list(rows)
+    table = build_history(old + new)
+    added = sorted({_as_date(r["race_date"]) for r in new} - have)
+    return table, added
+
+
 def _dates(table: pd.DataFrame) -> list[date]:
     return [_as_date(v) for v in table["race_date"]]
 
@@ -399,20 +432,29 @@ def history_counts(table: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def carryover_chain_breaks(table: pd.DataFrame) -> list[date]:
+def carryover_chain_breaks(table: pd.DataFrame, unread: Iterable[date] = ()) -> list[date]:
     """The days that break the carryover chain, sorted, each once: a no-winner day with no
     carryover out, or a day whose carryover in is not the previous row's carryover out (the first
     row is not checked on that rule). A winner day with a carryover out (the payout cap) is not a
-    break. Catches carryover labels the day-page parser no longer finds (read as 0)."""
+    break. Catches carryover labels the day-page parser no longer finds (read as 0). `unread` are
+    WIN5 days the table lacks on purpose (locked holdout days): the day after one is not checked
+    against the row before it, the link between them having never been read."""
     breaks: set[date] = set()
     previous_out: int | None = None
-    for day, tickets, carry_in, carry_out in zip(
-        _dates(table),
-        table["winning_tickets"],
-        table["carryover_in_yen"],
-        table["carryover_out_yen"],
-        strict=True,
-    ):
+    rows = list(
+        zip(
+            _dates(table),
+            table["winning_tickets"],
+            table["carryover_in_yen"],
+            table["carryover_out_yen"],
+            strict=True,
+        )
+    )
+    rows += [(_as_date(d), None, None, None) for d in unread]
+    for day, tickets, carry_in, carry_out in sorted(rows, key=lambda r: r[0]):
+        if tickets is None:
+            previous_out = None
+            continue
         if tickets == 0 and not carry_out > 0:
             breaks.add(day)
         if previous_out is not None and carry_in != previous_out:
@@ -595,6 +637,49 @@ def _bin_of(ratio: float, edges: list[float]) -> int | None:
     return None
 
 
+def _development_bins(
+    history: pd.DataFrame, p: dict[str, Any]
+) -> tuple[list[list[dict[str, Any]]], int, int]:
+    """The development days of `history` by carryover bin (`p` from `_study_params`): the rows per
+    bin, the holdout days skipped, and the development days with a carryover in and no known
+    takeout. A day's ratio is carryover_in / (break_even_takeout x net_pool(row)). A holdout day is
+    counted and skipped before any of its outcome figures is read."""
+    edges = p["edges"]
+    binned: list[list[dict[str, Any]]] = [[] for _ in edges]
+    excluded = gross_days = 0
+    for record in history.to_dict("records"):
+        if is_holdout_day(COUNTRY, _as_date(record["race_date"])):
+            excluded += 1
+            continue
+        row = _plain(record)
+        carry_in = float(row["carryover_in_yen"])
+        if carry_in > 0 and win5_takeout(row["race_date"]) is None:
+            gross_days += 1
+        ratio = carry_in / (p["break_even"] * net_pool(row))
+        where = _bin_of(ratio, edges)
+        if where is not None:
+            binned[where].append(row)
+    return binned, excluded, gross_days
+
+
+def bin_counts(history: pd.DataFrame, spec: dict[str, Any]) -> dict[str, Any]:
+    """The development days per carryover bin of the study spec, binned as `score_study` bins them
+    (#325): {"bins": [{"lo_ratio", "hi_ratio", "n_days"}, ...], "holdout_days_excluded": n}.
+    ValueError for a spec the scorer cannot score. No outcome of a holdout day is read."""
+    p = _study_params(spec)
+    binned, excluded, _ = _development_bins(history, p)
+    edges = p["edges"]
+    bins = [
+        {
+            "lo_ratio": lo,
+            "hi_ratio": edges[i + 1] if i + 1 < len(edges) else None,
+            "n_days": len(binned[i]),
+        }
+        for i, lo in enumerate(edges)
+    ]
+    return {"bins": bins, "holdout_days_excluded": excluded}
+
+
 def _lower_bound(values: list[float], *, n_boot: int, level: float, seed: list[int]) -> float:
     """The (1 - level) quantile of `n_boot` bootstrap means, the days resampled with
     replacement (the WIN5 day is the unit), drawn in blocks to bound memory."""
@@ -628,20 +713,8 @@ def score_study(
         raise NotPreRegistered(f"family {family_id!r} has no frozen spec with hash {spec_hash}")
     p = _study_params(spec)
     edges = p["edges"]
-    values: list[list[float]] = [[] for _ in edges]
-    excluded = gross_days = 0
-    for row in history.to_dict("records"):
-        row = _plain(row)
-        if is_holdout_day(COUNTRY, row["race_date"]):
-            excluded += 1
-            continue
-        carry_in = float(row["carryover_in_yen"])
-        if carry_in > 0 and win5_takeout(row["race_date"]) is None:
-            gross_days += 1
-        ratio = carry_in / (p["break_even"] * net_pool(row))
-        where = _bin_of(ratio, edges)
-        if where is not None:
-            values[where].append(day_value(row))
+    binned, excluded, gross_days = _development_bins(history, p)
+    values = [[day_value(row) for row in rows] for rows in binned]
     bins = []
     for i, lo in enumerate(edges):
         got = values[i]
