@@ -27,6 +27,14 @@ The leaderboard is a view: nothing here re-runs a study or appends a record (the
 - ``japan-family-p-selection-v1`` (#88's machinery, run by #462): per rule one Win rule row
   selected at t, 100 x (1 + the walk-forward ``roi_win_dividend``), n in bets, no CI; a stage-1
   record, a failed rule and a dropped variant are its unmeasured rule row.
+- every #713 predicted-final family ('japan-713-predicted-final-*', one run per checkpoint): one
+  rule row per rule of the run's params['rules'], '<family>/<rule>@T-k', rule the rule id,
+  segment 'all', selection the run's ``predicted_final@T-k``; measured from its development
+  'return_per_100[<rule>]' (already per ¥100, its one-sided bounds, n in races) and
+  'n_meetings[<rule>]', unmeasured (its reason in ``note``) without one.
+- every #716 member-filter family ('japan-716-member-filter-*', one run per checkpoint): read as
+  #713's, one row per combination of params['rules'] (rule the combination id
+  '<rule>|<member>|k<k>', pool the #713 rule's), unmeasured without a qualifying ticket.
 
 Every other legacy family is unmeasured and takes its kind from ``LEGACY_KINDS``; #438's debut and
 maiden 'combined:' variants are models, their 'member:' variants members. Withheld rows
@@ -39,10 +47,15 @@ import dataclasses
 import math
 from collections.abc import Mapping
 from datetime import date
-from functools import cache
+from functools import cache, partial
 
 from horsetrack.core import config
-from horsetrack.core.eval.leaderboard import Adapter, LeaderboardRow, rows_from_registry
+from horsetrack.core.eval.leaderboard import (
+    PREDICTED_FINAL_SELECTIONS,
+    Adapter,
+    LeaderboardRow,
+    rows_from_registry,
+)
 from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord
 
 FAMILY_L = "japan-family-l-exotic-pool-choice"
@@ -401,6 +414,71 @@ def _family_p_rows(record: RunRecord, size: int) -> list[LeaderboardRow]:
     return [LeaderboardRow(**base, return_per_100=_scale(1.0 + roi.value), n=roi.n, n_unit="bets")]
 
 
+# --------------------------------------------------------------------------- predicted final (#713)
+
+_PREDICTED_FINAL_PREFIX = "japan-713-predicted-final-"
+
+
+def _pool_rate(pool: object) -> float | None:
+    try:
+        return payout_rate(pool) if isinstance(pool, str) else None
+    except KeyError:
+        return None
+
+
+def _predicted_final_rows(
+    record: RunRecord, size: int, *, no_bet: str = "no bet on the projected boards"
+) -> list[LeaderboardRow]:
+    """One rule row per rule the run names (module docstring); none for a malformed run."""
+    selection, rules = record.params.get("selection"), record.params.get("rules")
+    level = record.params.get("ci_level")
+    if selection not in PREDICTED_FINAL_SELECTIONS or not isinstance(rules, Mapping):
+        return []
+    found = _development(record)
+    rows = []
+    for rule_id, info in rules.items():
+        info = info if isinstance(info, Mapping) else {}
+        pool = info.get("pool") if isinstance(info.get("pool"), str) else None
+        metric = found.get(f"return_per_100[{rule_id}]")
+        ci = metric is not None and metric.lo is not None and metric.hi is not None
+        unmeasured = info.get("unmeasured")
+        note = None
+        if metric is None:
+            note = unmeasured if isinstance(unmeasured, str) else no_bet
+        rows.append(
+            LeaderboardRow(
+                option_id=f"{record.family_id}/{rule_id}@{selection.split('@', 1)[1]}",
+                family_id=record.family_id,
+                ticket=record.ticket,
+                kind="rule",
+                pool=pool,
+                segment="all",
+                rule=rule_id,
+                selection=selection,
+                sources=tuple(record.sources),
+                variants_searched=size,
+                status=record.status,
+                return_per_100=None if metric is None else metric.value,
+                ci_lo=metric.lo if ci else None,
+                ci_hi=metric.hi if ci else None,
+                ci_level=level if ci else None,
+                n=None if metric is None else metric.n,
+                n_unit=None if metric is None else "races",
+                n_meetings=_whole(found.get(f"n_meetings[{rule_id}]")),
+                payout_rate=_pool_rate(pool),
+                note=note,
+            )
+        )
+    return rows
+
+
+# #716's member-filter families: one combination of a #713 rule, a member and k per params rule.
+_MEMBER_FILTER_PREFIX = "japan-716-member-filter-"
+_member_filter_rows = partial(
+    _predicted_final_rows, no_bet="no qualifying ticket on the projected boards"
+)
+
+
 LEGACY_ADAPTERS: Mapping[str, Adapter] = {
     FAMILY_L: _family_l_rows,
     COPLACER: _coplacer_rows,
@@ -410,13 +488,18 @@ LEGACY_ADAPTERS: Mapping[str, Adapter] = {
 
 
 class _Adapters(Mapping):
-    """``LEGACY_ADAPTERS``, and ``_exacta_rows`` for every #131 exacta family by its prefix."""
+    """``LEGACY_ADAPTERS``, ``_exacta_rows`` for every #131 exacta family and
+    ``_predicted_final_rows`` for every #713 family, each by its prefix."""
 
     def __getitem__(self, family_id: str) -> Adapter:
         if family_id in LEGACY_ADAPTERS:
             return LEGACY_ADAPTERS[family_id]
         if isinstance(family_id, str) and family_id.startswith(_CELL_PREFIXES):
             return _exacta_rows
+        if isinstance(family_id, str) and family_id.startswith(_PREDICTED_FINAL_PREFIX):
+            return _predicted_final_rows
+        if isinstance(family_id, str) and family_id.startswith(_MEMBER_FILTER_PREFIX):
+            return _member_filter_rows
         raise KeyError(family_id)
 
     def __iter__(self):
