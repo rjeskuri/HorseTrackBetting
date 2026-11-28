@@ -89,7 +89,7 @@ flowchart TB
     subgraph L4["C4: meta-model at the final price, shrunk toward the market (α = 0)"]
         CAL["Calibrated market (D4)<br/>#114 japan/models/v0/calibration.py<br/>v0"]
         RES["Shrunk segment residual<br/>#125 japan/models/v0/residual.py<br/>v0"]
-        META["Meta-model #87 and meld of members #98<br/>planned"]
+        META["Meta-model #87 japan/models/meta.py;<br/>meld of members #98 japan/models/meld.py,<br/>run japan/studies/meld.py<br/>ranked, not adopted"]
     end
     subgraph L5["C5: Place, Wide and exotics"]
         ORD["Discounted Harville ordering<br/>#115 japan/models/v0/ordering.py<br/>v0"]
@@ -153,7 +153,7 @@ flowchart LR
     PAR["Par and expected top-3 time #96<br/>japan/models/speed.py"]
     PSPD["Horse relative speed, p_speed #97<br/>japan/models/speed_horse.py,<br/>E39 #347 japan/studies/p_speed.py"]
     MKT["Calibrated-market baseline (D4)<br/>#114 japan/models/v0/calibration.py"]
-    META["Meta-model at the final price,<br/>shrunk toward the market (α = 0)<br/>#87, #98: planned"]
+    META["Meta-model at the final price,<br/>shrunk toward the market (α = 0)<br/>#87 japan/models/meta.py;<br/>meld #98 japan/models/meld.py"]
     PP --> HCP
     BIAS -.-> HCP
     PAR -.->|"par swap #219"| HCP
@@ -167,8 +167,9 @@ flowchart LR
     MKT -.->|"offset"| META
     HCP -.-> META
     WRK -.-> META
-    RAT -.-> META
-    PL -.-> META
+    RAT -->|"meld #98"| META
+    PL -->|"meld #98"| META
+    INT -->|"meld #98"| META
     PSPD -.-> META
 ```
 
@@ -176,8 +177,10 @@ The meta-model is where everything known about the horses meets the market's own
 price. Each box on the left is a member or a set of features, and an arrow means its output is an
 input of the box it points to; today the past-performance lines feeding the handicap factors and
 the dynamic rating feeding the Plackett-Luce ability (#92's study) and the par feeding the horse
-speed model (#97, scored at the final price by #347's study) run in code, and every other
-flow is planned. The ability model's sire comes from the JRA-VAN pedigree, so its results are
+speed model (#97, scored at the final price by #347's study) run in code, and so do the meld's
+members (#98: the rating, the ability model and the six interaction members, each out of fold,
+melded at the final price by `studies/meld.py`); every other flow is planned (competition,
+lineage and p_speed have no out-of-fold export for the meld yet). The ability model's sire comes from the JRA-VAN pedigree, so its results are
 withheld (D21). The meta-model starts from the calibrated market and
 gives a member weight only when it improves on the final price, so a member that adds nothing ends
 up with no weight. Members built on the licensed JRDB data, such as the workout features, run only
@@ -187,7 +190,7 @@ in private models on the owner's machine and never publish a figure (D21).
 
 ```mermaid
 flowchart TD
-    WIN["Win chance p for every runner<br/>C4: #114 v0, #87 planned"]
+    WIN["Win chance p for every runner<br/>C4: #114 v0; #87 meta and #98 meld built, not adopted"]
     ORD["Discounted Harville ordering: second and third<br/>place from p, with fitted discount powers<br/>#115 japan/models/v0/ordering.py"]
     TOP3["Chance of every top-3 finishing order"]
     PLACE["Place: chance of finishing in the paid places,<br/>top 3, or top 2 in small fields"]

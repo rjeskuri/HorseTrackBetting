@@ -60,6 +60,7 @@ KEY = ["race_id", "horse_id"]
 MEMBER_COLUMNS = (*KEY, "logp", "oof_fold")
 FOLD = "fold"
 ALL = "all"
+MARKET = "market"  # the market-only meta's column of the walk-forward predictions
 TABLE_COLUMNS = [
     "variant",
     "races",
@@ -317,57 +318,96 @@ def winner_log_loss(frame: pd.DataFrame, p: np.ndarray) -> pd.Series:
     return per_race_log_loss(p, frame["won"].astype(bool), race, no).per_race
 
 
-def walk_forward_loss(
+def meld_options(members: Sequence[str], **meld) -> dict:
+    """`fit_meld`'s keywords for `members` from shared ones: the precision and kappa entries of
+    the members kept, the other keywords as given (no gates and no segments by default)."""
+    precision, kappa = dict(meld.pop("precision", None) or {}), dict(meld.pop("kappa", None) or {})
+    return (
+        {"gates": (), "segment_cols": ()}
+        | meld
+        | {
+            "members": list(members),
+            "precision": {k: s for k, s in precision.items() if k in members},
+            "kappa": {k: v for k, v in kappa.items() if k in members},
+        }
+    )
+
+
+def walk_forward_predictions(
     frame: pd.DataFrame,
-    variants: Mapping[str, Sequence[str]],
+    variants: Mapping[str, Mapping],
     *,
-    gates: Sequence[str] = (),
-    segment_cols: Sequence[str] = (),
-    precision: Mapping[str, str] | None = None,
-    kappa: Mapping[str, float] | None = None,
-    form: str = "stage2",
-    ridge: float = 0.0,
-    quadratic: bool = False,
+    market: Mapping | None = None,
+    embargo_days: int = 0,
 ) -> pd.DataFrame:
-    """Per scored race, the out-of-fold winner log loss of the market-only meta (column
-    "market") and of the meld of each variant's members (a variant with none is the market):
-    each fold after the first by fits on every earlier fold. Indexed by race_id."""
-    precision, kappa = dict(precision or {}), dict(kappa or {})
+    """Out-of-fold P(win) on the scored rows, walk-forward over the frame's sorted `fold` labels:
+    each fold after the first predicted by fits on every earlier fold's rows, the first never
+    scored. Column MARKET is the market-only meta (`fit_market` with `market`'s form and
+    quadratic), then one column per variant, `variants` mapping its name to `fit_meld`'s keywords
+    (one with no members is the market-only meta). With `embargo_days`, a fold trains only on
+    rows whose `race_date` is that many days or more before its first race day (D9's embargo).
+    Indexed by the scored rows' labels, in frame order."""
     if FOLD not in frame.columns:
         raise KeyError(f"the frame has no {FOLD!r} column")
+    if MARKET in variants:
+        raise ValueError(f"{MARKET!r} is the market-only meta's column, not a variant name")
     fold = _labels(frame[FOLD])
     if any(f is None for f in fold):
         raise ValueError("every row needs its fold")
     labels = sorted(set(fold))
     if len(labels) < 2:
         raise ValueError(f"walk-forward needs two folds or more, got {labels}")
-    parts = []
+    day = pd.to_datetime(frame["race_date"]).to_numpy() if embargo_days else None
+    names = [MARKET, *variants]
+    out = np.full((len(frame), len(names)), np.nan)
     for label in labels[1:]:
-        train, test = frame.loc[fold < label], frame.loc[fold == label]
+        test_at = np.flatnonzero(fold == label)
+        train = fold < label
+        if day is not None:
+            train &= day <= day[test_at].min() - np.timedelta64(embargo_days, "D")
+        train_rows, test = frame.iloc[np.flatnonzero(train)], frame.iloc[test_at]
         q = np.exp(test[Q].to_numpy(dtype=float))
-        losses = {
-            "market": winner_log_loss(
-                test, fit_market(train, form=form, quadratic=quadratic).predict(test, q)
-            )
-        }
-        for name, keep in variants.items():
-            if not keep:
-                losses[name] = losses["market"]
-                continue
-            fit = fit_meld(
-                train,
-                members=keep,
-                gates=gates,
-                segment_cols=segment_cols,
-                precision={k: s for k, s in precision.items() if k in keep},
-                kappa={k: v for k, v in kappa.items() if k in keep},
-                form=form,
-                ridge=ridge,
-                quadratic=quadratic,
-            )
-            losses[name] = winner_log_loss(test, fit.predict(test, q))
-        parts.append(pd.DataFrame(losses))
-    return pd.concat(parts)
+        out[test_at, 0] = fit_market(train_rows, **dict(market or {})).predict(test, q)
+        for j, name in enumerate(variants, start=1):
+            options = dict(variants[name])
+            if options.get("members"):
+                out[test_at, j] = fit_meld(train_rows, **options).predict(test, q)
+            else:
+                out[test_at, j] = out[test_at, 0]
+    scored = np.flatnonzero(fold != labels[0])
+    return pd.DataFrame(out[scored], index=frame.index[scored], columns=names)
+
+
+def walk_forward_loss(frame: pd.DataFrame, p: pd.DataFrame) -> pd.DataFrame:
+    """Per scored race (indexed by race_id), the winner log loss of each column of `p`, the
+    out-of-fold probabilities on `frame`'s rows `p.index` (`walk_forward_predictions`)."""
+    rows = frame.loc[p.index]
+    return pd.DataFrame({name: winner_log_loss(rows, p[name]) for name in p.columns})
+
+
+def ablation_table(
+    ll: pd.DataFrame,
+    members: Sequence[str],
+    *,
+    clusters: pd.Series,
+    n_boot: int,
+    level: float,
+    seed: int,
+) -> pd.DataFrame:
+    """The marginal table from per-race losses with columns MARKET, ALL and f"all minus {k}":
+    every variant's ΔLL against the market and each member's gain, all on one set of meeting
+    draws (`paired_bootstrap` on the same races with the same seed)."""
+
+    def bounds(diff: pd.Series) -> tuple[float, float, float]:
+        iv = paired_bootstrap(diff, clusters, n_boot=n_boot, level=level, seed=seed)
+        return iv.mean, iv.lo, iv.hi
+
+    rows = []
+    for name in [ALL, *(f"all minus {k}" for k in members)]:
+        delta = bounds(ll[MARKET] - ll[name])
+        gain = (np.nan,) * 3 if name == ALL else bounds(ll[name] - ll[ALL])
+        rows.append([name, len(ll), *delta, *gain])
+    return pd.DataFrame(rows, columns=TABLE_COLUMNS)
 
 
 def marginal_ablation(
@@ -378,26 +418,23 @@ def marginal_ablation(
     n_boot: int,
     level: float,
     seed: int,
+    embargo_days: int = 0,
     **meld,
 ) -> pd.DataFrame:
-    """The marginal table (see the module doc): "all", then "all minus k" per member in order;
-    `meld` passes gates, segment_cols, precision, kappa, form, ridge and quadratic to every fit."""
+    """The marginal table (see the module doc): "all", then "all minus k" per member in order.
+    `meld` passes gates, segment_cols, precision, kappa, form, ridge and quadratic to every fit
+    (the market-only meta takes its form and quadratic); `embargo_days` is
+    `walk_forward_predictions`'."""
     members = list(members)
     if not members or len(set(members)) != len(members):
         raise ValueError(f"members must be distinct and at least one, got {members!r}")
-    variants = {ALL: members} | {f"all minus {k}": [m for m in members if m != k] for k in members}
-    ll = walk_forward_loss(frame, variants, **meld)
-
-    def bounds(diff: pd.Series) -> tuple[float, float, float]:
-        iv = paired_bootstrap(diff, clusters, n_boot=n_boot, level=level, seed=seed)
-        return iv.mean, iv.lo, iv.hi
-
-    rows = []
-    for name in variants:
-        delta = bounds(ll["market"] - ll[name])
-        gain = (np.nan,) * 3 if name == ALL else bounds(ll[name] - ll[ALL])
-        rows.append([name, len(ll), *delta, *gain])
-    return pd.DataFrame(rows, columns=TABLE_COLUMNS)
+    variants = {ALL: meld_options(members, **meld)} | {
+        f"all minus {k}": meld_options([m for m in members if m != k], **meld) for k in members
+    }
+    market = {key: meld[key] for key in ("form", "quadratic") if key in meld}
+    p = walk_forward_predictions(frame, variants, market=market, embargo_days=embargo_days)
+    ll = walk_forward_loss(frame, p)
+    return ablation_table(ll, members, clusters=clusters, n_boot=n_boot, level=level, seed=seed)
 
 
 # --------------------------------------------------------------------------- diversity
