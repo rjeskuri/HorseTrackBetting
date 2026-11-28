@@ -100,6 +100,8 @@ BASELINES = {"E2": "the scored price itself (q normalised)", "E45": "Harville on
 _VIEW = "__board_vs_final_tyb"  # the release-time view jrdb_board reads through read_asof
 _KEYS = "__board_vs_final_races"
 JRDB_COLUMNS = ["race_id", "race_date", "horse_no", "tyb_win_odds", "tyb_odds_time"]
+FETCHED = "tyb_fetched_utc"  # jrdb_pre_race's measured fetch time of the TYB file (#603)
+BOARD_COLUMNS = ["race_id", "horse_no", "tyb_win_odds", "release_utc", "fetched_utc"]
 RUNNER_COLUMNS = ["race_id", "race_date", "horse_no", "win_odds", "finish_pos", "dead_heat"]
 RUNNER_COLUMNS += ["is_scratched"]
 # the races view needs its rule's label and gated columns (availability.yaml) to derive post_utc
@@ -128,6 +130,13 @@ def _lag(rules: Mapping) -> timedelta:
     return timedelta(minutes=minutes)
 
 
+def _release(rules: Mapping) -> str:
+    release = rules.get("release", "lag") if isinstance(rules, Mapping) else "lag"
+    if not isinstance(release, str) or release not in ("lag", "fetched"):
+        raise ValueError(f'rules["release"] must be "lag" or "fetched", got {release!r}')
+    return release
+
+
 def jrdb_board(
     con,
     race_ids: Sequence[str],
@@ -136,16 +145,35 @@ def jrdb_board(
     decision_utc: pd.Series | None = None,
 ) -> pd.DataFrame:
     """JRDB's fixed-time board of `race_ids` from the store table `jrdb_pre_race` in `con`:
-    race_id, horse_no, tyb_win_odds and release_utc, at most one row per runner.
+    race_id, horse_no, tyb_win_odds, release_utc and fetched_utc, at most one row per runner.
 
-    A row is released at race_date, tyb_odds_time ("HHMM" on the wall clock of `rules["tz"]`,
-    default Asia/Tokyo) + `rules["release_lag_min"]`; a missing or malformed odds time is never
-    released. The rows go through `read_asof` under a column rule on that release time, at
+    `rules["release"]` picks the release time. "lag" (the default): a row is released at race_date,
+    tyb_odds_time ("HHMM" on the wall clock of `rules["tz"]`, default Asia/Tokyo) +
+    `rules["release_lag_min"]` (required); a missing or malformed odds time is never released.
+    "fetched" (#603): a row is released when its TYB file was fetched (`jrdb_pre_race.
+    tyb_fetched_utc`, measured, not assumed); `release_lag_min` is not needed and a row with no
+    recorded fetch time is never released. Any other value raises ValueError. `fetched_utc` is the
+    row's fetch time under either rule (null where unrecorded, or when the table has no such
+    column). The rows go through `read_asof` under a column rule on the release time, at
     `decision_utc` (a Series of timezone-aware decision times indexed by race_id: a runner's board
     counts only if released by its own race's time; a race without one has no board) or, without
     it, now. Nothing is filled from another price: a runner without TYB odds reads null."""
-    lag, tz = _lag(rules), rules.get("tz", "Asia/Tokyo")
+    fetched_rule = _release(rules) == "fetched"
+    lag = timedelta(0) if fetched_rule else _lag(rules)
+    tz = rules.get("tz", "Asia/Tokyo")
     ZoneInfo(tz)  # an unknown zone fails here
+    has_fetched = FETCHED in {r[0] for r in con.execute("DESCRIBE jrdb_pre_race").fetchall()}
+    if fetched_rule and not has_fetched:
+        raise ValueError(f"release 'fetched' needs jrdb_pre_race.{FETCHED}")
+    fetched = f"j.{FETCHED}" if has_fetched else "CAST(NULL AS TIMESTAMPTZ)"
+    lagged = (
+        "CASE WHEN regexp_full_match(j.tyb_odds_time, '[0-9]{4}') THEN "
+        "timezone(?, try_strptime(strftime(j.race_date, '%Y-%m-%d') || ' ' || j.tyb_odds_time, "
+        "'%Y-%m-%d %H%M')) + to_microseconds(?) END"
+    )
+    release_sql, params = (
+        (fetched, []) if fetched_rule else (lagged, [tz, lag // timedelta(microseconds=1)])
+    )
     ids = pd.DataFrame(
         {"race_id": pd.Series(list(dict.fromkeys(map(str, race_ids))), dtype=object)}
     )
@@ -159,22 +187,18 @@ def jrdb_board(
     try:
         con.execute(
             f'CREATE OR REPLACE TEMP TABLE "{_VIEW}" AS SELECT j.race_id, j.horse_no, '
-            "j.tyb_win_odds, CASE WHEN regexp_full_match(j.tyb_odds_time, '[0-9]{4}') THEN "
-            "timezone(?, try_strptime(strftime(j.race_date, '%Y-%m-%d') || ' ' || j.tyb_odds_time, "
-            "'%Y-%m-%d %H%M')) + to_microseconds(?) END AS release_utc FROM jrdb_pre_race AS j "
-            f'WHERE j.race_id IN (SELECT race_id FROM "{_KEYS}")',
-            [tz, lag // timedelta(microseconds=1)],
+            f"j.tyb_win_odds, {release_sql} AS release_utc, {fetched} AS fetched_utc "
+            f'FROM jrdb_pre_race AS j WHERE j.race_id IN (SELECT race_id FROM "{_KEYS}")',
+            params,
         )
         rule = Availability(_VIEW, "column", column="release_utc")
-        board = pd.DataFrame(columns=["race_id", "horse_no", "tyb_win_odds", "release_utc"])
+        board = pd.DataFrame(columns=BOARD_COLUMNS)
         if at is not None:
             board = read_asof(con, _VIEW, at, rules={_VIEW: rule})
     finally:
         con.execute(f'DROP TABLE IF EXISTS "{_VIEW}"')
         con.unregister(_KEYS)
-    board = board[["race_id", "horse_no", "tyb_win_odds", "release_utc"]].astype(
-        {"race_id": object}
-    )
+    board = board[BOARD_COLUMNS].astype({"race_id": object})
     if decision is not None:
         off = pd.to_datetime(board["race_id"].map(decision), utc=True)
         board = board.loc[(board["release_utc"] <= off).to_numpy(dtype=bool, na_value=False)]
