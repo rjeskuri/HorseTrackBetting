@@ -26,7 +26,7 @@ How to read the diagrams:
   (diagram 5); the top-ranked options are shadowed and played by hand with small flat stakes, and no
   code places a bet.
 
-Status as of 2026-11-27. When a ticket in a diagram lands, move its box from planned to built and
+Status as of 2026-11-28. When a ticket in a diagram lands, move its box from planned to built and
 name its module.
 
 ## 1. The decision in one picture
@@ -42,7 +42,7 @@ flowchart LR
     TEST{"Measured: E[p · O_final | info_t] #gt; 1 ?"}
     YES["Claimed value: logged in shadow<br/>#119 japan/shadow/log.py"]
     NO["No claimed value: recorded as measured,<br/>not a bar to play"]
-    RANK["Play is set by the leaderboard rank, not by this test:<br/>a top-ranked option is played by hand (D16, D19),<br/>a loss-avoidance option even with every return negative (D18);<br/>any other option is the avoid rung<br/>leaderboard #449 planned, diagram 5"]
+    RANK["Play is set by the leaderboard rank, not by this test:<br/>a top-ranked option is played by hand (D16, D19),<br/>a loss-avoidance option even with every return negative (D18);<br/>any other option is the avoid rung<br/>leaderboard #449 core/eval/leaderboard.py, diagram 5"]
     HIST --> PROB
     LOGS --> PRICE
     INFO --> PROB
@@ -84,7 +84,7 @@ flowchart TB
         LIN["Lineage prior: sire × surface × band, damsire at ¼<br/>#95 japan/models/lineage.py<br/>built; E37 run planned"]
     end
     subgraph L3["C3: speed and par"]
-        SPEED["Par and expected top-3 time #96,<br/>horse relative speed p_speed #97<br/>planned"]
+        SPEED["Par and expected top-3 time #96 japan/models/speed.py;<br/>horse relative speed p_speed #97 japan/models/speed_horse.py,<br/>E39 at the final price #347 japan/studies/p_speed.py<br/>built, not adopted"]
     end
     subgraph L4["C4: meta-model at the final price, shrunk toward the market (α = 0)"]
         CAL["Calibrated market (D4)<br/>#114 japan/models/v0/calibration.py<br/>v0"]
@@ -125,8 +125,8 @@ flowchart TB
     classDef built fill:#dcfce7,stroke:#15803d,color:#052e16
     classDef planned fill:#f3f4f6,stroke:#6b7280,stroke-dasharray: 5 5,color:#111827
     class NC0,CAL,RES,ORD,SV v0
-    class ASOF,BOARD,SLOG,NC1,ABIL,STAKE built
-    class INTR,SPEED,META,EXO,SDEC planned
+    class ASOF,BOARD,SLOG,NC1,ABIL,STAKE,SPEED built
+    class INTR,META,EXO,SDEC planned
 ```
 
 The work is split into seven layers, and each is tested both on its own and for what it adds
@@ -150,8 +150,8 @@ flowchart LR
     INT["Interactions: jockey, trainer, track #93,<br/>competition #94<br/>planned"]
     LIN["Lineage prior: sire × surface × band,<br/>damsire at ¼ #95 japan/models/lineage.py"]
     PL["Plackett-Luce ability on the top 3, pooled jockey,<br/>trainer and sire #92 japan/models/ability.py"]
-    PAR["Par and expected top-3 time #96<br/>planned"]
-    PSPD["Horse relative speed, p_speed #97<br/>planned"]
+    PAR["Par and expected top-3 time #96<br/>japan/models/speed.py"]
+    PSPD["Horse relative speed, p_speed #97<br/>japan/models/speed_horse.py,<br/>E39 #347 japan/studies/p_speed.py"]
     MKT["Calibrated-market baseline (D4)<br/>#114 japan/models/v0/calibration.py"]
     META["Meta-model at the final price,<br/>shrunk toward the market (α = 0)<br/>#87, #98: planned"]
     PP --> HCP
@@ -159,7 +159,7 @@ flowchart LR
     PAR -.->|"par swap #219"| HCP
     GOING -.->|"rail setting #253"| BIAS
     GOING -.->|"variant prior"| PAR
-    PAR -.-> PSPD
+    PAR --> PSPD
     RAT --> PL
     INT -.-> PL
     LIN -.->|"debut and thin-history prior, E37"| PL
@@ -175,7 +175,8 @@ flowchart LR
 The meta-model is where everything known about the horses meets the market's own view, the final
 price. Each box on the left is a member or a set of features, and an arrow means its output is an
 input of the box it points to; today the past-performance lines feeding the handicap factors and
-the dynamic rating feeding the Plackett-Luce ability (#92's study) run in code, and every other
+the dynamic rating feeding the Plackett-Luce ability (#92's study) and the par feeding the horse
+speed model (#97, scored at the final price by #347's study) run in code, and every other
 flow is planned. The ability model's sire comes from the JRA-VAN pedigree, so its results are
 withheld (D21). The meta-model starts from the calibrated market and
 gives a member weight only when it improves on the final price, so a member that adds nothing ends
@@ -229,16 +230,16 @@ flowchart TD
     PRE["Pre-register the study: Claude freezes its spec<br/>by hash before any scored read, no sign-off wait<br/>#74 core/eval/registry.py"]
     REG["Registry: every run is a record,<br/>failures too, hash-chained<br/>#74 core/eval/registry.py"]
     OOF["Walk-forward out-of-fold fits<br/>on development days (D9, D14)<br/>#70 core/eval/folds.py"]
-    RET["Return per ¥100 at the final dividend,<br/>takeout and breakage included,<br/>with its meeting-bootstrap CI (D7)<br/>#69 core/eval/bootstrap.py;<br/>read from every record: #450 planned"]
-    SHRINK["Shrinkage of the ranking (D17):<br/>hierarchical within a study #78 core/eval/segment_roi.py,<br/>per pool across studies #449 planned"]
-    LB["Leaderboard: every option, model and member a row,<br/>failed variants too, with its CI and the<br/>number of variants searched (D16)<br/>#449 core/eval/leaderboard.py planned;<br/>horsetrack japan leaderboard and<br/>docs/leaderboard/japan.md #452 planned"]
-    SEL{"Top-ranked row: is every selection input<br/>available at the decision time t it is played at<br/>(D2 grid, T-2 primary; as-of views, board at t)?<br/>#455 planned"}
-    PROXY["Look-ahead row (a selection input from after t,<br/>such as the final price or a later board): played<br/>only through its board-at-t proxy, labelled as such,<br/>else left off the shortlist (D16, D19)<br/>labels #455 planned"]
-    PLAY["Top-ranked options: shadowed, and played by hand<br/>with flat stakes, at most ¥30,000 per race day (D19)<br/>shadow log #119 japan/shadow/log.py;<br/>the day's shortlist #455 planned"]
-    BETS["Bet log, every hand-placed bet, logged and<br/>counted toward the day cap, holdout days too<br/>#453 japan/bets/ planned"]
-    DAY{"Holdout day? (D14)<br/>is_holdout_day #71 core/eval/holdout.py;<br/>wired into settlement #454 planned"}
-    SETTLE["Development day: settled against<br/>the final dividends<br/>#454 planned"]
-    DEFER["Holdout day: not settled at routine settlement;<br/>settled only at the owner's opening (D15,<br/>LockedHoldout.open), its results kept out of<br/>the development ranking (D14)<br/>#454 planned, core/eval/holdout.py"]
+    RET["Return per ¥100 at the final dividend,<br/>takeout and breakage included,<br/>with its meeting-bootstrap CI (D7)<br/>#69 core/eval/bootstrap.py;<br/>read from every record: #450 core/eval/leaderboard.py (rows_from_registry),<br/>#451 japan/research/leaderboard_backfill.py"]
+    SHRINK["Shrinkage of the ranking (D17):<br/>hierarchical within a study #78 core/eval/segment_roi.py,<br/>per pool across studies #449 core/eval/leaderboard.py (shrink)"]
+    LB["Leaderboard: every option, model and member a row,<br/>failed variants too, with its CI and the<br/>number of variants searched (D16)<br/>#449 core/eval/leaderboard.py;<br/>horsetrack japan leaderboard #452 japan/research/leaderboard_build.py,<br/>docs/leaderboard/japan.md (public rows only, D21)"]
+    SEL{"Top-ranked row: is every selection input<br/>available at the decision time t it is played at<br/>(D2 grid, T-2 primary; as-of views, board at t)?<br/>the row's selection field, #449 core/eval/leaderboard.py;<br/>the owner reads it on the shortlist #455 japan/bets/shortlist.py"}
+    PROXY["Look-ahead row (a selection input from after t,<br/>such as the final price or a later board): played<br/>only through its board-at-t proxy, labelled as such,<br/>else left off the shortlist (D16, D19)<br/>label built: shortlist prints [look-ahead] #455;<br/>the proxy at t and the left-off rule are not built"]
+    PLAY["Top-ranked options: shadowed, and played by hand<br/>with flat stakes, at most ¥30,000 per race day (D19)<br/>shadow log #119 japan/shadow/log.py;<br/>the day's shortlist, horsetrack japan bets shortlist<br/>#455 japan/bets/shortlist.py"]
+    BETS["Bet log, every hand-placed bet, logged and<br/>counted toward the day cap, holdout days too<br/>#453 japan/bets/log.py (flat stake, cap: japan/config/betting.yaml)"]
+    DAY{"Holdout day? (D14)<br/>is_holdout_day #71 core/eval/holdout.py;<br/>wired into settlement #454 japan/bets/settle.py"}
+    SETTLE["Development day: settled against<br/>the final dividends<br/>#454 japan/bets/settle.py; the settled file<br/>feeds the shortlist's played-per-option line"]
+    DEFER["Holdout day: labelled holdout, not settled at routine<br/>settlement #454 japan/bets/settle.py; to be settled only<br/>at the owner's opening (D15, LockedHoldout.open,<br/>core/eval/holdout.py; settling at the opening not built),<br/>its results kept out of the development ranking (D14)"]
     HOLD["Holdout opening by the owner (D15), once per family<br/>at its power target: checks whether the ranking<br/>holds up, adopts or rejects nothing<br/>#71, #126 core/eval/holdout.py"]
     DIAG["Reported diagnostics, gating nothing:<br/>log-loss gain over the final price #69 core/eval/scoring.py,<br/>encompassing weight #87 planned,<br/>SPA and StepM #75 core/eval/snooping.py,<br/>tail-return curve #433 core/eval/tail.py"]
     PRE --> REG
@@ -246,16 +247,16 @@ flowchart TD
     OOF --> RET
     OOF --> DIAG
     RET --> SHRINK
-    SHRINK -.-> LB
+    SHRINK --> LB
     DIAG -.->|"beside the row"| LB
-    LB -.-> SEL
-    SEL -.->|"yes: decision-time"| PLAY
-    SEL -.->|"no: look-ahead"| PROXY
+    LB --> SEL
+    SEL -->|"yes: decision-time"| PLAY
+    SEL -->|"no: look-ahead"| PROXY
     PROXY -.->|"proxy at t"| PLAY
-    PLAY -.-> BETS
-    BETS -.-> DAY
-    DAY -.->|"no"| SETTLE
-    DAY -.->|"yes"| DEFER
+    PLAY --> BETS
+    BETS --> DAY
+    DAY -->|"no"| SETTLE
+    DAY -->|"yes"| DEFER
     SETTLE -.->|"settled bets feed back as rows"| LB
     DEFER -.->|"opened with the family's block"| HOLD
     LB -.->|"ranking checked"| HOLD
@@ -274,7 +275,8 @@ played at a decision time t only when every input its selection reads was availa
 views and the board at t); a look-ahead row, whose selection reads the final price or a board later
 than t, is played only through its board-at-t proxy, labelled as such, or left off the shortlist.
 Every bet is logged and counts toward the cap; a development-day bet is settled against the final
-dividends, so real bets feed back as data, while a holdout-day bet is settled only when the
+dividends, so real bets are data (today the settled file feeds the shortlist's played-per-option line;
+settled bets as leaderboard rows are not built), while a holdout-day bet is settled only when the
 owner opens the holdout and stays out of the development ranking (D14, D15, D19). A
 loss-avoidance rule and its stated alternative are each a row, with their paired difference beside
 them (D18). The owner opens the locked holdout once per family at its power target, to check

@@ -2223,3 +2223,29 @@ def test_the_run_command_never_drops_a_row_a_family_summary_publishes(tmp_path, 
         assert f"({family}.md)" in listed, f"the index dropped {family}"
     after = _tree(committed_dir) if committed_dir.is_dir() else {}
     assert after == committed_before, "the committed summary was touched"
+
+
+# --- #88: RunRecord.notes keeps the ids of records without notes ---------------------------------
+
+
+def test_an_identical_rerun_returns_the_run_ids_the_registry_wrote(tmp_path, monkeypatch):
+    """#88 adds ``RunRecord.notes``, a line without notes is written without the key, so a record
+    without notes keeps the id it had before the field. An identical rerun (same store, commit,
+    range and seed) appends nothing and returns the ids the first run's registry lines carry."""
+    data = tiny_store(tmp_path)
+    guard(monkeypatch)
+    registry = frozen_registry(tmp_path)
+    out_dir = tmp_path / "out"
+    seen = len(registry_lines(registry))
+    first = run(monkeypatch, data, out_dir, registry, date_from=date(2019, 1, 1))
+    lines = registry_lines(registry)
+    written = {
+        f"{e['record']['family_id']}/{e['record']['variant']}": e["run_id"]
+        for e in lines[seen:]
+        if e["kind"] == "run"
+    }
+    assert len(written) == len(ss.FAMILIES) * len(VARIANTS)
+    assert first.run_ids == written
+    again = run(monkeypatch, data, out_dir, registry, date_from=date(2019, 1, 1))
+    assert registry_lines(registry) == lines, "an identical rerun appended a record"
+    assert again.run_ids == written, "a rerun's run ids are not the registry's"

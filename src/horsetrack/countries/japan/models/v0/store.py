@@ -7,12 +7,18 @@ holdout exclusion pushed into the scan as one dataset expression
 (`core.eval.holdout.file_development_filter`, #415: #71's `is_holdout_day`, looked up at call
 time, so an open-ended `end=date.max` asks it only about the file's days). The scan is a
 `ds.dataset` of the file's path served from that handle (`_Snapshot`, a one-file read-only
-filesystem), so the bounds and the rows come from one snapshot and the read is a dataset scan
-with the predicate as its filter. No holdout row is materialized;
-Parquet prunes row groups only by their min/max statistics, so a row group mixing development and
-holdout days is still read from disk and its holdout rows are dropped by the scan's filter. A
-read that touches prices may not start before D10's price era (2014-06-07), whichever the source:
-the requested start is checked, before any clamping.
+filesystem whose file is the handle itself, read by byte range), so the bounds and the rows come
+from one snapshot (a file atomically replaced meanwhile is read as it was) and the read is a
+dataset scan with the predicate as its filter, its rows in file order. No holdout row is
+materialized. The scan skips each row group whose race_date statistics rule the predicate out,
+and reads the column chunks of the others one by one (no pre-buffering, whose coalesced reads
+could span a skipped group): a group holding one day (min == max, no null), as the jravan
+builders write `final_odds`, `pool_votes`, `races` and `runners` (#502), is never opened when its
+day is a holdout day or outside the range, so a development read decodes no byte of a holdout day
+there (D14). A group mixing days (a store not yet rebuilt, a group per year), or without
+statistics, is still read from disk and its holdout rows are dropped by the scan's filter. A read
+that touches prices may not start before D10's price era (2014-06-07), whichever the source: the
+requested start is checked, before any clamping.
 
 When #46 lands, this may delegate to its `read_table`.
 """
@@ -34,6 +40,8 @@ PRICE_ERA_START = date(2014, 6, 7)
 COUNTRY = "japan"
 SOURCE = "jra"
 DATE_COLUMN = "race_date"
+# Each column chunk read on its own: a pre-buffer coalesces nearby ranges, across a skipped group.
+_SCAN_OPTIONS = ds.ParquetFragmentScanOptions(pre_buffer=False)
 
 
 class PreReformPriceError(ValueError):
@@ -83,25 +91,28 @@ def read_store_table(
         )
         strings = [f.name for f in dataset.schema if pa.types.is_string(f.type)]
         if not strings:
-            return dataset.to_table(columns=columns, filter=keep)
+            return dataset.to_table(
+                columns=columns, filter=keep, fragment_scan_options=_SCAN_OPTIONS
+            )
         # The scan decodes its string columns as dictionaries and casts the rows it keeps back
         # to strings: the same table, without densely decoding every row the filter drops (a
         # year of final_odds decodes every pool's board before a pool filter, #430).
         options = ds.ParquetReadOptions(dictionary_columns=strings)
         compact = ds.dataset(path, filesystem=snapshot, format=ds.ParquetFileFormat(options))
-        table = compact.to_table(columns=columns, filter=keep)
+        table = compact.to_table(columns=columns, filter=keep, fragment_scan_options=_SCAN_OPTIONS)
         return table.cast(pa.schema([dataset.schema.field(c) for c in columns]))
 
 
 class _Snapshot(pafs.FileSystemHandler):
-    """A read-only filesystem holding the one file `path`, served from the memory map `handle`: a
-    dataset of `path` on it reads the snapshot the handle opened, even after the file is
-    atomically replaced on disk. Each open reads the map by byte range (`_Ranges`), so a scan
-    pages in only the column chunks it reads: one buffer over the whole map would have the kernel
-    page in the whole file (Arrow advises WILLNEED for every buffer it maps), a resident set the
-    size of the file for a one-year read of `final_odds` (#430)."""
+    """A read-only filesystem holding the one file `path`, served by the open handle `handle`
+    (positional reads of the byte ranges asked, never a buffer of the whole file): a dataset of
+    `path` on it reads the snapshot the handle opened, even after the file is atomically replaced
+    on disk. Each open reads the handle by byte range through `_Ranges`, so a scan pages in only
+    the column chunks it reads: one buffer over a whole memory map would have the kernel page in
+    the whole file (Arrow advises WILLNEED for every buffer it maps), a resident set the size of
+    the file for a one-year read of `final_odds` (#430)."""
 
-    def __init__(self, path: str, handle: pa.MemoryMappedFile) -> None:
+    def __init__(self, path: str, handle: pa.NativeFile) -> None:
         self.path = path
         self.handle = handle
         self.size = handle.size()
@@ -128,7 +139,8 @@ class _Snapshot(pafs.FileSystemHandler):
             raise FileNotFoundError(path)
         return pa.PythonFile(_Ranges(self.handle, self.size), mode="r")
 
-    open_input_stream = open_input_file
+    def open_input_stream(self, path: str) -> pa.NativeFile:
+        raise NotImplementedError("a snapshot is read by byte range, not as a stream")
 
     def _read_only(self, *args: object, **kwargs: object) -> None:
         raise PermissionError("a store snapshot is read-only")

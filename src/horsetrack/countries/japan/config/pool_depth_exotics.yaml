@@ -1,0 +1,37 @@
+# The pool-depth study's trifecta (TIERCE) and bracket-quinella cells (ticket #490, N3;
+# docs/specs/pool-depth-prereg.md, "Exotics"), read by `horsetrack japan pool-depth freeze|run
+# --spec pool_depth_exotics` (countries/japan/research/pool_depth.py).
+#
+# config/pool_depth.yaml (family japan-pool-depth-v1) left both pools out of its cells: exact
+# quantiles over the trifecta's combinations did not fit in memory, and the bracket quinella needs
+# the horse-to-bracket map. This family registers the depth variant for those two pools alone,
+# with v1's definitions, cells, edges, share lost, quantiles, class groups and flat stakes. Both
+# are single-winner pools, so every combination has the capacity stake. The quantiles are exact:
+# `StreamingQuantile`, a count map of distinct values (the capacity over the distinct (V, W) pairs
+# of a cell, each with its count), read a year at a time. A bracket pair's horses are the starters
+# the jravan `runners` table puts in its two brackets (枠番; a scratched horse, 取消 or 除外, is in
+# no bracket); a pair is sold when both brackets hold a starter, a same-bracket pair when its
+# bracket holds two or more, and a pair not sold gives no row. Not registered here: the pool-size
+# tertile cells and the totals at t (v1's, for its pools). Frozen before its run; any edit after
+# the freeze is another spec, which `run` refuses. The keys are explained in config/pool_depth.yaml.
+family_id: japan-pool-depth-exotics-v1
+date_from: "2014-06-07"
+edges: [0.05, 0.1, 0.2]
+share_lost: 0.5
+quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+odds_bands:
+  TIERCE: [30, 100, 300, 1000, 3000, 10000, 30000]
+  BRACKET_QUINELLA: [5, 10, 20, 50, 100, 300]
+class_groups:
+  DEBUT: newcomer
+  MAIDEN: maiden
+  C1: conditions
+  C2: conditions
+  C3: conditions
+  OP: open
+  L: open
+  G1: graded
+  G2: graded
+  G3: graded
+exclude_status: [abandoned]
+flat_stakes_yen: [1000, 10000, 30000]
