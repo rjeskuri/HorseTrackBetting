@@ -18,9 +18,8 @@ withholds their values.
 The release lag is an assumption (the store keeps no JRDB release log), so family v3 (#602)
 registers it as a counted variant: config/board_vs_final.yaml lists `release_lags_min`,
 `jrdb_boards` builds one board per lag, and the whole study (tables, coefficients, records,
-table x cell counted in `variants_searched`. v2, which assumed the single lag 10, stays in the
-registry as recorded.
-`variants_searched`. v2, which assumed the single lag 10, stays in the registry as recorded.
+leaderboard rows) runs once per lag, each lag x table x cell counted in `variants_searched`. v2,
+which assumed the single lag 10, stays in the registry as recorded.
 
 E45's Place and Wide outcomes, and whether a race is scored in them, come from the race's paid
 combinations in the dividends table (`payout_rules`; family v2): the store does not hold the field
