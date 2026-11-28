@@ -23,7 +23,7 @@ Accepted differences (#210), settled against HKTrack's copy and named on the tab
 (`jrdb_pre_race: match (accepted: jurisdiction added; all-null: cyb_a, sed_remarks)`); they do not
 fail a table, and every other difference still does:
 - `EXPECTED_ADDITIONS`: a column the rebuild has and the copy lacks (`jurisdiction` on jrdb_pre_race
-  and jrdb_post_race, added after the copy was made).
+  and jrdb_post_race, `tyb_fetched_utc` on jrdb_pre_race (#603), added after the copy was made).
 - every table: a column the copy types as Arrow `null` (it was all null when written) that the
   rebuild types otherwise but holds only nulls in. One value in the rebuild is still a difference.
 - `schemas.OPTIONAL_COLUMNS` (#215): a column the copy lacks and the rebuild has with only nulls. A
@@ -51,7 +51,7 @@ MANIFEST = "manifest.sqlite"
 JRDB_LINKS = ("raw/jrdb", "jrdb")  # the JRDB archives and the field-spec tables, for jra
 # columns the rebuild may have and HKTrack's copy lacks, per table (see the module docstring)
 EXPECTED_ADDITIONS: dict[str, tuple[str, ...]] = {
-    "jrdb_pre_race": ("jurisdiction",),
+    "jrdb_pre_race": ("jurisdiction", "tyb_fetched_utc"),
     "jrdb_post_race": ("jurisdiction",),
 }
 ADDED = "added"

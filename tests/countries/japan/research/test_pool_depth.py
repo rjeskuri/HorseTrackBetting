@@ -1326,6 +1326,64 @@ def renderings(value: float) -> set[str]:
     return {f"{value:.2f}", f"{value:,.2f}"}
 
 
+def figure_leaks(text: str, values) -> list[str]:
+    """The renderings of `values` that appear in `text` as a token of their own. A rendering inside
+    a longer alphanumeric run (a hex run id, a report stem, a short commit) or extending a longer
+    number (`89,100.50` for 89100) is not a leak. Nothing is scrubbed, so no digit run hides one."""
+    found = []
+    for value in values:
+        for rendering in sorted(renderings(float(value))):
+            token = (
+                r"(?<![0-9A-Za-z])(?<![0-9][.,])"
+                + re.escape(rendering)
+                + r"(?![0-9A-Za-z])(?![.,][0-9])"
+            )
+            if re.search(token, text):
+                found.append(rendering)
+    return found
+
+
+def test_figure_check_ignores_hex_identities():
+    """Digits inside a hex identity are no figure: a run id, report stem or short commit that
+    contains a table figure's digits passes, and the figure as its own token is still caught."""
+    whole, decimal = 89100.0, 1234.56
+    identities = (
+        "registry run `8796891002d4efb5`, private report `pool-depth-8796891002d4efb5.md`",
+        "run `8796891002d4efb5…` at `89100ab`",
+        "spec sha256 `ab89100cd0123456789abcdef0123456789abcdef0123456789abcdef0123456`",
+        "run `fe123456f` and `f1,234.56` and `abc1234.56`",
+    )
+    for identity in identities:
+        assert figure_leaks(identity, [whole, decimal]) == [], identity
+    # a longer number is another figure: 189,100 and 89100.5x do not render 89,100 or 89100
+    assert figure_leaks("run `a89100.50`, 189,100 and 89100.5x", [89100.5, whole]) == []
+
+    # the figure as a token of its own is caught, wherever it sits and beside any identity
+    prints = {
+        "plain": ("the pool held 89100 yen", whole, "89100"),
+        "thousands": ("the pool held 89,100 yen", whole, "89,100"),
+        "yen sign": ("capacity ¥89,100", whole, "89,100"),
+        "yen sign plain": ("capacity ¥89100", whole, "89100"),
+        "table cell": ("| A | 89,100 |", whole, "89,100"),
+        "table cell tight": ("|89100|", whole, "89100"),
+        "line end": ("the pool held\n89100", whole, "89100"),
+        "sentence end": ("the pool held 89,100.", whole, "89,100"),
+        "list": ("pools 12000.5, 89100, 5", whole, "89100"),
+        "brackets": ("(89100)", whole, "89100"),
+        "decimal": ("a stake of 1234.56 yen", decimal, "1234.56"),
+        "decimal separator": ("a stake of 1,234.56 yen", decimal, "1,234.56"),
+        "decimal cell": ("| 1,234.56 |", decimal, "1,234.56"),
+        "decimal line end": ("stake\n1234.56", decimal, "1234.56"),
+        "two places": ("pool ¥89,100.50", 89100.5, "89,100.50"),
+    }
+    for name, (text, value, rendering) in prints.items():
+        assert figure_leaks(text, [value]) == [rendering], name
+        beside = f"run `8796891002d4efb5…` at `89100ab`: {text}"
+        assert figure_leaks(beside, [value]) == [rendering], f"{name} beside an identity"
+    # another figure's value is not reported
+    assert figure_leaks("the pool held 89,100 yen", [decimal, 45678.0]) == []
+
+
 def test_public_report_carries_no_figures(tmp_path, data_dir):
     """D21: the public report holds the identity and worked arithmetic, never a figure from the
     data. Two runs over different data (other days, other money, more races, the same cells)
@@ -1356,9 +1414,8 @@ def test_public_report_carries_no_figures(tmp_path, data_dir):
     figure_columns = ["combo_yen", "pool_yen", *(f"capacity_{float(e):g}" for e in spec["edges"])]
     for result in (result_a, result_b):
         values = result.table[figure_columns].to_numpy(dtype=float).ravel()
-        for value in values[np.isfinite(values)]:
-            for text in renderings(float(value)):
-                assert text not in text_a, f"the figure {text} is in the public report"
+        leaks = figure_leaks(text_a, values[np.isfinite(values)])
+        assert not leaks, f"the figures {leaks} are in the public report"
 
 
 # --- review round 1: the co-placer rule, the readers, the run identities and the command --------

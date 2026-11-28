@@ -277,6 +277,31 @@ def test_one_row_per_run_of_each_horse_in_the_store_schema(data: Path) -> None:
     assert got.equals(arrow_table(TABLE, want)), "rows, values or sort order differ"
 
 
+def test_an_abandoned_races_unnumbered_runners_are_runs_with_no_draw(data: Path) -> None:
+    """The runners of an abandoned race that were never drawn have a null horse_no and draw
+    (#394); each is still a run of its horse, whose draw is null."""
+    rows = fixture_rows()
+    day = DEV_DAYS[3]
+    race = make_race(3, day, 7, 3) | {"status": "abandoned"}
+    rows["races"].append(race)
+    for j, horse in enumerate(HORSES[:3]):
+        runner = make_runner(3, race, j, horse, 3) | {
+            "horse_no": None, "draw": None, "placing_raw": None, "finish_pos": None,
+            "finish_time_s": None, "win_odds": None, "running_positions": [], "lbw_raw": None,
+            "lbw_lengths": None, "win_fav_rank": None,
+        }  # fmt: skip
+        rows["runners"].append(runner)
+    write_store(data, rows)
+    got = build(data)
+
+    want = expected_rows(rows)
+    assert got.equals(arrow_table(TABLE, want)), "rows, values or sort order differ"
+    mine = [r for r in got.to_pylist() if r["race_id"] == race["race_id"]]
+    assert sorted(r["horse_id"] for r in mine) == sorted(HORSES[:3])
+    assert all(r["draw"] is None and r["placing_raw"] is None for r in mine)
+    assert all(r["draw"] is not None for r in got.to_pylist() if r["race_id"] != race["race_id"])
+
+
 def test_every_column_comes_from_its_runner_or_its_race(data: Path) -> None:
     """Row by row on (horse_id, race_id): each column against the source it comes from, so a
     failure names the column."""
