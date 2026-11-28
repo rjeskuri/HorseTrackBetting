@@ -31,7 +31,9 @@ log-day
   own race date in the one process: its own log paths, health lines (dated with its date) and,
   unattended, markers (`<source>-day-done.txt` with its date).
 - A block on a probe (403/429) appends `<host> <race date> ...` to jra-block.txt for the race
-  date, so every later start that evening and on the race date sends nothing.
+  date. Since #387 (the owner: a block must not end the day's logging) the start pauses
+  logger.yaml's on_block.cooldown_min, sending nothing, and then goes on at the back-off level:
+  the race date is still logged (test_five_minute_floor.py has the ladder).
 - Unchanged board (decision 4 of #358): a round whose pages show the same 発表 clock as the
   previous capture still fetches every page and writes its rows, with its own snapshot_utc, in
   the log format of any capture: a snapshot like any other, no failure, no alert.
@@ -584,29 +586,47 @@ def test_an_unattended_start_past_todays_stop_logs_tomorrow(
         assert_grain_until_t15(times, opened, race.post_utc, f"KYO 1 from a {hhmm(start)} start")
 
 
-def test_a_probe_blocked_the_evening_before_blocks_the_race_date(monkeypatch, data_dir):
+def test_a_probe_blocked_the_evening_before_still_lets_the_race_date_log(monkeypatch, data_dir):
+    """#387 (the owner: a 403 or 429 must not end the day's logging): the probe at 19:00 is
+    refused (403) and the block lifts. The block line names the race date; the start pauses
+    on_block.cooldown_min, with no request meanwhile, then goes on at the back-off level: the
+    probe finds the sales open and the race date is logged, the night and to T-15 at its
+    grain, to its end."""
     world, before = evening_world()
     start = at(SAT, 19, 0)
     clock = Clock(start)
-    site = clocked(world, before, clock.now, at(SAT, 18, 30), block_from=start)
+    opens = at(SAT, 18, 30)
+    site = clocked(world, before, clock.now, opens, block_from=start,
+                   block_until=start + timedelta(seconds=1))  # fmt: skip
+    pause = timedelta(minutes=float(shipped()["on_block"]["cooldown_min"] or 0))
 
     result, _ = log_day(monkeypatch, clock, site, "--unattended")
-    assert result.exit_code in (0, 2), plain(result.output)
-    # #387: the probe refused (403), then once more after each of the on_block back-off's two
-    # pauses (1 req/s, then the floor only); the third block ends the day
-    assert len(site.seen) == 3, f"{len(site.seen)} requests, not the three refused (403)"
+    out = plain(result.output)
+    assert result.exit_code in (0, 2), out
+    refused = [t for t in site.at if site.refused(t)]
+    assert refused == [start], f"refused requests at {[hhmm(t) for t in refused]}"
+    after = [t for t in site.at if t > start]
+    assert after, f"nothing sent after the block at {hhmm(start)}: it ended the race date"
+    assert pause > timedelta(0) and after[0] >= start + pause, (
+        f"a request at {hhmm(after[0])}, inside the {pause} pause after the block"
+    )
     lines = block_lines()
     assert lines and all(x == [dbl.HOST, SUN.isoformat()] for x in lines), lines
-    assert SUN.isoformat() not in marker_days("jra-no-meeting.txt") + marker_days(
-        "jra-day-done.txt"
-    ), "a block is not a day without racing, nor a finished day"
+    assert SUN.isoformat() not in marker_days("jra-no-meeting.txt"), "a block is no meeting"
 
+    # The race date logged: from the first probe after the pause (the sales open) to its end
+    race = world.race(SUN, "KYO", 1)
+    times = snapshot_times(SUN, "KYO", race.race_id)
+    assert_grain_until_t15(times, after[0], race.post_utc, "KYO 1 after the evening's block")
+    assert marker_days("jra-day-done.txt") == [SUN.isoformat()], out
+
+    # so later starts that evening and on the race date have nothing to do
     for later in (at(SAT, 19, 30), at(SAT, 23, 30), at(SUN, 9, 0)):
         clock = Clock(later)
-        site = clocked(world, before, clock.now, at(SAT, 18, 30))
+        site = clocked(world, before, clock.now, opens)
         result, waited = log_day(monkeypatch, clock, site, "--unattended")
         got = (result.exit_code, len(site.seen), waited)
-        assert got == (0, 0, 0.0), f"a start at {hhmm(later)} after the block: {got}"
+        assert got == (0, 0, 0.0), f"a start at {hhmm(later)} after the logged day: {got}"
 
 
 def test_jra_and_nar_each_log_their_own_race_date(monkeypatch, data_dir, late_posts):

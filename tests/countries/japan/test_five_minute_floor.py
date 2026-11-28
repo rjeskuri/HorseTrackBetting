@@ -32,9 +32,10 @@ Config (logger.yaml's JRA schedule, its top level: `source_config(config, "jra")
   three venues a rate above jra.yaml's and under 2; none for one venue (Ruling: two venues stay at
   jra.yaml's rate unless the simulation fails there, and then an entry of their own, the lowest
   rate on the same grid). The tests change the rate: it comes from this key, never a constant.
-- `on_block`: `cooldown_min` a number, 0 < N <= 30 (Ruling: NAR's 15 is the precedent; a longer
-  pause would end the day by other means), and `resume_requests_per_second` 1.0 (the owner's 1
-  req/s). Any other key (the floor-only step) is the coder's.
+- `on_block`: `cooldown_min` a number, 5 <= N <= 30 (Ruling: NAR's 15 is the precedent; a shorter
+  pause polls a host that refuses too often, a longer one loses the day by other means), and
+  `resume_requests_per_second` 1.0 (the owner's 1 req/s). Any other key (the one that makes it
+  JRA's ladder rather than NAR's single resume) is the coder's.
 - Unchanged: the windows (07:00 every 300 s, 09:30 every 20 s), within_min 20, after_post_min 5,
   all_every_s 300, min_poll_interval_s 20, the five tier-1 pools at {navigation 2, per_race 4},
   jra.yaml's 1.0 requests a second, and the health line's MAX_GAP_S 120.
@@ -65,19 +66,26 @@ run_day uses it:
 - for venue_rates: once the day's venues are known, a day whose rate (above) is not its site's own
   runs on `resume(rate)`, so every capture from 09:30 is sent at that rate. A day at its site's own
   rate makes no new site. Without `resume` a day runs on the site it was given.
-- after a block (a CircuitOpen; the site that raised it is never called again: its breaker is open):
-  no call for on_block.cooldown_min minutes, then the day goes on, from within 320 s, on
-  `resume(resume_requests_per_second)`, with the full schedule (the hot grain included) and no
-  later switch back to the venue_rates rate. After a second block and its cooldown the day goes on
-  at no more than that rate with the floor only: every race at least every floor_s up to its post,
-  hot races included, and no race captured more than twice in any floor_s span (no hot grain).
-  Neither block ends the day: every venue still ends ('ended'). Ruling: a third block ends the
-  day as a block did before #387 (no further call, every venue still running 'circuit_open', the
-  marker names the host and the race date): the owner's ladder has two steps, and a host that
-  refuses the floor-only step after two cooldowns is not polled on until the stop.
-- the health line alerts a block: health.health_lines gives every venue of a day with a block an
-  ALERT whose reasons name it (the word "block", or the status 403/429). The venue line's fields
-  are unchanged (test_log_day_cli.py's pattern).
+- after a block (a CircuitOpen; the site that raised it is never called again: its breaker is open)
+  no block ever ends the day (the owner: "a 403 or 429 must not end the day's logging"):
+  - every block: no call for on_block.cooldown_min minutes, then the next call within 320 s.
+    Ruling: the pause is the same after every block (no growth), so a host that keeps refusing
+    gets one request a pause until the day's end: never a retry loop (HKTrack's bug f).
+  - the first block: the day goes on on `resume(resume_requests_per_second)` with the full
+    schedule (the hot grain included) and no later switch back to the venue_rates rate.
+  - the second and every later block: the day goes on at no more than that rate with the floor
+    only: every race at least every floor_s up to its post, hot races included, and no race
+    captured more than twice in any floor_s span (no hot grain).
+  - every venue still ends on its normal end ('ended'); DaySummary.stopped is not set by a block.
+- the block marker: every block still appends its line (`<host> <race date> status=.. at=..`).
+  A run_day that finds lines for its host and race date (a restart after the logger died) sends
+  nothing until the pause after the latest one is over, then logs the day at the back-off level
+  those lines give (one block: the resume rate with the full schedule; two or more: the floor
+  only) and never above the resume rate. A schedule whose on_block has cooldown_min null, or no
+  ladder (NAR's), keeps the marker as before: a run that finds a line sends nothing.
+- the health line alerts a block: health.health_lines gives every venue of a day with a block (in
+  this run or in the marker it resumed from) an ALERT whose reasons name it (the word "block", or
+  the status 403/429). The venue line's fields are unchanged (test_log_day_cli.py's pattern).
 
 The race-day simulation (the DoD): logger.yaml's JRA schedule as shipped (tier 2 and results polling
 included), a run from 07:00 (the first window: no day-before probe), synthetic 12-race cards:
@@ -99,8 +107,9 @@ lever):
   itself misses a bound on at least one of the two cards.
 
 Not pinned: the order of jobs, which race fills spare budget, tier 2's share, races already off,
-the cooldown's length within its range, the marker lines of a block the day recovers from.
-Everything is synthetic: no HTTP, no real sleep, no scraped page.
+the cooldown's length within its range, the marker line's fields beyond the host and the race
+date (the restart tests read only what run_day itself wrote). Everything is synthetic: no HTTP,
+no real sleep, no scraped page.
 """
 
 from __future__ import annotations
@@ -140,7 +149,7 @@ OWNER_FLOOR_S = 300  # the owner's 5 minutes (logger.yaml hot_races.floor_s)
 OWNER_RESUME_RPS = 1.0  # "back off to 1 req/s" (logger.yaml on_block.resume_requests_per_second)
 MAX_RATE = 2.0  # "keep it under 2 req/s"
 STEP = 0.05  # Ruling: the grid the lowest rate is found on
-COOLDOWN_MAX_MIN = 30  # Ruling: the longest pause after a block
+COOLDOWN_MIN_MIN, COOLDOWN_MAX_MIN = 5, 30  # Ruling: the range of the pause after a block
 CARD_NAMES = ("358", "358-later")
 
 # The schedule the plan_round tests start from: the shipped one's shape, with the owner's keys.
@@ -286,7 +295,7 @@ def test_logger_yaml_ships_the_hot_grain_the_floor_the_three_venue_rate_and_the_
     assert day_rate(jra, 1, base) == base
 
     on_block = jra["on_block"]
-    assert 0 < cooldown_of(jra) <= COOLDOWN_MAX_MIN, on_block
+    assert COOLDOWN_MIN_MIN <= cooldown_of(jra) <= COOLDOWN_MAX_MIN, on_block
     assert on_block.get("resume_requests_per_second") == OWNER_RESUME_RPS, on_block
 
     nar = source_config(shipped, "nar")
@@ -464,13 +473,25 @@ class Runaway(BaseException):
     """run_day kept going where a day cannot (a BaseException: no `except Exception` hides it)."""
 
 
-class Clock:
-    """The fake clock: sleep() moves it, and so does each site call's request time."""
+class Died(BaseException):
+    """The logger's process ended (a crash, a reboot): run_day stops where it is."""
 
-    def __init__(self, start: datetime):
+
+class Clock:
+    """The fake clock: sleep() moves it, and so does each site call's request time. With
+    `die_after` n, the first sleep once n blocks have been answered ends the run (Died)."""
+
+    def __init__(self, start: datetime, die_after: int | None = None):
         self.t = start
         self.limit = start + timedelta(hours=24)
         self.reads = 0
+        self.die_after, self.net = die_after, None
+
+    def sleep(self, seconds: float) -> None:
+        if self.die_after is not None and self.net is not None:
+            if len([c for c in self.net.calls if c.status is not None]) >= self.die_after:
+                raise Died(f"the logger died at {self.t.isoformat()}")
+        self.advance(seconds)
 
     def now(self) -> datetime:
         self.reads += 1
@@ -486,8 +507,6 @@ class Clock:
         self.t += timedelta(seconds=max(seconds, 0.0))
         if self.t > self.limit:
             raise Runaway(f"run_day still running at {self.t.isoformat()}: it never returned")
-
-    sleep = advance
 
 
 @dataclass
@@ -505,16 +524,32 @@ class Call:
 @dataclass
 class Net:
     """What every site of one run shares: the clock, the card, the call log, the scripted blocks
-    ((instant, status): the first call at or after the instant is refused with that status) and
-    the sites `resume` made, as (when, rate)."""
+    and the sites `resume` made, as (when, rate). A block (instant, status) refuses the first
+    call at or after the instant; (start, end, status) refuses every call from start to end (a
+    host that keeps refusing: each fresh site's first call)."""
 
     clock: Clock
     meetings: dict[str, dict[int, datetime]]
     cfg: dict
-    blocks: list[tuple[datetime, int]] = field(default_factory=list)
+    blocks: list[tuple] = field(default_factory=list)
     calls: list[Call] = field(default_factory=list)
     made: list[tuple[datetime, float]] = field(default_factory=list)
     defects: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self._pending = [list(b) if len(b) == 3 else [b[0], None, b[1]] for b in self.blocks]
+        self._pending.sort(key=lambda b: b[0])
+
+    def refusal(self, t: datetime) -> int | None:
+        """The status a call at `t` is refused with, or None."""
+        for block in self._pending:
+            start, end, status = block
+            if end is None and start <= t:
+                self._pending.remove(block)
+                return status
+            if end is not None and start <= t < end:
+                return status
+        return None
 
     def resume(self, rate: float) -> FakeSite:
         self.made.append((self.clock.t, float(rate)))
@@ -548,8 +583,8 @@ class FakeSite:
         if self.broken:
             net.calls.append(Call(t, kind, venue, races, 0, self._rps, refused=True))
             raise CircuitOpen("the circuit breaker is open", host=HOST)
-        if net.blocks and net.blocks[0][0] <= t:
-            status = net.blocks.pop(0)[1]
+        status = net.refusal(t)
+        if status is not None:
             self.broken = True
             net.calls.append(Call(t, kind, venue, races, 1, self._rps, status=status))
             net.clock.advance(1.0 / self._rps)
@@ -640,15 +675,24 @@ class Run:
         return self.net.meetings
 
 
-def simulate(meetings, cfg: dict, marker: Path, blocks=()) -> Run:
-    """A race day from 07:00 (the first window: no day-before probe) to its end, on a site at
-    jra.yaml's rate, with `resume` making a site at any rate."""
-    clock = Clock(jst(7, 0))
-    net = Net(clock, meetings, cfg, blocks=sorted(blocks))
+def simulate(
+    meetings, cfg: dict, marker: Path, blocks=(), start: datetime | None = None, die_after=None
+) -> Run:
+    """A race day from `start` (07:00, the first window, by default: no day-before probe) to its
+    end, on a site at jra.yaml's rate, with `resume` making a site at any rate. With `die_after`
+    n the run ends (Died) at its first sleep once n blocks have been answered; summary None."""
+    clock = Clock(start or jst(7, 0), die_after=die_after)
+    net = Net(clock, meetings, cfg, blocks=list(blocks))
+    clock.net = net
     store = FakeStore()
     site = FakeSite(net, jra_rate())
-    summary = run_day(DAY, site, store, config=cfg, now=clock.now, sleep=clock.sleep,
-                      block_marker=marker, resume=net.resume)  # fmt: skip
+    try:
+        summary = run_day(DAY, site, store, config=cfg, now=clock.now, sleep=clock.sleep,
+                          block_marker=marker, resume=net.resume)  # fmt: skip
+    except Died:
+        if die_after is None:
+            raise
+        summary = None
     assert net.defects == [], net.defects[:5]
     return Run(net, store, summary, cfg, marker)
 
@@ -881,6 +925,51 @@ def assert_block_alerts(run: Run) -> None:
         )
 
 
+def assert_hot_grain_on(run: Run, since: datetime) -> None:
+    """The full schedule: every race whose hot window starts 300 s after `since` or later is
+    captured at least 10 times in it (the floor alone gives about 5)."""
+    hot = run.cfg["hot_races"]
+    thin = []
+    for venue, races in run.meetings.items():
+        for n, post in races.items():
+            lo = post - timedelta(minutes=hot["within_min"])
+            if lo < since + timedelta(seconds=300):
+                continue
+            hi = post + timedelta(minutes=hot["after_post_min"])
+            got = [t for t in captured_at(run, venue, n) if lo <= t <= hi]
+            if len(got) < 10:
+                thin.append(f"{venue} {n}: {len(got)} captures while hot")
+    assert thin == [], f"the hot grain stopped after {hhmm(since)}: {thin[:4]}"
+
+
+def assert_floor_only(run: Run, since: datetime) -> None:
+    """From `since`: every race at least every floor_s up to its post, and none captured more
+    than twice in any floor_s span (no hot grain)."""
+    floor_s = floor_grain(run.cfg)
+    span = timedelta(seconds=floor_s)
+    over, crowded = [], []
+    for venue, races in run.meetings.items():
+        for n, post in races.items():
+            times = captured_at(run, venue, n, since=since)
+            for i, t in enumerate(times):
+                inside = [u for u in times[i:] if u <= t + span]
+                if len(inside) > 2:
+                    crowded.append(f"{venue} {n}: {len(inside)} from {hhmm(t)}")
+                    break
+            if post > since:
+                gap, at = longest_gap(times, since, post)
+                if gap > floor_s + EPS:
+                    over.append(f"{venue} {n} (post {hhmm(post)}): {gap:.1f} s from {hhmm(at)}")
+    assert crowded == [], f"captured at the hot grain from {hhmm(since)}: {crowded[:4]}"
+    assert over == [], f"the floor missed from {hhmm(since)}: {over[:4]}"
+
+
+def resume_rate_of(cfg: dict) -> float:
+    rate = float(cfg["on_block"].get("resume_requests_per_second") or 0.0)
+    assert rate > 0, f"on_block {cfg['on_block']}: no resume rate"
+    return rate
+
+
 @pytest.mark.parametrize(
     ("status", "changes"),
     [(403, {}), (429, {"cooldown_min": 10, "resume_requests_per_second": 1.2})],
@@ -892,8 +981,7 @@ def test_a_first_block_pauses_then_the_day_goes_on_at_the_resume_rate_and_alerts
     cfg = jra_schedule()
     cfg["on_block"] = {**cfg["on_block"], **changes}
     cooldown = cooldown_of(cfg)
-    resume_rps = float(cfg["on_block"].get("resume_requests_per_second") or 0.0)
-    assert resume_rps > 0, f"on_block {cfg['on_block']}: no resume rate"
+    resume_rps = resume_rate_of(cfg)
     meetings = card(3, *CARDS["358"])
     run = simulate(meetings, cfg, tmp_path / "jra-block.txt", blocks=[(jst(8, 0), status)])
 
@@ -908,26 +996,14 @@ def test_a_first_block_pauses_then_the_day_goes_on_at_the_resume_rate_and_alerts
     # the day goes on, every venue to its end, with the full schedule: the hot grain still runs
     assert run.summary.stopped is None, run.summary.stopped
     assert_day_ended(run)
-    hot = cfg["hot_races"]
-    thin = []
-    for venue, races in meetings.items():
-        for n, post in races.items():
-            lo = post - timedelta(minutes=hot["within_min"])
-            if lo < later[0].t + timedelta(seconds=300):
-                continue
-            hi = post + timedelta(minutes=hot["after_post_min"])
-            got = [t for t in captured_at(run, venue, n) if lo <= t <= hi]
-            if len(got) < 10:
-                thin.append(f"{venue} {n}: {len(got)} captures while hot")
-    assert thin == [], f"the hot grain stopped after the block: {thin[:4]}"
+    assert_hot_grain_on(run, later[0].t)
     assert_block_alerts(run)
 
 
 def test_a_second_block_drops_to_the_floor_only_and_the_day_still_goes_on(tmp_path):
     cfg = jra_schedule()
     cooldown = cooldown_of(cfg)
-    resume_rps = float(cfg["on_block"].get("resume_requests_per_second") or 0.0)
-    floor_s = floor_grain(cfg)
+    resume_rps = resume_rate_of(cfg)
     meetings = card(3, *CARDS["358"])
     blocks = [(jst(8, 0), 403), (jst(10, 30), 429)]
     run = simulate(meetings, cfg, tmp_path / "jra-block.txt", blocks=blocks)
@@ -943,41 +1019,84 @@ def test_a_second_block_drops_to_the_floor_only_and_the_day_still_goes_on(tmp_pa
     assert fast == [], f"after the second block, calls over {resume_rps} req/s: {fast[:3]}"
     assert run.summary.stopped is None, run.summary.stopped
     assert_day_ended(run)
-
-    # the floor only: every race at least every floor_s up to its post, none at the hot grain
-    resumed = later[0].t
-    span = timedelta(seconds=floor_s)
-    over, crowded = [], []
-    for venue, races in meetings.items():
-        for n, post in races.items():
-            times = captured_at(run, venue, n, since=resumed)
-            for i, t in enumerate(times):
-                inside = [u for u in times[i:] if u <= t + span]
-                if len(inside) > 2:
-                    crowded.append(f"{venue} {n}: {len(inside)} from {hhmm(t)}")
-                    break
-            if post > resumed:
-                gap, at = longest_gap(times, resumed, post)
-                if gap > floor_s + EPS:
-                    over.append(f"{venue} {n} (post {hhmm(post)}): {gap:.1f} s from {hhmm(at)}")
-    assert crowded == [], f"captured at the hot grain after the second block: {crowded[:4]}"
-    assert over == [], f"the floor missed after the second block: {over[:4]}"
+    assert_floor_only(run, later[0].t)
     assert_block_alerts(run)
 
 
-def test_a_third_block_ends_the_day_as_before(tmp_path):
+def test_no_later_block_ends_the_day_and_a_host_that_keeps_refusing_gets_one_request_a_pause(
+    tmp_path,
+):
+    # A third block at 12:00, and the host refusing every request until 13:00.
     cfg = jra_schedule()
-    cooldown_of(cfg)
+    cooldown = cooldown_of(cfg)
+    resume_rps = resume_rate_of(cfg)
     meetings = card(3, *CARDS["358"])
-    blocks = [(jst(8, 0), 403), (jst(10, 30), 429), (jst(12, 0), 403)]
+    hard = (jst(12, 0), jst(13, 0))
+    blocks = [(jst(8, 0), 403), (jst(10, 30), 429), (*hard, 403)]
     marker = tmp_path / "jra-block.txt"
     run = simulate(meetings, cfg, marker, blocks=blocks)
 
-    third = blocked_calls(run)[-1]
-    assert len(blocked_calls(run)) == 3, blocked_calls(run)
-    assert [c for c in run.net.calls if c.t > third.t] == [], "a call after the third block"
-    assert run.summary.stopped == "circuit_open", run.summary.stopped
-    stops = {v: vs.stopped for v, vs in run.summary.venues.items()}
-    assert set(stops.values()) == {"circuit_open"}, stops  # no venue had ended by 12:00
+    refused = blocked_calls(run)
+    assert len(refused) >= 3, f"{len(refused)} blocks: a block ended the day"
+    assert [c for c in run.net.calls if c.refused] == [], "a call to a site that was blocked"
+    for block in refused:  # every pause the same: nothing inside it, the next call soon after
+        after_cooldown(run, block, cooldown)
+    while_hard = [c for c in refused if hard[0] <= c.t < hard[1]]
+    most = secs(hard[1] - hard[0]) / (60 * cooldown) + 1
+    assert 1 <= len(while_hard) <= most, (
+        f"{len(while_hard)} requests while the host refused for an hour ({most:.0f} at most)"
+    )
+    second = refused[1]
+    made = [r for t, r in run.net.made if t > second.t]
+    assert made and max(made) <= resume_rps + EPS, f"sites made after the second block: {made}"
+    fast = [c for c in run.net.calls if c.t > second.t and c.rps > resume_rps + EPS]
+    assert fast == [], f"after the second block, calls over {resume_rps} req/s: {fast[:3]}"
+
+    # the day goes on to its end, the floor only once the host answers again
+    assert run.summary.stopped is None, run.summary.stopped
+    assert_day_ended(run)
+    resumed = min(c.t for c in run.net.calls if c.t > refused[-1].t)
+    assert_floor_only(run, resumed)
+    assert_block_alerts(run)
     text = marker.read_text(encoding="utf-8")
     assert HOST in text and DAY.isoformat() in text, text
+
+
+@pytest.mark.parametrize(
+    ("blocks", "when"),
+    [(1, "during"), (1, "after"), (2, "during"), (2, "after")],
+    ids=["1-block-during-the-pause", "1-block-after-it", "2-blocks-during", "2-blocks-after"],
+)
+def test_a_restart_on_a_blocked_day_waits_out_the_pause_then_logs_at_the_marker_s_level(
+    tmp_path, blocks, when
+):
+    # The logger dies in the pause after its block(s); a new run_day starts on the same marker.
+    cfg = jra_schedule()
+    cooldown = cooldown_of(cfg)
+    resume_rps = resume_rate_of(cfg)
+    meetings = card(3, *CARDS["358"])
+    marker = tmp_path / "jra-block.txt"
+    scripted = [(jst(8, 0), 403), (jst(8, 45), 429)][:blocks]
+    died = simulate(meetings, cfg, marker, blocks=scripted, die_after=blocks)
+    assert len(blocked_calls(died)) == blocks, blocked_calls(died)
+    assert died.summary is None, "the first run went on: it did not pause after its block"
+    last = blocked_calls(died)[-1].t
+    pause = timedelta(minutes=cooldown)
+    start = last + (pause / 2 if when == "during" else pause + timedelta(minutes=2))
+
+    run = simulate(meetings, cfg, marker, start=start)
+    calls = run.net.calls
+    assert calls, f"the restart at {hhmm(start)} sent nothing: the block ended the day"
+    assert calls[0].t >= last + pause, f"a call at {hhmm(calls[0].t)}, inside the pause"
+    soon = max(start, last + pause) + timedelta(seconds=320)
+    assert calls[0].t < soon, f"the restart at {hhmm(start)} first called at {hhmm(calls[0].t)}"
+    fast = [c for c in calls if c.rps > resume_rps + EPS]
+    assert fast == [], f"the restart called over the resume rate {resume_rps}: {fast[:3]}"
+    assert all(r <= resume_rps + EPS for _, r in run.net.made), run.net.made
+    assert run.summary.stopped is None, run.summary.stopped
+    assert_day_ended(run)
+    if blocks == 1:
+        assert_hot_grain_on(run, calls[0].t)  # one block: the full schedule at the resume rate
+    else:
+        assert_floor_only(run, calls[0].t)  # two: the floor only
+    assert_block_alerts(run)

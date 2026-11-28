@@ -73,8 +73,9 @@ run_day(race_date, site, store, *, config, now, sleep, block_marker, venues=None
   naming the host and the race's Tokyo date (ISO, e.g. 2026-11-28). A run that finds a marker for
   this host and today's date sends nothing (no discover either); a marker for another date or host
   does not block. With cooldown_min N: nothing for N minutes, then the run resumes once; the next
-  CircuitOpen ends it. (#387: logger.yaml's JRA on_block adds a floor-only step after a second
-  block, its own key; test_five_minute_floor.py pins that ladder.)
+  CircuitOpen ends it. (#387: logger.yaml's JRA on_block is a back-off ladder, its own key, under
+  which no block ends the day and a marker holds a run only for the pause after its latest
+  block; test_five_minute_floor.py pins it. This file's config() keeps the rules above.)
 - DaySummary: `venues` {code: VenueSummary}, `requests` (at least the captures' requests, at most
   what the site sent), `deferred` (race captures a round left out for budget: 0 when the budget
   never binds, > 0 when it does). VenueSummary: snapshots (successful captures), rows (sum of

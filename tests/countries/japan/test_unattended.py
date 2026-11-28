@@ -11,7 +11,8 @@ test_log_day_cli.py: `utc_now`, `sleep` and `make_fetcher`, looked up at call ti
 - It exits 0 at once (no request, no sleep) when any of these holds:
   - the block marker logs_dir('japan')/jra-block.txt has a line `<host> <race date> ...` for the
     JRA official host (jra.yaml hosts.official) and today: the line schedule.run_day appends when
-    a 403/429 opens the breaker;
+    a 403/429 opens the breaker. Since #387 only while the pause after the latest such block
+    (on_block.cooldown_min from its `at=`) is not over: below;
   - another open file holds fcntl.flock(LOCK_EX) on logs_dir('japan')/log-day.lock: another
     --unattended start or an attended log-day (below). A start that goes on takes
     fcntl.flock(fd, LOCK_EX | LOCK_NB) on that file (never a blocking wait) and keeps it until it
@@ -42,12 +43,15 @@ test_log_day_cli.py: `utc_now`, `sleep` and `make_fetcher`, looked up at call ti
   line, so the next start resumes the day. (Without the line a start after the last race but
   before the stop rediscovers, rereads post times and appends a health block of 'logged 0 rows'
   alerts.)
-- So after a block, on a day without racing, or once the day's run has finished, every later start
-  that day sends nothing and appends no health line; a line for another day, or for another host,
-  blocks nothing.
-- #387: inside one start a JRA block backs off as logger.yaml's on_block says (a pause, a fresh
-  Fetcher at 1 req/s, after a second block the floor only; a third block ends the day:
-  test_five_minute_floor.py), so a site that refuses everything from the n-th request gets n + 2.
+- So on a day without racing, or once the day's run has finished, every later start that day sends
+  nothing and appends no health line; a line for another day, or for another host, blocks
+  nothing.
+- #387 (the owner: a 403 or 429 must not end the day's logging): no JRA block ends a day. Inside
+  one start each block pauses on_block.cooldown_min, with no request meanwhile, then the day goes
+  on at the back-off level (1 req/s, from the second block the floor only:
+  test_five_minute_floor.py); a site that keeps refusing gets one request a pause until the day's
+  end, never a retry loop. A start that finds today's block line sends nothing until the pause
+  after the latest one is over, then logs the day at the back-off level the marker gives.
 
 Ruling: an attended `log-day` (no --unattended; any --date, --venues, --pools) takes the same
 fcntl.flock(fd, LOCK_EX | LOCK_NB) on logs_dir('japan')/log-day.lock for its whole run, so a manual
@@ -314,12 +318,13 @@ def block_lines() -> list[list[str]]:
     return [line.split()[:2] for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def write_block_lines(*lines: tuple[str, date, int]) -> None:
-    """Block lines as schedule.run_day appends them: `<host> <race date> status=<s> at=<UTC>`."""
+def write_block_lines(*lines: tuple[str, date, int], hm: tuple[int, int] = (9, 41)) -> None:
+    """Block lines as schedule.run_day appends them: `<host> <race date> status=<s> at=<UTC>`,
+    at `hm` Tokyo time on the line's day."""
     path = logs() / "jra-block.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     text = "".join(
-        f"{host} {day.isoformat()} status={status} at={at(day, 9, 41).isoformat()}\n"
+        f"{host} {day.isoformat()} status={status} at={at(day, *hm).isoformat()}\n"
         for host, day, status in lines
     )
     path.write_text(text, encoding="utf-8")
@@ -629,50 +634,73 @@ def test_a_running_attended_log_day_holds_the_lock_against_a_second_start(
 # ---------------------------------------------------------------- after a block
 
 
-@pytest.mark.parametrize(
-    "today, first, later",
-    [
-        (SAT, (at(SAT, 6, 0), 1, 403), [at(SAT, 7, 30), at(SAT, 12, 0)]),
-        (SUN, (at(SUN, 9, 20), 6, 429), [at(SUN, 9, 50), at(SUN, 16, 0)]),
-        (SAT, None, [at(SAT, 5, 0), at(SAT, 13, 0)]),
-    ],
-    ids=["403-on-discovery", "429-mid-capture", "marker-left-by-an-earlier-start"],
-)
-def test_a_block_marker_for_today_exits_0_without_a_request(monkeypatch, today, first, later):
-    world = week()
-    if first is None:
-        # Today's line, and lines that must block nothing: another day, another host.
-        write_block_lines((HOST, today, 403), (HOST, FRI, 429), ("odds.example.invalid", MON, 403))
-    else:
-        t0, block_at, status = first
-        clock = Clock(t0)
-        site = Site(dict(world.pages), clock=clock, block_at=block_at, status=status)
-        blocked = start(monkeypatch, clock, world, site=site)
-        assert blocked.code in (0, 2), blocked.output
-        # #387: the site refuses every request from block_at on. The start backs off as
-        # logger.yaml's on_block says: a pause, a fresh Fetcher at 1 req/s (refused: a second
-        # block), a pause, the floor only (refused: a third block), and the third block ends
-        # its day. So two requests more than block_at, after two pauses.
-        assert blocked.requests == block_at + 2, (
-            f"{blocked.requests} requests: the start did not back off twice after the {status}"
-        )
-        pause_s = 60.0 * float(load_country_yaml("japan", "logger")["on_block"]["cooldown_min"])
-        assert blocked.waited >= 2 * pause_s, f"waited {blocked.waited} s, not two pauses"
-        assert [HOST, today.isoformat()] in block_lines(), "no block line for today"
-        assert today.isoformat() not in no_meeting_days(), "a block is not a day without racing"
-        assert today.isoformat() not in day_done_days(), "a block is not a finished day"
+def pause() -> timedelta:
+    """logger.yaml's JRA on_block.cooldown_min: the pause after every block (#387)."""
+    minutes = load_country_yaml("japan", "logger")["on_block"]["cooldown_min"]
+    assert isinstance(minutes, (int, float)) and minutes > 0, f"on_block.cooldown_min {minutes!r}"
+    return timedelta(minutes=float(minutes))
 
-    for t in later:
-        s = start(monkeypatch, Clock(t), world)
-        assert s.code == 0, s.output
-        assert s.requests == 0, f"a start at {t:%H:%M}Z sent {s.requests} request(s) after a block"
-        assert s.waited == 0.0, f"a start at {t:%H:%M}Z waited {s.waited} s instead of exiting"
 
-    # The block is for today and that host only: Monday, without racing, has its one discovery
-    # (and, at 05:00, one probe before it: #358).
+def assert_monday_unblocked(monkeypatch, world: World) -> None:
+    """A block is for its day and host only: Monday, without racing, has its one discovery (and,
+    at 05:00, one probe before it: #358)."""
     s = start(monkeypatch, Clock(at(MON, 5, 0)), world)
     assert s.code == 0, s.output
     assert s.requests == no_racing_requests(at(MON, 5, 0)), f"Monday sent {s.requests} requests"
+
+
+@pytest.mark.parametrize(
+    "today, t0, block_at, status",
+    [(SAT, at(SAT, 6, 0), 1, 403), (SUN, at(SUN, 7, 10), 6, 429)],
+    ids=["403-on-discovery", "429-mid-capture"],
+)
+def test_a_start_blocked_for_good_sends_one_request_a_pause_until_its_day_ends(
+    monkeypatch, today, t0, block_at, status
+):
+    """#387 (the owner: a 403 or 429 must not end the day's logging): the site refuses every
+    request from the block_at-th on. The start pauses after each block and tries again, one
+    request a pause (no retry loop: HKTrack's bug f), until its day is over; no block ends it."""
+    world = week()
+    clock = Clock(t0)
+    site = Site(dict(world.pages), clock=clock, block_at=block_at, status=status)
+    blocked = start(monkeypatch, clock, world, site=site)
+    assert blocked.code in (0, 2), blocked.output
+
+    refused = site.at[block_at - 1 :]
+    assert len(refused) >= 3, f"{len(refused)} refused requests: a block ended the day"
+    gaps = [b - a for a, b in zip(refused, refused[1:], strict=False)]
+    assert min(gaps) >= pause(), f"a request {min(gaps)} after the previous block, inside a pause"
+    end = stop(today)
+    assert refused[-1] < end, f"a request at {refused[-1]:%H:%M}Z, after the day's stop"
+    assert len(refused) <= (end - refused[0]) / pause() + 2, f"{len(refused)} refused requests"
+    assert [HOST, today.isoformat()] in block_lines(), "no block line for today"
+    assert today.isoformat() not in no_meeting_days(), "a block is not a day without racing"
+    if today == SUN:  # its venue was known: it ran to its normal end, never stopped by a block
+        assert set(health_stops(today).values()) == {"ended"}, health_stops(today)
+        assert today.isoformat() in day_done_days(), "the day ran to its end"
+    assert_monday_unblocked(monkeypatch, world)
+
+
+@pytest.mark.parametrize("when", ["during-the-pause", "after-the-pause"])
+def test_a_block_line_for_today_holds_a_later_start_only_for_its_pause(monkeypatch, when):
+    """#387: a restart on a blocked day (the logger died after the block) does not send nothing
+    for the rest of the day: nothing until the pause after the latest block is over, then it logs
+    the day at the back-off level. Lines for another day or host hold nothing."""
+    world = week()
+    line_at = at(SAT, 8, 0)
+    write_block_lines(
+        (HOST, SAT, 403), (HOST, FRI, 429), ("odds.example.invalid", MON, 403), hm=(8, 0)
+    )
+    t0 = line_at + (pause() / 2 if when == "during-the-pause" else pause() + timedelta(minutes=1))
+    s = start(monkeypatch, Clock(t0), world)
+    assert s.code in (0, 2), s.output
+    early = [t for t in s.site.at if t < line_at + pause()]
+    assert early == [], f"{len(early)} requests inside the pause after the 08:00 block"
+    if when == "after-the-pause":
+        assert s.site.at and s.site.at[0] < t0 + timedelta(seconds=320), "the start sent nothing"
+        assert logged_rows(SAT, "TOK"), "the restarted day logged no odds"
+        assert set(health_stops(SAT).values()) == {"ended"}, health_stops(SAT)
+    assert_monday_unblocked(monkeypatch, world)
 
 
 # ---------------------------------------------------------------- a day without racing

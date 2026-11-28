@@ -28,7 +28,8 @@ Since #358 bracket quinella (枠連) is captured every round with tier 1: its pa
 
 The evening before (#358): `ClockedSite` answers as of a fake clock. Before `opens_at` its オッズ
 menu is `menu_before` (the race date's meetings not on it yet: the day-before sales are not
-open), and from `block_from` on every request is refused with `status` (403: the breaker opens).
+open), and from `block_from` on (until `block_until`, when given) every request is refused with
+`status` (403: the breaker opens).
 Every request's fake time is kept in `at`, in the order of `seen`.
 
 Every value is invented. No real page, name or scraped value is copied here.
@@ -521,8 +522,9 @@ class JradbSite:
 class ClockedSite(JradbSite):
     """The double as of a fake clock (#358). `clock()` is read at each request and kept in `at`.
     Before `opens_at` (or always, when it is None) the オッズ menu is `menu_before` when given: the
-    race date's meetings not listed yet, the day-before sales not open. From `block_from` on,
-    every request is answered `status` with an empty body."""
+    race date's meetings not listed yet, the day-before sales not open. From `block_from` on
+    (until `block_until`, when given: #387, a block that lifts), every request is answered
+    `status` with an empty body."""
 
     clock: Callable[[], datetime] | None = None
     opens_at: datetime | None = None
@@ -530,15 +532,22 @@ class ClockedSite(JradbSite):
     block_from: datetime | None = None
     status: int = 403
     at: list[datetime] = field(default_factory=list)
+    block_until: datetime | None = None
 
     def __post_init__(self) -> None:
         self._menu_open = self.pages.get(ODDS_MENU)
+
+    def refused(self, t: datetime) -> bool:
+        """Whether a request at `t` is refused."""
+        if self.block_from is None or t < self.block_from:
+            return False
+        return self.block_until is None or t < self.block_until
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         assert self.clock is not None, "a ClockedSite needs its clock"
         t = self.clock()
         self.at.append(t)
-        if self.block_from is not None and t >= self.block_from:
+        if self.refused(t):
             url = request.url
             self.seen.append(Seen(request.method, url.host, url.path, None, None, False))
             return httpx.Response(self.status, content=b"", headers={"Content-Type": "text/html"})
