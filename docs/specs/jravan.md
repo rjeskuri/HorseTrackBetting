@@ -41,6 +41,7 @@ command run by hand. The same inputs give the same bytes.
 | `masters` | `masters.py` | `horses`, `horse_pedigree`; `jockeys`, `trainers` | store tables; jravan-only | `horses` refused, `horse_pedigree` `static`; `current_value` with `in_view` |
 | `bloodlines` | `bloodlines.py` | `breeding_horses`, `produce`, `lineages` | jravan-only | `static` |
 | `exclusions` | `exclusions.py` | `exclusions` | jravan-only | `offset` on `race_date`, 00:00 JST (#405) |
+| `mining` | `mining.py` | `mining_predictions` | jravan-only | `column` on `created_utc` (the owner's rule C, #406) |
 | `workouts` | `handicap/workouts_jravan.py` | `workouts` | jravan-only | none: its readers apply the module's own publication rule (#229), and the as-of views refuse it |
 | `dump` | `dump.py` | `interim/jravan/records/` | not tables | none |
 | `reconcile` | `reconcile.py` | `reports/jravan-reconcile.md` | not a table | n/a |
@@ -649,6 +650,46 @@ listed above; `jravan-spec-figures.md` holds the removed text: the wall time and
 per-type table (records, versions dropped, deletions, rows written), and the sire ids, pedigree
 ids and lineages with their resolution.
 
+## DM and TM: data-mining predictions (#406)
+
+`horsetrack.countries.japan.jravan.mining`; `horsetrack japan jravan mining [--year YYYY ...]`
+writes `processed/jravan/mining_predictions.parquet`: JV-Data's time-type (DM) and match-type
+(TM) data-mining predictions per runner, candidate C4 members. It is not in `schemas.TABLES`, so
+`read_table` refuses it. Its availability rule is the owner's rule C (his answer on #406,
+2026-11-28): `kind: column` on `created_utc`, no fallback and no label columns, so `read_asof`
+and `asof_join` show a row at t once its kept record's `created_utc <= t`, and a record created
+after the post is never in a view before that race. `created_utc` is
+the kept record's creation stamp, not a known publication time; which versions the export holds
+is withheld (D21).
+
+- `build_mining_predictions(*, years=None, raw=None, out=None, chunk_records=500) -> BuildReport`
+  reads `<raw>/stored/MING/DM/<YYYY>.jvd` and `TM/<YYYY>.jvd` (`years` None reads every year file
+  of either folder; a year with only one of the two files reads that one alone; a named year with
+  neither file is a `FileNotFoundError`). Before anything is written, and so leaving a table
+  already there as it was: `years` None with no `<YYYY>.jvd` in either folder (or no folder) is a
+  `FileNotFoundError`, and the command exits non-zero; an `out` that resolves inside the repository
+  is a `paths.DataDirInsideRepo` (`paths.outside_repo`). Each record's type is checked and its race date read from its 開催年 and
+  開催月日 bytes alone: a record on a holdout day is read no further and counted only in
+  `holdout_skipped` (D14). Each file is then streamed twice, as for `votes`: the first pass keeps
+  one version per race and record type (`latest_versions` on 開催年, 開催月日, 競馬場コード,
+  開催回, 開催日目, レース番号; the latest by データ作成年月日 then データ作成時分, a tie to the
+  later record; a race whose latest record is a deletion has no rows of that kind), the second
+  turns the kept records of JRA venues into rows. Each year's rows are sorted by `race_id, kind,
+  horse_no` and written as one row group; the same inputs give the same bytes.
+- `mining_rows(record_type, cols)` maps decoded DM or TM arrays to rows
+  (`MINING_PREDICTIONS_SCHEMA`), every version kept: one per slot of マイニング予想 whose 馬番 is a
+  positive integer. `jurisdiction` `jra`, `race_id` (`keys.race_id`), `race_date`, `venue`,
+  `race_no`, `horse_no`, `kind` (`DM` or `TM`), `value` (DM 予想走破タイム in seconds, MMSSff; TM
+  予測スコア, tenths), `error_plus_s` and `error_minus_s` (DM 予想誤差(信頼度)＋ and －, hundredths
+  of a second; null on TM), each null when blank or not a number; an all-zero DM time is unset too
+  (null value and rank, its errors as printed), a zero TM score is a value; `rank` per race and kind over
+  the rows with a value (DM ascending, TM descending, ties sharing the lowest rank, null without a
+  value); `data_kubun`; `created_utc` (データ作成年月日 + データ作成時分, JST, as UTC; null when
+  either is invalid).
+- The report, `reports/jravan-mining.json` through `records.write_build_report`, holds counts
+  only (`records`, `holdout_skipped`, `versions_dropped`, `deletions`, `non_jra`, `kept`, `rows`,
+  in total and per year); its figures are withheld (D21).
+
 ## The dump of unmapped families (#363)
 
 `horsetrack japan jravan dump [--type RT ...] [--year YYYY ...]`
@@ -657,7 +698,8 @@ epic maps into a store table, so nothing in the export goes unread and the cover
 what each family holds.
 
 - What is read: `raw/jravan/stored/<DATASPEC>/<RT>/*.jvd`, the files directly in the folder, of
-  every folder not in `MAPPED` (RACE RA, SE, HR, H1, H6, O1-O6; DIFN UM, KS, CH; BLDN HN, SK, BT).
+  every folder not in `MAPPED` (RACE RA, SE, HR, H1, H6, O1-O6; DIFN UM, KS, CH; BLDN HN, SK, BT;
+  MING DM, TM).
   `--type` names record types instead, in every dataspec, mapped or not. `--year` keeps
   `<YYYY>.jvd` of those years; `all.jvd` is always read. `timeseries/` and the folders outside
   `stored/` are never dumped.

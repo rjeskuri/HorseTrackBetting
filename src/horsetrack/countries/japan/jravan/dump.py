@@ -41,6 +41,7 @@ MAPPED: frozenset[tuple[str, str]] = frozenset(
     {("RACE", rt) for rt in ("RA", "SE", "HR", "H1", "H6", "O1", "O2", "O3", "O4", "O5", "O6")}
     | {("DIFN", rt) for rt in ("UM", "KS", "CH")}
     | {("BLDN", rt) for rt in ("HN", "SK", "BT")}
+    | {("MING", rt) for rt in ("DM", "TM")}
 )
 
 _TEXT = pa.string()
