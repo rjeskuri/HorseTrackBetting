@@ -60,7 +60,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from horsetrack.countries.japan.models.ability import AbilityModel
+from horsetrack.countries.japan.models import interactions
+from horsetrack.countries.japan.models.ability import EB_MAX, TAU2_FLOOR, AbilityModel
 from horsetrack.countries.japan.models.interactions import (
     InteractionBlock,
     cell_sizes,
@@ -85,6 +86,8 @@ from interactions_synth import (
     alias_frame,
     aptitude_frame,
     east_west_frame,
+    few_run_cells_frame,
+    horse_jockey_frame,
     mixed_frame,
     sequence_frame,
     trainer_track_frame,
@@ -595,3 +598,164 @@ def test_one_factor_trainer_track_term_learns_east_west():
         for w in ("w1", "w2", "w3", "w4"):
             dd = (at(e, "tokyo") - at(w, "tokyo")) - (at(e, "kyoto") - at(w, "kyoto"))
             assert dd > 0.8, (e, w, dd)
+
+
+# ---------------------------------------------------------------------------------------------
+# #570: the block-Jacobi path and the fixed-point step
+# ---------------------------------------------------------------------------------------------
+
+LOCAL_DENSE_MAX = 100  # below the 180 horse x jockey cells and above the 6 jockeys of the base
+HJ_BASE = dict(k=3, discounts=UNIT3, entity_cols=("jockey_id",), features=["x1"])
+# (seed, planted tau, races): a clear cell effect, none at all, and a large one on fewer races.
+HJ_CASES = [(21, 0.4, 500), (22, 0.0, 500), (23, 0.7, 300)]
+FLOOR_SD = math.sqrt(TAU2_FLOOR)
+
+
+def test_block_jacobi_matches_the_dense_fit(monkeypatch):
+    """Horse x jockey cells (180, planted tau 0.4, none, 0.7) fitted dense, then with DENSE_MAX
+    forced below the block's size so its levels take block-Jacobi steps (asserted: the block is
+    local, the 6-level jockey entity is not, the dense fit has no local term). (1) At the local
+    fit's own prior variances, the dense MAP agrees with the local one to 1e-6 (MAP_TOL is 1e-8):
+    the local MAP is exact. (2) Its empirical-Bayes tau, whose trace and log-determinant use the
+    block-diagonal approximation, is within 5% of the dense fit's and within 0.15 of the planted
+    one (0.14 where none is planted), and the two fits' utilities within 0.05."""
+    taus = []
+    for seed, planted, races in HJ_CASES:
+        frame = horse_jockey_frame(seed, planted, races)
+        assert frame.groupby(["horse_id", "jockey_id"]).ngroups > LOCAL_DENSE_MAX
+        dense = fit_with_blocks(frame, AbilityModel(**HJ_BASE), [HJ])
+        assert not dense._model.has_local
+
+        with monkeypatch.context() as patch:
+            patch.setattr(interactions, "DENSE_MAX", LOCAL_DENSE_MAX)
+            local = fit_with_blocks(frame, AbilityModel(**HJ_BASE), [HJ])
+        is_local = {t.label: t.local for t in local._model.terms}
+        assert is_local == {"entity:jockey_id": False, HJ.name: True}, is_local
+        assert local._model.has_local
+
+        # (1) the MAP at one set of prior variances, dense against block-Jacobi
+        same_z = interactions._Model(frame, AbilityModel(**HJ_BASE), [HJ])
+        assert not same_z.has_local
+        same_z.z = local._model.z.copy()
+        same_z.solve(same_z.z, interactions.MAP_TOL)
+        exact = interactions.InteractionFit(same_z)
+        u_exact = predict_on(exact, frame)["u"].to_numpy(dtype=float)
+        u_local = predict_on(local, frame)["u"].to_numpy(dtype=float)
+        np.testing.assert_allclose(u_local, u_exact, atol=1e-6)
+        np.testing.assert_allclose(local.coef_.to_numpy(), exact.coef_.to_numpy(), atol=1e-6)
+
+        # (2) the fitted tau and utilities
+        tau_dense, tau_local = dense.tau_point(HJ.name), local.tau_point(HJ.name)
+        taus.append(tau_local)
+        assert abs(tau_local - tau_dense) < 0.05 * tau_dense, (tau_local, tau_dense)
+        assert abs(tau_local - planted) < 0.15, (tau_local, planted)
+        u_dense = predict_on(dense, frame)["u"].to_numpy(dtype=float)
+        assert np.abs(u_local - u_dense).max() < 0.05
+        point, lo, hi = tau_interval(local, HJ.name)
+        assert lo <= point <= hi and point == pytest.approx(tau_local)
+    assert taus[1] < taus[0] < taus[2], taus
+
+
+# (seed, planted tau, races, DENSE_MAX or None): 12 trainers x 4 venues = 48 cells of 6 to 30
+# runs. Cases 0 and 3 end with a prior sd clear of the floor, which the fixed point crawls to;
+# cases 1, 2 and 4 end at the floor. Cases 2 and 4 are fitted block-Jacobi (48 > 20 cell levels).
+WEAK_CASES = [
+    (1, 0.0, 60, None),
+    (2, 0.05, 60, None),
+    (3, 0.0, 60, 20),
+    (5, 0.3, 40, None),
+    (6, 0.02, 200, 20),
+]
+WEAK_BASE = dict(k=3, discounts=UNIT3, entity_cols=("trainer_id",), features=["x1"])
+
+
+def run_weak_fit(monkeypatch, frame, dense_max, start=None):
+    """fit_with_blocks on the weak design, with the z and posterior inputs of every empirical-
+    Bayes update recorded: [(z, [(m, trace, square) per group])]. Returns (fit, record)."""
+    record = []
+    original = interactions._Model._posterior
+
+    def recording(self, z, *, trace):
+        out = original(self, z, trace=trace)
+        if trace:
+            record.append((np.array(z, dtype=float), list(out[0])))
+        return out
+
+    with monkeypatch.context() as patch:
+        patch.setattr(interactions._Model, "_posterior", recording)
+        if dense_max is not None:
+            patch.setattr(interactions, "DENSE_MAX", dense_max)
+        fit = fit_with_blocks(frame, AbilityModel(**WEAK_BASE), [TT], start=start)
+    return fit, record
+
+
+def fixed_point_residuals(record) -> np.ndarray:
+    """MacKay's update less z, per empirical-Bayes update and group, from the recorded
+    (m, trace, square): ln(square / (m - trace / tau^2)) floored at ln TAU2_FLOOR."""
+    floor = math.log(TAU2_FLOOR)
+    rows = []
+    for z, groups in record:
+        row = []
+        for g, (m, trace, square) in enumerate(groups):
+            effective = m - trace * math.exp(-z[g])
+            ratio = square / effective if effective > 0 and square > 0 else 0.0
+            row.append((max(math.log(ratio), floor) if ratio > 0 else floor) - z[g])
+        rows.append(row)
+    return np.array(rows)
+
+
+def doubled_steps(record) -> int:
+    """How many (update, group) pairs took a doubled plain step: the secant of the last two
+    updates had no valid slope (dz = 0 or the residual not falling as z rises), the residual kept
+    its sign, and the step to the next z was more than the plain residual (the secant's own
+    step is never used there)."""
+    r = fixed_point_residuals(record)
+    z = np.array([z for z, _ in record])
+    count = 0
+    for t in range(1, len(record) - 1):
+        for g in range(r.shape[1]):
+            dz, dr = z[t, g] - z[t - 1, g], r[t, g] - r[t - 1, g]
+            invalid = dz == 0 or dr * dz >= 0
+            if invalid and np.sign(r[t, g]) == np.sign(r[t - 1, g]) and r[t, g] != 0:
+                step = z[t + 1, g] - z[t, g]
+                if np.sign(step) == np.sign(r[t, g]) and abs(step) > 1.5 * abs(r[t, g]):
+                    count += 1
+    return count
+
+
+def test_weak_variance_converges_within_eb_max(monkeypatch):
+    """Trainer x venue cells of 6 to 30 runs (40 to 200 races), whose variances are weakly
+    identified: planted tau 0, 0.05, 0.3, 0.02, two of them fitted block-Jacobi. Each fit
+    succeeds (no RuntimeError) in at most EB_MAX updates, with every prior sd finite and no lower
+    than the floor's, and a group the data leaves with no variance sits exactly at the floor.
+    Started instead at prior sd 1.0 and then 0.01 (`start=`) it stops at the same prior sds (the
+    fixed point, not the path, is the answer), each within 0.2% where it is clear of the floor
+    (the runs differ by 0.015% at most; EB_LOCAL_TOL is 1e-4 in ln tau^2). The
+    plain step of a group whose secant has no valid slope is doubled in four of the five fits."""
+    crawled = 0
+    for seed, planted, races, dense_max in WEAK_CASES:
+        frame = few_run_cells_frame(seed, planted, races)
+        assert frame.groupby(["trainer_id", "venue"]).size().median() <= 30
+        fit, record = run_weak_fit(monkeypatch, frame, dense_max)
+        label = (seed, planted, races, dense_max)
+        assert fit._model.has_local == (dense_max is not None), label
+        assert 2 <= len(record) <= EB_MAX, (label, len(record))
+        sds = fit.prior_sd_
+        assert set(sds) == {"entity:trainer_id", TT.name}
+        assert all(math.isfinite(s) and s >= FLOOR_SD * (1 - 1e-9) for s in sds.values()), sds
+        crawled += doubled_steps(record) > 0
+
+        tolerance = 2e-3
+        for start_sd in (1.0, 0.01):
+            start = {"prior_sd": {name: start_sd for name in sds}}
+            again, _ = run_weak_fit(monkeypatch, frame, dense_max, start=start)
+            for name, sd in sds.items():
+                if sd < 2 * FLOOR_SD:
+                    assert again.prior_sd_[name] < 2 * FLOOR_SD, (label, name, start_sd)
+                else:
+                    assert again.prior_sd_[name] == pytest.approx(sd, rel=tolerance), (
+                        label,
+                        name,
+                        start_sd,
+                    )
+    assert crawled >= 4, crawled

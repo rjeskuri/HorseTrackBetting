@@ -305,6 +305,68 @@ def alias_frame(seed: int, *, trainer_change: bool, jockey_constant: bool = Fals
 
 
 # ---------------------------------------------------------------------------------------------
+# Horse x jockey cells (the block-Jacobi path) and trainer x venue cells with few runs (a weakly
+# identified variance), #570
+# ---------------------------------------------------------------------------------------------
+
+HJ_HORSES = 30
+HJ_JOCKEYS = 6
+
+
+def horse_jockey_frame(seed: int, tau: float, races: int) -> pd.DataFrame:
+    """race_id, race_utc, horse_id, jockey_id, finish_pos, x1: races of 6 to 8 distinct horses of
+    30, each with one of 6 jockeys drawn per run. u = X_COEF * x1 + a planted N(0, tau^2) effect
+    for each of the 180 horse x jockey cells (no horse level, no jockey main effect), so the cell
+    block's tau is the one planted."""
+    rng = np.random.default_rng(seed)
+    codes = field(rng, races, sizes=(6, 8))
+    n = len(codes)
+    horse = np.concatenate(
+        [rng.choice(HJ_HORSES, size=s, replace=False) for s in np.bincount(codes)]
+    )
+    jockey = rng.integers(0, HJ_JOCKEYS, size=n)
+    cells = rng.normal(0.0, tau, size=(HJ_HORSES, HJ_JOCKEYS))
+    x1 = rng.normal(size=n)
+    pos = pl_positions(rng, X_COEF * x1 + cells[horse, jockey], codes)
+    return pd.DataFrame(
+        {
+            "race_id": labels(codes),
+            "race_utc": race_times(codes),
+            "horse_id": np.array([f"h:{i:03d}" for i in horse], dtype=object),
+            "jockey_id": np.array([f"j:{i}" for i in jockey], dtype=object),
+            "finish_pos": pos.astype(np.int64),
+            "x1": x1,
+        }
+    )
+
+
+def few_run_cells_frame(seed: int, tau: float, races: int) -> pd.DataFrame:
+    """race_id, race_utc, horse_id, trainer_id, venue, finish_pos, x1: races of 6 to 8 runners of
+    12 trainers at 4 venues, a planted N(0, tau^2) effect on each of the 48 trainer x venue
+    cells and no trainer main effect. With a few dozen races a cell has about 10 runs or fewer,
+    so the cell variance (and the trainer's) is weakly identified."""
+    rng = np.random.default_rng(seed)
+    codes = field(rng, races, sizes=(6, 8))
+    n = len(codes)
+    venue = rng.integers(0, len(VENUES), size=races)[codes]
+    trainer = rng.integers(0, TT_TRAINERS, size=n)
+    cells = rng.normal(0.0, tau, size=(TT_TRAINERS, len(VENUES)))
+    x1 = rng.normal(size=n)
+    pos = pl_positions(rng, X_COEF * x1 + cells[trainer, venue], codes)
+    return pd.DataFrame(
+        {
+            "race_id": labels(codes),
+            "race_utc": race_times(codes),
+            "horse_id": np.array([f"h:{i:06d}" for i in range(n)], dtype=object),
+            "trainer_id": np.array([f"t:{i:02d}" for i in trainer], dtype=object),
+            "venue": np.array(VENUES, dtype=object)[venue],
+            "finish_pos": pos.astype(np.int64),
+            "x1": x1,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------------------------
 # Trainer sequences for the transfer step
 # ---------------------------------------------------------------------------------------------
 
