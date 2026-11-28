@@ -19,6 +19,7 @@ from collections import Counter
 from datetime import date, timedelta
 
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 import pytest
 
@@ -217,3 +218,120 @@ def test_the_default_source_is_still_jra(tmp_path, monkeypatch):
     # spelling the default out gives the same rows
     explicit = read({"source": "jra"}, OPEN_DAYS)
     assert explicit.equals(default)
+
+
+# ---------------------------------------------------------------------------------------------
+# #404 review: a holdout day's outcome and price columns are never scanned, only its race_date
+# ---------------------------------------------------------------------------------------------
+
+
+class _ScanSpy:
+    """A pyarrow dataset that records every scan made through it: the columns asked for, the
+    row filter in force (its own `filter()` narrowing combined with the scan's) and the days that
+    filter lets through. The days are read when the scan is made, while the reader's handle is
+    still open (#415's reader serves the dataset from a memory-mapped snapshot it closes on
+    return), by the same filter over race_date alone."""
+
+    def __init__(self, real, log, narrowed=None):
+        self._real, self._log, self._narrowed = real, log, narrowed
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def _combined(self, filter):
+        if self._narrowed is None:
+            return filter
+        return self._narrowed if filter is None else self._narrowed & filter
+
+    def _note(self, columns, filter):
+        reached = self._real.to_table(columns=["race_date"], filter=self._combined(filter))
+        days = set(reached.column("race_date").to_pylist())
+        names = _column_names(columns, self._real)
+        self._log.append({"columns": columns, "names": names, "days": days})
+
+    def _scan(self, method, columns=None, filter=None, **kwargs):
+        self._note(columns, filter)
+        return getattr(self._real, method)(columns=columns, filter=filter, **kwargs)
+
+    def to_table(self, columns=None, filter=None, **kwargs):
+        return self._scan("to_table", columns, filter, **kwargs)
+
+    def to_batches(self, columns=None, filter=None, **kwargs):
+        return self._scan("to_batches", columns, filter, **kwargs)
+
+    def scanner(self, columns=None, filter=None, **kwargs):
+        return self._scan("scanner", columns, filter, **kwargs)
+
+    def head(self, num_rows, columns=None, filter=None, **kwargs):
+        self._note(columns, filter)
+        return self._real.head(num_rows, columns=columns, filter=filter, **kwargs)
+
+    def filter(self, expression):
+        return _ScanSpy(self._real.filter(expression), self._log, self._combined(expression))
+
+
+def _column_names(columns, dataset) -> set[str]:
+    if columns is None:
+        return set(dataset.schema.names)  # a scan without a projection reads every column
+    if isinstance(columns, dict):
+        return set(columns)
+    return set(columns)
+
+
+@pytest.mark.parametrize(
+    ("source", "columns", "where"),
+    [
+        ("jra", ["race_id", "venue"], None),
+        ("jravan", ["race_id", "venue"], None),
+        ("jravan", ["race_id", "race_date", "venue"], None),
+        ("jravan", ["venue", "race_id"], "narrowed"),
+    ],
+)
+def test_a_holdout_days_other_columns_are_never_scanned(
+    tmp_path, monkeypatch, source, columns, where
+):
+    """Every scan that reads a column other than race_date runs with a row filter that already
+    excludes the holdout days, so no outcome or price of a held day is materialised; a scan of
+    race_date alone (to find the held days) is allowed."""
+    data = data_dir(tmp_path, monkeypatch)
+    held = [d for d in LATE_DAYS if holdout.is_holdout_day("japan", d)]
+    open_ = [d for d in LATE_DAYS if not holdout.is_holdout_day("japan", d)]
+    assert held and open_
+    rows = make_rows(source, LATE_DAYS, lambda k: 1 + k % 3)
+    write_table(data, source, "races", rows)
+    if source != "jra":
+        write_table(data, "jra", "races", make_rows("jra", LATE_DAYS, lambda k: 2))
+
+    log: list[dict] = []
+    real_dataset = ds.dataset
+    monkeypatch.setattr(ds, "dataset", lambda *a, **k: _ScanSpy(real_dataset(*a, **k), log))
+
+    expr = None
+    if where == "narrowed":
+        expr = ds.field("race_id") != f"{source}:{open_[0].isoformat()}:01"
+    table = read_store_table(
+        "races",
+        columns=columns,
+        start=LATE_DAYS[0],
+        end=LATE_DAYS[-1],
+        touches_price=False,
+        where=expr,
+        source=source,
+    )
+
+    # The rows returned are still the open days' rows, in the columns asked.
+    want = [r for r in rows if r["race_date"] in set(open_)]
+    if where == "narrowed":
+        want = [r for r in want if r["race_id"] != f"{source}:{open_[0].isoformat()}:01"]
+    assert table.column_names == columns
+    assert race_ids(table) == Counter(r["race_id"] for r in want)
+
+    wide = [s for s in log if s["names"] - {"race_date"}]
+    assert wide, "the reader made no scan of the requested columns through pyarrow.dataset"
+    for scan in wide:
+        # The days that scan's filter let through, read over race_date while the scan was made.
+        days = scan["days"]
+        assert not days & set(held), (
+            f"a scan of {scan['columns']} reached holdout day(s) "
+            f"{sorted(days & set(held))[:3]} before they were dropped"
+        )

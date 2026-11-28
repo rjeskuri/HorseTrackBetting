@@ -41,9 +41,12 @@ cell alone? The null is that it does not.
   Per prediction, each arm's `RmseDiff` against par_only and `gain_change_bootstrap`'s paired
   change on the races both arms score (delta = gain_complete - gain_existing, D7's bounds from
   meeting draws that recompute all four RMSEs on the same draw).
-- `read_inputs()`: the JRA store's races and runners, column-scoped, holdout days excluded by
-  the Parquet scan (#415), so none is materialized; a row group mixing development and holdout
-  days is still read from disk (pruning is by min/max statistics only).
+- `read_inputs(*, source='jra', start=date.min)`: the store copy's races and runners from
+  `start` on, column-scoped, holdout days excluded by the Parquet scan (#415), so none is
+  materialized; a row group mixing development and holdout days is still read from disk (pruning
+  is by min/max statistics only). `run_study(source=..., start=...)` passes both and records them
+  in the spec (a `start` only when given), the source also in the records and the report; a copy
+  other than 'jra' runs both families as `<family>-<source>` (`source_family`).
 
 The study (`run_study`; CLI `python -m horsetrack.countries.japan.studies.speed_run --run [--out
 DIR]`, an `--out` inside the repository refused) freezes its spec in the run registry before any
@@ -75,6 +78,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.dataset as ds
 
 from horsetrack.core import paths
 from horsetrack.core.config import load_country_yaml
@@ -91,6 +96,7 @@ from horsetrack.core.eval.registry import (
 from horsetrack.core.eval.reports import write_report
 from horsetrack.core.store.tables import read_table, table_path
 from horsetrack.countries.japan.models.speed import SpeedModel, SpeedSpec
+from horsetrack.countries.japan.studies import source_family
 
 COUNTRY = "japan"
 SOURCE = "jra"  # the store's JRA results (netkeiba); no JRDB, no JRA-VAN
@@ -637,14 +643,22 @@ def _timing_arms(
 # --------------------------------------------------------------------------- reading
 
 
-def read_inputs() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """The JRA store's races (RACE_COLUMNS) and runners (RUNNER_COLUMNS and race_date),
-    column-scoped. Holdout days are excluded by the scan (`read_table(..., development=COUNTRY)`,
-    #415: each table's own race_date bounds and its scan from one open handle), so no holdout row
-    is materialized. No JRDB table is read (D21)."""
-    races = read_table(SOURCE, "races", columns=list(RACE_COLUMNS), development=COUNTRY)
-    runners = read_table(
-        SOURCE, "runners", columns=[*RUNNER_COLUMNS, "race_date"], development=COUNTRY
+def read_inputs(
+    *, source: str = SOURCE, start: date = date.min
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The store copy `source`'s races (RACE_COLUMNS) and runners (RUNNER_COLUMNS and race_date)
+    from `start` on (default every day), column-scoped. Holdout days are excluded by the scan
+    (`read_table(..., development=COUNTRY)`, #415: each table's own race_date bounds and its scan
+    from one open handle), so no holdout row is materialized; `start` narrows that scan. `source`
+    defaults to the JRA store (#404: 'jravan' reads the JRA-VAN copy). No JRDB table is read
+    (D21)."""
+    after = None if start == date.min else ds.field("race_date") >= pa.scalar(start, pa.date32())
+    races, runners = (
+        read_table(source, name, columns=columns, filters=after, development=COUNTRY)
+        for name, columns in (
+            ("races", list(RACE_COLUMNS)),
+            ("runners", [*RUNNER_COLUMNS, "race_date"]),
+        )
     )
     return races, runners
 
@@ -672,10 +686,25 @@ def scheme_label(scheme: FoldScheme) -> str:
     return "walk_forward:" + json.dumps(dataclasses.asdict(scheme), sort_keys=True)
 
 
-def build_spec(boot: dict, scheme: FoldScheme, minutes: int) -> dict:
-    """The family's pre-registered spec, frozen before any outcome is read."""
-    return {
-        "family_id": FAMILY_ID,
+def build_spec(
+    boot: dict,
+    scheme: FoldScheme,
+    minutes: int,
+    *,
+    source: str = SOURCE,
+    start: date = date.min,
+) -> dict:
+    """The family's pre-registered spec, frozen before any outcome is read. `source` is the store
+    copy read and `start` the first race day read (#404); the default spec is unchanged, and a
+    `start` is recorded only when one is given. A copy other than 'jra' is its own family
+    (`source_family`)."""
+    licensed = {
+        SOURCE: "no licensed source (JRDB, JRA-VAN) is read",
+        "jravan": "JRA-VAN, a licensed source, is read (the jravan store copy), so the report is "
+        "withheld; no JRDB table is read",
+    }.get(source, f"the store copy {source} is read; no JRDB table is read")
+    spec = {
+        "family_id": source_family(FAMILY_ID, source),
         "ticket": TICKET,
         "hypotheses": {
             "null": "the same-day variant does not lower the time RMSE of E[top-3 time] below the "
@@ -688,8 +717,8 @@ def build_spec(boot: dict, scheme: FoldScheme, minutes: int) -> dict:
         "estimand": ESTIMANDS[0] + ": the mean finish time of the first three past the post, "
         "per runner; each runner placed 1 or 2 once, the runners placed 3rd as one slot at their "
         "mean; without a 3rd-placed runner, the runners placed 1-2 present (partly placed)",
-        "races": "store races and runners (jra), every development race day; excluded in order "
-        "and counted: jump races, no post time, no placed and timed runner",
+        "races": f"store races and runners ({source}), every development race day; excluded in "
+        "order and counted: jump races, no post time, no placed and timed runner",
         "post_utc": "post_time_local (H:MM or HH:MM) on the Asia/Tokyo wall clock of race_date",
         "result_available_utc": "post_utc + 30 min (availability.yaml's same-day results rule)",
         "model": {
@@ -727,19 +756,31 @@ def build_spec(boot: dict, scheme: FoldScheme, minutes: int) -> dict:
             "D10": "no price is read, so rows before 2014-06-07 may train",
             "D11-D15": "Japan holdout A2 from 2026-11-28, fully locked: no holdout day is read",
             "D16": "nothing is adopted",
-            "D21": "no licensed source (JRDB, JRA-VAN) is read",
+            "D21": licensed,
         },
-        "sources": [SOURCE],
+        "sources": [source],
     }
+    if start != date.min:
+        spec["first_race_day_read"] = start.isoformat()
+    return spec
 
 
-def build_timing_spec(boot: dict, scheme: FoldScheme, minutes: int) -> dict:
+def build_timing_spec(
+    boot: dict,
+    scheme: FoldScheme,
+    minutes: int,
+    *,
+    source: str = SOURCE,
+    start: date = date.min,
+) -> dict:
     """#416's family: #305's spec, unchanged, plus the complete-timing sensitivity's definition,
-    frozen before any outcome is read."""
-    return build_spec(boot, scheme, minutes) | {
-        "family_id": TIMING_FAMILY_ID,
+    frozen before any outcome is read. `source` and `start` as in `build_spec` (#404); a copy
+    other than 'jra' is its own family, on its own base family (`source_family`)."""
+    base_family = source_family(FAMILY_ID, source)
+    return build_spec(boot, scheme, minutes, source=source, start=start) | {
+        "family_id": source_family(TIMING_FAMILY_ID, source),
         "ticket": TIMING_TICKET,
-        "base_family": FAMILY_ID,
+        "base_family": base_family,
         "coverage": {
             "who_placed": "the runners with finish_pos 1, 2 or 3, read before any time",
             "missing_timing": "a runner placed 1-3 has no finish time",
@@ -753,7 +794,7 @@ def build_timing_spec(boot: dict, scheme: FoldScheme, minutes: int) -> dict:
         "sensitivity": {
             "null": "dropping the races without complete timing does not change the time gain of "
             "the same-day variant over the par: delta = gain_complete - gain_existing = 0",
-            "existing": "the published fold loop on every kept race (family " + FAMILY_ID + ")",
+            "existing": "the published fold loop on every kept race (family " + base_family + ")",
             "complete": "the races with complete_timing only, on the existing arm's fold windows "
             "(walk_forward over every development race); the other races are in no fit, are not "
             "observed by the same-day variant and are not scored",
@@ -942,25 +983,31 @@ def _sha_prefix(path: Path) -> str:
     return digest.hexdigest()[:16]
 
 
-def store_builds() -> dict[str, str]:
+def store_builds(source: str = SOURCE) -> dict[str, str]:
     return {
-        f"{SOURCE}_{name}": f"processed/{SOURCE}/{name}.parquet@"
-        + _sha_prefix(table_path(SOURCE, name))
+        f"{source}_{name}": f"processed/{source}/{name}.parquet@"
+        + _sha_prefix(table_path(source, name))
         for name in ("races", "runners")
     }
 
 
-def _record(variant: Variant, git_sha: str, builds: dict[str, str], fold_scheme: str) -> RunRecord:
+def _record(
+    variant: Variant,
+    git_sha: str,
+    builds: dict[str, str],
+    fold_scheme: str,
+    source: str = SOURCE,
+) -> RunRecord:
     params = variant.params | ({"error": variant.error} if variant.error else {})
     family_id, ticket = _family(variant)
     return RunRecord(
         hypothesis_id=HYPOTHESIS_ID,
-        family_id=family_id,
+        family_id=source_family(family_id, source),
         variant=variant.name,
         ticket=ticket,
         git_sha=git_sha,
         data_builds=builds,
-        sources=(SOURCE,),
+        sources=(source,),
         fold_scheme=fold_scheme,
         components=variant.components,
         params=params,
@@ -1047,22 +1094,28 @@ def render_report(variants: list[Variant], tables: dict, counts: dict, about: di
     return "\n".join(lines) + "\n"
 
 
-def run_study(out_dir: Path | None = None) -> dict:
+def run_study(out_dir: Path | None = None, *, source: str = SOURCE, start: date = date.min) -> dict:
     """Freeze the spec, build the race table from the development store, run the fold loop per
     error model, append the registry records, rewrite the committed summary and write the
-    report outside the tree."""
+    report outside the tree. `source` names the store copy read (#404: 'jravan' the JRA-VAN
+    copy) and `start` the first race day read (default every day); both are recorded in the spec,
+    and the source in the records, the data builds and the report's `write_report` sources; a
+    copy other than 'jra' runs as its own family `<FAMILY_ID>-<source>` (`source_family`)."""
     out_dir = paths.reports_dir() if out_dir is None else paths.outside_repo(out_dir, what="out")
     scheme, minutes = load_country_scheme(COUNTRY), decision_min()
     boot = bootstrap_settings()
-    spec = build_spec(boot, scheme, minutes)
+    spec = build_spec(boot, scheme, minutes, source=source, start=start)
+    timing_spec = build_timing_spec(boot, scheme, minutes, source=source, start=start)
     git_sha = _git_sha()
     registry = default_registry(COUNTRY)
+    family_id = source_family(FAMILY_ID, source)
+    timing_family_id = source_family(TIMING_FAMILY_ID, source)
     # both families before any outcome is read; #305's spec is unchanged, so its freeze is a no-op
-    spec_hash = registry.freeze_family(FAMILY_ID, spec)
-    timing_hash = registry.freeze_family(TIMING_FAMILY_ID, build_timing_spec(boot, scheme, minutes))
+    spec_hash = registry.freeze_family(family_id, spec)
+    timing_hash = registry.freeze_family(timing_family_id, timing_spec)
 
-    builds = store_builds()
-    races, runners = read_inputs()
+    builds = store_builds(source)
+    races, runners = read_inputs(source=source, start=start)
     table, builder = build_race_table(races, runners, estimand=ESTIMANDS[0])
     del races, runners
     builder |= {
@@ -1072,9 +1125,9 @@ def run_study(out_dir: Path | None = None) -> dict:
     variants, tables, counts = compute_study(table, spec, scheme, minutes)
     counts = {"builder": builder} | counts
 
-    existing = registry.records(FAMILY_ID) + registry.records(TIMING_FAMILY_ID)
+    existing = registry.records(family_id) + registry.records(timing_family_id)
     fold_scheme = scheme_label(scheme)
-    records = [_record(v, git_sha, builds, fold_scheme) for v in variants]
+    records = [_record(v, git_sha, builds, fold_scheme, source) for v in variants]
     run_ids = {}
     for variant, record in zip(variants, records, strict=True):
         # only an exact match, its commit included, is already recorded: the registry names
@@ -1082,8 +1135,8 @@ def run_study(out_dir: Path | None = None) -> dict:
         if record not in existing:
             run_ids[variant.name] = registry.append(record)
     about = {
-        "family": f"`{FAMILY_ID}`, spec sha256 `{spec_hash}`",
-        "complete-timing family": f"`{TIMING_FAMILY_ID}`, spec sha256 `{timing_hash}`",
+        "family": f"`{family_id}`, spec sha256 `{spec_hash}`",
+        "complete-timing family": f"`{timing_family_id}`, spec sha256 `{timing_hash}`",
         "git": git_sha,
         "store": ", ".join(builds.values()),
         "run ids": ", ".join(f"{k} `{v}`" for k, v in run_ids.items()) or "already recorded",
@@ -1092,14 +1145,14 @@ def run_study(out_dir: Path | None = None) -> dict:
     report = write_report(
         out_dir / f"speed-{COUNTRY}-{spec_hash[:12]}-{timing_hash[:12]}.md",
         render_report(variants, tables, counts, about),
-        sources=(SOURCE,),
+        sources=(source,),
     )
     # last: another ticket's family id in the shared registry can make it raise (#344, #391)
     write_summary(registry, summary_dir(COUNTRY))
     return {
-        "family_id": FAMILY_ID,
+        "family_id": family_id,
         "spec_hash": spec_hash,
-        "timing_family_id": TIMING_FAMILY_ID,
+        "timing_family_id": timing_family_id,
         "timing_spec_hash": timing_hash,
         "timing": timing_rows(variants),
         "report_path": str(report),

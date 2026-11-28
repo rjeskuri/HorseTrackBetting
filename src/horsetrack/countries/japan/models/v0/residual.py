@@ -65,6 +65,7 @@ from horsetrack.countries.japan.models.v0.calibration import (
 )
 from horsetrack.countries.japan.models.v0.ordering import _git_sha
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
+from horsetrack.countries.japan.studies import source_family
 
 COUNTRY = "japan"
 TICKET = 125
@@ -344,13 +345,13 @@ def read_segments(path: Path = CONFIG_PATH) -> tuple[str, ...]:
 # --------------------------------------------------------------------------- the real-data run
 
 
-def _store_build() -> dict[str, str]:
-    """The JRA store's build identity for the registry, as `jra/runners@<built_utc>`."""
+def _store_build(source: str = "jra") -> dict[str, str]:
+    """The store copy's build identity for the registry, as `<source>/runners@<built_utc>`."""
     try:
-        build = json.loads((paths.processed_dir("jra") / "_build.json").read_text())
-        return {"runners": f"jra/runners@{build['built_utc']}"}
+        build = json.loads((paths.processed_dir(source) / "_build.json").read_text())
+        return {"runners": f"{source}/runners@{build['built_utc']}"}
     except (OSError, ValueError, KeyError):
-        return {"runners": "jra/runners"}
+        return {"runners": f"{source}/runners"}
 
 
 def _bootstrap_settings() -> dict:
@@ -412,8 +413,23 @@ def _score(frame: pd.DataFrame, oof: pd.DataFrame, folds: list[Fold], boot: dict
     }
 
 
+def _sources(source: str, base: WinCalibration) -> tuple[str, ...]:
+    """The store copies a residual rests on: its own `source`, then the base fit's (#404), so a
+    residual on a licensed base is labelled, and withheld, as that base's copy."""
+    return tuple(dict.fromkeys((source, *base.sources)))
+
+
 def _record(
-    *, status: str, scheme, segments, ridge, n_knots, base, fit_id, score: dict | None
+    *,
+    status: str,
+    scheme,
+    segments,
+    ridge,
+    n_knots,
+    base,
+    fit_id,
+    score: dict | None,
+    source: str = "jra",
 ) -> RunRecord:
     metrics: tuple[FoldMetric, ...] = ()
     if score is not None:
@@ -443,12 +459,12 @@ def _record(
         components["residual"] = fit_id
     return RunRecord(
         hypothesis_id=HYPOTHESIS_ID,
-        family_id=FAMILY_ID,
+        family_id=source_family(FAMILY_ID, source),  # another store copy, its own family (#404)
         variant=f"segments-{len(segments)}-ridge-{ridge:g}",
         ticket=TICKET,
         git_sha=_git_sha() or "unknown",
-        data_builds=_store_build(),
-        sources=("jra",),
+        data_builds=_store_build(source),
+        sources=_sources(source, base),
         fold_scheme=json.dumps({"country": COUNTRY, **dataclasses.asdict(scheme)}, sort_keys=True),
         components=components,
         params={
@@ -478,11 +494,22 @@ def _development_frame_with_race(table: pa.Table) -> tuple[pd.DataFrame, dict, d
 
 
 def run_fit(
-    base_path: Path, out_dir: Path | None = None, *, ridge: float = RIDGE, n_knots: int = 5
+    base_path: Path,
+    out_dir: Path | None = None,
+    *,
+    ridge: float = RIDGE,
+    n_knots: int = 5,
+    source: str = "jra",
 ) -> dict:
     """Fit the residual on every development race of the price era on top of the calibration in
     `base_path`, score it out of fold, and write the fit, the predictions, a manifest and the
     report under the data dir; the run (failed or scored) is appended to Japan's registry.
+
+    `source` names the store copy read (#404): 'jra' by default, 'jravan' the JRA-VAN copy. The
+    registry record, the report's `write_report` sources and (off 'jra') the manifest name it,
+    with the base fit's own `sources`, so a licensed copy's figures are withheld
+    (`core.eval.reports.WITHHELD_SOURCES`); off 'jra' the output file names carry the source and
+    the record is in its own family `<FAMILY_ID>-<source>` (`studies.source_family`).
 
     An `out_dir` that resolves inside the repository raises `paths.DataDirInsideRepo` before
     anything is read or written."""
@@ -495,7 +522,9 @@ def run_fit(
     scheme = load_country_scheme(COUNTRY)
     boot = _bootstrap_settings()
     registry = default_registry(COUNTRY)
-    run = dict(scheme=scheme, segments=segments, ridge=ridge, n_knots=n_knots, base=base)
+    run = dict(
+        scheme=scheme, segments=segments, ridge=ridge, n_knots=n_knots, base=base, source=source
+    )
 
     fit_id = ""
     try:
@@ -505,6 +534,7 @@ def run_fit(
             start=PRICE_ERA_START,
             end=date.max,  # to the store's last date
             touches_price=True,
+            source=source,
         )
         frame, races_left_out, runners_dropped = _development_frame_with_race(table)
         del table
@@ -521,10 +551,13 @@ def run_fit(
         raise
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    fit_path = out_dir / f"residual-{fit.fit_id}.json"
-    oof_path = out_dir / f"residual_oof-{fit.fit_id}.parquet"
-    manifest_path = out_dir / f"manifest-residual-{fit.fit_id}.json"
-    report_path = paths.reports_dir() / "japan" / f"residual_v0-{fit.fit_id}.json"
+    # Another store copy's outputs name it, so a run on each copy keeps its own files.
+    name = fit.fit_id if source == "jra" else f"{source}-{fit.fit_id}"
+    fit_path = out_dir / f"residual-{name}.json"
+    oof_path = out_dir / f"residual_oof-{name}.parquet"
+    manifest_path = out_dir / f"manifest-residual-{name}.json"
+    report_path = paths.reports_dir() / "japan" / f"residual_v0-{name}.json"
+    sources = _sources(source, base)
     manifest = {
         "fit_id": fit.fit_id,
         "model": "win_residual_v0",
@@ -550,12 +583,14 @@ def run_fit(
         "manifest_path": str(manifest_path),
         "report_path": str(report_path),
     }
+    if sources != ("jra",):  # the default manifest is unchanged
+        manifest["sources"] = list(sources)
     oof["race_id"] = oof["race_id"].astype(str)
     fit_path.write_text(fit.to_json())
     pq.write_table(pa.Table.from_pandas(oof, preserve_index=False), oof_path)
     manifest_path.write_text(json.dumps(manifest, indent=2))
     report = {"fit_id": fit.fit_id, "base_fit_id": base.fit_id, "out_of_fold": score, **manifest}
-    write_report(report_path, json.dumps(report, indent=2) + "\n", sources=("jra",))
+    write_report(report_path, json.dumps(report, indent=2) + "\n", sources=sources)
     manifest["run_id"] = registry.append(
         _record(status="scored", fit_id=fit.fit_id, score=score, **run)
     )
