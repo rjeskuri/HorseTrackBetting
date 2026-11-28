@@ -45,6 +45,9 @@ test_log_day_cli.py: `utc_now`, `sleep` and `make_fetcher`, looked up at call ti
 - So after a block, on a day without racing, or once the day's run has finished, every later start
   that day sends nothing and appends no health line; a line for another day, or for another host,
   blocks nothing.
+- #387: inside one start a JRA block backs off as logger.yaml's on_block says (a pause, a fresh
+  Fetcher at 1 req/s, after a second block the floor only; a third block ends the day:
+  test_five_minute_floor.py), so a site that refuses everything from the n-th request gets n + 2.
 
 Ruling: an attended `log-day` (no --unattended; any --date, --venues, --pools) takes the same
 fcntl.flock(fd, LOCK_EX | LOCK_NB) on logs_dir('japan')/log-day.lock for its whole run, so a manual
@@ -646,9 +649,15 @@ def test_a_block_marker_for_today_exits_0_without_a_request(monkeypatch, today, 
         site = Site(dict(world.pages), clock=clock, block_at=block_at, status=status)
         blocked = start(monkeypatch, clock, world, site=site)
         assert blocked.code in (0, 2), blocked.output
-        assert blocked.requests == block_at, (
-            f"{blocked.requests} requests: the start went on after the {status}"
+        # #387: the site refuses every request from block_at on. The start backs off as
+        # logger.yaml's on_block says: a pause, a fresh Fetcher at 1 req/s (refused: a second
+        # block), a pause, the floor only (refused: a third block), and the third block ends
+        # its day. So two requests more than block_at, after two pauses.
+        assert blocked.requests == block_at + 2, (
+            f"{blocked.requests} requests: the start did not back off twice after the {status}"
         )
+        pause_s = 60.0 * float(load_country_yaml("japan", "logger")["on_block"]["cooldown_min"])
+        assert blocked.waited >= 2 * pause_s, f"waited {blocked.waited} s, not two pauses"
         assert [HOST, today.isoformat()] in block_lines(), "no block line for today"
         assert today.isoformat() not in no_meeting_days(), "a block is not a day without racing"
         assert today.isoformat() not in day_done_days(), "a block is not a finished day"

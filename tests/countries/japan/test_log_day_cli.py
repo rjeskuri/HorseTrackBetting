@@ -59,8 +59,10 @@ NAR (ticket #38), `log-day --sources jra,nar` (default: logger.yaml's `sources`)
   `nar.on_block.cooldown_min` (15), then NAR resumes once on a fresh Fetcher,
   `make_fetcher("nar", requests_per_second=<nar.on_block.resume_requests_per_second>)` (0.05:
   20 s between requests to nar.netkeiba.com); a second block stops NAR for the day as above, and
-  a restart that day sends NAR nothing. JRA never pauses and its make_fetcher is never given a
-  rate. Ruling: `make_fetcher(source="jra", *, requests_per_second=None)`; a rate replaces the
+  a restart that day sends NAR nothing. In these tests (one JRA venue, no JRA block) JRA never
+  pauses and its make_fetcher is never given a rate; #387's three-venue rate and JRA back-off are
+  the three-venue test below and test_five_minute_floor.py's.
+  Ruling: `make_fetcher(source="jra", *, requests_per_second=None)`; a rate replaces the
   rate of every host of that source's http block, jitter and User-Agent unchanged.
 - An error escaping one source's day (a 500 on NAR's race list at discovery: a FetchError) stops
   that source only. The other source logs its day; its health lines and, unattended, its
@@ -464,6 +466,65 @@ def test_a_venue_that_logged_nothing_raises_an_alert_and_exit_2(
     day_log = paths.logs_dir("japan") / f"log-day-{SAT.isoformat()}.log"
     text = day_log.read_text(encoding="utf-8")
     assert all(venue in text for venue in empty)
+
+
+def test_a_three_venue_day_runs_jra_at_logger_yaml_s_three_venue_rate(
+    monkeypatch, data_dir, late_posts
+):
+    """#387: a day that logs three JRA venues runs at logger.yaml's `venue_rates` rate for three
+    venues (above jra.yaml's): once the venues are known, log-day sends JRA's requests through a
+    fresh Fetcher, make_fetcher("jra", requests_per_second=<that rate>), and from 09:30 nothing
+    goes through the first one."""
+    meetings = [Meeting("TOK", 1), Meeting("KYO", 1, nichi=3), Meeting("FKS", 1, 3, 1)]
+    world = World({SAT: meetings}, tier2=tier2_config()["pools"])
+    base = float(
+        load_country_yaml("japan", "jra")["http"]["hosts"][dbl.HOST]["requests_per_second"]
+    )
+    entries = [
+        e for e in load_country_yaml("japan", "logger").get("venue_rates") or []
+        if int(e["min_venues"]) <= len(meetings)
+    ]  # fmt: skip
+    assert entries, "logger.yaml has no venue_rates entry for three venues (#387)"
+    rate = float(max(entries, key=lambda e: int(e["min_venues"]))["requests_per_second"])
+    assert rate > base, f"three venues at {rate} requests a second, jra.yaml's {base}"
+
+    mod = importlib.import_module(MODULE)
+    clock = Clock(datetime(2026, 11, 27, 21, 0, tzinfo=UTC))  # 06:00 in Tokyo on the race day
+    site = dbl.JradbSite(dict(world.pages))
+    made: list[tuple[dict, list[datetime]]] = []  # each JRA Fetcher: its arguments, its requests
+
+    def make_fetcher(*a, **k):
+        source = k.get("source", a[0] if a else "jra")
+        assert source == "jra", f"make_fetcher for {source!r}"
+        fetcher = dbl.make_fetcher(site)
+        sent_at: list[datetime] = []
+        send = fetcher.request
+
+        def request(task):
+            sent_at.append(clock.now())
+            return send(task)
+
+        fetcher.request = request
+        made.append(({key: v for key, v in k.items() if key != "source"}, sent_at))
+        return fetcher
+
+    monkeypatch.setattr(mod, "utc_now", clock.now)
+    monkeypatch.setattr(mod, "sleep", clock.sleep)
+    monkeypatch.setattr(mod, "make_fetcher", make_fetcher)
+    from horsetrack.cli import app
+
+    result = CliRunner().invoke(app, ["japan", "log-day", "--date", SAT.isoformat()])
+    out = plain(result.output)
+    assert result.exit_code == 0, out
+    rates = [kwargs.get("requests_per_second") for kwargs, _ in made]
+    assert len(made) == 2 and rates[0] is None, f"JRA's Fetchers: {rates}"
+    assert rates[1] == pytest.approx(rate), f"JRA's Fetchers: {rates}, not one at {rate}"
+    w = datetime(2026, 11, 28, 0, 30, tzinfo=UTC)  # 09:30 in Tokyo
+    late = [t for t in made[0][1] if t >= w]
+    assert late == [], f"{len(late)} requests at jra.yaml's rate from 09:30"
+    assert any(t >= w for t in made[1][1]), "nothing sent at the three-venue rate from 09:30"
+    health, alerts = read_health(SAT.isoformat())
+    assert sorted(health) == sorted(m.venue for m in meetings) and alerts == [], (health, alerts)
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,8 @@
 """The day-before window (ticket #358): the JRA odds logger matches JV-Link's time-series grain. It
 starts when the day-before sales open the evening before the race date, read off the オッズ menu,
 captures every race at least every 5 minutes through the night until each race's T-15, and from
-T-15 (hot from T-20) keeps the race date's fine grain (20 s) as before.
+T-15 (hot from T-20) keeps the race date's hot grain as before (every 20 s round here; logger.yaml's
+60 s since #387).
 
 Contract pinned here (the coder follows it), on top of test_schedule.py's for run_day:
 
@@ -13,10 +14,10 @@ Config
   (`source_config(config, "nar")`) never inherits it, as with tier2 and results.
 - logger.yaml: tier 1 `pools` are WIN, PLACE, QUINELLA, QUINELLA_PLACE and BRACKET_QUINELLA (its
   own page: `requests.per_race` 4); tier 2 keeps FORECAST, TRIO, TIERCE (`tier2.requests.per_race`
-  3). The windows (07:00 every 300 s, 09:30 every 20 s), the stop and the hot races are unchanged,
-  but for `hot_races.floor_s` 300: the owner's 5-minute floor (#387, option (a), 2026-11-28),
-  which test_five_minute_floor.py pins on the race date (a stale race outranks the hot races but
-  the nearest; those keep inside the health line's MAX_GAP_S). This file's CONFIG has no floor_s.
+  3). The windows (07:00 every 300 s, 09:30 every 20 s), the stop and the hot window are
+  unchanged; #387 (the owner, 2026-11-29) adds `hot_races.every_s` 60 and `floor_s` 300 (each hot
+  race at least every 60 s, every other race every 300 s), which test_five_minute_floor.py pins on
+  the race date. This file's CONFIG has neither: its hot races are captured every round, as here.
 
 Site
 - With `day_before`, a site also has `sales_open() -> bool`: whether the オッズ menu lists the race
@@ -396,8 +397,10 @@ def test_logger_yaml_ships_the_358_rules():
     tier2 = shipped["tier2"]
     assert sorted(tier2["pools"]) == ["FORECAST", "TIERCE", "TRIO"], tier2["pools"]
     assert tier2["requests"] == {"navigation": 2, "per_race": 3}, tier2["requests"]
-    # unchanged: the race date's windows, hot races and stop; #387 adds the owner's floor
+    # unchanged: the race date's windows, hot window and stop; #387 adds the owner's hot grain
+    # (60 s) and floor (5 minutes)
     hot = dict(shipped["hot_races"])
+    assert hot.pop("every_s", None) == 60, f"hot_races.every_s: {shipped['hot_races']}"
     assert hot.pop("floor_s", None) == GRAIN_S, f"hot_races.floor_s: {shipped['hot_races']}"
     assert hot == CONFIG["hot_races"], f"logger.yaml hot_races: {shipped['hot_races']!r}"
     for key in ("windows", "stop", "after_last_race_min", "min_poll_interval_s"):

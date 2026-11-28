@@ -27,14 +27,15 @@ plan_round(now, venues, config, rps) -> list[Job]   (horsetrack.countries.japan.
   so navigation is charged once.
 - Budget = every_s of the window in force at `now` x rps. Before the first window: [] always.
 - A race is hot when post - within_min <= now <= post + after_post_min (closed at both ends).
-  With no stale race (always so without `hot_races.floor_s`, and with a fresh VenueState): hot
-  races are taken first, nearest post first, race by race across venues, each one that still fits
-  (a hot race no plan includes would not have fit on top of the planned hot races). Then the spare
-  budget fills the venues' due full cycles race by race until no further race fits.
-- The owner's 5-minute floor (#387, option (a), 2026-11-28; logger.yaml `hot_races.floor_s` 300):
-  the nearest hot race of all still comes first, then a race whose latest capture is stale
-  outranks the other hot races, which take a slower grain inside the health line's MAX_GAP_S.
-  test_five_minute_floor.py pins it (VenueState.captured, when a race is stale, the race day).
+  With a fresh VenueState (no race captured yet), and always without `hot_races.every_s` and
+  `floor_s` (this file's CONFIG): hot races are taken first, nearest post first, race by race
+  across venues, each one that still fits (a hot race no plan includes would not have fit on top
+  of the planned hot races). Then the spare budget fills the venues' due full cycles race by race
+  until no further race fits.
+- The owner's rule (#387, 2026-11-29; logger.yaml `hot_races.every_s` 60, `floor_s` 300,
+  `venue_rates`, `on_block`): each hot race at least every 60 s, every other race at least every
+  300 s, a faster JRA rate on three-venue days, and a block that backs off instead of ending the
+  day. test_five_minute_floor.py pins it (VenueState.captured, the must races, the race day).
 - The sum of Job.requests is <= budget, except when the budget is below one hot race's cost
   (navigation + per_race): then the plan is that single race alone ("one hot job always runs").
 - A venue whose last_capture is less than min_poll_interval_s before `now` gets no Job (exactly
@@ -72,7 +73,8 @@ run_day(race_date, site, store, *, config, now, sleep, block_marker, venues=None
   naming the host and the race's Tokyo date (ISO, e.g. 2026-11-28). A run that finds a marker for
   this host and today's date sends nothing (no discover either); a marker for another date or host
   does not block. With cooldown_min N: nothing for N minutes, then the run resumes once; the next
-  CircuitOpen ends it.
+  CircuitOpen ends it. (#387: logger.yaml's JRA on_block adds a floor-only step after a second
+  block, its own key; test_five_minute_floor.py pins that ladder.)
 - DaySummary: `venues` {code: VenueSummary}, `requests` (at least the captures' requests, at most
   what the site sent), `deferred` (race captures a round left out for budget: 0 when the budget
   never binds, > 0 when it does). VenueSummary: snapshots (successful captures), rows (sum of
@@ -476,33 +478,6 @@ def assert_hot_races_followed(site: FakeSite, cfg: dict, venues, every: float) -
             assert max(gaps, default=0.0) <= every + EPS, f"{where}: a {max(gaps)} s gap while hot"
 
 
-def assert_nearest_hot_every_round(site: FakeSite, cfg: dict) -> None:
-    """Every round from the last window's start (captures take no time here, so every capture of
-    a round is at its start, every_s apart) in which a race is hot captures the nearest hot race
-    of all: the smallest |post - round start| (either one of a tie)."""
-    at: dict[datetime, set[tuple[str, int]]] = defaultdict(set)
-    for call in caps(site, ok=True):
-        at[call.t] |= {(call.venue, n) for n in asked(call, site)}
-    day = min(at).astimezone(JST).date()
-    t = max(wall(w["from"], day) for w in cfg["windows"])
-    last = max(p for posts in site.meetings.values() for p in posts.values())
-    missed = []
-    while t <= last + timedelta(minutes=cfg["hot_races"]["after_post_min"]):
-        hot = [
-            (abs(secs(post - t)), venue, n)
-            for venue, posts in site.meetings.items()
-            for n, post in posts.items()
-            if is_hot(post, t, cfg)
-        ]
-        if hot:
-            best = min(d for d, *_ in hot)
-            nearest = {(venue, n) for d, venue, n in hot if d <= best + EPS}
-            if not nearest & at.get(t, set()):
-                missed.append(f"{hhmm(t)}: nearest {sorted(nearest)}, got {sorted(at.get(t, []))}")
-        t += timedelta(seconds=every_s_at(t, cfg))
-    assert missed == [], f"{len(missed)} rounds without the nearest hot race: {missed[:3]}"
-
-
 def assert_logged_until(site: FakeSite, venue: str, end: datetime) -> None:
     """No call for `venue` at or after `end`, and it was being captured up to one cycle before."""
     late = [c for c in site.calls if c.venue == venue and c.t >= end]
@@ -528,13 +503,16 @@ def assert_summary_matches(summary, site: FakeSite, store: FakeStore) -> None:
 def test_logger_yaml_ships_the_outline_values():
     shipped = load_country_yaml("japan", "logger")
     # #358: bracket quinella is captured every round with tier 1, on a page of its own; #387: the
-    # owner's 5-minute floor (hot_races.floor_s), the hot window and the cycles as they were
+    # owner's 60 s hot grain and 300 s floor beside the hot window and the cycles as they were.
+    # on_block is the owner's back-off since #387 (test_five_minute_floor.py pins it).
     want = config(
         pools=["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE", "BRACKET_QUINELLA"],
         requests={"navigation": 2, "per_race": 4},
-        hot_races={"floor_s": 300},
+        hot_races={"every_s": 60, "floor_s": 300},
     )
     for key, value in want.items():
+        if key == "on_block":
+            continue
         assert shipped.get(key) == value, f"logger.yaml {key}: {shipped.get(key)!r}, not {value!r}"
 
 
@@ -579,9 +557,9 @@ def _spaced(now: datetime, anchor: int, minutes: float) -> dict[int, datetime]:
 
 
 def test_hot_races_come_first_nearest_post_first_when_the_budget_is_short():
-    for cfg in (config(), config(hot_races={"floor_s": 300})):
-        # With the owner's floor (#387) too: no VenueState here has a capture, so no race is
-        # stale and #24's order stands (test_five_minute_floor.py has the stale races).
+    for cfg in (config(), config(hot_races={"every_s": 60, "floor_s": 300})):
+        # With the owner's grain and floor (#387) too: no VenueState here has a capture, so every
+        # hot race is due and #24's order stands (test_five_minute_floor.py has the captures).
         _hot_races_come_first(cfg)
 
 
@@ -830,7 +808,8 @@ def test_three_venues_are_logged_until_after_their_last_races(tmp_path):
         vs = summary.venues[venue]
         assert (vs.failures, vs.wrong_meeting) == (0, 0), venue
         assert vs.stopped not in ("circuit_open", "wrong_meeting"), (venue, vs.stopped)
-        assert vs.longest_cycle_s >= 20 - EPS, f"{venue}: a 50-request cycle takes 3 rounds"
+        # (#387: with the shipped floor the 300 s captures may take the full cycles' place from
+        # 09:30; test_a_full_cycle_is_spread_over_rounds_race_by_race keeps #24's cycles.)
         reads = [c for c in site.calls if c.kind == "post_times" and c.venue == venue]
         assert 1 <= len(reads) <= secs(end - jst(7, 0)) / 300 + 2, f"{venue}: {len(reads)} reads"
         assert (venue, meetings[venue]) in store.post_times, f"{venue}: post times not stored"
@@ -838,10 +817,9 @@ def test_three_venues_are_logged_until_after_their_last_races(tmp_path):
     last_post = max(meetings["FKS"].values())
     after_hot = [c for c in caps(site, "FKS", ok=True) if last_post + timedelta(minutes=5) < c.t]
     assert after_hot, "FKS not captured between its last post + 5 and + 10 minutes"
-    # three venues with one hot race each cost 18 of a round's 20 requests. The owner's floor
-    # (#387): the nearest hot race of all keeps every round; the other hot races may yield to a
-    # stale race, inside the health line's MAX_GAP_S
-    assert_nearest_hot_every_round(site, shipped)
+    # Three venues at jra.yaml's 1 req/s (no `resume` here, so no three-venue rate, #387): the
+    # hot races keep at least the health line's T-20 criterion, MAX_GAP_S. The owner's 60 s grain
+    # at the three-venue rate is test_five_minute_floor.py's.
     assert_hot_races_followed(site, shipped, meetings, every=MAX_GAP_S)
     assert_summary_matches(summary, site, store)
     assert clock.t <= max(ends.values()) + timedelta(seconds=300), f"returned at {hhmm(clock.t)}"

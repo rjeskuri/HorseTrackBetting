@@ -592,8 +592,11 @@ def test_a_probe_blocked_the_evening_before_blocks_the_race_date(monkeypatch, da
 
     result, _ = log_day(monkeypatch, clock, site, "--unattended")
     assert result.exit_code in (0, 2), plain(result.output)
-    assert len(site.seen) == 1, f"{len(site.seen)} requests, not the one refused (403)"
-    assert block_lines() == [[dbl.HOST, SUN.isoformat()]], block_lines()
+    # #387: the probe refused (403), then once more after each of the on_block back-off's two
+    # pauses (1 req/s, then the floor only); the third block ends the day
+    assert len(site.seen) == 3, f"{len(site.seen)} requests, not the three refused (403)"
+    lines = block_lines()
+    assert lines and all(x == [dbl.HOST, SUN.isoformat()] for x in lines), lines
     assert SUN.isoformat() not in marker_days("jra-no-meeting.txt") + marker_days(
         "jra-day-done.txt"
     ), "a block is not a day without racing, nor a finished day"

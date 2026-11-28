@@ -17,8 +17,9 @@ Contract pinned here (the coder follows it), on top of test_schedule.py's for ru
   'circuit_open', its DaySummary.stopped 'circuit_open', its block marker written with its host
   and the Tokyo race date); every other source logs its whole day, and its marker is not written.
   A later run that day sends nothing for the blocked source and logs the others.
-- Block policy per source (fix round, review of PR #255), from its schedule's `on_block`. JRA's
-  is `{cooldown_min: null}`: the first block stops it for the day, as above. NAR's follows the
+- Block policy per source (fix round, review of PR #255), from its schedule's `on_block`. This
+  file's JRA_CONFIG has `{cooldown_min: null}`: the first block stops it for the day, as above
+  (logger.yaml's JRA on_block backs off since #387: test_five_minute_floor.py). NAR's follows the
   owner decision in docs/research/nar-data-access.md: `{cooldown_min: 15,
   resume_requests_per_second: 0.05}` (half nar.yaml's 0.1). On the first block that source alone
   pauses `cooldown_min` minutes (no call to it meanwhile; the other sources keep logging), then
@@ -713,15 +714,19 @@ def test_logger_yaml_ships_a_schedule_per_source():
 
     jra = source_config(shipped, "jra")
     # #358: bracket quinella every round with tier 1, on a page of its own; #387: the owner's
-    # 5-minute floor in JRA's hot_races (NAR's own hot_races has none: checked below)
+    # 60 s hot grain and 5-minute floor in JRA's hot_races, JRA's venue_rates and its back-off
+    # on_block (test_five_minute_floor.py); NAR inherits none of them (checked below)
     shipped_jra = {
         **JRA_CONFIG,
         "pools": ["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE", "BRACKET_QUINELLA"],
         "requests": {"navigation": 2, "per_race": 4},
-        "hot_races": {**JRA_CONFIG["hot_races"], "floor_s": 300},
+        "hot_races": {**JRA_CONFIG["hot_races"], "every_s": 60, "floor_s": 300},
     }
+    shipped_jra.pop("on_block")
     for key, value in shipped_jra.items():
         assert jra.get(key) == value, f"JRA's {key} changed: {jra.get(key)!r}"
+    assert jra["on_block"].get("cooldown_min") is not None, f"JRA's on_block {jra['on_block']}"
+    assert jra.get("venue_rates"), "JRA has no venue_rates (#387)"
     assert jra.get("day_before") == shipped.get("day_before") is not None, "JRA's day_before"
 
     nar = source_config(shipped, "nar")
@@ -739,11 +744,12 @@ def test_logger_yaml_ships_a_schedule_per_source():
             f"at {hhmm(t)} a NAR round ({every_s_at(t, nar)} s x {rps}) fits no race"
         )
     assert not nar.get("tier2"), "NAR has no tier-2 capture"
-    assert "floor_s" not in nar["hot_races"], (
-        f"NAR inherited JRA's floor (#387): {nar['hot_races']}"
+    assert not {"every_s", "floor_s"} & set(nar["hot_races"]), (
+        f"NAR inherited JRA's hot grain or floor (#387): {nar['hot_races']}"
     )
+    assert "venue_rates" not in nar, f"NAR inherited JRA's venue_rates (#387): {nar}"
     assert "day_before" not in nar, "NAR has no day-before window (#358)"
     # The owner's NAR block policy: pause 15 minutes, resume once at half nar.yaml's rate. JRA's
-    # stays as it was (cooldown null, checked with the rest of JRA_CONFIG above).
+    # is its own since #387 (a pause, then 1 req/s, then the floor only).
     assert nar["on_block"]["cooldown_min"] == 15, nar["on_block"]
     assert nar["on_block"]["resume_requests_per_second"] == pytest.approx(rps / 2), nar["on_block"]

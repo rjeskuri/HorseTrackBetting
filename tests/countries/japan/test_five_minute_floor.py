@@ -1,81 +1,113 @@
-"""The 5-minute floor on two- and three-venue days at jra.yaml's 1 request a second (ticket #387).
+"""The 60 s hot grain, the 300 s floor and the three-venue JRA rate (ticket #387).
 
-#358 (the owner's rule 2) asks for every JRA race to be captured at least every 5 minutes until its
-T-15, and keeps the 09:30 window (20 s rounds) and the T-20 hot rule. At 1 req/s three hot races at
-per_race 4 cost 18 of a round's 20 requests, so the other races' full cycles starve: #358's
-simulation measured gaps up to 1,140 s (three venues) and 404 s (two) from 09:30 to T-15.
+#358 (the owner's rule 2) asks for every JRA race at least every 5 minutes until its T-15, while
+the 09:30 window (20 s rounds) captured each hot race every round. At jra.yaml's 1 request a second
+three venues' hot races starve the other races: #358's simulation measured gaps up to 1,140 s
+(three venues) and 404 s (two) from 09:30 to T-15.
 
-The owner's decision (2026-11-28, option (a) on #387): "Keep the 5-minute floor first. The
-20-second hot grain is second priority: once a race's last capture is 300 s old, it outranks the
-other hot races, and those take the slower grain (about 30-40 s, inside MAX_GAP_S 120). The JRA
-rate stays at 1 req/s, and all five tier-1 pools stay every round."
+The owner's decision (2026-11-29 01:20 JST on #387, replacing the 2026-11-28 answer (a)): "go faster
+than 1 req/second to get as close as possible. Since our data is mostly looking at 1 minute
+intervals for training we don't need the 20 seconds logger, we want to make sure we aren't slow on
+all the venues."
+1. Hot races (the existing hot window) are captured every 60 s; every other race keeps the 300 s
+   floor from 09:30 to its hot window (measured to its T-15, as #358). No venue may fall behind.
+2. On three-venue days the JRA rate goes above 1 req/s, to the lowest rate at which the simulation
+   holds both, under 2 req/s.
+3. The simulation is re-run on #358's cards (the PR and docs/ledger.md carry the figures).
+4. A 403/429 does not end the day's logging: back off to 1 req/s, then to the 300 s floor only, and
+   alert through the health line.
 
-Contract pinned here (the coder follows it), on top of test_schedule.py's and
-test_day_before_schedule.py's:
+Contract pinned here (the coder follows it), on top of test_schedule.py's:
 
-Config
-- `hot_races.floor_s` (seconds): the floor. logger.yaml's JRA schedule (its top level) ships
-  `floor_s: 300`; NAR's schedule (`source_config(config, "nar")`) has its own `hot_races` block
-  without it, so NAR is unchanged. A schedule without `floor_s` plans and runs exactly as before
-  (#24's order). The tests vary floor_s and the windows' every_s: neither may be a constant.
-- Unchanged, as the owner decided: jra.yaml's www.jra.go.jp at 1.0 requests a second; the five
-  tier-1 pools at `requests` {navigation 2, per_race 4}; the windows (09:30 every 20 s); the hot
-  window (within_min 20, after_post_min 5); all_every_s 300; min_poll_interval_s 20; and the
-  health line's `MAX_GAP_S` 120 (horsetrack.countries.japan.logger.health).
+Config (logger.yaml's JRA schedule, its top level: `source_config(config, "jra")`)
+- `hot_races.every_s` (s): the hot grain. A hot race (post - within_min <= now <= post +
+  after_post_min) is captured at least every every_s. Shipped: 60. `hot_races.floor_s` (s): the
+  floor. A race not hot whose post is still ahead is captured at least every floor_s. Shipped: 300.
+  A schedule without every_s captures its hot races every round (#24; NAR's, and the CONFIG of
+  test_schedule.py and test_day_before_schedule.py); one without floor_s has no floor (the full
+  cycles alone, as before). The tests vary both: neither may be a constant in the code.
+- `venue_rates`: a list of `{min_venues: N, requests_per_second: R}`. A day that logs V venues
+  (given or discovered) runs at the R of the entry with the greatest N <= V; a day no entry
+  applies to runs at its site's own rate (jra.yaml's www.jra.go.jp). Shipped: an entry that gives
+  three venues a rate above jra.yaml's and under 2; none for one venue (Ruling: two venues stay at
+  jra.yaml's rate unless the simulation fails there, and then an entry of their own, the lowest
+  rate on the same grid). The tests change the rate: it comes from this key, never a constant.
+- `on_block`: `cooldown_min` a number, 0 < N <= 30 (Ruling: NAR's 15 is the precedent; a longer
+  pause would end the day by other means), and `resume_requests_per_second` 1.0 (the owner's 1
+  req/s). Any other key (the floor-only step) is the coder's.
+- Unchanged: the windows (07:00 every 300 s, 09:30 every 20 s), within_min 20, after_post_min 5,
+  all_every_s 300, min_poll_interval_s 20, the five tier-1 pools at {navigation 2, per_race 4},
+  jra.yaml's 1.0 requests a second, and the health line's MAX_GAP_S 120.
+- NAR's schedule (`source_config(config, "nar")`) inherits none of venue_rates, every_s, floor_s.
 
-VenueState (horsetrack.countries.japan.logger.schedule)
-- gains `captured: dict[int, datetime]`, default empty: race number -> the start of the round
-  whose successful capture of that race is the latest (run_day stamps it, as it stamps
-  last_capture with the round's start; a capture of every race, races None, stamps every race of
-  the meeting). A race missing from it has never been captured: it is never stale (the full cycle
-  covers it), so a fresh VenueState plans as test_schedule.py says.
+VenueState.captured (horsetrack.countries.japan.logger.schedule): dict[int, datetime], default
+empty: race number -> when its latest successful capture started (run_day keeps it; whether it
+stamps the round's start or the call's own is the coder's). A race missing from it has never been
+captured: a hot one is due, a race not hot is the full cycle's; so a fresh VenueState plans as
+test_schedule.py says.
 
-Stale (a round starting at `now`, every_s e of the window in force, floor_s F)
-- A race of `captured` whose post is still ahead (now < post) is stale when now - captured[race]
-  >= F - e (one round before its capture would be F old), and not stale when that age is <= F / 2.
-  Between the two the threshold is the coder's (a Ruling line on the PR). Races already off are
-  not part of the floor (the rule is "until its T-15"; from T-20 the hot window applies).
+plan_round(now, venues, config, rps) with every_s H, floor_s F and e the every_s of the window in
+force (a race's age: now - captured[race]):
+- must: a hot race whose age is >= H - e (the next round would be H late); a race not hot whose post
+  is ahead (now < post) and whose age is >= F - e.
+- fresh: a hot race whose age is <= H / 2; a race not hot whose age is <= F / 2. Between the two the
+  coder decides (a Ruling line on the PR), so a race may be captured early to absorb its offset in
+  the round.
+- Must races come first: a must race left out of the plan would not fit on top of the plan's must
+  races alone (navigation once per venue), so a fresh race never takes budget a must race needed,
+  and when every must race fits, every must race is planned. Their order among themselves and what
+  fills the spare budget are not pinned. Budget (every_s x rps), one Job per venue, Job.requests,
+  min_poll_interval_s and the single hot job are test_schedule.py's.
 
-plan_round(now, venues, config, rps) with floor_s, inside the budget (every_s x rps):
-1. the nearest hot race of all: the hot race (post - within_min <= now <= post + after_post_min)
-   with the smallest |post - now| over the eligible venues (ties: either); its Job comes first;
-2. then every stale race that still fits (their order among themselves is not pinned);
-3. then the other hot races, nearest post first, each one that still fits;
-4. then the due full cycles race by race, from what is left (as before).
-One Job per venue, Job.requests, min_poll_interval_s and the single hot job exception (a budget
-below one hot race) are test_schedule.py's. With no stale race the plan is test_schedule.py's.
+run_day(..., resume=factory): `resume(requests_per_second)` returns a fresh site at that rate (as
+for NAR's cooldown; log-day: a site over `make_fetcher(source, requests_per_second=rate)`).
+run_day uses it:
+- for venue_rates: once the day's venues are known, a day whose rate (above) is not its site's own
+  runs on `resume(rate)`, so every capture from 09:30 is sent at that rate. A day at its site's own
+  rate makes no new site. Without `resume` a day runs on the site it was given.
+- after a block (a CircuitOpen; the site that raised it is never called again: its breaker is open):
+  no call for on_block.cooldown_min minutes, then the day goes on, from within 320 s, on
+  `resume(resume_requests_per_second)`, with the full schedule (the hot grain included) and no
+  later switch back to the venue_rates rate. After a second block and its cooldown the day goes on
+  at no more than that rate with the floor only: every race at least every floor_s up to its post,
+  hot races included, and no race captured more than twice in any floor_s span (no hot grain).
+  Neither block ends the day: every venue still ends ('ended'). Ruling: a third block ends the
+  day as a block did before #387 (no further call, every venue still running 'circuit_open', the
+  marker names the host and the race date): the owner's ladder has two steps, and a host that
+  refuses the floor-only step after two cooldowns is not polled on until the stop.
+- the health line alerts a block: health.health_lines gives every venue of a day with a block an
+  ALERT whose reasons name it (the word "block", or the status 403/429). The venue line's fields
+  are unchanged (test_log_day_cli.py's pattern).
 
-run_day, the race-day simulation (the DoD): logger.yaml's JRA schedule as shipped (tier 2 and
-results polling included; the run starts at 07:00, the first window, so it never probes for the
-day-before sales), jra.yaml's rate, synthetic 12-race cards: #358's (first posts 09:50, 10:00,
-10:10, every 34 minutes) on two and three venues, the same five minutes later on three, and a
-30-minute card (10:00, 10:10) on two. Two clocks:
-- 1 s a request: each site call moves the fake clock by its requests / rps, so a round lasts as
-  long as what it sends (results polls, post-time reads and tier 2 included).
-- exact rounds: site calls take no time, so every capture of a round is at the round's start.
-Both pin, for every race:
-- (i) the floor: no gap over floor_s between 09:30, its successful tier-1 captures from 09:30 to
-  its T-15, and its T-15;
-- (ii) the hot window [post - within_min, post + after_post_min]: no gap over MAX_GAP_S between
-  the window's start, the race's captures in it and the window's end; and the health line's own
-  metric (health.gaps_inside of the written tier-1 rows, [T-20, post]) at most MAX_GAP_S.
-The exact rounds also pin:
-- (iii) every round from 09:30 while a race is hot captures the nearest hot race of all (at the
-  round's start, smallest |post - start|; either one of a tie);
-- (iv) every round fits its budget, or is the single hot job (test_schedule.py's
-  assert_rounds_fit_budget).
+The race-day simulation (the DoD): logger.yaml's JRA schedule as shipped (tier 2 and results polling
+included), a run from 07:00 (the first window: no day-before probe), synthetic 12-race cards:
+#358's (first posts 09:50, 10:00, 10:10, every 34 minutes) and the same five minutes later, on two
+and three venues. The site starts at jra.yaml's rate and `resume` makes sites at any rate. Every
+site call moves the fake clock by its requests / its site's rate (1 s a request at 1 req/s;
+jra.yaml's +-10 % jitter is not modelled, as in #358's), so a round lasts as long as what it sends
+(results polls, post-time reads and tier 2 included). The bounds are on the instants the captures
+started, with no slack (Ruling: the models read 1-minute boards, and the rate is the owner's
+lever):
+- the floor: for every race no gap over floor_s between 09:30, its tier-1 captures from 09:30 to its
+  T-15, and its T-15;
+- the hot grain: for every race no gap over every_s between its hot window's start, its captures in
+  the window and the window's end; the health line's own metric (health.gaps_inside of the written
+  tier-1 rows) at most MAX_GAP_S, and no ALERT line for the day;
+- the rate: every capture from 09:30 until the first venue ends is sent at the day's rate;
+- the lowest rate (Ruling: a 0.05 req/s grid): for a venue count whose rate is above jra.yaml's
+  (three venues always), the simulation at that rate minus 0.05, 0.10, ... and at jra.yaml's rate
+  itself misses a bound on at least one of the two cards.
 
-Not pinned: the order of jobs after the first, the order of stale races among themselves, which
-venue's cycle gets spare budget, tier 2's share (it takes what tier 1 leaves), races already off,
-and a three-venue 30-minute card (three hot races half the time: denser than #358's simulation,
-which the DoD names). Everything is synthetic: no HTTP, no real sleep, no scraped page.
+Not pinned: the order of jobs, which race fills spare budget, tier 2's share, races already off,
+the cooldown's length within its range, the marker lines of a block the day recovers from.
+Everything is synthetic: no HTTP, no real sleep, no scraped page.
 """
 
 from __future__ import annotations
 
 import copy
-from collections import defaultdict
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -83,8 +115,9 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from horsetrack.core.config import load_country_yaml
+from horsetrack.core.ingest.fetcher import CircuitOpen
 from horsetrack.countries.japan.jra.capture import MeetingCapture
-from horsetrack.countries.japan.logger.health import MAX_GAP_S, gaps_inside
+from horsetrack.countries.japan.logger.health import MAX_GAP_S, gaps_inside, health_lines
 
 # isort: split
 from horsetrack.countries.japan.logger.schedule import (
@@ -101,26 +134,33 @@ HOST = "www.jra.go.jp"
 EPS = 1e-6
 TIER1 = ["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE", "BRACKET_QUINELLA"]
 TIER2 = ["FORECAST", "TRIO", "TIERCE"]
-FLOOR_END_MIN = 15  # the owner's rule 2 (#358): the floor holds until the race's T-15
+FLOOR_END_MIN = 15  # #358's rule 2: the floor holds until the race's T-15
+OWNER_HOT_S = 60  # the owner's hot grain (logger.yaml hot_races.every_s)
 OWNER_FLOOR_S = 300  # the owner's 5 minutes (logger.yaml hot_races.floor_s)
+OWNER_RESUME_RPS = 1.0  # "back off to 1 req/s" (logger.yaml on_block.resume_requests_per_second)
+MAX_RATE = 2.0  # "keep it under 2 req/s"
+STEP = 0.05  # Ruling: the grid the lowest rate is found on
+COOLDOWN_MAX_MIN = 30  # Ruling: the longest pause after a block
+CARD_NAMES = ("358", "358-later")
 
-# The outline's schedule as #358 ships it, with the owner's floor (plan_round tests).
+# The schedule the plan_round tests start from: the shipped one's shape, with the owner's keys.
 CONFIG = {
     "pools": list(TIER1),
     "min_poll_interval_s": 20,
     "windows": [{"from": "07:00", "every_s": 300}, {"from": "09:30", "every_s": 20}],
     "stop": "16:45",
     "after_last_race_min": 10,
-    "hot_races": {"within_min": 20, "after_post_min": 5, "all_every_s": 300, "floor_s": 300},
+    "hot_races": {"within_min": 20, "after_post_min": 5, "all_every_s": 300, "every_s": 60,
+                  "floor_s": 300},
     "requests": {"navigation": 2, "per_race": 4},
     "max_wrong_meeting": 3,
     "on_block": {"cooldown_min": None},
-}
+}  # fmt: skip
 
 
-def config(base: dict | None = None, **changes) -> dict:
-    """`base` (CONFIG by default) with some values changed (a dict value is merged in)."""
-    cfg = copy.deepcopy(CONFIG if base is None else base)
+def config(**changes) -> dict:
+    """CONFIG with some values changed (a dict value is merged in)."""
+    cfg = copy.deepcopy(CONFIG)
     for key, value in changes.items():
         if isinstance(value, dict) and isinstance(cfg.get(key), dict):
             cfg[key] = {**cfg[key], **copy.deepcopy(value)}
@@ -135,8 +175,47 @@ def jra_schedule() -> dict:
 
 
 def jra_rate() -> float:
+    """jra.yaml's rate for the odds host."""
     http = load_country_yaml("japan", "jra")["http"]
     return float(http["hosts"].get(HOST, http["default"])["requests_per_second"])
+
+
+def day_rate(cfg: dict, venues: int, base: float) -> float:
+    """The venue_rates rule, from first principles: the entry with the greatest min_venues <=
+    venues, else the site's own rate."""
+    entries = [e for e in cfg.get("venue_rates") or [] if int(e["min_venues"]) <= venues]
+    if not entries:
+        return base
+    return float(max(entries, key=lambda e: int(e["min_venues"]))["requests_per_second"])
+
+
+def with_rate(cfg: dict, venues: int, rate: float) -> dict:
+    """`cfg` with the rate a day of `venues` venues runs at set to `rate`."""
+    cfg = copy.deepcopy(cfg)
+    entries = list(cfg.get("venue_rates") or [])
+    applies = [e for e in entries if int(e["min_venues"]) <= venues]
+    if applies:
+        max(applies, key=lambda e: int(e["min_venues"]))["requests_per_second"] = rate
+    else:
+        entries.append({"min_venues": venues, "requests_per_second": rate})
+    cfg["venue_rates"] = entries
+    return cfg
+
+
+def hot_grain(cfg: dict) -> float:
+    return float(cfg["hot_races"].get("every_s", OWNER_HOT_S))
+
+
+def floor_grain(cfg: dict) -> float:
+    return float(cfg["hot_races"].get("floor_s", OWNER_FLOOR_S))
+
+
+def cooldown_of(cfg: dict) -> float:
+    c = cfg["on_block"].get("cooldown_min")
+    assert isinstance(c, (int, float)) and not isinstance(c, bool) and c > 0, (
+        f"on_block.cooldown_min {c!r}: a block must pause, then resume (#387)"
+    )
+    return float(c)
 
 
 # ---------------------------------------------------------------- time
@@ -147,25 +226,12 @@ def jst(h: int, m: int = 0, s: int = 0, day: date = DAY) -> datetime:
     return datetime(day.year, day.month, day.day, h, m, s, tzinfo=JST).astimezone(UTC)
 
 
-def wall(hhmm: str, day: date = DAY) -> datetime:
-    h, m = (int(part) for part in str(hhmm).split(":"))
-    return jst(h, m, day=day)
-
-
 def secs(delta: timedelta) -> float:
     return delta.total_seconds()
 
 
 def hhmm(t: datetime) -> str:
     return t.astimezone(JST).strftime("%H:%M:%S JST")
-
-
-def every_s_at(t: datetime, cfg: dict) -> float | None:
-    current = None
-    for window in sorted(cfg["windows"], key=lambda w: wall(w["from"])):
-        if wall(window["from"]) <= t:
-            current = float(window["every_s"])
-    return current
 
 
 def is_hot(post: datetime, t: datetime, cfg: dict) -> bool:
@@ -181,26 +247,217 @@ def cost(n_races: int, cfg: dict) -> int:
     return cfg["requests"]["navigation"] + cfg["requests"]["per_race"] * n_races
 
 
-# ---------------------------------------------------------------- race cards
+def set_cost(races: set[tuple[str, int]], cfg: dict) -> int:
+    """What capturing `races` costs in one round: navigation once per venue."""
+    per_venue: dict[str, int] = {}
+    for venue, _ in races:
+        per_venue[venue] = per_venue.get(venue, 0) + 1
+    return sum(cost(k, cfg) for k in per_venue.values())
 
 
-def card(venues: int, firsts: list[tuple[int, int]], every_min: int, races: int = 12):
-    """`venues` meetings of `races` races, `every_min` minutes apart, first posts `firsts`."""
+# ---------------------------------------------------------------- logger.yaml
+
+
+def test_logger_yaml_ships_the_hot_grain_the_floor_the_three_venue_rate_and_the_back_off():
+    shipped = copy.deepcopy(load_country_yaml("japan", "logger"))
+    jra = source_config(shipped, "jra")
+    hot = jra["hot_races"]
+    assert hot.get("every_s") == OWNER_HOT_S, f"JRA hot_races.every_s {hot.get('every_s')!r}"
+    assert hot.get("floor_s") == OWNER_FLOOR_S, f"JRA hot_races.floor_s {hot.get('floor_s')!r}"
+    rest = {k: v for k, v in hot.items() if k not in ("every_s", "floor_s")}
+    assert rest == {"within_min": 20, "after_post_min": 5, "all_every_s": 300}, hot
+    assert jra["windows"] == CONFIG["windows"], jra["windows"]
+    assert jra["min_poll_interval_s"] == 20
+    assert sorted(jra["pools"]) == sorted(TIER1), jra["pools"]
+    assert jra["requests"] == {"navigation": 2, "per_race": 4}, jra["requests"]
+    assert MAX_GAP_S == 120, "the health line's T-20 criterion is the owner's (#34)"
+
+    base = jra_rate()
+    assert base == 1.0, f"jra.yaml {HOST} at {base} requests a second"
+    entries = jra.get("venue_rates")
+    assert isinstance(entries, list) and entries, f"JRA venue_rates {entries!r}"
+    for entry in entries:
+        assert set(entry) == {"min_venues", "requests_per_second"}, entry
+        assert int(entry["min_venues"]) >= 2, f"{entry}: a one-venue day keeps jra.yaml's rate"
+        assert base < float(entry["requests_per_second"]) < MAX_RATE, entry
+    r3, r2 = day_rate(jra, 3, base), day_rate(jra, 2, base)
+    assert base < r3 < MAX_RATE, f"three venues at {r3} requests a second"
+    assert base <= r2 <= r3, f"two venues at {r2}, three at {r3}"
+    assert day_rate(jra, 1, base) == base
+
+    on_block = jra["on_block"]
+    assert 0 < cooldown_of(jra) <= COOLDOWN_MAX_MIN, on_block
+    assert on_block.get("resume_requests_per_second") == OWNER_RESUME_RPS, on_block
+
+    nar = source_config(shipped, "nar")
+    assert "venue_rates" not in nar, f"NAR inherited JRA's venue_rates: {nar.get('venue_rates')}"
+    assert not {"every_s", "floor_s"} & set(nar["hot_races"]), f"NAR's {nar['hot_races']}"
+
+
+# ---------------------------------------------------------------- plan_round
+
+
+def _spaced(now: datetime, minutes: float) -> dict[int, datetime]:
+    """12 races 30 minutes apart, race 5 posting `minutes` after `now`: race 5 is hot, races 1-4
+    are off and out of their hot window, races 6-12 are not hot and post later."""
+    return {n: now + timedelta(minutes=minutes + 30 * (n - 5)) for n in range(1, 13)}
+
+
+def _states(now, posts, every: float, ages: dict, order, default_age: float) -> list[VenueState]:
+    """VenueStates with every race captured `default_age` s ago, but `ages` ((venue, race) -> s);
+    each venue last captured one round ago, its full cycle not due."""
+    out = []
+    for venue in order:
+        captured = {n: now - timedelta(seconds=default_age) for n in posts[venue]}
+        for (v, n), age in ages.items():
+            if v == venue:
+                captured[n] = now - timedelta(seconds=age)
+        state = VenueState(
+            code=venue,
+            post_times=posts[venue],
+            last_capture=now - timedelta(seconds=every),
+            cycle_start=now - timedelta(seconds=100),
+            cycle_left=None,
+        )
+        state.captured = captured  # the field #387 adds
+        out.append(state)
+    return out
+
+
+def must_races(now, states, cfg: dict, every: float) -> set[tuple[str, int]]:
+    """The contract's must races, from first principles."""
+    h, f = hot_grain(cfg), floor_grain(cfg)
+    out = set()
+    for s in states:
+        for n, post in s.post_times.items():
+            age = secs(now - s.captured[n])
+            if is_hot(post, now, cfg):
+                if age >= h - every - EPS:
+                    out.add((s.code, n))
+            elif now < post and age >= f - every - EPS:
+                out.add((s.code, n))
+    return out
+
+
+def check_must_first(plan, now, states, cfg: dict, rps: float, every: float, where: str) -> set:
+    """The plan is well formed, within its budget, and no must race left out fits on top of the
+    plan's must races. Returns the planned races."""
+    venues = [job.venue for job in plan]
+    assert len(venues) == len(set(venues)), f"{where}: two jobs for one venue: {plan}"
+    posts = {s.code: s.post_times for s in states}
+    for job in plan:
+        assert job.races and len(set(job.races)) == len(job.races), f"{where}: {job}"
+        assert set(job.races) <= set(posts[job.venue]), f"{where}: {job}"
+        assert job.requests == cost(len(job.races), cfg), f"{where}: {job}"
+    budget = every * rps
+    total = sum(job.requests for job in plan)
+    assert total <= budget + EPS, f"{where}: {total} requests for a budget of {budget}"
+    got = {(job.venue, n) for job in plan for n in job.races}
+    must = must_races(now, states, cfg, every)
+    kept = got & must
+    for race in sorted(must - got):
+        assert set_cost(kept | {race}, cfg) > budget + EPS, (
+            f"{where}: must race {race} left out, though it fits beside the planned must races "
+            f"{sorted(kept)} (planned {sorted(got)}, budget {budget})"
+        )
+    return got
+
+
+# (hot every_s H, floor_s F, the 09:30 window's every_s e, rps, ages by (rank of the venue by
+# |post - now| of its race 5, race), the must races by (rank, race))
+PLAN_CASES = [
+    (60, 300, 20, 1.0, {(0, 5): 40, (2, 8): 280}, {(0, 5), (2, 8)}),  # 12 of 20
+    # 22 of 20: three hot musts and a floor must do not all fit
+    (60, 300, 20, 1.0, {(0, 5): 40, (1, 5): 45, (2, 5): 60, (2, 8): 290},
+     {(0, 5), (1, 5), (2, 5), (2, 8)}),
+    (60, 300, 20, 0.3, {(1, 5): 40}, {(1, 5)}),  # 6 of 6: the must, not the nearest (fresh)
+    (60, 300, 20, 0.5, {(0, 8): 280, (1, 9): 300}, {(0, 8), (1, 9)}),  # the fresh hot races wait
+    (60, 300, 20, 1.0, {(0, 8): 285, (0, 9): 290, (1, 10): 299, (2, 11): 300},
+     {(0, 8), (0, 9), (1, 10), (2, 11)}),  # 22 of 20
+    (60, 300, 20, 0.8, {(0, 5): 40, (0, 8): 280, (2, 8): 280}, {(0, 5), (0, 8), (2, 8)}),  # 16/16
+    (90, 300, 20, 0.6, {(0, 5): 40, (1, 5): 70, (2, 8): 280}, {(1, 5), (2, 8)}),  # H 90: 40 fresh
+    (60, 600, 20, 0.6, {(0, 5): 40, (2, 8): 290, (1, 9): 580}, {(0, 5), (1, 9)}),  # F 600
+    (90, 300, 30, 0.4, {(0, 5): 60, (2, 8): 270}, {(0, 5), (2, 8)}),  # 30 s rounds: 12 of 12
+    (90, 300, 30, 0.4, {(0, 5): 45, (1, 5): 60, (2, 8): 150}, {(1, 5)}),  # 45 and 150 are fresh
+]  # fmt: skip
+ASSIGNMENTS = [
+    [("TOK", 3), ("KYO", 9), ("FKS", 16)],
+    [("FKS", -2), ("TOK", 7), ("KYO", 19)],  # the nearest is off 2 minutes ago, still hot
+]
+
+
+def test_must_races_come_first_and_a_fresh_race_never_takes_their_budget():
+    now = jst(12, 0, 7)
+    for assignment in ASSIGNMENTS:
+        posts = {venue: _spaced(now, minutes) for venue, minutes in assignment}
+        ranked = [venue for venue, _ in sorted(assignment, key=lambda a: abs(a[1]))]
+        for h, f, e, rps, by_rank, want in PLAN_CASES:
+            windows = [{"from": "07:00", "every_s": 300}, {"from": "09:30", "every_s": e}]
+            cfg = config(windows=windows, hot_races={"every_s": h, "floor_s": f})
+            ages = {(ranked[rank], n): float(age) for (rank, n), age in by_rank.items()}
+            expected = {(ranked[rank], n) for rank, n in want}
+            for order in ([v for v, _ in assignment], [v for v, _ in assignment][::-1]):
+                states = _states(now, posts, e, ages, order, default_age=e)
+                where = f"H {h}, F {f}, e {e}, rps {rps}, posts {assignment}, ages {ages}"
+                assert must_races(now, states, cfg, e) == expected, where  # the table itself
+                got = check_must_first(plan_round(now, states, cfg, rps), now, states, cfg, rps,
+                                       e, where)  # fmt: skip
+                if abs(set_cost(expected, cfg) - e * rps) < EPS:  # the musts fill the budget
+                    assert got == expected, f"{where}: planned {sorted(got)}"
+
+    # Without hot_races.every_s and floor_s (NAR's schedule, the older tests' CONFIG) hot races
+    # come first every round (#24), however recent their latest capture.
+    cfg = config()
+    cfg["hot_races"] = {
+        k: v for k, v in cfg["hot_races"].items() if k not in ("every_s", "floor_s")
+    }
+    for assignment in ASSIGNMENTS:
+        posts = {venue: _spaced(now, minutes) for venue, minutes in assignment}
+        order = [v for v, _ in assignment]
+        states = _states(now, posts, 20, {}, order, default_age=20)
+        plan = plan_round(now, states, cfg, 1.0)  # 20 requests: the three hot races cost 18
+        got = {(job.venue, n) for job in plan for n in job.races}
+        assert got >= {(v, 5) for v in order}, f"without every_s, {assignment}: {sorted(got)}"
+
+    # The field itself: empty by default, kept as given
+    assert getattr(VenueState(code="TOK"), "captured", None) == {}, "VenueState.captured"
+    assert VenueState(code="TOK", captured={3: now}).captured == {3: now}
+
+
+def test_at_the_three_venue_rate_a_round_holds_every_venue_s_hot_race():
+    shipped = jra_schedule()
+    rate = day_rate(shipped, 3, jra_rate())
+    assert rate > jra_rate(), f"three venues at {rate} requests a second"
+    every = float(shipped["windows"][-1]["every_s"])
+    h = hot_grain(shipped)
+    now = jst(12, 0, 7)
+    for assignment in ASSIGNMENTS:
+        posts = {venue: _spaced(now, minutes) for venue, minutes in assignment}
+        order = [v for v, _ in assignment]
+        ages = {(v, 5): h - every for v in order}  # all three hot races must, the rest fresh
+        states = _states(now, posts, every, ages, order, default_age=every)
+        where = f"shipped schedule at {rate} req/s, posts {assignment}"
+        got = check_must_first(plan_round(now, states, shipped, rate), now, states, shipped, rate,
+                               every, where)  # fmt: skip
+        assert got >= {(v, 5) for v in order}, f"{where}: planned {sorted(got)}"
+
+
+# ---------------------------------------------------------------- the simulated race day
+
+
+def card(venues: int, first: list[tuple[int, int]], every_min: int, races: int = 12):
+    """`venues` meetings of `races` races, `every_min` minutes apart, first posts `first`."""
     codes = ["TOK", "KYO", "FKS"][:venues]
     return {
-        code: {n: jst(*first) + timedelta(minutes=every_min * (n - 1)) for n in range(1, races + 1)}
-        for code, first in zip(codes, firsts, strict=False)
+        code: {n: jst(*f) + timedelta(minutes=every_min * (n - 1)) for n in range(1, races + 1)}
+        for code, f in zip(codes, first, strict=False)
     }
 
 
 CARDS = {
     "358": ([(9, 50), (10, 0), (10, 10)], 34),  # #358's simulation
     "358-later": ([(9, 55), (10, 5), (10, 15)], 34),  # the same density, five minutes later
-    "30-min": ([(10, 0), (10, 10), (10, 20)], 30),  # two venues only: see the module docstring
 }
-
-
-# ---------------------------------------------------------------- fakes
 
 
 class Runaway(BaseException):
@@ -208,7 +465,7 @@ class Runaway(BaseException):
 
 
 class Clock:
-    """The fake clock: sleep() moves it, and so does the fake site's request time."""
+    """The fake clock: sleep() moves it, and so does each site call's request time."""
 
     def __init__(self, start: datetime):
         self.t = start
@@ -238,35 +495,70 @@ class Call:
     t: datetime
     kind: str  # sales_open | discover | post_times | capture | tier2 | results
     venue: str | None
-    races: tuple[int, ...] | None = None
-    requests: int = 0
+    races: tuple[int, ...] | None
+    requests: int
+    rps: float  # the rate of the site it went to
+    status: int | None = None  # the 403/429 a scripted block answered
+    refused: bool = False  # sent to a site whose breaker was open: never sent
+
+
+@dataclass
+class Net:
+    """What every site of one run shares: the clock, the card, the call log, the scripted blocks
+    ((instant, status): the first call at or after the instant is refused with that status) and
+    the sites `resume` made, as (when, rate)."""
+
+    clock: Clock
+    meetings: dict[str, dict[int, datetime]]
+    cfg: dict
+    blocks: list[tuple[datetime, int]] = field(default_factory=list)
+    calls: list[Call] = field(default_factory=list)
+    made: list[tuple[datetime, float]] = field(default_factory=list)
+    defects: list[str] = field(default_factory=list)
+
+    def resume(self, rate: float) -> FakeSite:
+        self.made.append((self.clock.t, float(rate)))
+        return FakeSite(self, float(rate))
 
 
 class FakeSite:
-    """The JRA site of race date DAY as the scheduler sees it: every call recorded at the fake
-    clock's time, then the clock moved by its requests x `request_s` (1 / rps: one request a
-    second; 0: calls take no time). A tier-1 capture costs navigation + per_race x races, a tier-2
-    one its own, a results poll 2 (the レース結果 menu and the race list); a race's result is
-    published 10 minutes after its post."""
+    """The JRA site of race date DAY as the scheduler sees it, at one rate: each call is recorded
+    at the fake clock's time, then the clock moves by its requests / the rate. A tier-1 capture
+    costs navigation + per_race x races, a tier-2 one its own, a results poll 2; a race's result is
+    published 10 minutes after its post. After a block its breaker is open: every later call to it
+    is refused (CircuitOpen) without being sent."""
 
     source = "jra"
     host = HOST
 
-    def __init__(self, clock: Clock, meetings, cfg: dict, *, rps: float, request_s: float):
-        self.clock, self.meetings, self.cfg = clock, meetings, cfg
-        self.requests_per_second, self.request_s = rps, request_s
+    def __init__(self, net: Net, rps: float):
+        self.net, self._rps, self.broken = net, rps, False
+        cfg = net.cfg
         self.nav, self.per_race = cfg["requests"]["navigation"], cfg["requests"]["per_race"]
         tier2 = cfg.get("tier2") or {"requests": {"navigation": 2, "per_race": 3}}
         self.t2_nav, self.t2_per = tier2["requests"]["navigation"], tier2["requests"]["per_race"]
-        self.calls: list[Call] = []
-        self.defects: list[str] = []
+
+    @property
+    def requests_per_second(self) -> float:  # read-only: a new rate is a new site (Fetcher)
+        return self._rps
 
     def _call(self, kind: str, venue: str | None, races, requests: int) -> Call:
-        call = Call(self.clock.t, kind, venue, races, requests)
-        self.calls.append(call)
-        if venue is not None and venue not in self.meetings:
-            self.defects.append(f"{kind} for {venue}, which has no meeting on {DAY}")
-        self.clock.advance(requests * self.request_s)
+        net = self.net
+        t = net.clock.t
+        if self.broken:
+            net.calls.append(Call(t, kind, venue, races, 0, self._rps, refused=True))
+            raise CircuitOpen("the circuit breaker is open", host=HOST)
+        if net.blocks and net.blocks[0][0] <= t:
+            status = net.blocks.pop(0)[1]
+            self.broken = True
+            net.calls.append(Call(t, kind, venue, races, 1, self._rps, status=status))
+            net.clock.advance(1.0 / self._rps)
+            raise CircuitOpen(f"HTTP {status}", http_status=status, host=HOST)
+        if venue is not None and venue not in net.meetings:
+            net.defects.append(f"{kind} for {venue}, which has no meeting on {DAY}")
+        call = Call(t, kind, venue, races, requests, self._rps)
+        net.calls.append(call)
+        net.clock.advance(requests / self._rps)
         return call
 
     def sales_open(self) -> bool:
@@ -275,19 +567,19 @@ class FakeSite:
 
     def discover(self) -> list[str]:
         self._call("discover", None, None, 1)
-        return list(self.meetings)
+        return list(self.net.meetings)
 
     def post_times(self, venue: str) -> dict[int, datetime]:
         self._call("post_times", venue, None, self.nav)
-        return dict(self.meetings[venue])
+        return dict(self.net.meetings[venue])
 
     def _asked(self, venue: str, races, kind: str) -> list[int]:
-        every = sorted(self.meetings[venue])
+        every = sorted(self.net.meetings.get(venue, {}))
         if races is None:
             return every
         asked = list(races)
         if not asked or len(set(asked)) != len(asked) or set(asked) - set(every):
-            self.defects.append(f"{hhmm(self.clock.t)} {kind} of {venue} asks for {asked}")
+            self.net.defects.append(f"{hhmm(self.net.clock.t)} {kind} of {venue} asks {asked}")
         return sorted(set(asked) & set(every))
 
     def capture(self, venue: str, races) -> MeetingCapture:
@@ -298,7 +590,7 @@ class FakeSite:
             {"race_id": f"jra:{DAY.isoformat()}:{venue}:{n:02d}", "pool": pool,
              "snapshot_utc": call.t}
             for n in wanted
-            for pool in self.cfg["pools"]
+            for pool in self.net.cfg["pools"]
         ]  # fmt: skip
         return MeetingCapture(rows, call.t, spent)
 
@@ -317,381 +609,375 @@ class FakeSite:
     def published_results(self, venue: str) -> set[int]:
         call = self._call("results", venue, None, 2)
         out = timedelta(minutes=10)
-        return {n for n, post in self.meetings[venue].items() if call.t >= post + out}
+        return {n for n, post in self.net.meetings[venue].items() if call.t >= post + out}
 
 
 class FakeStore:
     def __init__(self):
         self.writes: list[tuple[str, MeetingCapture]] = []
-        self.post_times: list[tuple[str, dict[int, datetime]]] = []
-        self.published: list[tuple[str, list[int]]] = []
 
     def write(self, venue: str, capture: MeetingCapture) -> int:
         self.writes.append((venue, capture))
         return len(capture.rows)
 
     def write_post_times(self, venue: str, times: dict[int, datetime]) -> None:
-        self.post_times.append((venue, dict(times)))
+        pass
 
     def write_published(self, venue, races, seen_utc, unpublished_utc=None) -> None:
-        self.published.append((venue, sorted(races)))
+        pass
 
 
-def simulate(meetings, cfg: dict, rps: float, request_s: float, marker: Path):
-    """A race day from 07:00 (the first window: no day-before probe) to its end."""
+@dataclass
+class Run:
+    net: Net
+    store: FakeStore
+    summary: object
+    cfg: dict
+    marker: Path
+
+    @property
+    def meetings(self) -> dict[str, dict[int, datetime]]:
+        return self.net.meetings
+
+
+def simulate(meetings, cfg: dict, marker: Path, blocks=()) -> Run:
+    """A race day from 07:00 (the first window: no day-before probe) to its end, on a site at
+    jra.yaml's rate, with `resume` making a site at any rate."""
     clock = Clock(jst(7, 0))
-    site = FakeSite(clock, meetings, cfg, rps=rps, request_s=request_s)
+    net = Net(clock, meetings, cfg, blocks=sorted(blocks))
     store = FakeStore()
+    site = FakeSite(net, jra_rate())
     summary = run_day(DAY, site, store, config=cfg, now=clock.now, sleep=clock.sleep,
-                      block_marker=marker)  # fmt: skip
-    assert site.defects == [], site.defects[:5]
-    return site, store, summary
+                      block_marker=marker, resume=net.resume)  # fmt: skip
+    assert net.defects == [], net.defects[:5]
+    return Run(net, store, summary, cfg, marker)
+
+
+class Sims:
+    """One simulation per (venues, card, rate, hot_races changes), shared by the tests."""
+
+    def __init__(self, root: Path):
+        self.root, self.cache = root, {}
+
+    def run(self, venues: int, card_name: str, rate: float | None = None, hot=None) -> Run:
+        key = (venues, card_name, rate, tuple(sorted((hot or {}).items())))
+        if key not in self.cache:
+            cfg = jra_schedule()
+            if rate is not None:
+                cfg = with_rate(cfg, venues, rate)
+            cfg["hot_races"].update(hot or {})
+            marker = self.root / f"jra-block-{len(self.cache)}.txt"
+            self.cache[key] = simulate(card(venues, *CARDS[card_name]), cfg, marker)
+        return self.cache[key]
+
+
+@pytest.fixture(scope="module")
+def sims(tmp_path_factory) -> Sims:
+    return Sims(tmp_path_factory.mktemp("sims"))
 
 
 # ---------------------------------------------------------------- what the fake saw
 
 
-def captured_at(site: FakeSite, venue: str, race: int) -> list[datetime]:
-    """When `race` of `venue` was captured in tier 1."""
-    return [c.t for c in site.calls if c.kind == "capture" and c.venue == venue and race in c.races]
+def captured_at(run: Run, venue: str, race: int, since: datetime | None = None) -> list[datetime]:
+    """When `race` of `venue` was captured in tier 1 (sent and answered), from `since` on."""
+    return [
+        c.t
+        for c in run.net.calls
+        if c.kind == "capture" and c.venue == venue and c.races and race in c.races
+        and c.status is None and not c.refused and (since is None or c.t >= since)
+    ]  # fmt: skip
 
 
 def longest_gap(times: list[datetime], lo: datetime, hi: datetime) -> tuple[float, datetime]:
     """The longest gap between lo, the times inside [lo, hi] and hi; and where it starts."""
     edges = [lo, *sorted(t for t in times if lo <= t <= hi), hi]
-    gap, at = max((secs(b - a), a) for a, b in zip(edges, edges[1:], strict=False))
-    return gap, at
+    return max((secs(b - a), a) for a, b in zip(edges, edges[1:], strict=False))
 
 
-def floor_misses(site: FakeSite, cfg: dict) -> list[str]:
-    """(i): races with a gap over floor_s from 09:30 to their T-15 (the owner's 300 s while a
-    schedule has no floor_s yet: the yaml test pins the key)."""
-    floor_s = float(cfg["hot_races"].get("floor_s", OWNER_FLOOR_S))
-    w = jst(9, 30)
-    out = []
-    for venue, races in site.meetings.items():
+def floor_misses(run: Run) -> list[str]:
+    """Races with a gap over floor_s from 09:30 to their T-15."""
+    floor_s, w, out = floor_grain(run.cfg), jst(9, 30), []
+    for venue, races in run.meetings.items():
         for n, post in races.items():
             t15 = post - timedelta(minutes=FLOOR_END_MIN)
             if t15 <= w:
                 continue
-            gap, at = longest_gap(captured_at(site, venue, n), w, t15)
+            gap, at = longest_gap(captured_at(run, venue, n), w, t15)
             if gap > floor_s + EPS:
-                out.append(f"{venue} {n} (post {hhmm(post)}): {gap:.0f} s from {hhmm(at)}")
+                out.append(f"{venue} {n} (post {hhmm(post)}): {gap:.1f} s from {hhmm(at)}")
     return out
 
 
-def hot_misses(site: FakeSite, cfg: dict) -> list[str]:
-    """(ii): races with a gap over MAX_GAP_S inside their hot window, its edges included."""
-    hot = cfg["hot_races"]
-    out = []
-    for venue, races in site.meetings.items():
+def hot_misses(run: Run) -> list[str]:
+    """Races with a gap over every_s inside their hot window, its edges included."""
+    hot, grain, out = run.cfg["hot_races"], hot_grain(run.cfg), []
+    for venue, races in run.meetings.items():
         for n, post in races.items():
             lo = post - timedelta(minutes=hot["within_min"])
             hi = post + timedelta(minutes=hot["after_post_min"])
-            gap, at = longest_gap(captured_at(site, venue, n), lo, hi)
-            if gap > MAX_GAP_S + EPS:
-                out.append(f"{venue} {n} (post {hhmm(post)}): {gap:.0f} s from {hhmm(at)}")
+            gap, at = longest_gap(captured_at(run, venue, n), lo, hi)
+            if gap > grain + EPS:
+                out.append(f"{venue} {n} (post {hhmm(post)}): {gap:.1f} s from {hhmm(at)}")
     return out
 
 
-def health_misses(site: FakeSite, store: FakeStore, cfg: dict) -> list[str]:
-    """(ii), the health line's metric: health.gaps_inside over the written tier-1 rows."""
-    rows = [r for _, cap in store.writes for r in cap.rows if r["pool"] in cfg["pools"]]
-    posts = {
+def post_times(run: Run) -> dict[str, datetime]:
+    return {
         f"jra:{DAY.isoformat()}:{venue}:{n:02d}": post
-        for venue, races in site.meetings.items()
+        for venue, races in run.meetings.items()
         for n, post in races.items()
     }
-    gaps = gaps_inside(rows, posts, cfg["hot_races"]["within_min"])
-    return [f"{rid}: {gap:.0f} s" for rid, gap in sorted(gaps.items()) if gap > MAX_GAP_S + EPS]
 
 
-def assert_day_ended(summary, site: FakeSite) -> None:
-    for venue, vs in summary.venues.items():
+def tier1_rows(run: Run) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {venue: [] for venue in run.meetings}
+    for venue, capture in run.store.writes:
+        out[venue] += [r for r in capture.rows if r["pool"] in TIER1]
+    return out
+
+
+def health_misses(run: Run) -> list[str]:
+    """The health line's own metric: health.gaps_inside over the written tier-1 rows."""
+    rows = [r for rs in tier1_rows(run).values() for r in rs]
+    gaps = gaps_inside(rows, post_times(run), run.cfg["hot_races"]["within_min"])
+    return [f"{rid}: {gap:.1f} s" for rid, gap in sorted(gaps.items()) if gap > MAX_GAP_S + EPS]
+
+
+def alerts(run: Run) -> list[str]:
+    lines = health_lines(run.summary, tier1_rows(run), post_times(run))
+    return [line for line in lines if line.startswith("ALERT")]
+
+
+def first_end(run: Run) -> datetime:
+    after = timedelta(minutes=run.cfg["after_last_race_min"])
+    return min(max(races.values()) + after for races in run.meetings.values())
+
+
+def rate_misses(run: Run, rate: float) -> list[str]:
+    """Captures from 09:30 until the first venue ends that were not sent at `rate`."""
+    lo, hi = jst(9, 30), first_end(run)
+    return [
+        f"{hhmm(c.t)} {c.venue} at {c.rps} req/s"
+        for c in run.net.calls
+        if c.kind == "capture" and lo <= c.t < hi and abs(c.rps - rate) > EPS
+    ]
+
+
+def misses(run: Run) -> dict[str, list[str]]:
+    return {
+        f"gap over floor_s {floor_grain(run.cfg):g} s from 09:30 to T-15": floor_misses(run),
+        f"gap over every_s {hot_grain(run.cfg):g} s while hot": hot_misses(run),
+        f"health.gaps_inside over MAX_GAP_S {MAX_GAP_S}": health_misses(run),
+    }
+
+
+def describe(found: dict[str, list[str]], run: Run) -> str:
+    races = sum(len(r) for r in run.meetings.values())
+    return " | ".join(f"{name}: {len(v)} of {races} races: {v[:4]}" for name, v in found.items())
+
+
+def assert_day_ended(run: Run) -> None:
+    assert set(run.summary.venues) == set(run.meetings), sorted(run.summary.venues)
+    for venue, vs in run.summary.venues.items():
         assert vs.stopped == "ended", (venue, vs.stopped)
         assert (vs.failures, vs.wrong_meeting) == (0, 0), (venue, vs)
-    assert set(summary.venues) == set(site.meetings)
 
 
-def assert_no_misses(misses: dict[str, list[str]], site: FakeSite) -> None:
-    """Every kind of miss at once, so a failure shows the floor and the hot window together."""
-    races = sum(len(r) for r in site.meetings.values())
-    found = {name: found for name, found in misses.items() if found}
-    assert not found, " | ".join(
-        f"{name}: {len(found)} (of {races} races): {found[:4]}" for name, found in found.items()
-    )
-
-
-def race_misses(site: FakeSite, store: FakeStore, cfg: dict) -> dict[str, list[str]]:
-    floor_s = cfg["hot_races"].get("floor_s", OWNER_FLOOR_S)
-    return {
-        f"(i) gap over floor_s {floor_s} s from 09:30 to T-15": floor_misses(site, cfg),
-        f"(ii) gap over MAX_GAP_S {MAX_GAP_S} s while hot": hot_misses(site, cfg),
-        "(ii) health.gaps_inside over MAX_GAP_S": health_misses(site, store, cfg),
-    }
-
-
-# ---------------------------------------------------------------- logger.yaml
-
-
-def test_logger_yaml_ships_the_floor_and_keeps_the_rate_pools_and_hot_rule():
-    shipped = copy.deepcopy(load_country_yaml("japan", "logger"))
-    jra = source_config(shipped, "jra")
-    hot = jra["hot_races"]
-    assert hot.get("floor_s") == 300, f"JRA hot_races.floor_s {hot.get('floor_s')!r}: the 5 minutes"
-    # what the owner kept: the hot window, the cycles, the windows, the rate, the pools, the costs
-    assert {k: v for k, v in hot.items() if k != "floor_s"} == {
-        "within_min": 20,
-        "after_post_min": 5,
-        "all_every_s": 300,
-    }, hot
-    assert jra["windows"] == CONFIG["windows"], jra["windows"]
-    assert jra["min_poll_interval_s"] == 20
-    assert sorted(jra["pools"]) == sorted(TIER1), jra["pools"]
-    assert jra["requests"] == {"navigation": 2, "per_race": 4}, jra["requests"]
-    assert jra_rate() == 1.0, f"jra.yaml {HOST} at {jra_rate()} requests a second"
-    assert MAX_GAP_S == 120, "the health line's T-20 criterion is the owner's (#34)"
-    # NAR's schedule keeps its own hot_races: no floor
-    nar = source_config(shipped, "nar")
-    assert "floor_s" not in nar["hot_races"], f"NAR's hot_races {nar['hot_races']}"
-
-
-# ---------------------------------------------------------------- plan_round
-
-
-def _spaced(now: datetime, minutes: float) -> dict[int, datetime]:
-    """12 races 30 minutes apart, race 5 posting `minutes` after `now`: race 5 is hot, races 1-4
-    are off and out of their hot window, races 6-12 are not hot yet."""
-    return {n: now + timedelta(minutes=minutes + 30 * (n - 5)) for n in range(1, 13)}
-
-
-def _states(now, posts, every: float, ages: dict[tuple[str, int], float | None], order):
-    """VenueStates captured in the previous round (every race fresh, no full cycle due), but
-    `ages`: (venue, race) -> seconds since its latest capture's round (None: never captured)."""
-    out = []
-    for venue in order:
-        captured = {n: now - timedelta(seconds=every) for n in posts[venue]}
-        for (v, n), age in ages.items():
-            if v != venue:
-                continue
-            if age is None:
-                captured.pop(n)
-            else:
-                captured[n] = now - timedelta(seconds=age)
-        state = VenueState(
-            code=venue,
-            post_times=posts[venue],
-            last_capture=now - timedelta(seconds=every),
-            cycle_start=now - timedelta(seconds=100),
-            cycle_left=None,
-        )
-        state.captured = captured  # the field #387 adds; set after construction
-        out.append(state)
-    return out
-
-
-def _check(plan, now, posts, cfg, rps, want: set[tuple[str, int]], nearest, where) -> None:
-    got = {(job.venue, n) for job in plan for n in job.races}
-    venues = [job.venue for job in plan]
-    assert len(venues) == len(set(venues)), f"{where}: two jobs for one venue: {plan}"
-    for job in plan:
-        assert job.races and len(set(job.races)) == len(job.races), f"{where}: {job}"
-        assert job.requests == cost(len(job.races), cfg), f"{where}: {job}"
-    budget = every_s_at(now, cfg) * rps
-    total = sum(job.requests for job in plan)
-    assert total <= budget + EPS, f"{where}: {total} requests for a budget of {budget}"
-    assert plan and plan[0].venue == nearest and 5 in plan[0].races, f"{where}: first {plan[:1]}"
-    hot_out = sorted(
-        (v, n)
-        for v, races in posts.items()
-        for n, post in races.items()
-        if is_hot(post, now, cfg) and (v, n) not in got
-    )
-    assert got == want, (
-        f"{where}: planned {sorted(got)}, expected {sorted(want)}; hot left out {hot_out}"
-    )
-
-
-def test_a_stale_race_outranks_the_farther_hot_races_but_never_the_nearest():
-    now = jst(12, 0, 7)
-    cfg = config()
-    floor_s = cfg["hot_races"]["floor_s"]
-    # Three venues, one hot race each (race 5), budget 20 x 1.0: the three hot races cost 18, so
-    # under #24's order no other race fits. With a race whose latest capture is floor_s old, the
-    # plan is: the nearest hot race (6), the stale race (4 at a venue in the round, else 6), then
-    # the other hot races nearest first while they fit.
-    # (rps, stale races as (rank of their venue by hot post: 0 nearest), race), expected plan as
-    # (rank, race); a venue whose hot race is left out still gets its stale race.
-    cases = [
-        (1.0, [(0, 8)], [(0, 5), (0, 8), (1, 5)]),  # 6 + 4 + 6 = 16; the third hot race: 22
-        (1.0, [(1, 8)], [(0, 5), (1, 8), (1, 5)]),  # 6 + 6 + 4 = 16; then 22
-        (1.0, [(2, 8)], [(0, 5), (2, 8), (1, 5)]),  # 6 + 6 + 6 = 18; its own hot race: 22
-        (1.0, [(1, 9), (2, 8)], [(0, 5), (1, 9), (2, 8)]),  # 18: both farther hot races out
-        (1.0, [(0, 8), (0, 9)], [(0, 5), (0, 8), (0, 9), (1, 5)]),  # 6 + 4 + 4 + 6 = 20
-        (1.25, [(2, 8)], [(0, 5), (2, 8), (1, 5), (2, 5)]),  # budget 25: 22, every hot race fits
-        (0.5, [(1, 8)], [(0, 5)]),  # budget 10: the nearest hot race, then no 6 fits beside it
-    ]
-    assignments = [
-        [("TOK", 3), ("KYO", 9), ("FKS", 16)],
-        [("FKS", -2), ("TOK", 7), ("KYO", 19)],  # the nearest is off 2 minutes ago, still hot
-    ]
-    for assignment in assignments:
-        posts = {venue: _spaced(now, minutes) for venue, minutes in assignment}
-        ranked = [venue for venue, _ in sorted(assignment, key=lambda a: abs(a[1]))]
-        for order in ([v for v, _ in assignment], [v for v, _ in assignment][::-1]):
-            for rps, stale, want in cases:
-                ages = {(ranked[rank], n): float(floor_s) for rank, n in stale}
-                states = _states(now, posts, 20, ages, order)
-                plan = plan_round(now, states, cfg, rps)
-                where = f"rps {rps}, posts {assignment} given as {order}, stale {sorted(ages)}"
-                expected = {(ranked[rank], n) for rank, n in want}
-                _check(plan, now, posts, cfg, rps, expected, ranked[0], where)
-
-    # The field itself: empty by default, kept as given
-    assert VenueState(code="TOK").captured == {}
-    at = {3: now}
-    assert VenueState(code="TOK", captured=at).captured == {3: now}
-
-
-def test_a_race_is_stale_from_floor_s_minus_every_s_and_not_at_half_floor_s():
-    now = jst(12, 0, 7)
-    assignment = [("TOK", 3), ("KYO", 9), ("FKS", 16)]
-    posts = {venue: _spaced(now, minutes) for venue, minutes in assignment}
-    three_hot = {("TOK", 5), ("KYO", 5), ("FKS", 5)}
-    # FKS race 8 (not hot) is the candidate. Budgets are 20 (every_s x rps). Stale: it goes
-    # in beside the nearest hot race (6 + 6), KYO's hot race (6) follows and FKS's own (4) does
-    # not fit (22). Not stale: the three hot races (18) leave 2, and no full cycle is due.
-    stale_plan = {("TOK", 5), ("FKS", 8), ("KYO", 5)}
-    # (floor_s, every_s, rps, age of FKS 8's latest capture in s (None: never captured), stale)
-    cases = [
-        (300, 20, 1.0, 280, True),  # floor_s - every_s
-        (300, 20, 1.0, 300, True),
-        (300, 20, 1.0, 1000, True),
-        (300, 20, 1.0, 150, False),  # floor_s / 2
-        (300, 20, 1.0, 40, False),
-        (300, 20, 1.0, None, False),  # never captured: the full cycle's, not the floor's
-        (240, 20, 1.0, 220, True),
-        (240, 20, 1.0, 120, False),
-        (600, 20, 1.0, 580, True),
-        (600, 20, 1.0, 300, False),  # 300 s is not stale when the floor is 600 s
-        (300, 30, 2 / 3, 270, True),  # a 30 s window: stale one round (30 s) before 300 s
-        (300, 30, 2 / 3, 150, False),
-    ]
-    for floor_s, every, rps, age, stale in cases:
-        windows = [{"from": "07:00", "every_s": 300}, {"from": "09:30", "every_s": every}]
-        cfg = config(windows=windows, hot_races={"floor_s": floor_s})
-        for order in (["TOK", "KYO", "FKS"], ["FKS", "KYO", "TOK"]):
-            states = _states(now, posts, every, {("FKS", 8): age}, order)
-            plan = plan_round(now, states, cfg, rps)
-            where = f"floor_s {floor_s}, every_s {every}, FKS 8 captured {age} s ago"
-            _check(plan, now, posts, cfg, rps, stale_plan if stale else three_hot, "TOK", where)
-
-
-# ---------------------------------------------------------------- run_day: the race day
+# ---------------------------------------------------------------- the DoD: both bounds
 
 
 @pytest.mark.parametrize(
     ("venues", "card_name"),
-    [(2, "358"), (3, "358"), (2, "30-min"), (3, "358-later")],
-    ids=["2-venues-358", "3-venues-358", "2-venues-30-min", "3-venues-358-later"],
+    [(2, "358"), (2, "358-later"), (3, "358"), (3, "358-later")],
+    ids=["2-venues-358", "2-venues-358-later", "3-venues-358", "3-venues-358-later"],
 )
-def test_at_one_request_a_second_every_race_keeps_the_floor_and_hot_races_max_gap_s(
-    tmp_path, venues, card_name
+def test_every_race_keeps_the_floor_and_every_hot_race_the_hot_grain_at_the_day_s_rate(
+    sims, venues, card_name
 ):
-    cfg = jra_schedule()
-    rps = jra_rate()
-    assert rps == 1.0 and cfg["requests"] == {"navigation": 2, "per_race": 4}, (rps, cfg)
-    assert sorted(cfg["pools"]) == sorted(TIER1) and cfg.get("tier2") and cfg.get("results")
-    meetings = card(venues, *CARDS[card_name])
-    site, store, summary = simulate(meetings, cfg, rps, 1.0 / rps, tmp_path / "jra-block.txt")
-    assert_day_ended(summary, site)
-    kinds = {c.kind for c in site.calls}
+    run = sims.run(venues, card_name)
+    base = jra_rate()
+    rate = day_rate(run.cfg, venues, base)
+    if venues == 3:
+        assert rate > base, f"three venues at {rate} requests a second: venue_rates (#387)"
+    assert_day_ended(run)
+    kinds = {c.kind for c in run.net.calls}
     assert {"results", "tier2"} <= kinds, f"results polls and tier 2 ride on the rounds: {kinds}"
-    assert_no_misses(race_misses(site, store, cfg), site)
+    assert rate_misses(run, rate) == [], rate_misses(run, rate)[:4]
+    if rate == base:
+        assert run.net.made == [], f"a day at its site's rate made new sites: {run.net.made}"
+    found = {name: v for name, v in misses(run).items() if v}
+    assert not found, f"at {rate} req/s: " + describe(found, run)
+    assert alerts(run) == [], alerts(run)
 
 
-# ---------------------------------------------------------------- run_day: exact rounds
+def grid_below(rate: float, base: float) -> list[float]:
+    """rate - STEP, rate - 2 STEP, ... while above base, then base."""
+    out, k = [], 1
+    while rate - k * STEP > base + EPS:
+        out.append(round(rate - k * STEP, 6))
+        k += 1
+    return [*out, base]
 
 
-def assert_rounds_fit_budget(site: FakeSite, cfg: dict) -> None:
-    """test_schedule.py's: every round (the tier-1 captures at one instant) fits the budget of
-    the window in force, or is the single hot job."""
-    rps = site.requests_per_second
-    rounds: dict[datetime, list[Call]] = defaultdict(list)
-    for call in site.calls:
-        if call.kind == "capture":
-            rounds[call.t].append(call)
-    for t, group in sorted(rounds.items()):
-        where = f"round at {hhmm(t)} (rps {rps})"
-        every = every_s_at(t, cfg)
-        assert every is not None, f"{where}: a capture before the first window"
-        venues = [c.venue for c in group]
-        assert len(venues) == len(set(venues)), f"{where}: a venue captured twice: {venues}"
-        planned = sum(cost(len(c.races), cfg) for c in group)
-        if planned > every * rps + EPS:
-            (call,) = group
-            post = site.meetings[call.venue][call.races[0]]
-            assert len(call.races) == 1 and is_hot(post, t, cfg), f"{where}: {planned} requests"
-            assert every * rps < cost(1, cfg), f"{where}: over the budget of {every * rps}"
+def test_the_day_s_rate_is_the_lowest_on_the_grid_that_holds_both_bounds(sims):
+    shipped, base = jra_schedule(), jra_rate()
+    r3 = day_rate(shipped, 3, base)
+    assert base < r3 < MAX_RATE, f"three venues at {r3} requests a second: above {base}, under 2"
+    for venues in (3, 2):
+        rate = day_rate(shipped, venues, base)
+        if rate <= base + EPS:
+            continue  # two venues at jra.yaml's rate: the test above holds them there
+        for lower in grid_below(rate, base):
+            held = []
+            for card_name in CARD_NAMES:
+                run = sims.run(venues, card_name, lower)
+                # the day ran at the rate venue_rates gave it, not at a constant
+                assert rate_misses(run, lower) == [], rate_misses(run, lower)[:4]
+                held.append(not any(misses(run).values()))
+            assert not all(held), (
+                f"{venues} venues at {lower} req/s hold both bounds on every card: logger.yaml's "
+                f"{rate} is not the lowest rate on the {STEP} grid"
+            )
 
 
-def nearest_hot(site: FakeSite, cfg: dict, t: datetime) -> set[tuple[str, int]]:
-    """The hot races at `t` with the smallest |post - t| (more than one: a tie)."""
-    hot = [
-        (abs(secs(post - t)), venue, n)
-        for venue, races in site.meetings.items()
-        for n, post in races.items()
-        if is_hot(post, t, cfg)
-    ]
-    if not hot:
-        return set()
-    best = min(d for d, *_ in hot)
-    return {(venue, n) for d, venue, n in hot if d <= best + EPS}
+def test_the_floor_and_the_hot_grain_come_from_the_schedule(sims):
+    # Two venues at 2 req/s with a 50 s hot grain and a 240 s floor: a constant 60 or 300 misses.
+    hot = {"every_s": 50, "floor_s": 240}
+    run = sims.run(2, "358", 2.0, hot=hot)
+    assert_day_ended(run)
+    assert rate_misses(run, 2.0) == [], rate_misses(run, 2.0)[:4]
+    found = {name: v for name, v in misses(run).items() if v}
+    assert not found, f"hot_races {hot}: " + describe(found, run)
 
 
-def nearest_misses(site: FakeSite, cfg: dict) -> list[str]:
-    """(iii): rounds from 09:30 (every every_s, start to start) in which some race is hot and the
-    nearest hot race of all was not captured at the round's start."""
-    at: dict[datetime, set[tuple[str, int]]] = defaultdict(set)
-    for c in site.calls:
-        if c.kind == "capture":
-            at[c.t] |= {(c.venue, n) for n in c.races}
-    hot = cfg["hot_races"]
-    last = max(
-        post + timedelta(minutes=hot["after_post_min"])
-        for races in site.meetings.values()
-        for post in races.values()
-    )
-    out = []
-    t = jst(9, 30)
-    while t <= last:
-        nearest = nearest_hot(site, cfg, t)
-        if nearest and not nearest & at.get(t, set()):
-            got = sorted(at.get(t, set()))
-            out.append(f"{hhmm(t)}: nearest {sorted(nearest)}, captured {got}")
-        t += timedelta(seconds=every_s_at(t, cfg))
-    return out
+# ---------------------------------------------------------------- a block does not end the day
+
+
+BLOCK_ALERT = re.compile(r"block|403|429", re.IGNORECASE)
+
+
+def blocked_calls(run: Run) -> list[Call]:
+    return [c for c in run.net.calls if c.status is not None]
+
+
+def after_cooldown(run: Run, block: Call, cooldown_min: float) -> list[Call]:
+    """The calls after `block`, checked: none inside the cooldown, the first within 320 s of
+    its end."""
+    later = [c for c in run.net.calls if c.t > block.t]
+    assert later, f"nothing after the block at {hhmm(block.t)}: the day ended"
+    end = block.t + timedelta(minutes=cooldown_min)
+    assert later[0].t >= end, f"a call at {hhmm(later[0].t)}, inside the cooldown to {hhmm(end)}"
+    assert later[0].t < end + timedelta(seconds=320), f"resumed only at {hhmm(later[0].t)}"
+    return later
+
+
+def assert_block_alerts(run: Run) -> None:
+    lines = alerts(run)
+    for venue in run.meetings:
+        named = [x for x in lines if x.split()[1:2] == [venue]]
+        assert any(BLOCK_ALERT.search(x) for x in named), (
+            f"{venue}: no ALERT names the block: {lines}"
+        )
 
 
 @pytest.mark.parametrize(
-    ("venues", "card_name", "changes"),
-    [
-        (3, "358", {}),
-        (3, "358-later", {}),
-        (2, "358", {"hot_races": {"floor_s": 240}}),
-        (3, "358", {"windows": [{"from": "07:00", "every_s": 300},
-                                {"from": "09:30", "every_s": 30}]}),
-    ],
-    ids=["3-venues-358", "3-venues-358-later", "2-venues-floor-240", "3-venues-30-s-rounds"],
-)  # fmt: skip
-def test_in_exact_rounds_the_nearest_hot_race_keeps_every_round_under_the_floor(
-    tmp_path, venues, card_name, changes
+    ("status", "changes"),
+    [(403, {}), (429, {"cooldown_min": 10, "resume_requests_per_second": 1.2})],
+    ids=["403-as-shipped", "429-other-cooldown-and-rate"],
+)
+def test_a_first_block_pauses_then_the_day_goes_on_at_the_resume_rate_and_alerts(
+    tmp_path, status, changes
 ):
-    cfg = config(jra_schedule(), **changes)
-    rps = jra_rate()
-    meetings = card(venues, *CARDS[card_name])
-    site, store, summary = simulate(meetings, cfg, rps, 0.0, tmp_path / "jra-block.txt")
-    assert_day_ended(summary, site)
-    assert_rounds_fit_budget(site, cfg)
-    misses = {"(iii) rounds without the nearest hot race": nearest_misses(site, cfg)}
-    assert_no_misses(misses | race_misses(site, store, cfg), site)
+    cfg = jra_schedule()
+    cfg["on_block"] = {**cfg["on_block"], **changes}
+    cooldown = cooldown_of(cfg)
+    resume_rps = float(cfg["on_block"].get("resume_requests_per_second") or 0.0)
+    assert resume_rps > 0, f"on_block {cfg['on_block']}: no resume rate"
+    meetings = card(3, *CARDS["358"])
+    run = simulate(meetings, cfg, tmp_path / "jra-block.txt", blocks=[(jst(8, 0), status)])
+
+    (block,) = blocked_calls(run)
+    assert [c for c in run.net.calls if c.refused] == [], "a call to the site that was blocked"
+    later = after_cooldown(run, block, cooldown)
+    made = [(t, r) for t, r in run.net.made if t >= block.t]
+    assert len(made) == 1 and abs(made[0][1] - resume_rps) < EPS, f"sites made after it: {made}"
+    slow = [c for c in later if abs(c.rps - resume_rps) > EPS]
+    assert slow == [], f"after the block, calls not at {resume_rps} req/s: {slow[:3]}"
+
+    # the day goes on, every venue to its end, with the full schedule: the hot grain still runs
+    assert run.summary.stopped is None, run.summary.stopped
+    assert_day_ended(run)
+    hot = cfg["hot_races"]
+    thin = []
+    for venue, races in meetings.items():
+        for n, post in races.items():
+            lo = post - timedelta(minutes=hot["within_min"])
+            if lo < later[0].t + timedelta(seconds=300):
+                continue
+            hi = post + timedelta(minutes=hot["after_post_min"])
+            got = [t for t in captured_at(run, venue, n) if lo <= t <= hi]
+            if len(got) < 10:
+                thin.append(f"{venue} {n}: {len(got)} captures while hot")
+    assert thin == [], f"the hot grain stopped after the block: {thin[:4]}"
+    assert_block_alerts(run)
+
+
+def test_a_second_block_drops_to_the_floor_only_and_the_day_still_goes_on(tmp_path):
+    cfg = jra_schedule()
+    cooldown = cooldown_of(cfg)
+    resume_rps = float(cfg["on_block"].get("resume_requests_per_second") or 0.0)
+    floor_s = floor_grain(cfg)
+    meetings = card(3, *CARDS["358"])
+    blocks = [(jst(8, 0), 403), (jst(10, 30), 429)]
+    run = simulate(meetings, cfg, tmp_path / "jra-block.txt", blocks=blocks)
+
+    first, second = blocked_calls(run)
+    assert [c for c in run.net.calls if c.refused] == [], "a call to a site that was blocked"
+    after_cooldown(run, first, cooldown)
+    later = after_cooldown(run, second, cooldown)
+    made = [r for t, r in run.net.made if t >= first.t]
+    assert len(made) == 2 and made[0] == pytest.approx(resume_rps), f"sites made: {made}"
+    assert made[1] <= resume_rps + EPS, f"the floor-only step at {made[1]} req/s"
+    fast = [c for c in later if c.rps > resume_rps + EPS]
+    assert fast == [], f"after the second block, calls over {resume_rps} req/s: {fast[:3]}"
+    assert run.summary.stopped is None, run.summary.stopped
+    assert_day_ended(run)
+
+    # the floor only: every race at least every floor_s up to its post, none at the hot grain
+    resumed = later[0].t
+    span = timedelta(seconds=floor_s)
+    over, crowded = [], []
+    for venue, races in meetings.items():
+        for n, post in races.items():
+            times = captured_at(run, venue, n, since=resumed)
+            for i, t in enumerate(times):
+                inside = [u for u in times[i:] if u <= t + span]
+                if len(inside) > 2:
+                    crowded.append(f"{venue} {n}: {len(inside)} from {hhmm(t)}")
+                    break
+            if post > resumed:
+                gap, at = longest_gap(times, resumed, post)
+                if gap > floor_s + EPS:
+                    over.append(f"{venue} {n} (post {hhmm(post)}): {gap:.1f} s from {hhmm(at)}")
+    assert crowded == [], f"captured at the hot grain after the second block: {crowded[:4]}"
+    assert over == [], f"the floor missed after the second block: {over[:4]}"
+    assert_block_alerts(run)
+
+
+def test_a_third_block_ends_the_day_as_before(tmp_path):
+    cfg = jra_schedule()
+    cooldown_of(cfg)
+    meetings = card(3, *CARDS["358"])
+    blocks = [(jst(8, 0), 403), (jst(10, 30), 429), (jst(12, 0), 403)]
+    marker = tmp_path / "jra-block.txt"
+    run = simulate(meetings, cfg, marker, blocks=blocks)
+
+    third = blocked_calls(run)[-1]
+    assert len(blocked_calls(run)) == 3, blocked_calls(run)
+    assert [c for c in run.net.calls if c.t > third.t] == [], "a call after the third block"
+    assert run.summary.stopped == "circuit_open", run.summary.stopped
+    stops = {v: vs.stopped for v, vs in run.summary.venues.items()}
+    assert set(stops.values()) == {"circuit_open"}, stops  # no venue had ended by 12:00
+    text = marker.read_text(encoding="utf-8")
+    assert HOST in text and DAY.isoformat() in text, text
