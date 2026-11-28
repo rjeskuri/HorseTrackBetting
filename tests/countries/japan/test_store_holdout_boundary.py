@@ -22,6 +22,16 @@ Contract pinned here (the coder follows it):
   file by another route fails.
 - Output: exactly the development rows in range that satisfy `where`, the columns asked for in
   their order.
+- The jra store (fix round). The same boundary holds on `processed/jra/{races,runners}.parquet`
+  as the core build writes them (`core.store.build._write_tables`, from frames shaped as the build
+  hands them over) for the readers that read it: `models.v0.store.read_store_table` (its default
+  source, `jra`) and `core.store.tables.read_table("jra", ..., development="japan")`; in the
+  build's race_id order (a day's rows contiguous, venues interleaved within it) and in venue
+  order (a day's rows in one run per venue, so a holdout day spans several groups among the
+  development days'). Each file must show a row group per race day (statistics min == max, no
+  null): the build's writer is what gives the readers groups to skip. A jra store written the old
+  way (one row group per table) reads as before, exactly the development rows; no byte-level
+  claim is made there (`test_store_build_day_groups` pins the writer itself).
 
 Not covered here: `studies.avoidance.read_development`'s dividends read (no race_date column, and
 its writer does not keep a row group per day).
@@ -52,7 +62,7 @@ import yaml
 
 import horsetrack.core.eval.holdout as holdout_module
 from horsetrack.core import paths
-from horsetrack.core.store import schemas, tables
+from horsetrack.core.store import build, schemas, tables
 from horsetrack.countries.japan.models.v0.store import PRICE_ERA_START, read_store_table
 from horsetrack.countries.japan.research import pool_depth
 
@@ -185,22 +195,24 @@ def file_layout(data: bytes) -> Layout:
 
 @dataclass(frozen=True)
 class Store:
-    """A data dir holding `processed/jravan/runners.parquet`, its rows (store order), its layout
-    and its holdout days (`held`)."""
+    """A data dir holding `processed/<source>/<table>.parquet` (by default jravan's runners), its
+    rows (store order), its layout and its holdout days (`held`)."""
 
     root: Path
     rows: tuple[dict, ...]
     held: frozenset[date]
     days: tuple[date, ...]
     layout: Layout
+    source: str = SOURCE
+    table: str = TABLE
 
     @property
     def folder(self) -> Path:
-        return self.root / "processed" / SOURCE
+        return self.root / "processed" / self.source
 
     @property
     def path(self) -> Path:
-        return self.folder / f"{TABLE}.parquet"
+        return self.folder / f"{self.table}.parquet"
 
 
 def write_store(root: Path, span: Sequence[tuple[date, bool, int]]) -> Store:
@@ -305,7 +317,7 @@ class HoldoutBytesRead(OSError):
 
 
 class ByteSpy:
-    """Serves every read-only open of a file in the store's folder by `pyarrow.memory_map` or
+    """Serves every read-only open of the store's file by `pyarrow.memory_map` or
     `pyarrow.OSFile` from an in-memory copy that records each read's byte range and refuses
     (raises on) every read, other than the library's footer reads, overlapping a holdout day's
     row group."""
@@ -335,7 +347,7 @@ class ByteSpy:
             if not isinstance(path, (str, os.PathLike)) or mode not in ("r", "rb"):
                 return real(path, mode, *args, **kwargs)
             target = Path(path).resolve()
-            if target.parent != self.store.folder:
+            if target != self.store.path:
                 return real(path, mode, *args, **kwargs)
             copy = CountingFile(target.read_bytes(), guard=self._guard)
             self.copies.append(copy)
@@ -344,11 +356,16 @@ class ByteSpy:
         return open_
 
     def assert_boundary(
-        self, error: BaseException | None, columns: Sequence[str], result_days: Counter
+        self,
+        error: BaseException | None,
+        columns: Sequence[str],
+        result_days: Counter,
+        result_groups: set[int] | None = None,
     ) -> None:
         """No read reached a holdout group; the reader opened the file through the spied
-        openers; every development group holding a result row had each of `columns`' chunks read
-        through the handle."""
+        openers; every development group holding a result row (`result_groups`, or else every
+        group holding a day of `result_days`) had each of `columns`' chunks read through the
+        handle."""
         refused = "; ".join(
             f"bytes {lo}..{hi} over {self.layout.describe(groups)}"
             for (lo, hi), groups in self.refused
@@ -367,7 +384,10 @@ class ByteSpy:
             r for f in self.copies for r in f.reads if r[1] > r[0] and r not in self.layout.footer
         ]
         for g, days in enumerate(self.layout.days):
-            if not any(result_days[d] for d in days):
+            holds = (
+                any(result_days[d] for d in days) if result_groups is None else g in result_groups
+            )
+            if not holds:
                 continue
             for column in columns:
                 lo, hi = self.layout.chunks[g][column]
@@ -472,6 +492,7 @@ WHERES: dict[str, tuple[ds.Expression | None, Callable[[dict], bool]]] = {
     "venue-nak": (ds.field("venue") == "NAK", lambda r: r["venue"] == "NAK"),
     "venue-tok": (ds.field("venue") == "TOK", lambda r: r["venue"] == "TOK"),
     "finish-pos-le-5": (ds.field("finish_pos") <= 5, lambda r: r["finish_pos"] <= 5),
+    "race-no-ge-3": (ds.field("race_no") >= 3, lambda r: r["race_no"] >= 3),
 }
 
 
@@ -541,3 +562,294 @@ def test_development_read_touches_no_holdout_row_group(
         assert kept, "the read returns development rows"
     if asked is not None:
         assert asked, "the holdout rule was not consulted"
+
+
+# ---------------------------------------------------------------------------------------------
+# The jra store (netkeiba): races and runners as the core build's writer writes them
+# ---------------------------------------------------------------------------------------------
+
+JRA = "jra"  # models.v0.store.read_store_table's default source
+JRA_TABLES = ("races", "runners")
+JRA_VENUE_SETS = (("KYO", "TOK"), ("KYO", "NAK", "TOK"), ("NAK",), ("NAK", "TOK"))  # by k % 4
+JRA_HORSES = 6
+JRA_ORDERS: dict[str, Callable[[dict], tuple]] = {
+    # the build's order (the declared sort keys): a day's rows contiguous, its venues within it
+    "race-id": lambda r: (r["race_id"], r.get("horse_no", 0)),
+    # venue first: a day's rows in one run per venue, so a day spans several row groups
+    "venue": lambda r: (r["venue"], r["race_date"], r["race_no"], r.get("horse_no", 0)),
+}
+_PANDAS_TYPES = {pa.int64(): pd.Int64Dtype(), pa.bool_(): pd.BooleanDtype()}
+
+
+def declared_schema(name: str) -> pa.Schema:
+    return pa.schema([(c, tables.ARROW_TYPES[k]) for c, k in schemas.TABLES[name].columns.items()])
+
+
+def hexed(*parts: object) -> str:
+    """64 hex characters no compression shrinks: the files stay well over the footer read."""
+    return hashlib.sha256(":".join(map(str, parts)).encode()).hexdigest()
+
+
+def jra_rows(span: Sequence[tuple[date, bool, int]]) -> dict[str, list[dict]]:
+    """Store-shaped races and runners of `span`'s days (the k-th day races at
+    JRA_VENUE_SETS[k % 4], two to four races a venue), values set by the day, venue, race and
+    horse."""
+    races, runners = [], []
+    for k, (day, _, _) in enumerate(span):
+        for v, venue in enumerate(JRA_VENUE_SETS[k % len(JRA_VENUE_SETS)]):
+            for r in range(1, 2 + (k + v) % 3 + 1):
+                rid = f"{JRA}:{day.isoformat()}:{venue}:{r:02d}"
+                keys = {"jurisdiction": JRA, "race_id": rid,
+                        "meeting_id": f"{JRA}:{day.isoformat()}:{venue}", "race_date": day,
+                        "venue": venue, "race_no": r, "season": str(day.year)}  # fmt: skip
+                races.append({
+                    **keys, "race_index": 100 * k + 10 * v + r, "race_name": hexed("name", rid),
+                    "race_class_raw": hexed("class", rid), "going_raw": hexed("going", rid),
+                    "source_race_key": hexed("key", rid),
+                    "distance_m": 1000 + 200 * ((k + v + r) % 8),
+                    "surface": ("turf", "dirt")[(k + r) % 2], "field_size": JRA_HORSES,
+                    "finish_time_s": round(58.0 + 0.7 * r + 0.13 * k + 0.05 * v, 2),
+                    "split_times_s": [round(11.0 + ((7 * k + 3 * r + i) % 17) / 10, 1)
+                                      for i in range(6)],
+                    "status": "run",
+                })  # fmt: skip
+                for h in range(1, JRA_HORSES + 1):
+                    runners.append({
+                        **keys, "horse_id": f"J{k:03d}{v}{r}{h}", "horse_no": h,
+                        "horse_name": hexed("horse", rid, h),
+                        "jockey_name": hexed("jockey", rid, h),
+                        "finish_pos": (h + k + r) % JRA_HORSES + 1,
+                        "win_odds": round(1.5 + 0.9 * h + 0.01 * k + 0.1 * r, 2),
+                        "finish_time_s": round(60.0 + 0.1 * h + 0.3 * k + 0.5 * r, 1),
+                        "horse_wt_kg": 440 + (7 * h + k) % 60,
+                        "running_positions": [(h + i) % JRA_HORSES + 1 for i in range(4)],
+                    })  # fmt: skip
+    return {"races": races, "runners": runners}
+
+
+def frame_of(name: str, rows: Sequence[dict]) -> pd.DataFrame:
+    """A table's frame as the build hands it to its writer: declared columns in order, pandas
+    Int64 and boolean."""
+    return pa.Table.from_pylist(list(rows), schema=declared_schema(name)).to_pandas(
+        types_mapper=_PANDAS_TYPES.get
+    )
+
+
+def write_jra_store(
+    root: Path, span: Sequence[tuple[date, bool, int]], order: str
+) -> dict[str, Store]:
+    """`span`'s races and runners, in `order`, written by the core build's writer into
+    `processed/jra`. No layout is asserted here: the tests do."""
+    rows = {name: sorted(got, key=JRA_ORDERS[order]) for name, got in jra_rows(span).items()}
+    folder = root / "processed" / JRA
+    build._write_tables({name: frame_of(name, rows[name]) for name in JRA_TABLES}, folder)
+    held = frozenset(day for day, holdout, _ in span if holdout)
+    days = tuple(day for day, _, _ in span)
+    return {
+        name: Store(
+            root,
+            tuple(rows[name]),
+            held,
+            days,
+            file_layout((folder / f"{name}.parquet").read_bytes()),
+            source=JRA,
+            table=name,
+        )  # fmt: skip
+        for name in JRA_TABLES
+    }
+
+
+@pytest.fixture(scope="module")
+def jra_stores(tmp_path_factory: pytest.TempPathFactory) -> dict[tuple[str, str], dict]:
+    spans = {"stand-in": STAND_IN_SPAN, "committed": committed_span()}
+    return {
+        (rule, order): write_jra_store(
+            tmp_path_factory.mktemp(f"jra-{rule}-{order}").resolve(), span, order
+        )
+        for rule, span in spans.items()
+        for order in JRA_ORDERS
+    }
+
+
+def assert_a_row_group_per_day(store: Store) -> None:
+    """Every row group of the store's file holds one race day, recorded in its race_date
+    statistics (min == max, no null)."""
+    meta = pq.read_metadata(store.path)
+    at = meta.schema.names.index("race_date")
+    name = f"processed/{store.source}/{store.path.name}"
+    for g in range(meta.num_row_groups):
+        days = sorted(store.layout.days[g])
+        assert len(days) == 1, (
+            f"{name}: row group {g} of {meta.num_row_groups} holds {len(days)} race days "
+            f"({days[0]} .. {days[-1]}), not one: the core build's writer must write a row group "
+            "per race day for a reader to skip a holdout day's rows unread"
+        )
+        stats = meta.row_group(g).column(at).statistics
+        assert stats is not None and stats.has_min_max, f"{name}: group {g} has no min/max"
+        assert stats.min == stats.max == days[0], (name, g, stats.min, stats.max)
+        assert stats.has_null_count and stats.null_count == 0, (name, g, stats.null_count)
+    assert set().union(*store.layout.days) == set(store.days), f"{name}: not every day written"
+
+
+def assert_reads_can_be_seen(store: Store) -> None:
+    """The synthetic file is large enough for the claim: the library's footer reads leave
+    holdout and development row groups wholly unread, so the spy sees a reader's reads of them."""
+    layout = store.layout
+    assert store.path.stat().st_size > 2 * FOOTER_READ
+    first_footer = min(lo for lo, _ in layout.footer)
+    clear = [g for g, (_, hi) in enumerate(layout.extents) if hi <= first_footer]
+    assert any(layout.days[g] & store.held for g in clear), "no holdout group before the footer"
+    assert any(not layout.days[g] & store.held for g in clear), "no development group before it"
+
+
+def via_jra_read_store_table(store, columns, start, end, where):
+    table = read_store_table(  # the default source: jra
+        store.table,
+        columns=list(columns),
+        start=start,
+        end=end,
+        touches_price=start >= PRICE_ERA_START,
+        where=where,
+    )
+    return _table_rows(table, columns)
+
+
+def via_jra_store_tables(store, columns, start, end, where):
+    span = _span(start, end)
+    filters = where if span is None else (span if where is None else span & where)
+    frame = tables.read_table(JRA, store.table, list(columns), filters=filters, development=COUNTRY)
+    return _frame_rows(frame, columns)
+
+
+JRA_READERS = {
+    "v0.store.read_store_table": via_jra_read_store_table,
+    "store.tables.read_table": via_jra_store_tables,
+}
+
+
+@dataclass(frozen=True)
+class JraRead:
+    rule: str  # "stand-in" or "committed"
+    start: date
+    end: date
+    where: str
+    columns: dict[str, tuple[str, ...]]  # per table
+
+
+JRA_READS = {
+    "open-ended": JraRead(
+        "stand-in", date.min, date.max, "none",
+        {"races": ("race_id", "distance_m", "finish_time_s"),
+         "runners": ("race_id", "horse_no", "win_odds")},
+    ),
+    "holdout-day-to-holdout-day-where": JraRead(
+        "stand-in", day_at(3), day_at(23), "venue-nak",
+        {"races": ("race_id", "race_date", "race_name"),
+         "runners": ("horse_id", "race_date", "finish_pos")},
+    ),
+    "development-day-to-date-max-where-unread-column": JraRead(
+        "stand-in", day_at(31), date.max, "race-no-ge-3",
+        {"races": ("source_race_key", "field_size"), "runners": ("horse_name", "finish_time_s")},
+    ),
+    "one-development-day-between-holdout-days": JraRead(
+        "stand-in", day_at(8), day_at(8), "none",
+        {"races": ("race_id", "venue", "race_no"), "runners": ("race_id", "venue", "horse_no")},
+    ),
+    "one-holdout-day": JraRead(
+        "stand-in", day_at(21), day_at(21), "none", {"races": ("race_id",), "runners": ("race_id",)}
+    ),
+    "committed-rule-holdout-start-to-date-max-where": JraRead(
+        "committed", COMMITTED_START, date.max, "venue-tok",
+        {"races": ("race_id", "distance_m"), "runners": ("horse_id", "win_odds")},
+    ),
+}  # fmt: skip
+
+
+def wanted(store: Store, read: JraRead) -> Callable[[dict], bool]:
+    """A row of the read's result: a development day in range that satisfies `where`."""
+    keep = WHERES[read.where][1]
+    return lambda r: (
+        read.start <= r["race_date"] <= read.end and r["race_date"] not in store.held and keep(r)
+    )
+
+
+def development_rows(store: Store, read: JraRead) -> list[dict]:
+    return [r for r in store.rows if wanted(store, read)(r)]
+
+
+def groups_holding(store: Store, read: JraRead) -> set[int]:
+    """The row groups of the file holding a row of the read's result, from the file's own rows
+    (a day may span several groups, of which a `where` can rule some out)."""
+    file = pq.ParquetFile(io.BytesIO(store.path.read_bytes()))
+    row_of = wanted(store, read)
+    return {
+        g
+        for g in range(file.metadata.num_row_groups)
+        if any(row_of(r) for r in file.read_row_group(g).to_pylist())
+    }
+
+
+@pytest.mark.parametrize("read_id", list(JRA_READS))
+@pytest.mark.parametrize("table", JRA_TABLES)
+@pytest.mark.parametrize("order", list(JRA_ORDERS))
+@pytest.mark.parametrize("reader", list(JRA_READERS))
+def test_jra_development_read_touches_no_holdout_row_group(
+    jra_stores: dict, monkeypatch: pytest.MonkeyPatch, reader: str, order: str, table: str,
+    read_id: str,
+) -> None:  # fmt: skip
+    read = JRA_READS[read_id]
+    store = jra_stores[(read.rule, order)][table]
+    columns = read.columns[table]
+    assert_a_row_group_per_day(store)
+    assert_reads_can_be_seen(store)
+    if order == "venue":  # a holdout day in several groups, among development days' groups
+        spans = Counter(d for days in store.layout.days for d in days)
+        assert any(spans[d] > 1 for d in store.held)
+    result_groups = groups_holding(store, read)
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(store.root))
+    asked = stand_in(monkeypatch, store.held) if read.rule == "stand-in" else None
+    spy = ByteSpy(monkeypatch, store)
+
+    error = None
+    try:
+        names, got = JRA_READERS[reader](
+            store, columns, read.start, read.end, WHERES[read.where][0]
+        )
+    except Exception as exc:  # judged below: a refused holdout read first
+        error = exc
+
+    kept = development_rows(store, read)
+    spy.assert_boundary(error, columns, Counter(r["race_date"] for r in kept), result_groups)
+    assert names == list(columns)
+    assert Counter(got) == Counter(tuple(plain(r[c]) for c in columns) for r in kept)
+    if read_id != "one-holdout-day":
+        assert kept, "the read returns development rows"
+    if asked is not None:
+        assert asked, "the holdout rule was not consulted"
+
+
+@pytest.mark.parametrize("table", JRA_TABLES)
+@pytest.mark.parametrize("reader", list(JRA_READERS))
+def test_a_jra_store_written_a_row_group_per_table_reads_as_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reader: str, table: str
+) -> None:
+    """The jra store as the build wrote it before #510 (`pq.write_table`'s default: one row group
+    holding every day): exactly the development rows; no byte-level claim."""
+    root = tmp_path.resolve()
+    rows = sorted(jra_rows(STAND_IN_SPAN)[table], key=JRA_ORDERS["race-id"])
+    path = root / "processed" / JRA / f"{table}.parquet"
+    path.parent.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist(rows, schema=declared_schema(table)), path)
+    assert pq.read_metadata(path).num_row_groups == 1
+    held = frozenset(day for day, holdout, _ in STAND_IN_SPAN if holdout)
+    store = Store(root, tuple(rows), held, (), file_layout(path.read_bytes()), JRA, table)
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(root))
+    stand_in(monkeypatch, held)
+
+    read = JRA_READS["holdout-day-to-holdout-day-where"]
+    columns = read.columns[table]
+    names, got = JRA_READERS[reader](store, columns, read.start, read.end, WHERES[read.where][0])
+    kept = development_rows(store, read)
+    assert kept and {r["race_date"] for r in kept}.isdisjoint(held)
+    assert names == list(columns)
+    assert Counter(got) == Counter(tuple(plain(r[c]) for c in columns) for r in kept)

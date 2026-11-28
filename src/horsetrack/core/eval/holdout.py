@@ -24,7 +24,9 @@ Parquet skips a row group only from its min/max statistics, so a row group whose
 development and holdout days is still read from disk and decoded, and the scan's filter drops
 its holdout rows before any table is returned. A row group holding one day (min == max, no
 null), as the jravan builders write ``final_odds``, ``pool_votes``, ``races`` and ``runners``
-(#502), is pruned whole, never decoded, when that day is a holdout day or out of range.
+(#502) and the core store build writes ``meetings``, ``races``, ``runners`` and ``win_sales``
+(#510: a group per run of one day in the table's order), is pruned whole, never decoded, when
+that day is a holdout day or out of range.
 
 ``read_development(handle, country, *, columns, start, end, where, column, dated)`` is the
 development scan of one Parquet file through one open handle (#415, PR #427 review): it first
