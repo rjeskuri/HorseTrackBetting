@@ -10,10 +10,17 @@ D7's meeting-clustered one-sided bounds.
 
 The board is JRDB's TYB board: `tyb_win_odds` taken at `tyb_odds_time` (HHMM on the JST clock of
 the race date), read through `core.store.asof.read_asof` under a column rule on its release time,
-the odds time plus the configured lag (config/board_vs_final.yaml), at each race's off. It is
-never filled from another price. Every output is JRDB-derived (D21): the report and the private
-leaderboard go through `write_report` outside the repository, the registry records carry the
-source `jrdb`, and the committed registry summary withholds their values.
+the odds time plus a lag, at each race's off. It is never filled from another price. Every output
+is JRDB-derived (D21): the report and the private leaderboard go through `write_report` outside
+the repository, the registry records carry the source `jrdb`, and the committed registry summary
+withholds their values.
+
+The release lag is an assumption (the store keeps no JRDB release log), so family v3 (#602)
+registers it as a counted variant: config/board_vs_final.yaml lists `release_lags_min`,
+`jrdb_boards` builds one board per lag, and the whole study (tables, coefficients, records,
+table x cell counted in `variants_searched`. v2, which assumed the single lag 10, stays in the
+registry as recorded.
+`variants_searched`. v2, which assumed the single lag 10, stays in the registry as recorded.
 
 E45's Place and Wide outcomes, and whether a race is scored in them, come from the race's paid
 combinations in the dividends table (`payout_rules`; family v2): the store does not hold the field
@@ -175,6 +182,36 @@ def jrdb_board(
     return board.drop_duplicates(["race_id", "horse_no"], keep="last").reset_index(drop=True)
 
 
+def release_lags(rules: Mapping) -> list:
+    """`rules["release_lags_min"]`: a list of distinct finite lags in minutes, each >= 0, at least
+    one (ValueError otherwise); the counted variants of the release-time assumption (#602)."""
+    lags = rules.get("release_lags_min") if isinstance(rules, Mapping) else None
+    if not isinstance(lags, list) or not lags:
+        raise ValueError(f"rules need release_lags_min, a non-empty list, got {lags!r}")
+    for lag in lags:
+        _lag({"release_lag_min": lag})  # a number >= 0, finite, not a bool
+    if len(set(lags)) != len(lags):
+        raise ValueError(f"release_lags_min must be distinct, got {lags!r}")
+    return list(lags)
+
+
+def jrdb_boards(
+    con,
+    race_ids: Sequence[str],
+    *,
+    rules: Mapping,
+    decision_utc: pd.Series | None = None,
+) -> dict[float, pd.DataFrame]:
+    """`jrdb_board` once per lag of `rules["release_lags_min"]`, in the list's order: {lag_min:
+    board}. `rules`' other keys (tz) apply to every lag."""
+    return {
+        lag: jrdb_board(
+            con, race_ids, rules={**rules, "release_lag_min": lag}, decision_utc=decision_utc
+        )
+        for lag in release_lags(rules)
+    }
+
+
 # --------------------------------------------------------------------------- cross-application
 
 
@@ -243,14 +280,15 @@ def cross_apply(
 
 
 def _cells(tables: Mapping) -> list[tuple]:
-    """(hypothesis, pool, fit price, score price, mean, lo, hi, races, clusters) per cell."""
+    """(hypothesis, pool, lag, fit price, score price, mean, lo, hi, races, clusters) per cell,
+    `tables` keyed (hypothesis, pool, lag_min)."""
     out = []
-    for (hypothesis, pool), table in tables.items():
+    for (hypothesis, pool, lag), table in tables.items():
         for f in table.index:
             for s in table.index:
                 n = table.attrs.get("cells", {}).get((f, s), {})
                 stats = (float(table.loc[f, (s, stat)]) for stat in STATS)
-                out.append((hypothesis, pool, f, s, *stats, n.get("races"), n.get("clusters")))
+                out.append((hypothesis, pool, lag, f, s, *stats, n.get("races"), n.get("clusters")))
     return out
 
 
@@ -259,18 +297,20 @@ def _selection(price: str) -> str:
 
 
 def leaderboard_rows(tables: Mapping) -> list[LeaderboardRow]:
-    """One withheld member row per fit x score cell, in its table's pool. A cell is a ΔLL per
-    race, not a return per ¥100: it carries no return and ranks unranked; its ΔLL is the note."""
+    """One withheld member row per lag x fit x score cell, in its table's pool. A cell is a ΔLL
+    per race, not a return per ¥100: it carries no return and ranks unranked; its ΔLL is the
+    note. Every lag x table x cell is a counted variant (`variants_searched`)."""
     cells = _cells(tables)
     return [
         LeaderboardRow(
-            option_id=f"{FAMILY_ID}:{h}:{pool}:fit={f}:score={s}",
+            option_id=f"{FAMILY_ID}:{h}:{pool}:lag={lag:g}:fit={f}:score={s}",
             family_id=FAMILY_ID,
             ticket=TICKET,
             kind="member",
             pool=pool,
             segment="all",
-            rule=f"{h} {MODELS.get(h, h)}: fitted on {f}, scored on {s}, ΔLL per race against "
+            rule=f"{h} {MODELS.get(h, h)}: board released {lag:g} min after its odds time, "
+            f"fitted on {f}, scored on {s}, ΔLL per race against "
             f"{BASELINES.get(h, 'the scored price')}",
             selection=_selection(s),
             sources=SOURCES,
@@ -282,7 +322,7 @@ def leaderboard_rows(tables: Mapping) -> list[LeaderboardRow]:
             licensed=True,
             note=f"ΔLL {mean:.6g} nats per race, one-sided bounds [{lo:.6g}, {hi:.6g}]",
         )
-        for h, pool, f, s, mean, lo, hi, races, clusters in cells
+        for h, pool, lag, f, s, mean, lo, hi, races, clusters in cells
     ]
 
 
@@ -297,11 +337,12 @@ def run_records(
     *,
     git_sha: str,
     data_builds: Mapping[str, str],
-    coefficients: Mapping[tuple[str, str], Sequence[FoldMetric]] | None = None,
+    coefficients: Mapping[tuple[str, str, float], Sequence[FoldMetric]] | None = None,
 ) -> list[RunRecord]:
-    """One record per fitted model (hypothesis, pool, price fitted on): its ΔLL on each price
-    scored, mean with D7's bounds; then one per `coefficients` entry ((hypothesis, price) ->
-    its per-fold coefficient metrics)."""
+    """One record per fitted model (hypothesis, pool, lag, price fitted on): its ΔLL on each
+    price scored, mean with D7's bounds; then one per `coefficients` entry ((hypothesis, price,
+    lag) -> its per-fold coefficient metrics). Each record names its release lag (#602) in its
+    components and as a `lag=<minutes>` segment of its variant."""
     scheme = _fold_scheme()
 
     def record(hypothesis: str, variant: str, components: dict, metrics) -> RunRecord:
@@ -321,15 +362,21 @@ def run_records(
         )
 
     by_fit: dict[tuple, list[FoldMetric]] = {}
-    for h, pool, f, s, mean, lo, hi, races, _ in _cells(tables):
+    for h, pool, lag, f, s, mean, lo, hi, races, _ in _cells(tables):
         metric = FoldMetric("scored_folds", f"delta_ll[score={s}]", mean, lo, hi, races or 0)
-        by_fit.setdefault((h, pool, f), []).append(metric)
+        by_fit.setdefault((h, pool, lag, f), []).append(metric)
     out = [
-        record(h, f"{pool}:fit={f}", {"pool": pool, "fit_price": f}, metrics)
-        for (h, pool, f), metrics in by_fit.items()
+        record(
+            h,
+            f"{pool}:lag={lag:g}:fit={f}",
+            {"pool": pool, "release_lag_min": f"{lag:g}", "fit_price": f},
+            metrics,
+        )
+        for (h, pool, lag, f), metrics in by_fit.items()
     ]
-    for (h, f), metrics in (coefficients or {}).items():
-        out.append(record(h, f"coefficients:fit={f}", {"fit_price": f}, metrics))
+    for (h, f, lag), metrics in (coefficients or {}).items():
+        components = {"release_lag_min": f"{lag:g}", "fit_price": f}
+        out.append(record(h, f"coefficients:lag={lag:g}:fit={f}", components, metrics))
     return out
 
 
@@ -347,33 +394,45 @@ def render_report(
     payout: Mapping | None = None,
     leads: Mapping | None = None,
 ) -> str:
-    """`payout`: E45's races per pool by the status of their paid record (`payout_rules`);
-    `leads`: per hypothesis, the board's lead to the off per fold (`board_leads`)."""
+    """`tables`: keyed (hypothesis, pool, lag_min), `coefficients` (hypothesis, price, lag_min);
+    `payout`: E45's races per (pool, lag_min) by the status of their paid record
+    (`payout_rules`); `leads`: per (hypothesis, lag_min), the board's lead to the off per fold
+    (`board_leads`). Failures are keyed (hypothesis, pool, lag_min)."""
     lines = [f"# Board-fitted against final-fitted terms on the JRDB board ({COUNTRY}, #{TICKET})"]
     lines += ["", *(f"- {k}: {v}" for k, v in (about or {}).items())]
     lines += ["- built on JRDB (D21): private, never published", ""]
     lines += [
         "Each cell: the mean ΔLL per race in nats (the fitted model's log-likelihood gain over "
         "the baseline on the price scored on; positive: the fit helps), with D7's one-sided "
-        "bounds [lo, hi] (meeting-clustered paired bootstrap). Rows: the price fitted on.",
+        "bounds [lo, hi] (meeting-clustered paired bootstrap). Rows: the price fitted on. Every "
+        "table is read once per release lag (#602): the minutes from the board's odds time to its "
+        "release, each lag a counted variant.",
     ]
-    for (h, pool), table in tables.items():
+    for (h, pool, lag), table in tables.items():
         rows = [
             {"fit on": f, **{f"scored on {s}": _cell_text(table, f, s) for s in table.index}}
             | {"races": table.attrs.get("cells", {}).get((f, f), {}).get("races")}
             for f in table.index
         ]
-        lines += ["", f"## {h} {pool}: {MODELS.get(h, h)}", ""]
+        lines += ["", f"## {h} {pool}, lag {lag:g} min: {MODELS.get(h, h)}", ""]
         lines += [f"Baseline: {BASELINES.get(h, 'the scored price')}.", "", _markdown_table(rows)]
-    for (h, f), metrics in (coefficients or {}).items():
+    for (h, f, lag), metrics in (coefficients or {}).items():
         rows = [
             {"fold": m.fold, "term": m.metric, "value": m.value, "lo": m.lo, "hi": m.hi, "n": m.n}
             for m in metrics
         ]
-        lines += ["", f"## {h} coefficients fitted on {f} (R13: with their snapshot)", ""]
+        lines += [
+            "",
+            f"## {h} coefficients fitted on {f}, lag {lag:g} min (R13: with their snapshot)",
+            "",
+        ]
         lines.append(_markdown_table(rows) if rows else "_None._")
-    for h, rows in (leads or {}).items():
-        lines += ["", f"## {h}: the board's lead to the off per fold (R13: the snapshot)", ""]
+    for (h, lag), rows in (leads or {}).items():
+        lines += [
+            "",
+            f"## {h}, lag {lag:g} min: the board's lead to the off per fold (R13: the snapshot)",
+            "",
+        ]
         lines += [
             "Minutes from each matched race's latest board release to its off, the median over "
             "the fold's training races (what the board fits are fitted at) and its test races.",
@@ -382,10 +441,11 @@ def render_report(
         ]
     if payout:
         lines += ["", "## E45's races by pool and paid record (the dividends table)", ""]
-        lines.append(_markdown_table([{"pool": p, **dict(n)} for p, n in payout.items()]))
+        rows = [{"pool": p, "lag (min)": f"{lag:g}", **dict(n)} for (p, lag), n in payout.items()]
+        lines.append(_markdown_table(rows))
     if failures:
         lines += ["", "## Failed (each a registry record)", ""]
-        lines += [f"- {key}: {error}" for key, error in failures.items()]
+        lines += [f"- {key}: {error}" for key, error in failures.items()]  # (h, pool, lag)
     return "\n".join(lines) + "\n"
 
 
@@ -400,7 +460,11 @@ def write_outputs(tables: Mapping, *, out_dir: Path | str, **report) -> dict[str
     rows = leaderboard_rows(tables)
     cells = [
         dict(
-            zip(("hypothesis", "pool", "fit", "score", *STATS, "races", "clusters"), c, strict=True)
+            zip(
+                ("hypothesis", "pool", "lag_min", "fit", "score", *STATS, "races", "clusters"),
+                c,
+                strict=True,
+            )
         )
         for c in _cells(tables)
     ]
@@ -693,8 +757,9 @@ def build_spec(scheme, boot: dict) -> dict:
         "board": {
             "table": "jrdb_pre_race (TYB): tyb_win_odds at tyb_odds_time, HHMM on the "
             f"{board['tz']} clock of race_date",
-            "release": "odds time + release_lag_min (an assumption: no JRDB release log)",
-            "release_lag_min": board["release_lag_min"],
+            "release": "odds time + a release lag (an assumption: no JRDB release log); each lag "
+            "in release_lags_min is a counted variant (#602): the study runs once per lag",
+            "release_lags_min": list(release_lags(board)),
             "read": "core.store.asof.read_asof under a column rule on release_utc, at each race's "
             "off (races.post_utc, availability.yaml's derived post); a board released after its "
             "race's off is not used",
@@ -744,19 +809,24 @@ def build_spec(scheme, boot: dict) -> dict:
             "paid combinations differ from the result; each race counted by status per pool in "
             "the private report",
         },
-        "supersedes": "japan-board-vs-final-e2-e45-v1, whose Place places and Wide sale came "
-        "from the field of starters (a late scratch from eight to seven scored as two places); "
-        "its records stay in the registry as recorded",
+        "supersedes": "japan-board-vs-final-e2-e45-v2, which assumed the single release lag 10 "
+        "(v1 before it: Place places and Wide sale from the field of starters, a late scratch "
+        "from eight to seven scored as two places); their records stay in the registry as "
+        "recorded",
+        "variants": "the release lags: each lag x table x cell is a counted variant "
+        "(variants_searched); every table, coefficient, record and leaderboard row is per lag, "
+        "the same development races, folds and models, only the board's release time moved",
         "lead": "R13: per fold, the median minutes from each matched race's latest board "
         "release to its off, over the training and the test races, in the private report",
         "bootstrap": boot,
         "cluster_unit": CONFIG["cluster_unit"],
-        "records": "one per (hypothesis, pool, price fitted on): its ΔLL on each price scored "
-        "with D7's bounds; one per (hypothesis, price fitted on): its per-fold coefficients; a "
-        "failed table gives failed records, never none; a run with a failed table writes its "
-        "report to an attempt-named file, leaves the last complete outputs and exits non-zero",
-        "leaderboard": "each fit x score cell a member row, withheld (D21): a ΔLL, not a return "
-        "per ¥100, so it carries no return and ranks unranked",
+        "records": "one per (hypothesis, pool, lag, price fitted on): its ΔLL on each price "
+        "scored with D7's bounds; one per (hypothesis, lag, price fitted on): its per-fold "
+        "coefficients; a failed table gives failed records per lag, never none; a run with a "
+        "failed table writes its report to an attempt-named file, leaves the last complete "
+        "outputs and exits non-zero",
+        "leaderboard": "each lag x fit x score cell a member row, withheld (D21): a ΔLL, not a "
+        "return per ¥100, so it carries no return and ranks unranked",
         "sources": list(SOURCES),
         "holdout": "never read and never opened (D11-D15)",
         "d21": "every output is JRDB-derived: written through write_report outside the "
@@ -843,16 +913,19 @@ def clean_top3(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.loc[ok].reset_index(drop=True)
 
 
-def compute(frame: pd.DataFrame, paid: pd.DataFrame, boot: dict) -> tuple[dict, dict, dict, dict]:
+def compute(
+    frame: pd.DataFrame, paid: pd.DataFrame, boot: dict, lag: float
+) -> tuple[dict, dict, dict, dict]:
     """The cross tables, the coefficients, the failures and the report's notes (`render_report`'s
-    `payout` and `leads`) of both hypotheses; E45's Place and Wide by `paid` (`payout_rules`)."""
+    `payout` and `leads`) of both hypotheses on the board released `lag` minutes after its odds
+    time (every key carries it); E45's Place and Wide by `paid` (`payout_rules`)."""
     tables, coefficients, failures, notes = {}, {}, {}, {"payout": {}, "leads": {}}
     prices = (FINAL, BOARD)
     rows = frame.loc[matched(frame, prices)].reset_index(drop=True)  # cross_apply's own rows
-    notes["leads"]["E2"] = board_leads(rows) if len(rows) else []
+    notes["leads"][("E2", lag)] = board_leads(rows) if len(rows) else []
     fits = _Memo(e2_fit)
     try:
-        tables[("E2", WIN)] = cross_apply(
+        tables[("E2", WIN, lag)] = cross_apply(
             rows,
             fit_price=FINAL,
             score_price=BOARD,
@@ -861,21 +934,23 @@ def compute(frame: pd.DataFrame, paid: pd.DataFrame, boot: dict) -> tuple[dict, 
             bootstrap=boot,
         )
     except Exception as exc:  # a failed variant is a registry record, never dropped
-        failures[("E2", WIN)] = f"{type(exc).__name__}: {exc}"
+        failures[("E2", WIN, lag)] = f"{type(exc).__name__}: {exc}"
     for price in prices:
         if price in fits.cache:
-            coefficients[("E2", price)] = e2_coefficients(fits.cache[price], rows, boot["level"])
+            coefficients[("E2", price, lag)] = e2_coefficients(
+                fits.cache[price], rows, boot["level"]
+            )
     rows = clean_top3(rows)
     rules = payout_rules(rows, paid)
     by_race = rows["race_id"].map
     rows = rows.assign(places_paid=by_race(rules["places"]), wide_paid=by_race(rules["wide"]))
     for pool, status in ((PLACE, "place_status"), (WIDE, "wide_status")):
-        notes["payout"][pool] = rules[status].value_counts().sort_index().to_dict()
-    notes["leads"]["E45"] = board_leads(rows) if len(rows) else []
+        notes["payout"][(pool, lag)] = rules[status].value_counts().sort_index().to_dict()
+    notes["leads"][("E45", lag)] = board_leads(rows) if len(rows) else []
     fits, deltas = _Memo(e45_fit), _Memo(e45_deltas)
     for pool in E45_POOLS:
         try:
-            tables[("E45", pool)] = cross_apply(
+            tables[("E45", pool, lag)] = cross_apply(
                 rows,
                 fit_price=FINAL,
                 score_price=BOARD,
@@ -884,29 +959,34 @@ def compute(frame: pd.DataFrame, paid: pd.DataFrame, boot: dict) -> tuple[dict, 
                 bootstrap=boot,
             )
         except Exception as exc:
-            failures[("E45", pool)] = f"{type(exc).__name__}: {exc}"
+            failures[("E45", pool, lag)] = f"{type(exc).__name__}: {exc}"
     for price in prices:
         if price in fits.cache:
-            coefficients[("E45", price)] = e45_coefficients(fits.cache[price], rows)
+            coefficients[("E45", price, lag)] = e45_coefficients(fits.cache[price], rows)
     return tables, coefficients, failures, notes
 
 
 def _failed_records(failures: Mapping, git_sha: str, builds: dict) -> list[RunRecord]:
-    """A failed record per price fitted on of each failed (hypothesis, pool) table."""
+    """A failed record per price fitted on of each failed (hypothesis, pool, lag) table."""
     out = []
-    for h, pool in failures:
+    for h, pool, lag in failures:
         for price in (FINAL, BOARD):
             out.append(
                 RunRecord(
                     h,
                     FAMILY_ID,
-                    f"{pool}:fit={price}",
+                    f"{pool}:lag={lag:g}:fit={price}",
                     TICKET,
                     git_sha,
                     dict(builds),
                     SOURCES,
                     _fold_scheme(),
-                    {"pool": pool, "fit_price": price, "model": MODELS[h]},
+                    {
+                        "pool": pool,
+                        "release_lag_min": f"{lag:g}",
+                        "fit_price": price,
+                        "model": MODELS[h],
+                    },
                     {"baseline": BASELINES[h]},
                     (),
                     "failed",
@@ -970,16 +1050,27 @@ def run_study(out_dir: Path | str | None = None) -> dict:
         **{f"jra_{name}": _build(name) for name in ("runners", "races")},  # store_builds' keys
         **{name: _build(name) for name in ("dividends", "jrdb_pre_race")},
     }
-    notes: dict = {}
+    lags = release_lags(CONFIG["board"])
+    tables, coefficients, failures, notes = {}, {}, {}, {"payout": {}, "leads": {}}
+    done: set = set()
     try:
         data = read_development()
-        frame, paid = study_frame(data, _board(data)), data["dividends"]
-        del data
-        tables, coefficients, failures, notes = compute(frame, paid, boot)
-    except Exception as exc:  # a failed read fails every table: each a registry record
+        boards = _boards(data)  # one board per lag
+        for lag in lags:
+            frame = study_frame(data, boards[lag])
+            t, c, f, n = compute(frame, data["dividends"], boot, lag)
+            tables |= t
+            coefficients |= c
+            failures |= f
+            notes["payout"] |= n["payout"]
+            notes["leads"] |= n["leads"]
+            done.add(lag)
+    except Exception as exc:  # a failed read or lag fails every table of the lags not done
         error = f"{type(exc).__name__}: {exc}"
-        tables, coefficients = {}, {}
-        failures = {key: error for key in [("E2", WIN), *(("E45", p) for p in E45_POOLS)]}
+        for lag in lags:
+            if lag not in done:
+                for h, pool in [("E2", WIN), *(("E45", p) for p in E45_POOLS)]:
+                    failures[(h, pool, lag)] = error
     git_sha = _git_sha()
     records = run_records(tables, git_sha=git_sha, data_builds=builds, coefficients=coefficients)
     records += _failed_records(failures, git_sha, builds)
@@ -1026,21 +1117,25 @@ def _build(name: str) -> str:
     return f"processed/jra/{name}.parquet@{digest.hexdigest()[:16]}"
 
 
-def _board(data: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
-    """`jrdb_board` at each race's off, with `lead_min`, the minutes from release to the off."""
+def _boards(data: Mapping[str, pd.DataFrame]) -> dict[float, pd.DataFrame]:
+    """`jrdb_boards` at each race's off, per lag, each with `lead_min`, the minutes from release
+    to the off."""
     races = data["races"]
     offs = post_times(races)
     con = duckdb.connect(":memory:")
     try:
         con.register("jrdb_pre_race", _arrow(data["jrdb_pre_race"]))
-        board = jrdb_board(
+        boards = jrdb_boards(
             con, races["race_id"].astype(str).tolist(), rules=CONFIG["board"], decision_utc=offs
         )
     finally:
         con.close()
-    off = pd.to_datetime(board["race_id"].map(pd.to_datetime(offs, utc=True)), utc=True)
-    lead = off - pd.to_datetime(board["release_utc"], utc=True)
-    return board.assign(lead_min=lead.dt.total_seconds() / 60.0)
+    out = {}
+    for lag, board in boards.items():
+        off = pd.to_datetime(board["race_id"].map(pd.to_datetime(offs, utc=True)), utc=True)
+        lead = off - pd.to_datetime(board["release_utc"], utc=True)
+        out[lag] = board.assign(lead_min=lead.dt.total_seconds() / 60.0)
+    return out
 
 
 def main(argv: Sequence[str] | None = None) -> int:
