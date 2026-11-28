@@ -5,11 +5,16 @@ over the rule alone, the registry records and the leaderboard rows.
 Contract pinned here for `horsetrack.countries.japan.research.member_filter` (with the names of
 `test_member_filter.py`):
 
-- `run_study(*, races, predictions, nowcast, registry, out_dir, seed, n_boot)`:
+- `run_study(*, races, predictions, provenance, nowcast, registry, out_dir, seed, n_boot)`:
   - `races` are #713's `predicted_final.RaceInput`s; `predictions` maps member id -> race id ->
     horse -> p_member (the member's win probability, taken as given). A race a member has no entry
     for is not covered by it. A member id that `MEMBERS` does not register raises ValueError before
     anything is appended or written (only pre-registered members are scored);
+  - `provenance` maps member id -> its declaration, a plain dict {"fit_id": non-empty str,
+    "out_of_fold": bool, "final_board_inputs": bool}. Every member with predictions needs one with
+    out_of_fold True and final_board_inputs False (p built only from what is known at post - k);
+    otherwise ValueError before a race is read, a run appended or a file written. Each record of a
+    member's families carries its declaration as `params["member_provenance"]`;
   - refuses with `FamilyNotFrozen`, before it reads a race, unless every family of `FAMILIES` is
     frozen in `registry` with `family_spec(family_id)`; an `out_dir` inside the repository raises
     `LicensedOutputInRepo`; a refusal appends no run and writes no file;
@@ -408,11 +413,25 @@ def frozen_registry(root: Path) -> Registry:
     return registry
 
 
-def run(mp, root: Path, registry: Registry, out_dir: Path, races=None, preds=None):
+FIT_OF = {"A": "oof-438-synthetic-a1", "B": "oof-87-synthetic-b7"}
+DROP = object()  # a declaration field left out
+
+
+def declaration(label: str, **changes) -> dict:
+    out = {"fit_id": FIT_OF[label], "out_of_fold": True, "final_board_inputs": False, **changes}
+    return {k: v for k, v in out.items() if v is not DROP}
+
+
+def provenances() -> dict:
+    return {member(label): declaration(label) for label in P_MEMBER}
+
+
+def run(mp, root: Path, registry: Registry, out_dir: Path, races=None, preds=None, prov=None):
     mp.setenv(DATA_VAR, str(root / "data"))
     return mf.run_study(
         races=all_races() if races is None else races,
         predictions=predictions() if preds is None else preds,
+        provenance=provenances() if prov is None else prov,
         nowcast=make_nowcast(),
         registry=registry,
         out_dir=out_dir,
@@ -681,3 +700,84 @@ def test_an_out_dir_inside_the_repository_is_refused(tmp_path, monkeypatch):
         assert registry.records() == []
     finally:
         shutil.rmtree(inside, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- member provenance
+
+
+def test_each_record_carries_its_members_provenance(study):
+    """A's and B's declarations differ in their fit ids: each family's records carry their own
+    member's, so the registry says which out-of-fold fit each scored p came from."""
+    declared = provenances()
+    seen = set()
+    for r in study.registry.records():
+        member_id = r.params["member_id"]
+        if member_id in declared:
+            assert r.params.get("member_provenance") == declared[member_id], r.family_id
+            seen.add(member_id)
+    assert seen == set(declared)
+
+
+BAD_DECLARATIONS = {
+    "in-sample": {"out_of_fold": False},
+    "final-board inputs": {"final_board_inputs": True},
+    "out_of_fold not declared": {"out_of_fold": DROP},
+    "final_board_inputs not declared": {"final_board_inputs": DROP},
+    "out_of_fold not a bool": {"out_of_fold": None},
+    "final_board_inputs not a bool": {"final_board_inputs": None},
+    "no fit id": {"fit_id": DROP},
+    "an empty fit id": {"fit_id": ""},
+}
+
+
+def _refused(monkeypatch, tmp_path, prov) -> None:
+    registry = frozen_registry(tmp_path)
+    out_dir = tmp_path / "data" / "reports"
+    read = []
+
+    def races():
+        read.append(True)
+        yield from all_races()
+
+    with pytest.raises(ValueError):
+        run(monkeypatch, tmp_path, registry, out_dir, races=races(), prov=prov)
+    assert read == [], "a race was read before the provenance was checked"
+    assert registry.records() == []
+    assert not out_dir.exists() or not any(p.is_file() for p in out_dir.rglob("*"))
+
+
+@pytest.mark.parametrize("label", ["A", "B"])
+def test_a_member_with_predictions_and_no_provenance_is_refused(tmp_path, monkeypatch, label):
+    prov = {m: d for m, d in provenances().items() if m != member(label)}
+    _refused(monkeypatch, tmp_path, prov)
+
+
+def test_an_empty_provenance_is_refused_when_members_have_predictions(tmp_path, monkeypatch):
+    _refused(monkeypatch, tmp_path, {})
+
+
+@pytest.mark.parametrize("label", ["A", "B"])
+@pytest.mark.parametrize("what", sorted(BAD_DECLARATIONS))
+def test_a_member_declared_in_sample_or_final_board_informed_is_refused(
+    tmp_path, monkeypatch, label, what
+):
+    prov = {**provenances(), member(label): declaration(label, **BAD_DECLARATIONS[what])}
+    _refused(monkeypatch, tmp_path, prov)
+
+
+def test_only_the_members_with_predictions_need_a_declaration(tmp_path, monkeypatch):
+    """A alone has predictions and a declaration: the run scores it and records A's."""
+    registry = frozen_registry(tmp_path)
+    result = run(
+        monkeypatch,
+        tmp_path,
+        registry,
+        tmp_path / "data" / "reports",
+        races=[make_race("R3")],
+        preds={member("A"): predictions()[member("A")]},
+        prov={member("A"): declaration("A")},
+    )
+    assert result.rows
+    recorded = [r for r in registry.records() if r.params["member_id"] == member("A")]
+    assert recorded
+    assert all(r.params.get("member_provenance") == declaration("A") for r in recorded)

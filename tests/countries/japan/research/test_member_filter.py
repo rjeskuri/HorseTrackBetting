@@ -15,7 +15,9 @@ what these tests call; the run itself is pinned in `test_member_filter_run.py`):
   member; `COMBINATIONS`: combination id -> combination with `.rule_id`, `.member_id`, `.k`, one
   per rule of #713's `predicted_final.RULES` x `MEMBERS` x `K_GRID`. `FAMILIES`: family id ->
   combination ids, a partition of `COMBINATIONS` (the registry families); `family_spec(family_id)`
-  the plain-JSON spec each is frozen with; `spec_hash()`.
+  the plain-JSON spec each is frozen with; `spec_hash()`. Each spec carries `member_predictions`,
+  a dict with `out_of_fold: True`, `final_board_inputs: False` and `provenance`, a list naming at
+  least `fit_id`, `out_of_fold` and `final_board_inputs` (the declaration `run_study` takes).
 - `crowd_q(board) -> {horse: q}`: the crowd's win probability on a (projected) Win board,
   normalised: q_h = (1 / O_h) / sum over the board of (1 / O_j).
 - `qualifying(tickets, *, p_member, q, k, brackets=None) -> TicketSet | None`: the tickets of
@@ -155,6 +157,23 @@ def test_each_family_freezes_a_plain_json_spec_with_its_rules_members_k_grid_and
         texts.append(json.dumps(spec, sort_keys=True))
     assert len(set(texts)) == len(texts)
     assert isinstance(mf.spec_hash(), str) and mf.spec_hash()
+
+
+PROVENANCE_FIELDS = {"fit_id", "out_of_fold", "final_board_inputs"}
+
+
+def test_each_family_spec_requires_out_of_fold_decision_time_member_predictions():
+    """A member's p is compared with the projected q at post - k, so it must be out-of-fold and
+    built only from what is known at post - k (#87's C4 meta reads the final market otherwise):
+    each frozen spec carries `member_predictions` with `out_of_fold` True, `final_board_inputs`
+    False and `provenance`, the fields every scored member declares and the run records."""
+    for family_id in mf.FAMILIES:
+        spec = mf.family_spec(family_id)
+        req = spec.get("member_predictions")
+        assert isinstance(req, dict), f"{family_id}'s spec states no member-prediction requirement"
+        assert req.get("out_of_fold") is True, family_id
+        assert req.get("final_board_inputs") is False, family_id
+        assert PROVENANCE_FIELDS <= set(req.get("provenance", ())), family_id
 
 
 # --------------------------------------------------------------------------- the crowd's q

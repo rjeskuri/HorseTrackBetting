@@ -12,9 +12,12 @@ where the rule bought, bounded by one meeting bootstrap shared by both sides.
 
 `run_study` refuses (`FamilyNotFrozen`) before it reads a race unless every family of `FAMILIES`
 (one per member x #713 family) is frozen with `family_spec`, refuses a member `MEMBERS` does not
-register (ValueError) and an out_dir inside the repository, drops every holdout day (the holdout is
-never opened), writes the private report through `write_report` and appends one registry record per
-(family, checkpoint) whose params name every combination; `leaderboard_backfill` reads them as one
+register (ValueError), a member with predictions whose `provenance` does not declare an out-of-fold
+fit (a non-empty fit_id) with no final-board input (ValueError: p_member is compared with q at
+post - k, so it may use only what is known then) and an out_dir inside the repository, drops every
+holdout day (the holdout is never opened), writes the private report through `write_report` and
+appends one registry record per (family, checkpoint) whose params name every combination and the
+member's declaration (`member_provenance`); `leaderboard_backfill` reads them as one
 `predicted_final@T-k` row per combination and checkpoint. A member registered unavailable, a member
 without predictions and a #713 rule no projected board reads are unmeasured rows. D21: the figures
 are JRA-VAN-derived and stay under the data directory. Reading the store, the logs and the members'
@@ -150,8 +153,20 @@ def _common_spec() -> dict[str, Any]:
         "named at run time; each rule picks on the projection as #713 frozen it",
         "crowd_q": "q_h = (1 / O_h) / sum_j (1 / O_j) over the projected Win board's priced "
         "runners (finite, positive prices)",
-        "p_member": "the member's win probability per runner of the race, taken as given; a race "
-        "the member has no entry for is not covered by it",
+        "p_member": "the member's win probability per runner of the race; a race the member has "
+        "no entry for is not covered by it",
+        "member_predictions": {
+            "out_of_fold": True,
+            "final_board_inputs": False,
+            "as_of": "each p_member is out-of-fold (predicted by a fit that never saw its race) "
+            "and built only from information available at post - k: no final-board input "
+            "(final odds, final votes or anything derived from them, e.g. #87's ln_q_final)",
+            "provenance": ["fit_id", "out_of_fold", "final_board_inputs"],
+            "declaration": "run_study takes one declaration per member with predictions and "
+            "refuses the run before any race is read unless fit_id is a non-empty string, "
+            "out_of_fold is True and final_board_inputs is False; every record of the member's "
+            "families carries it as params.member_provenance",
+        },
         "filter": "a horse passes when its p_member and q are finite, q > 0 and p_member / q >= k "
         "(the boundary passes); a horse without either never passes. A ticket qualifies when "
         "every horse of its combination passes, in every pool and whatever its position "
@@ -378,10 +393,35 @@ def _fingerprint(predictions: Mapping[str, Mapping], scored: list[str]) -> str:
     return _sha256(_canonical(items))[:16]
 
 
+PROVENANCE_FIELDS = ("fit_id", "out_of_fold", "final_board_inputs")
+
+
+def _check_provenance(
+    predictions: Mapping[str, Any], provenance: Mapping[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Each member with predictions declares an out-of-fold fit with no final-board input
+    (the spec's `member_predictions`); returns the declarations as plain dicts, else raises."""
+    declared = {}
+    for member_id in sorted(predictions):
+        decl = provenance.get(member_id)
+        if not isinstance(decl, Mapping):
+            raise ValueError(f"{member_id} has predictions and no provenance declaration")
+        fit_id = decl.get("fit_id")
+        if not isinstance(fit_id, str) or not fit_id.strip():
+            raise ValueError(f"{member_id}'s provenance names no fit_id")
+        if decl.get("out_of_fold") is not True:
+            raise ValueError(f"{member_id}'s predictions are not declared out-of-fold")
+        if decl.get("final_board_inputs") is not False:
+            raise ValueError(f"{member_id}'s predictions may use the final board")
+        declared[member_id] = {field: decl[field] for field in PROVENANCE_FIELDS}
+    return declared
+
+
 def run_study(
     *,
     races: Iterable[pf.RaceInput],
     predictions: Mapping[str, Mapping[str, Mapping[int, float]]],
+    provenance: Mapping[str, Mapping[str, Any]],
     nowcast: NowcastV0,
     registry: Registry,
     out_dir: Path | str,
@@ -397,6 +437,7 @@ def run_study(
     unknown = sorted(set(predictions) - set(MEMBERS))
     if unknown:
         raise ValueError(f"members {unknown} are not pre-registered (have {sorted(MEMBERS)})")
+    declared = _check_provenance(predictions, provenance)
     level = pf._level()
     members = {m: p for m, p in predictions.items() if MEMBERS[m].unavailable is None}
     measured = [rule for rule in pf.RULES.values() if rule.pick is not None]
@@ -463,7 +504,9 @@ def run_study(
     run_ids = {}
     for family_id in FAMILIES:
         for k in CHECKPOINTS:
-            record = _record(family_id, k, by_record[(family_id, k)], builds, git_sha, sources)
+            record = _record(
+                family_id, k, by_record[(family_id, k)], builds, git_sha, sources, covered, declared
+            )
             run_ids[f"{family_id}@T-{k}"] = registry.append(replace(record, notes=notes))
     return StudyResult(rows, report_path, run_ids, dict(counts))
 
@@ -475,6 +518,8 @@ def _record(
     builds: dict[str, str],
     git_sha: str,
     sources: tuple[str, ...],
+    covered: set[str],
+    declared: Mapping[str, dict[str, Any]],
 ) -> RunRecord:
     level = pf._level()
     metrics = []
@@ -499,13 +544,16 @@ def _record(
             ),
         ]
     member_id, rule_family = _FAMILY_PARTS[family_id]
+    absent = None if member_id in covered else f"no predictions from {member_id} in this run"
     combos = {
         row["combination_id"]: {
             "rule_id": row["rule_id"],
             "member_id": row["member_id"],
             "k": row["k"],
             "pool": row["pool"],
-            "unmeasured": pf.RULES[row["rule_id"]].unmeasured or MEMBERS[member_id].unavailable,
+            "unmeasured": pf.RULES[row["rule_id"]].unmeasured
+            or MEMBERS[member_id].unavailable
+            or absent,
         }
         for row in rows
     }
@@ -530,6 +578,7 @@ def _record(
             "ci_level": level,
             "k_grid": list(K_GRID),
             "member_id": member_id,
+            "member_provenance": declared.get(member_id),
             "rule_family": rule_family,
             "rules_spec_hash": pf.spec_hash(),
             "rules": combos,  # the leaderboard reads each combination as a rule row
