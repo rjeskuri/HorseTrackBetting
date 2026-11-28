@@ -52,6 +52,17 @@ tier2:
   grid_min: [60, 30, 16, 5, 2, 1]
   # the odds menu and the race list, then one page per pool of each race
   requests: {navigation: 2, per_race: 3}
+# Race cards (ticket #426): each race's 出馬表 (JRADB pw01dde) once per grid point (minutes before
+# post, stretches as tier 2's), within a round's budget: after tier 1's hot races, the results
+# polls and tier 2, before tier 1's spare full-cycle refreshes of races not hot (a refresh left out
+# waits for the venue's next cycle); every capture appended, with its fetch time, to
+# <VENUE>.cards.jsonl.gz beside the odds log. T-120 and T-60 see the morning's scratches and the
+# weigh-in (about T-65), T-30, T-10 and T-3 a late scratch. Without this block: no cards. JRA only:
+# NAR never inherits it.
+cards:
+  grid_min: [120, 60, 30, 10, 3]
+  # the 出馬表 menu and the card race list, then the card page of each race
+  requests: {navigation: 2, per_race: 1}
 # A venue answering for another meeting this many captures in a row stops (that venue only).
 max_wrong_meeting: 3
 # After a 403/429 (or any open circuit): null stops the host for the rest of the day and the

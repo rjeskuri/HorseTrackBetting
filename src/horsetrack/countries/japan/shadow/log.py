@@ -224,18 +224,19 @@ def _refusal(record: Any) -> str | None:
     return None
 
 
-def _stored_key(record: Any) -> Key | None:
+def _stored_key(record: Any, key_fields: tuple[str, ...] = KEY_FIELDS) -> Key | None:
     """The key of a record line read back, or None when it is not one this log writes."""
     if not isinstance(record, dict) or record.get("day_status") not in (HOLDOUT, DEVELOPMENT):
         return None
-    key = tuple(record.get(name) for name in KEY_FIELDS)
+    key = tuple(record.get(name) for name in key_fields)
     if not all(isinstance(part, str) for part in key[:3]) or type(key[3]) is not int:
         return None
     return key
 
 
-def _parse(raw: bytes, path: Path) -> _State:
-    """The verified content of a log file; ShadowLogTampered on any break in the chain."""
+def _parse(raw: bytes, path: Path, key_fields: tuple[str, ...] = KEY_FIELDS) -> _State:
+    """The verified content of a log file; ShadowLogTampered on any break in the chain.
+    `key_fields`: the four fields that key a record, each key at most once in the file."""
     if raw and not raw.endswith(b"\n"):
         raise ShadowLogTampered(f"{path}: the last line is cut off")
     lines = raw[:-1].split(b"\n") if raw else []
@@ -258,7 +259,7 @@ def _parse(raw: bytes, path: Path) -> _State:
         if type(seq) is not int or seq != FIRST_SEQ + n - 1:
             raise ShadowLogTampered(f"{where}: seq out of order")
         if set(obj) == {"seq", "prev_sha256", "record"}:
-            key = _stored_key(obj["record"])
+            key = _stored_key(obj["record"], key_fields)
             if key is None or key in keys:
                 raise ShadowLogTampered(f"{where}: a malformed or repeated record")
             keys.add(key)
@@ -284,13 +285,17 @@ def _parse(raw: bytes, path: Path) -> _State:
 # ---------------------------------------------------------------- the log
 
 
-class ShadowLog:
-    """One race day's shadow log. Every call reads and verifies the whole file first."""
+class ChainedLog:
+    """One race day's hash-chained, sealed log; every call reads and verifies the whole file
+    first. A subclass names its file suffix, its four key fields and its record check."""
+
+    SUFFIX = ".jsonl"
+    KEY_FIELDS: tuple[str, ...] = KEY_FIELDS
 
     def __init__(self, path: Path, *, day: date) -> None:
         _check_day(day)
         path = Path(path)
-        if path.name != f"{day.isoformat()}.jsonl":
+        if path.name != f"{day.isoformat()}{self.SUFFIX}":
             raise ValueError(f"{path.name} is not the log of {day.isoformat()}")
         self._path = path
         self._day = day
@@ -300,7 +305,11 @@ class ShadowLog:
             raw = self._path.read_bytes()
         except FileNotFoundError:
             raw = b""
-        return _parse(raw, self._path)
+        return _parse(raw, self._path, self.KEY_FIELDS)
+
+    def _refusal(self, record: Any) -> str | None:
+        """Why ``record`` is refused, or None."""
+        return _refusal(record)
 
     def _status(self, state: _State) -> str:
         """Fails closed: holdout when the rule says so now or any record was logged as holdout."""
@@ -329,9 +338,9 @@ class ShadowLog:
         seq, prev = state.next_seq, state.last_sha
         lines = []
         for i, record in enumerate(batch, 1):
-            reason = _refusal(record)
+            reason = self._refusal(record)
             if reason is None:
-                key = tuple(record[name] for name in KEY_FIELDS)
+                key = tuple(record[name] for name in self.KEY_FIELDS)
                 if key in seen:
                     reason = f"repeats the logged key {key}"
             if reason is None:
@@ -367,7 +376,8 @@ class ShadowLog:
         return _sha(line)
 
     def logged_keys(self) -> set[Key]:
-        """The (race_id, pool, combination, tau_min) keys in the file, on any day."""
+        """The KEY_FIELDS keys in the file ((race_id, pool, combination, tau_min) for the shadow
+        log), on any day."""
         return set(self._load().keys)
 
     def read(self) -> list[dict]:
@@ -382,7 +392,7 @@ class ShadowLog:
     def verify(self) -> LogSummary:
         """Check the chain and return counts only."""
         state = self._load()
-        by_tau = Counter(record["tau_min"] for record in state.records)
+        by_tau = Counter(record[self.KEY_FIELDS[3]] for record in state.records)
         return LogSummary(
             n_records=len(state.records),
             by_tau=dict(sorted(by_tau.items())),
@@ -390,3 +400,7 @@ class ShadowLog:
             sealed=state.sealed,
             day_status=self._status(state),
         )
+
+
+class ShadowLog(ChainedLog):
+    """One race day's shadow log. Every call reads and verifies the whole file first."""

@@ -67,6 +67,7 @@ from horsetrack.core.eval.registry import (
     Registry,
     RunRecord,
     _canonical,
+    _record_data,
     _sha256,
     default_registry,
     summary_dir,
@@ -1002,9 +1003,7 @@ def _append_new(registry: Registry, records: list[RunRecord]) -> tuple[dict, int
     def same(r: RunRecord) -> str:
         return json.dumps(dataclasses.asdict(dataclasses.replace(r, git_sha="")), sort_keys=True)
 
-    held = {
-        same(r): _sha256(_canonical(dataclasses.asdict(r))) for r in registry.records(FAMILY_ID)
-    }
+    held = {same(r): _sha256(_canonical(_record_data(r))) for r in registry.records(FAMILY_ID)}
     ids, appended = {}, 0
     for record in records:
         key = f"{record.hypothesis_id}:{record.variant}"
