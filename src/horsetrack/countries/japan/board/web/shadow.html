@@ -90,11 +90,12 @@ tbody tr:last-child{border-bottom:0}
 .mv.up{color:var(--up)} .mv.down{color:var(--down)}
 .projected{color:var(--muted);font-style:italic}
 td.flags .chip{margin-right:3px}
+.member-mark::before{content:"\25B2\00A0";color:var(--accent)}
 tr.scratched{color:var(--muted)}
 tr.scratched .combo{text-decoration:line-through}
 .empty{padding:24px 0;text-align:center}
 
-/* best bets (#714): the owner's selection rule, the one highlight on the page */
+/* best bets (#714): the owner's selection rule, with the member mark (#717) the page's highlights */
 .best{background:var(--surface);border:1px solid var(--rule);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px}
 .best-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
 .best-bet{border-top:1px solid var(--sunk);padding-top:8px;display:flex;flex-direction:column;gap:4px}

@@ -35,9 +35,9 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import permutations
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -89,6 +89,9 @@ class ShadowModels:
     ordering: OrderingModel | None
     nowcast: NowcastModel
     ids: dict[str, str]
+    # segment -> models.v0.member.MemberEntry (.fit, .k), #717: the shadow page's horse member,
+    # display only; empty for the market only. Never in `ids`, a value or p_model.
+    member: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
