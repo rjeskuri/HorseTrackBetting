@@ -675,8 +675,8 @@ def test_member_place_wide_probabilities_sum_correctly(family):
     """Eight races (4 to 18 runners at sale, one late scratch) through each C5 ordering family:
     WIN reproduces the member's probabilities; PLACE sums to the places paid by the field at
     sale (no rows for a field of 4) and WIDE's pairs to 3, every p in [0, 1], each starter's
-    Place at least its Win and its Wide pairs summing to its top-three probability. Every value
-    equals the ordering's own joint_probs, and under Harville a brute-force sum over ordered
+    Place at least its Win and its Wide pairs summing to twice its top-three probability. Every
+    value equals the ordering's own joint_probs, and under Harville a brute-force sum over ordered
     first threes, so a member's abilities move every figure."""
     rows, p_win = pw_card(5740 + len(family))
     ordering = PW_ORDERINGS[family]()
@@ -726,7 +726,7 @@ def test_member_place_wide_probabilities_sum_correctly(family):
         in_top3 = t.sum(axis=(1, 2)) + t.sum(axis=(0, 2)) + t.sum(axis=(0, 1))
         for i, h in enumerate(numbers):
             with_h = sum(v for c, v in wide.items() if str(h) in c.split(","))
-            assert with_h == pytest.approx(in_top3[i], abs=1e-6), (race_id, h)
+            assert with_h == pytest.approx(2 * in_top3[i], abs=1e-6), (race_id, h)
 
         if family == "harville":
             brute = harville_top3(p)
