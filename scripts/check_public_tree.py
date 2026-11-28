@@ -12,7 +12,8 @@ Rules, by id:
             directory (browser-tool snapshots hold scraped page text)
   fixture   a file under tests/fixtures/ outside tests/fixtures/synthetic/, or an .html/.htm
             there that does not start with the synthetic marker (see that folder's README)
-  size      a file over 256 KB, except uv.lock (whose content is still scanned)
+  size      a file over 256 KB, except uv.lock and a .md file directly under docs/leaderboard/
+            (owner, #452); every other rule, content included, still applies to both
   jrdb      a JRDB-style data file name: three capital letters, six digits, .txt
   jravan    a JV-Data file name, in any letter case: a record file ending .jvd, or the JV-Data
             specification (a name starting JV-Data and ending .xlsx or .pdf)
@@ -45,6 +46,8 @@ DATA, FIXTURE, SIZE, JRDB, JRAVAN, SECRET, PERSONAL = (
 
 LIMIT = 256 * 1024
 SIZE_EXEMPT = "uv.lock"
+# The public leaderboard pages, on the path exactly as given: case-sensitive, nothing nested.
+LEADERBOARD_PAGE = re.compile(r"docs/leaderboard/[^/]+\.md")
 FIXTURES = "tests/fixtures/"
 SYNTHETIC = FIXTURES + "synthetic/"
 MARKER = b"<!-- synthetic:"
@@ -104,7 +107,7 @@ def _path_violations(path: str, data: bytes) -> Iterator[Violation]:
             yield Violation(path, FIXTURE, "fixture outside " + SYNTHETIC)
         elif path.lower().endswith((".html", ".htm")) and not data.startswith(MARKER):
             yield Violation(path, FIXTURE, "html fixture does not start with the synthetic marker")
-    if path != SIZE_EXEMPT and len(data) > LIMIT:
+    if len(data) > LIMIT and path != SIZE_EXEMPT and not LEADERBOARD_PAGE.fullmatch(path):
         yield Violation(path, SIZE, f"{len(data)} bytes, over the {LIMIT}-byte limit")
     name = path.rsplit("/", 1)[-1]
     if JRDB_NAME.fullmatch(name):
