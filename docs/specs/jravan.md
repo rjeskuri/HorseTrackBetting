@@ -141,6 +141,12 @@ so each family maps fields instead of slicing bytes:
   malformed part.
 - `jurisdiction(venue_code)`: `'jra'` for 01-10, `'nar'` for any other two-digit number,
   `'overseas'` for any other non-blank code, None for `'00'` or blank.
+- `form_race_id(year, mmdd, venue_code, race_no)` (#377): `<jurisdiction>:<YYYY-MM-DD>:<code>:<NN>`
+  for a NAR or overseas venue, the code as JV-Data writes it (`overseas:2025-10-05:A4:09`);
+  `form_meeting_id` the same without the race. Race number `00`, which JV-Data writes for some
+  overseas races, is a race of its own (`overseas:2025-10-05:A4:00`); `race_id` keeps refusing it.
+  None for a JRA venue, one without a jurisdiction, an invalid date or a race number that is not
+  two digits.
 - `announced_utc(year, race_mmdd, mmddhhmm)`: a JST minute (UTC+9, no DST) as an aware UTC
   datetime; a month after the race's month is in the year before (a December announcement for a
   January race). None for `00000000`, blank or an invalid time.
@@ -157,7 +163,8 @@ so each family maps fields instead of slicing bytes:
   (sorted by `race_id`, one row group per race day) and `meetings.parquet` (by `race_date`,
   `venue`) in the store's columns and types. The same inputs give the same bytes. The report, `<reports dir>/jravan-races.json`,
   holds per year `records`, `versions_dropped`, `deletions`, `races_written`, `non_jra_nar`,
-  `non_jra_overseas`, `non_jra_unknown` and `unmapped` (a count), and `unmapped` as store column
+  `non_jra_overseas`, `non_jra_unknown`, `unmapped` (a count) and `form_without_id` (the kept NAR
+  and overseas races with no form id, so in no table), and `unmapped` as store column
   (`race_class`, `weight_type`, `surface`, `going`) -> code -> count over the races written.
 - Columns use the jra store's vocabulary (`jra/netkeiba/parse_results.py`): ids and keys from
   `keys.py`; `season` the calendar-year label; `race_class` from the youngest-age condition code,
@@ -169,6 +176,12 @@ so each family maps fields instead of slicing bytes:
   `finish_time_s` and the `result_*_utc` columns are null. Each mapping's code values are
   constants in `races.py`; a code a mapping lacks is null and counted. A blank or all-zero
   code is JV-Data's "unset": null (its `*_raw` column too), counted only on a race that was run.
+- NAR and overseas races (#377), kept the same way, go to `processed/jravan/form_races.parquet`
+  in the `races` schema (no meetings): `jurisdiction` `nar` or `overseas`, ids from
+  `keys.form_race_id` (`nar:2025-06-01:30:01`), `venue` the JV-Data code. Horse form only; their
+  codes stay out of the report's `unmapped`, and a venue without a jurisdiction is written nowhere.
+  A build with no NAR or overseas race writes no `form_races.parquet` (and removes an earlier one);
+  the same holds for `form_runners.parquet`.
 - Meetings: one row per `meeting_id`, `run` when any race ran, else `abandoned`; `day_night` and
   `surface_mix` null.
 
@@ -198,8 +211,9 @@ post time a null `post_time_local`.
   file is a `FileNotFoundError` before anything is read (build the races first). The same inputs
   give the same bytes, and a second fill changes nothing. The report,
   `<reports dir>/jravan-runners.json`, holds per year `records`, `versions_dropped`, `deletions`,
-  `runners_written`, `non_jra_nar`, `non_jra_overseas`, `non_jra_unknown` and `unmapped` (a
-  count), in `counts` the totals and `races_timed`, and `unmapped` as field (`placing`, `sex`,
+  `runners_written`, `non_jra_nar`, `non_jra_overseas`, `non_jra_unknown`, `unmapped` (a count)
+  and `form_without_id` (the kept NAR and overseas runners whose race got no form id), in
+  `counts` the totals and `races_timed`, and `unmapped` as field (`placing`, `sex`,
   `dead_heat`, `margin`) -> code -> count over the runners written.
 - Columns use the jra store's vocabulary (`jra/netkeiba/parse_results.py`, whose placing codes,
   scratched codes, margin names, beaten-lengths sum and pound conversion the mapping reuses): the
@@ -220,6 +234,10 @@ post time a null `post_time_local`.
   code a mapping lacks is null and counted.
 - Runners of abandoned races (RA data kubun 9) are written, without a place; their undrawn
   runners carry 馬番 99 as printed.
+- NAR and overseas runners (#377) go to `processed/jravan/form_runners.parquet` in the `runners`
+  schema under their races' form ids, and their winners' times to `form_races.parquet` when it is
+  there. Horse form only: the jravan `horse_runs` adds them with `win_odds` null (the price is
+  never scanned), and no betting reader names them.
 
 The run on the export: `horsetrack japan jravan runners`, run 2026-11-26. Every count, span,
 share, rate, wall time and peak memory of it is withheld (D21), in two files under
@@ -250,7 +268,8 @@ row for row:
   (the group's 馬番 or 組番 split into its 1, 2 or 3 equal-width legs, joined with `,`, leading
   zeros dropped; FORECAST and TIERCE in finishing order, the others ascending), `dividend` (払戻金,
   yen per 100 as printed) and `is_refund` false. Within a race the pools come in that order, then
-  the record's slot order (dead heats give several slots). 人気順 is not used.
+  the record's slot order (dead heats give several slots), then the pool's refund rows (below).
+  人気順 is not used.
 - A slot is a row only when every leg and the payout are positive integers: blank slots, zeros
   (an unsold pool prints zeros and a blank payout) and zero or blank payouts write nothing, so a
   pool not yet sold in a year has no rows, never zeros.
@@ -264,7 +283,13 @@ The pool flags, each `1` when set, per pool (単勝 複勝 枠連 馬連 ワイ�
 - 返還フラグ (refund): some tickets were refunded, typically a horse scratched after sales opened.
   It writes no row of its own; the pool's paid combinations are still rows.
 - 返還馬番情報 (one `1` per refunded horse number), 返還枠番情報 and 返還同枠情報 (brackets) write
-  no row.
+  refund rows (#443): in each horse-number pool (WIN, PLACE, QUINELLA, QUINELLA_PLACE, FORECAST,
+  TRIO, TIERCE) every combination over the horse numbers 1..登録頭数 holding a refunded horse is a
+  row with `is_refund` true and a null `dividend`, in the paid rows' text (FORECAST and TIERCE
+  every ordered permutation); in BRACKET_QUINELLA every bracket pair holding a 返還枠番 bracket,
+  and b,b for each 返還同枠 bracket. They follow the pool's paid rows and are written whatever the
+  pool's 返還フラグ; a pool flagged 不成立 or 特払 writes none, and a combination that also paid
+  stays its paid row only.
 
 `horsetrack japan jravan dividends [--year YYYY ...]` runs the build and writes
 `reports/jravan-dividends.json` through `write_build_report`: per 開催年 (`by_year`) and in total

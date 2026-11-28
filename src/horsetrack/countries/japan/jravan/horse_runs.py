@@ -10,7 +10,11 @@ mark kept, as a form table lists it), in the jra store's vocabulary, which the j
 runners already write: the race's `race_index`,
 `venue`, `surface`, `course_config`, `distance_m`, `going` and `race_class` (on `race_id`), the
 rest from the runner. `win_odds` follows D10: the runner's Win odds for a run on or after
-2014-06-07, read with `touches_price=True`, and null before it, the run itself kept. The table is
+2014-06-07, read with `touches_price=True`, and null before it, the run itself kept. The NAR and
+overseas runs (#377) come the same way from `form_races.parquet` and `form_runners.parquet` when
+both are there, under their own `jurisdiction`, with `win_odds` null: a form run is never a price,
+so their `win_odds` is never scanned. This module and the builders are the only readers of the
+form tables; no betting reader reads them. The table is
 written to `processed/jravan/horse_runs.parquet` through `records.write_parquet` (tmp file and
 `os.replace`), in the columns and types of `schemas.TABLES['horse_runs']`, without schema
 metadata, sorted by its sort key and then `race_id`, so the same inputs give the same bytes. The
@@ -32,6 +36,8 @@ from horsetrack.core.eval.holdout import DEFAULT_COUNTRIES_DIR, _is_holdout_day,
 from horsetrack.core.store.build import arrow_schema
 from horsetrack.core.store.schemas import TABLES
 from horsetrack.countries.japan.jravan import records
+from horsetrack.countries.japan.jravan.races import FORM_RACES
+from horsetrack.countries.japan.jravan.runners import FORM_RUNNERS
 from horsetrack.countries.japan.models.v0.store import (
     COUNTRY,
     DATE_COLUMN,
@@ -51,7 +57,10 @@ FROM_RUNNER = (
     "declared_horse_wt_lb", "gear_raw", "placing_raw",
 )  # fmt: skip
 PRICE = "win_odds"
-YEAR_COUNTS = ("runners", "without_horse_id", "runs_written", "before_price_era", "without_race")
+YEAR_COUNTS = (
+    "runners", "without_horse_id", "runs_written", "form_runs_written", "before_price_era",
+    "without_race",
+)  # fmt: skip
 
 
 def _holdout_days() -> pa.Array:
@@ -72,11 +81,22 @@ def _not_held(held: pa.Array, lo: date, hi: date) -> ds.Expression | None:
     return ~ds.field(DATE_COLUMN).isin(days) if len(days) else None
 
 
-def _years(held: pa.Array) -> list[int]:
-    """Every calendar year from the first to the last race day of the jravan races and runners,
-    holdout days excluded in the scan."""
+def _sources() -> list[tuple[str, str, bool]]:
+    """The (races, runners, priced) table pairs to read: the JRA tables, priced, and the form
+    tables (#377), never priced, when both their files are there."""
+    folder = paths.processed_dir(SOURCE)
+    pairs = [("races", "runners", True)]
+    if all((folder / f"{t}.parquet").is_file() for t in (FORM_RACES, FORM_RUNNERS)):
+        pairs.append((FORM_RACES, FORM_RUNNERS, False))
+    return pairs
+
+
+def _years(held: pa.Array, sources: list[tuple[str, str, bool]]) -> list[int]:
+    """Every calendar year from the first to the last race day of the `sources` tables, holdout
+    days excluded in the scan."""
     first, last = [], []
-    for table in ("races", "runners"):
+    for table in (t for races_table, runners_table, _ in sources
+                  for t in (races_table, runners_table)):  # fmt: skip
         days = read_store_table(
             table, columns=["race_date"], start=EARLIEST, end=LATEST, touches_price=False,
             where=_not_held(held, EARLIEST, LATEST), source=SOURCE,
@@ -88,22 +108,22 @@ def _years(held: pa.Array) -> list[int]:
     return list(range(min(first).year, max(last).year + 1)) if first else []
 
 
-def _runners(lo: date, hi: date, held: pa.Array) -> pa.Table:
-    """The runners of `lo..hi` with `FROM_RUNNER` and `win_odds`: the price read only inside D10's
-    era, null before it; holdout days excluded in the scan."""
+def _runners(lo: date, hi: date, held: pa.Array, table: str, priced: bool) -> pa.Table:
+    """The runners of `table` in `lo..hi` with `FROM_RUNNER` and `win_odds`: the price read only
+    inside D10's era and only when `priced`, else null; holdout days excluded in the scan."""
     parts = []
-    if lo < PRICE_ERA_START:
-        end = min(hi, PRICE_ERA_START - timedelta(days=1))
+    if lo < PRICE_ERA_START or not priced:
+        end = hi if not priced else min(hi, PRICE_ERA_START - timedelta(days=1))
         before = read_store_table(
-            "runners", columns=FROM_RUNNER, start=lo, end=end, touches_price=False,
+            table, columns=FROM_RUNNER, start=lo, end=end, touches_price=False,
             where=_not_held(held, lo, end), source=SOURCE,
         )  # fmt: skip
         parts.append(before.append_column(PRICE, pa.nulls(before.num_rows, pa.float64())))
-    if hi >= PRICE_ERA_START:
+    if priced and hi >= PRICE_ERA_START:
         start = max(lo, PRICE_ERA_START)
         parts.append(
             read_store_table(
-                "runners",
+                table,
                 columns=[*FROM_RUNNER, PRICE],
                 start=start,
                 end=hi,
@@ -116,21 +136,30 @@ def _runners(lo: date, hi: date, held: pa.Array) -> pa.Table:
     return pa.concat_tables([part.cast(schema) for part in parts])
 
 
-def _year(lo: date, hi: date, held: pa.Array, counts: dict[str, int]) -> pa.Table:
-    """The `horse_runs` rows of `lo..hi`, unsorted."""
-    runners = _runners(lo, hi, held)
-    counts["runners"] = runners.num_rows
-    runners = runners.filter(pc.is_valid(runners["horse_id"]))
-    counts["without_horse_id"] = counts["runners"] - runners.num_rows
-    counts["before_price_era"] = pc.sum(pc.less(runners["race_date"], PRICE_ERA_START)).as_py() or 0
+def _year(
+    lo: date, hi: date, held: pa.Array, counts: dict[str, int], races_table: str,
+    runners_table: str, priced: bool,
+) -> pa.Table:  # fmt: skip
+    """The `horse_runs` rows of `lo..hi` from one races and runners pair, unsorted; `counts`
+    adds the pair's."""
+    runners = _runners(lo, hi, held, runners_table, priced)
+    counts["runners"] += runners.num_rows
+    with_id = runners.filter(pc.is_valid(runners["horse_id"]))
+    counts["without_horse_id"] += runners.num_rows - with_id.num_rows
+    runners = with_id
+    if priced:
+        before = pc.sum(pc.less(runners["race_date"], PRICE_ERA_START)).as_py() or 0
+        counts["before_price_era"] += before
     races = read_store_table(
-        "races", columns=["race_id", *FROM_RACE], start=lo, end=hi, touches_price=False,
+        races_table, columns=["race_id", *FROM_RACE], start=lo, end=hi, touches_price=False,
         where=_not_held(held, lo, hi), source=SOURCE,
     )  # fmt: skip
     at = pc.index_in(runners["race_id"], value_set=races["race_id"].combine_chunks())
-    counts["without_race"] = at.null_count
+    counts["without_race"] += at.null_count
     race = races.take(at)
-    counts["runs_written"] = runners.num_rows
+    counts["runs_written"] += runners.num_rows
+    if not priced:
+        counts["form_runs_written"] += runners.num_rows
     schema = arrow_schema(NAME)
     return pa.table(
         {
@@ -149,9 +178,11 @@ def build_horse_runs() -> records.BuildReport:
     by_year: dict[int, dict[str, int]] = {}
     tables = []
     held = _holdout_days()
-    for year in _years(held):
+    sources = _sources()
+    for year in _years(held, sources):
         counts = dict.fromkeys(YEAR_COUNTS, 0)
-        tables.append(_year(date(year, 1, 1), date(year, 12, 31), held, counts))
+        for pair in sources:
+            tables.append(_year(date(year, 1, 1), date(year, 12, 31), held, counts, *pair))
         by_year[year] = counts
     table = pa.concat_tables(tables) if tables else schema.empty_table()
     keys = [*TABLES[NAME].sort_by, "race_id"]  # race_id breaks a tie, so no order is left open
@@ -175,7 +206,8 @@ def horse_runs_command() -> None:
         _die(f"jravan horse-runs failed: {type(exc).__name__}: {exc}")
     c = report.counts
     typer.echo(
-        f"horse_runs: {c['years']} years, {c['runs_written']} runs written, "
+        f"horse_runs: {c['years']} years, {c['runs_written']} runs written "
+        f"({c['form_runs_written']} NAR or overseas, win_odds null), "
         f"{c['before_price_era']} before the price era (win_odds null, D10), "
         f"{c['without_horse_id']} runners without a horse id, {c['without_race']} without a race"
     )
