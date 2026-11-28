@@ -740,3 +740,124 @@ def test_no_value_field_names_a_stake():
     for name in names:
         for word in ("stake", "bet", "kelly", "amount", "wager"):
             assert word not in name.lower(), f"{name} names a {word}"
+
+
+# ---------------------------------------------------------------------------------------------
+# Places from the runners at the start of sales (#566)
+#
+# `shadow_values(..., starters=None)`: JRA fixes the places Place and Wide pay, and whether they
+# are sold, by the runners at the start of sales. `starters` is that count; the default is
+# `board.starters` (the runners with a WIN price). It is validated: not below the runners priced
+# on the board (ValueError). Only the places come from it: the shocks, the p draws and every WIN
+# row are those of the priced runners alone, and the rows are still one per priced runner / pair.
+# ---------------------------------------------------------------------------------------------
+
+START_CASES = [
+    # (priced runners, runners at the start of sales, Place places, Wide places)
+    (7, 8, 3, 3),  # 8 drawn, one scratched after sales opened: Place still pays three
+    (7, 7, 2, 3),
+    (7, None, 2, 3),  # no keyword: the priced runners
+    (6, 8, 3, 3),  # two scratched after sales opened
+    (7, 12, 3, 3),
+    (5, 5, 2, 3),
+    (4, 5, 2, 3),  # 5 drawn, one out: Place is still sold, with two places
+    (4, 4, 0, 3),  # 4 drawn: no Place
+    (3, 4, 0, 3),  # 4 drawn, one out: no Place, Wide still sold
+    (3, 3, 0, 0),  # 3 starters: Wide is not sold
+]
+
+
+@pytest.mark.parametrize(("priced", "starters", "place_places", "wide_places"), START_CASES)
+def test_places_follow_the_runners_at_the_start_of_sales(
+    priced, starters, place_places, wide_places
+):
+    board = full_board(range(1, priced + 1))
+    ordering, nowcast = FakeOrdering(), ShockNowcast(scale=0.3)
+    win = PowerWin(1.4)
+    kwargs = {} if starters is None else {"starters": starters}
+    out = by_key(
+        shadow_values(
+            board,
+            tau_min=5,
+            models=models(win=win, ordering=ordering, nowcast=nowcast),
+            n_draws=40,
+            seed=9,
+            **kwargs,
+        )
+    )
+    # no selection and no new rows: one per priced runner and pair, whatever `starters` is
+    expected_keys = {(WIN, str(h)) for h in board.win}
+    expected_keys |= {(PLACE, str(h)) for h in board.place}
+    expected_keys |= {(WIDE, pair_key(a, b)) for a, b in board.wide}
+    assert set(out) == expected_keys
+    assert set(ordering.place_calls) == ({place_places} if place_places else set())
+    assert set(ordering.pair_calls) == ({wide_places} if wide_places else set())
+
+    ref = reference(board, nowcast.returned, 1.4, place_places, wide_places)
+    for (pool, c), row in out.items():
+        if pool == WIN:
+            assert row.value_mean == pytest.approx(float(ref[(pool, c)]["x"].mean()), abs=TOL)
+            continue
+        places = place_places if pool == PLACE else wide_places
+        if not places:
+            assert row.value_at_low is None and row.value_at_high is None
+            continue
+        assert row.value_at_low == pytest.approx(ref[(pool, c)]["low"], abs=TOL)
+        if ref[(pool, c)]["high"] is None:
+            assert row.value_at_high is None
+        else:
+            assert row.value_at_high == pytest.approx(ref[(pool, c)]["high"], abs=TOL)
+
+
+def test_a_scratch_after_sales_open_raises_place_values_to_three_places():
+    """An 8-drawn race with one scratch: the same board valued with three places is worth more
+    on every runner than with two, and the WIN rows do not move."""
+    board = full_board(range(1, 8), scratched=(8,))
+    assert board.starters == 7
+    three = by_key(shadow_values(board, tau_min=2, models=models(), n_draws=30, seed=3, starters=8))
+    two = by_key(shadow_values(board, tau_min=2, models=models(), n_draws=30, seed=3))
+    for h in board.place:
+        a, b = three[(PLACE, str(h))], two[(PLACE, str(h))]
+        assert a.board_odds == b.board_odds
+        assert a.value_at_low > b.value_at_low
+    for h in board.win:
+        assert three[(WIN, str(h))] == two[(WIN, str(h))]
+    for a, b in board.wide:  # Wide pays three places from four starters either way
+        assert three[(WIDE, pair_key(a, b))] == two[(WIDE, pair_key(a, b))]
+
+
+@pytest.mark.parametrize("n", [5, 7, 8, 10])
+def test_starters_equal_to_the_priced_runners_changes_nothing(n):
+    board = full_board(range(1, n + 1))
+    plain = shadow_values(board, tau_min=5, models=models(), n_draws=25, seed=6)
+    same = shadow_values(board, tau_min=5, models=models(), n_draws=25, seed=6, starters=n)
+    assert same == plain
+
+
+@pytest.mark.parametrize(("priced", "starters"), [(7, 6), (7, 0), (8, 3), (5, 4)])
+def test_starters_below_the_priced_runners_is_refused(priced, starters):
+    board = full_board(range(1, priced + 1))
+    with pytest.raises(ValueError):
+        shadow_values(board, tau_min=5, models=models(), n_draws=10, seed=1, starters=starters)
+
+
+def test_starters_do_not_change_the_shocks_or_the_win_model_inputs():
+    board = full_board(range(1, 8), scratched=(8,))
+    base_now, with_now = ShockNowcast(), ShockNowcast()
+    base_win, with_win = PowerWin(), PowerWin()
+    shadow_values(
+        board, tau_min=5, models=models(win=base_win, nowcast=base_now), n_draws=12, seed=2
+    )
+    shadow_values(
+        board,
+        tau_min=5,
+        models=models(win=with_win, nowcast=with_now),
+        n_draws=12,
+        seed=2,
+        starters=8,
+    )
+    assert [c["pool"] for c in base_now.calls] == [c["pool"] for c in with_now.calls]
+    for a, b in zip(base_now.calls, with_now.calls, strict=True):
+        assert set(a["shocks"]) == set(b["shocks"]) == set(board.win)
+        for h in a["shocks"]:
+            assert np.array_equal(a["shocks"][h], b["shocks"][h])

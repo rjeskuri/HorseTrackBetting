@@ -102,6 +102,7 @@ LADDER_END = clock_time(17, 30)  # local: the ladder log is sealed by then, fina
 LOG_SUFFIX = ".jsonl.gz"
 ANY = "*"  # pool and combination of a no_board record: it stands for the whole point
 VALUE_FIELDS = ("value_mean", "value_q05", "value_q95", "value_at_low", "value_at_high")
+VALUES_VERSION = 2  # #566: Place and Wide places from the runners at the start of sales; 1 = none
 EXIT_ERROR = 1
 # The pools with no price forecast (#564): logged as p_model x the decision-time odds
 EXOTIC_POOLS = frozenset({QUINELLA, FORECAST, TRIO, TIERCE, BRACKET_QUINELLA})
@@ -380,7 +381,12 @@ def _point_records(
     seed = point_seed(s.seed, race.race_id, tau)
     if models is not None:
         try:
-            found = shadow_values(board, tau_min=tau, models=models, n_draws=s.n_draws, seed=seed)
+            # JRA fixes the places at the start of sales: the runners priced plus the ones scratched
+            # on the board, a scratch on the board being taken as after sales opened (ledger).
+            starters = len(set(board.win) | set(board.scratched))
+            found = shadow_values(
+                board, tau_min=tau, models=models, n_draws=s.n_draws, seed=seed, starters=starters
+            )
             values = {(v.pool, v.combination): v for v in found}
             lacking = {v.pool: v.reason for v in found if v.reason is not None}
             for pool, reason in lacking.items():
@@ -413,6 +419,9 @@ def _point_records(
             "seed": None if models is None else seed,
             "p_model": prob,
         }
+        if models is not None:  # a record without these keys is version 1 (places from the priced)
+            record["values_version"] = VALUES_VERSION
+            record["starters"] = starters
         records.append(record)
     if p_model and s.models is not None:  # p_model is only ever formed with models
         try:

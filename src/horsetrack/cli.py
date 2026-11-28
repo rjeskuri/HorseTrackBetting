@@ -30,6 +30,7 @@ from horsetrack.countries.japan.jravan.horse_runs import (
     horse_runs_command as jravan_horse_runs_command,
 )
 from horsetrack.countries.japan.jravan.masters import masters_command as jravan_masters_command
+from horsetrack.countries.japan.jravan.mining import mining_command as jravan_mining_command
 from horsetrack.countries.japan.jravan.odds import final_odds_command as jravan_final_odds_command
 from horsetrack.countries.japan.jravan.races import races_command as jravan_races_command
 from horsetrack.countries.japan.jravan.reconcile import (
@@ -54,6 +55,7 @@ from horsetrack.countries.japan.research.exacta_impact import exacta_impact_comm
 from horsetrack.countries.japan.research.exacta_rules import exacta_rules_command
 from horsetrack.countries.japan.research.joined_coverage import joined_coverage_command
 from horsetrack.countries.japan.research.leaderboard_build import leaderboard_command
+from horsetrack.countries.japan.research.member_filter import member_filter_app
 from horsetrack.countries.japan.research.pool_depth import pool_depth_app
 from horsetrack.countries.japan.research.predicted_final import predicted_final_app
 from horsetrack.countries.japan.research.spread_scan import spread_scan_app
@@ -101,6 +103,7 @@ japan.command("joined-coverage")(joined_coverage_command)
 japan.command("leaderboard")(leaderboard_command)
 japan.add_typer(spread_scan_app, name="spread-scan")
 japan.add_typer(predicted_final_app, name="predicted-final")
+japan.add_typer(member_filter_app, name="member-filter")
 japan.add_typer(bets_app, name="bets")
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")
 japan.add_typer(jrdb, name="jrdb")
@@ -116,6 +119,7 @@ jravan.command("dump")(jravan_dump_command)
 jravan.command("final-odds")(jravan_final_odds_command)
 jravan.command("horse-runs")(jravan_horse_runs_command)
 jravan.command("masters")(jravan_masters_command)
+jravan.command("mining")(jravan_mining_command)
 jravan.command("races")(jravan_races_command)
 jravan.command("reconcile")(jravan_reconcile_command)
 jravan.command("runners")(jravan_runners_command)
