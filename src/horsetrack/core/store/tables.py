@@ -64,7 +64,8 @@ def read_table(
     `where`; a table with a null race_date on any row raises ValueError (from its footer null
     counts or the bounds scan, before any row is read) rather than dropping it. Either way row
     groups are skipped only by their min/max statistics, and a row group that mixes kept and
-    excluded rows is still read from disk."""
+    excluded rows is still read from disk. A development read does not pre-buffer, so a skipped
+    group (a holdout day's, in a table written a day per row group) has no byte read (#510)."""
     spec = _spec(name)
     wanted = list(spec.columns) if columns is None else list(columns)
     unknown = [c for c in wanted if c not in spec.columns]
