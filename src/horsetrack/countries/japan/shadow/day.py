@@ -5,9 +5,12 @@ Each poll tails every venue's log (`odds_log.LogTail`: only members appended sin
 are parsed) and re-reads the post times (#113). A grid point (race, tau) is due once
 now >= post - tau + grace_s and is decided once, on `board_at(rows, race_id, post - tau)`: one
 record per WIN runner, PLACE runner and Wide pair, or one `no_board` record when there is no board
-or it is more than max_board_age_s older than the decision time. A point with a key already in the
-log is not decided again, so a restart writes no duplicate. The day ends once the last race's last
-point is due (16:45 Asia/Tokyo without post times), and the log is then sealed.
+or it is more than its tau's board-age limit older than the decision time (#625: max_board_age_s,
+tau -> seconds, by default nowcast_v0.yaml's `max_board_age_s`, the limits the v0 nowcast fit
+uses; a grid tau of decision.yaml without a limit refuses to start, before anything is written).
+A point with a key already in the log is not decided again, so a restart writes no duplicate. The
+day ends once the last race's last point is due (16:45 Asia/Tokyo without post times), and the log
+is then sealed.
 
 Model probabilities (#564): every record is `record_version` 2 and carries `p_model`, the shadow
 feed's p_model of the decision board (`shadow_feed._p_model`, starters by `_starters`), null
@@ -30,7 +33,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as clock_time
@@ -41,7 +44,7 @@ from zoneinfo import ZoneInfo
 import typer
 
 from horsetrack.core import paths
-from horsetrack.core.config import load_source
+from horsetrack.core.config import load_country_yaml, load_source
 from horsetrack.countries.japan import odds_log
 from horsetrack.countries.japan.board import snapshot
 from horsetrack.countries.japan.board.flags import FlagRules, avoid_flags, load_flag_rules
@@ -267,7 +270,7 @@ def _board_keys(board: RaceBoard) -> list[tuple[str, str, float, float | None]]:
 @dataclass(frozen=True)
 class _Settings:
     grace_s: float
-    max_board_age_s: float
+    max_board_age_s: Mapping[int, float]  # tau -> the oldest board accepted, in seconds
     max_lag_s: float
     models: ShadowModels | None
     flag_rules: FlagRules
@@ -339,7 +342,7 @@ def _point_records(
     board = race.board(tau)
     common = _common(race.race_id, tau, decision, written, s)
     age = None if board is None else (decision - board.capture_utc).total_seconds()
-    if board is None or age > s.max_board_age_s:
+    if board is None or age > s.max_board_age_s[tau]:
         record = {
             **common,
             "pool": ANY,
@@ -427,6 +430,23 @@ def _day_end(race_date: date, races: dict[str, _Race], grid: tuple[int, ...], gr
     return max(posts) - timedelta(minutes=min(grid)) + timedelta(seconds=grace_s)
 
 
+def _board_age_limits(
+    limits: Mapping[int, float] | float | None, grid: tuple[int, ...]
+) -> dict[int, float]:
+    """The board-age limit of every grid tau: nowcast_v0.yaml's `max_board_age_s` when None, the
+    same limit for every tau when a number. Raises ValueError when a grid tau has no limit."""
+    if limits is None:
+        limits = load_country_yaml("japan", "nowcast_v0").get("max_board_age_s") or {}
+    if isinstance(limits, Mapping):
+        by_tau = {int(tau): float(seconds) for tau, seconds in limits.items()}
+    else:
+        by_tau = {tau: float(limits) for tau in grid}
+    missing = [tau for tau in grid if tau not in by_tau]
+    if missing:
+        raise ValueError(f"max_board_age_s has no limit for grid tau {missing}")
+    return by_tau
+
+
 def run_shadow_day(
     race_date: date,
     *,
@@ -435,7 +455,7 @@ def run_shadow_day(
     sleep: Callable[[float], None] = time.sleep,
     poll_s: float = 10.0,
     grace_s: float = 15.0,
-    max_board_age_s: float = 120.0,
+    max_board_age_s: Mapping[int, float] | float | None = None,
     max_lag_s: float = 120.0,
     once: bool = False,
     models: ShadowModels | None,
@@ -447,12 +467,14 @@ def run_shadow_day(
 ) -> ShadowSummary:
     """Log every grid point of the day as it falls due, then seal the log. `once` decides every
     point due now and returns, sealing only when the day's last point is due. The odds logs are read
-    from `day_dir` when given (a pulled VM folder), else the Mac's own day folder."""
+    from `day_dir` when given (a pulled VM folder), else the Mac's own day folder.
+    `max_board_age_s`: tau -> seconds, one limit for every tau, or None for nowcast_v0.yaml's; a
+    grid tau without a limit raises ValueError before anything is written."""
     clock = now if now is not None else utc_now
     grid = tuple(sorted(load_decision_grid().minutes, reverse=True))
     settings = _Settings(
         grace_s,
-        max_board_age_s,
+        _board_age_limits(max_board_age_s, grid),
         max_lag_s,
         models,
         flag_rules,
