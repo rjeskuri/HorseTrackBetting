@@ -1815,7 +1815,11 @@ def render_public_report(result: C5Result) -> str:
         f"run read any store row; the pre-registration is `{SPEC_DOC}`.",
         f"- Code: `countries/japan/studies/exotic_c5.py` at `{result.git_sha[:12]}`. Reproduce: "
         f"`uv run horsetrack japan exotic-c5{flag} --members <HKTrack>/outputs/oof/"
-        f"{MEMBER_FILE}`.",
+        f"{MEMBER_FILE}`. #418's level-2 guard (`studies.meta.check_level2`) came after this "
+        f"family's first run, whose {FORM} records stand: under it, this command refuses this "
+        "member file before any fit, because D9's five seasons are met at level 2 on none of "
+        f"the scored folds (#87's documented shortfall), and records every {FORM} variant "
+        "failed.",
         f"- Run window: {result.run['date_from']} to {result.run['date_to']}, development days "
         "only.",
         f"- Records: `docs/experiments/registry/{COUNTRY}/{fid}.md` (the {FORM} records "
