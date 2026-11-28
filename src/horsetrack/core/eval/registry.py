@@ -11,7 +11,9 @@ A run's id is the sha256 hex of its record's canonical JSON: the same run twice 
 family's pre-registered spec is frozen with ``freeze_family``; the freeze is a line of its own,
 not a run. ``write_summary`` writes the committed, aggregate-only view, one file per family: E id,
 variant, status and per-fold metric, value, CI and n, with the values of licensed-source runs
-withheld.
+withheld. A record's ``notes`` (run metadata, such as why a measurement could not be made) are
+outside its variant identity and the summary; a record without notes is written without the key,
+so its line and id are those it had before ``notes`` existed.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import json
 import math
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -112,6 +114,7 @@ class RunRecord:
     status: str
     holdout_open: str | None = None
     owner_signoff: int | None = None
+    notes: dict[str, str] | None = None  # run metadata, outside the variant identity
 
 
 def _canonical(value: Any) -> str:
@@ -128,6 +131,16 @@ def _spec_hash(spec: dict) -> str:
     return hashlib.sha256(
         json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _record_data(record: RunRecord) -> dict:
+    """The record as its line holds it: ``asdict`` without ``notes`` when they are None, so a
+    record without notes has the id it had before the field existed, and an older line reads back
+    with notes None."""
+    data = asdict(record)
+    if data["notes"] is None:
+        del data["notes"]
+    return data
 
 
 def _record_from(data: dict) -> RunRecord:
@@ -224,8 +237,10 @@ def _problem(r: RunRecord) -> str | None:
         return "an adopted run needs owner_signoff, the ticket where the owner signed adoption"
     if r.holdout_open is not None and not isinstance(r.holdout_open, str):
         return f"holdout_open must be a line hash (str), got {r.holdout_open!r}"
+    if r.notes is not None and not _names(r.notes):
+        return f"notes must be None or map names to strings, got {r.notes!r}"
     try:
-        if _record_from(json.loads(_canonical(asdict(r)))) != r:
+        if _record_from(json.loads(_canonical(_record_data(r)))) != r:
             return "the record would not read back unchanged (tuples or non-str keys in params?)"
     except (TypeError, ValueError) as exc:
         return f"the record is not plain JSON: {exc}"
@@ -311,6 +326,35 @@ def _parse(data: bytes) -> _Chain:
     return chain
 
 
+def variant_count(records: Iterable[RunRecord]) -> int:
+    """How many variants the family has tried, from its runs ``records``: its distinct run
+    specifications ``(hypothesis_id, variant, fold_scheme, sources, components, params)`` plus the
+    feature-table identity of each data build (``_feature_tables``), compared as canonical
+    JSON so mapping key order does not matter. Each counts once whatever its status or number
+    of runs, failed ones included; a change to params, components, fold_scheme, sources or a
+    build's identity, or an added, removed or renamed build, is a new variant even under the
+    same label. A later decision, retry or rerun (another status, owner_signoff, metrics,
+    holdout_open, notes, git_sha or ticket, or a refresh of the same builds) is another run in
+    ``records()``, not another variant. ``Registry.family_size`` is this over one family's runs.
+    """
+    return len(
+        {
+            _canonical(
+                [
+                    r.hypothesis_id,
+                    r.variant,
+                    r.fold_scheme,
+                    r.sources,
+                    r.components,
+                    r.params,
+                    _feature_tables(r.data_builds),
+                ]
+            )
+            for r in records
+        }
+    )
+
+
 class Registry:
     """One country's run registry: append-only, hash-chained JSON lines."""
 
@@ -345,7 +389,7 @@ class Registry:
         if _licensed(record) and is_inside(self._path, env.repo_root()):
             raise LicensedOutputInRepo(f"the registry {self._path} is inside the repository")
 
-        data = asdict(record)
+        data = _record_data(record)
         run_id = _sha256(_canonical(data))
 
         def entry(chain: _Chain) -> dict:
@@ -368,32 +412,8 @@ class Registry:
         return runs if family_id is None else [r for r in runs if r.family_id == family_id]
 
     def family_size(self, family_id: str) -> int:
-        """How many variants the family has tried: its distinct run specifications
-        ``(hypothesis_id, variant, fold_scheme, sources, components, params)`` plus the
-        feature-table identity of each data build (``_feature_tables``), compared as canonical
-        JSON so mapping key order does not matter. Each counts once whatever its status or number
-        of runs, failed ones included; a change to params, components, fold_scheme, sources or a
-        build's identity, or an added, removed or renamed build, is a new variant even under the
-        same label. A later decision, retry or rerun (another status, owner_signoff, metrics,
-        holdout_open, git_sha or ticket, or a refresh of the same builds) is another run in
-        ``records()``, not another variant.
-        """
-        return len(
-            {
-                _canonical(
-                    [
-                        r.hypothesis_id,
-                        r.variant,
-                        r.fold_scheme,
-                        r.sources,
-                        r.components,
-                        r.params,
-                        _feature_tables(r.data_builds),
-                    ]
-                )
-                for r in self.records(family_id)
-            }
-        )
+        """How many variants the family has tried; the rule is `variant_count`'s."""
+        return variant_count(self.records(family_id))
 
     def freeze_family(self, family_id: str, spec: dict) -> str:
         """Freeze the family's pre-registered spec and return its hash (sha256 hex of the spec's
