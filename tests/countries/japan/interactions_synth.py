@@ -313,21 +313,25 @@ HJ_HORSES = 30
 HJ_JOCKEYS = 6
 
 
-def horse_jockey_frame(seed: int, tau: float, races: int) -> pd.DataFrame:
+def horse_jockey_frame(
+    seed: int, tau: float, races: int, *, level_sd: float = 0.0, horses: int = HJ_HORSES
+) -> pd.DataFrame:
     """race_id, race_utc, horse_id, jockey_id, finish_pos, x1: races of 6 to 8 distinct horses of
-    30, each with one of 6 jockeys drawn per run. u = X_COEF * x1 + a planted N(0, tau^2) effect
-    for each of the 180 horse x jockey cells (no horse level, no jockey main effect), so the cell
-    block's tau is the one planted."""
+    `horses` (30 by default), each with one of 6 jockeys drawn per run. u = X_COEF * x1 + a
+    planted N(0, tau^2) effect for each of the horses x 6 horse x jockey cells + (with
+    level_sd > 0) a planted N(0, level_sd^2) level for each horse; no jockey main effect. So the
+    cell block's tau, and the horse entity's sd, are the ones planted. A horse level next to its
+    own horse x jockey cells is the shape of #92's ability model with horse_id among its
+    entities, which is what the horse-level blocks take at store scale."""
     rng = np.random.default_rng(seed)
     codes = field(rng, races, sizes=(6, 8))
     n = len(codes)
-    horse = np.concatenate(
-        [rng.choice(HJ_HORSES, size=s, replace=False) for s in np.bincount(codes)]
-    )
+    horse = np.concatenate([rng.choice(horses, size=s, replace=False) for s in np.bincount(codes)])
     jockey = rng.integers(0, HJ_JOCKEYS, size=n)
-    cells = rng.normal(0.0, tau, size=(HJ_HORSES, HJ_JOCKEYS))
+    cells = rng.normal(0.0, tau, size=(horses, HJ_JOCKEYS))
+    level = rng.normal(0.0, level_sd, size=horses) if level_sd > 0 else np.zeros(horses)
     x1 = rng.normal(size=n)
-    pos = pl_positions(rng, X_COEF * x1 + cells[horse, jockey], codes)
+    pos = pl_positions(rng, X_COEF * x1 + level[horse] + cells[horse, jockey], codes)
     return pd.DataFrame(
         {
             "race_id": labels(codes),
