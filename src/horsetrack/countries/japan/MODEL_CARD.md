@@ -88,7 +88,42 @@ C3 forecasts a race's top-3 time at the decision time.
     resolved yet (#90, #329). The run predates #253, which now fills `rail_setting` in the store build from the
     cached JRA going pages; historical rail still needs #90, and the rerun by rail and layout is #329.
   - The 30-minute publication rule is an assumption in the ledger.
-  - C3 has no test against the final price yet (E39 marginal, #97).
+  - The race-level time test is not a test at the final price; E39 (#347, below) is.
+
+### C3: horse-level finish speed and p_speed (#97, scored at the final price by #347; leaderboard input)
+
+C3's horse layer turns each runner's expected finish time at t into a win probability, p_speed.
+- **Code:** the model is `countries/japan/models/speed_horse.py` (#97) on #96's `SpeedModel`, with the runs frame
+  from `countries/japan/models/speed_runs.py` (#346). The E39 study is `countries/japan/studies/p_speed.py` (#347).
+- **Data:** the store's JRA races and runners (netkeiba results) from 2010, column-scoped; holdout days dropped first;
+  jump races excluded. Prices only from 2014-06-07 (D10). No JRDB or JRA-VAN input is read.
+- **Model:** finish_time = baseline + θ_i(t) + b[style] · pace_r + w · (weight − w_ref) + ε.
+  - The baseline is #96's expected top-3 time of the run's race as of its off (a fit day's in-sample variant once
+    that day is fully resulted, the owner on #97, Q3 (b)). pace_r is the field's mean early position from earlier
+    races (#129; the owner on #97, Q2 (c)).
+  - θ_i is a random walk per horse (variance drift_var_per_day per day) from a population prior, forward-filtered by
+    Kalman; ε is normal or Student-t. The global terms are maximum likelihood on each fold's training runs.
+  - p_speed: Plackett-Luce, softmax(−μ / s) with s = 1 / the conditional-logit coefficient on −μ, or Henery,
+    P(fastest) of independent N(μ, s²) times with s its own ML. Fold k's s comes from earlier folds' predictions.
+- **Prediction at t:** each test race at the off, from every run and race-level result published strictly before it
+  (results at post + 30 min). Per #70 fold, `SpeedModel` is fitted on the training races and observes the test races;
+  `HorseSpeed` is fitted on the training runs and observes the test runs in one batch.
+- **Evaluation (E39):** standalone, p_speed's winner log loss against D4's calibrated market out of fold; marginal,
+  p_speed as a member of #87's stage-2 meta next to ln q (α = 0 is the market), the pooled α with a
+  meeting-clustered 95% CI and the paired out-of-fold ΔLL against the market-only stage-2 meta (D7 bounds).
+  Pre-registered grid: drift_var_per_day {0, 0.004} × t_df {normal, 5}, both methods.
+- **Result (#347):** no gain over the final price, so E39 does not reject the null.
+  - Over D4's window (normal error, 22,088 marginal races, 2020-Q2 to 2026-11-23), the stage-2 meta with p_speed
+    against the market-only meta gives ΔLL −0.00018 to +0.00003 nats per race. No lower bound is above 0, and the
+    largest one-sided upper bound is +0.00021.
+  - The pooled α is −0.031 to −0.006; where its CI excludes 0 (drift 0.004) it is negative.
+  - Alone, p_speed is 0.44 to 0.47 nats per race behind D4's calibrated market (pseudo-R² 0.08 to 0.09 against
+    0.26; 22,968 races).
+  - Sixteen variants, none failed ([docs/experiments/p-speed-japan.md](../../../../docs/experiments/p-speed-japan.md)).
+- **Limitations:**
+  - A Student-t fit takes about 15 minutes per fold at 788k training runs, so the Student-t points cover 2026-Q2 to
+    Q4 only; the full-window rerun is #651.
+  - The publication proxy (post + 30 min) and the race-level limitations above (rail, layout) carry over.
 
 ### C4: meta-model (#87; leaderboard input)
 
@@ -107,6 +142,7 @@ Splits, metric and confidence interval: not decided, see [the problem statement]
 Every result below feeds the leaderboard (`horsetrack japan leaderboard`, planned), failures included.
 
 - C3 time test (#305): the same-day variant lowers the time RMSE of E[top-3 time] by +0.233 s against the par alone (one-sided 95% lower bound +0.224). This is a time result only, not a result at the final price. See the C3 entry under Model.
+- C3 at the final price (E39, #347): p_speed in the stage-2 meta next to ln q gains nothing over the market-only meta. Over D4's window the ΔLL is −0.00018 to +0.00003 nats per race, with no lower bound above 0. Alone, p_speed is 0.44 to 0.47 nats per race behind the calibrated market. Family `japan-c3-p-speed-final-win`. See the C3 horse-level entry under Model.
 - C1 nowcast (#85): scored against the random walk and #116's drift on D9's folds of the JRA-VAN paths, in registry family `japan-c1-nowcast-final-shares-v2` (late scratches scored by #69). It supersedes `japan-c1-nowcast-final-shares`, whose spec dropped late-scratch cases. A run that also reads our own logged days registers under `japan-c1-nowcast-logged-wide-v1` (#411), its spec (v6's design with our logged days) naming both sources, with reports of its own; it is a line of its own, not a successor of #410's `japan-c1-nowcast-final-shares-v3` to `-v6`. Figures withheld (D21). See `docs/experiments/nowcast-japan.md` for the registry records, the trial runs and the private report.
 
 - C2 ability (#92): E33 (top-3 against winner-only training) and E34 (pooling against #129's as-of rates) scored after stage 2 on D9's folds from 2020-Q1, in registry family `japan-c2-ability-final-win-v2`, with the member's correlation with ln q_final, its standalone and stage-2 results, its C4 marginal against the market-only stage-2 meta and a by-class table. It supersedes `japan-c2-ability-final-win`, which had no market-only comparator and ended the rates' window on the last race day before the race. Figures withheld (D21). See `docs/experiments/ability-japan.md` for the records and the private report.
@@ -119,4 +155,4 @@ Every result below feeds the leaderboard (`horsetrack japan leaderboard`, planne
 
 ## Leaderboard
 
-Nothing is adopted or rejected (D16 as amended 2026-11-27, epic #447), so there is no adoption history. Every option, model and member is a row on the Japan leaderboard, ranked by its expected return per ¥100 staked at the final price, shrunk within its pool, with its CI and the number of variants searched: `horsetrack japan leaderboard` (planned), specified in `docs/specs/leaderboard.md` (planned). A model or member ranks by the return of the bets it selects and is listed unranked until one is measured (D16 as amended); C3, for one, has only a time error so far. The owner reviews it; the top-ranked options are shadowed and played by hand with small flat stakes (D19 as amended). An option whose selection is read from the final price (look-ahead) ranks in the same list, labelled by its selection (D16 as amended), and may be played only through its board-at-t proxy, labelled as such (D19 as amended).
+Nothing is adopted or rejected (D16 as amended 2026-11-27, epic #447), so there is no adoption history. Every option, model and member is a row on the Japan leaderboard, ranked by its expected return per ¥100 staked at the final price, shrunk within its pool, with its CI and the number of variants searched: `horsetrack japan leaderboard` (planned), specified in `docs/specs/leaderboard.md` (planned). A model or member ranks by the return of the bets it selects and is listed unranked until one is measured (D16 as amended); C3, for one, has a time error and a log loss at the final price (E39) so far, but no measured return. The owner reviews it; the top-ranked options are shadowed and played by hand with small flat stakes (D19 as amended). An option whose selection is read from the final price (look-ahead) ranks in the same list, labelled by its selection (D16 as amended), and may be played only through its board-at-t proxy, labelled as such (D19 as amended).
