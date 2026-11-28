@@ -89,7 +89,7 @@ RAIL_SETTINGS = frozenset({"A", "B", "C", "D"})
 UNMAPPED_COLUMNS = ("race_class", "weight_type", "surface", "going")
 YEAR_COUNTS = (
     "records", "versions_dropped", "deletions", "races_written", "non_jra_nar",
-    "non_jra_overseas", "non_jra_unknown", "unmapped",
+    "non_jra_overseas", "non_jra_unknown", "unmapped", "form_without_id",
 )  # fmt: skip
 
 
@@ -303,7 +303,9 @@ def build_races(
         form = rows[[w in keys.FORM_JURISDICTIONS for w in where_kept]]
         if len(form):
             form_frame = _map({name: array[form] for name, array in cols.items()}, form=True)[0]
-            form_frames.append(form_frame[form_frame["race_id"].notna()])
+            form_frame = form_frame[form_frame["race_id"].notna()]
+            counts["form_without_id"] = len(form) - len(form_frame)  # bad date or race number
+            form_frames.append(form_frame)
     empty = arrow_schema("races").empty_table().to_pandas()  # typed, so an empty file writes
     races = pd.concat(frames, ignore_index=True) if frames else empty
     form_races = pd.concat(form_frames, ignore_index=True) if form_frames else empty
@@ -335,7 +337,8 @@ def races_command(
     typer.echo(
         f"RA: {c['years']} years, {c['records']} records, {c['races_written']} races written, "
         f"{c['versions_dropped']} versions dropped, {c['deletions']} deletions, "
-        f"{c['non_jra_nar'] + c['non_jra_overseas'] + c['non_jra_unknown']} non-JRA races"
+        f"{c['non_jra_nar'] + c['non_jra_overseas'] + c['non_jra_unknown']} non-JRA races, "
+        f"{c['form_without_id']} NAR/overseas races without a form id"
     )
     for column, codes in report.unmapped.items():
         if codes:

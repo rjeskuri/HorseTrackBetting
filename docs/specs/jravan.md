@@ -136,8 +136,10 @@ so each family maps fields instead of slicing bytes:
   `'overseas'` for any other non-blank code, None for `'00'` or blank.
 - `form_race_id(year, mmdd, venue_code, race_no)` (#377): `<jurisdiction>:<YYYY-MM-DD>:<code>:<NN>`
   for a NAR or overseas venue, the code as JV-Data writes it (`overseas:2025-10-05:A4:09`);
-  `form_meeting_id` the same without the race. None for a JRA venue, one without a jurisdiction,
-  an invalid date or race number.
+  `form_meeting_id` the same without the race. Race number `00`, which JV-Data writes for some
+  overseas races, is a race of its own (`overseas:2025-10-05:A4:00`); `race_id` keeps refusing it.
+  None for a JRA venue, one without a jurisdiction, an invalid date or a race number that is not
+  two digits.
 - `announced_utc(year, race_mmdd, mmddhhmm)`: a JST minute (UTC+9, no DST) as an aware UTC
   datetime; a month after the race's month is in the year before (a December announcement for a
   January race). None for `00000000`, blank or an invalid time.
@@ -154,7 +156,8 @@ so each family maps fields instead of slicing bytes:
   (sorted by `race_id`) and `meetings.parquet` (by `race_date`, `venue`) in the store's columns
   and types. The same inputs give the same bytes. The report, `<reports dir>/jravan-races.json`,
   holds per year `records`, `versions_dropped`, `deletions`, `races_written`, `non_jra_nar`,
-  `non_jra_overseas`, `non_jra_unknown` and `unmapped` (a count), and `unmapped` as store column
+  `non_jra_overseas`, `non_jra_unknown`, `unmapped` (a count) and `form_without_id` (the kept NAR
+  and overseas races with no form id, so in no table), and `unmapped` as store column
   (`race_class`, `weight_type`, `surface`, `going`) -> code -> count over the races written.
 - Columns use the jra store's vocabulary (`jra/netkeiba/parse_results.py`): ids and keys from
   `keys.py`; `season` the calendar-year label; `race_class` from the youngest-age condition code,
@@ -198,8 +201,9 @@ post time a null `post_time_local`.
   file is a `FileNotFoundError` before anything is read (build the races first). The same inputs
   give the same bytes, and a second fill changes nothing. The report,
   `<reports dir>/jravan-runners.json`, holds per year `records`, `versions_dropped`, `deletions`,
-  `runners_written`, `non_jra_nar`, `non_jra_overseas`, `non_jra_unknown` and `unmapped` (a
-  count), in `counts` the totals and `races_timed`, and `unmapped` as field (`placing`, `sex`,
+  `runners_written`, `non_jra_nar`, `non_jra_overseas`, `non_jra_unknown`, `unmapped` (a count)
+  and `form_without_id` (the kept NAR and overseas runners whose race got no form id), in
+  `counts` the totals and `races_timed`, and `unmapped` as field (`placing`, `sex`,
   `dead_heat`, `margin`) -> code -> count over the runners written.
 - Columns use the jra store's vocabulary (`jra/netkeiba/parse_results.py`, whose placing codes,
   scratched codes, margin names, beaten-lengths sum and pound conversion the mapping reuses): the

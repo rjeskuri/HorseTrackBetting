@@ -4,17 +4,23 @@ Contract pinned here (the coder follows it):
 
 - `keys.form_race_id(year, mmdd, venue_code, race_no)`: `<jurisdiction>:<YYYY-MM-DD>:<code>:<NN>`
   for a venue `keys.jurisdiction` puts in `nar` or `overseas`, the venue code as JV-Data writes
-  it (`nar:2025-06-01:30:01`, `overseas:2025-10-05:A4:09`); None for a JRA venue (01-10, which
-  keeps `keys.race_id`), a venue with no jurisdiction ('00', blank), an invalid date or race
-  number. `keys.form_meeting_id(year, mmdd, venue_code)` is the same without the race.
-  `keys.race_id` and `keys.meeting_id` stay JRA-only.
+  it (`nar:2025-06-01:30:01`, `overseas:2025-10-05:A4:09`). Race number '00', which JV-Data
+  writes for some overseas races, is a valid race number for any form venue
+  (`overseas:2025-10-05:A4:00`, `nar:2025-06-01:30:00`); None for a JRA venue (01-10, which
+  keeps `keys.race_id`), a venue with no jurisdiction ('00', blank), an invalid date or a race
+  number that is not two digits. `keys.form_meeting_id(year, mmdd, venue_code)` is the same
+  without the race. `keys.race_id` and `keys.meeting_id` stay JRA-only, and `keys.race_id` keeps
+  refusing race number '00'.
 - `races.build_races` writes, beside `races.parquet` and `meetings.parquet`, the kept NAR and
   overseas races (one version per race, deletions dropped, as for JRA) to
   `<out>/form_races.parquet`: the columns and Arrow types of `TABLES['races']`, sorted by its
   sort key, `jurisdiction` 'nar' or 'overseas', `race_id`/`meeting_id` the form ids, `venue` the
   JV-Data venue code, the rest mapped as a JRA race is. `runners.build_runners` writes the kept
   NAR and overseas runners to `<out>/form_runners.parquet` the same way (`TABLES['runners']`).
-  A venue with no jurisdiction is written nowhere. `races.parquet`, `meetings.parquet` and
+  A venue with no jurisdiction is written nowhere. Each year of both reports counts, as
+  `form_without_id`, the kept NAR and overseas records that got no form id (an invalid date or
+  race number) and so reached no form table: 0 when every one has an id, so no loss is silent;
+  the report's totals carry it too. `races.parquet`, `meetings.parquet` and
   `runners.parquet` stay JRA-only and byte-identical to a build without the non-JRA records, and
   the reports' `unmapped` codes stay those of the JRA rows (the non_jra_* counts stay as they are).
 - `horse_runs.build_horse_runs` adds one row per form runner with a horse_id, the columns taken
@@ -101,6 +107,11 @@ FORM_ID_CASES = [  # (year, mmdd, venue, race) -> race id
     (("2025", "1005", "A4", "09"), "overseas:2025-10-05:A4:09"),
     (("2016", "1002", "B6", "04"), "overseas:2016-10-02:B6:04"),
     (("2010", "0105", "C0", "01"), "overseas:2010-01-05:C0:01"),
+    # race number 00, as JV-Data writes it for some overseas races: a race of its own
+    (("2025", "1005", "A4", "00"), "overseas:2025-10-05:A4:00"),
+    (("2003", "0413", "B6", "00"), "overseas:2003-04-13:B6:00"),
+    (("2024", "0229", "C0", "00"), "overseas:2024-02-29:C0:00"),
+    (("2025", "0601", "30", "00"), "nar:2025-06-01:30:00"),
 ]
 
 
@@ -116,10 +127,14 @@ def test_form_race_ids_carry_the_jurisdiction_date_venue_code_and_race() -> None
         assert keys.form_race_id("2025", "0601", venue, "01") is None, venue
         assert keys.form_meeting_id("2025", "0601", venue) is None, venue
     for year, mmdd, race in [("2025", "0229", "01"), ("2026", "1301", "01"), ("2026", "0000", "01"),
-                             ("    ", "0601", "01"), ("2025", "0601", "00"),
-                             ("2025", "0601", "  ")]:  # fmt: skip
+                             ("    ", "0601", "01"), ("2025", "0229", "00"),
+                             ("2025", "0601", "  "), ("2025", "0601", "0"), ("2025", "0601", "1 "),
+                             ("2025", "0601", "000")]:  # fmt: skip
         assert keys.form_race_id(year, mmdd, "30", race) is None, (year, mmdd, race)
         assert keys.form_race_id(year, mmdd, "A4", race) is None, (year, mmdd, race)
+    # race number 00 stays refused for a JRA race
+    for venue in ("01", "05", "10"):
+        assert keys.race_id("2025", "0601", venue, "00") is None, venue
 
 
 # ------------------------------------------------------------------------------------------------
@@ -147,6 +162,8 @@ RA_FORM_2025 = [
           cond="000", weight="0", grade="", track="11", turf="1", dirt="0", course="",
           laps=()),  # unset codes: counted as unmapped only if (wrongly) merged into the report
     rn.ra(mmdd="0601", venue="00", kai="00", nichi="00", race="01", kubun="A"),  # no jurisdiction
+    rn.ra(mmdd="1012", venue="B6", kai="00", nichi="00", race="00", kubun="B", distance=2000,
+          track="11", turf="1", dirt="0", course=""),  # race number 00, as for some overseas races
 ]  # fmt: skip
 FORM_RACES_EXPECTED = {  # race id -> the columns pinned
     "nar:2024-12-30:47:10": dict(jurisdiction="nar", meeting_id="nar:2024-12-30:47",
@@ -164,6 +181,9 @@ FORM_RACES_EXPECTED = {  # race id -> the columns pinned
     "overseas:2025-10-05:A4:09": dict(jurisdiction="overseas", meeting_id="overseas:2025-10-05:A4",
                                       race_date=date(2025, 10, 5), venue="A4", race_no=9,
                                       season="2025/26", distance_m=2400, surface="turf"),
+    "overseas:2025-10-12:B6:00": dict(jurisdiction="overseas", meeting_id="overseas:2025-10-12:B6",
+                                      race_date=date(2025, 10, 12), venue="B6", race_no=0,
+                                      season="2025/26", distance_m=2000, surface="turf"),
 }  # fmt: skip
 
 
@@ -195,8 +215,11 @@ def test_build_races_writes_nar_and_overseas_races_to_form_races_only(data: Path
         ).read_bytes(), table
     assert report.unmapped == jra_report.unmapped, "a form race's codes reached the JRA report"
     year = report.by_year[2025]
-    expected = {"races_written": 2, "non_jra_nar": 3, "non_jra_overseas": 1, "non_jra_unknown": 1}
+    expected = {"races_written": 2, "non_jra_nar": 3, "non_jra_overseas": 2, "non_jra_unknown": 1,
+                "form_without_id": 0}  # fmt: skip
     assert {k: year.get(k) for k in expected} == expected
+    assert report.by_year[2024].get("form_without_id") == 0
+    assert report.counts.get("form_without_id") == 0  # every form race got its id
 
     # `out` takes the form file too, and a rebuild gives the same bytes
     again = data / "again"
@@ -216,7 +239,9 @@ RA_FOR_SE = [
     rn.ra(mmdd="0710", venue="44", kai="05", nichi="02", race="11", kubun="A", **DIRT),
     rn.ra(mmdd="1005", venue="A4", kai="00", nichi="00", race="09", kubun="B"),
     rn.ra(mmdd="0601", venue="00", kai="00", nichi="00", race="01", kubun="A"),
+    rn.ra(mmdd="1102", venue="C0", kai="00", nichi="00", race="00", kubun="B"),  # race number 00
 ]
+SE_C0 = dict(mmdd="1102", venue="C0", kai="00", nichi="00", race="00", kubun="B")
 SE_NAR30 = dict(mmdd="0601", venue="30", kai="01", nichi="01", race="01", kubun="A")
 SE_JRA = [
     rn.se(race="01", horse_no=1, horse_id="2021100001", place=1, odds=3.4),
@@ -236,12 +261,20 @@ SE_FORM = [
           horse_id="2021100004", place=7, odds=0, fav=0),
     rn.se(mmdd="0601", venue="00", kai="00", nichi="00", race="01", kubun="A", horse_no=1,
           horse_id="2021199999", place=1),  # no jurisdiction: nowhere
+    rn.se(**SE_C0, horse_no=2, horse_id="2021100001", place=5, odds=0, fav=0),  # a JRA horse's
+    rn.se(**SE_C0, horse_no=6, horse_id="2021180006", place=1, odds=0, fav=0),  # start abroad
 ]  # fmt: skip
 FORM_RUNNERS_EXPECTED = {  # (race id, horse_no) -> the columns pinned
     ("nar:2025-06-01:30:01", 1): dict(horse_id="2021190001", finish_pos=1, placing_raw="1"),
     ("nar:2025-06-01:30:01", 2): dict(horse_id="2021190002", finish_pos=2, placing_raw="2"),
     ("nar:2025-07-10:44:11", 5): dict(horse_id="2021100001", finish_pos=3, placing_raw="3"),
     ("overseas:2025-10-05:A4:09", 3): dict(horse_id="2021100004", finish_pos=7, placing_raw="7"),
+    ("overseas:2025-11-02:C0:00", 2): dict(
+        horse_id="2021100001", finish_pos=5, placing_raw="5", race_no=0
+    ),
+    ("overseas:2025-11-02:C0:00", 6): dict(
+        horse_id="2021180006", finish_pos=1, placing_raw="1", race_no=0
+    ),
 }
 
 
@@ -280,9 +313,60 @@ def test_build_runners_writes_nar_and_overseas_runners_to_form_runners_only(data
     assert report.unmapped == jra_report.unmapped, "a form runner's codes reached the JRA report"
     year = report.by_year[2025]
     expected = {
-        "runners_written": 2, "non_jra_nar": 3, "non_jra_overseas": 1, "non_jra_unknown": 1,
+        "runners_written": 2, "non_jra_nar": 3, "non_jra_overseas": 3, "non_jra_unknown": 1,
+        "form_without_id": 0,
     }  # fmt: skip
     assert {k: year.get(k) for k in expected} == expected
+    assert report.counts.get("form_without_id") == 0  # every form runner got its race's id
+
+
+# NAR and overseas records with no form id, beside a JRA record with a bad date (not form) and a
+# venue with no jurisdiction (counted as non_jra_unknown, not here)
+RA_NO_ID_2025 = [
+    rn.ra(mmdd="0229", venue="30", kai="01", nichi="01", race="05", kubun="A", **DIRT),  # no day
+    rn.ra(mmdd="1005", venue="A4", kai="00", nichi="00", race=" 1", kubun="B"),  # race number
+    rn.ra(mmdd="0229", venue="05", race="03"),  # JRA
+]
+RA_NO_ID_2024 = [rn.ra(year="2024", mmdd="1301", venue="C0", kai="00", nichi="00", race="02",
+                       kubun="B")]  # fmt: skip
+SE_NO_ID = [
+    rn.se(mmdd="0229", venue="30", kai="01", nichi="01", race="05", kubun="A", horse_no=1,
+          horse_id="2021190005", place=1),
+    rn.se(mmdd="1005", venue="A4", kai="00", nichi="00", race=" 1", kubun="B", horse_no=2,
+          horse_id="2021180002", place=2, odds=0, fav=0),
+    rn.se(mmdd="1005", venue="A4", kai="00", nichi="00", race=" 1", kubun="B", horse_no=4,
+          horse_id="2021180004", place=1, odds=0, fav=0),
+    rn.se(mmdd="0229", venue="05", race="01", horse_no=9, horse_id="2021100009", place=9),  # JRA
+]  # fmt: skip
+
+
+def test_reports_count_the_form_records_that_got_no_form_id(data: Path) -> None:
+    """A kept NAR or overseas record with no form id reaches no form table; the reports count it
+    per year and in total, so the loss is never silent. JRA and no-jurisdiction records are not
+    form records and stay out of the count."""
+    raw = data / "raw" / SOURCE
+    write_raw(raw, "RA", 2024, RA_FORM_2024 + RA_NO_ID_2024 + RA_JRA_2024)
+    write_raw(raw, "RA", 2025, RA_FOR_SE + RA_NO_ID_2025)
+    write_raw(raw, "SE", 2025, SE_JRA + SE_NO_ID + SE_FORM)
+    race_report = races.build_races()
+    runner_report = runners.build_runners()
+
+    assert {y: c.get("form_without_id") for y, c in race_report.by_year.items()} == {
+        2024: 1, 2025: 2
+    }  # fmt: skip
+    assert race_report.counts.get("form_without_id") == 3
+    assert runner_report.by_year[2025].get("form_without_id") == 3
+    assert runner_report.counts.get("form_without_id") == 3
+
+    # the records without an id are in no table, and the rest are as without them
+    form_races = [r["race_id"] for r in read(processed(data) / f"{FORM_RACES}.parquet")]
+    assert form_races == [
+        "nar:2024-12-30:47:10", "nar:2025-06-01:30:01", "nar:2025-07-10:44:11",
+        "overseas:2025-10-05:A4:09", "overseas:2025-11-02:C0:00",
+    ], form_races  # fmt: skip
+    form_runners = [(r["race_id"], r["horse_no"]) for r in
+                    read(processed(data) / f"{FORM_RUNNERS}.parquet")]  # fmt: skip
+    assert form_runners == sorted(FORM_RUNNERS_EXPECTED), form_runners
 
 
 # ------------------------------------------------------------------------------------------------
@@ -436,6 +520,8 @@ def test_nar_and_overseas_starts_in_the_export_reach_horse_runs(data: Path) -> N
             (date(2025, 6, 1), "jra", "jra:2025-06-01:TOK:01", "TOK", 1600, "turf", "1",
              pytest.approx(3.4)),
             (date(2025, 7, 10), "nar", "nar:2025-07-10:44:11", "44", 1600, "dirt", "3", None),
+            (date(2025, 11, 2), "overseas", "overseas:2025-11-02:C0:00", "C0", 1600, "turf", "5",
+             None),  # race number 00 abroad
         ],
         "2021100004": [
             (date(2025, 6, 1), "jra", "jra:2025-06-01:TOK:02", "TOK", 1600, "turf", "1",
@@ -448,6 +534,10 @@ def test_nar_and_overseas_starts_in_the_export_reach_horse_runs(data: Path) -> N
         ],
         "2021190002": [
             (date(2025, 6, 1), "nar", "nar:2025-06-01:30:01", "30", 1600, "dirt", "2", None),
+        ],
+        "2021180006": [
+            (date(2025, 11, 2), "overseas", "overseas:2025-11-02:C0:00", "C0", 1600, "turf", "1",
+             None),
         ],
     }  # fmt: skip
 

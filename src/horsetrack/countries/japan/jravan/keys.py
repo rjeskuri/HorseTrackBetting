@@ -45,9 +45,11 @@ def _race_day(year: str, mmdd: str) -> date | None:
         return None
 
 
-def _race_no(race_no: str) -> int | None:
+def _race_no(race_no: str, *, zero: bool = False) -> int | None:
+    """The two-digit race number; '00' only with `zero` (a form race: JV-Data writes it for some
+    overseas races)."""
     digits = _digits(race_no, 2)
-    return int(digits) if digits is not None and int(digits) > 0 else None
+    return int(digits) if digits is not None and (zero or int(digits) > 0) else None
 
 
 def meeting_id(year: str, mmdd: str, venue_code: str) -> str | None:
@@ -81,9 +83,10 @@ def form_meeting_id(year: str, mmdd: str, venue_code: str) -> str | None:
 
 
 def form_race_id(year: str, mmdd: str, venue_code: str, race_no: str) -> str | None:
-    """`<jurisdiction>:<YYYY-MM-DD>:<code>:<NN>`, a NAR or overseas race's form id; None for a JRA
-    venue, a venue without a jurisdiction, an invalid date or race number."""
-    meeting, number = form_meeting_id(year, mmdd, venue_code), _race_no(race_no)
+    """`<jurisdiction>:<YYYY-MM-DD>:<code>:<NN>`, a NAR or overseas race's form id, race number
+    '00' included (JV-Data writes it for some overseas races); None for a JRA venue, a venue
+    without a jurisdiction, an invalid date or a race number that is not two digits."""
+    meeting, number = form_meeting_id(year, mmdd, venue_code), _race_no(race_no, zero=True)
     if meeting is None or number is None:
         return None
     return f"{meeting}:{number:02d}"

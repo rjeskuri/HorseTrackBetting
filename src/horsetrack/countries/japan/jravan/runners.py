@@ -111,7 +111,7 @@ PLACING, SEX_FIELD, DEAD_HEAT_FIELD, MARGIN_FIELD = "placing", "sex", "dead_heat
 UNMAPPED_FIELDS = (PLACING, SEX_FIELD, DEAD_HEAT_FIELD, MARGIN_FIELD)
 YEAR_COUNTS = (
     "records", "versions_dropped", "deletions", "runners_written", "non_jra_nar",
-    "non_jra_overseas", "non_jra_unknown", "unmapped",
+    "non_jra_overseas", "non_jra_unknown", "unmapped", "form_without_id",
 )  # fmt: skip
 
 
@@ -367,7 +367,9 @@ def build_runners(
         tables.append(_arrow(frame, schema))
         if len(form):  # the form runners' codes stay out of the report
             form_frame = _map({name: array[form] for name, array in cols.items()}, form=True)[0]
-            form_tables.append(_arrow(form_frame[form_frame["race_id"].notna()], schema))
+            form_frame = form_frame[form_frame["race_id"].notna()]
+            counts["form_without_id"] = len(form) - len(form_frame)  # bad date or race number
+            form_tables.append(_arrow(form_frame, schema))
         del cols, frame
     runners = _sorted(tables, schema, sort_by)
     del tables
@@ -404,7 +406,8 @@ def runners_command(
     typer.echo(
         f"SE: {c['years']} years, {c['records']} records, {c['runners_written']} runners written, "
         f"{c['versions_dropped']} versions dropped, {c['deletions']} deletions, "
-        f"{c['non_jra_nar'] + c['non_jra_overseas'] + c['non_jra_unknown']} non-JRA runners; "
+        f"{c['non_jra_nar'] + c['non_jra_overseas'] + c['non_jra_unknown']} non-JRA runners, "
+        f"{c['form_without_id']} NAR/overseas runners without a form id; "
         f"{c['races_timed']} races with the winner's time"
     )
     for field, codes in report.unmapped.items():
