@@ -151,7 +151,10 @@ The development readers take two routes over one open handle (`pyarrow.memory_ma
 table's file. The speed study's `studies/speed_run.read_inputs`, through
 `tables.read_table(..., development=...)`, reads through
 `core.eval.holdout.read_development(handle, country, ...)`, which scans the handle with
-`pyarrow.parquet.read_table`. `countries/japan/models/v0/store.read_store_table` builds the same
+`pyarrow.parquet.read_table(..., pre_buffer=False)` (#510: each column chunk read on its own, so
+no coalesced read spans a row group the scan skips). A study may also open its own handle
+(`pyarrow.OSFile`, as `research.spread_scan` reads `final_odds`) and call `read_development` on
+it. `countries/japan/models/v0/store.read_store_table` builds the same
 predicate with `core.eval.holdout.file_development_filter` on the handle and scans a `ds.dataset`
 of the file's path on a one-file read-only filesystem whose file is that handle (read by byte
 range, never as a buffer of the whole file), so its read is a dataset scan with the predicate as
@@ -159,8 +162,9 @@ its filter, its rows in file order, and without pre-buffering (each column chunk
 so no coalesced read spans a row group the scan skips). Either way the predicate first narrows the
 requested range to the file's own first and last race_date: from each row group's footer
 statistics, or, for a row group written without them, by one Acero plan over those row groups
-together (a scan of race_date, a projection and a min/max aggregate of the in-range days with a
-null count), so the file is scanned once for its bounds and only the two bounds and the count,
+together (a scan of race_date, without pre-buffering, a projection and a min/max aggregate of
+the in-range days with a null count), so the file is scanned once for its bounds and only the
+two bounds and the count,
 never a race_date column, reach Python. An open-ended read (`end=date.max`, as several callers
 pass) so asks the holdout rule only about the days the file can hold, and a range outside the
 file returns no row. The price-era guard of `read_store_table` checks the requested start,
@@ -179,9 +183,9 @@ filter before a table is built. A multi-day group after the holdout start is not
 such a group: 2026-12-03 and 12-04 are both holdout days. The jravan builders write
 `final_odds`, `pool_votes`, `races` and `runners` with one row group per race day (#502:
 `jravan.records.write_days`, each group's race_date statistics one day with no null), so
-`read_store_table` there skips every holdout day's group from the footer alone and decodes no
-byte of it (D14); a store built before #502 (a group per year) reads as described above until it
-is rebuilt. Every store table
+`read_development`, `read_table(..., development=...)` and `read_store_table` there skip every
+holdout day's group from the footer alone and read no byte of it (D14, #510); a store built
+before #502 (a group per year) reads as described above until it is rebuilt. Every store table
 is Parquet; the other files under `$HORSETRACK_DATA_DIR` (the ingest manifest, JSONL logs, the
 raw page cache) have no row-group statistics and are not development reads. `LockedHoldout.open`
 remains the only way to holdout rows.

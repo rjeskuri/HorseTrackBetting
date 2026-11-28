@@ -22,7 +22,9 @@ row. It is built from the calendar alone (every day from ``start`` to ``end`` is
 holdout row, outcomes included, reaches a table. Pruning is limited by what the file records:
 Parquet skips a row group only from its min/max statistics, so a row group whose days mix
 development and holdout days is still read from disk and decoded, and the scan's filter drops
-its holdout rows before any table is returned.
+its holdout rows before any table is returned. A row group holding one day (min == max, no
+null), as the jravan builders write ``final_odds``, ``pool_votes``, ``races`` and ``runners``
+(#502), is pruned whole, never decoded, when that day is a holdout day or out of range.
 
 ``read_development(handle, country, *, columns, start, end, where, column, dated)`` is the
 development scan of one Parquet file through one open handle (#415, PR #427 review): it first
@@ -34,8 +36,11 @@ two bounds and the count reach Python), so an open-ended read (``end=date.max``)
 ``development_filter`` over that narrowed range. With ``dated=True`` a file with a null
 ``column`` on any row raises ``ValueError`` before any row is read, instead of the undated rows
 being dropped. The bounds and the scan read one snapshot of the file even when it is
-atomically replaced meanwhile. ``split_off`` and ``LockedHoldout.open`` below are unchanged and
-remain the only way to the holdout rows.
+atomically replaced meanwhile. Both read each column chunk they need on its own, with no
+pre-buffering, whose coalesced reads could span a skipped group (#510): a row group pruned by
+its statistics has no byte read, so a development read of a store written a day per row group
+reads nothing of a holdout day (D14). ``split_off`` and ``LockedHoldout.open`` below are
+unchanged and remain the only way to the holdout rows.
 
 The holdout rows are reached only through ``LockedHoldout.open(ticket=..., purpose=...,
 family=...)``, which appends one JSON line to ``<countries_dir>/<country>/holdout_log.jsonl``
@@ -99,6 +104,8 @@ CONFIG_NAME = Path("config") / f"{CONFIG_STEM}.yaml"
 LOG_NAME = "holdout_log.jsonl"
 
 _ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+# Each column chunk read on its own: a pre-buffer coalesces nearby ranges, across a skipped group.
+_NO_PRE_BUFFER = ds.ParquetFragmentScanOptions(pre_buffer=False)
 
 
 class HoldoutConfigError(ValueError):
@@ -394,9 +401,13 @@ def file_development_filter(
     range outside the file keeps no row. For a reader that scans the same snapshot by another
     route (``models.v0.store``). With ``dated``, a file with a null ``column`` on any row is
     refused (``ValueError``) instead of its undated rows being dropped: the null count comes from
-    the same footer statistics and bounds scan, so no row is read for it. Raises
-    ``HoldoutConfigError`` when the country has no valid holdout definition."""
-    fragment = ds.ParquetFileFormat().make_fragment(handle)
+    the same footer statistics and bounds scan, so no row is read for it. The bounds scan reads
+    only the ``column`` chunks of the row groups without statistics, each on its own (no
+    pre-buffer reaching a group between them). Raises ``HoldoutConfigError`` when the country has
+    no valid holdout definition."""
+    fragment = ds.ParquetFileFormat(default_fragment_scan_options=_NO_PRE_BUFFER).make_fragment(
+        handle
+    )
     bounds, nulls = _file_day_bounds(fragment, column, start, end)
     if dated and nulls:
         raise ValueError(f"{column} has a missing value: {nulls} row(s) of the file have no day")
@@ -425,14 +436,18 @@ def read_development(
     the file's own first and last day (footer statistics, or one min/max scan of the row groups
     without them), so ``development_filter`` asks ``is_holdout_day`` only about days the file
     can hold; a range outside the file returns no row. Bounds and scan read the one open handle,
-    so a file atomically replaced at its path meanwhile is read as it was. With ``dated``, a file
-    with a null ``column`` on any row raises ``ValueError`` before any row is read (see
-    ``file_development_filter``). Raises ``HoldoutConfigError`` when the country has no valid
-    holdout definition."""
+    so a file atomically replaced at its path meanwhile is read as it was. The scan skips each
+    row group whose ``column`` statistics rule the predicate out and reads the column chunks of
+    the others one by one (no pre-buffer, whose coalesced reads could span a skipped group): a
+    group holding one holdout day (min == max, no null) has no byte read, while a group mixing
+    days, or without statistics, is read and its holdout rows dropped by the filter. With
+    ``dated``, a file with a null ``column`` on any row raises ``ValueError`` before any row is
+    read (see ``file_development_filter``). Raises ``HoldoutConfigError`` when the country has no
+    valid holdout definition."""
     keep = file_development_filter(
         handle, country, start=start, end=end, where=where, column=column, dated=dated
     )
-    return pq.read_table(handle, columns=list(columns), filters=keep)
+    return pq.read_table(handle, columns=list(columns), filters=keep, pre_buffer=False)
 
 
 def _race_days(frame: pd.DataFrame, date_col: str) -> pd.Series:
