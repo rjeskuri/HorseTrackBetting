@@ -1,0 +1,2771 @@
+"""Ticket #430: pre-register and run the final-board segment scan (N1), on synthetic stores only.
+
+The owner's reframe of 2026-11-27 applies: every cell is ranked (nothing is closed), the rows are
+the ranked cells in the candidate-cell schema, and `test_a_planted_cell_ranks_first` replaces the
+open/closed test.
+
+Contract pinned here for `horsetrack.countries.japan.research.pool_scan_run` (the coder implements
+what these tests call):
+
+- `FAMILY_ID: str` and `prereg_spec() -> dict`, the pre-registered spec (plain JSON). The family is
+  frozen with `registry.freeze_family(FAMILY_ID, prereg_spec())` before the scan runs.
+- `run_scan(*, date_from, date_to, out_dir, seed, registry=None) -> ScanResult`:
+  - raises a ValueError (any subclass) when `registry.frozen_spec_hash(FAMILY_ID)` is not the hash
+    of `prereg_spec()` (never frozen, or frozen with another spec), before any store file is opened
+    and without a scored record or a report;
+  - reads the jravan store (`processed/jravan/{final_odds,races,dividends}.parquet`) on development
+    days only (`core.eval.holdout.is_holdout_day`), from max(date_from, 2014-06-07) to date_to (D10:
+    an earlier `date_from` is clamped, not refused), flat races only (a `jump` race is not scored);
+    `LockedHoldout` is never opened;
+  - scores the six pools `pool_scan.POOLS` (store codes: QUINELLA_PLACE is Wide, FORECAST the
+    exacta) and appends registry records for every pool, failures included, each with
+    `family_id == FAMILY_ID`, `sources == ('jravan',)`, `hypothesis_id == 'E8'`, `ticket == 430` and
+    `params['pool']` the pool's code. A pool whose `core.eval.segment_roi.fit_segment_roi` raises
+    gets a `failed` record and the other pools are still scored; run_scan does not raise for it;
+  - writes through `core.eval.reports.write_report`, with a withheld source (jravan) among the
+    sources, the private report `ScanResult.report_path`, in `out_dir`, its name
+    `pool-scan-japan-<...>.md` holding the frozen spec hash, and the candidate-cell file
+    `ScanResult.candidates_path`, a `pool-scan*.json` in `out_dir / 'candidate-cells'` (review
+    round 7: the names also tell runs apart, so a rerun never replaces an earlier run's files; no
+    naming scheme is pinned). An `out_dir` inside the repository raises `LicensedOutputInRepo` and
+    writes no file there. Nothing else is written inside the repository (these tests also keep
+    `write_summary` out of it).
+- `ScanResult.rows: list[dict]`: every cell of every pool, one row per (pool, cell_id), in rank
+  order: rows with a `shrunk_edge` first, by `shrunk_edge` descending (the shrunk expected return
+  per unit at the final price, takeout included, minus 1), then the rows without one. The
+  candidate-cell file is a strict JSON array of the same rows in the same order. Each row holds the
+  candidate-cell keys of the ticket's Context and five more: `omega` (the shrunk omega), `omega_lo`
+  and `omega_hi` (its one-sided 95% lower and upper bounds), `family_size` and `variants_searched`
+  (ints, below; they are equal on a registry without superseded records). Where set,
+  `omega_lo <= omega <= omega_hi` and
+  `shrunk_edge == omega * payout_rate - 1`. `class_group` is the cell's `pool_scan.class_group`
+  level, null for a cell without a class level; `mean_return` is the cell's flat return per unit
+  staked at the final dividend, `mean_odds` the mean final odds of its bets (both over its bets),
+  `n_bets`, `n_race_days` and `n_meetings` count its staked combinations, race days and meetings
+  (`races.meeting_id`). A cell with bets has float figures; a cell without may hold nulls. Every
+  pool has a newcomer and a maiden cell.
+- `render_public_report(result) -> str`: names the family id, the spec hash, every run id the scan
+  appended and the private report's file name, carries 'withheld (D21)', and shows no figure from
+  the rows and no absolute data-directory path.
+
+Spec v2 (review of PR #496), pinned on small synthetic stores of their own:
+
+- A cell mixing payout rates (a Super Premium day's 80% beside a pool's ordinary rate) has
+  `1 + shrunk_edge` equal to its mean over bets of rate x omega: for 'all' = newcomer (boosted) +
+  conditions (ordinary), the bet-weighted mean of the two class cells' `1 + shrunk_edge`
+  ('readings', omega_full weighted by payout rate), not mean omega x mean rate.
+- A race and pool sold on the board with no dividends row ('exclusions') is left out of that pool
+  (its counts and mean return are the settled races' alone), counted in
+  `result.pool_excluded[pool]['unsettled: no paying dividends row']`, and scored in its other pools.
+- A narrower rerun on the same registry, where a cell scored by the earlier run has no bets
+  ('spa_stepm'): `result.snooping[pool]` holds `spa` (pvalue, `n_rules` = this run's cells with
+  bets, `family_size` = the registry size of `spa_family(pool)`) and `stepm` (a subset of those
+  cells), and no `error`.
+
+Review round 2 of PR #496, pinned the same way (the coder honours these names):
+
+- R1. A race and pool with a paying (non-refund) dividend whose combination is not on the pool's
+  priced, non-refunded final board (the board lacks it, prints it unpriced `0000` or cancelled
+  `****`, or the dividend names a combination the board does not have) is left out of that pool
+  and counted in `result.pool_excluded[pool][OFF_BOARD_REASON]`; it is never scored as if every
+  ticket lost and never fails the pool, and the race is scored in its other pools.
+- R2. A sparse PLACE or Wide odds band with bets and no payout keeps its baseline's uncertainty:
+  every reading finite, `omega >= 0`, `omega_hi > 0`, and the registered omega_full reading's
+  `p_beats_takeout[<cell_id>]` on `MAIN_SPAN` finite in [0, 1]. No exact value is pinned.
+- R3. `ScanResult.family_size` and each row's `family_size` are `registry.family_size(FAMILY_ID)`;
+  `ScanResult.variants_searched` and each row's `variants_searched` are that plus
+  `registry.family_size(f)` for each superseded family `f` (`SUPERSEDED_FAMILIES`, a tuple, or
+  `SUPERSEDED_FAMILY`, one id). Likewise `snooping[pool]['spa']['family_size']` is
+  `registry.family_size(spa_family(pool))` and `['variants_searched']` adds
+  `registry.family_size(spa_family(pool, f))` for each `f`.
+- R4 (D14), as revised in review round 5 (below): R4 first had the scan skip, unread and counted,
+  every `final_odds` row group whose race_date [min, max] spans a holdout day, its development days
+  unscored. The owner's D14 boundary (the ticket's definition of done) replaces that.
+- R5. Every pool's cells cross class with every other dimension, `class:<group>&<dim>:<level>`
+  for dim in CROSSED_WITH_CLASS; a newcomer or maiden cross cell with bets has a reading, and the
+  pool's SPA family holds the same cell list.
+- R6. PLACE and Wide also run #78's `fit_segment_roi` on their boards, registered as variants of
+  FAMILY_ID whose name holds ROI78, scored or failed, beside the empirical-Bayes variants.
+
+Review round 3 of PR #496:
+
+- The planted-cell test runs on the planted store with QUINELLA sold in one unit of races only
+  (`planted_thin`), so that a fair pool's cells are sparse enough for their omega_full bounds (the
+  row's `omega_lo`, `omega_hi`) to cover break-even, 1 / payout rate, from both sides.
+- A PLACE or Wide class whose few bets in an odds band all lose, inside a band that pays in other
+  classes (the class-by-band family's cells differing, so its between-cell variance is positive),
+  is no certain total loss: its omega_full has an upper bound above 0 and a spread, its registered
+  segment_effect reading a spread, and with more such losing bets its upper bounds are lower.
+  No estimator is pinned.
+
+Review round 5 of PR #496:
+
+- D14 at the owner's boundary: a development read meets D14 when no holdout value reaches Python.
+  A `final_odds`, `races` or `dividends` row group that mixes development and holdout days, or
+  whose [min, max] spans a holdout day (the jravan builders' annual row groups once an export
+  holds a holdout day), is read through the scan's day filter: every development day of it in the
+  range is scored in every pool, and no holdout race is. A row group that holds holdout days only
+  is still never decoded (the tests overwrite its pages with bytes no reader decodes, `poison`;
+  the store reader's day filter prunes it by its statistics).
+- Settlement in the fit: in the one-winner pools a dead heat pays several combinations, each at a
+  dividend below its board odds when JRA splits the pool. A cell's raw rho is the settled one, and
+  its shrunk omega_full (the row's `omega`, `shrunk_edge`) carries the settlement too: two stores
+  that differ only in those dividends differ in the shrunk reading by about what the dividends
+  take away, not by nothing.
+- The committed registry summary: `pool-scan run` with the default registry writes the pages of
+  N1's families (`FAMILY_ID` and `spa_family(pool)` for every pool), each what `write_summary`
+  writes from the registry's records of that family alone, and merges their links into the
+  committed index (`summary_dir`'s `README.md`): every line it lists stays, N1's are added once,
+  no other family's page is written or changed, and a family that is only in the local registry
+  never enters (the cross-pool study's `write_committed_summary`).
+- The private report's ranking table and each pool's table give, beside omega_full's omega and
+  its bounds, the expected return per 100 yen staked and its two bounds: 100 x omega x the cell's
+  payout rate, and the same of each bound. No column name or format is pinned: the figures are
+  found by value, to the precision printed.
+
+Review round 7 of PR #496:
+
+- D14, what reaches Python: on the annual layout (one row group per table mixing development and
+  holdout days, the dividends group's race_id max a holdout race), no holdout race id is returned
+  to Python by any Parquet row-group statistic (`pyarrow._parquet.Statistics` min, max, min_raw,
+  max_raw, however reached), and none appears in the result, the private report, the candidate
+  file or the registry.
+- Settlement above the board: a capped final-board quote can pay a dividend above its stored odds.
+  The fit keeps the full settled return: two stores that differ only in such dividends differ in
+  the shrunk reading (omega_full, its expected return) by at least half the raw excess the
+  dividends add, and by no more than all of it.
+- Reruns keep the run of record's files: a second `run_scan` into the same `out_dir` on a shorter
+  range writes its report and candidate file at other paths and leaves the first run's
+  byte-identical. Each candidate cell carries its run's first and last day (ISO dates) and seed
+  among its values, and so does the private report (no key name pinned).
+
+The stores are synthetic and built here (`write_store`): five runners per race, every pool's board
+priced so that each combination's realised wins over a unit of races match its implied
+probability exactly (counts per unit below), so every cell's flat return is known in closed form:
+the pool's payout rate when fair, 1.6 x 0.8 = 1.28 for the planted WIN newcomer races, whose
+boards are the open class's and whose winners are 1.6x as many (dead heats). The private report
+names every row's `cell_id`. Holdout days are picked with `is_holdout_day`, never assumed. No real
+data is read except by the `local` test, which skips without the real store.
+"""
+
+# Ruff reads the module under test as third-party until it exists, then as first-party.
+from __future__ import annotations  # noqa: I001
+
+import contextlib
+import copy
+import ctypes
+import dataclasses
+import gc
+import itertools
+import json
+import math
+import re
+import shutil
+import subprocess
+import uuid
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.dataset as ds
+import pyarrow.parquet as pq
+import pytest
+from typer.testing import CliRunner
+
+from horsetrack.core import env, paths
+from horsetrack.core.eval import holdout, reports, segment_roi
+from horsetrack.core.eval import registry as registry_module
+from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord
+from horsetrack.core.eval.reports import LicensedOutputInRepo
+from horsetrack.core.store.build import arrow_schema
+from horsetrack.countries.japan import takeout
+from horsetrack.countries.japan.jravan.odds import FINAL_ODDS_SCHEMA
+from horsetrack.countries.japan.models.v0 import store as v0store
+from horsetrack.countries.japan.research import pool_scan_run as psr
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+DATA_VAR = "HORSETRACK_DATA_DIR"
+PRICE_ERA_START = date(2014, 6, 7)
+SEED = 20261127
+WITHHELD = "withheld (D21)"
+
+POOLS = ("WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE", "FORECAST", "TRIO")
+# Payout rates (1 - takeout, config/jra.yaml, since 2014-06-07); no synthetic race is boosted.
+RATES = {
+    "WIN": 0.80,
+    "PLACE": 0.80,
+    "QUINELLA": 0.775,
+    "QUINELLA_PLACE": 0.775,
+    "FORECAST": 0.75,
+    "TRIO": 0.75,
+}
+RANGE_POOLS = ("PLACE", "QUINELLA_PLACE")
+GROUPS = ("newcomer", "maiden", "conditions", "open", "graded")
+GROUP = {"DEBUT": "newcomer", "MAIDEN": "maiden", "C1": "conditions", "OP": "open", "G3": "graded"}
+FLAT_CLASSES = tuple(GROUP)
+RACE_NO = {"DEBUT": 1, "MAIDEN": 2, "C1": 3, "OP": 4, "G3": 5}
+CLASS_RAW = {"DEBUT": "701", "MAIDEN": "703", "C1": "005", "OP": "999", "G3": "999"}
+JUMP_RACE_NO = 6
+HORSES = (1, 2, 3, 4, 5)
+
+# Review round 2: the names the coder implements (module docstring, R1-R6).
+OFF_BOARD_REASON = "unsettled: dividend not on the priced board"  # R1, pool_excluded[pool]
+ROI78 = "roi78"  # R6: in the variant name of PLACE's and Wide's #78 fit
+CROSSED_WITH_CLASS = ("band", "field", "fav", "pool_size", "surface", "venue")  # R5
+
+
+def _combos(pool: str) -> list[str]:
+    """Every combination of `pool` over five runners, written as the jravan store writes it."""
+    if pool in ("WIN", "PLACE"):
+        return [str(h) for h in HORSES]
+    if pool == "FORECAST":
+        return [f"{a},{b}" for a, b in itertools.permutations(HORSES, 2)]
+    legs = 3 if pool == "TRIO" else 2
+    return [",".join(str(h) for h in c) for c in itertools.combinations(HORSES, legs)]
+
+
+COMBOS = {pool: _combos(pool) for pool in POOLS}
+PAYING = {"WIN": 1, "PLACE": 2, "QUINELLA": 1, "QUINELLA_PLACE": 3, "FORECAST": 1, "TRIO": 1}
+
+# Wins per combination (in COMBOS order) over one unit of races; a combination's implied
+# probability is count / unit and its final odds rate * unit / count, so its realised return per
+# unit staked over the unit is exactly the payout rate. WIN's units are 40 races; the newcomer
+# (DEBUT) board is priced as the open class's, so no odds level, band or favourite level belongs to
+# newcomers alone, and the planted newcomer races win 1.6x as often (dead heats pay each co-winner).
+WIN_UNIT = 40
+WIN_COUNTS = {"E": (15, 10, 5, 5, 5), "B": (10, 10, 8, 6, 6), "C": (14, 10, 8, 6, 2)}
+WIN_PROFILE = {"DEBUT": "E", "MAIDEN": "B", "C1": "B", "OP": "E", "G3": "C"}
+OTHER_COUNTS = {
+    "PLACE": (20, (14, 9, 7, 6, 4)),
+    "QUINELLA": (20, (4, 3, 3, 2, 2, 2, 1, 1, 1, 1)),
+    "QUINELLA_PLACE": (20, (10, 9, 8, 7, 6, 6, 5, 4, 3, 2)),
+    "FORECAST": (40, (5,) * 2 + (3,) * 6 + (1,) * 12),  # odds 6, 10, 30: none of TRIO's
+    "TRIO": (20, (4, 3, 3, 2, 2, 2, 1, 1, 1, 1)),
+}
+POOL_SHARE = {
+    "WIN": 1.0,
+    "PLACE": 0.5,
+    "QUINELLA": 2.0,
+    "QUINELLA_PLACE": 0.8,
+    "FORECAST": 1.2,
+    "TRIO": 2.5,
+}
+PLANTED_BOOST = 1.6  # the WIN newcomer races' omega: realised wins 1.6x the implied probability
+UNIT = 20  # the dev store's scored days: one unit of each class
+
+
+def counts_for(pool: str, race_class: str) -> tuple[int, tuple[int, ...]]:
+    """(unit, implied wins per combination over the unit): the board's prices."""
+    if pool == "WIN":
+        return WIN_UNIT, WIN_COUNTS[WIN_PROFILE[race_class]]
+    return OTHER_COUNTS[pool]
+
+
+def wins_for(pool: str, race_class: str, boost: float) -> tuple[int, tuple[int, ...]]:
+    """(unit, realised wins per combination over the unit): `boost` x the implied wins."""
+    unit, counts = counts_for(pool, race_class)
+    wins = tuple(round(c * boost) for c in counts)
+    assert all(math.isclose(w, c * boost) for w, c in zip(wins, counts, strict=True))
+    return unit, wins
+
+
+def prices(pool: str, race_class: str, rate: float | None = None) -> list[float]:
+    """The board's final odds, priced at `rate` (None: the pool's ordinary payout rate)."""
+    unit, counts = counts_for(pool, race_class)
+    return [(RATES[pool] if rate is None else rate) * unit / c for c in counts]
+
+
+def paying_slots(unit: int, wins: Sequence[int]) -> list[list[int]]:
+    """Per slot of a unit, the distinct combinations that pay; combination i pays wins[i] times
+    over the unit (a slot holding two WIN combinations is a dead heat)."""
+    assert max(wins) <= unit
+    out: list[list[int]] = [[] for _ in range(unit)]
+    for s, i in enumerate(i for i, n in enumerate(wins) for _ in range(n)):
+        out[s % unit].append(i)
+    assert all(len(set(slot)) == len(slot) for slot in out)
+    return out
+
+
+def _check_profiles() -> None:
+    for pool in POOLS:
+        for race_class in FLAT_CLASSES:
+            unit, counts = counts_for(pool, race_class)
+            assert len(counts) == len(COMBOS[pool])
+            assert sum(counts) == unit * PAYING[pool]
+            assert all(len(s) == PAYING[pool] for s in paying_slots(unit, counts))
+    _, planted = wins_for("WIN", "DEBUT", PLANTED_BOOST)
+    assert planted == (24, 16, 8, 8, 8)
+    assert all(1 <= len(s) <= 2 for s in paying_slots(WIN_UNIT, planted))
+    for pool, counts in LONGSHOT_COUNTS.items():
+        fair = [c for c in COMBOS[pool] if LONGSHOT_HORSE not in c.split(",")]
+        assert len(fair) == len(counts) and sum(counts) == LONGSHOT_UNIT * PAYING[pool]
+        assert all(len(s) == PAYING[pool] for s in paying_slots(LONGSHOT_UNIT, counts))
+
+
+# A PLACE or Wide board whose combinations with horse 5 never pay on the span: horse 5 at odds 8
+# on PLACE (band 5.0-10.0), its pairs at odds 30 on Wide (band 20.0-50.0), bands no other price
+# falls in; the other combinations are fair over a unit of 20 races.
+LONGSHOT_HORSE = "5"
+LONGSHOT_UNIT = 20
+LONGSHOT_ODDS = {"PLACE": 8.0, "QUINELLA_PLACE": 30.0}
+LONGSHOT_COUNTS = {"PLACE": (14, 10, 9, 7), "QUINELLA_PLACE": (14, 12, 10, 10, 8, 6)}
+
+# Review round 3: an odds band that pays in some classes and never in others. Horse 5 (its pairs
+# on Wide) sits at SPARSE_ODDS on every such board, the only price in its band (PLACE 5.0-10.0,
+# Wide 10.0-20.0). On a 'pays' board it pays as often as its price implies over a unit of 20 races
+# (SPARSE_SHOT_WINS per combination); on a 'loses' board never. The other combinations are fair and
+# sit in one low band; on a 'loses' board they share the places evenly, so its other bets return
+# the payout rate in every race.
+SPARSE_UNIT = 20
+SPARSE_SHOT_WINS = {"PLACE": 3, "QUINELLA_PLACE": 1}
+SPARSE_ODDS = {pool: RATES[pool] * SPARSE_UNIT / w for pool, w in SPARSE_SHOT_WINS.items()}
+SPARSE_COUNTS = {
+    "pays": {"PLACE": (10, 9, 9, 9), "QUINELLA_PLACE": (10, 10, 9, 9, 9, 9)},
+    "loses": {"PLACE": (10, 10, 10, 10), "QUINELLA_PLACE": (10, 10, 10, 10, 10, 10)},
+}
+
+
+def _check_sparse_profiles() -> None:
+    for pool, odds in SPARSE_ODDS.items():
+        assert math.isclose(RATES[pool] * SPARSE_UNIT / SPARSE_SHOT_WINS[pool], odds), pool
+        shots = sum(LONGSHOT_HORSE in c.split(",") for c in COMBOS[pool])
+        for kind, by_pool in SPARSE_COUNTS.items():
+            counts = by_pool[pool]
+            assert len(counts) + shots == len(COMBOS[pool]), (pool, kind)
+            fair = [RATES[pool] * SPARSE_UNIT / c for c in counts]
+            assert max(fair) < odds / 2, (pool, kind)  # no other price in the long shot's band
+            shot = SPARSE_SHOT_WINS[pool] if kind == "pays" else 0
+            assert sum(counts) + shots * shot == SPARSE_UNIT * PAYING[pool], (pool, kind)
+            race = Race(date(2019, 1, 5), "TOK", 1, "C1", "turf", 0, 1, sparse_shot=kind)
+            unit, _, wins = board_for(pool, race)
+            assert all(len(s) == PAYING[pool] for s in paying_slots(unit, wins)), (pool, kind)
+
+
+_check_profiles()
+
+
+# --- synthetic jravan stores ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Race:
+    day: date
+    venue: str
+    race_no: int
+    race_class: str  # races.race_class
+    surface: str
+    position: int  # the race's place in its class's unit (which combinations pay)
+    pool_rank: int  # the race's pool size, in steps of 1e6 yen
+    win_boost: float = 1.0  # realised wins over implied, in the pools `boost_pools`
+    boost_pools: tuple[str, ...] = ("WIN",)
+    priced_at: float | None = None  # the payout rate every board is priced at (None: RATES)
+    longshot: bool = False  # PLACE and Wide boards carry the never-paying long shot
+    # PLACE and Wide boards carry the long shot at SPARSE_ODDS: 'pays' as often as its price
+    # implies, or 'loses' (never pays); None: the class's ordinary board
+    sparse_shot: str | None = None
+    unpaid: tuple[str, ...] = ()  # pools sold on the board with no dividends row
+    unsold: tuple[str, ...] = ()  # pools not sold: no board, no pool total, no dividends row
+    # (pool, defect): the pool's first paying combination is paid (a non-refund dividends row) but
+    # not on the priced, non-refunded board (OFF_BOARD_DEFECTS)
+    off_board: tuple[tuple[str, str], ...] = ()
+    # one-winner pools whose dead heats split the pool (JRA's rule): each of the k paying
+    # combinations pays its board odds / k; elsewhere a paying combination pays its board odds
+    split: tuple[str, ...] = ()
+    # one-winner pools whose final-board quotes are capped (review round 7): each paying
+    # combination pays ABOVE_BOARD[pool] x its stored board odds
+    above_board: tuple[str, ...] = ()
+
+    @property
+    def race_id(self) -> str:
+        return f"jra:{self.day.isoformat()}:{self.venue}:{self.race_no:02d}"
+
+    @property
+    def meeting_id(self) -> str:
+        return f"jravan:{self.day.isoformat()}:{self.venue}"
+
+
+def board_for(pool: str, race: Race) -> tuple[int, list[float], tuple[int, ...]]:
+    """(unit, final odds per combination in COMBOS order, realised wins per combination over the
+    unit) of `pool`'s board in `race`."""
+    if race.longshot and pool in LONGSHOT_ODDS:
+        counts, price, wins = iter(LONGSHOT_COUNTS[pool]), [], []
+        for combination in COMBOS[pool]:
+            if LONGSHOT_HORSE in combination.split(","):
+                price.append(LONGSHOT_ODDS[pool])
+                wins.append(0)
+            else:
+                c = next(counts)
+                price.append(RATES[pool] * LONGSHOT_UNIT / c)
+                wins.append(c)
+        return LONGSHOT_UNIT, price, tuple(wins)
+    if race.sparse_shot is not None and pool in SPARSE_ODDS:
+        counts, price, wins = iter(SPARSE_COUNTS[race.sparse_shot][pool]), [], []
+        shot = SPARSE_SHOT_WINS[pool] if race.sparse_shot == "pays" else 0
+        for combination in COMBOS[pool]:
+            if LONGSHOT_HORSE in combination.split(","):
+                price.append(SPARSE_ODDS[pool])
+                wins.append(shot)
+            else:
+                c = next(counts)
+                price.append(RATES[pool] * SPARSE_UNIT / c)
+                wins.append(c)
+        return SPARSE_UNIT, price, tuple(wins)
+    boost = race.win_boost if pool in race.boost_pools else 1.0
+    unit, wins = wins_for(pool, race.race_class, boost)
+    return unit, prices(pool, race.race_class, race.priced_at), wins
+
+
+def paying(pool: str, race: Race) -> list[int]:
+    """The combinations (indices into COMBOS[pool]) that pay in `race`."""
+    unit, _, wins = board_for(pool, race)
+    return paying_slots(unit, wins)[(7 * race.position) % unit]
+
+
+def dividend_odds(pool: str, race: Race) -> dict[int, float]:
+    """Each paying combination's dividend per unit staked: its board odds, or, in a pool of
+    `race.split` with k > 1 paying combinations (a dead heat), its board odds / k; in a pool of
+    `race.above_board` (a capped quote), ABOVE_BOARD[pool] x that."""
+    _, price, _ = board_for(pool, race)
+    payers = paying(pool, race)
+    k = len(payers) if pool in race.split else 1
+    factor = ABOVE_BOARD[pool] if pool in race.above_board else 1.0
+    return {i: price[i] / k * factor for i in payers}
+
+
+def race_return(pool: str, race: Race) -> float:
+    """The flat box's return in `race` at the final dividend (a dead heat pays each winner)."""
+    return sum(dividend_odds(pool, race).values())
+
+
+# R1's defects: how a paid combination is missing from the priced, non-refunded board.
+# 'absent': the board has no row for it; 'unpriced': its row has no price ('0000', never staked);
+# 'refunded': its row is cancelled after sale ('****'); 'stray': the board is whole and the
+# dividends row names a combination the board does not have (STRAY) instead.
+UNSTAKED = {"unpriced": "0000", "refunded": "****"}
+STRAY = {
+    "WIN": "6",
+    "PLACE": "6",
+    "QUINELLA": "1,6",
+    "QUINELLA_PLACE": "1,6",
+    "FORECAST": "6,1",
+    "TRIO": "1,2,6",
+}
+
+
+def _write_groups(
+    path: Path, rows: list[dict], schema: pa.Schema, group_of: Callable[[date], object] | None
+) -> None:
+    """`rows` (sorted by race_id) as Parquet: one row group per year when `group_of` is None, else
+    one per distinct `group_of(race_date)`, in order of each group's first day."""
+    if group_of is None:
+        groups = [list(g) for _, g in itertools.groupby(rows, key=lambda r: r["race_date"].year)]
+    else:
+        keyed: dict[object, list[dict]] = {}
+        for row in rows:
+            keyed.setdefault(group_of(row["race_date"]), []).append(row)
+        groups = sorted(keyed.values(), key=lambda g: min(r["race_date"] for r in g))
+    with pq.ParquetWriter(path, schema) as writer:
+        for rows_ in groups:
+            writer.write_table(pa.Table.from_pylist(rows_, schema=schema))
+
+
+def write_store(
+    data: Path, races: Sequence[Race], *, group_of: Callable[[date], object] | None = None
+) -> None:
+    """`processed/jravan/` final_odds (FINAL_ODDS_SCHEMA), races, meetings and dividends (the
+    store schemas) for `races`. final_odds has one row group per year and races one in all, or,
+    with `group_of`, both one row group per distinct `group_of(race_date)` (`group_of=lambda d: d`
+    is the day-isolated layout of #502)."""
+    folder = data / "processed" / "jravan"
+    folder.mkdir(parents=True, exist_ok=True)
+    board, paid, race_rows, meetings = [], [], [], {}
+    for race in races:
+        rid = race.race_id
+        when = datetime(race.day.year, race.day.month, race.day.day, 6, tzinfo=timezone.utc)
+        base = {"jurisdiction": "jra", "race_id": rid, "race_date": race.day, "venue": race.venue}
+        base["race_no"] = race.race_no
+        for pool in POOLS:
+            if pool in race.unsold:
+                continue
+            _, price, _ = board_for(pool, race)
+            order = sorted(range(len(price)), key=lambda i, price=price: (price[i], i))
+            rank = {i: r + 1 for r, i in enumerate(order)}
+            defect = dict(race.off_board).get(pool)
+            first = COMBOS[pool][paying(pool, race)[0]] if defect else None
+            for i, (combination, odds) in enumerate(zip(COMBOS[pool], price, strict=True)):
+                row = {
+                    **base,
+                    "pool": pool,
+                    "combination": combination,
+                    "odds": odds,
+                    "odds_hi": odds if pool in RANGE_POOLS else None,
+                    "fav_rank": rank[i],
+                    "investment": None,
+                    "status_raw": None,
+                    "published_utc": when,
+                    "data_kubun": "4",
+                }
+                if combination == first and defect == "absent":
+                    continue
+                if combination == first and defect in UNSTAKED:
+                    row |= {"odds": None, "odds_hi": None, "fav_rank": None}
+                    row["status_raw"] = UNSTAKED[defect]
+                board.append(row)
+            board.append(
+                {
+                    **base,
+                    "pool": pool,
+                    "combination": "__pool__",
+                    "odds": None,
+                    "odds_hi": None,
+                    "fav_rank": None,
+                    "investment": race.pool_rank * 1_000_000 * POOL_SHARE[pool],
+                    "status_raw": None,
+                    "published_utc": when,
+                    "data_kubun": "4",
+                }
+            )
+            if pool in race.unpaid:
+                continue
+            for i, dividend in dividend_odds(pool, race).items():
+                combination = COMBOS[pool][i]
+                if combination == first and defect == "stray":
+                    combination = STRAY[pool]
+                paid.append(
+                    {
+                        "jurisdiction": "jra",
+                        "race_id": rid,
+                        "pool": pool,
+                        "combination": combination,
+                        "dividend": dividend * 100,
+                        "is_refund": False,
+                    }
+                )
+        race_rows.append(
+            {
+                "jurisdiction": "jra",
+                "race_id": rid,
+                "meeting_id": race.meeting_id,
+                "race_date": race.day,
+                "venue": race.venue,
+                "race_no": race.race_no,
+                "season": str(race.day.year),
+                "race_name": f"synthetic {race.race_class}",
+                "race_class": race.race_class,
+                "distance_m": 3000 if race.surface == "jump" else 1600,
+                "surface": race.surface,
+                "field_size": len(HORSES),
+                "status": "run",
+                "weight_type": "age",
+                "race_class_raw": CLASS_RAW[race.race_class],
+            }
+        )
+        meetings[race.meeting_id] = {
+            "jurisdiction": "jra",
+            "meeting_id": race.meeting_id,
+            "race_date": race.day,
+            "venue": race.venue,
+            "season": str(race.day.year),
+            "status": "run",
+        }
+
+    board.sort(key=lambda r: (r["race_id"], r["pool"], r["combination"]))
+    _write_groups(folder / "final_odds.parquet", board, FINAL_ODDS_SCHEMA, group_of)
+    race_rows.sort(key=lambda r: r["race_id"])
+    if group_of is None:
+        pq.write_table(
+            pa.Table.from_pylist(race_rows, schema=arrow_schema("races")), folder / "races.parquet"
+        )
+    else:
+        _write_groups(folder / "races.parquet", race_rows, arrow_schema("races"), group_of)
+    pq.write_table(
+        pa.Table.from_pylist(
+            sorted(meetings.values(), key=lambda r: (r["race_date"], r["venue"])),
+            schema=arrow_schema("meetings"),
+        ),
+        folder / "meetings.parquet",
+    )
+    paid.sort(key=lambda r: r["race_id"])
+    pq.write_table(
+        pa.Table.from_pylist(paid, schema=arrow_schema("dividends")), folder / "dividends.parquet"
+    )
+
+
+def boost_free(day: date, venues: Iterable[str], race_nos: Iterable[int]) -> bool:
+    calendar = takeout.shipped_boosts()
+    return not any(
+        calendar.matching(day, venue, n, pool)
+        for venue in venues
+        for n in race_nos
+        for pool in POOLS
+    )
+
+
+def boost_free_days(start: date, count: int, venues, race_nos) -> list[date]:
+    days, day = [], start
+    while len(days) < count:
+        if boost_free(day, venues, race_nos):
+            days.append(day)
+        day += timedelta(days=1)
+    return days
+
+
+# The planted store: 40 days of 2019, a TOK (turf) and a KYO (dirt) meeting each day, one race of
+# each flat class per meeting. A (class, venue) unit has its own pool size; the ranks interleave
+# the classes so that every pool-size tertile mixes classes. WIN newcomer (DEBUT) races win 1.6x
+# as often as their boards imply (omega 1.6, flat return 1.28); every other board is fair.
+PLANTED_VENUES = {"TOK": "turf", "KYO": "dirt"}
+PLANTED_RANKS = {
+    ("DEBUT", "TOK"): 1,
+    ("MAIDEN", "TOK"): 2,
+    ("OP", "KYO"): 3,
+    ("C1", "TOK"): 4,
+    ("G3", "KYO"): 5,
+    ("DEBUT", "KYO"): 6,
+    ("MAIDEN", "KYO"): 7,
+    ("G3", "TOK"): 8,
+    ("OP", "TOK"): 9,
+    ("C1", "KYO"): 10,
+}
+PLANTED_DAYS = 40
+
+
+def planted_races(days: Sequence[date]) -> list[Race]:
+    return [
+        Race(
+            day=day,
+            venue=venue,
+            race_no=RACE_NO[c],
+            race_class=c,
+            surface=surface,
+            position=j,
+            pool_rank=PLANTED_RANKS[(c, venue)],
+            win_boost=PLANTED_BOOST if c == "DEBUT" else 1.0,
+        )
+        for j, day in enumerate(days)
+        for venue, surface in PLANTED_VENUES.items()
+        for c in FLAT_CLASSES
+    ]
+
+
+@dataclass(frozen=True)
+class DevStore:
+    """One TOK meeting a day: the five flat classes and a jump maiden (race 6)."""
+
+    scored: tuple[date, ...]  # development days from 2014-06-07 to date_to
+    pre_era: tuple[date, ...]  # before 2014-06-07 (D10)
+    held: tuple[date, ...]  # holdout days inside the requested range (D14)
+    after: tuple[date, ...]  # a development day after date_to
+    date_to: date
+    races: tuple[Race, ...]
+
+
+DEV_RANKS = {"DEBUT": 2, "MAIDEN": 4, "C1": 1, "OP": 5, "G3": 3}
+
+
+def dev_store() -> DevStore:
+    early = [date(2014, 6, 7), date(2014, 6, 8), date(2014, 6, 14), date(2014, 6, 15)]
+    pre_era = [date(2014, 6, 1), date(2014, 6, 6)]
+    late = [date(2026, 11, 28) + timedelta(days=k) for k in range(10)]
+    held = [d for d in late if holdout.is_holdout_day("japan", d)]
+    late_dev = [d for d in late if not holdout.is_holdout_day("japan", d)]
+    assert len(held) >= 2 and len(late_dev) >= 2, "the committed holdout rule should split the days"
+    date_to = late[-1]
+    after = date_to + timedelta(days=1)
+    while holdout.is_holdout_day("japan", after):
+        after += timedelta(days=1)
+    race_nos = range(1, JUMP_RACE_NO + 1)
+    mid = boost_free_days(date(2019, 1, 5), UNIT - len(early) - len(late_dev), ("TOK",), race_nos)
+    scored = sorted(early + mid + late_dev)
+    assert len(scored) == UNIT
+    assert all(boost_free(d, ("TOK",), race_nos) for d in scored)
+    assert all(not holdout.is_holdout_day("japan", d) for d in scored)
+
+    position = {d: i for i, d in enumerate(scored)}
+    everything = sorted([*scored, *pre_era, *held, after])
+    races = []
+    for k, day in enumerate(everything):
+        j = position.get(day, k % UNIT)
+        for c in FLAT_CLASSES:
+            races.append(Race(day, "TOK", RACE_NO[c], c, "turf", j, DEV_RANKS[c]))
+        races.append(Race(day, "TOK", JUMP_RACE_NO, "MAIDEN", "jump", j, 3))
+    return DevStore(
+        scored=tuple(scored),
+        pre_era=tuple(pre_era),
+        held=tuple(held),
+        after=(after,),
+        date_to=date_to,
+        races=tuple(races),
+    )
+
+
+# --- row groups that hold or span a holdout day (D14, the owner's boundary) -----------------------
+
+
+def board_path(data: Path) -> Path:
+    return data / "processed" / "jravan" / "final_odds.parquet"
+
+
+def row_group_days(path: Path) -> list[tuple[date, date]]:
+    """Each row group's race_date (min, max), from the footer statistics (no row is decoded)."""
+    meta = pq.ParquetFile(path).metadata
+    column = meta.schema.to_arrow_schema().get_field_index("race_date")
+    out = []
+    for g in range(meta.num_row_groups):
+        stats = meta.row_group(g).column(column).statistics
+        assert stats is not None and stats.has_min_max, f"row group {g} has no race_date statistics"
+        out.append((pd.Timestamp(stats.min).date(), pd.Timestamp(stats.max).date()))
+    return out
+
+
+def spans_holdout(lo: date, hi: date) -> bool:
+    """Whether a holdout day (`is_holdout_day`) lies in lo..hi, both inclusive."""
+    days = (lo + timedelta(days=k) for k in range((hi - lo).days + 1))
+    return any(holdout.is_holdout_day("japan", d) for d in days)
+
+
+def poison(path: Path, groups: Iterable[int]) -> None:
+    """Overwrite every page of the row groups `groups` with bytes no Parquet reader decodes, the
+    footer (schema, statistics, offsets) untouched: a scan that skips those groups by their
+    statistics reads the file as before, and decoding any of their pages raises."""
+    meta = pq.ParquetFile(path).metadata
+    data = bytearray(path.read_bytes())
+    for g in groups:
+        group = meta.row_group(g)
+        for c in range(group.num_columns):
+            chunk = group.column(c)
+            start = chunk.data_page_offset
+            if chunk.has_dictionary_page and chunk.dictionary_page_offset is not None:
+                start = min(start, chunk.dictionary_page_offset)
+            size = chunk.total_compressed_size
+            data[start : start + size] = b"\xff" * size
+    path.write_bytes(bytes(data))
+
+
+def poison_holdout_only(path: Path, first: date, last: date) -> list[int]:
+    """Poison every row group of `path` whose rows all fall on holdout days, check that each now
+    fails to decode and the others still decode, and return the poisoned groups inside
+    first..last: the ones no development read needs. A row group that mixes development and
+    holdout days, or spans a holdout day, is left readable: the owner's D14 boundary has the scan
+    decode it and drop its holdout rows inside the scan."""
+    days = row_group_days(path)
+    file = pq.ParquetFile(path)
+    held = [
+        g
+        for g in range(len(days))
+        if all(
+            holdout.is_holdout_day("japan", d)
+            for d in set(file.read_row_group(g, columns=["race_date"]).column(0).to_pylist())
+        )
+    ]
+    poison(path, held)
+    file = pq.ParquetFile(path)
+    for g in held:
+        with pytest.raises(Exception):  # noqa: B017, PT011 -- any decode error will do
+            file.read_row_group(g)
+    clean = [g for g in range(len(days)) if g not in held]
+    assert clean and file.read_row_groups(clean).num_rows > 0
+    return [g for g in held if first <= days[g][0] and days[g][1] <= last]
+
+
+def spanning_layout(store: DevStore) -> tuple[Callable[[date], object], set[date]]:
+    """Row groups for the dev store with two that span a holdout day without being one: two
+    development days with a holdout day between them share one (it holds no holdout row, but its
+    [min, max] spans one), and a development day shares one with a holdout day; every other day
+    has its own. Returns `group_of` and the development days in those two groups."""
+    late_dev = [d for d in store.scored if d >= min(store.held)]
+    a, b = next((x, y) for x, y in itertools.pairwise(late_dev) if spans_holdout(x, y))
+    rest = [d for d in late_dev if d not in (a, b)]
+    assert len(rest) >= 2, "the committed holdout rule should leave late development days"
+    mixed_dev = rest[0]
+    mixed_held = next(h for h in store.held if not a < h < b)
+    groups: dict[date, object] = {a: "straddle", b: "straddle"}
+    groups |= {mixed_dev: "mixed", mixed_held: "mixed"}
+    return (lambda day: groups.get(day, day)), {a, b, mixed_dev}
+
+
+def scan_decoding_no_holdout_group(store: Path, registry: Registry, **kwargs):
+    """`scan`, naming a decode of a poisoned row group for what it is."""
+    try:
+        return scan(store, registry, **kwargs)
+    except Exception as exc:
+        if "deserializ" in str(exc).lower() or "page header" in str(exc).lower():
+            pytest.fail(
+                "run_scan decoded a final_odds row group that holds holdout days only (its pages "
+                f"are poisoned): {type(exc).__name__}: {exc}"
+            )
+        raise
+
+
+# --- registry, guards and spies -------------------------------------------------------------------
+
+
+def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    data = (tmp_path / "data").resolve()
+    data.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv(DATA_VAR, str(data))
+    return data
+
+
+def temp_registry(root: Path) -> Registry:
+    return Registry(root / "registry" / "japan.jsonl", holdout_log=root / "holdout_log.jsonl")
+
+
+def frozen_registry(root: Path) -> tuple[Registry, str]:
+    registry = temp_registry(root)
+    return registry, registry.freeze_family(psr.FAMILY_ID, psr.prereg_spec())
+
+
+def registry_lines(registry: Registry) -> list[dict]:
+    if not registry.path.exists():
+        return []
+    return [json.loads(line) for line in registry.path.read_text().splitlines() if line]
+
+
+def run_ids(registry: Registry) -> list[str]:
+    return [
+        e["run_id"]
+        for e in registry_lines(registry)
+        if e["kind"] == "run" and e["record"]["family_id"] == psr.FAMILY_ID
+    ]
+
+
+class Forbidden(BaseException):
+    """A guarded call was made. A BaseException, so that no `except Exception` hides it."""
+
+
+def guard(mp: pytest.MonkeyPatch) -> dict[str, list]:
+    """Never open the holdout; keep `write_summary` out of the repository; record every
+    `write_report` call (path, sources) and call through."""
+    calls: dict[str, list] = {"holdout_open": [], "write_report": [], "summary": []}
+
+    def no_open(*args, **kwargs):
+        calls["holdout_open"].append(args)
+        raise Forbidden("LockedHoldout.open was called: the scan reads development days only")
+
+    mp.setattr(holdout.LockedHoldout, "open", no_open)
+
+    real_report = reports.write_report
+
+    def spy_report(path, text, *, sources, repo_root=None):
+        calls["write_report"].append((Path(path), tuple(sources)))
+        return real_report(path, text, sources=sources, repo_root=repo_root)
+
+    mp.setattr(reports, "write_report", spy_report)
+    mp.setattr(psr, "write_report", spy_report, raising=False)
+
+    real_summary = registry_module.write_summary
+
+    def kept_out(registry, directory):
+        calls["summary"].append(Path(directory))
+        if not reports.is_inside(Path(directory), REPO_ROOT):
+            real_summary(registry, directory)
+
+    mp.setattr(registry_module, "write_summary", kept_out)
+    mp.setattr(psr, "write_summary", kept_out, raising=False)
+    return calls
+
+
+def block_store(mp: pytest.MonkeyPatch) -> list[str]:
+    """Make every route into a Parquet file raise `Forbidden`, and record it."""
+    opened: list[str] = []
+
+    def blocked(name):
+        def refuse(*args, **kwargs):
+            opened.append(name)
+            raise Forbidden(f"{name} was called before the family check")
+
+        return refuse
+
+    mp.setattr(v0store, "read_store_table", blocked("read_store_table"))
+    mp.setattr(psr, "read_store_table", blocked("read_store_table"), raising=False)
+    mp.setattr(pa, "memory_map", blocked("pyarrow.memory_map"))
+    mp.setattr(pq, "read_table", blocked("pyarrow.parquet.read_table"))
+    mp.setattr(pq, "ParquetFile", blocked("pyarrow.parquet.ParquetFile"))
+    mp.setattr(pq, "ParquetDataset", blocked("pyarrow.parquet.ParquetDataset"))
+    mp.setattr(ds, "dataset", blocked("pyarrow.dataset.dataset"))
+    mp.setattr(pd, "read_parquet", blocked("pandas.read_parquet"))
+    try:
+        import polars
+    except ImportError:
+        pass
+    else:
+        mp.setattr(polars, "scan_parquet", blocked("polars.scan_parquet"))
+        mp.setattr(polars, "read_parquet", blocked("polars.read_parquet"))
+    try:
+        import duckdb
+    except ImportError:
+        pass
+    else:
+        mp.setattr(duckdb, "connect", blocked("duckdb.connect"))
+    return opened
+
+
+def repo_status() -> str | None:
+    """`git status` of the repository, or None where git cannot say."""
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def scan(store: Path, registry: Registry, *, date_from: date, date_to: date, out_dir=None):
+    return psr.run_scan(
+        date_from=date_from,
+        date_to=date_to,
+        out_dir=store / "reports" if out_dir is None else out_dir,
+        seed=SEED,
+        registry=registry,
+    )
+
+
+def pool_rows(rows: Sequence[dict], pool: str) -> list[dict]:
+    return [r for r in rows if r["pool"] == pool]
+
+
+def with_bets(rows: Iterable[dict]) -> list[dict]:
+    return [r for r in rows if r["n_bets"] > 0]
+
+
+def spy_fits(mp: pytest.MonkeyPatch) -> list[frozenset[float]]:
+    """Record the distinct odds of every `fit_segment_roi` call's bets, and call through."""
+    seen: list[frozenset[float]] = []
+    real_fit = segment_roi.fit_segment_roi
+
+    def recorded(*args, **kwargs):
+        bets = args[0] if args else kwargs["bets"]
+        seen.append(frozenset(round(float(o), 6) for o in bets["odds"]))
+        return real_fit(*args, **kwargs)
+
+    mp.setattr(segment_roi, "fit_segment_roi", recorded)
+    mp.setattr(psr, "fit_segment_roi", recorded, raising=False)
+    return seen
+
+
+def superseded_families() -> tuple[str, ...]:
+    """The superseded family ids the spec names (R3): `SUPERSEDED_FAMILIES` or the one
+    `SUPERSEDED_FAMILY`."""
+    many = getattr(psr, "SUPERSEDED_FAMILIES", None)
+    return tuple(many) if many is not None else (psr.SUPERSEDED_FAMILY,)
+
+
+def earlier_record(family: str, variant: str, pool: str, status: str) -> RunRecord:
+    """A run of an earlier, superseded family (synthetic; it never read a store)."""
+    return RunRecord(
+        hypothesis_id="E8",
+        family_id=family,
+        variant=variant,
+        ticket=430,
+        git_sha="0" * 40,
+        data_builds={"final_odds": "processed/jravan/final_odds.parquet@earlier"},
+        sources=("jravan",),
+        fold_scheme="in-sample:development-days",
+        components={"bet": "flat_box_final_board"},
+        params={"pool": pool, "earlier": True},
+        metrics=(),
+        status=status,
+    )
+
+
+# --- the planted run (shared by the ranking, schema, report and public-report tests) --------------
+
+
+@dataclass(frozen=True)
+class PlantedRun:
+    result: object
+    data: Path
+    out_dir: Path
+    registry: Registry
+    spec_hash: str
+    calls: dict
+    repo_before: str | None
+    repo_after: str | None
+    fits: tuple[frozenset[float], ...]  # the distinct odds of each fit_segment_roi call
+
+
+@pytest.fixture(scope="module")
+def planted(tmp_path_factory: pytest.TempPathFactory) -> PlantedRun:
+    root = tmp_path_factory.mktemp("planted")
+    data = (root / "data").resolve()
+    data.mkdir()
+    days = boost_free_days(date(2019, 1, 5), PLANTED_DAYS, PLANTED_VENUES, RACE_NO.values())
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(DATA_VAR, str(data))
+        write_store(data, planted_races(days))
+        registry, spec_hash = frozen_registry(root)
+        calls = guard(mp)
+        fits = spy_fits(mp)
+        before = repo_status()
+        result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+        after = repo_status()
+    return PlantedRun(
+        result, data, data / "reports", registry, spec_hash, calls, before, after, tuple(fits)
+    )
+
+
+# Review round 3: the planted store with a fair QUINELLA pool sparse enough that its cells' bounds
+# cover break-even (1 / payout rate) as well as omega 1. QUINELLA is sold in the conditions races
+# at TOK only (positions 0-39: two QUINELLA units, every paying slot twice); every other race's
+# QUINELLA pool is not sold. A populated QUINELLA cell then holds whole units, so its flat return
+# is still exactly the payout rate, and every band holds enough winners for omega to stay near 1.
+# Every other pool is the planted one.
+THIN_QUINELLA = ("C1", "TOK")
+
+
+def thin_quinella_races(days: Sequence[date]) -> list[Race]:
+    out = []
+    for race in planted_races(days):
+        sold = (race.race_class, race.venue) == THIN_QUINELLA
+        out.append(race if sold else replace(race, unsold=("QUINELLA",)))
+    sold = sum("QUINELLA" not in r.unsold for r in out)
+    assert sold == len(days) and sold % OTHER_COUNTS["QUINELLA"][0] == 0, sold
+    return out
+
+
+@pytest.fixture(scope="module")
+def planted_thin(tmp_path_factory: pytest.TempPathFactory):
+    """The planted run's result on the planted store with QUINELLA sold in one unit of races."""
+    root = tmp_path_factory.mktemp("planted-thin")
+    data = (root / "data").resolve()
+    data.mkdir()
+    days = boost_free_days(date(2019, 1, 5), PLANTED_DAYS, PLANTED_VENUES, RACE_NO.values())
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(DATA_VAR, str(data))
+        write_store(data, thin_quinella_races(days))
+        registry, _ = frozen_registry(root)
+        calls = guard(mp)
+        result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+    assert calls["holdout_open"] == []
+    return result
+
+
+# ---------------------------------------------------------------------------------------------
+# DoD: the family's freeze line comes before every scored record
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("frozen", ["never", "with another spec"])
+def test_run_scan_refuses_an_unfrozen_family(tmp_path, monkeypatch, frozen):
+    data = data_dir(tmp_path, monkeypatch)
+    store = dev_store()
+    write_store(data, store.races)  # a complete store: only the family check can refuse
+    registry = temp_registry(tmp_path)
+    if frozen == "with another spec":
+        other = {**psr.prereg_spec(), "test_only_member": "not the pre-registered spec"}
+        registry.freeze_family(psr.FAMILY_ID, other)
+    calls = guard(monkeypatch)
+    opened = block_store(monkeypatch)
+
+    with pytest.raises(ValueError):
+        scan(data, registry, date_from=PRICE_ERA_START, date_to=store.date_to)
+
+    assert opened == []
+    assert calls["holdout_open"] == []
+    assert [r for r in registry.records(psr.FAMILY_ID) if r.status == "scored"] == []
+    out = data / "reports"
+    written = [p for p in out.rglob("*") if p.is_file()] if out.exists() else []
+    assert written == [], f"a refused scan wrote {written}"
+
+
+# ---------------------------------------------------------------------------------------------
+# DoD: no holdout day is read (D14), no price row before 2014-06-07 enters (D10), LockedHoldout is
+# never opened; flat races only
+# ---------------------------------------------------------------------------------------------
+
+
+def assert_scored_days(result, n_days: int) -> None:
+    """Every pool scores exactly `n_days` race days (one meeting a day), each class cell every
+    combination of the class's flat race on each of them."""
+    for pool in POOLS:
+        mine = with_bets(pool_rows(result.rows, pool))
+        assert mine, f"{pool} has no scored cell"
+        # a cell covers at most the scored days; each class cell covers every one of them
+        assert max(r["n_race_days"] for r in mine) == n_days, pool
+        assert max(r["n_meetings"] for r in mine) == n_days, pool
+        for group in GROUPS:
+            cells = [r for r in mine if r["class_group"] == group]
+            assert cells, f"{pool} has no {group} cell"
+            # every combination of the class's flat races on the scored days, and no more: the jump
+            # maiden, the pre-era days, the holdout days and the day after date_to add none
+            assert max(r["n_bets"] for r in cells) == n_days * len(COMBOS[pool]), (pool, group)
+
+
+def test_run_scan_reads_development_days_from_2014_06_07_only(tmp_path, monkeypatch):
+    data = data_dir(tmp_path, monkeypatch)
+    store = dev_store()
+    # day-isolated row groups, as #502 builds them; each holdout day's group is poisoned, so the
+    # scan must leave it undecoded (the day filter prunes it by its statistics)
+    write_store(data, store.races, group_of=lambda day: day)
+    poisoned = poison_holdout_only(board_path(data), PRICE_ERA_START, store.date_to)
+    assert len(poisoned) == len(store.held), "one row group per holdout day"
+    registry, _ = frozen_registry(tmp_path)
+    calls = guard(monkeypatch)
+    # the excluded days sit inside the requested range, so only the rules can exclude them
+    date_from = date(2014, 6, 1)
+    assert all(date_from <= d <= store.date_to for d in (*store.pre_era, *store.held))
+    assert all(d > store.date_to for d in store.after)
+
+    result = scan_decoding_no_holdout_group(
+        data, registry, date_from=date_from, date_to=store.date_to
+    )
+
+    assert isinstance(result, psr.ScanResult)
+    assert isinstance(result.rows, list)
+    assert_scored_days(result, len(store.scored))  # every development day from 2014-06-07
+    assert calls["holdout_open"] == []
+
+
+def test_a_row_group_mixing_development_and_holdout_days_keeps_its_development_days(
+    tmp_path, monkeypatch
+):
+    data = data_dir(tmp_path, monkeypatch)
+    store = dev_store()
+    group_of, shared = spanning_layout(store)
+    write_store(data, store.races, group_of=group_of)
+    # the holdout days in groups of their own are poisoned; the group mixing a development and a
+    # holdout day, and the one straddling a holdout day, stay readable (the owner's boundary)
+    poisoned = poison_holdout_only(board_path(data), PRICE_ERA_START, store.date_to)
+    assert len(poisoned) == len(store.held) - 1
+    assert shared <= set(store.scored) and all(d.year == 2026 for d in shared)
+    registry, _ = frozen_registry(tmp_path)
+    calls = guard(monkeypatch)
+
+    result = scan_decoding_no_holdout_group(
+        data, registry, date_from=PRICE_ERA_START, date_to=store.date_to
+    )
+
+    # every development day is scored, the two shared groups' included, and no holdout day is
+    assert_scored_days(result, len(store.scored))
+    assert calls["holdout_open"] == []
+
+
+# 2026 in the jravan builders' layout: one final_odds row group for the year, races and dividends
+# in one row group each, holding development days up to the holdout start and holdout days after
+# it. The holdout days' races run at HSN, a venue no development race uses, so a scored holdout
+# race would show in the venue:HSN cell.
+ANNUAL_DAYS = 10
+ANNUAL_TO = date(2026, 11, 27)  # the documented run's last day, the day before the holdout start
+HELD_VENUE = "HSN"
+
+
+def annual_races() -> tuple[list[Race], list[date], list[date]]:
+    race_nos = [RACE_NO[c] for c in FLAT_CLASSES]
+    dev = boost_free_days(date(2026, 6, 6), ANNUAL_DAYS, ("TOK",), race_nos)
+    late = [ANNUAL_TO + timedelta(days=k) for k in range(1, 15)]
+    held = [d for d in late if holdout.is_holdout_day("japan", d)][:2]
+    assert len(held) == 2 and dev[-1] <= ANNUAL_TO < held[0]
+    assert not any(spans_holdout(d, d) for d in dev)
+    races = [
+        Race(day, "TOK", RACE_NO[c], c, "turf", j, DEV_RANKS[c])
+        for j, day in enumerate(dev)
+        for c in FLAT_CLASSES
+    ]
+    races += [
+        Race(day, HELD_VENUE, RACE_NO[c], c, "turf", j, DEV_RANKS[c])
+        for j, day in enumerate(held)
+        for c in FLAT_CLASSES
+    ]
+    return races, dev, held
+
+
+# Review round 7 (D14): what reaches Python. The owner's boundary accepts Arrow decoding a mixed
+# row group in C++ before the scan's filter, never a holdout value returned to Python. A Parquet
+# row group's footer statistics are such a route: the dividends group of the annual layout ends
+# on a holdout race, so its race_id max is that race's id. Every accessor of
+# `pyarrow._parquet.Statistics` that returns a value is instrumented (on the type, so every route
+# to a statistic is seen: `read_metadata`, `ParquetFile`, a dataset fragment's row groups,
+# `to_dict`, the repr).
+STATISTIC_VALUES = ("min", "max", "min_raw", "max_raw")
+
+
+@contextlib.contextmanager
+def statistics_seen():
+    """Record (accessor, value) for every value a Parquet row-group statistic returns to Python
+    while the block runs. `Statistics` is an immutable extension type, so its accessors are
+    swapped in the type's own dict and the type's attribute cache is reset, then restored."""
+    from pyarrow import _parquet
+
+    kind = _parquet.Statistics
+    (own,) = (d for d in gc.get_referents(kind.__dict__) if isinstance(d, dict))
+    saved = {name: own[name] for name in STATISTIC_VALUES}
+    seen: list[tuple[str, object]] = []
+
+    def recorded(name, descriptor):
+        def get(stats):
+            value = descriptor.__get__(stats, kind)
+            seen.append((name, value))
+            return value
+
+        return property(get)
+
+    def reset() -> None:
+        ctypes.pythonapi.PyType_Modified(ctypes.py_object(kind))
+
+    try:
+        own.update({name: recorded(name, d) for name, d in saved.items()})
+        reset()
+        yield seen
+    finally:
+        own.update(saved)
+        reset()
+
+
+def holdout_ids_in(value: object, held: Iterable[date]) -> list[str]:
+    """The holdout race ids (any race on a day of `held`) that `value`, a string or bytes or
+    anything printed, names."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    text = value if isinstance(value, str) else repr(value)
+    return [f"jra:{day.isoformat()}:" for day in held if f"jra:{day.isoformat()}:" in text]
+
+
+@dataclass(frozen=True)
+class AnnualRun:
+    """The scan of the annual layout, shared by its two tests; `seen` holds every value a
+    row-group statistic returned to Python while the scan ran (`statistics_seen`)."""
+
+    result: object
+    races: tuple[Race, ...]
+    dev: tuple[date, ...]
+    held: tuple[date, ...]
+    data: Path
+    registry: Registry
+    calls: dict
+    seen: tuple[tuple[str, object], ...]
+
+
+@pytest.fixture(scope="module")
+def annual_run(tmp_path_factory: pytest.TempPathFactory) -> AnnualRun:
+    root = tmp_path_factory.mktemp("annual")
+    data = (root / "data").resolve()
+    data.mkdir()
+    races, dev, held = annual_races()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(DATA_VAR, str(data))
+        write_store(data, races)
+        registry, _ = frozen_registry(root)
+        calls = guard(mp)
+        with statistics_seen() as seen:
+            result = scan(data, registry, date_from=date(2026, 1, 1), date_to=ANNUAL_TO)
+    return AnnualRun(
+        result, tuple(races), tuple(dev), tuple(held), data, registry, calls, tuple(seen)
+    )
+
+
+def test_an_annual_row_group_holding_a_holdout_day_keeps_its_development_races(annual_run):
+    races, dev, held, data = annual_run.races, annual_run.dev, annual_run.held, annual_run.data
+    folder = data / "processed" / "jravan"
+    # one row group per table, each holding development and holdout rows
+    held_ids = {r.race_id for r in races if r.day in held}
+    for name in ("final_odds", "races", "dividends"):
+        file = pq.ParquetFile(folder / f"{name}.parquet")
+        assert file.metadata.num_row_groups == 1, name
+        ids = set(file.read_row_group(0, columns=["race_id"]).column(0).to_pylist())
+        assert held_ids <= ids and ids - held_ids, name
+    lo, hi = row_group_days(board_path(data))[0]
+    assert lo == dev[0] and hi == held[-1] and spans_holdout(lo, hi)
+
+    result = annual_run.result
+    scored = [r for r in races if r.day in dev]
+    # every development race of the year's row group is scored in every pool, settled at its
+    # dividend; no holdout race is
+    assert_scored_days(result, len(dev))
+    for pool in POOLS:
+        cells = {r["cell_id"]: r for r in pool_rows(result.rows, pool)}
+        n = len(scored) * len(COMBOS[pool])
+        assert cells["all"]["n_bets"] == n, pool
+        assert cells["venue:TOK"]["n_bets"] == n, pool
+        assert cells[f"venue:{HELD_VENUE}"]["n_bets"] == 0, pool
+        want = sum(race_return(pool, r) for r in scored) / n
+        assert cells["all"]["mean_return"] == pytest.approx(want, rel=1e-9), pool
+    assert annual_run.calls["holdout_open"] == []
+
+
+def test_no_holdout_race_id_reaches_python_on_the_annual_layout(annual_run):
+    held = annual_run.held
+    held_ids = {r.race_id for r in annual_run.races if r.day in held}
+    # the finding's layout: one dividends row group, holding development and holdout races, whose
+    # race_id max is a holdout race (read here by the test, outside the instrument)
+    dividends = annual_run.data / "processed" / "jravan" / "dividends.parquet"
+    meta = pq.ParquetFile(dividends).metadata
+    column = meta.schema.to_arrow_schema().get_field_index("race_id")
+    assert meta.num_row_groups == 1
+    stats = meta.row_group(0).column(column).statistics
+    assert stats.max in held_ids and stats.min not in held_ids
+
+    # the instrument sees a footer read, by either route, and is gone after its block
+    with statistics_seen() as probe:
+        footer = pq.read_metadata(dividends).row_group(0).column(column).statistics.to_dict()
+        fragment = next(iter(ds.dataset(dividends, format="parquet").get_fragments()))
+        assert footer["max"] == fragment.row_groups[0].statistics["race_id"]["max"]
+    leaks = [name for name, value in probe if holdout_ids_in(value, held)]
+    assert set(leaks) == {"max"} and len(leaks) >= 2, leaks  # both reads of the race_id max
+    count = len(probe)
+    assert pq.read_metadata(dividends).row_group(0).column(column).statistics.max in held_ids
+    assert len(probe) == count
+
+    # during the scan, no statistic returned a holdout race id to Python
+    seen = annual_run.seen
+    leaked = sorted({(name, str(value)) for name, value in seen if holdout_ids_in(value, held)})
+    assert leaked == [], (
+        "row-group statistics returned holdout race ids to Python (D14: no holdout value reaches "
+        f"Python): {leaked}"
+    )
+    # and nothing the run returns or writes names a holdout race
+    result = annual_run.result
+    outputs = {
+        "result": json.dumps(dataclasses.asdict(result), default=repr),
+        "private report": result.report_path.read_text(encoding="utf-8"),
+        "candidate file": result.candidates_path.read_text(encoding="utf-8"),
+        "registry": annual_run.registry.path.read_text(encoding="utf-8"),
+    }
+    for name, text in outputs.items():
+        assert holdout_ids_in(text, held) == [], f"the {name} names a holdout race"
+
+
+# ---------------------------------------------------------------------------------------------
+# DoD: the private report's ranking; the planted cell ranks first, a fair pool's cells cover
+# break-even and rank below it
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_planted_cell_ranks_first(planted_thin):
+    rows = planted_thin.rows
+    win = with_bets(pool_rows(rows, "WIN"))
+    assert win
+    top = win[0]
+    assert top["class_group"] == "newcomer", f"WIN's first cell is {top['cell_id']}"
+    # the planted cell's figures: every newcomer race returns 1.6 x the WIN payout rate
+    assert top["mean_return"] == pytest.approx(PLANTED_BOOST * RATES["WIN"], abs=1e-9)
+    if top["odds_band"] is None:
+        assert top["mean_odds"] == pytest.approx(np.mean(prices("WIN", "DEBUT")))
+    for r in win:
+        if r["class_group"] == "newcomer":
+            assert r["mean_return"] == pytest.approx(1.28, abs=1e-9), r["cell_id"]
+        elif r["class_group"] is not None:
+            assert r["mean_return"] == pytest.approx(RATES["WIN"], abs=1e-9), r["cell_id"]
+        else:  # a mixture of newcomer and fair races
+            assert RATES["WIN"] - 1e-9 <= r["mean_return"] <= 1.28 + 1e-9, r["cell_id"]
+    # within WIN the newcomer cell's shrunk omega is the highest
+    assert all(top["omega"] >= r["omega"] for r in win if r["omega"] is not None)
+    assert top["omega"] > 1.0
+
+    first = next(i for i, r in enumerate(rows) if r is top)
+    quinella = [(i, r) for i, r in enumerate(rows) if r["pool"] == "QUINELLA" and r["n_bets"] > 0]
+    assert quinella
+    # the fair pool is the races that sold it: every combination of the 40, no more
+    assert max(r["n_bets"] for _, r in quinella) == PLANTED_DAYS * len(COMBOS["QUINELLA"])
+    break_even = 1 / RATES["QUINELLA"]
+    quinella_mean_odds = np.mean(prices("QUINELLA", "C1"))
+    for i, r in quinella:
+        assert i > first, f"QUINELLA {r['cell_id']} ranks above the planted cell"
+        assert r["mean_return"] == pytest.approx(RATES["QUINELLA"], abs=1e-9), r["cell_id"]
+        if r["odds_band"] is None:
+            assert r["mean_odds"] == pytest.approx(quinella_mean_odds), r["cell_id"]
+        lo, omega, hi = r["omega_lo"], r["omega"], r["omega_hi"]
+        assert None not in (lo, omega, hi), r["cell_id"]
+        assert lo <= omega <= hi, r["cell_id"]
+        assert lo <= 1.0 <= hi, f"{r['cell_id']}: [{lo}, {hi}] misses the fair omega 1"
+        # the one-sided lower bound covers break-even: no fair cell is shown to beat the takeout
+        assert lo <= break_even, r["cell_id"]
+        # and, on a pool this sparse, neither is it shown to lose to the takeout: the ranking's
+        # reading (the row's omega_full bounds) covers break-even from both sides
+        assert lo <= break_even <= hi, f"{r['cell_id']}: [{lo}, {hi}] misses {break_even}"
+        assert abs(omega - 1.0) <= 0.1, r["cell_id"]
+    # every other fair pool returns exactly its payout rate in every cell
+    for pool in ("PLACE", "QUINELLA_PLACE", "FORECAST", "TRIO"):
+        for r in with_bets(pool_rows(rows, pool)):
+            assert r["mean_return"] == pytest.approx(RATES[pool], abs=1e-9), (pool, r["cell_id"])
+
+
+# ---------------------------------------------------------------------------------------------
+# DoD: every pool's run, scored or failed, is a registry record with the family id and
+# sources=('jravan',); the family size is reported with every result
+# ---------------------------------------------------------------------------------------------
+
+TRIO_ODDS = frozenset(round(o, 6) for o in prices("TRIO", "C1"))
+
+
+def _is_trio(bets: pd.DataFrame, takeout_col: str) -> bool:
+    """TRIO's bets in the dev store: takeout 0.25 and only TRIO's prices (FORECAST's differ)."""
+    odds = {round(float(o), 6) for o in bets["odds"]}
+    return bool(np.allclose(bets[takeout_col].astype(float), 0.25)) and odds <= TRIO_ODDS
+
+
+def test_a_failed_pool_still_writes_a_registry_record(tmp_path, monkeypatch):
+    assert not TRIO_ODDS & {round(o, 6) for o in prices("FORECAST", "C1")}
+    data = data_dir(tmp_path, monkeypatch)
+    store = dev_store()
+    write_store(data, store.races)
+    registry, _ = frozen_registry(tmp_path)
+    guard(monkeypatch)
+    real_fit = segment_roi.fit_segment_roi
+
+    def fit_failing_on_trio(*args, **kwargs):
+        if _is_trio(args[0] if args else kwargs["bets"], kwargs["takeout_col"]):
+            raise RuntimeError("injected: the TRIO shrinkage fit fails")
+        return real_fit(*args, **kwargs)
+
+    monkeypatch.setattr(segment_roi, "fit_segment_roi", fit_failing_on_trio)
+    monkeypatch.setattr(psr, "fit_segment_roi", fit_failing_on_trio, raising=False)
+
+    result = scan(data, registry, date_from=PRICE_ERA_START, date_to=store.date_to)
+
+    records = registry.records(psr.FAMILY_ID)
+    assert records
+    for r in records:
+        assert r.family_id == psr.FAMILY_ID
+        assert r.sources == ("jravan",)
+        assert r.hypothesis_id == "E8"
+        assert r.ticket == 430
+        assert r.params.get("pool") in POOLS, r.variant
+    by_pool = {pool: [r for r in records if r.params["pool"] == pool] for pool in POOLS}
+    assert any(r.status == "failed" for r in by_pool["TRIO"])
+    for pool in POOLS:
+        if pool == "TRIO":
+            continue
+        assert any(r.status == "scored" for r in by_pool[pool]), f"{pool} was not scored"
+        scored = [
+            r for r in with_bets(pool_rows(result.rows, pool)) if r["shrunk_edge"] is not None
+        ]
+        assert scored, f"{pool} has no ranked cell"
+
+    # the freeze line comes before every record of the family
+    lines = registry_lines(registry)
+    freeze = [i for i, e in enumerate(lines) if e["kind"] == "freeze"]
+    runs = [i for i, e in enumerate(lines) if e["kind"] == "run"]
+    assert len(freeze) == 1 and runs and min(runs) > freeze[0]
+    # the family size, failed variants included, is on every row
+    size = registry.family_size(psr.FAMILY_ID)
+    assert size >= len(POOLS)
+    assert {r["variants_searched"] for r in result.rows} == {size}
+
+
+# ---------------------------------------------------------------------------------------------
+# DoD: results read from the jravan store go through write_report, under the data dir (D21)
+# ---------------------------------------------------------------------------------------------
+
+
+def assert_output_names(result, out_dir: Path, spec_hash: str) -> None:
+    """The report in `out_dir`, named pool-scan-japan-<...>.md with the spec hash, the candidate
+    file a pool-scan*.json in `out_dir / 'candidate-cells'` (review round 7: no fixed name)."""
+    report, candidates = Path(result.report_path), Path(result.candidates_path)
+    assert report.parent.resolve() == Path(out_dir).resolve(), report
+    assert report.name.startswith("pool-scan-japan-") and report.suffix == ".md", report.name
+    assert spec_hash in report.name, report.name
+    assert candidates.parent.resolve() == (Path(out_dir) / "candidate-cells").resolve()
+    assert candidates.name.startswith("pool-scan") and candidates.suffix == ".json"
+
+
+def test_reports_go_through_write_report_outside_the_repo(planted, tmp_path, monkeypatch):
+    assert_output_names(planted.result, planted.out_dir, planted.spec_hash)
+    report, candidates = planted.result.report_path, planted.result.candidates_path
+    for path in (report, candidates):
+        assert path.is_file(), f"missing {path}"
+        assert path.resolve().is_relative_to(planted.data)
+        sources = [s for p, s in planted.calls["write_report"] if p.resolve() == path.resolve()]
+        assert sources, f"{path.name} was not written through write_report"
+        assert all(reports.is_withheld(s) for s in sources), sources
+    text = report.read_text(encoding="utf-8")
+    for row in planted.result.rows:
+        assert row["cell_id"] in text, f"the private report lacks {row['cell_id']}"
+    if planted.repo_before is not None and planted.repo_after is not None:
+        assert planted.repo_after == planted.repo_before, "run_scan wrote inside the repository"
+
+    # a target inside the repository is refused, and nothing lands there
+    data = data_dir(tmp_path, monkeypatch)
+    store = dev_store()
+    write_store(data, store.races)
+    registry, _ = frozen_registry(tmp_path)
+    guard(monkeypatch)
+    target = REPO_ROOT / f".pool-scan-test-{uuid.uuid4().hex[:12]}"
+    try:
+        with pytest.raises(LicensedOutputInRepo):
+            scan(data, registry, date_from=PRICE_ERA_START, date_to=store.date_to, out_dir=target)
+        landed = [p for p in target.rglob("*") if p.is_file()] if target.exists() else []
+        assert landed == [], f"files landed inside the repository: {landed}"
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 7: a rerun keeps the files the run of record links, and each file names its run
+# ---------------------------------------------------------------------------------------------
+
+
+def values_in(value: object) -> list[object]:
+    """Every scalar inside a parsed JSON value (dict values, list items), recursively."""
+    if isinstance(value, dict):
+        return [v for item in value.values() for v in values_in(item)]
+    if isinstance(value, list):
+        return [v for item in value for v in values_in(item)]
+    return [value]
+
+
+def assert_names_its_run(result) -> None:
+    """Every cell of the run's candidate file, and its private report, carry the run's first and
+    last day (ISO dates) and its seed."""
+    first, last = result.start.isoformat(), result.end.isoformat()
+    cells = _strict_json(Path(result.candidates_path).read_text(encoding="utf-8"))
+    assert isinstance(cells, list) and len(cells) == len(result.rows) > 0
+    for cell in cells:
+        held = values_in(cell)
+        texts = [v for v in held if isinstance(v, str)]
+        for day in (first, last):
+            assert any(day in v for v in texts), (cell["cell_id"], day)
+        seeds = [v for v in held if (_is_int(v) and v == result.seed) or v == str(result.seed)]
+        assert seeds, (cell["cell_id"], result.seed)
+    text = Path(result.report_path).read_text(encoding="utf-8")
+    assert first in text and last in text and str(result.seed) in text
+
+
+def test_a_rerun_keeps_the_earlier_runs_files(narrowing_runs):
+    # the run of record's range, then a shorter one into the same folder (narrowing_runs)
+    first, second = narrowing_runs.full, narrowing_runs.narrow
+    out_dir, calls, kept = narrowing_runs.out_dir, narrowing_runs.calls, narrowing_runs.kept
+    spec_hash = narrowing_runs.spec_hash
+    assert first.start < second.start <= second.end == first.end
+
+    for path, content in kept.items():
+        assert Path(path).is_file(), f"the rerun removed {path}"
+        assert Path(path).read_bytes() == content, f"the rerun replaced {Path(path).name}"
+    assert Path(second.report_path) != Path(first.report_path)
+    assert Path(second.candidates_path) != Path(first.candidates_path)
+    for result in (first, second):
+        assert_output_names(result, out_dir, spec_hash)
+        for path in (result.report_path, result.candidates_path):
+            assert Path(path).is_file(), path
+            sources = [s for p, s in calls["write_report"] if p.resolve() == Path(path).resolve()]
+            assert sources and all(reports.is_withheld(s) for s in sources), (path, sources)
+        assert_names_its_run(result)
+    # each run's candidate file is its own: the shorter run scored fewer bets
+    n_bets = [
+        {(c["pool"], c["cell_id"]): c["n_bets"] for c in _strict_json(Path(p).read_text("utf-8"))}
+        for p in (first.candidates_path, second.candidates_path)
+    ]
+    assert n_bets[1][("WIN", "all")] < n_bets[0][("WIN", "all")]
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 5: the private ranking gives the expected return per 100 yen with its bounds
+# ---------------------------------------------------------------------------------------------
+
+NUMBER = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
+
+def report_tables(text: str) -> list[tuple[str, list[list[str]]]]:
+    """Each Markdown table of `text`: the `## ` heading above it and its rows' cells, the header
+    row first and the separator row dropped."""
+    out: list[tuple[str, list[list[str]]]] = []
+    heading, rows = "", None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            heading = line[3:].strip()
+        if not line.startswith("|"):
+            rows = None
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if rows is None:
+            rows = []
+            out.append((heading, rows))
+        if not all(c and set(c) <= set("-: ") for c in cells):
+            rows.append(cells)
+    return out
+
+
+def printed_numbers(cell: str) -> list[tuple[float, int]]:
+    """Each number printed in a table cell (thousands commas and a yen sign allowed), with its
+    count of decimals."""
+    return [
+        (float(m), len(m.partition(".")[2]))
+        for m in NUMBER.findall(cell.replace(",", "").replace("¥", ""))
+    ]
+
+
+def prints_series(rows: list[list[str]], want: list[float]) -> bool:
+    """Whether one place in the table (a column, and the k-th number printed in its cell) shows
+    each row's value of `want`, to the precision printed."""
+    width = max(len(r) for r in rows)
+    for j, k in itertools.product(range(width), range(4)):
+        found = True
+        for row, value in zip(rows, want, strict=True):
+            numbers = printed_numbers(row[j]) if j < len(row) else []
+            if len(numbers) <= k:
+                found = False
+                break
+            x, decimals = numbers[k]
+            if abs(x - value) > 0.5 * 10.0**-decimals + 1e-9 * max(1.0, abs(value)):
+                found = False
+                break
+        if found:
+            return True
+    return False
+
+
+def test_the_private_ranking_gives_expected_return_per_100_yen_with_its_bounds(planted):
+    text = planted.result.report_path.read_text("utf-8")
+    rows = {(r["pool"], r["cell_id"]): r for r in planted.result.rows}
+    planted_key = ("WIN", "class:newcomer")
+    assert rows[planted_key]["omega"] is not None
+
+    def keyed(table: list[list[str]], pool: str | None) -> list[tuple[list[str], dict]]:
+        """The table's cell rows with a reading: those naming a cell (and, with `pool` None, its
+        pool) whose row has an omega."""
+        out = []
+        for cells in table[1:]:
+            pools = [pool] if pool is not None else [c for c in cells if c in POOLS]
+            key = next(((p, c) for p in pools for c in cells if (p, c) in rows), None)
+            if key is not None and rows[key]["omega"] is not None:
+                out.append((cells, rows[key]))
+        return out
+
+    tables = report_tables(text)
+    ranking = [keyed(t, None) for _, t in tables]
+    ranking = max(ranking, key=len)  # the ranking table holds every pool's cells
+    assert {r["pool"] for _, r in ranking} == set(POOLS)
+    targets = [("the ranking", ranking)]
+    for pool in POOLS:
+        mine = [keyed(t, pool) for heading, t in tables if heading.split()[:1] == [pool]]
+        assert mine and max(mine, key=len), f"no table of {pool}'s cells under its heading"
+        targets.append((pool, max(mine, key=len)))
+
+    for name, table in targets:
+        assert len(table) >= 3, name
+        if name in ("the ranking", "WIN"):
+            assert any((r["pool"], r["cell_id"]) == planted_key for _, r in table), (
+                f"{name} lacks the planted cell"
+            )
+        cells = [c for c, _ in table]
+        # the omega_full reading and its one-sided bounds, as before
+        for key in ("omega", "omega_lo", "omega_hi"):
+            assert prints_series(cells, [r[key] for _, r in table]), (name, key)
+        # beside them, the expected return per 100 yen staked and its two bounds, at each
+        # cell's payout rate
+        for key in ("omega", "omega_lo", "omega_hi"):
+            yen = [100 * r[key] * r["payout_rate"] for _, r in table]
+            assert prints_series(cells, yen), (name, f"100 x {key} x payout rate")
+
+
+# ---------------------------------------------------------------------------------------------
+# DoD: the public report carries no JRA-VAN count, rate, span, sign or bound
+# ---------------------------------------------------------------------------------------------
+
+FIGURE_RHO, FIGURE_N = 1.2345, 98765
+COUNT_KEYS = ("n_bets", "n_race_days", "n_meetings")
+
+
+def test_public_report_carries_no_figures(planted):
+    result = copy.deepcopy(planted.result)
+    assert result.rows
+    for row in result.rows:
+        for key, value in list(row.items()):
+            if isinstance(value, float) and not isinstance(value, bool):
+                row[key] = FIGURE_RHO
+        for key in COUNT_KEYS:
+            row[key] = FIGURE_N
+
+    text = psr.render_public_report(result)
+
+    assert isinstance(text, str)
+    assert "1.2345" not in text
+    assert str(FIGURE_N) not in text
+    assert WITHHELD in text
+    assert psr.FAMILY_ID in text
+    assert planted.spec_hash in text
+    ids = run_ids(planted.registry)
+    assert ids
+    for run_id in ids:
+        assert run_id in text, f"run {run_id} is not named"
+    assert planted.result.report_path.name in text
+    assert str(planted.data) not in text, "the public report names the private data directory"
+
+
+# ---------------------------------------------------------------------------------------------
+# DoD: the candidate-cell file lists every cell, ranked, in the shared schema
+# ---------------------------------------------------------------------------------------------
+
+STR_KEYS = ("study", "family_id", "cell_id", "pool")
+OPTIONAL_STR_KEYS = ("class_group", "odds_band")
+INT_KEYS = ("n_bets", "n_race_days", "n_meetings", "variants_searched")
+FLOAT_KEYS = ("payout_rate", "mean_return", "se_mean_return", "mean_odds")
+OPTIONAL_FLOAT_KEYS = ("shrunk_edge", "omega", "omega_lo", "omega_hi")
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_float(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _strict_json(text: str):
+    def refuse(constant):
+        raise ValueError(f"not strict JSON: {constant}")
+
+    return json.loads(text, parse_constant=refuse)
+
+
+def test_candidate_cells_follow_the_schema(planted):
+    path = planted.result.candidates_path
+    cells = _strict_json(path.read_text(encoding="utf-8"))
+    rows = planted.result.rows
+    assert isinstance(cells, list) and len(cells) == len(rows) > 0
+    size = planted.registry.family_size(psr.FAMILY_ID)
+
+    for cell, row in zip(cells, rows, strict=True):
+        assert isinstance(cell, dict)
+        for key in STR_KEYS:
+            assert isinstance(cell[key], str) and cell[key].strip(), key
+        for key in OPTIONAL_STR_KEYS:
+            assert cell[key] is None or isinstance(cell[key], str), key
+        for key in INT_KEYS:
+            assert _is_int(cell[key]) and cell[key] >= 0, key
+        figures = FLOAT_KEYS if cell["n_bets"] > 0 else ("payout_rate",)
+        for key in figures:
+            assert _is_float(cell[key]), (key, cell[key])
+        for key in (*FLOAT_KEYS, *OPTIONAL_FLOAT_KEYS):
+            assert cell[key] is None or _is_float(cell[key]), (key, cell[key])
+        # the file holds the rows, in rank order
+        for key in (*STR_KEYS, *OPTIONAL_STR_KEYS, *INT_KEYS):
+            assert cell[key] == row[key], key
+        for key in (*FLOAT_KEYS, *OPTIONAL_FLOAT_KEYS):
+            assert (cell[key] is None) == (row[key] is None), key
+            if cell[key] is not None:
+                assert cell[key] == pytest.approx(row[key], rel=1e-12, abs=1e-12), key
+
+        assert cell["family_id"] == psr.FAMILY_ID
+        assert cell["pool"] in POOLS
+        assert cell["class_group"] in (*GROUPS, None)
+        assert cell["payout_rate"] == pytest.approx(RATES[cell["pool"]], abs=1e-9)
+        assert cell["variants_searched"] == size
+        if cell["n_bets"] > 0:
+            assert cell["n_bets"] >= cell["n_meetings"] >= cell["n_race_days"] >= 1
+            assert cell["mean_odds"] >= 1.0
+            assert cell["se_mean_return"] >= 0.0
+            if cell["n_meetings"] > 1:  # every synthetic cell's returns vary across meetings
+                assert cell["se_mean_return"] > 0.0, cell["cell_id"]
+        if cell["omega"] is not None:
+            assert cell["omega_lo"] <= cell["omega"] <= cell["omega_hi"], cell["cell_id"]
+            assert cell["shrunk_edge"] == pytest.approx(
+                cell["omega"] * cell["payout_rate"] - 1, abs=1e-9
+            ), cell["cell_id"]
+
+    assert len({c["study"] for c in cells}) == 1
+    keys = [(c["pool"], c["cell_id"]) for c in cells]
+    assert len(set(keys)) == len(keys), "a cell is listed twice"
+    edges = [c["shrunk_edge"] for c in cells]
+    ranked = [e for e in edges if e is not None]
+    assert ranked, "no cell is ranked"
+    assert edges[: len(ranked)] == ranked, "unranked cells come after the ranked ones"
+    assert all(a >= b for a, b in itertools.pairwise(ranked)), "cells are not in rank order"
+
+    # every pool has its newcomer and maiden cells, with every bet of the class counted
+    meetings = PLANTED_DAYS * len(PLANTED_VENUES)
+    races_per_class = meetings  # one race of each class per meeting
+    for pool in POOLS:
+        mine = with_bets(c for c in cells if c["pool"] == pool)
+        assert max(c["n_race_days"] for c in mine) == PLANTED_DAYS, pool
+        assert max(c["n_meetings"] for c in mine) == meetings, pool
+        for group in GROUPS:
+            of_group = [c for c in mine if c["class_group"] == group]
+            if group in ("newcomer", "maiden"):
+                assert of_group, f"{pool} has no {group} cell"
+            if of_group:
+                want = races_per_class * len(COMBOS[pool])
+                assert max(c["n_bets"] for c in of_group) == want, (pool, group)
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 2 (R5): newcomers and maidens are read in every two-way cross with class
+# ---------------------------------------------------------------------------------------------
+
+
+def fav_level(race_class: str) -> str:
+    """The favourite-strength level of the class's planted WIN board (its lowest price)."""
+    fav = min(prices("WIN", race_class))
+    return "le1.9" if fav < 2 else "2.0-2.9" if fav < 3 else "3.0-4.9" if fav < 5 else "ge5.0"
+
+
+def test_newcomer_and_maiden_cells_cross_class_with_every_dimension(planted):
+    per_venue = PLANTED_DAYS  # one race of each class per meeting, one meeting per venue a day
+    per_class = PLANTED_DAYS * len(PLANTED_VENUES)
+    for pool in POOLS:
+        cells = {r["cell_id"]: r for r in pool_rows(planted.result.rows, pool)}
+        for group, race_class in (("newcomer", "DEBUT"), ("maiden", "MAIDEN")):
+            for other in CROSSED_WITH_CLASS:
+                prefix = f"class:{group}&{other}:"
+                assert any(c.startswith(prefix) for c in cells), f"{pool} has no {prefix} cell"
+            # the populated cross cells hold exactly the class's races there, and are read
+            populated = {
+                f"class:{group}&field:5-10": per_class,
+                f"class:{group}&fav:{fav_level(race_class)}": per_class,
+                **{f"class:{group}&surface:{s}": per_venue for s in PLANTED_VENUES.values()},
+                **{f"class:{group}&venue:{v}": per_venue for v in PLANTED_VENUES},
+            }
+            for cell, races in populated.items():
+                row = cells.get(cell)
+                assert row is not None, f"{pool} has no {cell} cell"
+                assert row["n_bets"] == races * len(COMBOS[pool]), (pool, cell)
+                assert row["n_meetings"] == races, (pool, cell)
+                assert row["omega"] is not None and row["shrunk_edge"] is not None, (pool, cell)
+        # SPA and StepM test the same cell list as the ranking
+        spa = {r.variant for r in planted.registry.records(psr.spa_family(pool))}
+        assert spa == set(cells), pool
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 2 (R6): Place and Wide also get #78's fit, as a registered variant of its own
+# ---------------------------------------------------------------------------------------------
+
+
+def board_prices(pool: str) -> set[float]:
+    return {round(p, 6) for race_class in FLAT_CLASSES for p in prices(pool, race_class)}
+
+
+def test_place_and_wide_also_register_78s_fit(planted):
+    records = planted.registry.records(psr.FAMILY_ID)
+    for pool in RANGE_POOLS:
+        # prices only this pool's planted board has: a fit that sees one was fed this pool
+        only = board_prices(pool) - set().union(*(board_prices(p) for p in POOLS if p != pool))
+        assert only, pool
+        assert any(odds & only for odds in planted.fits), f"fit_segment_roi never saw {pool}"
+        mine = [r for r in records if r.params.get("pool") == pool]
+        roi78 = [r for r in mine if ROI78 in r.variant]
+        assert roi78, f"{pool} has no #78 variant ('{ROI78}') in the registry"
+        assert {r.status for r in roi78} <= {"scored", "failed"}, pool
+        assert all(r.sources == ("jravan",) for r in roi78), pool
+        # beside the empirical-Bayes variants, not instead of them
+        assert any(ROI78 not in r.variant and r.status == "scored" for r in mine), pool
+
+
+# ---------------------------------------------------------------------------------------------
+# Review of PR #496 (spec v2): a cell mixing payout rates ranks by its mean expected return
+# ---------------------------------------------------------------------------------------------
+
+SUPER_PREMIUM = takeout.SUPER_PREMIUM_RATE  # a Super Premium day pays 80% in every pool
+# The #78 pools whose ordinary rate is below 80%, so that Super Premium raises it (WIN pays 80%
+# either way, and a premium, which may be withheld, leaves the race out).
+MIXED_POOLS = ("QUINELLA", "FORECAST", "TRIO")
+MIXED_BOOST = 2.0
+MIXED_PER_DAY = 10
+
+
+def super_premium_days(year: int, venue: str, race_nos: Sequence[int]) -> list[date]:
+    """Days of `year` on which every MIXED_POOLS pool of races `race_nos` at `venue` matches
+    Super Premium entries only (no premium and no age entry), read off the shipped calendar."""
+    calendar = takeout.shipped_boosts()
+    days = {e.date for e in calendar.entries if e.kind == "super_premium" and e.date.year == year}
+    return [
+        day
+        for day in sorted(days)
+        if {
+            (e.kind, e.age)
+            for n in race_nos
+            for pool in MIXED_POOLS
+            for e in calendar.matching(day, venue, n, pool)
+        }
+        == {("super_premium", None)}
+    ]
+
+
+def mixed_rate_races() -> list[Race]:
+    """20 newcomer races on two Super Premium days, their boards priced at 80% and their
+    MIXED_POOLS combinations winning twice as often as they imply; 20 fair conditions races on
+    two ordinary days."""
+    race_nos = range(1, MIXED_PER_DAY + 1)
+    boosted = super_premium_days(2019, "TOK", race_nos)[:2]
+    assert len(boosted) == 2, "the shipped calendar should hold two such days in 2019"
+    ordinary = boost_free_days(date(2019, 1, 5), 2, ("TOK",), race_nos)
+    races = [
+        Race(day, "TOK", n, "DEBUT", "turf", j, 1 + j % 5, MIXED_BOOST, MIXED_POOLS, SUPER_PREMIUM)
+        for j, (day, n) in enumerate(itertools.product(boosted, race_nos))
+    ]
+    races += [
+        Race(day, "TOK", n, "C1", "turf", j, 1 + (j + 2) % 5)
+        for j, (day, n) in enumerate(itertools.product(ordinary, race_nos))
+    ]
+    return races
+
+
+def test_a_mixed_rate_cell_ranks_by_its_rate_weighted_expected_return(tmp_path, monkeypatch):
+    data = data_dir(tmp_path, monkeypatch)
+    races = mixed_rate_races()
+    write_store(data, races)
+    registry, _ = frozen_registry(tmp_path)
+    guard(monkeypatch)
+
+    result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    per_class = sum(r.race_class == "DEBUT" for r in races)
+    assert per_class == sum(r.race_class == "C1" for r in races)
+    for pool in MIXED_POOLS:
+        cells = {r["cell_id"]: r for r in pool_rows(result.rows, pool)}
+        boosted, ordinary, mixed = cells["class:newcomer"], cells["class:conditions"], cells["all"]
+        n = per_class * len(COMBOS[pool])
+        assert (boosted["n_bets"], ordinary["n_bets"], mixed["n_bets"]) == (n, n, 2 * n), pool
+        assert boosted["payout_rate"] == pytest.approx(SUPER_PREMIUM, abs=1e-12), pool
+        assert ordinary["payout_rate"] == pytest.approx(RATES[pool], abs=1e-12), pool
+        assert mixed["payout_rate"] == pytest.approx((SUPER_PREMIUM + RATES[pool]) / 2), pool
+        for r in (boosted, ordinary, mixed):
+            assert r["omega"] is not None and r["shrunk_edge"] is not None, (pool, r["cell_id"])
+            want = r["omega"] * r["payout_rate"] - 1
+            assert r["shrunk_edge"] == pytest.approx(want, abs=1e-12), (pool, r["cell_id"])
+        # Expected return is the mean over bets of rate x omega, and a bet's omega is the same in
+        # every cell that holds it, so the mixed cell's expected return is the bet-weighted mean
+        # of its two single-rate halves'.
+        halves = (2 + boosted["shrunk_edge"] + ordinary["shrunk_edge"]) / 2
+        assert 1 + mixed["shrunk_edge"] == pytest.approx(halves, rel=1e-9), pool
+        # The fixture tells it apart from mean omega x mean rate.
+        assert boosted["omega"] > ordinary["omega"] + 0.3, pool
+        naive = (boosted["omega"] + ordinary["omega"]) / 2 * mixed["payout_rate"]
+        assert abs(halves - naive) > 1e-3, pool
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 5: a dead heat settled below the board prices lowers the shrunk reading
+# ---------------------------------------------------------------------------------------------
+
+# Every newcomer race's one-winner pools pay two combinations (realised wins twice the implied
+# ones, so every race is a dead heat). In the board-price store each pays its board odds: the
+# newcomer cells return twice the payout rate (rho 2). In the split store JRA's rule splits the
+# pool, each paying half its odds: the newcomer cells return exactly the payout rate (rho 1,
+# priced like the pool). The paid flags and the boards are the same in both stores; only the
+# dividends differ. Conditions and open races are fair; 8 meetings of 5 races per class each make
+# 40 newcomer races, whole units of every pool.
+DEAD_HEAT_POOLS = ("WIN", "QUINELLA", "FORECAST", "TRIO")
+DEAD_HEAT_BOOST = 2.0
+DEAD_HEAT_DAYS = 4  # x two venues: 8 meetings
+DEAD_HEAT_PER_MEETING = 5
+DEAD_HEAT_CLASSES = ("DEBUT", "C1", "OP")
+
+
+def dead_heat_races(*, split: bool) -> list[Race]:
+    race_nos = range(1, len(DEAD_HEAT_CLASSES) * DEAD_HEAT_PER_MEETING + 1)
+    days = boost_free_days(date(2019, 1, 5), DEAD_HEAT_DAYS, PLANTED_VENUES, race_nos)
+    meetings = list(itertools.product(days, PLANTED_VENUES))
+    races = []
+    for m, race_class in enumerate(DEAD_HEAT_CLASSES):
+        heat = race_class == "DEBUT"
+        slots = itertools.product(meetings, range(DEAD_HEAT_PER_MEETING))
+        races += [
+            Race(
+                day,
+                venue,
+                m * DEAD_HEAT_PER_MEETING + k + 1,
+                race_class,
+                PLANTED_VENUES[venue],
+                j,
+                PLANTED_RANKS[(race_class, venue)],
+                win_boost=DEAD_HEAT_BOOST if heat else 1.0,
+                boost_pools=DEAD_HEAT_POOLS,
+                split=DEAD_HEAT_POOLS if heat and split else (),
+            )
+            for j, ((day, venue), k) in enumerate(slots)
+        ]
+    newcomers = [r for r in races if r.race_class == "DEBUT"]
+    assert len(newcomers) == 40
+    for pool in DEAD_HEAT_POOLS:
+        assert len(newcomers) % counts_for(pool, "DEBUT")[0] == 0, pool
+        for race in newcomers:
+            assert len(paying(pool, race)) == 2, (pool, race.race_id)
+            _, price, _ = board_for(pool, race)
+            for i, odds in dividend_odds(pool, race).items():
+                assert odds == pytest.approx(price[i] / 2 if split else price[i])
+    return races
+
+
+def test_a_dead_heat_paid_below_the_board_lowers_the_shrunk_reading(tmp_path, monkeypatch):
+    guard(monkeypatch)
+    stores, results = {}, {}
+    for kind in ("board", "split"):
+        data = data_dir(tmp_path / kind, monkeypatch)
+        stores[kind] = dead_heat_races(split=kind == "split")
+        write_store(data, stores[kind])
+        registry, _ = frozen_registry(tmp_path / kind)
+        results[kind] = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    for pool in DEAD_HEAT_POOLS:
+        rate = RATES[pool]
+        cell = {
+            kind: next(r for r in pool_rows(result.rows, pool) if r["cell_id"] == "class:newcomer")
+            for kind, result in results.items()
+        }
+        for kind, races in stores.items():
+            newcomers = [r for r in races if r.race_class == "DEBUT"]
+            n = len(newcomers) * len(COMBOS[pool])
+            assert cell[kind]["n_bets"] == n, (pool, kind)
+            # the raw reading is the settled one
+            want = sum(race_return(pool, r) for r in newcomers) / n
+            assert cell[kind]["mean_return"] == pytest.approx(want, rel=1e-9), (pool, kind)
+        assert cell["board"]["mean_return"] == pytest.approx(DEAD_HEAT_BOOST * rate), pool
+        assert cell["split"]["mean_return"] == pytest.approx(rate), pool
+
+        board, split = cell["board"], cell["split"]
+        for r in (board, split):
+            assert r["omega"] is not None and r["shrunk_edge"] is not None, pool
+        # at the board prices the shrunk reading shows the newcomers' excess ...
+        excess = board["omega"] - 1
+        assert excess >= 0.2, (pool, board["omega"])
+        # ... which the split dividends remove whole: settled, the cell is priced like the pool
+        # (rho 1), so its shrunk omega sits near 1, within a quarter of the board excess, and its
+        # expected return near the payout rate; a fit that credits the hits at the board prices
+        # reads the board store's omega in both
+        assert abs(split["omega"] - 1) <= 0.25 * excess, (pool, board["omega"], split["omega"])
+        expected = 1 + split["shrunk_edge"]
+        assert abs(expected - rate) <= 0.25 * excess * rate + 1e-12, (pool, expected)
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 7: a capped quote paid above the board raises the shrunk reading
+# ---------------------------------------------------------------------------------------------
+
+# The JRA-VAN store keeps capped final-board quotes, so a winning combination can pay more than its
+# stored odds. The dead-heat layout without the dead heats: every newcomer race is fair at its
+# board odds (one paying combination per race in each one-winner pool, whole units). In the
+# board-price store each pays its board odds: the newcomer cells return the payout rate (rho 1).
+# In the capped store each pays ABOVE_BOARD[pool] x its board odds (rho = that factor, varied by
+# pool, each below 1 / the pool's highest implied probability, 0.375 in WIN). The boards and the
+# paid flags are the same in both stores; only the dividends differ.
+ABOVE_BOARD = {"WIN": 2.0, "QUINELLA": 3.0, "FORECAST": 2.5, "TRIO": 1.5}
+
+
+def above_board_races(*, capped: bool) -> list[Race]:
+    races = [
+        replace(
+            race,
+            win_boost=1.0,
+            above_board=DEAD_HEAT_POOLS if capped and race.race_class == "DEBUT" else (),
+        )
+        for race in dead_heat_races(split=False)
+    ]
+    newcomers = [r for r in races if r.race_class == "DEBUT"]
+    for pool in DEAD_HEAT_POOLS:
+        for race in newcomers:
+            assert len(paying(pool, race)) == 1, (pool, race.race_id)
+            _, price, _ = board_for(pool, race)
+            factor = ABOVE_BOARD[pool] if capped else 1.0
+            for i, odds in dividend_odds(pool, race).items():
+                assert odds == pytest.approx(price[i] * factor)
+    return races
+
+
+def test_a_capped_quote_paid_above_the_board_raises_the_shrunk_reading(tmp_path, monkeypatch):
+    guard(monkeypatch)
+    stores, results = {}, {}
+    for kind in ("board", "capped"):
+        data = data_dir(tmp_path / kind, monkeypatch)
+        stores[kind] = above_board_races(capped=kind == "capped")
+        write_store(data, stores[kind])
+        registry, _ = frozen_registry(tmp_path / kind)
+        results[kind] = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    for pool in DEAD_HEAT_POOLS:
+        rate, factor = RATES[pool], ABOVE_BOARD[pool]
+        cell = {
+            kind: next(r for r in pool_rows(result.rows, pool) if r["cell_id"] == "class:newcomer")
+            for kind, result in results.items()
+        }
+        for kind, races in stores.items():
+            newcomers = [r for r in races if r.race_class == "DEBUT"]
+            n = len(newcomers) * len(COMBOS[pool])
+            assert cell[kind]["n_bets"] == n, (pool, kind)
+            # the raw reading is the settled one, every yen of the dividend included
+            want = sum(race_return(pool, r) for r in newcomers) / n
+            assert cell[kind]["mean_return"] == pytest.approx(want, rel=1e-9), (pool, kind)
+        assert cell["board"]["mean_return"] == pytest.approx(rate), pool
+        assert cell["capped"]["mean_return"] == pytest.approx(factor * rate), pool
+
+        board, capped = cell["board"], cell["capped"]
+        for r in (board, capped):
+            assert r["omega"] is not None and r["shrunk_edge"] is not None, pool
+        # at the board prices the newcomers are priced like the pool: omega near 1
+        assert abs(board["omega"] - 1) <= 0.1, (pool, board["omega"])
+        # the capped dividends add (factor - 1) to the raw rho; the shrunk omega keeps at least
+        # half of that and never more than all of it. A fit that settles a hit at no more than
+        # its board odds reads the board store's omega in both stores.
+        lift = capped["omega"] - board["omega"]
+        assert lift >= 0.5 * (factor - 1), (pool, board["omega"], capped["omega"])
+        assert capped["omega"] <= factor * (1 + 0.05), (pool, capped["omega"])
+        # and so does the ranked expected return, 1 + shrunk_edge = omega x rate
+        gain = capped["shrunk_edge"] - board["shrunk_edge"]
+        assert gain >= 0.5 * (factor - 1) * rate, (pool, gain)
+        assert capped["omega_lo"] > board["omega_lo"], pool
+
+
+# ---------------------------------------------------------------------------------------------
+# Review of PR #496 (spec v2, 'zero_return_band'; round 2, R2): a sparse Place or Wide band with
+# bets and no winner keeps its baseline's uncertainty
+# ---------------------------------------------------------------------------------------------
+
+
+def longshot_races() -> list[Race]:
+    """A maiden and a conditions race on each of 20 days, every PLACE and Wide board carrying the
+    long shot (LONGSHOT_ODDS), which never places: a sparse band (40 PLACE bets, 160 Wide)."""
+    classes = ("MAIDEN", "C1")
+    days = boost_free_days(date(2019, 1, 5), LONGSHOT_UNIT, ("TOK",), [RACE_NO[c] for c in classes])
+    return [
+        Race(day, "TOK", RACE_NO[c], c, "turf", j, DEV_RANKS[c], longshot=True)
+        for j, day in enumerate(days)
+        for c in classes
+    ]
+
+
+# A winless band's loss is constant per bet, so arch warns that its studentized statistic is
+# degenerate; SPA is not what this test is about.
+@pytest.mark.filterwarnings("ignore:The loss differential has a variance of 0")
+def test_a_winless_place_or_wide_band_keeps_finite_readings(tmp_path, monkeypatch):
+    data = data_dir(tmp_path, monkeypatch)
+    races = longshot_races()
+    write_store(data, races)
+    registry, _ = frozen_registry(tmp_path)
+    guard(monkeypatch)
+
+    result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    records = registry.records(psr.FAMILY_ID)
+    run = {GROUP[c]: sum(r.race_class == c for r in races) for c in {r.race_class for r in races}}
+    for pool in RANGE_POOLS:
+        mine = with_bets(pool_rows(result.rows, pool))
+        for r in mine:
+            figures = [r[k] for k in ("omega", "omega_lo", "omega_hi", "shrunk_edge")]
+            assert all(v is not None and math.isfinite(v) for v in figures), (pool, r["cell_id"])
+            assert r["omega_lo"] <= r["omega"] <= r["omega_hi"], (pool, r["cell_id"])
+        longshots = sum(LONGSHOT_HORSE in c.split(",") for c in COMBOS[pool])
+        winless = [
+            r
+            for r in mine
+            if r["odds_band"] is not None and r["mean_odds"] == pytest.approx(LONGSHOT_ODDS[pool])
+        ]
+        # the band itself, and its cross with each class run
+        assert sorted(r["class_group"] or "" for r in winless) == sorted(["", *run]), pool
+        # the empirical-Bayes readings of the pool (R6's #78 variants are read elsewhere)
+        eb = [rec for rec in records if rec.params.get("pool") == pool and ROI78 not in rec.variant]
+        for r in winless:
+            cell, group = r["cell_id"], r["class_group"]
+            want = longshots * (run[group] if group else len(races))
+            assert r["n_bets"] == want, (pool, cell)
+            assert r["mean_return"] == 0.0, (pool, cell)
+            # R2: a sparse band that paid nothing has an uncertain baseline, not a known 0: its
+            # one-sided upper bound stays above 0 (a few bets more could have paid)
+            assert r["omega"] >= 0.0, (pool, cell, r["omega"])
+            assert r["omega_hi"] > 0.0, (pool, cell, r["omega_hi"])
+            want_edge = r["omega"] * r["payout_rate"] - 1
+            assert r["shrunk_edge"] == pytest.approx(want_edge, abs=1e-12), (pool, cell)
+            # the registered readings on the main span: finite, ordered, omega_full's upper bound
+            # above 0 and its P(omega > 1/rate) a probability
+            readings = ("omega_full",) if group is None else ("omega_full", "segment_effect")
+            for reading in readings:
+                metrics = {
+                    m.metric: m
+                    for rec in eb
+                    if rec.params.get("reading") == reading
+                    for m in rec.metrics
+                    if m.fold == psr.MAIN_SPAN
+                }
+                m = metrics.get(f"omega[{cell}]")
+                assert m is not None, (pool, reading, cell)
+                assert None not in (m.lo, m.hi), (pool, reading, cell)
+                assert all(math.isfinite(v) for v in (m.value, m.lo, m.hi)), (pool, reading, cell)
+                assert m.lo <= m.value <= m.hi, (pool, reading, cell)
+                if reading == "omega_full":
+                    assert m.hi > 0.0, (pool, cell, m.hi)
+                    p = metrics.get(f"p_beats_takeout[{cell}]")
+                    assert p is not None and math.isfinite(p.value), (pool, cell)
+                    assert 0.0 <= p.value <= 1.0, (pool, cell, p.value)
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 3: a Place or Wide class whose few bets in an odds band all lose, inside a band
+# that pays in other classes, keeps its uncertainty after zero hits
+# ---------------------------------------------------------------------------------------------
+
+_check_sparse_profiles()
+
+SPARSE_PAYING = ("C1", "OP")  # every race of SPARSE_UNIT days, the long shot paying (fair)
+SPARSE_WINLESS = {"DEBUT": 3, "MAIDEN": 10}  # races run, the long shot never paying
+
+
+def sparse_band_races() -> list[Race]:
+    """One TOK meeting on each of 20 days: a conditions and an open race every day, whose long
+    shot pays as its price implies, and a newcomer race on the first 3 days and a maiden race on
+    the first 10, whose long shot never pays. The long shot's band thus pays regularly (in two
+    classes) while two classes' few bets in it all lose, the newcomer's fewer than the maiden's;
+    within the class-by-band family the cells' realised returns differ (0 beside the payout rate),
+    so the family's between-cell variance is positive."""
+    classes = (*SPARSE_PAYING, *SPARSE_WINLESS)
+    days = boost_free_days(date(2019, 1, 5), SPARSE_UNIT, ("TOK",), [RACE_NO[c] for c in classes])
+    races = []
+    for j, day in enumerate(days):
+        for c in classes:
+            if c in SPARSE_WINLESS and j >= SPARSE_WINLESS[c]:
+                continue
+            kind = "pays" if c in SPARSE_PAYING else "loses"
+            races.append(Race(day, "TOK", RACE_NO[c], c, "turf", j, DEV_RANKS[c], sparse_shot=kind))
+    return races
+
+
+@pytest.mark.filterwarnings("ignore:The loss differential has a variance of 0")
+def test_a_winless_class_in_a_paying_place_or_wide_band_keeps_its_uncertainty(
+    tmp_path, monkeypatch
+):
+    data = data_dir(tmp_path, monkeypatch)
+    write_store(data, sparse_band_races())
+    registry, _ = frozen_registry(tmp_path)
+    guard(monkeypatch)
+
+    result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    records = registry.records(psr.FAMILY_ID)
+    for pool in RANGE_POOLS:
+        shots = sum(LONGSHOT_HORSE in c.split(",") for c in COMBOS[pool])
+        band = {
+            r["class_group"]: r
+            for r in with_bets(pool_rows(result.rows, pool))
+            if r["odds_band"] is not None and r["mean_odds"] == pytest.approx(SPARSE_ODDS[pool])
+        }
+        # the band itself and its cross with each class run
+        assert set(band) == {None, "conditions", "open", "newcomer", "maiden"}, (pool, set(band))
+        # the band pays: in the paying classes exactly as its price implies
+        for group in ("conditions", "open"):
+            assert band[group]["n_bets"] == shots * SPARSE_UNIT, (pool, group)
+            assert band[group]["mean_return"] == pytest.approx(RATES[pool], abs=1e-9), pool
+        assert band[None]["mean_return"] > 0.0, pool
+        # the empirical-Bayes readings of the pool on the main span (R6's #78 variants aside)
+        eb = [rec for rec in records if rec.params.get("pool") == pool and ROI78 not in rec.variant]
+        readings = {
+            reading: {
+                m.metric: m
+                for rec in eb
+                if rec.params.get("reading") == reading
+                for m in rec.metrics
+                if m.fold == psr.MAIN_SPAN
+            }
+            for reading in psr.READINGS
+        }
+        upper: dict[str, dict[str, float]] = {}
+        for group, race_class in (("newcomer", "DEBUT"), ("maiden", "MAIDEN")):
+            r = band[group]
+            cell = r["cell_id"]
+            assert r["n_bets"] == shots * SPARSE_WINLESS[race_class], (pool, cell)
+            assert r["mean_return"] == 0.0, (pool, cell)
+            figures = [r[k] for k in ("omega", "omega_lo", "omega_hi", "shrunk_edge")]
+            assert all(v is not None and math.isfinite(v) for v in figures), (pool, cell, figures)
+            assert 0.0 <= r["omega_lo"] <= r["omega"] <= r["omega_hi"], (pool, cell, figures)
+            # a few bets that lost are not a certain total loss: the ranking's reading keeps an
+            # upper bound above 0 and a spread
+            assert r["omega_hi"] > 0.0, (pool, cell, r["omega_hi"])
+            assert r["omega_hi"] > r["omega_lo"], (pool, cell, r["omega_lo"], r["omega_hi"])
+            upper[group] = {"omega_full": r["omega_hi"]}
+            # both registered readings: finite, ordered, with a spread and an upper bound above 0
+            for reading in psr.READINGS:
+                m = readings[reading].get(f"omega[{cell}]")
+                assert m is not None, (pool, reading, cell)
+                assert None not in (m.lo, m.hi), (pool, reading, cell)
+                assert all(math.isfinite(v) for v in (m.value, m.lo, m.hi)), (pool, reading, cell)
+                assert m.lo <= m.value <= m.hi, (pool, reading, cell)
+                assert m.hi > m.lo, (pool, reading, cell, m.lo, m.hi)
+                assert m.hi > 0.0, (pool, reading, cell, m.hi)
+                upper[group][reading + " (registry)"] = m.hi
+        # not a constant: more losing bets in the same band, a lower upper bound
+        for reading, fewer in upper["newcomer"].items():
+            more = upper["maiden"][reading]
+            assert more < fewer, (pool, reading, f"maiden {more} >= newcomer {fewer}")
+
+
+# ---------------------------------------------------------------------------------------------
+# Review of PR #496 (spec v2, 'exclusions'): a sold race and pool with no paying dividends row
+# ---------------------------------------------------------------------------------------------
+
+UNSETTLED_REASON = "unsettled: no paying dividends row"
+UNSETTLED = (("QUINELLA",), ("TRIO",), ("TRIO", "PLACE"))  # one extra race each, unpaid pools
+
+
+def unsettled_races() -> list[Race]:
+    """40 settled conditions races on 20 days, then one race a day per UNSETTLED entry whose
+    pools named there have no dividends row (sold: priced, with a pool total)."""
+    race_nos = (3, 4)
+    days = boost_free_days(date(2019, 1, 5), 20 + len(UNSETTLED), ("TOK",), race_nos)
+    races = [
+        Race(day, "TOK", n, "C1", "turf", 2 * j + k, 1 + (2 * j + k) % 3)
+        for j, day in enumerate(days[:20])
+        for k, n in enumerate(race_nos)
+    ]
+    races += [
+        Race(day, "TOK", 3, "C1", "turf", 5 + k, 2, unpaid=pools)
+        for k, (day, pools) in enumerate(zip(days[20:], UNSETTLED, strict=True))
+    ]
+    return races
+
+
+def test_a_sold_pool_without_a_paying_dividend_is_excluded_and_counted(tmp_path, monkeypatch):
+    data = data_dir(tmp_path, monkeypatch)
+    races = unsettled_races()
+    write_store(data, races)
+    registry, _ = frozen_registry(tmp_path)
+    guard(monkeypatch)
+
+    result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    for pool in POOLS:
+        settled = [r for r in races if pool not in r.unpaid]
+        n = len(settled) * len(COMBOS[pool])
+        whole = next(r for r in pool_rows(result.rows, pool) if r["cell_id"] == "all")
+        assert whole["n_bets"] == n, pool
+        assert whole["n_race_days"] == len({r.day for r in settled}), pool
+        # the settled races alone: an unsettled one is not scored as if every ticket lost
+        want = sum(race_return(pool, r) for r in settled) / n
+        assert whole["mean_return"] == pytest.approx(want, rel=1e-9), pool
+        counted = result.pool_excluded.get(pool, {}).get(UNSETTLED_REASON, 0)
+        assert counted == len(races) - len(settled), pool
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 2 (R1): a paid combination that is not on the priced, non-refunded final board
+# ---------------------------------------------------------------------------------------------
+
+# One extra race each; every pool appears at least once, TRIO twice, with each kind of defect.
+OFF_BOARD_DEFECTS = (
+    (("WIN", "stray"), ("QUINELLA", "absent"), ("TRIO", "unpriced")),
+    (("PLACE", "absent"), ("FORECAST", "refunded")),
+    (("QUINELLA_PLACE", "stray"), ("TRIO", "absent")),
+)
+
+
+def off_board_races() -> list[Race]:
+    """40 clean conditions races on 20 days, then one race a day per OFF_BOARD_DEFECTS entry whose
+    named pools pay a combination the priced, non-refunded board does not hold."""
+    race_nos = (3, 4)
+    days = boost_free_days(date(2019, 1, 5), 20 + len(OFF_BOARD_DEFECTS), ("TOK",), race_nos)
+    races = [
+        Race(day, "TOK", n, "C1", "turf", 2 * j + k, 1 + (2 * j + k) % 3)
+        for j, day in enumerate(days[:20])
+        for k, n in enumerate(race_nos)
+    ]
+    races += [
+        Race(day, "TOK", 3, "C1", "turf", 5 + k, 2, off_board=defects)
+        for k, (day, defects) in enumerate(zip(days[20:], OFF_BOARD_DEFECTS, strict=True))
+    ]
+    return races
+
+
+def test_a_dividend_off_the_priced_board_excludes_its_race_and_pool(tmp_path, monkeypatch):
+    data = data_dir(tmp_path, monkeypatch)
+    races = off_board_races()
+    write_store(data, races)
+    registry, _ = frozen_registry(tmp_path)
+    guard(monkeypatch)
+
+    result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    records = registry.records(psr.FAMILY_ID)
+    for pool in POOLS:
+        settled = [r for r in races if pool not in dict(r.off_board)]
+        assert len(settled) < len(races), f"the fixture leaves {pool} without a defect"
+        n = len(settled) * len(COMBOS[pool])
+        whole = next(r for r in pool_rows(result.rows, pool) if r["cell_id"] == "all")
+        # the defective race is left out of this pool, and every other race and pool scores
+        assert whole["n_bets"] == n, pool
+        assert whole["n_race_days"] == len({r.day for r in settled}), pool
+        # the settled races' return alone: no paid ticket is scored as a loss
+        want = sum(race_return(pool, r) for r in settled) / n
+        assert whole["mean_return"] == pytest.approx(want, rel=1e-9), pool
+        counted = result.pool_excluded.get(pool, {})
+        assert counted.get(OFF_BOARD_REASON, 0) == len(races) - len(settled), (pool, counted)
+        assert counted.get(UNSETTLED_REASON, 0) == 0, (pool, counted)  # every race paid
+        # a defect excludes a race; it does not fail the pool
+        assert any(r.params.get("pool") == pool and r.status == "scored" for r in records), pool
+
+
+# ---------------------------------------------------------------------------------------------
+# Review of PR #496 (spec v2, 'spa_stepm'): a narrower rerun on the same registry
+# ---------------------------------------------------------------------------------------------
+
+
+NARROW_FROM = 10  # the narrower rerun starts on this day of narrowing_races
+
+
+def narrowing_races() -> tuple[list[date], list[Race]]:
+    """30 days, one meeting each: a maiden and a conditions race on the first 10, a conditions
+    race alone on the last 20 (more meetings than SPA_BLOCK, so the narrower run can be tested)."""
+    days = boost_free_days(date(2019, 1, 5), 30, ("TOK",), (RACE_NO["MAIDEN"], RACE_NO["C1"]))
+    assert len(days) - NARROW_FROM > psr.SPA_BLOCK
+    races = [
+        Race(day, "TOK", RACE_NO[c], c, "turf", j, DEV_RANKS[c] + j % 2)
+        for j, day in enumerate(days)
+        for c in (("MAIDEN", "C1") if j < NARROW_FROM else ("C1",))
+    ]
+    return days, races
+
+
+@dataclass(frozen=True)
+class NarrowingRuns:
+    """A run on narrowing_races, then a narrower rerun on the same registry into the same output
+    folder (the command's default, `paths.reports_dir()`); `kept` holds the first run's report
+    and candidate file as they were before the rerun. Shared by the SPA test and the rerun test."""
+
+    full: object
+    narrow: object
+    registry: Registry
+    spec_hash: str
+    out_dir: Path
+    calls: dict
+    kept: dict[Path, bytes]
+
+
+@pytest.fixture(scope="module")
+def narrowing_runs(tmp_path_factory: pytest.TempPathFactory) -> NarrowingRuns:
+    root = tmp_path_factory.mktemp("narrowing")
+    data = (root / "data").resolve()
+    data.mkdir()
+    days, races = narrowing_races()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(DATA_VAR, str(data))
+        write_store(data, races)
+        registry, spec_hash = frozen_registry(root)
+        calls = guard(mp)
+        out_dir = paths.reports_dir()
+        assert out_dir.resolve() == (data / "reports").resolve()
+        full = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+        kept = {Path(p): Path(p).read_bytes() for p in (full.report_path, full.candidates_path)}
+        narrow = scan(data, registry, date_from=days[NARROW_FROM], date_to=date(2019, 12, 31))
+    return NarrowingRuns(full, narrow, registry, spec_hash, out_dir, calls, kept)
+
+
+def test_a_narrower_rerun_on_the_same_registry_still_runs_spa_and_stepm(narrowing_runs):
+    full, narrow, registry = narrowing_runs.full, narrowing_runs.narrow, narrowing_runs.registry
+    for pool in POOLS:
+        before = {r["cell_id"]: r for r in pool_rows(full.rows, pool)}
+        after = {r["cell_id"]: r for r in pool_rows(narrow.rows, pool)}
+        assert before["class:maiden"]["n_bets"] > 0, pool
+        assert after["class:maiden"]["n_bets"] == 0, pool
+        for result, rows in ((full, before), (narrow, after)):
+            snoop = result.snooping[pool]
+            assert "error" not in snoop, (pool, snoop.get("error"))
+            tested = {cell for cell, r in rows.items() if r["n_bets"] > 0}
+            assert 0.0 <= snoop["spa"]["pvalue"] <= 1.0, pool
+            assert snoop["spa"]["n_rules"] == len(tested), pool
+            assert set(snoop["stepm"]) <= tested, pool
+        # the narrower run's SPA reports every variant tried, both runs' cell rules included
+        size = registry.family_size(psr.spa_family(pool))
+        assert narrow.snooping[pool]["spa"]["family_size"] == size, pool
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 2 (R3): the family size and the variants searched are reported apart
+# ---------------------------------------------------------------------------------------------
+
+
+def test_family_size_and_variants_searched_are_reported_apart(tmp_path, monkeypatch):
+    data = data_dir(tmp_path, monkeypatch)
+    _, races = narrowing_races()
+    write_store(data, races)
+    registry, _ = frozen_registry(tmp_path)
+    old = superseded_families()
+    assert old and psr.FAMILY_ID not in old
+    # the superseded families already hold runs, of their own and of their SPA families, a
+    # different number in each; an unrelated family's run counts toward neither
+    earlier = []
+    for k, family in enumerate(old):
+        earlier += [
+            earlier_record(family, f"earlier-{j}", POOLS[j % 6], ("scored", "failed")[j % 2])
+            for j in range(3 + 2 * k)
+        ]
+        for p, pool in enumerate(POOLS):
+            earlier += [
+                earlier_record(psr.spa_family(pool, family), f"cell-{j}", pool, "scored")
+                for j in range(1 + p + k)
+            ]
+    earlier.append(earlier_record("japan-unrelated-test-family", "x", "WIN", "scored"))
+    registry.append_all(earlier)
+    guard(monkeypatch)
+
+    result = scan(data, registry, date_from=date(2019, 1, 1), date_to=date(2019, 12, 31))
+
+    size = registry.family_size(psr.FAMILY_ID)
+    searched = size + sum(registry.family_size(f) for f in old)
+    assert 0 < size < searched
+    assert result.family_size == size
+    assert result.variants_searched == searched
+    assert {r["family_size"] for r in result.rows} == {size}
+    assert {r["variants_searched"] for r in result.rows} == {searched}
+    path = result.candidates_path
+    cells = _strict_json(path.read_text(encoding="utf-8"))
+    assert {c["variants_searched"] for c in cells} == {searched}
+    for pool in POOLS:
+        spa = result.snooping[pool].get("spa")
+        assert spa is not None, (pool, result.snooping[pool].get("error"))
+        own = registry.family_size(psr.spa_family(pool))
+        assert spa["family_size"] == own, pool
+        before = sum(registry.family_size(psr.spa_family(pool, f)) for f in old)
+        assert before > 0
+        assert spa["variants_searched"] == own + before, pool
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 5: `pool-scan run` merges N1's pages into the committed registry summary
+# ---------------------------------------------------------------------------------------------
+
+SUMMARY_COMMITTED = ("japan-alpha-test-study", "japan-beta-test-study")
+SUMMARY_UNCOMMITTED = "japan-uncommitted-test-study"  # another ticket's, in the local registry only
+INDEX_LINK = re.compile(r"- \[([^\]]+)\]\(([^)]+)\.md\)")
+
+
+def public_record(family: str, variant: str, value: float) -> RunRecord:
+    """Another study's run, on a public source so its summary page shows its values."""
+    return RunRecord(
+        hypothesis_id="E99",
+        family_id=family,
+        variant=variant,
+        ticket=92,
+        git_sha="1" * 40,
+        data_builds={"jra_runners": "processed/jra/runners.parquet@00aa11bb22cc33dd"},
+        sources=("jra",),
+        fold_scheme="walk_forward:synthetic",
+        components={"study": "other"},
+        params={"k": 1},
+        metrics=(FoldMetric("all_folds", "delta_ll", value, None, None, 10),),
+        status="scored",
+    )
+
+
+def n1_families() -> list[str]:
+    """The families an N1 run appends to: FAMILY_ID and each pool's SPA family."""
+    return [psr.FAMILY_ID, *(psr.spa_family(pool) for pool in POOLS)]
+
+
+class Records:
+    """A registry stand-in holding `records` alone, for `write_summary`."""
+
+    def __init__(self, records: Iterable[RunRecord]) -> None:
+        self._records = list(records)
+
+    def records(self, family_id: str | None = None) -> list[RunRecord]:
+        return [r for r in self._records if family_id in (None, r.family_id)]
+
+
+def page_of(records: list[RunRecord], family: str, scratch: Path) -> bytes:
+    """What `write_summary` writes as the page of `family` from `records` alone."""
+    registry_module.write_summary(Records(records), scratch)
+    return (scratch / f"{family}.md").read_bytes()
+
+
+def snapshot(folder: Path) -> dict[str, bytes]:
+    if not folder.exists():
+        return {}
+    return {p.name: p.read_bytes() for p in folder.iterdir() if p.is_file()}
+
+
+def split_index(index: bytes) -> tuple[list[str], list[str]]:
+    """The index's lines other than its family links, and its family links."""
+    lines = index.decode("utf-8").splitlines()
+    return [x for x in lines if not x.startswith("- [")], [x for x in lines if x.startswith("- [")]
+
+
+def keep_out_of_checkout(mp: pytest.MonkeyPatch) -> None:
+    """Never open the holdout, and refuse every `write_report` into the real checkout."""
+
+    def no_open(*args, **kwargs):
+        raise Forbidden("LockedHoldout.open was called: the scan reads development days only")
+
+    mp.setattr(holdout.LockedHoldout, "open", no_open)
+    real_report = reports.write_report
+
+    def outside(path, text, *, sources, repo_root=None):
+        if reports.is_inside(Path(path), REPO_ROOT):
+            raise Forbidden(f"write_report into the checkout: {path}")
+        return real_report(path, text, sources=sources, repo_root=repo_root)
+
+    for module in (reports, registry_module, psr):
+        mp.setattr(module, "write_report", outside, raising=False)
+
+
+def summary_races() -> list[Race]:
+    """Four days of one TOK meeting, the five flat classes each: a small store (few meetings)."""
+    race_nos = [RACE_NO[c] for c in FLAT_CLASSES]
+    days = boost_free_days(date(2019, 1, 5), 4, ("TOK",), race_nos)
+    return [
+        Race(day, "TOK", RACE_NO[c], c, "turf", j, DEV_RANKS[c])
+        for j, day in enumerate(days)
+        for c in FLAT_CLASSES
+    ]
+
+
+def test_pool_scan_run_merges_its_family_pages_into_the_committed_summary(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"  # the summary folder under tmp, never the checkout's
+    repo.mkdir()
+    folder = lambda country: repo / "docs" / "experiments" / "registry" / country  # noqa: E731
+    monkeypatch.setattr(env, "repo_root", lambda: repo)
+    monkeypatch.setattr(registry_module, "summary_dir", folder)
+    monkeypatch.setattr(psr, "summary_dir", folder, raising=False)
+    summary = folder("japan")
+    keep_out_of_checkout(monkeypatch)
+
+    # the committed summary: two other studies, a superseded N1 family, and some of N1's own
+    # families as an earlier run elsewhere wrote them (FAMILY_ID and three pools' SPA families;
+    # the other three pools' are not listed yet)
+    listed = [psr.FAMILY_ID, *(psr.spa_family(pool) for pool in POOLS[:3])]
+    committed = temp_registry(tmp_path / "committed")
+    committed.append_all(
+        [
+            public_record(SUMMARY_COMMITTED[0], "alpha", 0.25),
+            public_record(SUMMARY_COMMITTED[1], "beta", 0.375),
+            earlier_record(superseded_families()[-1], "earlier", "WIN", "failed"),
+            *(earlier_record(f, "earlier-elsewhere", "WIN", "failed") for f in listed),
+        ]
+    )
+    registry_module.write_summary(committed, summary)
+    before = snapshot(summary)
+
+    # the default registry, fresh on this data directory: the frozen family, a local rerun of a
+    # committed study and another ticket's family that was never committed
+    data = data_dir(tmp_path, monkeypatch)
+    local = registry_module.default_registry("japan")
+    assert local.path.resolve().is_relative_to(data)
+    local.freeze_family(psr.FAMILY_ID, psr.prereg_spec())
+    local.append_all(
+        [
+            public_record(SUMMARY_COMMITTED[0], "alpha:local-rerun", 0.875),
+            public_record(SUMMARY_UNCOMMITTED, "elsewhere", 0.125),
+        ]
+    )
+    write_store(data, summary_races())
+    status = repo_status()
+
+    args = ["run", "--from", "2019-01-01", "--to", "2019-12-31", "--out", str(data / "reports")]
+    out = CliRunner().invoke(psr.pool_scan_app, args)
+
+    assert out.exit_code == 0, (out.output, out.exception)
+    if status is not None:
+        assert repo_status() == status, "the run changed the checkout"
+    after = snapshot(summary)
+    families = n1_families()
+    fresh = {f: local.records(f) for f in families}
+    assert all(fresh.values()), "the run appended records to every N1 family"
+    # the index: its head and every committed line kept, N1's lines added once, the family only
+    # in the local registry absent
+    head, entries = split_index(after["README.md"])
+    committed_head, committed_entries = split_index(before["README.md"])
+    assert head == committed_head
+    assert len(entries) == len(set(entries)), "the index lists a family twice"
+    assert set(entries) == set(committed_entries) | {f"- [{f}]({f}.md)" for f in families}
+    assert SUMMARY_UNCOMMITTED not in after["README.md"].decode("utf-8")
+    # N1's pages, each from its family's records alone; no other page written or changed
+    assert set(after) == set(before) | {f"{f}.md" for f in families}
+    for f in families:
+        want = page_of(fresh[f], f, tmp_path / "expected" / f)
+        assert after[f"{f}.md"] == want, f"{f}.md is not its records' page"
+        if f in listed:
+            assert before[f"{f}.md"] != want, "the committed page must differ from the fresh one"
+        else:
+            assert f"{f}.md" not in before, f
+    for name, content in before.items():
+        if name != "README.md" and name.removesuffix(".md") not in families:
+            assert after[name] == content, f"{name} changed"
+    # the verification run's index-to-files check: every page linked once, every link a page
+    links = [INDEX_LINK.fullmatch(e)[2] for e in entries]
+    assert sorted(links) == sorted(n.removesuffix(".md") for n in after if n != "README.md")
+
+
+# ---------------------------------------------------------------------------------------------
+# The real store (local: needs $HORSETRACK_DATA_DIR/processed/jravan/final_odds.parquet)
+# ---------------------------------------------------------------------------------------------
+
+
+def _last_board_day(path: Path) -> date:
+    """The last race_date of the file's row groups whose [min, max] spans no holdout day, from
+    their statistics (no row is read): a month ending there is a development range whatever the
+    store's later row groups hold."""
+    meta = pq.ParquetFile(path).metadata
+    column = meta.schema.to_arrow_schema().get_field_index("race_date")
+    last = []
+    for g in range(meta.num_row_groups):
+        stats = meta.row_group(g).column(column).statistics
+        if stats is None or not stats.has_min_max:
+            pytest.skip(f"{path} has a row group without race_date statistics")
+        lo, hi = (pd.Timestamp(v).date() for v in (stats.min, stats.max))
+        if not spans_holdout(lo, hi):
+            last.append(hi)
+    if not last:
+        pytest.skip(f"{path} has no row group clear of the holdout")
+    return max(last)
+
+
+@pytest.mark.local
+def test_real_store_one_month_reads_development_days_only(tmp_path, monkeypatch):
+    try:
+        real = paths.data_dir()
+    except paths.DataDirNotSet:
+        pytest.skip(f"{DATA_VAR} is not set: the real jravan store is unavailable")
+    board = real / "processed" / "jravan" / "final_odds.parquet"
+    if not board.is_file():
+        pytest.skip(f"no real jravan final_odds at {board}")
+    date_to = _last_board_day(board)
+    date_from = max(PRICE_ERA_START, date_to - timedelta(days=30))
+    races = v0store.read_store_table(
+        "races",
+        columns=["race_date", "surface"],
+        start=date_from,
+        end=date_to,
+        touches_price=False,
+        source="jravan",
+    ).to_pydict()
+    flat_days = {
+        d for d, s in zip(races["race_date"], races["surface"], strict=True) if s != "jump"
+    }
+    assert flat_days and not any(holdout.is_holdout_day("japan", d) for d in flat_days)
+
+    registry, _ = frozen_registry(tmp_path)
+    calls = guard(monkeypatch)
+    seen: list[tuple[str, str, set]] = []
+    real_read = v0store.read_store_table
+
+    def read_and_record(name, *, columns, start, end, touches_price, where=None, source="jra"):
+        asked = list(columns)
+        extra = [] if "race_date" in asked else ["race_date"]
+        table = real_read(
+            name,
+            columns=asked + extra,
+            start=start,
+            end=end,
+            touches_price=touches_price,
+            where=where,
+            source=source,
+        )
+        seen.append((name, source, set(table.column("race_date").to_pylist())))
+        return table.select(asked)
+
+    monkeypatch.setattr(v0store, "read_store_table", read_and_record)
+    monkeypatch.setattr(psr, "read_store_table", read_and_record, raising=False)
+
+    result = psr.run_scan(
+        date_from=date_from,
+        date_to=date_to,
+        out_dir=tmp_path / "reports",
+        seed=SEED,
+        registry=registry,
+    )
+
+    assert any(name == "final_odds" and source == "jravan" for name, source, _ in seen)
+    for name, _, days in seen:
+        assert all(date_from <= d <= date_to for d in days), name
+        assert not any(holdout.is_holdout_day("japan", d) for d in days), name
+        if name == "final_odds":
+            assert min(days, default=PRICE_ERA_START) >= PRICE_ERA_START
+    scored = with_bets(result.rows)
+    assert scored
+    assert max(r["n_race_days"] for r in scored) <= len(flat_days)
+    records = registry.records(psr.FAMILY_ID)
+    assert records and all(r.sources == ("jravan",) for r in records)
+    assert calls["holdout_open"] == []

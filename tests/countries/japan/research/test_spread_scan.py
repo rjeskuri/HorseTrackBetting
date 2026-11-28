@@ -2139,7 +2139,10 @@ def test_a_refresh_rerun_is_new_runs_of_the_same_variants(tmp_path, monkeypatch)
         )
 
 
-_SUMMARY_ROW = re.compile(r"\| P503 \| (t2|lookahead) \| (\w+) \| .*\|")
+# A licensed-source run's row shows its E id and variant and this in place of its status (D21,
+# #430): every N8 run names jravan. `\w+` still captures a status that leaks.
+WITHHELD = "withheld (licensed source)"
+_SUMMARY_ROW = re.compile(rf"\| P503 \| (t2|lookahead) \| ({re.escape(WITHHELD)}|\w+) \| .*\|")
 
 
 def summary_rows(path: Path) -> Counter:
@@ -2150,7 +2153,11 @@ def summary_rows(path: Path) -> Counter:
 
 
 def by_variant(rows: Counter) -> Counter:
-    return Counter({_SUMMARY_ROW.fullmatch(line).groups(): n for line, n in rows.items()})
+    """The rows per (variant, status), summed over distinct lines: one row per run."""
+    variants: Counter = Counter()
+    for line, n in rows.items():
+        variants[_SUMMARY_ROW.fullmatch(line).groups()] += n
+    return variants
 
 
 def test_the_run_command_never_drops_a_row_a_family_summary_publishes(tmp_path, monkeypatch):
@@ -2194,7 +2201,7 @@ def test_the_run_command_never_drops_a_row_a_family_summary_publishes(tmp_path, 
         for family, path in family_files().items():
             assert path.is_file(), family
             assert by_variant(summary_rows(path)) == Counter(
-                {(v, "scored"): n_runs for v in VARIANTS}
+                {(v, WITHHELD): n_runs for v in VARIANTS}
             ), f"{family}: after {n_runs} run(s) the file lists every run of the registry"
     published = {family: summary_rows(path) for family, path in family_files().items()}
 

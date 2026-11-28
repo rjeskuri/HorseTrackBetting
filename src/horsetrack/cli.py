@@ -55,6 +55,7 @@ from horsetrack.countries.japan.research.exacta_rules import exacta_rules_comman
 from horsetrack.countries.japan.research.joined_coverage import joined_coverage_command
 from horsetrack.countries.japan.research.leaderboard_build import leaderboard_command
 from horsetrack.countries.japan.research.pool_depth import pool_depth_app
+from horsetrack.countries.japan.research.pool_scan_run import pool_scan_app
 from horsetrack.countries.japan.research.spread_scan import spread_scan_app
 from horsetrack.countries.japan.research.win5_backfill import win5_history_command
 from horsetrack.countries.japan.research.win5_study import win5_study_app
@@ -98,6 +99,7 @@ japan.command("lineage-study")(lineage_study_command)
 japan.command("coverage")(coverage_command)
 japan.command("joined-coverage")(joined_coverage_command)
 japan.command("leaderboard")(leaderboard_command)
+japan.add_typer(pool_scan_app, name="pool-scan")
 japan.add_typer(spread_scan_app, name="spread-scan")
 japan.add_typer(bets_app, name="bets")
 jrdb = typer.Typer(no_args_is_help=True, help="JRDB commands.")

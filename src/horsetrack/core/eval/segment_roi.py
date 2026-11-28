@@ -64,6 +64,18 @@ bets one row each. Every query weighs each row by its count: the means over the 
 behind ``expected_return``, ``p_beats_takeout`` and ``omega_mean``, and ``predictive_roi``'s mix
 of future bets. A cell's bound is a maximum over its bets' implied probabilities, the same
 whichever way they are grouped.
+
+Settled wins (#430). With ``fractional_won`` (grouped input only) ``won`` may be any real of at
+least 0, above ``count`` included: each hit counts for the dividend that settled it over its board
+odds, below 1 when a dead heat splits the pool and above 1 when a capped board quote paid more, so
+that ``omega * (1 - t)`` stays the expected return per unit stake at the dividend that pays. The
+likelihood is then the Bernoulli kernel with fractional successes (a quasi-likelihood): per cell
+and implied probability, the settled wins and, as losers, the bets less the settled wins, floored
+at 0 (a group that settled more than its bets adds its wins and no loser term, which keeps the
+kernel concave; the rest of its cell bounds it, as for a group whose bets all won). Wherever every
+such group settles at most its bets, as with whole wins, it is the Bernoulli likelihood above,
+unchanged. ``omega_draws`` and ``effect_draws``, the readings #430's scan takes, return the
+posterior draws of omega as they are, without the cell bound above.
 """
 
 from __future__ import annotations
@@ -121,13 +133,11 @@ class _Likelihood:
         self.design = design
         n_cells = design.shape[0]
         self.wins = np.bincount(cell, weights=won, minlength=n_cells).astype(float)
-        lost = count - won
-        lose = lost > 0
-        losers = (
-            pd.DataFrame({"cell": cell[lose], "q": q[lose], "n": lost[lose]})
-            .groupby(["cell", "q"])["n"]
-            .sum()
-        )
+        # per cell and implied probability, the bets less their (settled) wins, floored at 0: with
+        # whole wins no row is below 0, so this is the sum of each row's losers
+        losers = pd.DataFrame({"cell": cell, "q": q, "n": count - won}).groupby(["cell", "q"])["n"]
+        losers = losers.sum()
+        losers = losers[losers > 0]
         self.lose_cell = losers.index.get_level_values("cell").to_numpy()
         self.lose_q = losers.index.get_level_values("q").to_numpy()
         self.lose_n = losers.to_numpy(dtype=float)
@@ -212,6 +222,7 @@ class SegmentROI:
         design: np.ndarray,
         cell: np.ndarray,
         codes: np.ndarray,
+        band: np.ndarray,
         odds: np.ndarray,
         takeout: np.ndarray,
         count: np.ndarray,
@@ -223,12 +234,14 @@ class SegmentROI:
     ):
         self._columns = columns
         self._levels = levels
+        self._band_levels = {name: i for i, name in enumerate(band_levels)}
         self._offsets = offsets
         self._mean = theta_mean
         self._draws = theta_draws
         self._design = design
         self._cell = cell
         self._codes = codes
+        self._band = band
         self._odds = odds
         self._takeout = takeout
         self._count = count  # the bets each row stands for (all 1 without count_col)
@@ -263,6 +276,44 @@ class SegmentROI:
         if not rows.any():
             raise ValueError(f"no bets in segment {segment}")
         return rows
+
+    def omega_draws(
+        self, segment: dict[str, str], *, band: str | None = None, rate_weighted: bool = False
+    ) -> np.ndarray:
+        """Posterior draws of the segment's omega, its band effects included: per draw, the mean
+        over the segment's bets (a grouped row counts its bets) of each bet's omega. An empty
+        `segment` is every bet; `band` keeps only the bets of that odds band. With
+        `rate_weighted` each bet weighs by its payout rate 1 - takeout, so that a draw times the
+        bets' mean payout rate is their mean expected return per unit stake, mean(omega_i *
+        (1 - t_i)), even when the takeouts differ (a boosted race beside ordinary ones)."""
+        rows = np.ones(len(self._cell), dtype=bool)
+        if segment:
+            rows &= self._rows(segment)
+        if band is not None:
+            if band not in self._band_levels:
+                raise KeyError(f"no odds band {band!r}")
+            rows &= self._band == self._band_levels[band]
+        if not rows.any():
+            raise ValueError(f"no bets in segment {segment} and band {band!r}")
+        cells, local = np.unique(self._cell[rows], return_inverse=True)
+        bets = self._count[rows] * ((1 - self._takeout[rows]) if rate_weighted else 1.0)
+        weight = np.bincount(local.ravel(), weights=bets)
+        weight /= weight.sum()
+        design = self._design[cells]
+        block = max(1, _BLOCK // len(cells))
+        return np.concatenate(
+            [
+                np.exp(self._draws[start : start + block] @ design.T) @ weight
+                for start in range(0, len(self._draws), block)
+            ]
+        )
+
+    def effect_draws(self, segment: dict[str, str]) -> np.ndarray:
+        """Posterior draws of exp(the sum of the named random effects): the segment effect alone,
+        no band effect, whose posterior mean on the ln scale is `posterior_mean`."""
+        codes = self._codes_of(segment)
+        index = [self._offsets[c] + code for c, code in codes.items()]
+        return np.exp(self._draws[:, index].sum(axis=1))
 
     def posterior_mean(self, segment: dict[str, str]) -> float:
         """Posterior mean of the sum of the named random effects (ln-omega scale)."""
@@ -344,7 +395,9 @@ class SegmentROI:
         return Interval(float(low), float(high), INTERVAL_LEVEL)
 
 
-def _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws, count_col) -> None:
+def _validate(
+    bets, segment_cols, odds_band_col, takeout_col, seed, draws, count_col, fractional_won=False
+) -> None:
     if not isinstance(bets, pd.DataFrame) or bets.empty:
         raise ValueError("bets must be a non-empty DataFrame")
     if not segment_cols or len(set(segment_cols)) != len(segment_cols):
@@ -374,6 +427,8 @@ def _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws, count
     if not ((1 - takeout) / odds < P_MAX).all():
         raise ValueError(f"(1 - {takeout_col}) / odds must be below 1 (odds 1 needs a takeout)")
     if count_col is None:
+        if fractional_won:
+            raise ValueError("fractional_won needs count_col (grouped input)")
         if not bets["won"].isin([0, 1]).all():
             raise ValueError("won must be 0 or 1")
         return
@@ -381,6 +436,10 @@ def _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws, count
     won = pd.to_numeric(bets["won"], errors="coerce").to_numpy(dtype=float)
     if not (np.isfinite(count) & (count == np.round(count)) & (count >= 1)).all():
         raise ValueError(f"{count_col} must be a positive integer")
+    if fractional_won:  # settled wins: a capped quote can settle a hit above its board odds
+        if not (np.isfinite(won) & (won >= 0)).all():
+            raise ValueError("won must be a number of at least 0")
+        return
     if not (np.isfinite(won) & (won == np.round(won)) & (won >= 0) & (won <= count)).all():
         raise ValueError(f"won must be an integer from 0 to {count_col}")
 
@@ -394,14 +453,18 @@ def fit_segment_roi(
     seed: int,
     draws: int,
     count_col: str | None = None,
+    fractional_won: bool = False,
 ) -> SegmentROI:
     """Fit the hierarchical omega model (module docstring) to one row per bet, or with
-    `count_col` to rows of `count` identical bets of which `won` won."""
+    `count_col` to rows of `count` identical bets of which `won` won; with `fractional_won`,
+    `won` is their settled wins (module docstring, 'Settled wins')."""
     segment_cols = list(segment_cols)
-    _validate(bets, segment_cols, odds_band_col, takeout_col, seed, draws, count_col)
+    _validate(
+        bets, segment_cols, odds_band_col, takeout_col, seed, draws, count_col, fractional_won
+    )
     odds = bets["odds"].to_numpy(dtype=float)
     takeout = bets[takeout_col].to_numpy(dtype=float)
-    won = bets["won"].to_numpy(dtype=int)
+    won = bets["won"].to_numpy(dtype=float if fractional_won else int)
     row_bets = np.ones(len(bets), dtype=int) if count_col is None else bets[count_col].to_numpy(int)
     band, band_levels = pd.factorize(bets[odds_band_col].astype(str), sort=True)
     codes, levels = [], []
@@ -481,6 +544,10 @@ def fit_segment_roi(
             "segment ROI fit: every tau sample is out of range or has its mode on p = 1"
         )
     weights = np.exp(log_w - special.logsumexp(log_w))
+    # Log weights of large magnitude (a big fit's log-likelihood) round the normalising
+    # difference, so the weights can sum past 1 by more than multinomial's 1e-12 tolerance when
+    # one sample dominates; renormalise them exactly (#430).
+    weights = weights / weights.sum()
 
     theta_draws = []
     for k, count in enumerate(rng.multinomial(draws, weights)):
@@ -500,6 +567,7 @@ def fit_segment_roi(
         design=design,
         cell=cell,
         codes=codes,
+        band=band,
         odds=odds,
         takeout=takeout,
         count=row_bets,

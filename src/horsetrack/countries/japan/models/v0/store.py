@@ -89,14 +89,28 @@ def read_store_table(
         keep = file_development_filter(
             handle, COUNTRY, start=start, end=end, where=where, column=DATE_COLUMN
         )
-        return dataset.to_table(columns=columns, filter=keep, fragment_scan_options=_SCAN_OPTIONS)
+        strings = [f.name for f in dataset.schema if pa.types.is_string(f.type)]
+        if not strings:
+            return dataset.to_table(
+                columns=columns, filter=keep, fragment_scan_options=_SCAN_OPTIONS
+            )
+        # The scan decodes its string columns as dictionaries and casts the rows it keeps back
+        # to strings: the same table, without densely decoding every row the filter drops (a
+        # year of final_odds decodes every pool's board before a pool filter, #430).
+        options = ds.ParquetReadOptions(dictionary_columns=strings)
+        compact = ds.dataset(path, filesystem=snapshot, format=ds.ParquetFileFormat(options))
+        table = compact.to_table(columns=columns, filter=keep, fragment_scan_options=_SCAN_OPTIONS)
+        return table.cast(pa.schema([dataset.schema.field(c) for c in columns]))
 
 
 class _Snapshot(pafs.FileSystemHandler):
     """A read-only filesystem holding the one file `path`, served by the open handle `handle`
-    itself (positional reads of the byte ranges asked, never a buffer of the whole file): a
-    dataset of `path` on it reads the snapshot the handle opened, even after the file is
-    atomically replaced on disk."""
+    (positional reads of the byte ranges asked, never a buffer of the whole file): a dataset of
+    `path` on it reads the snapshot the handle opened, even after the file is atomically replaced
+    on disk. Each open reads the handle by byte range through `_Ranges`, so a scan pages in only
+    the column chunks it reads: one buffer over a whole memory map would have the kernel page in
+    the whole file (Arrow advises WILLNEED for every buffer it maps), a resident set the size of
+    the file for a one-year read of `final_odds` (#430)."""
 
     def __init__(self, path: str, handle: pa.NativeFile) -> None:
         self.path = path
@@ -123,7 +137,7 @@ class _Snapshot(pafs.FileSystemHandler):
     def open_input_file(self, path: str) -> pa.NativeFile:
         if path != self.path:
             raise FileNotFoundError(path)
-        return self.handle
+        return pa.PythonFile(_Ranges(self.handle, self.size), mode="r")
 
     def open_input_stream(self, path: str) -> pa.NativeFile:
         raise NotImplementedError("a snapshot is read by byte range, not as a stream")
@@ -133,3 +147,40 @@ class _Snapshot(pafs.FileSystemHandler):
 
     create_dir = delete_dir = delete_dir_contents = delete_root_dir_contents = _read_only
     delete_file = move = copy_file = open_output_stream = open_append_stream = _read_only
+
+
+class _Ranges:
+    """A read-only file object over the open handle with a position of its own: each read is one
+    `read_at` of the handle (thread-safe, the handle's own position untouched)."""
+
+    closed = False
+
+    def __init__(self, handle: pa.NativeFile, size: int) -> None:
+        self._handle, self._size, self._position = handle, size, 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return False
+
+    def tell(self) -> int:
+        return self._position
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        base = {0: 0, 1: self._position, 2: self._size}[whence]
+        self._position = base + offset
+        return self._position
+
+    def read(self, nbytes: int | None = -1) -> bytes:
+        left = max(0, self._size - self._position)
+        count = left if nbytes is None or nbytes < 0 else min(nbytes, left)
+        data = self._handle.read_at(count, self._position) if count else b""
+        self._position += count
+        return data
+
+    def close(self) -> None:
+        self.closed = True

@@ -1148,6 +1148,67 @@ def test_a_licensed_source_in_another_spelling_is_still_withheld(tmp_path, sourc
     assert [num for num in PUBLIC_NUMBERS if shows_number(text, num)] == PUBLIC_NUMBERS
 
 
+STATUSES = ("failed", "scored", "rejected", "adopted")
+
+
+def status_record(status: str, *, licensed: bool, sources: tuple[str, ...]) -> RunRecord:
+    """A run of family FAM-st with `status`: a failed one has no metrics (a cell rule that failed
+    for want of bets, #430), the others LICENSED_METRICS or PUBLIC_METRICS."""
+    metrics = LICENSED_METRICS if licensed else PUBLIC_METRICS
+    return make_record(
+        hypothesis_id="E78" if licensed else "E6",
+        family_id="FAM-st",
+        variant=f"{'lic' if licensed else 'pub'}-{STATUSES.index(status)}",
+        sources=sources if licensed else ("netkeiba",),
+        metrics=() if status == "failed" else metrics,
+        status=status,
+        owner_signoff=430 if status == "adopted" else None,
+    )
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        pytest.param(("jravan",), id="jravan"),
+        pytest.param(("jrdb",), id="jrdb"),
+        pytest.param(("netkeiba", "jravan"), id="netkeiba-jravan"),
+    ],
+)
+def test_summary_withholds_the_status_of_licensed_source_runs(tmp_path, sources):
+    """D21 (#430): a status can be read off the data (a cell rule fails for want of bets), so a
+    licensed-source run's lines show neither its status nor anything that differs by status."""
+    reg, _, _ = open_registry(tmp_path)
+    licensed = [status_record(s, licensed=True, sources=sources) for s in STATUSES]
+    public = [status_record(s, licensed=False, sources=sources) for s in STATUSES]
+    for record in [*public, *licensed]:
+        reg.append(record)
+
+    text = summary_of(reg, tmp_path)
+
+    def lines_of(record: RunRecord) -> list[str]:
+        return [line for line in text.splitlines() if record.variant in line]
+
+    shapes = set()
+    for record in licensed:
+        lines = lines_of(record)
+        assert lines, f"{record.variant} is not listed"
+        assert any(WITHHELD_LABEL in line for line in lines), record.variant
+        shown = [s for s in STATUSES if any(s in line for line in lines)]
+        assert shown == [], f"the {record.status} licensed run {record.variant} shows {shown}"
+        shapes.add(tuple(line.replace(record.variant, "<variant>") for line in lines))
+    assert len(shapes) == 1, f"a licensed run's lines differ by status: {sorted(shapes)}"
+    assert [num for num in LICENSED_NUMBERS if shows_number(text, num)] == []
+
+    # an unlicensed run's lines are as before: its status, and its values where it has any
+    for record in public:
+        lines = lines_of(record)
+        assert any(record.status in line for line in lines), record.variant
+        assert not any(WITHHELD_LABEL in line for line in lines), record.variant
+        if record.metrics:
+            numbers = [n for n in PUBLIC_NUMBERS if shows_number("\n".join(lines), n)]
+            assert numbers == PUBLIC_NUMBERS, record.variant
+
+
 # ------------------------------------------------------------------------- #431 licensed row order
 #
 # Contract (#431, D21): the registry is append-only and a study may append its licensed runs in the

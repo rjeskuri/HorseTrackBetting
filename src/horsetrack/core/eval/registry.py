@@ -10,10 +10,11 @@ opened to read or to append, under an exclusive lock, so concurrent writers cann
 A run's id is the sha256 hex of its record's canonical JSON: the same run twice is refused. A
 family's pre-registered spec is frozen with ``freeze_family``; the freeze is a line of its own,
 not a run. ``write_summary`` writes the committed, aggregate-only view, one file per family: E id,
-variant, status and per-fold metric, value, CI and n, with the values of licensed-source runs
-withheld. A record's ``notes`` (run metadata, such as why a measurement could not be made) are
-outside its variant identity and the summary; a record without notes is written without the key,
-so its line and id are those it had before ``notes`` existed.
+variant, status and per-fold metric, value, CI and n, with the status and values of licensed-source
+runs withheld (a status can be read off the data, e.g. a cell rule that failed for want of bets).
+A record's ``notes`` (run metadata, such as why a measurement could not be made) are outside its
+variant identity and the summary; a record without notes is written without the key, so its line
+and id are those it had before ``notes`` existed.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ __all__ = [
     "RunRecord",
     "default_registry",
     "is_licensed_record",
+    "run_id",
     "summary_dir",
     "summary_stem",
     "write_summary",
@@ -266,6 +268,22 @@ def _unnameable(family_id: str) -> str | None:
     return None
 
 
+def _shared_summary_file(chain: _Chain, families: list[str]) -> str | None:
+    """Why one of `families` (new runs' family ids, each its own safe stem) would share its
+    summary file, ignoring case, with another family already in `chain` or with another of
+    `families`; None when none would."""
+    held = {r.family_id for r in chain.runs}
+    seen: dict[str, str] = {}
+    for family in dict.fromkeys(families):
+        name = family.casefold()
+        for other in held - {family}:
+            if (summary_stem(other) or "").casefold() == name:
+                return f"family {family!r} would share its summary file with {other!r}"
+        if (other := seen.setdefault(name, family)) != family:
+            return f"family {family!r} would share its summary file with {other!r}"
+    return None
+
+
 # --------------------------------------------------------------------------- the chain
 
 
@@ -375,6 +393,44 @@ class Registry:
         rule, is already in the registry, or its family id cannot name its summary file: not a
         safe file stem as it is, ``README`` in any case, or the file (ignoring case) of another
         family already in the registry."""
+        run_id, data = self._checked(record)
+
+        def entry(chain: _Chain) -> dict:
+            if run_id in chain.run_ids:
+                raise RecordRefused(f"run {run_id} is already in the registry")
+            shared = _shared_summary_file(chain, [record.family_id])
+            if shared is not None:
+                raise RecordRefused(shared)
+            return {"kind": "run", "run_id": run_id, "record": data}
+
+        self._append(entry)
+        return run_id
+
+    def append_all(self, records: list[RunRecord]) -> list[str]:
+        """Add the runs in order under one lock and one read of the chain, and return their ids:
+        for a study with many variants, since ``append`` reads the whole chain each time. Each
+        record is checked as ``append`` checks one, and the batch's families also against each
+        other; when any breaks a rule, is already in the registry, repeats an earlier one or would
+        share a summary file, ``RecordRefused`` is raised and none is written."""
+        checked = [self._checked(record) for record in records]
+
+        def entries(chain: _Chain) -> list[dict]:
+            seen = set(chain.run_ids)
+            for run_id, _ in checked:
+                if run_id in seen:
+                    raise RecordRefused(f"run {run_id} is already in the registry or repeated")
+                seen.add(run_id)
+            shared = _shared_summary_file(chain, [record.family_id for record in records])
+            if shared is not None:
+                raise RecordRefused(shared)
+            return [{"kind": "run", "run_id": run_id, "record": data} for run_id, data in checked]
+
+        if checked:
+            self._append(entries)
+        return [run_id for run_id, _ in checked]
+
+    def _checked(self, record: RunRecord) -> tuple[str, dict]:
+        """The record's id and data when it passes every rule that needs no chain."""
         if not isinstance(record, RunRecord):
             raise TypeError(f"append takes a RunRecord, got {type(record).__name__}")
         problem = _problem(record) or _unnameable(record.family_id)
@@ -388,23 +444,8 @@ class Registry:
             raise RecordRefused(problem)
         if _licensed(record) and is_inside(self._path, env.repo_root()):
             raise LicensedOutputInRepo(f"the registry {self._path} is inside the repository")
-
         data = _record_data(record)
-        run_id = _sha256(_canonical(data))
-
-        def entry(chain: _Chain) -> dict:
-            if run_id in chain.run_ids:
-                raise RecordRefused(f"run {run_id} is already in the registry")
-            name = record.family_id.casefold()
-            for other in {r.family_id for r in chain.runs} - {record.family_id}:
-                if (summary_stem(other) or "").casefold() == name:
-                    raise RecordRefused(
-                        f"family {record.family_id!r} would share its summary file with {other!r}"
-                    )
-            return {"kind": "run", "run_id": run_id, "record": data}
-
-        self._append(entry)
-        return run_id
+        return _sha256(_canonical(data)), data
 
     def records(self, family_id: str | None = None) -> list[RunRecord]:
         """Every run in append order, or only the runs of ``family_id``."""
@@ -479,23 +520,35 @@ class Registry:
                 fcntl.flock(handle, fcntl.LOCK_SH)
             return _parse(handle.read())
 
-    def _append(self, make_entry: Callable[[_Chain], dict | None]) -> None:
+    def _append(self, make_entry: Callable[[_Chain], dict | list[dict] | None]) -> None:
         """Under an exclusive lock: verify the chain, then append ``make_entry``'s entry (when it
-        returns one) as one sealed line linked to the last."""
+        returns one), or each of its list of entries in order, as sealed lines, each linked to
+        the line before it."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, "a+b") as handle:
             if fcntl is not None:
                 fcntl.flock(handle, fcntl.LOCK_EX)
             handle.seek(0)
             chain = _parse(handle.read())
-            entry = make_entry(chain)
-            if entry is None:
+            made = make_entry(chain)
+            entries = [] if made is None else made if isinstance(made, list) else [made]
+            if not entries:
                 return
-            entry = {**entry, "prev": chain.head, "utc": datetime.now(timezone.utc).isoformat()}
-            line = _canonical({**entry, "seal": _sha256(_canonical(entry))})
-            handle.write(line.encode("ascii") + b"\n")
+            head, lines, utc = chain.head, [], datetime.now(timezone.utc).isoformat()
+            for entry in entries:
+                entry = {**entry, "prev": head, "utc": utc}
+                line = _canonical({**entry, "seal": _sha256(_canonical(entry))}).encode("ascii")
+                lines.append(line + b"\n")
+                head = _sha256(line)
+            handle.write(b"".join(lines))
             handle.flush()
             os.fsync(handle.fileno())
+
+
+def run_id(record: RunRecord) -> str:
+    """The id ``Registry.append`` gives ``record``: the sha256 hex of its canonical JSON (its
+    line's data, without ``notes`` when they are None)."""
+    return _sha256(_canonical(_record_data(record)))
 
 
 def default_registry(country: str, *, create: bool = True) -> Registry:
@@ -545,10 +598,12 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
     the index of the families. A legacy family id written before #525 has each ``/`` mapped to
     ``--`` in its file name; its heading and index entry show the original id. ``ValueError``,
     before any file is written, when a mapped name is still unsafe or ``README``, or two families
-    would share a file (ignoring case). A licensed-source run shows only its identity and
-    ``withheld (licensed source)``. A family's file depends on that family's records alone: its
-    public runs in append order, then its licensed-source runs in identity order, so the file
-    is the same whatever order those were appended in (a study may append them ranked)."""
+    would share a file (ignoring case). A licensed-source run shows only its E id and variant,
+    with ``withheld (licensed source)`` in place of its status and values: a status may be
+    data-derived (D21; #430, a cell rule failed for want of bets). A family's file depends on
+    that family's records alone: its public runs in append order, then its licensed-source runs
+    in identity order, so the file is the same whatever order those were appended in (a study
+    may append them ranked)."""
     families: dict[str, list[RunRecord]] = {}
     for record in registry.records():
         families.setdefault(record.family_id, []).append(record)
@@ -573,10 +628,11 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
             "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for r in _summary_order(records):
-            who = f"| {_cell(r.hypothesis_id)} | {_cell(r.variant)} | {_cell(r.status)} |"
             if _licensed(r):
-                lines.append(f"{who} {WITHHELD_LABEL} | | | | |")
+                ids = f"| {_cell(r.hypothesis_id)} | {_cell(r.variant)} |"
+                lines.append(f"{ids} {WITHHELD_LABEL} | | | | | |")
                 continue
+            who = f"| {_cell(r.hypothesis_id)} | {_cell(r.variant)} | {_cell(r.status)} |"
             if not r.metrics:
                 lines.append(f"{who} - | - | - | - | - |")
             for m in r.metrics:

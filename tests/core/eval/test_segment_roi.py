@@ -47,7 +47,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from horsetrack.core.eval.segment_roi import Interval, SegmentROI, fit_segment_roi
+from horsetrack.core.eval.segment_roi import TAU_SAMPLES, Interval, SegmentROI, fit_segment_roi
 
 TAKEOUT = 0.2
 DRAWS = 1000
@@ -731,3 +731,84 @@ def test_count_col_rejects_wins_above_the_count():
     row = all_won.index[all_won["band"] == "long"][0]
     all_won.loc[row, "won"] = all_won.loc[row, "count"]
     assert isinstance(fit_segment_roi(all_won, count_col="count", **kwargs), SegmentROI)
+
+
+# --- a big fit: tau importance weights from log-likelihoods of large magnitude (#430) -------------
+
+BIG_TRACK = {"A": 0.05, "B": -0.05}
+BIG_CLASS = {"c1": 0.03, "c2": -0.03}
+BIG_ODDS = (2.0, 5.0, 12.0)
+BIG_COUNT = 100_000  # bets per grouped row: 12 rows, 1.2 million bets
+
+
+def make_big_grouped_bets() -> pd.DataFrame:
+    """Track x class x odds rows of BIG_COUNT bets each, one odds band, whose wins are exactly
+    (rounded) what the planted ln omega = u_track + u_class predicts."""
+    rows = []
+    for track, u_track in BIG_TRACK.items():
+        for klass, u_class in BIG_CLASS.items():
+            for odds in BIG_ODDS:
+                p = math.exp(u_track + u_class) * (1 - TAKEOUT) / odds
+                rows.append(
+                    {
+                        "track": track,
+                        "class": klass,
+                        "band": "all",
+                        "odds": odds,
+                        "takeout": TAKEOUT,
+                        "count": BIG_COUNT,
+                        "won": round(BIG_COUNT * p),
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def test_a_big_fit_resamples_tau_whatever_the_seed():
+    """#430: N1 v3 lost a #78 fit to numpy's ``ValueError: sum(pvals[:-1]) > 1.0``.
+
+    The tau importance weights exp(log_w - logsumexp(log_w)) of a fit this size have log weights
+    near -5e5, where one rounding of logsumexp (half an ulp, 6e-11) can leave their sum above 1 by
+    more than multinomial's 1e-12 tolerance; multinomial then raises whenever the last tau sample's
+    weight is below that overshoot. Unrenormalised, that happens on several of these 40 seeds (a
+    different set on another BLAS, hence the loop). Every seed must fit, with finite tau
+    diagnostics, every cell's posterior mean ln omega on its planted value (1.2 million bets pin
+    each to about 0.003), no track flagged and a finite predictive ROI.
+    """
+    bets = make_big_grouped_bets()
+
+    # Premise: the data's own (saturated) log-likelihood, an upper bound on the fit's, is of a
+    # magnitude where float spacing exceeds multinomial's tolerance.
+    rate = bets["won"] / bets["count"]
+    loglik = float(
+        (bets["won"] * np.log(rate) + (bets["count"] - bets["won"]) * np.log1p(-rate)).sum()
+    )
+    assert loglik < -1e5
+    assert np.spacing(abs(loglik)) > 1e-11
+    # Premise: each cell's observed ln omega is its planted one (wins rounded to whole bets), and
+    # every track's expected return omega * (1 - t) is far below the stake.
+    planted = {(t, c): u_t + u_c for t, u_t in BIG_TRACK.items() for c, u_c in BIG_CLASS.items()}
+    for (track, klass), log_omega in planted.items():
+        cell = bets[(bets["track"] == track) & (bets["class"] == klass)]
+        expected = (cell["count"] * (1 - cell["takeout"]) / cell["odds"]).sum()
+        assert math.log(cell["won"].sum() / expected) == pytest.approx(log_omega, abs=1e-4)
+        assert math.exp(log_omega) * (1 - TAKEOUT) < 0.9
+
+    for seed in range(40):
+        fit = fit_segment_roi(
+            bets,
+            segment_cols=["track", "class"],
+            odds_band_col="band",
+            takeout_col="takeout",
+            seed=seed,
+            draws=200,
+            count_col="count",
+        )
+        assert all(math.isfinite(t) and t > 0 for t in fit.tau.values()), (seed, fit.tau)
+        assert 1.0 <= fit.tau_ess <= TAU_SAMPLES, (seed, fit.tau_ess)
+        for (track, klass), log_omega in planted.items():
+            fitted = fit.band_effects["all"] + fit.posterior_mean({"track": track, "class": klass})
+            assert fitted == pytest.approx(log_omega, abs=0.01), (seed, track, klass, fitted)
+        for track in BIG_TRACK:
+            assert 0.0 <= fit.p_beats_takeout({"track": track}) < 0.01, (seed, track)
+        interval = fit.predictive_roi({"track": "A"}, 100)
+        assert math.isfinite(interval.low) and -1.0 <= interval.low < interval.high, seed
