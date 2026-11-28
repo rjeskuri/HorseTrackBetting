@@ -555,7 +555,7 @@ def test_the_projections_equal_the_pages_ladder_read_at_each_checkpoint(case):
     run(Clock(world, late_of(DAY)), models=models, once=True)
 
     got = points(open_ladder().read())
-    compared = 0
+    compared = compared_previous = 0
     for race in world.races:
         for k in CHECKPOINTS:
             # just after the checkpoint's last row is fetched, before the next capture
@@ -568,7 +568,21 @@ def test_the_projections_equal_the_pages_ladder_read_at_each_checkpoint(case):
                 ladder = page["pools"][record["pool"]][record["combination"]]["ladder"]
                 shown = {str(j): v for j, v in ladder.items()}
                 where = (race.race_id, record["pool"], record["combination"], k)
-                assert shown[str(k)] == {"odds": record["odds"], "observed": True}, where
+                at_k = shown[str(k)]
+                assert at_k["odds"] == record["odds"] and at_k["observed"] is True, where
+                assert "projected" in at_k, where  # #627: what the previous rung projected for k
+                if k == CHECKPOINTS[0]:
+                    # the previous rung (post - 30) has no record in the ladder log
+                    assert at_k["projected"] is None or isinstance(at_k["projected"], float), where
+                else:
+                    j = CHECKPOINTS[CHECKPOINTS.index(k) - 1]
+                    (before,) = [
+                        r
+                        for r in got[(race.race_id, j)]
+                        if (r["pool"], r["combination"]) == (record["pool"], record["combination"])
+                    ]
+                    assert at_k["projected"] == before["projected"][str(k)], (*where, j)
+                    compared_previous += before["projected"][str(k)] is not None
                 for j in later(k):
                     entry = shown[str(j)]
                     want = None if entry is None else entry["odds"]
@@ -576,6 +590,7 @@ def test_the_projections_equal_the_pages_ladder_read_at_each_checkpoint(case):
                     assert record["projected"][str(j)] == want, (*where, j)
                     compared += want is not None
     assert compared > 100
+    assert compared_previous > 50
 
 
 # ---------------------------------------------------------------- no board within the limit

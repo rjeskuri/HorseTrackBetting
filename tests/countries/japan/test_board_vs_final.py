@@ -326,11 +326,15 @@ def put(con, name: str, frame: pd.DataFrame, casts: dict[str, str]) -> None:
     con.unregister("_frame")
 
 
-def put_jrdb_store(con, seed: int = 5, races=BOARD_RACES, no_odds=NO_ODDS) -> pd.DataFrame:
+def put_jrdb_store(
+    con, seed: int = 5, races=BOARD_RACES, no_odds=NO_ODDS, fetched: Mapping | None = None
+) -> pd.DataFrame:
     """`jrdb_pre_race` as the store holds it (the store's key columns, then KYI's day-before board
-    and TYB's day-of columns) and `runners` with the final Win odds, every price different, for
-    `races` (race_id, race_date, odds time, runners), the `no_odds` runner without board odds.
-    Returns the rows, one per runner, with the final odds beside them."""
+    and TYB's day-of columns, then `tyb_fetched_utc`: a UTC timestamp, null unless `fetched` maps
+    the race_id to an instant, ticket #603) and `runners` with the final Win odds, every price
+    different, for `races` (race_id, race_date, odds time, runners), the `no_odds` runner without
+    board odds. Returns the rows, one per runner, with the final odds beside them."""
+    fetched = fetched or {}
     rng = np.random.default_rng(seed)
     rows = []
     for race_id, day, odds_time, n in races:
@@ -353,12 +357,19 @@ def put_jrdb_store(con, seed: int = 5, races=BOARD_RACES, no_odds=NO_ODDS) -> pd
                     "tyb_win_odds": board,
                     "tyb_place_odds": round(1.0 + board / 4.0, 1),
                     "tyb_weight": float(rng.integers(420, 540)),
+                    "tyb_fetched_utc": fetched.get(race_id),
                     "final_win_odds": round(board * 0.8 + 0.2, 1),
                 }
             )
     frame = pd.DataFrame(rows)
+    frame["tyb_fetched_utc"] = pd.to_datetime(frame["tyb_fetched_utc"], utc=True)
     pre_race = frame.drop(columns=["final_win_odds"])
-    casts = {"race_date": "DATE", "horse_no": "BIGINT", "tyb_odds_time": "VARCHAR"}
+    casts = {
+        "race_date": "DATE",
+        "horse_no": "BIGINT",
+        "tyb_odds_time": "VARCHAR",
+        "tyb_fetched_utc": "TIMESTAMPTZ",
+    }
     put(con, "jrdb_pre_race", pre_race, casts)
     for race_id, _, odds_time, _ in races:
         if odds_time is None:
@@ -519,6 +530,200 @@ def test_each_race_reads_its_board_as_of_its_own_off(lag, zone):
             f"{key}: released {release[key[0]]}, its off {off[key[0]]}: no board, yet reads "
             f"{value} (final odds {final[key]})"
         )
+
+
+# ---------------------------------------------------------------------------------------------
+# Ticket #603: the measured release time. `jrdb_pre_race.tyb_fetched_utc` is when the TYB file was
+# fetched (a UTC timestamp, null when unrecorded). `jrdb_board` returns it as `fetched_utc` and
+# takes a new optional rule `rules["release"]`: "lag" (the default when absent: the rule above) or
+# "fetched" (release_utc is the fetch time; `release_lag_min` is not required; a null fetch time
+# is never released). Any other value raises ValueError. The frozen config is not edited.
+# ---------------------------------------------------------------------------------------------
+
+# race_id, day, odds time, runners, off (JST clock), fetch time as seconds after the off (None: no
+# fetch time), expected under "fetched". The odds time is chosen so that the lag rule (10 minutes)
+# disagrees with the fetch rule on most of them.
+FETCH_RACES = [
+    ("jra:2025-06-01:TOK:01", date(2025, 6, 1), "0950", 4, "1000", 60, False),  # fetched after off
+    ("jra:2025-06-01:TOK:02", date(2025, 6, 1), "1025", 5, "1030", -90, True),  # lag: after off
+    ("jra:2025-06-01:TOK:03", date(2025, 6, 1), "1105", 4, "1140", 0, True),  # exactly at the off
+    ("jra:2025-06-01:TOK:05", date(2025, 6, 1), "1200", 3, "1240", None, False),  # never fetched
+    ("jra:2025-06-01:TOK:06", date(2025, 6, 1), None, 3, "1300", -1800, True),  # no odds time
+    ("jra:2025-06-01:TOK:07", date(2025, 6, 1), "1075", 3, "1330", -300, True),  # bad odds time
+    ("jra:2025-06-01:TOK:08", date(2025, 6, 1), "1300", 3, None, -600, False),  # no decision time
+    ("jra:2025-06-01:TOK:11", date(2025, 6, 1), "1500", 6, "1532", -7200, True),  # fetched early
+    ("jra:2025-06-08:KYO:01", date(2025, 6, 8), "0850", 4, "0900", -180, True),  # UTC day before
+]
+FETCH_NO_ODDS = ("jra:2025-06-01:TOK:11", 2)
+
+
+def fetch_instant(day: date, off_hhmm: str, seconds: int | None) -> pd.Timestamp | None:
+    if seconds is None:
+        return None
+    return released_at(day, off_hhmm, 0) + pd.Timedelta(seconds=seconds)
+
+
+@pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo"])
+def test_a_fetched_board_is_released_at_its_fetch_time(zone):
+    """Under `release: fetched` a runner's board counts when its TYB file was fetched at or before
+    its own race's off, whatever its odds time says; release_utc and fetched_utc are the fetch
+    time. Fetched after the off, never fetched (null), or a race with no decision time: no board
+    (absent, or null odds); never a value from another price. `release_lag_min` is not given."""
+    rules = {"tz": "Asia/Tokyo", "release": "fetched"}
+    fetched = {r[0]: fetch_instant(r[1], r[4] or "1200", r[5]) for r in FETCH_RACES}
+    fetched = {k: v for k, v in fetched.items() if v is not None}
+    offs = {r[0]: released_at(r[1], r[4], 0) for r in FETCH_RACES if r[4] is not None}
+    decision = pd.Series(
+        pd.DatetimeIndex(list(offs.values())).tz_convert(zone),
+        index=pd.Index(list(offs), dtype=object),
+    )
+    requested = [r[0] for r in FETCH_RACES]
+    con = duckdb.connect(":memory:")
+    try:
+        store = put_jrdb_store(
+            con, seed=21, races=[r[:4] for r in FETCH_RACES], no_odds=FETCH_NO_ODDS, fetched=fetched
+        )
+        got = jrdb_board(con, requested, rules=rules, decision_utc=decision)
+    finally:
+        con.close()
+
+    assert {"race_id", "horse_no", "tyb_win_odds", "release_utc", "fetched_utc"} <= set(got.columns)
+    keys = [(str(r), int(h)) for r, h in zip(got["race_id"], got["horse_no"], strict=True)]
+    assert len(keys) == len(set(keys)), "one row per runner at most"
+    at = dict(zip(keys, range(len(got)), strict=True))
+
+    counted = {r[0] for r in FETCH_RACES if r[6]}
+    expected = {}
+    for row in store.itertuples(index=False):
+        key = (row.race_id, int(row.horse_no))
+        if row.race_id in counted and key != FETCH_NO_ODDS:
+            expected[key] = (row.tyb_win_odds, fetched[row.race_id])
+    assert len(expected) == 5 + 4 + 3 + 3 + 5 + 4  # TOK:02, 03, 06, 07, 11 but one runner, KYO:01
+
+    for key, (board, when) in expected.items():
+        assert key in at, f"{key}: fetched by its own off, so it is read"
+        row = got.iloc[at[key]]
+        assert float(row["tyb_win_odds"]) == pytest.approx(board), f"{key}: the board's own odds"
+        for column in ("release_utc", "fetched_utc"):
+            stamp = pd.Timestamp(row[column])
+            assert stamp.tzinfo is not None, f"{key}: {column} must be timezone-aware"
+            assert stamp.tz_convert("UTC") == when, f"{key}: {column} {stamp}, want {when}"
+
+    final = {(r.race_id, int(r.horse_no)): r.final_win_odds for r in store.itertuples(index=False)}
+    for key in set(at) - set(expected):
+        value = got.iloc[at[key]]["tyb_win_odds"]
+        assert pd.isna(value), f"{key} was not fetched in time, yet reads {value} ({final[key]})"
+
+
+def test_a_fetched_board_without_a_decision_time_is_read_as_of_now():
+    """No decision_utc: the board is read as of now. A fetch time in the past counts, one in the
+    future (or null) does not, whatever the odds time; the lag rule would read the opposite for
+    the races whose odds time is later than their fetch."""
+    past = pd.Timestamp("2025-06-01T00:40:00Z")
+    fetched = {
+        "jra:2025-06-01:TOK:01": past,
+        "jra:2025-06-01:TOK:11": pd.Timestamp("2099-01-01T00:00:00Z"),
+        "jra:2025-06-08:KYO:01": None,
+        "jra:2025-06-08:KYO:05": past + pd.Timedelta(days=7),  # no odds time: still released
+        "jra:2025-06-08:KYO:06": past + pd.Timedelta(days=7, seconds=5),  # bad odds time
+    }
+    requested = [r[0] for r in BOARD_RACES if r[0] != NOT_REQUESTED]
+    con = duckdb.connect(":memory:")
+    try:
+        store = put_jrdb_store(con, fetched=fetched)
+        got = jrdb_board(con, requested, rules={"release": "fetched"})
+    finally:
+        con.close()
+    readable = {r for r, t in fetched.items() if t is not None and t < pd.Timestamp.now(tz="UTC")}
+    assert readable == {
+        "jra:2025-06-01:TOK:01",
+        "jra:2025-06-08:KYO:05",
+        "jra:2025-06-08:KYO:06",
+    }
+    final = {(r.race_id, int(r.horse_no)): r for r in store.itertuples(index=False)}
+    seen = set()
+    for row in got.itertuples(index=False):
+        key = (str(row.race_id), int(row.horse_no))
+        if pd.isna(row.tyb_win_odds):
+            continue
+        seen.add(key)
+        assert key[0] in readable, f"{key}: not fetched yet, yet reads {row.tyb_win_odds}"
+        assert float(row.tyb_win_odds) == pytest.approx(final[key].tyb_win_odds)
+        assert pd.Timestamp(row.release_utc).tz_convert("UTC") == fetched[key[0]]
+        assert pd.Timestamp(row.fetched_utc).tz_convert("UTC") == fetched[key[0]]
+    want = {k for k, r in final.items() if r.race_id in readable and k != NO_ODDS}
+    assert seen == want and len(want) == 5 + 5 + 5
+
+
+@pytest.mark.parametrize("release", [None, "lag"], ids=["absent", "lag"])
+def test_the_lag_rule_stays_the_default_and_returns_the_fetch_time(release):
+    """Without `release`, or with "lag", release_utc is odds time + release_lag_min as before,
+    whatever the fetch time (even one in the future, or null); `fetched_utc` is the row's own
+    fetch time (NaT where unrecorded)."""
+    configured = load_country_yaml("japan", "board_vs_final")["board"]
+    assert "release" not in configured  # the frozen family's config is not edited
+    rules = dict(configured) if release is None else {**configured, "release": release}
+    minutes = configured["release_lag_min"]
+    fetched = {
+        "jra:2025-06-01:TOK:01": pd.Timestamp("2030-01-01T00:00:00Z"),  # not yet fetched, but lag
+        "jra:2025-06-08:KYO:01": pd.Timestamp("2025-06-07T23:51:07Z"),
+    }
+    requested = [r[0] for r in BOARD_RACES if r[0] != NOT_REQUESTED]
+    con = duckdb.connect(":memory:")
+    try:
+        store = put_jrdb_store(con, fetched=fetched)
+        got = jrdb_board(con, requested, rules=rules)
+    finally:
+        con.close()
+
+    assert "fetched_utc" in got.columns
+    by_race = {}
+    for row in got.itertuples(index=False):
+        if pd.isna(row.tyb_win_odds):
+            continue
+        by_race.setdefault(str(row.race_id), []).append(row)
+        day = store.loc[store["race_id"] == row.race_id, "race_date"].iloc[0]
+        odds_time = store.loc[store["race_id"] == row.race_id, "tyb_odds_time"].iloc[0]
+        assert pd.Timestamp(row.release_utc).tz_convert("UTC") == released_at(
+            day, odds_time, minutes
+        )
+    assert set(by_race) == {
+        "jra:2025-06-01:TOK:01",
+        "jra:2025-06-01:TOK:11",
+        "jra:2025-06-08:KYO:01",
+    }
+    for race_id, rows in by_race.items():
+        for row in rows:
+            if race_id in fetched:
+                assert pd.Timestamp(row.fetched_utc).tz_convert("UTC") == fetched[race_id]
+            else:
+                assert pd.isna(row.fetched_utc)
+
+
+@pytest.mark.parametrize("release", ["bogus", "Fetched", "", 0, True])
+def test_an_unknown_release_rule_is_refused(release):
+    con = duckdb.connect(":memory:")
+    try:
+        put_jrdb_store(con)
+        with pytest.raises(ValueError):
+            jrdb_board(
+                con, ["jra:2025-06-01:TOK:01"], rules={"release_lag_min": 10, "release": release}
+            )
+    finally:
+        con.close()
+
+
+def test_the_lag_rule_still_needs_its_lag_but_the_fetched_rule_does_not():
+    con = duckdb.connect(":memory:")
+    try:
+        put_jrdb_store(con, fetched={"jra:2025-06-01:TOK:01": pd.Timestamp("2025-06-01T00:00:00Z")})
+        for rules in ({"tz": "Asia/Tokyo"}, {"tz": "Asia/Tokyo", "release": "lag"}):
+            with pytest.raises(ValueError):
+                jrdb_board(con, ["jra:2025-06-01:TOK:01"], rules=rules)
+        got = jrdb_board(con, ["jra:2025-06-01:TOK:01"], rules={"release": "fetched"})
+        assert len(got) == 5 and got["tyb_win_odds"].notna().sum() == 5
+    finally:
+        con.close()
 
 
 # ---------------------------------------------------------------------------------------------
