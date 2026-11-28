@@ -16,6 +16,14 @@ every other parsed column of family F as ``<f>_<column>`` (``kyi_idm``, ``tyb_pa
 A family that was not delivered still has its columns, all null; a ``date``-kind field is a
 date32 column either way. Rows are stored in the table's sort order (race_id, horse_no).
 
+``jrdb_pre_race`` ends with ``tyb_fetched_utc`` (ticket #603), a UTC timestamp: when the TYB
+delivery behind the row was fetched, the ``fetched_utc`` that the downloader (outside this repo)
+wrote for the delivery's archive in ``raw/jrdb/manifest.json`` (``{"files": [{"file":
+"TYB/TYB261128.zip", "fetched_utc": "..."}]}``, ``file`` relative to raw/jrdb; a member of a year
+pack takes its pack's time). It is null when there is no manifest, no entry for the archive, or
+the entry's time is missing or unparseable, and for a runner TYB does not print; the file's mtime
+is never a fallback. ``jrdb_post_race`` has no such column.
+
 ``run`` reads every archive under ``paths.raw_dir("jrdb") / <FAM>/`` and writes both tables to
 ``paths.processed_dir("jra")`` and ``paths.reports_dir() / "jrdb-build.json"`` (per table the
 ``JoinReport`` counts and rates plus ``table_rows``). Each delivery file (``<FAM>yymmdd``: a day
@@ -59,6 +67,8 @@ TABLES: dict[str, tuple[str, ...]] = {
     POST_RACE: ("SED", "SKB"),
 }
 REPORT = "jrdb-build.json"
+MANIFEST = "manifest.json"  # the downloader's log under raw/jrdb
+FETCHED = "tyb_fetched_utc"
 UPCOMING_DIR = "upcoming"  # processed/jra/upcoming/<meeting_id with ':' as '_'>/
 _RACE_COLUMNS = ("race_id", "race_date", "venue", "race_no", "kai", "nichi", "source_race_key")
 _RUNNER_COLUMNS = ["race_id", "horse_no", "horse_id"]
@@ -90,6 +100,8 @@ def table_schema(table: str) -> pa.Schema:
     fields = [(c, store_tables.ARROW_TYPES[kind]) for c, kind in keys.items()]
     for family in TABLES[table]:
         fields += list(_family_columns(family).items())
+    if table == PRE_RACE:
+        fields.append((FETCHED, pa.timestamp("us", tz="UTC")))
     return pa.schema(fields)
 
 
@@ -132,6 +144,8 @@ def build_table(
     kept = kept.sort_values(["race_id", "horse_no"], kind="stable").reset_index(drop=True)
     schema = table_schema(table)
     frame = kept.reindex(columns=schema.names)
+    if FETCHED in frame.columns:  # all null when TYB was not delivered or has no recorded time
+        frame[FETCHED] = pd.to_datetime(frame[FETCHED], utc=True)
     return pa.Table.from_pandas(frame, schema=schema, preserve_index=False), report
 
 
@@ -207,14 +221,43 @@ def collect(families: list[str]) -> Archives:
     return found
 
 
-def parse_deliveries(deliveries: list[Delivery]) -> pd.DataFrame:
-    """The deliveries' records as one frame, in delivery-name order."""
+def fetch_times() -> dict[str, pd.Timestamp]:
+    """Archive (relative to raw/jrdb) -> the UTC instant the downloader's manifest says it was
+    fetched. An absent or unreadable manifest, or an entry with a missing or unparseable time,
+    leaves the archive out."""
+    try:
+        files = json.loads((paths.raw_dir("jrdb") / MANIFEST).read_text(encoding="utf-8"))["files"]
+        entries = [e for e in files if isinstance(e, dict)]
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    out: dict[str, pd.Timestamp] = {}
+    for entry in entries:
+        try:
+            when = pd.Timestamp(entry["fetched_utc"])
+            name = entry["file"]
+        except (KeyError, ValueError, TypeError):
+            continue
+        if isinstance(name, str) and not pd.isna(when):
+            out[name] = when.tz_localize("UTC") if when.tzinfo is None else when.tz_convert("UTC")
+    return out
+
+
+def parse_deliveries(
+    deliveries: list[Delivery], fetched: Mapping[str, pd.Timestamp] | None = None
+) -> pd.DataFrame:
+    """The deliveries' records as one frame, in delivery-name order. With ``fetched`` (archive ->
+    instant, see ``fetch_times``) each row also carries its archive's ``fetched_utc``, null for an
+    archive not in it."""
     frames = []
     for d in deliveries:
         try:
-            frames.append(parse.parse_bytes(d.family, d.data))
+            frame = parse.parse_bytes(d.family, d.data)
         except parse.RecordLengthError as exc:
             raise ValueError(f"{d.archive} {d.name}: {exc}") from exc
+        if fetched is not None:
+            when = fetched.get(d.archive, pd.NaT)
+            frame["fetched_utc"] = pd.Series(when, index=frame.index, dtype="datetime64[us, UTC]")
+        frames.append(frame)
     return pd.concat(frames, ignore_index=True)
 
 
@@ -323,7 +366,11 @@ def run() -> BuildOutcome:
             "download the .zip versions"
         )
         return outcome
-    parsed = {fam: parse_deliveries(d) for fam, d in archives.deliveries.items()}
+    fetched = fetch_times()
+    parsed = {
+        fam: parse_deliveries(d, fetched if fam == "TYB" else None)
+        for fam, d in archives.deliveries.items()
+    }
     counts = ", ".join(f"{k} {len(v)}" for k, v in parsed.items()) or "none"
     outcome.lines.append(
         f"jrdb build: {archives.read} archives, "
