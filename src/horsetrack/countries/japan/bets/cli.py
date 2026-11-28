@@ -11,6 +11,7 @@ under the data dir: the bet log is the owner's financial record.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from datetime import date, datetime, timezone
@@ -21,15 +22,24 @@ import pandas as pd
 import typer
 
 from horsetrack.core import env
+from horsetrack.core.eval.registry import default_registry
 from horsetrack.core.eval.reports import is_inside
 from horsetrack.countries.japan.bets.log import (
     BetLog,
     BetLogInRepo,
+    CapCheck,
     Limits,
     bet_log_path,
     load_limits,
 )
-from horsetrack.countries.japan.bets.settle import day_dividends, settle_bets, totals
+from horsetrack.countries.japan.bets.settle import (
+    day_dividends,
+    played_by_option,
+    settle_bets,
+    totals,
+)
+from horsetrack.countries.japan.bets.shortlist import shortlist, shortlist_text
+from horsetrack.countries.japan.research import leaderboard_build
 
 EXIT_OVER_CAP = 1
 EXIT_REFUSED = 2
@@ -40,7 +50,7 @@ _ERRORS = (ValueError, RuntimeError, OSError)
 DATE_HELP = "The race day, YYYY-MM-DD (its JST date)."
 bets_app = typer.Typer(
     no_args_is_help=True,
-    help="The manual bet log: check the day cap, record a hand-placed bet, settle a day.",
+    help="The manual bet log: check the day cap, record a bet, settle a day, list the top options.",
 )
 
 
@@ -205,3 +215,42 @@ def settle_command(race_date: Annotated[str, typer.Option("--date", help=DATE_HE
         f"won or lost bets; {day_total['n_refunded']} refunded, {day_total['n_pending']} pending"
     )
     typer.echo(f"wrote {path}")
+
+
+def _all_settled(day: date) -> pd.DataFrame:
+    """Every ``<day>.settled.json`` beside ``day``'s bet log as one frame; reads only."""
+    records: list[dict[str, Any]] = []
+    for path in sorted(settled_path(day).parent.glob("*.settled.json")):
+        content = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(content, list):
+            raise ValueError(f"{path} is not a list of settled bets")
+        records.extend(content)
+    return pd.DataFrame(records)
+
+
+@bets_app.command("shortlist")
+def shortlist_command(
+    race_date: Annotated[str, typer.Option("--date", help=DATE_HELP)],
+    top: Annotated[int, typer.Option("--top", min=1, help="How many options to list.")] = 10,
+) -> None:
+    """The top-ranked options of the private leaderboard beside the day's cap and what has been
+    played on each. Terminal only, writes nothing: the figures are withheld (D21)."""
+    try:
+        day = _day(race_date)
+        limits = load_limits()
+        staked = _log(day, limits).staked_yen()
+        # the head needs the staked total and the cap left; no stake is being asked about
+        check = CapCheck(
+            fits=staked <= limits.day_cap_yen,
+            staked_yen=staked,
+            remaining_yen=limits.day_cap_yen - staked,
+            off_flat=False,
+        )
+        # a reader: the registry folder of a fresh data root is not created
+        rows = leaderboard_build.build_rows(registry=default_registry("japan", create=False))
+        ranked = shortlist(rows, top=top)
+        settled = _all_settled(day)
+        played = played_by_option(settled) if len(settled) else None
+    except _ERRORS as exc:
+        _refused(exc)
+    typer.echo(shortlist_text(ranked, day=day, check=check, limits=limits, played=played))

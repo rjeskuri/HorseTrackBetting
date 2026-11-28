@@ -476,3 +476,150 @@ All `status:proposed` under epic #72:
 - #284 Refit λ2 per walk-forward fold for #131's B3 and C, so both are strictly out-of-sample.
 - #449, the leaderboard writer (not this ticket's): once it lands, every E1 and E2 member is a
   leaderboard row.
+
+## #284: λ2 refitted per walk-forward fold (B3 and C out of sample)
+
+Registry families `japan-131-exacta-category-b3-v3` and `japan-131-exacta-logscore-v3` (frozen
+2026-11-28, scored at git `25995af`), files
+[japan-131-exacta-category-b3-v3.md](registry/japan/japan-131-exacta-category-b3-v3.md) and
+[japan-131-exacta-logscore-v3.md](registry/japan/japan-131-exacta-logscore-v3.md). They sit beside
+the v2 families, which are unchanged: both λ2 versions are kept as ranked rows,
+`full_development` (#115's single fit, partly in-sample, the rows above) and `per_fold` (below).
+Public JRA data only (exacta dividends, final Win odds, results); development days only, nothing
+touches A2 holdout days. Exacta takeout 25%.
+
+**Hypothesis (stated before scoring).** B3 and C at #115's λ2 = 0.8104 were partly in-sample: that
+fit saw the races they were scored on. If the in-sample part matters, B3 and C move when λ2 is
+fitted on each fold's training races alone. The null, the starting point: they do not, beyond what
+the sample change below alone does.
+
+**Method.** For each fold of `folds.yaml` (quarterly, expanding, one-week embargo) over the
+development calendar, λ2 is `ordering.fit_ordering`'s stage-1 maximum-likelihood fit
+(discounted Harville) on the development out-of-fold (#114) races dated on or before the fold's
+`train_end`: no race of the test window, the embargo or a later fold reaches it. Each race is then
+scored at the λ2 of the fold holding its date, with the v2 member design, estimand, bootstrap
+(meeting clusters, 10,000 replicates, seed 131) and exclusions unchanged. The spec pins the fold
+scheme it was frozen under, so a changed `folds.yaml` is a new family.
+
+**Excluded: 2020-Q1.** The out-of-fold Win probabilities start with 2020-Q1, so that quarter has
+no training race and no λ2 (n_train_races 0). Its races are left out and counted
+(`no_training_races` 910 of the development races; 907 of them scored in v2). There is no
+minimum training size: 2020-Q2 trains on 869 races. The per-fold rows therefore rest on 22,722
+races (1,903 meetings), 2020-04-04 to 2026-11-15, against v2's 23,629 (1,980 meetings): the
+comparison below changes the λ2 fit and drops that quarter at once, and the two are not
+separated. Other exclusions are v2's (dead heat 43, under 5 starters 1, boost may be withheld 84).
+
+| Test window | Training ends | Training races | λ2 |
+| --- | --- | --- | --- |
+| 2020-01-01 to 2020-03-31 | 2019-12-29 | 0 | none (left out) |
+| 2020-04-01 to 2020-06-30 | 2020-03-28 | 869 | 0.8205 |
+| 2020-07-01 to 2020-09-30 | 2020-06-27 | 1,728 | 0.7883 |
+| 2020-10-01 to 2020-12-31 | 2020-09-26 | 2,548 | 0.8099 |
+| 2021-01-01 to 2021-03-31 | 2020-12-29 | 3,426 | 0.8197 |
+| 2021-04-01 to 2021-06-30 | 2021-03-27 | 4,272 | 0.8184 |
+| 2021-07-01 to 2021-09-30 | 2021-06-26 | 5,131 | 0.8229 |
+| 2021-10-01 to 2021-12-31 | 2021-09-25 | 5,953 | 0.8217 |
+| 2022-01-01 to 2022-03-31 | 2021-12-29 | 6,861 | 0.8230 |
+| 2022-04-01 to 2022-06-30 | 2022-03-26 | 7,687 | 0.8211 |
+| 2022-07-01 to 2022-09-30 | 2022-06-25 | 8,548 | 0.8124 |
+| 2022-10-01 to 2022-12-31 | 2022-09-24 | 9,395 | 0.8153 |
+| 2023-01-01 to 2023-03-31 | 2022-12-29 | 10,305 | 0.8131 |
+| 2023-04-01 to 2023-06-30 | 2023-03-25 | 11,131 | 0.8166 |
+| 2023-07-01 to 2023-09-30 | 2023-06-24 | 11,993 | 0.8111 |
+| 2023-10-01 to 2023-12-31 | 2023-09-24 | 12,865 | 0.8080 |
+| 2024-01-01 to 2024-03-31 | 2023-12-30 | 13,747 | 0.8056 |
+| 2024-04-01 to 2024-06-30 | 2024-03-30 | 14,627 | 0.8075 |
+| 2024-07-01 to 2024-09-30 | 2024-06-29 | 15,495 | 0.8102 |
+| 2024-10-01 to 2024-12-31 | 2024-09-28 | 16,320 | 0.8092 |
+| 2025-01-01 to 2025-03-31 | 2024-12-29 | 17,179 | 0.8079 |
+| 2025-04-01 to 2025-06-30 | 2025-03-29 | 18,002 | 0.8078 |
+| 2025-07-01 to 2025-09-30 | 2025-06-28 | 18,860 | 0.8068 |
+| 2025-10-01 to 2025-12-31 | 2025-09-27 | 19,757 | 0.8063 |
+| 2026-01-01 to 2026-03-31 | 2025-12-28 | 20,606 | 0.8088 |
+| 2026-04-01 to 2026-06-30 | 2026-03-28 | 21,425 | 0.8109 |
+| 2026-07-01 to 2026-09-30 | 2026-06-27 | 22,282 | 0.8116 |
+| 2026-10-01 to 2026-12-31 | 2026-09-26 | 23,178 | 0.8100 |
+
+The per-fold λ2 ranges from 0.7883 (2020-Q3, 1,728 training races) to 0.8230 (2022-Q1) and settles
+within 0.8056 to 0.8116 from 2023-Q4 on; #115's single fit of 0.8104 sits inside the later folds'
+range. A discount below 1 holds in every fold.
+
+**Results.** B3 (mean return, Harville's calibration on the category, null 1) for every member,
+`per_fold` beside `full_development` (the v2 record, partly in-sample, 23,629 races), one-sided 95%
+lower and upper bounds of the meeting bootstrap in brackets (not adjusted for multiplicity):
+
+| Category | Cell | n per_fold | B3 per_fold | n full_development | B3 full_development |
+| --- | --- | --- | --- | --- | --- |
+| fav_first | all | 22,722 | 0.935 [0.904, 0.966] | 23,629 | 0.931 [0.902, 0.962] |
+| fav_first | fav_odds:le1.9 | 5,245 | 0.901 [0.857, 0.947] | 5,449 | 0.890 [0.848, 0.934] |
+| fav_first | fav_odds:2.0-2.9 | 9,982 | 0.938 [0.894, 0.986] | 10,375 | 0.938 [0.895, 0.984] |
+| fav_first | fav_odds:3.0-4.9 | 7,314 | 0.955 [0.890, 1.022] | 7,616 | 0.952 [0.890, 1.019] |
+| fav_first | fav_odds:ge5.0 | 181 | 0.871 [0.535, 1.253] | 189 | 0.917 [0.577, 1.286] |
+| fav_first | field:5-10 | 3,687 | 0.963 [0.899, 1.030] | 3,820 | 0.962 [0.899, 1.027] |
+| fav_first | field:11-14 | 7,633 | 0.981 [0.927, 1.038] | 7,939 | 0.975 [0.924, 1.029] |
+| fav_first | field:15-18 | 11,402 | 0.894 [0.848, 0.942] | 11,870 | 0.893 [0.848, 0.939] |
+| fav_first | class:maiden | 10,173 | 0.889 [0.843, 0.937] | 10,559 | 0.884 [0.839, 0.930] |
+| fav_first | class:win1-3 | 10,535 | 0.995 [0.950, 1.043] | 10,978 | 0.990 [0.946, 1.036] |
+| fav_first | class:open | 2,014 | 0.848 [0.761, 0.938] | 2,092 | 0.862 [0.776, 0.955] |
+| fav_first | popularity:less | 10,662 | 0.888 [0.844, 0.934] | 11,070 | 0.884 [0.841, 0.928] |
+| fav_first | popularity:rest | 12,060 | 0.976 [0.934, 1.020] | 12,559 | 0.973 [0.932, 1.015] |
+| fav_first | headline | 2,809 | 0.896 [0.793, 1.007] | 2,923 | 0.895 [0.796, 1.003] |
+| fav_second | all | 22,722 | 0.855 [0.801, 0.914] | 23,629 | 0.864 [0.808, 0.924] |
+| fav_second | fav_odds:le1.9 | 5,245 | 0.775 [0.692, 0.865] | 5,449 | 0.777 [0.696, 0.866] |
+| fav_second | fav_odds:2.0-2.9 | 9,982 | 0.902 [0.802, 1.011] | 10,375 | 0.898 [0.801, 1.006] |
+| fav_second | fav_odds:3.0-4.9 | 7,314 | 0.824 [0.753, 0.901] | 7,616 | 0.856 [0.770, 0.951] |
+| fav_second | fav_odds:ge5.0 | 181 | 1.870 [0.843, 3.279] | 189 | 1.793 [0.818, 3.185] |
+| fav_second | field:5-10 | 3,687 | 0.838 [0.738, 0.950] | 3,820 | 0.840 [0.738, 0.949] |
+| fav_second | field:11-14 | 7,633 | 0.811 [0.731, 0.898] | 7,939 | 0.809 [0.732, 0.896] |
+| fav_second | field:15-18 | 11,402 | 0.891 [0.806, 0.983] | 11,870 | 0.908 [0.819, 1.007] |
+| fav_second | class:maiden | 10,173 | 0.873 [0.784, 0.969] | 10,559 | 0.896 [0.800, 0.999] |
+| fav_second | class:win1-3 | 10,535 | 0.845 [0.771, 0.924] | 10,978 | 0.843 [0.770, 0.922] |
+| fav_second | class:open | 2,014 | 0.821 [0.671, 0.993] | 2,092 | 0.812 [0.665, 0.977] |
+| fav_second | popularity:less | 10,662 | 0.872 [0.786, 0.964] | 11,070 | 0.892 [0.800, 0.990] |
+| fav_second | popularity:rest | 12,060 | 0.841 [0.772, 0.915] | 12,559 | 0.839 [0.770, 0.913] |
+| fav_second | headline | 2,809 | 0.929 [0.784, 1.090] | 2,923 | 1.007 [0.811, 1.229] |
+| no_fav | all | 22,722 | 1.061 [0.977, 1.156] | 23,629 | 1.053 [0.974, 1.148] |
+| no_fav | fav_odds:le1.9 | 5,245 | 0.989 [0.833, 1.173] | 5,449 | 0.976 [0.823, 1.148] |
+| no_fav | fav_odds:2.0-2.9 | 9,982 | 1.055 [0.972, 1.144] | 10,375 | 1.050 [0.970, 1.136] |
+| no_fav | fav_odds:3.0-4.9 | 7,314 | 1.116 [0.941, 1.369] | 7,616 | 1.110 [0.941, 1.362] |
+| no_fav | fav_odds:ge5.0 | 181 | 1.234 [0.948, 1.556] | 189 | 1.200 [0.924, 1.521] |
+| no_fav | field:5-10 | 3,687 | 0.908 [0.813, 1.014] | 3,820 | 0.903 [0.811, 1.005] |
+| no_fav | field:11-14 | 7,633 | 0.987 [0.908, 1.073] | 7,939 | 0.982 [0.906, 1.067] |
+| no_fav | field:15-18 | 11,402 | 1.160 [1.011, 1.342] | 11,870 | 1.149 [1.004, 1.326] |
+| no_fav | class:maiden | 10,173 | 1.078 [0.914, 1.279] | 10,559 | 1.062 [0.903, 1.258] |
+| no_fav | class:win1-3 | 10,535 | 1.050 [0.979, 1.125] | 10,978 | 1.046 [0.978, 1.119] |
+| no_fav | class:open | 2,014 | 1.029 [0.921, 1.143] | 2,092 | 1.049 [0.939, 1.163] |
+| no_fav | popularity:less | 10,662 | 1.096 [0.938, 1.288] | 11,070 | 1.078 [0.924, 1.265] |
+| no_fav | popularity:rest | 12,060 | 1.030 [0.967, 1.096] | 12,559 | 1.031 [0.971, 1.097] |
+| no_fav | headline | 2,809 | 1.279 [0.863, 1.931] | 2,923 | 1.257 [0.854, 1.906] |
+
+C (the log-score total: mean of log q_w − log p_w, nats per race, one-sided 95% bounds): `per_fold`
++0.0135 [0.0109, 0.0161] over 22,722 races in 1,903 meetings, against `full_development` (partly
+in-sample) +0.0133 [0.0108, 0.0158] over 23,629 races. Both λ2 versions are kept as rows.
+
+**What it shows.** Out of sample, B3 and C land where the in-sample fit put them. Across the 42
+B3 members the per-fold value differs from the `full_development` value by 0.0055 at the median
+and by at most 0.078 (fav_second headline, 0.929 against 1.007, and the 181-race fav_second
+fav_odds:ge5.0 cell, 1.870 against 1.793, both with CIs far wider than the difference); in "all",
+fav_first 0.935 against 0.931, fav_second 0.855 against 0.864 and no_fav 1.061 against 1.053,
+each well inside the other's bound. The pool still forecasts the paying exacta better than Win
+plus Harville by about 0.013 nats per race, with the lower bound above 0 (0.0109).
+
+**What it rules out.** The partly in-sample fit did not manufacture B3's departures from 1 or C's
+positive gain: with λ2 fitted on training races alone they are the same size and sign, so the
+#131 reading of B3 (an outcome-calibration diagnostic: favourite-first 0.935 and favourite-second
+0.855, one-sided upper bounds 0.966 and 0.914, below 1; no_fav 1.061, bounds 0.977 to 1.156, not
+distinguishable from 1) and of C does not depend on the in-sample fit. It rules out nothing about B2, whose null does not depend on p, and it does
+not change #131's conclusions: B3 still gives no direction for the cross-pool ratio, and nothing
+is adopted. It does not separate the λ2 refit from the drop of 2020-Q1; a comparison on the same
+22,722 races would need the `full_development` rows re-scored on them, which this ticket did not
+do (the v2 rows are kept as recorded).
+
+**Variants tried.** B3: 42 members (3 categories × 14 cells, `per_fold`); C: 1; no other λ2
+(plain Harville is not re-scored: it has no fit), no other fold scheme, one run at `25995af`.
+Failures: none. Reports with the full tables:
+`$HORSETRACK_DATA_DIR/reports/japan/131-exacta/per-fold-25995afe232c-39cb0745.{json,md}` (outside
+the repository; aggregates of public JRA data).
+
+Follow-up: none filed. #284 closes the "partly in-sample" caveat on B3 and C; the v2 B3 and C rows
+stay labelled partly in-sample.
