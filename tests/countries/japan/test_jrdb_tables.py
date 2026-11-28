@@ -55,7 +55,7 @@ import math
 import os
 import zipfile
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +79,7 @@ TABLE_FAMILIES = {PRE: ("KYI", "CYB", "JOA", "TYB"), POST: ("SED", "SKB")}
 ALL_FAMILIES = (*TABLE_FAMILIES[PRE], *TABLE_FAMILIES[POST])
 VENUE_NO = {"KYO": "08", "TOK": "05", "HSN": "09"}
 UNPREFIXED = ("race_key", "horse_no", "jrdb_horse_id")
+FETCHED = "tyb_fetched_utc"  # ticket #603: a pre-race column beside the parsed families' columns
 
 _KEY = [("venue_code", 2, "skip"), ("year", 2, "skip"), ("kai", 1, "skip")]
 _KEY += [("nichi", 1, "skip"), ("race_no", 2, "skip")]
@@ -458,6 +459,8 @@ def table_columns(table: str) -> set[str]:
     out = set(schemas.TABLES[table].columns)
     for family in TABLE_FAMILIES[table]:
         out |= {f"{family.lower()}_{c}" for c in DATA_COLUMNS[family]}
+    if table == PRE:
+        out.add(FETCHED)
     return out
 
 
@@ -676,6 +679,210 @@ def test_an_lzh_only_family_is_one_error_line(
     build_ok()
     for table in (PRE, POST):
         assert_table(table, set(ALL_FAMILIES))
+
+
+# ------------------------------------------------------------------------------------------------
+# Ticket #603: the fetch time of each TYB delivery
+#
+# Contract (the coder follows it). The files under raw/jrdb/<FAM>/ are fetched by a downloader
+# outside this repo, which writes `raw/jrdb/manifest.json`:
+#   {"index": {...}, "files": [{"file": "TYB/TYB261128.zip", "url_path": ..., "size": ...,
+#    "sha256": ..., "fetched_utc": "2026-11-28T00:29:45+00:00"}], "missing": []}
+# with `file` relative to raw/jrdb. `jrdb_pre_race` gains `tyb_fetched_utc` (Arrow timestamp,
+# UTC): each row's TYB delivery's archive's `fetched_utc` (a member of a year pack takes its
+# archive's time; a day file read before a pack takes its own). Null when the manifest is absent,
+# has no entry for the archive, or the entry's time is missing, null or unparseable, and for a
+# runner with no TYB row. Never the file's mtime. `jrdb_post_race` has no such column.
+# ------------------------------------------------------------------------------------------------
+
+UTC = timezone.utc
+T_DAY1 = datetime(2026, 11, 28, 0, 29, 45, tzinfo=UTC)
+T_DAY2 = datetime(2026, 11, 29, 0, 31, 2, tzinfo=UTC)
+T_PACK = datetime(2026, 12, 1, 6, 5, 9, tzinfo=UTC)
+TYB_DAYS = (DAY1, DAY2)
+
+
+def _tyb_members() -> dict[str, bytes]:
+    return {f"{delivery('TYB', d)}.txt": day_records("TYB", d) for d in TYB_DAYS}
+
+
+def write_tyb(layout: str) -> dict[date, str]:
+    """TYB's deliveries in one of four layouts; returns the archive (relative to raw/jrdb) each
+    day's delivery is read from."""
+    folder = paths.raw_dir("jrdb") / "TYB"
+    members = _tyb_members()
+    n1, n2 = delivery("TYB", DAY1), delivery("TYB", DAY2)
+    if layout == "day-zips":
+        for name in (n1, n2):
+            zip_of(folder / f"{name}.zip", {f"{name}.txt": members[f"{name}.txt"]})
+        return {DAY1: f"TYB/{n1}.zip", DAY2: f"TYB/{n2}.zip"}
+    if layout == "txt-and-zip":
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"{n1}.txt").write_bytes(members[f"{n1}.txt"])
+        zip_of(folder / f"{n2}.zip", {f"{n2}.txt": members[f"{n2}.txt"]})
+        return {DAY1: f"TYB/{n1}.txt", DAY2: f"TYB/{n2}.zip"}
+    if layout == "year-pack":
+        zip_of(folder / "TYB_2026.zip", members)
+        return {DAY1: "TYB/TYB_2026.zip", DAY2: "TYB/TYB_2026.zip"}
+    if layout == "day-file-and-pack":  # DAY1 held twice: the day file is read, the pack's copy not
+        zip_of(folder / f"{n1}.zip", {f"{n1}.txt": members[f"{n1}.txt"]})
+        zip_of(folder / "TYB_2026.zip", members)
+        return {DAY1: f"TYB/{n1}.zip", DAY2: "TYB/TYB_2026.zip"}
+    raise AssertionError(layout)
+
+
+def write_manifest(entries: dict[str, dict[str, Any]]) -> None:
+    """raw/jrdb/manifest.json in the downloader's shape: an entry per archive with the given
+    fields (``fetched_utc`` or not), plus a decoy for a KYI archive and one for a TYB archive that
+    is not held."""
+
+    def entry(file: str, extra: dict[str, Any]) -> dict[str, Any]:
+        return {"file": file, "url_path": f"/m/{file}", "size": 1, "sha256": "0" * 64, **extra}
+
+    decoys = {
+        "KYI/KYI261128.zip": "2020-01-01T00:00:00+00:00",
+        "TYB/TYB261101.zip": "2020-02-02T00:00:00+00:00",
+    }
+    files = [entry(f, extra) for f, extra in entries.items()]
+    files += [entry(f, {"fetched_utc": t}) for f, t in decoys.items() if f not in entries]
+    manifest = {"index": {"indexes": [], "archives": []}, "files": files, "missing": []}
+    path = paths.raw_dir("jrdb") / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+
+
+def want_fetched(day_time: dict[date, datetime | None]) -> dict[tuple[str, int], datetime | None]:
+    """(race_id, horse_no) -> the fetch time a pre-race row must carry: its day's TYB delivery's
+    time when TYB printed the runner, else None."""
+    rows, _ = expected(PRE, set(ALL_FAMILIES))
+    by_id = {r.race_id: r for r in RACES}
+    out: dict[tuple[str, int], datetime | None] = {}
+    for row in rows:
+        race = by_id[row["race_id"]]
+        printed = row["horse_no"] in selection("TYB", race)
+        out[(row["race_id"], row["horse_no"])] = day_time[race.day] if printed else None
+    return out
+
+
+def assert_fetched(want: dict[tuple[str, int], datetime | None]) -> None:
+    path = paths.processed_dir("jra") / f"{PRE}.parquet"
+    kind = pq.read_schema(path).field(FETCHED).type
+    assert pa.types.is_timestamp(kind) and kind.tz == "UTC", kind
+    got: dict[tuple[str, int], pd.Timestamp | None] = {}
+    for row in built(PRE).to_dict("records"):
+        v = row[FETCHED]
+        got[(row["race_id"], int(row["horse_no"]))] = None if pd.isna(v) else pd.Timestamp(v)
+    assert set(got) == set(want)
+    for key, when in want.items():
+        if when is None:
+            assert got[key] is None, (key, got[key])
+        else:
+            seen = got[key]
+            assert seen is not None and seen.tz_convert("UTC") == pd.Timestamp(when), (key, seen)
+
+
+def test_the_pre_race_schema_has_the_fetch_time_column(tmp_path: Path, monkeypatch) -> None:
+    """`table_schema` names `tyb_fetched_utc` for the pre-race table as a UTC timestamp; the
+    post-race table has no such column. The family columns come from the specs in the data dir,
+    so the test runs against the synthetic world's."""
+    world(tmp_path, monkeypatch)
+    kind = tables.table_schema(PRE).field(FETCHED).type
+    assert pa.types.is_timestamp(kind) and kind.tz == "UTC", kind
+    assert set(tables.table_schema(PRE).names) == table_columns(PRE)
+    assert FETCHED not in tables.table_schema(POST).names
+
+
+@pytest.mark.parametrize(
+    ("layout", "times"),
+    [
+        ("day-zips", {DAY1: T_DAY1, DAY2: T_DAY2}),
+        ("txt-and-zip", {DAY1: T_DAY2, DAY2: T_DAY1}),
+        ("year-pack", {DAY1: T_PACK, DAY2: T_PACK}),
+        ("day-file-and-pack", {DAY1: T_DAY1, DAY2: T_PACK}),
+    ],
+)
+def test_a_tyb_delivery_carries_its_fetch_time_to_the_table(
+    tmp_path: Path, monkeypatch, layout: str, times: dict[date, datetime]
+) -> None:
+    """Each TYB runner's row has the `fetched_utc` of the archive its delivery was read from: a
+    day file its own, a year pack's member the pack's, a day file read before a pack its own and
+    not the pack's. A runner TYB does not print (R2 #5, who has a KYI row) has none; the other
+    columns and the post-race table are as before. File mtimes are the same for every archive."""
+    world(tmp_path, monkeypatch)
+    write_day_files([f for f in ALL_FAMILIES if f != "TYB"])
+    source = write_tyb(layout)
+    for archive in set(source.values()):  # a file time that is nobody's fetch time
+        os.utime(paths.raw_dir("jrdb") / archive, (1_500_000_000, 1_500_000_000))
+    write_manifest({source[d]: {"fetched_utc": times[d].isoformat()} for d in TYB_DAYS})
+    build_ok()
+
+    assert_table(PRE, set(ALL_FAMILIES))
+    assert_table(POST, set(ALL_FAMILIES))
+    want = want_fetched(times)
+    assert {w for w in want.values() if w is not None} == set(times.values())  # every time used
+    assert any(w is None for w in want.values())  # a runner TYB did not print
+    assert_fetched(want)
+    assert FETCHED not in built(POST).columns
+
+
+UNUSABLE: dict[str, dict[str, Any] | None] = {
+    "no-manifest": None,
+    "no-entry-for-the-archive": {},
+    "entry-without-a-time": {"size": 1},
+    "null-time": {"fetched_utc": None},
+    "unparseable-time": {"fetched_utc": "the day before yesterday"},
+    "empty-time": {"fetched_utc": ""},
+}
+
+
+@pytest.mark.parametrize("case", list(UNUSABLE))
+def test_an_unrecorded_fetch_time_is_null(tmp_path: Path, monkeypatch, case: str) -> None:
+    """No manifest, no entry for the archive, an entry with no time, a null, an unparseable or an
+    empty one: `tyb_fetched_utc` is null on every row (a timestamp column all the same), the
+    build completes, and the file's mtime is not a fallback."""
+    world(tmp_path, monkeypatch)
+    write_day_files([f for f in ALL_FAMILIES if f != "TYB"])
+    source = write_tyb("day-zips")
+    for archive in source.values():
+        os.utime(paths.raw_dir("jrdb") / archive, (1_700_000_000, 1_700_000_000))
+    extra = UNUSABLE[case]
+    if extra is not None:
+        # an empty `extra` means no entry for TYB's archives (only the decoys)
+        write_manifest({archive: dict(extra) for archive in source.values()} if extra else {})
+    build_ok()
+    assert_table(PRE, set(ALL_FAMILIES))
+    assert_fetched(want_fetched({DAY1: None, DAY2: None}))
+
+
+def test_only_the_delivery_with_an_entry_has_a_fetch_time(tmp_path: Path, monkeypatch) -> None:
+    """DAY1's archive has an entry, DAY2's an unparseable time: DAY1's rows carry the time, DAY2's
+    are null, row by row."""
+    world(tmp_path, monkeypatch)
+    write_day_files([f for f in ALL_FAMILIES if f != "TYB"])
+    source = write_tyb("day-zips")
+    write_manifest(
+        {source[DAY1]: {"fetched_utc": T_DAY1.isoformat()}, source[DAY2]: {"fetched_utc": "n/a"}}
+    )
+    build_ok()
+    assert_fetched(want_fetched({DAY1: T_DAY1, DAY2: None}))
+
+
+@pytest.mark.parametrize("manifest", [True, False], ids=["manifest", "no-manifest"])
+def test_without_a_tyb_delivery_the_fetch_time_is_null(
+    tmp_path: Path, monkeypatch, manifest: bool
+) -> None:
+    """TYB is not delivered (the manifest may still list a TYB archive that is not held): the
+    column exists as a timestamp, all null; the other families' rows are as before."""
+    world(tmp_path, monkeypatch)
+    delivered = ["KYI", "CYB", "JOA", "SED", "SKB"]
+    write_day_files(delivered)
+    if manifest:
+        write_manifest({"TYB/TYB261128.zip": {"fetched_utc": T_DAY1.isoformat()}})
+    build_ok()
+    assert_table(PRE, set(delivered))
+    path = paths.processed_dir("jra") / f"{PRE}.parquet"
+    assert pa.types.is_timestamp(pq.read_schema(path).field(FETCHED).type)
+    assert len(built(PRE)) and built(PRE)[FETCHED].isna().all()
 
 
 # ------------------------------------------------------------------------------------------------

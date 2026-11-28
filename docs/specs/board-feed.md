@@ -255,7 +255,8 @@ bet type whatever the plain feed holds, in this order: Win, Place, Quinella, Wid
   says `no price forecast`.
 - Capture age: each tier-2 section states its capture's age at now in whole minutes
   (`data-capture-age`), or that nothing is captured yet.
-- Never coloured or highlighted by value or probability.
+- Never coloured or highlighted by value or probability. The one highlight is the owner's own
+  selection rule, the best-bets badges ("Best bets" below).
 
 ### The odds ladder
 
@@ -319,6 +320,51 @@ every `min_rebuild_s`, whether or not a log changed (buckets and the stale flag 
 and its body and ETag change only when something other than `generated_utc` and
 `minutes_to_post` did, so the page's poll costs a 304 between captures; the page counts down to
 the post from `post_utc`. `board-serve` loads the models once at start with `load_shadow_models`.
+
+## Best bets
+
+Code: `src/horsetrack/countries/japan/board/best_bets.py`, its route in `board/server.py` and its
+tab and badges in `board/web/shadow.js`, ticket #714. The owner's selection rule (D19): nothing is
+adopted, and nothing here places or sizes a bet.
+
+`/best-bets?venue=<VENUE>` (token-gated like every path; 400 without one venue code) answers
+`build_best_bets` of the day for that venue as of the server's clock (`feed.utc_now`), rebuilt at
+most every `min_rebuild_s` per venue, gzip when asked, no ETag:
+`{race_date, venue, generated_utc, race: {race_id, race_no, post_utc} | null, checkpoint_min,
+frozen, board_capture_utc, note, best_bets: [...], unmatched: [...]}`.
+
+- Rows: the private leaderboard JSON (`leaderboard_build.PRIVATE_JSON` under the reports dir,
+  read at the first request and again when its size or mtime changes; [] without it). Eligible:
+  selection `predicted_final@T-k` at the current checkpoint k, or `decision_time`; a shrunk
+  return; n >= 100 (whatever its unit) and n_meetings >= 20; licensed rows included (the page is
+  token-gated and never in the repository). look_ahead, card_only and unknown rows never.
+- The race: the venue's first race whose post time (the post-time sidecar, so a delayed post
+  counts) is after now; null once the venue's last race has gone. The checkpoint is T-10 while
+  more than 5 min to the post, T-5 while more than 2, T-2 from post - 2 on.
+- The board: before post - 2 the board as of now (`frozen: false`, provisional); from post - 2
+  the latest row of each price captured at or before post - 2 among the rows available by now
+  (the ladder's observed rule; `frozen: true`, so a later capture changes nothing). It is
+  projected to the final with `models.nowcast` by `predicted_final.project_board`, tau the
+  minutes from the board's capture to the post. No capture yet or no nowcast: no best bets, with
+  `note` saying why.
+- Matching: a row whose rule is a `predicted_final.RULES` rule of its family (#713) is read with
+  that rule's picker on the projected board; every other row (another family, an unknown or an
+  unmeasured rule) is listed in `unmatched`, never dropped. A rule that buys nothing on the board
+  is in neither list. Each ticket (pool, combination as the feed writes it) appears once, under its
+  row of the highest shrunk return per 100 yen, the other rows buying it as `duplicates`
+  (shrunk descending); tickets are ranked by that shrunk return (`rank` 1..n). Each carries the
+  row's option_id, family_id, rule, `description` (the rule in plain English), shrunk_per_100,
+  return_per_100, CI, n, n_meetings and variants_searched, `horses` (number and card name; names
+  from the day's card log `<VENUE>.cards.jsonl.gz` when it has them, else null) and `highlight`:
+  `strong` at a shrunk return of 100 or more, `muted` below. Model p plays no part.
+
+The page: above the race, the selected venue's tab (`data-best-venue`; it follows the venue tabs,
+and the page polls `best-bets?venue=<that venue>` with the other feeds) lists the next race's best
+bets with their figures, the ticket's current odds from /feed and its Model p from /shadow-feed
+(`-` without one), the rule, the duplicates and the unmatched rows. On the race page the race's
+top three best bets each carry a rank badge in their row (`data-best-rank`, `data-highlight`
+`strong` or `muted`, by class, never an inline style), only for the payload of the race drawn,
+and the page states the selection rule beside them (`data-best-rule`).
 
 ## Access
 

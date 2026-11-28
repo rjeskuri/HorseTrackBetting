@@ -55,6 +55,31 @@ The key of a record is `(race_id, pool, combination, tau_min)`. Other keys (`boa
 `value_mean`, `value_q05`, `value_q95`, `flags`, ...) are kept as given. Records are stored as given:
 no keys dropped, no values coerced, no timestamps normalised; the log adds `day_status` only.
 
+### Versioned values (#566)
+
+Every `ok` record of a point valued with models (`models` not null) also carries:
+
+| key | type | notes |
+| --- | --- | --- |
+| `values_version` | integer | `2` from #566 on |
+| `starters` | integer | the runners at the start of sales the PLACE and Wide values used: the runners priced on the board plus the ones scratched on it |
+
+JRA fixes the places Place pays (and whether Wide is sold) by the runners at the start of sales, so
+a scratch after sales opened leaves them unchanged: an 8-drawn race that loses a runner still pays
+three places. The shadow day takes a scratch on the board as one after sales opened (an assumption,
+`docs/ledger.md`), and passes `starters` to `shadow_values`, which reads the places from it. Only
+the places come from `starters`; WIN values, shocks and the rows are those of the runners priced.
+
+A record without the two keys has values version 1: its places came from the runners priced at the
+time. `values_version` is its own axis, apart from `record_version` (#564, "Record versions"
+below): `record_version` says whether the record carries a `p_model`; `values_version` says how
+its PLACE and Wide values took their places. A shadow-day record has both (a point valued with
+models: `record_version` 2 and `values_version` 2), and the `p_model` of the same record forms its
+places from `shadow_feed._starters` (the log's opening of sales), not from the `starters` above.
+The log keeps both keys as given (like any other key, covered by the chain), does not require
+them, and old files keep verifying and take new records. A `no_board` record, and a point logged
+without models, carry neither key.
+
 Example, synthetic:
 
 ```json

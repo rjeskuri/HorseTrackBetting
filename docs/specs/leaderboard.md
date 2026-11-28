@@ -20,7 +20,7 @@ adopted or rejected by the leaderboard; it orders the options.
 | `pool` | the pari-mutuel pool (e.g. `WIN`, `PLACE`, `EXACTA`), or None |
 | `segment` | `all`, or a segment label such as `class:maiden` |
 | `rule` | the option in words |
-| `selection` | when the selection is known: `decision_time`, `card_only`, `look_ahead`, `unknown` |
+| `selection` | when the selection is known: `decision_time`, `card_only`, `look_ahead`, `unknown`, or `predicted_final@T-10`, `@T-5`, `@T-2` (#713: read on the nowcast's projection of the final board from the board at T-k; placeable at T-k, not look-ahead) |
 | `sources` | the run's data sources |
 | `variants_searched` | the family's variants tried (`Registry.family_size`), at least 1 |
 | `status` | the run's status (`scored`, `failed`; legacy `rejected` and `adopted` read like `scored`) |

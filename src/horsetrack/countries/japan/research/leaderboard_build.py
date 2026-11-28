@@ -80,7 +80,7 @@ import typer
 
 from horsetrack.core import env, paths
 from horsetrack.core.eval.leaderboard import (
-    SELECTIONS,
+    ACCEPTED_SELECTIONS,
     LeaderboardRow,
     to_json,
     write_leaderboard,
@@ -219,7 +219,11 @@ def _cell_id(cell: Mapping, family: str) -> str | None:
 def _selection(cell: Mapping, family: str) -> str:
     if "selection" in cell:
         selection = cell["selection"]
-        return selection if isinstance(selection, str) and selection in SELECTIONS else "unknown"
+        return (
+            selection
+            if isinstance(selection, str) and selection in ACCEPTED_SELECTIONS
+            else "unknown"
+        )
     if family in FAMILY_SELECTIONS:
         return FAMILY_SELECTIONS[family]
     variant = cell.get("variant")
