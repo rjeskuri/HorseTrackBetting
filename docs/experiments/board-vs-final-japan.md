@@ -62,8 +62,8 @@ leaves the last complete outputs as they are and exits non-zero.
 ## Data and rules
 
 - The board: `tyb_win_odds` at `tyb_odds_time` (HHMM on the Tokyo clock of the race date), read through
-  `core.store.asof.read_asof` under a column rule on its release time, the odds time plus `release_lag_min`
-  (`config/board_vs_final.yaml`). The lag is an assumption: the store keeps no JRDB release log (ledger row
+  `core.store.asof.read_asof` under a column rule on its release time, the odds time plus a lag from `release_lags_min`
+  (`config/board_vs_final.yaml`; v1 and v2 assumed the single lag 10, v3 runs 0 and 10). The lag is an assumption: the store keeps no JRDB release log (ledger row
   added). The board is read at each race's own off (`races.post_utc`, availability.yaml's derived post); a board
   released after its race's off is not used. A missing or malformed odds time, or missing TYB odds, gives no board;
   nothing is filled from the final or KYI odds. availability.yaml's `jrdb_pre_race` rule (every `tyb_` column a
@@ -126,8 +126,8 @@ in either run.
 - **`asof_join` per runner at its race's off.** The ticket names `read_asof`. The board is read once at the latest
   off of the races asked for, and each race keeps only the rows released by its own off.
 - **`tyb_post_time` as the off.** It is sparse in the store; the netkeiba post time is not.
-- **Several release lags as counted variants.** One lag was frozen to keep the run to one fit per price and fold; a
-  second lag is follow-up #602.
+- **Several release lags as counted variants.** v1 and v2 froze one lag (10) to keep the run to one fit per price and
+  fold. Family v3 (#602, below) registers the lags 0 and 10 as counted variants; v2 stays as recorded.
 
 ## What this rules out
 
@@ -148,3 +148,42 @@ v1's private leaderboard file, superseded. Each option id is `<family>:<E>:<pool
 
 - #602: the release lag as a counted variant (the board at its odds time, lag 0, beside the frozen lag).
 - #603: a JRDB release log (the fetch time of each TYB file), so the lag can be measured rather than assumed.
+
+## Family v3: the release lag as a counted variant (#602)
+
+The v1 and v2 boards assumed one release lag, 10 minutes from TYB's odds time to the board's release (ledger,
+"assumption"). Family `japan-board-vs-final-e2-e45-v3` runs the whole study once per lag in
+`release_lags_min: [0, 10]` of `config/board_vs_final.yaml`, so E2 and E45's cross-application does not rest on one
+assumed lag. Lag 0 reads the board as released at its odds time; lag 10 is v2's lag. **Every figure stays withheld
+(D21)**: this section gives structure only.
+
+- **Run.** Frozen with `--freeze` before any outcome was read (spec sha256
+  `fe41b5745d3d41801c168057609bc77b8426c369a930ffa9edf3be8713f8a236`), then `--run` on development data at the head
+  of ticket #602's branch. The spec is a new family because the lags changed the spec; v2's records are untouched.
+  No `LockedHoldout.open` call was made, and the study splits the holdout off itself. The run appended 24 registry
+  records with the sources netkeiba and jrdb and ticket 602, every one status scored, none failed. The committed
+  summary `docs/experiments/registry/japan/japan-board-vs-final-e2-e45-v3.md` lists them with every value withheld.
+- **Private outputs** (under `$HORSETRACK_DATA_DIR/reports/`, written through `write_report`, named by the family):
+  `board-vs-final-japan-japan-board-vs-final-e2-e45-v3.md` (both cross-application tables, per-fold coefficients,
+  the board's lead to the off per fold, E45's races per pool by paid-record status, each per lag),
+  `…-v3-tables.json`, and the private leaderboard `…-v3-leaderboard.md` and `…-v3-leaderboard.json`.
+- **Hypothesis.** E2's and E45's hypotheses are unchanged (above). The added question is whether the board-fitted
+  against final-fitted contrast holds at both lags or turns on the lag: the claim is shown wrong for a lag in the
+  same way as before, and the lag matters if the two lags disagree. The null result is the starting point.
+- **Variants tried (`variants_searched`).** Two lags times the twelve v2 variants: 24 registry records, one per lag x
+  cell. Variant names carry the lag, `<POOL>:lag=<n>:fit=<price>` for WIN, PLACE, QUINELLA_PLACE and TRIO and
+  `coefficients:lag=<n>:fit=<price>` for E2 and E45, with `fit` one of `q_final` and `q_board`. Each lag x table x
+  cell is counted in `variants_searched`, which covers the cross-application cells (two fits, two scores, four pools,
+  two lags) as well as the fits.
+- **Alternatives rejected.** More lags than 0 and 10: the store keeps no release log, so no lag beyond the two
+  bracketing the assumed one is more grounded, and #603 (a JRDB release log) is the way to measure it. Pooling the
+  lags into one board (the latest release per race): it hides which lag a result rests on. Replacing v2: v2 stays in
+  the registry as recorded, and its private outputs keep their names.
+- **What this rules out.** Withheld (D21). Whether the contrast depends on the lag is in v3's private report; no
+  sign, bound or count from it is given here.
+- **Leaderboard rows added.** Thirty-two member rows, one per lag x fit x score cell, all withheld and unranked (a
+  cell is a ΔLL per race, not a return per ¥100). Each option id is
+  `japan-board-vs-final-e2-e45-v3:<E>:<pool>:lag=<n>:fit=<price>:score=<price>`, for `E2:WIN`, `E45:PLACE`,
+  `E45:QUINELLA_PLACE` and `E45:TRIO` at each lag.
+- **Follow-ups.** #603 (a JRDB release log) stays open and is the remaining way to replace the assumption by a
+  measurement.
